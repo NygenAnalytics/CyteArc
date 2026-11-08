@@ -209,12 +209,12 @@ def test_marker_heatmap_and_run_summary_read_groups_stored_by_code(labelled) -> 
 def test_a_table_of_an_earlier_release_with_labels_now_stored_by_code_is_read_and_reused(
     tmp_path, monkeypatch
 ) -> None:
-    # Earlier releases named child groups by labels that start with a dot,
-    # which this release stores by code.
+    # Earlier releases named a child group .zattrs in a Zarr v3 store, which
+    # this release stores by code, since that name is a Zarr v2 document.
     rng = np.random.default_rng(5)
-    labels = np.repeat(np.array([".x", "B"], dtype=object), 10)
+    labels = np.repeat(np.array([".zattrs", "B"], dtype=object), 10)
     counts = rng.poisson(3.0, size=(20, 6)).astype(np.float32)
-    counts[labels == ".x", 1] += 12.0
+    counts[labels == ".zattrs", 1] += 12.0
     store = _store(tmp_path, labels, counts)
     clusters = store.snapshot_cluster_labels(
         "labels", cell_selection=store.snapshot_cell_selection()
@@ -223,7 +223,7 @@ def test_a_table_of_an_earlier_release_with_labels_now_stored_by_code_is_read_an
     marker = store.markers.search(clusters, features=features)
     expected = store.markers.load(marker, **EVERY_ROW)
     slot = _slot(store, marker)
-    assert slot.attrs["group_labels"] == [".x", "B"]
+    assert slot.attrs["group_labels"] == [".zattrs", "B"]
 
     # The layout of earlier releases: each child group named by its label.
     for code, label in enumerate(slot.attrs["group_labels"]):
@@ -234,7 +234,7 @@ def test_a_table_of_an_earlier_release_with_labels_now_stored_by_code_is_read_an
     del slot.attrs["group_labels"]
     del slot.attrs["skipped_group_codes"]
     slot.attrs["skipped_groups"] = {}
-    assert sorted(slot.group_keys()) == [".x", "B"]
+    assert sorted(slot.group_keys()) == [".zattrs", "B"]
 
     pd.testing.assert_frame_equal(
         store.markers.load(marker, **EVERY_ROW), expected, check_exact=True
@@ -274,15 +274,23 @@ def test_a_blank_label_is_refused_before_the_search(labelled, monkeypatch) -> No
         ("γδ T", True),
         ("__x", True),
         ("feature_index_2", True),
+        # Earlier releases named child groups by these labels.
+        (".x", True),
+        ("..x", True),
+        ("...", True),
+        (".hidden.", True),
+        (".zattrs2", True),
         ("", False),
         ("T/NK", False),
         ("a\\b", False),
         ("a\x00b", False),
         (".", False),
         ("..", False),
-        (".x", False),
-        (".zattrs", False),
         ("zarr.json", False),
+        (".zattrs", False),
+        (".zgroup", False),
+        (".zarray", False),
+        (".zmetadata", False),
         ("feature_index", False),
         ("feature_names", False),
         ("feature_ids", False),
@@ -362,6 +370,97 @@ def test_one_label_that_cannot_name_a_child_group_stores_every_group_by_code() -
     pd.testing.assert_frame_equal(
         table, result.table("T/NK", np.array([f"g{index}" for index in range(6)]))
     )
+
+
+# Labels that start with a dot, which earlier releases stored by label.
+DOTTED = [".x", "..x", "...", ".hidden.", ".zattrs2"]
+
+
+def _stored_files(root) -> dict[str, bytes]:
+    """Every file of a local store under ``root``, by its path."""
+    return {
+        str(path.relative_to(root)): path.read_bytes()
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+    }
+
+
+def test_labels_that_start_with_a_dot_keep_the_layout_of_earlier_releases_byte_for_byte(
+    tmp_path, monkeypatch
+) -> None:
+    import cytearc.datastore._operations.features as features_operations
+    from zarr.storage import LocalStore
+
+    labels = sorted([*DOTTED, "B cell", "x"])
+    sizes = [1 if label == "x" else 10 for label in labels]
+    rng = np.random.default_rng(3)
+    statistics = rng.random((3, len(labels), 8))
+    statistics[:, :, 6] = rng.normal(scale=3.0, size=statistics.shape[:2])
+    result = RankMarkerResult(
+        group_ids=np.asarray(labels),
+        group_sizes=np.asarray(sizes),
+        feature_index=np.array([0, 2, 5]),
+        statistics=statistics,
+    )
+
+    def write(directory) -> dict[str, bytes]:
+        slot = zarr.open_group(LocalStore(directory), mode="w").create_group("slot")
+        DataStore._write_marker_slot(
+            slot,
+            result,
+            feature_names=np.array([f"g{index}" for index in range(6)]),
+            feature_ids=np.array([f"id{index}" for index in range(6)]),
+        )
+        return _stored_files(directory)
+
+    written = write(tmp_path / "written")
+    slot = zarr.open_group(str(tmp_path / "written"), mode="r")["slot"]
+    assert list(slot.attrs.items()) == [*MARKER_METADATA, ("skipped_groups", {"x": 1})]
+    assert sorted(slot.group_keys()) == sorted([*DOTTED, "B cell"])
+    # Earlier releases named the child group of every label they accepted
+    # by the label, which the writer does for every label when told it can.
+    monkeypatch.setattr(
+        features_operations, "can_name_marker_group", lambda _label: True
+    )
+    assert written == write(tmp_path / "by_label")
+    assert any(path.startswith("slot/.x/") for path in written)
+
+
+@pytest.mark.parametrize(
+    "label",
+    [
+        "",
+        "a/b",
+        "a\\b",
+        "a\x00b",
+        ".",
+        "..",
+        "zarr.json",
+        ".zattrs",
+        ".zgroup",
+        ".zarray",
+        ".zmetadata",
+        "feature_index",
+        "feature_names",
+        "feature_ids",
+    ],
+)
+def test_a_label_that_no_child_group_can_take_stores_the_groups_by_code(label) -> None:
+    labels = sorted([label, "B cell", "x"])
+    slot, result = _write_slot(labels, [1 if name == "x" else 10 for name in labels])
+
+    assert slot.attrs["group_labels"] == labels
+    assert slot.attrs["skipped_group_codes"] == {str(labels.index("x")): 1}
+    assert "skipped_groups" not in slot.attrs
+    assert sorted(slot.group_keys()) == sorted(
+        str(code) for code, name in enumerate(labels) if name != "x"
+    )
+    read = MarkerSlot.read(slot, 6)
+    assert read.groups == {
+        name: str(code) for code, name in enumerate(labels) if name != "x"
+    }
+    names = np.array([f"g{index}" for index in range(6)])
+    pd.testing.assert_frame_equal(read.table(label, names), result.table(label, names))
 
 
 def _add_group(slot, name: str) -> None:

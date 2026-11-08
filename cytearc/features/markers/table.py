@@ -68,8 +68,22 @@ _MARKER_METADATA = {
     "fold_change_policy": MARKER_FOLD_CHANGE_POLICY,
     "p_value_policy": MARKER_P_VALUE_POLICY,
 }
-# The arrays of a marker slot, whose names no child group of the slot can take.
-_SLOT_ARRAYS = frozenset({"feature_index", "feature_names", "feature_ids"})
+# Names that no child group of a marker slot can take: the paths "." and
+# "..", the metadata documents of Zarr v3 and v2, and the slot's own arrays.
+_RESERVED_NAMES = frozenset(
+    {
+        ".",
+        "..",
+        "zarr.json",
+        ".zattrs",
+        ".zgroup",
+        ".zarray",
+        ".zmetadata",
+        "feature_index",
+        "feature_names",
+        "feature_ids",
+    }
+)
 
 __all__ = [
     "MARKER_REVISION_1_P_VALUE_POLICY",
@@ -153,18 +167,18 @@ def can_name_marker_group(label: str) -> bool:
     """Return whether ``label`` can name the child group of a marker slot that stores its group.
 
     A label cannot when Zarr or a file system would refuse it or read it as
-    another node: when it is empty, contains ``/``, ``\\`` or a NUL
-    character, starts with ``.`` as ``.``, ``..`` and the ``.zattrs`` of Zarr
-    v2 do, or is ``zarr.json`` or the name of one of the slot's arrays. A
-    slot with such a label names each group's child group by its code
-    instead (:class:`MarkerSlot`).
+    another node in either Zarr format, or when the slot already uses it:
+    when it is empty, contains ``/``, ``\\`` or a NUL character, or is ``.``,
+    ``..``, a Zarr metadata document (``zarr.json``, ``.zattrs``,
+    ``.zgroup``, ``.zarray``, ``.zmetadata``) or the name of one of the
+    slot's arrays. Any other label, such as ``.x``, names its child group as
+    in earlier releases. A slot with a label that cannot names each group's
+    child group by its code instead (:class:`MarkerSlot`).
     """
     return not (
         not label
-        or label.startswith(".")
         or any(character in label for character in "/\\\x00")
-        or label == "zarr.json"
-        or label in _SLOT_ARRAYS
+        or label in _RESERVED_NAMES
     )
 
 
