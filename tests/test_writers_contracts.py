@@ -60,7 +60,7 @@ _PUBLIC_CLASS_METHODS = {
 # Every importer takes the keyword ``overwrite``.
 _PUBLIC_CLASS_SIGNATURE_DIGESTS = {
     CrToZarr: "0bad82837ebacaac338db06c264da8ded4ca3846fb909c8d4f9fc5cbe4c53c05",
-    H5adToZarr: "73600608e432fc45187acb12b569036d664246b54bacdda6d6956347f558bc08",
+    H5adToZarr: "a383c4d9ff9250c56cab57b510895690067d881d90da5bb743a4c0f47de035b5",
     SparseToZarr: "4414be8892bf0a7f7baa9aacd4ff2f2a1648cb722d62f07878dda83fba22a3ef",
     CSVtoZarr: "3044903008c618715e44e0127ca983d174eb27813e76144d4c48145be9996b7f",
     SubsetZarr: "76fd6326d68a545065ce07fed9411ec7f02d3f080041db627c3623bda5fe4ed8",
@@ -134,6 +134,15 @@ def test_seurat_writer_takes_a_keyword_default_assay():
     assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
     assert parameter.default is None
     assert get_type_hints(SeuratToZarr.__init__)["default_assay"] == str | None
+
+
+def test_h5ad_writer_takes_a_keyword_categorical_columns():
+    parameters = inspect.signature(H5adToZarr.__init__).parameters
+    assert list(parameters)[-3:] == ["overwrite", "values", "categorical_columns"]
+    parameter = parameters["categorical_columns"]
+    assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
+    assert parameter.default is False
+    assert get_type_hints(H5adToZarr.__init__)["categorical_columns"] is bool
 
 
 def test_writer_module_function_signatures_are_stable():

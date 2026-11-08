@@ -179,13 +179,7 @@ UMAP/t-SNE-versus-coordinates role that the DimReduc key and name decide.
 
 A deposit that holds only normalized values, such as LARRY's matrices on GEO or a CELLxGENE `X` without `raw/X`, imports with `values=` on `H5adToZarr`, `CrToZarr`, `CSVtoZarr`, `SparseToZarr` or `SeuratToZarr`: `"normalized"`, `"log_normalized"` (`log1p`, scanpy and Seurat) or `"log2_normalized"` (`log2(x + 1)`, scater). The default detects them from the first 100 cells, undoes a log, and records `ds.RNA.normalizedValues`; values it cannot place raise and name these options, with `values="counts"` for fractional counts such as alevin's. Negative (scaled) values are refused: import another matrix. CyteArc then normalizes them as counts, and steps that need counts refuse them; a Matrix Market file of normalized values goes through `scipy.io.mmread` and `SparseToZarr`.
 
-H5AD categoricals keep their category order, unused categories, `ordered`, and
-`uns["<col>_colors"]` (stored as `levels`, `ordered`, and `display` attributes, which plots use
-and exports restore). A var or obs index that is neither the ID nor the name column imports as
-`source_index` unless it repeats the IDs or names. Missing feature names take the feature ID.
-Repeated obs names (`anndata.concat` without `index_unique`): inspection warns, and
-`H5adReader.from_inspect(insp, duplicate_cell_ids="make_unique")` renames later ones `ID-1`, ...;
-record that choice.
+H5AD categoricals keep their category order, unused categories, `ordered`, and `uns["<col>_colors"]` (stored as `levels`, `ordered`, and `display` attributes, which plots use and exports restore). By default they import as label columns; `H5adToZarr(..., categorical_columns=True)` stores them as categorical columns, integer codes beside every category, which hold the same labels, attributes, fingerprints and artifact identities in fewer bytes. It is off by default in this release because a CyteArc release before categorical columns cannot open such a store (`Not all columns are of same length`), so leave it off for a store that older installs must read. A var or obs index that is neither the ID nor the name column imports as `source_index` unless it repeats the IDs or names. Missing feature names take the feature ID. Repeated obs names (`anndata.concat` without `index_unique`): inspection warns, and `H5adReader.from_inspect(insp, duplicate_cell_ids="make_unique")` renames later ones `ID-1`, ...; record that choice.
 
 Repeated feature IDs (some exporters use gene symbols as IDs) raise `ValueError: ... must contain
 unique values`. Renaming them is an explicit choice: `duplicate_feature_ids="make_unique"` on

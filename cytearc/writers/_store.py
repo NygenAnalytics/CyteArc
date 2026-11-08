@@ -7,6 +7,7 @@ import zarr
 
 from ..metadata.encoding import (
     missing_rows,
+    stored_categorical_codes,
     stored_categorical_values,
     stored_values,
 )
@@ -216,6 +217,52 @@ def write_metadata_column(
         hasMissing=True,
         profile=profile,
     )
+
+
+def write_categorical_column(
+    group: zarr.Group,
+    name: str,
+    codes: Any,
+    categories: Any,
+    *,
+    ordered: bool,
+    profile: StorageProfile | None = None,
+) -> np.ndarray:
+    """Write a categorical as a categorical column, its codes beside its categories.
+
+    The layout is the one that ``MetaData.insert`` writes for pandas
+    categorical values. Every category is kept in its order, unused ones
+    included, typed by
+    :func:`~cytearc.metadata.encoding.stored_categorical_codes`, so each row
+    reads the label that :func:`write_metadata_column` stores for it from
+    the same codes and categories.
+
+    Args:
+        group: Destination metadata group, which does not hold ``name``.
+        name: Column name.
+        codes: Each row's integer code. A negative code, or one past the
+            last category, is missing.
+        categories: The categories that the codes index.
+        ordered: Whether the categories are ordered.
+        profile: Zarr encoding profile. When None, chosen from the store.
+
+    Returns:
+        The missing rows.
+
+    Raises:
+        TypeError: If ``name`` is not a string, or codes are not integers.
+        ValueError: If ``name`` cannot name one Zarr array, or the
+            categories cannot be stored as categories, as
+            ``stored_categorical_codes`` raises.
+    """
+    from ..storage.identity import replace_metadata_column
+
+    validate_metadata_column_name(name)
+    stored, typed = stored_categorical_codes(codes, categories, name=name)
+    replace_metadata_column(
+        group, name, stored, categories=typed, ordered=ordered, profile=profile
+    )
+    return stored < 0
 
 
 def write_membership_column(
