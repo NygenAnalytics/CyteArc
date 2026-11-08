@@ -19,7 +19,6 @@ import numpy as np
 import zarr
 from fsspec.implementations.asyn_wrapper import AsyncFileSystemWrapper
 from zarr.abc.store import Store
-from zarr.core.sync import sync
 from zarr.storage import (
     FsspecStore,
     LocalStore,
@@ -28,7 +27,7 @@ from zarr.storage import (
     WrapperStore,
 )
 
-from .async_execution import run_read
+from .async_execution import run_on_zarr_loop, run_read
 from .types import array_metadata_shards
 
 if TYPE_CHECKING:
@@ -173,11 +172,12 @@ def _run[T](array: zarr.Array, coroutine: Coroutine[Any, Any, T]) -> T:
     """Run a read of ``array`` on an event loop of its own when its stores allow it.
 
     Reads that touch a store not known to work on any event loop run on
-    Zarr's loop, as Zarr's synchronous API runs them.
+    Zarr's loop, as Zarr's synchronous API runs them. Either way, the stop of
+    the block stream that runs the read cancels it.
     """
     if _reads_on_any_loop(array.store, array.path):
         return run_read(coroutine)
-    return sync(coroutine)
+    return run_on_zarr_loop(coroutine)
 
 
 def chunk_read_scratch_bytes(array: Any) -> int:

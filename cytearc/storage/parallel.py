@@ -2,12 +2,15 @@ import threading
 from collections import deque
 from collections.abc import Callable, Generator, Iterable, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
-from contextlib import contextmanager
-from typing import Any, Literal
+from contextlib import contextmanager, nullcontext
+from typing import TYPE_CHECKING, Any, Literal
 
 
 from ..utils.errors import raise_collected_errors
 from ..utils.shutdown import shutdown_checkpoint
+
+if TYPE_CHECKING:
+    from .async_execution import ReadStop
 
 __all__ = ["stream_shards", "in_shard_context"]
 
@@ -58,9 +61,17 @@ def _imap_ordered(
     *,
     workers: int,
 ) -> Iterator[Any]:
+    from .async_execution import ReadStop, current_read_stop, read_stop_scope
+
+    # One stop for this stream's reads. A stream that runs within another
+    # stream's read is stopped by that stream's stop too.
+    stop = ReadStop()
+    outer = current_read_stop()
+
     def worker(item: Any) -> Any:
         _shard_ctx.active = True
-        return fn(item)
+        with read_stop_scope(stop):
+            return fn(item)
 
     iterator = iter(items)
     executor = ThreadPoolExecutor(max_workers=workers)
@@ -79,39 +90,53 @@ def _imap_ordered(
     # ``finally``: Python unbinds the name when the clause ends, so this frame
     # never keeps an error whose traceback refers back to it. That reference
     # cycle would keep the read-ahead blocks until the cycle collector ran.
-    try:
-        for _ in range(workers):
-            if not enqueue():
-                break
-        while pending:
-            result = pending.popleft().result()
-            shutdown_checkpoint()
-            try:
-                yield result
-            finally:
-                del result
-            enqueue()
-    except BaseException as error:
+    with nullcontext() if outer is None else outer.cancelling(stop.stop):
+        try:
+            for _ in range(workers):
+                if not enqueue():
+                    break
+            while pending:
+                result = pending.popleft().result()
+                shutdown_checkpoint()
+                try:
+                    yield result
+                finally:
+                    del result
+                enqueue()
+        except BaseException as error:
+            raise_collected_errors(
+                _stop_reads(executor, pending, iterator, stop),
+                _CLEANUP_FAILED,
+                ended_by=error,
+            )
+            raise
         raise_collected_errors(
-            _stop_reads(executor, pending, iterator), _CLEANUP_FAILED, ended_by=error
+            _stop_reads(executor, pending, iterator, stop), _CLEANUP_FAILED
         )
-        raise
-    raise_collected_errors(_stop_reads(executor, pending, iterator), _CLEANUP_FAILED)
 
 
 def _stop_reads(
     executor: ThreadPoolExecutor,
     pending: deque[Future[Any]],
     iterator: Iterator[Any],
+    stop: "ReadStop",
 ) -> list[BaseException]:
     """Stop a stream's reads and close its items, returning what failed.
 
-    Reads that have not started are cancelled, and running reads finish before
-    this returns. ``pending`` is empty afterwards, so no finished block outlives
-    the stream. The caller raises the errors through ``raise_collected_errors``,
-    which empties the list, so no frame here keeps one.
+    Reads that have not started are cancelled, and ``stop`` stops the running
+    ones at their next step: it cancels each read on the event loop that runs
+    it, and a read between the operations of its block stops before the next
+    one. They have all ended before this returns, with the store calls and
+    decodes that reads on their own event loops handed to Zarr's codec pool,
+    so no read holds a block outside the stream's budget; a call that a read
+    through Zarr's loop had started can end just after. ``pending`` is empty
+    afterwards, so no finished block outlives the stream. The ``ReadStopped``
+    that stopped reads raise is dropped, and every other failure is returned.
+    The caller raises them through ``raise_collected_errors``, which empties
+    the list, so no frame here keeps one.
     """
     errors: list[BaseException] = []
+    stop.stop()
     for future in pending:
         future.cancel()
     try:
@@ -128,14 +153,16 @@ def _stop_reads(
 
 
 def _collect_failure(future: Future[Any], errors: list[BaseException]) -> None:
-    """Add the error of a stopped read to ``errors``, unless it was cancelled or succeeded."""
+    """Add the error of a stopped read to ``errors``, unless it was cancelled, stopped or succeeded."""
+    from .async_execution import ReadStopped
+
     try:
         failure = None if future.cancelled() else future.exception()
     except BaseException as error:
         # An interruption while a read that a failed shutdown left still runs.
         errors.append(error)
         return
-    if failure is not None:
+    if failure is not None and not isinstance(failure, ReadStopped):
         errors.append(failure)
 
 
@@ -173,7 +200,9 @@ def stream_shards(
     read-ahead calls end, even before the stream is collected. A stream sets
     no BLAS or OpenMP limit, which would apply to the whole process beside its
     consumer; an ``fn`` that runs such work holds its own through
-    ``process_thread_limit``.
+    ``process_thread_limit``. Closing a threaded stream stops its running
+    calls at their next step, a read's next ``await`` or the next operation
+    of its block, and returns once they have ended.
     """
     workers = max(1, int(workers))
     work = _io_limited(fn, io_concurrency)
