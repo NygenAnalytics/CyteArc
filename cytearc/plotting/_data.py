@@ -22,6 +22,7 @@ from ..metadata.rows import (
 )
 from ..metadata.selection import cell_value_spec, resolve_cell_aligned_artifact
 from ..storage.artifacts import ArtifactRef, artifact_group, inspect_artifact
+from ..storage.categorical import CategoricalColumn
 from ..storage.metadata_keys import assay_membership_column
 from ..storage.selections import read_stored_selection_indices
 from ..storage.types import as_zarr_array
@@ -160,8 +161,17 @@ def _fetch_cell_column(
 ) -> np.ndarray:
     """Read one cell-metadata column for plotting with masked rows missing.
 
-    See :func:`~cytearc.metadata.rows.apply_missing_mask` for ``labels``.
+    See :func:`~cytearc.metadata.rows.apply_missing_mask` for ``labels``. A
+    categorical column of live metadata decodes the codes of the plotted
+    rows alone, as :func:`_decoded_rows` does.
     """
+    categorical = _categorical_column(store.cells, column)
+    if categorical is not None:
+        rows = store.cells.active_index(cell_key) if cell_idx is None else cell_idx
+        missing = _cell_column_missing(
+            store.cells, column, cell_key=cell_key, cell_idx=cell_idx
+        )
+        return _decoded_rows(categorical, rows, missing, labels=labels)
     values, missing = _cell_column_values(
         store,
         column,
@@ -169,6 +179,45 @@ def _fetch_cell_column(
         cell_idx=cell_idx,
     )
     return apply_missing_mask(values, missing, labels=labels)
+
+
+def _categorical_column(cells: Any, column: str) -> CategoricalColumn | None:
+    """Return a column of live cell metadata that stores codes and categories, or None.
+
+    A frozen run view holds its snapshot's labels, so its columns are None.
+    """
+    get_array = getattr(cells, "_get_array", None)
+    if getattr(cells, "_selection_ref", None) is not None or not callable(get_array):
+        return None
+    array = get_array(column)
+    return array if isinstance(array, CategoricalColumn) else None
+
+
+def _decoded_rows(
+    column: CategoricalColumn,
+    rows: np.ndarray,
+    missing: np.ndarray | None,
+    *,
+    labels: bool,
+) -> np.ndarray:
+    """Return a categorical column's values at ``rows``, its masked rows shown as missing.
+
+    Only the codes of ``rows`` are decoded, so the values equal those that
+    reading every row and picking ``rows`` gives, shown as
+    :func:`~cytearc.metadata.rows.apply_missing_mask` shows them. Values that
+    become objects because a row is masked, text and ``labels``, are one
+    Python value per category that the rows share, rather than one per row.
+    """
+    codes = np.asarray(read_array_rows_chunkwise(column.codes, rows))
+    if (
+        missing is None
+        or not np.asarray(missing, dtype=bool).any()
+        or (column.dtype.kind != "U" and not labels)
+    ):
+        return apply_missing_mask(column.decode(codes), missing, labels=labels)
+    values = column.decode_objects(codes)
+    values[np.asarray(missing, dtype=bool)] = None
+    return values
 
 
 def _category_universe(store: Any, column: str) -> np.ndarray:
@@ -217,12 +266,15 @@ def _resolve_grouping(
         masks: list[np.ndarray] = []
         for key in group_keys:
             missing = _cell_column_missing(cells, key, cell_key=cell_key)
+            categorical = _categorical_column(cells, key)
             columns.append(
                 apply_missing_mask(
                     np.asarray(cells.fetch(key, key=cell_key)),
                     missing,
                     labels=True,
                 )
+                if categorical is None
+                else _decoded_rows(categorical, cell_idx, missing, labels=True)
             )
             if missing is not None:
                 masks.append(missing)

@@ -408,12 +408,12 @@ def _index_label(value: Any) -> Any:
 
 
 def bulk_column_rows(
-    group_values: NDArray[Any],
+    group_values: NDArray[Any] | pd.Categorical,
     group_order: Sequence[Any],
     labelled: NDArray[np.bool_],
     cell_idx: NDArray[np.int64],
     *,
-    secondary: tuple[NDArray[Any], Sequence[Any]] | None,
+    secondary: tuple[NDArray[Any] | pd.Categorical, Sequence[Any]] | None,
     null_vals: Sequence[Any] | None,
     secondary_null_vals: Sequence[Any] | None,
     pseudo_reps: int,
@@ -426,7 +426,9 @@ def bulk_column_rows(
     sub-group or fewer cells than ``pseudo_reps``. A column is labelled by
     its group alone, or by a MultiIndex of the levels ``group``,
     ``subgroup``, and ``replicate`` (numbered from 1) that the call uses, so
-    labels never join into a name that two columns could share.
+    labels never join into a name that two columns could share. Labels may
+    be a pandas Categorical of the cells' codes, which compares each group
+    by its code.
     """
     if null_vals is None:
         null_vals = []
