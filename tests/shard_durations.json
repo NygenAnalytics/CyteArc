@@ -201,6 +201,7 @@
   "tests/test_mapping_projection.py": 8.7,
   "tests/test_mapping_reference.py": 22.4,
   "tests/test_mapping_utils.py": 0.1,
+  "tests/test_marker_group_labels.py": 2.2,
   "tests/test_marker_tables.py": 54.5,
   "tests/test_markers.py": 89.0,
   "tests/test_markers_search.py": 26.2,
