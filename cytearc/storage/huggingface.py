@@ -234,13 +234,14 @@ class HfReadStore(FsspecStore):
 
     A read-only store keeps each metadata document it reads, shared by its
     readers on any event loop. It lists its objects once, recursively, the
-    first time it needs them, and keeps each object's size. That listing answers ``exists``,
-    ``getsize``, ``list``, ``list_prefix`` and ``list_dir``, a key it does not
-    hold reads as missing without a request, and a read of a key it holds is
-    one GET of the key's resolver URL for exactly the bytes asked for. The
-    listing is a snapshot: the store does not see objects written after it,
-    and a listed key that is no longer there raises ``FileNotFoundError``. A
-    writable store reads through Hugging Face's file system.
+    first time it needs them, and keeps each object's size. That listing
+    answers ``exists``, ``getsize``, ``list``, ``list_prefix`` and
+    ``list_dir``, a key it does not hold reads as missing without a request,
+    and a read of a key it holds is one GET of the key's resolver URL for
+    exactly the bytes asked for. The listing is a snapshot: the store does not
+    see objects written after it, and a listed key that is no longer there
+    raises ``OSError``. A writable store reads through Hugging Face's file
+    system.
 
     Each attempt at a request of the store, a read or a listing, is given
     ``request_timeout`` seconds, 60 by default. An attempt that times out, loses
@@ -350,7 +351,9 @@ class HfReadStore(FsspecStore):
                 timeout=self.request_timeout,
             )
             if response.status_code == 404:
-                raise FileNotFoundError(
+                # Not FileNotFoundError: Zarr reads that from a partial shard
+                # read as a missing shard, which fills its chunks with zeros.
+                raise OSError(
                     f"{key!r} is listed in {self._location}, but reading it "
                     "answered 404: the store changed after it was listed. Open "
                     "the store again to read what it holds now."

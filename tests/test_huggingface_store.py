@@ -914,15 +914,55 @@ def test_read_store_raises_when_a_listed_key_is_gone(loopback_hub):
         assert sync(store.exists("c/1/1"), timeout=GUARD_SECONDS)
         # The store changes after it was listed.
         chunk.rename(chunk.with_name("moved"))
-        with pytest.raises(FileNotFoundError) as raised:
+        with pytest.raises(OSError) as raised:
             sync(store.get("c/1/1", _PROTOTYPE), timeout=GUARD_SECONDS)
     finally:
         store.close()
+    # Not FileNotFoundError, which Zarr reads as a missing chunk, and not
+    # retried.
+    assert type(raised.value) is OSError
     assert str(raised.value).startswith(
         f"'c/1/1' is listed in {LOOPBACK_URI}, but reading it answered 404: the "
         "store changed after it was listed."
     )
     assert [kind for kind, _ in loopback_hub.requests].count("file") == 1
+
+
+def _leaves(error):
+    """Return the errors that an exception group holds, or the error itself."""
+    if isinstance(error, BaseExceptionGroup):
+        return [leaf for inner in error.exceptions for leaf in _leaves(inner)]
+    return [error]
+
+
+def test_read_store_raises_when_a_listed_shard_is_gone_after_its_index(loopback_hub):
+    uri = f"hf://buckets/{BUCKET_ID}/sharded.zarr"
+    zarr.create_array(
+        store=loopback_hub.root / "sharded.zarr",
+        data=np.arange(1, 65, dtype=np.int32).reshape(8, 8),
+        chunks=(2, 2),
+        shards=(4, 4),
+    )
+    store = _loopback_store(loopback_hub, uri=uri)
+    try:
+        array = zarr.open_array(store=store, mode="r", zarr_format=3)
+        # A partial read of a shard reads its index, then its chunks' bytes.
+        # Zarr reads a FileNotFoundError from the second as a missing shard and
+        # fills its chunks with zeros, so the store must raise something else.
+        loopback_hub.plan["file"] = ["serve", 404]
+        with pytest.raises((OSError, BaseExceptionGroup)) as raised:
+            array[0:2, 0:2]
+    finally:
+        store.close()
+    errors = [leaf for leaf in _leaves(raised.value) if type(leaf) is OSError]
+    assert len(errors) == 1
+    assert str(errors[0]).startswith(
+        f"'c/0/0' is listed in {uri}, but reading it answered 404: the store "
+        "changed after it was listed."
+    )
+    index, values = _received(loopback_hub, "file")[-2:]
+    assert index[0] == values[0] == "sharded.zarr/c/0/0"
+    assert index[1] != values[1]
 
 
 def test_read_store_reads_a_missing_store_as_empty(loopback_hub):
