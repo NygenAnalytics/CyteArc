@@ -203,8 +203,9 @@ def test_an_operation_declares_camel_case_keys_once() -> None:
     assert declared_diagnostics(None) == ()
 
 
-#: The keys that each operation of the clone stack, repertoire and variants
-#: saves, beside the shared ones, as the API's table of diagnostics gives them.
+#: The keys that each operation of the clone stack, repertoire, variants and
+#: perturbation screens saves, beside the shared ones, as the API reference
+#: gives them.
 _OWN_KEYS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     "CloneImportArguments": (
         (*JOIN_DIAGNOSTICS, *CLONE_DIAGNOSTICS),
@@ -288,6 +289,42 @@ _OWN_KEYS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
         ("earlyCellsWithoutLateCells", "earlyCellsWithTiedFates", "testedClones"),
     ),
     "GuideCallImportArguments": (JOIN_DIAGNOSTICS, ()),
+    "GuideCallArguments": (
+        (),
+        (
+            "guideFits",
+            "fitsCallingNoCell",
+            "fitsNoCells",
+            "fitsTooSparse",
+            "fitsNoFit",
+            "fitsNoPositive",
+            "fitCallingNoCellExamples",
+            "cellsWithCall",
+            "cellsWithSeveralGuides",
+        ),
+    ),
+    "PerturbationEfficiencyArguments": (
+        (),
+        ("rowsWithoutFeature", "rowWithoutFeatureExamples"),
+    ),
+    "PerturbationAssociationArguments": (
+        (),
+        (
+            "calibrationStatus",
+            "controlGuides",
+            "calibrationGrade",
+            "falseDiscoveries",
+            "negativeControlPairs",
+            "rowsWithoutStatistic",
+            "rowWithoutStatisticExamples",
+            "calibrationGroupsWithoutStatistic",
+            "calibrationGroupWithoutStatisticExamples",
+        ),
+    ),
+    "PerturbationProfileArguments": (
+        (),
+        ("leftOutPerturbations", "leftOutPerturbationExamples"),
+    ),
 }
 
 

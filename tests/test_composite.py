@@ -11,14 +11,14 @@ import zarr
 from zarr.abc.store import OffsetByteRequest, RangeByteRequest, SuffixByteRequest
 from zarr.core.buffer import default_buffer_prototype
 from zarr.core.sync import sync
-from zarr.storage import FsspecStore, LocalStore
+from zarr.storage import FsspecStore, LocalStore, MemoryStore
 
 from cytearc import DataStore
 from cytearc.composite import create_composite
 from cytearc.storage.count_matrix import CountMatrixPolicy
 from cytearc.storage.schema import create_cell_data, create_zarr_count_assay
 from cytearc.writers.counts_t import finalize_writer_counts_t
-from tests.storage_helpers import finalize_test_counts
+from tests.storage_helpers import finalize_test_counts, stored_bytes
 
 
 @pytest.fixture
@@ -621,6 +621,194 @@ def test_remote_source_credentials_are_runtime_only(
             source_storage_options={"a": credentials["token"]},
             nthreads=1,
         )
+
+
+_BUCKET_OPTIONS = {"access_key_id": "bucket-key", "secret_access_key": "bucket-secret"}
+_SELECTED = {"features": "union", "rows": {"a": [0, 7, 12], "b": [3, 5]}}
+
+
+def _codec_settings(array) -> list[tuple[str, dict]]:
+    """Name each compressor of an array with its settings, without Blosc's item size."""
+    return [
+        (
+            type(codec).__name__,
+            {
+                key: value
+                for key, value in codec.to_dict()["configuration"].items()
+                if key != "typesize"
+            },
+        )
+        for codec in array
+    ]
+
+
+def _composite_contents(joint):
+    """Return what a composite reads, to compare composites at two destinations."""
+    return {
+        "ids": joint.cells.fetch_all("ids"),
+        "dataset": joint.cells.fetch_all("dataset"),
+        "orig_quality": joint.cells.fetch_all("orig_quality"),
+        "nCounts": joint.cells.fetch_all("RNA_nCounts"),
+        "features": joint.RNA.feats.fetch_all("ids"),
+        "counts": joint.RNA.matrixGroup["counts"][:],
+        "countsT": joint.RNA.matrixGroup["countsT"][:],
+    }
+
+
+def _assert_same_contents(observed, expected):
+    assert observed.keys() == expected.keys()
+    for name, values in expected.items():
+        np.testing.assert_array_equal(observed[name], values, err_msg=name)
+
+
+@pytest.mark.parametrize("destination", ["url", "memory_store", "fsspec_store"])
+def test_a_composite_on_another_store_reads_as_a_local_one(
+    sources, composite_sources, tmp_path, monkeypatch, destination
+):
+    from obstore.store import MemoryStore as ObjectMemoryStore
+    from zarr.storage import ObjectStore
+
+    from cytearc.storage.layout import get_compressors
+    from tests.storage_helpers import serve_uris
+
+    options = {**_SELECTED, "nthreads": 1, "mem_budget": "64M"}
+    local = create_composite(sources, at=tmp_path / "joint.zarr", **options)
+    expected = _composite_contents(local)
+    np.testing.assert_array_equal(
+        expected["counts"], _expected_counts(local, composite_sources)
+    )
+    profile = "cloud"
+    if destination == "url":
+        uri = "s3://bucket/project/joint.zarr"
+        store = ObjectStore(ObjectMemoryStore())
+        serve_uris(monkeypatch, {uri: (store, _BUCKET_OPTIONS)})
+        # The destination opens only with its own options, which a source
+        # never gets.
+        with pytest.raises(PermissionError, match=re.escape(uri)):
+            create_composite(sources, at=uri, **options)
+        assert stored_bytes(store) == {}
+        joint = create_composite(
+            sources, at=uri, storage_options=_BUCKET_OPTIONS, **options
+        )
+
+        def reopen():
+            return DataStore(uri, storage_options=_BUCKET_OPTIONS, nthreads=1)
+
+    else:
+        if destination == "memory_store":
+            store = MemoryStore()
+            profile = "fast_local"
+        else:
+            store = FsspecStore.from_url(f"memory://{tmp_path.name}/joint.zarr")
+        joint = create_composite(sources, at=store, **options)
+
+        def reopen():
+            return DataStore(store, nthreads=1)
+
+    _assert_same_contents(_composite_contents(joint), expected)
+    # Sources outside the destination's directory keep their absolute paths.
+    assert [
+        binding["location"] for binding in joint.z.attrs["composite"]["sources"]
+    ] == [str((tmp_path / f"{name}.zarr").resolve()) for name in ("a", "b")]
+    # Metadata takes the profile of its destination, as other writers' does.
+    for name in ("ids", "dataset", "orig_quality"):
+        assert _codec_settings(joint.z[f"cellData/{name}"].compressors) == (
+            _codec_settings(get_compressors(profile))
+        )
+        assert _codec_settings(local.z[f"cellData/{name}"].compressors) == (
+            _codec_settings(get_compressors("fast_local"))
+        )
+    for value in stored_bytes(store).values():
+        assert _BUCKET_OPTIONS["secret_access_key"].encode() not in value
+    joint.z.store.close()
+    reopened = reopen()
+    _assert_same_contents(_composite_contents(reopened), expected)
+    reopened.z.store.close()
+
+
+@pytest.mark.parametrize("relative_sources", [False, True])
+def test_a_composite_in_the_bucket_of_its_sources_records_them_relative_when_asked(
+    composite_sources, tmp_path, monkeypatch, relative_sources
+):
+    from obstore.store import MemoryStore as ObjectMemoryStore
+    from zarr.storage import ObjectStore
+
+    from tests.storage_helpers import object_store_copy, serve_uris
+
+    bucket = "s3://bucket/project"
+    target = ObjectStore(ObjectMemoryStore())
+    serve_uris(
+        monkeypatch,
+        {
+            f"{bucket}/joint.zarr": (target, _BUCKET_OPTIONS),
+            **{
+                f"{bucket}/{name}.zarr": (object_store_copy(path), _BUCKET_OPTIONS)
+                for name, (path, _, _) in composite_sources.items()
+            },
+        },
+    )
+    options = {"nthreads": 1, "mem_budget": "64M"}
+    sources = {
+        name: DataStore(
+            f"{bucket}/{name}.zarr",
+            zarr_mode="r",
+            storage_options=_BUCKET_OPTIONS,
+            **options,
+        )
+        for name in composite_sources
+    }
+    joint = create_composite(
+        sources,
+        at=f"{bucket}/joint.zarr",
+        storage_options=_BUCKET_OPTIONS,
+        relative_sources=relative_sources,
+        **_SELECTED,
+        **options,
+    )
+    expected = _expected_counts(joint, composite_sources)
+    assert [
+        binding["location"] for binding in joint.z.attrs["composite"]["sources"]
+    ] == [
+        f"{name}.zarr" if relative_sources else f"{bucket}/{name}.zarr"
+        for name in ("a", "b")
+    ]
+    # Sources in a bucket read through the source cache, however they are
+    # recorded.
+    assert joint.z.store.source_cache is not None
+    np.testing.assert_array_equal(joint.RNA.matrixGroup["counts"][:], expected)
+    joint.z.store.close()
+
+    reopened = DataStore(
+        f"{bucket}/joint.zarr",
+        storage_options=_BUCKET_OPTIONS,
+        source_storage_options=dict.fromkeys(composite_sources, _BUCKET_OPTIONS),
+        **options,
+    )
+    assert reopened.z.store.source_cache is not None
+    np.testing.assert_array_equal(reopened.RNA.matrixGroup["counts"][:], expected)
+    np.testing.assert_array_equal(reopened.RNA.matrixGroup["countsT"][:], expected.T)
+    reopened.z.store.close()
+
+
+def test_a_composite_names_its_source_column(sources, tmp_path):
+    options = {**_SELECTED, "nthreads": 1, "mem_budget": "64M"}
+    joint = create_composite(
+        sources, at=tmp_path / "joint.zarr", source_column="sample", **options
+    )
+    names = [str(identity).split("__")[0] for identity in joint.cells.fetch_all("ids")]
+    assert sorted(set(names)) == ["a", "b"]
+    assert "sample" in joint.cells.columns
+    assert "dataset" not in joint.cells.columns
+    assert joint.cells.fetch_all("sample").tolist() == names
+    joint.z.store.close()
+    reopened = DataStore(str(tmp_path / "joint.zarr"), nthreads=1)
+    assert reopened.cells.fetch_all("sample").tolist() == names
+    reopened.z.store.close()
+
+    default = create_composite(sources, at=tmp_path / "default.zarr", **options)
+    assert "dataset" in default.cells.columns
+    assert "sample" not in default.cells.columns
+    assert default.cells.fetch_all("dataset").tolist() == names
 
 
 @pytest.mark.parametrize("writer", ["subset", "merge"])
@@ -1850,7 +2038,11 @@ def test_composite_reopen_rejects_invalid_saved_contract(
         ("name", ValueError, "Source names"),
         ("type", TypeError, "open DataStore"),
         ("selection", ValueError, "existing source"),
-        ("remote", ValueError, "destination must be a local path"),
+        ("occupied_store", FileExistsError, "already exists"),
+        ("source_column_reserved", ValueError, "not ids, I, or names"),
+        ("source_column_nested", ValueError, "must not contain '/'"),
+        ("source_column_type", TypeError, "must be strings"),
+        ("source_column_taken", ValueError, "conflicts with merged metadata"),
         ("existing", FileExistsError, "already exists"),
         ("mounted", ValueError, "Mounted and composite sources"),
         ("assay", ValueError, "has no assay"),
@@ -1877,8 +2069,19 @@ def test_composite_invalid_creation_preserves_sources(
         inputs = {"a": sources["a"].z}
     elif problem == "selection":
         options["rows"] = {"missing": [0]}
-    elif problem == "remote":
-        destination = "s3://composite-test/rejected.zarr"
+    elif problem == "occupied_store":
+        destination = MemoryStore()
+        zarr.open_group(destination, mode="w").attrs["kept"] = True
+        occupied = stored_bytes(destination)
+    elif problem == "source_column_reserved":
+        options["source_column"] = "ids"
+    elif problem == "source_column_nested":
+        options["source_column"] = "sample/name"
+    elif problem == "source_column_type":
+        options["source_column"] = 3
+    elif problem == "source_column_taken":
+        # Each source's "quality" column is copied as "orig_quality".
+        options["source_column"] = "orig_quality"
     elif problem == "existing":
         destination.mkdir()
     elif problem == "mounted":
@@ -1910,7 +2113,9 @@ def test_composite_invalid_creation_preserves_sources(
     } == before
     if problem == "existing":
         assert list(destination.iterdir()) == []
-    elif problem != "remote":
+    elif problem == "occupied_store":
+        assert stored_bytes(destination) == occupied
+    else:
         assert not destination.exists()
 
 

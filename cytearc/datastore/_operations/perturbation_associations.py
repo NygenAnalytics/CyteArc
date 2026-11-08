@@ -31,7 +31,13 @@ from ...storage.artifact_writer import (
     AttributeRequirement,
     PlannedArtifact,
 )
-from ...storage.artifacts import ArtifactRef, artifact_group, require_complete_artifact
+from ...storage.artifacts import (
+    ArtifactRef,
+    artifact_group,
+    inspect_artifact,
+    require_complete_artifact,
+)
+from ...storage.diagnostics import EXAMPLES, DiagnosticRule, warn_diagnostics
 from ...storage.geometry import array_geometry
 from ...storage.partition import row_band
 from ...storage.types import as_zarr_array, read_array
@@ -122,107 +128,157 @@ def _chunk_read_bytes(codes: zarr.Array) -> int:
     return stored + _chunk_rows(codes) * row_bytes
 
 
-def _association_warnings(
-    unmatched: np.ndarray,
-    n_rows: int,
-    by: str,
-    assay: str,
-    attributes: Mapping[str, Any],
-    moi: str,
-) -> list[str]:
-    """Describe what association tests warn about, whether computed or reused.
+# Why no calibration check ran, by its status, when the reason needs no
+# number or setting.
+_UNCHECKED_CALIBRATION = {
+    "no_passing_discovery": (
+        "No discovery pair passes QC, and by default the calibration check "
+        "tests as many pairs as pass, so no calibration check was run; pass "
+        "n_calibration_pairs to run one"
+    ),
+    "no_passing_calibration": (
+        "No pair of a calibration group and a feature passes QC, so no "
+        "calibration check was run"
+    ),
+    "no_calibration_statistic": (
+        "No calibration pair has a statistic, so no calibration check was run"
+    ),
+}
+
+
+def _named(examples: Sequence[str], count: int) -> str:
+    """Join up to five examples of ``count``, saying when there are others."""
+    return ", ".join(examples) + ("" if len(examples) == count else ", among others")
+
+
+def _unmatched_positive_controls_message(
+    unmatched: np.ndarray, n_rows: int, by: str, assay: str
+) -> str:
+    """Name the rows, targets or guides, whose target matches no feature for a positive control.
 
     Args:
-        unmatched: The rows, targets or guides, without a feature for a
-            positive control.
+        unmatched: The names of the rows without a feature.
         n_rows: The rows of the labels.
         by: ``"target"`` or ``"guide"``.
         assay: The expression assay.
-        attributes: The attributes of the tests: ``calibration_status``,
-            ``n_control_guides``, ``calibration_grade``,
-            ``n_false_discoveries``, ``n_negative_control_pairs``,
-            ``rows_without_statistic`` and
-            ``calibration_groups_without_statistic``.
+    """
+    return (
+        f"{len(unmatched)} of {n_rows} {by}s have no feature of assay "
+        f"{assay!r} for a positive control, for example "
+        + ", ".join(repr(str(name)) for name in unmatched[:EXAMPLES])
+        + ". A target that is not a gene, such as an enhancer, has none; for "
+        "a gene, check id_column, or the target names against the feature "
+        "names."
+    )
+
+
+def _association_rules(by: str, moi: str) -> tuple[DiagnosticRule, ...]:
+    """The warnings of association tests, from their diagnostics.
+
+    Args:
+        by: ``"target"`` or ``"guide"``.
         moi: ``"low"`` or ``"high"``, which choose the control guides of the
             calibration groups and the comparison cells.
     """
-    messages = []
-    if len(unmatched):
-        messages.append(
-            f"{len(unmatched)} of {n_rows} {by}s have no feature of assay "
-            f"{assay!r} for a positive control, for example "
-            + ", ".join(repr(str(name)) for name in unmatched[:5])
-            + ". A target that is not a gene, such as an enhancer, has none; for "
-            "a gene, check id_column, or the target names against the feature "
-            "names."
-        )
-    status = attributes["calibration_status"]
-    if status == "few_control_guides" and moi == "high":
-        messages.append(
-            "No labelled cell carries a control guide, which a calibration group "
-            "needs, so no calibration check was run"
-        )
-    elif status == "few_control_guides":
-        n_guides = int(attributes["n_control_guides"])
+
+    def unchecked(numbers: Mapping[str, Any]) -> str:
+        status = str(numbers["calibrationStatus"])
+        if status != "few_control_guides":
+            return _UNCHECKED_CALIBRATION[status]
+        if moi == "high":
+            return (
+                "No labelled cell carries a control guide, which a calibration "
+                "group needs, so no calibration check was run"
+            )
+        n_guides = int(numbers["controlGuides"])
         guides = "1 control guide" if n_guides == 1 else f"{n_guides} control guides"
-        messages.append(
+        return (
             f"Control cells with one guide carry {guides}, fewer than the 2 that "
             "a calibration group and its comparison cells need, so no calibration "
             "check was run"
         )
-    elif status == "no_passing_discovery":
-        messages.append(
-            "No discovery pair passes QC, and by default the calibration check "
-            "tests as many pairs as pass, so no calibration check was run; pass "
-            "n_calibration_pairs to run one"
-        )
-    elif status == "no_passing_calibration":
-        messages.append(
-            "No pair of a calibration group and a feature passes QC, so no "
-            "calibration check was run"
-        )
-    elif status == "no_calibration_statistic":
-        messages.append(
-            "No calibration pair has a statistic, so no calibration check was run"
-        )
-    grade = attributes["calibration_grade"]
-    if grade in ("moderate", "severe"):
-        messages.append(
-            f"The calibration check found {attributes['n_false_discoveries']} "
-            f"false discoveries among {attributes['n_negative_control_pairs']} "
-            f"negative-control pairs, a {grade} miscalibration; check the "
-            "covariates and the control guides before trusting the discoveries"
-        )
+
     # Within a pair's cells, a sample or a binary covariate that holds exactly
     # the treatment cells makes the variance of their score 0.
-    rows = [str(name) for name in attributes["rows_without_statistic"]]
-    if rows:
-        noun = f"{len(rows)} {by}" + ("s" if len(rows) > 1 else "")
+    def rows_without_statistic(numbers: Mapping[str, Any]) -> str:
+        count = int(numbers["rowsWithoutStatistic"])
+        noun = f"{count} {by}" + ("s" if count > 1 else "")
         holding = (
             "samples, or of a binary covariate, that hold no control cell"
             if moi == "low"
             else "samples or of a binary covariate"
         )
-        messages.append(
+        return (
             f"The pairs of {noun} pass QC but have no statistic, so they have no "
             "p-value or fold change and are not significant: "
-            + ", ".join(repr(name) for name in rows)
+            + _named(numbers["rowWithoutStatisticExamples"], count)
             + f". The covariates determine which of each pair's cells carry the "
             f"{by}, as they do when its cells are exactly the cells of {holding}; "
             f"test such a {by} without that sample column or covariate."
         )
-    groups = [str(name) for name in attributes["calibration_groups_without_statistic"]]
-    if groups:
-        noun = f"{len(groups)} calibration group" + ("s" if len(groups) > 1 else "")
-        messages.append(
+
+    def groups_without_statistic(numbers: Mapping[str, Any]) -> str:
+        count = int(numbers["calibrationGroupsWithoutStatistic"])
+        noun = f"{count} calibration group" + ("s" if count > 1 else "")
+        return (
             f"The pairs of {noun} pass QC but have no statistic, so they have no "
             "p-value or fold change and are not counted as false discoveries: "
-            + ", ".join(repr(name) for name in groups)
+            + _named(numbers["calibrationGroupWithoutStatisticExamples"], count)
             + ". The covariates determine which of each pair's cells carry the "
             "group's guides, as they do when those are exactly the pair's cells "
             "of samples or of a binary covariate."
         )
-    return messages
+
+    return (
+        DiagnosticRule(
+            "calibrationStatus",
+            applies=lambda numbers: (
+                numbers["calibrationStatus"]
+                in ("few_control_guides", *_UNCHECKED_CALIBRATION)
+            ),
+            message=unchecked,
+        ),
+        DiagnosticRule(
+            "falseDiscoveries",
+            applies=lambda numbers: (
+                numbers["calibrationGrade"] in ("moderate", "severe")
+            ),
+            message=lambda numbers: (
+                f"The calibration check found {numbers['falseDiscoveries']} false "
+                f"discoveries among {numbers['negativeControlPairs']} "
+                f"negative-control pairs, a {numbers['calibrationGrade']} "
+                "miscalibration; check the covariates and the control guides "
+                "before trusting the discoveries"
+            ),
+        ),
+        DiagnosticRule(
+            "rowsWithoutStatistic",
+            applies=lambda numbers: bool(numbers["rowsWithoutStatistic"]),
+            message=rows_without_statistic,
+        ),
+        DiagnosticRule(
+            "calibrationGroupsWithoutStatistic",
+            applies=lambda numbers: bool(numbers["calibrationGroupsWithoutStatistic"]),
+            message=groups_without_statistic,
+        ),
+    )
+
+
+def _warn_associations(
+    root: zarr.Group,
+    arguments: PerturbationAssociationArguments,
+    ref: ArtifactRef,
+    by: str,
+) -> None:
+    """Warn from saved association tests' diagnostics, whether computed or reused.
+
+    ``by`` names what the tested rows are, ``"target"`` or ``"guide"``.
+    """
+    warn_diagnostics(
+        arguments,
+        inspect_artifact(root, ref).diagnostics,
+        _association_rules(by, arguments.moi),
+    )
 
 
 class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperationsBase):
@@ -347,6 +403,21 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
         cells, and a target whose cells are exactly the cells of samples, or
         of a binary covariate, has no statistic.
 
+        The tests save their diagnostics, which
+        ``ds.artifacts.inspect(tests).diagnostics`` returns:
+        ``calibrationStatus``, ``"checked"``, ``"off"`` or why no check ran;
+        ``controlGuides``, the control guides that the calibration groups draw
+        from; ``calibrationGrade``; ``falseDiscoveries`` among the
+        ``negativeControlPairs``; and ``rowsWithoutStatistic`` and
+        ``calibrationGroupsWithoutStatistic``, the tested targets or guides and
+        the calibration groups whose pairs pass QC without a statistic, with
+        up to five of each in ``rowWithoutStatisticExamples`` and
+        ``calibrationGroupWithoutStatisticExamples``. Each warning of the
+        calibration check and of pairs without a statistic is a
+        ``DiagnosticWarning`` that comes again each time the tests are reused.
+        With ``positive_controls="targets"``, a warning names the targets or
+        guides whose target matches no feature each time the tests are called.
+
         Args:
             labels: A ``perturbation_labels`` artifact.
             from_assay: The expression assay, whose counts are tested.
@@ -412,11 +483,7 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
                 the message names the smallest budget that runs the tests.
         """
         invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
-        from ...perturbation.associations import (
-            ASSOCIATION_SETS,
-            CALIBRATION_STATUSES,
-            pair_table_rows,
-        )
+        from ...perturbation.associations import ASSOCIATION_SETS, pair_table_rows
 
         from ...storage.artifacts import fingerprint_array
         from ...storage.feature_selection import read_feature_selection_indices
@@ -611,6 +678,15 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
             covariate_columns=covariate_names,
             invalidate_cache=invalidate_cache,
         )
+        # The tests' identity records the positive pairs, which a table of the
+        # same pairs shares, so the targets without a feature are the call's
+        # to name, before it plans and whether it computes or reuses.
+        if len(unmatched):
+            warn(
+                _unmatched_positive_controls_message(
+                    unmatched, n_rows, by, expression.name
+                )
+            )
         planned = arguments.plan(
             self.zw,
             scope="assay",
@@ -633,39 +709,10 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
                     "set_names",
                     predicate=lambda value: list(value) == list(ASSOCIATION_SETS),
                 ),
-                AttributeRequirement("calibration_grade", expected_types=(str,)),
-                AttributeRequirement(
-                    "calibration_status",
-                    predicate=lambda value: value in CALIBRATION_STATUSES,
-                ),
-                *(
-                    AttributeRequirement(name, expected_types=(int,))
-                    for name in (
-                        "n_false_discoveries",
-                        "n_negative_control_pairs",
-                        "n_control_guides",
-                    )
-                ),
-                *(
-                    AttributeRequirement(name, expected_types=(list,))
-                    for name in (
-                        "rows_without_statistic",
-                        "calibration_groups_without_statistic",
-                    )
-                ),
             ),
         )
         if planned.reused:
-            # Saved tests warn as they did when they were computed.
-            for message in _association_warnings(
-                unmatched,
-                n_rows,
-                by,
-                expression.name,
-                artifact_group(self.zw, planned.ref).attrs,
-                moi,
-            ):
-                warn(message)
+            _warn_associations(self.zw, arguments, planned.ref, by)
             return planned.ref
         if high:
             tables = self._complement_association_tables(
@@ -715,18 +762,18 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
                 seed=resolved_seed,
                 operation=arguments.operation,
             )
-        return self._save_association_tables(
+        self._save_association_tables(
             planned,
             tables,
             rows=rows,
             by=by,
             used=used,
-            unmatched=unmatched,
-            assay=expression.name,
             alpha=rate,
             requested=requested,
             moi=moi,
         )
+        _warn_associations(self.zw, arguments, planned.ref, by)
+        return planned.ref
 
     def _control_association_tables(
         self,
@@ -1575,19 +1622,17 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
         rows: _LabelRows,
         by: str,
         used: np.ndarray,
-        unmatched: np.ndarray,
-        assay: str,
         alpha: float,
         requested: int | None,
         moi: str,
-    ) -> ArtifactRef:
+    ) -> None:
         """Adjust the tested pairs' p-values, grade the calibration and save the tests.
 
         The p-values are adjusted by Benjamini-Hochberg within each set of
         pairs; a pair without a p-value, such as one that passes QC without a
-        statistic, is not significant, nor a false discovery. The attributes
-        also hold what the warnings name, so that saved tests warn again as
-        they did.
+        statistic, is not significant, nor a false discovery. The diagnostics
+        hold what the warnings name, so that saved tests warn again as they
+        did.
         """
         from ...perturbation.associations import (
             ASSOCIATION_SETS,
@@ -1614,22 +1659,6 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
         n_tested_calibration = int(np.count_nonzero(with_statistic & (sets == 1)))
         grade = calibration_grade(n_false) if n_tested_calibration else "none"
         n_control_guides = len(tables.control_guides)
-        attributes = {
-            "set_names": list(ASSOCIATION_SETS),
-            "calibration_grade": grade,
-            "n_false_discoveries": n_false,
-            "calibration_group_size": tables.group_size,
-            "calibration_status": calibration_status(
-                n_calibration,
-                n_tested_calibration,
-                requested,
-                n_control_guides,
-                pairs.passing_discovery,
-                moi,
-            ),
-            "n_control_guides": n_control_guides,
-            "n_negative_control_pairs": n_calibration,
-        }
         # Each group of treatment cells, the tested rows and then the
         # calibration groups, names its target and guides once, and each pair
         # names its group.
@@ -1659,14 +1688,32 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
             ]
         )
         # The tested rows and calibration groups whose pairs pass QC without a
-        # statistic, by name, which the warning names again on reuse.
+        # statistic, by name.
         without = np.unique(pairs.groups[pass_qc & np.isnan(values_out["z"])])
-        attributes["rows_without_statistic"] = (
-            rows.names[used][without[without < len(used)]].astype(str).tolist()
-        )
-        attributes["calibration_groups_without_statistic"] = (
-            group_targets[without[without >= len(used)]].astype(str).tolist()
-        )
+        rows_without = rows.names[used][without[without < len(used)]].astype(str)
+        groups_without = group_targets[without[without >= len(used)]].astype(str)
+        diagnostics = {
+            "calibrationStatus": calibration_status(
+                n_calibration,
+                n_tested_calibration,
+                requested,
+                n_control_guides,
+                pairs.passing_discovery,
+                moi,
+            ),
+            "controlGuides": n_control_guides,
+            "calibrationGrade": grade,
+            "falseDiscoveries": n_false,
+            "negativeControlPairs": n_calibration,
+            "rowsWithoutStatistic": len(rows_without),
+            "rowWithoutStatisticExamples": [
+                repr(str(name)) for name in rows_without[:EXAMPLES]
+            ],
+            "calibrationGroupsWithoutStatistic": len(groups_without),
+            "calibrationGroupWithoutStatisticExamples": [
+                repr(str(name)) for name in groups_without[:EXAMPLES]
+            ],
+        }
         qc = pairs.qc
         write_cell_data_artifact(
             self.zw,
@@ -1686,12 +1733,12 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
                 "stage": tables.stage,
                 **values_out,
             },
-            attributes=attributes,
+            attributes={
+                "set_names": list(ASSOCIATION_SETS),
+                "calibration_group_size": tables.group_size,
+            },
+            diagnostics=diagnostics,
         )
-        for message in _association_warnings(
-            unmatched, len(rows.names), by, assay, attributes, moi
-        ):
-            warn(message)
         discovered = sets == 0
         n_without = int(np.count_nonzero(discovered & pass_qc & ~with_statistic))
         logger.info(
@@ -1706,7 +1753,6 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
             f"{alpha}; calibration {grade} with {n_false} false discoveries in "
             f"{n_calibration} pairs"
         )
-        return planned.ref
 
     @validation_scoped
     def _perturbation_load_associations(
@@ -1723,7 +1769,9 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
 
         Raises:
             TypeError: If ``tests`` is not an ArtifactRef.
-            ValueError: If it is not a ``perturbation_associations`` artifact.
+            ValueError: If it is not a ``perturbation_associations`` artifact,
+                or tests saved without their diagnostics, as earlier releases
+                saved them; the error names the call that tests anew.
             KeyError: If the store holds no such artifact.
             RuntimeError: If the artifact is incomplete, as a call that
                 stopped before it finished leaves it.
@@ -1813,6 +1861,6 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
             moi=str(parameters["moi"]),
             resampling=str(parameters["resampling"]),
             from_assay=str(tests.assay),
-            n_false_discoveries=int(str(group.attrs["n_false_discoveries"])),
-            calibration_grade=str(group.attrs["calibration_grade"]),
+            n_false_discoveries=int(status.diagnostics["falseDiscoveries"]),
+            calibration_grade=str(status.diagnostics["calibrationGrade"]),
         )

@@ -29,6 +29,7 @@ from tests.perturbation_helpers import (
     fixed_labels,
     size_root,
     use_python_kernels,
+    warned,
     write_screen,
 )
 from tests.memory_helpers import named_budget
@@ -1192,13 +1193,24 @@ def _qc_of(row) -> tuple[int, int, int, int]:
 
 
 def _warned(store, *args, **kwargs):
-    """Run association tests, and return them with the messages they warn."""
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        tests = store.perturbation.associations(*args, **kwargs)
-    return tests, [
-        str(entry.message) for entry in caught if entry.category is UserWarning
-    ]
+    """Run association tests, and return them with every warning that CyteArc gives or logs.
+
+    Each one is given once: the call's warning about targets without a feature
+    for a positive control, or a DiagnosticWarning of the value of the
+    diagnostic that the tests saved.
+    """
+    tests, texts, diagnostic = warned(
+        lambda: store.perturbation.associations(*args, **kwargs)
+    )
+    saved = store.artifacts.inspect(tests).diagnostics
+    for warning in diagnostic:
+        assert warning.operation == "test_perturbation_associations"
+        assert warning.value == saved[warning.diagnostic]
+    # The call names the targets without a feature for a positive control
+    # before it plans; every other warning comes from the saved diagnostics.
+    calls = [text for text in texts if " for a positive control, for example " in text]
+    assert texts == calls + [str(warning) for warning in diagnostic]
+    return tests, texts
 
 
 @pytest.fixture(scope="module")
@@ -1320,10 +1332,9 @@ def test_high_moi_calibration_groups_take_the_called_control_guides(
     for row in calibration.itertuples():
         gene = int(row.feature.removeprefix("RNA"))
         assert _qc_of(row) == _expected_qc(group, gene)
-    stored = artifact_group(store.zw, tests).attrs
-    assert stored["n_control_guides"] == 2
-    assert stored["calibration_group_size"] == 2
-    assert stored["calibration_status"] == "checked"
+    assert artifact_group(store.zw, tests).attrs["calibration_group_size"] == 2
+    saved = store.artifacts.inspect(tests).diagnostics
+    assert (saved["controlGuides"], saved["calibrationStatus"]) == (2, "checked")
     assert result.calibration_grade in ("excellent", "mild")
     # One control guide is enough, since a group is compared with all other
     # cells; at low MOI the same screen has too few.
@@ -1366,6 +1377,11 @@ def test_high_moi_without_a_called_control_guide_runs_no_check(tmp_path) -> None
         "No labelled cell carries a control guide, which a calibration group "
         "needs, so no calibration check was run"
     ]
+    saved = store.artifacts.inspect(tests).diagnostics
+    assert (saved["controlGuides"], saved["calibrationStatus"]) == (
+        0,
+        "few_control_guides",
+    )
     result = store.perturbation.load_associations(tests)
     assert result.calibration.empty and result.calibration_grade == "none"
     # Saved tests warn again, alike.

@@ -253,3 +253,19 @@ def object_store_copy(directory: Path) -> Any:
                 memory, file.relative_to(directory).as_posix(), file.read_bytes()
             )
     return ObjectStore(store=memory)
+
+
+def stored_bytes(store: Any) -> dict[str, bytes]:
+    """Return every key of a Zarr store with the bytes it holds."""
+    from zarr.core.buffer import default_buffer_prototype
+    from zarr.core.sync import sync
+
+    async def read() -> dict[str, bytes]:
+        values = {}
+        async for key in store.list():
+            value = await store.get(key, default_buffer_prototype())
+            assert value is not None
+            values[key] = value.to_bytes()
+        return values
+
+    return sync(read())

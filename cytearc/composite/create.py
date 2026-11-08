@@ -60,15 +60,25 @@ from ..storage.identity import (
     validate_preparation,
     write_feature_sums,
 )
-from ..storage.metadata_keys import assay_membership_column
+from ..storage.metadata_keys import (
+    assay_membership_column,
+    validate_metadata_column_name,
+)
 from ..storage.partition import checked_indices
-from ..storage.profiles import is_remote_zarr_location, local_zarr_path
+from ..storage.profiles import (
+    ZarrLocation,
+    is_remote_zarr_location,
+    local_zarr_path,
+    resolve_storage_profile,
+)
 from ..storage.schema import validate_assay_name
 from ..storage.stores import (
     MATRIX_SOURCE_ATTR,
     locations_overlap,
     prefetch_metadata_listing,
     record_source_location,
+    store_location,
+    zarr_location_has_content,
 )
 from ..storage.types import as_zarr_array, as_zarr_group
 from ..utils.arguments import bool_argument
@@ -557,21 +567,56 @@ def _require_unique_cell_ids(
 def create_composite(
     sources: Mapping[str, "DataStore"],
     *,
-    at: str | Path,
+    at: ZarrLocation | Path,
     features: Literal["union", "intersection"],
     assay: str = "RNA",
     rows: Mapping[str, Sequence[int] | np.ndarray] | None = None,
     mem_budget: int | str | None = None,
     nthreads: int | None = None,
+    storage_options: dict[str, Any] | None = None,
+    source_column: str = "dataset",
     relative_sources: bool = False,
 ) -> "DataStore":
     """Create a writable datastore that reads its counts from frozen sources.
 
-    The composite records each source by its absolute path or URL. With
-    ``relative_sources=True`` it records a source in the directory that holds
-    it, or below it, by its path relative to that directory, so the directory
-    can be moved, copied, or served from a bucket with its sources in it.
-    Releases before this option cannot find a source recorded that way.
+    The composite copies cell and feature metadata and leaves the counts in the
+    sources, which must stay available and unchanged. It records each source
+    by its absolute path or URL, unless ``relative_sources`` asks for relative
+    paths. New arrays use the storage profile of ``at``.
+
+    Args:
+        sources: Open source DataStores by name. A cell's ID in the composite
+                 is ``{name}__{cell_id}``, so a name cannot contain ``__``.
+        at: New destination outside every source: a local path, a URL of a
+            store that CyteArc can write, such as ``s3://bucket/joint.zarr``,
+            or a Zarr store.
+        features: ``"union"`` keeps every feature of any source, with zeros
+                  where a source lacks one, and ``"intersection"`` keeps the
+                  features that every source holds.
+        assay: Assay to combine, which every source holds as one type.
+        rows: Positions of the cells to include, by source name. A source left
+              out contributes all of its stored cells.
+        mem_budget: Memory budget for creation. When None, the tightest
+                    source budget is used.
+        nthreads: Maximum worker budget. When None, the tightest source worker
+                  count is used.
+        storage_options: Backend options passed when opening ``at``. They are
+                         never saved; reopen the composite with them, and
+                         with ``source_storage_options`` for its sources.
+        source_column: Cell metadata column that holds each cell's source
+                       name.
+        relative_sources: Record a source in the directory that holds ``at``,
+                          or below it, by its path relative to that
+                          directory, when both are local or both are URLs of
+                          one scheme and host, so the directory can be moved,
+                          copied, or served from a bucket with its sources in
+                          it. By default, and for any other source, the
+                          composite records the source's absolute path or
+                          URL. Releases before this option cannot find a
+                          source recorded by a relative path.
+
+    Returns:
+        The composite, open for writing.
     """
     from ..datastore.datastore import DataStore
     from .reader import copy_source_selection, source_index_bytes
@@ -596,13 +641,19 @@ def create_composite(
     if set(selections) - set(names):
         raise ValueError("Selections must name an existing source")
     relative_sources = bool_argument(relative_sources, "relative_sources")
-    target = str(at)
-    if is_remote_zarr_location(target):
-        raise ValueError("The composite destination must be a local path")
-    destination = Path(local_zarr_path(target)).expanduser().resolve()
-    if destination.exists() or destination.is_symlink():
-        raise FileExistsError(f"Composite destination already exists: {destination}")
-    check_destination(str(destination))
+    # Merge checks its source column the same way, and planning the metadata
+    # refuses the reserved names and a name that a source column takes.
+    validate_metadata_column_name(source_column)
+    target: ZarrLocation = str(at) if isinstance(at, Path) else at
+    if isinstance(target, str) and not is_remote_zarr_location(target):
+        target = str(Path(local_zarr_path(target)).expanduser().resolve())
+    if zarr_location_has_content(target, storage_options=storage_options):
+        raise FileExistsError(f"Composite destination already exists: {target}")
+    check_destination(target, storage_options=storage_options)
+    # The absolute path or URL of the destination, or None for a store object
+    # that has neither, whose overlap with the sources cannot be checked.
+    destination = store_location(target)
+    profile = resolve_storage_profile(target)
     resources = resolve_budget(
         mem_budget
         if mem_budget is not None
@@ -631,7 +682,7 @@ def create_composite(
             require_transpose=source_assay.requiresCountsT,
         )
         location = _source_location(source)
-        if locations_overlap(str(destination), location):
+        if destination is not None and locations_overlap(destination, location):
             raise ValueError("The composite destination must not overlap a source")
         selection = selections.get(name)
         selected_rows.append(
@@ -645,7 +696,7 @@ def create_composite(
         bindings.append(
             {
                 "name": name,
-                "location": record_source_location(location, str(destination))
+                "location": record_source_location(location, destination)
                 if relative_sources
                 else location,
                 "workspace": source.workspace,
@@ -748,7 +799,7 @@ def create_composite(
             names,
             prepend_text="orig",
             reset_cell_filter=True,
-            source_column="dataset",
+            source_column=source_column,
             membership={assay: membership},
             block_rows=metadata_chunk_rows(row_plan),
             scan_rows=scan_rows,
@@ -772,7 +823,7 @@ def create_composite(
             mapping_width=width,
             memory_bytes=resources.memoryBytes,
         )
-        root = create_destination(str(destination))
+        root = create_destination(target, storage_options=storage_options)
         record: dict[str, Any] = {
             "assay": assay,
             "sources": bindings,
@@ -819,9 +870,9 @@ def create_composite(
             row_plan,
             cell_tables,
             metadata_plan,
-            profile="fast_local",
+            profile=profile,
             reset_cell_filter=True,
-            source_column="dataset",
+            source_column=source_column,
             membership={assay: membership},
         )
         del cell_tables
@@ -840,7 +891,7 @@ def create_composite(
             row_plan.nCells,
             alignment,
             dtype,
-            profile="fast_local",
+            profile=profile,
             policy=pair.policy,
             sources=assays,
             normalization=normalization,
@@ -854,7 +905,7 @@ def create_composite(
             alignment.nFeats,
             resources=resources,
             resident_bytes=resident,
-            profile="fast_local",
+            profile=profile,
         )
         counts_t = None
         if requires_transpose:

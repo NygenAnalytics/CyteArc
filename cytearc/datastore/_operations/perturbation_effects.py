@@ -29,12 +29,17 @@ from ...perturbation.efficiency import (
     efficiency_settings,
 )
 from ...storage.artifact_writer import ArrayRequirement, AttributeRequirement
-from ...storage.artifacts import ArtifactRef, artifact_group, require_complete_artifact
+from ...storage.artifacts import (
+    ArtifactRef,
+    artifact_group,
+    inspect_artifact,
+    require_complete_artifact,
+)
+from ...storage.diagnostics import EXAMPLES, DiagnosticRule, warn_diagnostics
 from ...storage.types import as_zarr_array, read_array
 from ...storage.validation_scope import validation_scoped
 from ...utils.arguments import bool_argument
 from ...utils.logging import logger
-from ...utils.warnings import warn
 from .perturbation_store import (
     _COORDINATE_KINDS,
     _cell_selection_check_bytes,
@@ -92,36 +97,61 @@ def _float64_rows(data: zarr.Array, rows: np.ndarray) -> np.ndarray:
     return values
 
 
-def _unmatched_targets_warning(
-    names: np.ndarray, targets: np.ndarray, status: np.ndarray, assay: str, by: str
-) -> str | None:
-    """Name the efficiency rows whose target matches no feature, or return None.
+def _efficiency_diagnostics(
+    names: np.ndarray, targets: np.ndarray, status: np.ndarray, by: str
+) -> dict[str, Any]:
+    """Return the diagnostics of an efficiency table: its rows whose target matches no feature.
 
-    A measured table warns with this message, and so does a saved table when
-    ``efficiency`` reuses it. By guide, each example names the guide and the
-    target that matches nothing.
+    By guide, each example names the guide and the target that matches
+    nothing.
 
     Args:
         names: Each row's name: its target, or its guide.
         targets: Each row's target.
         status: Each row's status, as a position in ``EFFICIENCY_STATUSES``.
-        assay: The expression assay.
         by: ``"target"`` or ``"guide"``, which the rows are.
     """
     unmatched = np.flatnonzero(np.asarray(status) == EFFICIENCY_NO_FEATURE)
-    if not len(unmatched):
-        return None
-    examples = [
-        repr(str(names[row]))
-        if by == "target"
-        else f"guide {str(names[row])!r} (target {str(targets[row])!r})"
-        for row in unmatched[:5]
-    ]
-    return (
-        f"{len(unmatched)} of {len(names)} rows have no feature of assay "
-        f"{assay!r} for their target, for example "
-        + ", ".join(examples)
-        + ". Check id_column, or the target names against the feature names."
+    return {
+        "rowsWithoutFeature": len(unmatched),
+        "rowWithoutFeatureExamples": [
+            repr(str(names[row]))
+            if by == "target"
+            else f"guide {str(names[row])!r} (target {str(targets[row])!r})"
+            for row in unmatched[:EXAMPLES]
+        ],
+    }
+
+
+def _warn_efficiency(
+    root: zarr.Group,
+    arguments: PerturbationEfficiencyArguments,
+    ref: ArtifactRef,
+    *,
+    n_rows: int,
+    assay: str,
+) -> None:
+    """Warn from a saved efficiency table's diagnostics, whether measured or reused.
+
+    ``n_rows`` is the table's rows and ``assay`` the expression assay, which
+    the warning names.
+    """
+    warn_diagnostics(
+        arguments,
+        inspect_artifact(root, ref).diagnostics,
+        (
+            DiagnosticRule(
+                "rowsWithoutFeature",
+                applies=lambda numbers: bool(numbers["rowsWithoutFeature"]),
+                message=lambda numbers: (
+                    f"{numbers['rowsWithoutFeature']} of {n_rows} rows have no "
+                    f"feature of assay {assay!r} for their target, for example "
+                    + ", ".join(numbers["rowWithoutFeatureExamples"])
+                    + ". Check id_column, or the target names against the "
+                    "feature names."
+                ),
+            ),
+        ),
     )
 
 
@@ -164,8 +194,12 @@ class _PerturbationEffectOperationsMixin(_PerturbationEffectOperationsBase):
         feature whose name equals the target, when no other feature shares
         that name. Only the target genes are read, feature-major when that
         reads less. A target that matches no feature is kept with the status
-        ``"no_feature"`` and named in a warning, beside its guide by guide,
-        which a reused table repeats.
+        ``"no_feature"``. The table saves its diagnostics, which
+        ``ds.artifacts.inspect(efficiency).diagnostics`` returns:
+        ``rowsWithoutFeature``, the rows whose target matches no feature, and
+        ``rowWithoutFeatureExamples``, up to five of them, by guide each guide
+        with its target, such as ``guide 'CRISPR2' (target 'ENH1')``. Such rows
+        give a ``DiagnosticWarning`` each time the table is measured or reused.
 
         Args:
             labels: A ``perturbation_labels`` artifact from
@@ -256,17 +290,9 @@ class _PerturbationEffectOperationsMixin(_PerturbationEffectOperationsBase):
             ),
         )
         if planned.reused:
-            # A saved table warns as it did when it was measured.
-            stored = artifact_group(self.zw, planned.ref)
-            message = _unmatched_targets_warning(
-                read_array(stored, "names").astype(str),
-                read_array(stored, "targets").astype(str),
-                read_array(stored, "status"),
-                expression.name,
-                by,
+            _warn_efficiency(
+                self.zw, arguments, planned.ref, n_rows=n_rows, assay=expression.name
             )
-            if message is not None:
-                warn(message)
             return planned.ref
         compared, finding = _compared_cells(self, labels, rows, by)
         n_compared = len(compared.cells)
@@ -334,12 +360,13 @@ class _PerturbationEffectOperationsMixin(_PerturbationEffectOperationsBase):
         arrays = efficiency_arrays(
             counts, library, compared.groups, compared.control, row_columns
         )
+        row_targets = rows.target_names[rows.codes]
         write_cell_data_artifact(
             self.zw,
             planned,
             {
                 "names": row_names,
-                "targets": rows.target_names[rows.codes],
+                "targets": row_targets,
                 "features": row_feature_ids,
                 **{
                     name: getattr(arrays, name)
@@ -352,16 +379,13 @@ class _PerturbationEffectOperationsMixin(_PerturbationEffectOperationsBase):
                 },
             },
             attributes={"status_names": list(EFFICIENCY_STATUSES), "by": by},
+            diagnostics=_efficiency_diagnostics(
+                row_names, row_targets, arrays.status, by
+            ),
         )
-        message = _unmatched_targets_warning(
-            row_names,
-            rows.target_names[rows.codes],
-            arrays.status,
-            expression.name,
-            by,
+        _warn_efficiency(
+            self.zw, arguments, planned.ref, n_rows=n_rows, assay=expression.name
         )
-        if message is not None:
-            warn(message)
         logger.info(
             "Measured the efficiency of "
             f"{int(np.count_nonzero(arrays.status == EFFICIENCY_TESTED))} "
@@ -384,7 +408,9 @@ class _PerturbationEffectOperationsMixin(_PerturbationEffectOperationsBase):
 
         Raises:
             TypeError: If ``efficiency`` is not an ArtifactRef.
-            ValueError: If it is not a ``perturbation_efficiency`` artifact.
+            ValueError: If it is not a ``perturbation_efficiency`` artifact, or
+                a table saved without its diagnostics, as earlier releases
+                saved them; the error names the call that measures it anew.
             KeyError: If the store holds no such artifact.
             RuntimeError: If the artifact is incomplete, as a call that
                 stopped before it finished leaves it.

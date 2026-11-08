@@ -48,7 +48,7 @@ from cytearc.perturbation import PerturbationAssociations
 from cytearc.perturbation.labels import guide_targets
 from cytearc.storage.artifacts import artifact_group
 from cytearc.utils.memory_budget import MemoryBudgetError
-from tests.perturbation_helpers import record_cell_reads
+from tests.perturbation_helpers import record_cell_reads, warned
 from tests.test_pipeline_plan import assert_plan_reuses_run, read_only_plan
 from tests.storage_helpers import (
     insert_nullable_cell_column,
@@ -1111,6 +1111,130 @@ def test_a_run_after_an_rna_run_reuses_its_cells_genes_and_coordinates(
     assert given.report()["run"]["config"]["cells"]["run"] == {
         "runId": rna.run_id,
         "label": None,
+    }
+
+
+def test_a_rerun_records_the_warnings_of_the_screen_results_it_reuses(
+    tmp_path,
+) -> None:
+    # No cell holds a UMI of guide 9, so its fit calls none and its 50 cells
+    # carry no guide; each guide of GENE_B is in 30 cells.
+    guides = GUIDE_COUNTS.copy()
+    guides[:, 9] = 0
+    store = _write(tmp_path / "screen.zarr", guides=guides)
+    settings: dict[str, Any] = {
+        **QUICK,
+        # By name, no target is a feature of the RNA assay.
+        "efficiency": {"id_column": None},
+        "edistance": False,
+        # No gene is expressed by 1,000 cells, so no pair passes QC.
+        "associations": {
+            "id_column": None,
+            "min_nonzero": 1000,
+            "n_resamples": [99, 499, 999],
+        },
+        "profiles": {"by": "guide", "min_cells": 35},
+        "clusters": {"min_cluster_size": 2},
+    }
+    targets = "'GENE_A', 'GENE_B', 'GENE_C', 'GENE_D'"
+    recorded = {
+        "guide_calling": [
+            "1 of 10 guide fits call no cell: 1 have no cell with a UMI of the "
+            "guide. For example 'CRISPR9'. perturbation.load_guide_thresholds "
+            "lists every status."
+        ],
+        "efficiency": [
+            f"4 of 4 rows have no feature of assay 'RNA' for their target, for "
+            f"example {targets}. Check id_column, or the target names against the "
+            "feature names."
+        ],
+        "associations": [
+            f"4 of 4 targets have no feature of assay 'RNA' for a positive control, "
+            f"for example {targets}. A target that is not a gene, such as an "
+            "enhancer, has none; for a gene, check id_column, or the target names "
+            "against the feature names.",
+            "No discovery pair passes QC, and by default the calibration check "
+            "tests as many pairs as pass, so no calibration check was run; pass "
+            "n_calibration_pairs to run one",
+        ],
+        "profiles": [
+            "3 of 10 guides have fewer than 35 cells and get no profile: "
+            "'CRISPR2' (30), 'CRISPR3' (30), 'CRISPR9' (0). "
+            "perturbation.load_profiles lists them all in left_out."
+        ],
+    }
+
+    runs = []
+    for _ in range(2):
+        run, _texts, diagnostic = warned(
+            lambda: store.pipeline.perturbation(labels=LABELS, **settings)
+        )
+        runs.append(run)
+        stages = _stages(run)
+        assert {
+            name: stage["warnings"]
+            for name, stage in stages.items()
+            if stage["warnings"]
+        } == recorded
+        # Every warning but the association call's own about positive controls
+        # comes from a diagnostic that its stage's result saved.
+        assert [
+            (warning.operation, warning.diagnostic, warning.value)
+            for warning in diagnostic
+        ] == [
+            ("call_guides", "fitsCallingNoCell", 1),
+            ("measure_perturbation_efficiency", "rowsWithoutFeature", 4),
+            (
+                "test_perturbation_associations",
+                "calibrationStatus",
+                "no_passing_discovery",
+            ),
+            ("compute_perturbation_profiles", "leftOutPerturbations", 3),
+        ]
+
+    first, second = runs
+    # The second run reuses every result of the first.
+    assert dict(second) == dict(first)
+    assert all(_reused(second).values())
+    saved = {
+        key: store.artifacts.inspect(first[key]).diagnostics
+        for key in ("guide_calls", "efficiency", "associations", "profiles")
+    }
+    # 370 cells carry one guide of 0 to 8, and 4 cells guides 0 and 4.
+    assert saved["guide_calls"] == {
+        "guideFits": 10,
+        "fitsCallingNoCell": 1,
+        "fitsNoCells": 1,
+        "fitsTooSparse": 0,
+        "fitsNoFit": 0,
+        "fitsNoPositive": 0,
+        "fitCallingNoCellExamples": ["'CRISPR9'"],
+        "cellsWithCall": 374,
+        "cellsWithSeveralGuides": 4,
+    }
+    assert saved["efficiency"] == {
+        "rowsWithoutFeature": 4,
+        "rowWithoutFeatureExamples": targets.split(", "),
+    }
+    # Guides 6 to 8 remain the control guides.
+    assert saved["associations"] == {
+        "calibrationStatus": "no_passing_discovery",
+        "controlGuides": 3,
+        "calibrationGrade": "none",
+        "falseDiscoveries": 0,
+        "negativeControlPairs": 0,
+        "rowsWithoutStatistic": 0,
+        "rowWithoutStatisticExamples": [],
+        "calibrationGroupsWithoutStatistic": 0,
+        "calibrationGroupWithoutStatisticExamples": [],
+    }
+    assert saved["profiles"] == {
+        "leftOutPerturbations": 3,
+        "leftOutPerturbationExamples": [
+            "'CRISPR2' (30)",
+            "'CRISPR3' (30)",
+            "'CRISPR9' (0)",
+        ],
     }
 
 
@@ -2581,9 +2705,9 @@ def test_summaries_of_artifacts_without_their_arrays_are_empty() -> None:
         summaries._efficiency,
         summaries._edistance,
         summaries._mixscape,
-        summaries._associations,
     ):
         assert summarize(empty, {}) == {}
+    assert summaries._associations(empty, {}, {}) == {}
     # Fits without a sample axis summarize nothing.
     assert summaries._guide_thresholds(_group({"status": [0, 1]})) == {}
 
@@ -2753,12 +2877,16 @@ def test_false_discoveries_are_counted_by_their_control_guides() -> None:
             "group_guides": np.asarray(["", "nt1+nt2", "nt3", "nt4"]),
         },
         set_names=["discovery", "calibration", "positive"],
-        n_false_discoveries=3,
-        calibration_grade="mild",
-        calibration_status="checked",
     )
+    # The calibration check's numbers come from the diagnostics that the
+    # tests saved.
+    diagnostics = {
+        "falseDiscoveries": 3,
+        "calibrationGrade": "mild",
+        "calibrationStatus": "checked",
+    }
 
-    summary = summaries._associations(group, {"alpha": 0.1})
+    summary = summaries._associations(group, {"alpha": 0.1}, diagnostics)
 
     assert summary == {
         "discoveryPairs": 3,

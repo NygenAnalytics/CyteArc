@@ -1,4 +1,3 @@
-import warnings
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -21,12 +20,13 @@ from cytearc.perturbation.profiles import (
     profile_values,
     z_score_sums,
 )
-from cytearc.storage.artifacts import ArtifactRef, inspect_artifact
+from cytearc.storage.artifacts import ArtifactRef, artifact_path, inspect_artifact
 from tests.perturbation_helpers import (
     fixed_labels,
     memory_screen,
     record_cell_reads,
     use_python_kernels,
+    warned,
     write_screen,
 )
 from tests.memory_helpers import climb_refusals
@@ -346,19 +346,25 @@ def test_the_profiles_type_is_exported() -> None:
 def test_left_out_perturbations_are_named_five_at_most() -> None:
     names = np.array([f"G{k}" for k in range(7)])
 
-    message = perturbation_operations._left_out_warning(
-        names, np.arange(7), 9, 25, "guides", "cells"
-    )
+    numbers = perturbation_operations._left_out_diagnostics(names, np.arange(7))
+    (rule,) = perturbation_operations._left_out_rules(9, 25, "guides", "cells")
 
-    assert message is not None
+    assert numbers == {
+        "leftOutPerturbations": 7,
+        "leftOutPerturbationExamples": [f"'G{k}' ({k})" for k in range(5)],
+    }
+    assert rule.applies(numbers)
+    message = rule.message(numbers)
     assert message.startswith("7 of 9 guides have fewer than 25 cells")
     assert "'G4' (4), and more." in message and "'G5'" not in message
-    assert (
-        perturbation_operations._left_out_warning(
-            names[:0], np.arange(0), 9, 25, "guides", "cells"
-        )
-        is None
+    # Five perturbations are all named, with nothing more to name.
+    five = perturbation_operations._left_out_diagnostics(names[:5], np.arange(5))
+    assert rule.message(five).endswith(
+        "'G4' (4). perturbation.load_profiles lists them all in left_out."
     )
+    none = perturbation_operations._left_out_diagnostics(names[:0], np.arange(0))
+    assert none == {"leftOutPerturbations": 0, "leftOutPerturbationExamples": []}
+    assert not rule.applies(none)
 
 
 # GENE_A has two guides of 30 cells, GENE_B one of 50 and GENE_C one of 4;
@@ -430,13 +436,23 @@ def _selected(store: DataStore) -> ArtifactRef:
 def _warned_profiles(
     store: DataStore, *args, **kwargs
 ) -> tuple[ArtifactRef, list[str]]:
-    """Compute profiles, and return them with the messages they warn."""
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        profiles = store.perturbation.profiles(*args, **kwargs)
-    return profiles, [
-        str(entry.message) for entry in caught if entry.category is UserWarning
-    ]
+    """Compute profiles, and return them with every warning that CyteArc gives or logs.
+
+    Each one must be a DiagnosticWarning of the perturbations left out, given
+    once with the number that the profiles saved.
+    """
+    profiles, texts, diagnostic = warned(
+        lambda: store.perturbation.profiles(*args, **kwargs)
+    )
+    assert texts == [str(warning) for warning in diagnostic]
+    saved = store.artifacts.inspect(profiles).diagnostics["leftOutPerturbations"]
+    for warning in diagnostic:
+        assert (warning.operation, warning.diagnostic, warning.value) == (
+            "compute_perturbation_profiles",
+            "leftOutPerturbations",
+            saved,
+        )
+    return profiles, texts
 
 
 def _expected(
@@ -483,6 +499,11 @@ def test_profiles_equal_a_direct_computation(shared) -> None:
         "'GENE_C' (4), 'GENE_D' (0). perturbation.load_profiles lists them all "
         "in left_out."
     ]
+    # GENE_C's guide is in 4 cells, and GENE_D's in none.
+    assert store.artifacts.inspect(profiles).diagnostics == {
+        "leftOutPerturbations": 2,
+        "leftOutPerturbationExamples": ["'GENE_C' (4)", "'GENE_D' (0)"],
+    }
     result = store.perturbation.load_profiles(profiles)
     assert isinstance(result, PerturbationProfiles)
     assert (result.by, result.from_assay, result.sample_column) == (
@@ -709,7 +730,7 @@ def test_profiles_are_reused_read_only_and_refused_when_new(shared) -> None:
     reused, messages = _warned_profiles(reader, labels, features)
 
     assert reused == profiles
-    # A reused result warns as the computed one did.
+    # A reused result warns as the computed one did, once.
     assert len(messages) == 1 and messages[0].startswith("2 of 4 targets")
     with pytest.raises(PermissionError, match="compute_perturbation_profiles"):
         reader.perturbation.profiles(labels, features, min_cells=30)
@@ -718,6 +739,52 @@ def test_profiles_are_reused_read_only_and_refused_when_new(shared) -> None:
     pd.testing.assert_frame_equal(
         store.perturbation.load_profiles(again).values,
         store.perturbation.load_profiles(profiles).values,
+    )
+
+
+def test_profiles_without_a_perturbation_left_out_warn_in_neither_call(
+    shared,
+) -> None:
+    store, features = shared.store, shared.features
+    # With GENE_C and GENE_D as controls, GENE_A's 60 cells and GENE_B's 50
+    # reach min_cells.
+    labels = fixed_labels(store, ["NT", "GENE_C", "GENE_D"])
+
+    computed, first = _warned_profiles(store, labels, features)
+    reused, second = _warned_profiles(store, labels, features)
+
+    assert reused == computed
+    assert first == second == []
+    assert store.artifacts.inspect(computed).diagnostics == {
+        "leftOutPerturbations": 0,
+        "leftOutPerturbationExamples": [],
+    }
+    assert store.perturbation.load_profiles(computed).left_out.empty
+
+
+def test_profiles_saved_without_diagnostics_are_computed_anew(tmp_path) -> None:
+    store = _store(tmp_path)
+    labels, features = fixed_labels(store, ["NT"]), _selected(store)
+    saved, messages = _warned_profiles(store, labels, features)
+    # As profiles saved before profiles saved diagnostics.
+    del store.zw[artifact_path(saved)].attrs["diagnostics"]
+    operation = "compute_perturbation_profiles"
+    with pytest.raises(ValueError, match=f"holds no diagnostics, which {operation}"):
+        store.artifacts.inspect(saved).diagnostics
+    for read in (store.perturbation.load_profiles, store.perturbation.cluster):
+        with pytest.raises(ValueError, match=r"call ds\.perturbation\.profiles again"):
+            read(saved)
+
+    computed, again = _warned_profiles(store, labels, features)
+    reused, repeated = _warned_profiles(store, labels, features)
+
+    assert computed != saved
+    # The new profiles warn once when computed and once when reused.
+    assert reused == computed
+    assert again == repeated == messages and len(messages) == 1
+    np.testing.assert_array_equal(
+        store.artifacts.load(computed)["values"][:],
+        store.artifacts.load(saved)["values"][:],
     )
 
 
