@@ -29,6 +29,7 @@ from .metadata_keys import (
     validate_metadata_column_name,
 )
 from .partition import scan_band
+from .profiles import StorageProfile
 from .schema import PENDING_ASSAY_ATTR
 from .stores import metadata_workers, run_concurrently
 from .types import as_zarr_array, as_zarr_group, read_fresh_group
@@ -616,11 +617,14 @@ def _write_column(
     column: _HeldArray | None,
     mask: _HeldArray | None,
     categories: _HeldArray | None = None,
+    *,
+    profile: StorageProfile | None = None,
 ) -> None:
     """Delete column ``name`` with its mask and categories, then write ``mask``, ``categories`` and ``column``.
 
     The values are deleted first and written last, so they never link an
-    array that is not there.
+    array that is not there. ``profile`` encodes the written arrays and,
+    when None, is chosen from the store.
     """
     mask_name = f"{MISSING_MASK_PREFIX}{name}"
     linked_name = categories_name(name)
@@ -636,6 +640,7 @@ def _write_column(
                 data=values,
                 dtype=values.dtype,
                 chunkSize=chunk,
+                profile=profile,
                 attributes=attributes,
             )
 
@@ -648,6 +653,7 @@ def replace_metadata_column(
     *,
     categories: np.ndarray | None = None,
     ordered: bool = False,
+    profile: StorageProfile | None = None,
 ) -> None:
     """Replace or create column ``name``; the caller checks protection first.
 
@@ -657,7 +663,8 @@ def replace_metadata_column(
     whose ``ordered`` attribute records ``ordered``; the rows of code -1 are
     flagged in its missing mask, so ``missing`` must be None. A failed write
     puts the previous column back, whatever its layout, before the error
-    propagates.
+    propagates. ``profile`` encodes the written arrays, as an import writer
+    passes its own, and when None is chosen from the store.
 
     Raises:
         TypeError: If codes are not integers.
@@ -720,6 +727,7 @@ def replace_metadata_column(
             (stored, link, rows),
             None if flagged is None else (flagged, {}, rows),
             linked,
+            profile=profile,
         )
     except BaseException as error:
         try:
