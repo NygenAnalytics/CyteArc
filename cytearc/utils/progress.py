@@ -2,9 +2,9 @@ from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 import itertools
-import sys
 from typing import Any
 
+from .errors import raise_collected_errors
 from .logging import logger, progress_enabled
 
 tqdm_params = {
@@ -12,6 +12,8 @@ tqdm_params = {
     "dynamic_ncols": True,
     "colour": "#34abeb",
 }
+
+_CLEANUP_FAILED = "Progress stream cleanup failed"
 
 type ProgressObserver = Callable[[int, str | None, int, int | None], None]
 """Receives ``(bar, description, completed, total)`` after a bar advances.
@@ -166,31 +168,36 @@ def iter_progress[T](
     if disable is not None:
         kwargs["disable"] = disable
     progress = None
+    # The error that ends the stream is caught by name, so this frame never
+    # keeps it in a reference cycle; see ``raise_collected_errors``.
     try:
         progress = tqdmbar(**kwargs)
         while True:
             try:
                 item = next(iterator)
             except StopIteration:
-                return
+                break
             try:
                 yield item
             finally:
                 del item
             progress.update()
-    finally:
-        original = sys.exception()
-        errors: list[BaseException] = []
-        for resource in (iterator, progress):
-            close = getattr(resource, "close", None)
-            if callable(close):
-                try:
-                    close()
-                except BaseException as error:
-                    errors.append(error)
-        if errors:
-            if original is not None and not isinstance(original, GeneratorExit):
-                errors.insert(0, original)
-            if len(errors) == 1:
-                raise errors[0]
-            raise BaseExceptionGroup("Progress stream cleanup failed", errors)
+    except BaseException as error:
+        raise_collected_errors(
+            _close_all((iterator, progress)), _CLEANUP_FAILED, ended_by=error
+        )
+        raise
+    raise_collected_errors(_close_all((iterator, progress)), _CLEANUP_FAILED)
+
+
+def _close_all(resources: Iterable[object]) -> list[BaseException]:
+    """Close each resource that has a ``close`` method, returning what failed."""
+    errors: list[BaseException] = []
+    for resource in resources:
+        close = getattr(resource, "close", None)
+        if callable(close):
+            try:
+                close()
+            except BaseException as error:
+                errors.append(error)
+    return errors

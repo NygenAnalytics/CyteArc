@@ -1,13 +1,17 @@
 import gc
+import os
 import threading
 import time
+import types
 import weakref
+from collections.abc import Callable, Iterator
 
 import numpy as np
 import pytest
 import zarr
 from zarr.storage import MemoryStore
 
+import cytearc
 from cytearc.matrix import ChunkedArray
 from cytearc.storage.parallel import in_shard_context, stream_shards
 from tests.thread_helpers import blas_threads, raised_threads
@@ -523,6 +527,122 @@ def test_stream_cleanup_reports_the_failure_with_every_cleanup_error():
         (OSError, "source cleanup failed"),
     ]
     assert closed == ["source"]
+
+
+def _frames_left_in_cycles(run: Callable[[], None]) -> list[str]:
+    """Run ``run`` with the cycle collector off; name the CyteArc frames only it frees.
+
+    Reference counting frees everything else as soon as ``run`` returns.
+    """
+    package = os.path.dirname(cytearc.__file__)
+    enabled = gc.isenabled()
+    gc.collect()
+    gc.disable()
+    try:
+        run()
+        gc.set_debug(gc.DEBUG_SAVEALL)
+        gc.collect()
+        # A weak proxy left in the garbage raises on isinstance, so compare types.
+        return [
+            item.f_code.co_qualname
+            for item in gc.garbage
+            if type(item) is types.FrameType
+            and item.f_code.co_filename.startswith(package)
+        ]
+    finally:
+        gc.set_debug(0)
+        gc.garbage.clear()
+        gc.collect()
+        if enabled:
+            gc.enable()
+
+
+def _leave_stream(how: str, *, workers: int, msg: str | None, blocks: list) -> None:
+    """Read a stream of eight blocks and leave it the way ``how`` names."""
+
+    def items() -> Iterator[int]:
+        try:
+            yield from range(8)
+        finally:
+            if how == "failed cleanup":
+                raise OSError("source cleanup failed")
+
+    def read(index: int) -> np.ndarray:
+        if how == "failed read" and index == 1:
+            raise ValueError("read failed")
+        block = np.ones(100_000)
+        blocks.append(weakref.ref(block))
+        return block
+
+    stream = stream_shards(items(), read, workers=workers, msg=msg, total=8)
+    if how in ("close", "failed cleanup"):
+        next(stream)
+        try:
+            stream.close()
+        except OSError:
+            assert how == "failed cleanup"
+    elif how == "break":
+        for _ in stream:
+            break
+    elif how == "raise in loop":
+        try:
+            for _ in stream:
+                raise KeyError("the consumer stops")
+        except KeyError:
+            pass
+    else:
+        try:
+            for _ in stream:
+                pass
+        except ValueError:
+            pass
+    del stream
+
+
+@pytest.mark.parametrize("msg", [None, "reading"])
+@pytest.mark.parametrize("workers", [1, 2])
+@pytest.mark.parametrize(
+    "how", ["close", "break", "raise in loop", "failed read", "failed cleanup"]
+)
+def test_a_stream_frees_its_blocks_once_its_consumer_leaves(how, workers, msg):
+    blocks: list[weakref.ref] = []
+
+    frames = _frames_left_in_cycles(
+        lambda: _leave_stream(how, workers=workers, msg=msg, blocks=blocks)
+    )
+
+    assert blocks, "the stream read no block"
+    # Every block was freed by reference counting, before any collection ran.
+    assert [ref() for ref in blocks if ref() is not None] == []
+    assert frames == []
+
+
+def test_closing_a_stream_drops_the_yielded_block_before_running_reads_finish():
+    release = threading.Event()
+    yielded: list[weakref.ref] = []
+    alive_while_closing: list[bool] = []
+
+    def read(index: int) -> np.ndarray:
+        if index:
+            release.wait(5)
+        block = np.ones(10)
+        if not index:
+            yielded.append(weakref.ref(block))
+        return block
+
+    def watch() -> None:
+        # The close below waits for the running read; check the first block then.
+        time.sleep(0.2)
+        alive_while_closing.append(yielded[0]() is not None)
+        release.set()
+
+    stream = stream_shards(range(4), read, workers=2)
+    next(stream)
+    watcher = threading.Thread(target=watch)
+    watcher.start()
+    stream.close()
+    watcher.join()
+    assert alive_while_closing == [False]
 
 
 def test_failed_pool_shutdown_still_closes_the_source(monkeypatch):
