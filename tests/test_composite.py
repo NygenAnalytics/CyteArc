@@ -470,51 +470,25 @@ def test_workspace_and_non_rna_sources_reopen(tmp_path, assay, workspace):
         np.testing.assert_array_equal(output.matrixGroup["countsT"][:], expected.T)
 
 
-def test_remote_composite_reuses_metadata_table_listings(
-    composite_sources, tmp_path, monkeypatch
+def test_remote_composite_lists_each_source_once(
+    composite_sources, tmp_path, loopback_hub
 ):
-    from huggingface_hub import BucketFile, HfFileSystem
+    from tests.fixtures_hub import BUCKET_ID
 
-    from cytearc.storage.huggingface import HfReadStore
-    from tests.fixtures_hub import FakeHub
-
-    hub = FakeHub(tmp_path / "hub")
-    bucket_id = "tests/composite"
-    fs = HfFileSystem(token=False, skip_instance_cache=True)
-    fs._bucket_exists_cache[bucket_id] = (True, None)
-
-    def list_tree(bucket_id, prefix=None, *, recursive=False):
-        entries = hub.list_bucket_tree(bucket_id, prefix, recursive=recursive)
-        return [
-            entry for entry in entries if not recursive or isinstance(entry, BucketFile)
-        ]
-
-    def open_file(path, mode="rb", **options):
-        info = fs.info(path)
-        resolved = fs.resolve_path(path)
-        opened = hub.path(resolved.path, resolved.bucket_id).open(mode)
-        opened.size = info["size"]
-        return opened
-
-    monkeypatch.setattr(fs._api, "list_bucket_tree", list_tree)
-    monkeypatch.setattr(fs, "_open", open_file)
     sources = {}
     joint = None
     try:
         for name, (path, _, _) in composite_sources.items():
-            shutil.copytree(path, hub.path(f"{name}.zarr", bucket_id))
-            store = HfReadStore.from_mapper(
-                fs.get_mapper(f"hf://buckets/{bucket_id}/{name}.zarr"), read_only=True
-            )
+            shutil.copytree(path, loopback_hub.root / f"{name}.zarr")
             sources[name] = DataStore(
-                store,
+                f"hf://buckets/{BUCKET_ID}/{name}.zarr",
                 zarr_mode="r",
+                storage_options={"token": False, "endpoint": loopback_hub.endpoint},
                 min_features_per_cell=-1,
                 nthreads=1,
                 mem_budget="64M",
             )
-        fs.dircache.clear()
-        hub.calls.clear()
+        opened = len(loopback_hub.received)
 
         joint = create_composite(
             sources,
@@ -540,22 +514,15 @@ def test_remote_composite_reuses_metadata_table_listings(
             name, row = identity.split("__c")
             assert dataset == name
             assert quality == int(row)
-
-        tables = {
-            f"{name}.zarr/{table}"
-            for name in sources
-            for table in ("cellData", "RNA/featureData")
-        }
-        for table in tables:
-            calls = [
-                call
-                for call in hub.calls
-                if call[2] == table or call[2].startswith(table + "/")
-            ]
-            recursive = ("list_bucket_tree", bucket_id, table, True, None)
-            assert calls.count(recursive) == 1
-            assert calls[calls.index(recursive) :] == [recursive]
-        assert {call[2] for call in hub.calls if call[3]} == tables
+        # Each source lists itself once when it opens, and creation reads
+        # its keys without listing it again.
+        listings = [
+            (path, detail)
+            for kind, path, detail in loopback_hub.received
+            if kind == "tree"
+        ]
+        assert sorted(listings) == [("a.zarr", "recursive"), ("b.zarr", "recursive")]
+        assert {kind for kind, _, _ in loopback_hub.received[opened:]} == {"file"}
     finally:
         if joint is not None:
             joint.z.store.close()

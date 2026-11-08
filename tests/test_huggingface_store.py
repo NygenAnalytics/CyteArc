@@ -3,6 +3,7 @@
 import asyncio
 import re
 import socket
+import threading
 import time
 from datetime import UTC, datetime, timedelta
 from email.utils import format_datetime
@@ -14,7 +15,7 @@ import numpy as np
 import pytest
 import zarr
 from huggingface_hub.errors import HfHubHTTPError
-from zarr.abc.store import RangeByteRequest
+from zarr.abc.store import OffsetByteRequest, RangeByteRequest, SuffixByteRequest
 from zarr.core.buffer import default_buffer_prototype
 from zarr.core.sync import sync
 from zarr.storage import FsspecStore
@@ -507,18 +508,24 @@ async def _names(listing):
     return [name async for name in listing]
 
 
-def _loopback_store(hub, **timeouts):
+def _loopback_store(hub, *, read_only=True, uri=LOOPBACK_URI, **timeouts):
     """Publish an array in the hub's bucket and open it as an ``hf://`` store."""
-    zarr.create_array(
-        store=hub.root / "data.zarr",
-        data=np.arange(64, dtype=np.int32).reshape(8, 8),
-        chunks=(4, 4),
-    )
+    if not (hub.root / "data.zarr").exists():
+        zarr.create_array(
+            store=hub.root / "data.zarr",
+            data=np.arange(64, dtype=np.int32).reshape(8, 8),
+            chunks=(4, 4),
+        )
     return huggingface.HfReadStore.from_url(
-        LOOPBACK_URI,
+        uri,
         storage_options={"token": False, "endpoint": hub.endpoint, **timeouts},
-        read_only=True,
+        read_only=read_only,
     )
+
+
+def _received(hub, kind):
+    """Return the path and detail of each request of ``kind`` that the hub met."""
+    return [(path, detail) for got, path, detail in hub.received if got == kind]
 
 
 def _record_sleeps(monkeypatch):
@@ -545,6 +552,9 @@ _STORE_CALLS = {
     "list_prefix": lambda store: _names(store.list_prefix("")),
     "list_dir": lambda store: _names(store.list_dir("")),
 }
+# What each call of a writable store requests first, which names the request
+# in the error that ends its retries. Every call of a read-only store lists
+# the store first.
 _REQUESTS = {
     "get": f"Reading 'zarr.json' from {LOOPBACK_URI}",
     "get_partial_values": f"Reading 'zarr.json' from {LOOPBACK_URI}",
@@ -580,6 +590,7 @@ def test_read_store_answers_lookups_and_listings_from_the_bucket(loopback_hub):
     assert size == (published / "zarr.json").stat().st_size
 
 
+@pytest.mark.parametrize("read_only", [True, False])
 @pytest.mark.parametrize(
     ("stalled", "call"),
     [
@@ -588,10 +599,14 @@ def test_read_store_answers_lookups_and_listings_from_the_bucket(loopback_hub):
         *(("tree", call) for call in _STORE_CALLS),
     ],
 )
-def test_read_store_raises_when_a_request_stalls(loopback_hub, stalled, call):
+def test_read_store_raises_when_a_request_stalls(
+    loopback_hub, stalled, call, read_only
+):
     # Hugging Face's lookup of a bucket and its tree listings wait on the
     # server without a timeout of their own.
-    store = _loopback_store(loopback_hub, request_timeout=0.25, retry_timeout=1)
+    store = _loopback_store(
+        loopback_hub, read_only=read_only, request_timeout=0.25, retry_timeout=1
+    )
     loopback_hub.plan[stalled] = ["stall"]
     started = time.monotonic()
     try:
@@ -601,12 +616,29 @@ def test_read_store_raises_when_a_request_stalls(loopback_hub, stalled, call):
         store.close()
     # The next attempt would wait 2 s first, past the 1 s that the request has.
     assert time.monotonic() - started < 1.5
+    request = f"Listing {LOOPBACK_URI}" if read_only else _REQUESTS[call]
     assert str(raised.value).startswith(
-        f"{_REQUESTS[call]} did not succeed within 1 s: 1 attempt failed, the last "
+        f"{request} did not succeed within 1 s: 1 attempt failed, the last "
         "with no answer within 0.25 s. To wait longer, pass more seconds in "
         "storage_options as request_timeout"
     )
     assert [kind for kind, _ in loopback_hub.requests].count(stalled) == 1
+
+
+@pytest.mark.parametrize("call", ["get", "get_partial_values"])
+def test_read_store_raises_when_a_read_stalls(loopback_hub, call):
+    store = _loopback_store(loopback_hub, request_timeout=0.25, retry_timeout=1)
+    loopback_hub.plan["file"] = ["stall"]
+    try:
+        with pytest.raises(TimeoutError) as raised:
+            sync(_STORE_CALLS[call](store), timeout=GUARD_SECONDS)
+    finally:
+        store.close()
+    assert str(raised.value).startswith(
+        f"Reading 'zarr.json' from {LOOPBACK_URI} did not succeed within 1 s: 1 "
+        "attempt failed, the last with no answer within 0.25 s."
+    )
+    assert [kind for kind, _ in loopback_hub.requests].count("file") == 1
 
 
 @pytest.mark.parametrize("stalled", ["bucket", "tree", "file"])
@@ -640,7 +672,7 @@ def test_read_store_cuts_its_last_attempt_to_the_time_left(loopback_hub):
     # One attempt of 0.5 s, a wait of 2 s, and an attempt cut to the 0.2 s left.
     assert 2.6 < elapsed < 3.5
     assert re.match(
-        rf"Listing '' in {re.escape(LOOPBACK_URI)} did not succeed within 2\.7 s: "
+        rf"Listing {re.escape(LOOPBACK_URI)} did not succeed within 2\.7 s: "
         r"2 attempts failed, the last with no answer within 0\.(1[5-9]|2)\d* s\.",
         str(raised.value),
     ), str(raised.value)
@@ -714,7 +746,205 @@ def test_read_store_retries_a_refused_connection(monkeypatch):
         store.close()
     assert sleeps == [2.0, 4.0]
     assert isinstance(raised.value.__cause__, httpx2.ConnectError)
+    # A read-only store lists itself before it reads, so the listing fails.
     assert str(raised.value).startswith(
-        f"Reading 'zarr.json' from {LOOPBACK_URI} did not succeed within 5 s: "
+        f"Listing {LOOPBACK_URI} did not succeed within 5 s: "
         "3 attempts failed, the last with ConnectError: "
     )
+
+
+def test_read_store_lists_once_and_reads_exactly_the_bytes_asked(loopback_hub):
+    store = _loopback_store(loopback_hub)
+    published = loopback_hub.root / "data.zarr"
+    first = (published / "c/1/0").read_bytes()
+    second = (published / "c/0/1").read_bytes()
+    reads = [
+        ("c/1/0", None, first, f"bytes=0-{len(first) - 1}"),
+        ("c/1/0", RangeByteRequest(2, 9), first[2:9], "bytes=2-8"),
+        ("c/1/0", OffsetByteRequest(5), first[5:], f"bytes=5-{len(first) - 1}"),
+        (
+            "c/1/0",
+            SuffixByteRequest(4),
+            first[-4:],
+            f"bytes={len(first) - 4}-{len(first) - 1}",
+        ),
+        # A range past the end stops at the end, as other stores read it.
+        (
+            "c/0/1",
+            RangeByteRequest(len(second) - 3, len(second) + 50),
+            second[-3:],
+            f"bytes={len(second) - 3}-{len(second) - 1}",
+        ),
+        # An empty range and a key that the store does not hold need no request.
+        ("c/0/1", RangeByteRequest(3, 3), b"", None),
+        ("c/9/9", None, None, None),
+    ]
+
+    async def read_all():
+        return await asyncio.gather(
+            *(store.get(key, _PROTOTYPE, byte_range) for key, byte_range, _, _ in reads)
+        )
+
+    try:
+        values = sync(read_all(), timeout=GUARD_SECONDS)
+        exists = sync(store.exists("c/1/0"), timeout=GUARD_SECONDS)
+        size = sync(store.getsize("c/0/1"), timeout=GUARD_SECONDS)
+    finally:
+        store.close()
+    assert [None if value is None else value.to_bytes() for value in values] == [
+        expected for _, _, expected, _ in reads
+    ]
+    assert exists and size == len(second)
+    assert _received(loopback_hub, "tree") == [("data.zarr", "recursive")]
+    assert sorted(_received(loopback_hub, "file")) == sorted(
+        (f"data.zarr/{key}", header)
+        for key, _, _, header in reads
+        if header is not None
+    )
+
+
+def test_read_store_reads_a_zarr_array_without_listing_its_directories(loopback_hub):
+    store = _loopback_store(loopback_hub)
+    try:
+        array = zarr.open_array(store=store, mode="r", zarr_format=3)
+        values = array[2:7, 1:6]
+    finally:
+        store.close()
+    np.testing.assert_array_equal(
+        values, np.arange(64, dtype=np.int32).reshape(8, 8)[2:7, 1:6]
+    )
+    # One listing of the store answers every lookup the array makes.
+    assert _received(loopback_hub, "tree") == [("data.zarr", "recursive")]
+    assert {path for path, _ in _received(loopback_hub, "file")} == {
+        "data.zarr/zarr.json",
+        *(f"data.zarr/c/{row}/{column}" for row in (0, 1) for column in (0, 1)),
+    }
+
+
+def test_read_store_raises_when_a_listed_key_is_gone(loopback_hub):
+    store = _loopback_store(loopback_hub)
+    chunk = loopback_hub.root / "data.zarr/c/1/1"
+    try:
+        assert sync(store.exists("c/1/1"), timeout=GUARD_SECONDS)
+        # The store changes after it was listed.
+        chunk.rename(chunk.with_name("moved"))
+        with pytest.raises(FileNotFoundError) as raised:
+            sync(store.get("c/1/1", _PROTOTYPE), timeout=GUARD_SECONDS)
+    finally:
+        store.close()
+    assert str(raised.value).startswith(
+        f"'c/1/1' is listed in {LOOPBACK_URI}, but reading it answered 404: the "
+        "store changed after it was listed."
+    )
+    assert [kind for kind, _ in loopback_hub.requests].count("file") == 1
+
+
+def test_read_store_reads_a_missing_store_as_empty(loopback_hub):
+    store = _loopback_store(loopback_hub, uri=f"hf://buckets/{BUCKET_ID}/absent.zarr")
+    try:
+        exists = sync(store.exists("zarr.json"), timeout=GUARD_SECONDS)
+        keys = sync(_names(store.list_prefix("")), timeout=GUARD_SECONDS)
+        value = sync(store.get("zarr.json", _PROTOTYPE), timeout=GUARD_SECONDS)
+        empty = sync(store.is_empty(""), timeout=GUARD_SECONDS)
+        with pytest.raises(FileNotFoundError):
+            sync(store.getsize("zarr.json"), timeout=GUARD_SECONDS)
+    finally:
+        store.close()
+    assert not exists and keys == [] and value is None and empty
+    assert _received(loopback_hub, "tree") == [("absent.zarr", "recursive")]
+    assert _received(loopback_hub, "file") == []
+
+
+def test_read_store_shares_its_listing_across_callers_and_event_loops(
+    loopback_hub, monkeypatch
+):
+    store = _loopback_store(loopback_hub)
+    started, cancelled, release = (
+        threading.Event(),
+        threading.Event(),
+        threading.Event(),
+    )
+    calls = []
+    list_store = huggingface._list_store
+
+    def held(fs, path):
+        calls.append(path)
+        started.set()
+        assert release.wait(GUARD_SECONDS)
+        return list_store(fs, path)
+
+    monkeypatch.setattr(huggingface, "_list_store", held)
+    results: dict[str, object] = {}
+
+    async def first_caller_cancelled():
+        reader = asyncio.create_task(store.get("c/0/0", _PROTOTYPE))
+        while not started.is_set():
+            await asyncio.sleep(0.01)
+        waiter = asyncio.create_task(store.exists("c/0/0"))
+        await asyncio.sleep(0)
+        # Cancelling the caller that started the listing leaves it to the others.
+        reader.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await reader
+        cancelled.set()
+        return await waiter
+
+    def other_loop():
+        results["other"] = asyncio.run(store.getsize("zarr.json"))
+
+    try:
+        thread = threading.Thread(target=other_loop)
+        with_cancel = threading.Thread(
+            target=lambda: results.update(first=asyncio.run(first_caller_cancelled()))
+        )
+        with_cancel.start()
+        assert cancelled.wait(GUARD_SECONDS)
+        # A caller on another event loop waits for the same listing.
+        thread.start()
+        release.set()
+        with_cancel.join(GUARD_SECONDS)
+        thread.join(GUARD_SECONDS)
+        clone = store.with_read_only(True)
+        clone_keys = sync(_names(clone.list()), timeout=GUARD_SECONDS)
+    finally:
+        store.close()
+    published = loopback_hub.root / "data.zarr"
+    assert results == {
+        "first": True,
+        "other": (published / "zarr.json").stat().st_size,
+    }
+    assert calls == [store.path]
+    assert len(clone_keys) == 5
+    assert _received(loopback_hub, "tree") == [("data.zarr", "recursive")]
+
+
+def test_read_store_lists_again_after_a_failed_listing_and_after_closing(
+    loopback_hub,
+):
+    store = _loopback_store(loopback_hub)
+    loopback_hub.plan["tree"] = [403]
+    try:
+        with pytest.raises(HfHubHTTPError):
+            sync(store.exists("zarr.json"), timeout=GUARD_SECONDS)
+        found = sync(store.exists("zarr.json"), timeout=GUARD_SECONDS)
+        store.close()
+        reopened = sync(store.exists("c/0/0"), timeout=GUARD_SECONDS)
+    finally:
+        store.close()
+    assert found and reopened
+    assert _received(loopback_hub, "tree") == [("data.zarr", "recursive")] * 3
+
+
+def test_writable_read_store_reads_through_the_file_system(loopback_hub):
+    store = _loopback_store(loopback_hub, read_only=False)
+    try:
+        chunk = sync(store.get("c/1/0", _PROTOTYPE), timeout=GUARD_SECONDS)
+        found = sync(store.exists("c/0/1"), timeout=GUARD_SECONDS)
+    finally:
+        store.close()
+    assert chunk.to_bytes() == (loopback_hub.root / "data.zarr/c/1/0").read_bytes()
+    assert found
+    # Hugging Face's file system lists the directory of each key it reads.
+    listings = _received(loopback_hub, "tree")
+    assert ("data.zarr/c/1", "directory") in listings
+    assert all(detail == "directory" for _, detail in listings)

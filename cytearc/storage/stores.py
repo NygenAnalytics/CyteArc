@@ -15,7 +15,13 @@ from typing import Any, Self, cast
 
 import numpy as np
 import zarr
-from zarr.abc.store import ByteRequest, Store
+from zarr.abc.store import (
+    ByteRequest,
+    OffsetByteRequest,
+    RangeByteRequest,
+    Store,
+    SuffixByteRequest,
+)
 from zarr.core.buffer import Buffer, BufferPrototype
 from zarr.core.common import ZARR_JSON
 from zarr.storage import WrapperStore
@@ -183,6 +189,27 @@ def run_concurrently[T](tasks: Sequence[Callable[[], T]], *, workers: int) -> li
     with ThreadPoolExecutor(max_workers=min(workers, len(tasks))) as pool:
         futures = [pool.submit(task) for task in tasks]
         return [future.result() for future in futures]
+
+
+def byte_request_span(request: ByteRequest | None, size: int) -> tuple[int, int]:
+    """Return the start and stop of the bytes that ``request`` reads from ``size`` bytes.
+
+    A request that reaches past the end stops at ``size``, as a store read
+    returns only the bytes that exist.
+
+    Raises:
+        TypeError: If ``request`` is not a Zarr byte request or None.
+    """
+    match request:
+        case None:
+            return 0, size
+        case RangeByteRequest(start=start, end=end):
+            return min(start, size), min(end, size)
+        case OffsetByteRequest(offset=start):
+            return min(start, size), size
+        case SuffixByteRequest(suffix=suffix):
+            return max(0, size - suffix), size
+    raise TypeError(f"Unsupported byte request: {request!r}")
 
 
 def _is_obstore_native_store(obj: object) -> bool:
