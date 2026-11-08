@@ -690,7 +690,7 @@ def test_label_snapshots_samples_and_groups_fingerprint_the_labels(stores) -> No
     assert names == ["s10", "s2"]
 
 
-def test_exports_and_plots_read_the_labels(stores) -> None:
+def test_plots_read_the_labels_and_exports_keep_the_categories(stores) -> None:
     from cytearc.plotting._data import _category_universe, _fetch_cell_column
 
     exported = {layout: store.to_anndata() for layout, store in stores.items()}
@@ -712,8 +712,14 @@ def test_exports_and_plots_read_the_labels(stores) -> None:
     }
 
     obs = exported["categorical"].obs["cell_type"]
+    text = exported["text"].obs["cell_type"]
     assert [None if pd.isna(label) else label for label in obs] == LABELS
-    pd.testing.assert_series_equal(obs, exported["text"].obs["cell_type"])
+    assert [None if pd.isna(label) else label for label in text] == LABELS
+    # The categorical column exports as its codes beside every category, in
+    # their order; the text column exports its labels as text.
+    assert obs.cat.categories.tolist() == CATEGORIES
+    assert obs.cat.codes.tolist() == CODES
+    assert not isinstance(text.dtype, pd.CategoricalDtype)
     pd.testing.assert_series_equal(loaded["categorical"], loaded["text"])
     assert [None if pd.isna(label) else label for label in loaded["text"]] == LABELS
     # Every cell of these stores is in I.

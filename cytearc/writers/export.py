@@ -31,6 +31,7 @@ import numpy as np
 from scipy.sparse import csr_matrix, issparse, vstack
 
 from ..metadata.rows import apply_missing_mask, metadata_missing_mask
+from ..storage.categorical import CategoricalColumn
 from ..storage.refs import ArtifactRef
 from ..utils.compute import compute_with_progress
 from ..utils.logging import logger
@@ -44,6 +45,8 @@ if TYPE_CHECKING:
 type H5adText = Literal["string", "categorical"]
 type H5adSource = ArtifactRef | tuple[ArtifactRef, str]
 """An artifact to export, or an artifact with the name of one of its per-cell arrays."""
+type H5adValues = np.ndarray | pd.Categorical
+"""The values of an exported column: an array, or a categorical of codes and categories."""
 
 # Element storage of a streamed CSR matrix.
 _CSR_CHUNK = 65_536
@@ -95,10 +98,18 @@ class H5adCategorical:
 
 @dataclass(frozen=True, slots=True)
 class H5adColumn:
-    """One ``obs`` or ``var`` column of an H5AD export, or the index of either."""
+    """One ``obs`` or ``var`` column of an H5AD export, or the index of either.
+
+    ``read`` returns the column's values and the mask of its missing rows, or
+    None without a mask. A column that a store keeps as codes beside its
+    categories reads as a pandas ``Categorical`` without a mask, since code
+    -1 marks its missing rows, and exports as that categorical: its
+    categories in their order, unused ones included, and its ``ordered``
+    flag. Its ``categorical`` then gives only the colors of its categories.
+    """
 
     name: str
-    read: Callable[[], tuple[np.ndarray, np.ndarray | None]]
+    read: Callable[[], tuple[H5adValues, np.ndarray | None]]
     text: H5adText = "string"
     categorical: H5adCategorical | None = None
 
@@ -421,12 +432,23 @@ def _explicit_categorical(
             )
             levels = [*levels, *extra]
     categorical = pd.Categorical(objects, categories=levels, ordered=spec.ordered)
-    colors: tuple[str, ...] | None = None
-    if spec.colors is not None and levels:
-        palette = [spec.colors.get(level) for level in categorical.categories.tolist()]
-        if all(isinstance(color, str) for color in palette):
-            colors = tuple(cast(list[str], palette))
-    return categorical, colors
+    return categorical, _category_colors(categorical, spec)
+
+
+def _category_colors(
+    categorical: "pd.Categorical",
+    spec: H5adCategorical | None,
+) -> tuple[str, ...] | None:
+    """Return the colors of a categorical's categories in their order, or None.
+
+    The colors are returned only when ``spec`` gives every category one.
+    """
+    if spec is None or spec.colors is None or not len(categorical.categories):
+        return None
+    palette = [spec.colors.get(level) for level in categorical.categories.tolist()]
+    if not all(isinstance(color, str) for color in palette):
+        return None
+    return tuple(cast(list[str], palette))
 
 
 def unique_column_names(
@@ -540,10 +562,18 @@ def _write_masked_column(
 def _read_column(
     column: H5adColumn,
     n_rows: int,
-) -> tuple[np.ndarray, np.ndarray | None]:
-    """Read one column and check that it and its missing mask have ``n_rows``."""
+) -> tuple[H5adValues, np.ndarray | None]:
+    """Read one column and check that it and its missing mask have ``n_rows``.
+
+    A pandas ``Categorical`` is returned as read, and takes no mask: code -1
+    marks its missing rows.
+    """
+    import pandas as pd
+
     raw_values, raw_missing = column.read()
-    values = np.asarray(raw_values)
+    values = (
+        raw_values if isinstance(raw_values, pd.Categorical) else np.asarray(raw_values)
+    )
     if values.ndim != 1:
         raise ValueError(
             f"Column {column.name!r} has {values.ndim} dimensions; "
@@ -556,6 +586,11 @@ def _read_column(
         )
     if raw_missing is None:
         return values, None
+    if isinstance(values, pd.Categorical):
+        raise ValueError(
+            f"Column {column.name!r} is a categorical with a missing mask; code -1 "
+            "marks the missing rows of a categorical"
+        )
     missing = np.asarray(raw_missing, dtype=bool)
     if missing.shape != values.shape:
         raise ValueError(
@@ -563,6 +598,16 @@ def _read_column(
             f"its values have {n_rows} rows"
         )
     return values, missing
+
+
+def _read_index(index: H5adColumn, n_rows: int) -> np.ndarray:
+    """Read an ``obs`` or ``var`` index, which holds a value in every row."""
+    values, missing = _read_column(index, n_rows)
+    if not isinstance(values, np.ndarray):
+        raise TypeError(f"Index {index.name!r} must hold values, not a categorical")
+    if missing is not None and missing.any():
+        raise ValueError(f"Index {index.name!r} holds missing values")
+    return values
 
 
 def _write_column(
@@ -576,6 +621,16 @@ def _write_column(
     if it has them.
     """
     values, missing = _read_column(column, n_rows)
+    if not isinstance(values, np.ndarray):
+        # A categorical keeps its codes, categories, and order as read.
+        _write_categorical(
+            group,
+            column.name,
+            np.asarray(values.categories),
+            np.asarray(values.codes),
+            values.ordered,
+        )
+        return True, _category_colors(values, column.categorical)
     if column.categorical is not None:
         explicit, colors = _explicit_categorical(
             column.name, values, missing, column.categorical
@@ -626,13 +681,18 @@ def h5ad_table(
 
     from ..metadata.queries import missing_frame_values
 
-    index_values, index_missing = _read_column(index, n_rows)
-    if index_missing is not None and index_missing.any():
-        raise ValueError(f"Index {index.name!r} holds missing values")
+    index_values = _read_index(index, n_rows)
     data: dict[str, Any] = {}
     colors: dict[str, tuple[str, ...]] = {}
     for column in columns:
         values, missing = _read_column(column, n_rows)
+        if not isinstance(values, np.ndarray):
+            # A categorical keeps its codes, categories, and order as read.
+            data[column.name] = values
+            palette = _category_colors(values, column.categorical)
+            if palette is not None:
+                colors[column.name] = palette
+            continue
         if column.categorical is not None:
             data[column.name], palette = _explicit_categorical(
                 column.name, values, missing, column.categorical
@@ -676,10 +736,7 @@ def _write_frame(
     Returns the columns that it holds and the category colors of each that
     has them.
     """
-    values, missing = _read_column(index, n_rows)
-    if missing is not None and missing.any():
-        raise ValueError(f"Index {index.name!r} holds missing values")
-    _write_array(group, index.name, values)
+    _write_array(group, index.name, _read_index(index, n_rows))
     # column-order names only written columns: AnnData reads every column it
     # names, so a skipped one would make the file unreadable.
     written: list[str] = []
@@ -1745,8 +1802,17 @@ def _live_column(
     table: Any,
     column: str,
     rows: np.ndarray | None,
-) -> tuple[np.ndarray, np.ndarray | None]:
-    """Read one live metadata column and its linked missing mask."""
+) -> tuple[H5adValues, np.ndarray | None]:
+    """Read one live metadata column and its linked missing mask.
+
+    A categorical column reads as the pandas ``Categorical`` of its stored
+    codes and categories that ``MetaData.fetch_categorical`` returns, every
+    category in its order, unused ones included, without a mask: code -1
+    marks its missing rows.
+    """
+    if isinstance(table._get_array(column), CategoricalColumn):
+        categorical = table.fetch_categorical(column, key=None)
+        return (categorical if rows is None else categorical[rows]), None
     mask = metadata_missing_mask(table, column)
     missing = None if mask is None else np.asarray(mask[:], dtype=bool)
     values = np.asarray(table.fetch_all(column))
@@ -1812,10 +1878,10 @@ def live_h5ad_plan(
     """Plan the H5AD export of an assay with its live metadata.
 
     Every cell is exported, or the cells at store rows ``cell_rows``. A
-    column that holds a source categorical's ``levels`` exports as that
-    categorical, with the colors of its ``display``. Column names that
-    AnnData reserves or that the export already uses are renamed
-    (:func:`unique_column_names`).
+    categorical column exports as its codes and categories, and a column
+    that holds a source categorical's ``levels`` as that categorical; either
+    takes the colors of its ``display``. Column names that AnnData reserves
+    or that the export already uses are renamed (:func:`unique_column_names`).
     """
     from ..metadata.membership import exported_membership
 
@@ -1930,13 +1996,17 @@ def to_h5ad(
     Rows that a nullable metadata column's linked missing mask flags are
     written as missing values: NaN in a float64 column for numeric columns, a
     nullable boolean for boolean columns, and a missing category for other
-    columns. A column that keeps a source categorical's categories, as H5AD
-    and Seurat imports store them, is written as that categorical, with its
-    category order, unused categories, ``ordered`` flag, and colors in
-    ``uns["<column>_colors"]``. A column that AnnData reserves, ``_index``,
-    exports as ``source_index``, and a column whose name the export already
-    uses, such as a ``gene_short_name`` beside the feature names, takes the
-    next free ``_2`` name, with a warning.
+    columns. A categorical column, which a store keeps as codes beside its
+    categories, is written with AnnData's categorical encoding from its codes
+    and categories: every category in its stored order, unused ones
+    included, its ``ordered`` flag, and code -1 in its missing rows. A column
+    that keeps a source categorical's categories, as H5AD and Seurat imports
+    store them, is written as that categorical, with its category order,
+    unused categories, and ``ordered`` flag. Either takes the colors of its
+    ``display`` in ``uns["<column>_colors"]``. A column that AnnData
+    reserves, ``_index``, exports as ``source_index``, and a column whose
+    name the export already uses, such as a ``gene_short_name`` beside the
+    feature names, takes the next free ``_2`` name, with a warning.
 
     Args:
         assay: Assay to save in H5ad format
