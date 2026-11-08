@@ -9,14 +9,17 @@ from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
+import pandas as pd
 
 from ...metadata.rows import (
     apply_missing_mask,
     metadata_missing_mask,
+    read_categorical_rows,
     read_rows,
     read_text_rows,
 )
 from ...metadata.selection import sample_codes
+from ...storage.categorical import CategoricalColumn
 from ...utils.memory_budget import MemoryLedger, object_array_bytes
 
 # The bytes of a label that is not text as a Python object, such as a
@@ -66,15 +69,21 @@ def read_cell_samples(
     cell needs a label; it ends the error for a cell without one. The labels
     and their missing mask are read through ``ledger``, and numbering them
     charges it as :func:`~cytearc.metadata.selection.sample_codes` states;
-    the cells' sample codes stay charged and the labels are let go.
+    the cells' sample codes stay charged and the labels are let go. A
+    categorical column is read as a pandas Categorical of the cells' codes,
+    whose code -1 marks each row that its missing mask flags, and numbered
+    through its categories, so no cell's label is made.
     """
     columns = () if column is None else (column,)
     n_cells = len(cell_index)
-    labels = []
+    labels: list[np.ndarray | pd.Categorical] = []
     before = ledger.charged
     for name in columns:
         array = store.cells._get_array(name)
         item = f"the cells' labels in {name!r}"
+        if isinstance(array, CategoricalColumn):
+            labels.append(read_categorical_rows(ledger, array, cell_index, item=item))
+            continue
         if np.dtype(array.dtype).kind == "U":
             values = read_text_rows(ledger, array, cell_index, item=item)
         else:

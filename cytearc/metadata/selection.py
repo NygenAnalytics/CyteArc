@@ -11,6 +11,7 @@ import pandas as pd
 
 from ..storage.arrays import linked_missing_mask
 from ..storage.async_execution import zarr_decoding_threads
+from ..storage.categorical import CategoricalColumn
 from ..storage.artifacts import (
     ArtifactRef,
     ArtifactStatus,
@@ -35,8 +36,11 @@ from ..utils.memory_budget import (
 )
 from .rows import (
     apply_missing_mask,
+    category_values_bytes,
     metadata_missing_mask,
     operation_concurrency,
+    read_categorical_rows,
+    read_metadata_label_rows,
     read_metadata_missing_rows,
     read_metadata_rows,
     read_rows,
@@ -347,33 +351,42 @@ def valid_category_mask(
     A typed NumPy array is checked by its dtype: integers and booleans are
     always valid, floats and complex numbers unless NaN, and fixed-width text
     or bytes unless empty or whitespace. Other values, such as an object
-    array, are checked one by one.
+    array, are checked one by one. A pandas Categorical is checked through
+    its categories: a value is valid when its code names a valid category,
+    so code -1 is missing.
     """
-    array = (
-        values if isinstance(values, np.ndarray) else np.asarray(values, dtype=object)
-    )
-    if array.ndim != 1:
-        raise ValueError("category values must be one-dimensional")
-    kind = array.dtype.kind
-    if kind in "biu":
-        valid = np.ones(array.shape, dtype=bool)
-    elif kind in "fc":
-        valid = ~np.isnan(array)
-    elif kind in "US":
-        # Text strips the same whitespace as str.strip and bytes.strip.
-        valid = ~((np.strings.str_len(array) == 0) | np.strings.isspace(array))
+    if isinstance(values, pd.Categorical):
+        categories = valid_category_mask(np.asarray(values.categories, dtype=object))
+        # Code -1 selects the False after the categories.
+        valid = np.append(categories, False)[np.asarray(values.codes)]
     else:
-        valid = np.fromiter(
-            (
-                not _is_missing_label(value) and not _is_blank_label(value)
-                for value in array.astype(object, copy=False)
-            ),
-            dtype=bool,
-            count=array.size,
+        array = (
+            values
+            if isinstance(values, np.ndarray)
+            else np.asarray(values, dtype=object)
         )
+        if array.ndim != 1:
+            raise ValueError("category values must be one-dimensional")
+        kind = array.dtype.kind
+        if kind in "biu":
+            valid = np.ones(array.shape, dtype=bool)
+        elif kind in "fc":
+            valid = ~np.isnan(array)
+        elif kind in "US":
+            # Text strips the same whitespace as str.strip and bytes.strip.
+            valid = ~((np.strings.str_len(array) == 0) | np.strings.isspace(array))
+        else:
+            valid = np.fromiter(
+                (
+                    not _is_missing_label(value) and not _is_blank_label(value)
+                    for value in array.astype(object, copy=False)
+                ),
+                dtype=bool,
+                count=array.size,
+            )
     if missing_mask is not None:
         missing = np.asarray(missing_mask, dtype=bool)
-        if missing.shape != array.shape:
+        if missing.shape != valid.shape:
             raise ValueError("missing mask must align with category values")
         valid &= ~missing
     return valid
@@ -429,7 +442,11 @@ def category_codes(
     read alike share a code. Missing and blank values get -1, as
     :func:`valid_category_mask` marks them, and so do the values that
     ``missing_mask`` marks. Each distinct value is checked and named once, so
-    a million labels of a few categories cost one factorization.
+    a million labels of a few categories cost one factorization. A pandas
+    Categorical, such as the codes of a categorical column that
+    :func:`~cytearc.metadata.rows.read_categorical_rows` reads, is coded
+    through its codes: each category is checked and named once and each
+    value takes its category's code, with the same result as its labels.
 
     With ``ledger``, what coding holds is charged to it before each step:
     pandas' hash table of the values, as
@@ -438,9 +455,12 @@ def category_codes(
     then the codes beside naming and ordering the distinct labels, from their
     texts' characters and widest character, as
     :func:`~cytearc.utils.memory_budget.python_text_bytes` counts them, and
-    the tokens of their natural order. The codes and names returned are the
-    caller's to charge, and so are the UTF-8 forms that hashing leaves in the
-    values' strings beyond ASCII, as :func:`hashed_text_bytes` counts them.
+    the tokens of their natural order. A Categorical charges, beside naming
+    its categories, which values hold a category and their codes as they are
+    looked up, rather than a hash table of the values. The codes and names
+    returned are the caller's to charge, and so are the UTF-8 forms that
+    hashing leaves in the values' strings beyond ASCII, as
+    :func:`hashed_text_bytes` counts them.
 
     Returns:
         Each value's code, as int64, and the categories' texts in the order of
@@ -453,6 +473,8 @@ def category_codes(
         MemoryBudgetError: If coding the values would pass the ledger's
             budget.
     """
+    if isinstance(values, pd.Categorical):
+        return _categorical_codes(values, missing_mask, ledger=ledger)
     array = (
         values if isinstance(values, np.ndarray) else np.asarray(values, dtype=object)
     )
@@ -516,9 +538,54 @@ def category_codes(
     return codes, names
 
 
+def _categorical_codes(
+    values: pd.Categorical,
+    missing_mask: Any | None,
+    *,
+    ledger: MemoryLedger | None,
+) -> tuple[np.ndarray, list[str]]:
+    """Code a Categorical's labels through its codes, as :func:`category_codes` codes its labels.
+
+    Each category is checked and named once. A value takes the code of its
+    category's text among the texts that some value holds, so the result
+    equals that of the labels, without a text or a hash entry per value.
+    """
+    codes = np.asarray(values.codes)
+    n_values = len(codes)
+    categories = np.asarray(values.categories, dtype=object)
+    texts = [str(value) for value in categories.tolist()]
+    if ledger is not None:
+        # Whether each value holds a category, the codes it holds gathered
+        # twice, and each value's code beside their lookup.
+        ledger.peak(
+            f"coding {n_values} labels through their codes",
+            (17 + codes.itemsize) * n_values + 16 * len(texts) + _naming_bytes(texts),
+        )
+    present = codes >= 0
+    if missing_mask is not None:
+        missing = np.asarray(missing_mask, dtype=bool)
+        if missing.shape != codes.shape:
+            raise ValueError("missing mask must align with category values")
+        present &= ~missing
+    # Only the categories that some value holds name a category.
+    held = np.bincount(codes[present], minlength=len(texts)) > 0
+    valid = (held & valid_category_mask(categories)).tolist()
+    names = sort_categories(
+        dict.fromkeys(text for text, ok in zip(texts, valid, strict=True) if ok)
+    )
+    rank = {name: position for position, name in enumerate(names)}
+    lookup = np.asarray(
+        [rank[text] if ok else -1 for text, ok in zip(texts, valid, strict=True)],
+        dtype=np.int64,
+    )
+    coded = np.full(n_values, -1, dtype=np.int64)
+    coded[present] = lookup[codes[present]]
+    return coded, names
+
+
 def sample_codes(
     columns: tuple[str, ...],
-    labels: Sequence[np.ndarray],
+    labels: Sequence[np.ndarray | pd.Categorical],
     n_cells: int,
     *,
     reason: str,
@@ -534,7 +601,10 @@ def sample_codes(
     Args:
         columns: The cell metadata columns whose labels define the samples.
         labels: Each column's label of every selected cell, with missing
-            labels already masked.
+            labels already masked, or a pandas Categorical of the cells'
+            codes, whose code -1 marks a missing label; a Categorical is
+            numbered through its categories, with the same result as its
+            labels.
         n_cells: The number of selected cells.
         reason: Why every selected cell needs a label; it ends the error for
             a cell without one.
@@ -557,7 +627,11 @@ def sample_codes(
     codes_by_column = []
     held = 0
     for column, values in zip(columns, labels, strict=True):
-        array = np.asarray(values, dtype=object)
+        array = (
+            values
+            if isinstance(values, pd.Categorical)
+            else np.asarray(values, dtype=object)
+        )
         if array.shape != (n_cells,):
             raise ValueError(
                 f"Sample column {column!r} must hold one label per selected cell"
@@ -573,13 +647,13 @@ def sample_codes(
                 f"Sample column {column!r} has no label for {missing} selected "
                 f"cells. {reason}"
             )
-        names, codes = np.unique(array.astype(str), return_inverse=True)
+        names, codes = _numbered_labels(array)
         if ledger is not None:
             held += ledger.hold(
                 f"the cells' codes in {column!r}", codes.nbytes + names.nbytes
             )
         names_by_column.append(names)
-        codes_by_column.append(codes.reshape(-1))
+        codes_by_column.append(codes)
     if ledger is not None:
         ledger.peak(
             "the cells' samples and their fingerprint",
@@ -624,13 +698,52 @@ _BYTES_PER_SAMPLE = 512
 _KEPT_BYTES_PER_SAMPLE = 640
 
 
-def label_numbering_bytes(labels: np.ndarray) -> int:
+def _numbered_labels(
+    labels: np.ndarray | pd.Categorical,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Number labels in the sorted order of their texts: the distinct texts, and each label's position among them.
+
+    A Categorical numbers the texts of the categories that its codes hold
+    and looks each label's number up from its code, so it makes no text per
+    label; the texts keep the width of the widest held one, as the labels'
+    texts do.
+    """
+    if not isinstance(labels, pd.Categorical):
+        names, codes = np.unique(labels.astype(str), return_inverse=True)
+        return names, codes.reshape(-1)
+    codes = np.asarray(labels.codes)
+    texts = [
+        str(value) for value in np.asarray(labels.categories, dtype=object).tolist()
+    ]
+    held = (np.bincount(codes, minlength=len(texts)) > 0).tolist()
+    names = np.unique(
+        np.asarray(
+            [text for text, ok in zip(texts, held, strict=True) if ok], dtype=str
+        )
+    )
+    lookup = np.searchsorted(names, np.asarray(texts, dtype=str)).astype(np.int64)
+    return names, lookup[codes]
+
+
+def label_numbering_bytes(labels: np.ndarray | pd.Categorical) -> int:
     """Return the most bytes that :func:`sample_codes` holds to number one column's ``labels``, beside them.
 
     The labels become text at the width of the widest, a number as its text,
     which a sort copies twice, as NumPy's ``np.unique`` sorts them, beside
-    the distinct labels, as many as the labels at most.
+    the distinct labels, as many as the labels at most. A Categorical makes
+    the texts of its categories instead, and each label's number from its
+    code.
     """
+    if isinstance(labels, pd.Categorical):
+        texts = [
+            str(value) for value in np.asarray(labels.categories, dtype=object).tolist()
+        ]
+        width = max(map(len, texts), default=1)
+        return (
+            4 * fixed_text_bytes(len(texts), max(1, width))
+            + _NUMBERING_BYTES_PER_LABEL * len(texts)
+            + 16 * len(labels)
+        )
     array = np.asarray(labels, dtype=object)
     # The labels' text, as numbering makes it: a number's text is measured
     # one at a time, as it is made and let go.
@@ -758,10 +871,15 @@ class ResolvedCellArtifact:
 
 @dataclass(frozen=True, slots=True)
 class ResolvedGrouping:
-    """Categorical labels aligned to exact physical cell rows."""
+    """Categorical labels aligned to exact physical cell rows.
+
+    ``labels`` holds the labels, or, for a categorical column that
+    :func:`resolve_grouping` reads with ``categorical=True``, a pandas
+    Categorical of the cells' codes.
+    """
 
     source: ArtifactRef | CellField
-    labels: np.ndarray
+    labels: np.ndarray | pd.Categorical
     cell_idx: np.ndarray
     cell_selection: ArtifactRef | None
     missing_mask: np.ndarray | None
@@ -1313,7 +1431,8 @@ def resolve_cell_column(
     cell_selection: ArtifactRef | None,
     ledger: MemoryLedger | None = None,
     caller_reads: Sequence[Any] = (),
-) -> tuple[np.ndarray, np.ndarray | None, np.ndarray]:
+    categorical: bool = False,
+) -> tuple[np.ndarray | pd.Categorical, np.ndarray | None, np.ndarray]:
     """Read one cell metadata column and its linked missing mask at the cells of a selection.
 
     Without ``cell_selection``, every row of the cell table is read. With
@@ -1323,28 +1442,38 @@ def resolve_cell_column(
     ``caller_reads``, arrays that the caller reads at the same rows, each
     beside the rows read before it; the largest step is checked before
     anything is read, and the values, the mask and the positions stay
-    charged. Without a ledger, the read checks no budget.
+    charged. Without a ledger, the read checks no budget. With
+    ``categorical``, a categorical column is read as a pandas Categorical of
+    the cells' codes over its categories, planned and charged as its codes
+    and categories, so no cell's label is decoded; another column is read as
+    its values.
 
     Returns:
-        The values, the missing mask or None, and the rows of the cells in
-        the cell table, ascending, as int64. The caller checks that the
-        values and the mask hold one row per cell.
+        The values, or the Categorical, the missing mask or None, and the
+        rows of the cells in the cell table, ascending, as int64. The caller
+        checks that the values and the mask hold one row per cell.
 
     Raises:
         MemoryBudgetError: If ``ledger`` cannot hold what the read holds.
     """
+    values: np.ndarray | pd.Categorical
     if ledger is None:
         cell_idx = (
             np.arange(cells.N, dtype=np.int64)
             if cell_selection is None
             else cell_selection_indices(root, cell_selection)
         )
-        values = np.asarray(read_metadata_rows(cells, column, cell_idx))
+        values = (
+            read_metadata_label_rows(cells, column, cell_idx)
+            if categorical
+            else np.asarray(read_metadata_rows(cells, column, cell_idx))
+        )
         missing = read_metadata_missing_rows(cells, column, cell_idx)
     else:
         values_array = cells._get_array(column)
+        coded = categorical and isinstance(values_array, CategoricalColumn)
         mask_array = metadata_missing_mask(cells, column)
-        row_arrays = [values_array]
+        row_arrays = [values_array.codes if coded else values_array]
         if mask_array is not None:
             row_arrays.append(mask_array)
         row_arrays.extend(caller_reads)
@@ -1363,6 +1492,9 @@ def resolve_cell_column(
             rows_read = 2 * _INDEX_BYTES * n_cells + _reads_in_turn_bytes(
                 row_arrays, n_cells
             )
+            if coded:
+                # The categories, which the codes' Categorical keeps.
+                rows_read += category_values_bytes(values_array)
             _refuse_cell_read(
                 ledger, max(selection_read, rows_read), item=item, n_cells=n_cells
             )
@@ -1371,7 +1503,11 @@ def resolve_cell_column(
                 ledger.hold(positions, cell_idx.nbytes)
             else:
                 cell_idx = read_cell_selection(ledger, root, planned, item=positions)
-        values = read_rows(ledger, values_array, cell_idx, item=item)
+        values = (
+            read_categorical_rows(ledger, values_array, cell_idx, item=item)
+            if coded
+            else read_rows(ledger, values_array, cell_idx, item=item)
+        )
         missing = (
             None
             if mask_array is None
@@ -1390,18 +1526,26 @@ def resolve_grouping(
     *,
     cell_selection: ArtifactRef | None = None,
     ledger: MemoryLedger | None = None,
+    categorical: bool = False,
 ) -> ResolvedGrouping:
     """Resolve categorical labels from an artifact or an explicit metadata field.
 
     With ``ledger``, the labels are read within it, an artifact's as
     :func:`resolve_cell_aligned_artifact` charges them and a metadata
-    field's as :func:`resolve_cell_column` charges them.
+    field's as :func:`resolve_cell_column` charges them. With
+    ``categorical``, a categorical column's labels are a pandas Categorical
+    of the cells' codes, as :func:`resolve_cell_column` reads them.
     """
     if isinstance(grouping, CellField):
         if grouping.kind == "continuous":
             raise ValueError("Grouping CellField must be categorical")
         labels, missing_mask, cell_idx = resolve_cell_column(
-            root, cells, grouping.key, cell_selection=cell_selection, ledger=ledger
+            root,
+            cells,
+            grouping.key,
+            cell_selection=cell_selection,
+            ledger=ledger,
+            categorical=categorical,
         )
         if labels.shape != (len(cell_idx),):
             raise ValueError("Grouping metadata does not align with selected cells")

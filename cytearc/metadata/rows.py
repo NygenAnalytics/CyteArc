@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 import numpy as np
+import pandas as pd
 import zarr
 
 from ..storage.async_execution import zarr_decoding_threads, zarr_io_concurrency
@@ -419,6 +420,81 @@ def read_metadata_rows(
 ) -> np.ndarray:
     """Read selected metadata rows without expanding scattered ranges."""
     return _read_array_rows(metadata._get_array(column), rows)
+
+
+def categorical_rows(column: CategoricalColumn, codes: np.ndarray) -> pd.Categorical:
+    """Return the codes of some rows of a categorical column as a pandas Categorical over its categories.
+
+    The codes are checked as decoding checks them and kept as they are, so
+    no row becomes its label; pandas widens them only where its own code
+    type for that many categories is wider, for 127 and 128 categories.
+    """
+    return pd.Categorical.from_codes(
+        column.check_codes(codes),
+        categories=pd.Index(column.categories),
+        ordered=column.ordered,
+        validate=False,
+    )
+
+
+def read_metadata_label_rows(
+    metadata: _RowReadableMetaData,
+    column: str,
+    rows: np.ndarray,
+) -> np.ndarray | pd.Categorical:
+    """Read selected rows of a label column: a categorical column as a Categorical of its codes, another as its values.
+
+    A categorical column's codes are read as :func:`read_metadata_rows`
+    reads values, and returned by :func:`categorical_rows`.
+    """
+    array = metadata._get_array(column)
+    if isinstance(array, CategoricalColumn):
+        return categorical_rows(array, _read_array_rows(array.codes, rows))
+    return _read_array_rows(array, rows)
+
+
+def category_values_bytes(column: CategoricalColumn) -> int:
+    """The bytes of a categorical column's categories as stored and as the Python values of a pandas Categorical.
+
+    Text categories are measured by their characters and their widest
+    character, as :func:`~cytearc.utils.memory_budget.python_text_bytes`
+    counts them, and other categories as numbers.
+    """
+    categories = column.categories
+    n_categories = len(categories)
+    if categories.dtype.kind != "U":
+        return categories.nbytes + object_array_bytes(n_categories) + 32 * n_categories
+    characters = int(np.char.str_len(categories).sum()) if n_categories else 0
+    widest = int(categories.view(np.uint32).max()) if categories.size else 0
+    return (
+        categories.nbytes
+        + object_array_bytes(n_categories)
+        + python_text_bytes(n_categories, characters, widest=widest)
+    )
+
+
+def read_categorical_rows(
+    ledger: MemoryLedger, column: CategoricalColumn, rows: np.ndarray, *, item: str
+) -> pd.Categorical:
+    """Read distinct ``rows`` of a categorical column as a Categorical of their codes, keeping it charged as ``item``.
+
+    The codes are read as :func:`read_rows` reads them and stay charged,
+    beside the categories, as :func:`category_values_bytes` counts them, so
+    the read holds a code per row and no label.
+
+    Raises:
+        MemoryBudgetError: If the read would pass the budget.
+    """
+    codes = read_rows(ledger, column.codes, rows, item=item)
+    ledger.hold(item, category_values_bytes(column))
+    categorical = categorical_rows(column, codes)
+    if categorical.codes.dtype != codes.dtype:
+        # pandas widened the codes into a copy, which replaces them.
+        ledger.hold(item, categorical.codes.nbytes)
+        codes_bytes = codes.nbytes
+        del codes
+        ledger.release(codes_bytes)
+    return categorical
 
 
 def read_metadata_rows_chunkwise(
