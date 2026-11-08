@@ -1624,7 +1624,7 @@ def test_composite_metadata_dtype_inspection_does_not_fetch_payload(
     ("read_workers", "mem_budget", "expected_overlap"),
     ((1, "64M", 1), (3, "64M", 3), (None, "8M", 1)),
 )
-def test_composite_metadata_schema_prefetch_bounds_actual_reads(
+def test_composite_metadata_prefetch_bounds_actual_reads(
     segmented_metadata_source,
     read_workers,
     mem_budget,
@@ -1702,7 +1702,14 @@ def test_composite_metadata_schema_prefetch_bounds_actual_reads(
         expected_schema = {
             f"cellData/{column}/c/0": 1 for column in ("ids", "names", "cohort")
         }
-        assert before_plan == [(expected_schema, expected_overlap)]
+        # The warm-up also fetches the chunk of the selected cell in every
+        # copied column and missing mask, and nothing else.
+        expected_warm = {
+            **expected_schema,
+            "cellData/nullable/c/1": 1,
+            "cellData/__cytearc_missing__nullable/c/1": 1,
+        }
+        assert before_plan == [(expected_warm, expected_overlap)]
         assert active == 0
         assert all(requests[key] == 1 for key in expected_schema)
         assert requests["cellData/nullable/c/1"] == 1
@@ -1764,7 +1771,7 @@ def test_composite_creation_with_cache_disabled_keeps_remote_metadata_and_counts
 
 
 @pytest.mark.parametrize("limit", ("capacity", "entries"))
-def test_composite_metadata_schema_prefetch_skips_working_set_that_cannot_fit(
+def test_composite_metadata_prefetch_warms_what_fits_without_extra_reads(
     segmented_metadata_source, limit, monkeypatch, tmp_path
 ):
     source, _ = segmented_metadata_source
@@ -1777,14 +1784,17 @@ def test_composite_metadata_schema_prefetch_skips_working_set_that_cannot_fit(
         monkeypatch.setattr(
             module, "is_remote_zarr_location", lambda path: str(path) == source_root
         )
-    # The schema's chunks of 96 IDs, 96 names and 96 cohorts are 4,992 bytes:
-    # a cache one byte smaller, or of two entries, cannot hold them.
+    # The decoded chunks of 96 IDs, 96 names and 96 cohorts are 4,992 bytes: a
+    # cache one byte smaller, or of two entries, cannot reserve them all at
+    # once. Their encoded objects are smaller, so the capacity holds them once
+    # each fetch has shrunk its reservation, and two entries hold two of them.
     options = {"capacity_bytes": 4_991} if limit == "capacity" else {"max_entries": 2}
     monkeypatch.setattr(create, "new_source_cache", lambda: SourceCache(**options))
     get = LocalStore.get
     plan = create.plan_cell_metadata
     requests = Counter()
     before_plan = []
+    schema = {"cellData/ids/c/0", "cellData/names/c/0", "cellData/cohort/c/0"}
 
     async def record(self, key, *args, **kwargs):
         if (
@@ -1807,7 +1817,7 @@ def test_composite_metadata_schema_prefetch_skips_working_set_that_cannot_fit(
         with monkeypatch.context() as patch:
             if not enabled:
                 patch.setattr(
-                    create, "_prefetch_metadata_schema", lambda *args, **kwargs: None
+                    create, "_prefetch_metadata", lambda *args, **kwargs: None
                 )
             joint = create_composite(
                 {"source": source},
@@ -1825,9 +1835,75 @@ def test_composite_metadata_schema_prefetch_skips_working_set_that_cannot_fit(
             )
         finally:
             joint.z.store.close()
-    assert before_plan == [Counter(), Counter()]
-    assert observed[1] == observed[0]
+    warmed = {key for key, count in before_plan[1].items() if count} & schema
+    assert before_plan[0] == Counter()
+    # Each schema object is warmed on its own while it fits, never by
+    # evicting another, so the entry limit leaves one out.
+    assert len(warmed) == (3 if limit == "capacity" else 2)
+    assert all(count == 1 for count in before_plan[1].values())
+    # Warming reads no object from the source more often than creation does
+    # without it.
     assert observed[0]
+    assert all(observed[1][key] <= observed[0][key] for key in observed[1])
+
+
+def test_composite_feature_metadata_reads_through_the_warmed_cache(
+    segmented_metadata_source, monkeypatch, tmp_path
+):
+    source, _ = segmented_metadata_source
+    create = import_module("cytearc.composite.create")
+    source_root = str(source.z.store.root)
+    for module in (create, import_module("cytearc.composite.store")):
+        monkeypatch.setattr(
+            module, "is_remote_zarr_location", lambda path: str(path) == source_root
+        )
+    get = LocalStore.get
+    requests = Counter()
+    during_copy = Counter()
+    copying = False
+
+    async def record(self, key, *args, **kwargs):
+        if (
+            str(self.root) == source_root
+            and key.startswith("RNA/featureData/")
+            and "/c/" in key
+        ):
+            requests[key] += 1
+            if copying:
+                during_copy[key] += 1
+        return await get(self, key, *args, **kwargs)
+
+    write = create.write_feature_metadata
+
+    def record_copy(*args, **kwargs):
+        nonlocal copying
+        copying = True
+        try:
+            return write(*args, **kwargs)
+        finally:
+            copying = False
+
+    monkeypatch.setattr(LocalStore, "get", record)
+    monkeypatch.setattr(create, "write_feature_metadata", record_copy)
+    joint = create_composite(
+        {"source": source},
+        at=tmp_path / "joint.zarr",
+        features="union",
+        rows={"source": [35]},
+        mem_budget="64M",
+        nthreads=3,
+    )
+    try:
+        quality = joint.RNA.feats.fetch_all("quality")
+        expected = [None if index % 5 == 0 else float(index) for index in range(16)]
+        assert [None if np.isnan(value) else value for value in quality] == expected
+    finally:
+        joint.z.store.close()
+    # The warm-up fetches the feature column and its missing mask once, and
+    # their copy reads them from the cache.
+    assert requests["RNA/featureData/quality/c/0"] == 1
+    assert requests["RNA/featureData/__cytearc_missing__quality/c/0"] == 1
+    assert not during_copy
 
 
 def test_composite_metadata_cache_waits_for_memory_admission(
@@ -1866,7 +1942,7 @@ def test_composite_metadata_cache_waits_for_memory_admission(
     assert not requests
 
 
-def test_composite_metadata_schema_prefetch_failure_drains_other_reads(
+def test_composite_metadata_prefetch_failure_drains_other_reads(
     segmented_metadata_source, monkeypatch, tmp_path
 ):
     source, expected_counts = segmented_metadata_source
@@ -1927,7 +2003,9 @@ def test_composite_metadata_schema_prefetch_failure_drains_other_reads(
         patch.setattr(LocalStore, "get", fail)
         patch.setattr(SourceCache, "close", record_close)
         patch.setattr(SourceCache, "_cancel", release_cancelled_read)
-        with pytest.raises(ExceptionGroup) as failure:
+        # The one failed fetch reaches the caller as itself, after the warm-up
+        # has drained the fetches running beside it.
+        with pytest.raises(OSError, match="^metadata schema source read failed$"):
             create_composite(
                 {"source": source},
                 at=tmp_path / "joint.zarr",
@@ -1935,20 +2013,6 @@ def test_composite_metadata_schema_prefetch_failure_drains_other_reads(
                 mem_budget="64M",
                 nthreads=3,
             )
-    errors = list(failure.value.exceptions)
-    while any(isinstance(error, BaseExceptionGroup) for error in errors):
-        errors = [
-            nested
-            for error in errors
-            for nested in (
-                error.exceptions if isinstance(error, BaseExceptionGroup) else [error]
-            )
-        ]
-    assert any(
-        isinstance(error, OSError)
-        and str(error) == "metadata schema source read failed"
-        for error in errors
-    )
     assert (calls, active, cancelled, completed) == (3, 0, 0, 2)
     assert cache_directories and all(not path.exists() for path in cache_directories)
     np.testing.assert_array_equal(source.RNA.matrixGroup["counts"][:], expected_counts)

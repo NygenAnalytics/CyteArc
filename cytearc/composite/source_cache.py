@@ -415,6 +415,7 @@ class SourceCache:
         max_bytes: int,
         *,
         suffix: int | None = None,
+        evict: bool = True,
     ) -> bool:
         limit = operator.index(max_bytes)
         if limit < 1:
@@ -440,7 +441,7 @@ class SourceCache:
                     del self._entries[cache_key]
                     entry = None
             if entry is None:
-                if suffix is not None:
+                if suffix is not None or not evict:
                     if (
                         self._used_bytes + limit > self._capacity
                         or len(self._entries) >= self._max_entries
@@ -603,10 +604,15 @@ class CachedSourceStore(WrapperStore[Store]):
     def __exit__(self, *args: Any, **kwargs: Any) -> None:
         self.close()
 
-    async def prefetch(self, key: str, max_bytes: int) -> bool:
-        """Fetch one whole object into the cache; return whether it is cached."""
+    async def prefetch(self, key: str, max_bytes: int, *, evict: bool = True) -> bool:
+        """Fetch one whole object into the cache; return whether it is cached.
+
+        The fetch reserves ``max_bytes`` until it ends, then the object's own
+        size. With ``evict=False`` the object is admitted only into free space,
+        and False is returned without a request when there is none.
+        """
         return await self._cache._prefetch(
-            self._store, self._source_key, key, max_bytes
+            self._store, self._source_key, key, max_bytes, evict=evict
         )
 
     async def get(

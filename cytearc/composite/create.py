@@ -1,7 +1,9 @@
 import asyncio
+import functools
+import itertools
 import math
-from collections.abc import Iterator, Mapping, Sequence
-from dataclasses import replace
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import urlsplit
@@ -52,6 +54,7 @@ from ..storage.destinations import (
 from ..storage.execution import admitted_worker_split
 from ..storage.geometry import ArrayGeometry, array_geometry
 from ..storage.identity import (
+    GENERATED_FEATURE_COLUMNS,
     CountSummary,
     count_fingerprint,
     feature_sums_key,
@@ -187,80 +190,181 @@ class _CachedMetadataTable:
         return default_block_rows(self, column)
 
 
-def _prefetch_metadata_schema(
-    tables: list[_CachedMetadataTable],
-    excluded_columns: list[frozenset[str]],
+# A chunk of a few values can encode to more bytes than it decodes to, so the
+# warm-up lets a fetch keep at least this many, and such objects are cached too.
+SMALLEST_FETCH_LIMIT = 4096
+
+
+@dataclass(frozen=True)
+class _TableReads:
+    """What creation reads of one source metadata table.
+
+    ``row_objects(extent)`` returns the indices of the row objects, of
+    ``extent`` rows each, that hold the rows the copy reads. A column in
+    ``scanned``, or whose dtype kind is in ``scanned_kinds``, is also read in
+    full by a schema scan. Creation does not read the columns in ``skipped``.
+    """
+
+    table: _CachedMetadataTable
+    row_objects: Callable[[int], np.ndarray]
+    skipped: frozenset[str] = frozenset()
+    scanned: frozenset[str] = frozenset()
+    scanned_kinds: frozenset[str] = frozenset()
+
+
+def _copied_row_objects(row_plan: RowPlan, source: int) -> Callable[[int], np.ndarray]:
+    """Return the row objects, of each extent, that hold the copied cells of ``source``."""
+
+    @functools.cache
+    def objects(extent: int) -> np.ndarray:
+        parts = [
+            np.unique(segment.localRows // extent)
+            for segment in iter_row_plan_segments(row_plan)
+            if segment.sourceIdx == source
+        ]
+        return np.unique(np.concatenate(parts)) if parts else np.empty(0, np.int64)
+
+    return objects
+
+
+def _mapped_row_objects(mapping: np.ndarray) -> Callable[[int], np.ndarray]:
+    """Return the row objects, of each extent, that hold a source's mapped features."""
+    rows = np.flatnonzero(mapping >= 0)
+
+    @functools.cache
+    def objects(extent: int) -> np.ndarray:
+        return np.unique(rows // extent)
+
+    return objects
+
+
+def _object_requests(
+    array: zarr.Array, row_objects: np.ndarray | None
+) -> list[tuple[CachedSourceStore, str, int]]:
+    """Return the store, key and fetch limit of stored objects of ``array``.
+
+    ``row_objects`` are the indices of the objects along the rows, or None
+    for every object. An object is a shard of a sharded array, or a chunk,
+    and a fetch keeps at most one decoded chunk's bytes, as
+    ``_PrefetchingMetadataStore`` reads it, or ``SMALLEST_FETCH_LIMIT`` bytes
+    for a smaller chunk.
+    """
+    store = array.store
+    assert isinstance(store, CachedSourceStore)
+    geometry = array_geometry(array)
+    if geometry is None:
+        return []
+    size = max(geometry.nominalChunkBytes(), SMALLEST_FETCH_LIMIT)
+    counts = [
+        -(-extent // geometry.axisShard(axis))
+        for axis, extent in enumerate(geometry.shape)
+    ]
+    rows = (
+        range(counts[0])
+        if row_objects is None
+        else row_objects[(row_objects >= 0) & (row_objects < counts[0])].tolist()
+    )
+    return [
+        (
+            store,
+            "/".join(
+                part
+                for part in (
+                    array.path,
+                    array.metadata.encode_chunk_key((row, *rest)),
+                )
+                if part
+            ),
+            size,
+        )
+        for row in rows
+        for rest in itertools.product(*(range(count) for count in counts[1:]))
+    ]
+
+
+def _prefetch_metadata(
+    tables: Sequence[_TableReads],
     resources: ResourceBudget,
     *,
     cache: SourceCache,
     resident_bytes: int,
     read_workers: int,
 ) -> None:
-    arrays = []
-    for table, excluded in zip(tables, excluded_columns, strict=True):
+    """Fetch the stored objects of the metadata that creation reads into ``cache``.
+
+    The cell schema scan and the copies of cell and feature metadata then read
+    their columns a chunk at a time from the cache instead of making one
+    request at a time. The objects of each read column, of a categorical
+    column's codes and of a missing mask are fetched with a bounded number of
+    requests in flight: every object of a column that a scan reads in full,
+    and the objects that hold the copied rows of any other. Each object is
+    admitted on its own while the cache has room for it without evicting
+    anything, and one that it leaves out is read from its source as before.
+    """
+    requests: list[tuple[CachedSourceStore, str, int]] = []
+    for reads in tables:
+        table = reads.table
         if table.source_cache is not cache:
             continue
         for column in table.columns:
-            identity = column in {"ids", "names"}
-            if not identity and (column == "I" or column in excluded):
+            if column in reads.skipped:
                 continue
-            column_array = table._get_array(column)
-            if not identity and column_array.dtype.kind not in {"U", "S", "O"}:
-                continue
-            # A categorical column's scan reads its codes.
-            array = (
-                column_array.codes
-                if isinstance(column_array, CategoricalColumn)
-                else column_array
+            values = table._get_array(column)
+            whole = (
+                column in reads.scanned
+                or np.dtype(values.dtype).kind in reads.scanned_kinds
             )
-            geometry = array_geometry(array)
-            assert geometry is not None
-            objects = -(-array.shape[0] // geometry.axisShard(0))
-            if objects:
-                arrays.append((array, objects, geometry.nominalChunkBytes()))
-    objects = sum(count for _array, count, _size in arrays)
-    nominal_bytes = sum(count * size for _array, count, size in arrays)
-    # Warming more than the fresh cache can hold would evict objects before
-    # the schema scan reaches them and cause a second source read.
-    if (
-        not objects
-        or objects > cache.max_entries
-        or nominal_bytes > cache.capacity_bytes
-    ):
+            for array, full in (
+                (
+                    values.codes if isinstance(values, CategoricalColumn) else values,
+                    whole,
+                ),
+                (table._get_missing_mask_array(column), False),
+            ):
+                if array is None:
+                    continue
+                geometry = array_geometry(array)
+                if geometry is None:
+                    continue
+                requests.extend(
+                    _object_requests(
+                        array,
+                        None if full else reads.row_objects(geometry.axisShard(0)),
+                    )
+                )
+    if not requests:
         return
+    largest = max(size for _store, _key, size in requests)
     workers, _ = admitted_worker_split(
         resources,
-        nTasks=objects,
+        nTasks=len(requests),
         residentBytes=resident_bytes,
-        taskBytes=lambda _: 2 * (max(size for _array, _count, size in arrays) + 1),
+        taskBytes=lambda _: 2 * (largest + 1),
         requested=read_workers,
     )
-    requests = iter(
-        (array, coordinate, size)
-        for array, count, size in arrays
-        for coordinate in range(count)
-    )
+    # A fetch reserves its limit until it ends, then only its object's size,
+    # so a window whose limits fit the free space admits every object that
+    # fits once the window before it has ended.
+    workers = max(1, min(workers, cache.free_bytes // largest, len(requests)))
+    pending = iter(requests)
 
     async def prefetch() -> None:
         async def worker() -> None:
-            for array, coordinate, size in requests:
-                store = array.store
-                assert isinstance(store, CachedSourceStore)
-                key = "/".join(
-                    part
-                    for part in (
-                        array.path,
-                        array.metadata.encode_chunk_key((coordinate,)),
-                    )
-                    if part
-                )
-                await store.prefetch(key, max_bytes=size)
+            for store, key, size in pending:
+                await store.prefetch(key, max_bytes=size, evict=False)
 
         async with asyncio.TaskGroup() as group:
             for _ in range(workers):
                 group.create_task(worker())
 
-    sync(prefetch())
+    try:
+        sync(prefetch())
+    except BaseExceptionGroup as failures:
+        # A task group reports even one failed fetch as a group; the caller
+        # meets that failure as the read of the copy would have raised it.
+        if len(failures.exceptions) == 1:
+            raise failures.exceptions[0] from None
+        raise
 
 
 def _prefetch_counts(
@@ -274,6 +378,13 @@ def _prefetch_counts(
     memory_bytes: int,
     cache: SourceCache,
 ) -> None:
+    """Fetch the count shards that creation reads whole into ``cache``.
+
+    Up to ``read_workers`` fetches run at once, and each one that ends lets
+    the next start, so a slow shard holds back nothing but itself. Shards
+    start in order, each when the cache has room for it beside the fetches in
+    flight and the fetches fit ``memory_bytes``.
+    """
     from .reader import shard_prefetch_plan
 
     if memory_bytes <= 4096:
@@ -304,52 +415,80 @@ def _prefetch_counts(
                         yield plan.store, key, plan.maxBytes
 
     async def prefetch() -> None:
+        pending = requests()
         seen: set[tuple[int, str]] = set()
         descriptor_bytes = 4096
-        wave: list[tuple[CachedSourceStore, str, int]] = []
-        wave_bytes = 0
-        wave_memory = 0
+        in_flight = 0
+        flight_memory = 0
+        taken = started = 0
+        stopped = False
+        changed = asyncio.Condition()
 
-        async def flush() -> bool:
-            async with asyncio.TaskGroup() as group:
-                tasks = [
-                    group.create_task(store.prefetch(key, max_bytes=limit))
-                    for store, key, limit in wave
-                ]
-            return all(task.result() for task in tasks)
+        def take() -> tuple[int, CachedSourceStore, str, int] | None:
+            nonlocal taken
+            for store, key, limit in pending:
+                identity = (store.source_key, key)
+                if identity in seen:
+                    continue
+                if len(seen) >= cache.max_entries:
+                    return None
+                seen.add(identity)
+                taken += 1
+                return taken - 1, store, key, limit
+            return None
 
-        for store, key, limit in requests():
-            identity = (store.source_key, key)
-            if identity in seen:
-                continue
-            if len(seen) >= cache.max_entries:
-                break
-            retained_bytes = 4 * len(key) + 512
-            task_bytes = 2 * (limit + 1) + 1024
+        def fits(limit: int, retained_bytes: int, task_bytes: int) -> bool:
+            # A fetch in flight already holds its reservation in the cache.
+            return (
+                limit <= cache.free_bytes
+                and cache.free_entries >= 1
+                and descriptor_bytes + retained_bytes + flight_memory + task_bytes
+                <= memory_bytes
+            )
 
-            def fits() -> bool:
-                # Creation owns the idle cache exclusively between joined waves.
-                return (
-                    wave_bytes + limit <= cache.free_bytes
-                    and len(wave) + 1 <= cache.free_entries
-                    and descriptor_bytes + retained_bytes + wave_memory + task_bytes
-                    <= memory_bytes
-                )
+        async def worker() -> None:
+            nonlocal descriptor_bytes, in_flight, flight_memory, started, stopped
+            while not stopped and (request := take()) is not None:
+                turn, store, key, limit = request
+                retained_bytes = 4 * len(key) + 512
+                task_bytes = 2 * (limit + 1) + 1024
+                async with changed:
+                    # Shards start in their order, each once it fits beside the
+                    # fetches in flight; with none in flight, one that does not
+                    # fit ends the prefetch.
+                    await changed.wait_for(
+                        lambda: (
+                            stopped
+                            or turn == started
+                            and (
+                                in_flight == 0
+                                or fits(limit, retained_bytes, task_bytes)
+                            )
+                        )
+                    )
+                    if stopped or not fits(limit, retained_bytes, task_bytes):
+                        stopped = True
+                        changed.notify_all()
+                        return
+                    started += 1
+                    descriptor_bytes += retained_bytes
+                    in_flight += 1
+                    flight_memory += task_bytes
+                    changed.notify_all()
+                # The fetch reserves its room in the cache before it yields.
+                try:
+                    cached = await store.prefetch(key, max_bytes=limit)
+                finally:
+                    in_flight -= 1
+                    flight_memory -= task_bytes
+                async with changed:
+                    # A shard that the cache did not keep ends the prefetch.
+                    stopped = stopped or not cached
+                    changed.notify_all()
 
-            if wave and (len(wave) == read_workers or not fits()):
-                if not await flush():
-                    return
-                wave.clear()
-                wave_bytes = wave_memory = 0
-            if not fits():
-                break
-            seen.add(identity)
-            descriptor_bytes += retained_bytes
-            wave.append((store, key, limit))
-            wave_bytes += limit
-            wave_memory += task_bytes
-        if wave:
-            await flush()
+        async with asyncio.TaskGroup() as group:
+            for _ in range(read_workers):
+                group.create_task(worker())
 
     sync(prefetch())
 
@@ -751,26 +890,28 @@ def create_composite(
             min(table.N, table._get_array("ids").chunks[0]) for table in cell_tables
         ),
     )
-    # Remote cell metadata reads through its own cache, which is closed once
-    # the metadata is copied; the composite store keeps a cache for counts.
+    feature_tables = [_CachedMetadataTable(source.feats) for source in assays]
+    # Remote cell and feature metadata read through their own cache, which is
+    # closed once the metadata is copied; the composite store keeps a cache
+    # for counts.
     metadata_cache: SourceCache | None = None
     wrapper: CompositeStore | None = None
     try:
         schema_read_workers = resources.workers
-        for source_location, table, source in zip(
-            locations, cell_tables, datasets, strict=True
+        for source_location, cell_table, feature_table, source in zip(
+            locations, cell_tables, feature_tables, datasets, strict=True
         ):
             if is_remote_zarr_location(source_location):
                 if metadata_cache is None:
                     metadata_cache = new_source_cache()
                 if metadata_cache is not None:
-                    table.use_source_cache(metadata_cache)
+                    cell_table.use_source_cache(metadata_cache)
+                    feature_table.use_source_cache(metadata_cache)
                 if source.storageIo is not None:
                     schema_read_workers = min(
                         schema_read_workers,
                         source.storageIo.readWorkers or resources.workers,
                     )
-        del table
         excluded_columns = [
             frozenset(
                 column
@@ -786,9 +927,41 @@ def create_composite(
             for source in datasets
         ]
         if metadata_cache is not None:
-            _prefetch_metadata_schema(
-                cell_tables,
-                excluded_columns,
+            # As plan_cell_metadata and write_cell_metadata read them: the IDs,
+            # the names and every text column in full, and the selected rows of
+            # every column but the filter and the generated ones. Features are
+            # read as write_feature_metadata reads them: the rows of the
+            # features the composite keeps, and text stored as bytes or
+            # objects in full.
+            feature_skipped = frozenset(
+                {"ids", "names", "I", *GENERATED_FEATURE_COLUMNS}
+            )
+            _prefetch_metadata(
+                [
+                    *(
+                        _TableReads(
+                            table,
+                            _copied_row_objects(row_plan, index),
+                            skipped=frozenset({"I", *excluded}) - {"ids", "names"},
+                            scanned=frozenset({"ids", "names"}),
+                            scanned_kinds=frozenset({"U", "S", "O"}),
+                        )
+                        for index, (table, excluded) in enumerate(
+                            zip(cell_tables, excluded_columns, strict=True)
+                        )
+                    ),
+                    *(
+                        _TableReads(
+                            table,
+                            _mapped_row_objects(mapping),
+                            skipped=feature_skipped,
+                            scanned_kinds=frozenset({"S", "O"}),
+                        )
+                        for table, mapping in zip(
+                            feature_tables, alignment.featOrderMap, strict=True
+                        )
+                    ),
+                ],
                 resources,
                 cache=metadata_cache,
                 resident_bytes=resident,
@@ -876,9 +1049,6 @@ def create_composite(
             membership={assay: membership},
         )
         del cell_tables
-        if metadata_cache is not None:
-            metadata_cache.close()
-            metadata_cache = None
         _require_unique_cell_ids(
             as_zarr_array(cells["ids"], name="ids"),
             resources,
@@ -899,7 +1069,7 @@ def create_composite(
         matrix = as_zarr_group(root[assay], name=assay)
         counts = as_zarr_array(matrix["counts"], name="counts")
         write_feature_metadata(
-            [_CachedMetadataTable(source.feats) for source in assays],
+            feature_tables,
             alignment.featOrderMap,
             as_zarr_group(matrix["featureData"], name="featureData"),
             alignment.nFeats,
@@ -907,6 +1077,10 @@ def create_composite(
             resident_bytes=resident,
             profile=profile,
         )
+        del feature_tables
+        if metadata_cache is not None:
+            metadata_cache.close()
+            metadata_cache = None
         counts_t = None
         if requires_transpose:
             create_count_matrix_array(matrix, "countsT", pair.countsT)
