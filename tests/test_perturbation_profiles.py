@@ -776,9 +776,12 @@ def test_profiles_saved_without_diagnostics_are_computed_anew(tmp_path) -> None:
             read(saved)
 
     computed, again = _warned_profiles(store, labels, features)
+    reused, repeated = _warned_profiles(store, labels, features)
 
     assert computed != saved
-    assert again == messages and len(messages) == 1
+    # The new profiles warn once when computed and once when reused.
+    assert reused == computed
+    assert again == repeated == messages and len(messages) == 1
     np.testing.assert_array_equal(
         store.artifacts.load(computed)["values"][:],
         store.artifacts.load(saved)["values"][:],
