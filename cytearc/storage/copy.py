@@ -22,7 +22,9 @@ from .categorical import (
     CATEGORIES_PREFIX,
     ORDERED_ATTRIBUTE,
     categories_name,
+    category_count,
     linked_categories,
+    stored_categories,
 )
 from .geometry import array_geometry
 from .layout import PROFILE_METADATA_CHUNK, ChunkRows, normed_array_spec
@@ -136,7 +138,8 @@ def _copy_metadata_array(
     as :func:`~cytearc.storage.layout.column_chunk_rows` for a column of a
     cell or feature table; without it, chunks hold 100,000 rows. A
     categorical column's codes pass its ``categories``, which are copied
-    whole, with their ``ordered`` attribute, before the codes that link them.
+    whole, with their ``ordered`` attribute, before the codes that link them;
+    a reserved entry follows them when they number exactly the copied rows.
     """
     if src.ndim != 1:
         raise ValueError(
@@ -188,7 +191,11 @@ def _copy_metadata_array(
         else {}
     )
     if categories is not None:
-        labels = np.asarray(categories[:])
+        # The copy holds its own rows, so its categories take a reserved entry
+        # when they number exactly those rows, whatever the source held.
+        labels, padding = stored_categories(
+            np.asarray(categories[: category_count(categories)]), n_rows
+        )
         create_metadata_column(
             dst,
             categories_name(name),
@@ -197,7 +204,10 @@ def _copy_metadata_array(
             overwrite=overwrite,
             chunkSize=_copy_chunk_rows(len(labels), labels.dtype.itemsize, chunk_rows),
             profile=profile,
-            attributes={ORDERED_ATTRIBUTE: bool(categories.attrs[ORDERED_ATTRIBUTE])},
+            attributes={
+                ORDERED_ATTRIBUTE: bool(categories.attrs[ORDERED_ATTRIBUTE]),
+                **padding,
+            },
         )
         attributes[CATEGORIES_LINK] = categories_name(name)
     create_streamed_metadata_column(

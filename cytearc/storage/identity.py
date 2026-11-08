@@ -20,6 +20,7 @@ from .categorical import (
     categories_name,
     category_codes_dtype,
     linked_categories,
+    stored_categories,
 )
 from .geometry import array_geometry
 from .layout import column_chunk_rows
@@ -745,6 +746,10 @@ def _categorical_column(
 ) -> tuple[np.ndarray, np.ndarray, _HeldArray]:
     """Return a categorical column's stored codes, missing rows, and held categories.
 
+    Categories that number exactly the rows are held with a reserved entry
+    after the last one, as :func:`~cytearc.storage.categorical.stored_categories`
+    builds them.
+
     Raises:
         TypeError: If the codes are not integers or ``ordered`` is not a bool.
         ValueError: If the codes are not one per row, a code names no category,
@@ -780,5 +785,8 @@ def _categorical_column(
             f"{n_categories - 1}, the positions of its {n_categories} categories"
         )
     stored = codes.astype(category_codes_dtype(n_categories))
-    rows = column_chunk_rows(n_categories, max(1, labels.dtype.itemsize))
-    return stored, stored < 0, (labels, {ORDERED_ATTRIBUTE: bool(ordered)}, rows)
+    # As many categories as rows take a reserved entry after the last one.
+    held, padding = stored_categories(labels, len(codes))
+    rows = column_chunk_rows(len(held), max(1, held.dtype.itemsize))
+    attributes = {ORDERED_ATTRIBUTE: bool(ordered), **padding}
+    return stored, stored < 0, (held, attributes, rows)

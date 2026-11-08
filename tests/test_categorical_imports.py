@@ -30,6 +30,7 @@ from cytearc.storage.identity import read_dataset_fingerprint
 from cytearc.storage.selections import snapshot_run_metadata
 from cytearc.writers import H5adToZarr
 from tests.storage_helpers import open_store
+from tests.test_categorical_columns import _opens_before_categorical_columns
 
 _TEXT = h5py.string_dtype()
 _N_CELLS = 12
@@ -506,6 +507,9 @@ def test_subsets_and_merges_read_each_categorical_from_either_import(
         source = categorical.cells._get_array(name).attrs
         for key in ("levels", "ordered", "display"):
             assert array.attrs.get(key) == source.get(key), (name, key)
+        # Four categories over the subset's four cells take a reserved entry.
+        padded = subset.zw[f"cellData/__cytearc_categories__{name}"].attrs.get("padded")
+        assert padded is (True if len(column["stored_categories"]) == 4 else None)
         # A merge writes the labels of either import as values.
         values = merged.cells.fetch_all(f"orig_{name}")
         for layout in ("text", "categorical"):
@@ -516,6 +520,47 @@ def test_subsets_and_merges_read_each_categorical_from_either_import(
         assert merged.cells._get_array(f"orig_{name}").attrs.get("levels") == (
             text.cells._get_array(name).attrs.get("levels")
         )
+
+
+def test_categories_that_number_the_rows_take_a_reserved_entry(
+    imports, tmp_path: Path
+) -> None:
+    # The proteins' symbol column has four categories over four proteins.
+    text, categorical = imports["text"].zw, imports["categorical"].zw
+    stored = categorical["ADT/featureData/__cytearc_categories__symbol"]
+    assert stored[:].tolist() == ["A", "B", "a protein symbol", "中", ""]
+    assert stored.attrs["padded"] is True
+    genes = categorical["RNA/featureData/__cytearc_categories__symbol"]
+    assert "padded" not in genes.attrs
+    # A release before categorical columns refuses the table rather than read
+    # its codes as values, and opens the default import's.
+    assert not _opens_before_categorical_columns(categorical["ADT/featureData"])
+    assert _opens_before_categorical_columns(text["ADT/featureData"])
+
+    # Four cells of a categorical with four categories, two of them unused.
+    source = tmp_path / "four.h5ad"
+    _single_categorical_source(source, np.array(["a", "b", "c", "d"], dtype=_TEXT))
+    stores = {}
+    for layout, options in (
+        ("text", {}),
+        ("categorical", {"categorical_columns": True}),
+    ):
+        _import(source, tmp_path / f"{layout}.zarr", **options)
+        stores[layout] = open_store(tmp_path / f"{layout}.zarr")
+
+    cells = {layout: store.cells for layout, store in stores.items()}
+    group = stores["categorical"].zw["cellData"]
+    assert group["__cytearc_categories__label"][:].tolist() == ["a", "b", "c", "d", ""]
+    assert cells["categorical"].fetch_all("label").tolist() == ["a", "b", "b", "a"]
+    assert cells["text"].fetch_all("label").tolist() == ["a", "b", "b", "a"]
+    assert cells["categorical"].fetch_categorical(
+        "label", key=None
+    ).categories.tolist() == ["a", "b", "c", "d"]
+    assert metadata_column_fingerprint(cells["categorical"], "label") == (
+        metadata_column_fingerprint(cells["text"], "label")
+    )
+    assert not _opens_before_categorical_columns(group)
+    assert _opens_before_categorical_columns(stores["text"].zw["cellData"])
 
 
 def test_a_default_import_stores_the_tables_of_earlier_releases(

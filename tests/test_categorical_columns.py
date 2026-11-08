@@ -185,6 +185,81 @@ def test_codes_take_the_smallest_signed_integer_type_of_their_categories(
     assert metadata_missing_mask(table, "labels") is None
 
 
+def _opens_before_categorical_columns(group: zarr.Group) -> bool:
+    """Whether a release before categorical columns opens the table.
+
+    Such a release opens a table only when each of its arrays holds one value
+    per row, and then reads every array beside the columns as a column.
+    """
+    return len({int(array.shape[0]) for _name, array in group.arrays()}) == 1
+
+
+def _rows_table(n_rows: int) -> MetaData:
+    group = zarr.open_group(store=MemoryStore(), mode="w")
+    group.create_array("I", data=np.ones(n_rows, dtype=bool))
+    group.create_array(
+        "ids", data=np.array([f"cell{index}" for index in range(n_rows)])
+    )
+    group.create_array(
+        "names", data=np.array([f"name{index}" for index in range(n_rows)])
+    )
+    return MetaData(group)
+
+
+# As many categories as the table has rows, three that no row holds.
+ROW_CATEGORIES = [f"type {index}" for index in range(N)]
+ROW_LABELS = [ROW_CATEGORIES[index % 9] for index in range(N)]
+ROW_LABELS[4] = None
+
+
+def test_categories_that_number_the_rows_take_a_reserved_entry() -> None:
+    table = _table()
+    assert _opens_before_categorical_columns(table._group)
+
+    table.insert("labels", pd.Categorical(ROW_LABELS, categories=ROW_CATEGORIES))
+    table.insert("text", np.array(ROW_LABELS, dtype=object))
+
+    group = table._group
+    stored = group["__cytearc_categories__labels"]
+    # One reserved entry, empty text, follows the last category, and no code
+    # names it.
+    assert stored[:].tolist() == [*ROW_CATEGORIES, ""]
+    assert stored.attrs.asdict() == {"ordered": False, "padded": True}
+    assert group["labels"][:].tolist() == [
+        -1 if label is None else ROW_CATEGORIES.index(label) for label in ROW_LABELS
+    ]
+    assert table.fetch_all("labels").tolist() == table.fetch_all("text").tolist()
+    assert table.fetch_categorical("labels", key=None).categories.tolist() == (
+        ROW_CATEGORIES
+    )
+    assert metadata_column_fingerprint(table, "labels") == (
+        metadata_column_fingerprint(table, "text")
+    )
+    # Every other array holds one value per row, so only the reserved entry
+    # makes a release before categorical columns refuse the table rather
+    # than read the codes as values.
+    lengths = {name: int(array.shape[0]) for name, array in group.arrays()}
+    assert lengths.pop("__cytearc_categories__labels") == N + 1
+    assert set(lengths.values()) == {N}
+    assert not _opens_before_categorical_columns(group)
+
+
+@pytest.mark.parametrize("n_rows", [0, 1, 128])
+def test_reserved_entries_keep_the_codes_of_their_categories(n_rows: int) -> None:
+    table = _rows_table(n_rows)
+    categories = [f"c{index}" for index in range(n_rows)]
+
+    table.insert("labels", pd.Categorical(categories[::-1], categories=categories))
+
+    # int8 codes name 128 categories beside the reserved entry.
+    assert table._group["labels"].dtype == np.dtype(np.int8)
+    assert table._group["__cytearc_categories__labels"].shape == (n_rows + 1,)
+    assert table.fetch_all("labels").tolist() == categories[::-1]
+    assert table.fetch_categorical("labels", key=None).categories.tolist() == (
+        categories
+    )
+
+
 def test_ordered_categories_keep_their_order() -> None:
     table = _table()
     sizes = ["small", "large", "medium"] * 4
@@ -1070,6 +1145,14 @@ def _code_below_missing(group: zarr.Group) -> None:
     group["labels"][0] = -2
 
 
+def _padded_with_text(group: zarr.Group) -> None:
+    group["__cytearc_categories__labels"].attrs["padded"] = "yes"
+
+
+def _padded_without_a_reserved_entry(group: zarr.Group) -> None:
+    group["__cytearc_categories__labels"].attrs["padded"] = True
+
+
 @pytest.mark.parametrize(
     ("corrupt", "message"),
     [
@@ -1079,6 +1162,8 @@ def _code_below_missing(group: zarr.Group) -> None:
         (_unordered, "malformed categories array"),
         (_code_past_the_categories, "holds the code 12"),
         (_code_below_missing, "holds the code -2"),
+        (_padded_with_text, "reserved entry is malformed"),
+        (_padded_without_a_reserved_entry, "reserved entry is malformed"),
     ],
 )
 def test_a_malformed_categorical_column_fails_when_read(corrupt, message) -> None:
@@ -1088,6 +1173,16 @@ def test_a_malformed_categorical_column_fails_when_read(corrupt, message) -> Non
     corrupt(table._group)
 
     with pytest.raises(ValueError, match=message):
+        table.fetch_all("labels")
+
+
+def test_a_code_that_names_the_reserved_entry_fails_when_read() -> None:
+    table = _table()
+    table.insert("labels", pd.Categorical(ROW_LABELS, categories=ROW_CATEGORIES))
+
+    table._group["labels"][0] = N
+
+    with pytest.raises(ValueError, match=f"holds the code {N}, but its codes name {N}"):
         table.fetch_all("labels")
 
 
@@ -1181,6 +1276,49 @@ def test_subset_repack_and_mount_keep_the_categorical_layout(
         assert copy.cells.fetch_categorical("cell_type", key=None).codes.tolist() == (
             expected_codes
         )
+
+
+@pytest.mark.parametrize(
+    ("categories", "labels", "rows", "padded"),
+    [
+        # Nine categories, copied with nine rows, take a reserved entry.
+        (CATEGORIES, LABELS, np.arange(9), True),
+        (CATEGORIES, LABELS, np.arange(5), False),
+        (CATEGORIES, LABELS, None, False),
+        # As many categories as rows keep their reserved entry when every row
+        # is copied, and leave it out for fewer rows.
+        (ROW_CATEGORIES, ROW_LABELS, None, True),
+        (ROW_CATEGORIES, ROW_LABELS, np.arange(5), False),
+    ],
+)
+def test_copies_reserve_an_entry_for_the_rows_they_hold(
+    categories: list[str],
+    labels: list[str | None],
+    rows: np.ndarray | None,
+    padded: bool,
+) -> None:
+    from cytearc.storage.copy import copy_zarr_group_tree
+
+    table = _table()
+    table.insert("labels", pd.Categorical(labels, categories=categories))
+    copy = zarr.open_group(store=MemoryStore(), mode="w")
+
+    copy_zarr_group_tree(table._group, copy, row_indices=rows)
+
+    stored = copy["__cytearc_categories__labels"]
+    assert stored.shape == (len(categories) + padded,)
+    assert stored.attrs.asdict() == (
+        {"ordered": False, "padded": True} if padded else {"ordered": False}
+    )
+    copied = MetaData(copy)
+    expected = labels if rows is None else [labels[row] for row in rows]
+    assert copied.fetch_all("labels").tolist() == [
+        "" if label is None else label for label in expected
+    ]
+    assert copied.fetch_categorical("labels", key=None).categories.tolist() == (
+        categories
+    )
+    assert not _opens_before_categorical_columns(copy)
 
 
 def test_a_merge_writes_the_labels_of_categorical_columns(
