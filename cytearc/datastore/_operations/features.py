@@ -88,6 +88,7 @@ from ...features.markers.table import (
     _describe_groups,
     _validate_marker_slot,
     _validate_rank_marker_groups,
+    can_name_marker_group,
     rank_marker_tested_groups,
 )
 from ...features.statistical import (
@@ -200,17 +201,13 @@ def _write_compact_marker_stats(
     arr[:] = stats
 
 
-def _validate_marker_group_name(name: str) -> None:
-    """Reject a group label that cannot name its stored marker group.
-
-    Each group's statistics are stored under a child group named by the label.
-    """
-    if not name.strip() or name in (".", "..") or "/" in name or "\\" in name:
+def _validate_marker_group_label(label: str) -> None:
+    """Reject a blank group label, which CyteArc's groupings count as missing."""
+    if not label.strip():
         raise ValueError(
-            f"Marker group label {name!r} cannot name a stored marker group: "
-            "labels must be non-blank, must not be '.' or '..', and must not "
-            "contain '/' or '\\'. Rename the labels in a cell metadata column, "
-            "or leave these cells out with select_cells, then freeze the labels "
+            f"Marker group label {label!r} is blank, and CyteArc's groupings count "
+            "a blank label as missing. Label these cells in a cell metadata "
+            "column, or leave them out with select_cells, then freeze the labels "
             "with snapshot_cluster_labels before running markers.search."
         )
 
@@ -2015,7 +2012,7 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
         group_ids, group_sizes = np.unique(labels, return_counts=True)
         n_selected = int(len(labels))
         for group_id in group_ids:
-            _validate_marker_group_name(str(group_id))
+            _validate_marker_group_label(str(group_id))
         tested = _validate_rank_marker_groups(group_ids, group_sizes)
         # The distinct values of one array have distinct string forms.
         expected_group_cell_counts = {
@@ -2192,11 +2189,12 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
             from_assay: Name of the assay to be used. If no value is provided then the default assay will be used.
             clusters: Complete ``cluster_labels`` or ``cluster_cut`` artifact
                 with a label for every cell. Labels that its linked missing
-                mask flags raise ``ValueError``, as do labels that are blank,
-                ``'.'`` or ``'..'``, or contain ``'/'`` or ``'\\'``, because each label
-                names its stored marker group. To compare the groups of a
-                cell metadata column, or only some cells or clusters, freeze
-                the labels over those cells with ``snapshot_cluster_labels``.
+                mask flags raise ``ValueError``, as do blank labels, which
+                CyteArc's groupings count as missing. Any other label names a
+                group, ``'T/NK'`` and ``'.'`` included. To compare the groups
+                of a cell metadata column, or only some cells or clusters,
+                freeze the labels over those cells with
+                ``snapshot_cluster_labels``.
             features: Explicit feature-selection artifact.
             nthreads: Threads for marker search.
             **norm_params: Extra keyword arguments forwarded to ``normed``.
@@ -2270,9 +2268,14 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
     ) -> None:
         """Write the marker table of every tested group, each straight from the result.
 
-        Concurrent writers each finish one group's stored table at a time. The
-        slot records the cell count of each skipped group in its
-        ``skipped_groups`` attribute.
+        Concurrent writers each finish one group's stored table at a time. Each
+        tested group's table is a child group named by its label, and the slot
+        records the cell count of each skipped group by label in its
+        ``skipped_groups`` attribute. When a label cannot name a child group
+        (:func:`~cytearc.features.markers.table.can_name_marker_group`), the
+        slot lists every label in its ``group_labels`` attribute instead, names
+        each child group by its code, the position of its label there, and
+        records the skipped groups by code in ``skipped_group_codes``.
         """
         from ...storage.arrays import create_metadata_column
         from ...storage.stores import run_concurrently
@@ -2285,27 +2288,29 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
             raise ValueError("Marker feature indices must index feature_names")
         n_cells = int(markers.group_sizes.sum())
         tested = rank_marker_tested_groups(markers.group_sizes)
-        group.attrs.update(
-            {
-                "stat_columns": list(MARKER_STAT_COLUMNS),
-                "method": MARKER_METHOD,
-                "alternative": MARKER_ALTERNATIVE,
-                "tie_correction": MARKER_TIE_CORRECTION,
-                "continuity_correction": MARKER_CONTINUITY_CORRECTION,
-                "adjustment_method": MARKER_ADJUSTMENT_METHOD,
-                "adjustment_scope": MARKER_ADJUSTMENT_SCOPE,
-                "fold_change_policy": MARKER_FOLD_CHANGE_POLICY,
-                "p_value_policy": MARKER_P_VALUE_POLICY,
-                "skipped_groups": {
-                    str(group_id): int(n_group)
-                    for group_id, n_group in zip(
-                        markers.group_ids[~tested],
-                        markers.group_sizes[~tested],
-                        strict=True,
-                    )
-                },
-            }
-        )
+        labels = [str(group_id) for group_id in markers.group_ids]
+        by_code = not all(can_name_marker_group(label) for label in labels)
+        names = [str(code) for code in range(len(labels))] if by_code else labels
+        skipped = {
+            names[position]: int(markers.group_sizes[position])
+            for position in np.flatnonzero(~tested)
+        }
+        attributes: dict[str, Any] = {
+            "stat_columns": list(MARKER_STAT_COLUMNS),
+            "method": MARKER_METHOD,
+            "alternative": MARKER_ALTERNATIVE,
+            "tie_correction": MARKER_TIE_CORRECTION,
+            "continuity_correction": MARKER_CONTINUITY_CORRECTION,
+            "adjustment_method": MARKER_ADJUSTMENT_METHOD,
+            "adjustment_scope": MARKER_ADJUSTMENT_SCOPE,
+            "fold_change_policy": MARKER_FOLD_CHANGE_POLICY,
+            "p_value_policy": MARKER_P_VALUE_POLICY,
+        }
+        if by_code:
+            attributes.update({"group_labels": labels, "skipped_group_codes": skipped})
+        else:
+            attributes["skipped_groups"] = skipped
+        group.attrs.update(attributes)
         columns: dict[str, tuple[np.ndarray, Any]] = {
             "feature_index": (markers.feature_index, np.int32),
             "feature_names": (np.asarray(feature_names).astype(str), None),
@@ -2321,10 +2326,13 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
 
             return write
 
-        def cluster_writer(group_id: Any, n_group: int) -> Callable[[], None]:
+        def cluster_writer(position: int) -> Callable[[], None]:
+            group_id = markers.group_ids[position]
+            n_group = int(markers.group_sizes[position])
+
             def write() -> None:
                 cluster_group = group.create_group(
-                    str(group_id),
+                    names[position],
                     attributes={"n_group": n_group, "n_reference": n_cells - n_group},
                 )
                 _write_compact_marker_stats(
@@ -2335,12 +2343,7 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
 
         run_concurrently(
             [column_writer(name) for name in columns]
-            + [
-                cluster_writer(group_id, int(n_group))
-                for group_id, n_group in zip(
-                    markers.group_ids[tested], markers.group_sizes[tested], strict=True
-                )
-            ],
+            + [cluster_writer(int(position)) for position in np.flatnonzero(tested)],
             workers=workers,
         )
 
@@ -2516,8 +2519,10 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
         """Load, sort, and filter each requested marker group in natural label order.
 
         The slot's metadata, feature index, and frozen feature identities are
-        read once for every group. Each table holds the ID of each row's
-        feature in ``feature_id``, after ``feature_name``.
+        read once for every group, and its groups are known by their labels
+        whether it names their child groups by label or by code. Each table
+        holds the ID of each row's feature in ``feature_id``, after
+        ``feature_name``.
         """
         marker_sort_key(sort_by)
         _assay, g = self._resolve_marker_group(marker)
@@ -2542,7 +2547,7 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
                 "neg_log10_p_value is derived from p_value. markers.search "
                 "recomputes it at revision 2 on a writable store."
             )
-        gids = sort_categories([*g.group_keys(), *slot.skipped_groups])
+        gids = sort_categories([*slot.groups, *slot.skipped_groups])
         if group_id is not None:
             requested = str(group_id)
             if requested not in gids:

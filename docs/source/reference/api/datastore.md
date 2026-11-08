@@ -510,24 +510,7 @@ artifacts over one selection of the cells labelled in both. Doublet detection an
 cells only when some of its cells have no label, then freeze the labels over the cell selection
 that the graph was built from, such as `run["analysis_cell_selection"]` of a pipeline run.
 
-{py:meth}`cytearc.datastore.datastore.DataStore.snapshot_cluster_labels` freezes one label for each
-cell of an explicit `cell_selection` into a datastore-scoped `cluster_labels` artifact. Label
-consumers accept it like a clustering, among them `markers.search`, `compare.compute_bulk`, `select_cells`,
-`compare.test`, `clusters.relabel_by_overlap`, and `clusters.compute_concordance`. The labels come from a
-cell metadata column, such as an annotation or a condition, or from a cell-label artifact, such as
-a clustering, a Paris cut, or imported clusters. An artifact is read for a subset of its own cell
-selection, so its labels can be narrowed to the labelled cells or to some of its clusters.
-Floating-point labels that are whole numbers within the int64 range, such as the float64 ids that
-pandas writes for integer ids with missing values, are stored as int64, and other floating-point
-labels raise `TypeError`. Every selected cell needs a label: a missing label, including a row that
-a linked missing mask flags, or a blank label raises `ValueError`. Text is stored at the width of
-the selected labels, and integer and boolean labels keep their dtype. The identity holds the source
-column name or source artifact, the cell selection, and a fingerprint of the stored labels, so the
-same labels reuse one artifact, also from a read-only store, and changed labels create a new one
-while earlier snapshots keep their values. On a mounted store the
-artifact is written to the target. The labels are not checked against the marker-group naming
-rule; `markers.search` rejects a label that cannot name a stored marker group before it writes
-anything.
+{py:meth}`cytearc.datastore.datastore.DataStore.snapshot_cluster_labels` freezes one label for each cell of an explicit `cell_selection` into a datastore-scoped `cluster_labels` artifact. Label consumers accept it like a clustering, among them `markers.search`, `compare.compute_bulk`, `select_cells`, `compare.test`, `clusters.relabel_by_overlap`, and `clusters.compute_concordance`. The labels come from a cell metadata column, such as an annotation or a condition, or from a cell-label artifact, such as a clustering, a Paris cut, or imported clusters. An artifact is read for a subset of its own cell selection, so its labels can be narrowed to the labelled cells or to some of its clusters. Floating-point labels that are whole numbers within the int64 range, such as the float64 ids that pandas writes for integer ids with missing values, are stored as int64, and other floating-point labels raise `TypeError`. Every selected cell needs a label: a missing label, including a row that a linked missing mask flags, or a blank label raises `ValueError`. Text is stored at the width of the selected labels, and integer and boolean labels keep their dtype. The identity holds the source column name or source artifact, the cell selection, and a fingerprint of the stored labels, so the same labels reuse one artifact, also from a read-only store, and changed labels create a new one while earlier snapshots keep their values. On a mounted store the artifact is written to the target.
 
 For example, rank the genes that separate disease from normal cells within one annotated cell type
 of a mounted store:
@@ -643,6 +626,7 @@ Marker tables report `group_id` as a string and list groups in the same order as
 categories: decimal labels first in numeric order, so `"2"` precedes `"10"`, then other labels in
 natural order, so `"1_2"` precedes `"1_10"` and `"2_T"` precedes `"B cell"`.
 `markers.export_csv` uses the same column order. An unknown `group_id` raises an error.
+Any label names a group, `"T/NK"`, `"."` and labels beyond ASCII included, and `markers.load(group_id="T/NK")` selects that group; only a blank label raises `ValueError`, since CyteArc's groupings count it as missing. A table whose labels cannot all name a Zarr group stores its groups by code beside the labels ([Marker tables](../developers/zarr-internals#marker-tables)).
 Fresh marker results include score, expression fractions, fold change, AUC, two-sided Mann-Whitney p-values, and Benjamini-Hochberg values adjusted within each one-versus-rest group over tested features.
 These are cell-level marker statistics, not replicate-aware differential expression.
 Statistics are stored at full float64 precision. `neg_log10_p_value` holds `-log10` of the

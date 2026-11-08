@@ -535,19 +535,7 @@ CyteArc validates persisted data and public arguments against the following cont
   column, and `silhouette_scoring` of a metadata column reject masked inputs before any reuse or
   write, so results from unmasked inputs keep their identities. `clusters.membership_strength` and
   `clusters.relabel_by_overlap` accept only categorical label kinds.
-- `DataStore.snapshot_cluster_labels(labels, cell_selection=...)` freezes a cell metadata column,
-  or a cell-label artifact read for a subset of its cell selection, into a datastore-scoped
-  `cluster_labels` artifact with operation `snapshot_cluster_labels`. Floating-point labels that
-  are whole numbers within the int64 range, such as the float64 ids that pandas writes for integer
-  ids with missing values, are stored as int64; other floating-point labels raise `TypeError`, and
-  missing, masked, and blank labels raise `ValueError`. Text is stored at the width of the selected
-  labels, and integer and boolean labels keep their dtype. The identity records `source_column` as
-  a parameter or `source_labels` as an input, the cell selection, and the `values_fingerprint` of
-  the stored labels, and a snapshot is reused only while its payload holds exactly those labels.
-  The missing-label errors of `markers.search`, `clusters.membership_strength`, and `clusters.relabel_by_overlap`
-  name this method and the cell selection that each consumer needs. The group-name error of
-  `markers.search` also names this method, and only `markers.search` applies the group-name
-  rule.
+- `DataStore.snapshot_cluster_labels(labels, cell_selection=...)` freezes a cell metadata column, or a cell-label artifact read for a subset of its cell selection, into a datastore-scoped `cluster_labels` artifact with operation `snapshot_cluster_labels`. Floating-point labels that are whole numbers within the int64 range, such as the float64 ids that pandas writes for integer ids with missing values, are stored as int64; other floating-point labels raise `TypeError`, and missing, masked, and blank labels raise `ValueError`. Text is stored at the width of the selected labels, and integer and boolean labels keep their dtype. The identity records `source_column` as a parameter or `source_labels` as an input, the cell selection, and the `values_fingerprint` of the stored labels, and a snapshot is reused only while its payload holds exactly those labels. The missing-label errors of `markers.search`, `clusters.membership_strength`, and `clusters.relabel_by_overlap` name this method and the cell selection that each consumer needs, and so does the blank-label error of `markers.search`.
 - Query projections record the input `query_dataset_fingerprint`, which replaces
   `selected_expression_fingerprint`. A query cell with no counts in any shared reference feature
   is uninformative. The diagnostic `zeroNormCellCount` is renamed `uninformativeCellCount`, and
@@ -893,15 +881,7 @@ CyteArc validates persisted data and public arguments against the following cont
 - Paris fits raise each merge to at least its child heights, so hierarchies of tied graphs
   validate, and straight and fixed cuts number equal-size clusters by hierarchy node order.
   `clusters.load_paris` rejects cuts that do not name their hierarchy.
-- Inputs are validated before any lookup or write. Graph flags accept only booleans (NumPy
-  booleans included). `markers.search` rejects labels that are blank, `.`, `..`, or contain
-  `/` or `\`. `clusters.relabel_by_overlap` suffixes continue past `z` (`aa`, `ab`) and colliding names raise.
-  `select_cells` raises when no cell is retained. `compare.compute_bulk` and integration metrics leave out or
-  reject NaN, None, blank, and masked labels. Doublet, cell-cycle, prevalent-peak, membership,
-  and statistical-testing arguments are checked first, and two-group tests reject `comparisons`
-  that reverse the resolved group order. `mapping.run` rejects `query_batches` values that share
-  text, such as `1` and `"1"`, and treats nested store locations as one store. `get_cell_vals`
-  clipping covers every real numeric column. A stored `defaultAssay` must name an assay.
+- Inputs are validated before any lookup or write. Graph flags accept only booleans (NumPy booleans included). `markers.search` rejects blank labels. `clusters.relabel_by_overlap` suffixes continue past `z` (`aa`, `ab`) and colliding names raise. `select_cells` raises when no cell is retained. `compare.compute_bulk` and integration metrics leave out or reject NaN, None, blank, and masked labels. Doublet, cell-cycle, prevalent-peak, membership, and statistical-testing arguments are checked first, and two-group tests reject `comparisons` that reverse the resolved group order. `mapping.run` rejects `query_batches` values that share text, such as `1` and `"1"`, and treats nested store locations as one store. `get_cell_vals` clipping covers every real numeric column. A stored `defaultAssay` must name an assay.
 - Validation corrections that change only which error is raised, never a result or an artifact
   identity: `trajectory.pseudotime` compares the graph's recorded cell count with its stored cell
   selection, as `imputation.diffusion` does, and `cytearc.trajectory.select_pseudotime_component`
@@ -1533,6 +1513,7 @@ CyteArc validates persisted data and public arguments against the following cont
   that layout, so `markers.search` recomputes such a table at revision 2 on a writable store and
   never reuses it, even under current provenance. Any other slot without `p_value_policy`, and any
   table without `fold_change_policy`, raises `ValueError`.
+- A marker table names the child group of each tested group by the group's label, as earlier releases did, while every label can name one (`can_name_marker_group`). A table with a label that cannot, one that is empty or contains `/`, `\` or a NUL character, `.`, `..`, a Zarr metadata document (`zarr.json`, `.zattrs`, `.zgroup`, `.zarray`, `.zmetadata`) or the name of one of the slot's arrays, stores its groups by code beside the labels in its `group_labels` attribute and records skipped groups by code in `skipped_group_codes` ({ref}`marker tables <marker_tables>`). `MarkerSlot.groups` maps the label of each tested group to its child group in either layout, and `markers.load`, `markers.export_csv`, `marker_heatmap`, the reuse check of `markers.search` and the run summary read labels through it. The layout adds no operation revision: a table whose labels can all name child groups is written byte for byte as before and is reused as before, and earlier releases refused the other labels before they searched, so no stored table changes its meaning or stops being reused. Other labels that start with a dot, such as `.x`, keep the label layout, so an earlier release reads their tables. Earlier releases stored the Zarr v2 documents `.zattrs`, `.zgroup`, `.zarray` and `.zmetadata` by label in a Zarr v3 store; this release stores them by code, and still reads and reuses those tables.
 - `markers.load` and `markers.export_csv` filter by default on `frac_exp >= 0.2`, `auc >= 0.6`,
   and `p_value_adjusted <= 0.05`; `min_score` defaults to `None` because the score falls with the
   number of groups and is capped by a group's size, and `None` disables any filter. They read the

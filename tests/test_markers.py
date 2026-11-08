@@ -632,31 +632,39 @@ def _refuse_marker_search(*_args, **_kwargs):
     raise AssertionError("the rank marker search must not run")
 
 
-@pytest.mark.parametrize("label", ["NK/T", "NK\\T", ".", ".."])
-def test_marker_search_rejects_labels_that_cannot_name_a_group_before_search(
-    datastore_ephemeral, monkeypatch, label
+@pytest.mark.parametrize(
+    ("label", "natural"),
+    [
+        ("NK/T", ["B", "NK/T"]),
+        ("NK\\T", ["B", "NK\\T"]),
+        (".", [".", "B"]),
+        ("..", ["..", "B"]),
+    ],
+)
+def test_marker_search_accepts_labels_that_cannot_name_a_child_group(
+    datastore_ephemeral, label, natural
 ) -> None:
-    import cytearc.features.markers as markers_package
-
     store = datastore_ephemeral
     n_cells = len(store.cells.active_index("I"))
     labels = np.where(np.arange(n_cells) % 2 == 0, label, "B")
-    clusters = _cluster_labels(store, labels)
-    features = store.features.snapshot(feature_indexes=np.arange(20))
-    monkeypatch.setattr(markers_package, "find_markers_by_rank", _refuse_marker_search)
+    marker = store.markers.search(
+        _cluster_labels(store, labels),
+        from_assay="RNA",
+        features=store.features.snapshot(feature_indexes=np.arange(20)),
+    )
 
-    with pytest.raises(ValueError, match="cannot name a stored marker group"):
-        store.markers.search(clusters, from_assay="RNA", features=features)
-    assert store.artifacts.list(kind="marker_table", from_assay="RNA") == []
+    table = store.markers.load(marker, min_frac_exp=None, min_auc=None, max_p_adj=None)
+    assert list(dict.fromkeys(table["group_id"])) == natural
+    assert table.groupby("group_id").size().to_dict() == dict.fromkeys(natural, 20)
 
 
 @pytest.mark.parametrize("label", ["", "  "])
 def test_blank_labels_cannot_name_a_marker_group(label) -> None:
     # Snapshots reject blank labels, but imported label artifacts can hold them.
-    from cytearc.datastore._operations.features import _validate_marker_group_name
+    from cytearc.datastore._operations.features import _validate_marker_group_label
 
-    with pytest.raises(ValueError, match="cannot name a stored marker group"):
-        _validate_marker_group_name(label)
+    with pytest.raises(ValueError, match="is blank, and CyteArc's groupings count"):
+        _validate_marker_group_label(label)
 
 
 def test_marker_search_on_a_read_only_store_reuses_but_never_searches(

@@ -68,6 +68,22 @@ _MARKER_METADATA = {
     "fold_change_policy": MARKER_FOLD_CHANGE_POLICY,
     "p_value_policy": MARKER_P_VALUE_POLICY,
 }
+# Names that no child group of a marker slot can take: the paths "." and
+# "..", the metadata documents of Zarr v3 and v2, and the slot's own arrays.
+_RESERVED_NAMES = frozenset(
+    {
+        ".",
+        "..",
+        "zarr.json",
+        ".zattrs",
+        ".zgroup",
+        ".zarray",
+        ".zmetadata",
+        "feature_index",
+        "feature_names",
+        "feature_ids",
+    }
+)
 
 __all__ = [
     "MARKER_REVISION_1_P_VALUE_POLICY",
@@ -76,6 +92,7 @@ __all__ = [
     "MarkerFilter",
     "MarkerSlot",
     "RankMarkerResult",
+    "can_name_marker_group",
     "exact_marker_groups",
     "load_marker_table",
     "rank_marker_tested_groups",
@@ -144,6 +161,25 @@ def rank_marker_tested_groups(group_sizes: np.ndarray) -> np.ndarray:
     """
     sizes = np.asarray(group_sizes, dtype=np.int64)
     return (sizes >= 2) & (int(sizes.sum()) - sizes >= 2)
+
+
+def can_name_marker_group(label: str) -> bool:
+    """Return whether ``label`` can name the child group of a marker slot that stores its group.
+
+    A label cannot when Zarr or a file system would refuse it or read it as
+    another node in either Zarr format, or when the slot already uses it:
+    when it is empty, contains ``/``, ``\\`` or a NUL character, or is ``.``,
+    ``..``, a Zarr metadata document (``zarr.json``, ``.zattrs``,
+    ``.zgroup``, ``.zarray``, ``.zmetadata``) or the name of one of the
+    slot's arrays. Any other label, such as ``.x``, names its child group as
+    in earlier releases. A slot with a label that cannot names each group's
+    child group by its code instead (:class:`MarkerSlot`).
+    """
+    return not (
+        not label
+        or any(character in label for character in "/\\\x00")
+        or label in _RESERVED_NAMES
+    )
 
 
 def _describe_groups(group_ids: np.ndarray, group_sizes: np.ndarray) -> str:
@@ -409,8 +445,8 @@ class RankMarkerResult:
 
         Args:
             group_id: One of ``tested_group_ids``; the table's ``group_id``
-                column holds the string form of that label, which names the
-                group in a marker artifact.
+                column holds the string form of that label, which a marker
+                artifact reads back as the group's label.
             feature_names: Names of every feature of the assay, indexed by
                 ``feature_index``.
             sort_by: The statistic that orders the rows.
@@ -527,36 +563,84 @@ def _validated_feature_indices(values: np.ndarray, *, n_features: int) -> np.nda
     return indices
 
 
-def _skipped_groups(slot_group: zarr.Group) -> dict[str, int]:
-    """Return the cell count of each group that a slot records as skipped."""
-    skipped = slot_group.attrs.get("skipped_groups")
+def _skipped_cell_counts(
+    slot_group: zarr.Group, name: str, keys: str
+) -> dict[str, int]:
+    """Return the cell count of each skipped group that the slot's ``name`` metadata records by ``keys``."""
+    skipped = slot_group.attrs.get(name)
     if not isinstance(skipped, dict) or not all(
-        isinstance(name, str)
+        isinstance(key, str)
         and isinstance(count, int)
         and not isinstance(count, bool)
         and count >= 1
-        for name, count in skipped.items()
+        for key, count in skipped.items()
     ):
         raise ValueError(
-            "Canonical marker tables require skipped_groups metadata that maps "
-            "group labels to cell counts"
+            f"Canonical marker tables require {name} metadata that maps {keys} to "
+            "cell counts"
         )
     return dict(skipped)
 
 
+def _stored_groups(slot_group: zarr.Group) -> tuple[dict[str, str], dict[str, int]]:
+    """Return the child group of each tested group's label, and each skipped group's cell count by label.
+
+    A slot without ``group_labels`` metadata names each tested group's child
+    group by its label and records skipped groups by label in
+    ``skipped_groups``. A slot with it lists every label there, names each
+    tested group's child group by its code, the position of its label, and
+    records skipped groups by code in ``skipped_group_codes``, so that every
+    code names a child group or a skipped group.
+    """
+    names = list(slot_group.group_keys())
+    if "group_labels" not in slot_group.attrs:
+        if "skipped_group_codes" in slot_group.attrs:
+            raise ValueError(
+                "Marker tables that record skipped_group_codes must list their "
+                "labels in group_labels metadata"
+            )
+        skipped = _skipped_cell_counts(slot_group, "skipped_groups", "group labels")
+        return {name: name for name in names}, skipped
+    if "skipped_groups" in slot_group.attrs:
+        raise ValueError(
+            "Marker tables that list their labels in group_labels metadata record "
+            "skipped groups by code in skipped_group_codes, not in skipped_groups"
+        )
+    labels = slot_group.attrs["group_labels"]
+    if (
+        not isinstance(labels, list)
+        or not all(isinstance(label, str) for label in labels)
+        or len(set(labels)) != len(labels)
+    ):
+        raise ValueError("Marker group_labels metadata must list distinct text labels")
+    skipped = _skipped_cell_counts(slot_group, "skipped_group_codes", "group codes")
+    codes = [str(code) for code in range(len(labels))]
+    tested = [code for code in codes if code not in skipped]
+    if set(skipped).difference(codes) or set(names) != set(tested):
+        raise ValueError(
+            "Marker groups stored by code must be named by the codes of group_labels "
+            "that skipped_group_codes does not record"
+        )
+    return (
+        {labels[int(code)]: code for code in tested},
+        {labels[int(code)]: count for code, count in skipped.items()},
+    )
+
+
 def _canonical_slot(
     slot_group: zarr.Group, n_features: int
-) -> tuple[list[str], np.ndarray, dict[str, int], str]:
-    """Validate slot metadata.
+) -> tuple[list[str], np.ndarray, dict[str, str], dict[str, int], str]:
+    """Validate slot metadata and find the slot's groups.
 
     A slot without ``p_value_policy`` metadata is a table of revision 1: it
-    must store exactly ``MARKER_REVISION_1_STAT_COLUMNS`` and record no
-    ``skipped_groups``, and it reads under
+    must store exactly ``MARKER_REVISION_1_STAT_COLUMNS``, record no skipped
+    groups, and name each child group by its label, and it reads under
     ``MARKER_REVISION_1_P_VALUE_POLICY``.
 
     Returns:
-        The stat columns, the feature indices, the cell count of each skipped
-        group, and the table's p-value policy.
+        The stat columns, the feature indices, the child group of each tested
+        group's label, the cell count of each skipped group's label, and the
+        table's p-value policy.
     """
     if "feature_index" not in slot_group:
         raise ValueError("Canonical marker tables require feature_index and stats")
@@ -584,11 +668,15 @@ def _canonical_slot(
                 "Marker tables without p_value_policy metadata must store the "
                 "revision 1 stat_columns, which have no neg_log10_p_value"
             )
-        if "skipped_groups" in slot_group.attrs:
+        if any(
+            name in slot_group.attrs
+            for name in ("skipped_groups", "group_labels", "skipped_group_codes")
+        ):
             raise ValueError(
                 "Marker tables without p_value_policy metadata must not record "
-                "skipped_groups"
+                "skipped_groups, group_labels or skipped_group_codes"
             )
+        groups = {name: name for name in slot_group.group_keys()}
         skipped: dict[str, int] = {}
         policy = MARKER_REVISION_1_P_VALUE_POLICY
     else:
@@ -596,7 +684,7 @@ def _canonical_slot(
             raise ValueError(
                 "Canonical marker tables must store the complete named stat_columns"
             )
-        skipped = _skipped_groups(slot_group)
+        groups, skipped = _stored_groups(slot_group)
         policy = MARKER_P_VALUE_POLICY
     feature_index = _validated_feature_indices(
         _array_values(slot_group, "feature_index"),
@@ -604,7 +692,7 @@ def _canonical_slot(
     )
     if feature_index.shape[0] == 0:
         raise ValueError("Canonical marker groups must contain marker rows")
-    return columns, feature_index, skipped, policy
+    return columns, feature_index, groups, skipped, policy
 
 
 def _canonical_cluster_stats(
@@ -648,52 +736,54 @@ def _validate_marker_slot(
 ) -> None:
     """Check every marker group without building display tables.
 
-    ``expected_group_cell_counts`` maps each stored group to its group and
-    reference cell counts, and ``expected_skipped_groups`` each skipped group
-    to its cell count. ``workers`` reads groups concurrently, which hides
-    object-store latency. A table of revision 1 fails the check, so marker
-    search never reuses one, even under current provenance.
+    ``expected_group_cell_counts`` maps the label of each stored group to its
+    group and reference cell counts, and ``expected_skipped_groups`` the label
+    of each skipped group to its cell count, whether the slot names its child
+    groups by label or by code. ``workers`` reads groups concurrently, which
+    hides object-store latency. A table of revision 1 fails the check, so
+    marker search never reuses one, even under current provenance.
     """
-    group_names = sorted(slot_group.group_keys())
-    if not group_names:
+    slot = MarkerSlot.read(slot_group, len(feature_names))
+    if not slot.groups:
         raise ValueError("Canonical marker tables must contain populated groups")
-    if expected_group_cell_counts is not None and set(group_names) != set(
+    if expected_group_cell_counts is not None and set(slot.groups) != set(
         expected_group_cell_counts
     ):
         raise ValueError("Canonical marker groups do not match the requested groups")
-    columns, feature_index, skipped, policy = _canonical_slot(
-        slot_group, len(feature_names)
-    )
-    if policy != MARKER_P_VALUE_POLICY:
+    if slot.p_value_policy != MARKER_P_VALUE_POLICY:
         raise ValueError(
             "Canonical marker table has the revision 1 layout, which is read but "
             "never reused"
         )
-    if expected_skipped_groups is not None and skipped != expected_skipped_groups:
+    if (
+        expected_skipped_groups is not None
+        and slot.skipped_groups != expected_skipped_groups
+    ):
         raise ValueError("Canonical marker skipped groups do not match the request")
 
-    def check(group_name: str) -> None:
-        cluster_group = _marker_group(slot_group, group_name)
-        _canonical_cluster_stats(cluster_group, columns, feature_index.shape[0])
+    def check(label: str) -> None:
+        cluster_group = _marker_group(slot_group, slot.groups[label])
+        _canonical_cluster_stats(
+            cluster_group, slot.columns, slot.feature_index.shape[0]
+        )
         if expected_group_cell_counts is None:
             return
-        expected_group, expected_reference = expected_group_cell_counts[group_name]
+        expected_group, expected_reference = expected_group_cell_counts[label]
         if (
             cluster_group.attrs.get("n_group") != expected_group
             or cluster_group.attrs.get("n_reference") != expected_reference
         ):
-            raise ValueError(
-                f"Canonical marker group {group_name!r} has stale cell counts"
-            )
+            raise ValueError(f"Canonical marker group {label!r} has stale cell counts")
 
+    labels = sorted(slot.groups)
     if workers <= 1:
-        for group_name in group_names:
-            check(group_name)
+        for label in labels:
+            check(label)
         return
     from concurrent.futures import ThreadPoolExecutor
 
-    with ThreadPoolExecutor(max_workers=min(workers, len(group_names))) as pool:
-        list(pool.map(check, group_names))
+    with ThreadPoolExecutor(max_workers=min(workers, len(labels))) as pool:
+        list(pool.map(check, labels))
 
 
 def _with_neg_log10_p_values(
@@ -715,6 +805,16 @@ def _with_neg_log10_p_values(
 class MarkerSlot:
     """A marker slot whose metadata was validated once for all of its groups.
 
+    A slot stores each tested group's statistics in a child group named by
+    the group's label, and records each skipped group's cell count by label
+    in its ``skipped_groups`` metadata. When a label cannot name a child group
+    (:func:`can_name_marker_group`), the slot lists every label in its
+    ``group_labels`` metadata instead, as the categories of a categorical,
+    names each tested group's child group by its code, the position of its
+    label there, and records skipped groups by code in
+    ``skipped_group_codes``. Either way the slot's groups are known by their
+    labels.
+
     A table of revision 1, written before release 1.3.0, keeps the statistics
     it stored, rounded to five decimals except for the p-values, which come
     from the tie- and continuity-corrected normal approximation. Its slot
@@ -725,7 +825,10 @@ class MarkerSlot:
         group: The slot's Zarr group.
         columns: The stored statistic columns, in stored order.
         feature_index: The tested feature of each stored row.
-        skipped_groups: The cell count of each group that the slot skipped.
+        groups: The name of the child group that stores each tested group,
+            by the group's label.
+        skipped_groups: The cell count of each group that the slot skipped,
+            by the group's label.
         p_value_policy: How the table's p-values were computed:
             ``MARKER_P_VALUE_POLICY``, or ``MARKER_REVISION_1_P_VALUE_POLICY``
             for a table of revision 1.
@@ -734,12 +837,13 @@ class MarkerSlot:
     group: zarr.Group
     columns: list[str]
     feature_index: np.ndarray
+    groups: dict[str, str]
     skipped_groups: dict[str, int]
     p_value_policy: str
 
     @classmethod
     def read(cls, slot_group: zarr.Group, n_features: int) -> "MarkerSlot":
-        """Validate a slot's metadata and its feature index once.
+        """Validate a slot's metadata and its feature index once, and find its groups.
 
         Args:
             slot_group: The marker slot.
@@ -775,7 +879,7 @@ class MarkerSlot:
 
     def table(
         self,
-        group_name: str,
+        label: str,
         feature_names: np.ndarray,
         *,
         sort_by: MarkerSortKey = "score",
@@ -785,23 +889,23 @@ class MarkerSlot:
         A skipped group gives a table without rows.
 
         Args:
-            group_name: A stored or skipped group label.
+            label: The label of a stored or skipped group.
             feature_names: Names of every feature of the assay.
             sort_by: The statistic that orders the rows.
         """
-        if group_name in self.skipped_groups:
+        if label in self.skipped_groups:
             return _ranked_table(
                 np.empty((0, len(self.columns))),
                 self.columns,
                 np.empty(0, dtype=np.int64),
                 feature_names,
-                group_name,
+                label,
                 sort_by,
             )
         return self.group_table(
-            _marker_group(self.group, group_name),
+            _marker_group(self.group, self.groups[label]),
             feature_names,
-            group_id=group_name,
+            group_id=label,
             sort_by=sort_by,
         )
 
