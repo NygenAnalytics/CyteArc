@@ -175,6 +175,13 @@ class CompositeStore(WrapperStore[Store], VirtualArrayStore):
     def virtual_array_reader(self, path: str) -> VirtualArrayReader | None:
         return self._reader(path)
 
+    def stores_read(self, path: str) -> Sequence[Store]:
+        """Return this composite's own store, which holds its mappings, and the stores of its sources."""
+        return (
+            self._store,
+            *(array.store for arrays in self._sources for array in arrays.values()),
+        )
+
     def _reader(self, path: str) -> CompositeArrayReader | None:
         """Return the cached reader of the virtual array at ``path``."""
         if path not in self.record["arrays"]:

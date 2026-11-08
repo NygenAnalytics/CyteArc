@@ -104,6 +104,7 @@
   "tests/test_count_dtype.py": 2.4,
   "tests/test_count_layout_fit.py": 10.7,
   "tests/test_count_matrix.py": 0.1,
+  "tests/test_count_read_loops.py": 6.0,
   "tests/test_counts_t.py": 12.9,
   "tests/test_dataset_fingerprint.py": 0.4,
   "tests/test_datasets.py": 7.6,

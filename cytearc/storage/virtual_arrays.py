@@ -12,13 +12,23 @@ answer a selection directly does less work. Such a store implements
 import math
 import operator
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Coroutine, Iterator, Sequence
 from typing import TYPE_CHECKING, Any, Protocol
 
 import numpy as np
 import zarr
-from zarr.storage import WrapperStore
+from fsspec.implementations.asyn_wrapper import AsyncFileSystemWrapper
+from zarr.abc.store import Store
+from zarr.core.sync import sync
+from zarr.storage import (
+    FsspecStore,
+    LocalStore,
+    MemoryStore,
+    ObjectStore,
+    WrapperStore,
+)
 
+from .async_execution import run_read
 from .types import array_metadata_shards
 
 if TYPE_CHECKING:
@@ -108,6 +118,15 @@ class VirtualArrayStore(ABC):
         wrapper of this store.
         """
 
+    def stores_read(self, path: str) -> Sequence[Store] | None:
+        """Return every store that a read of the array at ``path`` reads from, if known.
+
+        ``read_selection`` gives a read an event loop of its own only when it
+        knows each of these stores to work on any event loop. A store that
+        returns None, as this default does, is read through Zarr's loop.
+        """
+        return None
+
 
 def virtual_array_reader(array: zarr.Array) -> VirtualArrayReader | None:
     """Return the reader of ``array`` when its own store computes it.
@@ -119,6 +138,46 @@ def virtual_array_reader(array: zarr.Array) -> VirtualArrayReader | None:
     if isinstance(store, VirtualArrayStore):
         return store.virtual_array_reader(array.path)
     return None
+
+
+def _reads_on_any_loop(store: Any, path: str) -> bool:
+    """Return whether every store that reading ``path`` of ``store`` touches works on any event loop.
+
+    Known to: Zarr's local and memory stores, obstore's ``ObjectStore``, and an
+    fsspec store over Zarr's wrapper of a synchronous file system, such as
+    ``HfReadStore``, which runs each call on a thread. A native asynchronous
+    fsspec file system, such as fsspec's HTTP or S3 ones, binds its client
+    session to the first loop it runs on, and an unknown store may do the
+    same. Wrappers are looked through, and a virtual array's store names the
+    stores its reads touch.
+    """
+    while True:
+        if isinstance(store, VirtualArrayStore):
+            stores = store.stores_read(path)
+            return stores is not None and all(
+                _reads_on_any_loop(inner, path) for inner in stores
+            )
+        if isinstance(store, WrapperStore):
+            store = store._store
+            continue
+        if isinstance(store, LocalStore | MemoryStore | ObjectStore):
+            return True
+        return (
+            isinstance(store, FsspecStore)
+            and isinstance(store.fs, AsyncFileSystemWrapper)
+            and store.fs.semaphore is None
+        )
+
+
+def _run[T](array: zarr.Array, coroutine: Coroutine[Any, Any, T]) -> T:
+    """Run a read of ``array`` on an event loop of its own when its stores allow it.
+
+    Reads that touch a store not known to work on any event loop run on
+    Zarr's loop, as Zarr's synchronous API runs them.
+    """
+    if _reads_on_any_loop(array.store, array.path):
+        return run_read(coroutine)
+    return sync(coroutine)
 
 
 def chunk_read_scratch_bytes(array: Any) -> int:
@@ -172,25 +231,36 @@ def read_selection(
     read through Zarr, as a basic slice when both axes are contiguous runs and
     otherwise through orthogonal indexing, which preserves the order of index
     arrays. A sharded array's index arrays on both axes are read in bands;
-    see ``_read_index_arrays``. Call it outside Zarr's event loop, like any
-    synchronous Zarr read.
+    see ``_read_index_arrays``. A read whose stores all work on any event
+    loop runs on an event loop of its own in the calling thread, through
+    ``run_read``, so reads from several threads, such as the readers of a
+    block stream, run at once; any other read runs on Zarr's loop.
     """
     reader = virtual_array_reader(array)
     if reader is not None:
-        from zarr.core.sync import sync
-
-        return sync(reader.read(rows, columns))
+        return _run(array, reader.read(rows, columns))
     row_selection = _axis_selection(rows, int(array.shape[0]))
     column_selection = _axis_selection(columns, int(array.shape[1]))
     if isinstance(row_selection, slice) and isinstance(column_selection, slice):
-        return np.asarray(array[row_selection, column_selection])
+        return np.asarray(
+            _run(array, array.async_array.getitem((row_selection, column_selection)))
+        )
     if (
         isinstance(row_selection, np.ndarray)
         and isinstance(column_selection, np.ndarray)
         and array_metadata_shards(array) is not None
     ):
         return _read_index_arrays(array, row_selection, column_selection)
-    return np.asarray(array.get_orthogonal_selection((row_selection, column_selection)))
+    return _orthogonal_selection(array, (row_selection, column_selection))
+
+
+def _orthogonal_selection(
+    array: zarr.Array, selection: tuple[AxisSelection, AxisSelection]
+) -> np.ndarray:
+    """Read an orthogonal selection of ``array``, on an event loop of its own when its stores allow it."""
+    return np.asarray(
+        _run(array, array.async_array.get_orthogonal_selection(selection))
+    )
 
 
 def _in_axis_indices(selection: np.ndarray, extent: int) -> np.ndarray | None:
@@ -224,7 +294,7 @@ def _read_index_arrays(
     if row_indices is None or column_indices is None:
         # Zarr reads empty selections, negative indices, and boolean masks,
         # and rejects indices outside the axis before it reads anything.
-        return np.asarray(array.get_orthogonal_selection((rows, columns)))
+        return _orthogonal_selection(array, (rows, columns))
     row_chunk, column_chunk = (operator.index(extent) for extent in array.chunks)
     column_band = row_indices.size * widest_chunk_span(column_indices, column_chunk)
     row_band = column_indices.size * widest_chunk_span(row_indices, row_chunk)
@@ -262,12 +332,11 @@ def _read_bands(
         start, stop = int(values[first]), int(values[last - 1]) + 1
         positions = order[first:last]
         local = values[first:last] - start
-        band = np.asarray(
-            array.get_orthogonal_selection(
-                (slice(start, stop), indexed)
-                if axis == 0
-                else (indexed, slice(start, stop))
-            )
+        band = _orthogonal_selection(
+            array,
+            (slice(start, stop), indexed)
+            if axis == 0
+            else (indexed, slice(start, stop)),
         )
         if result is None:
             result = np.empty((rows.size, columns.size), dtype=band.dtype)

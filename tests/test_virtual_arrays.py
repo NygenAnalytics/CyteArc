@@ -226,13 +226,13 @@ def test_sharded_reads_never_send_index_arrays_on_both_axes_to_zarr(monkeypatch)
     )
     array[:] = BANDED
     selections = []
-    original = zarr.Array.get_orthogonal_selection
+    original = zarr.AsyncArray.get_orthogonal_selection
 
-    def record(self, selection, *args, **kwargs):
+    async def record(self, selection, *args, **kwargs):
         selections.append(selection)
-        return original(self, selection, *args, **kwargs)
+        return await original(self, selection, *args, **kwargs)
 
-    monkeypatch.setattr(zarr.Array, "get_orthogonal_selection", record)
+    monkeypatch.setattr(zarr.AsyncArray, "get_orthogonal_selection", record)
     # Zarr reads negative indices and boolean masks itself.
     for name, (rows, columns) in INDEX_ARRAYS.items():
         if name in ("negative", "masks"):
