@@ -1942,7 +1942,7 @@ def test_composite_metadata_cache_waits_for_memory_admission(
     assert not requests
 
 
-def test_composite_metadata_schema_prefetch_failure_drains_other_reads(
+def test_composite_metadata_prefetch_failure_drains_other_reads(
     segmented_metadata_source, monkeypatch, tmp_path
 ):
     source, expected_counts = segmented_metadata_source
@@ -2003,7 +2003,9 @@ def test_composite_metadata_schema_prefetch_failure_drains_other_reads(
         patch.setattr(LocalStore, "get", fail)
         patch.setattr(SourceCache, "close", record_close)
         patch.setattr(SourceCache, "_cancel", release_cancelled_read)
-        with pytest.raises(ExceptionGroup) as failure:
+        # The one failed fetch reaches the caller as itself, after the warm-up
+        # has drained the fetches running beside it.
+        with pytest.raises(OSError, match="^metadata schema source read failed$"):
             create_composite(
                 {"source": source},
                 at=tmp_path / "joint.zarr",
@@ -2011,20 +2013,6 @@ def test_composite_metadata_schema_prefetch_failure_drains_other_reads(
                 mem_budget="64M",
                 nthreads=3,
             )
-    errors = list(failure.value.exceptions)
-    while any(isinstance(error, BaseExceptionGroup) for error in errors):
-        errors = [
-            nested
-            for error in errors
-            for nested in (
-                error.exceptions if isinstance(error, BaseExceptionGroup) else [error]
-            )
-        ]
-    assert any(
-        isinstance(error, OSError)
-        and str(error) == "metadata schema source read failed"
-        for error in errors
-    )
     assert (calls, active, cancelled, completed) == (3, 0, 0, 2)
     assert cache_directories and all(not path.exists() for path in cache_directories)
     np.testing.assert_array_equal(source.RNA.matrixGroup["counts"][:], expected_counts)
