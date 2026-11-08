@@ -137,6 +137,16 @@ revision 1, so stores written before operation revisions existed keep their iden
 compares the whole `provenance` mapping exactly; `execution_options`, `created_at_ns`, and
 `cytearc_version` never affect it. [](operation_revisions.md) explains when a revision changes.
 
+(marker_tables)=
+
+### Marker tables
+
+A `marker_table` artifact from `markers.search` holds three arrays with one value per feature, `feature_index`, the assay index of each tested feature, and `feature_names` and `feature_ids`, the names and IDs that the search froze, and one child group for each tested group. A child group records the group's cell count in its `n_group` attribute and the count of the other cells in `n_reference`, and holds the group's statistics in `stats`, one row per tested feature and one column per name in the slot's `stat_columns` attribute. The slot's other attributes record the test, its adjustment, and its fold-change and p-value policies.
+
+Each child group is named by its group's label, and the slot's `skipped_groups` attribute maps the label of each group too small to test to its cell count. Some labels cannot name a child group, because Zarr would read the name as a path or as another node, or refuse it: a label that contains `/`, `\` or a NUL character, starts with `.` as `.`, `..` and the `.zattrs` of Zarr v2 do, or is `zarr.json` or the name of one of the slot's arrays. A table with such a label stores its groups by code instead, as AnnData stores a categorical. The slot's `group_labels` attribute lists every label, in the order that the search sorts them, which is the categories; each tested group's child group is named by its code, the position of its label in `group_labels`; and `skipped_group_codes` maps the code of each skipped group to its cell count. `markers.load`, `markers.export_csv` and `marker_heatmap` read either layout and show labels in the same natural order, and `markers.search` reuses a table of either layout for the same labels.
+
+A table whose labels can all name child groups keeps the layout of earlier releases byte for byte, so they read it as before. A table stored by code needs a release that reads that layout: an earlier release finds no `skipped_groups` in it and raises `ValueError` rather than showing codes as labels. Earlier releases refused those labels before they searched, so none of their tables is stored by code.
+
 ## Pipeline records and snapshots
 
 Pipeline run, stage, and label-claim documents use one strict unversioned shape. A run has exactly

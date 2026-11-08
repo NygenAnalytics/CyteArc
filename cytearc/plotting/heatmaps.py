@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 
 from ..assay.normalization import resolve_normalization_params
-from ..features.markers.table import load_marker_table
+from ..features.markers.table import MarkerSlot
 from ..metadata.membership import measured_rows
 from ..metadata.selection import grouping_value_name
 from ..storage.artifacts import ArtifactRef, artifact_path
@@ -187,14 +187,11 @@ def _prepare_marker_heatmap(
     feature_indices: list[int] = []
     marker_rows: list[dict[str, Any]] = []
     feature_names = np.asarray(marker_slot["feature_names"][:]).astype(str)
-    for group_name in marker_slot.group_keys():
-        marker_group = as_zarr_group(marker_slot[group_name], name=group_name)
-        markers = load_marker_table(
-            marker_slot,
-            marker_group,
-            feature_names,
-            group_id=group_name,
-        )
+    # The slot knows each stored group by its label, also when it names the
+    # group's child group by code.
+    slot = MarkerSlot.read(marker_slot, len(feature_names))
+    for group_name in slot.groups:
+        markers = slot.table(group_name, feature_names)
         ranked = markers.sort_values(
             ["score", "feature_name"],
             ascending=[False, True],

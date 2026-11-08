@@ -294,7 +294,9 @@ def _doublets(group: Any) -> dict[str, Any]:
 
 
 def _markers(group: Any) -> dict[str, Any]:
-    skipped = group.attrs.get("skipped_groups")
+    # A slot records its skipped groups by label, or by code when it lists
+    # its labels in group_labels.
+    skipped = group.attrs.get("skipped_groups", group.attrs.get("skipped_group_codes"))
     return {
         "groups": len(list(group.group_keys())),
         "skippedGroups": len(skipped) if isinstance(skipped, Mapping) else 0,

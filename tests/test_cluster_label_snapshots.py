@@ -599,7 +599,7 @@ def test_membership_strength_takes_labels_frozen_over_the_graph_cell_selection(
     assert strength.mean() > 0.9
 
 
-def test_snapshot_keeps_labels_that_cannot_name_a_marker_group(store_path):
+def test_snapshot_keeps_labels_with_a_slash_for_every_consumer(store_path):
     ds = _open(store_path)
     all_cells = ds.snapshot_cell_selection()
     subtype = np.where(CELL_TYPES == "B", "B", "NK/T")
@@ -609,9 +609,6 @@ def test_snapshot_keeps_labels_that_cannot_name_a_marker_group(store_path):
 
     np.testing.assert_array_equal(_labels(ds, labels), subtype)
     assert set(ds.compare.compute_bulk(labels).profiles.columns) == {"B", "NK/T"}
-    with pytest.raises(
-        ValueError,
-        match=r"'NK/T' cannot name a stored marker group.*snapshot_cluster_labels",
-    ):
-        ds.markers.search(labels, features=ds.features.universe(from_assay="RNA"))
-    assert ds.artifacts.list(kind="marker_table", from_assay="RNA") == []
+    marker = ds.markers.search(labels, features=ds.features.universe(from_assay="RNA"))
+    table = ds.markers.load(marker, min_frac_exp=None, min_auc=None, max_p_adj=None)
+    assert list(dict.fromkeys(table["group_id"])) == ["B", "NK/T"]

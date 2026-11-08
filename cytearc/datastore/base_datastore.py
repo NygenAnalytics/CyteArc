@@ -1313,10 +1313,7 @@ class BaseDataStore:
         labels. The same labels reuse one artifact, also from a store opened
         with ``zarr_mode='r'``, and changed labels create a new one while
         earlier snapshots keep their values. A mounted store writes the
-        artifact to its target, never to the matrix source. The labels are
-        not checked against the marker-group naming rule;
-        ``markers.search`` rejects labels that cannot name a stored marker
-        group before it writes anything.
+        artifact to its target, never to the matrix source.
 
         Args:
             labels: Cell metadata column name, or a cell-label artifact.
