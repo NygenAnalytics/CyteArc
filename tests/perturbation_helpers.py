@@ -1,7 +1,7 @@
 """Shared helpers for the tests of ``cytearc.perturbation``."""
 
 import warnings
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import TYPE_CHECKING, Any
@@ -11,6 +11,8 @@ import pytest
 import statsmodels.api as sm
 from scipy import optimize, special, stats
 
+from cytearc import DiagnosticWarning
+from cytearc.utils.logging import collect_warnings
 from tests.storage_helpers import open_store, write_count_store
 
 if TYPE_CHECKING:
@@ -45,6 +47,24 @@ def write_screen(
     for name, values in (cell_columns or {}).items():
         store.cells.insert(name, values)
     return store
+
+
+def warned(call: Callable[[], Any]) -> tuple[Any, list[str], list[DiagnosticWarning]]:
+    """Call, and return its result, every warning that CyteArc logged or issued, and its DiagnosticWarnings.
+
+    A warning given twice, once from the saved diagnostics and once by the
+    computation, appears twice among the texts.
+    """
+    with (
+        collect_warnings() as texts,
+        warnings.catch_warnings(record=True) as caught,
+    ):
+        warnings.simplefilter("always")
+        result = call()
+    diagnostic = [
+        item.message for item in caught if isinstance(item.message, DiagnosticWarning)
+    ]
+    return result, texts, diagnostic
 
 
 def fixed_labels(

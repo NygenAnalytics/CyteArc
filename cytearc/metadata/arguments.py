@@ -1042,6 +1042,22 @@ class GuideThresholdArguments(OperationArguments):
 class GuideCallArguments(OperationArguments):
     operation: ClassVar[str] = "call_guides"
     artifact_kind: ClassVar[str] = "guide_calls"
+    diagnostics: ClassVar[tuple[str, ...]] = (
+        # The fits of each guide in each sample, those whose status is not
+        # "fitted", which call no cell, those of each such status, and up to
+        # five of them; None and no examples for a method that fits none.
+        "guideFits",
+        "fitsCallingNoCell",
+        "fitsNoCells",
+        "fitsTooSparse",
+        "fitsNoFit",
+        "fitsNoPositive",
+        "fitCallingNoCellExamples",
+        # The cells with a call, and those of them with several guides.
+        "cellsWithCall",
+        "cellsWithSeveralGuides",
+    )
+    call: ClassVar[str | None] = "ds.perturbation.call_guides"
 
     cell_selection: ArtifactRef = artifact_input()
     dataset_fingerprint: str = artifact_input()
@@ -1072,6 +1088,12 @@ class PerturbationLabelArguments(OperationArguments):
 class PerturbationEfficiencyArguments(OperationArguments):
     operation: ClassVar[str] = "measure_perturbation_efficiency"
     artifact_kind: ClassVar[str] = "perturbation_efficiency"
+    # The rows whose target matches no feature, and up to five of them.
+    diagnostics: ClassVar[tuple[str, ...]] = (
+        "rowsWithoutFeature",
+        "rowWithoutFeatureExamples",
+    )
+    call: ClassVar[str | None] = "ds.perturbation.efficiency"
 
     labels: ArtifactRef = artifact_input()
     # The expression counts that the means and tests read.
@@ -1130,6 +1152,23 @@ class MixscapeArguments(OperationArguments):
 class PerturbationAssociationArguments(OperationArguments):
     operation: ClassVar[str] = "test_perturbation_associations"
     artifact_kind: ClassVar[str] = "perturbation_associations"
+    diagnostics: ClassVar[tuple[str, ...]] = (
+        # Whether the calibration check ran and why not, the control guides
+        # that its groups draw from, its grade, and the false discoveries
+        # among its negative-control pairs.
+        "calibrationStatus",
+        "controlGuides",
+        "calibrationGrade",
+        "falseDiscoveries",
+        "negativeControlPairs",
+        # The tested rows and calibration groups whose pairs pass QC without
+        # a statistic, and up to five of each.
+        "rowsWithoutStatistic",
+        "rowWithoutStatisticExamples",
+        "calibrationGroupsWithoutStatistic",
+        "calibrationGroupWithoutStatisticExamples",
+    )
+    call: ClassVar[str | None] = "ds.perturbation.associations"
 
     labels: ArtifactRef = artifact_input()
     # The counts that the regressions and the QC read.
@@ -1167,6 +1206,13 @@ class PerturbationAssociationArguments(OperationArguments):
 class PerturbationProfileArguments(OperationArguments):
     operation: ClassVar[str] = "compute_perturbation_profiles"
     artifact_kind: ClassVar[str] = "perturbation_profiles"
+    # The perturbations with fewer than min_cells cells, which get no profile,
+    # and up to five of them with their cells.
+    diagnostics: ClassVar[tuple[str, ...]] = (
+        "leftOutPerturbations",
+        "leftOutPerturbationExamples",
+    )
+    call: ClassVar[str | None] = "ds.perturbation.profiles"
 
     # Perturbation labels, or Mixscape classes whose knocked-out cells alone
     # make each target's profile.

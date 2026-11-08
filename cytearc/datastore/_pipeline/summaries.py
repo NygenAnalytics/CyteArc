@@ -498,7 +498,9 @@ def _mixscape(group: Any, parameters: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def _associations(group: Any, parameters: Mapping[str, Any]) -> dict[str, Any]:
+def _associations(
+    group: Any, parameters: Mapping[str, Any], diagnostics: Mapping[str, Any]
+) -> dict[str, Any]:
     arrays = _arrays(
         group, "sets", "pass_qc", "z", "significant", "groups", "group_guides"
     )
@@ -540,9 +542,9 @@ def _associations(group: Any, parameters: Mapping[str, Any]) -> dict[str, Any]:
         "testedDiscoveryPairs": int(tested[discovery]),
         "discoveries": int(found[discovery]),
         "calibrationPairs": int(pairs[calibration]),
-        "falseDiscoveries": int(group.attrs["n_false_discoveries"]),
-        "calibrationGrade": str(group.attrs["calibration_grade"]),
-        "calibrationStatus": str(group.attrs["calibration_status"]),
+        "falseDiscoveries": int(diagnostics["falseDiscoveries"]),
+        "calibrationGrade": str(diagnostics["calibrationGrade"]),
+        "calibrationStatus": str(diagnostics["calibrationStatus"]),
         "falseDiscoveriesByControlGuides": {
             str(labels[index]): int(counts[index]) for index in order
         },
@@ -637,6 +639,12 @@ _BY_KIND_WITH_PARAMETERS: Mapping[
     "perturbation_efficiency": _efficiency,
     "perturbation_edistance": _edistance,
     "mixscape_classes": _mixscape,
+}
+# The summaries that read the artifact's recorded parameters and the
+# diagnostics that it saved.
+_BY_KIND_WITH_PARAMETERS_AND_DIAGNOSTICS: Mapping[
+    str, Callable[[Any, Mapping[str, Any], Mapping[str, Any]], dict[str, Any]]
+] = {
     "perturbation_associations": _associations,
 }
 
@@ -664,6 +672,11 @@ def summarize_stage(
         elif ref.kind in _BY_KIND_WITH_PARAMETERS:
             summary = _BY_KIND_WITH_PARAMETERS[ref.kind](
                 group, inspect_artifact(root, ref).parameters or {}
+            )
+        elif ref.kind in _BY_KIND_WITH_PARAMETERS_AND_DIAGNOSTICS:
+            status = inspect_artifact(root, ref)
+            summary = _BY_KIND_WITH_PARAMETERS_AND_DIAGNOSTICS[ref.kind](
+                group, status.parameters or {}, status.diagnostics
             )
         elif ref.kind in _BY_KIND_WITH_DIAGNOSTICS:
             summary = _BY_KIND_WITH_DIAGNOSTICS[ref.kind](

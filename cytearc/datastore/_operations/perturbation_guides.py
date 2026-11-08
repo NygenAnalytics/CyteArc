@@ -82,7 +82,7 @@ from ...storage.artifacts import (
     inspect_artifact,
     require_complete_artifact,
 )
-from ...storage.diagnostics import DiagnosticRule, warn_diagnostics
+from ...storage.diagnostics import EXAMPLES, DiagnosticRule, warn_diagnostics
 from ...storage.types import as_zarr_array, read_array
 from ...storage.validation_scope import validation_scoped
 from ...utils.arguments import bool_argument
@@ -96,7 +96,6 @@ from ...utils.memory_budget import (
     python_text_bytes,
 )
 from ...utils.numba import numba_threads
-from ...utils.warnings import warn
 from .cell_barcodes import (
     BarcodeFile,
     CellBarcodeJoin,
@@ -385,13 +384,16 @@ def _called_guide_positions(
     return positions
 
 
-# Fits named in the warning about guides that call nothing.
-_FIT_EXAMPLES = 5
-_STATUS_TEXT = {
-    GUIDE_FIT_NO_CELLS: "have no cell with a UMI of the guide",
-    GUIDE_FIT_TOO_SPARSE: "have too few cells or counts to fit",
-    GUIDE_FIT_NO_FIT: "have no admissible fit",
-    GUIDE_FIT_NO_POSITIVE: "have no guide population above the background",
+# The diagnostic that counts the fits of each status that calls no cell, and
+# the words that the warning about them gives the status.
+_UNFITTED_STATUSES = {
+    GUIDE_FIT_NO_CELLS: ("fitsNoCells", "have no cell with a UMI of the guide"),
+    GUIDE_FIT_TOO_SPARSE: ("fitsTooSparse", "have too few cells or counts to fit"),
+    GUIDE_FIT_NO_FIT: ("fitsNoFit", "have no admissible fit"),
+    GUIDE_FIT_NO_POSITIVE: (
+        "fitsNoPositive",
+        "have no guide population above the background",
+    ),
 }
 # Above this share of called cells with several guides, a gaussian fit over
 # every cell has likely set thresholds among the ambient counts.
@@ -460,33 +462,105 @@ def _unselected_barcodes_message(diagnostics: Mapping[str, Any]) -> str | None:
     )
 
 
-def _unfitted_warning(
-    status: np.ndarray, samples: list[str | None], guide_ids: np.ndarray
-) -> str | None:
-    """Describe the fits that call no cell, or return None when every fit calls."""
-    unfitted = status != GUIDE_FIT_FITTED
-    total = int(np.count_nonzero(unfitted))
-    if not total:
-        return None
-    parts = [
-        f"{int(np.count_nonzero(status == code))} {text}"
-        for code, text in _STATUS_TEXT.items()
-        if np.any(status == code)
-    ]
-    rows, columns = np.nonzero(unfitted)
-    examples = [
-        repr(str(guide_ids[column]))
-        + ("" if samples[row] is None else f" in sample {samples[row]!r}")
-        for row, column in zip(
-            rows[:_FIT_EXAMPLES], columns[:_FIT_EXAMPLES], strict=True
+def _guide_call_diagnostics(
+    status: np.ndarray | None,
+    samples: list[str | None],
+    guide_ids: np.ndarray,
+    n_guides: np.ndarray,
+) -> dict[str, Any]:
+    """Return the diagnostics of guide calls: their fits that call no cell and their cells with calls.
+
+    Args:
+        status: The status of each guide's fit in each sample, samples x
+            guides, as positions in ``FIT_STATUSES``, or None for a method
+            that fits none.
+        samples: The name of each sample of the fits, None for the one sample
+            of every cell.
+        guide_ids: The guide IDs, in assay order.
+        n_guides: The number of guides called in each cell.
+    """
+    diagnostics: dict[str, Any] = {
+        "guideFits": None,
+        "fitsCallingNoCell": None,
+        **{key: None for key, _ in _UNFITTED_STATUSES.values()},
+        "fitCallingNoCellExamples": [],
+        "cellsWithCall": int(np.count_nonzero(n_guides > 0)),
+        "cellsWithSeveralGuides": int(np.count_nonzero(n_guides > 1)),
+    }
+    if status is None:
+        return diagnostics
+    # A fit whose status is not "fitted" calls no cell.
+    rows, columns = np.nonzero(status != GUIDE_FIT_FITTED)
+    diagnostics.update(
+        guideFits=int(status.size),
+        fitsCallingNoCell=len(rows),
+        fitCallingNoCellExamples=[
+            repr(str(guide_ids[column]))
+            + ("" if samples[row] is None else f" in sample {samples[row]!r}")
+            for row, column in zip(rows[:EXAMPLES], columns[:EXAMPLES], strict=True)
+        ],
+    )
+    for code, (key, _) in _UNFITTED_STATUSES.items():
+        diagnostics[key] = int(np.count_nonzero(status == code))
+    return diagnostics
+
+
+def _guide_call_rules(method: str) -> tuple[DiagnosticRule, ...]:
+    """The warnings of guide calls made by ``method``, from their diagnostics."""
+
+    def fits_calling_no_cell(numbers: Mapping[str, Any]) -> str:
+        parts = [
+            f"{numbers[key]} {text}"
+            for key, text in _UNFITTED_STATUSES.values()
+            if numbers[key]
+        ]
+        return (
+            f"{numbers['fitsCallingNoCell']} of {numbers['guideFits']} guide fits "
+            "call no cell: "
+            + ", ".join(parts)
+            + ". For example "
+            + ", ".join(numbers["fitCallingNoCellExamples"])
+            + ". perturbation.load_guide_thresholds lists every status."
         )
-    ]
+
+    def among_ambient_counts(numbers: Mapping[str, Any]) -> bool:
+        called = int(numbers["cellsWithCall"])
+        return (
+            method == "gaussian"
+            and called > 0
+            and int(numbers["cellsWithSeveralGuides"])
+            > _GAUSSIAN_MULTIPLE_SHARE * called
+        )
+
     return (
-        f"{total} of {status.size} guide fits call no cell: "
-        + ", ".join(parts)
-        + ". For example "
-        + ", ".join(examples)
-        + ". perturbation.load_guide_thresholds lists every status."
+        DiagnosticRule(
+            "fitsCallingNoCell",
+            applies=lambda numbers: bool(numbers["fitsCallingNoCell"]),
+            message=fits_calling_no_cell,
+        ),
+        DiagnosticRule(
+            "cellsWithSeveralGuides",
+            applies=among_ambient_counts,
+            message=lambda numbers: (
+                "With method='gaussian', "
+                f"{numbers['cellsWithSeveralGuides'] / numbers['cellsWithCall']:.0%} "
+                "of the cells with a call have several guides. A fit over every "
+                "cell sets low thresholds when most cells hold no UMI of a guide; "
+                "check plots.guide_thresholds, or call with "
+                "method='poisson_gaussian'."
+            ),
+        ),
+    )
+
+
+def _warn_guide_calls(
+    root: zarr.Group, arguments: GuideCallArguments, ref: ArtifactRef
+) -> None:
+    """Warn from saved guide calls' diagnostics, whether computed or reused."""
+    warn_diagnostics(
+        arguments,
+        inspect_artifact(root, ref).diagnostics,
+        _guide_call_rules(arguments.method),
     )
 
 
@@ -832,14 +906,15 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
         arrays: GuideCallArrays,
         summary: GuideCountSummary,
         guide_ids: np.ndarray,
-        diagnostics: Mapping[str, Any] | None = None,
+        diagnostics: Mapping[str, Any],
     ) -> None:
         """Save each cell's calls and its top guide, top UMIs and guide UMIs.
 
         A cell without guide UMIs has an empty top guide. Imported calls save
-        the join's ``diagnostics``; called ones save none. What saving holds
-        beside the calls and the summary, as :func:`_guide_call_write_bytes`
-        states it, is charged to ``ledger`` first.
+        the join's ``diagnostics``, and called ones those of
+        :func:`_guide_call_diagnostics`. What saving holds beside the calls
+        and the summary, as :func:`_guide_call_write_bytes` states it, is
+        charged to ``ledger`` first.
         """
         n_cells, width = arrays.guide_codes.shape
         ledger.peak(
@@ -1154,7 +1229,10 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
 
         Raises:
             TypeError: If ``calls`` is not an ArtifactRef.
-            ValueError: If it is not a ``guide_calls`` artifact.
+            ValueError: If it is not a ``guide_calls`` artifact, or calls of
+                :meth:`~cytearc.datastore.namespaces.PerturbationAccessor.call_guides`
+                saved without their diagnostics, as earlier releases saved
+                them; the error names the call that makes them anew.
             KeyError: If the store holds no such artifact.
             RuntimeError: If the artifact is incomplete, as a call that
                 stopped before it finished leaves it.
@@ -1493,32 +1571,6 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
             _stored_samples(group),
         )
 
-    def _warn_about_guide_calls(
-        self,
-        method: str,
-        status: np.ndarray | None,
-        samples: list[str | None],
-        guide_ids: np.ndarray,
-        n_guides: np.ndarray,
-    ) -> None:
-        """Warn about fits that call nothing and about gaussian fits among ambient counts."""
-        message = (
-            None if status is None else _unfitted_warning(status, samples, guide_ids)
-        )
-        if message is not None:
-            warn(message)
-        if method != "gaussian":
-            return
-        called = int(np.count_nonzero(n_guides > 0))
-        several = int(np.count_nonzero(n_guides > 1))
-        if called and several > _GAUSSIAN_MULTIPLE_SHARE * called:
-            warn(
-                f"With method='gaussian', {several / called:.0%} of the cells with "
-                "a call have several guides. A fit over every cell sets low "
-                "thresholds when most cells hold no UMI of a guide; check "
-                "plots.guide_thresholds, or call with method='poisson_gaussian'."
-            )
-
     @validation_scoped
     def _perturbation_call_guides(
         self,
@@ -1581,6 +1633,19 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
         guide, ``"Negative"`` or ``"Multiple"``, beside each cell's number of
         calls, top guide, top UMIs, share and total guide UMIs, and its called
         guides with their UMIs.
+
+        A fit whose status is not ``"fitted"`` calls no cell. The calls save
+        their diagnostics, which ``ds.artifacts.inspect(calls).diagnostics``
+        returns: ``guideFits``, the fits of each guide in each sample;
+        ``fitsCallingNoCell``, those that call no cell; ``fitsNoCells``,
+        ``fitsTooSparse``, ``fitsNoFit`` and ``fitsNoPositive``, those of each
+        such status; ``fitCallingNoCellExamples``, up to five of them, such as
+        ``'CRISPR3' in sample 'L2'``; the fit counts are None and the examples
+        empty for ``"fixed"`` and ``"top_guide"``. ``cellsWithCall`` counts the
+        cells with a call and ``cellsWithSeveralGuides`` those of them with
+        several guides. Fits that call no cell, and with ``"gaussian"`` a
+        majority of called cells with several guides, each give a
+        ``DiagnosticWarning`` every time the calls are computed or reused.
 
         Args:
             cell_selection: The cells to call.
@@ -1687,23 +1752,11 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
             fraction_threshold=fraction if method == "top_guide" else None,
         )
         planned = self._plan_guide_calls(arguments, assay.name, n_cells, n_guide_ids)
-        status: np.ndarray | None = None
         if planned.reused:
-            if thresholds is not None:
-                fits_group = artifact_group(self.zw, thresholds.ref)
-                status = read_whole(
-                    ledger, fits_group, "status", item="the saved fits' statuses"
-                )
-                samples = _stored_samples(fits_group)
-            stored = artifact_group(self.zw, planned.ref)
-            self._warn_about_guide_calls(
-                method,
-                status,
-                samples,
-                guide_ids,
-                read_whole(ledger, stored, "n_guides", item="each cell's calls"),
-            )
+            _warn_guide_calls(self.zw, arguments, planned.ref)
             return planned.ref
+        # The status of each fit, which the fitted methods give.
+        status: np.ndarray | None = None
         # A threshold of at least 1 UMI calls at most a cell's detected guides,
         # which bound its calls; top_guide calls at most one guide per cell.
         if method == "top_guide":
@@ -1832,10 +1885,15 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
             )
             del fits, histograms
             ledger.release(fitted_bytes)
-        self._write_guide_calls(ledger, planned, arrays, summary, guide_ids)
-        self._warn_about_guide_calls(
-            method, status, samples, guide_ids, arrays.n_guides
+        self._write_guide_calls(
+            ledger,
+            planned,
+            arrays,
+            summary,
+            guide_ids,
+            _guide_call_diagnostics(status, samples, guide_ids, arrays.n_guides),
         )
+        _warn_guide_calls(self.zw, arguments, planned.ref)
         n_called = int(np.count_nonzero(arrays.n_guides))
         logger.info(
             f"Called guides in {n_called} of {n_cells} cells, "
@@ -1882,7 +1940,9 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
             TypeError: If ``thresholds`` is not an ArtifactRef, or ``guides``
                 is text or not a collection of guide IDs.
             ValueError: If ``thresholds`` holds no fitted thresholds, or a
-                guide is not a guide of the assay.
+                guide is not a guide of the assay, or ``thresholds`` is
+                guide calls saved without their diagnostics, as earlier
+                releases saved them.
             KeyError: If the store holds no such artifact.
             RuntimeError: If the artifact is incomplete, as a call that
                 stopped before it finished leaves it.
@@ -2109,8 +2169,9 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If ``calls`` is not a ``guide_calls`` artifact,
-                ``controls`` names no target or a blank one, neither
+            ValueError: If ``calls`` is not a ``guide_calls`` artifact or
+                was saved without its diagnostics, as earlier releases
+                saved called guides, ``controls`` names no target or a blank one, neither
                 ``target_column`` nor ``targets`` is given, the target column
                 is not a feature column, ``targets`` names a guide that is not
                 in the assay or gives an empty target, a target that is not a
