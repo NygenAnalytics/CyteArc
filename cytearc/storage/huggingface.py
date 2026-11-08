@@ -168,68 +168,73 @@ def _list_store(fs: HfFileSystem, path: str) -> _StoreListing:
     return _StoreListing(sizes, url)
 
 
-class _ListingAbandoned(Exception):
-    """The listing that a caller waited for ended with its event loop."""
+class _FetchAbandoned(Exception):
+    """The fetch that a reader waited for ended with its event loop."""
 
 
-class _SharedListing:
-    """One listing of a store, taken once and awaited from any event loop.
+class _SharedFetches[T]:
+    """Fetches shared by key, each taken once and awaited from any event loop.
 
-    The first caller starts the listing on its event loop, and every caller,
-    on that loop or another, waits for the same thread-safe future. Cancelling
-    a caller cancels only its wait. A listing that fails is taken again by the
-    next caller, and one whose event loop ended before it finished is taken
-    again by a caller that was waiting for it.
+    The first reader of a key starts its fetch on its own event loop, and every
+    reader of that key, on that loop or another, waits for the same
+    thread-safe future. Cancelling a reader cancels only its wait. A fetch
+    that fails is dropped, so the next reader fetches again; a reader that
+    waited for a fetch whose event loop ended before it finished fetches again
+    itself.
     """
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._future: concurrent.futures.Future[_StoreListing] | None = None
+        self._futures: dict[str, concurrent.futures.Future[T]] = {}
 
-    async def get(self, take: Callable[[], Awaitable[_StoreListing]]) -> _StoreListing:
+    async def get(self, key: str, fetch: Callable[[], Awaitable[T]]) -> T:
         while True:
             with self._lock:
-                future = self._future
+                future = self._futures.get(key)
                 starting = future is None
                 if future is None:
-                    future = self._future = concurrent.futures.Future()
-                    # A running future cannot be cancelled, so a waiter that is
-                    # cancelled leaves the listing to the others.
+                    future = self._futures[key] = concurrent.futures.Future()
+                    # A running future cannot be cancelled, so a reader that is
+                    # cancelled leaves the fetch to the others.
                     future.set_running_or_notify_cancel()
             if starting:
-                task = asyncio.ensure_future(take())
-                task.add_done_callback(functools.partial(self._settle, future))
+                task = asyncio.ensure_future(fetch())
+                task.add_done_callback(functools.partial(self._settle, key, future))
             try:
                 return await asyncio.wrap_future(future)
-            except _ListingAbandoned:
+            except _FetchAbandoned:
                 continue
 
     def _settle(
         self,
-        future: concurrent.futures.Future[_StoreListing],
-        task: asyncio.Future[_StoreListing],
+        key: str,
+        future: concurrent.futures.Future[T],
+        task: asyncio.Future[T],
     ) -> None:
+        # Reading the task's error here also consumes it when every reader
+        # that waited for it was cancelled.
         error: BaseException | None = (
-            _ListingAbandoned() if task.cancelled() else task.exception()
+            _FetchAbandoned() if task.cancelled() else task.exception()
         )
         if error is None:
             future.set_result(task.result())
             return
         with self._lock:
-            if self._future is future:
-                self._future = None
+            if self._futures.get(key) is future:
+                del self._futures[key]
         future.set_exception(error)
 
     def clear(self) -> None:
         with self._lock:
-            self._future = None
+            self._futures.clear()
 
 
 class HfReadStore(FsspecStore):
     """Read one published store with unique listings and metadata cached in RAM.
 
-    A read-only store lists its objects once, recursively, the first time it
-    needs them, and keeps each object's size. That listing answers ``exists``,
+    A read-only store keeps each metadata document it reads, shared by its
+    readers on any event loop. It lists its objects once, recursively, the
+    first time it needs them, and keeps each object's size. That listing answers ``exists``,
     ``getsize``, ``list``, ``list_prefix`` and ``list_dir``, a key it does not
     hold reads as missing without a request, and a read of a key it holds is
     one GET of the key's resolver URL for exactly the bytes asked for. The
@@ -264,8 +269,8 @@ class HfReadStore(FsspecStore):
         self.request_timeout = _seconds("request_timeout", request_timeout)
         self.retry_timeout = _seconds("retry_timeout", retry_timeout)
         self._location = self.fs.unstrip_protocol(self.path)
-        self._metadata: dict[str, asyncio.Task[bytes | None]] = {}
-        self._listing = _SharedListing()
+        self._metadata = _SharedFetches[bytes | None]()
+        self._listing = _SharedFetches[_StoreListing]()
 
     @classmethod
     def from_url(
@@ -311,11 +316,12 @@ class HfReadStore(FsspecStore):
 
     async def _store_listing(self, fs: HfFileSystem) -> _StoreListing:
         return await self._listing.get(
+            "",
             functools.partial(
                 self._request,
                 f"Listing {self._location}",
                 lambda: asyncio.to_thread(_list_store, fs, self.path),
-            )
+            ),
         )
 
     async def _read_listed(
@@ -456,22 +462,8 @@ class HfReadStore(FsspecStore):
             not in {"zarr.json", ".zarray", ".zgroup", ".zattrs", ".zmetadata"}
         ):
             return await self._read(key, prototype, byte_range)
-        task = self._metadata.get(key)
-        if task is None:
-
-            def discard_failed(completed: asyncio.Task[bytes | None]) -> None:
-                # Consume errors even if every waiting reader was cancelled.
-                if completed.cancelled() or completed.exception() is not None:
-                    if self._metadata.get(key) is completed:
-                        del self._metadata[key]
-
-            task = asyncio.create_task(self._read_metadata(key, prototype))
-            self._metadata[key] = task
-            task.add_done_callback(discard_failed)
-        # Cancelling one reader must not cancel a fetch shared by other readers.
-        if not task.done():
-            await asyncio.wait((task,))
-        raw = task.result()
+        # Readers of a key share one fetch, from whichever event loop they run on.
+        raw = await self._metadata.get(key, lambda: self._read_metadata(key, prototype))
         return None if raw is None else prototype.buffer.from_bytes(raw)
 
     async def get_partial_values(

@@ -132,6 +132,92 @@ def test_read_store_shares_fetches_without_serializing_other_keys(
         store.close()
 
 
+def test_read_store_shares_a_metadata_fetch_across_event_loops(tmp_path, monkeypatch):
+    calls = []
+    started, release = threading.Event(), threading.Event()
+    prototype = default_buffer_prototype()
+
+    async def read(self, key, prototype, byte_range=None):
+        calls.append(key)
+        started.set()
+        # The fetch waits on a thread, as a network read does.
+        assert await asyncio.to_thread(release.wait, GUARD_SECONDS)
+        return prototype.buffer.from_bytes(b"metadata")
+
+    monkeypatch.setattr(FsspecStore, "get", read)
+    store = huggingface.HfReadStore.from_url(str(tmp_path), read_only=True)
+    results = {}
+
+    def reader(name):
+        results[name] = asyncio.run(store.get("zarr.json", prototype)).to_bytes()
+
+    first = threading.Thread(target=reader, args=("first",), daemon=True)
+    second = threading.Thread(target=reader, args=("second",), daemon=True)
+    try:
+        first.start()
+        assert started.wait(GUARD_SECONDS)
+        # The second reader, on its own event loop, waits for the same fetch.
+        second.start()
+        time.sleep(0.2)
+        assert results == {}
+        release.set()
+        first.join(GUARD_SECONDS)
+        second.join(GUARD_SECONDS)
+    finally:
+        release.set()
+        store.close()
+    assert results == {"first": b"metadata", "second": b"metadata"}
+    assert calls == ["zarr.json"]
+
+
+def test_read_store_fetches_again_when_a_shared_fetch_loses_its_event_loop(
+    tmp_path, monkeypatch
+):
+    calls = []
+    started, finish, release = threading.Event(), threading.Event(), threading.Event()
+    prototype = default_buffer_prototype()
+
+    async def read(self, key, prototype, byte_range=None):
+        calls.append(key)
+        if len(calls) == 1:
+            started.set()
+            await asyncio.to_thread(release.wait, GUARD_SECONDS)
+        return prototype.buffer.from_bytes(b"metadata")
+
+    monkeypatch.setattr(FsspecStore, "get", read)
+    store = huggingface.HfReadStore.from_url(str(tmp_path), read_only=True)
+    results = {}
+
+    async def leave():
+        reader = asyncio.create_task(store.get("zarr.json", prototype))
+        assert await asyncio.to_thread(finish.wait, GUARD_SECONDS)
+        reader.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await reader
+        # Ending this event loop cancels the fetch that the reader started.
+
+    def waiter():
+        results["waiter"] = asyncio.run(store.get("zarr.json", prototype)).to_bytes()
+
+    leaving = threading.Thread(target=lambda: asyncio.run(leave()), daemon=True)
+    waiting = threading.Thread(target=waiter, daemon=True)
+    try:
+        leaving.start()
+        assert started.wait(GUARD_SECONDS)
+        waiting.start()
+        time.sleep(0.2)
+        finish.set()
+        waiting.join(GUARD_SECONDS)
+        assert results == {"waiter": b"metadata"}
+    finally:
+        release.set()
+        finish.set()
+        leaving.join(GUARD_SECONDS)
+        store.close()
+    # The waiter fetched the key again on its own event loop.
+    assert calls == ["zarr.json", "zarr.json"]
+
+
 def test_read_store_retries_failed_metadata_fetches(tmp_path, monkeypatch):
     calls = []
     prototype = default_buffer_prototype()
@@ -893,9 +979,10 @@ def test_read_store_shares_its_listing_across_callers_and_event_loops(
         results["other"] = asyncio.run(store.getsize("zarr.json"))
 
     try:
-        thread = threading.Thread(target=other_loop)
+        thread = threading.Thread(target=other_loop, daemon=True)
         with_cancel = threading.Thread(
-            target=lambda: results.update(first=asyncio.run(first_caller_cancelled()))
+            target=lambda: results.update(first=asyncio.run(first_caller_cancelled())),
+            daemon=True,
         )
         with_cancel.start()
         assert cancelled.wait(GUARD_SECONDS)
