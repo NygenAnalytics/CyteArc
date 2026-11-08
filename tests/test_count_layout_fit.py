@@ -305,11 +305,11 @@ def test_a_dense_h5ad_writes_the_default_layout_below_the_sparse_plan(
     )
     csr = _write_h5ad(tmp_path / "csr.h5ad", values, feature_types=types)
     options = {"nthreads": 1, "assay_split_key": "feature_types" if split else None}
-    # Through the sparse writer, the default layout needs 14 to 18 MiB at a
-    # tenth nonzero and 52 to 70 MiB at 42%, as the screen holds, for the CSR
+    # Through the sparse writer, the default layout needs 9 to 15 MiB at a
+    # tenth nonzero and 30 to 50 MiB at 42%, as the screen holds, for the CSR
     # file and before for the dense one. Through dense row bands, the dense
     # file needs about 8 MiB whatever its share of zeros.
-    budget = 11 * 1024**2
+    budget = 17 * 1024**2 // 2
     roots = {
         "dense": _build(dense, tmp_path / "dense.zarr", mem_budget=budget, **options)
     }
@@ -368,12 +368,11 @@ def test_an_h5ad_import_charges_sorting_only_for_rows_out_of_order(
     tenth_nonzero, reversed_rows, tmp_path
 ):
     dense, csr, values = tenth_nonzero
-    # Sorting each batch and summing its repeated coordinates was charged for
-    # every source, so the default layout needed about 24 MiB for the CSR
-    # file. Its batches arrive canonical, so it needs about 14 MiB, and the
-    # dense file, written through dense row bands, about 8 MiB. The same rows
-    # with their indices reversed are sorted, and still need about 24 MiB.
-    budget = 22 * 1024**2
+    # The CSR file's batches arrive canonical, so the default layout needs
+    # about 9 MiB for it, and the dense file, written through dense row bands,
+    # about 8 MiB. The same rows with their indices reversed are sorted and
+    # summed, which needs about 17 MiB.
+    budget = 14 * 1024**2
     roots = {
         name: _build(path, tmp_path / f"{name}.zarr", mem_budget=budget, nthreads=1)
         for name, path in (("dense", dense), ("csr", csr))
@@ -381,7 +380,7 @@ def test_an_h5ad_import_charges_sorting_only_for_rows_out_of_order(
     with pytest.raises(CountLayoutMemoryError, match="default count-matrix policy"):
         _build(reversed_rows, tmp_path / "reversed.zarr", mem_budget=budget, nthreads=1)
     roots["reversed"] = _build(
-        reversed_rows, tmp_path / "reversed.zarr", mem_budget=26 * 1024**2, nthreads=1
+        reversed_rows, tmp_path / "reversed.zarr", mem_budget=19 * 1024**2, nthreads=1
     )
     for root in roots.values():
         assert _policy(root) == DEFAULT_COUNT_MATRIX_POLICY
@@ -409,13 +408,13 @@ def test_sparse_to_zarr_charges_sorting_only_for_rows_out_of_order(tenth_nonzero
     _dense, _csr, values = tenth_nonzero
     canonical = csr_matrix(values)
     reversed_matrix = _reversed_rows(canonical)
-    # As from an h5ad file, the canonical rows need about 15 MiB instead of
-    # 25 MiB, and the same rows with their indices reversed still need 25 MiB.
-    budget = 20 * 1024**2
+    # As from an h5ad file, the canonical rows need about 10 MiB, and the
+    # same rows with their indices reversed, which are sorted, about 18 MiB.
+    budget = 14 * 1024**2
     roots = {"canonical": _sparse_import(canonical, budget)}
     with pytest.raises(CountLayoutMemoryError, match="default count-matrix policy"):
         _sparse_import(reversed_matrix, budget)
-    roots["reversed"] = _sparse_import(reversed_matrix, 28 * 1024**2)
+    roots["reversed"] = _sparse_import(reversed_matrix, 20 * 1024**2)
     for root in roots.values():
         assert _policy(root) == DEFAULT_COUNT_MATRIX_POLICY
         np.testing.assert_array_equal(root["RNA/counts"][:], values)

@@ -1300,6 +1300,10 @@ _LAYOUT_CASES = {
     "subset": (None, (2_000, 400), 16 * 1024**2, 128 * 1024),
     "repack": (None, (2_000, 400), 16 * 1024**2, 128 * 1024),
 }
+# The Matrix Market import reserves a Python object for each field of the
+# lines it parses at a time, as pandas 2.2 makes them, and the default 100,000
+# lines take more than the budget.
+_LAYOUT_OPTIONS: dict[str, dict[str, Any]] = {"mtx": {"lines_in_mem": 25_000}}
 
 
 def _layout_import(
@@ -1309,6 +1313,7 @@ def _layout_import(
     if encoding is None:
         directory.mkdir(parents=True, exist_ok=True)
         return _rebuild(writer, directory, large_store, **options)
+    options = {**_LAYOUT_OPTIONS.get(writer, {}), **options}
     return _import(writer, directory, _large_values(*shape), encoding, **options)
 
 
@@ -1575,3 +1580,228 @@ def test_csc_imports_plan_batches_in_the_dtype_consume_yields(
     assert {dtype for _name, dtype in planned} == {np.dtype(converted)}
     counts = zarr.open_group(str(tmp_path / "counts.zarr"), mode="r")["RNA/counts"]
     np.testing.assert_array_equal(counts[:], values)
+
+
+def _producer_counts(n_cells: int = 3_000, n_features: int = 400) -> np.ndarray:
+    """Counts with a quarter of their genes nonzero and four dense antibodies."""
+    rng = np.random.default_rng(11)
+    genes = np.where(
+        rng.random((n_cells, n_features)) < 0.25,
+        rng.integers(1, 30, (n_cells, n_features)),
+        0,
+    )
+    return np.hstack([genes, rng.integers(1, 200, (n_cells, 4))])
+
+
+_PRODUCER_BANDS = CountMatrixPolicy(unitBytes=500 * 404 * 2, chunkBytes=50 * 404 * 2)
+
+
+def _split_source(writer: str, directory: Path, values: np.ndarray) -> Any:
+    """Open the genes and the antibodies of ``values`` as one file of two assays."""
+    if writer == "h5ad":
+        types = ["RNA"] * (values.shape[1] - 4) + ["ADT"] * 4
+        return H5adReader(
+            str(_write_h5ad(directory / "counts.h5ad", values, "float32", types)),
+            feature_name_key="feature_name",
+        )
+    types = ["Gene Expression"] * (values.shape[1] - 4) + ["Antibody Capture"] * 4
+    return CrH5Reader(
+        str(_write_cellranger(directory / "counts.h5", values, "int32", types))
+    )
+
+
+def _drain_sparse_writes(monkeypatch) -> list[dict[str, Any]]:
+    """Replace the band writes with a drain that measures the sparse producer.
+
+    The drain drops each band before the producer resumes, as a write would
+    once it wrote the band, and records the producer's peak traced bytes
+    against the reserve its plan admitted, and how many of the bands it
+    handed over the producer still held whenever it buffered a batch.
+    """
+    import tracemalloc
+    import weakref
+
+    from cytearc.storage import sharding
+
+    records: list[dict[str, Any]] = []
+    handed: list[weakref.ref] = []
+    kept: list[int] = []
+    buffer_batch = sharding.SparseShardBuffer.add
+
+    def add(self, batch):
+        kept.append(sum(band() is not None for band in handed))
+        yield from buffer_batch(self, batch)
+
+    def drain(writes, *, producerReserveBytes: int = 0, **_options: Any) -> None:
+        tracemalloc.start()
+        try:
+            base, _ = tracemalloc.get_traced_memory()
+            for item in writes:
+                handed.append(weakref.ref(item.band.row))
+                del item
+            _current, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        records.append(
+            {
+                "held": peak - base,
+                "reserve": int(producerReserveBytes),
+                "bands": len(handed),
+                "kept": max(kept, default=0),
+            }
+        )
+
+    monkeypatch.setattr(sharding.SparseShardBuffer, "add", add)
+    monkeypatch.setattr(sharding, "write_sparse_bands", drain)
+    return records
+
+
+@pytest.mark.parametrize(
+    ("writer", "encoding", "split", "tight"),
+    [
+        ("h5ad", "float32", False, True),
+        ("h5ad", "float32", True, True),
+        ("sparse", "float32", False, True),
+        ("cellranger", "int32", True, False),
+        ("mtx", "integer", False, False),
+        ("mtx", "real", False, False),
+        ("seurat", "sparse", False, False),
+    ],
+)
+def test_every_sparse_producer_holds_no_more_than_its_plan_reserves(
+    tmp_path, monkeypatch, writer, encoding, split, tight
+):
+    values = _producer_counts()
+    if not split:
+        values = values[:, :-4]
+    source = (
+        _split_source(writer, tmp_path, values)
+        if split
+        else _source(writer, tmp_path, values, encoding)
+    )
+    records = _drain_sparse_writes(monkeypatch)
+    try:
+        options: dict[str, Any] = {"nthreads": 1, "policy": _PRODUCER_BANDS}
+        if writer == "h5ad" and split:
+            options["assay_split_key"] = "feature_types"
+        instance = _writer(writer, source, str(tmp_path / "counts.zarr"), **options)
+        # Nothing is written, so the counts are refused once the bands are out.
+        with pytest.raises(RuntimeError, match="does not cover its row window"):
+            instance.dump()
+    finally:
+        _close(source)
+    (record,) = records
+    # The producer let go of every band it handed over before it buffered
+    # more, so a band it wrote is not held beside the next batch.
+    assert record["bands"] > 1
+    assert record["kept"] == 0
+    assert record["held"] <= record["reserve"]
+    if tight:
+        # Readers that hold one batch are planned close to what they hold;
+        # the plan charged two to six times it.
+        assert record["reserve"] <= 1.5 * record["held"]
+
+
+@pytest.mark.parametrize("encoding", ["integer", "real"])
+def test_a_matrix_market_reader_charges_each_line_it_parses_at_its_largest(
+    tmp_path, encoding
+):
+    import tracemalloc
+
+    from cytearc.readers._matrix_market import (
+        matrix_market_entries,
+        matrix_market_header,
+    )
+
+    reader = _source("mtx", tmp_path, _producer_counts(40, 20), encoding)
+    try:
+        # What the reader charges for each line it parses at a time.
+        line_bytes = reader.producer_staging_bytes(1, 2)
+        line_bytes -= reader.producer_staging_bytes(1, 1)
+    finally:
+        _close(reader)
+    # Coordinates and counts near the largest int64 each parse to a Python int
+    # of an int64's full size, and real counts to floats.
+    largest = int(np.iinfo(np.int64).max)
+    n_entries = 120_000
+    rng = np.random.default_rng(3)
+    coordinates = rng.integers(largest // 2, largest, (n_entries, 2))
+    counts = (
+        rng.integers(largest // 2, largest, n_entries)
+        if encoding == "integer"
+        else np.floor(rng.random(n_entries) * 1e6)
+    )
+    path = tmp_path / "largest.mtx"
+    with path.open("w") as handle:
+        handle.write(f"%%MatrixMarket matrix coordinate {encoding} general\n")
+        handle.write(f"{largest} {largest} {n_entries}\n")
+        handle.writelines(
+            f"{row} {column} {count}\n"
+            for (row, column), count in zip(coordinates, counts, strict=True)
+        )
+    header = matrix_market_header(path)
+
+    def parse_peak(chunk_rows: int) -> int:
+        tracemalloc.start()
+        try:
+            for entries in matrix_market_entries(header, chunk_rows, counts=True):
+                del entries
+            return tracemalloc.get_traced_memory()[1]
+        finally:
+            tracemalloc.stop()
+
+    # The parser also holds read buffers of a fixed size, which the growth
+    # from one chunk size to the next leaves out.
+    assert (parse_peak(40_000) - parse_peak(10_000)) / 30_000 <= line_bytes
+
+
+@pytest.mark.parametrize("writer", ["h5ad", "cellranger"])
+def test_a_split_import_charges_a_narrow_assay_only_its_own_values(tmp_path, writer):
+    values = _producer_counts()
+    source = _split_source(writer, tmp_path, values)
+    options: dict[str, Any] = {"nthreads": 1, "policy": _PRODUCER_BANDS}
+    if writer == "h5ad":
+        options["assay_split_key"] = "feature_types"
+    # The antibodies' bands span every cell. Charged every value of the source
+    # over all of them, beside about twice what the producer holds, the
+    # import needed 25 MiB from the h5ad file and 32 MiB from the 10x HDF5
+    # file. Charged their own four values a cell, it needs 11 and 19 MiB.
+    try:
+        _writer(
+            writer,
+            source,
+            str(tmp_path / "counts.zarr"),
+            mem_budget=21 * 1024**2,
+            **options,
+        ).dump()
+    finally:
+        _close(source)
+    root = zarr.open_group(str(tmp_path / "counts.zarr"), mode="r")
+    assert _policy(root) == _PRODUCER_BANDS
+    np.testing.assert_array_equal(root["RNA/counts"][:], values[:, :-4])
+    np.testing.assert_array_equal(root["ADT/counts"][:], values[:, -4:])
+    np.testing.assert_array_equal(root["RNA/countsT"][:], values[:, :-4].T)
+
+
+def test_a_split_import_charges_the_band_it_writes_once(tmp_path):
+    values = _producer_counts()
+    source = _split_source("h5ad", tmp_path, values)
+    # With the default layout the genes' band spans every cell. While it is
+    # written, its values are the band's, which the write is charged, and the
+    # producer keeps only the antibodies' rows. Charged its genes a second
+    # time, the import needed 33 MiB; it needs 30.
+    try:
+        _writer(
+            "h5ad",
+            source,
+            str(tmp_path / "counts.zarr"),
+            nthreads=1,
+            mem_budget=31 * 1024**2,
+            assay_split_key="feature_types",
+        ).dump()
+    finally:
+        _close(source)
+    root = zarr.open_group(str(tmp_path / "counts.zarr"), mode="r")
+    assert _policy(root) == DEFAULT_COUNT_MATRIX_POLICY
+    np.testing.assert_array_equal(root["RNA/counts"][:], values[:, :-4])
+    np.testing.assert_array_equal(root["ADT/counts"][:], values[:, -4:])

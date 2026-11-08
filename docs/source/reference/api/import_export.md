@@ -191,7 +191,7 @@ counts = ds.variants.import_counts(
 )
 ```
 
-The default count layout writes shards of up to 1 GB, which the narrow assays of a large run fill with many cells at once. The import plans that write from the nonzero reads, which it counts as it checks the file's values before writing: 200,000 cells of 600 amplicons and 45 antibodies need about 35 GB to write that way when nearly every read is nonzero, and less the more of the reads are zero. Below that, `TapestriToZarr` raises `MemoryError` before it writes, naming the largest smaller layout that fits the budget, such as `policy=CountMatrixPolicy(unitBytes=62_500_000, chunkBytes=6_250_000)` from `cytearc.storage.count_matrix`, which wrote those cells in 25 seconds within a budget of 24 GB. `policy="fit"` writes that layout without the refusal.
+The default count layout writes shards of up to 1 GB, which the narrow assays of a large run fill with many cells at once. The import plans that write from the nonzero reads, which it counts as it checks the file's values before writing: 200,000 cells of 600 amplicons and 45 antibodies need about 26 GB to write that way when nearly every read is nonzero, and less the more of the reads are zero. Below that, `TapestriToZarr` raises `MemoryError` before it writes, naming the largest smaller layout that fits the budget, such as `policy=CountMatrixPolicy(unitBytes=62_500_000, chunkBytes=6_250_000)` from `cytearc.storage.count_matrix`, which wrote those cells in 25 seconds within a budget of 24 GB. `policy="fit"` writes that layout without the refusal.
 
 ```{eval-rst}
 .. autoclass:: cytearc.TapestriReader

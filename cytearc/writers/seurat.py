@@ -1083,6 +1083,7 @@ class SeuratToZarr:
                     sourceDtype=source.dtype,
                     residentBytes=resident,
                     producerStagingBytes=staging,
+                    alignedBatches=True,
                 )
                 if source.is_sparse
                 else dense_counts_admission(resident, staging)
@@ -1148,6 +1149,7 @@ class SeuratToZarr:
             batchRows=requested_rows,
             residentBytes=self._residentSourceBytes,
             producerStagingBytes=staging,
+            alignedBatches=True,
         )
         self._lastImportPlans[assay_name] = plan
         self._lastImportPlan = plan

@@ -95,10 +95,11 @@ def test_sparse_import_planner_prefers_geometry_and_shrinks_monotonically() -> N
     large = resolve_sparse_import_batch(
         destinations,
         nRows=12,
-        resources=ResourceBudget(13_000, 2),
+        resources=ResourceBudget(11_200, 2),
         maxWindowNnz=lambda rows: min(rows, 12) * 4,
         sourceDtype=np.uint32,
         producerStagingBytes=lambda rows: rows * 1_000,
+        alignedBatches=True,
     )
     small = resolve_sparse_import_batch(
         destinations,
@@ -107,20 +108,28 @@ def test_sparse_import_planner_prefers_geometry_and_shrinks_monotonically() -> N
         maxWindowNnz=lambda rows: min(rows, 12) * 4,
         sourceDtype=np.uint32,
         producerStagingBytes=lambda rows: rows * 1_000,
+        alignedBatches=True,
     )
     wider = resolve_sparse_import_batch(
         destinations,
         nRows=12,
-        resources=ResourceBudget(13_000, 2),
+        resources=ResourceBudget(11_200, 2),
         maxWindowNnz=lambda rows: min(rows, 12) * 8,
         sourceDtype=np.uint32,
         producerStagingBytes=lambda rows: rows * 1_000,
+        alignedBatches=True,
     )
 
     assert large.batchRows == 4
-    assert large.producerReserveBytes == 8_272
+    # Batches of 4 rows fill the 4-row bands of the first array, which buffers
+    # 4 rows of 4 values, and the 6-row bands of the second array cut across
+    # them, which buffers up to 9 rows of its 2 features: 34 buffered values
+    # of 20 bytes, held twice with two mask bytes as a band is cut, beside
+    # the 16 values of a batch, sorting that batch (84 bytes each), and 4,000
+    # bytes of staging.
+    assert large.producerReserveBytes == 34 * 42 + 16 * 20 + 16 * 84 + 4_000
     assert large.writeTasks == 5
-    assert small.batchRows == 2
+    assert small.batchRows == 3
     assert small.producerReserveBytes < large.producerReserveBytes
     assert wider.batchRows < large.batchRows
 
@@ -158,10 +167,12 @@ def test_sparse_admission_checks_the_pull_and_write_phases_separately() -> None:
         middle = (low + high) // 2
         low, high = (low, middle) if admits(middle) else (middle, high)
 
-    # The in-process producer buffers one source row and the next band while
-    # no band is written, and holds only its source row while a band is.
-    buffering = sparse_producer_peak_bytes(window_nnz(1 + 16), window_nnz(1), 4)
-    held = sparse_producer_peak_bytes(0, window_nnz(1), 4)
+    # The in-process producer buffers one band before it cuts it, as batches
+    # of one row fill each band exactly, while no band is written. While a
+    # band is written it holds its source row and that row's sorted copy,
+    # 20 bytes a value each.
+    buffering = sparse_producer_peak_bytes(window_nnz(16), window_nnz(1), 4)
+    held = 2 * window_nnz(1) * (4 + 2 * 8)
     band = window_nnz(16) * (4 + 2 * 8)
     dense, inner, chunks = _band_geometry(destination)
     task = _row_band_task_peak(
@@ -1257,4 +1268,126 @@ def test_canonical_batches_leave_out_a_charge_for_each_source_value_only() -> No
         sparse_producer_peak_bytes(5, 7, itemsize, canonicalBatches=True)
         < sparse_producer_peak_bytes(5, 7, itemsize)
         for itemsize in (1, 4, 8)
+    )
+
+
+def _band_spec(n_rows: int, n_columns: int, band_rows: int) -> ZarrArraySpec:
+    return ZarrArraySpec(
+        shape=(n_rows, n_columns),
+        chunks=(band_rows, n_columns),
+        dtype=np.dtype(np.uint16),
+        compressors=(),
+        shards=(band_rows, n_columns),
+        fillValue=0,
+    )
+
+
+def _counts_csr(n_rows: int, n_columns: int, *, reversed_rows: bool) -> csr_matrix:
+    rng = np.random.default_rng(4)
+    values = np.where(
+        rng.random((n_rows, n_columns)) < 0.2,
+        rng.integers(1, 50, (n_rows, n_columns)),
+        0,
+    ).astype(np.float32)
+    matrix = csr_matrix(values)
+    if not reversed_rows:
+        return matrix
+    order = np.concatenate(
+        [
+            np.arange(stop - 1, start - 1, -1)
+            for start, stop in zip(matrix.indptr[:-1], matrix.indptr[1:], strict=True)
+        ]
+    )
+    return csr_matrix(
+        (matrix.data[order], matrix.indices[order], matrix.indptr), shape=matrix.shape
+    )
+
+
+def _held_by_sparse_buffer(matrix: csr_matrix, band_rows: int) -> int:
+    """Return the most bytes a sparse buffer and its batch hold, one band per batch."""
+    import tracemalloc
+
+    from cytearc.storage.sharding import SparseShardBuffer
+    from cytearc.utils.arrays import csr_to_coo
+
+    n_rows, n_columns = matrix.shape
+    buffer = SparseShardBuffer(_band_spec(n_rows, n_columns, band_rows))
+    held = 0
+    tracemalloc.start()
+    try:
+        for start in range(0, n_rows, band_rows):
+            # Each batch fills one band, so the buffer holds one band's values
+            # when it cuts it, and the batch, from its creation on.
+            tracemalloc.reset_peak()
+            base, _ = tracemalloc.get_traced_memory()
+            batch = csr_to_coo(matrix[start : start + band_rows])
+            bands = list(buffer.add(batch))
+            assert [band.start for band in bands] == [start]
+            _current, peak = tracemalloc.get_traced_memory()
+            held = max(held, peak - base)
+            del batch, bands
+    finally:
+        tracemalloc.stop()
+    return held
+
+
+def test_the_producer_charge_bounds_what_a_sparse_buffer_holds() -> None:
+    from cytearc.storage.sharding import sparse_producer_peak_bytes
+
+    band_rows = 1_000
+    for reversed_rows in (False, True):
+        matrix = _counts_csr(4_000, 500, reversed_rows=reversed_rows)
+        held = _held_by_sparse_buffer(matrix, band_rows)
+        values = int(np.diff(matrix.indptr).reshape(-1, band_rows).sum(axis=1).max())
+        # float32 sources stored as uint16 are charged 4-byte values; rows out
+        # of order are also charged their sort and sum.
+        planned = sparse_producer_peak_bytes(
+            values, values, 4, canonicalBatches=not reversed_rows
+        )
+        assert held <= planned
+        if not reversed_rows:
+            # The charge follows what the buffer holds instead of twice it.
+            assert planned <= 1.5 * held
+
+
+@pytest.mark.parametrize(
+    ("batch_rows", "aligned", "buffered_rows"),
+    [
+        # Batches that fill a band exactly buffer one band before it is cut.
+        (16, True, 16),
+        (8, True, 16),
+        (1, True, 16),
+        # A batch that crosses a band boundary can leave a band and a batch
+        # less one row buffered.
+        (12, True, 27),
+        (5, True, 20),
+        # So can any batch of a producer whose batches do not start on band
+        # boundaries, such as a merge's, which restarts them at every source.
+        (16, False, 31),
+        (8, False, 23),
+    ],
+)
+def test_the_producer_buffers_one_band_when_batches_fill_it(
+    batch_rows, aligned, buffered_rows
+) -> None:
+    from cytearc.storage.sharding import sparse_producer_peak_bytes
+
+    destination = _band_spec(64, 8, 16)
+
+    def window_nnz(rows: int) -> int:
+        return min(rows, 64) * 8
+
+    plan = resolve_sparse_import_spec(
+        (destination,),
+        nRows=64,
+        resources=ResourceBudget(1 << 30, 1),
+        maxWindowNnz=window_nnz,
+        sourceDtype=np.uint16,
+        batchRows=batch_rows,
+        canonicalBatches=True,
+        alignedBatches=aligned,
+    )
+    assert plan.batchRows == batch_rows
+    assert plan.producerReserveBytes == sparse_producer_peak_bytes(
+        window_nnz(buffered_rows), window_nnz(batch_rows), 2, canonicalBatches=True
     )

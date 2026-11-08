@@ -213,6 +213,9 @@ def _count_matrix_bands(
                 item.residentBytes for item in buffers.values()
             )
             yield assay_name, band, producer_bytes
+            # The consumer holds the band it was handed; keeping it here would
+            # hold its values beside the rest of the batch.
+            del band
         return
 
     codes, columns = projection
@@ -244,6 +247,7 @@ def _count_matrix_bands(
                 + sum(item.residentBytes for item in buffers.values())
             )
             yield assay_name, band, producer_bytes
+            del band
 
 
 def _finished_count_bands(
@@ -448,6 +452,8 @@ def _read_h5ad_process_window(
             ):
                 if not send_band(item):
                     return
+                # The band was sent; its copy here would sit beside the next one.
+                del item
         for item in _finished_count_bands(buffers):
             if not send_band(item):
                 return
@@ -523,6 +529,7 @@ def _write_h5ad_process_window(
                         band,
                         producer_bytes,
                     )
+                    del band
             if stop.is_set():
                 return
             for assay_name, band, producer_bytes in _finished_count_bands(buffers):
@@ -1713,6 +1720,7 @@ class H5adToZarr:
                 producerStagingBytes=self.h5ad.producer_batch_staging_bytes,
                 extraProducerBytes=extra_producer_bytes,
                 canonicalBatches=canonical_batches,
+                alignedBatches=True,
             )
         widths = self._assay_widths()
         return fit_count_layout(
@@ -2029,6 +2037,7 @@ class H5adToZarr:
             producerStagingBytes=self.h5ad.producer_batch_staging_bytes,
             extraProducerBytes=extra_producer_bytes,
             canonicalBatches=canonical_batches,
+            alignedBatches=True,
         )
         self._lastImportPlan = plan
         resolved_batch_rows = plan.batchRows
@@ -2079,6 +2088,7 @@ class H5adToZarr:
                     producerStagingBytes=self.h5ad.producer_batch_staging_bytes,
                     extraProducerBytes=extra_producer_bytes,
                     canonicalBatches=canonical_batches,
+                    alignedBatches=True,
                 )
                 if (
                     direct_candidate
@@ -2096,6 +2106,7 @@ class H5adToZarr:
                         producerStagingBytes=self.h5ad.producer_batch_staging_bytes,
                         extraProducerBytes=extra_producer_bytes,
                         canonicalBatches=canonical_batches,
+                        alignedBatches=True,
                     )
             except MemoryBudgetError:
                 continue
@@ -2346,6 +2357,7 @@ class H5adToZarr:
                 band,
                 producer_bytes,
             )
+            del band
 
     def _finish_count_buffers(
         self,

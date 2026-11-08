@@ -13,6 +13,7 @@ gzip-compressed (:mod:`cytearc.utils.files`).
 import gzip
 import os
 import re
+import sys
 import zlib
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -28,6 +29,7 @@ from ..utils.files import is_gzip, open_text
 __all__ = [
     "MatrixMarketHeader",
     "matrix_market_entries",
+    "matrix_market_entry_object_bytes",
     "matrix_market_header",
     "read_matrix_market_header",
 ]
@@ -176,6 +178,31 @@ def matrix_market_header(
         raise ValueError(f"{name} is cut short or corrupt: {error}") from None
 
 
+def _entry_width(field: str) -> int:
+    """The number of fields of each entry of a matrix of ``field`` values."""
+    return 2 if field == "pattern" else 3
+
+
+def matrix_market_entry_object_bytes(header: MatrixMarketHeader) -> int:
+    """Return the bytes of the Python objects that pandas 2.2 makes of each
+    entry while :func:`matrix_market_entries` parses a chunk.
+
+    Given a dtype for each column, pandas 2.2 builds each chunk through an
+    object array of the chunk's columns, filled in one assignment, so numpy
+    first turns every column into an array of Python objects: per field, an
+    8-byte reference to an int of at most an int64's size, or to a float.
+    Later versions hold less while they build a chunk, so these bytes are the
+    worst case of the supported versions.
+
+    Args:
+        header: The matrix's header, from :func:`matrix_market_header`.
+    """
+    # The parser reads one column past the entry's fields.
+    fields = _entry_width(header.field) + 1
+    largest = sys.getsizeof(int(np.iinfo(np.int64).max))
+    return fields * (np.dtype(object).itemsize + largest)
+
+
 def _entry_fields(field: str) -> str:
     """The fields of each entry of a matrix of ``field`` values."""
     if field == "pattern":
@@ -254,7 +281,7 @@ def matrix_market_entries(
     path = header.path
     file = path if source is None else os.fspath(source)
     pattern = header.field == "pattern"
-    width = 2 if pattern else 3
+    width = _entry_width(header.field)
     dtype: dict[int, Any] = {0: np.int64, 1: np.int64}
     if not pattern:
         dtype[2] = np.int64 if header.field == "integer" else np.float64
