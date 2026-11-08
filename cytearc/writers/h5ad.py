@@ -152,15 +152,28 @@ def _write_column(
     column: TableColumn,
     *,
     profile: StorageProfile,
+    categorical: bool = False,
+    ordered: bool = False,
 ) -> np.ndarray:
     """Write a source column as a metadata column and return its missing rows.
 
     A categorical is written from its codes, so its categories are converted
-    once each rather than once per row.
+    once each rather than once per row. With ``categorical`` it is stored as
+    a categorical column, its codes beside its categories, which ``ordered``
+    records as ordered or not; otherwise as a column of its labels.
     """
-    from ._store import write_metadata_column
+    from ._store import write_categorical_column, write_metadata_column
 
     if isinstance(column, CategoryCodes):
+        if categorical:
+            return write_categorical_column(
+                group,
+                name,
+                column.codes,
+                column.categories,
+                ordered=ordered,
+                profile=profile,
+            )
         write_metadata_column(
             group, name, column.codes, profile=profile, categories=column.categories
         )
@@ -787,6 +800,12 @@ class H5adToZarr:
             ``"log_normalized"`` or ``"log2_normalized"``, as the import
             reference's normalized values section describes. None decides
             from the values.
+        categorical_columns: If True, store each categorical column of
+            ``obs`` and ``var`` as a categorical column, its codes beside
+            every one of its categories, instead of a column of its labels.
+            Every read returns the same labels either way. Off by default
+            in this release, because releases before categorical columns
+            cannot read such a store.
 
     Each assay stores its counts in the dtype that
     :func:`~cytearc.storage.count_dtype.count_storage_dtype` resolves from the
@@ -795,6 +814,7 @@ class H5adToZarr:
 
     Raises:
         FileExistsError: If ``zarr_loc`` is not empty and may not be replaced.
+        TypeError: If ``categorical_columns`` is not a boolean.
 
     Attributes:
         h5ad: A h5ad object (h5 file with added AnnData structure).
@@ -824,8 +844,12 @@ class H5adToZarr:
         *,
         overwrite: bool = False,
         values: ImportValues = None,
+        categorical_columns: bool = False,
     ) -> None:
         overwrite = bool_argument(overwrite, "overwrite")
+        self._categoricalColumns = bool_argument(
+            categorical_columns, "categorical_columns"
+        )
         from ..utils.matrix_values import import_values_argument
 
         import_values_argument(values)
@@ -1090,10 +1114,18 @@ class H5adToZarr:
             "cell",
             membership=reserved,
         ):
-            missing = _write_column(g, key, column, profile=self.profile)
+            missing = _write_column(
+                g,
+                key,
+                column,
+                profile=self.profile,
+                categorical=self._categoricalColumns,
+                ordered=categories is not None and categories.ordered,
+            )
             if categories is not None:
                 self._keep_categories(
-                    as_zarr_array(g[key], name=key),
+                    g,
+                    key,
                     categories,
                     colors=self.h5ad._category_colors(name, categories),
                     missing=missing,
@@ -1104,17 +1136,28 @@ class H5adToZarr:
 
     @staticmethod
     def _keep_categories(
-        array: Any,
+        group: Any,
+        key: str,
         categories: Any,
         *,
         colors: tuple[str, ...] | None,
         missing: np.ndarray,
         display: bool,
     ) -> None:
-        """Record a source categorical's categories on its stored column."""
+        """Record a source categorical's categories on its stored column.
+
+        A categorical column records them on its codes, whose attributes are
+        the column's. The attributes follow the type of the labels, which a
+        categorical column's categories hold, so either layout records the
+        same ones.
+        """
+        from ..storage.categorical import CategoricalColumn
+
+        array = as_zarr_array(group[key], name=key)
+        labels = CategoricalColumn.open(group, key, values=array)
         array.attrs.update(
             _categorical_attributes(
-                np.dtype(array.dtype),
+                np.dtype(array.dtype) if labels is None else labels.dtype,
                 categories,
                 colors=colors,
                 has_missing=bool(np.asarray(missing, dtype=bool).any()),
@@ -1155,15 +1198,20 @@ class H5adToZarr:
             "feature",
         ):
             for feat_group, feature_indexes in targets:
+                # Each assay of a split types its categories from its own
+                # codes, as it types the labels of a column of them.
                 selected_missing = _write_column(
                     feat_group,
                     column_name,
                     _column_rows(column, feature_indexes),
                     profile=self.profile,
+                    categorical=self._categoricalColumns,
+                    ordered=categories is not None and categories.ordered,
                 )
                 if categories is not None:
                     self._keep_categories(
-                        as_zarr_array(feat_group[column_name], name=column_name),
+                        feat_group,
+                        column_name,
                         categories,
                         colors=None,
                         missing=selected_missing,

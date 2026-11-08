@@ -10,6 +10,15 @@ ordered. Codes that hold -1 also link the missing mask that flags exactly
 those rows, as every nullable column does, so readers of missing values need
 not know the layout.
 
+A release before categorical columns opens a table only when each of its
+arrays holds one value per row, so the categories array never holds as many
+entries as its table has rows: such a release then refuses the table rather
+than read the codes as values. When the categories number exactly the rows,
+the array holds one reserved entry after the last category, the placeholder
+of their dtype, which no code names, and records it with its ``padded``
+attribute. :func:`stored_categories` builds that array, and readers leave the
+entry out.
+
 :class:`CategoricalColumn` reads such a column as its labels. A read selects
 codes and returns the categories at them, with the placeholder of the
 categories' dtype in missing rows, so it returns what a column that stores
@@ -35,6 +44,9 @@ CATEGORIES_LINK = "categories"
 
 ORDERED_ATTRIBUTE = "ordered"
 """Attribute of a categories array that records whether its categories are ordered."""
+
+PADDED_ATTRIBUTE = "padded"
+"""Attribute of a categories array that ends in a reserved entry, which no code names."""
 
 _CODE_TYPES = (np.int8, np.int16, np.int32, np.int64)
 # Text, booleans and numbers, as metadata columns type labels.
@@ -65,6 +77,32 @@ def category_codes_dtype(n_categories: int) -> np.dtype[Any]:
     raise ValueError(f"No signed integer type holds codes for {count} categories")
 
 
+def stored_categories(
+    categories: np.ndarray, n_rows: int
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Return the array that stores ``categories`` beside ``n_rows`` codes, and the attributes that record its reserved entry.
+
+    When the categories number exactly ``n_rows``, the array holds one more
+    entry after the last category, the placeholder of their dtype, and the
+    attributes are ``{"padded": True}``, so the array's length differs from
+    the table's row count. Otherwise the array holds the categories alone and
+    the attributes are empty.
+    """
+    labels = np.asarray(categories)
+    if len(labels) != int(n_rows):
+        return labels, {}
+    padded = np.empty(len(labels) + 1, dtype=labels.dtype)
+    padded[:-1] = labels
+    padded[-1] = missing_placeholder(labels.dtype)
+    return padded, {PADDED_ATTRIBUTE: True}
+
+
+def category_count(categories: zarr.Array) -> int:
+    """Return how many categories a stored categories array holds, its reserved entry left out."""
+    padded = categories.attrs.get(PADDED_ATTRIBUTE) is True
+    return int(categories.shape[0]) - int(padded)
+
+
 def linked_categories(
     group: zarr.Group,
     name: str,
@@ -80,7 +118,9 @@ def linked_categories(
     sibling, the column must store signed integer codes wide enough for
     every category, and the sibling must be a one-dimensional array of text,
     booleans or numbers with a boolean ``ordered`` attribute and no link of
-    its own. ``label`` names the column in errors and defaults to
+    its own. A ``padded`` attribute, when present, must be True, and the
+    sibling then holds one entry more than the column has rows, the last of
+    which is reserved. ``label`` names the column in errors and defaults to
     ``Column '<name>'``. Pass the already opened ``values`` array to skip
     reopening it, and members of ``group`` that are already open, keyed by
     name, as ``opened``.
@@ -119,9 +159,19 @@ def linked_categories(
         or not isinstance(node.attrs.get(ORDERED_ATTRIBUTE), bool)
     ):
         raise ValueError(f"{subject} has a malformed categories array")
-    if int(node.shape[0]) > int(np.iinfo(codes_dtype.type).max) + 1:
+    if PADDED_ATTRIBUTE in node.attrs and (
+        node.attrs[PADDED_ATTRIBUTE] is not True
+        or int(node.shape[0]) != int(values.shape[0]) + 1
+    ):
         raise ValueError(
-            f"{subject} has {node.shape[0]} categories, more than its {codes_dtype} "
+            f"{subject} has a categories array whose reserved entry is malformed: "
+            f"its {PADDED_ATTRIBUTE!r} attribute must be True, and it must then hold "
+            "one entry more than the column has rows"
+        )
+    n_categories = category_count(node)
+    if n_categories > int(np.iinfo(codes_dtype.type).max) + 1:
+        raise ValueError(
+            f"{subject} has {n_categories} categories, more than its {codes_dtype} "
             "codes can name"
         )
     return node
@@ -143,12 +193,21 @@ class CategoricalColumn:
         ordered: Whether the categories are ordered.
     """
 
-    __slots__ = ("codes", "ordered", "_categories_array", "_categories", "_lookup")
+    __slots__ = (
+        "codes",
+        "ordered",
+        "_categories_array",
+        "_n_categories",
+        "_categories",
+        "_lookup",
+    )
 
     def __init__(self, codes: zarr.Array, categories: zarr.Array, *, ordered: bool):
         self.codes = codes
         self.ordered = bool(ordered)
         self._categories_array = categories
+        # A reserved entry after the last category is no category.
+        self._n_categories = category_count(categories)
         self._categories: np.ndarray | None = None
         self._lookup: np.ndarray | None = None
 
@@ -188,20 +247,20 @@ class CategoricalColumn:
 
     @property
     def categories_array(self) -> zarr.Array:
-        """The stored categories."""
+        """The stored categories, with a reserved entry after the last one when it records one."""
         return self._categories_array
 
     @property
     def categories(self) -> np.ndarray:
-        """The categories, read once."""
+        """The categories, read once, without the stored array's reserved entry."""
         if self._categories is None:
-            self._categories = np.asarray(self._categories_array[:])
+            self._categories = np.asarray(self._categories_array[: self._n_categories])
         return self._categories
 
     @property
     def n_categories(self) -> int:
-        """The number of categories, from the stored array's shape."""
-        return int(self._categories_array.shape[0])
+        """The number of categories, from the stored array's shape and its reserved entry."""
+        return self._n_categories
 
     @property
     def dtype(self) -> np.dtype[Any]:

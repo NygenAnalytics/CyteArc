@@ -31,6 +31,7 @@ __all__ = [
     "missing_placeholder",
     "missing_rows",
     "nullable_values",
+    "stored_categorical_codes",
     "stored_categorical_values",
     "stored_values",
 ]
@@ -215,6 +216,80 @@ def stored_categorical_values(
     stored = np.full(codes.shape, missing_placeholder(typed.dtype), dtype=typed.dtype)
     stored[present] = typed[rank[present_codes]]
     return stored, ~present
+
+
+def stored_categorical_codes(
+    codes: np.ndarray,
+    categories: np.ndarray,
+    *,
+    name: str,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return a categorical's codes and categories as a categorical column stores them.
+
+    A negative code, or one past the last category, is missing and becomes
+    -1. Every category is kept in its order, unused ones included, and typed
+    so that each row reads the label that :func:`stored_categorical_values`
+    stores for it: the categories that rows use set the dtype, as they set
+    the dtype of those labels, and every category takes it. When no row uses
+    a category, those labels are text, and so are the categories.
+
+    Args:
+        codes: One integer code per row.
+        categories: The categories that the codes index.
+        name: Column name, for errors.
+
+    Returns:
+        The codes as int64, -1 in missing rows, and the typed categories.
+
+    Raises:
+        TypeError: If the codes are not integers.
+        ValueError: If the categories are not one-dimensional, are not all of
+            the type that the used ones share, hold NaN, read alike once
+            typed, or :func:`stored_values` refuses one.
+    """
+    codes = np.asarray(codes)
+    categories = np.asarray(categories)
+    if codes.dtype.kind not in "iu":
+        raise TypeError(
+            f"Column {name!r} needs integer category codes, not values of dtype "
+            f"{codes.dtype}"
+        )
+    if categories.ndim != 1:
+        raise ValueError(
+            f"Column {name!r} needs one category per position, not categories of "
+            f"shape {categories.shape}"
+        )
+    present = (codes >= 0) & (codes < len(categories))
+    stored = np.full(codes.shape, -1, dtype=np.int64)
+    stored[present] = codes[present]
+    used = np.zeros(len(categories), dtype=bool)
+    used[stored[present]] = True
+    # Python objects, as an array of decoded labels holds them.
+    labels = np.empty(len(categories), dtype=object)
+    labels[:] = categories
+    dtype = _shared_dtype(labels[used])
+    if dtype is None:
+        typed = _text(labels, np.zeros(len(labels), dtype=bool), name=name)
+    elif _shared_dtype(labels) == dtype:
+        typed = _typed_numbers(labels, dtype, name=name)
+    else:
+        raise ValueError(
+            f"Column {name!r} has categories of more than one type: the ones that "
+            f"rows hold are stored as {dtype}, which cannot hold the others"
+        )
+    if typed.dtype.kind in "fc" and bool(np.isnan(typed).any()):
+        raise ValueError(
+            f"Column {name!r} has NaN among its categories; a categorical column "
+            "marks a missing row with code -1 and cannot store NaN as a category"
+        )
+    distinct, counts = np.unique(typed, return_counts=True)
+    if len(distinct) != len(typed):
+        raise ValueError(
+            f"Column {name!r} has categories that read alike once stored, as text "
+            "or numbers, so a categorical column cannot tell them apart, such as "
+            f"{distinct[counts > 1][0].item()!r}"
+        )
+    return stored, typed
 
 
 def is_categorical(values: Any) -> bool:
