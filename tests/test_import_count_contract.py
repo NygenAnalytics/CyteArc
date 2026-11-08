@@ -1300,8 +1300,8 @@ _LAYOUT_CASES = {
     "subset": (None, (2_000, 400), 16 * 1024**2, 128 * 1024),
     "repack": (None, (2_000, 400), 16 * 1024**2, 128 * 1024),
 }
-# The Matrix Market import reserves the lines it parses at a time. With pandas
-# 2.2, which makes a Python object of each parsed field, the default 100,000
+# The Matrix Market import reserves a Python object for each field of the
+# lines it parses at a time, as pandas 2.2 makes them, and the default 100,000
 # lines take more than the budget.
 _LAYOUT_OPTIONS: dict[str, dict[str, Any]] = {"mtx": {"lines_in_mem": 25_000}}
 

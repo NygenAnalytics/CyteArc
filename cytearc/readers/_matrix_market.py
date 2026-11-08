@@ -22,15 +22,14 @@ from typing import Any, TextIO
 
 import numpy as np
 import pandas as pd
-from packaging.version import Version
 
 from ..utils.arguments import quoted_value
 from ..utils.files import is_gzip, open_text
 
 __all__ = [
     "MatrixMarketHeader",
-    "matrix_market_chunk_copy_bytes",
     "matrix_market_entries",
+    "matrix_market_entry_object_bytes",
     "matrix_market_header",
     "read_matrix_market_header",
 ]
@@ -184,30 +183,24 @@ def _entry_width(field: str) -> int:
     return 2 if field == "pattern" else 3
 
 
-def matrix_market_chunk_copy_bytes(header: MatrixMarketHeader) -> int:
-    """Return the bytes per entry of the copies of its fields that pandas 2
-    makes while :func:`matrix_market_entries` parses a chunk.
+def matrix_market_entry_object_bytes(header: MatrixMarketHeader) -> int:
+    """Return the bytes of the Python objects that pandas 2.2 makes of each
+    entry while :func:`matrix_market_entries` parses a chunk.
 
-    pandas 2.3 copies a chunk's parsed columns into blocks of one dtype,
-    unless its copy-on-write mode is on. Given a dtype for each column, pandas
-    2.2 first builds an object array of the chunk's columns, filled in one
-    assignment, so numpy turns every column into an array of Python objects:
-    per field, an 8-byte reference to an int of at most an int64's size, or
-    to a float. It frees those before it copies the blocks. pandas 3 makes
-    neither copy.
+    Given a dtype for each column, pandas 2.2 builds each chunk through an
+    object array of the chunk's columns, filled in one assignment, so numpy
+    first turns every column into an array of Python objects: per field, an
+    8-byte reference to an int of at most an int64's size, or to a float.
+    Later versions hold less while they build a chunk, so these bytes are the
+    worst case of the supported versions.
 
     Args:
         header: The matrix's header, from :func:`matrix_market_header`.
     """
-    version = Version(pd.__version__)
-    if version >= Version("3"):
-        return 0
-    width = _entry_width(header.field)
-    if version >= Version("2.3"):
-        # The parser reads one float32 column past the entry's fields.
-        return width * np.dtype(np.int64).itemsize + np.dtype(np.float32).itemsize
+    # The parser reads one column past the entry's fields.
+    fields = _entry_width(header.field) + 1
     largest = sys.getsizeof(int(np.iinfo(np.int64).max))
-    return (width + 1) * (np.dtype(object).itemsize + largest)
+    return fields * (np.dtype(object).itemsize + largest)
 
 
 def _entry_fields(field: str) -> str:
