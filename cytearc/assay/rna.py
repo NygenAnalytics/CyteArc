@@ -45,6 +45,7 @@ from .normalization import (
     norm_lib_size,
     norm_lib_size_log,
     norm_tf_idf,
+    normalize_counts,
     normalizes_per_cell,
     reject_unknown_normalization_params,
     uses_library_size_normalization,
@@ -548,14 +549,9 @@ class RNAassay(Assay):
             scalar_cache = self.scalar
             self.scalar = scalar
             try:
-                values = method(self, counts)
+                return normalize_counts(self, counts, log_transform=log_transform)
             finally:
                 self.scalar = scalar_cache
-        if log_transform:
-            # NumPy logs uint8 in float16 and uint16 in float32, so the
-            # logarithms are taken in float64 for every value dtype.
-            values = cast(ChunkedArray, np.log1p(values, dtype=np.float64))
-        return values
 
     def _normalization_flags(self) -> frozenset[str]:
         """Return the normalization flags that ``normed`` applies.

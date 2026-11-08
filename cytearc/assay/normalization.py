@@ -373,11 +373,22 @@ def stream_document_frequency(
     return document_frequency, term_frequency_sum
 
 
-def _library_size_scaled(assay: "Assay", counts: ChunkedArray) -> ChunkedArray:
-    """Scale each cell's counts by the size factor over its total in float64."""
+def _library_size_scaled(
+    assay: "Assay", counts: ChunkedArray, *, log_transform: bool = False
+) -> ChunkedArray:
+    """Scale each cell's counts by the size factor over its total in float64.
+
+    With ``log_transform``, the same operation then takes ``log1p`` of the
+    scaled values in place.
+    """
     assert assay.sf is not None and assay.scalar is not None
     totals = assay.scalar.reshape(-1, 1)
-    scale = partial(library_size_values, size_factor=assay.sf, dtype=np.float64)
+    scale = partial(
+        library_size_values,
+        size_factor=assay.sf,
+        dtype=np.float64,
+        log_transform=log_transform,
+    )
     if isinstance(counts, ChunkedArray):
         return counts._binary(scale, totals, "left")
     return cast(ChunkedArray, scale(counts, totals))
@@ -407,6 +418,24 @@ def norm_lib_size(assay: "Assay", counts: ChunkedArray) -> ChunkedArray:
     Returns:  A chunked array (delayed matrix) containing normalized data.
     """
     return _library_size_scaled(assay, counts)
+
+
+def normalize_counts(
+    assay: "Assay", counts: ChunkedArray, *, log_transform: bool
+) -> ChunkedArray:
+    """Return ``assay.normMethod`` of ``counts``, and its ``log1p`` with ``log_transform``.
+
+    The logarithm is taken in float64 for every value dtype, since NumPy logs
+    uint8 in float16 and uint16 in float32. Library-size scaling takes it in
+    place inside its own operation, so a block of its values holds one float64
+    array instead of two and gets the same values.
+    """
+    if log_transform and assay.normMethod is norm_lib_size:
+        return _library_size_scaled(assay, counts, log_transform=True)
+    values = assay.normMethod(assay, counts)
+    if log_transform:
+        values = cast(ChunkedArray, np.log1p(values, dtype=np.float64))
+    return values
 
 
 def uses_library_size_normalization(assay: "Assay") -> bool:

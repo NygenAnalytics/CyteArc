@@ -34,6 +34,7 @@ from .normalization import (
     norm_lib_size,
     norm_lib_size_log,
     norm_tf_idf,
+    normalize_counts,
     normalizes_per_cell,
     uses_library_size_normalization,
 )
@@ -398,12 +399,7 @@ class Assay:
             feat_idx = np.arange(self.feats.N, dtype=np.int64)
         require_counts_for(self, self.normMethod)
         counts = self.rawData[:, feat_idx][cell_idx, :]
-        values = self.normMethod(self, counts)
-        if log_transform:
-            # NumPy logs uint8 in float16 and uint16 in float32, so the
-            # logarithms are taken in float64 for every value dtype.
-            values = cast(ChunkedArray, np.log1p(values, dtype=np.float64))
-        return values
+        return normalize_counts(self, counts, log_transform=log_transform)
 
     def _normalization_flags(self) -> frozenset[str]:
         """Return the normalization flags that ``normed`` applies.
