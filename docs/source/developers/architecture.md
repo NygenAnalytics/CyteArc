@@ -53,10 +53,7 @@ These calls do not create module-load cycles.
   fingerprint of the ordered row IDs that every selection check compares, while a stamp of the
   array's metadata document and stored chunk bytes is unchanged; any change to those bytes
   computes the value again.
-  `storage/virtual_arrays.py` is the one seam for arrays that a store computes, such as composite
-  counts: a `VirtualArrayStore` hands out a `VirtualArrayReader` for such an array. Count selections
-  are read through `read_selection`, and `storage.feature_stream` hands a virtual array's feature
-  streams to its reader, so no other module checks for a virtual array.
+  `storage/virtual_arrays.py` is the one seam for arrays that a store computes, such as composite counts: a `VirtualArrayStore` hands out a `VirtualArrayReader` for such an array. Count selections are read through `read_selection`, and `storage.feature_stream` hands a virtual array's feature streams to its reader, so no other module checks for a virtual array. `read_selection` runs a read on an event loop of its own in the calling thread, through `storage/async_execution.run_read`, when every store the read touches is known to work on any loop: Zarr's local and memory stores, obstore's `ObjectStore`, and an fsspec store over Zarr's wrapper of a synchronous file system, such as `HfReadStore`; a virtual array's store names the stores its reads touch through `VirtualArrayStore.stores_read`. The readers of a block stream then copy their chunks at once instead of in turn on Zarr's one loop thread; store calls and decodes still run on Zarr's codec pool, which each loop borrows, and a loop closes only after every task its read started has ended. Any other read, such as one through a native asynchronous fsspec file system whose session is bound to the loop it first ran on, runs on Zarr's loop, as `tests/test_count_read_loops.py` checks.
 - `matrix/` owns the lazy blockwise matrix abstraction used over NumPy and Zarr arrays.
   Its arithmetic, indexing, and reduction behavior keeps it separate from low-level storage mechanics.
   An assay's `ChunkedArray` over `counts` carries the validated `countsT`. Streams that allow it,

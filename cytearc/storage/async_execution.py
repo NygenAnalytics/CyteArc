@@ -350,6 +350,70 @@ def zarr_decoding_threads(threads: int) -> Iterator[None]:
         _DECODING_THREADS.reset(token)
 
 
+class _LentPool(ThreadPoolExecutor):
+    """Zarr's codec pool, as the default executor of one read's event loop.
+
+    Work goes to the pool. Closing an event loop shuts down its default
+    executor, so this one leaves the pool running when the read's loop closes.
+    """
+
+    def __init__(self, pool: ThreadPoolExecutor) -> None:
+        # One worker, never started: every call goes to ``pool``.
+        super().__init__(max_workers=1)
+        self._pool = pool
+
+    def submit[**P, R](
+        self, fn: Callable[P, R], /, *args: P.args, **kwargs: P.kwargs
+    ) -> "Future[R]":
+        return self._pool.submit(fn, *args, **kwargs)
+
+    def shutdown(self, wait: bool = True, *, cancel_futures: bool = False) -> None:
+        """Leave the lent pool running."""
+
+
+def _finish_tasks(loop: asyncio.AbstractEventLoop) -> None:
+    """Run every task left on ``loop`` to its end, then close its async generators."""
+    while pending := [task for task in asyncio.all_tasks(loop) if not task.done()]:
+        loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+    loop.run_until_complete(loop.shutdown_asyncgens())
+
+
+def run_read(coroutine: Coroutine[Any, Any, T]) -> T:
+    """Run one synchronous read's coroutine on an event loop of its own, in the calling thread.
+
+    The loop's work, such as copying decoded chunks into the result, then runs
+    in the calling thread, so reads from several threads run at once instead
+    of in turn on Zarr's one event-loop thread. Store calls and decodes still
+    run on Zarr's codec pool, which the loop borrows, so they follow
+    :func:`zarr_decoding_threads`. The loop runs until every task that the
+    read started has ended, such as a shared cache fill that another read
+    waits on, and then closes. An interruption, such as Ctrl-C, cancels the
+    read and waits for it to stop. A thread that already runs an event loop
+    reads through Zarr's loop, as Zarr's synchronous API does.
+    """
+    if _in_event_loop():
+        from zarr.core.sync import sync
+
+        return sync(coroutine)
+    ensure_zarr_host_ceiling()
+    pool = importlib.import_module("zarr.core.sync")._executor
+    loop = asyncio.new_event_loop()
+    try:
+        loop.set_default_executor(_LentPool(pool))
+        task = loop.create_task(coroutine)
+        try:
+            return loop.run_until_complete(task)
+        except BaseException:
+            # An interruption leaves the read running; it stops at its next await.
+            task.cancel()
+            raise
+        finally:
+            del task
+            _finish_tasks(loop)
+    finally:
+        loop.close()
+
+
 class ByteLedger:
     """Admit CyteArc-owned buffers before async tasks are created.
 
