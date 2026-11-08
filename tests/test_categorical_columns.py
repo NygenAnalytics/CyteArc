@@ -448,7 +448,11 @@ def test_a_categorical_column_reads_its_codes_through_another_array() -> None:
 def test_a_composite_reads_categorical_codes_through_its_source_cache(
     tmp_path: Path,
 ) -> None:
-    from cytearc.composite.create import _CachedMetadataTable, _prefetch_metadata_schema
+    from cytearc.composite.create import (
+        _CachedMetadataTable,
+        _prefetch_metadata,
+        _TableReads,
+    )
     from cytearc.composite.source_cache import SourceCache
     from cytearc.storage.budget import ResourceBudget
 
@@ -462,15 +466,20 @@ def test_a_composite_reads_categorical_codes_through_its_source_cache(
     cache = SourceCache()
     try:
         handles.use_source_cache(cache)
-        _prefetch_metadata_schema(
-            [handles],
-            [frozenset()],
+        _prefetch_metadata(
+            [
+                _TableReads(
+                    handles,
+                    lambda extent: np.arange(-(-N // extent)),
+                    scanned_kinds=frozenset({"U", "S", "O"}),
+                )
+            ],
             ResourceBudget(1024**2, 2),
             cache=cache,
             resident_bytes=0,
             read_workers=1,
         )
-        # The schema scan of a categorical column warms its codes' chunk.
+        # The warm-up of a categorical column fetches its codes' chunk.
         assert "labels/c/0" in {key for _source, key in cache._entries}
         column = handles._get_array("labels")
         assert isinstance(column, CategoricalColumn)

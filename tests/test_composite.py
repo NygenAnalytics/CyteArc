@@ -163,10 +163,14 @@ def test_composite_metadata_handles_preserve_boolean_selection_contract(sources)
         handles._bool_array("quality")
 
 
-def test_composite_schema_prefetch_skips_local_and_empty_tables(
+def test_composite_metadata_prefetch_skips_local_and_empty_tables(
     sources, tmp_path, monkeypatch
 ):
-    from cytearc.composite.create import _CachedMetadataTable, _prefetch_metadata_schema
+    from cytearc.composite.create import (
+        _CachedMetadataTable,
+        _prefetch_metadata,
+        _TableReads,
+    )
     from cytearc.composite.source_cache import SourceCache
     from cytearc.metadata.table import MetaData
     from cytearc.storage.budget import ResourceBudget
@@ -189,9 +193,9 @@ def test_composite_schema_prefetch_skips_local_and_empty_tables(
 
     monkeypatch.setattr(LocalStore, "get", record)
     try:
-        _prefetch_metadata_schema(
-            [local, empty],
-            [frozenset(), frozenset()],
+        every_row = lambda extent: np.arange(4)  # noqa: E731
+        _prefetch_metadata(
+            [_TableReads(local, every_row), _TableReads(empty, every_row)],
             ResourceBudget(2, 1024**2),
             cache=cache,
             resident_bytes=0,
@@ -199,6 +203,237 @@ def test_composite_schema_prefetch_skips_local_and_empty_tables(
         )
         assert not requests
         assert not cache._entries
+    finally:
+        cache.close()
+
+
+def _warmable_table(path, n_cells=64, chunk_rows=16):
+    """Write a cell table whose every column is stored in chunks of ``chunk_rows``."""
+    import pandas as pd
+
+    from cytearc.metadata.table import MetaData
+
+    root = zarr.open_group(str(path), mode="w")
+    create_cell_data(
+        root,
+        None,
+        ids=np.array([f"cell{index:03d}" for index in range(n_cells)]),
+        names=np.array([f"name{index:03d}" for index in range(n_cells)]),
+    )
+    table = MetaData(root["cellData"])
+    # Wide text decodes to far more bytes than its encoded chunks hold.
+    table.insert(
+        "label", np.array([f"type {index % 3}".ljust(40) for index in range(n_cells)])
+    )
+    table.insert(
+        "score", [None if index % 4 == 0 else float(index) for index in range(n_cells)]
+    )
+    table.insert(
+        "kind", pd.Categorical([("a", "b")[index % 2] for index in range(n_cells)])
+    )
+    table.insert("skipped", np.arange(n_cells))
+    group = root["cellData"]
+    for path, array in list(group.arrays()):
+        # A categorical column stores its codes as the column's array.
+        if array.shape and array.shape[0] == n_cells:
+            data, attributes = array[:], dict(array.attrs)
+            del group[path]
+            replacement = group.create_array(path, data=data, chunks=(chunk_rows,))
+            replacement.attrs.update(attributes)
+    return MetaData(root["cellData"])
+
+
+def test_composite_metadata_prefetch_warms_each_object_on_its_own(
+    tmp_path, monkeypatch
+):
+    import asyncio
+
+    from cytearc.composite.create import (
+        SMALLEST_FETCH_LIMIT,
+        _CachedMetadataTable,
+        _prefetch_metadata,
+        _TableReads,
+    )
+    from cytearc.composite.source_cache import SourceCache
+    from cytearc.storage.budget import ResourceBudget
+    from cytearc.storage.categorical import CategoricalColumn
+
+    table = _warmable_table(tmp_path / "cells.zarr")
+    handles = _CachedMetadataTable(table)
+    root = str(tmp_path / "cells.zarr")
+    stored = {
+        path.relative_to(root).as_posix(): path.stat().st_size
+        for path in (tmp_path / "cells.zarr").rglob("*")
+        if path.is_file() and "/c/" in path.as_posix()
+    }
+    kind = table._get_array("kind")
+    assert isinstance(kind, CategoricalColumn)
+    codes = kind.codes.path.removeprefix("cellData/")
+    # The scan reads the IDs, the names and the text columns in full, and the
+    # copy reads rows 20 to 23, in the second chunk of 16 rows.
+    expected = {
+        f"cellData/{column}/c/{chunk}"
+        for column in ("ids", "names", "label", codes)
+        for chunk in range(4)
+    } | {"cellData/score/c/1", "cellData/__cytearc_missing__score/c/1"}
+    assert expected <= set(stored)
+    arrays = {column: table._get_array(column) for column in ("ids", "names", "label")}
+    decoded = {
+        column: int(np.prod(array.chunks)) * array.dtype.itemsize
+        for column, array in arrays.items()
+    }
+    # A fetch reserves a decoded chunk's bytes, or the warm-up's smallest
+    # limit, until it ends, then its encoded object's. The cache holds the
+    # largest limit twice beside every encoded object, but not the decoded
+    # chunks of the scanned columns.
+    largest = max(*decoded.values(), SMALLEST_FETCH_LIMIT)
+    capacity = 2 * largest + sum(stored[key] for key in expected)
+    assert 4 * sum(decoded.values()) > capacity
+    cache = SourceCache(capacity_bytes=capacity)
+    handles.use_source_cache(cache)
+    requests = []
+    active = peak = 0
+    get = LocalStore.get
+
+    async def record(store, key, *args, **kwargs):
+        nonlocal active, peak
+        if "/c/" not in key:
+            return await get(store, key, *args, **kwargs)
+        requests.append(key)
+        active += 1
+        peak = max(peak, active)
+        try:
+            await asyncio.sleep(0.01)
+            return await get(store, key, *args, **kwargs)
+        finally:
+            active -= 1
+
+    monkeypatch.setattr(LocalStore, "get", record)
+    try:
+        _prefetch_metadata(
+            [
+                _TableReads(
+                    handles,
+                    lambda extent: np.unique(np.arange(20, 24) // extent),
+                    skipped=frozenset({"I", "skipped"}),
+                    scanned=frozenset({"ids", "names"}),
+                    scanned_kinds=frozenset({"U", "S", "O"}),
+                )
+            ],
+            ResourceBudget(1024**2, 4),
+            cache=cache,
+            resident_bytes=0,
+            read_workers=4,
+        )
+        assert sorted(requests) == sorted(expected)
+        assert peak > 1
+        assert {key for _source, key in cache._entries} == expected
+    finally:
+        cache.close()
+
+
+def test_composite_metadata_prefetch_never_evicts(tmp_path, monkeypatch):
+    from cytearc.composite.create import (
+        _CachedMetadataTable,
+        _prefetch_metadata,
+        _TableReads,
+    )
+    from cytearc.composite.source_cache import SourceCache
+    from cytearc.storage.budget import ResourceBudget
+
+    table = _warmable_table(tmp_path / "cells.zarr")
+    handles = _CachedMetadataTable(table)
+    cache = SourceCache(max_entries=4)
+    handles.use_source_cache(cache)
+    skipped = handles._get_array("skipped")
+    held = "cellData/skipped/c/3"
+    assert sync(skipped.store.prefetch(held, max_bytes=1024))
+    requests = []
+    get = LocalStore.get
+
+    async def record(store, key, *args, **kwargs):
+        if "/c/" in key:
+            requests.append(key)
+        return await get(store, key, *args, **kwargs)
+
+    monkeypatch.setattr(LocalStore, "get", record)
+    try:
+        _prefetch_metadata(
+            [
+                _TableReads(
+                    handles,
+                    lambda extent: np.arange(4),
+                    skipped=frozenset({"I", "skipped"}),
+                    scanned=frozenset({"ids", "names"}),
+                )
+            ],
+            ResourceBudget(1024**2, 4),
+            cache=cache,
+            resident_bytes=0,
+            read_workers=1,
+        )
+        entries = {key for _source, key in cache._entries}
+        # The object that the cache held stays; three more fill its entries,
+        # and the objects that find no room are left to their reads.
+        assert held in entries
+        assert len(entries) == 4
+        assert len(requests) == 3
+    finally:
+        cache.close()
+
+
+def test_composite_count_prefetch_starts_shards_past_a_slow_one(tmp_path, monkeypatch):
+    import asyncio
+
+    from cytearc.composite.create import _prefetch_counts
+    from cytearc.composite.source_cache import SourceCache
+    from cytearc.merge.row_plan import build_row_plan
+    from cytearc.storage.geometry import array_geometry
+
+    root = zarr.open_group(str(tmp_path / "source.zarr"), mode="w")
+    root.create_array(
+        "a", data=np.ones((64, 16), dtype=np.uint16), chunks=(8, 16), shards=(16, 16)
+    )
+    cache = SourceCache(max_entries=16)
+    array = zarr.open_array(cache.wrap(root.store), path="a", mode="r")
+    plan = build_row_plan([64], [16], ["a"])
+    requested = []
+    others: asyncio.Event | None = None
+    waited = {}
+    get = LocalStore.get
+
+    async def record(store, key, *args, **kwargs):
+        nonlocal others
+        if "/c/" in key:
+            if others is None:
+                others = asyncio.Event()
+            requested.append(key)
+            if len(requested) == 1:
+                # The first shard is slow until every other shard has started.
+                try:
+                    await asyncio.wait_for(others.wait(), timeout=5)
+                    waited["first"] = "others started"
+                except TimeoutError:
+                    waited["first"] = "timed out"
+            elif len(requested) == 4:
+                others.set()
+        return await get(store, key, *args, **kwargs)
+
+    monkeypatch.setattr(LocalStore, "get", record)
+    try:
+        _prefetch_counts(
+            [array],
+            plan,
+            [np.arange(16)],
+            [array_geometry(array)],
+            segment_rows=64,
+            read_workers=2,
+            memory_bytes=1024**2,
+            cache=cache,
+        )
+        assert sorted(requested) == [f"a/c/{row}/0" for row in range(4)]
+        assert waited == {"first": "others started"}
+        assert len(cache._entries) == 4
     finally:
         cache.close()
 
