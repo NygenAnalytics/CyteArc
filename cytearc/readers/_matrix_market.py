@@ -13,6 +13,7 @@ gzip-compressed (:mod:`cytearc.utils.files`).
 import gzip
 import os
 import re
+import sys
 import zlib
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -21,12 +22,14 @@ from typing import Any, TextIO
 
 import numpy as np
 import pandas as pd
+from packaging.version import Version
 
 from ..utils.arguments import quoted_value
 from ..utils.files import is_gzip, open_text
 
 __all__ = [
     "MatrixMarketHeader",
+    "matrix_market_chunk_copy_bytes",
     "matrix_market_entries",
     "matrix_market_header",
     "read_matrix_market_header",
@@ -176,6 +179,37 @@ def matrix_market_header(
         raise ValueError(f"{name} is cut short or corrupt: {error}") from None
 
 
+def _entry_width(field: str) -> int:
+    """The number of fields of each entry of a matrix of ``field`` values."""
+    return 2 if field == "pattern" else 3
+
+
+def matrix_market_chunk_copy_bytes(header: MatrixMarketHeader) -> int:
+    """Return the bytes per entry of the copies of its fields that pandas 2
+    makes while :func:`matrix_market_entries` parses a chunk.
+
+    pandas 2.3 copies a chunk's parsed columns into blocks of one dtype,
+    unless its copy-on-write mode is on. Given a dtype for each column, pandas
+    2.2 first builds an object array of the chunk's columns, filled in one
+    assignment, so numpy turns every column into an array of Python objects:
+    per field, an 8-byte reference to an int of at most an int64's size, or
+    to a float. It frees those before it copies the blocks. pandas 3 makes
+    neither copy.
+
+    Args:
+        header: The matrix's header, from :func:`matrix_market_header`.
+    """
+    version = Version(pd.__version__)
+    if version >= Version("3"):
+        return 0
+    width = _entry_width(header.field)
+    if version >= Version("2.3"):
+        # The parser reads one float32 column past the entry's fields.
+        return width * np.dtype(np.int64).itemsize + np.dtype(np.float32).itemsize
+    largest = sys.getsizeof(int(np.iinfo(np.int64).max))
+    return (width + 1) * (np.dtype(object).itemsize + largest)
+
+
 def _entry_fields(field: str) -> str:
     """The fields of each entry of a matrix of ``field`` values."""
     if field == "pattern":
@@ -254,7 +288,7 @@ def matrix_market_entries(
     path = header.path
     file = path if source is None else os.fspath(source)
     pattern = header.field == "pattern"
-    width = 2 if pattern else 3
+    width = _entry_width(header.field)
     dtype: dict[int, Any] = {0: np.int64, 1: np.int64}
     if not pattern:
         dtype[2] = np.int64 if header.field == "integer" else np.float64

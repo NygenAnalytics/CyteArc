@@ -20,6 +20,7 @@ from ..utils.arrays import cumulative_nnz, max_window_nnz
 from ..utils.count_values import CountValueRange, new_count_ranges
 from ..utils.files import is_gzip, open_text
 from ._matrix_market import (
+    matrix_market_chunk_copy_bytes,
     matrix_market_entries,
     matrix_market_header,
     read_matrix_market_header,
@@ -1505,7 +1506,12 @@ class _MtxEngine:
             else 0
         )
         return int(
-            lines_in_mem * (4 * parser_value_bytes + np.dtype(np.bool_).itemsize)
+            lines_in_mem
+            * (
+                4 * parser_value_bytes
+                + np.dtype(np.bool_).itemsize
+                + matrix_market_chunk_copy_bytes(self.header)
+            )
             + source_nnz
             * (
                 2 * np.dtype(np.int64).itemsize

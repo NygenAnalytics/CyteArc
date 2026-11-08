@@ -1300,6 +1300,10 @@ _LAYOUT_CASES = {
     "subset": (None, (2_000, 400), 16 * 1024**2, 128 * 1024),
     "repack": (None, (2_000, 400), 16 * 1024**2, 128 * 1024),
 }
+# The Matrix Market import reserves the lines it parses at a time. With pandas
+# 2.2, which makes a Python object of each parsed field, the default 100,000
+# lines take more than the budget.
+_LAYOUT_OPTIONS: dict[str, dict[str, Any]] = {"mtx": {"lines_in_mem": 25_000}}
 
 
 def _layout_import(
@@ -1309,6 +1313,7 @@ def _layout_import(
     if encoding is None:
         directory.mkdir(parents=True, exist_ok=True)
         return _rebuild(writer, directory, large_store, **options)
+    options = {**_LAYOUT_OPTIONS.get(writer, {}), **options}
     return _import(writer, directory, _large_values(*shape), encoding, **options)
 
 
@@ -1659,6 +1664,7 @@ def _drain_sparse_writes(monkeypatch) -> list[dict[str, Any]]:
         ("sparse", "float32", False, True),
         ("cellranger", "int32", True, False),
         ("mtx", "integer", False, False),
+        ("mtx", "real", False, False),
         ("seurat", "sparse", False, False),
     ],
 )
@@ -1694,6 +1700,59 @@ def test_every_sparse_producer_holds_no_more_than_its_plan_reserves(
         # Readers that hold one batch are planned close to what they hold;
         # the plan charged two to six times it.
         assert record["reserve"] <= 1.5 * record["held"]
+
+
+@pytest.mark.parametrize("encoding", ["integer", "real"])
+def test_a_matrix_market_reader_charges_each_line_it_parses_at_its_largest(
+    tmp_path, encoding
+):
+    import tracemalloc
+
+    from cytearc.readers._matrix_market import (
+        matrix_market_entries,
+        matrix_market_header,
+    )
+
+    reader = _source("mtx", tmp_path, _producer_counts(40, 20), encoding)
+    try:
+        # What the reader charges for each line it parses at a time.
+        line_bytes = reader.producer_staging_bytes(1, 2)
+        line_bytes -= reader.producer_staging_bytes(1, 1)
+    finally:
+        _close(reader)
+    # Coordinates and counts near the largest int64 each parse to a Python int
+    # of an int64's full size, and real counts to floats.
+    largest = int(np.iinfo(np.int64).max)
+    n_entries = 120_000
+    rng = np.random.default_rng(3)
+    coordinates = rng.integers(largest // 2, largest, (n_entries, 2))
+    counts = (
+        rng.integers(largest // 2, largest, n_entries)
+        if encoding == "integer"
+        else np.floor(rng.random(n_entries) * 1e6)
+    )
+    path = tmp_path / "largest.mtx"
+    with path.open("w") as handle:
+        handle.write(f"%%MatrixMarket matrix coordinate {encoding} general\n")
+        handle.write(f"{largest} {largest} {n_entries}\n")
+        handle.writelines(
+            f"{row} {column} {count}\n"
+            for (row, column), count in zip(coordinates, counts, strict=True)
+        )
+    header = matrix_market_header(path)
+
+    def parse_peak(chunk_rows: int) -> int:
+        tracemalloc.start()
+        try:
+            for entries in matrix_market_entries(header, chunk_rows, counts=True):
+                del entries
+            return tracemalloc.get_traced_memory()[1]
+        finally:
+            tracemalloc.stop()
+
+    # The parser also holds read buffers of a fixed size, which the growth
+    # from one chunk size to the next leaves out.
+    assert (parse_peak(40_000) - parse_peak(10_000)) / 30_000 <= line_bytes
 
 
 @pytest.mark.parametrize("writer", ["h5ad", "cellranger"])

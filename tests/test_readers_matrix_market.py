@@ -8,9 +8,11 @@ variant callers read their headers and entries through
 import gzip
 import zipfile
 
+import pandas as pd
 import pytest
 
 from cytearc.readers._matrix_market import (
+    matrix_market_chunk_copy_bytes,
     matrix_market_entries,
     matrix_market_header,
 )
@@ -46,6 +48,33 @@ def test_entries_come_in_chunks_from_zero_with_the_fields_values(tmp_path) -> No
     # A real matrix keeps its numbers, as scipy writes counts in one.
     real = _BANNER.format(field="real") + "1 1 1\n1 1 3.71E2\n"
     assert _entries(_write(tmp_path, real, "r.mtx")) == [([0], [0], [371.0])]
+
+
+@pytest.mark.parametrize(
+    ("version", "per_value_entry", "per_pattern_entry"),
+    [
+        # Each field, and the float32 column past them, becomes a 36-byte int,
+        # the size of the largest int64, behind an 8-byte reference.
+        ("2.2.3", 176, 132),
+        # The int64 fields and the float32 column are copied once more.
+        ("2.3.0", 28, 20),
+        ("2.3.3", 28, 20),
+        ("3.0.0", 0, 0),
+        ("3.1.1", 0, 0),
+    ],
+)
+def test_pandas_2_charges_the_copies_it_makes_of_each_parsed_entry(
+    tmp_path, monkeypatch, version, per_value_entry, per_pattern_entry
+) -> None:
+    monkeypatch.setattr(pd, "__version__", version)
+    for field, expected in [
+        ("integer", per_value_entry),
+        ("real", per_value_entry),
+        ("pattern", per_pattern_entry),
+    ]:
+        path = _write(tmp_path, _BANNER.format(field=field) + "1 1 0\n", f"{field}.mtx")
+        header = matrix_market_header(path, fields=("integer", "real", "pattern"))
+        assert matrix_market_chunk_copy_bytes(header) == expected
 
 
 def test_masters_separator_and_index_offset_reach_the_entries(tmp_path) -> None:
