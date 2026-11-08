@@ -277,6 +277,7 @@ class CrToZarr:
                 residentBytes=resident,
                 producerStagingBytes=staging_bytes,
                 extraProducerBytes=projection_bytes,
+                alignedBatches=True,
             ),
             requested=requested,
         )
@@ -448,6 +449,7 @@ class CrToZarr:
                 residentBytes=resident_reader_bytes,
                 producerStagingBytes=staging_bytes,
                 extraProducerBytes=projection_bytes,
+                alignedBatches=True,
             )
             self._lastImportPlan = plan
             resolved_batch_rows = plan.batchRows
@@ -505,6 +507,9 @@ class CrToZarr:
                                 band,
                                 producer_bytes,
                             )
+                            # The write holds the band it was handed; keeping
+                            # it here would hold its values beside the rest.
+                            del band
                 if self.cr.nCells:
                     del matrix, chunk, selected, columns, inside, projected
                 for assay, buffer in buffers.items():

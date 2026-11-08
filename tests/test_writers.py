@@ -698,9 +698,9 @@ def test_h5ad_parallel_producer_count_is_memory_admitted(tmp_path):
 
     # Producer processes keep buffering while the parent writes, so two of
     # them need both of their reserves beside the parent's write band.
-    producers, store = write(6_224)
+    producers, store = write(5_300)
     assert producers == 2
-    assert write(6_223)[0] == 1
+    assert write(5_299)[0] == 1
 
     root = zarr.open_group(store=store, mode="r")
     np.testing.assert_array_equal(root["RNA/counts"][:], values)

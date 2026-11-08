@@ -164,10 +164,18 @@ def sparse_producer_peak_bytes(
     *,
     canonicalBatches: bool = False,
 ) -> int:
-    """Bound one sparse pull through projection, buffering, and band splitting.
+    """Bound one sparse pull through buffering and band splitting.
 
-    :class:`SparseShardBuffer` sorts a source batch and sums its repeated
-    coordinates unless the batch is marked canonical. With
+    The producer holds its source batch, a row, column and value for each of
+    its ``sourceValues``. :class:`SparseShardBuffer` holds each of the
+    ``bufferedValues`` as an int64 row and column and a value, and when it
+    cuts a band it joins them, masks the rows of the band and copies them
+    into the band and the rows it keeps: two of those triplets and two masks
+    for each buffered value. Readers whose batches hold more, such as copies
+    made while parsing, add it as their staging bytes.
+
+    :class:`SparseShardBuffer` also sorts a source batch and sums its
+    repeated coordinates unless the batch is marked canonical. With
     ``canonicalBatches`` the producer marks every batch, so the bound leaves
     out the bytes of that sort and sum.
     """
@@ -176,19 +184,21 @@ def sparse_producer_peak_bytes(
     value_bytes = max(1, int(valueItemsize))
     index_bytes = np.dtype(np.int64).itemsize
     mask_bytes = np.dtype(np.bool_).itemsize
-    triplet_bytes = value_bytes + 2 * index_bytes
-    buffered_bytes = buffered_values * (
-        2 * triplet_bytes + index_bytes + 2 * mask_bytes
-    )
-    source_bytes = 2 * source_values * triplet_bytes
-    source_indexes = source_values * (2 * index_bytes + 2 * mask_bytes)
+    triplet_bytes = sparse_triplet_bytes(value_bytes)
+    buffered_bytes = buffered_values * (2 * triplet_bytes + 2 * mask_bytes)
+    source_bytes = source_values * triplet_bytes
     if canonicalBatches:
-        return buffered_bytes + source_bytes + source_indexes
+        return buffered_bytes + source_bytes
     canonical_value_bytes = max(value_bytes, np.dtype(np.int64).itemsize)
     canonicalization_bytes = source_values * (
         4 * canonical_value_bytes + 6 * index_bytes + 4
     )
-    return buffered_bytes + source_bytes + source_indexes + canonicalization_bytes
+    return buffered_bytes + source_bytes + canonicalization_bytes
+
+
+def sparse_triplet_bytes(valueItemsize: int) -> int:
+    """Return the bytes of one buffered sparse value: int64 row and column and the value."""
+    return max(1, int(valueItemsize)) + 2 * np.dtype(np.int64).itemsize
 
 
 def row_band_task_count(nRows: int, bandRows: int) -> int:
@@ -214,6 +224,7 @@ def resolve_sparse_import_batch(
     producerStagingBytes: Callable[[int], int] | None = None,
     extraProducerBytes: Callable[[int], int] | None = None,
     canonicalBatches: bool = False,
+    alignedBatches: bool = False,
 ) -> SparseImportPlan:
     """Resolve sparse source rows for physical destination arrays."""
     return _resolve_sparse_import_geometries(
@@ -227,6 +238,7 @@ def resolve_sparse_import_batch(
         producerStagingBytes=producerStagingBytes,
         extraProducerBytes=extraProducerBytes,
         canonicalBatches=canonicalBatches,
+        alignedBatches=alignedBatches,
     )
 
 
@@ -242,6 +254,7 @@ def resolve_sparse_import_spec(
     producerStagingBytes: Callable[[int], int] | None = None,
     extraProducerBytes: Callable[[int], int] | None = None,
     canonicalBatches: bool = False,
+    alignedBatches: bool = False,
 ) -> SparseImportPlan:
     """Resolve sparse source rows before destination arrays are created."""
     return _resolve_sparse_import_geometries(
@@ -255,6 +268,7 @@ def resolve_sparse_import_spec(
         producerStagingBytes=producerStagingBytes,
         extraProducerBytes=extraProducerBytes,
         canonicalBatches=canonicalBatches,
+        alignedBatches=alignedBatches,
     )
 
 
@@ -270,11 +284,24 @@ def _resolve_sparse_import_geometries(
     producerStagingBytes: Callable[[int], int] | None = None,
     extraProducerBytes: Callable[[int], int] | None = None,
     canonicalBatches: bool = False,
+    alignedBatches: bool = False,
 ) -> SparseImportPlan:
     """Resolve source rows while admitting one complete destination write band.
 
     ``canonicalBatches`` states that the producer marks every source batch
     canonical, as :func:`sparse_producer_peak_bytes` describes.
+
+    A destination buffers at most a band and a batch less one row before it
+    cuts the band. ``alignedBatches`` states that the producer cuts batches of
+    the resolved rows one after another from a band boundary of every
+    destination, as from the first row, so that a destination whose band is
+    a whole number of batches buffers one band. The rows that a destination
+    buffers, or that one of its bands holds, hold at most the source's
+    nonzeros over those rows and at most one value of each of the
+    destination's features per row. A destination of a few features, such as
+    an antibody assay whose bands span every cell, is therefore charged its
+    own values, not every value of the source. A band holds its values in the
+    destination dtype, to which the buffer casts them.
     """
     destination_list = tuple(destinations)
     if not destination_list:
@@ -305,30 +332,79 @@ def _resolve_sparse_import_geometries(
         for geometry, _dtype in destination_list
     )
 
-    band_requirements: list[tuple[ArrayGeometry, np.dtype[Any], int, int]] = []
+    def destination_values(geometry: ArrayGeometry, window: int) -> int:
+        held = min(rows, window)
+        if held <= 0:
+            return 0
+        return min(max(0, int(maxWindowNnz(held))), held * int(geometry.shape[1]))
+
+    def buffered_rows(geometry: ArrayGeometry, width: int) -> int:
+        band_rows = geometry.axisShard(0)
+        if alignedBatches and band_rows % width == 0:
+            return band_rows
+        return band_rows + width - 1
+
+    band_requirements: list[tuple[ArrayGeometry, int]] = []
     if rows:
         for geometry, dtype in destination_list:
-            band_rows = min(rows, geometry.axisShard(0))
-            band_values = max(0, int(maxWindowNnz(band_rows)))
-            band_sparse_bytes = band_values * (
-                source_dtype.itemsize + 2 * np.dtype(np.int64).itemsize
+            band_values = destination_values(geometry, geometry.axisShard(0))
+            band_requirements.append(
+                (geometry, band_values * sparse_triplet_bytes(dtype.itemsize))
             )
-            band_requirements.append((geometry, dtype, band_values, band_sparse_bytes))
 
-    def producer_bytes(width: int, *, buffering: bool) -> int:
-        source_values = max(0, int(maxWindowNnz(width)))
-        buffered_values = (
-            max(0, int(maxWindowNnz(width + maximum_shard_rows))) if buffering else 0
+    def buffered_values(width: int) -> int:
+        # Each destination buffers its own features of the rows since its last
+        # band, and all of them together never more than the source holds
+        # over the batch and the tallest band.
+        return min(
+            max(0, int(maxWindowNnz(width + maximum_shard_rows))),
+            sum(
+                destination_values(geometry, buffered_rows(geometry, width))
+                for geometry, _dtype in destination_list
+            ),
         )
+
+    def kept_values(written: int, width: int) -> int:
+        # While a band of the ``written`` destination is written, that
+        # destination keeps the rows of the batch beyond the band, none when
+        # its bands end on batch boundaries, and every other destination at
+        # most the rows since its own last band; all of them together never
+        # more than the source holds over the batch and the tallest band.
+        geometry = destination_list[written][0]
+        if alignedBatches and geometry.axisShard(0) % width == 0:
+            kept = 0
+        else:
+            kept = destination_values(geometry, width - 1)
+        kept += sum(
+            destination_values(other, buffered_rows(other, width))
+            for index, (other, _dtype) in enumerate(destination_list)
+            if index != written
+        )
+        return min(max(0, int(maxWindowNnz(width + maximum_shard_rows))), kept)
+
+    def producer_extra_bytes(width: int) -> int:
+        return max(0, int(staging_bytes(width))) + max(0, int(extra_bytes(width)))
+
+    def buffering_bytes(width: int) -> int:
         return int(
             sparse_producer_peak_bytes(
-                buffered_values,
-                source_values,
+                buffered_values(width),
+                max(0, int(maxWindowNnz(width))),
                 value_itemsize,
                 canonicalBatches=canonicalBatches,
             )
-            + max(0, int(staging_bytes(width)))
-            + max(0, int(extra_bytes(width)))
+            + producer_extra_bytes(width)
+        )
+
+    def held_bytes(written: int, width: int) -> int:
+        # While a band is written, the producer holds the batch, its sorted
+        # copy unless batches arrive canonical, and the rows its buffers keep.
+        batch_copies = 1 if canonicalBatches else 2
+        source_values = max(0, int(maxWindowNnz(width)))
+        return int(
+            (batch_copies * source_values + kept_values(written, width))
+            * sparse_triplet_bytes(value_itemsize)
+            + producer_extra_bytes(width)
         )
 
     def admit(width: int) -> int:
@@ -336,7 +412,7 @@ def _resolve_sparse_import_geometries(
         # and cuts a band while no band is written, and it is suspended,
         # holding one source batch, while bands are written, so the two peaks
         # never coexist and each phase is admitted on its own.
-        producer_reserve = producer_bytes(width, buffering=True)
+        producer_reserve = buffering_bytes(width)
         admitted_worker_split(
             resources,
             nTasks=1,
@@ -346,29 +422,16 @@ def _resolve_sparse_import_geometries(
             taskBytes=lambda _: 1,
             requested=1,
         )
-        producer_held = producer_bytes(width, buffering=False)
-        for (
-            geometry,
-            destination_dtype,
-            band_values,
-            band_sparse_bytes,
-        ) in band_requirements:
+        for written, (geometry, band_sparse_bytes) in enumerate(band_requirements):
             dense_bytes, inner_bytes, n_chunks = _band_geometry(geometry)
-            conversion_bytes = (
-                band_values * destination_dtype.itemsize
-                if source_dtype != destination_dtype
-                else 0
-            )
-            if source_dtype.kind == "f" and destination_dtype.kind in "biu":
-                conversion_bytes += band_values * (source_dtype.itemsize + 1)
             admitted_worker_split(
                 resources,
                 nTasks=1,
                 residentBytes=max(0, int(residentBytes)),
-                reservedBytes=producer_held + band_sparse_bytes,
+                reservedBytes=held_bytes(written, width) + band_sparse_bytes,
                 reservedFor="the producer's source batch and the band's sparse values",
                 taskBytes=lambda inner: _row_band_task_peak(
-                    sourceBytes=conversion_bytes,
+                    sourceBytes=0,
                     denseBytes=dense_bytes,
                     innerChunkBytes=inner_bytes,
                     nChunks=n_chunks,
@@ -1409,6 +1472,9 @@ def accumulate_sparse_to_shards(
                         band,
                         source_bytes + buffer.residentBytes,
                     )
+                    # The write holds the band it was handed; keeping it here
+                    # would hold its values beside the next batch.
+                    del band
                 del batch, coo
             for band in buffer.finish():
                 yield SparseWriteBand(dst, band, buffer.residentBytes)
@@ -1544,6 +1610,7 @@ def sparse_counts_admission(
     producerStagingBytes: Callable[[int], int] | None = None,
     extraProducerBytes: Callable[[int], int] | None = None,
     canonicalBatches: bool = False,
+    alignedBatches: bool = False,
 ) -> Callable[[tuple[ZarrArraySpec, ...], ResourceBudget], object]:
     """Return the ``admitCounts`` of a sparse import for :func:`fit_count_layout`.
 
@@ -1566,6 +1633,7 @@ def sparse_counts_admission(
             producerStagingBytes=producerStagingBytes,
             extraProducerBytes=extraProducerBytes,
             canonicalBatches=canonicalBatches,
+            alignedBatches=alignedBatches,
         )
 
     return admit

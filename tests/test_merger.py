@@ -4398,7 +4398,7 @@ def test_dataset_merge_below_one_row_shards_fails_before_the_destination_exists(
             prepend_text="",
             seed=0,
             nthreads=1,
-            mem_budget=int(3.5 * 1024**2),
+            mem_budget=int(3.4 * 1024**2),
         ).dump()
     assert not path.exists()
 

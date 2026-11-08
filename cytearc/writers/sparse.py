@@ -440,6 +440,7 @@ class SparseToZarr:
                 sourceDtype=assay.matrix.dtype,
                 residentBytes=resident,
                 canonicalBatches=canonical_batches,
+                alignedBatches=True,
             ),
             requested=requested,
         )
@@ -483,6 +484,7 @@ class SparseToZarr:
             batchRows=batch_size,
             residentBytes=resident_bytes,
             canonicalBatches=canonical_batches,
+            alignedBatches=True,
         )
         self._lastImportPlan = plan
         resolved_batch_rows = plan.batchRows

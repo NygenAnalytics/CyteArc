@@ -440,8 +440,8 @@ def test_reads_that_are_mostly_zero_write_the_default_layout_in_less_memory(
         tmp_path / "zeros.h5", n_cells=2_000, n_variants=2, n_amplicons=300
     )
     reads = _zero_reads(file, 0.6)
-    # Planned as if every read were nonzero, the default layout needed about
-    # 168 MiB; these reads need about 80.
+    # Planned as if every read were nonzero, the default layout would need
+    # about 137 MiB; these reads need about 67.
     _write_store(file, tmp_path / "store.zarr", mem_budget=120 * 1024**2)
     root = zarr.open_group(str(tmp_path / "store.zarr"), mode="r")
     for name, columns in (("CNV", slice(0, 300)), ("ADT", slice(300, None))):
