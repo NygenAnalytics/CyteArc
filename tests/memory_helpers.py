@@ -65,3 +65,24 @@ def budgeted(budget: int | None, doing: str = "Calling clones") -> Any:
     from cytearc.utils.memory_budget import MemoryLedger
 
     return None if budget is None else MemoryLedger(budget, doing)
+
+
+def recording_ledger(doing: str = "Recording charges") -> Any:
+    """A memory ledger without a budget whose ``most`` records the most bytes held at once, peaks included."""
+    from cytearc.utils.memory_budget import MemoryLedger
+
+    class RecordingLedger(MemoryLedger):
+        def __init__(self) -> None:
+            super().__init__(None, doing)
+            self.most = 0
+
+        def hold(self, item, nbytes, *, remedy=None):
+            held = super().hold(item, nbytes, remedy=remedy)
+            self.most = max(self.most, self.held_bytes)
+            return held
+
+        def peak(self, item, nbytes, *, remedy=None):
+            super().peak(item, nbytes, remedy=remedy)
+            self.most = max(self.most, self.held_bytes + int(nbytes))
+
+    return RecordingLedger()

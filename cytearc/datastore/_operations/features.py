@@ -136,6 +136,7 @@ from ...metadata.selection import (
 )
 from ...metadata.rows import (
     read_array_rows_chunkwise,
+    read_metadata_label_rows,
     read_metadata_missing_rows,
     read_metadata_rows,
 )
@@ -244,6 +245,22 @@ def _hvg_batch_argument(batch: object, columns: Sequence[str]) -> None:
     if not isinstance(batch, ArtifactRef):
         raise TypeError("batch must be a cell metadata column name or an ArtifactRef")
     grouping_value_name(batch.kind)
+
+
+def _held_labels(
+    values: NDArray[Any] | pd.Categorical, held: NDArray[np.bool_]
+) -> list[Any]:
+    """Return the distinct labels of the cells that ``held`` marks, sorted.
+
+    A Categorical's labels are the categories that those cells' codes name,
+    as Python values, so no cell's label is made.
+    """
+    if not isinstance(values, pd.Categorical):
+        return sorted(set(values[held]))
+    named = np.bincount(
+        np.asarray(values.codes)[held], minlength=len(values.categories)
+    )
+    return sorted(values.categories[named > 0].tolist())
 
 
 #: The diagnostics that an HVG selection saves: how many features it selected,
@@ -3056,11 +3073,15 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
             expected_selection: ArtifactRef | None,
             live_idx: NDArray[np.int64] | None,
         ) -> tuple[
-            NDArray[Any], ArtifactRef | None, NDArray[np.int64], NDArray[np.bool_]
+            NDArray[Any] | pd.Categorical,
+            ArtifactRef | None,
+            NDArray[np.int64],
+            NDArray[np.bool_],
         ]:
             # A metadata grouping without a selection reads the cells of the
             # live I column, live_idx, without a snapshot, so compare.compute_bulk
-            # writes nothing.
+            # writes nothing. A categorical column is read as its cells' codes,
+            # which the bulk columns compare by code.
             if isinstance(source, str):
                 grouping: ArtifactRef | CellField = CellField(source)
             elif isinstance(source, ArtifactRef):
@@ -3068,7 +3089,9 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
             else:
                 raise TypeError("groups must be an ArtifactRef or column name")
             if live_idx is not None and isinstance(source, str):
-                labels = np.asarray(read_metadata_rows(self.cells, source, live_idx))
+                labels = read_metadata_label_rows(self.cells, source, live_idx)
+                if not isinstance(labels, pd.Categorical):
+                    labels = np.asarray(labels)
                 missing = read_metadata_missing_rows(self.cells, source, live_idx)
                 valid = valid_category_mask(labels, missing_mask=missing)
                 return labels, None, live_idx, valid
@@ -3077,6 +3100,7 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
                 self.cells,
                 grouping,
                 cell_selection=expected_selection,
+                categorical=True,
             )
             valid = valid_category_mask(
                 resolved.labels,
@@ -3126,15 +3150,15 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
             live_idx,
         )
         # Cells with a missing label join no group.
-        groups_set = sorted(set(group_values[labelled]))
-        secondary: tuple[NDArray[Any], list[Any]] | None = None
+        groups_set = _held_labels(group_values, labelled)
+        secondary: tuple[NDArray[Any] | pd.Categorical, list[Any]] | None = None
         if secondary_groups is not None:
             # Sub-groups are read over the cells of the primary groups'
             # selection, in the same order.
             sec_group_values, _selection, _cells, sec_valid = resolve_groups(
                 secondary_groups, resolved_selection, live_idx
             )
-            secondary = (sec_group_values, sorted(set(sec_group_values[sec_valid])))
+            secondary = (sec_group_values, _held_labels(sec_group_values, sec_valid))
             labelled &= sec_valid
 
         if from_assay is None and isinstance(groups, ArtifactRef):

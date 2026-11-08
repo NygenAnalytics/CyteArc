@@ -22,6 +22,7 @@ from ...clones.groups import group_names
 from ...metadata.rows import (
     array_row_selection_parts,
     metadata_missing_mask,
+    read_categorical_rows,
     read_rows,
     read_text_rows,
 )
@@ -205,28 +206,32 @@ def selection_chunk_bytes(zw: zarr.Group, selection: ArtifactRef) -> int:
 
 def _column_values(
     ledger: MemoryLedger, cells: MetaData, column: str, cell_index: np.ndarray
-) -> tuple[np.ndarray, np.ndarray | None, int]:
+) -> tuple[np.ndarray | pd.Categorical, np.ndarray | None, int]:
     """Read a column's rows of the cells, text as Python strings, and its missing mask.
 
     Each string beyond ASCII is charged beside it the UTF-8 form that coding
     the labels leaves in it, as
-    :func:`~cytearc.metadata.selection.hashed_text_bytes` counts it; the
-    rows of a categorical column share one string per category.
+    :func:`~cytearc.metadata.selection.hashed_text_bytes` counts it. A
+    categorical column is read as a pandas Categorical of the cells' codes,
+    which :func:`~cytearc.metadata.selection.category_codes` codes through
+    its categories, so no cell's label is made.
 
     Returns:
-        The values, the mask or None, and the bytes that both keep charged.
+        The values or the Categorical, the mask or None, and the bytes that
+        both keep charged.
     """
     array = cells._get_array(column)
     item = f"the labels of {quoted_value(column)}"
     charged = ledger.charged
-    if np.dtype(array.dtype).kind == "U":
+    values: np.ndarray | pd.Categorical
+    if isinstance(array, CategoricalColumn):
+        values = read_categorical_rows(ledger, array, cell_index, item=item)
+        if array.dtype.kind == "U":
+            # pandas hashes the categories to check that they differ.
+            ledger.hold(item, hashed_text_bytes(array.categories.tolist()))
+    elif np.dtype(array.dtype).kind == "U":
         values = read_text_rows(ledger, array, cell_index, item=item)
-        strings = (
-            array.categories.tolist()
-            if isinstance(array, CategoricalColumn)
-            else values
-        )
-        ledger.hold(item, hashed_text_bytes(strings))
+        ledger.hold(item, hashed_text_bytes(values))
     else:
         values = read_rows(ledger, array, cell_index, item=item)
     mask = metadata_missing_mask(cells, column)
