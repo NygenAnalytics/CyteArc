@@ -43,6 +43,7 @@ from cytearc.storage.artifacts import ArtifactRef
 from cytearc.storage.count_matrix import CountMatrixPolicy
 from cytearc.storage.errors import ArtifactResolutionError
 from cytearc.storage.finite_values import NonFiniteArtifactError
+from cytearc.storage.huggingface import _FetchAbandoned
 from cytearc.perturbation.histograms import HistogramMemoryError
 from cytearc.storage.sharding import CountLayoutMemoryError
 from cytearc.trajectory import PseudotimeConvergenceError, SourceSinkLabelsError
@@ -58,6 +59,7 @@ SAMPLES: dict[type[BaseException], Callable[[], BaseException]] = {
     ),
     PipelineCancelled: lambda: PipelineCancelled(RUN_ID, "pca", "stopped"),
     _SourceConflict: lambda: _SourceConflict("The sources disagree on 'batch'"),
+    _FetchAbandoned: lambda: _FetchAbandoned(),
     RefusedTokens: lambda: RefusedTokens([3, 5], [("EMX1", "GTNAG"), (None, "Q")]),
     UnmeasuredCellsError: lambda: UnmeasuredCellsError(
         "run_pca", "ADT", "ADT_I", 2, 9, "graph"
