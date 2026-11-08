@@ -164,14 +164,18 @@ After opening a writable store, use the same analysis calls as for local data.
 
 ## Time limits of Hugging Face stores
 
-CyteArc reads an `hf://` URI, such as a [CyteBase dataset](../tutorials/cytebase_datasets.md), through Hugging Face's file system. `storage_options` takes that file system's options, such as `"token": False` for anonymous reads, and two time limits in seconds that bound each read or listing of the store:
+CyteArc reads an `hf://` URI, such as a [CyteBase dataset](../tutorials/cytebase_datasets.md), from Hugging Face. `storage_options` takes the options of Hugging Face's file system, such as `"token": False` for anonymous reads, and two time limits in seconds that bound each read or listing of the store:
 
 | Option | Default | Limit |
 |---|---|---|
 | `request_timeout` | `60` | Each attempt at a read or listing |
 | `retry_timeout` | `180` | The read or listing with all of its attempts |
 
-An attempt that runs out of time, loses its connection, or receives a 408 or 5xx response is retried after 2, 4, 8 and more seconds, or after the delay the server asks for if that is longer. When the next attempt could not start within `retry_timeout`, the read raises `TimeoutError`, which names the store, the key and the time limit. A 429 response, which asks the reader to slow down, is retried at most three times, after the delay it asks for or after 2, 4 and 8 seconds if that is longer, and only for a delay of up to 300 seconds; that wait does not count toward `retry_timeout`.
+An attempt that runs out of time, loses its connection, or receives a 408 or 5xx response is retried after 2, 4, 8 and more seconds, or after the delay the server asks for if that is longer. When the next attempt could not start within `retry_timeout`, the read or listing raises `TimeoutError`, which names it, the store and the time limit. A 429 response, which asks the reader to slow down, is retried at most three times, after the delay it asks for or after 2, 4 and 8 seconds if that is longer, and only for a delay of up to 300 seconds; that wait does not count toward `retry_timeout`.
+
+A store opened read-only lists its objects once, the first time it needs them, with one request to Hugging Face's API for each page of the listing; a CyteBase dataset fits on one page. Each read is then one request to Hugging Face's file resolver for exactly the bytes it needs, and a key that the listing does not hold reads as missing without a request. The listing is a snapshot: the store does not see objects written after it listed them, and reading a listed object that has since been deleted raises `OSError`. Reopen the store to read what it holds now. A writable store reads through Hugging Face's file system.
+
+Hugging Face limits the API and resolver requests of each account, and of each network address for anonymous requests, over 5-minute windows ([Hub rate limits](https://huggingface.co/docs/hub/rate-limits)). Anonymous readers on one address share its limits, so pass a token in `storage_options`, or log in to Hugging Face, to read under your own account's limits.
 
 On a slow connection, give the reads more time:
 

@@ -16,13 +16,7 @@ from typing import Any, Self
 
 import numpy as np
 import zarr
-from zarr.abc.store import (
-    ByteRequest,
-    OffsetByteRequest,
-    RangeByteRequest,
-    Store,
-    SuffixByteRequest,
-)
+from zarr.abc.store import ByteRequest, Store
 from zarr.codecs import Crc32cCodec
 from zarr.core.array_spec import ArrayConfig, ArraySpec
 from zarr.core.buffer import Buffer, BufferPrototype, default_buffer_prototype
@@ -33,7 +27,11 @@ from ..storage.artifacts import fingerprint_stored_arrays
 from ..storage.geometry import ArrayGeometry
 from ..storage.identity import count_fingerprint, validate_preparation
 from ..storage.profiles import ZarrLocation, is_remote_zarr_location
-from ..storage.stores import resolve_source_location, store_location
+from ..storage.stores import (
+    byte_request_span,
+    resolve_source_location,
+    store_location,
+)
 from ..storage.types import as_zarr_array, as_zarr_group, complete_chunks
 from ..storage.virtual_arrays import VirtualArrayReader, VirtualArrayStore
 from .reader import CompositeArrayReader
@@ -58,19 +56,6 @@ def refuse_composite(root: zarr.Group, *, operation: str) -> None:
 
 def _bytes(document: dict[str, Any]) -> bytes:
     return json.dumps(document, allow_nan=False, separators=(",", ":")).encode()
-
-
-def _limits(request: ByteRequest | None, size: int) -> tuple[int, int]:
-    match request:
-        case None:
-            return 0, size
-        case RangeByteRequest(start=start, end=end):
-            return min(start, size), min(end, size)
-        case OffsetByteRequest(offset=start):
-            return min(start, size), size
-        case SuffixByteRequest(suffix=suffix):
-            return max(0, size - suffix), size
-    raise TypeError(f"Unsupported byte request: {request!r}")
 
 
 def _array_spec(
@@ -355,7 +340,7 @@ class CompositeStore(WrapperStore[Store], VirtualArrayStore):
             raise ValueError(f"Composite array metadata is missing: {path}")
         if key == path + "/zarr.json":
             metadata = _bytes(document)
-            start, stop = _limits(byte_range, len(metadata))
+            start, stop = byte_request_span(byte_range, len(metadata))
             return prototype.buffer.from_bytes(metadata[start:stop])
         shard = self._shard(path, key)
         if shard is None:
@@ -365,7 +350,7 @@ class CompositeStore(WrapperStore[Store], VirtualArrayStore):
         count = math.prod(grid)
         chunk_bytes = math.prod(chunks) * dtype.itemsize
         data_bytes = count * chunk_bytes
-        start, stop = _limits(byte_range, data_bytes + count * 16 + 4)
+        start, stop = byte_request_span(byte_range, data_bytes + count * 16 + 4)
         result = bytearray(max(0, stop - start))
         data_stop = min(stop, data_bytes)
         if start == 0 and data_stop == data_bytes:

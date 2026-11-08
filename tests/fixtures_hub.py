@@ -253,7 +253,9 @@ class LoopbackHub(ThreadingHTTPServer):
     status. The kinds are
     ``"bucket"``, the bucket's lookup, ``"tree"``, a listing, and ``"file"``,
     a file's bytes. A request that its plan does not cover is served, and
-    ``requests`` records the kind and path of each.
+    ``requests`` records the kind and path of each. ``received`` records them
+    with what else the request asked: ``"recursive"`` or ``"directory"`` for a
+    listing, and the ``Range`` header, or None, for a file.
     """
 
     daemon_threads = True
@@ -263,6 +265,7 @@ class LoopbackHub(ThreadingHTTPServer):
         self.root = root
         self.plan: dict[str, list[str | int | tuple[int, dict[str, str]]]] = {}
         self.requests: list[tuple[str, str]] = []
+        self.received: list[tuple[str, str, str | None]] = []
         self.closing = threading.Event()
         self._lock = threading.Lock()
 
@@ -270,9 +273,12 @@ class LoopbackHub(ThreadingHTTPServer):
     def endpoint(self) -> str:
         return f"http://127.0.0.1:{self.server_address[1]}"
 
-    def take(self, kind: str, path: str) -> str | int | tuple[int, dict[str, str]]:
+    def take(
+        self, kind: str, path: str, detail: str | None = None
+    ) -> str | int | tuple[int, dict[str, str]]:
         with self._lock:
             self.requests.append((kind, path))
+            self.received.append((kind, path, detail))
             planned = self.plan.get(kind)
             return planned.pop(0) if planned else "serve"
 
@@ -320,7 +326,15 @@ class _LoopbackHandler(BaseHTTPRequestHandler):
             self._json(404, {"error": f"No route for {url.path}"})
             return
         path = path.lstrip("/")
-        planned = self.server.take(kind, path)
+        recursive = parse_qs(url.query).get("recursive") == ["true"]
+        detail = (
+            ("recursive" if recursive else "directory")
+            if kind == "tree"
+            else self.headers.get("Range")
+            if kind == "file"
+            else None
+        )
+        planned = self.server.take(kind, path, detail)
         if planned == "stall":
             # Once the hub closes, end the request with a status that
             # huggingface_hub never retries, so that a client which gave up on
@@ -343,7 +357,7 @@ class _LoopbackHandler(BaseHTTPRequestHandler):
                 },
             )
         elif kind == "tree":
-            self._tree(path, parse_qs(url.query).get("recursive") == ["true"])
+            self._tree(path, recursive)
         else:
             self._file(path)
 
