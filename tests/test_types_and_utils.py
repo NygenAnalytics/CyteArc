@@ -45,6 +45,7 @@ from cytearc.utils.arrays import (
     read_only_copy,
     sparse_matrix_bytes,
 )
+from cytearc.utils.errors import raise_collected_errors
 from cytearc.utils.progress import iter_progress
 
 
@@ -293,6 +294,66 @@ def test_progress_iterator_closes_source_on_early_exit():
     # Closing the stream closes the source before it produces its second item.
     assert closed
     assert len(produced) == 1
+
+
+def test_raise_collected_errors_raises_nothing_without_errors():
+    errors: list[BaseException] = []
+    raise_collected_errors(errors, "cleanup failed")
+    raise_collected_errors(errors, "cleanup failed", ended_by=ValueError("ended"))
+    assert errors == []
+
+
+def test_raise_collected_errors_raises_one_error_as_itself():
+    error = OSError("close failed")
+    errors: list[BaseException] = [error]
+    with pytest.raises(OSError) as caught:
+        raise_collected_errors(errors, "cleanup failed")
+    assert caught.value is error
+    assert errors == []
+
+
+def test_raise_collected_errors_groups_errors_behind_the_one_that_ended_the_work():
+    ended = ValueError("read failed")
+    first, second = OSError("close failed"), RuntimeError("shutdown failed")
+    errors: list[BaseException] = [first, second]
+    with pytest.raises(BaseExceptionGroup, match="cleanup failed") as caught:
+        raise_collected_errors(errors, "cleanup failed", ended_by=ended)
+    assert list(caught.value.exceptions) == [ended, first, second]
+    assert errors == []
+
+
+def test_raise_collected_errors_leaves_out_the_exit_of_a_closed_generator():
+    error = OSError("close failed")
+    with pytest.raises(OSError) as caught:
+        raise_collected_errors([error], "cleanup failed", ended_by=GeneratorExit())
+    assert caught.value is error
+
+
+def test_a_frame_that_raises_collected_errors_is_freed_without_a_collection():
+    held: list[weakref.ref] = []
+
+    def clean_up() -> None:
+        data = np.ones(1_000)
+        held.append(weakref.ref(data))
+        errors: list[BaseException] = []
+        try:
+            raise OSError("close failed")
+        except OSError as error:
+            errors.append(error)
+        # The error's traceback refers to this frame, which holds ``errors``.
+        raise_collected_errors(errors, "cleanup failed")
+
+    enabled = gc.isenabled()
+    gc.disable()
+    try:
+        try:
+            clean_up()
+        except OSError:
+            pass
+        assert held[0]() is None
+    finally:
+        if enabled:
+            gc.enable()
 
 
 def test_rolling_window_smoothes_along_rows():

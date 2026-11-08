@@ -1,12 +1,12 @@
 import threading
-import sys
 from collections import deque
 from collections.abc import Callable, Generator, Iterable, Iterator
-from concurrent.futures import CancelledError, Future, ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import contextmanager
 from typing import Any, Literal
 
 
+from ..utils.errors import raise_collected_errors
 from ..utils.shutdown import shutdown_checkpoint
 
 __all__ = ["stream_shards", "in_shard_context"]
@@ -14,6 +14,8 @@ __all__ = ["stream_shards", "in_shard_context"]
 type Backend = Literal["thread", "serial"]
 
 _shard_ctx = threading.local()
+
+_CLEANUP_FAILED = "Block stream failed during cleanup"
 
 
 def in_shard_context() -> bool:
@@ -73,6 +75,10 @@ def _imap_ordered(
         pending.append(executor.submit(worker, item))
         return True
 
+    # The error that ends the stream is caught by name rather than read in a
+    # ``finally``: Python unbinds the name when the clause ends, so this frame
+    # never keeps an error whose traceback refers back to it. That reference
+    # cycle would keep the read-ahead blocks until the cycle collector ran.
     try:
         for _ in range(workers):
             if not enqueue():
@@ -80,35 +86,57 @@ def _imap_ordered(
         while pending:
             result = pending.popleft().result()
             shutdown_checkpoint()
-            yield result
-            del result
-            enqueue()
-    finally:
-        original = sys.exception()
-        errors: list[BaseException] = []
-        for future in pending:
-            future.cancel()
-        try:
-            executor.shutdown(wait=True, cancel_futures=True)
-        except BaseException as exc:
-            errors.append(exc)
-        for future in pending:
             try:
-                future.result()
-            except CancelledError:
-                pass
-            except BaseException as exc:
-                errors.append(exc)
-        try:
-            _close_iterator(iterator)
-        except BaseException as exc:
-            errors.append(exc)
-        if errors:
-            if original is not None and not isinstance(original, GeneratorExit):
-                errors.insert(0, original)
-            if len(errors) == 1:
-                raise errors[0]
-            raise BaseExceptionGroup("Block stream failed during cleanup", errors)
+                yield result
+            finally:
+                del result
+            enqueue()
+    except BaseException as error:
+        raise_collected_errors(
+            _stop_reads(executor, pending, iterator), _CLEANUP_FAILED, ended_by=error
+        )
+        raise
+    raise_collected_errors(_stop_reads(executor, pending, iterator), _CLEANUP_FAILED)
+
+
+def _stop_reads(
+    executor: ThreadPoolExecutor,
+    pending: deque[Future[Any]],
+    iterator: Iterator[Any],
+) -> list[BaseException]:
+    """Stop a stream's reads and close its items, returning what failed.
+
+    Reads that have not started are cancelled, and running reads finish before
+    this returns. ``pending`` is empty afterwards, so no finished block outlives
+    the stream. The caller raises the errors through ``raise_collected_errors``,
+    which empties the list, so no frame here keeps one.
+    """
+    errors: list[BaseException] = []
+    for future in pending:
+        future.cancel()
+    try:
+        executor.shutdown(wait=True, cancel_futures=True)
+    except BaseException as error:
+        errors.append(error)
+    while pending:
+        _collect_failure(pending.popleft(), errors)
+    try:
+        _close_iterator(iterator)
+    except BaseException as error:
+        errors.append(error)
+    return errors
+
+
+def _collect_failure(future: Future[Any], errors: list[BaseException]) -> None:
+    """Add the error of a stopped read to ``errors``, unless it was cancelled or succeeded."""
+    try:
+        failure = None if future.cancelled() else future.exception()
+    except BaseException as error:
+        # An interruption while a read that a failed shutdown left still runs.
+        errors.append(error)
+        return
+    if failure is not None:
+        errors.append(failure)
 
 
 def _progress(
