@@ -5,7 +5,6 @@ template. A test that writes copies the template, and the tests of refused
 calls share one copy, which they check is left as it was.
 """
 
-import warnings
 from collections.abc import Iterator
 from types import SimpleNamespace
 
@@ -19,8 +18,8 @@ from cytearc.perturbation.efficiency import (
     efficiency_arrays,
     target_features,
 )
-from cytearc.storage.artifacts import ArtifactRef, inspect_artifact
-from tests.perturbation_helpers import fixed_labels, write_screen
+from cytearc.storage.artifacts import ArtifactRef, artifact_path, inspect_artifact
+from tests.perturbation_helpers import fixed_labels, warned, write_screen
 from tests.storage_helpers import copy_store, open_store, write_count_store, written
 
 # Guides, their targets and the feature IDs of the targets. RNA4 has no ID and
@@ -235,13 +234,23 @@ def test_targets_match_by_name_without_an_id_column(store, template) -> None:
 def _warned_efficiency(
     store: DataStore, *args, **kwargs
 ) -> tuple[ArtifactRef, list[str]]:
-    """Measure efficiency, and return the table with the messages it warns."""
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        table = store.perturbation.efficiency(*args, **kwargs)
-    return table, [
-        str(entry.message) for entry in caught if entry.category is UserWarning
-    ]
+    """Measure efficiency, and return the table with every warning that CyteArc gives or logs.
+
+    Each one must be a DiagnosticWarning of the rows without a feature, given
+    once with the number that the table saved.
+    """
+    table, texts, diagnostic = warned(
+        lambda: store.perturbation.efficiency(*args, **kwargs)
+    )
+    assert texts == [str(warning) for warning in diagnostic]
+    saved = store.artifacts.inspect(table).diagnostics["rowsWithoutFeature"]
+    for warning in diagnostic:
+        assert (warning.operation, warning.diagnostic, warning.value) == (
+            "measure_perturbation_efficiency",
+            "rowsWithoutFeature",
+            saved,
+        )
+    return table, texts
 
 
 def test_a_reused_table_repeats_the_warning_of_the_measured_one(
@@ -256,6 +265,10 @@ def test_a_reused_table_repeats_the_warning_of_the_measured_one(
         "1 of 5 rows have no feature of assay 'RNA' for their target, for example "
         "'GENE_C'. Check id_column, or the target names against the feature names."
     ]
+    assert store.artifacts.inspect(measured).diagnostics == {
+        "rowsWithoutFeature": 1,
+        "rowWithoutFeatureExamples": ["'GENE_C'"],
+    }
     assert _warned_efficiency(store, labels) == (measured, messages)
     # By name, only RNA4 matches a feature, so the warning names four rows.
     by_name, messages = _warned_efficiency(store, labels, id_column=None)
@@ -264,13 +277,44 @@ def test_a_reused_table_repeats_the_warning_of_the_measured_one(
         "'GENE_A', 'GENE_B', 'GENE_C', 'GENE_D'. Check id_column, or the target "
         "names against the feature names."
     ]
+    assert store.artifacts.inspect(by_name).diagnostics == {
+        "rowsWithoutFeature": 4,
+        "rowWithoutFeatureExamples": ["'GENE_A'", "'GENE_B'", "'GENE_C'", "'GENE_D'"],
+    }
     assert _warned_efficiency(store, labels, id_column=None) == (by_name, messages)
     # With GENE_C a control, every row matches a feature, and neither the
     # measured nor the reused table warns.
     matched = fixed_labels(store, ["Non-Targeting", "GENE_C"])
     quiet = _warned_efficiency(store, matched)
     assert quiet[1] == []
+    assert store.artifacts.inspect(quiet[0]).diagnostics == {
+        "rowsWithoutFeature": 0,
+        "rowWithoutFeatureExamples": [],
+    }
     assert _warned_efficiency(store, matched) == quiet
+
+
+def test_a_table_saved_without_diagnostics_is_measured_anew(store, template) -> None:
+    labels = template.labels
+    saved, messages = _warned_efficiency(store, labels)
+    # As a table saved before efficiency saved diagnostics.
+    del store.zw[artifact_path(saved)].attrs["diagnostics"]
+    operation = "measure_perturbation_efficiency"
+    with pytest.raises(ValueError, match=f"holds no diagnostics, which {operation}"):
+        store.artifacts.inspect(saved).diagnostics
+    with pytest.raises(ValueError, match=r"call ds\.perturbation\.efficiency again"):
+        store.perturbation.load_efficiency(saved)
+
+    measured, again = _warned_efficiency(store, labels)
+
+    assert measured != saved
+    assert again == messages
+    assert store.artifacts.inspect(measured).diagnostics["rowsWithoutFeature"] == 1
+    for name in ("status", "remaining_fraction", "p_value"):
+        np.testing.assert_array_equal(
+            store.artifacts.load(measured)[name][:],
+            store.artifacts.load(saved)[name][:],
+        )
 
 
 def test_efficiency_is_reused_and_follows_its_inputs(store, template) -> None:
@@ -497,6 +541,10 @@ def test_the_warning_by_guide_names_each_guide_and_its_target(store, template) -
         "guide 'CRISPR5' (target 'GENE_C'). Check id_column, or the target names "
         "against the feature names."
     ]
+    assert store.artifacts.inspect(measured).diagnostics == {
+        "rowsWithoutFeature": 1,
+        "rowWithoutFeatureExamples": ["guide 'CRISPR5' (target 'GENE_C')"],
+    }
     assert _warned_efficiency(store, labels, by="guide") == (measured, messages)
 
 

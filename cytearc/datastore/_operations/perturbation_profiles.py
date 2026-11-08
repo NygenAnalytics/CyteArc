@@ -1,6 +1,6 @@
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pandas as pd
@@ -20,8 +20,10 @@ from ...storage.artifacts import (
     ArtifactRef,
     artifact_group,
     fingerprint_strings,
+    inspect_artifact,
     require_complete_artifact,
 )
+from ...storage.diagnostics import EXAMPLES, DiagnosticRule, warn_diagnostics
 from ...storage.types import as_zarr_array, read_array
 from ...storage.validation_scope import validation_scoped
 from ...utils.arguments import bool_argument
@@ -29,7 +31,6 @@ from ...utils.compute import process_thread_limit
 from ...utils.logging import logger
 from ...utils.memory_budget import MemoryLedger
 from ...utils.numba import numba_threads
-from ...utils.warnings import warn
 from .cell_samples import read_cell_samples, require_cell_column
 from .perturbation_store import (
     _LabelRows,
@@ -81,35 +82,50 @@ class _ProfileCells:
     control: np.ndarray
 
 
-def _left_out_warning(
-    names: np.ndarray,
-    n_cells: np.ndarray,
-    n_rows: int,
-    min_cells: int,
-    rows: str,
-    cells: str,
-) -> str | None:
-    """Name the perturbations without a profile, or return None when every one has one.
+def _left_out_diagnostics(names: np.ndarray, n_cells: np.ndarray) -> dict[str, Any]:
+    """Return the diagnostics of profiles: the perturbations that get none.
 
     Args:
         names: The perturbations with fewer than ``min_cells`` cells.
         n_cells: Their cells.
+    """
+    return {
+        "leftOutPerturbations": len(names),
+        "leftOutPerturbationExamples": [
+            f"{str(name)!r} ({int(count)})"
+            for name, count in zip(names[:EXAMPLES], n_cells[:EXAMPLES], strict=True)
+        ],
+    }
+
+
+def _left_out_rules(
+    n_rows: int, min_cells: int, rows: str, cells: str
+) -> tuple[DiagnosticRule, ...]:
+    """The warning of profiles that leave perturbations out, from their diagnostics.
+
+    Args:
         n_rows: The perturbations of the labels.
         min_cells: The fewest cells of a profiled perturbation.
         rows: What the perturbations are, ``"targets"`` or ``"guides"``.
         cells: What their cells are, such as ``"knocked-out cells"``.
     """
-    if not len(names):
-        return None
-    examples = ", ".join(
-        f"{str(name)!r} ({int(count)})"
-        for name, count in zip(names[:5], n_cells[:5], strict=True)
-    )
-    more = ", and more" if len(names) > 5 else ""
+
+    def left_out(numbers: Mapping[str, Any]) -> str:
+        count = int(numbers["leftOutPerturbations"])
+        examples = list(numbers["leftOutPerturbationExamples"])
+        more = ", and more" if count > len(examples) else ""
+        return (
+            f"{count} of {n_rows} {rows} have fewer than {min_cells} {cells} and "
+            f"get no profile: {', '.join(examples)}{more}. "
+            "perturbation.load_profiles lists them all in left_out."
+        )
+
     return (
-        f"{len(names)} of {n_rows} {rows} have fewer than {min_cells} {cells} "
-        f"and get no profile: {examples}{more}. perturbation.load_profiles lists "
-        "them all in left_out."
+        DiagnosticRule(
+            "leftOutPerturbations",
+            applies=lambda numbers: bool(numbers["leftOutPerturbations"]),
+            message=left_out,
+        ),
     )
 
 
@@ -221,17 +237,24 @@ class _PerturbationProfileOperationsMixin(_PerturbationProfileOperationsBase):
         Mixscape called knocked out count, among the cells of the classes, so
         that escapers do not dilute the profiles; a control guide keeps its
         cells. A perturbation with fewer than ``min_cells`` cells, 25 as in
-        Replogle et al., gets no profile and is named in a warning, which a
-        reused result repeats. With ``mask_targets``, each profile's own
-        target feature is set to 0, the control mean, so that the knockdown
-        of the target itself does not make two perturbations alike; a target
-        is matched to a feature as
+        Replogle et al., gets no profile. With ``mask_targets``, each profile's
+        own target feature is set to 0, the control mean, so that the
+        knockdown of the target itself does not make two perturbations alike;
+        a target is matched to a feature as
         :meth:`~cytearc.datastore.namespaces.PerturbationAccessor.efficiency`
         matches it, and control guides mask nothing.
 
         The counts are read twice, the control cells and then the cells of
         the profiled perturbations, in bands of features that fit the memory
         budget, and the profiles do not depend on the bands or the threads.
+
+        The profiles save their diagnostics, which
+        ``ds.artifacts.inspect(profiles).diagnostics`` returns:
+        ``leftOutPerturbations``, the perturbations with fewer than
+        ``min_cells`` cells, and ``leftOutPerturbationExamples``, up to five of
+        them with their cells, such as ``'GENE_C' (12)``. Such perturbations
+        give a ``DiagnosticWarning`` each time the profiles are computed or
+        reused.
 
         Args:
             labels: A ``perturbation_labels`` artifact, or a
@@ -435,13 +458,11 @@ class _PerturbationProfileOperationsMixin(_PerturbationProfileOperationsBase):
                 ),
             ),
         )
-        left_out = _left_out_warning(
-            rows.names[thin].astype(str), sizes[thin], n_rows, floor, f"{by}s", noun
-        )
+        left_out = _left_out_rules(n_rows, floor, f"{by}s", noun)
         if planned.reused:
-            # Saved profiles warn as they did when they were computed.
-            if left_out is not None:
-                warn(left_out)
+            warn_diagnostics(
+                arguments, inspect_artifact(self.zw, planned.ref).diagnostics, left_out
+            )
             return planned.ref
         # Each labelled cell's position, perturbation and flag, each read
         # cell's position, sample and total, the float32 profiles, and each
@@ -563,9 +584,11 @@ class _PerturbationProfileOperationsMixin(_PerturbationProfileOperationsBase):
                 "control_sd": sds,
             },
             attributes={"sample_names": sample_names},
+            diagnostics=_left_out_diagnostics(rows.names[thin], sizes[thin]),
         )
-        if left_out is not None:
-            warn(left_out)
+        warn_diagnostics(
+            arguments, inspect_artifact(self.zw, planned.ref).diagnostics, left_out
+        )
         flat = int(np.count_nonzero(n_zero_sd))
         logger.info(
             f"Computed the profiles of {n_kept} {by}s in {n_features} features "
@@ -596,7 +619,9 @@ class _PerturbationProfileOperationsMixin(_PerturbationProfileOperationsBase):
 
         Raises:
             TypeError: If ``profiles`` is not an ArtifactRef.
-            ValueError: If it is not a ``perturbation_profiles`` artifact.
+            ValueError: If it is not a ``perturbation_profiles`` artifact, or
+                profiles saved without their diagnostics, as earlier releases
+                saved them; the error names the call that computes them anew.
             KeyError: If the store holds no such artifact.
             RuntimeError: If the artifact is incomplete, as a call that
                 stopped before it finished leaves it.
@@ -738,10 +763,11 @@ class _PerturbationProfileOperationsMixin(_PerturbationProfileOperationsBase):
         Raises:
             TypeError: If an argument has the wrong type.
             ValueError: If ``profiles`` is not a ``perturbation_profiles``
-                artifact, ``perturbations`` names a perturbation without a
-                profile, fewer than 3 perturbations or 2 features remain,
-                ``min_samples`` exceeds the perturbations, or a setting is
-                unknown or outside its range.
+                artifact or was saved without its diagnostics, as earlier
+                releases saved them, ``perturbations`` names a perturbation
+                without a profile, fewer than 3 perturbations or 2 features
+                remain, ``min_samples`` exceeds the perturbations, or a
+                setting is unknown or outside its range.
             PermissionError: If the store is read-only and the clusters are
                 not saved yet.
             MemoryError: If the profiles and the distances between them,
@@ -880,7 +906,9 @@ class _PerturbationProfileOperationsMixin(_PerturbationProfileOperationsBase):
 
         Raises:
             TypeError: If ``clusters`` is not an ArtifactRef.
-            ValueError: If it is not a ``perturbation_clusters`` artifact.
+            ValueError: If it is not a ``perturbation_clusters`` artifact, or
+                its profiles were saved without their diagnostics, as earlier
+                releases saved them.
             KeyError: If the store holds no such artifact.
             RuntimeError: If the artifact is incomplete, as a call that
                 stopped before it finished leaves it.

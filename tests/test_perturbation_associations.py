@@ -48,7 +48,7 @@ from cytearc.perturbation.p_values import (
     skew_normal_tail_ratios,
 )
 from cytearc.perturbation.random_sets import resampling_keys
-from cytearc.storage.artifacts import ArtifactRef
+from cytearc.storage.artifacts import ArtifactRef, artifact_path
 from cytearc.utils.logging import logger
 from cytearc.utils.memory_budget import MemoryBudgetError
 from tests.perturbation_helpers import (
@@ -57,6 +57,7 @@ from tests.perturbation_helpers import (
     record_cell_reads,
     size_root,
     use_python_kernels,
+    warned,
     write_screen,
 )
 from tests.storage_helpers import open_store
@@ -1420,13 +1421,39 @@ def _every_gene(store: DataStore) -> ArtifactRef:
 def _warned_associations(
     store: DataStore, *args, **kwargs
 ) -> tuple[ArtifactRef, list[str]]:
-    """Run association tests, and return them with the messages they warn."""
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        tests = store.perturbation.associations(*args, **kwargs)
-    return tests, [
-        str(entry.message) for entry in caught if entry.category is UserWarning
-    ]
+    """Run association tests, and return them with every warning that CyteArc gives or logs.
+
+    Each one is given once: the call's warning about targets without a feature
+    for a positive control, or a DiagnosticWarning of the value of the
+    diagnostic that the tests saved.
+    """
+    tests, texts, diagnostic = warned(
+        lambda: store.perturbation.associations(*args, **kwargs)
+    )
+    saved = store.artifacts.inspect(tests).diagnostics
+    for warning in diagnostic:
+        assert warning.operation == "test_perturbation_associations"
+        assert warning.value == saved[warning.diagnostic]
+    # The call names the targets without a feature for a positive control
+    # before it plans; every other warning comes from the saved diagnostics.
+    calls = [text for text in texts if " for a positive control, for example " in text]
+    assert texts == calls + [str(warning) for warning in diagnostic]
+    return tests, texts
+
+
+def _calibration(store: DataStore, tests: ArtifactRef) -> dict[str, object]:
+    """Return the diagnostics of the tests' calibration check."""
+    saved = store.artifacts.inspect(tests).diagnostics
+    return {
+        key: saved[key]
+        for key in (
+            "calibrationStatus",
+            "controlGuides",
+            "calibrationGrade",
+            "falseDiscoveries",
+            "negativeControlPairs",
+        )
+    }
 
 
 @dataclass(frozen=True)
@@ -1924,6 +1951,14 @@ def test_associations_without_a_calibration_check(shared, tmp_path) -> None:
     assert skipped.calibration.empty and skipped.calibration_grade == "none"
     # A check that is turned off raises no warning.
     assert not [message for message in messages if "calibration" in message]
+    # The control cells carry the screen's four control guides.
+    assert _calibration(store, tests) == {
+        "calibrationStatus": "off",
+        "controlGuides": 4,
+        "calibrationGrade": "none",
+        "falseDiscoveries": 0,
+        "negativeControlPairs": 0,
+    }
     # One control guide makes no group of two.
     guides = OPERATION_GUIDES.copy()
     guides[:, 4] = guides[:, 4:].max(axis=1)
@@ -1936,6 +1971,13 @@ def test_associations_without_a_calibration_check(shared, tmp_path) -> None:
         "Control cells with one guide carry 1 control guide, fewer than the 2"
     )
     assert messages[0].endswith("so no calibration check was run")
+    assert _calibration(single, tests) == {
+        "calibrationStatus": "few_control_guides",
+        "controlGuides": 1,
+        "calibrationGrade": "none",
+        "falseDiscoveries": 0,
+        "negativeControlPairs": 0,
+    }
     loaded = single.perturbation.load_associations(tests)
     assert loaded.calibration.empty and loaded.calibration_grade == "none"
     # Saved tests warn again, alike.
@@ -1967,14 +2009,22 @@ def test_associations_check_the_calibration_without_discovery_pairs(shared) -> N
 
 
 @pytest.mark.parametrize(
-    ("n_calibration_pairs", "message"),
+    ("n_calibration_pairs", "status", "message"),
     [
-        (None, "No discovery pair passes QC, and by default the calibration check"),
-        (5, "No pair of a calibration group and a feature passes QC"),
+        (
+            None,
+            "no_passing_discovery",
+            "No discovery pair passes QC, and by default the calibration check",
+        ),
+        (
+            5,
+            "no_passing_calibration",
+            "No pair of a calibration group and a feature passes QC",
+        ),
     ],
 )
 def test_associations_say_why_no_calibration_check_ran(
-    shared, n_calibration_pairs, message
+    shared, n_calibration_pairs, status, message
 ) -> None:
     store, labels = shared.store, shared.labels
     # No feature is expressed by 1,000 of the screen's cells.
@@ -1988,6 +2038,13 @@ def test_associations_say_why_no_calibration_check_ran(
     tests, messages = _warned_associations(store, labels, **arguments)
 
     assert len(messages) == 1 and messages[0].startswith(message)
+    assert _calibration(store, tests) == {
+        "calibrationStatus": status,
+        "controlGuides": 4,
+        "calibrationGrade": "none",
+        "falseDiscoveries": 0,
+        "negativeControlPairs": 0,
+    }
     result = store.perturbation.load_associations(tests)
     assert not result.discovery["pass_qc"].any()
     assert result.calibration.empty and result.calibration_grade == "none"
@@ -2007,8 +2064,12 @@ def test_associations_warn_about_targets_without_a_gene(tmp_path) -> None:
 
     tests, messages = _warned_associations(store, labels, **arguments)
 
-    assert len(messages) == 1
-    assert messages[0].startswith("1 of 2 targets have no feature of assay 'RNA'")
+    assert messages == [
+        "1 of 2 targets have no feature of assay 'RNA' for a positive control, for "
+        "example 'GENE9'. A target that is not a gene, such as an enhancer, has "
+        "none; for a gene, check id_column, or the target names against the "
+        "feature names."
+    ]
     assert store.perturbation.load_associations(tests).positive["target"].tolist() == [
         "RNA0"
     ]
@@ -2024,6 +2085,15 @@ def test_associations_warn_about_targets_without_a_gene(tmp_path) -> None:
     ]
     positive = store.perturbation.load_associations(singles).positive
     assert positive["guide"].tolist() == ["CRISPR0", "CRISPR1"]
+    # A table of the same pairs shares the tests, and its call matches no
+    # target to a gene, so it names none; nor do tests without positive
+    # controls.
+    table = pd.DataFrame({"target": ["RNA0"], "feature": ["RNA0"]})
+    assert _warned_associations(
+        store, labels, positive_controls=table, **arguments
+    ) == (tests, [])
+    _, quiet = _warned_associations(store, labels, positive_controls=None, **arguments)
+    assert quiet == []
     # Saved tests warn again, alike.
     assert _warned_associations(store, labels, **arguments) == (tests, messages)
     assert _warned_associations(
@@ -2049,6 +2119,15 @@ def test_associations_warn_about_miscalibration(tmp_path) -> None:
     result = store.perturbation.load_associations(tests)
     assert result.calibration_grade in ("moderate", "severe")
     assert result.n_false_discoveries >= 7
+    # The grades of the SCEPTRE book: 7 to 14 false discoveries are moderate.
+    n_false = int(result.calibration["significant"].sum())
+    assert _calibration(store, tests) == {
+        "calibrationStatus": "checked",
+        "controlGuides": 4,
+        "calibrationGrade": "moderate" if n_false <= 14 else "severe",
+        "falseDiscoveries": n_false,
+        "negativeControlPairs": 60,
+    }
     assert messages == [
         f"The calibration check found {result.n_false_discoveries} false "
         f"discoveries among {len(result.calibration)} negative-control pairs, a "
@@ -2172,6 +2251,21 @@ def test_pairs_whose_cells_the_covariates_determine_have_no_statistic(
         "group's guides, as they do when those are exactly the pair's cells of "
         "samples or of a binary covariate.",
     ]
+    saved = store.artifacts.inspect(tests).diagnostics
+    assert {
+        key: saved[key]
+        for key in (
+            "rowsWithoutStatistic",
+            "rowWithoutStatisticExamples",
+            "calibrationGroupsWithoutStatistic",
+            "calibrationGroupWithoutStatisticExamples",
+        )
+    } == {
+        "rowsWithoutStatistic": 1,
+        "rowWithoutStatisticExamples": ["'RNA1'"],
+        "calibrationGroupsWithoutStatistic": len(names),
+        "calibrationGroupWithoutStatisticExamples": [repr(name) for name in names],
+    }
     # Saved tests warn again, alike.
     again, repeated = _warned_associations(store, labels, **arguments)
     assert again == tests
@@ -2179,8 +2273,6 @@ def test_pairs_whose_cells_the_covariates_determine_have_no_statistic(
 
 
 def test_a_calibration_check_without_a_statistic_does_not_run(tmp_path) -> None:
-    from cytearc.storage.artifacts import artifact_group
-
     # Guides 4, 5 and 6 each make a batch, and guide 7 shares batch a with
     # the targets, so among the control cells each guide's cells are a
     # batch's: every calibration group of one guide is determined.
@@ -2203,13 +2295,137 @@ def test_a_calibration_check_without_a_statistic_does_not_run(tmp_path) -> None:
     assert result.calibration["z"].isna().all()
     assert result.discovery["z"].notna().all()
     assert (result.calibration_grade, result.n_false_discoveries) == ("none", 0)
-    status = artifact_group(store.zw, tests).attrs["calibration_status"]
-    assert status == "no_calibration_statistic"
+    assert _calibration(store, tests) == {
+        "calibrationStatus": "no_calibration_statistic",
+        "controlGuides": 4,
+        "calibrationGrade": "none",
+        "falseDiscoveries": 0,
+        "negativeControlPairs": 80,
+    }
     assert "No calibration pair has a statistic, so no calibration check was run" in (
         messages
     )
     # Saved tests warn again, alike.
     assert _warned_associations(store, labels, **arguments) == (tests, messages)
+
+
+def test_tests_saved_without_diagnostics_are_computed_anew(shared) -> None:
+    store, labels = shared.store, shared.labels
+    arguments = {
+        "features": _every_gene(store),
+        "positive_controls": None,
+        "n_calibration_pairs": 0,
+        "seed": 3,
+        **FAST,
+    }
+    saved = store.perturbation.associations(labels, **arguments)
+    keys = list(store.artifacts.inspect(saved).diagnostics)
+    # As tests saved before the association tests saved diagnostics.
+    del store.zw[artifact_path(saved)].attrs["diagnostics"]
+    operation = "test_perturbation_associations"
+    with pytest.raises(ValueError, match=f"holds no diagnostics, which {operation}"):
+        store.artifacts.inspect(saved).diagnostics
+    with pytest.raises(ValueError, match=r"call ds\.perturbation\.associations again"):
+        store.perturbation.load_associations(saved)
+
+    recomputed, messages = _warned_associations(store, labels, **arguments)
+
+    assert recomputed != saved
+    assert messages == []
+    assert list(store.artifacts.inspect(recomputed).diagnostics) == keys
+    for name in ("z", "p_value", "significant"):
+        np.testing.assert_array_equal(
+            store.artifacts.load(recomputed)[name][:],
+            store.artifacts.load(saved)[name][:],
+        )
+
+
+# The diagnostics of tests whose calibration check ran without a warning and
+# whose every pair has a statistic.
+_QUIET = {
+    "calibrationStatus": "checked",
+    "controlGuides": 4,
+    "calibrationGrade": "mild",
+    "falseDiscoveries": 3,
+    "negativeControlPairs": 100,
+    "rowsWithoutStatistic": 0,
+    "rowWithoutStatisticExamples": [],
+    "calibrationGroupsWithoutStatistic": 0,
+    "calibrationGroupWithoutStatisticExamples": [],
+}
+
+
+def _warnings_of(numbers: dict[str, object], moi: str = "low") -> dict[str, str]:
+    """The association tests' warnings from these diagnostics, by the diagnostic they report."""
+    rules = perturbation_operations._association_rules("target", moi)
+    return {rule.name: rule.message(numbers) for rule in rules if rule.applies(numbers)}
+
+
+def test_association_warnings_name_up_to_five_and_say_why_no_check_ran() -> None:
+    assert _warnings_of(_QUIET) == {}
+    assert _warnings_of({**_QUIET, "calibrationStatus": "off"}) == {}
+    # Beyond five rows, the warning names five among others; a group is one.
+    many = {
+        **_QUIET,
+        "rowsWithoutStatistic": 7,
+        "rowWithoutStatisticExamples": [f"'T{k}'" for k in range(5)],
+        "calibrationGroupsWithoutStatistic": 1,
+        "calibrationGroupWithoutStatisticExamples": ["'control group 2'"],
+    }
+    named = _warnings_of(many)
+    assert named["rowsWithoutStatistic"].startswith(
+        "The pairs of 7 targets pass QC but have no statistic, so they have no "
+        "p-value or fold change and are not significant: 'T0', 'T1', 'T2', 'T3', "
+        "'T4', among others. The covariates determine"
+    )
+    assert named["calibrationGroupsWithoutStatistic"].startswith(
+        "The pairs of 1 calibration group pass QC but have no statistic, so they "
+        "have no p-value or fold change and are not counted as false discoveries: "
+        "'control group 2'. The covariates"
+    )
+    severe = {**_QUIET, "calibrationGrade": "severe", "falseDiscoveries": 15}
+    assert _warnings_of(severe) == {
+        "falseDiscoveries": "The calibration check found 15 false discoveries "
+        "among 100 negative-control pairs, a severe miscalibration; check the "
+        "covariates and the control guides before trusting the discoveries"
+    }
+    # Each status of a check that did not run says why, in its own words.
+    unchecked = {
+        **_QUIET,
+        "calibrationGrade": "none",
+        "falseDiscoveries": 0,
+        "negativeControlPairs": 0,
+    }
+    reasons = {
+        status: _warnings_of({**unchecked, "calibrationStatus": status})
+        for status in CALIBRATION_STATUSES
+        if status not in ("checked", "off")
+    }
+    assert reasons == {
+        "few_control_guides": {
+            "calibrationStatus": "Control cells with one guide carry 4 control "
+            "guides, fewer than the 2 that a calibration group and its comparison "
+            "cells need, so no calibration check was run"
+        },
+        "no_passing_discovery": {
+            "calibrationStatus": "No discovery pair passes QC, and by default the "
+            "calibration check tests as many pairs as pass, so no calibration "
+            "check was run; pass n_calibration_pairs to run one"
+        },
+        "no_passing_calibration": {
+            "calibrationStatus": "No pair of a calibration group and a feature "
+            "passes QC, so no calibration check was run"
+        },
+        "no_calibration_statistic": {
+            "calibrationStatus": "No calibration pair has a statistic, so no "
+            "calibration check was run"
+        },
+    }
+    few = {**unchecked, "calibrationStatus": "few_control_guides", "controlGuides": 0}
+    assert _warnings_of(few, moi="high") == {
+        "calibrationStatus": "No labelled cell carries a control guide, which a "
+        "calibration group needs, so no calibration check was run"
+    }
 
 
 @pytest.mark.parametrize(

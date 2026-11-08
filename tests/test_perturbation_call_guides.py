@@ -7,7 +7,7 @@ write their own stores.
 """
 
 import re
-import warnings
+from collections import Counter
 from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
@@ -27,10 +27,10 @@ from cytearc.perturbation.mixtures import (
     fit_gaussian,
     fit_poisson_gaussian,
 )
-from cytearc.storage.artifacts import artifact_group, inspect_artifact
+from cytearc.storage.artifacts import artifact_group, artifact_path, inspect_artifact
 from cytearc.utils.logging import logger
 from cytearc.utils.memory_budget import MemoryBudgetError
-from tests.perturbation_helpers import record_cell_reads, write_screen
+from tests.perturbation_helpers import record_cell_reads, warned, write_screen
 from tests.storage_helpers import (
     copy_store,
     open_store,
@@ -142,17 +142,18 @@ def _lane_codes() -> np.ndarray:
 def test_fitted_methods_call_from_each_lane_fit(
     store, template, method, fit, min_umi
 ) -> None:
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        ref = store.perturbation.call_guides(
+    ref, texts, diagnostic = warned(
+        lambda: store.perturbation.call_guides(
             template.cells, method=method, sample_column="lane"
         )
+    )
 
     codes = _lane_codes()
     histograms = guide_count_histograms([COUNTS], codes, n_samples=3, n_guides=7)
     fits = fit(histograms)
     table = call_thresholds(fits.threshold, min_umi)
-    assert _call_sets(store, ref) == _expected_calls(COUNTS, codes, table)
+    expected_calls = _expected_calls(COUNTS, codes, table)
+    assert _call_sets(store, ref) == expected_calls
     loaded = store.perturbation.load_guide_calls(ref)
     assert loaded.source == "call_guides"
     status = inspect_artifact(store.zw, ref)
@@ -178,10 +179,35 @@ def test_fitted_methods_call_from_each_lane_fit(
     assert by_fit[("L0", "CRISPR0")] == "fitted"
     if method == "poisson_gaussian":
         assert by_fit[("L0", "CRISPR5")] == "too_sparse"
-    # A fit that calls nothing is counted in a warning that names an example.
-    messages = [str(warning.message) for warning in caught]
-    assert any("guide fits call no cell" in message for message in messages)
-    assert any("'CRISPR3' in sample 'L2'" in message for message in messages)
+    # The calls save the statuses of the fits that the method fits, lane by
+    # lane, and the cells that the thresholds call.
+    names = np.asarray(FIT_STATUSES)[fits.status]
+    lanes, guides = np.nonzero(names != "fitted")
+    called = Counter(cell for cell, _, _ in expected_calls)
+    saved = inspect_artifact(store.zw, ref).diagnostics
+    assert saved == {
+        "guideFits": 21,
+        "fitsCallingNoCell": len(lanes),
+        "fitsNoCells": int(np.count_nonzero(names == "no_cells")),
+        "fitsTooSparse": int(np.count_nonzero(names == "too_sparse")),
+        "fitsNoFit": int(np.count_nonzero(names == "no_fit")),
+        "fitsNoPositive": int(np.count_nonzero(names == "no_positive")),
+        "fitCallingNoCellExamples": [
+            f"'CRISPR{guide}' in sample '{SORTED_LANES[lane]}'"
+            for lane, guide in zip(lanes[:5], guides[:5], strict=True)
+        ],
+        "cellsWithCall": len(called),
+        "cellsWithSeveralGuides": sum(count > 1 for count in called.values()),
+    }
+    # The fits that call nothing give one warning, which names an example.
+    (warning,) = diagnostic
+    assert texts == [str(warning)]
+    assert (warning.operation, warning.diagnostic, warning.value) == (
+        "call_guides",
+        "fitsCallingNoCell",
+        saved["fitsCallingNoCell"],
+    )
+    assert "'CRISPR3' in sample 'L2'" in str(warning)
 
 
 def test_histograms_of_the_fits_hold_every_count_and_zero(store, template) -> None:
@@ -319,37 +345,194 @@ def test_top_guide_calls_the_top_guide_above_the_fraction(tmp_path) -> None:
     )
 
 
+def _called_cells(calls: set[tuple[str, str, int]]) -> dict[str, int]:
+    """Count the cells with a call and those with several, as the calls' diagnostics do."""
+    per_cell = Counter(cell for cell, _, _ in calls)
+    return {
+        "cellsWithCall": len(per_cell),
+        "cellsWithSeveralGuides": sum(count > 1 for count in per_cell.values()),
+    }
+
+
+# The fits of the screen's lanes that call no cell, by design: CRISPR3 has no
+# UMI in lane L2, and CRISPR4's one cell is in lane L2, so neither has a cell
+# with a UMI there; CRISPR4 in lane L2 and CRISPR5, of single UMIs, in every
+# lane have too few counts to fit. The examples come lane by lane.
+LANE_FITS_CALLING_NO_CELL = {
+    "guideFits": 21,
+    "fitsCallingNoCell": 7,
+    "fitsNoCells": 3,
+    "fitsTooSparse": 4,
+    "fitsNoFit": 0,
+    "fitsNoPositive": 0,
+    "fitCallingNoCellExamples": [
+        "'CRISPR4' in sample 'L0'",
+        "'CRISPR5' in sample 'L0'",
+        "'CRISPR4' in sample 'L1'",
+        "'CRISPR5' in sample 'L1'",
+        "'CRISPR3' in sample 'L2'",
+    ],
+}
+LANE_FITS_WARNING = (
+    "7 of 21 guide fits call no cell: 3 have no cell with a UMI of the guide, 4 "
+    "have too few cells or counts to fit. For example 'CRISPR4' in sample 'L0', "
+    "'CRISPR5' in sample 'L0', 'CRISPR4' in sample 'L1', 'CRISPR5' in sample "
+    "'L1', 'CRISPR3' in sample 'L2'. perturbation.load_guide_thresholds lists "
+    "every status."
+)
+
+
+def _lane_calls(min_umi: int) -> set[tuple[str, str, int]]:
+    """The calls of each lane's Poisson-Gaussian fit at ``min_umi``, from the counts."""
+    codes = _lane_codes()
+    histograms = guide_count_histograms([COUNTS], codes, n_samples=3, n_guides=7)
+    table = call_thresholds(fit_poisson_gaussian(histograms).threshold, min_umi)
+    return _expected_calls(COUNTS, codes, table)
+
+
+def test_fits_that_call_no_cell_warn_when_computed_and_when_reused(
+    store, template
+) -> None:
+    def call() -> object:
+        return store.perturbation.call_guides(template.cells, sample_column="lane")
+
+    computed, first_texts, first = warned(call)
+    reused, second_texts, second = warned(call)
+
+    assert reused == computed
+    assert store.artifacts.inspect(computed).diagnostics == {
+        **LANE_FITS_CALLING_NO_CELL,
+        **_called_cells(_lane_calls(1)),
+    }
+    # The saved fits hold the statuses that the warning counts.
+    statuses = store.perturbation.load_guide_thresholds(computed).table["status"]
+    assert statuses.value_counts().to_dict() == {
+        "fitted": 14,
+        "too_sparse": 4,
+        "no_cells": 3,
+    }
+    # Each call gives the warning once, and CyteArc gives or logs nothing else.
+    for texts, warnings_given in ((first_texts, first), (second_texts, second)):
+        assert texts == [LANE_FITS_WARNING]
+        (warning,) = warnings_given
+        assert str(warning) == LANE_FITS_WARNING
+        assert (warning.operation, warning.diagnostic, warning.value) == (
+            "call_guides",
+            "fitsCallingNoCell",
+            7,
+        )
+
+
 def test_identical_calls_are_reused_without_reading_counts(
     store, template, monkeypatch
 ) -> None:
     cells = template.cells
-    with warnings.catch_warnings(record=True) as first:
-        warnings.simplefilter("always")
-        ref = store.perturbation.call_guides(cells, sample_column="lane")
+    ref, first, _ = warned(
+        lambda: store.perturbation.call_guides(cells, sample_column="lane")
+    )
 
     def unreachable(*_args, **_kwargs):
         raise AssertionError("the counts were read again")
 
     monkeypatch.setattr(operations, "guide_count_histograms", unreachable)
-    with warnings.catch_warnings(record=True) as again:
-        warnings.simplefilter("always")
-        assert store.perturbation.call_guides(cells, sample_column="lane") == ref
+    again, repeated, _ = warned(
+        lambda: store.perturbation.call_guides(cells, sample_column="lane")
+    )
+    assert again == ref
     # The warning about fits that call nothing comes again on reuse.
-    assert [str(w.message) for w in again] == [str(w.message) for w in first]
+    assert repeated == first == [LANE_FITS_WARNING]
 
-    # Another floor reuses the fits and reads the counts once, to call.
-    floor = store.perturbation.call_guides(cells, sample_column="lane", min_umi=40)
+    # Another floor reuses the fits and reads the counts once, to call. The
+    # calls count the saved fits' statuses, and warn of them once.
+    floor, floor_texts, floor_warned = warned(
+        lambda: store.perturbation.call_guides(cells, sample_column="lane", min_umi=40)
+    )
     assert floor != ref
     fits = inspect_artifact(store.zw, ref).input_ref("guide_thresholds")
     assert inspect_artifact(store.zw, floor).input_ref("guide_thresholds") == fits
     calls = store.perturbation.load_guide_calls(floor).calls
     assert (calls["umis"] >= 40).all()
+    assert store.artifacts.inspect(floor).diagnostics == {
+        **LANE_FITS_CALLING_NO_CELL,
+        **_called_cells(_lane_calls(40)),
+    }
+    assert floor_texts == [LANE_FITS_WARNING]
+    assert [warning.diagnostic for warning in floor_warned] == ["fitsCallingNoCell"]
 
     monkeypatch.undo()
     fresh = store.perturbation.call_guides(
         cells, sample_column="lane", invalidate_cache=True
     )
     assert _call_sets(store, fresh) == _call_sets(store, ref)
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        # One fit of each guide over the three lanes: every guide fits, and
+        # fewer than half of the called cells have several guides.
+        {"method": "gaussian"},
+        {"method": "fixed", "min_umi": 4},
+        {"method": "top_guide"},
+    ],
+    ids=["gaussian", "fixed", "top_guide"],
+)
+def test_calls_without_a_reason_to_warn_warn_in_neither_call(
+    store, template, options
+) -> None:
+    def call() -> object:
+        return store.perturbation.call_guides(template.cells, **options)
+
+    computed, first_texts, first = warned(call)
+    reused, second_texts, second = warned(call)
+
+    assert reused == computed
+    assert (first_texts, first, second_texts, second) == ([], [], [], [])
+    saved = store.artifacts.inspect(computed).diagnostics
+    fitted = options["method"] == "gaussian"
+    # The methods that fit nothing count no fit.
+    assert {key: saved.pop(key) for key in LANE_FITS_CALLING_NO_CELL} == {
+        "guideFits": 7 if fitted else None,
+        "fitsCallingNoCell": 0 if fitted else None,
+        "fitsNoCells": 0 if fitted else None,
+        "fitsTooSparse": 0 if fitted else None,
+        "fitsNoFit": 0 if fitted else None,
+        "fitsNoPositive": 0 if fitted else None,
+        "fitCallingNoCellExamples": [],
+    }
+    assert saved == _called_cells(_call_sets(store, computed))
+    assert 2 * saved["cellsWithSeveralGuides"] < saved["cellsWithCall"]
+
+
+def test_calls_saved_without_diagnostics_are_called_anew(store, template) -> None:
+    cells = template.cells
+    saved = store.perturbation.call_guides(cells, sample_column="lane")
+    fits = inspect_artifact(store.zw, saved).input_ref("guide_thresholds")
+    # As calls saved before call_guides saved diagnostics.
+    del store.zw[artifact_path(saved)].attrs["diagnostics"]
+    with pytest.raises(ValueError, match="holds no diagnostics, which call_guides"):
+        store.artifacts.inspect(saved).diagnostics
+    with pytest.raises(ValueError, match=r"call ds\.perturbation\.call_guides again"):
+        store.perturbation.load_guide_calls(saved)
+    with pytest.raises(ValueError, match=r"call ds\.perturbation\.call_guides again"):
+        store.perturbation.labels(saved, controls=["CRISPR6"])
+
+    recomputed, texts, _ = warned(
+        lambda: store.perturbation.call_guides(cells, sample_column="lane")
+    )
+
+    assert recomputed != saved
+    # The fits save no diagnostics, so the new calls reuse them.
+    assert inspect_artifact(store.zw, recomputed).input_ref("guide_thresholds") == fits
+    assert store.artifacts.inspect(recomputed).diagnostics == {
+        **LANE_FITS_CALLING_NO_CELL,
+        **_called_cells(_lane_calls(1)),
+    }
+    assert texts == [LANE_FITS_WARNING]
+    np.testing.assert_array_equal(
+        store.artifacts.load(recomputed)["guide_codes"][:],
+        store.artifacts.load(saved)["guide_codes"][:],
+    )
 
 
 def test_read_only_store_reuses_but_cannot_call_again(store, template) -> None:
@@ -682,20 +865,57 @@ def test_gaussian_warns_when_most_calls_carry_several_guides(tmp_path) -> None:
     counts = rng.poisson(0.3, size=(1000, 15))
     carriers = rng.choice(1000, size=20, replace=False)
     counts[carriers, rng.integers(0, 15, size=20)] += 100
-    store = _store(tmp_path / "store.zarr", counts.astype(np.uint16), lanes=None)
+    counts = counts.astype(np.uint16)
+    store = _store(tmp_path / "store.zarr", counts, lanes=None)
     cells = _cells(store)
-    with warnings.catch_warnings(record=True) as first:
-        warnings.simplefilter("always")
-        calls = store.perturbation.call_guides(cells, method="gaussian", min_umi=1)
-    messages = [str(entry.message) for entry in first]
-    assert any("of the cells with a call have several guides" in m for m in messages)
 
-    # Saved calls warn again, alike.
-    with warnings.catch_warnings(record=True) as again:
-        warnings.simplefilter("always")
-        reused = store.perturbation.call_guides(cells, method="gaussian", min_umi=1)
+    def call() -> object:
+        return store.perturbation.call_guides(cells, method="gaussian", min_umi=1)
+
+    calls, first_texts, first = warned(call)
+    reused, second_texts, second = warned(call)
+
     assert reused == calls
-    assert [str(entry.message) for entry in again] == messages
+    # The calls of the fit over every cell, from the counts.
+    codes = np.zeros(len(counts), dtype=np.int64)
+    histograms = guide_count_histograms([counts], codes, n_samples=1, n_guides=15)
+    table = call_thresholds(fit_gaussian(histograms).threshold, 1)
+    expected = _called_cells(_expected_calls(counts, codes, table))
+    called, several = expected["cellsWithCall"], expected["cellsWithSeveralGuides"]
+    assert several > called / 2
+    assert store.artifacts.inspect(calls).diagnostics == {
+        "guideFits": 15,
+        "fitsCallingNoCell": 0,
+        "fitsNoCells": 0,
+        "fitsTooSparse": 0,
+        "fitsNoFit": 0,
+        "fitsNoPositive": 0,
+        "fitCallingNoCellExamples": [],
+        **expected,
+    }
+    message = (
+        f"With method='gaussian', {several / called:.0%} of the cells with a call "
+        "have several guides. A fit over every cell sets low thresholds when most "
+        "cells hold no UMI of a guide; check plots.guide_thresholds, or call with "
+        "method='poisson_gaussian'."
+    )
+    # Saved calls warn again, alike, once.
+    for texts, warnings_given in ((first_texts, first), (second_texts, second)):
+        assert texts == [message]
+        (warning,) = warnings_given
+        assert (warning.operation, warning.diagnostic, warning.value) == (
+            "call_guides",
+            "cellsWithSeveralGuides",
+            several,
+        )
+    # A fixed floor of 1 UMI calls the ambient UMIs too, so most of its called
+    # cells have several guides, but it fits nothing and gives no warning.
+    fixed, texts, _ = warned(
+        lambda: store.perturbation.call_guides(cells, method="fixed", min_umi=1)
+    )
+    numbers = store.artifacts.inspect(fixed).diagnostics
+    assert numbers["cellsWithSeveralGuides"] > numbers["cellsWithCall"] / 2
+    assert texts == []
 
 
 def test_fits_run_on_the_store_threads_and_restore_them(
