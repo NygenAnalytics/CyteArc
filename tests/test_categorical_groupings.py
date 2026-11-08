@@ -511,3 +511,33 @@ def test_plots_read_a_categorical_column_as_reading_every_row_does(
             )
             assert got.dtype == want.dtype
             assert got.tolist() == want.tolist() == text_values.tolist()
+
+
+def test_a_column_of_as_many_categories_as_rows_reads_its_codes_without_the_reserved_entry() -> (
+    None
+):
+    import zarr
+    from zarr.storage import MemoryStore
+
+    from cytearc.metadata.table import MetaData
+    from cytearc.storage.categorical import PADDED_ATTRIBUTE
+
+    labels = np.array(["s10", "B cell", "s2", "γδ T"], dtype=object)
+    group = zarr.open_group(store=MemoryStore(), mode="w")
+    group.create_array("I", data=np.ones(4, dtype=bool))
+    group.create_array("ids", data=np.array([f"c{index}" for index in range(4)]))
+    group.create_array("names", data=np.array([f"n{index}" for index in range(4)]))
+    table = MetaData(group)
+    table.insert("labels", pd.Categorical(labels))
+    column = table._get_array("labels")
+    assert column.categories_array.attrs.get(PADDED_ATTRIBUTE) is True
+    assert column.categories_array.shape == (5,)
+
+    values, missing, _rows = resolve_cell_column(
+        None, table, "labels", cell_selection=None, categorical=True
+    )
+    assert values.categories.tolist() == ["B cell", "s10", "s2", "γδ T"]
+    assert missing is None
+    coded, names = category_codes(values)
+    assert names == ["B cell", "s2", "s10", "γδ T"]
+    assert coded.tolist() == [2, 0, 1, 3]
