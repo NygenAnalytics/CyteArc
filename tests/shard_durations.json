@@ -50,6 +50,7 @@
   "tests/test_bulk_aggregation.py": 39.5,
   "tests/test_callable_identity.py": 0.9,
   "tests/test_categorical_columns.py": 10.0,
+  "tests/test_categorical_exports.py": 5.8,
   "tests/test_categorical_groupings.py": 2.0,
   "tests/test_categorical_imports.py": 11.2,
   "tests/test_cell_barcode_join.py": 39.2,

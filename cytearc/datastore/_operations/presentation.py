@@ -315,13 +315,17 @@ class _PresentationOperationsMixin(_PresentationOperationsBase):
     ) -> Any:
         """Return an assay as an in-memory AnnData object.
 
-        Cell and feature metadata are copied to ``obs`` and ``var``. A column
-        that keeps a source categorical's categories, as H5AD and Seurat
-        imports store them, becomes that categorical, with its category
-        order, unused categories, ``ordered`` flag, and colors in
-        ``uns["<column>_colors"]``. Rows that a nullable column's linked
-        missing mask flags are missing values in ``obs`` and ``var``, with
-        or without ``run``.
+        Cell and feature metadata are copied to ``obs`` and ``var``. A
+        categorical column, which the store keeps as codes beside its
+        categories, becomes a pandas ``Categorical`` of the codes of the
+        exported rows, with every category in its stored order, unused ones
+        included, and its ``ordered`` flag. A column that keeps a source
+        categorical's categories, as H5AD and Seurat imports store them,
+        becomes that categorical, with its category order, unused
+        categories, and ``ordered`` flag. Either takes the colors of its
+        ``display`` in ``uns["<column>_colors"]``. Rows that a nullable
+        column's linked missing mask flags are missing values in ``obs`` and
+        ``var``, with or without ``run``.
 
         Without ``run``, the live export holds the cells of ``cell_key`` or
         ``cell_selection``, and ``obsm``, ``obs``, and ``graph`` export
@@ -563,7 +567,8 @@ class _PresentationOperationsMixin(_PresentationOperationsBase):
 
         ``obs`` is indexed by ``ids`` and ``var`` by ``gene_ids``. Column
         names that AnnData reserves or that the index takes are renamed, and
-        columns that keep a source categorical's categories are categoricals.
+        categorical columns and columns that keep a source categorical's
+        categories are categoricals.
         """
         from ...writers.export import (
             H5adColumn,

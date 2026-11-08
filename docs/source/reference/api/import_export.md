@@ -474,10 +474,9 @@ imported before this release may hold, exports as `source_index`, and a column w
 export already uses, such as a `gene_short_name` beside the feature names that `to_h5ad` writes
 under that name, takes the first free `<name>_2`, with a warning; the store is not changed.
 
-A column that keeps a source categorical's `levels` and `ordered` attributes, as H5AD and Seurat
-imports store them, exports as that categorical, with its category order, unused categories, and
-`ordered` flag, and the colors of its `display` attribute as `uns["<column>_colors"]` in category
-order. A value that the levels do not list is appended to the categories with a warning.
+A [categorical column](../developers/zarr-internals#categorical-columns), which a store keeps as codes beside its categories, exports as an AnnData categorical of those codes and categories. `to_anndata` returns a pandas `Categorical` of the codes of the exported cells or features, and `to_h5ad` writes them with AnnData's categorical encoding; both keep every category in its stored order, unused ones included, and the column's `ordered` flag, and a missing row takes code -1. The reserved entry that a store adds when the categories number exactly its rows is no category, so no export holds it. `H5adToZarr(categorical_columns=True)` imports such a file's column as the same codes and categories, with the same labels and fingerprints. A run export reads the labels that its run froze, so its fields follow the run's own rules below.
+
+A column of labels that keeps a source categorical's `levels` and `ordered` attributes, as H5AD and Seurat imports store them, exports as that categorical, with its category order, unused categories, and `ordered` flag. A value that the levels do not list is appended to the categories with a warning. Either kind of categorical writes the colors of its `display` attribute as `uns["<column>_colors"]` in category order.
 
 Exported raw counts take the dtype that `dtype` names. Without it they keep the stored dtype,
 except that `uint8` and `uint16` counts become `float32`: arithmetic on narrow unsigned integers
