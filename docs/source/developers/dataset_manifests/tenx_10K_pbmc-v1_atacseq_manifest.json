@@ -1,141 +1,141 @@
 {
-  "archiveBytes": 510517556,
-  "archiveSha256": "6a6e4e34254c63998565228180a0a8b08f04c782905d023488aa7c212d466fbe",
+  "archiveBytes": 510648834,
+  "archiveSha256": "4f884703ecce60cab939bde2030154bc15d4adf112aae2d778f54015c8aec425",
   "artifacts": [
     {
-      "artifactId": "9b94ad1df0e8f4838ecad34488316342803df9e680d1637f25442e956df68c92",
-      "assay": null,
-      "kind": "cell_selection",
-      "operation": "snapshot_pipeline_input_selection",
-      "path": "artifacts/cell_selection/9b94ad1df0e8f4838ecad34488316342803df9e680d1637f25442e956df68c92",
-      "scope": "datastore"
-    },
-    {
-      "artifactId": "c55a4c30a9b83ae19a475325791e6032b70a4deb72f62cc130a889d63c4449c8",
+      "artifactId": "97eccca1d596389664bc9f6b20dee28a92a3ca474c1ed1b3a9bab92039ba2559",
       "assay": null,
       "kind": "cell_selection",
       "operation": "filter_pipeline_cells",
-      "path": "artifacts/cell_selection/c55a4c30a9b83ae19a475325791e6032b70a4deb72f62cc130a889d63c4449c8",
+      "path": "artifacts/cell_selection/97eccca1d596389664bc9f6b20dee28a92a3ca474c1ed1b3a9bab92039ba2559",
       "scope": "datastore"
     },
     {
-      "artifactId": "9b8141b325996bc3ace409b651cae76e08f8f6a4bef1b8ad08d2cb75262748d0",
+      "artifactId": "9cb0422e1b9adbfede24ca79efe7575bdc97ea6204368940b48a6646909813b8",
+      "assay": null,
+      "kind": "cell_selection",
+      "operation": "snapshot_pipeline_input_selection",
+      "path": "artifacts/cell_selection/9cb0422e1b9adbfede24ca79efe7575bdc97ea6204368940b48a6646909813b8",
+      "scope": "datastore"
+    },
+    {
+      "artifactId": "24448d48aa1f6b54eb002ed6fb561bae5621f6e4d6b405b202e268e52c8b586a",
       "assay": null,
       "kind": "metadata_snapshot",
       "operation": "snapshot_run_metadata",
-      "path": "artifacts/metadata_snapshot/9b8141b325996bc3ace409b651cae76e08f8f6a4bef1b8ad08d2cb75262748d0",
+      "path": "artifacts/metadata_snapshot/24448d48aa1f6b54eb002ed6fb561bae5621f6e4d6b405b202e268e52c8b586a",
       "scope": "datastore"
     },
     {
-      "artifactId": "2774d41d51b23d15e5d887d3d44cda00d25b48f9645cdb71e37baf6a47a56019",
+      "artifactId": "897d2725536ae21bb55f3a53edfe4cef988220539a92fea89502a309c01894da",
       "assay": "ATAC",
       "kind": "ann_index",
       "operation": "build_ann_index",
-      "path": "ATAC/artifacts/ann_index/2774d41d51b23d15e5d887d3d44cda00d25b48f9645cdb71e37baf6a47a56019",
+      "path": "ATAC/artifacts/ann_index/897d2725536ae21bb55f3a53edfe4cef988220539a92fea89502a309c01894da",
       "scope": "assay"
     },
     {
-      "artifactId": "c8eef99c2f24f3fd4c5c45a9613afccccb09a6d287a5e3a583f81c76e72347cb",
+      "artifactId": "51804219605da8941121e31e8ddd7104739cc836f87b8754f5de61fa5712b588",
       "assay": "ATAC",
       "kind": "cluster_labels",
       "operation": "run_leiden_clustering",
-      "path": "ATAC/artifacts/cluster_labels/c8eef99c2f24f3fd4c5c45a9613afccccb09a6d287a5e3a583f81c76e72347cb",
+      "path": "ATAC/artifacts/cluster_labels/51804219605da8941121e31e8ddd7104739cc836f87b8754f5de61fa5712b588",
       "scope": "assay"
     },
     {
-      "artifactId": "adf7061e519c25e70fffa17ccae350f36f391227a59b9d3c82a13a838f1b8aec",
+      "artifactId": "90dbbe2afc24e43db582798ee41b781a6334665547a00dd9d04481fc7b717a46",
       "assay": "ATAC",
       "kind": "cluster_selection",
       "operation": "select_clusters_by_silhouette",
-      "path": "ATAC/artifacts/cluster_selection/adf7061e519c25e70fffa17ccae350f36f391227a59b9d3c82a13a838f1b8aec",
+      "path": "ATAC/artifacts/cluster_selection/90dbbe2afc24e43db582798ee41b781a6334665547a00dd9d04481fc7b717a46",
       "scope": "assay"
     },
     {
-      "artifactId": "48b4e690d7591bc855935a0a2b555f3bce3a7a2c376a819b60f14151234871b6",
+      "artifactId": "18f71228723060dc9e1ec149cddfb90e6c7f0095a3110c52caacae9755c84363",
       "assay": "ATAC",
       "kind": "connectivity_map",
       "operation": "build_connectivity_map",
-      "path": "ATAC/artifacts/connectivity_map/48b4e690d7591bc855935a0a2b555f3bce3a7a2c376a819b60f14151234871b6",
+      "path": "ATAC/artifacts/connectivity_map/18f71228723060dc9e1ec149cddfb90e6c7f0095a3110c52caacae9755c84363",
       "scope": "assay"
     },
     {
-      "artifactId": "69c284541e57fcdd05e4b3f3afa0fddfa3b94666ef117344941a2c4a7a49f6d0",
+      "artifactId": "66f160b264821b23ebbf9ab3ee356babf0335a64b1791600bf86b7624ceb994b",
       "assay": "ATAC",
       "kind": "embedding",
       "operation": "run_umap",
-      "path": "ATAC/artifacts/embedding/69c284541e57fcdd05e4b3f3afa0fddfa3b94666ef117344941a2c4a7a49f6d0",
+      "path": "ATAC/artifacts/embedding/66f160b264821b23ebbf9ab3ee356babf0335a64b1791600bf86b7624ceb994b",
       "scope": "assay"
     },
     {
-      "artifactId": "675f7f498a91632e4814d2d030a5282c9b28931a7c8594eecd5b915fc4d8a4c1",
+      "artifactId": "6b64d505c188a81837ea6512ad8ebadeea3483a4ee716d63cbff651448113be7",
       "assay": "ATAC",
       "kind": "embedding_initialization",
       "operation": "build_embedding_initialization",
-      "path": "ATAC/artifacts/embedding_initialization/675f7f498a91632e4814d2d030a5282c9b28931a7c8594eecd5b915fc4d8a4c1",
+      "path": "ATAC/artifacts/embedding_initialization/6b64d505c188a81837ea6512ad8ebadeea3483a4ee716d63cbff651448113be7",
       "scope": "assay"
     },
     {
-      "artifactId": "d6c5698f3a508d5b609da51fa8d8894de6a6a2547cce7cfe924d8fd05201b8c1",
+      "artifactId": "33e0da68bf9322bdf44f77975d61185b436b3320946e5e22da73d48f8c9f65c8",
       "assay": "ATAC",
       "kind": "feature_scaling",
       "operation": "calculate_feature_scaling",
-      "path": "ATAC/artifacts/feature_scaling/d6c5698f3a508d5b609da51fa8d8894de6a6a2547cce7cfe924d8fd05201b8c1",
+      "path": "ATAC/artifacts/feature_scaling/33e0da68bf9322bdf44f77975d61185b436b3320946e5e22da73d48f8c9f65c8",
       "scope": "assay"
     },
     {
-      "artifactId": "7ebab384d1de71880c3779421f3195c1d70ba7782a71c251cd412db3c69b3835",
+      "artifactId": "92da63b5a2f8689ed8d63327e3e95915b0283c1eebc26f979e34798c2d3a2222",
       "assay": "ATAC",
       "kind": "feature_selection",
       "operation": "create_all_features",
-      "path": "ATAC/artifacts/feature_selection/7ebab384d1de71880c3779421f3195c1d70ba7782a71c251cd412db3c69b3835",
+      "path": "ATAC/artifacts/feature_selection/92da63b5a2f8689ed8d63327e3e95915b0283c1eebc26f979e34798c2d3a2222",
       "scope": "assay"
     },
     {
-      "artifactId": "c275537c6a178fd8117d845d377694542dab00dff44e0e1db7318697533cb676",
+      "artifactId": "92e9c77df7256e45f4d581bbbf6d79f94e219aa041cc344f6fb130bfdca3d279",
       "assay": "ATAC",
       "kind": "feature_selection",
       "operation": "select_prevalent_peaks",
-      "path": "ATAC/artifacts/feature_selection/c275537c6a178fd8117d845d377694542dab00dff44e0e1db7318697533cb676",
+      "path": "ATAC/artifacts/feature_selection/92e9c77df7256e45f4d581bbbf6d79f94e219aa041cc344f6fb130bfdca3d279",
       "scope": "assay"
     },
     {
-      "artifactId": "eeb95b2723e50ca82022eafcd745b863fd1cf55beb76d9e91bdb611d27930618",
+      "artifactId": "25b1635760fd9d5c92fb2803a7bd368405bc14a71d83685c82e2217e7bde5789",
       "assay": "ATAC",
       "kind": "feature_summary",
       "operation": "summarize_atac_features",
-      "path": "ATAC/artifacts/feature_summary/eeb95b2723e50ca82022eafcd745b863fd1cf55beb76d9e91bdb611d27930618",
+      "path": "ATAC/artifacts/feature_summary/25b1635760fd9d5c92fb2803a7bd368405bc14a71d83685c82e2217e7bde5789",
       "scope": "assay"
     },
     {
-      "artifactId": "e3a37d9a22a278f9d4a77a162be62537d693f5c6753a44472d6b1c977cb272c0",
+      "artifactId": "02422e0b574a23953dd2fd05eb062d0099499bc4fd8b5500e8b9c0fd1156a5e2",
       "assay": "ATAC",
       "kind": "metadata_snapshot",
       "operation": "snapshot_run_metadata",
-      "path": "ATAC/artifacts/metadata_snapshot/e3a37d9a22a278f9d4a77a162be62537d693f5c6753a44472d6b1c977cb272c0",
+      "path": "ATAC/artifacts/metadata_snapshot/02422e0b574a23953dd2fd05eb062d0099499bc4fd8b5500e8b9c0fd1156a5e2",
       "scope": "assay"
     },
     {
-      "artifactId": "122fce062ce25a0e9041318792834e90a178fab1d8f78037bfc0a3d8c8e7b15a",
+      "artifactId": "5ca24e1f0d9662c47bf6efba6d3165acc6b25a7b2c732415fc428192105dd7e6",
       "assay": "ATAC",
       "kind": "neighbors",
       "operation": "query_neighbors",
-      "path": "ATAC/artifacts/neighbors/122fce062ce25a0e9041318792834e90a178fab1d8f78037bfc0a3d8c8e7b15a",
+      "path": "ATAC/artifacts/neighbors/5ca24e1f0d9662c47bf6efba6d3165acc6b25a7b2c732415fc428192105dd7e6",
       "scope": "assay"
     },
     {
-      "artifactId": "8d39e81a4ea37bc1a95d9f578fe65af4be3e597a9ee7ecb5519116012fe8be3e",
+      "artifactId": "06aaf9cf67ddbdec0d75d12f18c4c0a544bcd317a6604967de986b2db6e528c1",
       "assay": "ATAC",
       "kind": "normalized",
       "operation": "run_normalization",
-      "path": "ATAC/artifacts/normalized/8d39e81a4ea37bc1a95d9f578fe65af4be3e597a9ee7ecb5519116012fe8be3e",
+      "path": "ATAC/artifacts/normalized/06aaf9cf67ddbdec0d75d12f18c4c0a544bcd317a6604967de986b2db6e528c1",
       "scope": "assay"
     },
     {
-      "artifactId": "b725339c6a714a98f67369a6523d5f3650141f2af58490dbbb9135caf781cbfc",
+      "artifactId": "1e9c3c45fe77020bf3361de61917b1c10c51b60549f61cf2e2392f4939b98aa2",
       "assay": "ATAC",
       "kind": "reduction",
       "operation": "run_lsi",
-      "path": "ATAC/artifacts/reduction/b725339c6a714a98f67369a6523d5f3650141f2af58490dbbb9135caf781cbfc",
+      "path": "ATAC/artifacts/reduction/1e9c3c45fe77020bf3361de61917b1c10c51b60549f61cf2e2392f4939b98aa2",
       "scope": "assay"
     }
   ],
@@ -150,16 +150,16 @@
     "ids",
     "names"
   ],
-  "cytearcVersion": "1.3.1.dev0+gdc81f51f0.d20261024",
+  "cytearcVersion": "1.3.1.dev157+g8b4729c28",
   "dataset": "tenx_10K_pbmc-v1_atacseq",
-  "generatedAt": "2026-10-24T09:16:09.034668+00:00",
+  "generatedAt": "2026-11-08T15:06:10.635922+00:00",
   "nCellsActive": 8426,
   "nCellsTotal": 8728,
   "pipelineRuns": [
     {
       "label": "atac",
       "recipe": "atac",
-      "runId": "af4efa669653eb378c4feec1978d63d2cb8a6b6a617a8c73783127edf0f668cc",
+      "runId": "899269a11013801aec4177f082d4fa0bf78cf296732f717eb5cb215956613015",
       "status": "completed"
     }
   ],
@@ -173,5 +173,5 @@
   "sourceFiles": [
     "data.h5"
   ],
-  "storeBytes": 725526391
+  "storeBytes": 725671000
 }
