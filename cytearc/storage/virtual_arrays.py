@@ -168,12 +168,14 @@ def _reads_on_any_loop(store: Any, path: str) -> bool:
         )
 
 
-def _run[T](array: zarr.Array, coroutine: Coroutine[Any, Any, T]) -> T:
-    """Run a read of ``array`` on an event loop of its own when its stores allow it.
+def run_array_read[T](array: zarr.Array, coroutine: Coroutine[Any, Any, T]) -> T:
+    """Run ``coroutine``, a read of ``array``, on an event loop of its own when its stores allow it.
 
     Reads that touch a store not known to work on any event loop run on
     Zarr's loop, as Zarr's synchronous API runs them. Either way, the stop of
-    the block stream that runs the read cancels it.
+    the block stream that runs the read cancels it. ``read_selection`` reads
+    through this, and so does composite creation, which reads its sources'
+    counts with ``copy_source_selection``.
     """
     if _reads_on_any_loop(array.store, array.path):
         return run_read(coroutine)
@@ -238,12 +240,14 @@ def read_selection(
     """
     reader = virtual_array_reader(array)
     if reader is not None:
-        return _run(array, reader.read(rows, columns))
+        return run_array_read(array, reader.read(rows, columns))
     row_selection = _axis_selection(rows, int(array.shape[0]))
     column_selection = _axis_selection(columns, int(array.shape[1]))
     if isinstance(row_selection, slice) and isinstance(column_selection, slice):
         return np.asarray(
-            _run(array, array.async_array.getitem((row_selection, column_selection)))
+            run_array_read(
+                array, array.async_array.getitem((row_selection, column_selection))
+            )
         )
     if (
         isinstance(row_selection, np.ndarray)
@@ -259,7 +263,7 @@ def _orthogonal_selection(
 ) -> np.ndarray:
     """Read an orthogonal selection of ``array``, on an event loop of its own when its stores allow it."""
     return np.asarray(
-        _run(array, array.async_array.get_orthogonal_selection(selection))
+        run_array_read(array, array.async_array.get_orthogonal_selection(selection))
     )
 
 
