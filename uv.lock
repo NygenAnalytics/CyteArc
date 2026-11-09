@@ -912,7 +912,7 @@ requires-dist = [
     { name = "statsmodels", specifier = ">=0.14.5" },
     { name = "threadpoolctl", specifier = ">=3.5.0" },
     { name = "tqdm", specifier = ">=4.60" },
-    { name = "umap-learn", specifier = ">=0.5.12" },
+    { name = "umap-learn", specifier = ">=0.5.12,<0.6" },
     { name = "zarr", specifier = ">=3.4.2" },
     { name = "zstandard", specifier = ">=0.25.0" },
 ]
