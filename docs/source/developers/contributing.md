@@ -41,7 +41,6 @@ AI-assisted contributions follow the same rules, and you remain the author of th
    If generated code reproduces a recognizable implementation, treat it as that project's code: attribute it under a compatible license, or discard it.
 3. Cite the methods and tools the code follows.
 4. Show that new behavior works, with tests, reference comparisons, or executed documentation pages.
-5. Say in the pull request description which AI tools helped.
 
 ## Testing locally
 
