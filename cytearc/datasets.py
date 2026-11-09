@@ -1,28 +1,39 @@
-"""Download CyteArc's public example datasets.
+"""Download CyteArc's public example datasets and the networks its operations read.
 
 The examples live in repositories of the public ``Nygen/cytebase`` Hugging Face
-bucket, such as ``cytearc_docs`` for the documentation datasets. This module
-only lists and downloads files. The CyteBase catalog of cloud-hosted datasets is
-the separate ``cytebase`` package.
+bucket, such as ``cytearc_docs`` for the documentation datasets, and the STRING
+networks in its ``cytearc_networks`` repository. This module only lists and
+downloads files. The CyteBase catalog of cloud-hosted datasets is the separate
+``cytebase`` package.
 """
 
 import os
 import shutil
 import tarfile
 import tempfile
+from collections.abc import Mapping
 from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
+from types import MappingProxyType
 
+import httpx2
 from huggingface_hub import (
     BucketFile,
     BucketFolder,
     download_bucket_files,
     list_bucket_tree,
 )
+from huggingface_hub.errors import (
+    EntryNotFoundError,
+    HfHubHTTPError,
+    XetDownloadError,
+)
 from huggingface_hub.utils import disable_progress_bars
 
 from .utils.arguments import bool_argument
+from .utils.cache import cache_directory
+from .utils.digest import file_sha256
 from .utils.logging import progress_enabled
 
 __all__ = ["Repository", "connect", "list_repositories"]
@@ -412,3 +423,205 @@ def _extract_and_replace(
     finally:
         shutil.rmtree(staging_path, ignore_errors=True)
         shutil.rmtree(backup_path, ignore_errors=True)
+
+
+# The repository and folder of the public bucket that hold the STRING networks,
+# named here and nowhere else.
+_NETWORK_REPOSITORY = "cytearc_networks"
+_NETWORK_FOLDER = "string_v12.5"
+
+# What the hub raises when it cannot serve a file: an unreachable host, offline
+# mode, a refused status, a failed transfer or a file that is not there.
+_UNSERVED = (
+    OSError,
+    EntryNotFoundError,
+    HfHubHTTPError,
+    XetDownloadError,
+    httpx2.TransportError,
+)
+
+
+@dataclass(frozen=True, slots=True)
+class NetworkFile:
+    """A network file that CyteArc downloads, as ``scripts/build_string_networks.py`` wrote it."""
+
+    species: str
+    taxid: int
+    string_version: str
+    name: str
+    size: int
+    sha256: str
+
+    @property
+    def remote_path(self) -> str:
+        """The file's path in the ``cytearc_networks`` repository."""
+        return f"{_NETWORK_FOLDER}/{self.name}"
+
+    @property
+    def uri(self) -> str:
+        """Where the public bucket holds the file."""
+        return f"hf://buckets/{_BUCKET_ID}/{_NETWORK_REPOSITORY}/{self.remote_path}"
+
+    @property
+    def label(self) -> str:
+        return f"STRING v{self.string_version} {self.species} network"
+
+
+#: The STRING v12.5 networks by species: protein links scored without STRING's
+#: ``database`` channel, kept at a recombined score of at least 0.700.
+STRING_NETWORKS: Mapping[str, NetworkFile] = MappingProxyType(
+    {
+        "human": NetworkFile(
+            species="human",
+            taxid=9606,
+            string_version="12.5",
+            name="human_9606.npz",
+            size=781_609,
+            sha256="8f038b97f824170679dff4aa4f8a3ad23fbf0f6709a4b9ae1b4966132388e89f",
+        ),
+        "mouse": NetworkFile(
+            species="mouse",
+            taxid=10090,
+            string_version="12.5",
+            name="mouse_10090.npz",
+            size=526_992,
+            sha256="ee2bad7fc335e23e7eb5fa51e6f40c08a126b7c919f839c8503b75ce28ff7e21",
+        ),
+    }
+)
+
+
+def string_network_file(
+    species: str, *, network: str | os.PathLike[str] | None = None
+) -> Path:
+    """Return a STRING network file whose size and SHA-256 digest match its record.
+
+    ``network`` names a local copy of the file, which is checked and returned.
+    Without it, the copy cached at ``$XDG_CACHE_HOME/cytearc/networks`` is
+    checked and returned, and the first call downloads it from the
+    ``cytearc_networks`` repository of the public ``Nygen/cytebase`` bucket. A
+    download is checked before it replaces anything, so a failed one leaves
+    nothing in the cache. A cached file that no longer matches stays where it is
+    and raises, since a file that changed in the cache is a fault to report, not
+    one to repair unseen.
+
+    Args:
+        species: A key of ``STRING_NETWORKS``, ``"human"`` or ``"mouse"``.
+        network: A local copy of the species' network file.
+
+    Raises:
+        TypeError: If ``species`` is not text or ``network`` is not a path.
+        ValueError: If ``species`` has no network, or if a file's size or
+            digest differs from its record.
+        FileNotFoundError: If ``network`` is not a file, or if the network is
+            not cached and could not be downloaded. The message names the file,
+            its digest, the command that downloads it and ``network=``.
+    """
+    if not isinstance(species, str):
+        raise TypeError(f"species must be text, got {type(species).__name__}")
+    entry = STRING_NETWORKS.get(species)
+    if entry is None:
+        raise ValueError(
+            f"No STRING network for species {species!r}. "
+            f"Networks exist for: {', '.join(sorted(STRING_NETWORKS))}"
+        )
+    if network is not None:
+        if not isinstance(network, str | os.PathLike):
+            raise TypeError(f"network must be a path, got {type(network).__name__}")
+        local = Path(network)
+        if not local.is_file():
+            raise FileNotFoundError(
+                f"network={str(local)!r} is not a file. It must be a copy of "
+                f"{entry.name}, the {entry.label} ({entry.size:,} bytes, SHA-256 "
+                f"{entry.sha256})"
+            )
+        _check_network_file(local, entry, f"The file passed as network=, {local},")
+        return local
+    cached = cache_directory("networks") / entry.remote_path
+    if cached.is_file():
+        _check_network_file(
+            cached,
+            entry,
+            f"The cached file {cached}",
+            "Delete it to download the network again, or pass network= a copy "
+            "that matches.",
+        )
+        return cached
+    _download_network(entry, cached)
+    return cached
+
+
+def _check_network_file(
+    path: Path, entry: NetworkFile, what: str, remedy: str = ""
+) -> None:
+    size = path.stat().st_size
+    digest = file_sha256(path)
+    if size == entry.size and digest == entry.sha256:
+        return
+    message = (
+        f"{what} does not match the {entry.label}: expected {entry.size:,} bytes "
+        f"with SHA-256 {entry.sha256}, found {size:,} bytes with SHA-256 {digest}."
+    )
+    raise ValueError(f"{message} {remedy}" if remedy else message)
+
+
+def _download_network(entry: NetworkFile, destination: Path) -> None:
+    """Download ``entry`` to ``destination`` once its size and digest match."""
+    created = [
+        directory
+        for directory in (destination.parent, *destination.parent.parents)
+        if not directory.exists()
+    ]
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(dir=destination.parent, prefix=".cytearc-network-"))
+    saved = False
+    try:
+        try:
+            downloaded = connect(_NETWORK_REPOSITORY).download(
+                entry.remote_path, destination=staging
+            )
+        except (KeyError, *_UNSERVED) as error:
+            raise FileNotFoundError(
+                _unavailable_message(entry, destination, error)
+            ) from error
+        if len(downloaded) != 1:
+            raise FileNotFoundError(
+                _unavailable_message(
+                    entry,
+                    destination,
+                    f"{entry.uri} names {len(downloaded)} files rather than one",
+                )
+            )
+        _check_network_file(
+            downloaded[0],
+            entry,
+            f"The file downloaded from {entry.uri}",
+            "Nothing was saved.",
+        )
+        os.replace(downloaded[0], destination)
+        saved = True
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+        if not saved:
+            # Leave no directory behind that the failed download created.
+            for directory in created:
+                try:
+                    directory.rmdir()
+                except OSError:
+                    break
+
+
+def _unavailable_message(
+    entry: NetworkFile, destination: Path, reason: BaseException | str
+) -> str:
+    if isinstance(reason, KeyError) and reason.args:
+        reason = str(reason.args[0])
+    return (
+        f"The {entry.label} ({entry.name}, {entry.size:,} bytes, SHA-256 "
+        f"{entry.sha256}) is not cached at {destination} and could not be "
+        f"downloaded from {entry.uri}: {reason}. On a machine with network "
+        "access, download it with "
+        f'cytearc.datasets.connect("{_NETWORK_REPOSITORY}").download('
+        f'"{entry.remote_path}", destination="<directory>"), then pass '
+        f'network="<directory>/{entry.remote_path}".'
+    )
