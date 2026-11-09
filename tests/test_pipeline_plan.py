@@ -32,7 +32,10 @@ from cytearc.storage.artifact_writer import (
 )
 from cytearc.storage.artifacts import ArtifactRef, artifact_group
 from cytearc.storage.diagnostics import DIAGNOSTICS_ATTRIBUTE
-from cytearc.storage.pipeline_runs import load_pipeline_stage_records
+from cytearc.storage.pipeline_runs import (
+    load_pipeline_stage_records,
+    pipeline_stage_path,
+)
 from tests.test_metadata_store_reads import _CountingStore
 
 # A run of every stage after the graph but Paris, membership strength, and
@@ -387,24 +390,49 @@ def test_estimates_come_from_the_latest_run_that_computed_each_stage(
         estimate = plan[stage].estimate
         metrics = records[stage]
         assert estimate is not None and metrics is not None
+        assert metrics.resources is not None
         assert (
             estimate.run_id,
             estimate.wall_seconds,
             estimate.rss_peak_bytes,
             estimate.rss_incremental_peak_bytes,
+            estimate.cpu_seconds,
+            estimate.threads_peak,
+            estimate.network_rx_bytes,
+            estimate.network_tx_bytes,
+            estimate.resources,
         ) == (
             completed.run.run_id,
             metrics.wall_seconds,
             metrics.rss_peak_bytes,
             metrics.rss_incremental_peak_bytes,
+            metrics.cpu_seconds,
+            metrics.threads_peak,
+            metrics.network_rx_bytes,
+            metrics.network_tx_bytes,
+            metrics.resources.to_dict(),
         )
+        assert estimate.resources["workers"] == completed.datastore.nthreads
+        start = metrics.rss_high_water_start_bytes
+        end = metrics.rss_high_water_end_bytes
+        assert start is not None and end is not None
+        # The process's peak counts only from a stage that raised it.
+        assert estimate.rss_high_water_bytes == (end if end > start else None)
+    hvg = records["highly_variable_features"]
+    assert hvg.resources is not None
     assert plan["highly_variable_features"].to_dict()["estimate"] == {
         "runId": completed.run.run_id,
-        "wallSeconds": records["highly_variable_features"].wall_seconds,
-        "rssPeakBytes": records["highly_variable_features"].rss_peak_bytes,
-        "rssIncrementalPeakBytes": records[
+        "wallSeconds": hvg.wall_seconds,
+        "rssPeakBytes": hvg.rss_peak_bytes,
+        "rssIncrementalPeakBytes": hvg.rss_incremental_peak_bytes,
+        "cpuSeconds": hvg.cpu_seconds,
+        "threadsPeak": hvg.threads_peak,
+        "rssHighWaterBytes": plan[
             "highly_variable_features"
-        ].rss_incremental_peak_bytes,
+        ].estimate.rss_high_water_bytes,
+        "networkRxBytes": hvg.network_rx_bytes,
+        "networkTxBytes": hvg.network_tx_bytes,
+        "resources": hvg.resources.to_dict(),
     }
     # No run computed Paris, and reused stages carry no estimate.
     assert plan["paris"].status == "computed"
@@ -412,6 +440,47 @@ def test_estimates_come_from_the_latest_run_that_computed_each_stage(
     assert {stage.estimate for stage in plan.stages if stage.status == "reused"} == {
         None
     }
+
+
+def test_estimates_from_records_without_resource_use_hold_none(
+    completed, tmp_path
+) -> None:
+    datastore = _copy(completed.location, tmp_path)
+    # Strip what an earlier release did not record from every stage record.
+    resource_fields = (
+        "cpuSeconds",
+        "threadsPeak",
+        "rssHighWaterStartBytes",
+        "rssHighWaterEndBytes",
+        "networkRxBytes",
+        "networkTxBytes",
+        "resources",
+        "trace",
+        "unavailable",
+    )
+    stage_order = completed.run.report()["run"]["stageOrder"]
+    for ordinal in range(len(stage_order)):
+        group = datastore.zw[pipeline_stage_path(completed.run.run_id, ordinal)]
+        attrs = dict(group.attrs)
+        attrs["metrics"] = {
+            key: value
+            for key, value in attrs["metrics"].items()
+            if key not in resource_fields
+        }
+        group.attrs.put(attrs)
+
+    plan = datastore.pipeline.plan("rna", **{**SETTINGS, "hvg": {"top_n": 150}})
+
+    estimate = plan["highly_variable_features"].estimate
+    assert estimate is not None and estimate.wall_seconds > 0
+    assert (
+        estimate.cpu_seconds,
+        estimate.threads_peak,
+        estimate.rss_high_water_bytes,
+        estimate.network_rx_bytes,
+        estimate.network_tx_bytes,
+        estimate.resources,
+    ) == (None,) * 6
 
 
 def test_a_plan_checks_the_call_as_the_recipe_does(completed) -> None:

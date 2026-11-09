@@ -1046,7 +1046,14 @@ def test_pending_shutdown_propagates_when_interruption_cleanup_fails(
             label=None,
             stage_order=(),
         )
-        active.append((run_id, events, RunLedger(store.zw, run_id, events)))
+        ledger = RunLedger(
+            store.zw,
+            run_id,
+            events,
+            workers=store.nthreads,
+            memory_budget_bytes=store.memoryBytes,
+        )
+        active.append((run_id, events, ledger))
         token = current_shutdown_token()
         assert token is not None
         token.request(reason="test shutdown")

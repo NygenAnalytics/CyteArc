@@ -81,8 +81,9 @@ class PipelineEvent:
         stages: How many stages the run has, skipped stages included.
         time_ns: When the event happened, in nanoseconds since the epoch.
         progress: The stage's progress, for ``stage_progress`` events.
-        metrics: The stage's wall time and sampled memory, as its record holds
-            them, for terminal stage events.
+        metrics: What the stage used and what its process had, as its record
+            holds them, for terminal stage events: wall and CPU time, memory,
+            threads, network bytes, ``resources`` and a ``trace`` of samples.
         summary: The stage's diagnostics, as its record holds them, for
             ``stage_completed`` events.
         outputs: The ``(key, ref)`` pairs a completed stage produced.

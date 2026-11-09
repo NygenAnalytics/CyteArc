@@ -201,10 +201,7 @@ CPU and memory limits, storage location, and whether the run reused existing art
 conversion and download time separate from analysis time, and report both stage timings and the
 complete elapsed time. Repeat measurements under the same conditions before comparing changes.
 
-A completed pipeline run provides stage timing, sampled resident memory, and each stage's
-warnings and summary in `run.report()`.
-Sampled peaks can miss brief allocations. `mem_budget` controls planned work and is not a hard
-limit on the process's resident memory; see [Memory budget](#memory-budget).
+A pipeline run records, for each stage, its wall and CPU time, sampled resident memory and the process's peak, OS threads, network bytes, the worker count and memory budget it was given, the CPUs and memory its process could use, and a trace of samples, beside its warnings and summary, in `run.report()` ([Stage resources](/api/pipeline.html#stage-resources)). `ds.pipeline.plan` reports these values from the latest earlier run that computed each stage, so the stages that stay on one core, read the most over the network, or need the most memory show before a run starts. Sampled peaks can miss brief allocations; the process's peak RSS, which the kernel keeps, holds them when a stage raised it. `mem_budget` controls planned work and is not a hard limit on the process's resident memory; see [Memory budget](#memory-budget).
 
 For focused performance checks, the repository's benchmark suite measures input-size ladders and
 projects their scaling to larger workloads:

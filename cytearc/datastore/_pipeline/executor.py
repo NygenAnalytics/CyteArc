@@ -272,7 +272,14 @@ def _execute(
         label=plan.label,
         stage_order=plan.stage_order,
     )
-    ledger = RunLedger(store.zw, record.run_id, events, plan.summarize)
+    ledger = RunLedger(
+        store.zw,
+        record.run_id,
+        events,
+        plan.summarize,
+        workers=store.nthreads,
+        memory_budget_bytes=store.memoryBytes,
+    )
     active.append((record.run_id, events, ledger))
     events.emit("run_started")
     for stage in plan.stages:
