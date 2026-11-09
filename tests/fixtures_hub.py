@@ -185,11 +185,16 @@ class FakeHub:
     def download_bucket_files(
         self,
         bucket_id: str,
-        files: list[tuple[str, Path]],
+        files: list[tuple[str | BucketFile, Path]],
         *,
         raise_on_missing_files: bool = False,
         token: str | bool | None = None,
     ) -> None:
+        # Like Hugging Face's function, take each file as its path or its listing.
+        files = [
+            (remote.path if isinstance(remote, BucketFile) else remote, destination)
+            for remote, destination in files
+        ]
         remotes = [remote for remote, _ in files]
         self.calls.append(("download_bucket_files", bucket_id, remotes, token))
         for remote in remotes:

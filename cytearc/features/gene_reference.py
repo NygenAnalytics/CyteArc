@@ -7,6 +7,7 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from ..utils.cache import cache_directory
 from ..utils.files import open_text
 
 __all__ = [
@@ -125,9 +126,7 @@ def default_cache_dir() -> Path:
     override = os.environ.get("CYTEARC_GENE_REFERENCE_CACHE")
     if override:
         return Path(override).expanduser()
-    xdg = os.environ.get("XDG_CACHE_HOME")
-    root = Path(xdg).expanduser() if xdg else Path.home() / ".cache"
-    return root / "cytearc" / "gene_reference"
+    return cache_directory("gene_reference")
 
 
 def strip_ensembl_version(gene_id: str) -> str:
