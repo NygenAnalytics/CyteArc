@@ -7,6 +7,7 @@ import threading
 import time
 from datetime import UTC, datetime, timedelta
 from email.utils import format_datetime
+from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
@@ -17,10 +18,16 @@ import zarr
 from huggingface_hub.errors import HfHubHTTPError
 from zarr.abc.store import OffsetByteRequest, RangeByteRequest, SuffixByteRequest
 from zarr.core.buffer import default_buffer_prototype
+from zarr.core.group import GroupMetadata
 from zarr.core.sync import sync
 from zarr.storage import FsspecStore
 
 from cytearc.storage import huggingface
+from cytearc.storage.preparation import (
+    PREPARATION_CLAIM,
+    _claim_document,
+    preparation_claim,
+)
 from tests.fixtures_hub import BUCKET_ID
 
 pytestmark = pytest.mark.usefixtures("hub_offline")
@@ -1075,3 +1082,197 @@ def test_writable_read_store_reads_through_the_file_system(loopback_hub):
     listings = _received(loopback_hub, "tree")
     assert ("data.zarr/c/1", "directory") in listings
     assert all(detail == "directory" for _, detail in listings)
+
+
+def _accept_uploads(hub, store, monkeypatch):
+    """Write each file that ``store`` uploads where ``hub`` serves it, and list them.
+
+    The loopback hub answers reads only, so the bucket's upload call writes
+    into the directory that the hub serves instead.
+    """
+    uploads = []
+
+    def upload(bucket_id, *, add):
+        assert bucket_id == BUCKET_ID
+        for source, remote in add:
+            uploads.append(remote)
+            target = hub.root / remote
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(Path(source).read_bytes())
+
+    monkeypatch.setattr(store.fs.sync_fs._api, "batch_bucket_files", upload)
+    return uploads
+
+
+def _publish_group(hub):
+    """Publish a group with one attribute as the hub's ``data.zarr``."""
+    zarr.create_group(store=hub.root / "data.zarr", attributes={"title": "kept"})
+
+
+def _published_attributes(hub):
+    return zarr.open_group(hub.root / "data.zarr", mode="r").attrs.asdict()
+
+
+# The document that Zarr writes for each parent group of a node it creates,
+# unless the parent's key exists.
+_EMPTY_GROUP = GroupMetadata(zarr_format=3).to_buffer_dict(_PROTOTYPE)["zarr.json"]
+
+
+@pytest.mark.parametrize("failing", ["bucket", "tree"])
+def test_writable_store_retries_a_lookup_that_meets_a_server_error(
+    loopback_hub, monkeypatch, failing
+):
+    # Hugging Face's exists reads a failed request as a missing key.
+    store = _loopback_store(loopback_hub, read_only=False)
+    loopback_hub.plan[failing] = [503]
+    sleeps = _record_sleeps(monkeypatch)
+    try:
+        found = sync(store.exists("zarr.json"), timeout=GUARD_SECONDS)
+    finally:
+        store.close()
+    assert found
+    assert sleeps == [2.0]
+    assert [kind for kind, _ in loopback_hub.requests].count(failing) == 2
+
+
+@pytest.mark.parametrize("key", ["absent.json", "c/9/9"])
+def test_writable_store_reads_a_key_as_missing_once_the_server_reports_it(
+    loopback_hub, monkeypatch, key
+):
+    # A key absent from its directory, and a key whose directory is absent.
+    store = _loopback_store(loopback_hub, read_only=False)
+    loopback_hub.plan["tree"] = [503]
+    sleeps = _record_sleeps(monkeypatch)
+    try:
+        found = sync(store.exists(key), timeout=GUARD_SECONDS)
+    finally:
+        store.close()
+    assert not found
+    # The answer comes from the listing after the failed one.
+    assert sleeps == [2.0]
+    assert loopback_hub.plan["tree"] == []
+
+
+@pytest.mark.parametrize("failing", ["bucket", "tree"])
+@pytest.mark.parametrize("status", [401, 403])
+def test_writable_store_raises_a_lookup_that_the_server_refuses(
+    loopback_hub, monkeypatch, status, failing
+):
+    store = _loopback_store(loopback_hub, read_only=False)
+    loopback_hub.plan[failing] = [status]
+    sleeps = _record_sleeps(monkeypatch)
+    try:
+        with pytest.raises(HfHubHTTPError) as raised:
+            sync(store.exists("zarr.json"), timeout=GUARD_SECONDS)
+        # The refusal is not kept as an answer: the next lookup finds the key.
+        found = sync(store.exists("zarr.json"), timeout=GUARD_SECONDS)
+    finally:
+        store.close()
+    assert raised.value.response.status_code == status
+    assert sleeps == []
+    assert found
+
+
+def test_writable_store_raises_when_the_retries_of_a_lookup_run_out(
+    loopback_hub, monkeypatch
+):
+    store = _loopback_store(loopback_hub, read_only=False, retry_timeout=5)
+    loopback_hub.plan["tree"] = [503, 503, 503]
+    sleeps = _record_sleeps(monkeypatch)
+    try:
+        with pytest.raises(TimeoutError) as raised:
+            sync(store.exists("zarr.json"), timeout=GUARD_SECONDS)
+    finally:
+        store.close()
+    # The waits are 2 and 4 s, and the next, of 8 s, would end past the 5 s.
+    assert sleeps == [2.0, 4.0]
+    assert isinstance(raised.value.__cause__, HfHubHTTPError)
+    assert raised.value.__cause__.response.status_code == 503
+    assert str(raised.value).startswith(
+        f"Looking up 'zarr.json' in {LOOPBACK_URI} did not succeed within 5 s: "
+        "3 attempts failed, the last with HTTP 503."
+    )
+    assert [kind for kind, _ in loopback_hub.requests].count("tree") == 3
+
+
+def test_writable_store_does_not_write_over_a_key_whose_lookup_failed(
+    loopback_hub, monkeypatch
+):
+    _publish_group(loopback_hub)
+    store = _loopback_store(loopback_hub, read_only=False)
+    uploads = _accept_uploads(loopback_hub, store, monkeypatch)
+    loopback_hub.plan["tree"] = [503]
+    sleeps = _record_sleeps(monkeypatch)
+    try:
+        sync(store.set_if_not_exists("zarr.json", _EMPTY_GROUP), timeout=GUARD_SECONDS)
+    finally:
+        store.close()
+    assert uploads == []
+    assert _published_attributes(loopback_hub) == {"title": "kept"}
+    assert sleeps == [2.0]
+    assert _received(loopback_hub, "tree") == [("data.zarr", "directory")] * 2
+
+
+def test_writable_store_keeps_a_parent_group_when_creating_a_child_meets_a_server_error(
+    loopback_hub, monkeypatch
+):
+    _publish_group(loopback_hub)
+    store = _loopback_store(loopback_hub, read_only=False)
+    uploads = _accept_uploads(loopback_hub, store, monkeypatch)
+    sleeps = _record_sleeps(monkeypatch)
+    root = zarr.open_group(store=store, mode="r+", use_consolidated=False)
+    take = loopback_hub.take
+    wrote = False
+
+    def take_during_a_write(kind, path, detail=None):
+        nonlocal wrote
+        if kind == "file" and path == "data.zarr/zarr.json" and not wrote:
+            wrote = True
+            # Zarr reads the parent group to check that it is not an array,
+            # and another write through the store lands meanwhile. Its upload
+            # drops Hugging Face's cached listing of the parent's directory,
+            # so Zarr's lookup of the parent before it writes the parent's
+            # document reaches the server, and meets a 503.
+            asyncio.run(store.set("sibling/zarr.json", _EMPTY_GROUP))
+            loopback_hub.plan["tree"] = [503]
+        return take(kind, path, detail)
+
+    monkeypatch.setattr(loopback_hub, "take", take_during_a_write)
+    try:
+        root.create_group("child")
+    finally:
+        store.close()
+    assert _published_attributes(loopback_hub) == {"title": "kept"}
+    assert sorted(uploads) == [
+        "data.zarr/child/zarr.json",
+        "data.zarr/sibling/zarr.json",
+    ]
+    assert sleeps == [2.0]
+    assert _received(loopback_hub, "tree")[-2:] == [("data.zarr", "directory")] * 2
+
+
+def test_writable_store_keeps_the_preparation_claim_of_another_process(
+    loopback_hub, monkeypatch
+):
+    _publish_group(loopback_hub)
+    held = loopback_hub.root / "data.zarr" / PREPARATION_CLAIM / "zarr.json"
+    held.parent.mkdir()
+    claim = _claim_document("another process").to_bytes()
+    held.write_bytes(claim)
+    store = _loopback_store(loopback_hub, read_only=False)
+    uploads = _accept_uploads(loopback_hub, store, monkeypatch)
+    sleeps = _record_sleeps(monkeypatch)
+    root = zarr.open_group(store=store, mode="r+", use_consolidated=False)
+    # The first listing of the claim's directory fails.
+    loopback_hub.plan["tree"] = [503]
+    try:
+        with pytest.raises(RuntimeError, match="is being prepared by another process"):
+            with preparation_claim(root):
+                pass
+    finally:
+        store.close()
+    assert uploads == []
+    assert held.read_bytes() == claim
+    assert sleeps == [2.0]
+    listings = _received(loopback_hub, "tree")
+    assert listings.count((f"data.zarr/{PREPARATION_CLAIM}", "directory")) == 2
