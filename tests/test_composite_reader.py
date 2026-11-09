@@ -79,6 +79,8 @@ def prefill_reads(prefill_sources, monkeypatch):
     roots = {str(path.resolve()) for path, _, _ in prefill_sources.values()}
     state = {"requests": [], "active": 0, "peak": 0, "enabled": True}
     get = LocalStore.get
+    # The count pass reads several segments at once, each from its own thread.
+    lock = Lock()
 
     async def record(store, key, *args, **kwargs):
         if (
@@ -87,14 +89,16 @@ def prefill_reads(prefill_sources, monkeypatch):
             or not key.startswith("RNA/counts/c/")
         ):
             return await get(store, key, *args, **kwargs)
-        state["requests"].append((str(store.root), key))
-        state["active"] += 1
-        state["peak"] = max(state["peak"], state["active"])
+        with lock:
+            state["requests"].append((str(store.root), key))
+            state["active"] += 1
+            state["peak"] = max(state["peak"], state["active"])
         try:
             await asyncio.sleep(0.01)
             return await get(store, key, *args, **kwargs)
         finally:
-            state["active"] -= 1
+            with lock:
+                state["active"] -= 1
 
     monkeypatch.setattr(LocalStore, "get", record)
     return state
@@ -137,7 +141,13 @@ def test_composite_count_prefill_overlaps_sources_and_preserves_preparation(
         prefill_reads["enabled"] = False
         try:
             assert prefill_reads["active"] == 0
-            assert prefill_reads["peak"] == (read_workers if prefill else 1)
+            if prefill:
+                assert prefill_reads["peak"] == read_workers
+            else:
+                # The count pass reads its segments at once, never more than
+                # the sources' read-worker limit allows, and one at a time
+                # under a limit of one.
+                assert 1 <= prefill_reads["peak"] <= read_workers
             assert len(prefill_reads["requests"]) == len(roots)
             assert len(set(prefill_reads["requests"])) == len(roots)
             tables = {

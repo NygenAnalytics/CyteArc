@@ -96,6 +96,7 @@
   "tests/test_cluster_tree.py": 8.0,
   "tests/test_compatibility_contracts.py": 0.0,
   "tests/test_composite.py": 60.0,
+  "tests/test_composite_count_pass.py": 24.1,
   "tests/test_composite_reader.py": 57.2,
   "tests/test_composite_source_cache.py": 10.2,
   "tests/test_compute_thread_limits.py": 32.2,

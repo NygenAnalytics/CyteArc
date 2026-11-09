@@ -28,6 +28,7 @@ from ..merge.metadata import (
 )
 from ..merge.row_plan import (
     RowPlan,
+    RowPlanSegment,
     build_row_plan,
     iter_row_plan_segments,
     max_row_plan_block_rows,
@@ -67,6 +68,7 @@ from ..storage.metadata_keys import (
     assay_membership_column,
     validate_metadata_column_name,
 )
+from ..storage.parallel import stream_shards
 from ..storage.partition import checked_indices
 from ..storage.profiles import (
     ZarrLocation,
@@ -84,6 +86,7 @@ from ..storage.stores import (
     zarr_location_has_content,
 )
 from ..storage.types import as_zarr_array, as_zarr_group
+from ..storage.virtual_arrays import run_array_read
 from ..utils.arguments import bool_argument
 from ..utils.memory_budget import MemoryBudgetError
 from .source_cache import CachedSourceStore, SourceCache, new_source_cache
@@ -703,6 +706,47 @@ def _require_unique_cell_ids(
                 seen.add(text)
 
 
+def _summarize_count_segment(
+    segment: RowPlanSegment,
+    *,
+    count_arrays: Sequence[zarr.Array],
+    feature_maps: Sequence[np.ndarray],
+    n_feats: int,
+    dtype: Any,
+    summary: CountSummary,
+    sums: Mapping[str, tuple[np.ndarray, np.ndarray]],
+    read_workers: int,
+) -> None:
+    """Read one row-plan segment's counts into a block and add its rows to ``summary`` and ``sums``.
+
+    The read runs through the store check of ``run_array_read``: on an event
+    loop of the calling thread when every store it touches works on any loop,
+    and on Zarr's loop otherwise. ``read_workers`` rectangles are read at once.
+    """
+    from .reader import copy_source_selection
+
+    source_array = count_arrays[segment.sourceIdx]
+    mapping = feature_maps[segment.sourceIdx]
+    block = np.zeros((len(segment.localRows), n_feats), dtype=dtype)
+    columns = np.flatnonzero(mapping >= 0)
+    run_array_read(
+        source_array,
+        copy_source_selection(
+            source_array,
+            segment.localRows,
+            columns,
+            block,
+            np.arange(len(segment.localRows)),
+            mapping[columns],
+            read_workers=read_workers,
+        ),
+    )
+    summary.update(segment.destStart, block)
+    target_rows = slice(segment.destStart, segment.destStart + len(segment.localRows))
+    for indices, totals in sums.values():
+        totals[target_rows] = block[:, indices].sum(axis=1, dtype=np.float64)
+
+
 def create_composite(
     sources: Mapping[str, "DataStore"],
     *,
@@ -758,7 +802,7 @@ def create_composite(
         The composite, open for writing.
     """
     from ..datastore.datastore import DataStore
-    from .reader import copy_source_selection, source_index_bytes
+    from .reader import source_index_bytes
     from .store import CompositeStore
 
     if not sources:
@@ -1096,19 +1140,21 @@ def create_composite(
             for geometry in geometries
             if geometry is not None
         )
-        available = (
-            resources.memoryBytes
-            - resident
-            - CountSummary.nbytes_for(row_plan.nCells, alignment.nFeats)
-            - family_bytes
-            - 96 * max(array.shape[1] for array in source_arrays["counts"])
-            - max(
-                source_index_bytes(
-                    geometry, max_row_plan_block_rows(row_plan), geometry.shape[1]
-                )
-                for geometry in geometries
-                if geometry is not None
+        summary_bytes = (
+            CountSummary.nbytes_for(row_plan.nCells, alignment.nFeats) + family_bytes
+        )
+        # Each segment in flight maps its source's columns and indexes its rows.
+        segment_index_bytes = 96 * max(
+            array.shape[1] for array in source_arrays["counts"]
+        ) + max(
+            source_index_bytes(
+                geometry, max_row_plan_block_rows(row_plan), geometry.shape[1]
             )
+            for geometry in geometries
+            if geometry is not None
+        )
+        available = (
+            resources.memoryBytes - resident - summary_bytes - segment_index_bytes
         )
         row_bytes = 3 * alignment.nFeats * np.dtype(dtype).itemsize + 96
         block_rows = min(
@@ -1124,13 +1170,26 @@ def create_composite(
                 budget_bytes=int(resources.memoryBytes),
                 item="one row of the composite count preparation",
             )
-        read_workers = min(
-            resources.workers,
-            (available - block_rows * row_bytes) // read_bytes,
-            *(
-                source.storageIo.readWorkers or resources.workers
-                for source in datasets
-                if source.storageIo is not None
+        segments = list(iter_row_plan_segments(row_plan, segment_rows=block_rows))
+        # Segments read at once, each with its rectangle reads, fit beside what
+        # the pass holds throughout, and their reads together stay within every
+        # source's read-worker limit.
+        segment_workers, read_workers = admitted_worker_split(
+            resources,
+            nTasks=len(segments),
+            taskBytes=lambda reads: (
+                block_rows * row_bytes + segment_index_bytes + reads * read_bytes
+            ),
+            residentBytes=resident,
+            reservedBytes=summary_bytes,
+            reservedFor="the count summary and feature sums",
+            requested=min(
+                (
+                    source.storageIo.readWorkers or resources.workers
+                    for source in datasets
+                    if source.storageIo is not None
+                ),
+                default=resources.workers,
             ),
         )
         count_arrays = wrapper.source_arrays("counts")
@@ -1151,28 +1210,22 @@ def create_composite(
             feature_sums_key(indices): (indices, np.zeros(row_plan.nCells))
             for indices in feature_sets
         }
-        for segment in iter_row_plan_segments(row_plan, segment_rows=block_rows):
-            source_array = count_arrays[segment.sourceIdx]
-            mapping = alignment.featOrderMap[segment.sourceIdx]
-            block = np.zeros((len(segment.localRows), alignment.nFeats), dtype=dtype)
-            columns = np.flatnonzero(mapping >= 0)
-            sync(
-                copy_source_selection(
-                    source_array,
-                    segment.localRows,
-                    columns,
-                    block,
-                    np.arange(len(segment.localRows)),
-                    mapping[columns],
-                    read_workers=read_workers,
-                )
-            )
-            summary.update(segment.destStart, block)
-            target_rows = slice(
-                segment.destStart, segment.destStart + len(segment.localRows)
-            )
-            for indices, totals in sums.values():
-                totals[target_rows] = block[:, indices].sum(axis=1, dtype=np.float64)
+
+        summarize = functools.partial(
+            _summarize_count_segment,
+            count_arrays=count_arrays,
+            feature_maps=alignment.featOrderMap,
+            n_feats=alignment.nFeats,
+            dtype=dtype,
+            summary=summary,
+            sums=sums,
+            read_workers=read_workers,
+        )
+        # The summary takes bands in any order, and each segment's sums fill its
+        # own rows, so segments are read and summarized at once.
+        for _ in stream_shards(segments, summarize, workers=segment_workers):
+            pass
+        del summarize
         fingerprint = finalize_counts(counts, summary)
         write_feature_sums(matrix, counts, sums)
         if counts_t is not None:
@@ -1185,7 +1238,7 @@ def create_composite(
                 "cytearc:import_complete": True,
             }
         )
-        del summary, sums, block, alignment, feature_columns, row_plan
+        del summary, sums, segments, alignment, feature_columns, row_plan
         result = DataStore(
             wrapper,
             default_assay=assay,
