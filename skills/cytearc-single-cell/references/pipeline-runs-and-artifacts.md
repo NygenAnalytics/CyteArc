@@ -151,7 +151,9 @@ run = ds.pipeline.open(label="baseline")
 same = ds.pipeline.open(run_id=run.run_id)
 ds.pipeline.list_runs(status="completed", limit=5)  # repr shows recipe, status, assay, label
 report = run.report(format="dict")  # keys: run, stages, summary
-[(s["stage"], s["status"], s["metrics"]["wallSeconds"]) for s in report["stages"]]
+[(s["stage"], s["status"], s["metrics"]["wallSeconds"], s["metrics"]["cpuSeconds"]) for s in report["stages"]]
+report["stages"][-1]["metrics"]["resources"]  # workers, memoryBudgetBytes, cpusAvailable, cpuQuotaCores, memoryLimitBytes
+report["stages"][-1]["metrics"]["trace"]  # up to 64 samples: seconds, cpuSeconds, rssBytes, threads, network bytes
 report["run"]["config"]  # cells, snapshotColumns, species, stages: one entry per stage keyword
 {s["stage"]: s["summary"] for s in report["stages"] if s["summary"]}  # stage diagnostics
 report["summary"]["warnings"]  # [{"stage", "message"}] logged while each stage ran
@@ -207,10 +209,7 @@ with cytearc.pipeline_listener(log_event):  # every run started in this block
   then `run_interrupted` naming no stage. A stop between stages, also while a skipped stage is
   recorded, emits `run_interrupted` alone, naming no stage. So `run_interrupted` names a stage
   only when that stage's work was cut short.
-- Fields: `kind`, `run_id`, `recipe`, `label`, `stage`, `ordinal` and `stages` (the position in
-  `report()["run"]["stageOrder"]`, skipped stages included), `time_ns`, `progress`
-  (`description`, `completed`, `total`), `metrics` (wall seconds and sampled RSS), `summary`,
-  `outputs` (`(key, ref)` pairs), `reused` (keys), `warnings`, `error`.
+- Fields: `kind`, `run_id`, `recipe`, `label`, `stage`, `ordinal` and `stages` (the position in `report()["run"]["stageOrder"]`, skipped stages included), `time_ns`, `progress` (`description`, `completed`, `total`), `metrics` (wall and CPU seconds, sampled RSS and the process's peak, threads, network bytes, `resources`, `trace`), `summary`, `outputs` (`(key, ref)` pairs), `reused` (keys), `warnings`, `error`.
 - Progress events arrive even with `configure_output(progress=False)`; UMAP's own bar is not
   forwarded.
 - `cytearc.configure_output(stdlib=True)` sends CyteArc's log records to the standard-library
@@ -307,10 +306,10 @@ for stage in plan.stages:          # status: "reused", "computed" or "skipped"
     print(stage.stage, stage.status, stage.reason, stage.detail)
 plan["highly_variable_features"].changed_parameters  # ("top_n",) after that change
 plan["pca"].upstream               # ("normalization",): the stages it waits on
-plan["pca"].estimate               # wall time and RSS when an earlier rna run computed it
+plan["pca"].estimate               # time, memory, threads and network of the earlier rna run that computed it
 ```
 
-A reused stage's `outputs` are the `(key, ref)` pairs that the run would record. A computed stage's `reason` is `"absent"` (no artifact of the operation), `"changed"` (the closest one, `existing`, differs in `changed_parameters` or `changed_inputs`), `"superseded"` (an operation revision replaces `existing`), `"incomplete"`, `"missing_diagnostics"` (an artifact saved before its operation recorded diagnostics), `"invalid"`, or `"upstream"`. A stage that reads nothing that changed stays reused: after a `umap` change, Leiden, cluster selection, doublets and markers are reused. `estimate` is a past measurement from the latest run of the same recipe and assay that computed the stage, None without one; that run's cells, settings and machine can differ.
+A reused stage's `outputs` are the `(key, ref)` pairs that the run would record. A computed stage's `reason` is `"absent"` (no artifact of the operation), `"changed"` (the closest one, `existing`, differs in `changed_parameters` or `changed_inputs`), `"superseded"` (an operation revision replaces `existing`), `"incomplete"`, `"missing_diagnostics"` (an artifact saved before its operation recorded diagnostics), `"invalid"`, or `"upstream"`. A stage that reads nothing that changed stays reused: after a `umap` change, Leiden, cluster selection, doublets and markers are reused. `estimate` is a past measurement from the latest run of the same recipe and assay that computed the stage, None without one; that run's cells, settings and machine can differ, and its `resources` record that machine's `workers`, CPUs and memory. A value that the run did not record is None, as runs of releases before these measurements hold no CPU time.
 
 ### Handle failures and interruptions
 

@@ -1321,17 +1321,28 @@ class PipelineRun(Mapping[str, ArtifactRef]):
 
     @staticmethod
     def _stage_markdown(stage: PipelineStageRecord) -> str:
-        duration = "" if stage.metrics is None else f"{stage.metrics.wall_seconds:.3f}"
+        metrics = stage.metrics
+        duration = "" if metrics is None else f"{metrics.wall_seconds:.3f}"
         peak = (
             "unavailable"
-            if stage.metrics is None or stage.metrics.rss_peak_bytes is None
-            else str(stage.metrics.rss_peak_bytes)
+            if metrics is None or metrics.rss_peak_bytes is None
+            else str(metrics.rss_peak_bytes)
         )
+        cpu = received = ""
+        # A record of an earlier release has no CPU time or network bytes.
+        if metrics is not None and metrics.cpu_seconds is not None:
+            cpu = f"{metrics.cpu_seconds:.3f}"
+            received = (
+                "unavailable"
+                if metrics.network_rx_bytes is None
+                else str(metrics.network_rx_bytes)
+            )
         created = sum(plan.disposition == "created" for plan in stage.plans)
         reused = sum(plan.disposition == "reused" for plan in stage.plans)
         return (
             f"| {stage.ordinal} | {stage.stage} | {stage.status} | {duration} | "
-            f"{peak} | {created} | {reused} | {len(stage.warnings)} |"
+            f"{cpu} | {peak} | {received} | {created} | {reused} | "
+            f"{len(stage.warnings)} |"
         )
 
     @staticmethod
@@ -1382,9 +1393,9 @@ class PipelineRun(Mapping[str, ArtifactRef]):
             "",
             "## Stages",
             "",
-            "| # | Stage | Status | Wall seconds | Peak RSS bytes | Created | Reused "
-            "| Warnings |",
-            "|---:|---|---|---:|---:|---:|---:|---:|",
+            "| # | Stage | Status | Wall seconds | CPU seconds | Peak RSS bytes "
+            "| Received bytes | Created | Reused | Warnings |",
+            "|---:|---|---|---:|---:|---:|---:|---:|---:|---:|",
         ]
         lines.extend(self._stage_markdown(stage) for stage in stages)
         diagnostics = self._diagnostics_markdown(stages)
@@ -1446,9 +1457,11 @@ class PipelineRun(Mapping[str, ArtifactRef]):
           and ``interruption``.
         - ``stages``: each stage record written so far, skipped stages
           included, with its status, times, outputs, artifact plans with
-          their ``created`` or ``reused`` dispositions, sampled time and
-          memory as ``metrics``, ``error``, ``interruption``, ``summary``,
-          and ``warnings``.
+          their ``created`` or ``reused`` dispositions, ``metrics``,
+          ``error``, ``interruption``, ``summary``, and ``warnings``. The
+          ``metrics`` hold the stage's wall and CPU time, sampled RSS, the
+          process's peak RSS, OS threads, network bytes, the ``resources``
+          its process had, and a ``trace`` of samples.
         - ``summary``: ``createdArtifacts``, ``reusedArtifacts``,
           ``uncleanIncomplete``, True while the run record is not complete,
           as for a running run or one whose process died,
@@ -1456,8 +1469,8 @@ class PipelineRun(Mapping[str, ArtifactRef]):
           the stage that logged them, in stage order.
 
         ``format="markdown"`` returns the same facts as a Markdown document,
-        with a table of the stages and a section of each stage's summary and
-        warnings.
+        with a table of the stages, their wall and CPU seconds, peak RSS and
+        received bytes, and a section of each stage's summary and warnings.
 
         Args:
             format: ``"dict"`` or ``"markdown"``.

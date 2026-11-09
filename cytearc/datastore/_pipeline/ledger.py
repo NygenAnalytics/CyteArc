@@ -1,4 +1,5 @@
 import asyncio
+import os
 import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -8,12 +9,15 @@ from typing import Any
 
 from ...storage.artifact_writer import ArtifactPlanReceipt, artifact_plan_scope
 from ...storage.artifacts import ArtifactRef
+from ...storage.budget import detect_cpu_quota_cores, detect_memory_limit_bytes
 from ...storage.pipeline_runs import (
     STAGE_WARNING_LIMIT,
     PipelineInterruptionRecord,
     PipelinePlanRecord,
     PipelineStageMetrics,
     PipelineStageOutputRecord,
+    PipelineStageResources,
+    PipelineStageTrace,
     bounded_record_text,
     fail_pipeline_run_record,
     finish_pipeline_stage_record,
@@ -23,7 +27,13 @@ from ...storage.pipeline_runs import (
     start_pipeline_stage_record,
 )
 from ...utils.logging import RUN_ID_EXTRA, STAGE_EXTRA, collect_warnings, logger
-from ...utils.process import ProcessTreeRssMeasurement, sample_process_tree_rss
+from ...utils.process import (
+    HIGH_WATER,
+    NETWORK,
+    THREADS,
+    ProcessResourceMeasurement,
+    sample_process_resources,
+)
 from ...utils.progress import observe_progress
 from ...utils.shutdown import ShutdownRequested, shutdown_checkpoint
 from ..pipeline_run import PipelineExecutionError
@@ -33,21 +43,86 @@ from .settings import parameter_value
 type StageOutputs = Sequence[tuple[str, ArtifactRef]]
 type StageSummarizer = Callable[[str, StageOutputs], Mapping[str, Any] | None]
 
+# The record fields of each measurement that the sampler can find unavailable.
+_MEASUREMENT_FIELDS = {
+    THREADS: ("threadsPeak",),
+    NETWORK: ("networkRxBytes", "networkTxBytes"),
+    HIGH_WATER: ("rssHighWaterStartBytes", "rssHighWaterEndBytes"),
+}
+
+
+@dataclass(frozen=True, slots=True)
+class StageResources:
+    """What the process has as a stage starts, and why any part is unknown."""
+
+    record: PipelineStageResources
+    unavailable: Mapping[str, str]
+
+
+def read_stage_resources(workers: int, memory_budget_bytes: int) -> StageResources:
+    """Read the CPUs and memory that the process may use, beside the store's budget.
+
+    Read as each stage starts, so a stage that another process or machine
+    ran records what that one had.
+    """
+    cpus = os.process_cpu_count()
+    memory = detect_memory_limit_bytes()
+    unavailable: dict[str, str] = {}
+    if cpus is None:
+        unavailable["cpusAvailable"] = (
+            "the logical CPUs that the process may use could not be determined"
+        )
+    if memory is None:
+        unavailable["memoryLimitBytes"] = (
+            "neither physical memory nor a cgroup memory limit could be read"
+        )
+    return StageResources(
+        record=PipelineStageResources(
+            workers=workers,
+            memory_budget_bytes=memory_budget_bytes,
+            cpus_available=cpus,
+            cpu_quota_cores=detect_cpu_quota_cores(),
+            memory_limit_bytes=memory,
+        ),
+        unavailable=unavailable,
+    )
+
 
 def stage_metrics(
     *,
     wall_seconds: float,
-    rss: ProcessTreeRssMeasurement,
+    measurement: ProcessResourceMeasurement,
+    resources: StageResources,
 ) -> PipelineStageMetrics:
+    unavailable = dict(resources.unavailable)
+    for name, reason in measurement.unavailable.items():
+        unavailable.update(dict.fromkeys(_MEASUREMENT_FIELDS[name], reason))
+    trace = measurement.trace
     return PipelineStageMetrics(
         wall_seconds=wall_seconds,
-        rss_baseline_bytes=rss.baseline_bytes,
-        rss_peak_bytes=rss.peak_bytes,
-        rss_incremental_peak_bytes=rss.incremental_peak_bytes,
-        sample_interval_seconds=rss.sample_interval_seconds,
-        sample_count=rss.sample_count,
-        sampling_error_count=rss.sampling_error_count,
-        rss_unavailable_reason=rss.unavailable_reason,
+        rss_baseline_bytes=measurement.baseline_bytes,
+        rss_peak_bytes=measurement.peak_bytes,
+        rss_incremental_peak_bytes=measurement.incremental_peak_bytes,
+        sample_interval_seconds=measurement.sample_interval_seconds,
+        sample_count=measurement.sample_count,
+        sampling_error_count=measurement.sampling_error_count,
+        rss_unavailable_reason=measurement.unavailable_reason,
+        cpu_seconds=measurement.cpu_seconds,
+        threads_peak=measurement.threads_peak,
+        rss_high_water_start_bytes=measurement.high_water_start_bytes,
+        rss_high_water_end_bytes=measurement.high_water_end_bytes,
+        network_rx_bytes=measurement.network_rx_bytes,
+        network_tx_bytes=measurement.network_tx_bytes,
+        resources=resources.record,
+        trace=PipelineStageTrace(
+            seconds=trace.seconds,
+            cpu_seconds=trace.cpu_seconds,
+            rss_bytes=trace.rss_bytes,
+            threads=trace.threads,
+            network_rx_bytes=trace.network_rx_bytes,
+            network_tx_bytes=trace.network_tx_bytes,
+        ),
+        unavailable=unavailable,
     )
 
 
@@ -130,13 +205,24 @@ class RunLedger:
     """Run pipeline stages one at a time and record each one durably.
 
     Stages run on the calling thread in the persisted order, and each stage's
-    record is terminal before the next stage starts, so its wall time, sampled
-    memory, artifact receipt, warnings, and summary describe that stage alone.
+    record is terminal before the next stage starts, so its wall and CPU time,
+    memory, threads, network traffic, artifact receipt, warnings, and summary
+    describe that stage alone. Each record also holds the store's ``workers``
+    and memory budget and what the process could use as the stage started.
     While a stage runs, CyteArc's log records carry the run and stage, its
     warnings are collected, and its progress bars become progress events.
     """
 
-    __slots__ = ("current_stage", "events", "ordinal", "root", "run_id", "summarize")
+    __slots__ = (
+        "current_stage",
+        "events",
+        "memory_budget_bytes",
+        "ordinal",
+        "root",
+        "run_id",
+        "summarize",
+        "workers",
+    )
 
     def __init__(
         self,
@@ -144,14 +230,28 @@ class RunLedger:
         run_id: str,
         events: PipelineEventEmitter,
         summarize: StageSummarizer | None = None,
+        *,
+        workers: int,
+        memory_budget_bytes: int,
     ) -> None:
+        for name, value in (
+            ("workers", workers),
+            ("memory_budget_bytes", memory_budget_bytes),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f"{name} must be a positive integer, not {value!r}")
         self.root = root
         self.run_id = run_id
         self.ordinal = 0
         self.events = events
         self.summarize = summarize
+        self.workers = workers
+        self.memory_budget_bytes = memory_budget_bytes
         # The stage that started last, which an interruption names.
         self.current_stage: str | None = None
+
+    def _resources(self) -> StageResources:
+        return read_stage_resources(self.workers, self.memory_budget_bytes)
 
     def _execute_stage(
         self,
@@ -165,7 +265,8 @@ class RunLedger:
         summary: Mapping[str, Any] | None = None
         caught: BaseException | None = None
         collected: list[str] = []
-        with sample_process_tree_rss() as read_rss:
+        resources = self._resources()
+        with sample_process_resources() as read_resources:
             with ExitStack() as context:
                 context.enter_context(
                     logger.contextualize(
@@ -207,7 +308,8 @@ class RunLedger:
             error=caught,
             metrics=stage_metrics(
                 wall_seconds=time.perf_counter() - wall_started,
-                rss=read_rss(),
+                measurement=read_resources(),
+                resources=resources,
             ),
             plans=tuple(plans),
             # The warnings that a stage record keeps; its events carry the same.
@@ -296,13 +398,14 @@ class RunLedger:
                 f"Could not record the interruption of pipeline run {self.run_id}"
             )
 
-    @staticmethod
-    def _fallback_metrics(wall_started: float) -> PipelineStageMetrics:
-        with sample_process_tree_rss() as read_rss:
+    def _fallback_metrics(self, wall_started: float) -> PipelineStageMetrics:
+        resources = self._resources()
+        with sample_process_resources() as read_resources:
             pass
         return stage_metrics(
             wall_seconds=time.perf_counter() - wall_started,
-            rss=read_rss(),
+            measurement=read_resources(),
+            resources=resources,
         )
 
     def _record_interrupted_stage(
@@ -424,11 +527,13 @@ class RunLedger:
                 stage=stage,
             )
             stage_started = True
-            with sample_process_tree_rss() as read_rss:
+            resources = self._resources()
+            with sample_process_resources() as read_resources:
                 pass
             metrics = stage_metrics(
                 wall_seconds=time.perf_counter() - wall_started,
-                rss=read_rss(),
+                measurement=read_resources(),
+                resources=resources,
             )
             finish_pipeline_stage_record(
                 self.root,

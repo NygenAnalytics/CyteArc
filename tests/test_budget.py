@@ -290,6 +290,66 @@ def test_detect_workers_uses_combined_legacy_controller_mount(monkeypatch):
     assert detect_workers() == 2
 
 
+def test_cpu_quota_keeps_its_fraction_where_workers_round_down(monkeypatch):
+    _serve_files(
+        monkeypatch,
+        {
+            "/proc/self/cgroup": "0::/batch/job.scope\n",
+            "/sys/fs/cgroup/batch/job.scope/cpu.max": "150000 100000\n",
+            "/sys/fs/cgroup/cpu.max": "max 100000\n",
+        },
+    )
+    monkeypatch.setattr("os.cpu_count", lambda: 16)
+    monkeypatch.setattr("os.sched_getaffinity", lambda pid: set(range(16)))
+
+    assert budget_module.detect_cpu_quota_cores() == 1.5
+    assert detect_workers() == 1
+
+
+def test_cpu_quota_reads_the_legacy_controller_and_none_without_a_limit(monkeypatch):
+    monkeypatch.setattr(
+        budget_module,
+        "_process_cgroup_entry",
+        lambda controller: (["cpu"], "batch") if controller == "cpu" else None,
+    )
+    _serve_files(
+        monkeypatch,
+        {
+            "/sys/fs/cgroup/cpu/batch/cpu.cfs_quota_us": "250000",
+            "/sys/fs/cgroup/cpu/batch/cpu.cfs_period_us": "100000",
+        },
+    )
+    assert budget_module.detect_cpu_quota_cores() == 2.5
+
+    _serve_files(monkeypatch, {"/sys/fs/cgroup/cpu/batch/cpu.cfs_quota_us": "-1"})
+    assert budget_module.detect_cpu_quota_cores() is None
+
+
+def test_memory_limit_is_unknown_where_planning_takes_a_fixed_size(monkeypatch):
+    # Neither /proc/meminfo nor sysconf answers, as on Windows.
+    _without_meminfo(monkeypatch)
+    monkeypatch.setattr("os.sysconf", lambda name: -1)
+
+    assert budget_module.detect_memory_limit_bytes() is None
+    assert detect_total_memory_bytes() == 8 * 1024**3
+
+    monkeypatch.setattr(budget_module, "_cgroup_memory_bytes", lambda: 2 * 1024**3)
+    assert budget_module.detect_memory_limit_bytes() == 2 * 1024**3
+
+
+def test_memory_limit_is_the_lower_of_physical_memory_and_the_cgroup_limit(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        budget_module, "_read_physical_memory_bytes", lambda: 16 * 1024**3
+    )
+    monkeypatch.setattr(budget_module, "_cgroup_memory_bytes", lambda: None)
+    assert budget_module.detect_memory_limit_bytes() == 16 * 1024**3
+
+    monkeypatch.setattr(budget_module, "_cgroup_memory_bytes", lambda: 4 * 1024**3)
+    assert budget_module.detect_memory_limit_bytes() == 4 * 1024**3
+
+
 def test_invalid_workers_env_rejected(monkeypatch):
     monkeypatch.delenv("CYTEARC_MEM_BUDGET", raising=False)
     monkeypatch.setenv("CYTEARC_WORKERS", "not-a-number")

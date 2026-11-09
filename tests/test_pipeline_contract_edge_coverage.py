@@ -43,7 +43,7 @@ from cytearc.storage.pipeline_runs import (
     PipelineStageRecord,
 )
 from cytearc.storage.refs import ArtifactRef
-from cytearc.utils.process import ProcessTreeRssMeasurement
+from cytearc.utils.process import ProcessResourceMeasurement, ResourceTrace
 
 
 def _ref(value: str = "a") -> ArtifactRef:
@@ -851,15 +851,30 @@ def test_resolve_rna_contract_errors(
 
 
 @contextmanager
-def _sample_rss() -> Any:
-    measurement = ProcessTreeRssMeasurement(
+def _sample_resources() -> Any:
+    measurement = ProcessResourceMeasurement(
         baseline_bytes=10,
         peak_bytes=20,
         incremental_peak_bytes=10,
         sample_interval_seconds=0.1,
-        sample_count=1,
+        sample_count=2,
         sampling_error_count=0,
         unavailable_reason=None,
+        cpu_seconds=0.5,
+        threads_peak=3,
+        high_water_start_bytes=30,
+        high_water_end_bytes=40,
+        network_rx_bytes=5,
+        network_tx_bytes=1,
+        trace=ResourceTrace(
+            seconds=(0.0, 0.1),
+            cpu_seconds=(0.0, 0.5),
+            rss_bytes=(10, 20),
+            threads=(2, 3),
+            network_rx_bytes=(0, 5),
+            network_tx_bytes=(0, 1),
+        ),
+        unavailable={},
     )
     yield lambda: measurement
 
@@ -867,7 +882,7 @@ def _sample_rss() -> Any:
 def test_run_ledger_records_and_interruption_helpers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    ledger = RunLedger(object(), "run", _events())
+    ledger = RunLedger(object(), "run", _events(), workers=1, memory_budget_bytes=2**30)
     with pytest.raises(
         RuntimeError, match=r"not observed by artifact planning: \['out'\]"
     ):
@@ -896,7 +911,9 @@ def test_run_ledger_records_and_interruption_helpers(
         )
 
     events: list[PipelineEvent] = []
-    ledger = RunLedger(object(), "run", _events(events.append))
+    ledger = RunLedger(
+        object(), "run", _events(events.append), workers=1, memory_budget_bytes=2**30
+    )
     monkeypatch.setattr(
         ledger_module,
         "load_pipeline_run_record",
@@ -919,7 +936,7 @@ def test_run_ledger_records_and_interruption_helpers(
 
 
 def test_run_ledger_skip_failure_paths(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(ledger_module, "sample_process_tree_rss", _sample_rss)
+    monkeypatch.setattr(ledger_module, "sample_process_resources", _sample_resources)
     monkeypatch.setattr(
         ledger_module,
         "load_pipeline_run_record",
@@ -955,7 +972,9 @@ def test_run_ledger_skip_failure_paths(monkeypatch: pytest.MonkeyPatch) -> None:
         lambda *a, **k: (_ for _ in ()).throw(KeyboardInterrupt("stop")),
     )
     with pytest.raises(KeyboardInterrupt):
-        RunLedger(object(), "run", _events()).skip("stage")
+        RunLedger(
+            object(), "run", _events(), workers=1, memory_budget_bytes=2**30
+        ).skip("stage")
     assert (recorded, pending) == ([0], [None])
 
     recorded.clear()
@@ -969,7 +988,9 @@ def test_run_ledger_skip_failure_paths(monkeypatch: pytest.MonkeyPatch) -> None:
         lambda *a, **k: (_ for _ in ()).throw(KeyboardInterrupt("stop")),
     )
     with pytest.raises(KeyboardInterrupt):
-        RunLedger(object(), "run", _events()).skip("pending")
+        RunLedger(
+            object(), "run", _events(), workers=1, memory_budget_bytes=2**30
+        ).skip("pending")
     assert (recorded, pending) == ([], [None])
 
     class Fatal(BaseException):
@@ -981,7 +1002,9 @@ def test_run_ledger_skip_failure_paths(monkeypatch: pytest.MonkeyPatch) -> None:
         lambda *a, **k: (_ for _ in ()).throw(Fatal()),
     )
     with pytest.raises(Fatal):
-        RunLedger(object(), "run", _events()).skip("fatal")
+        RunLedger(
+            object(), "run", _events(), workers=1, memory_budget_bytes=2**30
+        ).skip("fatal")
 
     monkeypatch.setattr(
         ledger_module,
@@ -997,7 +1020,9 @@ def test_run_ledger_skip_failure_paths(monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(
         PipelineExecutionError, match="failed during stage 'failed': bad$"
     ) as caught:
-        RunLedger(object(), "run", _events()).skip("failed")
+        RunLedger(
+            object(), "run", _events(), workers=1, memory_budget_bytes=2**30
+        ).skip("failed")
     assert isinstance(caught.value.__cause__, ValueError)
     # A stage that never started still ends its run as failed.
     assert [(kwargs["run_id"], str(kwargs["error"])) for kwargs in failed_runs] == [
@@ -1006,7 +1031,7 @@ def test_run_ledger_skip_failure_paths(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_run_ledger_run_failure_paths(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(ledger_module, "sample_process_tree_rss", _sample_rss)
+    monkeypatch.setattr(ledger_module, "sample_process_resources", _sample_resources)
     monkeypatch.setattr(
         ledger_module,
         "load_pipeline_run_record",
@@ -1020,7 +1045,9 @@ def test_run_ledger_run_failure_paths(monkeypatch: pytest.MonkeyPatch) -> None:
         lambda *a, **k: (_ for _ in ()).throw(ValueError("start")),
     )
     with pytest.raises(PipelineExecutionError, match="start"):
-        RunLedger(object(), "run", _events()).run("stage", lambda: ())
+        RunLedger(object(), "run", _events(), workers=1, memory_budget_bytes=2**30).run(
+            "stage", lambda: ()
+        )
 
     monkeypatch.setattr(
         ledger_module, "start_pipeline_stage_record", lambda *a, **k: None
@@ -1035,7 +1062,7 @@ def test_run_ledger_run_failure_paths(monkeypatch: pytest.MonkeyPatch) -> None:
         lambda self, **kwargs: failures.append(kwargs["error"]),
     )
     with pytest.raises(PipelineExecutionError, match="not observed"):
-        RunLedger(object(), "run", _events()).run(
+        RunLedger(object(), "run", _events(), workers=1, memory_budget_bytes=2**30).run(
             "unplanned",
             lambda: (("out", _ref()),),
         )
@@ -1046,7 +1073,9 @@ def test_run_ledger_run_failure_paths(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(ledger_module, "finish_pipeline_stage_record", fail_finish)
     with pytest.raises(PipelineExecutionError, match="finish"):
-        RunLedger(object(), "run", _events()).run("finish", lambda: ())
+        RunLedger(object(), "run", _events(), workers=1, memory_budget_bytes=2**30).run(
+            "finish", lambda: ()
+        )
 
     monkeypatch.setattr(
         ledger_module, "finish_pipeline_stage_record", lambda *a, **k: None
@@ -1058,7 +1087,7 @@ def test_run_ledger_run_failure_paths(monkeypatch: pytest.MonkeyPatch) -> None:
         lambda self, **kwargs: interrupted.append(kwargs["stage"]),
     )
     with pytest.raises(asyncio.CancelledError):
-        RunLedger(object(), "run", _events()).run(
+        RunLedger(object(), "run", _events(), workers=1, memory_budget_bytes=2**30).run(
             "cancelled",
             lambda: (_ for _ in ()).throw(asyncio.CancelledError()),
         )
@@ -1068,7 +1097,7 @@ def test_run_ledger_run_failure_paths(monkeypatch: pytest.MonkeyPatch) -> None:
         pass
 
     with pytest.raises(Fatal):
-        RunLedger(object(), "run", _events()).run(
+        RunLedger(object(), "run", _events(), workers=1, memory_budget_bytes=2**30).run(
             "fatal",
             lambda: (_ for _ in ()).throw(Fatal()),
         )

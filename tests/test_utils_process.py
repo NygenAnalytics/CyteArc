@@ -1,22 +1,58 @@
 """Behavioral tests for process helpers."""
 
+import importlib.util
+import json
 import os
 import io
 import re
+import subprocess
 import sys
+import textwrap
 import threading
+import time
+from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
 
 import cytearc.utils.process as process_module
 from cytearc.utils.process import (
+    HIGH_WATER,
+    NETWORK,
+    THREADS,
+    TRACE_POINT_LIMIT,
+    ProcessReaders,
+    ResourceSample,
     process_rss_mb,
     read_process_tree_rss_bytes,
     rss_text,
-    sample_process_tree_rss,
+    sample_process_resources,
     suppress_native_output,
 )
+
+
+def _scripted(
+    readings: Sequence[ResourceSample | Exception],
+    *,
+    high_water: Sequence[int] = (),
+    rss_unavailable_reason: str | None = None,
+) -> ProcessReaders:
+    """Readers that return ``readings`` in turn, raising the exceptions among them."""
+    pending = iter(readings)
+    marks = iter(high_water)
+
+    def sample() -> ResourceSample:
+        reading = next(pending)
+        if isinstance(reading, Exception):
+            raise reading
+        return reading
+
+    return ProcessReaders(
+        sample=sample,
+        high_water_bytes=(lambda: next(marks)) if high_water else None,
+        rss_unavailable_reason=rss_unavailable_reason,
+        unavailable={} if high_water else {HIGH_WATER: "the test reads no mark"},
+    )
 
 
 def _fake_proc_root(tmp_path: Path, status: bytes) -> Path:
@@ -87,7 +123,9 @@ def test_rna_feature_stats_log_rss_without_proc(tmp_path, monkeypatch):
     ), bands
 
 
-def test_process_tree_sampler_starts_no_thread_without_proc(tmp_path, monkeypatch):
+def test_sampler_without_proc_samples_cpu_and_names_what_it_cannot_read(
+    tmp_path, monkeypatch
+):
     monkeypatch.setattr(process_module, "_PROC_ROOT", tmp_path / "missing")
     started: list[str] = []
     real_start = threading.Thread.start
@@ -97,11 +135,15 @@ def test_process_tree_sampler_starts_no_thread_without_proc(tmp_path, monkeypatc
         real_start(thread)
 
     monkeypatch.setattr(threading.Thread, "start", recording_start)
-    with sample_process_tree_rss(interval_seconds=0.01) as measurement:
+    with sample_process_resources(interval_seconds=0.01) as measurement:
+        burned = time.process_time() + 0.05
+        while time.process_time() < burned:
+            pass
         during = measurement()
     final = measurement()
 
-    assert "cytearc-pipeline-rss" not in started
+    # The thread samples CPU time even where nothing else can be read.
+    assert "cytearc-resource-sampler" in started
     for observed in (during, final):
         assert (observed.baseline_bytes, observed.peak_bytes) == (None, None)
         assert observed.incremental_peak_bytes is None
@@ -110,22 +152,43 @@ def test_process_tree_sampler_starts_no_thread_without_proc(tmp_path, monkeypatc
         assert observed.unavailable_reason == (
             "process-tree RSS requires the Linux /proc filesystem"
         )
+        assert observed.unavailable[THREADS] == (
+            "OS thread counts require the Linux /proc filesystem"
+        )
+        assert observed.unavailable[NETWORK] == (
+            "network counters require the Linux /proc filesystem"
+        )
+        assert observed.threads_peak is None
+        assert (observed.network_rx_bytes, observed.network_tx_bytes) == (None, None)
+        trace = observed.trace
+        assert (trace.rss_bytes, trace.threads) == (None, None)
+        assert (trace.network_rx_bytes, trace.network_tx_bytes) == (None, None)
+    assert final.cpu_seconds >= 0.05
+    assert len(final.trace.seconds) >= 2
+    assert final.trace.cpu_seconds[-1] == round(final.cpu_seconds, 3)
 
 
-def test_process_tree_sampler_reads_the_patched_proc_root(tmp_path, monkeypatch):
+def test_sampler_reads_the_patched_proc_root(tmp_path, monkeypatch):
     proc_root = _fake_proc_root(tmp_path, b"PPid:\t1\nVmRSS:\t4 kB\n")
     pid_status = proc_root / str(os.getpid()) / "status"
     pid_status.parent.mkdir()
     pid_status.write_bytes(b"PPid:\t1\nVmRSS:\t8 kB\n")
     monkeypatch.setattr(process_module, "_PROC_ROOT", proc_root)
 
-    with sample_process_tree_rss(interval_seconds=3600.0) as measurement:
+    with sample_process_resources(interval_seconds=3600.0) as measurement:
         pass
 
     final = measurement()
     assert (final.baseline_bytes, final.peak_bytes) == (8 * 1024, 8 * 1024)
     assert (final.sample_count, final.sampling_error_count) == (2, 0)
     assert final.unavailable_reason is None
+    assert final.trace.rss_bytes == (8 * 1024, 8 * 1024)
+    # The fake status names no thread count, and the fake root no network file.
+    assert final.unavailable[THREADS] == "the /proc status file reports no thread count"
+    assert final.unavailable[NETWORK] == (
+        f"{proc_root / str(os.getpid()) / 'net' / 'dev'} cannot be read as network "
+        "counters"
+    )
 
 
 def test_process_tree_rss_sums_only_root_and_descendants(tmp_path: Path) -> None:
@@ -395,13 +458,12 @@ def test_process_tree_rss_survives_cycles_and_unreadable_roots() -> None:
         )
 
 
-def test_process_tree_sampler_reports_unavailable_measurements() -> None:
+def test_sampler_reports_unavailable_rss_when_no_reading_holds_it() -> None:
     # The sampling interval outlasts the test, so exactly the first and the
     # closing samples are taken.
-    with sample_process_tree_rss(
-        interval_seconds=3600.0,
-        root_pid=123,
-        reader=lambda _pid: None,
+    readers = _scripted([ResourceSample(1.0), ResourceSample(1.5)])
+    with sample_process_resources(
+        interval_seconds=3600.0, readers=readers
     ) as measurement:
         observed = measurement()
 
@@ -413,15 +475,15 @@ def test_process_tree_sampler_reports_unavailable_measurements() -> None:
     assert observed.unavailable_reason == "process-tree RSS is unavailable"
     final = measurement()
     assert final.sample_count == final.sampling_error_count == 2
+    assert final.trace.rss_bytes == (None, None)
 
 
-def test_process_tree_sampler_preserves_baseline_and_sampled_peak() -> None:
-    readings = iter((100, 140))
-
-    with sample_process_tree_rss(
-        interval_seconds=3600.0,
-        root_pid=123,
-        reader=lambda _pid: next(readings),
+def test_sampler_preserves_baseline_and_sampled_peak() -> None:
+    readers = _scripted(
+        [ResourceSample(1.0, rss_bytes=100), ResourceSample(2.0, rss_bytes=140)]
+    )
+    with sample_process_resources(
+        interval_seconds=3600.0, readers=readers
     ) as measurement:
         first = measurement()
         assert first.baseline_bytes == 100
@@ -435,33 +497,386 @@ def test_process_tree_sampler_preserves_baseline_and_sampled_peak() -> None:
     assert final.unavailable_reason is None
 
 
-@pytest.mark.parametrize("bad_reading", [RuntimeError("proc unavailable"), -1, True])
-def test_process_tree_sampler_counts_failed_and_invalid_readings(bad_reading) -> None:
-    readings = iter((bad_reading, 300))
-
-    def reader(_pid: int) -> int:
-        reading = next(readings)
-        if isinstance(reading, Exception):
-            raise reading
-        return reading
-
-    with sample_process_tree_rss(
-        interval_seconds=3600.0, root_pid=123, reader=reader
+@pytest.mark.parametrize("bad_reading", [None, -1, True])
+def test_sampler_counts_invalid_rss_readings(bad_reading) -> None:
+    readers = _scripted(
+        [ResourceSample(1.0, rss_bytes=bad_reading), ResourceSample(2.0, rss_bytes=300)]
+    )
+    with sample_process_resources(
+        interval_seconds=3600.0, readers=readers
     ) as measurement:
         pass
 
     final = measurement()
-    # The failed first reading leaves the baseline to the next valid one.
+    # The invalid first reading leaves the baseline to the next valid one.
     assert (final.sample_count, final.sampling_error_count) == (2, 1)
     assert (final.baseline_bytes, final.peak_bytes) == (300, 300)
     assert final.incremental_peak_bytes == 0
+    assert final.trace.rss_bytes == (None, 300)
+
+
+def test_sampler_counts_a_reading_that_raises_and_keeps_the_others() -> None:
+    readers = _scripted(
+        [ResourceSample(1.0, rss_bytes=300), RuntimeError("proc unavailable")]
+    )
+    with sample_process_resources(
+        interval_seconds=3600.0, readers=readers
+    ) as measurement:
+        pass
+
+    final = measurement()
+    assert (final.sample_count, final.sampling_error_count) == (2, 1)
+    assert (final.baseline_bytes, final.peak_bytes) == (300, 300)
+    # The failed closing sample adds no point.
+    assert (final.trace.seconds, final.cpu_seconds) == ((0.0,), 0.0)
+
+
+def test_sampler_raises_when_the_reading_that_opens_it_fails() -> None:
+    readers = _scripted([RuntimeError("no process clock")])
+    with pytest.raises(RuntimeError, match="^no process clock$"):
+        with sample_process_resources(readers=readers):
+            pass
 
 
 @pytest.mark.parametrize("interval", [0.0, -1.0])
-def test_process_tree_sampler_requires_a_positive_interval(interval) -> None:
+def test_sampler_requires_a_positive_interval(interval) -> None:
     with pytest.raises(ValueError, match="interval_seconds must be positive"):
-        with sample_process_tree_rss(interval_seconds=interval):
+        with sample_process_resources(interval_seconds=interval):
             pass
+
+
+def test_sampler_counts_cpu_threads_network_and_high_water_between_its_readings() -> (
+    None
+):
+    readers = _scripted(
+        [
+            ResourceSample(10.0, 100, 4, network_rx_bytes=1_000, network_tx_bytes=50),
+            ResourceSample(12.5, 140, 9, network_rx_bytes=4_000, network_tx_bytes=80),
+        ],
+        high_water=(1_000, 5_000),
+    )
+    with sample_process_resources(
+        interval_seconds=3600.0, readers=readers
+    ) as measurement:
+        pass
+
+    final = measurement()
+    assert final.cpu_seconds == 2.5
+    assert final.threads_peak == 9
+    assert (final.network_rx_bytes, final.network_tx_bytes) == (3_000, 30)
+    assert (final.high_water_start_bytes, final.high_water_end_bytes) == (1_000, 5_000)
+    assert final.unavailable == {}
+    trace = final.trace
+    assert trace.cpu_seconds == (0.0, 2.5)
+    assert (trace.rss_bytes, trace.threads) == ((100, 140), (4, 9))
+    assert (trace.network_rx_bytes, trace.network_tx_bytes) == ((0, 3_000), (0, 30))
+
+
+def test_network_counters_that_fall_leave_the_window_without_network_bytes() -> None:
+    readers = _scripted(
+        [
+            ResourceSample(1.0, 10, 2, network_rx_bytes=500, network_tx_bytes=5),
+            ResourceSample(2.0, 10, 2, network_rx_bytes=100, network_tx_bytes=9),
+        ]
+    )
+    with sample_process_resources(
+        interval_seconds=3600.0, readers=readers
+    ) as measurement:
+        pass
+
+    final = measurement()
+    assert (final.network_rx_bytes, final.network_tx_bytes) == (None, None)
+    assert final.unavailable[NETWORK] == (
+        "the network counters decreased during the window, as when an interface "
+        "goes away"
+    )
+    assert (final.trace.network_rx_bytes, final.trace.network_tx_bytes) == (None, None)
+
+
+# The samples that a trace of 200 keeps under the rule that a full trace keeps
+# its first point and the second point of each later pair: the oldest samples
+# end up 32 apart and the newest one apart. After 97 samples the same rule
+# keeps 0, 4, ..., 64 and 66, 68, ..., 96.
+_KEPT_OF_200 = (
+    (0, 32, 64, 80, 96, 104, 112, 120, 128)
+    + tuple(range(132, 160, 4))
+    + tuple(range(160, 192, 2))
+    + tuple(range(192, 200))
+)
+
+
+def test_a_trace_of_200_samples_keeps_real_samples_with_exact_counts_and_maxima() -> (
+    None
+):
+    rss = [(sample * 37) % 101 for sample in range(200)]
+    threads = [1 + (sample * 13) % 17 for sample in range(200)]
+    readers = ProcessReaders(sample=lambda: ResourceSample(0.0))
+    window = process_module._ResourceWindow(readers, 0.1)
+    for sample in range(200):
+        window.record(
+            ResourceSample(
+                cpu_seconds=100 + 0.25 * sample,
+                rss_bytes=rss[sample],
+                threads=threads[sample],
+                network_rx_bytes=10**6 + 1_000 * sample,
+                network_tx_bytes=7 * sample,
+            ),
+            0.1 * sample,
+        )
+    window.close(None)
+    final = window.measurement()
+    trace = final.trace
+
+    assert len(_KEPT_OF_200) == 40 <= TRACE_POINT_LIMIT
+    assert trace.seconds == tuple(round(0.1 * sample, 3) for sample in _KEPT_OF_200)
+    assert trace.cpu_seconds == tuple(0.25 * sample for sample in _KEPT_OF_200)
+    assert trace.network_rx_bytes == tuple(1_000 * sample for sample in _KEPT_OF_200)
+    assert trace.network_tx_bytes == tuple(7 * sample for sample in _KEPT_OF_200)
+    # Each point holds the largest RSS and thread count since the one before.
+    spans = list(zip((-1, *_KEPT_OF_200), _KEPT_OF_200))
+    assert trace.rss_bytes == tuple(max(rss[a + 1 : b + 1]) for a, b in spans)
+    assert trace.threads == tuple(max(threads[a + 1 : b + 1]) for a, b in spans)
+    assert (final.cpu_seconds, final.network_rx_bytes) == (0.25 * 199, 199_000)
+    assert (final.peak_bytes, final.threads_peak) == (max(rss), max(threads))
+
+
+def test_a_trace_of_97_samples_keeps_the_hand_derived_samples() -> None:
+    window = process_module._ResourceWindow(
+        ProcessReaders(sample=lambda: ResourceSample(0.0)), 0.1
+    )
+    for sample in range(97):
+        window.record(ResourceSample(cpu_seconds=float(sample)), 0.1 * sample)
+    window.close(None)
+
+    kept = window.measurement().trace.cpu_seconds
+    assert kept == tuple(map(float, (*range(0, 65, 4), *range(66, 97, 2))))
+
+
+def test_a_sample_after_the_window_closed_is_left_out_and_times_never_fall() -> None:
+    window = process_module._ResourceWindow(
+        ProcessReaders(sample=lambda: ResourceSample(0.0)), 0.1
+    )
+    window.record(ResourceSample(1.0, threads=2), 0.0)
+    window.record(ResourceSample(2.0, threads=3), 0.5)
+    # Timed by another thread before the previous sample was recorded.
+    window.record(ResourceSample(3.0, threads=4), 0.4)
+    window.close(None)
+    # From a sampling thread that outlived its join.
+    window.record(ResourceSample(9.0, threads=50), 0.9)
+
+    final = window.measurement()
+    assert final.trace.seconds == (0.0, 0.5, 0.5)
+    assert (final.cpu_seconds, final.threads_peak) == (2.0, 4)
+
+
+def test_a_delayed_sample_leaves_one_long_interval_and_exact_totals() -> None:
+    calls: list[int] = []
+
+    def sample() -> ResourceSample:
+        call = len(calls)
+        calls.append(call)
+        if call == 2:
+            # As when a call that holds the GIL keeps the sampler waiting.
+            time.sleep(0.4)
+        return ResourceSample(
+            float(call), threads=3, network_rx_bytes=10 * call, network_tx_bytes=call
+        )
+
+    readers = ProcessReaders(
+        sample=sample,
+        rss_unavailable_reason="the test reads no RSS",
+        unavailable={HIGH_WATER: "the test reads no mark"},
+    )
+    with sample_process_resources(
+        interval_seconds=0.01, readers=readers
+    ) as measurement:
+        deadline = time.monotonic() + 30
+        while len(calls) < 6 and time.monotonic() < deadline:
+            time.sleep(0.01)
+
+    final = measurement()
+    last = len(calls) - 1
+    intervals = [b - a for a, b in zip(final.trace.seconds, final.trace.seconds[1:])]
+    assert max(intervals) >= 0.4
+    assert (final.cpu_seconds, final.network_rx_bytes) == (float(last), 10 * last)
+    assert final.trace.cpu_seconds[-1] == float(last)
+
+
+def test_proc_files_parse_into_threads_cpu_ticks_and_network_bytes() -> None:
+    status = "Name:\tpython\nPPid:\t1\nThreads:\t12\nVmRSS:\t2048 kB\n"
+    assert process_module._parse_proc_status(status) == (1, 2 * 1024**2, 12)
+    # The command name may hold spaces and parentheses; fields 14 to 17 are
+    # the process's user and system ticks and those of children it waited for.
+    stat = "1234 (py (x) y) S 1 1234 1234 0 -1 4194560 100 0 0 0 250 50 7 3 20 0"
+    assert process_module._parse_proc_stat_cpu_ticks(stat) == 310
+    assert process_module._parse_proc_stat_cpu_ticks("1234 (py) S 1 2 3") is None
+    header = (
+        "Inter-|   Receive                                                |  "
+        "Transmit\n face |bytes    packets errs drop fifo frame compressed "
+        "multicast|bytes    packets errs drop fifo colls carrier compressed\n"
+    )
+    linux = header + (
+        "    lo: 1234567     100    0    0    0     0          0         0  "
+        "1234567     100    0    0    0     0       0          0\n"
+        "  eth0: 9876543210 12345    0    0    0     0          0         0 "
+        "123456789   6789    0    0    0     0       0          0\n"
+        "  eth1:4294967296      1    0    0    0     0          0         0       "
+        "20       2    0    0    0     0       0          0\n"
+    )
+    # Modal's gVisor sandbox writes the same layout.
+    gvisor = header + (
+        "    lo:       0       0    0    0    0     0          0         0        "
+        "0       0    0    0    0     0       0          0\n"
+        "  eth0:     552       6    0    0    0     0          0         0        "
+        "0       0    0    0    0     0       0          0\n"
+    )
+    assert process_module._parse_net_dev(linux) == (
+        9_876_543_210 + 4_294_967_296,
+        123_456_789 + 20,
+    )
+    assert process_module._parse_net_dev(gvisor) == (552, 0)
+    assert process_module._parse_net_dev("eth0: 1 2 3\n") is None
+    assert process_module._parse_net_dev(header + "  eth0: 1 2 3\n") is None
+    assert process_module._parse_net_dev(header + "  eth0: x 0 0 0 0 0 0 0 0\n") is None
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux lists children in /proc")
+def test_sampler_adds_a_child_that_a_worker_thread_started() -> None:
+    code = (
+        "import threading, time\n"
+        "held = b'x' * (50 * 2**20)\n"
+        "stop = threading.Event()\n"
+        "for _ in range(3):\n"
+        "    threading.Thread(target=stop.wait, daemon=True).start()\n"
+        "until = time.process_time() + 0.4\n"
+        "while time.process_time() < until:\n"
+        "    pass\n"
+        "print(time.process_time(), flush=True)\n"
+        "time.sleep(60)\n"
+    )
+    started: dict[str, subprocess.Popen[str]] = {}
+
+    def start() -> None:
+        started["child"] = subprocess.Popen(
+            [sys.executable, "-c", code], stdout=subprocess.PIPE, text=True
+        )
+
+    own_before = time.process_time()
+    try:
+        with sample_process_resources(interval_seconds=0.05) as measurement:
+            starter = threading.Thread(target=start)
+            starter.start()
+            starter.join()
+            child = started["child"]
+            assert child.stdout is not None
+            child_cpu = float(child.stdout.readline())
+            # The window closes while the child still lives, so only the walk
+            # of the process tree can count its CPU time.
+        own = time.process_time() - own_before
+        own_threads = process_module._parse_proc_status(
+            Path(f"/proc/{os.getpid()}/status").read_text()
+        ).threads
+    finally:
+        for process in started.values():
+            process.kill()
+            process.wait()
+
+    final = measurement()
+    assert own < child_cpu / 2
+    assert final.cpu_seconds >= child_cpu - 0.02
+    assert final.baseline_bytes is not None and final.peak_bytes is not None
+    assert final.peak_bytes >= final.baseline_bytes + 45 * 2**20
+    assert own_threads is not None and final.threads_peak is not None
+    assert final.threads_peak >= own_threads + 4
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux lists children in /proc")
+def test_a_sample_without_children_opens_no_task_file_at_any_thread_count() -> None:
+    # A fresh process has no child that another test left behind.
+    code = textwrap.dedent(
+        """
+        import json, os, subprocess, sys, threading
+        import cytearc.utils.process as process
+
+        opened = []
+        real_open = os.open
+
+        def counting_open(path, *args, **kwargs):
+            opened.append(os.fspath(path))
+            return real_open(path, *args, **kwargs)
+
+        stop = threading.Event()
+        for _ in range(64):
+            threading.Thread(target=stop.wait, daemon=True).start()
+        readers = process.default_process_readers()
+        os.open = counting_open
+        for _ in range(5):
+            readers.sample()
+        alone = sum("/task/" in path for path in opened)
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+        opened.clear()
+        readers.sample()
+        with_child = sum("/task/" in path for path in opened)
+        child.kill()
+        child.wait()
+        print(json.dumps({"alone": alone, "withChild": with_child}))
+        """
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=True,
+    )
+    counts = json.loads(result.stdout.strip().splitlines()[-1])
+    assert counts["alone"] == 0
+    # With a child, a sample walks the children files of all 65 threads, so
+    # the count above would have seen a walk.
+    assert counts["withChild"] >= 65
+
+
+@pytest.mark.skipif(
+    importlib.util.find_spec("resource") is None, reason="getrusage is missing"
+)
+def test_the_high_water_mark_keeps_a_peak_inside_a_call_that_holds_the_gil() -> None:
+    # On Linux a process starts with the mark of the process that started it,
+    # so a test worker's child would inherit the worker's peak. The probe runs
+    # as the grandchild of the worker, started by a small process.
+    code = textwrap.dedent(
+        """
+        import json
+        import numpy as np
+        from scipy.linalg import blas
+        from cytearc.utils.process import sample_process_resources
+
+        values = np.asfortranarray(np.ones((4, 7_000)))
+        with sample_process_resources(interval_seconds=0.01) as measurement:
+            # dsyrk holds the GIL while it allocates its 392 MB result and
+            # fills half of it, and the result is freed at once.
+            result = blas.dsyrk(1.0, values, trans=1)
+            del result
+        final = measurement()
+        print(json.dumps([final.high_water_start_bytes, final.high_water_end_bytes]))
+        """
+    )
+    launcher = (
+        "import subprocess, sys\n"
+        f"probe = subprocess.run([sys.executable, '-c', {code!r}], "
+        "capture_output=True, text=True)\n"
+        "sys.stdout.write(probe.stdout)\n"
+        "sys.stderr.write(probe.stderr)\n"
+        "sys.exit(probe.returncode)\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", launcher],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == 0, result.stderr
+    start, end = json.loads(result.stdout.strip().splitlines()[-1])
+    assert end - start >= 150 * 10**6
 
 
 def _standard_descriptors() -> dict[int, tuple[int, int]]:

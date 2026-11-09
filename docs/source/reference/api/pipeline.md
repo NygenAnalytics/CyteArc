@@ -445,7 +445,7 @@ plan["pca"].estimate    # what PCA took when an earlier rna run computed it
 
 An artifact's identity includes the identities of its inputs. A stage that reads what an earlier stage would compute therefore cannot know its own identity, since its inputs do not exist yet, and its artifact will be new whatever the store holds. The plan reports such a stage computed with the reason `upstream` and names, in `upstream`, the earlier stages whose outputs it reads; those may wait on others in turn. A stage that reads nothing that would change stays reused: after a change to the `umap` settings, the Leiden candidates, cluster selection, doublet scoring, and markers read the graph, not UMAP, so the plan, like the run, reuses them.
 
-A computed stage's `estimate`, a {py:class}`~cytearc.datastore.pipeline_accessor.PipelineStageEstimate`, holds the wall time and sampled RSS peaks of the stage in the latest earlier run of the same recipe and assay that computed it, with that run's ID; a run that reused every artifact of the stage does not count, and with no such run `estimate` is None. It is a past measurement, not a model: that run's cells, settings, and machine can differ.
+A computed stage's `estimate`, a {py:class}`~cytearc.datastore.pipeline_accessor.PipelineStageEstimate`, holds what the stage took in the latest earlier run of the same recipe and assay that computed it, with that run's ID: its wall and CPU time, sampled RSS peaks, OS thread peak, network bytes, the process's peak RSS when the stage raised it, and the `resources` that its process had, such as `workers` and `memoryLimitBytes` ([Stage resources](#stage-resources)). A run that reused every artifact of the stage does not count, and with no such run `estimate` is None. A value that the earlier run did not record, as runs of releases before these measurements record no CPU time, is None. It is a past measurement, not a model: that run's cells and settings can differ, and its `resources` describe the machine it ran on.
 
 A plan raises the errors that the call raises before it writes, such as a `ValueError` for an already completed label, and a `TypeError` for `callback` or `cancel`, which belong to a run. A stage's method checks some values only when the stage runs ([Validation before a run starts](#validation-before-a-run-starts)): when every stage before it would be reused, the plan reaches that check and raises the stage's error, as the run would. The plan goes through each stage until the stage would compute an artifact, so a reused stage warns from its saved diagnostics as it does in a run.
 
@@ -906,16 +906,18 @@ The recovery call succeeds only for the exact current owner while `complete=Fals
 torn terminal payload, and records an `abandoned_label_claim` interruption. It refuses every
 `complete=True` owner and has no timeout or automatic stale-process heuristic.
 
-Every status exposes identity, status, recipe, and `run.report(format="dict" | "markdown")`. Only a
-completed run exposes mapping outputs and frozen views. Reports include stage timing, sampled
-process-tree RSS, artifact plans with `created` or `reused` dispositions, stage summaries and
-warnings ([Diagnostics](#diagnostics)), failures, interruption details, and signal-guard
-availability. RSS peaks are sampled lower bounds. An unavailable measurement is reported as null
-with a reason. RSS comes from the Linux `/proc` filesystem; on platforms without it, such as macOS
-and Windows, nothing is sampled, so `sampleCount` is 0.
+Every status exposes identity, status, recipe, and `run.report(format="dict" | "markdown")`. Only a completed run exposes mapping outputs and frozen views. Reports include what each stage used and what its process had ([Stage resources](#stage-resources)), artifact plans with `created` or `reused` dispositions, stage summaries and warnings ([Diagnostics](#diagnostics)), failures, interruption details, and signal-guard availability.
 
 A hard process death can leave `complete=False`; this is reported as an unclean incomplete run.
 There is no resume, repair, or same-ID retry. A new invocation may reuse only complete artifacts.
+
+### Stage resources
+
+Each stage record's `metrics` holds what the stage used beside what its process had, so every run carries a resource trace of its stages: which stage stays on one core, which reads the most over the network, and which needs the most memory. `cpuSeconds` over `wallSeconds` gives the cores that a stage used on average, and `resources["workers"]` the worker count it was given, the store's `nthreads`. A stage that stays near one core although given eight runs serially, as UMAP's layout does by default. The `trace` holds up to 64 samples of each stage, about 3 s apart over a 17-minute stage, with the CPU seconds and network bytes counted since the stage started and the largest RSS and thread count between samples. `resources` also records the CPUs and memory that the process could use as the stage started, so stages that different machines ran stay comparable. [Pipeline records and snapshots](../developers/zarr_internals#pipeline-records-and-snapshots) describes each field.
+
+The measurements cover the whole process, so work on other threads of the process during a stage counts toward that stage. RSS peaks are sampled lower bounds, and a call that holds the GIL, such as SciPy's wrapped BLAS and LAPACK routines, pauses sampling until it returns. `rssHighWaterEndBytes`, the kernel's mark of the process's peak RSS, keeps such a peak when the stage raised it above `rssHighWaterStartBytes`. `networkRxBytes` and `networkTxBytes` count the process's network namespace, which on a container worker is the container and on a laptop is usually the whole machine.
+
+RSS, thread counts, and network bytes come from the Linux `/proc` filesystem. On platforms without it, such as macOS and Windows, RSS is not sampled, so `sampleCount` is 0, and the other two are null, each with its reason in `unavailable`. CPU time and its trace are recorded on every platform, and the process's peak RSS wherever Python offers `getrusage`, which Windows does not.
 
 ### Runs saved by other releases
 
@@ -930,6 +932,8 @@ such a run reopens and reports although no current recipe accepts its configurat
 again, translate its configuration into `ds.pipeline.rna` keywords with the
 [migration table](#migrate-from-pipeline-run); a new run never modifies the earlier one. Their
 stage records have no summaries or warnings, which their reports show as None and an empty list.
+
+Stage records of releases before the [stage resources](#stage-resources) hold metrics without `cpuSeconds`, `threadsPeak`, `rssHighWaterStartBytes`, `rssHighWaterEndBytes`, `networkRxBytes`, `networkTxBytes`, `resources`, `trace`, and `unavailable`. Their reports show each as None, and the plan's estimates take None for them.
 
 Running a configuration again recomputes a stage whose operation gained a revision that applies to
 it, or whose recorded provenance a later release changed. Lineage reports of the earlier run's
@@ -948,6 +952,8 @@ from earlier releases never meet this error. The pipeline recipes added the stag
 and `warnings`: a 1.x release from before the recipes opens the runs that they save, but its
 `report()` raises on those fields. A 2.0 release may change run records and lists each change in
 its compatibility inventory.
+
+Releases from before the stage resources open the runs that this release saves, but their `report()` raises on the new metric fields, and their `plan` skips those stage records with a warning.
 
 A cell field can read an artifact of another assay than the run's, as the guide fields of a `perturbation` run do ([Frozen fields](#frozen-fields)). Such a field is an ordinary entry of the record's `fields`, so run records keep their shape, with no new record field, schema version, or migration, and every saved run reads as before. CyteArc 1.3.0 and earlier releases read cell fields of the run's assay only: they refuse the cell view of a run with such a field, with an `ArtifactResolutionError` whose code is `pipeline_field_axis_mismatch`, while its outputs and feature view open. They do not know the artifact kinds of a `perturbation` run's guide calls and labels, such as `guide_calls`, so they open no `perturbation` run. A run keeps the fields that it recorded and gains none later: a `perturbation` run saved without the guide fields gets them only from a new run of the recipe with the same settings, under another label or none, which reuses every artifact of the earlier run.
 
@@ -1002,14 +1008,11 @@ warnings.
 - `run`: the run record, with `runId`, `recipe`, `requestedLabel`, `label`, `assay`,
   `startedAtNs`, `finishedAtNs`, `status`, `complete`, `cytearcVersion`, `config`, `stageOrder`,
   `outputs`, `fields`, `error`, and `interruption`;
-- `stages`: each stage record written so far, skipped stages included, with `stage`, `ordinal`,
-  `status`, its times, `outputs`, `plans`, `metrics`, `error`, `interruption`, `summary`, and
-  `warnings`;
+- `stages`: each stage record written so far, skipped stages included, with `stage`, `ordinal`, `status`, its times, `outputs`, `plans`, `metrics` ([Stage resources](#stage-resources)), `error`, `interruption`, `summary`, and `warnings`;
 - `summary`: `createdArtifacts`, `reusedArtifacts`, `uncleanIncomplete`, `signalProtection`, and
   `warnings`, a list of `{"stage", "message"}` entries for every stage's warnings in stage order.
 
-`run.report(format="markdown")` adds a `Warnings` column with each stage's count to its stage
-table and a `## Diagnostics` section with each stage's summary as JSON and its warnings.
+`run.report(format="markdown")` shows each stage's wall and CPU seconds, sampled peak RSS, received bytes, and warning count in its stage table, and adds a `## Diagnostics` section with each stage's summary as JSON and its warnings. A stage record of an earlier release leaves the CPU seconds and received bytes empty.
 
 ## Events and listeners
 

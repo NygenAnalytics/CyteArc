@@ -40,7 +40,8 @@ def _read_int(path: str) -> int | None:
     return parsed
 
 
-def _physical_memory_bytes() -> int:
+def _read_physical_memory_bytes() -> int | None:
+    """Return physical memory from /proc/meminfo or sysconf, None if neither."""
     try:
         with open("/proc/meminfo") as handle:
             for line in handle:
@@ -55,7 +56,12 @@ def _physical_memory_bytes() -> int:
             return int(page_size) * int(total_pages)
     except (ValueError, OSError, AttributeError):
         pass
-    return _FALLBACK_MEMORY_BYTES
+    return None
+
+
+def _physical_memory_bytes() -> int:
+    physical = _read_physical_memory_bytes()
+    return _FALLBACK_MEMORY_BYTES if physical is None else physical
 
 
 def _process_cgroup_entry(controller: str) -> tuple[list[str], str] | None:
@@ -116,8 +122,27 @@ def detect_total_memory_bytes() -> int:
     return physical if cgroup is None else min(physical, cgroup)
 
 
-def _cpu_quota_workers() -> int | None:
-    limits: list[int] = []
+def detect_memory_limit_bytes() -> int | None:
+    """Return physical memory or a lower cgroup limit, None where neither is read.
+
+    Unlike ``detect_total_memory_bytes``, which plans with a fixed size where
+    physical memory cannot be read, this reports only what it read.
+    """
+    limits = [
+        value
+        for value in (_read_physical_memory_bytes(), _cgroup_memory_bytes())
+        if value is not None
+    ]
+    return min(limits) if limits else None
+
+
+def detect_cpu_quota_cores() -> float | None:
+    """Return the process's cgroup CPU quota in cores, None without one.
+
+    The quota is the lowest of the cgroup v2 ``cpu.max`` and cgroup v1
+    ``cpu.cfs_quota_us`` limits along the process's cgroup path.
+    """
+    limits: list[float] = []
     for path in _unified_cgroup_files("cpu.max"):
         try:
             quota_text, period_text = Path(path).read_text().strip().split()
@@ -130,15 +155,20 @@ def _cpu_quota_workers() -> int | None:
             except ValueError:
                 continue
             if quota > 0 and period > 0:
-                limits.append(max(1, quota // period))
+                limits.append(quota / period)
 
     for legacy_quota_path in _legacy_cgroup_files("cpu", "cpu.cfs_quota_us"):
         legacy_period_path = str(Path(legacy_quota_path).with_name("cpu.cfs_period_us"))
         legacy_quota = _read_int(legacy_quota_path)
         legacy_period = _read_int(legacy_period_path)
         if legacy_quota is not None and legacy_period is not None:
-            limits.append(max(1, legacy_quota // legacy_period))
+            limits.append(legacy_quota / legacy_period)
     return min(limits) if limits else None
+
+
+def _cpu_quota_workers() -> int | None:
+    cores = detect_cpu_quota_cores()
+    return None if cores is None else max(1, int(cores))
 
 
 def detect_workers() -> int:

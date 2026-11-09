@@ -57,7 +57,10 @@ def _ledger(
         label=None,
         stage_order=stages,
     )
-    return root, RunLedger(root, run.run_id, emitter, summarize), events
+    ledger = RunLedger(
+        root, run.run_id, emitter, summarize, workers=1, memory_budget_bytes=2**30
+    )
+    return root, ledger, events
 
 
 def _statuses(root: zarr.Group, ledger: RunLedger) -> dict[str, str]:

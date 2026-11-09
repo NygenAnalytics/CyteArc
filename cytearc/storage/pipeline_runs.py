@@ -25,6 +25,7 @@ from .artifacts import parse_artifact_ref, require_complete_artifact
 from .refs import ArtifactRef
 from .types import as_zarr_group
 from ..utils.logging import logger
+from ..utils.process import TRACE_POINT_LIMIT
 
 
 PIPELINE_RUNS_PATH = "pipeline/runs"
@@ -111,6 +112,49 @@ _METRIC_FIELDS = frozenset(
         "rssUnavailableReason",
     }
 )
+# Metric fields that a later 1.x release added. CyteArc writes all of them on
+# every stage record, and a record of an earlier release holds none of them.
+_METRIC_RESOURCE_FIELDS = frozenset(
+    {
+        "cpuSeconds",
+        "threadsPeak",
+        "rssHighWaterStartBytes",
+        "rssHighWaterEndBytes",
+        "networkRxBytes",
+        "networkTxBytes",
+        "resources",
+        "trace",
+        "unavailable",
+    }
+)
+# The measurements that a record holds as null exactly where its
+# `unavailable` names them.
+_UNAVAILABLE_METRICS = frozenset(
+    {
+        "threadsPeak",
+        "rssHighWaterStartBytes",
+        "rssHighWaterEndBytes",
+        "networkRxBytes",
+        "networkTxBytes",
+        "cpusAvailable",
+        "memoryLimitBytes",
+    }
+)
+_STAGE_RESOURCE_FIELDS = frozenset(
+    {
+        "workers",
+        "memoryBudgetBytes",
+        "cpusAvailable",
+        "cpuQuotaCores",
+        "memoryLimitBytes",
+    }
+)
+_TRACE_FIELDS = frozenset(
+    {"seconds", "cpuSeconds", "rssBytes", "threads", "networkRxBytes", "networkTxBytes"}
+)
+# A trace rounds its seconds to milliseconds, so its last CPU seconds may
+# differ from the stage's by up to half of one.
+_TRACE_CPU_TOLERANCE_SECONDS = 0.001
 _LABEL_CLAIM_FIELDS = frozenset({"label", "runId"})
 _LABEL_CLAIM_KEY_PATTERN = re.compile(
     r"^(?P<digest>[0-9a-f]{64})/(?P<predecessor>head|[0-9a-f]{64})\.json$"
@@ -446,7 +490,199 @@ class PipelinePlanRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class PipelineStageResources:
+    """What the process that ran a stage had, read as the stage started.
+
+    Attributes:
+        workers: The worker count of the store, its ``nthreads``.
+        memory_budget_bytes: The store's memory budget.
+        cpus_available: The logical CPUs that the process could run on, or
+            None where that could not be determined.
+        cpu_quota_cores: The cgroup CPU quota in cores, or None without one.
+        memory_limit_bytes: Physical memory, or a lower cgroup limit, or None
+            where neither could be read.
+    """
+
+    workers: int
+    memory_budget_bytes: int
+    cpus_available: int | None
+    cpu_quota_cores: float | None
+    memory_limit_bytes: int | None
+
+    def __post_init__(self) -> None:
+        _validate_positive_int(self.workers, "resources workers")
+        _validate_positive_int(
+            self.memory_budget_bytes, "resources memory_budget_bytes"
+        )
+        _validate_nullable_positive_int(self.cpus_available, "resources cpus_available")
+        if self.cpu_quota_cores is not None:
+            object.__setattr__(
+                self,
+                "cpu_quota_cores",
+                _validate_positive_float(
+                    self.cpu_quota_cores, "resources cpu_quota_cores"
+                ),
+            )
+        _validate_nullable_positive_int(
+            self.memory_limit_bytes, "resources memory_limit_bytes"
+        )
+
+    def to_dict(self) -> dict[str, int | float | None]:
+        return {
+            "workers": self.workers,
+            "memoryBudgetBytes": self.memory_budget_bytes,
+            "cpusAvailable": self.cpus_available,
+            "cpuQuotaCores": self.cpu_quota_cores,
+            "memoryLimitBytes": self.memory_limit_bytes,
+        }
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "PipelineStageResources":
+        raw = _exact_mapping(value, _STAGE_RESOURCE_FIELDS, "pipeline stage resources")
+        return cls(
+            workers=raw["workers"],
+            memory_budget_bytes=raw["memoryBudgetBytes"],
+            cpus_available=raw["cpusAvailable"],
+            cpu_quota_cores=raw["cpuQuotaCores"],
+            memory_limit_bytes=raw["memoryLimitBytes"],
+        )
+
+
+def _trace_series(value: Any, name: str) -> tuple[Any, ...]:
+    if isinstance(value, str | bytes) or not isinstance(value, Sequence):
+        raise TypeError(f"{name} must be a sequence")
+    return tuple(value)
+
+
+def _counted_series(value: Any, name: str, *, integers: bool) -> tuple[Any, ...]:
+    """Validate a series counted from the stage's start: 0 first, never falling."""
+    series = _trace_series(value, name)
+    validate = _validate_non_negative_int if integers else _validate_non_negative_float
+    resolved = tuple(
+        validate(item, f"{name}[{index}]") for index, item in enumerate(series)
+    )
+    if resolved and resolved[0] != 0:
+        raise ValueError(f"{name} must start at 0, the stage's start")
+    if any(later < earlier for earlier, later in zip(resolved, resolved[1:])):
+        raise ValueError(f"{name} must never decrease")
+    return resolved
+
+
+def _maxima_series(value: Any, name: str) -> tuple[int | None, ...]:
+    series = _trace_series(value, name)
+    return tuple(
+        _validate_nullable_non_negative_int(item, f"{name}[{index}]")
+        for index, item in enumerate(series)
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class PipelineStageTrace:
+    """The samples of one stage, at most ``TRACE_POINT_LIMIT`` of them.
+
+    Each point is a sample: its ``seconds`` since the stage started, the CPU
+    seconds and network bytes counted since then, and the largest RSS and OS
+    thread count sampled since the previous point. A series that the
+    platform cannot sample is None, and a point whose reading failed holds
+    None in a sampled series.
+    """
+
+    seconds: tuple[float, ...]
+    cpu_seconds: tuple[float, ...]
+    rss_bytes: tuple[int | None, ...] | None
+    threads: tuple[int | None, ...] | None
+    network_rx_bytes: tuple[int, ...] | None
+    network_tx_bytes: tuple[int, ...] | None
+
+    def __post_init__(self) -> None:
+        seconds = _counted_series(self.seconds, "trace seconds", integers=False)
+        if not 1 <= len(seconds) <= TRACE_POINT_LIMIT:
+            raise ValueError(
+                f"a stage trace holds 1 to {TRACE_POINT_LIMIT} points, not "
+                f"{len(seconds)}"
+            )
+        object.__setattr__(self, "seconds", seconds)
+        series: dict[str, tuple[Any, ...]] = {
+            "cpu_seconds": _counted_series(
+                self.cpu_seconds, "trace cpu_seconds", integers=False
+            )
+        }
+        for name in ("rss_bytes", "threads"):
+            value = getattr(self, name)
+            if value is not None:
+                series[name] = _maxima_series(value, f"trace {name}")
+        for name in ("network_rx_bytes", "network_tx_bytes"):
+            value = getattr(self, name)
+            if value is not None:
+                series[name] = _counted_series(value, f"trace {name}", integers=True)
+        for name, values in series.items():
+            if len(values) != len(seconds):
+                raise ValueError(
+                    f"trace {name} holds {len(values)} points where seconds holds "
+                    f"{len(seconds)}"
+                )
+            object.__setattr__(self, name, values)
+
+    def to_dict(self) -> dict[str, list[Any] | None]:
+        def listed(values: tuple[Any, ...] | None) -> list[Any] | None:
+            return None if values is None else list(values)
+
+        return {
+            "seconds": list(self.seconds),
+            "cpuSeconds": list(self.cpu_seconds),
+            "rssBytes": listed(self.rss_bytes),
+            "threads": listed(self.threads),
+            "networkRxBytes": listed(self.network_rx_bytes),
+            "networkTxBytes": listed(self.network_tx_bytes),
+        }
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "PipelineStageTrace":
+        raw = _exact_mapping(value, _TRACE_FIELDS, "pipeline stage trace")
+        return cls(
+            seconds=raw["seconds"],
+            cpu_seconds=raw["cpuSeconds"],
+            rss_bytes=raw["rssBytes"],
+            threads=raw["threads"],
+            network_rx_bytes=raw["networkRxBytes"],
+            network_tx_bytes=raw["networkTxBytes"],
+        )
+
+
+def _largest(values: Sequence[int | None]) -> int | None:
+    return max((value for value in values if value is not None), default=None)
+
+
+@dataclass(frozen=True, slots=True)
 class PipelineStageMetrics:
+    """What a stage used, as its record holds it.
+
+    The first eight fields are the stage's wall time and sampled process-tree
+    RSS, whose peaks are lower bounds. The others describe the resources the
+    stage used and the ones its process had; a record of an earlier release
+    holds none of them, and each is then None.
+
+    Attributes:
+        cpu_seconds: CPU time, user and system, of the process and its child
+            processes during the stage.
+        threads_peak: The most OS threads that the process tree held at a
+            sample.
+        rss_high_water_start_bytes: The kernel's mark of the process's peak
+            RSS as the stage started. The kernel keeps the mark, so it
+            includes peaks that no sample saw; on Linux a process starts with
+            the mark of the process that started it.
+        rss_high_water_end_bytes: The same mark as the stage ended. When it
+            exceeds the start, the stage set a new peak, and the end is that
+            peak.
+        network_rx_bytes: Bytes received during the stage on every interface
+            but loopback, by every process of the network namespace.
+        network_tx_bytes: Bytes sent, likewise.
+        resources: What the process had as the stage started.
+        trace: The stage's samples.
+        unavailable: Why each of the measurements above that is None could
+            not be taken, by its record name, such as ``threadsPeak``.
+    """
+
     wall_seconds: float
     rss_baseline_bytes: int | None
     rss_peak_bytes: int | None
@@ -455,6 +691,15 @@ class PipelineStageMetrics:
     sample_count: int
     sampling_error_count: int
     rss_unavailable_reason: str | None
+    cpu_seconds: float | None = None
+    threads_peak: int | None = None
+    rss_high_water_start_bytes: int | None = None
+    rss_high_water_end_bytes: int | None = None
+    network_rx_bytes: int | None = None
+    network_tx_bytes: int | None = None
+    resources: PipelineStageResources | None = None
+    trace: PipelineStageTrace | None = None
+    unavailable: Mapping[str, str] | None = None
 
     def __post_init__(self) -> None:
         _validate_non_negative_float(self.wall_seconds, "metrics wall_seconds")
@@ -490,8 +735,93 @@ class PipelineStageMetrics:
                 raise ValueError("Unavailable RSS requires an explicit reason")
         elif self.rss_unavailable_reason is not None:
             raise ValueError("Available RSS cannot have an unavailable reason")
+        self._validate_resource_use()
 
-    def to_dict(self) -> dict[str, int | float | str | None]:
+    def _validate_resource_use(self) -> None:
+        later = (
+            self.threads_peak,
+            self.rss_high_water_start_bytes,
+            self.rss_high_water_end_bytes,
+            self.network_rx_bytes,
+            self.network_tx_bytes,
+            self.resources,
+            self.trace,
+            self.unavailable,
+        )
+        if self.cpu_seconds is None:
+            if any(value is not None for value in later):
+                raise ValueError(
+                    "A stage's resource measurements are recorded together, with "
+                    "cpu_seconds"
+                )
+            return
+        cpu = _validate_non_negative_float(self.cpu_seconds, "metrics cpu_seconds")
+        object.__setattr__(self, "cpu_seconds", cpu)
+        if not isinstance(self.resources, PipelineStageResources):
+            raise TypeError("metrics resources must be PipelineStageResources")
+        trace = self.trace
+        if not isinstance(trace, PipelineStageTrace):
+            raise TypeError("metrics trace must be PipelineStageTrace")
+        unavailable = _mapping(self.unavailable, "metrics unavailable")
+        for name, reason in unavailable.items():
+            if name not in _UNAVAILABLE_METRICS:
+                raise ValueError(
+                    f"metrics unavailable names {name!r}, which is not one of "
+                    f"{sorted(_UNAVAILABLE_METRICS)}"
+                )
+            _validate_non_empty_string(reason, f"metrics unavailable {name}")
+            if len(reason) > _RECORD_TEXT_LIMIT:
+                raise ValueError(f"metrics unavailable {name} exceeds the record limit")
+        object.__setattr__(self, "unavailable", dict(unavailable))
+        _validate_nullable_positive_int(self.threads_peak, "metrics threads_peak")
+        for name in (
+            "rss_high_water_start_bytes",
+            "rss_high_water_end_bytes",
+            "network_rx_bytes",
+            "network_tx_bytes",
+        ):
+            _validate_nullable_non_negative_int(getattr(self, name), f"metrics {name}")
+        values = {
+            "threadsPeak": self.threads_peak,
+            "rssHighWaterStartBytes": self.rss_high_water_start_bytes,
+            "rssHighWaterEndBytes": self.rss_high_water_end_bytes,
+            "networkRxBytes": self.network_rx_bytes,
+            "networkTxBytes": self.network_tx_bytes,
+            "cpusAvailable": self.resources.cpus_available,
+            "memoryLimitBytes": self.resources.memory_limit_bytes,
+        }
+        for name, value in values.items():
+            if (value is None) != (name in unavailable):
+                raise ValueError(
+                    f"metrics {name} must be null exactly where unavailable names it"
+                )
+        if abs(trace.cpu_seconds[-1] - cpu) > _TRACE_CPU_TOLERANCE_SECONDS:
+            raise ValueError("The trace must count the stage's CPU seconds")
+        if (trace.threads is None) != (self.threads_peak is None):
+            raise ValueError("The trace holds threads exactly when threads_peak exists")
+        if trace.threads is not None and _largest(trace.threads) != self.threads_peak:
+            raise ValueError(
+                "threads_peak must be the largest thread count of the trace"
+            )
+        for name, total in (
+            ("network_rx_bytes", self.network_rx_bytes),
+            ("network_tx_bytes", self.network_tx_bytes),
+        ):
+            series = getattr(trace, name)
+            if (series is None) != (total is None):
+                raise ValueError(f"The trace holds {name} exactly when the stage does")
+            if series is not None and series[-1] != total:
+                raise ValueError(f"The trace must count the stage's {name}")
+        if (trace.rss_bytes is None) != (self.sample_count == 0):
+            raise ValueError("The trace holds RSS exactly when RSS was sampled")
+        if (
+            trace.rss_bytes is not None
+            and self.rss_peak_bytes is not None
+            and _largest(trace.rss_bytes) != self.rss_peak_bytes
+        ):
+            raise ValueError("rss_peak_bytes must be the largest RSS of the trace")
+
+    def to_dict(self) -> dict[str, Any]:
         return {
             "wallSeconds": self.wall_seconds,
             "rssBaselineBytes": self.rss_baseline_bytes,
@@ -501,11 +831,34 @@ class PipelineStageMetrics:
             "sampleCount": self.sample_count,
             "samplingErrorCount": self.sampling_error_count,
             "rssUnavailableReason": self.rss_unavailable_reason,
+            "cpuSeconds": self.cpu_seconds,
+            "threadsPeak": self.threads_peak,
+            "rssHighWaterStartBytes": self.rss_high_water_start_bytes,
+            "rssHighWaterEndBytes": self.rss_high_water_end_bytes,
+            "networkRxBytes": self.network_rx_bytes,
+            "networkTxBytes": self.network_tx_bytes,
+            "resources": None if self.resources is None else self.resources.to_dict(),
+            "trace": None if self.trace is None else self.trace.to_dict(),
+            "unavailable": None if self.unavailable is None else dict(self.unavailable),
         }
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "PipelineStageMetrics":
-        raw = _exact_mapping(value, _METRIC_FIELDS, "pipeline stage metrics")
+        raw = _exact_mapping(
+            value,
+            _METRIC_FIELDS,
+            "pipeline stage metrics",
+            optional=_METRIC_RESOURCE_FIELDS,
+        )
+        present = _METRIC_RESOURCE_FIELDS & set(raw)
+        if present and present != _METRIC_RESOURCE_FIELDS:
+            raise ValueError(
+                "pipeline stage metrics fields do not match the contract: missing "
+                f"{sorted(_METRIC_RESOURCE_FIELDS - present)}"
+            )
+        resources = raw.get("resources")
+        trace = raw.get("trace")
+        unavailable = raw.get("unavailable")
         return cls(
             wall_seconds=_validate_non_negative_float(
                 raw["wallSeconds"],
@@ -538,6 +891,29 @@ class PipelineStageMetrics:
             rss_unavailable_reason=_validate_nullable_string(
                 raw["rssUnavailableReason"],
                 "metrics rssUnavailableReason",
+            ),
+            cpu_seconds=raw.get("cpuSeconds"),
+            threads_peak=raw.get("threadsPeak"),
+            rss_high_water_start_bytes=raw.get("rssHighWaterStartBytes"),
+            rss_high_water_end_bytes=raw.get("rssHighWaterEndBytes"),
+            network_rx_bytes=raw.get("networkRxBytes"),
+            network_tx_bytes=raw.get("networkTxBytes"),
+            resources=(
+                None
+                if resources is None
+                else PipelineStageResources.from_dict(
+                    _mapping(resources, "metrics resources")
+                )
+            ),
+            trace=(
+                None
+                if trace is None
+                else PipelineStageTrace.from_dict(_mapping(trace, "metrics trace"))
+            ),
+            unavailable=(
+                None
+                if unavailable is None
+                else dict(_mapping(unavailable, "metrics unavailable"))
             ),
         )
 

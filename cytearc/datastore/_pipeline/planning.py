@@ -10,7 +10,7 @@ yet, so the plan reports them computed, waiting on that stage.
 """
 
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Any, Literal
 
 from ...storage.artifact_writer import (
@@ -19,6 +19,7 @@ from ...storage.artifact_writer import (
 )
 from ...storage.artifacts import ArtifactRef
 from ...storage.pipeline_runs import (
+    PipelineStageMetrics,
     ensure_pipeline_label_claimable,
     list_pipeline_run_records,
     load_pipeline_stage_records,
@@ -44,7 +45,7 @@ class PipelineStageEstimate:
     """What a stage took when the latest earlier run of its recipe computed it.
 
     A past measurement, not a model: that run's cells, settings, and machine
-    may differ from the planned call's.
+    may differ from the planned call's, and ``resources`` records the machine.
 
     Attributes:
         run_id: The run whose stage record holds the measurement.
@@ -53,12 +54,35 @@ class PipelineStageEstimate:
             where RSS was not sampled.
         rss_incremental_peak_bytes: That peak above the RSS when the stage
             started, or None.
+        cpu_seconds: The CPU time of the process and its child processes
+            during the stage, or None from a record that lacks it.
+        threads_peak: The most OS threads that the process tree held, or
+            None.
+        rss_high_water_bytes: The process's peak RSS when the stage raised
+            the kernel's mark of it, which includes peaks that no sample saw;
+            None when the stage stayed under an earlier mark of its process,
+            such as one inherited from the process that started it, or where
+            the mark was not read.
+        network_rx_bytes: Bytes that the network namespace received during
+            the stage, or None.
+        network_tx_bytes: Bytes that it sent, or None.
+        resources: What the process had: ``workers``, ``memoryBudgetBytes``,
+            ``cpusAvailable``, ``cpuQuotaCores`` and ``memoryLimitBytes``, as
+            the stage record holds them, or None from a record that lacks
+            them.
     """
 
     run_id: str
     wall_seconds: float
     rss_peak_bytes: int | None
     rss_incremental_peak_bytes: int | None
+    cpu_seconds: float | None = None
+    threads_peak: int | None = None
+    rss_high_water_bytes: int | None = None
+    network_rx_bytes: int | None = None
+    network_tx_bytes: int | None = None
+    # A dict cannot be hashed, so the estimate's hash leaves it out.
+    resources: dict[str, Any] | None = field(default=None, hash=False)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -66,6 +90,12 @@ class PipelineStageEstimate:
             "wallSeconds": self.wall_seconds,
             "rssPeakBytes": self.rss_peak_bytes,
             "rssIncrementalPeakBytes": self.rss_incremental_peak_bytes,
+            "cpuSeconds": self.cpu_seconds,
+            "threadsPeak": self.threads_peak,
+            "rssHighWaterBytes": self.rss_high_water_bytes,
+            "networkRxBytes": self.network_rx_bytes,
+            "networkTxBytes": self.network_tx_bytes,
+            "resources": None if self.resources is None else dict(self.resources),
         }
 
 
@@ -268,6 +298,31 @@ def _waiting_on(
     return tuple(sorted(owners, key=order.__getitem__))
 
 
+def _estimate(run_id: str, metrics: PipelineStageMetrics) -> PipelineStageEstimate:
+    """Return the estimate that a completed stage's metrics give.
+
+    The process's peak RSS counts only when the stage raised it: a stage
+    whose peak stayed under an earlier stage's mark has only its sampled
+    peak.
+    """
+    start = metrics.rss_high_water_start_bytes
+    end = metrics.rss_high_water_end_bytes
+    return PipelineStageEstimate(
+        run_id=run_id,
+        wall_seconds=metrics.wall_seconds,
+        rss_peak_bytes=metrics.rss_peak_bytes,
+        rss_incremental_peak_bytes=metrics.rss_incremental_peak_bytes,
+        cpu_seconds=metrics.cpu_seconds,
+        threads_peak=metrics.threads_peak,
+        rss_high_water_bytes=(
+            end if start is not None and end is not None and end > start else None
+        ),
+        network_rx_bytes=metrics.network_rx_bytes,
+        network_tx_bytes=metrics.network_tx_bytes,
+        resources=None if metrics.resources is None else metrics.resources.to_dict(),
+    )
+
+
 def _estimates(
     store: Any, plan: RecipePlan, stages: set[str]
 ) -> dict[str, PipelineStageEstimate]:
@@ -301,13 +356,7 @@ def _estimates(
                 and record.metrics is not None
                 and any(item.disposition == "created" for item in record.plans)
             ):
-                metrics = record.metrics
-                found[record.stage] = PipelineStageEstimate(
-                    run_id=run.run_id,
-                    wall_seconds=metrics.wall_seconds,
-                    rss_peak_bytes=metrics.rss_peak_bytes,
-                    rss_incremental_peak_bytes=metrics.rss_incremental_peak_bytes,
-                )
+                found[record.stage] = _estimate(run.run_id, record.metrics)
         if found.keys() >= stages:
             break
     return found
