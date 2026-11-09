@@ -29,6 +29,7 @@ from zarr.abc.store import ByteRequest
 from zarr.core.buffer import Buffer, BufferPrototype
 from zarr.storage import FsspecStore
 from zarr.storage._fsspec import ALLOWED_EXCEPTIONS
+from zarr.storage._utils import _dereference_path
 
 from .stores import REMOTE_RETRY_TIMEOUT, byte_request_span
 
@@ -240,18 +241,21 @@ class HfReadStore(FsspecStore):
     and a read of a key it holds is one GET of the key's resolver URL for
     exactly the bytes asked for. The listing is a snapshot: the store does not
     see objects written after it, and a listed key that is no longer there
-    raises ``OSError``. A writable store reads through Hugging Face's file
-    system.
+    raises ``OSError``. A writable store reads and looks up keys through
+    Hugging Face's file system, and reads a key as missing only when the
+    server reports it missing, so a lookup that fails never makes
+    ``set_if_not_exists`` write over a key.
 
-    Each attempt at a request of the store, a read or a listing, is given
-    ``request_timeout`` seconds, 60 by default. An attempt that times out, loses
-    its connection, or meets a 408 or 5xx response is retried with exponential
-    backoff until ``retry_timeout`` seconds, 180 by default, after the request
-    began, each attempt cut to the time left; the request then raises
-    ``TimeoutError``, which names the request, the store and that time. A 429
-    response is retried after the delay its headers ask for, at most three
-    times and only for a delay of at most 300 s, and that wait does not count
-    toward ``retry_timeout``. ``from_url`` takes both timeouts from
+    Each attempt at a request of the store, a read, a lookup or a listing, is
+    given ``request_timeout`` seconds, 60 by default. An attempt that times
+    out, loses its connection, or meets a 408 or 5xx response is retried with
+    exponential backoff until ``retry_timeout`` seconds, 180 by default, after
+    the request began, each attempt cut to the time left; the request then
+    raises ``TimeoutError``, which names the request, the store and that time.
+    A 429 response is retried after the delay its headers ask for, at most
+    three times and only for a delay of at most 300 s, and that wait does not
+    count toward ``retry_timeout``. Other failures, such as a 401 or 403
+    response, raise at once. ``from_url`` takes both timeouts from
     ``storage_options``.
 
     Raises:
@@ -483,10 +487,21 @@ class HfReadStore(FsspecStore):
         fs = self._listed_fs()
         if fs is not None:
             return key in (await self._store_listing(fs)).sizes
-        exists = super().exists
-        return await self._request(
-            f"Looking up {key!r} in {self._location}", lambda: exists(key)
-        )
+        path = _dereference_path(self.path, key)
+
+        async def look_up() -> bool:
+            # Hugging Face's exists answers False for any OSError, and the
+            # HfHubHTTPError of a failed request is one. Its info raises
+            # FileNotFoundError only for a key that the server does not hold,
+            # and lets every other failure reach _request, which retries it
+            # or raises it.
+            try:
+                await self.fs._info(path)
+            except FileNotFoundError:
+                return False
+            return True
+
+        return await self._request(f"Looking up {key!r} in {self._location}", look_up)
 
     async def getsize(self, key: str) -> int:
         fs = self._listed_fs()
