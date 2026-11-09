@@ -322,6 +322,8 @@ class ScoresAccessor(_Accessor):
     waggr = _bind(_FeatureOperationsMixin._scores_waggr)
     load = _bind(_FeatureOperationsMixin._scores_load)
     cell_cycle = _bind(_QualityControlOperationsMixin._scores_cell_cycle)
+    potency = _bind(_TrajectoryOperationsMixin._scores_potency)
+    load_potency = _bind(_TrajectoryOperationsMixin._scores_load_potency)
 
 
 class TrajectoryAccessor(_Accessor):

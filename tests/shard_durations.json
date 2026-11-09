@@ -328,6 +328,7 @@
   "tests/test_plotting_summary_regressions.py": 1.0,
   "tests/test_plotting_trajectory_lineages.py": 29.6,
   "tests/test_plotting_variants.py": 31.5,
+  "tests/test_potency.py": 19.7,
   "tests/test_preparation.py": 6.1,
   "tests/test_presentation_show_zarr_tree.py": 1.0,
   "tests/test_profiling_counts_t.py": 3.6,

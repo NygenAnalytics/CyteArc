@@ -157,6 +157,32 @@ class CellCycleArguments(OperationArguments):
 
 
 @dataclass(frozen=True, slots=True)
+class PotencyArguments(OperationArguments):
+    operation: ClassVar[str] = "run_potency_scoring"
+    artifact_kind: ClassVar[str] = "cell_potency"
+    #: The network genes that the assay's features matched, those of the
+    #: largest connected part that the scores used and its edges, and whether
+    #: genes matched by Ensembl ID or by symbol.
+    diagnostics: ClassVar[tuple[str, ...]] = (
+        "networkGenesMatched",
+        "networkGenesUsed",
+        "networkEdgesUsed",
+        "matchedBy",
+    )
+    call: ClassVar[str | None] = "ds.scores.potency"
+
+    cell_selection: ArtifactRef = artifact_input()
+    measure: str = parameter()
+    species: str = parameter()
+    #: The network file's source, version, name and SHA-256 digest.
+    string_network: dict[str, str] = parameter()
+    invalidate_cache: bool = execution()
+    # Smoothing over a graph is recorded only when a graph smooths the scores.
+    graph: ArtifactRef | None = artifact_input(None, omit_if_none=True)
+    smoothing: float | None = parameter(None, omit_if_none=True)
+
+
+@dataclass(frozen=True, slots=True)
 class MarkerTableArguments(OperationArguments):
     operation: ClassVar[str] = "run_marker_search"
     artifact_kind: ClassVar[str] = "marker_table"

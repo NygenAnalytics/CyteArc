@@ -151,6 +151,14 @@ CELL_VALUE_NAMES: Mapping[str, CellValueSpec] = MappingProxyType(
         "cell_cycle": CellValueSpec(
             "phase", True, {"s_score": False, "g2m_score": False}
         ),
+        # differentiation, one minus the potency rank, rises along the process,
+        # so the artifact directs a fate map as it stands; the raw measures
+        # sit beside it.
+        "cell_potency": CellValueSpec(
+            "differentiation",
+            False,
+            {"potency": False, "signaling_entropy": False, "ccat": False},
+        ),
         # group_codes holds each cell's group, a position in the artifact's
         # group_keys attribute, -1 for none.
         "clonal_expansion": CellValueSpec(

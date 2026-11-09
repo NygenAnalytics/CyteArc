@@ -107,6 +107,56 @@ class PseudotimeScoreResult:
 
 
 @dataclass(frozen=True, slots=True, eq=False)
+class PotencyResult:
+    """Potency scores loaded from an immutable artifact.
+
+    Each array holds one value per cell of ``cell_selection``, in its order.
+    ``potency`` is the rank in [0, 1] of the ``measure``, smoothed over
+    ``graph`` when a graph smoothed it, and ``differentiation`` is one minus
+    ``potency``, so it rises along the process and directs
+    ``ds.trajectory.fate`` as it stands. ``signaling_entropy`` and ``ccat``
+    hold both raw measures, unsmoothed, whichever of them ranks the cells.
+    ``network`` names the network's source, version, file name and SHA-256
+    digest; ``genes_matched`` counts the network genes that the assay's
+    features matched, by ``matched_by`` (``"ensembl_id"`` or ``"symbol"``),
+    and ``genes_used`` and ``edges_used`` the largest connected part of them,
+    over which the scores were computed.
+    """
+
+    ref: ArtifactRef
+    cell_selection: ArtifactRef
+    graph: ArtifactRef | None
+    measure: str
+    smoothing: float | None
+    species: str
+    network: dict[str, str]
+    genes_matched: int
+    genes_used: int
+    edges_used: int
+    matched_by: str
+    differentiation: np.ndarray = field(repr=False)
+    potency: np.ndarray = field(repr=False)
+    signaling_entropy: np.ndarray = field(repr=False)
+    ccat: np.ndarray = field(repr=False)
+
+    def __post_init__(self) -> None:
+        names = ("differentiation", "potency", "signaling_entropy", "ccat")
+        arrays = [np.asarray(getattr(self, name), dtype=np.float64) for name in names]
+        if (
+            any(array.ndim != 1 for array in arrays)
+            or len({array.shape for array in arrays}) != 1
+        ):
+            raise ValueError("Potency arrays must be one-dimensional and align")
+        if (self.graph is None) != (self.smoothing is None):
+            raise ValueError(
+                "A potency smoothed over a graph names both, and only then"
+            )
+        for name, array in zip(names, arrays, strict=True):
+            object.__setattr__(self, name, read_only_copy(array))
+        object.__setattr__(self, "network", dict(self.network))
+
+
+@dataclass(frozen=True, slots=True, eq=False)
 class PseudotimeMarkerResult:
     """Pseudotime correlation table loaded from an immutable artifact."""
 

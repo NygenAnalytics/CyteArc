@@ -1,0 +1,70 @@
+{
+ "calls": [
+  "integ.l <- DoIntegPPI(exp.m = values, ppiA.m = adjacency)",
+  "sr.o <- CompSRana(integ.l, local = FALSE, mc.cores = 1); sr.o$SR",
+  "CompCCAT(exp = values, ppiA = adjacency)"
+ ],
+ "cells": "16 cells of each of Ductal, Ngn3 high EP, Pre-endocrine, Beta, drawn with NumPy's default generator seeded 0",
+ "data": "4K pancreas test fixture, Bastidas-Ponce et al. (2019), Development 146:dev173849, doi:10.1242/dev.173849, GEO GSE132188",
+ "environment": "Rscript in the rocker/r-ver:4.6.1 image, SCENT installed with remotes::install_github('aet21/SCENT', dependencies = FALSE) after igraph, mclust, Matrix and qlcMatrix from CRAN and destiny and marray from Bioconductor",
+ "network": "the largest connected part, among the genes that at least 5 of the cells detect, of the mouse STRING v12.5 network that CyteArc downloads (STRING, CC BY 4.0)",
+ "prepared": {
+  "cells": 64,
+  "edges": 57584,
+  "genes": 5778,
+  "h5ad": "data.h5ad",
+  "h5adSha256": "9e3e459eca00ba06b496ec80def32941b5b2889918720e3e7aa6ffb811fbe7c6",
+  "network": {
+   "changes": "Removed STRING's database channel, recombined the other channel scores with STRING's documented formula (prior 0.041), kept links scoring at least 700 of 1000, mapped proteins to genes through STRING's preferred names and Ensembl_gene aliases, and kept the largest connected component.",
+   "channels": [
+    "neighborhood",
+    "fusion",
+    "cooccurence",
+    "coexpression",
+    "experimental",
+    "textmining"
+   ],
+   "citation": "Szklarczyk D, Nastou K, Koutrouli M, et al. The STRING database in 2025: protein networks with directionality of regulation. Nucleic Acids Res. 2025;53(D1):D730-D737. doi:10.1093/nar/gkae1113",
+   "cutoff": 700,
+   "droppedChannels": [
+    "database"
+   ],
+   "edges": 132521,
+   "genes": 14599,
+   "largestRecombinationError": 0,
+   "license": "CC BY 4.0",
+   "licenseUrl": "https://creativecommons.org/licenses/by/4.0/",
+   "prior": 0.041,
+   "proteinsWithSeveralEnsemblGenes": 0,
+   "source": "STRING",
+   "sources": {
+    "protein.aliases": {
+     "bytes": 11695521,
+     "sha256": "2f1ccd371548d9db5784d341984209431a26573c3b34f16161bfe9052168159c",
+     "url": "https://stringdb-downloads.org/download/protein.aliases.v12.5/10090.protein.aliases.v12.5.txt.gz"
+    },
+    "protein.info": {
+     "bytes": 1922919,
+     "sha256": "ededc5cefddea16013c4d8f7d5a1080efea22d4b3f1f090c27019eb1d5209c08",
+     "url": "https://stringdb-downloads.org/download/protein.info.v12.5/10090.protein.info.v12.5.txt.gz"
+    },
+    "protein.links.detailed": {
+     "bytes": 123960785,
+     "sha256": "ee7f5646f536ffe78fe7fab5cb9bb7ec63a49ef7733293236577add941166c68",
+     "url": "https://stringdb-downloads.org/download/protein.links.detailed.v12.5/10090.protein.links.detailed.v12.5.txt.gz"
+    }
+   },
+   "species": "mouse",
+   "stringVersion": "12.5",
+   "taxid": 10090
+  },
+  "networkSha256": "ee2bad7fc335e23e7eb5fa51e6f40c08a126b7c919f839c8503b75ce28ff7e21"
+ },
+ "script": "scripts/export_scent_potency_golden.R",
+ "tool": [
+  "SCENT 1.1",
+  "SCENT commit 02b4bc64a45431860d7d756bca58ca3306b5eae9",
+  "R version 4.6.1 (2026-06-24)"
+ ],
+ "values": "log2(10,000 * counts / total + 1.1), each cell's total over all its genes; CCAT takes the same values as the signaling entropy rate"
+}

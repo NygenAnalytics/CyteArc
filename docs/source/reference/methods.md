@@ -44,6 +44,7 @@ The aim is one coherent execution path, not reimplementation for its own sake.
 - **Matched multi-omics:** {term}`SNN integration` and [Hao-inspired WNN](https://doi.org/10.1016/j.cell.2021.04.048) integration for two or more assays, with WNN reporting one per-cell weight per modality.
 - **Clustering:** a native, multi-threaded implementation of [Leiden](https://doi.org/10.1038/s41598-019-41695-z) community detection ({ref}`details <leiden_method>`) and a native implementation of [Paris hierarchical clustering](https://doi.org/10.48550/arXiv.1806.01664) with fixed and branch-adaptive cuts.
 - **Trajectory analysis:** memory-aware [Population Balance Analysis](https://doi.org/10.1073/pnas.1714723115), supervised terminal-state fate probabilities on a walk directed by a pseudotime or any per-cell score, pseudotime aggregation and modules, and [MAGIC-style graph diffusion](https://doi.org/10.1016/j.cell.2018.05.061) for imputation.
+  A per-cell potency score, the [signaling entropy rate](https://doi.org/10.1038/ncomms15599) or [CCAT](https://doi.org/10.1093/bioinformatics/btaa987) of each cell's expression on a STRING protein network, directs fate probabilities without named sources ({ref}`potency_method`).
   Fate probabilities also weigh each cell in each lineage, as in [CellRank](https://doi.org/10.1038/s41592-021-01346-6), for lineage-resolved markers, profiles, and modules, and for lineage drivers: correlations with fate probability tested by Fisher's z-transform.
   Lineage curves are fate-weighted [principal curves](https://doi.org/10.1080/01621459.1989.10478797) with the pseudotime rank as their projection index, smoothed by [penalized B-splines](https://doi.org/10.1214/ss/1038425655), and a [Slingshot](https://doi.org/10.1186/s12864-018-4772-0) cluster tree proposes candidate sinks ({ref}`lineage_curves`).
   Lineage membership calls each cell a lineage, shared or none: a band of fate probabilities decides between one lineage and several, and a robust limit on the distance from the curves, the weighted median plus a multiple of the weighted median absolute deviation of each lineage's cells at the same progress, decides none. Two lineages part at the pseudotime that best splits their shared cells from those that follow one of them.
@@ -187,6 +188,58 @@ doublet. The fraction of simulated doublets above the threshold is the detectabl
 and the fraction of cells called doublets divided by it is Scrublet's estimate of the sample's
 doublet rate. Doublets of two cells of one type cannot be told from singlets this way.
 
+(potency_method)=
+
+## Potency
+
+A fate map needs a direction, and a pseudotime gives one only from source cells that someone names. `scores.potency` scores how differentiated each cell is from its own expression on a protein interaction network, so the direction needs no named source. The canonical array of its `cell_potency` artifact, `differentiation`, rises along the process, and `ds.trajectory.fate(direction=...)` takes the artifact as it stands.
+
+Both measures read a cell's expression of each network gene as $x = \log_2(10{,}000\,c/t + 1.1)$, where $c$ is the gene's count, $t$ the cell's count over all its genes and 1.1 the pseudocount of the papers, so a network gene without counts enters at $\log_2 1.1$. Every cell is scaled to the same 10,000 counts, so a cell's measures depend on that cell alone and stay the same when other cells join or leave the selection.
+
+- **Signaling entropy rate (SR).** [Teschendorff and Enver (2017)](https://doi.org/10.1038/ncomms15599), after [Banerji et al. (2013)](https://doi.org/10.1038/srep03039), let $x$ weigh a random walk on the network's adjacency matrix $A$: from gene $i$, the walk steps to a neighbour $j$ with probability $p_{ij} = A_{ij} x_j / (Ax)_i$. Its stationary distribution is $\pi_i = x_i (Ax)_i / x^\top A x$, and its entropy rate, $-\sum_i \pi_i \sum_j p_{ij} \log p_{ij}$, reduces to $\sum_i \pi_i \log\big((Ax)_i / x_i\big)$, one sparse product per cell. SR divides the rate by the largest that any walk on the network reaches, $\log \lambda_{\max}(A)$, so it lies between 0 and 1. It is high when a cell's expression lets signals spread evenly across the network.
+- **CCAT.** [Teschendorff et al. (2021)](https://doi.org/10.1093/bioinformatics/btaa987) take the Pearson correlation between $x$ and each gene's degree in the network, which is high when the cell expresses the network's hubs.
+
+Higher values of either measure mean a less differentiated cell. One pass over the counts computes both, and `measure` chooses the one that ranks the cells.
+
+The networks are [STRING](https://doi.org/10.1093/nar/gkae1113) v12.5's protein links for human and mouse, as `scripts/build_string_networks.py` builds them: STRING's `database` channel is left out, since it draws on curated resources under their own terms, the other channels are recombined with STRING's formula, and links scoring at least 0.700 are kept. The human network holds 16,835 genes and 214,798 links, and the mouse network 14,599 genes and 132,521 links. The first call downloads the species' network, 0.8 MB for human or 0.5 MB for mouse, into `$XDG_CACHE_HOME/cytearc/networks`, and every call checks the file against the size and SHA-256 digest that CyteArc records. Network genes match the assay's features by Ensembl gene ID, versions ignored, when the feature IDs are the species' Ensembl IDs, and by symbol otherwise. The scores use the largest connected part of the network among the matched genes. An assay that matches fewer than 5,000 network genes is refused, since a network cut down that far no longer describes a cell's signaling; the systems below matched 11,035 to 14,623.
+
+With `graph`, the chosen measure is smoothed over the cells' neighbour graph before it ranks them, by a random walk with restart: each step sets $d \leftarrow \alpha P d + (1 - \alpha) d_0$, where $P$ is the row-normalized graph, $d_0$ the unsmoothed scores and $\alpha$ the `smoothing` argument, 0.9 by default. The steps continue until $d$ is within $10^{-12}$ of its fixed point, relative to the range of the scores, which takes 263 steps at 0.9, and no score crosses between unconnected parts of the graph. Smoothing is opt-in: in the comparison below, it raised SR's rank correlation with the pancreas stages from 0.76 to 0.89, and it deepened the reversals of the epidermis and of the oligodendrocyte lineage.
+
+The artifact holds four arrays over the cells of `cell_selection`. `potency` is the rank of the chosen measure, smoothed when a graph is given, scaled to $[0, 1]$ with ties sharing their mean rank, and `differentiation` is one minus `potency`. `signaling_entropy` and `ccat` hold both measures unsmoothed, so every artifact lets the two be compared. `ds.scores.load_potency` returns the arrays with the network's version and digest and the genes and links that the scores used.
+
+Scoring reads only the network's genes, in blocks of cells that fit the memory budget. Beyond one block of counts, it holds the network, two vectors over the network's genes for each thread and four values for each cell. On 250,000 bone marrow cells with 400 million nonzero counts held in memory, computing both measures over the human network's 15,875 matched genes took 8.7 s on 24 threads, and smoothing took 1.7 s.
+
+### Comparison on six systems
+
+Both measures were run, with the code and networks that CyteArc ships, on six public systems whose stage order is known. The pancreas is the test fixture. The other five were read from CyteBase's stores of CZ CELLxGENE Discover datasets, with at most 650 to 2,500 cells of each stage drawn at random.
+
+| System | Dataset | Cells | Known order |
+| :-- | :-- | --: | :-- |
+| Pancreas, mouse | [Bastidas-Ponce et al. 2019](https://doi.org/10.1242/dev.173849) | 3,696 | ductal, Ngn3 low and high, pre-endocrine, then alpha, beta, delta or epsilon |
+| Bone marrow, human | [Zeng et al. 2025](https://doi.org/10.1158/2643-3230.BCD-24-0342) | 11,700 | HSC, MPP, then erythroid (5 stages), monocyte (4) or B cell (7) |
+| Thymus, mouse | [Steier et al. 2023](https://doi.org/10.1038/s41590-023-01584-0) | 10,500 | double negative, double-positive blast, double positive, CD4 or CD8 single positive, then mature |
+| Hippocampus, adult mouse | [De Donno et al. 2026](https://doi.org/10.1038/s41380-025-03417-y) | 6,503 | neural progenitor, neuroblast, neuron; OPC, oligodendrocyte |
+| Gut, human | [Elmentaite et al. 2020](https://doi.org/10.1016/j.devcel.2020.11.010), healthy donors | 2,739 | crypt stem cell, transit amplifying, then enterocyte or goblet cell |
+| Epidermis, human | [Cheng et al. 2018](https://doi.org/10.1016/j.celrep.2018.09.006) | 5,212 | basal, spinous, granular |
+
+The second table reports:
+
+- **ρ**, Spearman's correlation between the score and the stage order among the cells of each lineage, averaged over a system's lineages. Positive values mean that less differentiated cells score higher, and 1 is a perfect order.
+- **ρ, half thinned**, the same once a random half of the cells were thinned to half their counts and every cell was scored again, as when samples of different depth are scored together.
+- **Depth AUC**, from the same thinning: within each stage, the probability that a cell at full depth outscores a thinned one, averaged over the stages by their cells. At 0.5, depth has no effect.
+- **Smoothed** rows, which use smoothing 0.9 on a graph of each cell's 30 nearest neighbours in 30 principal components of 2,000 genes.
+
+| Score | Pancreas | Bone marrow | Thymus | Hippocampus | Gut | Epidermis | Mean ρ | Mean ρ, half thinned | Mean depth AUC |
+| :-- | --: | --: | --: | --: | --: | --: | --: | --: | --: |
+| SR | 0.76 | 0.39 | -0.08 | 0.36 | 0.63 | -0.42 | 0.27 | 0.28 | 0.70 |
+| SR, smoothed | 0.89 | 0.44 | -0.08 | 0.27 | 0.67 | -0.63 | 0.26 | 0.27 | 0.60 |
+| CCAT | 0.81 | 0.31 | 0.38 | 0.39 | 0.61 | -0.37 | 0.35 | 0.35 | 0.74 |
+| CCAT, smoothed | 0.90 | 0.35 | 0.54 | 0.38 | 0.60 | -0.51 | 0.38 | 0.37 | 0.61 |
+
+- **Where the scores order a process.** Both measures order the pancreas and the gut, and neurogenesis in the hippocampus, whose neuronal lineage reaches ρ 0.73 for SR and 0.77 for CCAT. They order the bone marrow more weakly, at 0.39 and 0.31.
+- **Where they fail.** SR leaves the thymus unordered, at ρ -0.08, where CCAT orders it at 0.38. Both measures rank spinous keratinocytes above basal ones, which reverses the epidermis at -0.42 and -0.37. Neither orders the oligodendrocyte lineage of the hippocampus, at -0.02 and 0.01, and smoothing reverses it, to -0.34 and -0.13. Before a score directs a fate map, compare the order that the stored `ccat` array gives with that of `signaling_entropy`, and check where potency peaks against known markers.
+- **Depth.** Both measures rise with a cell's sequencing depth, at depth AUC 0.70 for SR and 0.74 for CCAT, so a deeply sequenced cell looks less differentiated than a shallow one of the same stage. Smoothing over neighbours of mixed depth brings both to about 0.60. Scoring half the cells at half depth changed the mean ρ by less than 0.02.
+
 ## Validation
 
 The comparisons below cover reference implementations, direct numerical checks, and biological
@@ -235,6 +288,7 @@ outcomes. Inputs and settings are matched unless the table says otherwise.
 | **iLISI and cLISI** | scib-metrics 0.6.1 | Two PBMC datasets | Per-cell scores agree within $1.6 \times 10^{-14}$ on the same neighbours and perplexity |
 | **Fate probabilities** | CellRank 2 | 3,696 pancreas cells; 1,110 LARRY progenitors | Correlations exceed 0.99999999 with matched graphs, pseudotime, terminal cells, and kernel settings; 0.985 on the pancreas with CellRank defaults |
 | **Lineage drivers** | CellRank 2.3.3 | 1,234 pancreas branch cells, 2,000 genes, four lineages | Correlations, confidence intervals, and significance results agree within $10^{-12}$ when both tools test every variable gene |
+| **Signaling entropy rate and CCAT** | SCENT 1.1 (GitHub commit 02b4bc6), run only | 64 pancreas cells of four stages, on 5,778 genes and 57,584 links of the mouse STRING network | SR within a relative $1.3 \times 10^{-14}$ and CCAT within $2.6 \times 10^{-14}$ of SCENT's values for every cell |
 | **GRNBoost2 networks** | pySCENIC 0.12.1 | 2,612 PBMC multiome cells, 13,308 genes, 1,201 factors | Importance correlation 0.998; Jaccard 0.96 for the top 1,000 to 100,000 links |
 | **chromVAR deviations** | chromVAR 1.34.1 | 879 motifs over 98,316 peaks | Deviations and z-scores agree within $4 \times 10^{-12}$ with the same motif matches and background peaks |
 | **Gene programs** | Hotspot 1.1.1 | PBMC multiome cells and highly variable genes | Six programs contain 89% of the 503 genes in Hotspot's ten modules; adjusted Rand index 0.45 on shared genes |
@@ -263,6 +317,7 @@ same AUROC. This evaluates a biological prediction separately from agreement bet
   reproduce the scikit-network clades on tie-free graphs.
 - **Population Balance Analysis:** [Weinreb et al.](https://doi.org/10.1073/pnas.1714723115) define the potential as $V = \tfrac{1}{2} L^{+} R$, with $L$ the random-walk Laplacian $I - D^{-1} W$ of the k-nearest-neighbour graph, $L^{+}$ its pseudoinverse and $R$ the net rate of cell gain or loss at each cell's state (main text, and Theorem 3 of the SI Appendix). The default solves for $L^{+} R$ by MINRES on the symmetric Laplacian $I - D^{-1/2} W D^{-1/2}$. CyteArc drops the factor $\tfrac{1}{2}$ and makes $R$ negative at sources and positive at sinks, the reverse of the paper's sign, so that the potential rises from sources to sinks; pseudotime then rescales it to $[0, 1]$. On small graphs it equals NumPy's dense pseudoinverse within $10^{-8}$ of its largest value, and on synthetic graphs of a million cells its random-walk residual stays below $3 \times 10^{-11}$ of the source-sink vector. `method="truncated"`, the potential of releases before 1.4.0, keeps the 29 smallest nonzero singular modes: on 3,696 pancreas cells, that solution has Spearman correlation 0.99999 with the full dense potential and a maximum difference of $9.1 \times 10^{-4}$ on a unit scale, while on a synthetic graph of 20,000 cells in 150 weakly joined clusters, whose slow modes outnumber the kept ones, the correlation falls to 0.971 and the largest difference rises to 0.19.
 - **Fate and lineage analysis:** fate probabilities are the absorption probabilities of a random walk on the graph whose edges toward a cell of lower pseudotime, or lower direction score, keep $2 / (1 + e^{\beta d})$ of their weight, with $\beta$ the `beta` argument and $d$ the drop in the score rescaled to $[0, 1]$. Sparse fate solutions are checked against dense Dirichlet solutions, and fate maps directed by a score against the gambler's ruin probabilities of a walk on a path. Lineage markers, drivers, and profiles are checked against dense recomputations from expression and fate probabilities. Lineage curves recover a known noisy curve, and cluster trees recover a branched cluster layout. Lineage membership recovers the known lineages of a branching trajectory and calls a dead end off its trunk none, and branch points sit where the fate probabilities of two lineages leave their band.
+- **Potency:** the signaling entropy rate is checked against the entropy rate of the walk's explicit transition matrix and stationary distribution on random networks, on which the walk weighted by the leading eigenvector reaches $\log \lambda_{\max}$, and against values worked by hand on paths of three and four genes. CCAT is checked against NumPy's correlation, smoothing against the dense solve $(1 - \alpha)(I - \alpha P)^{-1} d_0$, and the operation's scores against counts read apart from its stream, in blocks of 1, 7 and all cells.
 - **Cell calling and doublets:** tests check EmptyDrops likelihoods and simulations against
   direct calculations, and reproduce calls across thread counts. Doublet tests check that
   simulated parents come from the same capture and compare neighbour counts with exact searches.
