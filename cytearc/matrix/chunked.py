@@ -15,6 +15,7 @@ from ..storage.budget import (
     DEFAULT_READ_AHEAD_BLOCKS,
     ResourceBudget,
 )
+from ..storage.async_execution import check_read_stop
 from ..storage.io_policy import StorageIoPolicy
 from ..storage.geometry import ArrayGeometry, array_geometry
 from ..storage.virtual_arrays import read_selection, virtual_array_reader
@@ -192,8 +193,13 @@ class ChunkedArray:
         return self._apply_ops(self._read(start, end), start, end)
 
     def _apply_ops(self, array: np.ndarray, start: int, end: int) -> np.ndarray:
-        """Transform the backing values of rows ``start`` to ``end``."""
+        """Transform the backing values of rows ``start`` to ``end``.
+
+        A block stream that closes stops its reads before their next
+        operation, since an operation that runs cannot be interrupted.
+        """
         for operation in self._ops:
+            check_read_stop()
             array = operation.apply(array, start, end)
         return array
 

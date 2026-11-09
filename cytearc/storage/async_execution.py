@@ -7,8 +7,14 @@ import itertools
 import threading
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Iterator
-from concurrent.futures import Future, ThreadPoolExecutor
-from contextlib import AbstractContextManager, asynccontextmanager, contextmanager
+from concurrent.futures import CancelledError, Future, ThreadPoolExecutor
+from concurrent.futures import wait as wait_for_futures
+from contextlib import (
+    AbstractContextManager,
+    asynccontextmanager,
+    contextmanager,
+    nullcontext,
+)
 from typing import Any, TypeVar, cast
 
 import zarr
@@ -353,19 +359,43 @@ def zarr_decoding_threads(threads: int) -> Iterator[None]:
 class _LentPool(ThreadPoolExecutor):
     """Zarr's codec pool, as the default executor of one read's event loop.
 
-    Work goes to the pool. Closing an event loop shuts down its default
-    executor, so this one leaves the pool running when the read's loop closes.
+    Work goes to the pool, and ``wait_for_calls`` waits for the calls that
+    still run. Closing an event loop shuts down its default executor, so this
+    one leaves the pool running when the read's loop closes.
     """
 
     def __init__(self, pool: ThreadPoolExecutor) -> None:
         # One worker, never started: every call goes to ``pool``.
         super().__init__(max_workers=1)
         self._pool = pool
+        # Calls end on the pool's threads, whose done callbacks remove them.
+        self._calls_lock = threading.Lock()
+        self._calls: set[Future[Any]] = set()
 
     def submit[**P, R](
         self, fn: Callable[P, R], /, *args: P.args, **kwargs: P.kwargs
     ) -> "Future[R]":
-        return self._pool.submit(fn, *args, **kwargs)
+        future = self._pool.submit(fn, *args, **kwargs)
+        with self._calls_lock:
+            self._calls.add(future)
+        future.add_done_callback(self._call_ended)
+        return future
+
+    def _call_ended(self, future: Future[Any]) -> None:
+        with self._calls_lock:
+            self._calls.discard(future)
+
+    def wait_for_calls(self) -> None:
+        """Wait for the calls handed to the pool that still run.
+
+        A cancelled task stops awaiting a call that has started, such as a
+        store call or a decode, and the call runs on, holding its chunk, until
+        it ends.
+        """
+        with self._calls_lock:
+            calls = list(self._calls)
+        if calls:
+            wait_for_futures(calls)
 
     def shutdown(self, wait: bool = True, *, cancel_futures: bool = False) -> None:
         """Leave the lent pool running."""
@@ -378,6 +408,101 @@ def _finish_tasks(loop: asyncio.AbstractEventLoop) -> None:
     loop.run_until_complete(loop.shutdown_asyncgens())
 
 
+class ReadStopped(BaseException):
+    """Raised in a block stream's read when the stream stops it on closing.
+
+    The stream drops it while it closes, so its consumer never sees it. It is
+    a ``BaseException``, as ``ShutdownRequested`` is, so that a handler of
+    ordinary errors, such as a cache's fallback to its source, never takes a
+    stop for a failure.
+    """
+
+
+class ReadStop:
+    """Stop the running reads of one block stream.
+
+    A read registers how to cancel itself while it runs, through
+    ``cancelling``. ``stop`` cancels each registered read on the event loop
+    that runs it, and makes ``check_read_stop`` raise ``ReadStopped`` in the
+    stream's reads; a read that registers after the stop is cancelled at once.
+    A stream started within another stream's read is registered the same way,
+    so stopping the outer stream stops it too.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._stopped = False
+        self._cancels: dict[object, Callable[[], None]] = {}
+
+    @property
+    def stopped(self) -> bool:
+        """Whether the stream has stopped its reads."""
+        return self._stopped
+
+    def stop(self) -> None:
+        """Stop the stream's reads: cancel the running ones and refuse the next."""
+        with self._lock:
+            self._stopped = True
+            cancels = list(self._cancels.values())
+        for cancel in cancels:
+            cancel()
+
+    @contextmanager
+    def cancelling(self, cancel: Callable[[], None]) -> Iterator[None]:
+        """Let ``stop`` call ``cancel`` while this context runs, or call it now if stopped."""
+        token = object()
+        with self._lock:
+            stopped = self._stopped
+            if not stopped:
+                self._cancels[token] = cancel
+        if stopped:
+            cancel()
+        try:
+            yield
+        finally:
+            with self._lock:
+                self._cancels.pop(token, None)
+
+
+# The stop of the block stream whose read runs in the calling context, if any.
+_READ_STOP: contextvars.ContextVar[ReadStop | None] = contextvars.ContextVar(
+    "read_stop", default=None
+)
+
+
+@contextmanager
+def read_stop_scope(stop: ReadStop) -> Iterator[None]:
+    """Run the reads of the calling thread under the block stream's ``stop``."""
+    token = _READ_STOP.set(stop)
+    try:
+        yield
+    finally:
+        _READ_STOP.reset(token)
+
+
+def current_read_stop() -> ReadStop | None:
+    """Return the stop of the block stream whose read runs in this context, if any."""
+    return _READ_STOP.get()
+
+
+def check_read_stop() -> None:
+    """Raise ``ReadStopped`` once the block stream of the calling read has stopped."""
+    stop = _READ_STOP.get()
+    if stop is not None and stop.stopped:
+        raise ReadStopped("The block stream closed while this read ran")
+
+
+def _cancelled_only(error: BaseException) -> bool:
+    """Return whether ``error`` is a cancellation, or a group of nothing else."""
+    return all(isinstance(leaf, asyncio.CancelledError) for leaf in _leaves(error))
+
+
+def _stoppable(
+    stop: ReadStop | None, cancel: Callable[[], None]
+) -> AbstractContextManager[None]:
+    return nullcontext() if stop is None else stop.cancelling(cancel)
+
+
 def run_read(coroutine: Coroutine[Any, Any, T]) -> T:
     """Run one synchronous read's coroutine on an event loop of its own, in the calling thread.
 
@@ -387,31 +512,95 @@ def run_read(coroutine: Coroutine[Any, Any, T]) -> T:
     run on Zarr's codec pool, which the loop borrows, so they follow
     :func:`zarr_decoding_threads`. The loop runs until every task that the
     read started has ended, such as a shared cache fill that another read
-    waits on, and then closes. An interruption, such as Ctrl-C, cancels the
-    read and waits for it to stop. A thread that already runs an event loop
-    reads through Zarr's loop, as Zarr's synchronous API does.
+    waits on, and closes once every call it handed to the pool has ended too,
+    so a cancelled read leaves no store call or decode holding its chunk. An
+    interruption, such as Ctrl-C, cancels the read and waits for it to stop,
+    and so does the stop of the block stream that runs the read, which then
+    raises ``ReadStopped``. A thread that already runs an event loop reads
+    through Zarr's loop, with :func:`run_on_zarr_loop`.
     """
     if _in_event_loop():
-        from zarr.core.sync import sync
-
-        return sync(coroutine)
+        return run_on_zarr_loop(coroutine)
     ensure_zarr_host_ceiling()
-    pool = importlib.import_module("zarr.core.sync")._executor
+    pool = _LentPool(importlib.import_module("zarr.core.sync")._executor)
     loop = asyncio.new_event_loop()
     try:
-        loop.set_default_executor(_LentPool(pool))
+        loop.set_default_executor(pool)
         task = loop.create_task(coroutine)
+        stopped = False
+
+        def cancel(cancel_task: Callable[[], Any] = task.cancel) -> None:
+            nonlocal stopped
+            stopped = True
+            try:
+                loop.call_soon_threadsafe(cancel_task)
+            except RuntimeError:
+                # The read already ended and its loop closed.
+                pass
+
         try:
-            return loop.run_until_complete(task)
-        except BaseException:
+            with _stoppable(_READ_STOP.get(), cancel):
+                return loop.run_until_complete(task)
+        except BaseException as error:
+            if stopped and _cancelled_only(error):
+                raise ReadStopped(
+                    "The block stream closed while this read ran"
+                ) from None
             # An interruption leaves the read running; it stops at its next await.
             task.cancel()
             raise
         finally:
             del task
             _finish_tasks(loop)
+            pool.wait_for_calls()
     finally:
         loop.close()
+
+
+def run_on_zarr_loop(coroutine: Coroutine[Any, Any, T]) -> T:
+    """Run one synchronous read's coroutine on Zarr's event loop, through Zarr's ``sync``.
+
+    The stop of the block stream that runs the read cancels the read's task
+    on Zarr's loop, and this raises ``ReadStopped`` once the task has ended.
+    Every read on Zarr's loop shares Zarr's codec pool, so a store call or
+    decode that a stopped read had started there can end after this returns.
+    """
+    sync_module = importlib.import_module("zarr.core.sync")
+    stop = _READ_STOP.get()
+    if stop is None:
+        return cast(T, sync_module.sync(coroutine))
+    started: Future[asyncio.Task[T]] = Future()
+
+    async def tracked() -> T:
+        task = asyncio.current_task()
+        assert task is not None
+        started.set_result(cast("asyncio.Task[T]", task))
+        return await coroutine
+
+    stopped = False
+
+    def cancel() -> None:
+        nonlocal stopped
+        stopped = True
+        # The task may not have started yet; it is cancelled once it has.
+        started.add_done_callback(
+            lambda ready: (
+                ready.result().get_loop().call_soon_threadsafe(ready.result().cancel)
+            )
+        )
+
+    read = tracked()
+    try:
+        with stop.cancelling(cancel):
+            return cast(T, sync_module.sync(read))
+    except sync_module.SyncError:
+        # Zarr refuses a read from its own loop thread before the read starts.
+        read.close()
+        raise
+    except (CancelledError, asyncio.CancelledError):
+        if stopped:
+            raise ReadStopped("The block stream closed while this read ran") from None
+        raise
 
 
 class ByteLedger:

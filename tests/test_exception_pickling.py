@@ -40,6 +40,7 @@ from cytearc.storage.artifact_writer import (
     ArtifactComputationRequired,
 )
 from cytearc.storage.artifacts import ArtifactRef
+from cytearc.storage.async_execution import ReadStopped
 from cytearc.storage.count_matrix import CountMatrixPolicy
 from cytearc.storage.errors import ArtifactResolutionError
 from cytearc.storage.finite_values import NonFiniteArtifactError
@@ -154,6 +155,7 @@ SAMPLES: dict[type[BaseException], Callable[[], BaseException]] = {
             signal_name="SIGTERM",
         )
     ),
+    ReadStopped: lambda: ReadStopped("The block stream closed while this read ran"),
 }
 
 
