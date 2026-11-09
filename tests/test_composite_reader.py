@@ -732,10 +732,49 @@ def source_reads(reader_sources, monkeypatch):
     return requests
 
 
+class SourceOverlap:
+    """The source count reads in flight, held until ``expected`` of them run at once.
+
+    A composite reads its sources from several threads, each on an event loop
+    of its own, so no one loop can make the reads overlap. A read waits,
+    polling, until ``expected`` reads have been in flight together; once they
+    have, every read passes straight through. The first wait starts a 5 s
+    deadline after which no read waits, so an implementation that never
+    reaches the overlap fails instead of hanging.
+    """
+
+    def __init__(self) -> None:
+        self.lock = Lock()
+        self.active = 0
+        self.peak = 0
+        self.expected = 1
+        self.deadline: float | None = None
+
+    def expect(self, reads: int) -> None:
+        """Hold reads until ``reads`` run at once, counting the peak afresh."""
+        with self.lock:
+            assert self.active == 0
+            self.peak = 0
+            self.expected = reads
+            self.deadline = None
+
+    async def hold(self) -> None:
+        loop = asyncio.get_running_loop()
+        while True:
+            with self.lock:
+                if self.peak >= self.expected:
+                    return
+                if self.deadline is None:
+                    self.deadline = loop.time() + 5
+                elif loop.time() >= self.deadline:
+                    return
+            await asyncio.sleep(0.001)
+
+
 @pytest.fixture
 def source_overlap(source_reads, reader_sources, monkeypatch):
     roots = {str(path.resolve()) for path, _, _ in reader_sources.values()}
-    counts = {"active": 0, "peak": 0}
+    overlap = SourceOverlap()
     getitem = AsyncArray.getitem
 
     async def record(self, selection, *args, **kwargs):
@@ -744,16 +783,18 @@ def source_overlap(source_reads, reader_sources, monkeypatch):
             "RNA/countsT",
         }:
             return await getitem(self, selection, *args, **kwargs)
-        counts["active"] += 1
-        counts["peak"] = max(counts["peak"], counts["active"])
+        with overlap.lock:
+            overlap.active += 1
+            overlap.peak = max(overlap.peak, overlap.active)
         try:
-            await asyncio.sleep(0)
+            await overlap.hold()
             return await getitem(self, selection, *args, **kwargs)
         finally:
-            counts["active"] -= 1
+            with overlap.lock:
+                overlap.active -= 1
 
     monkeypatch.setattr(AsyncArray, "getitem", record)
-    return counts
+    return overlap
 
 
 @pytest.mark.parametrize("name", ("counts", "countsT"))
@@ -1009,9 +1050,10 @@ def test_composite_array_reader_bounds_parallel_source_reads(
     joint, expected = reader_joint
     reader = virtual_array_reader(joint.RNA.matrixGroup["counts"])
     assert reader is not None
+    source_overlap.expect(workers)
     actual = sync(reader.read(slice(None), slice(None), read_workers=workers))
     np.testing.assert_array_equal(actual, expected)
-    assert source_overlap == {"active": 0, "peak": workers}
+    assert (source_overlap.active, source_overlap.peak) == (0, workers)
     assert max(Counter(source_reads).values()) == 1
 
 
@@ -1277,6 +1319,8 @@ def test_composite_feature_stream_honors_source_read_worker_limit(
             values = values[:, group.cellStart : group.cellEnd]
         np.testing.assert_array_equal(group.values, values)
 
+    # Without a limit, at least two reads run at once.
+    source_overlap.expect(2 if workers is None else workers)
     list(
         mapping(
             joint.RNA.matrixGroup["countsT"],
@@ -1286,13 +1330,13 @@ def test_composite_feature_stream_honors_source_read_worker_limit(
             metrics=metrics,
         )
     )
-    assert source_overlap["active"] == 0
+    assert source_overlap.active == 0
     if workers is not None:
-        assert source_overlap["peak"] == workers
+        assert source_overlap.peak == workers
     else:
         assert (
             1
-            < source_overlap["peak"]
+            < source_overlap.peak
             <= metrics["effectiveReadWorkers"] * metrics["innerReads"]
         )
 
@@ -1311,7 +1355,7 @@ def test_composite_creation_honors_source_read_worker_limit(
             )
             for name, (path, _, _) in reader_sources.items()
         }
-        source_overlap["peak"] = 0
+        source_overlap.expect(workers)
         joint = create_composite(
             sources,
             at=tmp_path / f"joint_{workers}.zarr",
@@ -1319,7 +1363,7 @@ def test_composite_creation_honors_source_read_worker_limit(
             mem_budget="64M",
             nthreads=3,
         )
-        assert source_overlap == {"active": 0, "peak": workers}
+        assert (source_overlap.active, source_overlap.peak) == (0, workers)
         counts = joint.RNA.matrixGroup["counts"]
         observed.append(
             (
