@@ -201,17 +201,17 @@ Both measures read a cell's expression of each network gene as $x = \log_2(10{,}
 
 Higher values of either measure mean a less differentiated cell. One pass over the counts computes both, and `measure` chooses the one that ranks the cells.
 
-The networks are [STRING](https://doi.org/10.1093/nar/gkae1113) v12.5's protein links for human and mouse, as `scripts/build_string_networks.py` builds them: STRING's `database` channel is left out, since it draws on curated resources under their own terms, the other channels are recombined with STRING's formula, and links scoring at least 0.700 are kept. The human network holds 16,835 genes and 214,798 links, and the mouse network 14,599 genes and 132,521 links. The first call downloads the species' network, 0.8 MB for human or 0.5 MB for mouse, into `$XDG_CACHE_HOME/cytearc/networks`, and every call checks the file against the size and SHA-256 digest that CyteArc records. Network genes match the assay's features by Ensembl gene ID, versions ignored, when the feature IDs are the species' Ensembl IDs, and by symbol otherwise. The scores use the largest connected part of the network among the matched genes. An assay that matches fewer than 5,000 network genes is refused, since a network cut down that far no longer describes a cell's signaling; the systems below matched 11,035 to 14,623.
+The networks are [STRING](https://doi.org/10.1093/nar/gkae1113) v12.5's protein links for human and mouse, as `scripts/build_string_networks.py` builds them: STRING's `database` channel is left out, since it draws on curated resources under their own terms, the other channels are recombined with STRING's formula, and links scoring at least 0.700 are kept. The human network holds 16,835 genes and 214,798 links, and the mouse network 14,599 genes and 132,521 links. The first call downloads the species' network, 0.8 MB for human or 0.5 MB for mouse, into `$XDG_CACHE_HOME/cytearc/networks`, and every call checks the file against the size and SHA-256 digest that CyteArc records. Network genes match the assay's features by Ensembl gene ID, versions ignored, when the feature IDs are the species' Ensembl IDs, and by symbol otherwise. The scores use the largest connected part of the network among the matched genes. An assay that matches fewer than 5,000 network genes is refused, since a network cut down that far no longer describes a cell's signaling; the fifteen systems below matched 11,141 to 16,782.
 
-With `graph`, the chosen measure is smoothed over the cells' neighbour graph before it ranks them, by a random walk with restart: each step sets $d \leftarrow \alpha P d + (1 - \alpha) d_0$, where $P$ is the row-normalized graph, $d_0$ the unsmoothed scores and $\alpha$ the `smoothing` argument, 0.9 by default. The steps continue until $d$ is within $10^{-12}$ of its fixed point, relative to the range of the scores, which takes 263 steps at 0.9, and no score crosses between unconnected parts of the graph. Smoothing is opt-in: in the comparison below, it raised SR's rank correlation with the pancreas stages from 0.76 to 0.89, and it deepened the reversals of the epidermis and of the oligodendrocyte lineage.
+With `graph`, the chosen measure is smoothed over the cells' neighbour graph before it ranks them, by a random walk with restart: each step sets $d \leftarrow \alpha P d + (1 - \alpha) d_0$, where $P$ is the row-normalized graph, $d_0$ the unsmoothed scores and $\alpha$ the `smoothing` argument, 0.9 by default. The steps continue until $d$ is within $10^{-12}$ of its fixed point, relative to the range of the scores, which takes 263 steps at 0.9, and no score crosses between unconnected parts of the graph. Smoothing is opt-in: in the comparison below, it raised SR's rank correlation with the pancreas stages from 0.76 to 0.89 and CCAT's mean over the systems from 0.33 to 0.39, and it deepened the reversals of the epidermis, of both oligodendrocyte lineages and of the extravillous trophoblast.
 
 The artifact holds four arrays over the cells of `cell_selection`. `potency` is the rank of the chosen measure, smoothed when a graph is given, scaled to $[0, 1]$ with ties sharing their mean rank, and `differentiation` is one minus `potency`. `signaling_entropy` and `ccat` hold both measures unsmoothed, so every artifact lets the two be compared. `ds.scores.load_potency` returns the arrays with the network's version and digest and the genes and links that the scores used.
 
 Scoring reads only the network's genes, in blocks of cells that fit the memory budget. Beyond one block of counts, it holds the network, two vectors over the network's genes for each thread and four values for each cell. On 250,000 bone marrow cells with 400 million nonzero counts held in memory, computing both measures over the human network's 15,875 matched genes took 8.7 s on 24 threads, and smoothing took 1.7 s.
 
-### Comparison on six systems
+### Comparison on fifteen systems
 
-Both measures were run, with the code and networks that CyteArc ships, on six public systems whose stage order is known. The pancreas is the test fixture. The other five were read from CyteBase's stores of CZ CELLxGENE Discover datasets, with at most 650 to 2,500 cells of each stage drawn at random.
+Both measures were run, with the code and networks that CyteArc ships, on fifteen public systems whose stage order the source study states. The pancreas is the test fixture. The other fourteen were read from CyteBase's stores of CZ CELLxGENE Discover datasets. Each run drew at most 650 to 2,500 cells of each stage at random, kept one 10x chemistry per system so that no stage differs from another by chemistry, and matched the network to all of the assay's genes, as `scores.potency` does. Every system ran with three seeds, each for the cell draw, the thinning and the principal components.
 
 | System | Dataset | Cells | Known order |
 | :-- | :-- | --: | :-- |
@@ -221,24 +221,50 @@ Both measures were run, with the code and networks that CyteArc ships, on six pu
 | Hippocampus, adult mouse | [De Donno et al. 2026](https://doi.org/10.1038/s41380-025-03417-y) | 6,503 | neural progenitor, neuroblast, neuron; OPC, oligodendrocyte |
 | Gut, human | [Elmentaite et al. 2020](https://doi.org/10.1016/j.devcel.2020.11.010), healthy donors | 2,739 | crypt stem cell, transit amplifying, then enterocyte or goblet cell |
 | Epidermis, human | [Cheng et al. 2018](https://doi.org/10.1016/j.celrep.2018.09.006) | 5,212 | basal, spinous, granular |
+| Thymus, human | [Park et al. 2020](https://doi.org/10.1126/science.aay3224) | 6,000 | double negative, double positive, then CD4 or CD8 T cell |
+| Neocortex, human, nuclei | [Wang et al. 2025](https://doi.org/10.1038/s41586-024-08351-7) | 7,500 | radial glia, intermediate progenitor, glutamatergic neuron; OPC, oligodendrocyte |
+| Retina, human fetus, nuclei | [Zuo et al. 2024](https://doi.org/10.1038/s41467-024-50853-5) | 8,000 | progenitor, then ganglion, amacrine, horizontal, cone, rod, bipolar or Müller glial cell |
+| Placenta, human | [Vento-Tormo et al. 2018](https://doi.org/10.1038/s41586-018-0698-6) | 4,238 | villous cytotrophoblast, then syncytiotrophoblast or extravillous trophoblast |
+| Limb muscle, human embryo | [Zhang et al. 2024](https://doi.org/10.1038/s41586-023-06806-x) | 3,965 | muscle progenitor, myoblast, myocyte |
+| Ureter, human | [Fink et al. 2022](https://doi.org/10.1016/j.devcel.2022.07.004) | 4,500 | basal, intermediate, umbrella cell |
+| Small intestine, mouse | [Zwick et al. 2024](https://doi.org/10.1038/s41556-023-01337-z) | 4,500 | stem cell, transit amplifying, enterocyte |
+| Germ cells, mouse fetus | [Garcia-Alonso et al. 2022](https://doi.org/10.1038/s41586-022-04918-4) | 3,598 | primordial germ cell, then oogonium and oocyte, or male germ cell |
+| Testis, human | [Tabula Sapiens Consortium 2024](https://doi.org/10.1101/2024.12.03.626516), one donor | 3,180 | male germ cell, spermatogonium, spermatocyte, spermatid |
 
 The second table reports:
 
 - **ρ**, Spearman's correlation between the score and the stage order among the cells of each lineage, averaged over a system's lineages. Positive values mean that less differentiated cells score higher, and 1 is a perfect order.
 - **ρ, half thinned**, the same once a random half of the cells were thinned to half their counts and every cell was scored again, as when samples of different depth are scored together.
 - **Depth AUC**, from the same thinning: within each stage, the probability that a cell at full depth outscores a thinned one, averaged over the stages by their cells. At 0.5, depth has no effect.
-- **Smoothed** rows, which use smoothing 0.9 on a graph of each cell's 30 nearest neighbours in 30 principal components of 2,000 genes.
+- **Smoothed** columns, which use smoothing 0.9 on a graph of each cell's 30 nearest neighbours in 30 principal components of 2,000 genes.
 
-| Score | Pancreas | Bone marrow | Thymus | Hippocampus | Gut | Epidermis | Mean ρ | Mean ρ, half thinned | Mean depth AUC |
-| :-- | --: | --: | --: | --: | --: | --: | --: | --: | --: |
-| SR | 0.76 | 0.39 | -0.08 | 0.36 | 0.63 | -0.42 | 0.27 | 0.28 | 0.70 |
-| SR, smoothed | 0.89 | 0.44 | -0.08 | 0.27 | 0.67 | -0.63 | 0.26 | 0.27 | 0.60 |
-| CCAT | 0.81 | 0.31 | 0.38 | 0.39 | 0.61 | -0.37 | 0.35 | 0.35 | 0.74 |
-| CCAT, smoothed | 0.90 | 0.35 | 0.54 | 0.38 | 0.60 | -0.51 | 0.38 | 0.37 | 0.61 |
+Each value is the mean over the three seeds. Across the seeds, a system's unsmoothed ρ varied by at most 0.05, and each mean over the systems by at most 0.01.
 
-- **Where the scores order a process.** Both measures order the pancreas and the gut, and neurogenesis in the hippocampus, whose neuronal lineage reaches ρ 0.73 for SR and 0.77 for CCAT. They order the bone marrow more weakly, at 0.39 and 0.31.
-- **Where they fail.** SR leaves the thymus unordered, at ρ -0.08, where CCAT orders it at 0.38. Both measures rank spinous keratinocytes above basal ones, which reverses the epidermis at -0.42 and -0.37. Neither orders the oligodendrocyte lineage of the hippocampus, at -0.02 and 0.01, and smoothing reverses it, to -0.34 and -0.13. Before a score directs a fate map, compare the order that the stored `ccat` array gives with that of `signaling_entropy`, and check where potency peaks against known markers.
-- **Depth.** Both measures rise with a cell's sequencing depth, at depth AUC 0.70 for SR and 0.74 for CCAT, so a deeply sequenced cell looks less differentiated than a shallow one of the same stage. Smoothing over neighbours of mixed depth brings both to about 0.60. Scoring half the cells at half depth changed the mean ρ by less than 0.02.
+| System | SR | SR, smoothed | CCAT | CCAT, smoothed |
+| :-- | --: | --: | --: | --: |
+| Pancreas | 0.76 | 0.89 | 0.81 | 0.90 |
+| Bone marrow | 0.37 | 0.41 | 0.30 | 0.34 |
+| Thymus, mouse | -0.08 | -0.06 | 0.37 | 0.54 |
+| Hippocampus | 0.36 | 0.30 | 0.39 | 0.43 |
+| Gut | 0.63 | 0.67 | 0.61 | 0.59 |
+| Epidermis | -0.42 | -0.63 | -0.37 | -0.51 |
+| Thymus, human | 0.06 | -0.02 | 0.26 | 0.55 |
+| Neocortex | 0.08 | 0.01 | 0.08 | 0.03 |
+| Retina | 0.11 | 0.07 | 0.16 | 0.16 |
+| Placenta | 0.06 | 0.06 | 0.19 | 0.20 |
+| Limb muscle | 0.21 | 0.21 | 0.24 | 0.25 |
+| Ureter | 0.31 | 0.41 | 0.35 | 0.49 |
+| Small intestine, mouse | 0.84 | 0.88 | 0.52 | 0.47 |
+| Germ cells, mouse | 0.21 | 0.24 | 0.44 | 0.70 |
+| Testis | 0.32 | 0.44 | 0.53 | 0.78 |
+| Mean ρ | 0.26 | 0.26 | 0.33 | 0.39 |
+| Mean ρ, half thinned | 0.25 | 0.28 | 0.31 | 0.39 |
+| Mean depth AUC | 0.69 | 0.58 | 0.71 | 0.59 |
+
+- **Where the scores order a process.** Both measures order the pancreas, the gut, the mouse small intestine and the ureter, from basal to umbrella cells. They order neurogenesis in the hippocampus and the neocortex, whose neuronal lineages reach ρ 0.73 and 0.34 for SR and 0.77 and 0.38 for CCAT, and the germ lines of the testis and the fetal ovary, at 0.32 and 0.43 for SR and 0.53 and 0.49 for CCAT. The bone marrow, the limb muscle and the retina come out more weakly ordered, at 0.11 to 0.37.
+- **Where they fail.** SR leaves both thymuses unordered, at ρ -0.08 in the mouse and 0.06 in the human, where CCAT orders them at 0.37 and 0.26. SR also leaves the male germ cells unordered, at 0.00 against CCAT's 0.40. Both measures rank spinous keratinocytes above basal ones, which reverses the epidermis at -0.42 and -0.37, and both rank extravillous trophoblast above the villous cytotrophoblast that it comes from, at -0.30 and -0.13. Neither orders the oligodendrocyte lineages: the hippocampus's stays flat, at -0.02 and 0.02, and the neocortex's reverses, at -0.17 and -0.21. Before a score directs a fate map, compare the order that the stored `ccat` array gives with that of `signaling_entropy`, and check where potency peaks against known markers.
+- **Between the two measures.** CCAT's mean ρ is higher than SR's by 0.070 (0.070, 0.070 and 0.071 in the three seeds) and by 0.065 with half the cells thinned. Leaving out any one system keeps CCAT ahead by at least 0.043, or 0.040 half thinned, the lead being smallest without the mouse thymus. CCAT orders 12 of the 15 systems better, the neocortex by less than 0.01. SR orders the bone marrow, the gut and the mouse small intestine better, by 0.07, 0.02 and 0.32. SR's ρ is below zero in every seed for two systems, the mouse thymus and the epidermis, and CCAT's for one, the epidermis.
+- **Depth.** Both measures rise with a cell's sequencing depth, at depth AUC 0.69 for SR and 0.71 for CCAT, so a deeply sequenced cell looks less differentiated than a shallow one of the same stage. Smoothing over neighbours of mixed depth brings them to 0.58 and 0.59. Scoring half the cells at half depth changed each mean ρ by less than 0.03.
 
 ## Validation
 

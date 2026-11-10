@@ -432,10 +432,19 @@ The comparison of potency scores in [Methods and limitations](https://docs.nygen
 | --- | --- | --- |
 | Pancreas | The `bastidas-ponce_4K_pancreas-d15_rnaseq` example, credited under "Example datasets" | GEO; the processed file states no license |
 | Bone marrow | Zeng et al. (2025), Blood Cancer Discovery 6:307-324, doi:10.1158/2643-3230.BCD-24-0342, as `zeng_2025_balanced_bone_marrow_reference_map_hematopoietic_development_cd2f23c1` | CC BY 4.0 |
-| Thymus | Steier et al. (2023), Nature Immunology 24:1579-1590, doi:10.1038/s41590-023-01584-0, as `steier_2023_mouse_single_cell_multi_omic_cd4_cd8_lineage_commitment_c14c54f8` | CC BY 4.0 |
+| Thymus, mouse | Steier et al. (2023), Nature Immunology 24:1579-1590, doi:10.1038/s41590-023-01584-0, as `steier_2023_mouse_single_cell_multi_omic_cd4_cd8_lineage_commitment_c14c54f8` | CC BY 4.0 |
 | Hippocampus | De Donno et al. (2026), Molecular Psychiatry 31:1823-1836, doi:10.1038/s41380-025-03417-y, as `de_donno_2026_mouse_single_cell_adult_ventral_hippocampus_b2370cf4` | CC BY 4.0 |
 | Gut | Elmentaite et al. (2020), Developmental Cell 55:771-783.e5, doi:10.1016/j.devcel.2020.11.010, as `elmentaite_2020_paediatric_human_gut_4_14y_8e47ed12` | CC BY 4.0 |
 | Epidermis | Cheng et al. (2018), Cell Reports 25:871-883, doi:10.1016/j.celrep.2018.09.006, as `cheng_2018_skin_f512b8b6` | CC BY 4.0 |
+| Thymus, human | Park et al. (2020), Science 367:eaay3224, doi:10.1126/science.aay3224, as `park_2020_figure_1_cell_atlas_human_t_cell_repertoire_formation_cda2c8cd` | CC BY 4.0 |
+| Neocortex | Wang et al. (2025), Nature 647:169-178, doi:10.1038/s41586-024-08351-7, as `wang_2025_snmultiome_data_developing_human_neocortex_aa369999` | CC BY 4.0 |
+| Retina | Zuo et al. (2024), Nature Communications 15:6792, doi:10.1038/s41467-024-50853-5, as `zuo_2024_snrna_developing_human_retina_963a08cb` | CC BY 4.0 |
+| Placenta | Vento-Tormo et al. (2018), Nature 563:347-353, doi:10.1038/s41586-018-0698-6, as `ventotormo_2018_pregnant_uterus_all_5bc42b88` | CC BY 4.0 |
+| Limb muscle | Zhang et al. (2024), Nature 635:668-678, doi:10.1038/s41586-023-06806-x, as `zhang_2024_unfiltered_human_limb_scrnaseq_314ab602` | CC BY 4.0 |
+| Ureter | Fink et al. (2022), Developmental Cell 57:1899-1916.e6, doi:10.1016/j.devcel.2022.07.004, as `fink_2022_human_adult_ureter_3e524d45` | CC BY 4.0 |
+| Small intestine, mouse | Zwick et al. (2024), Nature Cell Biology 26:250-262, doi:10.1038/s41556-023-01337-z, as `zwick_2024_mouse_epithelial_cells_collected_mouse_small_intestine_a5ab6cde` | CC BY 4.0 |
+| Germ cells, mouse | Garcia-Alonso et al. (2022), Nature 607:540-547, doi:10.1038/s41586-022-04918-4, as `garciaalonso_2022_mouse_mouse_germ_cells_5695d556` | CC BY 4.0 |
+| Testis | The Tabula Sapiens Consortium (2024), bioRxiv, doi:10.1101/2024.12.03.626516: the testis cells of `tabula_2022_tabula_sapiens_all_cells_53d208b0`, the release credited as `tabula_sapiens` under "Example datasets" | CC BY 4.0, and the Tabula Sapiens Data Release Policy, as for that example |
 
 ## Data that validated the clone import
 

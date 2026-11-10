@@ -326,7 +326,7 @@ case (`Cd3e`, `Ptprc`, `Mki67`), and panel lookups are exact, so convert the pan
 | `tmin` (AUCell, WAGGR) | `5` | Lower for short sets; sources with fewer matched targets are dropped |
 | `n_up` (AUCell) | `None` (5% of universe) | Fix it when comparing runs; changes the score scale |
 | `s_genes` / `g2m_genes` | built-in human and mouse lists | Other species or naming schemes. Names match without case; a renamed gene missing under its 2019 symbol matches its previous HGNC symbol (`parameters["gene_aliases"]`, for example PIMREG as `Fam64a`), and a gene listed twice counts once. |
-| `measure` (`scores.potency`) | `"signaling_entropy"` | `"ccat"` when the stored `ccat` array orders known stages or markers better; on the thymus the signaling entropy rate gave no order where CCAT did |
+| `measure` (`scores.potency`) | `"signaling_entropy"` | `"ccat"` when the stored `ccat` array orders known stages or markers better; on the mouse and human thymus the signaling entropy rate gave no order where CCAT did |
 | `graph`, `smoothing` (`scores.potency`) | `None`, `0.9` | A graph built on `cell_selection` smooths the measure before ranking; it sharpened the pancreas order but deepened the reversals where the measures fail, so check it like the unsmoothed score |
 | `species` (`scores.potency`) | `None` (read from Ensembl gene IDs) | `"human"` or `"mouse"` when the features are gene symbols |
 | `network` (`scores.potency`) | `None` (cached download) | A local copy of the network file on a machine without network access; it is checked like a download |
@@ -361,7 +361,7 @@ case (`Cd3e`, `Ptprc`, `Mki67`), and panel lookups are exact, so convert the pan
 - `select_cells(include=...)` needs integers for integer cluster artifacts (`TypeError` otherwise).
 - Scores from different feature universes, `n_up` or WAGGR `mode`/`log_transform` are not comparable.
 - Reversing `differentiation` before `fate(direction=...)`: it already rises along the process. Reverse only another tool's score that falls along it.
-- Trusting potency on a tissue that the methods comparison did not cover. On six systems of known order, the signaling entropy rate left the thymus unordered, both measures reversed the epidermis (spinous above basal keratinocytes), and neither ordered the oligodendrocyte lineage of the hippocampus. Both measures rise with sequencing depth, so a deeply sequenced cell looks less differentiated than a shallow one of the same stage.
+- Trusting potency on a tissue that the methods comparison did not cover. On fifteen systems of known order, the signaling entropy rate left the mouse and human thymus unordered, both measures reversed the epidermis (spinous above basal keratinocytes), and neither ordered the oligodendrocyte lineages of the hippocampus and the neocortex. Both measures rise with sequencing depth, so a deeply sequenced cell looks less differentiated than a shallow one of the same stage.
 - Reading the most probable fate of uncommitted cells. Their probabilities are nearly even, so it flips with small changes in the direction; compare fates among the cells that one fate dominates.
 
 ## See also
