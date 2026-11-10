@@ -26,7 +26,9 @@ assumptions; changing it can change the scores.
 Compare these alternatives visually as well as numerically. A smooth-looking ordering
 cannot by itself distinguish biological progression from a technical gradient.
 
-A direction score that orients `fate` in place of a pseudotime needs the same checks. Its higher values must mark later cells, so reverse a score that is highest at the start, such as a potency score. The map leaves out the graph components that the score does not cover and those without a sink, so compare the `valid` mask that `load_fate` returns with the cells you meant to map.
+A direction score that orients `fate` in place of a pseudotime needs the same checks. Its higher values must mark later cells. The `differentiation` array of `scores.potency` already does, so its artifact directs `fate` as it stands; reverse only a score from another tool that is highest at the start. The map leaves out the graph components that the score does not cover and those without a sink, so compare the `valid` mask that `load_fate` returns with the cells you meant to map.
+
+A potency score orders some processes and not others: in the {ref}`comparison on six systems <potency_method>`, the signaling entropy rate left the thymus unordered, both measures reversed the epidermis, and neither ordered the oligodendrocyte lineage of the hippocampus. Check that the cells it scores least differentiated are known progenitors, compare its order with that of the stored `ccat` array, and when source cells are known, compare its fate map with a pseudotime-directed one, as [](fate_mapping.ipynb) does.
 
 ## Count the cells that were scored
 
