@@ -584,10 +584,12 @@ def test_potency_scores_the_cells_and_reuses_its_artifact(
     entropy, correlation, _ = independent_scores(datastore, auto_filter_cells, path)
     np.testing.assert_allclose(result.signaling_entropy, entropy, rtol=1e-12)
     np.testing.assert_allclose(result.ccat, correlation, rtol=1e-12)
-    np.testing.assert_allclose(result.potency, potency.unit_ranks(entropy))
+    # The two measures rank these cells differently, so the ranks name the default.
+    assert not np.allclose(potency.unit_ranks(entropy), potency.unit_ranks(correlation))
+    np.testing.assert_allclose(result.potency, potency.unit_ranks(correlation))
     np.testing.assert_allclose(result.differentiation, 1 - result.potency)
     assert (result.measure, result.species, result.graph, result.smoothing) == (
-        "signaling_entropy",
+        "ccat",
         "human",
         None,
         None,
@@ -607,20 +609,31 @@ def test_potency_scores_the_cells_and_reuses_its_artifact(
     status = datastore.artifacts.inspect(ref)
     assert set(status.parameters) == {"measure", "species", "string_network"}
     assert datastore.scores.potency(auto_filter_cells, network=path) == ref
+    # CCAT is the default, so naming it finds the same artifact.
+    assert (
+        datastore.scores.potency(auto_filter_cells, measure="ccat", network=path) == ref
+    )
 
 
-def test_ccat_ranks_the_cells_when_asked_and_keeps_both_measures(
+def test_signaling_entropy_ranks_the_cells_when_asked_and_keeps_both_measures(
     datastore, auto_filter_cells, recorded
 ):
     path = recorded[0]
-    entropy_ref = datastore.scores.potency(auto_filter_cells, network=path)
-    ccat_ref = datastore.scores.potency(auto_filter_cells, measure="ccat", network=path)
-    assert ccat_ref != entropy_ref
-    by_ccat = datastore.scores.load_potency(ccat_ref)
+    ccat_ref = datastore.scores.potency(auto_filter_cells, network=path)
+    entropy_ref = datastore.scores.potency(
+        auto_filter_cells, measure="signaling_entropy", network=path
+    )
+    assert entropy_ref != ccat_ref
     by_entropy = datastore.scores.load_potency(entropy_ref)
-    np.testing.assert_array_equal(by_ccat.ccat, by_entropy.ccat)
-    np.testing.assert_allclose(by_ccat.potency, potency.unit_ranks(by_ccat.ccat))
-    assert by_ccat.measure == "ccat"
+    by_ccat = datastore.scores.load_potency(ccat_ref)
+    np.testing.assert_array_equal(by_entropy.ccat, by_ccat.ccat)
+    np.testing.assert_array_equal(
+        by_entropy.signaling_entropy, by_ccat.signaling_entropy
+    )
+    np.testing.assert_allclose(
+        by_entropy.potency, potency.unit_ranks(by_entropy.signaling_entropy)
+    )
+    assert by_entropy.measure == "signaling_entropy"
 
 
 @pytest.mark.parametrize("rows", [1, 7, None])
@@ -650,19 +663,28 @@ def test_block_sizes_do_not_change_the_scores(
     np.testing.assert_allclose(result.ccat, correlation, rtol=1e-12)
 
 
+@pytest.mark.parametrize("measure", potency.MEASURES)
 def test_smoothing_over_the_graph_follows_the_dense_solve(
-    datastore, auto_filter_cells, connectivity_graph, recorded
+    datastore, auto_filter_cells, connectivity_graph, recorded, measure
 ):
     path = recorded[0]
     ref = datastore.scores.potency(
-        auto_filter_cells, graph=connectivity_graph, smoothing=0.8, network=path
+        auto_filter_cells,
+        measure=measure,
+        graph=connectivity_graph,
+        smoothing=0.8,
+        network=path,
     )
     result = datastore.scores.load_potency(ref)
     # The fuzzy union of the directed edges, as the operation loads the graph.
+    # The graph stores float32 weights; normalizing them in float64, as the
+    # operation does, keeps the solve exact enough to rank CCAT's close values.
     graph = datastore.graph.load(connectivity_graph, symmetric=True).toarray()
+    graph = graph.astype(np.float64)
     walk = graph / graph.sum(axis=1, keepdims=True)
-    entropy, _, _ = independent_scores(datastore, auto_filter_cells, path)
-    smoothed = 0.2 * np.linalg.solve(np.eye(len(walk)) - 0.8 * walk, entropy)
+    entropy, correlation, _ = independent_scores(datastore, auto_filter_cells, path)
+    raw = correlation if measure == "ccat" else entropy
+    smoothed = 0.2 * np.linalg.solve(np.eye(len(walk)) - 0.8 * walk, raw)
     np.testing.assert_allclose(result.potency, potency.unit_ranks(smoothed))
     assert (result.graph, result.smoothing) == (connectivity_graph, 0.8)
     status = datastore.artifacts.inspect(ref)
@@ -766,7 +788,7 @@ def test_arguments_are_refused_before_anything_is_computed(
     path = recorded[0]
     score = datastore.scores.potency
     with pytest.raises(
-        ValueError, match="measure must be 'signaling_entropy' or 'ccat'"
+        ValueError, match="measure must be 'ccat' or 'signaling_entropy'"
     ):
         score(auto_filter_cells, measure="entropy", network=path)
     for smoothing in (0, 0.995, 1.5):
@@ -860,7 +882,7 @@ def test_a_read_only_store_returns_saved_scores_and_refuses_new_ones(
     with pytest.raises(PermissionError):
         reader.scores.potency(
             auto_filter_cells,
-            measure="ccat",
+            measure="signaling_entropy",
             smoothing=0.5,
             network=path,
             invalidate_cache=True,

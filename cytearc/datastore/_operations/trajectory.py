@@ -3586,7 +3586,7 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         self,
         cell_selection: ArtifactRef,
         *,
-        measure: Literal["signaling_entropy", "ccat"] = "signaling_entropy",
+        measure: Literal["ccat", "signaling_entropy"] = "ccat",
         graph: ArtifactRef | None = None,
         smoothing: float = 0.9,
         species: str | None = None,
@@ -3603,6 +3603,11 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         ``direction`` without naming a source. Both measures are written from
         their papers and computed in one pass over the counts:
 
+        - ``"ccat"``, the default, of Teschendorff et al. (2021),
+          Bioinformatics 37:1528-1534, doi:10.1093/bioinformatics/btaa987: the
+          Pearson correlation of a cell's expression ``x`` with each gene's
+          degree in the network, whether the cell expresses the network's
+          hubs.
         - ``"signaling_entropy"``, the signaling entropy rate of Teschendorff
           and Enver (2017), Nature Communications 8:15599,
           doi:10.1038/ncomms15599: how evenly a cell's expression lets a walk
@@ -3611,10 +3616,6 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
           ``sum_i pi_i log((Ax)_i / x_i)`` with ``pi_i = x_i (Ax)_i / x'Ax``,
           is divided by the largest of any walk on the network,
           ``log lambda_max(A)``.
-        - ``"ccat"``, of Teschendorff et al. (2021), Bioinformatics
-          37:1528-1534, doi:10.1093/bioinformatics/btaa987: the Pearson
-          correlation of ``x`` with each gene's degree in the network, whether
-          the cell expresses the network's hubs.
 
         ``x`` is ``log2(10,000 * counts / total + 1.1)`` over the network's
         genes, with each cell's prepared total of all its counts,
@@ -3634,17 +3635,22 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         largest connected part of the genes matched.
 
         The scores do not order every process. On fifteen systems of known
-        order, compared on the methods page, the signaling entropy rate left
-        the mouse and human thymus unordered (Spearman's rho -0.08 and 0.06)
-        where CCAT ordered them (0.37 and 0.26), both measures ranked spinous
+        order, compared on the methods page, CCAT ordered 12 better than the
+        signaling entropy rate, which left the mouse and human thymus
+        unordered (Spearman's rho -0.08 and 0.06) where CCAT ordered them
+        (0.37 and 0.26). The signaling entropy rate ordered the mouse small
+        intestine better (0.84 against 0.52). Both measures ranked spinous
         keratinocytes above basal ones (rho -0.42 and -0.37), and neither
-        ordered the oligodendrocyte lineages. Compare the order of the stored
-        ``ccat`` array, which every artifact holds, and check where potency
-        peaks against known markers before trusting a direction.
+        ordered the oligodendrocyte lineages. Within a stage, both measures
+        follow a cell's sequencing depth, CCAT more closely (mean rho with the
+        cell's total counts 0.66 against 0.54), so the cells of one population
+        are ranked largely by depth. Compare the orders of the stored ``ccat``
+        and ``signaling_entropy`` arrays, which every artifact holds, and check
+        where potency peaks against known markers before trusting a direction.
 
         Args:
             cell_selection: Explicit cells to score; at least two.
-            measure: ``"signaling_entropy"``, the default, or ``"ccat"``: the
+            measure: ``"ccat"``, the default, or ``"signaling_entropy"``: the
                 measure that ranks the cells.
             graph: Explicit connectivity-map or integrated-graph artifact built
                 on the cells of ``cell_selection``. With it, the measure is
