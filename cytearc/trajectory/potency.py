@@ -59,7 +59,7 @@ __all__ = [
 ]
 
 #: The measures that ``ds.scores.potency`` computes, the first its default.
-MEASURES: tuple[str, ...] = ("signaling_entropy", "ccat")
+MEASURES: tuple[str, ...] = ("ccat", "signaling_entropy")
 #: The papers' pseudocount, which keeps a gene without counts above zero.
 PSEUDOCOUNT = 1.1
 #: The counts that every cell is scaled to before the log.

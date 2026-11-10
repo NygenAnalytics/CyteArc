@@ -51,7 +51,7 @@ Find cluster markers, turn marker evidence into cautious cell-type labels, separ
 - No public API saves user-assigned labels as an artifact. Store them as a live column with
   `ds.cells.insert` (mutable, unversioned, written into the store).
 - AUCell and WAGGR return `kind="enrichment_scores"` (activity scores, not p-values); cell-cycle scoring returns `kind="cell_cycle"` (`phase`, `s_score`, `g2m_score`); potency scoring returns `kind="cell_potency"`. Rows follow the selection.
-- `scores.potency(cell_selection, *, measure="signaling_entropy", graph=None, smoothing=0.9, species=None, network=None, from_assay=None, invalidate_cache=False)` scores how differentiated each cell is from its own expression on a STRING v12.5 protein network, by the signaling entropy rate or CCAT; one pass over the network genes' counts computes both. Its canonical array, `differentiation`, is one minus the rank of `measure` in [0, 1] and rises along the process, so `trajectory.fate(direction=ref)` takes the ref as it stands. `potency` is the rank itself; `signaling_entropy` and `ccat` hold both raw measures, unsmoothed, higher meaning less differentiated. `graph`, a connectivity map or integrated graph built on `cell_selection`, smooths the chosen measure before it ranks the cells (`d <- smoothing * P d + (1 - smoothing) * score` to its fixed point); `smoothing` must lie in (0, 0.99] and acts only with `graph`.
+- `scores.potency(cell_selection, *, measure="ccat", graph=None, smoothing=0.9, species=None, network=None, from_assay=None, invalidate_cache=False)` scores how differentiated each cell is from its own expression on a STRING v12.5 protein network, by CCAT or the signaling entropy rate; one pass over the network genes' counts computes both. Its canonical array, `differentiation`, is one minus the rank of `measure` in [0, 1] and rises along the process, so `trajectory.fate(direction=ref)` takes the ref as it stands. `potency` is the rank itself; `signaling_entropy` and `ccat` hold both raw measures, unsmoothed, higher meaning less differentiated. `graph`, a connectivity map or integrated graph built on `cell_selection`, smooths the chosen measure before it ranks the cells (`d <- smoothing * P d + (1 - smoothing) * score` to its fixed point); `smoothing` must lie in (0, 0.99] and acts only with `graph`.
 - `scores.load_potency(ref)` returns a `PotencyResult`: `differentiation`, `potency`, `signaling_entropy` and `ccat` in the order of `cell_selection`, with `ref`, `cell_selection`, `graph`, `measure`, `smoothing` (None without a graph), `species`, `network` (`source`, `version`, `name`, `sha256`), `genes_matched`, `genes_used`, `edges_used` and `matched_by` (`"ensembl_id"` or `"symbol"`).
 - Potency genes match the network by Ensembl gene ID when the feature IDs are the species' Ensembl IDs, and by symbol otherwise. `species=None` reads the species from Ensembl IDs, so gene-symbol features need `species="human"` or `"mouse"`. The first call downloads the network (0.8 MB human, 0.5 MB mouse) into `$XDG_CACHE_HOME/cytearc/networks`, and every call checks its size and SHA-256; `network=` takes a local copy. Refused: an assay matching fewer than 5,000 network genes, fewer than two cells, cells without counts or without counts on the network's genes (leave them out of the selection), a `graph` of other cells, and an assay that is not an RNA assay.
 
@@ -210,13 +210,13 @@ print(potency.genes_matched, potency.genes_used, potency.edges_used, potency.mat
 # Least differentiated clusters first, by both stored measures, with depth within clusters.
 in_run = run.cells.fetch_all("I").astype(bool)
 scored = pd.DataFrame({
-    "differentiation": potency.differentiation,  # rank of the entropy rate, reversed
-    "ccat_order": 1 - pd.Series(potency.ccat).rank(pct=True),
+    "differentiation": potency.differentiation,  # rank of CCAT, reversed
+    "sr_order": 1 - pd.Series(potency.signaling_entropy).rank(pct=True),
     "depth": ds.cells.fetch_all("RNA_nCounts")[in_run],
     "cluster": run.cells.fetch("clusters"),  # run cells, in the score's order
 })
 by_cluster = scored.groupby("cluster").agg(
-    differentiation=("differentiation", "median"), ccat_order=("ccat_order", "median"),
+    differentiation=("differentiation", "median"), sr_order=("sr_order", "median"),
     cells=("differentiation", "size"),
 ).sort_values("differentiation")
 by_cluster["depth_rho"] = scored.groupby("cluster")[["differentiation", "depth"]].corr(
@@ -245,7 +245,7 @@ print([round(float(np.corrcoef(a[:, j], b[:, j])[0, 1]), 3) for j in range(len(s
       round(float(same.mean()), 3), int(committed.sum()), round(float(same[committed].mean()), 3))
 ```
 
-(Pancreas docs dataset, `bastidas-ponce_4K_pancreas-d15_rnaseq`, whose features are gene symbols) 14,004 network genes matched by symbol and 13,858 were used. The least differentiated clusters were two ductal clusters and an Ngn3-high progenitor cluster by the default measure, CCAT put three ductal clusters first, and in one ductal cluster the score followed depth (Spearman -0.61). With the Alpha, Beta and Delta clusters as sinks, every cell was mapped. Against a pseudotime from one ductal cluster, each fate's probabilities correlated at 0.98 to 0.99 outside the sinks, and the most probable fate agreed for 96% of those cells and 99.5% of the 391 that one fate dominated. The fate mapping tutorial runs the same comparison step by step.
+(Pancreas docs dataset, `bastidas-ponce_4K_pancreas-d15_rnaseq`, whose features are gene symbols) 14,004 network genes matched by symbol and 13,858 were used. By the default measure, CCAT, the least differentiated clusters were three mostly ductal clusters, two of them cycling by their markers, and the signaling entropy rate put two ductal clusters and an Ngn3-high progenitor cluster first. Within every cluster, deeper cells scored as less differentiated (Spearman -0.35 to -0.89 between differentiation and depth). With the Alpha, Beta and Delta clusters as sinks, every cell was mapped. Against a pseudotime from one ductal cluster, each fate's probabilities correlated at 0.99 outside the sinks, and the most probable fate agreed for 94% of those cells and 99% of the 394 that one fate dominated. The fate mapping tutorial runs the same comparison step by step.
 
 ### Compare with existing labels (final post-hoc evaluation only)
 
@@ -326,7 +326,7 @@ case (`Cd3e`, `Ptprc`, `Mki67`), and panel lookups are exact, so convert the pan
 | `tmin` (AUCell, WAGGR) | `5` | Lower for short sets; sources with fewer matched targets are dropped |
 | `n_up` (AUCell) | `None` (5% of universe) | Fix it when comparing runs; changes the score scale |
 | `s_genes` / `g2m_genes` | built-in human and mouse lists | Other species or naming schemes. Names match without case; a renamed gene missing under its 2019 symbol matches its previous HGNC symbol (`parameters["gene_aliases"]`, for example PIMREG as `Fam64a`), and a gene listed twice counts once. |
-| `measure` (`scores.potency`) | `"signaling_entropy"` | `"ccat"` when the stored `ccat` array orders known stages or markers better; on the mouse and human thymus the signaling entropy rate gave no order where CCAT did |
+| `measure` (`scores.potency`) | `"ccat"` | `"signaling_entropy"` when the stored `signaling_entropy` array orders known stages or markers better; on the mouse small intestine the signaling entropy rate ordered the stages at 0.84 where CCAT reached 0.52 |
 | `graph`, `smoothing` (`scores.potency`) | `None`, `0.9` | A graph built on `cell_selection` smooths the measure before ranking; it sharpened the pancreas order but deepened the reversals where the measures fail, so check it like the unsmoothed score |
 | `species` (`scores.potency`) | `None` (read from Ensembl gene IDs) | `"human"` or `"mouse"` when the features are gene symbols |
 | `network` (`scores.potency`) | `None` (cached download) | A local copy of the network file on a machine without network access; it is checked like a download |
