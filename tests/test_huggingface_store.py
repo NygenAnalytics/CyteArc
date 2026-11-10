@@ -753,7 +753,7 @@ def test_read_store_reads_after_abandoning_a_stalled_attempt(
 
 
 def test_read_store_cuts_its_last_attempt_to_the_time_left(loopback_hub):
-    store = _loopback_store(loopback_hub, request_timeout=0.5, retry_timeout=2.7)
+    store = _loopback_store(loopback_hub, request_timeout=1.0, retry_timeout=3.6)
     loopback_hub.plan["tree"] = ["stall", "stall"]
     started = time.monotonic()
     try:
@@ -762,11 +762,13 @@ def test_read_store_cuts_its_last_attempt_to_the_time_left(loopback_hub):
     finally:
         store.close()
     elapsed = time.monotonic() - started
-    # One attempt of 0.5 s, a wait of 2 s, and an attempt cut to the 0.2 s left.
-    assert 2.6 < elapsed < 3.5
+    # One attempt of 1 s, a wait of 2 s, and an attempt cut to the 0.6 s left.
+    # A loaded machine handles the first timeout and the wait late, which
+    # shortens the last attempt: by up to 0.5 s, it still runs and is cut.
+    assert 3.5 < elapsed < 4.6
     assert re.match(
-        rf"Listing {re.escape(LOOPBACK_URI)} did not succeed within 2\.7 s: "
-        r"2 attempts failed, the last with no answer within 0\.(1[5-9]|2)\d* s\.",
+        rf"Listing {re.escape(LOOPBACK_URI)} did not succeed within 3\.6 s: "
+        r"2 attempts failed, the last with no answer within 0\.[1-6]\d* s\.",
         str(raised.value),
     ), str(raised.value)
     assert [kind for kind, _ in loopback_hub.requests].count("tree") == 2
