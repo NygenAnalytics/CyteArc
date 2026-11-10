@@ -122,6 +122,7 @@ They must not import those packages at module load time.
   curves (`curves.py`), cluster spanning trees (`lineage_tree.py`), lineage membership and branch points (`membership.py`), and their result records also
   live there; their persisted contracts join the others in `artifacts.py`.
   `lineage_tree.py` builds a tree without a store, `build_cluster_tree`, through the steps that `DataStore.trajectory.lineage_tree` takes over coordinate blocks, and names a saved tree's clusters for `load_lineage_tree` as it names its own, so the two give one tree. `DataStore.trajectory.curves_in_layout` draws fitted curves in a layout with `curves.smooth_against_progress`, and `plots.lineage_curves` draws the points it returns.
+  `potency.py` scores how differentiated each cell is, the signaling entropy rate or CCAT of its expression on a protein network, a block of counts at a time, and smooths and ranks the scores; `DataStore.scores.potency` streams the counts of the network's genes to it and saves a `cell_potency` artifact, whose canonical array, `differentiation`, directs a fate map as it stands.
   `fate.py` biases the walk of a fate map and solves its probabilities, and holds the rules of what directs the walk, a pseudotime or a direction score: `direction_scores` checks that a score covers whole graph components, and `fate_map_cells` gives the scored cells of the components that hold a sink, which the map covers, so `DataStore.trajectory.fate` and `load_fate` apply one rule.
 - `metrics/` owns LISI, silhouette, graph, concordance, and integration scores, including the neighbor label agreement that membership strength stores.
 - `features/` owns variability selection (the cytearc, seurat_v3, and pearson_residuals flavors,
@@ -594,17 +595,7 @@ CyteArc validates persisted data and public arguments against the following cont
   `DataStore` attribute has that name and the name does not start with an underscore;
   `get_assay(name)` returns any assay. Assays named like members, such as `cells` or
   `zarr_mode`, no longer break opening or replace the member.
-- Producers that cannot reuse a saved result raise `PermissionError` on a read-only store before
-  computing or writing. This covers every artifact producer, including marker search,
-  `clusters.relabel_by_overlap`, membership strength, cell filters and selections, graph, embedding, trajectory,
-  and mapping producers, and derived assays. Leiden, Paris, UMAP, and t-SNE refuse before they read
-  the graph. `features.universe`, `features.snapshot`, `features.detected`, `features.hvgs`,
-  `features.prevalent_peaks`, `scores.cell_cycle`, `mapping.build_reference`, and `mapping.run`
-  plan first, so a read-only store returns a result that it holds; a feature summary that must be
-  computed is refused before the counts are read. `mapping.build_reference` raises this
-  `PermissionError` where it raised `ValueError` before planning, and `mapping.run` raises it where
-  it raised `ValueError`. WAGGR, AUCell, chromVAR, and `regulons.grn` still refuse a read-only
-  store before planning.
+- Producers that cannot reuse a saved result raise `PermissionError` on a read-only store before computing or writing. This covers every artifact producer, including marker search, `clusters.relabel_by_overlap`, membership strength, cell filters and selections, graph, embedding, trajectory, and mapping producers, and derived assays. Leiden, Paris, UMAP, and t-SNE refuse before they read the graph. `features.universe`, `features.snapshot`, `features.detected`, `features.hvgs`, `features.prevalent_peaks`, `scores.cell_cycle`, `scores.potency`, `mapping.build_reference`, and `mapping.run` plan first, so a read-only store returns a result that it holds; a feature summary that must be computed is refused before the counts are read, and `scores.potency` refuses before it downloads its network. `mapping.build_reference` raises this `PermissionError` where it raised `ValueError` before planning, and `mapping.run` raises it where it raised `ValueError`. WAGGR, AUCell, chromVAR, and `regulons.grn` still refuse a read-only store before planning.
 - Public arguments are validated before any artifact is written: `graph.load(use_k=...)`,
   `reduction.lsi` `skip_first` and `rand_state`, `reduction.custom` loadings, `reduction.harmony`
   parameters, `integration.modalities(chunk_size=...)`, `features.hvgs` keywords, and `embeddings.umap` array

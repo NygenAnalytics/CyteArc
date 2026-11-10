@@ -230,6 +230,21 @@ _CONTRACTS = (
         },
     ),
     OperationContract(
+        ScoresAccessor.potency,
+        metadata_arguments.PotencyArguments,
+        signature_only={
+            **_classified("routing", "from_assay"),
+            # A local copy of the network, checked against the digest that a
+            # download is checked against, so it computes the same scores.
+            **_classified("execution", "network"),
+        },
+        model_only={
+            # The network file's source, version, name and digest, which the
+            # species and CyteArc's record of the networks give.
+            **_classified("derived", "string_network"),
+        },
+    ),
+    OperationContract(
         ScoresAccessor.cell_cycle,
         metadata_arguments.CellCycleArguments,
         constructor=_QualityControlOperationsMixin._run_cell_cycle_scoring_artifact,

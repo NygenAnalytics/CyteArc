@@ -1,3 +1,4 @@
+import os
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from functools import partial
@@ -7,11 +8,13 @@ import numpy as np
 import pandas as pd
 from scipy.sparse import coo_matrix, csr_matrix
 
-from ...assay import Assay
+from ...assay import Assay, RNAassay
 from ...assay.normalization import (
+    feature_value_blocks,
     reject_unknown_normalization_params,
     resolve_normalization_params,
 )
+from ...features.gene_reference import prefix_species, species_registry
 from ...features.values import (
     ResolvedFeature,
     iter_normalized_feature_blocks,
@@ -39,6 +42,7 @@ from ...metadata.arguments import (
     LineageMarkerArguments,
     LineageMembershipArguments,
     LineageTreeArguments,
+    PotencyArguments,
     PseudotimeAggregationArguments,
     PseudotimeMarkerArguments,
     PseudotimeScoringArguments,
@@ -50,6 +54,7 @@ from ...metadata.artifacts import (
 )
 from ...metadata.selection import (
     FeatureRef,
+    NormalizationSpec,
     cell_selection_indices,
     cell_value_spec,
     resolve_cell_aligned_artifact,
@@ -192,6 +197,17 @@ from ...trajectory.membership import (
     lineage_members as _lineage_members_impl,
     membership_labels as _membership_labels_impl,
 )
+from ...trajectory.potency import (
+    MAX_SMOOTHING as _MAX_SMOOTHING,
+    MEASURES as _POTENCY_MEASURES,
+    MIN_NETWORK_GENES as _MIN_NETWORK_GENES,
+    MatchedNetwork,
+    match_network as _match_network_impl,
+    network_scores as _network_scores_impl,
+    read_network as _read_network_impl,
+    smooth_on_graph as _smooth_on_graph_impl,
+    unit_ranks as _unit_ranks_impl,
+)
 from ...trajectory.pseudotime import (
     make_source_sink_vector as _make_source_sink_vector_impl,
     pba_potential as _pba_potential_impl,
@@ -209,6 +225,7 @@ from ...trajectory.results import (
     LineageMarkerResult,
     LineageMembershipResult,
     LineageTreeResult,
+    PotencyResult,
     PseudotimeAggregationResult,
     PseudotimeMarkerResult,
     PseudotimeScoreResult,
@@ -216,7 +233,8 @@ from ...trajectory.results import (
 from ...utils.arguments import bool_argument, float_argument, integer_argument
 from ...utils.arrays import array_digest, sorted_places
 from ...utils.logging import logger
-from ...utils.memory_budget import MemoryBudgetError
+from ...utils.memory_budget import MemoryBudgetError, MemoryLedger
+from ...utils.numba import numba_threads
 from .enrichment_store import _RowBandWriter
 
 if TYPE_CHECKING:
@@ -615,6 +633,57 @@ class _LineageFeatureRecord:
     ids_fingerprint: str
     names_fingerprint: str
     axes: _LineageCells
+
+
+#: The arrays of a ``cell_potency`` artifact, its canonical array first.
+_POTENCY_ARRAYS: tuple[str, ...] = (
+    "differentiation",
+    "potency",
+    "signaling_entropy",
+    "ccat",
+)
+_POTENCY_INPUTS = frozenset({"cell_selection"})
+_POTENCY_SMOOTHED_INPUTS = frozenset({"cell_selection", "graph"})
+_POTENCY_PARAMETERS = frozenset({"measure", "species", "string_network"})
+_POTENCY_SMOOTHED_PARAMETERS = frozenset(
+    {"measure", "species", "string_network", "smoothing"}
+)
+
+
+def _potency_species(
+    feature_ids: np.ndarray, species: str | None, networks: Mapping[str, Any]
+) -> tuple[str, Literal["ensembl", "symbol"]]:
+    """Return the species whose network scores an assay, and how genes match.
+
+    Without ``species``, the feature IDs name it when they are Ensembl gene IDs
+    of one species that has a network. Genes match by Ensembl ID when the IDs
+    are those of the species, and by symbol otherwise.
+    """
+    labels = {key: spec.label for key, spec in species_registry().items()}
+    prefixed = {
+        labels[key]: count
+        for key, count in prefix_species(feature_ids.tolist()).items()
+    }
+    available = ", ".join(sorted(networks))
+    if species is None:
+        if not prefixed:
+            raise ValueError(
+                "The assay's feature IDs are not Ensembl gene IDs, so they do not "
+                f"name its species; pass species= ({available}) to match genes by "
+                "symbol"
+            )
+        if len(prefixed) > 1 or next(iter(prefixed)) not in networks:
+            raise ValueError(
+                "The assay's feature IDs are Ensembl gene IDs of "
+                f"{', '.join(sorted(prefixed))}; pass species= to choose the network "
+                f"({available})"
+            )
+        species = next(iter(prefixed))
+    elif species not in networks:
+        raise ValueError(
+            f"No STRING network for species {species!r}. Networks exist for: {available}"
+        )
+    return species, "ensembl" if prefixed.get(species, 0) else "symbol"
 
 
 class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
@@ -1755,8 +1824,10 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         the subgraph of the cells that it was given as ``cells``, and the map
         covers the cells that it scored. ``direction`` takes any per-cell score
         in its place, higher meaning later, such as a pseudotime that another
-        tool computed, with the ``graph`` to walk on; the walk is biased by the
-        score exactly as by a pseudotime. A direction score scores the cells
+        tool computed or the ``cell_potency`` artifact of
+        :meth:`~cytearc.datastore.namespaces.ScoresAccessor.potency`, which
+        names no source, with the ``graph`` to walk on; the walk is biased by
+        the score exactly as by a pseudotime. A direction score scores the cells
         where it holds a finite value. Those cells must make up whole connected
         components of the graph, as a pseudotime's do, and the map covers those
         of them in components that hold a sink. Other components stay out of
@@ -3509,6 +3580,437 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
             f"lineages {result.lineages[first]!r} and {result.lineages[second]!r}"
         )
         return ref
+
+    @validation_scoped
+    def _scores_potency(
+        self,
+        cell_selection: ArtifactRef,
+        *,
+        measure: Literal["signaling_entropy", "ccat"] = "signaling_entropy",
+        graph: ArtifactRef | None = None,
+        smoothing: float = 0.9,
+        species: str | None = None,
+        network: str | os.PathLike[str] | None = None,
+        from_assay: str | None = None,
+        invalidate_cache: bool = False,
+    ) -> ArtifactRef:
+        """Score how differentiated each cell is from its expression on a protein network.
+
+        Less differentiated cells score higher potency. The measure ranks the
+        cells, and ``differentiation``, one minus that rank, rises along the
+        process, so the artifact directs
+        :meth:`~cytearc.datastore.namespaces.TrajectoryAccessor.fate` as its
+        ``direction`` without naming a source. Both measures are written from
+        their papers and computed in one pass over the counts:
+
+        - ``"signaling_entropy"``, the signaling entropy rate of Teschendorff
+          and Enver (2017), Nature Communications 8:15599,
+          doi:10.1038/ncomms15599: how evenly a cell's expression lets a walk
+          spread over the network. The expression ``x`` defines the walk
+          ``p_ij = A_ij x_j / (Ax)_i``, whose entropy rate,
+          ``sum_i pi_i log((Ax)_i / x_i)`` with ``pi_i = x_i (Ax)_i / x'Ax``,
+          is divided by the largest of any walk on the network,
+          ``log lambda_max(A)``.
+        - ``"ccat"``, of Teschendorff et al. (2021), Bioinformatics
+          37:1528-1534, doi:10.1093/bioinformatics/btaa987: the Pearson
+          correlation of ``x`` with each gene's degree in the network, whether
+          the cell expresses the network's hubs.
+
+        ``x`` is ``log2(10,000 * counts / total + 1.1)`` over the network's
+        genes, with each cell's prepared total of all its counts,
+        ``<assay>_nCounts``, and the papers' pseudocount, so a network gene
+        without counts enters at ``log2(1.1)``. Only the network's genes are
+        read, in blocks that fit the memory budget.
+
+        The network is STRING v12.5's for the species, its links without
+        STRING's ``database`` channel at a recombined score of at least 0.700
+        (Szklarczyk et al. (2025), Nucleic Acids Research 53:D730-D737,
+        doi:10.1093/nar/gkae1113, CC BY 4.0). The first call downloads it from
+        Nygen's public ``Nygen/cytebase`` bucket into
+        ``$XDG_CACHE_HOME/cytearc/networks``, and every call checks the file
+        against the size and SHA-256 digest that CyteArc records for it.
+        Network genes match features by Ensembl gene ID when the feature IDs
+        are those of the species, and by symbol otherwise; the scores use the
+        largest connected part of the genes matched.
+
+        The scores do not order every process. On six systems of known order,
+        compared on the methods page, the signaling entropy rate left the
+        thymus unordered (Spearman's rho -0.08) where CCAT ordered it (0.38),
+        both measures ranked spinous keratinocytes above basal ones (rho -0.42
+        and -0.37), and neither ordered the oligodendrocyte lineage. Compare
+        the order of the stored ``ccat`` array, which every artifact holds, and
+        check where potency peaks against known markers before trusting a
+        direction.
+
+        Args:
+            cell_selection: Explicit cells to score; at least two.
+            measure: ``"signaling_entropy"``, the default, or ``"ccat"``: the
+                measure that ranks the cells.
+            graph: Explicit connectivity-map or integrated-graph artifact built
+                on the cells of ``cell_selection``. With it, the measure is
+                smoothed before it ranks the cells: each step keeps
+                ``smoothing`` of the neighbours' values and restarts at the
+                cell's own, ``d <- smoothing * P d + (1 - smoothing) * score``
+                with ``P`` the row-normalized graph, until it is within 1e-12
+                of its fixed point. Without it the measure ranks the cells as
+                it is.
+            smoothing: The share of each step taken from the neighbours, above
+                0 and at most 0.99; used only with ``graph``.
+            species: ``"human"`` or ``"mouse"``. None takes the species whose
+                Ensembl gene IDs the features carry; an assay whose feature IDs
+                are not Ensembl gene IDs needs it.
+            network: A local copy of the species' network file, which is
+                checked like a downloaded one, for a machine without network
+                access.
+            from_assay: Name of the RNA assay to score. None uses the default
+                assay.
+            invalidate_cache: Recompute rather than reuse a saved artifact.
+
+        Returns:
+            A ``cell_potency`` artifact. Its canonical array is
+            ``differentiation``; ``potency``, ``signaling_entropy`` and
+            ``ccat`` sit beside it, and
+            :meth:`~cytearc.datastore.namespaces.ScoresAccessor.load_potency`
+            loads them with the network's coverage.
+
+        Raises:
+            TypeError: If an argument has the wrong type, or the assay is not
+                an RNAassay.
+            ValueError: If ``measure`` or ``species`` is unknown, ``smoothing``
+                is out of range, ``graph`` is built on other cells, the
+                selection holds fewer than two cells, a cell has no counts or
+                none on the network's genes, or the assay's features match
+                fewer than 5,000 of the network's genes.
+            FileNotFoundError: If the network is not cached and cannot be
+                downloaded; the message names the file and the way to supply
+                it.
+            UnmeasuredCellsError: If the assay did not measure a selected cell.
+            MemoryBudgetError: If the scores or the smoothing do not fit the
+                memory budget.
+            PermissionError: If the scores must be computed and the store is
+                not opened with ``zarr_mode='r+'``. A read-only store returns
+                saved scores.
+        """
+        from ... import datasets
+
+        invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
+        if not isinstance(cell_selection, ArtifactRef):
+            raise TypeError("cell_selection must be an ArtifactRef")
+        if not isinstance(measure, str) or measure not in _POTENCY_MEASURES:
+            raise ValueError(
+                "measure must be "
+                + " or ".join(repr(name) for name in _POTENCY_MEASURES)
+                + f", got {measure!r}"
+            )
+        smoothing = float_argument(smoothing, "smoothing")
+        if not 0.0 < smoothing <= _MAX_SMOOTHING:
+            raise ValueError(
+                f"smoothing must be above 0 and at most {_MAX_SMOOTHING}, got "
+                f"{smoothing}"
+            )
+        if graph is not None:
+            if not isinstance(graph, ArtifactRef):
+                raise TypeError("graph must be an ArtifactRef")
+            require_graph_kind(graph)
+        if species is not None and not isinstance(species, str):
+            raise TypeError(f"species must be text, got {type(species).__name__}")
+        if network is not None and not isinstance(network, str | os.PathLike):
+            raise TypeError(f"network must be a path, got {type(network).__name__}")
+        assay = self._get_assay(
+            self._defaultAssay if from_assay is None else from_assay
+        )
+        if not isinstance(assay, RNAassay):
+            raise TypeError(
+                f"Potency scoring needs an RNAassay; received {type(assay).__name__}"
+            )
+        self._require_measured_cells(
+            assay.name, cell_selection, operation=PotencyArguments.operation
+        )
+        if graph is not None and graph_cell_selection(self.zw, graph) != cell_selection:
+            raise ValueError(
+                "graph must be built on the cells of cell_selection, since the "
+                "smoothing walks between them: pass the graph's cell selection as "
+                "cell_selection, or leave graph out"
+            )
+        feature_ids = np.asarray(assay.feats.fetch_all("ids")).astype(str)
+        species, key = _potency_species(feature_ids, species, datasets.STRING_NETWORKS)
+        entry = datasets.STRING_NETWORKS[species]
+        cell_idx = read_stored_selection_indices(
+            self.zw,
+            cell_selection,
+            kind="cell_selection",
+            scope="datastore",
+            assay=None,
+            table_path="cellData",
+        ).astype(np.int64, copy=False)
+        n_cells = len(cell_idx)
+        if n_cells < 2:
+            raise ValueError(
+                "Potency ranks cells against each other, so cell_selection must "
+                f"hold at least two cells; it holds {n_cells}"
+            )
+        arguments = PotencyArguments(
+            cell_selection=cell_selection,
+            measure=measure,
+            species=species,
+            string_network={
+                "source": "STRING",
+                "version": entry.string_version,
+                "name": entry.name,
+                "sha256": entry.sha256,
+            },
+            invalidate_cache=invalidate_cache,
+            graph=graph,
+            smoothing=None if graph is None else smoothing,
+        )
+        record = arguments.to_record()
+        planned = plan_cell_data_artifact(
+            self.zw,
+            scope="assay",
+            assay=assay.name,
+            kind=arguments.artifact_kind,
+            operation=arguments.operation,
+            parameters=record.parameters,
+            inputs=dict(record.inputs),
+            execution_options=record.execution_options,
+            cell_selection=cell_selection,
+            arrays={name: ((n_cells,), "f") for name in _POTENCY_ARRAYS},
+            invalidate_cache=invalidate_cache,
+        )
+        if planned.reused:
+            return planned.ref
+        self._require_writable(arguments.operation)
+
+        path = datasets.string_network_file(species, network=network)
+        feature_keys = (
+            feature_ids
+            if key == "ensembl"
+            else np.asarray(assay.feats.fetch_all("names")).astype(str)
+        )
+        matched = _match_network_impl(_read_network_impl(path), feature_keys, key)
+        if matched.genes_matched < _MIN_NETWORK_GENES:
+            how = "Ensembl gene ID" if key == "ensembl" else "symbol"
+            raise ValueError(
+                f"Only {matched.genes_matched:,} genes of the {entry.label} match "
+                f"the features of assay {assay.name!r} by {how}, and potency "
+                f"scoring needs at least {_MIN_NETWORK_GENES:,}: both measures "
+                "summarize a cell's expression across the network, and a network "
+                "cut down this far no longer describes the cell's signaling. Score "
+                "an assay that measures the transcriptome, with the species' "
+                "Ensembl gene IDs as its feature IDs or the network's symbols as "
+                "its feature names"
+            )
+        logger.info(
+            f"Potency scoring: {matched.genes_used:,} network genes and "
+            f"{matched.edges_used:,} edges over {n_cells:,} cells"
+        )
+        entropy, correlation = self._potency_measures(assay, cell_idx, matched)
+        raw = entropy if measure == "signaling_entropy" else correlation
+        if graph is not None:
+            raw = self._smoothed_potency(graph, raw, smoothing)
+        potency = _unit_ranks_impl(raw)
+        write_cell_data_artifact(
+            self.zw,
+            planned,
+            {
+                "differentiation": 1.0 - potency,
+                "potency": potency,
+                "signaling_entropy": entropy,
+                "ccat": correlation,
+            },
+            diagnostics={
+                "networkGenesMatched": matched.genes_matched,
+                "networkGenesUsed": matched.genes_used,
+                "networkEdgesUsed": matched.edges_used,
+                "matchedBy": "ensembl_id" if key == "ensembl" else "symbol",
+            },
+        )
+        return planned.ref
+
+    def _potency_measures(
+        self, assay: RNAassay, cell_idx: np.ndarray, matched: MatchedNetwork
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Stream the network genes' counts and return each cell's SR and CCAT.
+
+        The scores, the totals and the network are held throughout, beside
+        each thread's two vectors over the network's genes; the counts arrive
+        in blocks that fit what is left of the budget.
+        """
+        n_cells = len(cell_idx)
+        ledger = MemoryLedger(
+            self.memoryBytes,
+            f"Scoring the potency of {n_cells:,} cells",
+            remedy="pass a smaller cell_selection",
+            codec_threads=self.nthreads,
+        )
+        itemsize = np.dtype(np.float64).itemsize
+        ledger.hold("the cells' scores and totals", 4 * itemsize * n_cells)
+        ledger.hold("the network", matched.nbytes)
+        ledger.hold(
+            "each thread's values over the network's genes",
+            2 * itemsize * matched.genes_used * max(1, int(self.nthreads)),
+        )
+        totals = assay._cell_count_totals(cell_idx)
+        empty = np.flatnonzero(totals <= 0)
+        if empty.size:
+            raise ValueError(
+                f"{empty.size:,} of the {n_cells:,} cells have no counts, so they "
+                "cannot be scaled: cells "
+                + ", ".join(
+                    repr(str(cell)) for cell in self._cell_ids_at(cell_idx[empty[:5]])
+                )
+                + ". Leave them out of cell_selection"
+            )
+        entropy = np.empty(n_cells, dtype=np.float64)
+        correlation = np.empty(n_cells, dtype=np.float64)
+        detected = np.empty(n_cells, dtype=np.int64)
+        _, blocks = feature_value_blocks(
+            assay,
+            matched.features,
+            cell_idx,
+            NormalizationSpec(source="raw"),
+            nthreads=self.nthreads,
+            resident_bytes=ledger.held_bytes,
+            scratch_bytes_per_row=3 * itemsize,
+            memory_bytes=ledger.budget,
+        )
+        start = 0
+        with numba_threads(self.nthreads):
+            for block in blocks:
+                stop = start + block.shape[0]
+                (
+                    entropy[start:stop],
+                    correlation[start:stop],
+                    detected[start:stop],
+                ) = _network_scores_impl(block, totals[start:stop], matched)
+                start = stop
+        if start != n_cells:
+            raise RuntimeError(
+                f"The count blocks held {start} cells rather than {n_cells}"
+            )
+        silent = np.flatnonzero(detected == 0)
+        if silent.size:
+            raise ValueError(
+                f"{silent.size:,} of the {n_cells:,} cells have no counts on the "
+                f"network's {matched.genes_used:,} genes, so their values over the "
+                "network do not vary and CCAT, a correlation, is undefined: cells "
+                + ", ".join(
+                    repr(str(cell)) for cell in self._cell_ids_at(cell_idx[silent[:5]])
+                )
+                + ". Leave them out of cell_selection"
+            )
+        return entropy, correlation
+
+    def _smoothed_potency(
+        self, graph: ArtifactRef, values: np.ndarray, smoothing: float
+    ) -> np.ndarray:
+        """Smooth the cells' values over their graph within the memory budget."""
+        graph_matrix = self._load_graph_artifact(
+            graph, symmetric=True, upper_only=False, use_k=None
+        )
+        n_cells = len(values)
+        if graph_matrix.shape != (n_cells, n_cells):
+            raise ValueError(
+                "Graph cell count does not match its stored cell selection"
+            )
+        # The graph and its row-normalized copy, and three vectors of cells.
+        working = (
+            2
+            * int(
+                graph_matrix.data.nbytes
+                + graph_matrix.indices.nbytes
+                + graph_matrix.indptr.nbytes
+            )
+            + 3 * np.dtype(np.float64).itemsize * n_cells
+        )
+        if working >= self.memoryBytes:
+            raise MemoryBudgetError(
+                f"Smoothing the potency of {n_cells:,} cells over their graph needs "
+                f"about {working} bytes, which exceeds the memory budget of "
+                f"{self.memoryBytes} bytes. Increase the memory budget, or leave "
+                "graph out to rank the unsmoothed scores.",
+                needed_bytes=working,
+                budget_bytes=int(self.memoryBytes),
+                item="the smoothing",
+            )
+        return _smooth_on_graph_impl(values, graph_matrix, smoothing)
+
+    def _scores_load_potency(self, potency: ArtifactRef) -> PotencyResult:
+        """Load potency scores from an explicit completed artifact.
+
+        Args:
+            potency: A ``cell_potency`` artifact from
+                :meth:`~cytearc.datastore.namespaces.ScoresAccessor.potency`.
+
+        Returns:
+            The cells' differentiation, potency and raw measures, in the order
+            of the artifact's cell selection, with the measure, the network
+            and its coverage.
+
+        Raises:
+            TypeError: If ``potency`` is not an ArtifactRef.
+            ValueError: If it is not a complete ``cell_potency`` artifact of
+                ``ds.scores.potency``, or its record does not match the
+                contract.
+        """
+        if not isinstance(potency, ArtifactRef):
+            raise TypeError("potency must be an ArtifactRef")
+        if potency.kind != "cell_potency":
+            raise ValueError("potency must be a cell_potency artifact")
+        status = inspect_artifact(self.zw, potency)
+        if (
+            not status.exists
+            or not status.complete
+            or status.operation != PotencyArguments.operation
+        ):
+            raise ValueError("Potency artifact is unavailable or invalid")
+        inputs = status.inputs or {}
+        parameters = status.parameters or {}
+        smoothed = "graph" in inputs
+        _require_exact_record_keys(
+            inputs,
+            _POTENCY_SMOOTHED_INPUTS if smoothed else _POTENCY_INPUTS,
+            "Potency inputs",
+        )
+        _require_exact_record_keys(
+            parameters,
+            _POTENCY_SMOOTHED_PARAMETERS if smoothed else _POTENCY_PARAMETERS,
+            "Potency parameters",
+        )
+        selection = parse_artifact_ref(
+            inputs.get("cell_selection"), "Potency cell selection input"
+        )
+        graph = (
+            parse_artifact_ref(inputs.get("graph"), "Potency graph input")
+            if smoothed
+            else None
+        )
+        diagnostics = status.diagnostics
+        group = artifact_group(self.zw, potency)
+        arrays = {
+            name: np.asarray(as_zarr_array(group[name], name=name)[:], dtype=np.float64)
+            for name in _POTENCY_ARRAYS
+        }
+        n_cells = _selection_size(self.zw, selection)
+        if any(len(values) != n_cells for values in arrays.values()):
+            raise ValueError("Potency arrays do not match their cell selection")
+        return PotencyResult(
+            ref=potency,
+            cell_selection=selection,
+            graph=graph,
+            measure=str(parameters["measure"]),
+            smoothing=float(parameters["smoothing"]) if smoothed else None,
+            species=str(parameters["species"]),
+            network={
+                str(name): str(value)
+                for name, value in dict(parameters["string_network"]).items()
+            },
+            genes_matched=int(diagnostics["networkGenesMatched"]),
+            genes_used=int(diagnostics["networkGenesUsed"]),
+            edges_used=int(diagnostics["networkEdgesUsed"]),
+            matched_by=str(diagnostics["matchedBy"]),
+            **arrays,
+        )
 
 
 class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):

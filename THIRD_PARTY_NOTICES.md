@@ -329,6 +329,7 @@ CyteArc is copyright Nygen Analytics AB and is licensed under the BSD 3-Clause L
 - **ConvexML** (<https://github.com/songlab-cal/ConvexML>), BSD-3-Clause, Copyright (c) 2025, Song Lab @ Cal: `tests/data/phylogenies/convexml_tree_0.nwk` is `tests/public_api_tests/data/tree_0_newick.txt` at commit e93f6aee113044c29c1f123023f11fe9e6753bde, unchanged. The license text is at the end of this file.
 - **treedata** (<https://github.com/YosefLab/treedata>), BSD-3-Clause: treedata 0.4.0 wrote `tests/data/phylogenies/truth_tree_treedata_0_4_0.h5td`, `truth_tree_treedata_0_4_0.zarr` and `truth_forest_treedata_0_4_0.h5td` from the synthetic experiment of `tests/clone_truth.py`, so they hold no third-party data.
 - **pycea** (<https://github.com/YosefLab/pycea>), BSD-3-Clause: `tests/pycea_0_4_0_golden.json` holds the clades that pycea 0.4.0's `tl.clades` cut from the PEtracer and ConvexML trees above, after treedata 0.4.0's `read_nwk` read them. No code of pycea was copied.
+- **Potency reference**: `tests/data/potency/scent_reference.npz` holds the counts of 64 cells of the `bastidas-ponce_4K_pancreas-d15_rnaseq` example, credited under "Example datasets", on 5,778 genes, the edges among those genes of the mouse STRING v12.5 network credited under "Networks that CyteArc downloads" (CC BY 4.0), and the signaling entropy rate and CCAT that SCENT 1.1 (<https://github.com/aet21/SCENT>, GPL-3, commit 02b4bc64a45431860d7d756bca58ca3306b5eae9) computed from them; `scent_reference.json` records how they were made. SCENT was run to produce the values, and no code of SCENT was copied.
 - **Color palettes** in `cytearc/plotting/_style.py`: the 10- and 20-color sets are Tableau 10 and
   20 as distributed with matplotlib (the 10-color set with Scanpy's colorblind substitutions), the
   28-color set is from Zeileis, Hornik, and Murrell (2009), Computational Statistics & Data
@@ -422,6 +423,19 @@ The comparisons of pooled CRISPR screen methods in [Methods and limitations](htt
 | Association tests at high MOI | The high-MOI example of the `sceptredata` R package, <https://github.com/Katsevich-Lab/sceptredata>, downsampled from Gasperini et al. (2019), Cell 176:377-390.e19, doi:10.1016/j.cell.2018.11.029 | MIT |
 | Perturbation profiles, and the calibration check at genome scale | The K562 essential screen of Replogle et al. (2022), Cell 185:2559-2575.e28, doi:10.1016/j.cell.2022.05.013, from "Replogle et al. 2022 processed Perturb-seq datasets", figshare+, doi:10.25452/figshare.plus.20029387.v1 | CC BY 4.0 |
 | Perturbation clusters | The published genome-wide K562 profiles of Replogle et al. (2022) from the same figshare+ record, and Table S3 of the paper; the names of the 1,973 perturbations that they clustered, from the authors' data browser, <https://gwps.wi.mit.edu> | CC BY 4.0; the data browser states no license |
+
+## Data that validated the potency score
+
+The comparison of potency scores in [Methods and limitations](https://docs.nygen.io/CyteArc/reference/methods#potency-method) ran on these datasets, read from CyteBase's public stores of release 2610, which convert them from CZ CELLxGENE Discover. The repository holds none of them, and neither the tests nor the documentation download them.
+
+| Validation | Source | License or terms |
+| --- | --- | --- |
+| Pancreas | The `bastidas-ponce_4K_pancreas-d15_rnaseq` example, credited under "Example datasets" | GEO; the processed file states no license |
+| Bone marrow | Zeng et al. (2025), Blood Cancer Discovery 6:307-324, doi:10.1158/2643-3230.BCD-24-0342, as `zeng_2025_balanced_bone_marrow_reference_map_hematopoietic_development_cd2f23c1` | CC BY 4.0 |
+| Thymus | Steier et al. (2023), Nature Immunology 24:1579-1590, doi:10.1038/s41590-023-01584-0, as `steier_2023_mouse_single_cell_multi_omic_cd4_cd8_lineage_commitment_c14c54f8` | CC BY 4.0 |
+| Hippocampus | De Donno et al. (2026), Molecular Psychiatry 31:1823-1836, doi:10.1038/s41380-025-03417-y, as `de_donno_2026_mouse_single_cell_adult_ventral_hippocampus_b2370cf4` | CC BY 4.0 |
+| Gut | Elmentaite et al. (2020), Developmental Cell 55:771-783.e5, doi:10.1016/j.devcel.2020.11.010, as `elmentaite_2020_paediatric_human_gut_4_14y_8e47ed12` | CC BY 4.0 |
+| Epidermis | Cheng et al. (2018), Cell Reports 25:871-883, doi:10.1016/j.celrep.2018.09.006, as `cheng_2018_skin_f512b8b6` | CC BY 4.0 |
 
 ## Data that validated the clone import
 
