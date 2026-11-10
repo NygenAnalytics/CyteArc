@@ -45,6 +45,7 @@ from ._seurat import (
     matrix_source_from_slots,
 )
 from ._seurat.sources import _index_runs
+from ._seurat.sources import _value_bound as _value_bound
 
 
 _VECTOR_BLOCK_SIZE = 65_536

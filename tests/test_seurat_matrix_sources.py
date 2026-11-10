@@ -4850,6 +4850,12 @@ def test_seurat_import_planning_does_not_read_every_cell_pointer(tmp_path, monke
     writer.resources = ResourceBudget(64 * 1024**2, 1)
     writer._residentSourceBytes = 0
     writer._lastImportPlans = {}
+    # What the value scan of a constructed writer records: the prefix sums of
+    # each cell's stored values, and that every cell is sorted without repeats.
+    writer._cellValues = {
+        "RNA": np.concatenate(([0], np.cumsum(np.count_nonzero(values, axis=0))))
+    }
+    writer._canonicalCells = {"RNA": True}
     writer.io = None
     from cytearc.storage.identity import CountSummary
     from cytearc.utils.matrix_values import MatrixValues
