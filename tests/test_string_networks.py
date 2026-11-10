@@ -360,13 +360,32 @@ def test_the_way_to_supply_a_network_offline_works(cache, synthetic, hub, tmp_pa
     assert not cache.exists()
 
 
+@pytest.fixture
+def real_client(monkeypatch):
+    """Point ``cytearc.datasets`` at a Hugging Face client of the test's own, for an endpoint it names.
+
+    The functions that ``cytearc.datasets`` imports are bound to the client that
+    ``huggingface_hub`` shares across the process. A client of the test's own
+    keeps the endpoint that the test sets out of that shared state.
+    """
+
+    def connect_to(endpoint: str) -> None:
+        client = hf_api.HfApi(endpoint=endpoint)
+        monkeypatch.setattr(datasets, "list_bucket_tree", client.list_bucket_tree)
+        monkeypatch.setattr(
+            datasets, "download_bucket_files", client.download_bucket_files
+        )
+
+    return connect_to
+
+
 def test_a_refused_connection_on_the_real_client_names_the_way_to_supply_it(
-    cache, synthetic, monkeypatch
+    cache, synthetic, real_client
 ):
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         port = probe.getsockname()[1]
-    monkeypatch.setattr(hf_api.api, "endpoint", f"http://127.0.0.1:{port}")
+    real_client(f"http://127.0.0.1:{port}")
 
     with pytest.raises(FileNotFoundError) as raised:
         datasets.string_network_file("human")
@@ -377,9 +396,9 @@ def test_a_refused_connection_on_the_real_client_names_the_way_to_supply_it(
 
 
 def test_a_status_from_the_loopback_hub_names_the_way_to_supply_it(
-    cache, synthetic, loopback_hub, monkeypatch
+    cache, synthetic, loopback_hub, monkeypatch, real_client
 ):
-    monkeypatch.setattr(hf_api.api, "endpoint", loopback_hub.endpoint)
+    real_client(loopback_hub.endpoint)
     monkeypatch.setattr(datasets, "_BUCKET_ID", LOOPBACK_BUCKET)
     published = loopback_hub.root / "cytearc_networks" / synthetic.remote_path
     published.parent.mkdir(parents=True)
