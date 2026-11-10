@@ -3633,14 +3633,14 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         are those of the species, and by symbol otherwise; the scores use the
         largest connected part of the genes matched.
 
-        The scores do not order every process. On six systems of known order,
-        compared on the methods page, the signaling entropy rate left the
-        thymus unordered (Spearman's rho -0.08) where CCAT ordered it (0.38),
-        both measures ranked spinous keratinocytes above basal ones (rho -0.42
-        and -0.37), and neither ordered the oligodendrocyte lineage. Compare
-        the order of the stored ``ccat`` array, which every artifact holds, and
-        check where potency peaks against known markers before trusting a
-        direction.
+        The scores do not order every process. On fifteen systems of known
+        order, compared on the methods page, the signaling entropy rate left
+        the mouse and human thymus unordered (Spearman's rho -0.08 and 0.06)
+        where CCAT ordered them (0.37 and 0.26), both measures ranked spinous
+        keratinocytes above basal ones (rho -0.42 and -0.37), and neither
+        ordered the oligodendrocyte lineages. Compare the order of the stored
+        ``ccat`` array, which every artifact holds, and check where potency
+        peaks against known markers before trusting a direction.
 
         Args:
             cell_selection: Explicit cells to score; at least two.
