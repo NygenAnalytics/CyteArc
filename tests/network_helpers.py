@@ -3,7 +3,8 @@
 A download that a host cannot serve whole, whether unreachable, slow, cut
 short or refused for the moment, skips its test, and the run ends naming every
 test that skipped so. A status that names a missing file fails the test,
-since skipping it would hide a file that moved.
+since skipping it would hide a file that moved, unless the host is GEO's and
+the listing of the file's directory still names the file.
 """
 
 import gzip
@@ -15,6 +16,7 @@ from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -45,6 +47,36 @@ def _transient(status: int) -> bool:
     return status in (403, 408, 429) or 500 <= status <= 599
 
 
+#: Hosts that answer 404 under load for files they hold and list each
+#: directory, so that the listing tells such a refusal from a file that moved.
+#: NCBI's file server, which serves GEO's files, is one.
+_LISTING_HOSTS = frozenset({"ftp.ncbi.nlm.nih.gov"})
+
+
+def _refused_though_listed(url: str, error: urllib.error.HTTPError) -> str | None:
+    """Why a 404 for ``url`` refused a file that its host still holds, or ``None`` when the 404 is final.
+
+    On a host in ``_LISTING_HOSTS``, a listing of the file's directory that
+    names the file, or that cannot be fetched, makes the 404 a refusal of the
+    moment, and a listing without the file makes it final. Any other status,
+    and a 404 from any other host, is left to ``_transient``.
+    """
+    if error.code != 404 or urlsplit(url).hostname not in _LISTING_HOSTS:
+        return None
+    directory, _, name = url.rpartition("/")
+    try:
+        with urllib.request.urlopen(f"{directory}/", timeout=120) as response:
+            listing = response.read().decode(errors="replace")
+    except _NOT_SERVED_WHOLE as listing_error:
+        return (
+            f"{error}, and the listing of {directory}/ could not be fetched: "
+            f"{listing_error}"
+        )
+    if f'href="{name}"' not in listing:
+        return None
+    return f"{error}, though the listing of {directory}/ names the file"
+
+
 def git_blob_sha1(data: bytes) -> str:
     """The SHA-1 of a file's git blob, as a repository's tree at a commit names it."""
     return hashlib.sha1(f"blob {len(data)}\0".encode() + data).hexdigest()  # noqa: S324
@@ -73,17 +105,21 @@ def download_or_skip(url: str, path: Path, *, git_blob: str | None = None) -> Pa
     whole, under a name of its own and then renamed. Unreachable hosts,
     timeouts, bodies cut short, statuses 403, 408 and 429 and every 5xx
     status skip the test after the second try; any other error status, such
-    as 404 for a file that moved, fails it. ``git_blob``, the git blob SHA-1
-    of a file at a pinned commit, makes a body of another blob one cut short.
+    as 404 for a file that moved, fails it. GEO's file server also answers
+    404 under load, so a 404 from it skips the test after the second try
+    when the listing of the file's directory names the file or cannot be
+    fetched. ``git_blob``, the git blob SHA-1 of a file at a pinned commit,
+    makes a body of another blob one cut short.
     """
-    failure: Exception | None = None
+    failure: Exception | str | None = None
     for _attempt in range(2):
         try:
             data = _fetched(url, git_blob)
         except urllib.error.HTTPError as error:
-            if not _transient(error.code):
+            refusal = _refused_though_listed(url, error)
+            if refusal is None and not _transient(error.code):
                 raise
-            failure = error
+            failure = error if refusal is None else refusal
             continue
         except _NOT_SERVED_WHOLE as error:
             failure = error

@@ -59,7 +59,7 @@ uv 0.13.4 or newer is required (`required-version` in `pyproject.toml`), because
 Update uv with `UV_SYSTEM_CERTS=true uv self update`, which checks the download against the operating system's certificates.
 
 Two markers select the expensive parts of the suite: `slow` for tests that build neighbourhood graphs or run iterative numerical workflows, and `integration` for tests that need live network access.
-An integration test downloads its files through `download_or_skip` of `tests/network_helpers.py`, which skips the test when a host cannot serve a file whole and fails it when a file is missing, and a run ends naming each test that skipped for the network.
+An integration test downloads its files through `download_or_skip` of `tests/network_helpers.py`, which skips the test when a host cannot serve a file whole and fails it when a file is missing, and a run ends naming each test that skipped for the network. GEO's file server also answers 404 under load for files that it holds, so a 404 from it fails the test only when the listing of the file's directory no longer names the file.
 While iterating, skip both:
 
     uv run pytest -m "not slow and not integration"

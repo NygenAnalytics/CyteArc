@@ -8,12 +8,16 @@ import socket
 import subprocess
 import sys
 import textwrap
+import threading
 import urllib.error
 import urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from tests import network_helpers
 from tests.network_helpers import (
     NETWORK_SKIP,
     download_or_skip,
@@ -163,6 +167,118 @@ def test_a_pinned_blob_is_written_only_when_its_bytes_are_the_blobs(
             download_or_skip("https://host/subsample.tsv", path, git_blob=blob)
     assert not pending
     assert list(tmp_path.iterdir()) == ([path] if outcome == "written" else [])
+
+
+@pytest.fixture
+def planned_host():
+    """A local HTTP server that answers each path with the next (status, body) planned for it."""
+    plans: dict[str, list[tuple[int, bytes]]] = {}
+    asked: list[str] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            asked.append(self.path)
+            pending = plans.get(self.path)
+            status, body = pending.pop(0) if pending else (418, b"unplanned")
+            self.send_response(status)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, format: str, *args: object) -> None:
+            return None
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    serving = threading.Thread(target=server.serve_forever, daemon=True)
+    serving.start()
+    try:
+        yield SimpleNamespace(
+            root=f"http://127.0.0.1:{server.server_port}", plans=plans, asked=asked
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        serving.join()
+
+
+def _listing(*names: str) -> bytes:
+    """A directory listing in the form GEO's file server gives."""
+    links = "".join(f'<a href="{name}">{name}</a>\n' for name in names)
+    return f'<pre><a href="/geo/samples/">Parent Directory</a>\n{links}</pre>'.encode()
+
+
+_SUPPL = "/geo/samples/GSM1nnn/GSM1000/suppl"
+_FILE = f"{_SUPPL}/GSM1000_calls.tsv.gz"
+_HELD = (200, _listing("GSM1000_counts.tsv.gz", "GSM1000_calls.tsv.gz"))
+# Names that contain the file's name without being it.
+_MOVED = (200, _listing("GSM1000_calls.tsv.gz.md5", "old_GSM1000_calls.tsv.gz"))
+_FOUND = (200, _WHOLE)
+_MISSING = (404, b"")
+
+
+@pytest.mark.parametrize(
+    ("file_answers", "listing_answers", "outcome", "reason"),
+    [
+        # Refused for the moment, as the listing shows, then served.
+        ([_MISSING, _FOUND], [_HELD], "written", None),
+        ([_MISSING, _MISSING], [_HELD, _HELD], "skipped", "names the file"),
+        # A listing that cannot be fetched cannot show that the file moved.
+        (
+            [_MISSING, _MISSING],
+            [(503, b""), _MISSING],
+            "skipped",
+            "could not be fetched: HTTP Error 404",
+        ),
+        # A listing without the file makes the 404 final, after a refusal too.
+        ([_MISSING], [_MOVED], "failed", None),
+        ([(503, b""), _MISSING], [_MOVED], "failed", None),
+    ],
+)
+def test_a_404_from_geo_skips_only_while_the_listing_names_the_file(
+    monkeypatch, tmp_path, planned_host, file_answers, listing_answers, outcome, reason
+) -> None:
+    monkeypatch.setattr(network_helpers, "_LISTING_HOSTS", frozenset({"127.0.0.1"}))
+    planned_host.plans[_FILE] = list(file_answers)
+    planned_host.plans[f"{_SUPPL}/"] = list(listing_answers)
+    url = planned_host.root + _FILE
+    path = tmp_path / "GSM1000_calls.tsv.gz"
+    # Caught here, a skip that should have been a failure fails the test
+    # rather than skipping it.
+    try:
+        written = download_or_skip(url, path)
+    except pytest.skip.Exception as skipped:
+        assert outcome == "skipped", skipped
+        message = str(skipped)
+        assert message.startswith(f"{NETWORK_SKIP} {url}: HTTP Error 404: Not Found")
+        assert f"the listing of {planned_host.root}{_SUPPL}/ " in message
+        assert reason in message
+    except urllib.error.HTTPError as failed:
+        assert outcome == "failed", failed
+        assert failed.code == 404
+    else:
+        assert outcome == "written"
+        assert written == path
+        assert path.read_bytes() == _WHOLE
+    # The listing is asked for after each 404, and only then.
+    expected = [
+        request
+        for status, _ in file_answers
+        for request in ([_FILE, f"{_SUPPL}/"] if status == 404 else [_FILE])
+    ]
+    assert planned_host.asked == expected
+    assert list(tmp_path.iterdir()) == ([path] if outcome == "written" else [])
+
+
+def test_a_404_from_another_host_fails_without_asking_for_a_listing(
+    tmp_path, planned_host
+) -> None:
+    # The local server is not in _LISTING_HOSTS, as no host but GEO's is.
+    planned_host.plans[_FILE] = [_MISSING]
+    planned_host.plans[f"{_SUPPL}/"] = [_HELD]
+    with pytest.raises(urllib.error.HTTPError):
+        download_or_skip(planned_host.root + _FILE, tmp_path / "calls.tsv.gz")
+    assert planned_host.asked == [_FILE]
+    assert network_helpers._LISTING_HOSTS == {"ftp.ncbi.nlm.nih.gov"}
 
 
 def test_git_blob_sha1_is_the_hash_git_gives_a_file(tmp_path) -> None:
