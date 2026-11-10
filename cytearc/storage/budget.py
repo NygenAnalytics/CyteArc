@@ -1,11 +1,11 @@
 """Resource limits used by one storage or analysis operation."""
 
+import ctypes
 import math
 import os
 from dataclasses import dataclass
 from pathlib import Path
 
-_FALLBACK_MEMORY_BYTES = 8 * 1024 * 1024 * 1024
 _SUFFIXES = {"K": 1024, "M": 1024**2, "G": 1024**3, "T": 1024**4}
 _MIN_RAW_BYTES = 1024 * 1024
 _CGROUP_UNLIMITED_THRESHOLD = 1 << 60
@@ -40,8 +40,45 @@ def _read_int(path: str) -> int | None:
     return parsed
 
 
+class _MemoryStatusEx(ctypes.Structure):
+    """Windows' MEMORYSTATUSEX, in fixed-width fields so that its 64-byte layout
+    is the same on every platform.
+    """
+
+    _fields_ = [
+        ("dwLength", ctypes.c_uint32),
+        ("dwMemoryLoad", ctypes.c_uint32),
+        ("ullTotalPhys", ctypes.c_uint64),
+        ("ullAvailPhys", ctypes.c_uint64),
+        ("ullTotalPageFile", ctypes.c_uint64),
+        ("ullAvailPageFile", ctypes.c_uint64),
+        ("ullTotalVirtual", ctypes.c_uint64),
+        ("ullAvailVirtual", ctypes.c_uint64),
+        ("ullAvailExtendedVirtual", ctypes.c_uint64),
+    ]
+
+
+def _windows_physical_memory_bytes() -> int | None:
+    """Return physical memory from GlobalMemoryStatusEx, None off Windows or on failure."""
+    windll = getattr(ctypes, "windll", None)
+    if windll is None:
+        return None
+    status = _MemoryStatusEx(dwLength=ctypes.sizeof(_MemoryStatusEx))
+    try:
+        succeeded = windll.kernel32.GlobalMemoryStatusEx(ctypes.pointer(status))
+    except (OSError, AttributeError):
+        return None
+    if not succeeded or status.ullTotalPhys <= 0:
+        return None
+    return int(status.ullTotalPhys)
+
+
 def _read_physical_memory_bytes() -> int | None:
-    """Return physical memory from /proc/meminfo or sysconf, None if neither."""
+    """Return physical memory, None where no source answers.
+
+    Linux reports it in /proc/meminfo, macOS and other Unix systems through
+    sysconf, and Windows through GlobalMemoryStatusEx.
+    """
     try:
         with open("/proc/meminfo") as handle:
             for line in handle:
@@ -56,12 +93,7 @@ def _read_physical_memory_bytes() -> int | None:
             return int(page_size) * int(total_pages)
     except (ValueError, OSError, AttributeError):
         pass
-    return None
-
-
-def _physical_memory_bytes() -> int:
-    physical = _read_physical_memory_bytes()
-    return _FALLBACK_MEMORY_BYTES if physical is None else physical
+    return _windows_physical_memory_bytes()
 
 
 def _process_cgroup_entry(controller: str) -> tuple[list[str], str] | None:
@@ -115,25 +147,32 @@ def _cgroup_memory_bytes() -> int | None:
     return min(limits) if limits else None
 
 
-def detect_total_memory_bytes() -> int:
-    """Return the effective physical or cgroup memory limit."""
-    physical = _physical_memory_bytes()
-    cgroup = _cgroup_memory_bytes()
-    return physical if cgroup is None else min(physical, cgroup)
-
-
 def detect_memory_limit_bytes() -> int | None:
-    """Return physical memory or a lower cgroup limit, None where neither is read.
-
-    Unlike ``detect_total_memory_bytes``, which plans with a fixed size where
-    physical memory cannot be read, this reports only what it read.
-    """
+    """Return physical memory or a lower cgroup limit, None where neither is read."""
     limits = [
         value
         for value in (_read_physical_memory_bytes(), _cgroup_memory_bytes())
         if value is not None
     ]
     return min(limits) if limits else None
+
+
+def detect_total_memory_bytes() -> int:
+    """Return physical memory or a lower cgroup limit, for planning budgets.
+
+    Raises:
+        RuntimeError: If neither can be read. A budget planned from a guessed
+            size could exceed the machine, or refuse work that it has room for.
+    """
+    limit = detect_memory_limit_bytes()
+    if limit is None:
+        raise RuntimeError(
+            "Could not read this machine's memory from /proc/meminfo, sysconf or "
+            "GlobalMemoryStatusEx, and no cgroup memory limit applies, so a default "
+            "or fractional memory budget cannot be resolved. Pass a size instead, "
+            "such as mem_budget='16G', or set CYTEARC_MEM_BUDGET=16G."
+        )
+    return limit
 
 
 def detect_cpu_quota_cores() -> float | None:
@@ -248,6 +287,8 @@ def resolve_budget(
     Raises:
         ValueError: If ``memory`` or ``CYTEARC_MEM_BUDGET`` is not a positive
             finite size, or ``workers`` or ``CYTEARC_WORKERS`` is below 1.
+        RuntimeError: If the default or a fraction needs the machine's memory
+            and neither physical memory nor a cgroup limit can be read.
     """
     if memory is None:
         env_mem = os.environ.get("CYTEARC_MEM_BUDGET")
