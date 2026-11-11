@@ -247,46 +247,123 @@ def _sparse(values: np.ndarray, encoding: str) -> csr_matrix:
     )
 
 
-def _write_seurat(path: Path, values: np.ndarray, encoding: str) -> Path:
-    """Write a Seurat object; ``encoding`` is ``real`` (dense R doubles),
-    ``integer`` (dense R integers) or ``sparse`` (a dgCMatrix)."""
-    wire = _Wire()
-    cells, features = _cells(values), _features(values)
-    if encoding == "sparse":
+def _seurat_compressed(
+    wire: _Wire,
+    values: np.ndarray,
+    features: list[str],
+    cells: list[str],
+    variant: str,
+) -> bytes:
+    """Return cells-by-features ``values`` as a compressed matrix of features by
+    cells: a dgCMatrix, an igCMatrix of R integers for ``integer``, or for
+    ``duplicates`` a dgCMatrix whose cells split their first value into two
+    entries, the second after the cell's other features."""
+    if variant == "duplicates":
+        pointers, indices, data = [0], [], []
+        for row in values:
+            entries = _split_duplicates(row)
+            indices.extend(column for column, _value in entries)
+            data.extend(value for _column, value in entries)
+            pointers.append(len(indices))
+    else:
         # A dgCMatrix of features by cells holds the CSR arrays of the cells
         # by features.
         stored = csr_matrix(values)
-        counts = wire.s4(
-            [
-                ("i", wire.integer_vector(stored.indices.tolist())),
-                ("p", wire.integer_vector(stored.indptr.tolist())),
-                ("Dim", wire.integer_vector([len(features), len(cells)])),
-                ("Dimnames", wire.dimnames(features, cells)),
-                ("x", wire.real_vector(stored.data.tolist())),
-                ("factors", wire.vector([])),
-                ("class", wire.string_vector(["dgCMatrix"])),
-            ]
-        )
-    else:
-        # R matrices are column-major, so the features-by-cells counts are the
-        # row-major cells-by-features values.
-        counts = wire.matrix(
-            values.reshape(-1).tolist(),
-            (len(features), len(cells)),
-            rows=features,
-            columns=cells,
-            real=encoding == "real",
-        )
-    assay = wire.s4(
+        pointers = stored.indptr.tolist()
+        indices = stored.indices.tolist()
+        data = stored.data.tolist()
+    integer = variant == "integer"
+    return wire.s4(
         [
-            ("counts", counts),
+            ("i", wire.integer_vector(indices)),
+            ("p", wire.integer_vector(pointers)),
+            ("Dim", wire.integer_vector([len(features), len(cells)])),
+            ("Dimnames", wire.dimnames(features, cells)),
             (
-                "meta.features",
-                wire.data_frame([("symbol", wire.string_vector(features))], features),
+                "x",
+                wire.integer_vector([int(value) for value in data])
+                if integer
+                else wire.real_vector([float(value) for value in data]),
             ),
-            ("class", wire.string_vector(["Assay"])),
+            ("factors", wire.vector([])),
+            ("class", wire.string_vector(["igCMatrix" if integer else "dgCMatrix"])),
         ]
     )
+
+
+def _seurat_layers(
+    wire: _Wire, values: np.ndarray, features: list[str], cells: list[str]
+) -> bytes:
+    """Return an Assay5 whose counts are two dgCMatrix layers, ``counts.1``
+    over the first half of the cells and ``counts.2`` over the rest."""
+    middle = len(cells) // 2
+    names = ["counts.1", "counts.2"]
+    halves = [slice(0, middle), slice(middle, len(cells))]
+    membership = [int(cell < middle) for cell in range(len(cells))]
+    membership += [int(cell >= middle) for cell in range(len(cells))]
+    return wire.s4(
+        [
+            (
+                "layers",
+                wire.vector(
+                    [
+                        _seurat_compressed(
+                            wire, values[half], features, cells[half], ""
+                        )
+                        for half in halves
+                    ],
+                    names=names,
+                ),
+            ),
+            ("cells", wire.logmap(membership, cells, names)),
+            ("features", wire.logmap([1] * (2 * len(features)), features, names)),
+            (
+                "meta.data",
+                wire.data_frame(
+                    [("symbol", wire.string_vector(features))], len(features)
+                ),
+            ),
+            ("class", wire.string_vector(["Assay5"])),
+        ]
+    )
+
+
+def _write_seurat(path: Path, values: np.ndarray, encoding: str) -> Path:
+    """Write a Seurat object; ``encoding`` is ``real`` (dense R doubles),
+    ``integer`` (dense R integers), ``sparse`` (a dgCMatrix),
+    ``sparse-integer`` (an igCMatrix), ``sparse-duplicates`` (a dgCMatrix whose
+    cells repeat a feature out of order) or ``sparse-layers`` (an Assay5 of
+    two dgCMatrix layers)."""
+    wire = _Wire()
+    cells, features = _cells(values), _features(values)
+    layout, _, variant = encoding.partition("-")
+    if layout == "sparse" and variant == "layers":
+        assay = _seurat_layers(wire, values, features, cells)
+    else:
+        if layout == "sparse":
+            counts = _seurat_compressed(wire, values, features, cells, variant)
+        else:
+            # R matrices are column-major, so the features-by-cells counts are
+            # the row-major cells-by-features values.
+            counts = wire.matrix(
+                values.reshape(-1).tolist(),
+                (len(features), len(cells)),
+                rows=features,
+                columns=cells,
+                real=encoding == "real",
+            )
+        assay = wire.s4(
+            [
+                ("counts", counts),
+                (
+                    "meta.features",
+                    wire.data_frame(
+                        [("symbol", wire.string_vector(features))], features
+                    ),
+                ),
+                ("class", wire.string_vector(["Assay"])),
+            ]
+        )
     root = wire.s4(
         [
             ("assays", wire.vector([assay], names=["RNA"])),
@@ -447,6 +524,10 @@ _ENCODINGS = [
     ("sparse", "float32-duplicates"),
     ("seurat", "real"),
     ("seurat", "integer"),
+    ("seurat", "sparse"),
+    ("seurat", "sparse-integer"),
+    ("seurat", "sparse-duplicates"),
+    ("seurat", "sparse-layers"),
 ]
 
 
@@ -1657,19 +1738,23 @@ def _drain_sparse_writes(monkeypatch) -> list[dict[str, Any]]:
 
 
 @pytest.mark.parametrize(
-    ("writer", "encoding", "split", "tight"),
+    ("writer", "encoding", "split", "bound"),
     [
-        ("h5ad", "float32", False, True),
-        ("h5ad", "float32", True, True),
-        ("sparse", "float32", False, True),
-        ("cellranger", "int32", True, False),
-        ("mtx", "integer", False, False),
-        ("mtx", "real", False, False),
-        ("seurat", "sparse", False, False),
+        ("h5ad", "float32", False, 1.5),
+        ("h5ad", "float32", True, 1.5),
+        ("sparse", "float32", False, 1.5),
+        ("cellranger", "int32", True, None),
+        ("mtx", "integer", False, None),
+        ("mtx", "real", False, None),
+        # A Seurat matrix estimates a read as its output with int64 indices
+        # and a working copy as large. That is a third more than a dgCMatrix
+        # read holds, which the plan charges beyond the batch it returns.
+        ("seurat", "sparse", False, 1.75),
+        ("seurat", "sparse-integer", False, 1.5),
     ],
 )
 def test_every_sparse_producer_holds_no_more_than_its_plan_reserves(
-    tmp_path, monkeypatch, writer, encoding, split, tight
+    tmp_path, monkeypatch, writer, encoding, split, bound
 ):
     values = _producer_counts()
     if not split:
@@ -1696,10 +1781,143 @@ def test_every_sparse_producer_holds_no_more_than_its_plan_reserves(
     assert record["bands"] > 1
     assert record["kept"] == 0
     assert record["held"] <= record["reserve"]
-    if tight:
+    if bound is not None:
         # Readers that hold one batch are planned close to what they hold;
-        # the plan charged two to six times it.
-        assert record["reserve"] <= 1.5 * record["held"]
+        # the plan charged two to six times it, and a Seurat import twelve.
+        assert record["reserve"] <= bound * record["held"]
+
+
+def _record_sparse_plans(monkeypatch) -> list[dict[str, Any]]:
+    """Record the arguments of every sparse counts write plan."""
+    from cytearc.storage import sharding
+
+    plans: list[dict[str, Any]] = []
+    resolve = sharding.resolve_sparse_import_batch
+
+    def recorded(destinations, **options):
+        plans.append(options)
+        return resolve(destinations, **options)
+
+    monkeypatch.setattr(sharding, "resolve_sparse_import_batch", recorded)
+    return plans
+
+
+@pytest.mark.parametrize("nthreads", [1, 4])
+@pytest.mark.parametrize(
+    ("encoding", "canonical", "bound"),
+    [
+        ("sparse", True, 1.75),
+        ("sparse-integer", True, 1.5),
+        # Cells that repeat a feature out of order are sorted and summed.
+        ("sparse-duplicates", False, None),
+        # Stitching layers holds three times the batch it returns, which the
+        # plan charges as the read's staging.
+        ("sparse-layers", True, None),
+    ],
+)
+def test_a_seurat_import_reserves_what_its_producer_holds(
+    tmp_path, monkeypatch, encoding, canonical, bound, nthreads
+):
+    values = _producer_counts()[:, :-4]
+    plans = _record_sparse_plans(monkeypatch)
+    records = _drain_sparse_writes(monkeypatch)
+    source = _source("seurat", tmp_path, values, encoding)
+    try:
+        instance = _writer(
+            "seurat",
+            source,
+            str(tmp_path / "counts.zarr"),
+            nthreads=nthreads,
+            policy=_PRODUCER_BANDS,
+        )
+        # Nothing is written, so the counts are refused once the bands are out.
+        with pytest.raises(RuntimeError, match="does not cover its row window"):
+            instance.dump()
+    finally:
+        _close(source)
+    (plan,) = plans
+    (record,) = records
+    # Only batches whose cells hold their features sorted without repeats
+    # skip the sort and sum, and its charge.
+    assert plan["canonicalBatches"] is canonical
+    assert record["bands"] > 1
+    assert record["kept"] == 0
+    assert record["held"] <= record["reserve"]
+    if bound is not None:
+        assert record["reserve"] <= bound * record["held"]
+
+
+@pytest.mark.parametrize(
+    ("values", "declared", "canonical"),
+    [
+        (_poisson_counts(), None, True),
+        # Undoing a log copies each batch into canonical linear values.
+        (np.log1p(_cp10k(_poisson_counts())), None, False),
+        (np.log1p(_cp10k(_poisson_counts())), "log_normalized", False),
+    ],
+    ids=["counts", "log1p detected", "log1p declared"],
+)
+def test_a_seurat_import_skips_the_sort_and_sum_only_for_batches_passed_on_as_read(
+    tmp_path, monkeypatch, values, declared, canonical
+):
+    plans = _record_sparse_plans(monkeypatch)
+    root = _import("seurat", tmp_path, values, "sparse", values=declared)
+    (plan,) = plans
+    assert plan["canonicalBatches"] is canonical
+    expected = values if canonical else np.expm1(values)
+    np.testing.assert_allclose(root["RNA/counts"][:], expected, rtol=1e-12)
+
+
+def test_a_seurat_import_plans_the_busiest_window_of_cells_wherever_it_starts(
+    tmp_path, monkeypatch
+):
+    # The deep cells straddle the windows that a pass of 1,500 cells reads, so
+    # the busiest window of 1,500 cells starts where no such pass reads.
+    values = np.zeros((3_000, 60), dtype=np.int64)
+    values[:, 0] = 1
+    values[750:2_250, :40] = 1
+    plans = _record_sparse_plans(monkeypatch)
+    root = _import("seurat", tmp_path, values, "sparse")
+    np.testing.assert_array_equal(root["RNA/counts"][:], values)
+    (plan,) = plans
+    window_values = plan["maxWindowNnz"]
+    stored = np.count_nonzero(values, axis=1)
+    for width in (1, 7, 1_000, 1_500, 2_999, 3_000, 5_000):
+        window = np.ones(min(width, stored.size), dtype=np.int64)
+        busiest = np.convolve(stored, window, mode="valid").max()
+        assert window_values(width) == busiest, width
+
+
+def test_a_seurat_import_holds_no_earlier_batch_while_it_reads_the_next(
+    tmp_path, monkeypatch
+):
+    import weakref
+
+    from cytearc.readers.seurat import _OwnedMatrixSource
+    from cytearc.writers import seurat as seurat_writer
+
+    batches: list[weakref.ref] = []
+    alive: list[int] = []
+    convert = seurat_writer._sparse_batch
+    read = _OwnedMatrixSource.read_cells
+
+    def tracked_batch(block):
+        batch = convert(block)
+        batches.append(weakref.ref(batch))
+        return batch
+
+    def tracked_read(self, start, stop):
+        # The batches made before this read that something still holds.
+        alive.append(sum(batch() is not None for batch in batches))
+        return read(self, start, stop)
+
+    monkeypatch.setattr(seurat_writer, "_sparse_batch", tracked_batch)
+    monkeypatch.setattr(_OwnedMatrixSource, "read_cells", tracked_read)
+    values = _producer_counts()[:, :-4]
+    root = _import("seurat", tmp_path, values, "sparse", policy=_PRODUCER_BANDS)
+    np.testing.assert_array_equal(root["RNA/counts"][:], values)
+    assert len(batches) > 2
+    assert max(alive) == 0
 
 
 @pytest.mark.parametrize("encoding", ["integer", "real"])

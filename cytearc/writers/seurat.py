@@ -21,6 +21,7 @@ from ..readers.seurat import (
     SeuratNumericVector,
     SeuratRMatrix,
     SeuratReduction,
+    _value_bound,
 )
 from ..storage.arrays import MISSING_MASK_PREFIX
 from ..storage.count_dtype import count_storage_dtype
@@ -41,7 +42,7 @@ from ..storage.metadata_keys import (
 )
 from ..storage.profiles import StorageProfile, ZarrLocation
 from ..storage.refs import ArtifactRef
-from ..utils.arrays import canonicalize_sparse
+from ..utils.arrays import canonicalize_sparse, csr_to_coo, max_window_nnz
 from ..utils.count_values import CountValueRange
 from ..utils.memory_budget import MemoryBudgetError, refusal_words
 from ._store import (
@@ -133,6 +134,33 @@ def _consecutive_runs(positions: np.ndarray) -> Iterator[tuple[int, int, int]]:
     stops = np.concatenate((breaks, [positions.size])).tolist()
     for offset, stop in zip(starts, stops, strict=True):
         yield int(offset), int(positions[offset]), int(positions[stop - 1]) + 1
+
+
+# A logged assay's batches are copied into a canonical batch of linear values.
+_LOGGED_KINDS = frozenset({"log_normalized", "log2_normalized"})
+
+
+def _sparse_batch(block: Any) -> coo_matrix:
+    """Return a block of cells as COO, marked canonical when its cells are.
+
+    A CSR block is marked when each cell's features are sorted without
+    repeats, on every supported SciPy; a dense block converts in canonical
+    order; another sparse block keeps its own mark.
+    """
+    if not issparse(block):
+        return coo_matrix(np.asarray(block))
+    if block.format == "csr":
+        return cast(coo_matrix, csr_to_coo(block))
+    return cast(coo_matrix, block.tocoo(copy=False))
+
+
+def _stored_cell_values(block: Any) -> np.ndarray:
+    """Return the values that each cell of a block stores, as its batch holds them."""
+    if not issparse(block):
+        return np.asarray(np.count_nonzero(np.asarray(block), axis=1))
+    if block.format == "csr":
+        return np.diff(block.indptr)
+    return np.bincount(block.tocoo(copy=False).row, minlength=block.shape[0])
 
 
 class _CellIdsAt(Sequence[str]):
@@ -399,6 +427,12 @@ class SeuratToZarr:
         )
         self._lastImportPlans: dict[str, Any] = {}
         self._lastDenseBatchRows: dict[str, int] = {}
+        # The value scan of each sparse assay counts its cells' stored values,
+        # as prefix sums over the cells, and checks that every cell holds its
+        # features sorted without repeats. The layout fit and the write plan
+        # from both.
+        self._cellValues: dict[str, np.ndarray] = {}
+        self._canonicalCells: dict[str, bool] = {}
         # Every assay's dtype, values and layout are resolved, and a layout
         # that does not fit fails, before the destination exists.
         self._valuesArgument = values
@@ -908,60 +942,104 @@ class SeuratToZarr:
             attributes=attributes,
         )
 
-    def _source_staging_peak(
-        self,
-        source: Any,
-        rows: int,
-    ) -> int:
-        n_cells = int(source.shape[1])
-        width = max(1, min(int(rows), max(1, n_cells)))
-        peak = 0
-        for start in range(0, n_cells, width):
-            stop = min(start + width, n_cells)
-            estimate = source.estimate_read_memory(start, stop)
-            peak = max(
-                peak,
-                max(0, int(estimate.workingBytes)) + max(0, int(estimate.outputBytes)),
-            )
-        return peak
+    def _read_peaks(self, source: Any) -> Callable[[int], tuple[int, int]]:
+        """Return what reading a window of cells holds, and stores, for a width.
 
-    def _source_resident_bytes(self) -> int:
-        """Return the bytes that the count sources of every assay hold."""
-        return sum(max(0, int(assay.counts.resident_bytes)) for assay in self._assays)
-
-    def _source_estimates(
-        self, source: Any
-    ) -> tuple[Callable[[int], int], Callable[[int], int]]:
-        """Return the read staging and the stored values of a window of cells.
-
-        The staging of a width costs one source estimate per window of that
-        width, and is computed once; the values are bounded from it.
+        A pass of a width reads the windows ``[0, width)``, ``[width,
+        2 * width)`` and so on. For each width, one source estimate per window
+        gives the most that reading one window holds, its working and output
+        bytes, and the most values that one window stores. Each width is
+        estimated once.
         """
         n_cells = int(source.shape[1])
-        n_features = int(source.shape[0])
-        itemsize = max(1, source.dtype.itemsize)
+        peaks: dict[int, tuple[int, int]] = {}
+
+        def window_peaks(rows: int) -> tuple[int, int]:
+            width = max(1, min(int(rows), max(1, n_cells)))
+            if width not in peaks:
+                held = values = 0
+                for start in range(0, n_cells, width):
+                    stop = min(start + width, n_cells)
+                    estimate = source.estimate_read_memory(start, stop)
+                    held = max(
+                        held,
+                        max(0, int(estimate.workingBytes))
+                        + max(0, int(estimate.outputBytes)),
+                    )
+                    values = max(values, _value_bound(source, estimate, stop - start))
+                peaks[width] = (held, values)
+            return peaks[width]
+
+        return window_peaks
+
+    def _source_resident_bytes(self) -> int:
+        """Return the bytes that the count sources of every assay hold.
+
+        They include each sparse assay's counts of its cells' stored values.
+        """
+        sources = sum(
+            max(0, int(assay.counts.resident_bytes)) for assay in self._assays
+        )
+        return sources + sum(values.nbytes for values in self._cellValues.values())
+
+    def _sparse_write_plan(
+        self, assay_name: str, source: Any
+    ) -> tuple[Callable[[int], int], Callable[[int], int], bool]:
+        """Return how a sparse counts write plans what its producer holds.
+
+        The first function returns the most values of any window of cells of a
+        width, wherever it starts, from the values that the scan counted in
+        each cell: the rows that the write buffers between two bands are not
+        one of its batches. The second returns the most that reading one batch
+        of a width holds beyond the batch. The read holds the working and
+        output bytes that the source estimates, and the plan already charges
+        the batch it returns, an int64 row and column and a value for each of
+        its values, so only the rest is staging.
+
+        The flag says whether every batch arrives canonical, so the write
+        sorts and sums none: every cell holds its features sorted without
+        repeats, and the write passes each batch on as it is read, as it does
+        for every kind of values but logged ones, whose log it undoes in a
+        copy.
+        """
+        from ..storage.sharding import sparse_triplet_bytes
+
+        n_cells = int(source.shape[1])
+        cumulative = self._cellValues[assay_name]
+        batch_value_bytes = sparse_triplet_bytes(source.dtype.itemsize)
         staging_cache: dict[int, int] = {}
 
-        def staging(rows: int) -> int:
+        def window_values(rows: int) -> int:
+            return max_window_nnz(cumulative, rows) if rows > 0 else 0
+
+        def read_staging(rows: int) -> int:
             width = max(1, min(int(rows), max(1, n_cells)))
             if width not in staging_cache:
-                staging_cache[width] = self._source_staging_peak(source, width)
+                staging = 0
+                for start in range(0, n_cells, width):
+                    stop = min(start + width, n_cells)
+                    estimate = source.estimate_read_memory(start, stop)
+                    held = max(0, int(estimate.workingBytes)) + max(
+                        0, int(estimate.outputBytes)
+                    )
+                    values = int(cumulative[stop] - cumulative[start])
+                    staging = max(staging, held - values * batch_value_bytes)
+                staging_cache[width] = staging
             return staging_cache[width]
 
-        def window_values(rows: int) -> int:
-            width = max(0, min(int(rows), n_cells))
-            if width == 0:
-                return 0
-            estimated = (staging(width) + itemsize - 1) // itemsize
-            return int(min(width * n_features, max(0, estimated)))
-
-        return staging, window_values
+        canonical = (
+            self._canonicalCells[assay_name]
+            and self.values[assay_name].kind not in _LOGGED_KINDS
+        )
+        return window_values, read_staging, canonical
 
     def _prepare_counts(self, assay: SeuratAssay) -> np.dtype[Any]:
         """Prepare one assay's count source and return its storage dtype.
 
         Every count is read once, in blocks, and duplicate coordinates of
-        sparse blocks are summed, as the write stores them.
+        sparse blocks are summed, as the write stores them. For a sparse
+        source, the same pass counts the values that each cell stores and
+        checks that every cell holds its features sorted without repeats.
 
         Raises:
             MemoryError: If the preparation, or reading one cell, does not fit
@@ -978,7 +1056,7 @@ class SeuratToZarr:
             max(0, int(item.counts.resident_bytes))
             for item in self._assays
             if item is not assay
-        )
+        ) + sum(values.nbytes for values in self._cellValues.values())
         # The count summary is allocated before the write and stays resident
         # through it, so preparation must fit beside it.
         reserved = other_sources + CountSummary.nbytes_for(n_cells, n_features)
@@ -997,19 +1075,27 @@ class SeuratToZarr:
                 item=error.item,
             ) from error
         value_range = CountValueRange()
+        # Prefix sums of the values that each cell stores, filled by the scan.
+        cell_values = np.zeros(n_cells + 1 if source.is_sparse else 0, dtype=np.int64)
+        if source.is_sparse:
+            self._cellValues[assay.name] = cell_values
+        canonical = True
         if n_cells:
-            staging, window_values = self._source_estimates(source)
+            read_peaks = self._read_peaks(source)
             itemsize = max(1, source.dtype.itemsize)
             available = int(self.resources.memoryBytes) - self._source_resident_bytes()
 
             def read_bytes(rows: int) -> int:
+                held, values = read_peaks(rows)
                 if source.is_sparse:
-                    # Summing a block's duplicates costs one unbuffered pull.
-                    scan = sparse_producer_peak_bytes(0, window_values(rows), itemsize)
+                    # Summing a block's duplicates costs one unbuffered pull,
+                    # and counting its cells' values one count per cell.
+                    scan = sparse_producer_peak_bytes(0, values, itemsize)
+                    scan += rows * np.dtype(np.int64).itemsize
                 else:
                     # The integrality check holds a truncated copy and masks.
                     scan = rows * n_features * (itemsize + 2)
-                return staging(rows) + scan
+                return held + scan
 
             def fits(rows: int) -> bool:
                 return read_bytes(rows) <= available
@@ -1025,10 +1111,22 @@ class SeuratToZarr:
                     item=f"reading one cell of assay {assay.name!r}",
                 )
             for start in range(0, n_cells, rows):
-                raw = source.read_cells(start, min(start + rows, n_cells))
-                value_range.update(
-                    canonicalize_sparse(coo_matrix(raw)).data if issparse(raw) else raw
-                )
+                stop = min(start + rows, n_cells)
+                raw = source.read_cells(start, stop)
+                if source.is_sparse:
+                    cell_values[start + 1 : stop + 1] = _stored_cell_values(raw)
+                if issparse(raw):
+                    batch = _sparse_batch(raw)
+                    canonical = canonical and bool(batch.has_canonical_format)
+                    value_range.update(canonicalize_sparse(batch).data)
+                    del batch
+                else:
+                    value_range.update(raw)
+                # The next read does not run beside this block.
+                del raw
+        if source.is_sparse:
+            np.cumsum(cell_values, out=cell_values)
+            self._canonicalCells[assay.name] = canonical
         from ..utils.matrix_values import DETECTION_CELLS
 
         storage_dtype = count_storage_dtype(source.dtype, value_range)
@@ -1069,25 +1167,31 @@ class SeuratToZarr:
         resident = CountSummary.nbytes_for(n_cells, n_features) + (
             self._residentSourceBytes
         )
-        staging, window_values = self._source_estimates(source)
+        if source.is_sparse:
+            window_values, read_staging, canonical = self._sparse_write_plan(
+                assay.name, source
+            )
+            admit_counts = sparse_counts_admission(
+                nRows=n_cells,
+                maxWindowNnz=window_values,
+                sourceDtype=source.dtype,
+                residentBytes=resident,
+                producerStagingBytes=read_staging,
+                canonicalBatches=canonical,
+                alignedBatches=True,
+            )
+        else:
+            read_peaks = self._read_peaks(source)
+            admit_counts = dense_counts_admission(
+                resident, lambda rows: read_peaks(rows)[0]
+            )
         return fit_count_layout(
             {assay.name: (n_features, storage_dtype)},
             nCells=n_cells,
             profile=self.profile,
             memoryBytes=self.resources.memoryBytes,
             transposed=counts_t_assays((assay.name,)),
-            admitCounts=(
-                sparse_counts_admission(
-                    nRows=n_cells,
-                    maxWindowNnz=window_values,
-                    sourceDtype=source.dtype,
-                    residentBytes=resident,
-                    producerStagingBytes=staging,
-                    alignedBatches=True,
-                )
-                if source.is_sparse
-                else dense_counts_admission(resident, staging)
-            ),
+            admitCounts=admit_counts,
             requested=requested,
         )
 
@@ -1139,7 +1243,9 @@ class SeuratToZarr:
         )
 
         n_cells = int(source.shape[1])
-        staging, window_values = self._source_estimates(source)
+        window_values, read_staging, canonical = self._sparse_write_plan(
+            assay_name, source
+        )
         plan = resolve_sparse_import_batch(
             (destination,),
             nRows=n_cells,
@@ -1148,11 +1254,13 @@ class SeuratToZarr:
             sourceDtype=source.dtype,
             batchRows=requested_rows,
             residentBytes=self._residentSourceBytes,
-            producerStagingBytes=staging,
+            producerStagingBytes=read_staging,
+            canonicalBatches=canonical,
             alignedBatches=True,
         )
         self._lastImportPlans[assay_name] = plan
         self._lastImportPlan = plan
+        kind = self.values[assay_name].kind
 
         # A source returns one row per requested cell; the shard writer
         # rejects a batch of another width and a stream of another length.
@@ -1161,15 +1269,16 @@ class SeuratToZarr:
 
             for start in range(0, n_cells, plan.batchRows):
                 stop = min(start + plan.batchRows, n_cells)
-                raw = source.read_cells(start, stop)
-                yield linear_coo(
-                    raw.tocoo(copy=False)
-                    if issparse(raw)
-                    else coo_matrix(np.asarray(raw)),
-                    self.values[assay_name].kind,
+                batch = linear_coo(
+                    _sparse_batch(source.read_cells(start, stop)),
+                    kind,
                     destination.dtype,
                     assay=assay_name,
                 )
+                yield batch
+                # The writer has buffered the batch, which would otherwise
+                # stay held beside the next read.
+                del batch
 
         accumulate_sparse_to_shards(
             destination,
@@ -1199,8 +1308,8 @@ class SeuratToZarr:
         rows = min(int(source.shape[1]), array_shard_rows(destination))
         if requested_rows is not None:
             rows = min(requested_rows, rows)
-        staging, _window_values = self._source_estimates(source)
-        return rows, staging(rows)
+        held, _values = self._read_peaks(source)(rows)
+        return rows, held
 
     def _write_dense_counts(
         self,
