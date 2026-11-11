@@ -9,7 +9,7 @@
 
 CyteArc is a Python framework for **single-cell RNA, ATAC, protein, and matched multi-omic analysis**. Its Zarr layout and read engine are designed together for efficient access by cell or gene, locally or directly from remote storage.
 
-CyteArc analysed **Tahoe-100M in under 20 hours on commodity hardware**, from cell filtering through UMAP, clustering, and marker gene identification, **without downsampling the dataset or using GPUs**. The same workflow processed one million cells within 15 minutes.
+CyteArc analyzed **Tahoe-100M in under 20 hours on commodity hardware**, from cell filtering through UMAP, clustering, and marker gene identification, **without downsampling the dataset or using GPUs**. The same workflow processed one million cells within 15 minutes.
 
 Mount remote datasets, combine studies into **virtual datasets**, and run pipelines with provenance stored alongside the results.
 
@@ -26,6 +26,7 @@ Mount remote datasets, combine studies into **virtual datasets**, and run pipeli
 | **[Reference mapping](https://docs.nygen.io/CyteArc/tutorials/mapping-and-label-transfer)** | Symphony-style mapping, label transfer, and diagnostics for projected cells |
 | **[Condition comparisons](https://docs.nygen.io/CyteArc/tutorials/condition-comparisons)** | Sample-level and paired comparisons across donors, with pseudobulk export for downstream differential expression |
 | **[Trajectories](https://docs.nygen.io/CyteArc/tutorials/lineage-dynamics)** | Population Balance Analysis pseudotime, fate probabilities, lineage-specific gene dynamics, and fate-weighted curves |
+| **[Lineage tracing and immune repertoires](https://docs.nygen.io/CyteArc/tutorials/lineage-tracing)** | Clones from lineage barcodes, lineage recorder alleles and phylogenies, and mitochondrial DNA variants; clonal expansion, diversity, fate coupling, and fate bias; TCR and BCR clonotypes, gene usage, and AIRR export |
 | **[Gene activity and regulation](https://docs.nygen.io/CyteArc/api/regulons.html)** | AUCell/WAGGR gene-set scores, SCENIC-style regulons, chromVAR motif activity, region-to-gene links, and gene programs |
 | **[CRISPR screens](https://docs.nygen.io/CyteArc/tutorials/crispr-screens)** | Guide calling, perturbation labels, target knockdown and E-distances, Mixscape's knocked-out cells and escapers, calibrated association tests at low and high MOI, and perturbation clusters |
 | **[Import and export](https://docs.nygen.io/CyteArc/tutorials/import-and-export)** | Cell Ranger, Matrix Market, AnnData, and Seurat import; export counts and selected analysis results to AnnData |
@@ -65,7 +66,7 @@ run = ds.pipeline.rna(label="rna")
 
 Find datasets in the companion [CyteBase catalog](https://docs.nygen.io/CyteBase/). See [remote access](https://docs.nygen.io/CyteArc/tutorials/remote-stores) for connection options.
 
-## Analyse several studies as one virtual dataset
+## Analyze several studies as one virtual dataset
 
 A virtual dataset combines cells from existing stores without copying their count matrices, saving the time and space of a physical merge. It works like a regular datastore.
 

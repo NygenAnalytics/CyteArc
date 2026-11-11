@@ -197,7 +197,7 @@ the current commit again.
 ### Add a tutorial
 
 1. Add an `.ipynb` file under `docs/source/tutorials/` with Markdown cells, code cells, and kernel metadata.
-2. Register it in `docs/source/myst.yml`.
+2. Register it in `docs/source/myst.yml`, in the section of the question it answers, and list it under the same section of `docs/source/llms.txt`.
 3. Execute it on Modal and inspect its figures and downloaded notebook.
 4. Commit the notebook with its outputs and execution metadata. Keep rendered site files outside Git.
 
