@@ -1,4 +1,6 @@
 import builtins
+import ctypes
+from types import SimpleNamespace
 
 import pytest
 
@@ -84,16 +86,129 @@ def test_resolve_budget_leaves_headroom_by_default(monkeypatch, detected, expect
         resolve_budget(memory="2M", workers=0)
 
 
-def test_detect_memory_fallback_when_meminfo_and_sysconf_fail(monkeypatch):
+def _unsupported_sysconf(name):
+    raise ValueError(f"unrecognized configuration name {name}")
+
+
+@pytest.mark.parametrize(
+    "sysconf",
+    [lambda name: -1, _unsupported_sysconf, None],
+    ids=["sysconf answers -1", "sysconf lacks the name", "no sysconf, as on Windows"],
+)
+def test_default_and_fractional_budgets_refuse_where_memory_cannot_be_read(
+    monkeypatch, sysconf
+):
     _without_meminfo(monkeypatch)
-    monkeypatch.setattr("os.sysconf", lambda name: -1)
-    assert detect_total_memory_bytes() == 8 * 1024**3
+    if sysconf is None:
+        monkeypatch.delattr("os.sysconf", raising=False)
+    else:
+        monkeypatch.setattr("os.sysconf", sysconf)
+    # Off Windows, or where Windows' own call is unavailable.
+    monkeypatch.delattr(ctypes, "windll", raising=False)
+    monkeypatch.delenv("CYTEARC_MEM_BUDGET", raising=False)
 
-    def unsupported(name):
-        raise ValueError(f"unrecognized configuration name {name}")
+    refusal = (
+        r"^Could not read this machine's memory from /proc/meminfo, sysconf or "
+        r"GlobalMemoryStatusEx, and no cgroup memory limit applies.*"
+        r"mem_budget='16G', or set CYTEARC_MEM_BUDGET=16G\.$"
+    )
+    with pytest.raises(RuntimeError, match=refusal):
+        detect_total_memory_bytes()
+    with pytest.raises(RuntimeError, match=refusal):
+        resolve_budget(workers=1)
+    with pytest.raises(RuntimeError, match=refusal):
+        resolve_budget(memory="0.5", workers=1)
+    monkeypatch.setenv("CYTEARC_MEM_BUDGET", "0.5")
+    with pytest.raises(RuntimeError, match=refusal):
+        resolve_budget(workers=1)
 
-    monkeypatch.setattr("os.sysconf", unsupported)
-    assert detect_total_memory_bytes() == 8 * 1024**3
+    # Sizes never read the machine's memory, so they still resolve.
+    monkeypatch.setenv("CYTEARC_MEM_BUDGET", "16G")
+    assert resolve_budget(workers=1).memoryBytes == 16 * 1024**3
+    assert resolve_budget(memory="2G", workers=1).memoryBytes == 2 * 1024**3
+    assert resolve_budget(memory=12_345_678, workers=1).memoryBytes == 12_345_678
+
+
+class _Kernel32:
+    """Answer GlobalMemoryStatusEx as Windows does for a machine of ``total`` bytes."""
+
+    def __init__(self, total: int, *, succeeds: bool = True) -> None:
+        self.total = total
+        self.succeeds = succeeds
+        self.lengths: list[int] = []
+
+    def GlobalMemoryStatusEx(self, status_pointer):
+        status = status_pointer.contents
+        self.lengths.append(status.dwLength)
+        # Windows fails the call unless dwLength holds the size of
+        # MEMORYSTATUSEX: two DWORDs and seven DWORDLONGs, 64 bytes.
+        if not self.succeeds or status.dwLength != 64:
+            return 0
+        status.ullTotalPhys = self.total
+        status.ullAvailPhys = self.total // 3
+        return 1
+
+
+def _on_windows(monkeypatch: pytest.MonkeyPatch, windll: object) -> None:
+    """Remove the Linux and Unix sources of memory and load ``windll`` as ctypes would."""
+    _without_meminfo(monkeypatch)
+    monkeypatch.delattr("os.sysconf", raising=False)
+    monkeypatch.setattr(ctypes, "windll", windll, raising=False)
+    monkeypatch.delenv("CYTEARC_MEM_BUDGET", raising=False)
+
+
+def test_memory_status_holds_the_windows_layout():
+    # MEMORYSTATUSEX: dwLength and dwMemoryLoad are DWORDs, the seven other
+    # fields DWORDLONGs. A DWORD read as C long would be 8 bytes on Linux.
+    layout = budget_module._MemoryStatusEx
+    assert ctypes.sizeof(layout) == 64
+    assert (layout.dwLength.offset, layout.dwLength.size) == (0, 4)
+    assert (layout.ullTotalPhys.offset, layout.ullTotalPhys.size) == (8, 8)
+    assert layout.ullAvailExtendedVirtual.offset == 56
+
+
+def test_windows_budgets_come_from_global_memory_status(monkeypatch):
+    kernel32 = _Kernel32(64 * 1024**3)
+    _on_windows(monkeypatch, SimpleNamespace(kernel32=kernel32))
+
+    assert detect_total_memory_bytes() == 64 * 1024**3
+    assert budget_module.detect_memory_limit_bytes() == 64 * 1024**3
+    assert resolve_budget(workers=1).memoryBytes == 48 * 1024**3
+    assert resolve_budget(memory="0.5", workers=1).memoryBytes == 32 * 1024**3
+    # Each reading asks Windows again, with the length it requires.
+    assert kernel32.lengths == [64, 64, 64, 64]
+
+
+@pytest.mark.parametrize(
+    "kernel32",
+    [
+        _Kernel32(64 * 1024**3, succeeds=False),
+        _Kernel32(0),
+        SimpleNamespace(),
+        SimpleNamespace(GlobalMemoryStatusEx=lambda pointer: 1),
+    ],
+    ids=["call fails", "reports no memory", "no such call", "call fills nothing"],
+)
+def test_a_windows_answer_without_memory_refuses_default_budgets(monkeypatch, kernel32):
+    _on_windows(monkeypatch, SimpleNamespace(kernel32=kernel32))
+
+    assert budget_module._windows_physical_memory_bytes() is None
+    assert budget_module.detect_memory_limit_bytes() is None
+    with pytest.raises(RuntimeError, match="^Could not read this machine's memory"):
+        resolve_budget(workers=1)
+
+
+def test_a_windows_library_that_fails_to_load_reads_as_no_memory(monkeypatch):
+    class Loader:
+        @property
+        def kernel32(self):
+            raise OSError("[WinError 126] The specified module could not be found")
+
+    _on_windows(monkeypatch, Loader())
+
+    assert budget_module._windows_physical_memory_bytes() is None
+    with pytest.raises(RuntimeError, match="^Could not read this machine's memory"):
+        detect_total_memory_bytes()
 
 
 @pytest.mark.parametrize(
@@ -167,7 +282,9 @@ def test_detect_memory_uses_process_cgroup_path(monkeypatch):
             nested_limit if path == "/sys/fs/cgroup/batch/memory.max" else None
         ),
     )
-    monkeypatch.setattr(budget_module, "_physical_memory_bytes", lambda: 16 * 1024**3)
+    monkeypatch.setattr(
+        budget_module, "_read_physical_memory_bytes", lambda: 16 * 1024**3
+    )
 
     assert detect_total_memory_bytes() == nested_limit
 
@@ -185,7 +302,9 @@ def test_cgroup_memory_ignores_unlimited_and_unreadable_limits(monkeypatch):
             "/sys/fs/cgroup/memory/legacy/memory.limit_in_bytes": str(3 * 1024**3),
         },
     )
-    monkeypatch.setattr(budget_module, "_physical_memory_bytes", lambda: 16 * 1024**3)
+    monkeypatch.setattr(
+        budget_module, "_read_physical_memory_bytes", lambda: 16 * 1024**3
+    )
 
     # Only the legacy parent directory holds a usable limit.
     assert detect_total_memory_bytes() == 3 * 1024**3
@@ -325,16 +444,21 @@ def test_cpu_quota_reads_the_legacy_controller_and_none_without_a_limit(monkeypa
     assert budget_module.detect_cpu_quota_cores() is None
 
 
-def test_memory_limit_is_unknown_where_planning_takes_a_fixed_size(monkeypatch):
-    # Neither /proc/meminfo nor sysconf answers, as on Windows.
+def test_stage_records_and_plans_read_memory_by_one_rule(monkeypatch):
+    # No source of physical memory answers.
     _without_meminfo(monkeypatch)
     monkeypatch.setattr("os.sysconf", lambda name: -1)
+    monkeypatch.delattr(ctypes, "windll", raising=False)
 
+    # A stage record stores that memory is unknown, and planning refuses.
     assert budget_module.detect_memory_limit_bytes() is None
-    assert detect_total_memory_bytes() == 8 * 1024**3
+    with pytest.raises(RuntimeError, match="^Could not read this machine's memory"):
+        detect_total_memory_bytes()
 
+    # A cgroup limit alone bounds what the process may use, so both take it.
     monkeypatch.setattr(budget_module, "_cgroup_memory_bytes", lambda: 2 * 1024**3)
     assert budget_module.detect_memory_limit_bytes() == 2 * 1024**3
+    assert detect_total_memory_bytes() == 2 * 1024**3
 
 
 def test_memory_limit_is_the_lower_of_physical_memory_and_the_cgroup_limit(

@@ -51,6 +51,7 @@ measurements.
 The size suffixes K, M, G, and T are powers of 1024, alone or followed by `B` or `iB`, so `"8G"`, `"8GB"`, and `"8GiB"` are the same budget.
 A budget that is not a positive finite size, such as `"inf"`, and a worker count below one, from `nthreads` or `CYTEARC_WORKERS`, raise `ValueError`.
 Without an explicit value or `CYTEARC_MEM_BUDGET`, it defaults to 75% of detected memory, using the smaller of physical memory and any detected cgroup limit: the total, not the memory free when the budget is resolved, so leave room for other processes on a shared host.
+Physical memory comes from `/proc/meminfo` on Linux, `sysconf` on macOS and other Unix systems, and `GlobalMemoryStatusEx` on Windows. Where neither physical memory nor a cgroup limit can be read, a default or fractional budget raises `RuntimeError`, and a size such as `mem_budget="16G"` still works.
 Explicit budgets, including fractions of detected memory, are not reduced.
 Each operation reserves within it the blocks it reads and what Zarr holds while it reads them: for a sharded array, such as the counts, a shard-level copy of the selection and the compressed chunks the read touches in a shard, and for every array the chunks it decodes.
 For a block transformed by a chain of element-wise steps, such as library-size scaling followed by a logarithm, it reserves the step of the chain that holds the most, one step's input beside its output.
