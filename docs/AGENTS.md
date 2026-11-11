@@ -17,7 +17,7 @@ uv sync --group docs-modal --extra docs --extra test --extra extra
 make -C docs html
 ```
 
-The site is written to ignored `docs/build/site/_build/html/`. Rendering does not execute code. Every executable notebook needs a completed execution timestamp, a matching code fingerprint, executed code cells, and no errors. Prose edits can reuse its outputs. Changed code requires re-execution and the updated notebook in the same change. For a lightweight source preview, use `make -C docs preview`; unexecuted pages display a warning that figures and results are unavailable. Preview builds still reject changed code and incomplete or failed executions.
+The site is written to ignored `docs/build/site/_build/html/`. Rendering does not execute code. Every executable notebook needs a completed execution timestamp, a matching code fingerprint, executed code cells, and no errors. Edits to prose, code comments, and blank lines can reuse its outputs, because the fingerprint hashes the code's Python tokens without them. Any other code change requires re-execution and the updated notebook in the same change. For a lightweight source preview, use `make -C docs preview`; unexecuted pages display a warning that figures and results are unavailable. Preview builds still reject changed code and incomplete or failed executions.
 
 Pages excluded by `project.exclude` in `docs/source/myst.yml` remain source-only and need no saved execution. Builds clear the generated site and API output so excluded pages leave no old routes. Package, dependency, and dataset changes require judgment about which pages to refresh; there is no dependency fingerprint or cache invalidation service.
 
