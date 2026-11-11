@@ -317,6 +317,39 @@ def test_pages_hold_no_em_dashes_or_html_comments() -> None:
     assert not found
 
 
+_NUMBERED_HEADING = re.compile(
+    r"^#{1,6}[ \t]+(?:\d+(?:\.\d+)*[.)]|\d+(?:\.\d+)+|0\d+)(?:[ \t].*)?$",
+    re.MULTILINE,
+)
+
+
+def test_numbered_headings_are_told_apart_from_headings_that_open_with_a_number() -> (
+    None
+):
+    numbered = [
+        "## 1. Choose datasets",
+        "### 2) Select",
+        "## 1.2 Topic",
+        "## 3.1. Topic",
+    ]
+    numbered.append("## 01 Introduction")
+    named = ["## 10x Genomics libraries", "## 3' RNA counts", "## 2024 releases"]
+    named.extend(["## 1.5x faster reads", "## Choose datasets", "    ## 1. In code"])
+    assert [bool(_NUMBERED_HEADING.search(text)) for text in numbered] == [True] * 5
+    assert [bool(_NUMBERED_HEADING.search(text)) for text in named] == [False] * 6
+
+
+def test_headings_name_their_sections_without_numbers() -> None:
+    # The order of a page already numbers its sections, and a number becomes
+    # the start of the heading's anchor.
+    found = [
+        (path.relative_to(_DOCS_SOURCE).as_posix(), heading.group(0))
+        for path in _pages()
+        for heading in _NUMBERED_HEADING.finditer(_prose(path))
+    ]
+    assert not found
+
+
 def test_every_citation_names_an_entry_of_the_bibliography() -> None:
     # A citation of a removed entry renders as its key, and MyST only warns.
     bibliography = (_DOCS_SOURCE / "references.bib").read_text()
