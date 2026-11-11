@@ -1278,3 +1278,22 @@ def test_writable_store_keeps_the_preparation_claim_of_another_process(
     assert sleeps == [2.0]
     listings = _received(loopback_hub, "tree")
     assert listings.count((f"data.zarr/{PREPARATION_CLAIM}", "directory")) == 2
+
+
+def test_offline_requests_build_their_headers_without_the_agent_registry(
+    monkeypatch, tmp_path
+):
+    # huggingface_hub fetches its agent registry from the Hub when the cache
+    # file is missing or older than a day; under hub_offline no request may.
+    from huggingface_hub import constants
+    from huggingface_hub.utils import _detect_agent, build_hf_headers
+
+    missing = tmp_path / "agent_harnesses.json"
+    monkeypatch.setattr(constants, "AGENT_HARNESSES_PATH", str(missing))
+    monkeypatch.setattr(_detect_agent, "_registry", None)
+
+    headers = build_hf_headers()
+
+    assert "hf_hub/" in headers["user-agent"]
+    assert "agent/" not in headers["user-agent"]
+    assert not missing.exists()

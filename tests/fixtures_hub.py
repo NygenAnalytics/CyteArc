@@ -19,6 +19,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 import pytest
 from huggingface_hub import BucketFile, BucketFolder
+from huggingface_hub import constants as hf_constants
 from huggingface_hub.errors import EntryNotFoundError
 
 BUCKET_ID = "test/cytearc"
@@ -66,6 +67,11 @@ def hub_offline(monkeypatch, tmp_path):
     monkeypatch.setattr(socket.socket, "connect", connect)
     monkeypatch.setattr(socket.socket, "connect_ex", connect_ex)
     monkeypatch.setattr(socket, "getaddrinfo", getaddrinfo)
+    # huggingface_hub adds the detected AI agent to its user agent, and detects
+    # it from a registry that it fetches from the Hub when its cache file under
+    # HF_HOME is missing or older than a day. The library reads its settings
+    # when imported, so the constant is patched rather than the variable.
+    monkeypatch.setattr(hf_constants, "HF_HUB_DISABLE_TELEMETRY", True)
 
     for name in (
         "HF_TOKEN",
