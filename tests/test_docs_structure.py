@@ -96,6 +96,40 @@ def test_llms_index_links_to_local_documentation() -> None:
         assert source.is_file(), target
 
 
+def test_llms_index_lists_each_page_under_its_sidebar_section() -> None:
+    # Assistants read llms.txt in place of the sidebar, so each page sits under
+    # the same section in both, in the same order. The build exports no route
+    # for an excluded page, so the index cannot link one.
+    project = _project()
+    sidebar: dict[str, str] = {}
+    excluded: set[str] = set()
+    for entry in project["toc"]:
+        for page in entry.get("children", []):
+            if "file" not in page:
+                continue
+            route = re.sub(r"\.(?:md|ipynb)$", "/", page["file"]).replace("_", "-")
+            if any(fnmatch(page["file"], rule) for rule in project["exclude"]):
+                excluded.add(route)
+            else:
+                sidebar[route] = entry["title"]
+    listed: dict[str, str] = {}
+    section = ""
+    for line in (_DOCS_SOURCE / "llms.txt").read_text().splitlines():
+        if line.startswith("## "):
+            section = line.removeprefix("## ")
+        elif link := re.match(r"- \[[^\]]+\]\(([^)]+)\)", line):
+            listed[link[1]] = section
+
+    assert [(listed[route], route) for route in listed if route in sidebar] == [
+        (sidebar[route], route) for route in sidebar if route in listed
+    ]
+    assert not excluded & set(listed)
+    assert set(sidebar) - set(listed) == {
+        "reference/license/",
+        "reference/third-party-notices/",
+    }
+
+
 def test_markdown_pages_open_with_their_own_title() -> None:
     # The discovery export reads a page from its first h1, and MyST renders an
     # h1 only for a heading in the page itself, not for one an include brings in.
@@ -120,14 +154,23 @@ def test_navigation_prioritizes_remote_workflows_and_preserves_tutorials() -> No
     sections = {
         entry["title"]: entry["children"] for entry in toctree if "children" in entry
     }
-    captions = list(sections)
 
-    assert captions[:3] == [
+    # Tutorials are grouped by the question that an analysis asks, in the order
+    # that an analysis meets those questions, ahead of the reference material.
+    assert list(sections) == [
         "Getting started",
-        "scRNA-seq analysis",
-        "scATAC-seq and multimodal",
+        "scRNA-seq preprocessing and structure",
+        "Annotation, programs, and visualization",
+        "Chromatin and multimodal integration",
+        "Integration, mapping, and donor comparisons",
+        "Trajectories and fate mapping",
+        "Lineage tracing and immune repertoires",
+        "Perturbation screens",
+        "Data management and interoperability",
+        "Public datasets",
+        "Reference",
+        "Developers",
     ]
-    assert captions[-2:] == ["Reference", "Developers"]
     assert {
         "concepts/memory_and_execution.md",
         "reference/remote_storage.md",
@@ -138,27 +181,91 @@ def test_navigation_prioritizes_remote_workflows_and_preserves_tutorials() -> No
         "children" not in entry for entries in sections.values() for entry in entries
     )
 
-    get_started = _toc_files(sections["Getting started"])
-    exploration = _toc_files(sections["scRNA-seq analysis"])
-    modalities = _toc_files(sections["scATAC-seq and multimodal"])
-    assert not {"scanpy.md", "seurat.md"} & get_started
-    assert {"scanpy.md", "seurat.md"} <= _toc_files(sections["Data management"])
-    assert "scanpy_and_seurat.md" not in get_started
-    assert {
-        "tutorials/scrna_seq.ipynb",
-        "tutorials/plotting.ipynb",
-        "tutorials/annotation.ipynb",
-    } <= exploration
-    assert "AI-assisted analysis" not in sections
-    assert {
-        "tutorials/scatac_seq.ipynb",
-        "tutorials/mitochondrial_lineage_tracing.ipynb",
-        "tutorials/cite_seq.ipynb",
-        "tutorials/tea_seq.ipynb",
-        "tutorials/multimodal_diagnostics.ipynb",
-        "tutorials/hto_demultiplexing.ipynb",
-        "tutorials/immune_repertoires.ipynb",
-    } <= modalities
+    placements = {
+        "Getting started": [
+            "quickstart.ipynb",
+            "tutorials/remote_stores.ipynb",
+            "installation.md",
+        ],
+        "scRNA-seq preprocessing and structure": [
+            "tutorials/scrna_seq.ipynb",
+            "tutorials/cell_calling.ipynb",
+            "tutorials/ambient_rna.ipynb",
+            "tutorials/hto_demultiplexing.ipynb",
+            "tutorials/quality_control.ipynb",
+            "tutorials/feature_selection.ipynb",
+            "tutorials/dimensionality_reduction.ipynb",
+            "tutorials/graph_construction.ipynb",
+            "tutorials/clustering.ipynb",
+            "tutorials/reuse_and_tracing.ipynb",
+        ],
+        "Annotation, programs, and visualization": [
+            "tutorials/annotation.ipynb",
+            "tutorials/gene_set_scoring.ipynb",
+            "tutorials/cell_cycle.ipynb",
+            "tutorials/regulons.ipynb",
+            "tutorials/plotting.ipynb",
+            "tutorials/imputation.ipynb",
+        ],
+        "Chromatin and multimodal integration": [
+            "tutorials/scatac_seq.ipynb",
+            "tutorials/cite_seq.ipynb",
+            "tutorials/tea_seq.ipynb",
+            "tutorials/multimodal_diagnostics.ipynb",
+        ],
+        "Integration, mapping, and donor comparisons": [
+            "tutorials/composite_datasets.ipynb",
+            "tutorials/dataset_merging.ipynb",
+            "tutorials/batch_correction.ipynb",
+            "tutorials/mapping_and_label_transfer.ipynb",
+            "tutorials/condition_comparisons.ipynb",
+            "tutorials/pseudobulk_and_differential_expression.ipynb",
+        ],
+        "Trajectories and fate mapping": [
+            "tutorials/pseudotime.ipynb",
+            "tutorials/expression_dynamics.ipynb",
+            "tutorials/fate_mapping.ipynb",
+            "tutorials/lineage_dynamics.ipynb",
+            "tutorials/lineage_curves.ipynb",
+            "tutorials/trajectory_validation.md",
+        ],
+        "Lineage tracing and immune repertoires": [
+            "tutorials/lineage_tracing.ipynb",
+            "tutorials/lineage_recorders.ipynb",
+            "tutorials/mitochondrial_lineage_tracing.ipynb",
+            "tutorials/immune_repertoires.ipynb",
+        ],
+        "Perturbation screens": ["tutorials/crispr_screens.ipynb"],
+        "Data management and interoperability": [
+            "tutorials/import_and_export.ipynb",
+            "tutorials/seurat_import.ipynb",
+            "scanpy.md",
+            "seurat.md",
+            "scanpy_and_seurat.md",
+            "tutorials/data_organization.ipynb",
+            "concepts/provenance.md",
+            "tutorials/custom_analyses.ipynb",
+        ],
+        "Public datasets": ["tutorials/cytebase_datasets.md"],
+    }
+    for section, pages in placements.items():
+        assert set(pages) <= _toc_files(sections[section]), section
+    listed = [
+        entry["file"]
+        for entries in sections.values()
+        for entry in entries
+        if "file" in entry
+    ]
+    assert len(listed) == len(set(listed))
+
+    # Cells are called, cleared of ambient RNA and assigned to their samples
+    # before quality control judges them.
+    preprocessing = [
+        entry["file"] for entry in sections["scRNA-seq preprocessing and structure"]
+    ]
+    quality_control = preprocessing.index("tutorials/quality_control.ipynb")
+    for step in ("cell_calling", "ambient_rna", "hto_demultiplexing"):
+        assert preprocessing.index(f"tutorials/{step}.ipynb") < quality_control, step
 
     published = _toc_files(toctree)
     for page in published:

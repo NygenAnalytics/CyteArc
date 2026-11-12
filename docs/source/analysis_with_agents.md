@@ -118,7 +118,7 @@ integrates modalities, and one for pooled CRISPR screens:
   they differ.
 - `ds.pipeline.multimodal(runs)` integrates completed runs of the same cells into one graph, then
   embeds and clusters it.
-- `ds.pipeline.perturbation(labels={"controls": [...]})` calls the guides of a pooled CRISPR screen, labels each cell by the genes its guides target, and measures each perturbation over the RNA recipe's highly variable genes and PCA ([Pooled CRISPR screens](#pooled-crispr-screens)).
+- `ds.pipeline.perturbation(labels={"controls": [...]})` calls the guides of a pooled CRISPR screen, labels each cell by the genes its guides target, and measures each perturbation over the RNA recipe's highly variable genes and PCA ([Perturbation screens](#perturbation-screens)).
 
 A recipe checks its call against the store before it writes anything: its keywords and settings,
 the columns and cells that it names, the combinations of its stages, and the setting values that
@@ -281,6 +281,7 @@ The pages below explain when and how to evaluate those operations.
 ### Import, quality control, and feature selection
 
 - Use [](tutorials/import_and_export.ipynb) for supported inputs and exports.
+- Before quality control, use [](tutorials/cell_calling.ipynb) to call cells in a raw droplet matrix, [](tutorials/ambient_rna.ipynb) to remove ambient RNA, and [](tutorials/hto_demultiplexing.ipynb) to assign hashed cells to their samples.
 - Use [](tutorials/quality_control.ipynb) to inspect modality-specific distributions and derive dataset-specific, often sample-aware selections.
 - Use [](tutorials/feature_selection.ipynb) to compare feature sets without treating partition agreement as proof of biological usefulness.
 
@@ -329,7 +330,7 @@ Separate three questions that require different evidence:
 - whether expression changes within a defined population;
 - whether the population definition itself changes.
 
-### Pseudotime and fate mapping
+### Trajectories and fate mapping
 
 Use pseudotime only when the graph and biological question support a plausible continuous process.
 Source and sink labels, or a per-cell direction score given to `fate` in place of a pseudotime, supervise the orientation; CyteArc does not discover terminal states.
@@ -383,7 +384,7 @@ Treat every regulon as a hypothesis about regulation, not as evidence of binding
   Factors nominated by motif enrichment of a program are candidates to test, not its
   demonstrated regulators.
 
-### Pooled CRISPR screens
+### Perturbation screens
 
 A pooled screen labels each cell by the guides it carries, so every downstream comparison depends on guide calls. Call guides from the guide counts with `perturbation.call_guides`, or import Cell Ranger's calls with `perturbation.import_guide_calls`, and inspect `plots.guide_calls` before labelling cells by perturbation with `perturbation.labels`, which names the genes that each cell's guides target. Then measure with `perturbation.efficiency` whether each perturbation changed its own target gene, and with `perturbation.edistance` how far it moved its cells from the control cells. Use [](tutorials/crispr_screens.ipynb) for a screen analyzed from download to results, the [Perturbation API reference](/api/perturbation.html) for each method's settings, checks and records, and the [perturbation recipe](/api/pipeline.html#perturbation) for the stages of one run.
 
@@ -428,7 +429,11 @@ A pooled screen labels each cell by the guides it carries, so every downstream c
 - Read a cluster as a hypothesis that its perturbations share a function, such as a complex or a pathway, and check it against known biology before reporting it. HDBSCAN leaves many perturbations unassigned (-1), which means no dense group, not no effect; their `probability` of 0 says so, and a low probability marks a member at a cluster's edge. Correlation ignores the strength of an effect, so pair a cluster with the efficiency and E-distance of its members.
 - Cells from one droplet run are not independent replicates. Test differential expression against controls across replicates, such as runs or donors, by pooling cells per perturbation label and replicate with `compare.compute_bulk`. The labels belong to the guide assay, so name the expression assay with `from_assay`, and leave out `"Negative"` and `"Multiple"` with `null_vals`.
 
-### Clones and lineage tracing
+### Lineage tracing and immune repertoires
+
+Use [](tutorials/lineage_tracing.ipynb) for clones marked by lineage barcodes and the fates they took, [](tutorials/lineage_recorders.ipynb) for clones cut from a lineage recorder's phylogenies, [](tutorials/mitochondrial_lineage_tracing.ipynb) for clones called from mitochondrial DNA variants, and [](tutorials/immune_repertoires.ipynb) for T and B cell clonotypes.
+
+#### Clones and lineage tracing
 
 A clone is the set of cells that descend from one ancestor cell. Import the clones that a lineage tracing tool assigned with `clones.import_clones`, or take them from a cell metadata column with `clones.from_column`, and check the artifact's count of unmatched barcodes before measuring how the clones expand, how diverse each sample is, which clones groups share, which fates are coupled and which fates the clones of early cells took.
 
@@ -457,7 +462,7 @@ A clone is the set of cells that descend from one ancestor cell. Import the clon
 - Cut at a depth, the branchings below each root, when the trees' lengths are not times (`time_unit=None`). Depth follows how finely the recorder resolved each part of a tree, so a depth compares clades within one tree better than across trees or experiments.
 - Check the diagnostic `cellsInNoTree` after importing a phylogeny: cells whose recorder alleles were too sparse to place have no clone at any cut, and every summary leaves them out. Check the phylogeny's `leafTimeSpread` before cutting late: in a tree whose leaves end at different times, cells whose leaves end before the cut are in no clone, which the cut's `cellsBeforeCut` and a warning count.
 
-### Immune receptor repertoires
+#### Immune receptor repertoires
 
 Single-cell immune profiling reads each T or B cell's receptor beside its transcriptome. Import the contigs with `repertoire.import_receptors` and inspect `plots.receptor_qc` before defining clonotypes or reading any repertoire statistic, since every later result counts cells by their chains.
 

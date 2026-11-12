@@ -27,16 +27,18 @@ project:
       title: Remote dataset mounting
     - file: installation.md
       title: Installation
-  - title: scRNA-seq analysis
+  - title: scRNA-seq preprocessing and structure
     children:
     - file: tutorials/scrna_seq.ipynb
       title: PBMC analysis
-    - file: tutorials/quality_control.ipynb
-      title: Quality control
     - file: tutorials/cell_calling.ipynb
       title: Cell calling
     - file: tutorials/ambient_rna.ipynb
       title: Ambient RNA removal
+    - file: tutorials/hto_demultiplexing.ipynb
+      title: HTO demultiplexing
+    - file: tutorials/quality_control.ipynb
+      title: Quality control
     - file: tutorials/feature_selection.ipynb
       title: Highly variable genes
     - file: tutorials/dimensionality_reduction.ipynb
@@ -47,37 +49,31 @@ project:
       title: Clustering
     - file: tutorials/reuse_and_tracing.ipynb
       title: Analysis reuse
+  - title: Annotation, programs, and visualization
+    children:
     - file: tutorials/annotation.ipynb
       title: Cell type annotation
     - file: tutorials/gene_set_scoring.ipynb
       title: Gene-set scoring
     - file: tutorials/cell_cycle.ipynb
       title: Cell-cycle scoring
+    - file: tutorials/regulons.ipynb
+      title: Regulons and gene programs
     - file: tutorials/plotting.ipynb
       title: Visualization
     - file: tutorials/imputation.ipynb
       title: Imputation
-  - title: scATAC-seq and multimodal
+  - title: Chromatin and multimodal integration
     children:
     - file: tutorials/scatac_seq.ipynb
       title: scATAC-seq
-    - file: tutorials/mitochondrial_lineage_tracing.ipynb
-      title: Mitochondrial lineage tracing
     - file: tutorials/cite_seq.ipynb
       title: CITE-seq
     - file: tutorials/tea_seq.ipynb
       title: TEA-seq
     - file: tutorials/multimodal_diagnostics.ipynb
       title: WNN and SNN integration
-    - file: tutorials/regulons.ipynb
-      title: Regulons and gene programs
-    - file: tutorials/hto_demultiplexing.ipynb
-      title: HTO demultiplexing
-    - file: tutorials/crispr_screens.ipynb
-      title: Pooled CRISPR screens
-    - file: tutorials/immune_repertoires.ipynb
-      title: Immune repertoires
-  - title: Integration and mapping
+  - title: Integration, mapping, and donor comparisons
     children:
     - file: tutorials/composite_datasets.ipynb
       title: CyteBase composite datasets
@@ -87,31 +83,39 @@ project:
       title: Harmony batch correction
     - file: tutorials/mapping_and_label_transfer.ipynb
       title: Reference mapping and label transfer
-  - title: Differential expression
-    children:
     - file: tutorials/condition_comparisons.ipynb
       title: Donor-level comparisons
     - file: tutorials/pseudobulk_and_differential_expression.ipynb
       title: Pseudobulk export
-  - title: Trajectory analysis
+  - title: Trajectories and fate mapping
     children:
     - file: tutorials/pseudotime.ipynb
       title: Pseudotime
     - file: tutorials/expression_dynamics.ipynb
       title: Expression dynamics
     - file: tutorials/fate_mapping.ipynb
-      title: Fate mapping
+      title: Fate mapping and potency
     - file: tutorials/lineage_dynamics.ipynb
       title: Lineage dynamics
     - file: tutorials/lineage_curves.ipynb
       title: Lineage curves
     - file: tutorials/trajectory_validation.md
       title: Trajectory validation
+  - title: Lineage tracing and immune repertoires
+    children:
     - file: tutorials/lineage_tracing.ipynb
       title: Lineage tracing
     - file: tutorials/lineage_recorders.ipynb
       title: Lineage recorders
-  - title: Data management
+    - file: tutorials/mitochondrial_lineage_tracing.ipynb
+      title: Mitochondrial lineage tracing
+    - file: tutorials/immune_repertoires.ipynb
+      title: Immune repertoires
+  - title: Perturbation screens
+    children:
+    - file: tutorials/crispr_screens.ipynb
+      title: Pooled CRISPR screens
+  - title: Data management and interoperability
     children:
     - file: tutorials/import_and_export.ipynb
       title: Import and export
