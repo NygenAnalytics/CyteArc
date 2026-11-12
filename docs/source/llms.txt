@@ -36,10 +36,10 @@ CyteBase, the catalog of public datasets stored as cloud-hosted CyteArc DataStor
 
 ## Chromatin and multimodal integration
 
-- [scATAC-seq](tutorials/scatac-seq/): peak filtering, LSI, graph construction, clustering, and gene scores
+- [scATAC-seq](tutorials/scatac-seq/): name the clusters of a saved PBMC run from gene scores of lineage markers, flag a doublet cluster by its peak counts, and run the ATAC recipe (cell filter, TF-IDF, LSI, Leiden) on your own peaks
 - [CITE-seq](tutorials/cite-seq/): matched RNA and ADT analysis with WNN integration
-- [TEA-seq](tutorials/tea-seq/): prepared RNA, ATAC, and protein analysis with three-way WNN
-- [WNN and SNN integration](tutorials/multimodal-diagnostics/): compare SNN and WNN and inspect modality weights
+- [TEA-seq](tutorials/tea-seq/): what RNA, ATAC, and protein each separate in the same PBMCs, three-way WNN integration, and each modality's WNN weight by cell type
+- [WNN and SNN integration](tutorials/multimodal-diagnostics/): compare RNA, protein, WNN and SNN clusterings of the same cells, trace where they disagree, and inspect modality weights
 
 ## Integration, mapping, and donor comparisons
 

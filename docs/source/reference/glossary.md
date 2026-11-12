@@ -148,11 +148,11 @@ SNN integration
 
 WNN integration
 : Default Hao-inspired weighted nearest-neighbor merge for two or more explicit modality
-  neighbour refs via `integration.modalities(sources)` or
+  neighbor refs via `integration.modalities(sources)` or
   `integration.modalities(sources, method="wnn")`.
-  CyteArc scores the union of all existing, self-free KNN rows with affinity and the distance span from each modality's nearest to its `k`-th neighbour as bandwidth.
+  CyteArc scores the union of all existing, self-free KNN rows with affinity and the distance span from each modality's nearest to its `k`-th neighbor as bandwidth.
   During scoring it L2-normalizes modality coordinate rows; the affinities themselves are not L2-normalized.
-  Unlike Seurat defaults, it does not build a wider 200-neighbour candidate pool or use SNN-far bandwidth.
+  Unlike Seurat defaults, it does not build a wider 200-neighbor candidate pool or use SNN-far bandwidth.
 
 densMAP
 : Density-preserving UMAP variant enabled by passing explicit graph and initialization refs to
