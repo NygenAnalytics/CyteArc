@@ -299,10 +299,4 @@ any changes you make after seeing the comparison as such.
 
 ## Documentation map
 
-The docs hold the full explanations, online at <https://docs.nygen.io/CyteArc/>:
-`quickstart.html`, `tutorials/<step>.html` (one page per step, for example `quality_control`,
-`graph_construction`, `clustering`, `annotation`, `batch_correction`,
-`condition_comparisons`), `concepts/` (`provenance`,
-`memory_and_execution`), `analysis_with_agents.html` (scientific decision loop, task
-routing, handoff) and `reference/api/<module>.html` (exact signatures). CyteBase has its own
-documentation at <https://docs.nygen.io/CyteBase/>.
+The docs hold the full explanations, online at <https://docs.nygen.io/CyteArc/>: `quickstart`, `tutorials/<step>` (one page per step, named with hyphens, for example `quality-control`, `graph-construction`, `clustering`, `annotation`, `batch-correction`, `condition-comparisons`), `concepts/` (`provenance`, `memory-and-execution`) and `api/<module>.html` (exact signatures, for example `api/pipeline.html`). The scientific decision loop, task routing and handoff are in [analysis_with_agents.md](https://github.com/NygenAnalytics/CyteArc/blob/master/docs/source/analysis_with_agents.md), which the site does not publish. CyteBase has its own documentation at <https://docs.nygen.io/CyteBase/>.

@@ -1,18 +1,18 @@
 ---
 myst:
   html_meta:
-    description: Build CyteArc neighborhood graphs through explicit normalization, reduction, neighbor search, and connectivity stages.
+    description: Build CyteArc neighbor graphs through explicit normalization, reduction, neighbor search, and connectivity stages.
 ---
 
 # Graph construction API reference
 
-These `DataStore` methods build a neighbourhood graph as explicit, provenance-backed stages. Each
+These `DataStore` methods build a neighbor graph as explicit, provenance-backed stages. Each
 builder returns an {py:class}`~cytearc.ArtifactRef`; pass that exact ref to the next stage.
 
 Prefer a pipeline recipe, such as `ds.pipeline.rna()`, for a standard analysis ({doc}`pipeline`).
 Use the individual methods for a partial workflow, an alternative branch, or a stage that the
 recipes do not run.
-See [Building neighbourhood graphs step by step](../tutorials/graph-construction) for an executable walkthrough.
+See [Build a neighbor graph stage by stage](../tutorials/graph-construction) for an executable walkthrough.
 
 ## Explicit chain
 
@@ -60,7 +60,7 @@ x86-64 Linux (`cytearc.neighbors.index.ann_index_peak_bytes`), where `dims` is t
 coordinate dimensions: the PCA dimensions, or the selected features of normalized coordinates.
 `graph.ann_index` holds it while it adds the coordinate blocks and while it saves it, and
 `graph.neighbors` while it loads and queries it, beside the indices and distances of every cell's
-neighbours, 8 bytes per neighbour. Each compares what it holds with the datastore's memory budget
+neighbors, 8 bytes per neighbor. Each compares what it holds with the datastore's memory budget
 before it creates or loads the index and raises `MemoryError` over it, naming the bytes, the cells,
 the dimensions, and the limit. The index moves between the store and memory through a temporary
 file of about `4 * dims + 8 * ann_m + 20` bytes per cell
@@ -76,7 +76,7 @@ argument is only an equality check; it cannot redirect an index to different coo
 
 By default `graph.ann_index` builds the hnswlib index with `ann_m=24` links per cell and a build
 candidate list of `ann_efc=200`, on one thread so that the index is reproducible. An `ann_efc`
-below `2 * ann_m` builds an index whose searches can miss every true neighbour of some cells
+below `2 * ann_m` builds an index whose searches can miss every true neighbor of some cells
 between well-separated clusters. The search depth only changes queries: `graph.neighbors` searches
 `max(ann_ef, 2 * k)` candidates by default, where `ann_ef` is the index's recorded smallest depth,
 200 by default, and its own `ann_ef=` argument sets another depth. The neighbors artifact records
@@ -85,7 +85,7 @@ depth as hnswlib applies it; an artifact without `ann_ef` searched that depth. A
 index's depth therefore keeps the identity of earlier ones, and a changed depth computes new
 neighbors from the same index.
 
-Queries run on the datastore's `nthreads` threads, which never change the neighbors. Each query saves the percentage of cells that it returned among their own nearest neighbours as its `selfHitRate` {ref}`diagnostic <artifact_diagnostics>`, and a rate below 99.5% warns each time the query is computed or reused; cells with identical coordinates also lower it. `reduction.pca` and `reduction.harmony` also save the numbers behind their warnings as diagnostics, which their entries below list.
+Queries run on the datastore's `nthreads` threads, which never change the neighbors. Each query saves the percentage of cells that it returned among their own nearest neighbors as its `selfHitRate` {ref}`diagnostic <artifact_diagnostics>`, and a rate below 99.5% warns each time the query is computed or reused; cells with identical coordinates also lower it. `reduction.pca` and `reduction.harmony` also save the numbers behind their warnings as diagnostics, which their entries below list.
 
 ## External coordinates
 
@@ -116,7 +116,7 @@ same values again reuses it and `ds.artifacts.lineage` shows where the coordinat
 ## Downstream consumers
 
 UMAP, t-SNE, clustering, diffusion, trajectories, graph metrics, and graph-backed plots
-require an exact graph or neighbour artifact. Analytical producers return artifacts and do not add
+require an exact graph or neighbor artifact. Analytical producers return artifacts and do not add
 live metadata fields:
 
 ```python

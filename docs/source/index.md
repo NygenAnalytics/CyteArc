@@ -43,7 +43,7 @@ flowchart TB
 
 The available starting points depend on what the atlas contains: mapping needs a prepared reference, while exploration can start from published annotations and embeddings.
 
-## Built for large cell atlases
+## Scale to large cell atlases
 
 CyteArc streams count matrices in bounded blocks and stores RNA counts in both cell-wise and gene-wise layouts so each operation can read in the direction it needs. Memory and worker settings let you fit the work to your machine. The count matrix does not have to fit in RAM; graphs, neighbor indexes, and other intermediate results still need memory and storage.
 
@@ -56,7 +56,7 @@ Completed steps are saved and reused when their inputs and settings match. Chang
 Set up your environment with the {ref}`Installation <installation>` guide, then start from the section that matches your question.
 
 - **Getting started:** [mount Tabula Sapiens](tutorials/remote_stores.ipynb), plot its saved UMAP and a marker gene, then save a cell selection locally; no credentials are needed. The {ref}`Quick start <quickstart>` opens a prepared analysis of 100,000 cells sampled from the same atlas, and its [RNA-seq workflow](quickstart.ipynb#analyze-your-own-rna-seq-data) runs the standard pipeline on your own counts.
-- **scRNA-seq preprocessing and structure:** the [PBMC walkthrough](tutorials/scrna_seq.ipynb) names the blood cell populations of a prepared analysis from their marker genes. For your own data, [call cells](tutorials/cell_calling.ipynb) in a raw droplet matrix, [remove ambient RNA](tutorials/ambient_rna.ipynb), and [assign hashed cells to their samples](tutorials/hto_demultiplexing.ipynb) where needed, then review [quality control](tutorials/quality_control.ipynb) before interpreting the results.
+- **scRNA-seq preprocessing and structure:** the [PBMC analysis](tutorials/scrna_seq.ipynb) names the blood cell populations of a prepared analysis from their marker genes. For your own data, [call cells](tutorials/cell_calling.ipynb) in a raw droplet matrix, [remove ambient RNA](tutorials/ambient_rna.ipynb), and [assign hashed cells to their samples](tutorials/hto_demultiplexing.ipynb) where needed, then review [quality control](tutorials/quality_control.ipynb) before interpreting the results.
 - **Annotation, programs, and visualization:** [annotate cell types](tutorials/annotation.ipynb) from supporting and competing markers, score [gene sets](tutorials/gene_set_scoring.ipynb) and [cell-cycle phases](tutorials/cell_cycle.ipynb), and [build figures](tutorials/plotting.ipynb) with CyteArc's plotting API.
 - **Chromatin and multimodal integration:** the [scATAC-seq tutorial](tutorials/scatac_seq.ipynb) reads chromatin accessibility through peaks and gene scores, and the [CITE-seq](tutorials/cite_seq.ipynb) and [TEA-seq](tutorials/tea_seq.ipynb) tutorials join RNA, protein, and ATAC measured in the same cells with WNN.
 - **Integration, mapping, and donor comparisons:** [analyze several CyteBase datasets together](tutorials/composite_datasets.ipynb) without copying their counts, [map query cells onto a fixed reference](tutorials/mapping_and_label_transfer.ipynb) and transfer its labels, and [compare conditions across matched donors](tutorials/condition_comparisons.ipynb).
@@ -65,7 +65,7 @@ Set up your environment with the {ref}`Installation <installation>` guide, then 
 - **Perturbation screens:** the [pooled CRISPR screen tutorial](tutorials/crispr_screens.ipynb) calls guides, separates knocked-out cells from escapers, and tests what each perturbation changes.
 - **Data management and interoperability:** [import counts](tutorials/import_and_export.ipynb) from 10x, Matrix Market, H5AD, CSV, or a [saved Seurat object](tutorials/seurat_import.ipynb), and export counts and results to AnnData. The [Scanpy guide](scanpy.md) and [Seurat guide](seurat.md) translate individual steps.
 
-## Methods and help
+## Find methods and get help
 
 [](reference/methods.md) describes the supported workflows, validation evidence, and scientific limitations. For help, check the [](reference/faq.md) and [](reference/glossary.md), [ask a question](https://github.com/NygenAnalytics/CyteArc/discussions), or [report a bug](https://github.com/NygenAnalytics/CyteArc/issues). See [](developers/contributing.md) to contribute code or documentation.
 

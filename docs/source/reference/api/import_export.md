@@ -237,7 +237,7 @@ melded assays keep their ``float64`` values.
 
 Some deposits hold only normalized values, such as LARRY's in vitro matrix on GEO or the `X` of a CELLxGENE file. `H5adToZarr`, `CrToZarr`, `CSVtoZarr`, `SparseToZarr`, and `SeuratToZarr` take `values=`: `"counts"`, `"normalized"` for counts scaled by one factor per cell, `"log_normalized"` for their natural log (`log1p`, as scanpy and Seurat write it), or `"log2_normalized"` for `log2(x + 1)`, as scater writes it. The default, `None`, decides each assay from its values before the destination is created:
 
-1. A negative value is refused: centred or scaled values, as prepared for PCA, have them.
+1. A negative value is refused: centered or scaled values, as prepared for PCA, have them.
 2. Whole numbers are counts.
 3. Otherwise the first 100 cells are read three ways: as they are, after undoing a natural log, and after undoing a base-2 log. A reading fits when every cell sums to one total within 1%, or when 99% of the values lie within 0.05 of a whole multiple of their cell's smallest value, as counts scaled per cell do. Exactly one fitting reading decides the values, and anything else refuses and asks for `values=`.
 

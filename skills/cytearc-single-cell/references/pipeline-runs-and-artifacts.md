@@ -5,7 +5,7 @@ run, reopen and audit runs, inspect and trace immutable artifacts, branch from a
 refs, and record the analysis for handoff. Docs:
 <https://docs.nygen.io/CyteArc/api/pipeline.html>, <https://docs.nygen.io/CyteArc/api/artifacts.html>,
 <https://docs.nygen.io/CyteArc/concepts/provenance>, <https://docs.nygen.io/CyteArc/tutorials/reuse-and-tracing>,
-<https://docs.nygen.io/CyteArc/analysis-with-agents>.
+<https://github.com/NygenAnalytics/CyteArc/blob/master/docs/source/analysis_with_agents.md>.
 
 ## When to use
 

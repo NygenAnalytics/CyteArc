@@ -116,7 +116,7 @@ CyteArc's sink already shows. Handlers that an application added receive CyteArc
 .. py:data:: cytearc.tqdm_params
 
     Default keyword arguments applied by :func:`cytearc.tqdmbar`, including bar
-    format, dynamic width, and colour. Override any of them per call.
+    format, dynamic width, and color. Override any of them per call.
 ```
 
 ```{eval-rst}
