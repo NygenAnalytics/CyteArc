@@ -14,16 +14,16 @@ CyteBase, the catalog of public datasets stored as cloud-hosted CyteArc DataStor
 
 ## scRNA-seq preprocessing and structure
 
-- [PBMC analysis](tutorials/scrna-seq/): interpret a prepared PBMC run with marker evidence
+- [PBMC analysis](tutorials/scrna-seq/): name the PBMC populations of a saved analysis from their marker genes
 - [Cell calling](tutorials/cell-calling/): EmptyDrops calls cells in an unfiltered droplet matrix before quality control
 - [Ambient RNA removal](tutorials/ambient-rna/): soup profile from empty droplets, contamination from marker gene sets, and corrected counts
-- [HTO demultiplexing](tutorials/hto-demultiplexing/): sample-tag classification and Seurat comparison
-- [Quality control](tutorials/quality-control/): modality-aware and sample-aware filtering
+- [HTO demultiplexing](tutorials/hto-demultiplexing/): call each droplet's donor from hashtag counts, check the calls against RNA content, compare cutoff quantiles, and select the singlets
+- [Quality control](tutorials/quality-control/): compare automatic and manual cell filters, see which cell types each removes, set bounds per sample, and score doublets
 - [Highly variable genes](tutorials/feature-selection/): feature-set diagnostics
 - [Dimensionality reduction](tutorials/dimensionality-reduction/): PCA dimensions and layout comparison
-- [Neighborhood graph](tutorials/graph-construction/): granular normalization, reduction, neighbors, and graphs
+- [Neighborhood graph](tutorials/graph-construction/): build a PBMC graph stage by stage, check node degree and connected components, and compare neighbor counts and search depths
 - [Clustering](tutorials/clustering/): Leiden resolutions, Paris cuts, membership strength, connectivity, and markers
-- [Analysis reuse](tutorials/reuse-and-tracing/): change the neighbor count without rerunning normalization, PCA, or the search index
+- [Analysis reuse](tutorials/reuse-and-tracing/): change the neighbor count or number of PCs and reuse unchanged results, trace where analyses diverge, plan a recipe run, and read what each stage used
 
 ## Annotation, programs, and visualization
 

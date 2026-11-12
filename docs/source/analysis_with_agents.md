@@ -290,7 +290,7 @@ Do not copy thresholds from another tissue or protocol without inspecting the cu
 
 ### Reduction, graph construction, and clustering
 
-- Use [](tutorials/graph_construction.ipynb) for granular normalization, reduction, neighbour, and graph methods.
+- Use [](tutorials/graph_construction.ipynb) for granular normalization, reduction, neighbor, and graph methods.
 - Use [](tutorials/dimensionality_reduction.ipynb) to compare dimension counts and layouts.
 - Use [](tutorials/clustering.ipynb) to compare Leiden resolutions, Paris cuts, graph connectivity, membership strength, and marker specificity.
 

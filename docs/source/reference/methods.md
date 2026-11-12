@@ -63,7 +63,7 @@ The aim is one coherent execution path, not reimplementation for its own sake.
   from its paper: the soup profile of empty droplets, contamination fractions from marker gene
   sets with cluster-level exclusion, and the removal of soup counts from each cell, rounded at
   random as in the paper with seeded [systematic sampling](https://doi.org/10.1214/aoms/1177729988)
-  so that every gene loses its share of the soup on average ({ref}`ambient_rna`). The paper's
+  so that the rounding leaves each gene's expected removal unchanged ({ref}`ambient_rna`). The paper's
   automatic estimate, its hierarchical cell-level model, and its correction of cluster-aggregated
   counts are not implemented, nor is DecontX; corrected counts from CellBender import as a Cell
   Ranger HDF5 file.
