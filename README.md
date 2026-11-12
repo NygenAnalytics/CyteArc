@@ -11,7 +11,7 @@ CyteArc is a Python framework for **single-cell RNA, ATAC, protein, and matched 
 
 CyteArc analyzed **Tahoe-100M in under 20 hours on commodity hardware**, from cell filtering through UMAP, clustering, and marker gene identification, **without downsampling the dataset or using GPUs**. The same workflow processed one million cells within 15 minutes.
 
-Mount remote datasets, combine studies into **virtual datasets**, and run pipelines with provenance stored alongside the results.
+Mount remote datasets, combine studies into **composite datasets**, and run pipelines with provenance stored alongside the results.
 
 [Documentation](https://docs.nygen.io/CyteArc/) · [Quick start](https://docs.nygen.io/CyteArc/quickstart) · [Methods and validation](https://docs.nygen.io/CyteArc/reference/methods)
 
@@ -19,7 +19,7 @@ Mount remote datasets, combine studies into **virtual datasets**, and run pipeli
 
 | Analysis | What you can do |
 | :-- | :-- |
-| **[Data access](https://docs.nygen.io/CyteArc/tutorials/remote-stores)** | Mount local or remote stores; combine cells across studies into virtual datasets without copying their counts |
+| **[Data access](https://docs.nygen.io/CyteArc/tutorials/remote-stores)** | Mount local or remote stores; combine cells across studies into composite datasets without copying their counts |
 | **[Cell calling and QC](https://docs.nygen.io/CyteArc/tutorials/quality-control)** | EmptyDrops cell calling, ambient RNA correction, doublet detection within samples, cell-cycle scoring, and HTO demultiplexing |
 | **[Cell populations](https://docs.nygen.io/CyteArc/tutorials/scrna-seq)** | RNA, ATAC, and protein pipelines; batch-aware feature selection, PCA/LSI, UMAP, densMAP, t-SNE, Leiden/Paris clustering, and marker tests |
 | **[Integration](https://docs.nygen.io/CyteArc/tutorials/multimodal-diagnostics)** | Harmony2 batch correction, WNN/SNN integration of modalities measured in the same cells, and integration diagnostics |
@@ -27,7 +27,7 @@ Mount remote datasets, combine studies into **virtual datasets**, and run pipeli
 | **[Condition comparisons](https://docs.nygen.io/CyteArc/tutorials/condition-comparisons)** | Sample-level and paired comparisons across donors, with pseudobulk export for downstream differential expression |
 | **[Trajectories](https://docs.nygen.io/CyteArc/tutorials/lineage-dynamics)** | Population Balance Analysis pseudotime, fate probabilities, lineage-specific gene dynamics, and fate-weighted curves |
 | **[Lineage tracing and immune repertoires](https://docs.nygen.io/CyteArc/tutorials/lineage-tracing)** | Clones from lineage barcodes, lineage recorder alleles and phylogenies, and mitochondrial DNA variants; clonal expansion, diversity, fate coupling, and fate bias; TCR and BCR clonotypes, gene usage, and AIRR export |
-| **[Gene activity and regulation](https://docs.nygen.io/CyteArc/api/regulons.html)** | AUCell/WAGGR gene-set scores, SCENIC-style regulons, chromVAR motif activity, region-to-gene links, and gene programs |
+| **[Gene activity and regulation](https://docs.nygen.io/CyteArc/tutorials/regulons)** | AUCell/WAGGR gene-set scores, SCENIC-style regulons, chromVAR motif activity, region-to-gene links, and gene programs |
 | **[CRISPR screens](https://docs.nygen.io/CyteArc/tutorials/crispr-screens)** | Guide calling, perturbation labels, target knockdown and E-distances, Mixscape's knocked-out cells and escapers, calibrated association tests at low and high MOI, and perturbation clusters |
 | **[Import and export](https://docs.nygen.io/CyteArc/tutorials/import-and-export)** | Cell Ranger, Matrix Market, AnnData, and Seurat import; export counts and selected analysis results to AnnData |
 
@@ -49,7 +49,7 @@ run = ds.pipeline.rna(label="rna")
 ds.plots.embedding(run=run, color_by="clusters")
 ```
 
-Pipelines cover QC through marker discovery, with over 100 stage settings across RNA, ATAC, protein, and multimodal workflows. See the [RNA tutorial](https://docs.nygen.io/CyteArc/tutorials/scrna-seq) for details.
+Pipelines cover QC through marker discovery, with over 100 stage settings across RNA, ATAC, protein, and multimodal workflows. See the [analysis pipeline API reference](https://docs.nygen.io/CyteArc/api/pipeline.html) for every stage and its settings.
 
 ## Mount a remote dataset
 
@@ -66,9 +66,9 @@ run = ds.pipeline.rna(label="rna")
 
 Find datasets in the companion [CyteBase catalog](https://docs.nygen.io/CyteBase/). See [remote access](https://docs.nygen.io/CyteArc/tutorials/remote-stores) for connection options.
 
-## Analyze several studies as one virtual dataset
+## Analyze several studies as one composite dataset
 
-A virtual dataset combines cells from existing stores without copying their count matrices, saving the time and space of a physical merge. It works like a regular datastore.
+A composite dataset combines cells from existing stores without copying their count matrices, saving the time and space of a physical merge. It works like a regular datastore.
 
 ```python
 from cytearc.composite import create_composite

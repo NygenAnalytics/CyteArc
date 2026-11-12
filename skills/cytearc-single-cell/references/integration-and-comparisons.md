@@ -1,9 +1,6 @@
 # Study design, integration, and condition comparisons
 
-Identify donors, samples, batches and conditions, correct a technical batch with Harmony and score
-it, then compare composition and expression at the donor level. Docs: <https://docs.nygen.io/CyteArc/tutorials/batch-correction>, and in the same folder
-`condition_comparisons.html`,
-`dataset_merging.html`, `mapping_and_label_transfer.html`.
+Identify donors, samples, batches and conditions, correct a technical batch with Harmony and score it, then compare composition and expression at the donor level. Docs: <https://docs.nygen.io/CyteArc/tutorials/batch-correction>, and in the same folder `condition-comparisons`, `dataset-merging` and `mapping-and-label-transfer`.
 
 ## When to use
 

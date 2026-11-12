@@ -8,11 +8,11 @@ myst:
 
 Prefer the `DataStore` methods below in analysis code.
 
-`integration.modalities` accepts two or more exact source refs. WNN is the default; it consumes neighbour
+`integration.modalities` accepts two or more exact source refs. WNN is the default; it consumes neighbor
 artifacts and follows each one's named native reduction or batch-correction coordinates. SNN is
 explicit and consumes connectivity-map artifacts. The returned integrated-graph reference is the
 exact downstream `graph` argument.
-WNN does not accept imported-coordinate ancestry. `coordinates` is a provenance input on neighbour
+WNN does not accept imported-coordinate ancestry. `coordinates` is a provenance input on neighbor
 and ANN artifacts, not a separate artifact kind.
 
 ```python
@@ -20,7 +20,7 @@ wnn = ds.integration.modalities([rna_neighbors, adt_neighbors])
 snn = ds.integration.modalities([rna_graph, adt_graph], method="snn")
 ```
 
-WNN also rejects neighbours built on normalized values, as an RNA pipeline run with
+WNN also rejects neighbors built on normalized values, as an RNA pipeline run with
 `pca={"dims": 0}` builds them, because it weighs each assay by its reduced coordinates; SNN
 integrates such graphs.
 
@@ -28,10 +28,10 @@ integrates such graphs.
 the same cells, then embeds and clusters the integrated graph as a durable run ({doc}`pipeline`).
 
 Integration holds its inputs in memory: SNN every source graph with a float64 matrix of
-shared-neighbour fractions per graph, about `16 * n_graphs + 20` bytes per edge, and WNN every
-assay's neighbours and coordinates with the integrated graph and its modality weights. Both
+shared-neighbor fractions per graph, about `16 * n_graphs + 20` bytes per edge, and WNN every
+assay's neighbors and coordinates with the integrated graph and its modality weights. Both
 compare that estimate with the datastore's memory budget before they load a graph or coordinate
-and raise `MemoryError` over it, naming the bytes, the cells, the neighbours, the dimensions, and
+and raise `MemoryError` over it, naming the bytes, the cells, the neighbors, the dimensions, and
 the limit. `reduction.harmony` does the same before it reads coordinates, with the estimate of
 {py:func}`~cytearc.embeddings.harmony.harmony_peak_bytes`: it holds the float64 coordinates three
 times, as its input, its original copy, and its corrected copy, and float64 soft cluster
@@ -49,7 +49,7 @@ The default WNN artifact stores one per-cell weight for each input assay. Plot t
 `ds.plots.modality_weights(graph=wnn, layout=wnn_layout)` accessor. An explicit SNN artifact does
 not contain modality weights.
 
-Neighbour-based metrics require `neighbors`; graph metrics require `graph`; reduction metrics
+Neighbor-based metrics require `neighbors`; graph metrics require `graph`; reduction metrics
 require their exact coordinate artifact. Batch-mixing methods and biological-annotation cLISI or
 graph connectivity intentionally read imported metadata columns over the rows selected by artifact
 lineage. They are not an indirect path for scoring CyteArc-produced clusterings. Concordance instead
@@ -68,8 +68,8 @@ Metric label columns must label every scored cell: masked, `NaN`, `None`, and bl
 `ValueError`.
 
 All LISI entry points resolve `perplexity=None` to `floor(k / 3)`, where `k` is the
-number of neighbours. Explicit values are capped at `k / 3`
-with a warning when the graph is too small. With three to five neighbours, the default
+number of neighbors. Explicit values are capped at `k / 3`
+with a warning when the graph is too small. With three to five neighbors, the default
 is 1, so scores can approach 1 when the nearest distance is unique. Tied distances can
 produce larger values.
 
@@ -202,7 +202,7 @@ Symphony-style mapping references copy. The soft assignments are not stored.
 `rounds`, `converged`, `objective`, the objective at the end of each round's clustering, and
 `clusterPasses`, the clustering passes of each round.
 
-Reuse requires every array and the diagnostics in this table. A correction saved by the earlier implementation stored a `ridge` array instead of `ridge_penalty` and `active_levels`, so it stays listable, loadable, and traceable, but no request reuses it: the next request computes a new correction, and the ANN index, neighbours, graphs, embeddings, clusters, and mapping references built on it are computed again. Mapping references built from an earlier correction still load and map.
+Reuse requires every array and the diagnostics in this table. A correction saved by the earlier implementation stored a `ridge` array instead of `ridge_penalty` and `active_levels`, so it stays listable, loadable, and traceable, but no request reuses it: the next request computes a new correction, and the ANN index, neighbors, graphs, embeddings, clusters, and mapping references built on it are computed again. Mapping references built from an earlier correction still load and map.
 
 ```{eval-rst}
 .. autofunction:: cytearc.embeddings.fit_harmony

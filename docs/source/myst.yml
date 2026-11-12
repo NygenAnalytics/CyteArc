@@ -41,7 +41,7 @@ project:
     - file: tutorials/dimensionality_reduction.ipynb
       title: Dimensionality reduction
     - file: tutorials/graph_construction.ipynb
-      title: Neighborhood graph
+      title: Neighbor graph
     - file: tutorials/clustering.ipynb
       title: Clustering
     - file: tutorials/reuse_and_tracing.ipynb

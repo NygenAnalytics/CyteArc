@@ -1,6 +1,6 @@
 # Immune receptor repertoires
 
-Import the T cell and B cell receptor contigs of single-cell immune profiling (10x Genomics Chromium Single Cell Immune Profiling, or any pipeline that writes AIRR Rearrangement files with cell IDs), check each cell's chains, label cells by receptor type, subtype and chain pairing, group them into clonotypes or clonotype clusters, count gene usage and junction lengths, and export AIRR Rearrangement files. Docs: <https://docs.nygen.io/CyteArc/api/repertoire.html>, <https://docs.nygen.io/CyteArc/tutorials/immune-repertoires>, <https://docs.nygen.io/CyteArc/analysis_with_agents.html>.
+Import the T cell and B cell receptor contigs of single-cell immune profiling (10x Genomics Chromium Single Cell Immune Profiling, or any pipeline that writes AIRR Rearrangement files with cell IDs), check each cell's chains, label cells by receptor type, subtype and chain pairing, group them into clonotypes or clonotype clusters, count gene usage and junction lengths, and export AIRR Rearrangement files. Docs: <https://docs.nygen.io/CyteArc/api/repertoire.html>, <https://docs.nygen.io/CyteArc/tutorials/immune-repertoires>, <https://github.com/NygenAnalytics/CyteArc/blob/master/docs/source/analysis_with_agents.md>.
 
 ## When to use
 
