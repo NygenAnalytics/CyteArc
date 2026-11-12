@@ -85,17 +85,13 @@ project:
   - title: Trajectories and fate mapping
     children:
     - file: tutorials/pseudotime.ipynb
-      title: Pseudotime
-    - file: tutorials/expression_dynamics.ipynb
-      title: Expression dynamics
+      title: Pseudotime and expression dynamics
     - file: tutorials/fate_mapping.ipynb
       title: Fate mapping and potency
     - file: tutorials/lineage_dynamics.ipynb
       title: Lineage dynamics
     - file: tutorials/lineage_curves.ipynb
-      title: Lineage curves
-    - file: tutorials/trajectory_validation.md
-      title: Trajectory validation
+      title: Lineage curves and trajectory checks
   - title: Lineage tracing and immune repertoires
     children:
     - file: tutorials/lineage_tracing.ipynb

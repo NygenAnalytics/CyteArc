@@ -222,11 +222,9 @@ def test_navigation_prioritizes_remote_workflows_and_preserves_tutorials() -> No
         ],
         "Trajectories and fate mapping": [
             "tutorials/pseudotime.ipynb",
-            "tutorials/expression_dynamics.ipynb",
             "tutorials/fate_mapping.ipynb",
             "tutorials/lineage_dynamics.ipynb",
             "tutorials/lineage_curves.ipynb",
-            "tutorials/trajectory_validation.md",
         ],
         "Lineage tracing and immune repertoires": [
             "tutorials/lineage_tracing.ipynb",
@@ -355,7 +353,6 @@ def test_installation_links_match_the_published_route() -> None:
 def test_trajectory_tutorials_use_source_sink_sign_convention() -> None:
     tutorials = (
         "pseudotime.ipynb",
-        "expression_dynamics.ipynb",
         "fate_mapping.ipynb",
         "lineage_dynamics.ipynb",
         "lineage_curves.ipynb",
