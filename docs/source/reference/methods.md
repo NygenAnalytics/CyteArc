@@ -54,7 +54,7 @@ The aim is one coherent execution path, not reimplementation for its own sake.
   Multiple-testing options include [Benjamini-Hochberg](https://doi.org/10.1111/j.2517-6161.1995.tb02031.x),
   Holm, and Bonferroni correction. Marker search reports AUC, expression fractions, fold changes,
   and Mann-Whitney statistics. See [](../tutorials/condition_comparisons.ipynb) for a paired
-  donor analysis and [](../tutorials/pseudobulk_and_differential_expression.ipynb) for export.
+  donor analysis and [pseudobulk export](../tutorials/condition_comparisons.ipynb#pseudobulk_and_differential_expression).
 - **Doublets and diagnostics:** [Scrublet](https://doi.org/10.1016/j.cels.2018.11.005)-style
   doublet scores and calls simulated within each sample, cluster separability, and integration
   metrics informed by the [scIB benchmark](https://doi.org/10.1038/s41592-021-01336-8).

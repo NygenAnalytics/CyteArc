@@ -321,7 +321,7 @@ Use [](tutorials/annotation.ipynb) to combine marker specificity, AUC, expressio
 Identify mixed populations explicitly and retain uncertain labels.
 
 Marker search treats cells as observations.
-For condition-level inference, use [](tutorials/pseudobulk_and_differential_expression.ipynb) to aggregate by biological replicate and export counts to a replicate-aware statistical method.
+For condition-level inference, use [pseudobulk export](tutorials/condition_comparisons.ipynb#pseudobulk_and_differential_expression) to aggregate by biological replicate and export counts to a replicate-aware statistical method.
 Descriptive pseudo-replicates made by splitting the same cells are not independent biological replicates.
 
 Separate three questions that require different evidence:

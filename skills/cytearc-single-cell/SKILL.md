@@ -302,7 +302,7 @@ any changes you make after seeing the comparison as such.
 The docs hold the full explanations, online at <https://docs.nygen.io/CyteArc/>:
 `quickstart.html`, `tutorials/<step>.html` (one page per step, for example `quality_control`,
 `graph_construction`, `clustering`, `annotation`, `batch_correction`,
-`pseudobulk_and_differential_expression`), `concepts/` (`provenance`,
+`condition_comparisons`), `concepts/` (`provenance`,
 `memory_and_execution`), `analysis_with_agents.html` (scientific decision loop, task
 routing, handoff) and `reference/api/<module>.html` (exact signatures). CyteBase has its own
 documentation at <https://docs.nygen.io/CyteBase/>.
