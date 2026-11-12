@@ -389,7 +389,9 @@ def test_every_figure_of_a_built_notebook_has_a_description() -> None:
 def test_committed_notebooks_match_the_code_they_executed() -> None:
     # The build refuses a notebook whose code changed after it ran. Checking
     # here finds such a notebook without a full build, excluded pages included.
+    pytest.importorskip("jupytext")
     nbformat = pytest.importorskip("nbformat")
+    pytest.importorskip("yaml")
     from docs.build_docs import validate_execution
 
     checked = 0

@@ -472,6 +472,9 @@ def test_an_added_empty_code_cell_requires_execution(executable_docs) -> None:
 def test_executable_tokens_leave_out_comments_and_line_layout() -> None:
     import tokenize
 
+    pytest.importorskip("jupytext")
+    pytest.importorskip("nbformat")
+    pytest.importorskip("yaml")
     from docs.build_docs import executable_tokens
 
     expected = [
@@ -494,7 +497,9 @@ def test_executable_tokens_leave_out_comments_and_line_layout() -> None:
     ],
 )
 def test_fingerprint_names_the_code_cell_it_cannot_read(unreadable) -> None:
+    pytest.importorskip("jupytext")
     nbformat = pytest.importorskip("nbformat")
+    pytest.importorskip("yaml")
     from docs.build_docs import code_fingerprint
 
     notebook = nbformat.v4.new_notebook(
