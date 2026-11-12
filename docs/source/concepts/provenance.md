@@ -34,7 +34,7 @@ Both branches read the same counts, selections and normalization. The two PCAs a
 
 ## When a saved result is reused
 
-A call whose operation, parameters and inputs match a saved artifact returns that artifact instead of computing it again. A changed parameter gives a new artifact, and each later step that reads it computes a new result too. [](../tutorials/reuse_and_tracing.ipynb) changes the neighbor count and the number of principal components and traces which results each change computes again.
+A call whose operation, parameters and inputs match a saved artifact returns that artifact instead of computing it again. A changed parameter gives a new artifact, and each later step that reads it computes a new result too. The [analysis reuse tutorial](../tutorials/reuse_and_tracing.ipynb) changes the neighbor count and the number of principal components and traces which results each change computes again.
 
 When a CyteArc release changes what an operation computes for the same parameters and inputs, the operation gets a new revision. Results saved under an earlier revision are then computed again instead of reused; they stay loadable, and lineage reports mark them stale. [](../developers/operation_revisions.md) explains when a change needs a revision.
 
@@ -42,10 +42,10 @@ When a CyteArc release changes what an operation computes for the same parameter
 
 Cell columns and another store's labels can change after a result reads them. A filter fingerprints the cell columns it reads, so once a column's values change, the same filter call computes a new selection instead of returning the old one. Label transfer instead copies the reference labels it reads into the query store, so the transferred labels keep pointing at the annotations, threshold and projection that produced them after the reference atlas is re-annotated.
 
-Provenance covers what CyteArc computes. A column that your own code writes with `ds.cells.insert`, as [](../tutorials/custom_analyses.ipynb) does, carries no record of how its values were computed. Coordinates imported with `ds.reduction.import_coordinates` keep the tool, version and parameters passed as `source`, as [](../tutorials/import_and_export.ipynb) shows.
+Provenance covers what CyteArc computes. A column that your own code writes with `ds.cells.insert`, as the [custom analyses tutorial](../tutorials/custom_analyses.ipynb) does, carries no record of how its values were computed. Coordinates imported with `ds.reduction.import_coordinates` keep the tool, version and parameters passed as `source`, as [](../tutorials/import_and_export.ipynb) shows.
 
 ## What a pipeline run adds
 
 A [`PipelineRun`](/api/pipeline.html#cytearc.PipelineRun) records one complete recipe call, such as `ds.pipeline.rna()`: its settings, its named outputs, and `run.cells` and `run.features`, tables of the cells and genes it analyzed that read the run's own selections and results, never the live columns. A run reuses every saved result whose operation, parameters and inputs match, as a single call does, and a run given an earlier run as `cells`, such as an ADT run after an RNA run, reuses that run's cell selection. The run also records each stage, one step of the recipe such as `pca` or `umap`, with its wall and CPU time, sampled memory use, warnings and summary; these records never decide whether a result is reused.
 
-The [Artifacts, lineage, and summaries API reference](/api/artifacts.html) documents the calls that list, inspect and trace saved results.
+The [artifacts, lineage, and summaries API reference](/api/artifacts.html) documents the calls that list, inspect and trace saved results.

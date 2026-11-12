@@ -5,7 +5,7 @@ description: Find the CyteArc call for each step of a Scanpy analysis, the setti
 (scanpy-users)=
 # CyteArc for Scanpy users
 
-Find the CyteArc call for each step of a Scanpy analysis, the settings where the two give different results, and how counts and results move between them through H5AD files. Where Scanpy writes each result into an `AnnData` object, CyteArc saves it in the store as an {term}`artifact` and returns an {term}`ArtifactRef`, a reference that the next step takes as its input. [](scanpy_and_seurat.md) compares the two models.
+Find the CyteArc call for each step of a Scanpy analysis, the settings where the two give different results, and how counts and results move between them through H5AD files. Where Scanpy writes each result into an `AnnData` object, CyteArc saves it in the store as an {term}`artifact` and returns an {term}`ArtifactRef`, a reference that the next step takes as its input. The [data model comparison](scanpy_and_seurat.md) explains how the two models differ.
 
 ## Translate each step
 
@@ -29,7 +29,7 @@ In the calls below, `ds` is a `cytearc.DataStore`, the object that opens a store
 | Plot | `sc.pl.umap`, `sc.pl.dotplot` | `ds.plots.embedding`, `ds.plots.dotplot` |
 | Write an H5AD file | `adata.write_h5ad` | `cytearc.to_h5ad`, or `ds.to_anndata()` for an `AnnData` object in memory |
 
-[](tutorials/graph_construction.ipynb) runs the chain from PCA to clusters one call at a time, and [](tutorials/scrna_seq.ipynb) interprets each stage of a PBMC analysis.
+The [neighbor graph tutorial](tutorials/graph_construction.ipynb) runs the chain from PCA to clusters one call at a time, and the [PBMC analysis](tutorials/scrna_seq.ipynb) names the populations of a saved run from their marker genes.
 
 ## Which settings give different results
 
@@ -38,7 +38,7 @@ In the calls below, `ds` is a `cytearc.DataStore`, the object that opens a store
 - **Neighbor count and default sizes.** CyteArc's `k` leaves out the cell itself and Scanpy's `n_neighbors` counts it, so `k=14` gives each cell as many neighbors as Scanpy's default `n_neighbors=15`; CyteArc's default is `k=11`. By default, `ds.features.hvgs` selects 1,000 genes, and `ds.reduction.pca` keeps 21 components where `sc.pp.pca` keeps 50. `ds.pipeline.rna()` clusters at Leiden resolutions 0.5, 0.75, 1.0 and 1.25 and saves the one with the best silhouette as the run's `clusters`; `leiden={"selected": 1.0}` saves resolution 1.0, the default of `sc.tl.leiden`, instead.
 - **Excluded gene families.** By default, `ds.features.hvgs` never selects mitochondrial, ribosomal protein or replication-dependent histone genes, human HLA or mouse H2 genes, cyclins such as `CCNA2` and `CCND1`, or ten sex-linked genes such as `XIST` and `DDX3Y`; it recognizes each family by gene name. `blacklist=""` keeps every gene, as Scanpy does.
 - **Batch-aware selection.** With `batch=`, genes rank by the number of batches that select them and then by their median rank, the order of Seurat's `SelectIntegrationFeatures` and of Scanpy's `flavor="seurat_v3_paper"`; Scanpy's `flavor="seurat_v3"` ranks by median rank first.
-- **Marker statistics and order.** `ds.markers.search` reports each gene's AUC and two-sided Mann-Whitney p-value, with Benjamini-Hochberg adjustment within each group. `ds.markers.load` keeps genes detected in at least 20% of a group's cells, with an AUC of at least 0.6 and an adjusted p-value of at most 0.05, and orders them by `score`, the gene's mean rank in the group divided by the sum of its mean ranks over all groups, which favors genes specific to one group. `sort_by="auc"` or `sort_by="p_value"` gives an order closer to that of `rank_genes_groups`, which sorts by its test statistic. Both tools test cells, not donors; [](tutorials/condition_comparisons.ipynb) compares conditions across donors.
+- **Marker statistics and order.** `ds.markers.search` reports each gene's AUC and two-sided Mann-Whitney p-value, with Benjamini-Hochberg adjustment within each group. `ds.markers.load` keeps genes detected in at least 20% of a group's cells, with an AUC of at least 0.6 and an adjusted p-value of at most 0.05, and orders them by `score`, the gene's mean rank in the group divided by the sum of its mean ranks over all groups, which favors genes specific to one group. `sort_by="auc"` or `sort_by="p_value"` gives an order closer to that of `rank_genes_groups`, which sorts by its test statistic. Both tools test cells, not donors; the [donor-level comparisons tutorial](tutorials/condition_comparisons.ipynb) compares conditions across donors.
 
 ## Move data through H5AD
 
