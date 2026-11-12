@@ -156,7 +156,7 @@ be decoded is otherwise left out with a `skipped_metadata_column` notice. `defau
 the store's default assay, which an active assay that is not imported, such as an `integrated`
 assay without raw counts (`counts_layer_missing`), requires. `reduction_roles` sets whether a
 reduction imports as a UMAP or t-SNE embedding or as graph coordinates.
-See [Import and export](../tutorials/import-and-export) for the worked contract and [CyteArc for Seurat users](../seurat) for
+See [Import a saved Seurat object](../tutorials/seurat-import) for a worked import and [CyteArc for Seurat users](../seurat) for
 workflow mapping.
 
 ```{eval-rst}
@@ -551,31 +551,7 @@ cytearc.to_h5ad(ds.RNA, "analysis.h5ad", run=run)
 cytearc.to_h5ad(ds.RNA, "analysis_normalized.h5ad", run=run, matrix="normed")
 ```
 
-The assay must be the run's assay, `run.assay`, as the exact assay object owned by the datastore
-that opened the run. A run export
-to a file holds exactly what {py:meth}`~cytearc.datastore.datastore.DataStore.to_anndata` returns
-for the same `run` and `matrix`, because one resolution of the run's rows, columns, and values
-serves both: the run's cells, its frozen cell fields in `obs` with the consecutive UMAP fields in
-`obsm["X_umap"]`, the PCA of an RNA or ADT run in `obsm["X_pca"]` with the loadings in
-`varm["PCs"]` and its Harmony correction, if any, in `obsm["X_pca_harmony"]`, the LSI of an ATAC
-run in `obsm["X_lsi"]` and its Harmony correction, if any, in `obsm["X_lsi_harmony"]`, and its
-frozen feature fields in `var`. `to_anndata` holds that object in memory; `to_h5ad` streams it
-into the file. The run's plan decides which fields are categoricals. Label fields, those with a
-categorical display (`clusters`, `leiden_*`,
-`paris`, and `cell_cycle_phase`), are categoricals whose categories are their labels as text in
-natural order, with the run's display colors as `uns["<field>_colors"]`, so that Scanpy's
-`rank_genes_groups(adata, "clusters")` and categorical plots work directly. Other text that repeats
-or has missing values is a categorical whose categories are in natural order (`d2` before `d10`,
-with a superscript or circled digit kept as text), and text missing in every row is a categorical
-without categories. `to_anndata` returns those fields as pandas categoricals with exactly those
-categories, and the file stores the same categories and codes, so the object, the file, and a file
-that `AnnData.write_h5ad` writes from the object agree whatever the AnnData version. Other text is a
-string array, and the indexes are named `ids` and `gene_ids`. The export stores `X` compressed,
-stores distinct text as a string array, and leaves out empty `layers`, `obsp`, `uns`, `varm`, and
-`varp` groups. `embeddings_cols`, feature-count recalculation, a cell selection, and a
-writer-specific thread override apply only to ordinary assay export and are rejected when `run` is
-supplied; `obsm`, `obs`, and `graph` add artifacts over the run's cells, such as
-`graph=run["connectivity_map"]`.
+The assay must be the run's assay, `run.assay`, as the exact assay object owned by the datastore that opened the run. A run export to a file holds exactly what {py:meth}`~cytearc.datastore.datastore.DataStore.to_anndata` returns for the same `run` and `matrix`, because one resolution of the run's rows, columns, and values serves both: the run's cells, its frozen cell fields in `obs` with the consecutive UMAP fields in `obsm["X_umap"]`, the PCA of an RNA or ADT run in `obsm["X_pca"]` with the loadings in `varm["PCs"]` and its Harmony correction, if any, in `obsm["X_pca_harmony"]`, the LSI of an ATAC run in `obsm["X_lsi"]` and its Harmony correction, if any, in `obsm["X_lsi_harmony"]`, and its frozen feature fields in `var`. `to_anndata` holds that object in memory; `to_h5ad` streams it into the file. The run's plan decides which fields are categoricals. Label fields, those with a categorical display (`clusters`, `leiden_*`, `paris`, and `cell_cycle_phase`), are categoricals whose categories are their labels as text in natural order, with the run's display colors as `uns["<field>_colors"]`, so that categorical plots and `rank_genes_groups(adata, "clusters")` use them without conversion. With the default raw counts in `X`, run `sc.pp.normalize_total` and `sc.pp.log1p` before `rank_genes_groups`, which expects log-normalized values. Other text that repeats or has missing values is a categorical whose categories are in natural order (`d2` before `d10`, with a superscript or circled digit kept as text), and text missing in every row is a categorical without categories. `to_anndata` returns those fields as pandas categoricals with exactly those categories, and the file stores the same categories and codes, so the object, the file, and a file that `AnnData.write_h5ad` writes from the object agree whatever the AnnData version. Other text is a string array, and the indexes are named `ids` and `gene_ids`. The export stores `X` compressed, stores distinct text as a string array, and leaves out empty `layers`, `obsp`, `uns`, `varm`, and `varp` groups. `embeddings_cols`, feature-count recalculation, a cell selection, and a writer-specific thread override apply only to ordinary assay export and are rejected when `run` is supplied; `obsm`, `obs`, and `graph` add artifacts over the run's cells, such as `graph=run["connectivity_map"]`.
 
 With `matrix="raw"`, the default, `X` holds the raw counts of the run's cells over its feature
 universe. With `matrix="normed"`, `X` is the run's `normalized` artifact: the float32 values that

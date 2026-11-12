@@ -47,13 +47,13 @@ pass them explicitly.
 Alternative results can coexist.
 Retain each granular method's returned [`ArtifactRef`](/api/artifacts.html#cytearc.ArtifactRef) and pass that reference to the
 next operation. No branch becomes a global implicit result.
-See [](tutorials/custom_analyses.ipynb) for a complete example and [](concepts/provenance.md) for the storage model.
+See [](tutorials/reuse_and_tracing.ipynb) for a complete example and [](concepts/provenance.md) for the storage model.
 
 Opening a mounted store with another workspace name does not create a separate analysis.
 A mount records one source workspace, and reopening that target with a different workspace is rejected.
 Create a separate mount target for each analysis that needs independent metadata and results.
 Use artifact branches within one target when only parameters or downstream methods differ.
-Mount behavior is documented in [](tutorials/remote_stores.ipynb); general layout is documented in [](tutorials/data_organization.ipynb).
+Mount behavior is documented in the [remote dataset tutorial](tutorials/remote_stores.ipynb); general layout is documented in the [cell and feature metadata tutorial](tutorials/data_organization.ipynb).
 
 ## Start or continue safely
 
