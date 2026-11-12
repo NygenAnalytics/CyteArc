@@ -51,12 +51,10 @@ CyteBase, the catalog of public datasets stored as cloud-hosted CyteArc DataStor
 
 ## Trajectories and fate mapping
 
-- [Pseudotime](tutorials/pseudotime/): supervised sources and sinks
-- [Expression dynamics](tutorials/expression-dynamics/): feature profiles and modules
+- [Pseudotime and expression dynamics](tutorials/pseudotime/): supervised sources and sinks, genes correlated with pseudotime, and expression modules that catch transient genes
 - [Fate mapping and potency](tutorials/fate-mapping/): multiple terminal outcomes, directed by a pseudotime or by potency scores without source cells
-- [Lineage dynamics](tutorials/lineage-dynamics/): fate-weighted genes, drivers, and modules per lineage
-- [Lineage curves](tutorials/lineage-curves/): curves per lineage, placing points, and candidate sinks from a cluster tree
-- [Trajectory validation](tutorials/trajectory-validation/): boundary, graph, statistical, and numerical checks
+- [Lineage dynamics](tutorials/lineage-dynamics/): fate-weighted genes, branch points, drivers, and modules per lineage
+- [Lineage curves and trajectory checks](tutorials/lineage-curves/): candidate sinks from a cluster tree, curves per lineage, placing points, and checks of scored cells, subgraph order, potency direction, cells off every curve, and branch points
 
 ## Lineage tracing and immune repertoires
 
