@@ -151,13 +151,7 @@ input datasets. Run them concurrently in separate ephemeral Modal containers:
 make -C docs execute-docs-modal PAGES="tea_seq cell_cycle" MODAL_ENVIRONMENT=your_environment
 ```
 
-The runner reads the selected source notebooks and atomically replaces each successful one
-at the same path in `docs/source/`. It records `metadata.executed_at` and the executed code's
-`metadata.executed_code_sha256` fingerprint. Do not edit the fingerprint by hand. Commit the
-updated notebook alongside any package changes that required re-execution. A failed page
-leaves its previous notebook intact and reports the error; rerun it after fixing the cause.
-Submit affected pages in one invocation, with one container per page. Do not execute the same
-notebook concurrently or render while the runner is replacing it.
+The runner reads the selected source notebooks and atomically replaces each successful one at the same path in `docs/source/`. It records `metadata.executed_at` and the executed code's `metadata.executed_code_sha256` fingerprint, a hash of the code cells' Python tokens that leaves out comments and blank lines. Editing a comment therefore keeps the saved outputs valid, while any change to the code itself requires re-execution. Do not edit the fingerprint by hand. Commit the updated notebook alongside any package changes that required re-execution. A failed page leaves its previous notebook intact and reports the error; rerun it after fixing the cause. Submit affected pages in one invocation, with one container per page. Do not execute the same notebook concurrently or render while the runner is replacing it.
 The runner consumes published datasets and does not rebuild or publish them.
 Provider-backed tutorials require separate credentials and authorization.
 
@@ -170,11 +164,7 @@ automatically by the runner. CPU time is not measured. Keep `%%time` out of note
 make -C docs html
 ```
 
-Open `docs/build/site/_build/html/index.html` through a local static web server. This command
-builds the Sphinx API, checks its public-symbol coverage, and renders MyST without executing
-notebooks. Each source notebook supplies both the rendered page and its notebook download.
-Prose edits can reuse outputs; changed code requires re-execution to update its fingerprint.
-Every executable page needs a complete, successful execution with a matching fingerprint.
+Open `docs/build/site/_build/html/index.html` through a local static web server. This command builds the Sphinx API, checks its public-symbol coverage, and renders MyST without executing notebooks. Each source notebook supplies both the rendered page and its notebook download. Edits to prose and code comments reuse the saved outputs; other code changes require re-execution to update the fingerprint. Every executable page needs a complete, successful execution with a matching fingerprint.
 
 Use `make -C docs preview` while editing unexecuted notebooks. Unexecuted pages display a
 source-preview warning explaining that their figures and results are unavailable. This command
@@ -193,11 +183,7 @@ make -C docs check-reference
 ### Publish to GitHub Pages
 
 The `GitHub Pages` workflow builds and publishes the complete site on pushes to `master`.
-Pull requests, PyPI release checks, and Pages validate and render the notebooks committed in
-`docs/source/` with `make -C docs html`. CI does not execute notebooks. Missing, failed, or stale
-executions fail the build. After changing executable code, rerun the affected pages on Modal,
-inspect the complete HTML build, and commit the updated notebooks. Prose-only changes can reuse
-outputs. Rendered site files under `docs/build/` remain ignored by Git.
+Pull requests, PyPI release checks, and Pages validate and render the notebooks committed in `docs/source/` with `make -C docs html`. CI does not execute notebooks. Missing, failed, or stale executions fail the build. After changing executable code, rerun the affected pages on Modal, inspect the complete HTML build, and commit the updated notebooks. Changes to prose and code comments can reuse outputs. Rendered site files under `docs/build/` remain ignored by Git.
 
 In the repository's Pages settings, select **GitHub Actions** as the publishing source.
 Set the custom domain to `docs.nygen.io`; the documentation is served at

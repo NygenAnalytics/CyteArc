@@ -364,6 +364,155 @@ def test_saved_outputs_follow_unchanged_code_and_current_prose(
         build_docs.prepare_site(preview=preview)
 
 
+_EXECUTED_LOOP = (
+    'for name in ("A#1", "B"):\n    print(name.lower())\ntotal = len("A#1")'
+)
+
+
+def _save_executed_loop(build_docs):
+    import nbformat
+
+    source = build_docs.SOURCE / "example.ipynb"
+    saved = nbformat.read(source, as_version=4)
+    saved.cells[1].source = _EXECUTED_LOOP
+    saved.cells[1].outputs = [
+        nbformat.v4.new_output("stream", name="stdout", text="a#1\nb\n")
+    ]
+    saved.metadata["executed_code_sha256"] = build_docs.code_fingerprint(saved)
+    nbformat.write(saved, source)
+    return source, saved
+
+
+@pytest.mark.parametrize(
+    "edited",
+    [
+        pytest.param(
+            '# Print each name.\nfor name in ("A#1", "B"):\n'
+            '    print(name.lower())  # lower case\ntotal = len("A#1")',
+            id="comments-added",
+        ),
+        pytest.param(
+            'for name in ("A#1", "B"):\n\n# A comment at another indentation.\n'
+            '    print(name.lower())\n\n\ntotal = len("A#1")\n',
+            id="blank-lines-and-dedented-comment",
+        ),
+        pytest.param(_EXECUTED_LOOP + "\n# A closing comment.", id="closing-comment"),
+        pytest.param(
+            'for name in (\n    "A#1",\n    "B"\n):\n    print(name.lower())\n'
+            'total = len("A#1")',
+            id="bracketed-line-breaks",
+        ),
+    ],
+)
+def test_comment_and_layout_edits_keep_saved_outputs(executable_docs, edited) -> None:
+    import nbformat
+
+    build_docs = executable_docs
+    source, saved = _save_executed_loop(build_docs)
+    current = nbformat.read(source, as_version=4)
+    current.cells[1].source = edited
+    nbformat.write(current, source)
+
+    assert (
+        build_docs.code_fingerprint(current) == (saved.metadata["executed_code_sha256"])
+    )
+    site = build_docs.prepare_site()
+    rendered = nbformat.read(site / "example.ipynb", as_version=4)
+    assert rendered.cells[1].source == edited
+    assert rendered.cells[1].outputs[0].text == "a#1\nb\n"
+
+
+@pytest.mark.parametrize(
+    "edited",
+    [
+        pytest.param(_EXECUTED_LOOP.replace('"B"', '"C"'), id="string"),
+        pytest.param(
+            _EXECUTED_LOOP.replace('("A#1", "B")', '("A#2", "B")'),
+            id="string-with-hash",
+        ),
+        pytest.param(_EXECUTED_LOOP.replace("lower", "upper"), id="name"),
+        pytest.param(_EXECUTED_LOOP + ";", id="semicolon"),
+        pytest.param(
+            _EXECUTED_LOOP.replace("total =", "# total ="), id="commented-out-code"
+        ),
+        pytest.param(
+            _EXECUTED_LOOP.replace("\ntotal", "\n    total"), id="indentation"
+        ),
+    ],
+)
+def test_changes_to_executed_code_require_execution(executable_docs, edited) -> None:
+    import nbformat
+
+    build_docs = executable_docs
+    source, saved = _save_executed_loop(build_docs)
+    current = nbformat.read(source, as_version=4)
+    current.cells[1].source = edited
+    nbformat.write(current, source)
+
+    assert (
+        build_docs.code_fingerprint(current) != (saved.metadata["executed_code_sha256"])
+    )
+    with pytest.raises(ValueError, match="Code changed"):
+        build_docs.prepare_site()
+
+
+def test_an_added_empty_code_cell_requires_execution(executable_docs) -> None:
+    import nbformat
+
+    build_docs = executable_docs
+    source, _saved = _save_executed_loop(build_docs)
+    current = nbformat.read(source, as_version=4)
+    current.cells.append(nbformat.v4.new_code_cell(""))
+    nbformat.write(current, source)
+
+    with pytest.raises(ValueError, match="Code changed"):
+        build_docs.prepare_site()
+
+
+def test_executable_tokens_leave_out_comments_and_line_layout() -> None:
+    import tokenize
+
+    pytest.importorskip("jupytext")
+    pytest.importorskip("nbformat")
+    pytest.importorskip("yaml")
+    from docs.build_docs import executable_tokens
+
+    expected = [
+        (tokenize.NAME, "total"),
+        (tokenize.OP, "="),
+        (tokenize.NUMBER, "1"),
+        (tokenize.NEWLINE, ""),
+        (tokenize.ENDMARKER, ""),
+    ]
+    assert executable_tokens("total = 1  # one\n\n# two\n") == expected
+    assert executable_tokens("# zero\ntotal = 1") == expected
+    assert executable_tokens("# Only a comment.") == [(tokenize.ENDMARKER, "")]
+
+
+@pytest.mark.parametrize(
+    "unreadable",
+    [
+        pytest.param("print(", id="unclosed-bracket"),
+        pytest.param("if True:\n    a = 1\n  b = 2\n", id="inconsistent-dedent"),
+    ],
+)
+def test_fingerprint_names_the_code_cell_it_cannot_read(unreadable) -> None:
+    pytest.importorskip("jupytext")
+    nbformat = pytest.importorskip("nbformat")
+    pytest.importorskip("yaml")
+    from docs.build_docs import code_fingerprint
+
+    notebook = nbformat.v4.new_notebook(
+        cells=[
+            nbformat.v4.new_markdown_cell("# Example"),
+            nbformat.v4.new_code_cell("total = 1"),
+            nbformat.v4.new_code_cell(unreadable),
+        ]
+    )
+    with pytest.raises(ValueError, match="Cannot read code cell 3 as Python"):
+        code_fingerprint(notebook)
+
+
 @pytest.mark.parametrize("state", ["count", "output", "timestamp", "fingerprint"])
 def test_preview_rejects_partial_execution(executable_docs, state: str) -> None:
     import nbformat

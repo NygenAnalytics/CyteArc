@@ -3,12 +3,14 @@
 import argparse
 import hashlib
 import inspect
+import io
 import json
 import os
 import pickle
 import re
 import shutil
 import subprocess
+import tokenize
 import tomllib
 from datetime import datetime
 from fnmatch import fnmatchcase
@@ -657,9 +659,37 @@ def write_discovery_files(
     (html / "llms.txt").write_text(index)
 
 
+# Comments, the line breaks of blank and comment-only lines, and the encoding
+# marker do not change what a code cell runs.
+_UNEXECUTED_TOKENS = frozenset({tokenize.COMMENT, tokenize.NL, tokenize.ENCODING})
+# These tokens end a statement, a block or the cell. Their text depends only on
+# whether a line break or comment follows, so only their position counts.
+_BOUNDARY_TOKENS = frozenset({tokenize.NEWLINE, tokenize.DEDENT, tokenize.ENDMARKER})
+
+
+def executable_tokens(source: str) -> list[tuple[int, str]]:
+    """Return the tokens of a code cell that decide what it runs."""
+    tokens = tokenize.generate_tokens(io.StringIO(source).readline)
+    return [
+        (token.type, "" if token.type in _BOUNDARY_TOKENS else token.string)
+        for token in tokens
+        if token.type not in _UNEXECUTED_TOKENS
+    ]
+
+
 def code_fingerprint(notebook: nbformat.NotebookNode) -> str:
-    sources = [cell.source for cell in notebook.cells if cell.cell_type == "code"]
-    encoded = json.dumps(sources, ensure_ascii=False, separators=(",", ":"))
+    """Hash the code a notebook runs, ignoring comments and blank lines."""
+    cells = []
+    for index, cell in enumerate(notebook.cells, start=1):
+        if cell.cell_type != "code":
+            continue
+        try:
+            cells.append(executable_tokens(cell.source))
+        except (SyntaxError, tokenize.TokenError) as error:
+            raise ValueError(
+                f"Cannot read code cell {index} as Python to fingerprint it: {error}"
+            ) from error
+    encoded = json.dumps(cells, ensure_ascii=False, separators=(",", ":"))
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 

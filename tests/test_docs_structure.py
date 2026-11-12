@@ -4,6 +4,7 @@ import tomllib
 from fnmatch import fnmatch
 from pathlib import Path
 
+import pytest
 import yaml
 
 
@@ -383,6 +384,26 @@ def test_every_figure_of_a_built_notebook_has_a_description() -> None:
             if len(figures) != len(texts) or not all(str(t).strip() for t in texts):
                 undescribed.append((page, cell.get("id")))
     assert not undescribed
+
+
+def test_committed_notebooks_match_the_code_they_executed() -> None:
+    # The build refuses a notebook whose code changed after it ran. Checking
+    # here finds such a notebook without a full build, excluded pages included.
+    pytest.importorskip("jupytext")
+    nbformat = pytest.importorskip("nbformat")
+    pytest.importorskip("yaml")
+    from docs.build_docs import validate_execution
+
+    checked = 0
+    for path in _pages():
+        if path.suffix != ".ipynb":
+            continue
+        notebook = nbformat.read(path, as_version=4)
+        if "executed_code_sha256" not in notebook.metadata:
+            continue
+        validate_execution(notebook, path.relative_to(_DOCS_SOURCE))
+        checked += 1
+    assert checked
 
 
 def test_api_pages_link_labels_through_the_ref_role() -> None:
