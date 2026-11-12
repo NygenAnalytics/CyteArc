@@ -1,99 +1,57 @@
 ---
-description: Translate a Seurat workflow to CyteArc and import a saved Seurat object.
+description: Find the CyteArc call for each step of a Seurat analysis, the settings that give different results, and how to import a saved Seurat object without R.
 ---
 
 (seurat-users)=
 # CyteArc for Seurat users
 
-This guide maps familiar Seurat stages to CyteArc's store-backed API. Use the workflow map
-below to find the equivalent task, or try the {ref}`Quick start <quickstart>` to inspect a prepared
-result. For optional background on how CyteArc stores and reuses results, see
-[](scanpy_and_seurat.md). Follow [](tutorials/seurat_import.ipynb) for an executed import
-with metadata selection, coordinate roles and partial-import notices.
+Find the CyteArc call for each step of a Seurat analysis, the settings where the two give different results, and how to bring a saved Seurat object into CyteArc without an R session. Where Seurat keeps assays, metadata and results in a `SeuratObject`, CyteArc keeps them in a Zarr store that a `DataStore` opens, and saves each result as an {term}`artifact` that later steps take by reference. [](scanpy_and_seurat.md) compares the two models.
 
-## Workflow map
+## Translate each step
 
-The methods below are approximate counterparts rather than identical implementations. After
-importing an `.rds` file, the CyteArc column describes analysis on the resulting Zarr store.
+In the calls below, `ds` is a `cytearc.DataStore`, the object that opens a store. `ds.pipeline.rna()`, `ds.pipeline.adt()` and `ds.pipeline.atac()` run each modality's standard workflow in one call and return a {term}`PipelineRun`, a saved record of the run's settings and results. The methods in the table run the same steps one at a time:
 
-| Goal | Seurat | CyteArc |
+| Step | Seurat | CyteArc |
 |---|---|---|
 | Hold the analysis | `SeuratObject` | `DataStore` |
-| Load a saved project | `readRDS()` | `inspect_seurat`, `SeuratReader`, `SeuratToZarr`, then `DataStore` |
-| Work with modalities | Assays such as `RNA` and `ADT` | Assays in the same Zarr store |
-| Select and normalize features | `NormalizeData`, `FindVariableFeatures` | `ds.features.hvgs`, then `ds.features.normalize`, using exact refs |
-| Scale, reduce, and find neighbours | `ScaleData`, `RunPCA`, `FindNeighbors` | `ds.reduction.pca` standardizes features by default, followed by CyteArc's neighbour-graph methods |
+| Load a saved project | `readRDS()` | `inspect_seurat`, `SeuratReader` and `SeuratToZarr`, then `DataStore` |
+| Hold several modalities | Assays such as `RNA` and `ADT` | Assays of the same store |
+| Compute QC metrics | The `nCount_RNA` and `nFeature_RNA` columns, and `PercentageFeatureSet(obj, pattern = "^MT-")` | Opening a new store adds `RNA_nCounts`, `RNA_nFeatures`, `RNA_percentMito` and `RNA_percentRibo` to the cell table |
+| Filter cells | `subset(obj, subset = nFeature_RNA > 200 & percent.mt < 5)` | `ds.qc.filter(["RNA_nFeatures", "RNA_percentMito"], lows=[200, None], highs=[None, 5])`, whose bounds exclude equal values as `>` and `<` do, or `ds.qc.auto_filter` with bounds from the median absolute deviation; both return a cell selection and delete no cells |
+| Select and normalize genes | `NormalizeData`, `FindVariableFeatures` | `ds.features.hvgs`, then `ds.features.normalize` over the same cell selection |
+| Scale and reduce | `ScaleData`, `RunPCA` | `ds.reduction.pca`, which standardizes each gene unless `feat_scaling=False` |
+| Build the neighbor graph | `FindNeighbors` | `ds.graph.ann_index`, `ds.graph.neighbors`, then `ds.graph.connectivity` |
 | Embed and cluster | `RunUMAP`, `FindClusters` | `ds.embeddings.umap`, `ds.clusters.leiden` |
-| Correct batches with Harmony | Harmony integration after PCA | `ds.reduction.harmony` after PCA, followed by graph construction |
-| Integrate modalities with WNN | `FindMultiModalNeighbors` | Run each modality's recipe over the same cells, then `ds.pipeline.multimodal([rna_run, adt_run])`; or build neighbours per assay and call `ds.integration.modalities(...)`. WNN is the default |
+| Find marker genes | `FindAllMarkers` | `ds.markers.search`, then `ds.markers.load` |
+| Correct batches with Harmony | Harmony integration after PCA | `ds.reduction.harmony` after PCA, then the graph steps |
+| Integrate modalities with weighted nearest neighbors (WNN) | `FindMultiModalNeighbors` | `ds.pipeline.multimodal([rna_run, adt_run])` on runs of the same cells, or `ds.integration.modalities` on a neighbor artifact of each assay |
 
-CyteArc WNN follows the published weighting equations but uses the supplied neighbour candidates
-rather than Seurat's wider default search. See [](tutorials/multimodal_diagnostics.ipynb) before
-interpreting differences between integration methods. SNN remains available with `method="snn"`.
+[](tutorials/scrna_seq.ipynb) interprets each stage of an RNA analysis, and [](tutorials/cite_seq.ipynb) analyzes RNA and antibody counts of the same cells and integrates them with WNN.
+
+## Which settings give different results
+
+- **WNN candidates and bandwidth.** CyteArc's WNN follows the published weighting equations [@Hao_2021] but scores only the neighbors that each modality's graph already holds, and sets each modality's bandwidth from the distances to a cell's nearest and k-th neighbors. Seurat's `FindMultiModalNeighbors` searches a wider pool of candidates by default and computes its bandwidth differently. With the same candidates and bandwidth, CyteArc reproduces Seurat 5.5.1 to float32 precision; with Seurat's defaults on a CITE-seq subset, 89% of the neighbors that CyteArc selects match Seurat's, and the per-cell RNA weights of the two correlate at 0.76 ([FAQ](reference/faq.md#cytearc-wnn-versus-seurat)). `method="snn"` combines the modalities by shared neighbors instead, and [](tutorials/multimodal_diagnostics.ipynb) compares the two methods on a CITE-seq dataset.
+- **Gene selection and normalization.** Seurat's default `FindVariableFeatures` method, `vst`, corresponds to `ds.features.hvgs` with `flavor="seurat_v3"`, which scores genes on raw counts by variance stabilization; CyteArc's default flavor scores the variance of library-size normalized values instead. CyteArc selects highly variable genes before it normalizes, and `ds.features.normalize` divides each cell's counts by its total over the selected genes, not over all genes, before taking the log.
+- **Marker order.** `ds.markers.search` reports each gene's AUC and two-sided Mann-Whitney p-value, and `ds.markers.load` orders the genes of each group by `score`, which favors genes specific to that group; pass `sort_by="p_value"` to order them by p-value.
 
 ## Import a saved Seurat object
 
-CyteArc imports a saved Seurat object from an `.rds` file. It reads the on-disk RDS document and
-does not attach to a live R session. It does not read `.h5seurat`.
-
-Inspect the RDS file, select importable assays and reductions, then write a Zarr store:
+CyteArc reads a Seurat `.rds` file directly, without R. `inspect_seurat` reports what the file holds and which parts can be imported, `SeuratReader` selects the parts to read, and `SeuratToZarr` writes them to a store:
 
 ```python
 import cytearc
 
-inspection = cytearc.inspect_seurat("pbmc.rds")
-with cytearc.SeuratReader(
-    "pbmc.rds",
-    assays=["RNA"],
-    reductions=["pca"],
-) as reader:
+# Read the RNA counts and both reductions, and write them to a new store.
+with cytearc.SeuratReader("pbmc.rds", assays=["RNA"], reductions=["pca", "umap"]) as reader:
     imported = cytearc.SeuratToZarr(reader, zarr_loc="pbmc.zarr").dump()
-ds = cytearc.DataStore("pbmc.zarr")
-imported.activeIdentity, imported.reductionArtifacts["pca"]
+
+# Keep every imported cell: by default, the first open of a new store
+# leaves out cells with 10 or fewer detected genes.
+ds = cytearc.DataStore("pbmc.zarr", min_features_per_cell=-1)
 ```
 
-The importer brings across supported count layers and literal cell metadata. It returns exact
-artifact refs for `active.ident` and selected reductions. Neighbour graphs, images, commands, and
-most tool slots stay behind. Graphs, clusterings, marker searches, and integrated analyses are
-rebuilt in CyteArc rather than imported from the RDS object. CyteArc does not write `.rds` or
-`.h5seurat`.
+The store holds the `counts` layer of each imported assay and the cell metadata. `imported.activeIdentity` is a clustering artifact, so plots and `ds.markers.search` accept Seurat's identities as they accept a Leiden result; `imported.reductionArtifacts["umap"]` is a layout that plots draw, and a PCA imports as coordinates that a neighbor graph can be built on. `imported.notices` lists what stayed behind, such as the normalized `data` and `scale.data` layers and the command history; CyteArc computes normalized values from the raw counts when a step needs them.
 
-An object imports in part when some of it cannot be imported:
+The `counts` layer of an SCT assay holds SCTransform-corrected counts, not raw counts. When SCT is the active assay, the import therefore makes the assay whose raw counts the SCT models were fitted to, usually `RNA`, the store's default assay, and reports an `sct_default_assay` notice; `SeuratToZarr(..., default_assay="SCT")` keeps SCT as the default.
 
-- Without `assays` or `reductions`, the reader selects everything, and `SeuratToZarr` skips an
-  assay or reduction that cannot be imported, with a `skipped_assay` or `skipped_reduction`
-  notice. An assay or reduction that you name must import.
-- A cell metadata column that cannot be decoded, such as a list column, is left out with a
-  `skipped_metadata_column` notice. `cell_metadata=["a", "b"]` reads only those columns and
-  raises for one that cannot be decoded; `cell_metadata={"exclude": ["a"]}` leaves columns out.
-  `Date` and `POSIXct` columns import as ISO 8601 text and bit64 `integer64` columns as 64-bit
-  integers.
-- The `integrated` assay of `IntegrateData` holds normalized data but no raw counts, so it
-  reports `counts_layer_missing`. When the active assay cannot be imported, pass
-  `default_assay`, such as `SeuratToZarr(reader, zarr_loc="pbmc.zarr", default_assay="RNA")`.
-  An active `SCTAssay` holds SCTransform-corrected counts, so the default assay becomes the
-  assay of raw counts that its models were fitted to, usually `RNA`, with an
-  `sct_default_assay` notice; `default_assay="SCT"` keeps it.
-- A reduction keeps its coordinates without the assay it was computed on (`assay.used`); only
-  its feature loadings need that assay. Such a reduction is stored under the default assay. A
-  reduction of some of the cells, as in the Seurat v5 sketch workflow, is aligned to the cells
-  by name and stored over a cell selection of its cells.
-- A reduction becomes a UMAP or t-SNE embedding when it has two or three columns and its key
-  names the method (`UMAP_`, `wnnUMAP_`, `tSNE_`) or it is named `umap`, `tsne`, or `t-sne`;
-  other reductions import as coordinates for graph construction.
-  `reduction_roles={"phate": "umap", "umap.layout": "coordinates"}` sets the role by name.
-
-Inspection reports each reduction's `assayUsed` and `role`, along with input notices, before
-anything is written. Review the writer's returned notices too: choices made during import,
-including the SCT-to-RNA default-assay change, are reported there.
-
-Typical next steps are `ds.pipeline.rna()`, [](tutorials/scrna_seq.ipynb), or
-[](tutorials/graph_construction.ipynb). For multimodal data, analyze the other modalities over the
-cells of the RNA run, such as `adt_run = ds.pipeline.adt(cells=rna_run)`, and integrate the runs
-with `ds.pipeline.multimodal([rna_run, adt_run])`; or build a neighbour artifact per assay before
-calling `integration.modalities`. When you only need raw matrices, original 10x HDF5 or Matrix
-Market counts are still preferable to an RDS export.
-
-To return to Seurat, write H5AD or Matrix Market from CyteArc and convert or import it with the tools
-used by your R workflow. See [](tutorials/seurat_import.ipynb) for the Seurat import examples
-and [](tutorials/import_and_export.ipynb) for H5AD and Matrix Market export.
+[](tutorials/seurat_import.ipynb) imports a PBMC object of monocytes and dendritic cells, reads the notices of a partial import, such as `skipped_metadata_column` and `sct_default_assay`, and shows which parts an import skips or must import and how to set a reduction's role; the [Seurat import reference](/api/import_export.html#seurat-import) lists every option. CyteArc does not read `.h5seurat` files or write Seurat files; to return to R, export H5AD or Matrix Market files as [](tutorials/import_and_export.ipynb) shows.

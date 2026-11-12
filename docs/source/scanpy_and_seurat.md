@@ -1,51 +1,27 @@
 ---
-description: Compare how CyteArc, Scanpy, and Seurat store data and reuse analysis results.
+description: Compare how CyteArc, Scanpy and Seurat hold counts and results, and decide which steps of an analysis to run in CyteArc.
 ---
 
 (scanpy_and_seurat)=
 # How CyteArc compares with Scanpy and Seurat
 
-CyteArc keeps the familiar biological sequence of quality control, feature selection,
-normalization, reduction, neighbourhood graphs, embeddings, clustering, and marker discovery.
-The main change is how the work is executed. A CyteArc `DataStore` opens a Zarr store on local disk
-or object storage, streams bounded blocks, and writes each completed result back as an immutable
-artifact.
+Compare how CyteArc keeps counts and results with how Scanpy and Seurat keep them, and decide which steps of an analysis to run in CyteArc. All three tools run the same steps: quality control, feature selection, normalization, reduction, neighbor graphs, embeddings, clustering and marker discovery. The three differ in where counts and results are kept and in how each step finds the results it builds on.
 
-Choose the guide for the ecosystem you already use:
+- [](scanpy.md) maps each Scanpy step to CyteArc and shows how to move data through H5AD files.
+- [](seurat.md) maps each Seurat step to CyteArc and shows how to import a saved Seurat object.
 
-- [](scanpy.md) maps Scanpy stages and explains H5AD transfer.
-- [](seurat.md) maps Seurat stages, RDS import, and multimodal WNN analysis.
+## How the data model differs
 
-If you want to run CyteArc before comparing APIs, start with the {ref}`Quick start <quickstart>`.
-
-## Where CyteArc fits
-
-CyteArc is most useful when:
-
-- the count matrix is too large for convenient in-memory analysis
-- counts should stay on local disk or object storage while the analysis runs
-- completed steps should persist so they can be inspected or reused
-- RNA, ATAC, or CITE-seq assays should live in one analysis store
-
-You do not need to move an entire project to CyteArc. A common pattern is to run the large,
-graph-based part of an analysis in CyteArc, then export the required data for a method in another
-single-cell ecosystem. CyteArc does not include scVI, Scanorama, RNA velocity, or replicate-aware
-differential expression.
-
-## The mental-model change
-
-| Familiar concept | CyteArc |
+| In Scanpy or Seurat | In CyteArc |
 |---|---|
-| An `AnnData` or `SeuratObject` holds counts, metadata, and results | A `DataStore` opens a Zarr store containing counts, metadata, and results |
-| Analysis changes an object in the current session | Each supported analysis step persists an immutable artifact |
-| Filtering subsets an object or creates a view | Filtering returns an immutable selection artifact without deleting cells |
-| Graphs and embeddings occupy named object slots | Graphs and embeddings are passed by exact artifact reference |
-| One object exposes an active result set | A `PipelineRun` exposes one durable frozen result set without replacing other runs |
+| An `AnnData` or `SeuratObject` in memory holds counts, metadata and results | A `DataStore` opens a Zarr store of counts, metadata and results on local disk or in object storage, and reads the counts in blocks of bounded size instead of loading them whole |
+| A step changes the object in the current session | A step saves its result in the store as an immutable {term}`artifact`, which later sessions can inspect or reuse |
+| Filtering subsets the object or creates a view | Filtering returns a cell selection, an artifact that marks the kept cells; no cell is deleted |
+| Graphs and embeddings fill named slots, such as `obsp` and `obsm`, or `graphs` and `reductions` | Each graph and embedding is an artifact, and the step that writes it returns an {term}`ArtifactRef` that the next step takes as its input |
+| One object holds one current set of results | Each {term}`PipelineRun` keeps its own results, and a new run leaves earlier runs unchanged |
 
-Feature selection is artifact-only. A call such as `features = ds.features.hvgs(cells, ...)` returns
-an immutable reference that normalization and downstream methods consume. Related analysis
-branches can therefore coexist in one datastore without an implicit active result replacing an
-earlier one.
+Because each step names its inputs, analyses with different settings share one store. Given a cell selection `cells`, such as the one `ds.qc.filter` returns, `features = ds.features.hvgs(cells, top_n=2000)` returns a reference to a gene selection that `ds.features.normalize(cells, features)` takes, and a second selection with `top_n=1000` is saved beside the first without replacing it. [](concepts/provenance.md) explains what each result records and when a saved result is reused.
 
-See [](concepts/provenance.md) for the result model and [](tutorials/import_and_export.ipynb) for the
-full format contracts.
+## Choose where each step runs
+
+A common split runs quality control through clustering and marker search in CyteArc, where the counts stay on disk or in object storage, and exports the cells and results that a method in another tool needs. CyteArc does not include scVI, Scanorama or RNA velocity; an scVI or Scanorama embedding comes back as coordinates through `ds.reduction.import_coordinates`. For differential expression across donors, CyteArc compares donor-level summaries, as [](tutorials/condition_comparisons.ipynb) shows, and builds {ref}`pseudobulk counts <pseudobulk_and_differential_expression>` for replicate-aware models such as DESeq2 and edgeR.
