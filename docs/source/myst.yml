@@ -81,9 +81,7 @@ project:
     - file: tutorials/mapping_and_label_transfer.ipynb
       title: Reference mapping and label transfer
     - file: tutorials/condition_comparisons.ipynb
-      title: Donor-level comparisons
-    - file: tutorials/pseudobulk_and_differential_expression.ipynb
-      title: Pseudobulk export
+      title: Donor-level comparisons and pseudobulk
   - title: Trajectories and fate mapping
     children:
     - file: tutorials/pseudotime.ipynb

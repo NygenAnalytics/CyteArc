@@ -219,7 +219,6 @@ def test_navigation_prioritizes_remote_workflows_and_preserves_tutorials() -> No
             "tutorials/batch_correction.ipynb",
             "tutorials/mapping_and_label_transfer.ipynb",
             "tutorials/condition_comparisons.ipynb",
-            "tutorials/pseudobulk_and_differential_expression.ipynb",
         ],
         "Trajectories and fate mapping": [
             "tutorials/pseudotime.ipynb",

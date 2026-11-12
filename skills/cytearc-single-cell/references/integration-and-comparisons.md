@@ -2,7 +2,7 @@
 
 Identify donors, samples, batches and conditions, correct a technical batch with Harmony and score
 it, then compare composition and expression at the donor level. Docs: <https://docs.nygen.io/CyteArc/tutorials/batch-correction>, and in the same folder
-`pseudobulk_and_differential_expression.html`, `condition_comparisons.html`,
+`condition_comparisons.html`,
 `dataset_merging.html`, `mapping_and_label_transfer.html`.
 
 ## When to use
