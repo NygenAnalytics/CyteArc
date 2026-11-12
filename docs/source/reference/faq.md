@@ -115,7 +115,6 @@ The reference values ship with the test suite.
 
 The per-cell prediction work grows quadratically with the number of modalities, while scoring blended graph edges is linear in the union candidate pool.
 Stored neighbour rows, output edges, and modality weights remain linear in cell count.
-See {ref}`WNN integration <multimodal_integration>` for deviations and trade-offs.
 
 ## How do I compute LISI in CyteArc?
 
