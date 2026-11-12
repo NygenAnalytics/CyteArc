@@ -29,8 +29,9 @@ CyteBase, the catalog of public datasets stored as cloud-hosted CyteArc DataStor
 
 - [Cell type annotation](tutorials/annotation/): marker interpretation and label assignment
 - [Gene-set scoring](tutorials/gene-set-scoring/): AUCell and WAGGR activity scores
-- [Cell-cycle scoring](tutorials/cell-cycle/): canonical phase scoring
-- [Visualization](tutorials/plotting/): colored embeddings, marker summaries, distributions, facets, composed panels, and raster views of large datasets
+- [Cell-cycle scoring](tutorials/cell-cycle/): S and G2M scores, phase assignment, marker coverage, the cycling populations of the embryonic mouse pancreas, and a comparison with the published scores
+- [Regulons and gene programs](tutorials/regulons/): SCENIC regulons and their specificity, co-regulated gene programs, and chromVAR motif and CUT&RUN activity in a PBMC multiome sample
+- [Visualization](tutorials/plotting/): colored embeddings, draw order, marker summaries, distributions, cluster composition, facets, saved and composed figures, and raster views of large datasets
 - [Imputation](tutorials/imputation/): graph diffusion for exploratory visualization
 
 ## Chromatin and multimodal integration
