@@ -71,18 +71,18 @@ CyteBase, the catalog of public datasets stored as cloud-hosted CyteArc DataStor
 
 ## Data management and interoperability
 
-- [Import and export](tutorials/import-and-export/): source formats, saved Seurat import, and output contracts
+- [Import and export](tutorials/import-and-export/): convert 10x, Matrix Market, H5AD, CSV and in-memory counts with their UMAPs and labels, and export to Matrix Market, H5AD and Scanpy
 - [Seurat import](tutorials/seurat-import/): selective RDS import, metadata notices, coordinate roles, and raw-count defaults
 - [Scanpy users](scanpy/): workflow mapping and H5AD exchange
 - [Seurat users](seurat/): workflow mapping, RDS import, and WNN differences
 - [Data model comparison](scanpy-and-seurat/): how objects, selections, and saved results differ between tools
-- [Cell and feature metadata](tutorials/data-organization/): assays, cell data, feature data, and metadata
+- [Cell and feature metadata](tutorials/data-organization/): cell and feature tables, saved run fields beside live columns, metadata selections, and the store layout
 - [Provenance](concepts/provenance/): artifacts, reuse, lineage, and limits
-- [Custom analyses](tutorials/custom-analyses/): public extension and export boundaries
+- [Custom analyses](tutorials/custom-analyses/): per-cell statistics from a saved neighborhood graph and streamed count blocks, custom cell selections, and export to AnnData or a new store
 
 ## Public datasets
 
-- [CyteBase datasets](tutorials/cytebase-datasets/): open public CyteBase datasets by URI, read-only or as a writable mount, and run the pipeline on them
+- [CyteBase datasets](tutorials/cytebase-datasets/): search the CyteBase catalog, build a dataset's URI, and open it read-only or as a writable mount
 
 ## Reference
 

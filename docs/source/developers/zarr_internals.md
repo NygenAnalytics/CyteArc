@@ -6,7 +6,7 @@ description: Inspect the CyteArc Zarr layout for count matrices, assay metadata,
 # Zarr internals
 
 This page is for contributors and advanced users who need the on-disk layout.
-Analysts should start with [](../tutorials/data_organization.ipynb).
+Analysts should start with the [cell and feature metadata tutorial](../tutorials/data_organization.ipynb).
 Why RNA stores two orientations, and what to do when an older store will not open, is in [](../concepts/memory_and_execution.md).
 
 ## Layout overview

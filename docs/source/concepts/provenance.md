@@ -1,63 +1,51 @@
 ---
-description: Understand how CyteArc records selections, parameters, and artifact lineage to trace analyses and reuse completed results.
+description: Understand how CyteArc records the operation, parameters and inputs of each saved result, and how that record drives reuse, branching and lineage.
 ---
 
 (provenance)=
 
 # Why CyteArc records provenance
 
-A single-cell result is a chain of choices. A marker table depends on a clustering, the clustering
-depends on a graph, and the graph depends on exact cells, features, normalization, and reduction.
-When several branches share one datastore, a filename or cluster column cannot identify that chain.
+Every analysis result that CyteArc saves records its {term}`provenance`: the operation that produced it, the operation's parameters and the exact inputs it read. CyteArc uses that record to return a saved result instead of computing it again, to keep analyses with different settings apart in one store, and to trace any result back through each step to the counts.
 
-CyteArc therefore persists substantial results as immutable {term}`artifacts <artifact>`. Each artifact records
-the producing operation, scientific parameters, and exact upstream inputs. Matching provenance can
-reuse completed work; changing an input creates a distinct downstream branch.
+## How analyses branch in one store
+
+A single-cell result is a chain of choices. A marker table depends on a clustering, the clustering on a neighbor graph, and the graph on the exact cells, genes, normalization and reduction it was built from. When several analyses share one store, a file name or a cluster column cannot say which chain produced a result.
+
+CyteArc therefore saves each analysis result, such as a cell selection, a PCA, a neighbor graph or a clustering, as an immutable {term}`artifact`. A method returns an {term}`ArtifactRef`, a reference to the saved result, and the next method takes that reference as its input, so every result names its inputs exactly. Two analyses that differ in one setting share every artifact upstream of that setting and branch from there:
 
 ```{mermaid}
 flowchart LR
     counts["Counts"]
     selection["Cell and feature selections"]
     norm["Normalization"]
-    pca15["PCA, 15 dimensions"]
     pca30["PCA, 30 dimensions"]
-    graph15["Neighbour graph"]
-    graph30["Neighbour graph"]
+    pca40["PCA, 40 dimensions"]
+    graph30["Neighbor graph"]
+    graph40["Neighbor graph"]
     clusters["Clusters"]
     markers["Marker table"]
     counts --> selection --> norm
-    norm --> pca15 --> graph15 --> clusters --> markers
-    norm --> pca30 --> graph30
+    norm --> pca30 --> graph30 --> clusters --> markers
+    norm --> pca40 --> graph40
 ```
 
-The branches share counts, selections, and normalization. Their reductions and downstream graphs
-remain distinct because those inputs differ. No branch becomes an implicit current result.
+Both branches read the same counts, selections and normalization. The two PCAs are different artifacts, so each branch builds its own graph, and neither branch becomes the store's current result.
 
-When a CyteArc release changes what an operation computes for the same parameters and inputs, it
-gives the operation a new revision, and provenance records it. A stored result of an older revision
-is then never reused: CyteArc computes the result again and logs which stored result it replaced and
-why. The older result stays listable, loadable, and traceable, and lineage reports mark it as stale.
-Results built from it keep their own current revision, but once the older result is computed
-again, they have a new input and are computed again too.
-Payload validation still applies: marker-table readers require `fold_change_policy` metadata
-and refuse a table that does not record it.
-[](../developers/operation_revisions.md) explains the policy behind revisions.
+## When a saved result is reused
 
-Inputs that could change are frozen before a result uses them. Label transfer, for example, copies
-the reference labels it reads into the query datastore, so the saved query labels keep pointing at
-the exact annotations, threshold, and projection that produced them, even after the reference
-atlas is re-annotated.
+A call whose operation, parameters and inputs match a saved artifact returns that artifact instead of computing it again. A changed parameter gives a new artifact, and each later step that reads it computes a new result too. The [analysis reuse tutorial](../tutorials/reuse_and_tracing.ipynb) changes the neighbor count and the number of principal components and traces which results each change computes again.
 
-A [`PipelineRun`](/api/pipeline.html#cytearc.PipelineRun) adds one durable record for a complete recipe invocation, such as
-`ds.pipeline.rna()`. It binds named outputs and frozen cell and feature views without changing the
-artifact identity rules: a run reuses every saved result whose provenance matches, and runs that
-analyze the same cells, such as an ADT run given an RNA run as `cells`, share one cell-selection
-artifact. The run's stage records hold timings, sampled memory, warnings, and summaries, which
-never change an artifact.
+When a CyteArc release changes what an operation computes for the same parameters and inputs, the operation gets a new revision. Results saved under an earlier revision are then computed again instead of reused; they stay loadable, and lineage reports mark them stale. [](../developers/operation_revisions.md) explains when a change needs a revision.
 
-Provenance establishes computational relationships. It does not prove that a parameter was
-scientifically appropriate, decide which branch is best, or replace study records.
+## How inputs that can change are tracked
 
-Use [](../tutorials/reuse_and_tracing.ipynb) for the single executable guide to listing, inspecting,
-branching, invalidating, and comparing artifact lineage. Use
-[Artifacts, lineage, and summaries API reference](/api/artifacts.html) for the complete API contract.
+Cell columns and another store's labels can change after a result reads them. A filter fingerprints the cell columns it reads, so once a column's values change, the same filter call computes a new selection instead of returning the old one. Label transfer instead copies the reference labels it reads into the query store, so the transferred labels keep pointing at the annotations, threshold and projection that produced them after the reference atlas is re-annotated.
+
+Provenance covers what CyteArc computes. A column that your own code writes with `ds.cells.insert`, as the [custom analyses tutorial](../tutorials/custom_analyses.ipynb) does, carries no record of how its values were computed. Coordinates imported with `ds.reduction.import_coordinates` keep the tool, version and parameters passed as `source`, as [](../tutorials/import_and_export.ipynb) shows.
+
+## What a pipeline run adds
+
+A [`PipelineRun`](/api/pipeline.html#cytearc.PipelineRun) records one complete recipe call, such as `ds.pipeline.rna()`: its settings, its named outputs, and `run.cells` and `run.features`, tables of the cells and genes it analyzed that read the run's own selections and results, never the live columns. A run reuses every saved result whose operation, parameters and inputs match, as a single call does, and a run given an earlier run as `cells`, such as an ADT run after an RNA run, reuses that run's cell selection. The run also records each stage, one step of the recipe such as `pca` or `umap`, with its wall and CPU time, sampled memory use, warnings and summary; these records never decide whether a result is reused.
+
+The [artifacts, lineage, and summaries API reference](/api/artifacts.html) documents the calls that list, inspect and trace saved results.
