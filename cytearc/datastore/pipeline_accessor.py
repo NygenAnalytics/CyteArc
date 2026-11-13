@@ -278,6 +278,7 @@ class PipelineAccessor:
         connectivity: StageSettings = None,
         embedding_initialization: StageSettings = None,
         umap: StageSwitch = True,
+        localmap: StageSwitch = False,
         tsne: StageSwitch = False,
         leiden: StageSwitch = True,
         paris: StageSwitch = False,
@@ -302,9 +303,10 @@ class PipelineAccessor:
         ``input_snapshot``, ``cell_calling``, ``hashing``, ``filtering``,
         ``cell_cycle``, ``highly_variable_features``, ``normalization``,
         ``pca``, ``harmony``, ``ann_index``, ``neighbors``, ``connectivity``,
-        ``embedding_initialization``, ``umap``, one ``leiden_<resolution>``
-        per candidate, ``paris``, ``cluster_selection``,
-        ``membership_strength``, ``tsne``, ``doublets``, ``markers``.
+        ``embedding_initialization``, ``umap``, ``localmap``, one
+        ``leiden_<resolution>`` per candidate, ``paris``,
+        ``cluster_selection``, ``membership_strength``, ``tsne``,
+        ``doublets``, ``markers``.
 
         Args:
             assay: The RNA assay. Defaults to the default assay when it is an
@@ -352,6 +354,8 @@ class PipelineAccessor:
             embedding_initialization: The keywords of
                 ``embeddings.initialization``.
             umap: UMAP, with the keywords of ``embeddings.umap``.
+            localmap: LocalMAP on the UMAP graph and initialization, with the
+                keywords of ``embeddings.localmap``.
             tsne: t-SNE on the UMAP graph and initialization, with the
                 keywords of ``embeddings.tsne``.
             leiden: Leiden candidates: ``partitions``, the resolutions
@@ -404,6 +408,7 @@ class PipelineAccessor:
             connectivity=connectivity,
             embedding_initialization=embedding_initialization,
             umap=umap,
+            localmap=localmap,
             tsne=tsne,
             leiden=leiden,
             paris=paris,
@@ -432,6 +437,7 @@ class PipelineAccessor:
         connectivity: StageSettings = None,
         embedding_initialization: StageSettings = None,
         umap: StageSwitch = True,
+        localmap: StageSwitch = False,
         tsne: StageSwitch = False,
         leiden: StageSwitch = True,
         paris: StageSwitch = False,
@@ -451,8 +457,8 @@ class PipelineAccessor:
 
         ``input_snapshot``, ``filtering``, ``prevalent_peaks``,
         ``normalization``, ``lsi``, ``harmony``, ``ann_index``, ``neighbors``,
-        ``connectivity``, ``embedding_initialization``, ``umap``, one
-        ``leiden_<resolution>`` per candidate, ``paris``,
+        ``connectivity``, ``embedding_initialization``, ``umap``,
+        ``localmap``, one ``leiden_<resolution>`` per candidate, ``paris``,
         ``cluster_selection``, ``membership_strength``, ``tsne``, ``markers``.
 
         Args:
@@ -492,6 +498,7 @@ class PipelineAccessor:
             connectivity=connectivity,
             embedding_initialization=embedding_initialization,
             umap=umap,
+            localmap=localmap,
             tsne=tsne,
             leiden=leiden,
             paris=paris,
@@ -519,6 +526,7 @@ class PipelineAccessor:
         connectivity: StageSettings = None,
         embedding_initialization: StageSettings = None,
         umap: StageSwitch = True,
+        localmap: StageSwitch = False,
         tsne: StageSwitch = False,
         leiden: StageSwitch = True,
         paris: StageSwitch = False,
@@ -538,9 +546,10 @@ class PipelineAccessor:
 
         ``input_snapshot``, ``filtering``, ``panel``, ``normalization``,
         ``pca``, ``harmony``, ``ann_index``, ``neighbors``, ``connectivity``,
-        ``embedding_initialization``, ``umap``, one ``leiden_<resolution>``
-        per candidate, ``paris``, ``cluster_selection``,
-        ``membership_strength``, ``tsne``, ``markers``.
+        ``embedding_initialization``, ``umap``, ``localmap``, one
+        ``leiden_<resolution>`` per candidate, ``paris``,
+        ``cluster_selection``, ``membership_strength``, ``tsne``,
+        ``markers``.
 
         Analyze ADT with the cells of an RNA run, ``cells=rna_run``, to
         integrate the two with :meth:`multimodal`.
@@ -584,6 +593,7 @@ class PipelineAccessor:
             connectivity=connectivity,
             embedding_initialization=embedding_initialization,
             umap=umap,
+            localmap=localmap,
             tsne=tsne,
             leiden=leiden,
             paris=paris,
@@ -604,6 +614,7 @@ class PipelineAccessor:
         integration: StageSettings = None,
         embedding_initialization: StageSettings = None,
         umap: StageSwitch = True,
+        localmap: StageSwitch = False,
         tsne: StageSwitch = False,
         leiden: StageSwitch = True,
         paris: StageSwitch = False,
@@ -645,6 +656,9 @@ class PipelineAccessor:
             embedding_initialization: The keywords of
                 ``embeddings.initialization``, which starts the joint
                 embedding from the first run's coordinates.
+            localmap: Must stay False. LocalMAP needs a single assay's
+                connectivity map, so a call that turns it on is refused before
+                anything is written.
             leiden: As for :meth:`rna`, but the integrated graph has no shared
                 coordinates in which to compare candidates by silhouette, so
                 ``partitions`` defaults to ``[1.0]`` and several partitions
@@ -665,6 +679,7 @@ class PipelineAccessor:
             integration=integration,
             embedding_initialization=embedding_initialization,
             umap=umap,
+            localmap=localmap,
             tsne=tsne,
             leiden=leiden,
             paris=paris,

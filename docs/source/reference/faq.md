@@ -76,9 +76,9 @@ The per-cell prediction work grows quadratically with the number of modalities, 
 
 Use `integration.compute_ilisi` for a single scIB-scaled batch-mixing score and `integration.compute_clisi` for a scIB-scaled biological-label conservation score. Each requires the exact neighbor artifact and reads matching metadata rows through its stored cell selection. Use `cytearc.metrics.compute_lisi` for raw per-cell LISI values from KNN arrays. See {ref}`LISI metrics <lisi_metrics>`.
 
-## Should I use t-SNE or UMAP?
+## Should I use t-SNE, UMAP or LocalMAP?
 
-t-SNE and UMAP are complementary visualization tools. t-SNE emphasizes local structure and can reveal fine-grained diversity. UMAP preserves more global structure, which helps when cluster relationships matter. CyteArc computes t-SNE with the optional `sgtsnepi` package (see {ref}`Optional t-SNE <installation_tsne>`), which runs on one thread, so time a subset before running it on an atlas-scale dataset. UMAP is part of every installation and can run in parallel. In CyteArc, UMAP and t-SNE both require an explicit graph and initialization. Pass the same refs when you want the layouts to share those inputs.
+t-SNE and UMAP are complementary visualization tools. t-SNE emphasizes local structure and can reveal fine-grained diversity. UMAP preserves more global structure, which helps when cluster relationships matter. CyteArc computes t-SNE with the optional `sgtsnepi` package (see {ref}`Optional t-SNE <installation_tsne>`), which runs on one thread, so time a subset before running it on an atlas-scale dataset. UMAP is part of every installation and can run in parallel. LocalMAP, also part of every installation, keeps more of each cell's nearest neighbors than UMAP and separates nearby cell types more sharply, and it runs on every thread with the same layout on any number of them ({ref}`details <localmap_method>`). In CyteArc, UMAP, LocalMAP and t-SNE all require an explicit graph and initialization. Pass the same refs when you want the layouts to share those inputs.
 
 ## What is densMAP?
 

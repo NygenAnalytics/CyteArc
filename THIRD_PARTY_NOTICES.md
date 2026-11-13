@@ -42,6 +42,28 @@ CyteArc is copyright Nygen Analytics AB and is licensed under the BSD 3-Clause L
   epoch loop of `_optimize_layout`, adapted from `optimize_layout_euclidean` in `umap/layouts.py`
   at 0.5.12) and the UMAP parameter descriptions in `cytearc/datastore/_operations/embeddings.py`.
 
+### PaCMAP and LocalMAP
+
+- Source: <https://github.com/YingfanWang/PaCMAP>, the `pacmap` package, which holds the LocalMAP
+  reference implementation that <https://github.com/williamsyy/LocalMAP> points to
+- Copyright 2020 Yingfan Wang, Haiyang Huang, Cynthia Rudin, Yaron Shaposhnik
+- License: Apache-2.0
+- Used in: `cytearc/embeddings/localmap.py` (the forces of the neighbor, mid-near and further pairs,
+  LocalMAP's scaled neighbor force, the weights of the three phases, the Adam update, the draws of
+  mid-near and further pairs, and the redraw of further pairs near each cell, adapted from
+  `pacmap/pacmap.py` at 0.9.1). `scripts/export_localmap_golden.py` runs pacmap 0.9.1 to produce
+  the test reference described under "Data in this repository".
+
+### brisc
+
+- Source: <https://github.com/briscverse/brisc>
+- Copyright (c) 2026 Michael Wainberg and Keon Arbabi
+- License: MIT
+- Used in: `cytearc/embeddings/localmap.py` follows the approach of brisc's LocalMAP in `brisc/embed.pyx`:
+  each cell draws from its own random key, and each cell's force sums its pairs in both directions,
+  listed by one bucketed pass over the pairs, so the layout does not depend on the thread count. No
+  code was copied.
+
 ### Seurat
 
 - Source: <https://github.com/satijalab/seurat>
@@ -299,6 +321,7 @@ CyteArc is copyright Nygen Analytics AB and is licensed under the BSD 3-Clause L
   Supplemental Table S1 and the artifact-prone positions of Laricchia et al. (2022), Genome Research
   32:569-582, doi:10.1101/gr.276013.121, and the RNA-DNA differences of Bar-Yaacov et al. (2013),
   Genome Research 23:1789-1796, doi:10.1101/gr.161265.113, as lists of positions and alleles.
+- **pacmap** (<https://github.com/YingfanWang/PaCMAP>), Apache-2.0: `tests/data/localmap/pacmap_0_9_1_reference.npz` holds 400 cells in four Gaussian clusters of 12 dimensions, which `scripts/export_localmap_golden.py` draws with NumPy, with the neighbor pairs, gradients and layouts that pacmap 0.9.1's own functions compute from them; `pacmap_0_9_1_reference.json` records the versions that produced them.
 - **cellsnp-lite** (<https://github.com/single-cell-genetics/cellsnp-lite>), Apache-2.0:
   `tests/data/variants/cellsnp_lite/` holds the first 60 records and the first 40 cells of
   `data/csp_mode1` at commit 8e8ba00c2adfe6fc758385f99c61ab5545387838.
@@ -445,6 +468,10 @@ The comparison of potency scores in [Methods and limitations](https://docs.nygen
 | Small intestine, mouse | Zwick et al. (2024), Nature Cell Biology 26:250-262, doi:10.1038/s41556-023-01337-z, as `zwick_2024_mouse_epithelial_cells_collected_mouse_small_intestine_a5ab6cde` | CC BY 4.0 |
 | Germ cells, mouse | Garcia-Alonso et al. (2022), Nature 607:540-547, doi:10.1038/s41586-022-04918-4, as `garciaalonso_2022_mouse_mouse_germ_cells_5695d556` | CC BY 4.0 |
 | Testis | The Tabula Sapiens Consortium (2024), bioRxiv, doi:10.1101/2024.12.03.626516: the testis cells of `tabula_2022_tabula_sapiens_all_cells_53d208b0`, the release credited as `tabula_sapiens` under "Example datasets" | CC BY 4.0, and the Tabula Sapiens Data Release Policy, as for that example |
+
+## Data that validated LocalMAP
+
+The comparisons of LocalMAP's inputs, and of LocalMAP with UMAP, in [Methods and limitations](https://docs.nygen.io/CyteArc/reference/methods#localmap-method) ran on the `bastidas-ponce_4K_pancreas-d15_rnaseq`, `kang_15K_pbmc_rnaseq`, `tabula_sapiens_100k` and `tabula_sapiens` examples, credited under "Example datasets". The repository holds none of them, and neither the tests nor the documentation download them.
 
 ## Data that validated the clone import
 
@@ -1067,6 +1094,32 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 ```
 
+### brisc (MIT License)
+
+```text
+MIT License
+
+Copyright (c) 2026 Michael Wainberg and Keon Arbabi
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
 ### CoSpar (MIT License)
 
 ```text
@@ -1328,7 +1381,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-### cellsnp-lite and MQuad (Apache License 2.0)
+### cellsnp-lite, MQuad and PaCMAP (Apache License 2.0)
 
 ```text
                                  Apache License

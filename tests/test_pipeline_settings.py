@@ -188,7 +188,7 @@ _REQUIRED_SETTINGS = {"harmony": {"batch_columns"}, "labels": {"controls"}}
 _INFINITE_DEFAULTS = {"hvg": {"min_var", "max_var", "min_mean", "max_mean"}}
 # Settings whose default is a tuple, recorded as the equal JSON list, which
 # the method takes too.
-_TUPLE_DEFAULTS = {"associations": {"n_resamples"}}
+_TUPLE_DEFAULTS = {"associations": {"n_resamples"}, "localmap": {"iterations"}}
 # The public method whose keywords each stage's settings are, then the method
 # that the stage passes them to where that is another one.
 _STAGE_METHODS: dict[str, tuple[str, ...]] = {
@@ -207,6 +207,7 @@ _STAGE_METHODS: dict[str, tuple[str, ...]] = {
     "integration": ("_integration_modalities",),
     "embedding_initialization": ("_embeddings_initialization",),
     "umap": ("_embeddings_umap", "_run_umap_artifact"),
+    "localmap": ("_embeddings_localmap",),
     "tsne": ("_embeddings_tsne",),
     "leiden": ("_clusters_leiden", "_run_leiden_artifact"),
     "paris": ("_clusters_paris", "_run_paris_artifact"),
@@ -324,6 +325,7 @@ def test_a_default_call_records_each_stage_at_its_method_defaults(readonly_store
         "connectivity": {},
         "embedding_initialization": {},
         "umap": {},
+        "localmap": False,
         "tsne": False,
         "leiden": {"partitions": list(DEFAULT_LEIDEN_PARTITIONS), "selected": None},
         "paris": False,
@@ -363,6 +365,7 @@ def test_stage_settings_are_forwarded_and_recorded(settings_store):
         "connectivity": {"bandwidth": 1.2},
         "embedding_initialization": {},
         "umap": False,
+        "localmap": False,
         "tsne": False,
         "leiden": {"partitions": [1.0], "selected": None, "random_seed": 7},
         "paris": False,
@@ -518,6 +521,49 @@ def test_checked_settings_are_recorded_as_given(readonly_store):
     assert _resolve(readonly_store, tsne=True).config["stages"]["tsne"] == {}
 
 
+def test_localmap_follows_umap_and_records_its_settings_as_given(readonly_store):
+    plan = _resolve(
+        readonly_store,
+        umap=False,
+        localmap={
+            "iterations": (np.int64(50), 50, 120),
+            "max_distance": 8,
+            "learning_rate": np.float32(0.5),
+        },
+    )
+
+    # Checked settings keep their JSON values, so 8 stays an integer.
+    recorded = plan.config["stages"]["localmap"]
+    assert recorded == {
+        "iterations": [50, 50, 120],
+        "max_distance": 8,
+        "learning_rate": 0.5,
+    }
+    assert type(recorded["max_distance"]) is int
+    # LocalMAP reads the graph and the embedding initialization, which runs
+    # for it without UMAP.
+    stages = {stage.name: stage for stage in plan.stages}
+    assert stages["localmap"].action is not None
+    assert stages["localmap"].inputs == ("connectivity_map", "embedding_initialization")
+    assert stages["localmap"].outputs == ("localmap",)
+    assert stages["embedding_initialization"].action is not None
+    assert stages["umap"].action is None
+    # The stage and its output follow UMAP's.
+    for order in (list(plan.stage_order), list(plan.output_keys)):
+        assert order[order.index("umap") + 1] == "localmap"
+    # A switch runs LocalMAP at the method's defaults, and LocalMAP is off,
+    # without the initialization, unless a call turns it on.
+    assert _resolve(readonly_store, localmap=True).config["stages"]["localmap"] == {}
+    assert _resolve(readonly_store, localmap={}).config["stages"]["localmap"] == {}
+    off = _resolve(readonly_store, umap=False)
+    assert off.config["stages"]["localmap"] is False
+    actions = {stage.name: stage.action for stage in off.stages}
+    assert actions["localmap"] is actions["embedding_initialization"] is None
+    assert _resolve(readonly_store, umap=False, localmap=np.bool_(False)).config == (
+        off.config
+    )
+
+
 def test_settings_resolve_into_the_recorded_stages(readonly_store):
     plan = _resolve(
         readonly_store,
@@ -562,6 +608,7 @@ def test_settings_resolve_into_the_recorded_stages(readonly_store):
         "connectivity",
         "embedding_initialization",
         "umap",
+        "localmap",
         "leiden_0.5",
         "leiden_1.0",
         "paris",
@@ -574,7 +621,13 @@ def test_settings_resolve_into_the_recorded_stages(readonly_store):
     # A selected resolution is the saved clustering, so cluster selection is
     # skipped along with the stages that are off.
     skipped = {stage.name for stage in plan.stages if stage.action is None}
-    assert skipped == {"cell_calling", "hashing", "harmony", "cluster_selection"}
+    assert skipped == {
+        "cell_calling",
+        "hashing",
+        "harmony",
+        "localmap",
+        "cluster_selection",
+    }
 
 
 @pytest.mark.parametrize(
@@ -623,6 +676,48 @@ def test_stages_that_always_run_refuse_a_switch(readonly_store, stage):
         # The embeddings run late, so their settings are checked before any
         # stage runs, as are the features.hvgs checks of the hvg settings.
         ({"tsne": {"box_h": -1.0}}, ValueError, "box_h must be positive"),
+        # LocalMAP takes the datastore's threads and no graph flags.
+        (
+            {"localmap": {"nthreads": 2}},
+            ValueError,
+            r"Unknown localmap settings \['nthreads'\]",
+        ),
+        ({"localmap": {"symmetric_graph": True}}, ValueError, "Unknown localmap"),
+        ({"localmap": 1}, TypeError, "localmap must be a mapping or bool"),
+        (
+            {"localmap": {"iterations": [100, 100]}},
+            TypeError,
+            "iterations must be three integers, one per phase",
+        ),
+        (
+            {"localmap": {"iterations": [100, 0, 250]}},
+            ValueError,
+            r"iterations\[1\] must be at least 1",
+        ),
+        (
+            {"localmap": {"iterations": [100, 100.5, 250]}},
+            TypeError,
+            r"iterations\[1\] must be an integer",
+        ),
+        ({"localmap": {"localmap_dims": 0}}, ValueError, "localmap_dims must be"),
+        ({"localmap": {"n_mid_near": 0}}, ValueError, "n_mid_near must be"),
+        ({"localmap": {"n_further": 0}}, ValueError, "n_further must be"),
+        (
+            {"localmap": {"learning_rate": 0.0}},
+            ValueError,
+            "learning_rate must be finite and positive",
+        ),
+        (
+            {"localmap": {"max_distance": -1.0}},
+            ValueError,
+            "max_distance must be finite and positive",
+        ),
+        (
+            {"localmap": {"max_distance": "8"}},
+            TypeError,
+            "max_distance must be a real number",
+        ),
+        ({"localmap": {"random_seed": -1}}, ValueError, "random_seed must be"),
         ({"umap": {"symmetric_graph": None}}, TypeError, "symmetric_graph must be"),
         (
             {"leiden": {"graph_upper_only": True}},
@@ -673,6 +768,17 @@ def test_stages_that_always_run_refuse_a_switch(readonly_store, stage):
         ({"leiden": False}, ValueError, "require at least one Leiden candidate"),
         (
             {"snapshot_columns": ["umap_3"], "umap": {"umap_dims": 3}},
+            ValueError,
+            "collide with reserved run fields",
+        ),
+        # A run reserves the LocalMAP fields that it could produce.
+        (
+            {"snapshot_columns": ["localmap_2"]},
+            ValueError,
+            "collide with reserved run fields",
+        ),
+        (
+            {"snapshot_columns": ["localmap_3"], "localmap": {"localmap_dims": 3}},
             ValueError,
             "collide with reserved run fields",
         ),

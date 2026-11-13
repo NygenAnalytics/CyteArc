@@ -67,6 +67,7 @@ _METHODS: dict[str, tuple[str, ...]] = {
     "integration": ("integration.modalities",),
     "embedding_initialization": ("embeddings.initialization",),
     "umap": ("embeddings.umap",),
+    "localmap": ("embeddings.localmap",),
     "tsne": ("embeddings.tsne",),
     "leiden": ("clusters.leiden",),
     "membership_strength": ("clusters.membership_strength",),

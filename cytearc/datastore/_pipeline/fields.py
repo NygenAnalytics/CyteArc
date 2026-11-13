@@ -123,7 +123,7 @@ def _snapshot_field(
 
 
 # The cell fields that a snapshot column may not shadow, besides the Leiden,
-# UMAP, and t-SNE fields of the run and its recipe's feature fields.
+# UMAP, LocalMAP, and t-SNE fields of the run and its recipe's feature fields.
 RESERVED_CELL_FIELDS = frozenset(
     {
         "I",
@@ -161,6 +161,7 @@ PERTURBATION_CELL_FIELDS: Mapping[str, tuple[str, str, bool]] = {
 def reserved_fields(
     *,
     umap_dims: int,
+    localmap_dims: int,
     tsne_dims: int,
     leiden_keys: Sequence[str],
     extra: Sequence[str] = (),
@@ -170,6 +171,7 @@ def reserved_fields(
         {
             *RESERVED_CELL_FIELDS,
             *(f"umap_{index}" for index in range(1, umap_dims + 1)),
+            *(f"localmap_{index}" for index in range(1, localmap_dims + 1)),
             *(f"tsne_{index}" for index in range(1, tsne_dims + 1)),
             *(f"leiden_{key}" for key in leiden_keys),
             *extra,
@@ -224,11 +226,11 @@ def cell_fields(
 ) -> list[PipelineFieldDescriptor]:
     """Return a run's cell fields: its selection, snapshots, and results.
 
-    Results appear in one order for every recipe: cell cycle scores, UMAP and
-    t-SNE coordinates, Leiden candidates, Paris, the saved clustering,
-    membership strength, doublet calls, guide calls, perturbation labels,
-    Mixscape classes, and WNN modality weights. A result the run did not
-    produce has no field.
+    Results appear in one order for every recipe: cell cycle scores, UMAP,
+    LocalMAP, and t-SNE coordinates, Leiden candidates, Paris, the saved
+    clustering, membership strength, doublet calls, guide calls, perturbation
+    labels, Mixscape classes, and WNN modality weights. A result the run did
+    not produce has no field.
     """
     root = store.zw
     cell_snapshot = artifacts["cell_snapshot"]
@@ -266,7 +268,7 @@ def cell_fields(
         fields.append(
             _categorical(root, key="cell_cycle_phase", ref=ref, source="phase")
         )
-    for embedding in ("umap", "tsne"):
+    for embedding in ("umap", "localmap", "tsne"):
         if embedding not in artifacts:
             continue
         ref = artifacts[embedding]

@@ -89,6 +89,25 @@ class TsneArguments(OperationArguments):
 
 
 @dataclass(frozen=True, slots=True)
+class LocalmapArguments(OperationArguments):
+    operation: ClassVar[str] = "run_localmap"
+    artifact_kind: ClassVar[str] = "embedding"
+
+    graph: ArtifactRef = artifact_input()
+    initialization: Any = artifact_input()
+    localmap_dims: int = parameter()
+    n_mid_near: int = parameter()
+    n_further: int = parameter()
+    iterations: tuple[int, int, int] = parameter()
+    learning_rate: float = parameter()
+    max_distance: float = parameter()
+    random_seed: int = parameter()
+    # The layout does not depend on the thread count.
+    nthreads: int = execution()
+    invalidate_cache: bool = execution()
+
+
+@dataclass(frozen=True, slots=True)
 class LeidenArguments(OperationArguments):
     operation: ClassVar[str] = "run_leiden_clustering"
     artifact_kind: ClassVar[str] = "cluster_labels"

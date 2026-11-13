@@ -1,7 +1,7 @@
 # Clustering and embedding
 
-Partition a cell graph with Leiden or Paris, choose a partition with evidence, build UMAP or t-SNE
-layouts, and extract labels and coordinates as cell-aligned arrays. Docs:
+Partition a cell graph with Leiden or Paris, choose a partition with evidence, build UMAP, LocalMAP or
+t-SNE layouts, and extract labels and coordinates as cell-aligned arrays. Docs:
 <https://docs.nygen.io/CyteArc/tutorials/clustering>, <https://docs.nygen.io/CyteArc/tutorials/dimensionality-reduction>,
 <https://docs.nygen.io/CyteArc/api/datastore.html>, <https://docs.nygen.io/CyteArc/api/integration.html>.
 
@@ -18,7 +18,7 @@ layouts, and extract labels and coordinates as cell-aligned arrays. Docs:
   graph) and returns a new immutable `ArtifactRef`. None of them writes to `ds.cells`. Repeating a
   call reuses the stored artifact; `invalidate_cache=True` creates another one.
 - Payloads: Leiden `kind="cluster_labels"` stores `values` (int, numbered from 1); Paris
-  `kind="cluster_cut"` stores `labels`; UMAP and t-SNE `kind="embedding"` store `values` with shape
+  `kind="cluster_cut"` stores `labels`; UMAP, LocalMAP and t-SNE `kind="embedding"` store `values` with shape
   `(n_cells, dims)`.
 - Payload rows follow the graph's frozen cell selection in stored-axis order, not every cell in
   the store (3,847 of 5,025 cells in the 10x 5K PBMC docs dataset baseline). Recover that
@@ -191,11 +191,12 @@ print(ds.clusters.compute_concordance(paris, leiden["leiden_0.5"]))
 High `persistence` means a branch survives over a wide range of the hierarchy. `forced=True` groups
 satisfy a structural constraint and are not, by themselves, biological evidence.
 
-### Build UMAP and t-SNE layouts
+### Build UMAP, LocalMAP and t-SNE layouts
 
 ```python
 init = run["embedding_initialization"]  # K-means initialization built on run["pca"]
 umap_tight = ds.embeddings.umap(graph, init, min_dist=0.5)
+localmap = ds.embeddings.localmap(graph, init)  # needs a connectivity map, not an integrated graph
 tsne = ds.embeddings.tsne(graph, init, verbose=False)  # needs the tsne extra (sgtsnepi)
 # For new coordinates, build a matching init first:
 # init = ds.embeddings.initialization(new_pca_ref)
@@ -246,6 +247,7 @@ The same helper works for membership strength, doublet scores, cell cycle and en
 | `min_dist` / `spread` (UMAP) | `1.0` / `2.0` | Lower `min_dist` (0.1 to 0.5) for tighter packing; appearance only |
 | `use_density_map` (UMAP) | `False` | `True` for densMAP when relative density matters |
 | `parallel` (UMAP) | `False` | `True` is faster but not reproducible; t-SNE has no parallel mode |
+| `max_distance` (LocalMAP) | `10.0` | Rarely; it sets how near in the layout the last phase draws repelling cells. LocalMAP gives the same layout on any thread count |
 
 ## Check before moving on
 
@@ -272,8 +274,9 @@ The same helper works for membership strength, doublet scores, cell cycle and en
 - `clusters.compute_concordance` requires both artifacts to share the exact cell-selection ref. For
   labels from different selections or from metadata, use sklearn on aligned arrays.
 - Comparing branches at the same resolution only: `k` and HVG count shift the resolution scale.
-- UMAP and t-SNE distances, empty space and island size are not biological measurements. Never
-  choose a resolution from a layout alone.
+- UMAP, LocalMAP and t-SNE distances, empty space and island size are not biological measurements.
+  Never choose a resolution from a layout alone. LocalMAP separates nearby clusters more sharply than
+  UMAP by design, so a gap in a LocalMAP layout is weaker evidence of a boundary.
 - A read-only store (`zarr_mode="r"`) raises `PermissionError` unless an identical artifact exists.
 - `embeddings.tsne` computes with the optional `sgtsnepi` package only (`pip install "cytearc[tsne]"`), on
   one thread; an `sgtsne` executable on `PATH` is ignored. `sgtsnepi` has wheels only for Linux

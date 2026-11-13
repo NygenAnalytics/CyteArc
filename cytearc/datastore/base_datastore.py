@@ -692,7 +692,12 @@ class BaseDataStore:
         from dataclasses import fields
 
         from ..graph.arguments import ConnectivityMapArguments, OperationArguments
-        from ..metadata.arguments import LeidenArguments, TsneArguments, UmapArguments
+        from ..metadata.arguments import (
+            LeidenArguments,
+            LocalmapArguments,
+            TsneArguments,
+            UmapArguments,
+        )
         from ..storage.errors import ArtifactResolutionError
         from ..utils.arguments import float_argument
 
@@ -708,6 +713,12 @@ class BaseDataStore:
                     UmapArguments.operation,
                     "graph",
                     UmapArguments,
+                ),
+                "localmap": (
+                    LocalmapArguments.artifact_kind,
+                    LocalmapArguments.operation,
+                    "graph",
+                    LocalmapArguments,
                 ),
                 "tsne": (
                     TsneArguments.artifact_kind,

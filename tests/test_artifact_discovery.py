@@ -541,7 +541,7 @@ def test_find_imported_embedding_does_not_overwrite_an_explicit_source_key(
         (None, {}, TypeError, "result must be a string"),
         ("unknown", {}, ValueError, "result must be 'embedding'"),
         ("embedding", {"method": 1}, TypeError, "method must be a string"),
-        ("embedding", {"method": "pca"}, ValueError, "use 'umap', 'tsne'"),
+        ("embedding", {"method": "pca"}, ValueError, "use 'umap', 'localmap', 'tsne'"),
         ("embedding", {"from_assay": 1}, TypeError, "from_assay must be a string"),
         ("embedding", {"graph": "graph"}, TypeError, "graph must be an ArtifactRef"),
         (
