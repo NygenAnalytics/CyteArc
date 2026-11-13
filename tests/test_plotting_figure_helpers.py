@@ -216,6 +216,101 @@ def test_plot_result_can_save_after_show(monkeypatch, tmp_path):
     assert plt.imread(output).shape[:2] == (round(height * 80), round(width * 80))
 
 
+def test_plot_result_show_in_ipython_closes_a_caller_figure_that_stays_usable(
+    monkeypatch, tmp_path
+):
+    result = _plot_result(owns_figure=False)
+    figure = result.figure
+    axis = result.axes["main"]
+    displayed = []
+    monkeypatch.setattr("IPython.get_ipython", lambda: object())
+    monkeypatch.setattr("IPython.display.display", displayed.append)
+    monkeypatch.setattr(
+        plt, "show", lambda: pytest.fail("IPython display must not call plt.show()")
+    )
+    assert figure.number in plt.get_fignums()
+
+    result.show()
+
+    # Jupyter draws every figure a cell leaves open, so the caller's figure
+    # leaves pyplot once displayed, while the result still points to it.
+    assert displayed == [figure]
+    assert figure.number not in plt.get_fignums()
+    assert result.figure is figure
+    assert result.owns_figure is False
+    assert "rendered=True" in repr(result)
+
+    # The closed figure still takes new artists and saves them.
+    axis.axhspan(-10, 10, color="#ff0000")
+    output = result.save(tmp_path / "caller-after-show.png", dpi=50)
+    width, height = figure.get_size_inches()
+    pixels = plt.imread(output)
+    assert pixels.shape[:2] == (round(height * 50), round(width * 50))
+    centre = pixels[pixels.shape[0] // 2, pixels.shape[1] // 2]
+    np.testing.assert_allclose(centre[:3], (1.0, 0.0, 0.0), atol=1 / 255)
+    assert figure.number not in plt.get_fignums()
+
+
+def test_plot_result_show_in_ipython_closes_a_composed_caller_figure(monkeypatch):
+    figure, (left, right) = plt.subplots(1, 2)
+    left.plot([0, 1])
+    right.plot([1, 0])
+    composed = compose_results(
+        figure,
+        [_child_result(figure, left), _child_result(figure, right)],
+        panel_labels=False,
+    )
+    displayed = []
+    monkeypatch.setattr("IPython.get_ipython", lambda: object())
+    monkeypatch.setattr("IPython.display.display", displayed.append)
+    other_figure, _ = plt.subplots()
+    assert composed.owns_figure is False
+
+    composed.show()
+
+    # Only the shown figure leaves pyplot; other open figures stay open.
+    assert displayed == [figure]
+    assert plt.get_fignums() == [other_figure.number]
+    figure.canvas.draw()
+
+
+def test_plot_result_show_in_ipython_closes_a_caller_figure_when_display_fails(
+    monkeypatch,
+):
+    result = _plot_result(owns_figure=False)
+
+    def failing_display(_figure):
+        raise RuntimeError("display failed")
+
+    monkeypatch.setattr("IPython.get_ipython", lambda: object())
+    monkeypatch.setattr("IPython.display.display", failing_display)
+
+    with pytest.raises(RuntimeError, match="display failed"):
+        result.show()
+
+    # As with plt.show() in Jupyter, a failed display still closes the figure.
+    assert result.figure.number not in plt.get_fignums()
+    assert "rendered=False" in repr(result)
+
+
+def test_plot_result_show_outside_ipython_keeps_a_caller_figure_open(monkeypatch):
+    result = _plot_result(owns_figure=False)
+    show_calls = []
+    monkeypatch.setattr("IPython.get_ipython", lambda: None)
+    monkeypatch.setattr(plt, "show", lambda: show_calls.append(True))
+    monkeypatch.setattr(
+        result.figure.canvas, "required_interactive_framework", "qt", raising=False
+    )
+
+    result.show()
+
+    assert show_calls == [True]
+    assert result.figure.number in plt.get_fignums()
+    assert "rendered=True" in repr(result)
+    result.close()
+    assert result.figure.number in plt.get_fignums()
+
+
 def test_plot_result_save_restores_chrome_when_backend_raises(monkeypatch, tmp_path):
     result = _plot_result()
     result.theme = "dark"
