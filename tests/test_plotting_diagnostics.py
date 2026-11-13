@@ -11,7 +11,7 @@ import cytearc.plotting as splt
 from cytearc.plotting._figure import PlotResult
 
 
-# A steep drop followed by a slow tail has its only corner at component 2.
+# A steep drop followed by a slow tail has its only corner at the third PC, 1.0.
 _CORNERED_VARIANCE = np.array([9.0, 5.0, 1.0, 0.9, 0.8, 0.7, 0.6, 0.5])
 
 
@@ -148,30 +148,98 @@ def test_elbow_result_records_detection_and_line_artists():
     values = _CORNERED_VARIANCE
     result = splt.elbow(values, show=False)
 
+    # PCs are numbered from 1, as dims counts them. The fields are named for PC
+    # numbers, so code that read the 0-based "component" and "elbow" fails.
     table = result.tables["variance_explained"]
-    np.testing.assert_array_equal(table["component"], np.arange(8))
+    assert table.columns.tolist() == ["pc", "variance_explained", "is_elbow"]
+    np.testing.assert_array_equal(table["pc"], [1, 2, 3, 4, 5, 6, 7, 8])
     np.testing.assert_array_equal(table["variance_explained"], values)
-    assert table.loc[table["is_elbow"], "component"].tolist() == [2]
+    assert table.loc[table["is_elbow"], "pc"].tolist() == [3]
+    assert table.loc[table["is_elbow"], "variance_explained"].tolist() == [1.0]
     assert result.provenance.extras == {
-        "elbow": 2,
+        "elbow_pc": 3,
         "n_components": 8,
         "sensitivity": 1.0,
     }
     assert result.legends[0].label == "Elbow"
-    assert result.legends[0].extras == {"component": 2}
+    assert result.legends[0].extras == {"pc": 3}
     # The default width spends a quarter inch on each component.
     assert result.figure.get_size_inches() == pytest.approx((2.0, 2.0))
 
     ax = result.axes["elbow"]
     curve, marker = ax.lines
-    np.testing.assert_array_equal(curve.get_xdata(), np.arange(8))
+    np.testing.assert_array_equal(curve.get_xdata(), [1, 2, 3, 4, 5, 6, 7, 8])
     np.testing.assert_array_equal(curve.get_ydata(), values)
-    np.testing.assert_array_equal(marker.get_xdata(), [2, 2])
+    np.testing.assert_array_equal(marker.get_xdata(), [3, 3])
     assert to_rgba(marker.get_color()) == to_rgba("red")
-    np.testing.assert_array_equal(ax.get_xticks(), np.arange(8))
+    np.testing.assert_array_equal(ax.get_xticks(), [1, 2, 3, 4, 5, 6, 7, 8])
+    result.figure.canvas.draw()
+    assert [label.get_text() for label in ax.get_xticklabels()] == [
+        "1",
+        "2",
+        "3",
+        "4",
+        "5",
+        "6",
+        "7",
+        "8",
+    ]
     assert [text.get_text() for text in ax.get_legend().get_texts()] == ["Elbow"]
     assert ax.get_xlabel() == "Principal components"
     assert ax.get_ylabel() == "% Variance explained"
+    result.close()
+
+
+def _variance_with_corner_at(last_steep_pc: int, n_pcs: int) -> np.ndarray:
+    # A steep straight drop from 50% to 5% over the first last_steep_pc PCs,
+    # then a tail that loses 0.1% per PC, so the curve bends at last_steep_pc.
+    steep = np.linspace(50.0, 5.0, last_steep_pc)
+    tail = 5.0 - 0.1 * np.arange(1, n_pcs - last_steep_pc + 1)
+    return np.concatenate([steep, tail])
+
+
+@pytest.mark.parametrize("last_steep_pc", [2, 3, 7, 10])
+@pytest.mark.parametrize("n_pcs", [12, 30])
+def test_elbow_marks_the_number_of_the_pc_where_the_curve_bends(last_steep_pc, n_pcs):
+    values = _variance_with_corner_at(last_steep_pc, n_pcs)
+    result = splt.elbow(values, show=False)
+
+    # The marked PC is the last PC of the drop, read straight as dims.
+    assert result.provenance.extras["elbow_pc"] == last_steep_pc
+    assert result.legends[0].extras == {"pc": last_steep_pc}
+    ax = result.axes["elbow"]
+    np.testing.assert_array_equal(ax.lines[1].get_xdata(), [last_steep_pc] * 2)
+    table = result.tables["variance_explained"]
+    (elbow_row,) = table.index[table["is_elbow"]]
+    assert table.loc[elbow_row, "pc"] == last_steep_pc
+    assert table.loc[elbow_row, "variance_explained"] == 5.0
+    np.testing.assert_array_equal(table["pc"], np.arange(n_pcs) + 1)
+    # The first PC sits at tick 1 and the last at tick n_pcs.
+    assert ax.lines[0].get_xdata()[0] == 1
+    assert ax.get_xticks()[[0, -1]].tolist() == [1, n_pcs]
+    result.close()
+
+
+def test_elbow_of_the_issue_curve_names_the_second_pc():
+    # Percent of variance for five PCs; the curve bends at the second PC, 12%.
+    result = splt.elbow(np.array([40.0, 12.0, 6.0, 5.0, 4.5]), show=False)
+
+    ax = result.axes["elbow"]
+    result.figure.canvas.draw()
+    assert [label.get_text() for label in ax.get_xticklabels()] == [
+        "1",
+        "2",
+        "3",
+        "4",
+        "5",
+    ]
+    assert ax.lines[0].get_xdata()[0] == 1
+    np.testing.assert_array_equal(ax.lines[1].get_xdata(), [2, 2])
+    assert result.provenance.extras["elbow_pc"] == 2
+    table = result.tables["variance_explained"]
+    assert table.loc[
+        table["is_elbow"], ["pc", "variance_explained"]
+    ].values.tolist() == [[2, 12.0]]
     result.close()
 
 
@@ -372,10 +440,12 @@ def test_elbow_without_detection_uses_data_driven_width():
     result = splt.elbow(values, show=False)
 
     assert result.figure.get_size_inches() == pytest.approx((2.0, 2.0))
-    assert result.provenance.extras["elbow"] is None
+    assert result.provenance.extras["elbow_pc"] is None
     assert result.legends == ()
     assert len(result.axes["elbow"].lines) == 1
-    assert not result.tables["variance_explained"]["is_elbow"].any()
+    table = result.tables["variance_explained"]
+    assert not table["is_elbow"].any()
+    np.testing.assert_array_equal(table["pc"], [1, 2, 3, 4, 5, 6, 7, 8])
     result.close()
 
 
