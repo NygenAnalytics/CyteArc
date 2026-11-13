@@ -437,7 +437,7 @@
   "tests/test_trajectory_lineage_results.py": 0.8,
   "tests/test_trajectory_lineage_statistics.py": 6.3,
   "tests/test_trajectory_lineage_tree.py": 0.1,
-  "tests/test_trajectory_membership.py": 7.4,
+  "tests/test_trajectory_membership.py": 36.7,
   "tests/test_trajectory_record_paths.py": 16.0,
   "tests/test_types_and_utils.py": 0.6,
   "tests/test_umap_and_harmony.py": 0.1,

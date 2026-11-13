@@ -3,13 +3,34 @@
 A fate map gives each scored cell one probability per sink, and those
 probabilities sum to one, so a cell on no trajectory still splits its
 probability among the sinks. Lineage curves add each cell's progress along
-every lineage's curve and its distance from it. A cell follows a lineage when
-its fate probability for that lineage lies within a band of its largest one,
-and when it lies on the trajectory: within the spread that some lineage's
-own cells show around their curve at the same progress. A cell that follows
-several lineages is shared by them, and one that lies on no curve follows
-none, whatever its probabilities. Two lineages part where their shared cells
-give way to cells that follow only one of them.
+every lineage's curve and its distance from it. A cell follows each lineage
+whose fate probability is still at least a band, a share, of what the
+lineage's trunk cells receive, and only when it lies on the trajectory:
+within the spread that some lineage's own cells show around their curve at
+the same progress. A progenitor follows every lineage that starts in its
+trunk, and as a cell commits it leaves the lineages whose probability falls,
+one after another, rather than joining the one whose probability rises. A
+cell that follows several lineages is shared by them, and one that lies on no
+curve follows none, whatever its probabilities. Two lineages part where their
+shared cells give way to cells that follow only one of them.
+
+Progenitors split their probability unevenly among the fates, so a cell's
+largest probability is no fair yardstick for a fate that the progenitors give
+a small share. Measuring each lineage's probability against its trunk
+probability puts every lineage on the scale of its own trunk, however small
+the share of a lineage. A lineage's trunk probability in a graph component
+that holds its sink cells is its mean probability over the earliest tenth, by
+the pseudotime or score that directs the fate map, of the component's scored
+cells outside the fate map's sinks, and each cell is measured against the
+trunk of its own component. A fate map directed by a score can span several
+components, each with its own trunk and its own split among the fates; in a
+component that holds none of a lineage's sink cells, a cell's probability for
+that lineage is rounding and counts as zero, with no tolerance. The trunk
+probability depends neither on the curves nor on how the later cells divide
+among the branches, as long as the earliest tenth lies before the branches
+part. A shorter trunk lets the earliest tenth reach past the branch point,
+which moves the trunk probabilities toward the fates whose branches start
+there.
 
 The spread is robust: the weighted median distance of a lineage's cells in
 a bin of progress, plus a multiple of their weighted median absolute
@@ -31,6 +52,7 @@ __all__ = [
     "BRANCH_POINT_COLUMNS",
     "MEMBERSHIP_NONE",
     "MEMBERSHIP_SHARED",
+    "TRUNK_SHARE",
     "branch_point",
     "branch_points",
     "branch_window",
@@ -38,6 +60,7 @@ __all__ = [
     "lineage_members",
     "membership_labels",
     "progress_bins",
+    "trunk_probabilities",
     "weighted_median",
 ]
 
@@ -55,6 +78,12 @@ BRANCH_POINT_COLUMNS = (
     "shared_cells",
     "parted_cells",
 )
+#: The share of the earliest cells outside the sinks of a graph component
+#: over which a lineage's trunk probability there is taken. On the pancreas
+#: maps of the lineage tutorials, every share from 1% to 30% gives the same
+#: branch points, and the trunk test of ``tests/test_trajectory_membership.py``
+#: checks the share on cells derived by hand.
+TRUNK_SHARE = 0.1
 # The median absolute deviation of a normal distribution, in standard
 # deviations, is 1 / 1.4826.
 _MAD_SCALE = 1.4826
@@ -166,38 +195,181 @@ def _neighbouring_medians(spreads: np.ndarray) -> np.ndarray:
     return medians
 
 
+def _refusal(lineages: Sequence[Any]) -> str:
+    """Say why lineages that no trunk reaches are refused, in the right number."""
+    named = ", ".join(repr(lineage) for lineage in lineages)
+    if len(lineages) == 1:
+        why = (
+            f"{named}: its sink cells fill a graph component of their own, or "
+            "the walk from the earliest cells does not reach them. Fit the "
+            "curves without that lineage"
+        )
+    else:
+        why = (
+            f"{named}: their sink cells fill graph components of their own, or "
+            "the walk from the earliest cells does not reach them. Fit the "
+            "curves without those lineages"
+        )
+    return (
+        "Lineage membership measures each lineage's probabilities against the "
+        "earliest cells outside the sinks in each graph component of its sink "
+        f"cells, and those cells give no probability to {why}"
+    )
+
+
+def trunk_probabilities(
+    weights: np.ndarray,
+    ordering: np.ndarray,
+    valid: np.ndarray,
+    sinks: np.ndarray,
+    lineage_sinks: np.ndarray,
+    component: np.ndarray,
+    *,
+    lineages: Sequence[Any],
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return each lineage's mean probability over the earliest cells that can reach it, by graph component.
+
+    The rows are the components of ``component`` that hold a scored cell of
+    some lineage's sink, which ``lineage_sinks`` marks, in ascending order.
+    For lineage ``l`` and a component that holds a scored cell of ``l``'s
+    sink, the candidates are the component's scored cells outside the fate
+    map's sinks, which ``sinks`` marks. Of them, the earliest
+    :data:`TRUNK_SHARE` by ``ordering``, at least one and every cell tied with
+    the last of them, are ``l``'s trunk in the component, and their mean
+    probability for ``l`` is its trunk probability there. It is NaN where the
+    component holds no scored cell of ``l``'s sink, and where it holds no
+    candidate, so that all its scored cells are sink cells.
+
+    Returns:
+        The component numbers, and the trunk probabilities, components by
+        lineages.
+
+    Raises:
+        ValueError: If a lineage has no candidate in any component that holds
+            its sink cells, or a trunk gives its lineage no probability.
+    """
+    weights = np.asarray(weights, dtype=np.float64)
+    if weights.ndim != 2:
+        raise ValueError("weights must be cells by lineages")
+    n_cells, n_lineages = weights.shape
+    if len(lineages) != n_lineages:
+        raise ValueError("lineages must name one lineage per column of weights")
+    ordering = np.asarray(ordering, dtype=np.float64)
+    valid = np.asarray(valid, dtype=bool)
+    sinks = np.asarray(sinks, dtype=bool)
+    component = np.asarray(component)
+    if any(
+        np.shape(values) != (n_cells,) for values in (ordering, valid, sinks, component)
+    ):
+        raise ValueError(
+            "ordering, valid, sinks and component must hold one entry per cell"
+        )
+    lineage_sinks = np.asarray(lineage_sinks, dtype=bool)
+    if lineage_sinks.shape != weights.shape:
+        raise ValueError("lineage_sinks must be cells by lineages")
+    scored = valid & np.isfinite(ordering)
+    candidates = scored & ~sinks
+    held = scored[:, None] & lineage_sinks
+    components = np.unique(component[held.any(axis=1)])
+    trunk = np.full((len(components), n_lineages), np.nan)
+    for row, number in enumerate(components):
+        cells = component == number
+        reach = candidates & cells
+        if not reach.any():
+            continue
+        last = np.quantile(ordering[reach], TRUNK_SHARE, method="inverted_cdf")
+        earliest = reach & (ordering <= last)
+        for lineage in np.flatnonzero((held & cells[:, None]).any(axis=0)):
+            trunk[row, lineage] = weights[earliest, lineage].mean()
+    unreached = [
+        lineages[int(index)]
+        for index in range(n_lineages)
+        if not np.any(trunk[:, index] > 0) or np.any(trunk[:, index] <= 0)
+    ]
+    if unreached:
+        raise ValueError(_refusal(unreached))
+    return components, trunk
+
+
 def lineage_members(
     weights: np.ndarray,
     distance: np.ndarray,
     progress: np.ndarray,
     valid: np.ndarray,
     limits: np.ndarray,
+    component: np.ndarray,
+    lineage_sinks: np.ndarray,
+    trunk_components: np.ndarray,
+    trunk: np.ndarray,
     *,
     band: float,
 ) -> np.ndarray:
     """Return which lineages each scored cell follows, cells by lineages.
 
-    A cell follows lineage ``l`` when its fate probability for ``l`` is
-    positive and at least ``band`` times its largest probability over the
-    lineages, and when it lies on some lineage's curve: within that
-    lineage's limit of ``limits`` at the cell's bin of progress on it.
-    Unscored cells follow none.
+    Each cell's probability for a lineage is divided by the lineage's trunk
+    probability in the cell's graph component, from
+    :func:`trunk_probabilities`. In a component that holds no scored cell of
+    the lineage's sink, the divided probability is zero; in one whose scored
+    cells are all sink cells, it is the probability itself, so each of them
+    follows the lineage of its own sink. A cell follows lineage ``l`` when
+    its probability for ``l`` is positive, its divided probability is at
+    least ``band`` times the smaller of one and its largest divided
+    probability over the lineages, and it lies on some lineage's curve:
+    within that lineage's limit of ``limits`` at the cell's bin of progress
+    on it. Unscored cells follow none.
+
+    When the lineages cover every sink of the fate map, a component's trunk
+    probabilities of the lineages whose sink cells it holds sum to one, so
+    every cell's largest divided probability is at least one, and a cell
+    follows each lineage whose probability is at least ``band`` times its
+    trunk probability in the cell's component. When they cover some of the
+    sinks, a cell that moves toward a sink they leave out can have every
+    divided probability below one; it then follows each lineage whose
+    divided probability is at least ``band`` times its largest.
     """
     weights = np.asarray(weights, dtype=np.float64)
     if weights.ndim != 2:
         raise ValueError("weights must be cells by lineages")
-    n_lineages = weights.shape[1]
+    n_cells, n_lineages = weights.shape
     valid = np.asarray(valid, dtype=bool)
     if limits.ndim != 2 or limits.shape[0] != n_lineages:
         raise ValueError("limits must be lineages by bins")
+    component = np.asarray(component)
+    lineage_sinks = np.asarray(lineage_sinks, dtype=bool)
+    if component.shape != (n_cells,) or lineage_sinks.shape != weights.shape:
+        raise ValueError(
+            "component must hold one entry per cell and lineage_sinks be cells "
+            "by lineages"
+        )
+    trunk_components = np.asarray(trunk_components)
+    trunk = np.asarray(trunk, dtype=np.float64)
+    if (
+        trunk_components.ndim != 1
+        or trunk.shape != (len(trunk_components), n_lineages)
+        or len(np.unique(trunk_components)) != len(trunk_components)
+        or np.any(trunk <= 0)
+        or np.isinf(trunk).any()
+    ):
+        raise ValueError(
+            "trunk must hold, for each component of trunk_components, one "
+            "positive probability or NaN per lineage"
+        )
     bins = progress_bins(progress, limits.shape[1])
     lineage_limits = limits[np.arange(n_lineages)[None, :], bins]
     with np.errstate(invalid="ignore"):
         on_curve = np.asarray(distance, dtype=np.float64) <= lineage_limits
     on_trajectory = valid & on_curve.any(axis=1)
     scored = np.where(valid[:, None] & np.isfinite(weights), weights, 0.0)
-    largest = scored.max(axis=1, initial=0.0)
-    compatible = (scored > 0) & (scored >= band * largest[:, None])
+    divided = np.zeros_like(scored)
+    for row, number in enumerate(trunk_components):
+        cells = component == number
+        held = (valid[cells, None] & lineage_sinks[cells]).any(axis=0)
+        for lineage in np.flatnonzero(held):
+            value = trunk[row, lineage]
+            scale = value if np.isfinite(value) else 1.0
+            divided[cells, lineage] = scored[cells, lineage] / scale
+    largest = np.minimum(divided.max(axis=1, initial=0.0), 1.0)
+    compatible = (divided > 0) & (divided >= band * largest[:, None])
     members: np.ndarray = on_trajectory[:, None] & compatible
     return members
 
@@ -232,8 +404,13 @@ def branch_point(
     of them. The split puts shared cells before it and parted cells after
     it with the fewest cells on the wrong side, the earliest such split, and
     lies halfway between the last cell before it and the first after it.
-    Without shared or without parted cells the lineages have no branch
-    point, NaN.
+    The lineages have no branch point, NaN, when that split lies before the
+    first cell, where it misplaces every shared cell, or after the last one,
+    where it misplaces every parted cell: no stretch of shared cells comes
+    before the parted cells. A split between two cells beats the one before
+    the first cell only when the cells before it hold more shared than
+    parted cells. Without shared or without parted cells the lineages have
+    no branch point either.
     """
     pseudotime = np.asarray(pseudotime, dtype=np.float64)
     shared = np.asarray(shared, dtype=bool)
@@ -256,10 +433,8 @@ def branch_point(
     allowed[1:-1] = times[1:] != times[:-1]
     errors = np.where(allowed, errors, np.iinfo(np.int64).max)
     after = int(np.argmin(errors))
-    if after == 0:
-        return float(times[0])
-    if after == len(times):
-        return float(times[-1])
+    if after == 0 or after == len(times):
+        return math.nan
     return float(0.5 * (times[after - 1] + times[after]))
 
 
@@ -281,9 +456,10 @@ def branch_points(
 
     For lineages ``first`` and ``second``, ``pseudotime`` is the
     :func:`branch_point` of the cells that follow both and those that follow
-    one of them, and ``first_progress`` and ``second_progress`` are the
-    progress on each lineage's curve at which its fitted pseudotime reaches
-    it. ``shared_cells`` and ``parted_cells`` count those cells.
+    one of them, NaN when they have none, and ``first_progress`` and
+    ``second_progress`` are the progress on each lineage's curve at which its
+    fitted pseudotime reaches it, NaN with it. ``shared_cells`` and
+    ``parted_cells`` count those cells.
     """
     members = np.asarray(members, dtype=bool)
     if members.ndim != 2 or members.shape[1] != len(lineages):

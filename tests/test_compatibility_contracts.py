@@ -244,6 +244,7 @@ _EXPECTED_RESULT_FIELDS = {
         "valid",
         "distance_limits",
         "branch_points",
+        "trunk_probabilities",
     ),
 }
 
