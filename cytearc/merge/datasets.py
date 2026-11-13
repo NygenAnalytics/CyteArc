@@ -346,7 +346,9 @@ class DataStoreMerge:
                 )
                 alignment = align_features(sources, self.names, key=self.featureKey)
                 self._alignments[assay_name] = alignment
-                unshared = unshared_features_warning(assay_name, alignment, self.names)
+                unshared = unshared_features_warning(
+                    assay_name, alignment, self.names, combination="merge"
+                )
                 if unshared is not None:
                     logger.warning(unshared)
             self._sourceMembership = self._source_membership()

@@ -6,6 +6,7 @@ import shutil
 from contextlib import contextmanager
 
 import numpy as np
+import pandas as pd
 import pytest
 import zarr
 from zarr.abc.store import OffsetByteRequest, RangeByteRequest, SuffixByteRequest
@@ -17,6 +18,7 @@ from cytearc import DataStore
 from cytearc.composite import create_composite
 from cytearc.storage.count_matrix import CountMatrixPolicy
 from cytearc.storage.schema import create_cell_data, create_zarr_count_assay
+from cytearc.utils.logging import logger
 from cytearc.writers.counts_t import finalize_writer_counts_t
 from tests.storage_helpers import finalize_test_counts, stored_bytes
 
@@ -663,6 +665,182 @@ def test_empty_source_selection_still_participates_in_features(
     expected = _expected_counts(joint, composite_sources)
     np.testing.assert_array_equal(joint.RNA.matrixGroup["counts"][:], expected)
     np.testing.assert_array_equal(joint.RNA.matrixGroup["countsT"][:], expected.T)
+
+
+@contextmanager
+def _unshared_feature_warnings():
+    """Capture the warnings about features that not every source measured.
+
+    Opening a composite also warns of other things, such as an assay without
+    mitochondrial genes.
+    """
+    messages = []
+    sink = logger.add(
+        lambda message: messages.append(message.record["message"]),
+        level="WARNING",
+        filter=lambda record: "not measured by every source" in record["message"],
+    )
+    try:
+        yield messages
+    finally:
+        logger.remove(sink)
+
+
+_ZEROS_READ_AS_COUNTS = (
+    " The composite reads zero counts for a feature in the cells of each source "
+    "that lacks it, and analyses read those zeros as measured counts. Pass "
+    "features='intersection' to keep only the features that every source "
+    "measured."
+)
+
+
+def test_union_composite_warns_of_the_features_that_each_source_lacks(
+    sources, composite_sources, tmp_path
+):
+    path = tmp_path / "joint.zarr"
+
+    with _unshared_feature_warnings() as messages:
+        joint = create_composite(sources, at=path, features="union", nthreads=1)
+        # Reopening the composite reads the features it kept, without a warning.
+        DataStore(str(path), nthreads=1, mem_budget="64M")
+
+    # Source a's nine genes come first in its order, then b's g9; a lacks g9,
+    # and b lacks g8 and g1.
+    assert messages == [
+        "Assay 'RNA': 3 of the 10 composite features were not measured by every "
+        "source that holds the assay. Source 'a' lacks 1: 'g9'. Source 'b' "
+        "lacks 2: 'g8', 'g1'." + _ZEROS_READ_AS_COUNTS
+    ]
+    # The composite reads the zeros that the warning describes.
+    ids = joint.RNA.feats.fetch_all("ids").tolist()
+    assert ids == ["g4", "g0", "g8", "g2", "g6", "g1", "g7", "g3", "g5", "g9"]
+    counts = joint.RNA.matrixGroup["counts"][:]
+    cells = joint.cells.fetch_all("ids").astype(str)
+    from_a = np.char.startswith(cells, "a__")
+    assert not counts[from_a, ids.index("g9")].any()
+    assert not counts[~from_a][:, [ids.index("g8"), ids.index("g1")]].any()
+    np.testing.assert_array_equal(counts, _expected_counts(joint, composite_sources))
+
+
+def test_union_composite_warns_of_an_antibody_that_one_of_three_panels_lacks(
+    tmp_path,
+):
+    panels = {
+        "p1": ["CD3", "CD4", "CD8"],
+        "p2": ["CD8", "CD3", "CD4"],
+        "p3": ["CD3", "CD4"],
+    }
+    sources = {
+        name: _write_source(
+            tmp_path / f"{name}.zarr",
+            np.arange(1, 3 * len(panel) + 1, dtype=np.uint16).reshape(3, len(panel)),
+            panel,
+            policy=CountMatrixPolicy(128, 32),
+            assay="ADT",
+        )
+        for name, panel in panels.items()
+    }
+
+    with _unshared_feature_warnings() as messages:
+        joint = create_composite(
+            sources, at=tmp_path / "joint.zarr", assay="ADT", features="union"
+        )
+
+    assert messages == [
+        "Assay 'ADT': 1 of the 3 composite features was not measured by every "
+        "source that holds the assay. Source 'p3' lacks 1: 'CD8'."
+        + _ZEROS_READ_AS_COUNTS
+    ]
+    assert joint.ADT.feats.fetch_all("ids").tolist() == ["CD3", "CD4", "CD8"]
+    counts = joint.ADT.matrixGroup["counts"][:]
+    rows = dict(zip(joint.cells.fetch_all("ids").tolist(), counts.tolist()))
+    assert [rows[f"p3__c{cell}"] for cell in range(3)] == [
+        [1, 2, 0],
+        [3, 4, 0],
+        [5, 6, 0],
+    ]
+
+
+def test_intersection_composite_does_not_warn(sources, tmp_path):
+    with _unshared_feature_warnings() as messages:
+        joint = create_composite(
+            sources, at=tmp_path / "joint.zarr", features="intersection", nthreads=1
+        )
+
+    assert messages == []
+    # The composite keeps the seven genes that both sources measured.
+    assert joint.RNA.feats.fetch_all("ids").tolist() == [
+        "g4",
+        "g0",
+        "g2",
+        "g6",
+        "g7",
+        "g3",
+        "g5",
+    ]
+
+
+@pytest.mark.parametrize(
+    "panels",
+    [
+        pytest.param({"p1": ["g0", "g1", "g2"]}, id="one source"),
+        pytest.param(
+            {"p1": ["g0", "g1", "g2"], "p2": ["g2", "g0", "g1"]},
+            id="one panel in another order",
+        ),
+    ],
+)
+def test_union_composite_of_sources_that_measured_one_panel_does_not_warn(
+    tmp_path, panels
+):
+    sources = {
+        name: _write_source(
+            tmp_path / f"{name}.zarr",
+            np.arange(6, dtype=np.uint16).reshape(2, 3),
+            panel,
+            policy=CountMatrixPolicy(128, 32),
+        )
+        for name, panel in panels.items()
+    }
+
+    with _unshared_feature_warnings() as messages:
+        joint = create_composite(sources, at=tmp_path / "joint.zarr", features="union")
+
+    assert messages == []
+    assert joint.RNA.feats.N == 3
+
+
+def test_unshared_features_warning_names_its_combinations():
+    from cytearc.merge.features import FeatureAlignment, unshared_features_warning
+
+    alignment = FeatureAlignment(
+        pd.DataFrame({"idx": [0, 1], "names": ["g0", "g1"], "ids": ["g0", "g1"]}),
+        [np.array([0, 1]), np.array([1])],
+        2,
+        0.5,
+    )
+    shared = (
+        "Assay 'RNA': 1 of the 2 {} features was not measured by every source "
+        "that holds the assay. Source 'b' lacks 1: 'g0'."
+    )
+
+    assert unshared_features_warning(
+        "RNA", alignment, ["a", "b"], combination="merge"
+    ) == shared.format("merged") + (
+        " The merge writes zero counts for a feature in the cells of each source "
+        "that lacks it, and analyses read those zeros as measured counts."
+    )
+    assert (
+        unshared_features_warning("RNA", alignment, ["a", "b"], combination="composite")
+        == shared.format("composite") + _ZEROS_READ_AS_COUNTS
+    )
+    with pytest.raises(ValueError, match="combination must be 'merge' or 'composite'"):
+        unshared_features_warning(
+            "RNA",
+            alignment,
+            ["a", "b"],
+            combination="mount",  # type: ignore[arg-type]
+        )
 
 
 @pytest.mark.parametrize(
