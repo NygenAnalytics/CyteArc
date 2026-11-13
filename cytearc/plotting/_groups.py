@@ -36,7 +36,7 @@ from ..utils.arguments import quoted_value
 from ..utils.memory_budget import MemoryLedger
 from ._contracts import CategoricalScale
 from ._data import store_method
-from ._display import stored_categorical_scale
+from ._display import stored_artifact_scale, stored_categorical_scale
 from ._style import RECEPTOR_TYPE_SCALE, palette_for_n, resolve_category_scale
 
 __all__ = [
@@ -231,8 +231,11 @@ def _colors(
         )
     if not group_by and groups is not None and column == groups.kind:
         _store_labels(store)
+        stored = _as_text(stored_artifact_scale(store, groups))
         return resolve_category_scale(
-            list(names), None, universe=_artifact_labels(store, groups)
+            list(names),
+            stored,
+            universe=_artifact_labels(store, groups) if stored is None else None,
         )
     if column in _VOCABULARY_SCALES:
         return resolve_category_scale(list(names), _VOCABULARY_SCALES[column])

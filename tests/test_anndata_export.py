@@ -107,6 +107,10 @@ class _FrozenView:
     def _selected_field(self, column):
         return self.fetch_all(column)[self._selected], None
 
+    def _descriptor(self, column):
+        # The run computed its clusters; it froze none of these columns.
+        return SimpleNamespace(artifact=SimpleNamespace(kind="cluster_labels"))
+
     def _field_display(self, column):
         if column != "clusters":
             return None

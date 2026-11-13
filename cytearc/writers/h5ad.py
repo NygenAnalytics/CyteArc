@@ -38,7 +38,6 @@ _MAX_STORED_CATEGORIES = 10_000
 # reads it, or in whole rows of its HDF5 chunks. Each batch is copied into a
 # band of every assay, so a batch need not hold a destination row band.
 _DENSE_BATCH_VALUES = 1 << 20
-_MISSING_DISPLAY = {"missing_label": "NA", "missing_color": "#bdbdbd"}
 
 
 def _stored_levels(dtype: np.dtype[Any], categories: Sequence[Any]) -> list[Any] | None:
@@ -70,42 +69,6 @@ def _stored_levels(dtype: np.dtype[Any], categories: Sequence[Any]) -> list[Any]
     return list(categories)
 
 
-def _categorical_display(
-    levels: list[Any],
-    colors: tuple[str, ...] | None,
-    has_missing: bool,
-) -> dict[str, Any] | None:
-    """Return the categorical display contract of levels in their order.
-
-    The categories keep the stored order, so plots show them in it. Colors
-    come from the file, or else from the palette of
-    :func:`~cytearc.metadata.artifacts.categorical_display`.
-    """
-    from ..metadata.artifacts import categorical_display, validate_display_metadata
-
-    if colors is None:
-        generated = {
-            category["value"]: category["color"]
-            for category in categorical_display(np.asarray(levels, dtype=object))[
-                "categories"
-            ]
-        }
-        colors = tuple(generated[level] for level in levels)
-    display: dict[str, Any] = {
-        "kind": "categorical",
-        "categories": [
-            {"value": level, "label": str(level), "color": color}
-            for level, color in zip(levels, colors, strict=True)
-        ],
-    }
-    if has_missing:
-        display.update(_MISSING_DISPLAY)
-    try:
-        return validate_display_metadata(display)
-    except (TypeError, ValueError):
-        return None
-
-
 def _categorical_attributes(
     dtype: np.dtype[Any],
     categories: Any,
@@ -130,7 +93,9 @@ def _categorical_attributes(
         return {}
     attributes: dict[str, Any] = {"levels": levels, "ordered": categories.ordered}
     if display:
-        contract = _categorical_display(levels, colors, has_missing)
+        from ..metadata.artifacts import levels_display
+
+        contract = levels_display(levels, colors, has_missing)
         if contract is not None:
             attributes["display"] = contract
     return attributes

@@ -233,14 +233,18 @@ def _run_label_categorical(
 ) -> "H5adCategorical | None":
     """Return how a run export writes a frozen label field, or None.
 
-    A field with a categorical display, such as ``clusters``, ``leiden_*``,
-    ``paris``, or ``cell_cycle_phase``, is a categorical whose categories are
-    its labels as text in natural order, with the display colors.
+    A run output with a categorical display, such as ``clusters``,
+    ``leiden_*``, ``paris``, or ``cell_cycle_phase``, is a categorical whose
+    categories are its labels as text in natural order, with the display
+    colors. A cell column that the run froze keeps its display for plots and
+    exports as the run's other frozen columns do.
     """
     from ...writers.export import H5adCategorical
 
     display = view._field_display(column)
     if display is None or display.get("kind") != "categorical":
+        return None
+    if view._descriptor(column).artifact.kind == "metadata_snapshot":
         return None
     return H5adCategorical(
         colors={

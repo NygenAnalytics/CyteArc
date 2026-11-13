@@ -2,6 +2,7 @@ import colorsys
 import math
 import re
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
@@ -26,6 +27,7 @@ from ..storage.artifact_writer import (
 from ..storage.artifacts import (
     ArtifactRef,
     ArtifactScope,
+    artifact_group,
     fingerprint_array,
     fingerprint_stored_arrays,
 )
@@ -35,7 +37,12 @@ from ..storage.finite_values import requires_finite_values, write_finite_array
 from ..storage.layout import column_chunk_rows
 from ..storage.selections import validate_cell_selection
 from ..storage.types import as_zarr_array, as_zarr_group
-from .selection import CellField, resolve_grouping, valid_category_mask
+from .selection import (
+    CellField,
+    cell_value_spec,
+    resolve_grouping,
+    valid_category_mask,
+)
 
 _CATEGORY_COLORS = (
     "#4e79a7",
@@ -564,6 +571,67 @@ def artifact_values(
     return values if value_index is None else values[:, value_index]
 
 
+@dataclass(frozen=True, slots=True)
+class RecordedCategories:
+    """The categories that a stored array of labels records in its attributes.
+
+    An import keeps a source categorical with the column or label artifact
+    that holds its labels, in the attributes that :func:`recorded_categories`
+    reads.
+
+    Attributes:
+        levels: Every category in its source order, unused ones included, or
+            None when the array records none.
+        ordered: Whether the levels are ordered.
+        display: The validated display contract, or None.
+    """
+
+    levels: tuple[Any, ...] | None
+    ordered: bool
+    display: dict[str, Any] | None
+
+    @property
+    def ordered_levels(self) -> tuple[Any, ...] | None:
+        """The levels when they are ordered, or None."""
+        return self.levels if self.ordered else None
+
+
+def recorded_categories(attributes: Mapping[str, Any]) -> RecordedCategories:
+    """Read the ``levels``, ``ordered``, and ``display`` attributes of a stored array.
+
+    Raises:
+        TypeError: If ``levels`` is not a list or ``display`` not a mapping.
+        ValueError: If ``display`` is not a valid display contract.
+    """
+    levels = attributes.get("levels")
+    if levels is not None and not isinstance(levels, list | tuple):
+        raise TypeError(
+            f"Stored levels must be a list of categories, not {type(levels).__name__}"
+        )
+    display = attributes.get("display")
+    if display is not None and not isinstance(display, Mapping):
+        raise TypeError("Existing display metadata must be a mapping")
+    return RecordedCategories(
+        levels=None if levels is None else tuple(levels),
+        ordered=attributes.get("ordered") is True,
+        display=None if display is None else validate_display_metadata(display),
+    )
+
+
+def artifact_categories(root: zarr.Group, ref: ArtifactRef) -> RecordedCategories:
+    """Return the categories that a cell-aligned artifact records with its values.
+
+    An H5AD import keeps the categories, order, and colors of each clustering
+    it imports on the artifact's value array; other artifacts record none.
+
+    Raises:
+        ValueError: If ``ref`` is not a cell-aligned artifact kind.
+    """
+    name = cell_value_spec(ref.kind).name
+    group = artifact_group(root, ref)
+    return recorded_categories(as_zarr_array(group[name], name=name).attrs)
+
+
 def column_display(
     root: zarr.Group,
     column: str,
@@ -571,16 +639,9 @@ def column_display(
     cell_data = as_zarr_group(root["cellData"], name="cellData")
     if column not in cell_data:
         return None
-    attrs = as_zarr_array(
-        cell_data[column],
-        name=column,
-    ).attrs
-    if "display" not in attrs:
-        return None
-    raw_display = attrs["display"]
-    if not isinstance(raw_display, Mapping):
-        raise TypeError("Existing display metadata must be a mapping")
-    return validate_display_metadata(raw_display)
+    return recorded_categories(
+        as_zarr_array(cell_data[column], name=column).attrs
+    ).display
 
 
 def column_category_order(
@@ -596,7 +657,7 @@ def column_category_order(
     a column the table does not hold, returns None.
 
     Raises:
-        TypeError: If an ordered column's ``levels`` attribute is not a list.
+        TypeError: If a column of labels records ``levels`` that are not a list.
     """
     cell_data = as_zarr_group(root["cellData"], name="cellData")
     if column not in cell_data:
@@ -605,15 +666,7 @@ def column_category_order(
     categorical = CategoricalColumn.open(cell_data, column, values=array)
     if categorical is not None:
         return tuple(categorical.categories.tolist()) if categorical.ordered else None
-    if array.attrs.get("ordered") is not True or "levels" not in array.attrs:
-        return None
-    levels = array.attrs["levels"]
-    if not isinstance(levels, list):
-        raise TypeError(
-            f"Column {column!r} records its ordered categories as "
-            f"{type(levels).__name__}; its levels attribute must be a list"
-        )
-    return tuple(levels)
+    return recorded_categories(array.attrs).ordered_levels
 
 
 def continuous_display(
@@ -681,3 +734,39 @@ def categorical_display(values: np.ndarray) -> dict[str, Any]:
         display["missing_label"] = "NA"
         display["missing_color"] = "#bdbdbd"
     return display
+
+
+def levels_display(
+    levels: list[Any],
+    colors: tuple[str, ...] | None,
+    has_missing: bool,
+) -> dict[str, Any] | None:
+    """Return the categorical display contract of levels in their order, or None.
+
+    The categories keep the order of ``levels``, so plots show them in it.
+    Colors come from ``colors``, one per level, or else from the palette of
+    :func:`categorical_display`, so each category takes the color that the
+    natural order of the levels gives it. Levels that a display cannot hold,
+    such as values that are not JSON scalars, give None.
+    """
+    if colors is None:
+        generated = {
+            category["value"]: category["color"]
+            for category in categorical_display(np.asarray(levels, dtype=object))[
+                "categories"
+            ]
+        }
+        colors = tuple(generated[level] for level in levels)
+    display: dict[str, Any] = {
+        "kind": "categorical",
+        "categories": [
+            {"value": level, "label": str(level), "color": color}
+            for level, color in zip(levels, colors, strict=True)
+        ],
+    }
+    if has_missing:
+        display.update({"missing_label": "NA", "missing_color": "#bdbdbd"})
+    try:
+        return validate_display_metadata(display)
+    except (TypeError, ValueError):
+        return None

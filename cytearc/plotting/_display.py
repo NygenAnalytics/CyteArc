@@ -3,10 +3,12 @@
 from typing import Any
 
 from ..metadata.artifacts import (
+    artifact_categories,
     column_category_order,
     column_display,
     validate_display_metadata,
 )
+from ..storage.refs import ArtifactRef
 from ._contracts import CategoricalScale, ColorScale
 
 
@@ -26,8 +28,9 @@ def stored_display_metadata(store: Any, column: str) -> dict[str, Any] | None:
 def stored_category_order(store: Any, column: str) -> tuple[Any, ...] | None:
     """Return the categories of a live cell column stored as ordered, in their stored order.
 
-    A pipeline run's frozen cell fields record no such order, so a run's
-    plot store returns None.
+    A run's plot store returns None: a run records the order of a column it
+    freezes in the display of the column's field, which
+    :func:`stored_display_metadata` reads.
     """
     if callable(getattr(store, "_stored_display_metadata", None)):
         return None
@@ -82,11 +85,36 @@ def stored_categorical_scale(store: Any, column: str) -> CategoricalScale | None
     plots sort its categories naturally.
     """
     display = stored_display_metadata(store, column)
+    return _stored_scale(
+        display,
+        None if display is not None else stored_category_order(store, column),
+    )
+
+
+def stored_artifact_scale(store: Any, ref: ArtifactRef) -> CategoricalScale | None:
+    """Return the category order and colors that a label artifact stores, or None.
+
+    The artifact's value array records them as a cell column does: an H5AD
+    import keeps the categories, order, and colors of each clustering it
+    imports there. Artifacts are immutable, so a run's plot store reads them
+    as a live store does.
+    """
+    try:
+        root = store.zw
+    except AttributeError:
+        return None
+    recorded = artifact_categories(root, ref)
+    return _stored_scale(recorded.display, recorded.ordered_levels)
+
+
+def _stored_scale(
+    display: dict[str, Any] | None, order: tuple[Any, ...] | None
+) -> CategoricalScale | None:
+    """The scale of a stored display, else of an order stored as ordered."""
     if display is not None:
         if display["kind"] != "categorical":
             return None
         return categorical_display_scale(display)
-    order = stored_category_order(store, column)
     return None if order is None else CategoricalScale(order=order)
 
 
@@ -139,3 +167,12 @@ def resolve_categorical_scale(
 ) -> CategoricalScale | None:
     """Merge an explicit scale over the scale that a cell column stores."""
     return merge_categorical_scales(stored_categorical_scale(store, column), explicit)
+
+
+def resolve_artifact_scale(
+    store: Any,
+    ref: ArtifactRef,
+    explicit: CategoricalScale | None,
+) -> CategoricalScale | None:
+    """Merge an explicit scale over the scale that a label artifact stores."""
+    return merge_categorical_scales(stored_artifact_scale(store, ref), explicit)

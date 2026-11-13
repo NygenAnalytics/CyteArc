@@ -15,7 +15,7 @@ from ._data import (
     _resolve_grouping,
 )
 from ._deps import require_matplotlib
-from ._display import resolve_categorical_scale
+from ._display import resolve_artifact_scale, resolve_categorical_scale
 from ._figure import (
     LegendSpec,
     PlotResult,
@@ -488,6 +488,7 @@ def composition(
         category_axis_label = category_by
     else:
         assert category_values is not None
+        categorical_scale = resolve_artifact_scale(store, categories, categorical_scale)
         cats = np.asarray(category_values[0], dtype=object).copy()
         category_axis_label = "categories"
     if len(cats) == 0:

@@ -28,7 +28,7 @@ from ._data import (
     _resolve_grouping,
     _resolve_layout,
 )
-from ._display import resolve_categorical_scale
+from ._display import resolve_artifact_scale, resolve_categorical_scale
 from ._figure import (
     LegendSpec,
     PlotResult,
@@ -300,6 +300,7 @@ def cluster_connectivity(
                 store, group_by=None, groups=groups, cell_key="I"
             )
             group_universe = all_labels[0]
+        categorical_scale = resolve_artifact_scale(store, groups, categorical_scale)
         group_label = "groups"
     else:
         if group_by is None or layout_key is None:

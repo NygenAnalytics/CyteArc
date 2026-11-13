@@ -309,8 +309,7 @@ The other keywords configure the run itself:
 - `label`: an immutable name for the completed run, unique in the store
   ([Open, list, and report runs](#open-list-and-report-runs)).
 - `cells`: the cells the run analyzes ([Cells](#cells)); `multimodal` takes the cells of its runs.
-- `snapshot_columns`: cell columns frozen into the run's cell view. They must exist and must not
-  use a reserved field name ([Frozen fields](#frozen-fields)).
+- `snapshot_columns`: cell columns frozen into the run's cell view. They must exist and must not use a reserved field name ([Frozen fields](#frozen-fields)). The run records how plots draw each column: its stored display, or for a column stored as ordered its categories in their stored order with the default colors, so run plots draw the column as plots of the live column do.
 - `species`: a species key recorded with the run, one of `homo_sapiens`, `mus_musculus`,
   `rattus_norvegicus`, `danio_rerio`, `drosophila_melanogaster`, or `caenorhabditis_elegans`.
   `multimodal` and `perturbation` take none.

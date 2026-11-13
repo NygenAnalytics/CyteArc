@@ -1320,23 +1320,25 @@ def stored_categorical(attributes: Mapping[str, Any]) -> H5adCategorical | None:
     """Return the categorical that a stored column's attributes record, or None.
 
     A column keeps the categories of a source categorical as ``levels`` and
-    ``ordered`` attributes, and a categorical ``display`` gives their colors.
+    ``ordered`` attributes, and a categorical ``display`` gives their colors,
+    as :func:`~cytearc.metadata.artifacts.recorded_categories` reads them for
+    plots too.
     """
-    levels = attributes.get("levels")
-    if not isinstance(levels, list | tuple):
+    from ..metadata.artifacts import recorded_categories
+
+    recorded = recorded_categories(attributes)
+    if recorded.levels is None:
         return None
-    colors: dict[Any, str] | None = None
-    display = attributes.get("display")
-    if isinstance(display, Mapping) and display.get("kind") == "categorical":
-        colors = {
-            category["value"]: category["color"]
-            for category in display.get("categories", ())
-            if isinstance(category, Mapping) and "value" in category
+    display = recorded.display
+    colors = (
+        None
+        if display is None or display["kind"] != "categorical"
+        else {
+            category["value"]: category["color"] for category in display["categories"]
         }
+    )
     return H5adCategorical(
-        levels=tuple(levels),
-        ordered=bool(attributes.get("ordered", False)),
-        colors=colors,
+        levels=recorded.levels, ordered=recorded.ordered, colors=colors
     )
 
 
