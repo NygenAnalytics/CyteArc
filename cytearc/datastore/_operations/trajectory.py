@@ -196,6 +196,7 @@ from ...trajectory.membership import (
     distance_limits as _distance_limits_impl,
     lineage_members as _lineage_members_impl,
     membership_labels as _membership_labels_impl,
+    trunk_probabilities as _trunk_probabilities_impl,
 )
 from ...trajectory.potency import (
     MAX_SMOOTHING as _MAX_SMOOTHING,
@@ -3183,20 +3184,14 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
 
     def _membership_inputs(
         self, curves: ArtifactRef
-    ) -> tuple[LineageCurvesResult, np.ndarray, np.ndarray]:
-        """Load lineage curves with the pseudotime of their cells and the sinks' cells.
+    ) -> tuple[LineageCurvesResult, _FateInputs]:
+        """Load lineage curves with the fate map's direction and sink labels.
 
-        For curves of a fate map that a score directs, the score takes the
-        pseudotime's place. The sinks' cells hold any sink label of the fate
-        map, also of a sink that the curves leave out.
+        The direction is the pseudotime of the curves' cells, or for curves
+        of a fate map that a score directs, the score.
         """
         loaded = self._trajectory_load_curves(curves)
-        inputs = self._load_fate_inputs(loaded.fate)
-        return (
-            loaded,
-            np.asarray(inputs.direction.scores, dtype=np.float64),
-            np.asarray(inputs.sink_cells, dtype=bool),
-        )
+        return loaded, self._load_fate_inputs(loaded.fate)
 
     @validation_scoped
     def _trajectory_lineage_membership(
@@ -3215,12 +3210,14 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         has not committed looks like a member of its most likely lineage.
         Progenitors also split their probability unevenly, so the rule
         measures each lineage's probabilities against that lineage's own
-        trunk: it divides them by their mean over the cells at the start of
-        the lineage's curve, the cells outside the fate map's sinks that lie
-        within its distance limit in its first bin of progress. A progenitor
-        whose probabilities match the trunk's split then scores one for
-        every lineage that starts there, whatever share of the trunk's
-        probability each lineage receives. A scored cell follows a lineage
+        trunk: it divides them by their mean over the earliest tenth, by the
+        pseudotime or the score that directs the fate map, of the scored
+        cells outside the fate map's sinks in the graph components that hold
+        the lineage's sink cells. A progenitor whose probabilities match the
+        trunk's split then scores one for every lineage that starts there,
+        whatever share of the trunk's probability each lineage receives and
+        however many cells its branch and sink hold, as long as the earliest
+        tenth lies before the branches part. A scored cell follows a lineage
         when its fate probability for that lineage is positive and its
         divided probability is at least ``band`` times its largest divided
         probability over the curves' lineages, and when it lies on the
@@ -3262,8 +3259,7 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
                 from it than its other cells, so values below 4 can call
                 some of them none.
             n_bins: Equal bins of progress along each curve, each with its
-                own distance limit. The cells of the first bin within its
-                limit, outside the sinks, set the lineage's scale.
+                own distance limit.
             invalidate_cache: Compute a new membership even when one matches.
 
         Returns:
@@ -3273,9 +3269,10 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         Raises:
             ValueError: If a lineage's sink label reads ``"shared"`` or
                 ``"none"``, ``band``, ``distance_score`` or ``n_bins`` is
-                out of range, or no cell outside the sinks at the start of a
-                lineage's curve has a probability for that lineage, as when
-                the curve starts among sink cells.
+                out of range, or the earliest cells outside the sinks in the
+                graph components of a lineage's sink cells give that lineage
+                no probability, as when its sink cells fill a component of
+                their own.
         """
         invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         if not isinstance(curves, ArtifactRef):
@@ -3283,7 +3280,8 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         validated = _validate_lineage_membership_parameters(
             {"band": band, "distance_score": distance_score, "n_bins": n_bins}
         )
-        loaded, pseudotime, sink_cells = self._membership_inputs(curves)
+        loaded, inputs = self._membership_inputs(curves)
+        pseudotime = np.asarray(inputs.direction.scores, dtype=np.float64)
         lineages = loaded.lineages
         # A lineage cannot share its name with the labels of shared cells and
         # of cells that follow none.
@@ -3335,14 +3333,14 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         if planned.reused:
             return planned.ref
         self._require_writable("call_lineage_membership")
-        # The curves' positions, distances and weights, the pseudotime and
-        # the sinks' cells, beside each cell's bins, limits, probabilities,
-        # rescaled probabilities and members for every lineage, its label,
-        # and the sorted cells of a pair.
+        # The curves' positions, distances and weights, the pseudotime, the
+        # sinks' cells and the cells a trunk may hold, beside each cell's
+        # bins, limits, probabilities, divided probabilities, sink labels and
+        # members for every lineage, its label, and the sorted cells of a pair.
         label_width = max(len(name) for name in (*names, "shared", "none"))
         needed = (
             3 * n_cells * n_lineages * 8
-            + n_cells * 9
+            + n_cells * 12
             + n_cells * (44 * n_lineages + 4 * label_width + 120)
         )
         if needed >= self.memoryBytes:
@@ -3363,15 +3361,27 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
             n_bins=validated["n_bins"],
             score=validated["distance_score"],
         )
+        # A lineage's sink cells hold its sink label; the trunk leaves out the
+        # cells of every sink of the fate map, also of a sink the curves leave out.
+        trunk = _trunk_probabilities_impl(
+            loaded.weights,
+            pseudotime,
+            loaded.valid,
+            inputs.sink_cells,
+            np.column_stack(
+                [np.asarray(inputs.sink_values == lineage) for lineage in lineages]
+            ),
+            inputs.direction.component,
+            lineages=lineages,
+        )
         members = _lineage_members_impl(
             loaded.weights,
             loaded.distance,
             loaded.progress,
             loaded.valid,
             limits,
-            sink_cells,
+            trunk,
             band=validated["band"],
-            lineages=lineages,
         )
         table = _branch_points_impl(
             members, pseudotime, loaded.curve_pseudotime, lineages
@@ -3452,7 +3462,8 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         selection = parse_artifact_ref(
             inputs.get("cell_selection"), "Lineage-membership cell selection input"
         )
-        loaded, pseudotime, _ = self._membership_inputs(curves)
+        loaded, fate_inputs = self._membership_inputs(curves)
+        pseudotime = np.asarray(fate_inputs.direction.scores, dtype=np.float64)
         if loaded.cell_selection != selection:
             raise ValueError("Lineage membership does not use its curves' cells")
         if ref.scope != curves.scope or ref.assay != curves.assay:
