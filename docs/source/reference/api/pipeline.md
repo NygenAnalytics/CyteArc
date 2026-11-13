@@ -339,6 +339,7 @@ A recipe checks its call against the store before it creates a run record, and a
   `membership_strength requires at least one Leiden candidate`;
 - `pca={'dims': 0} builds the graph on normalized values, which Harmony cannot correct; ...` and
   `pca={'dims': 0} builds the graph on normalized values, but doublet scoring needs a PCA graph; ...`;
+- `Assay 'RNA' normalizes with ..., but doublet scoring normalizes its simulated doublets by library size and needs norm_lib_size; ...` (`rna` with doublet scoring on, when the assay's `normMethod` is not `cytearc.assay.norm_lib_size`, such as `norm_pearson_residuals`): pass `doublets=False`, or set the `normMethod` back to `norm_lib_size`;
 - `PCA settings need dims above 0; dims=0 skips PCA`, for other `pca` settings beside `dims=0`;
 - `leiden selected must be one of the partitions`;
 - `snapshot_columns collide with reserved run fields: [...]`;

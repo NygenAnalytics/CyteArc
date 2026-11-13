@@ -366,6 +366,9 @@ class PipelineAccessor:
                 keywords of ``clusters.paris``.
             membership_strength: Score each cell's membership in its cluster.
             doublets: Doublet scoring, with the keywords of ``qc.doublets``.
+                It normalizes simulated doublets by library size, so it needs
+                the assay's ``normMethod`` to be ``norm_lib_size``, the
+                default.
             markers: Rank markers for each saved cluster.
             snapshot_columns: Cell columns to freeze into the run's cell view.
             species: A species key recorded with the run.
