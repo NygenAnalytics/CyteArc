@@ -31,6 +31,7 @@ from ._style import (
     category_label,
     foreground_color,
     legend_side_rows,
+    missing_category_entry,
     resolve_category_scale,
     scatter_edgecolor,
     theme_context,
@@ -650,12 +651,13 @@ def composition(
             )
 
     palette: dict[Any, str] = dict(category_scale.palette or {})
+    missing_color, missing_label = missing_category_entry(category_scale)
     if missing_mask.any():
-        palette[_MISSING_CATEGORY] = category_scale.missing_color
+        palette[_MISSING_CATEGORY] = missing_color
 
     def display_label(value: Any) -> str:
         if value is _MISSING_CATEGORY:
-            return category_scale.missing_label
+            return missing_label
         return category_label(category_scale, value)
 
     panel_key: Hashable = "composition"

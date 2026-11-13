@@ -925,6 +925,7 @@ def test_each_vocabulary_takes_one_palette_with_one_colour_for_no_value(
 ) -> None:
     from cytearc.clones.recorders import STATES
     from cytearc.plotting._contracts import CategoricalScale
+    from cytearc.plotting._style import resolve_category_scale
     from cytearc.plotting._style import (
         CHAIN_ARM_SCALE,
         CHAIN_PAIRING_SCALE,
@@ -956,7 +957,9 @@ def test_each_vocabulary_takes_one_palette_with_one_colour_for_no_value(
     # Every state of a site but not applicable is drawn.
     assert set(RECORDER_STATE_SCALE.order) == set(STATES) - {"not_applicable"}
     # No value takes the missing colour of every scale, in every vocabulary.
-    assert NO_VALUE_COLOR == CategoricalScale().missing_color
+    assert resolve_category_scale(["a"], CategoricalScale()).missing_color == (
+        NO_VALUE_COLOR
+    )
     assert RECEPTOR_TYPE_SCALE.palette[NO_RECEPTOR] == NO_VALUE_COLOR
     assert CHAIN_PAIRING_SCALE.palette[NO_RECEPTOR] == NO_VALUE_COLOR
     assert RECORDER_STATE_SCALE.palette["missing"] == NO_VALUE_COLOR
@@ -1848,6 +1851,7 @@ def test_genotype_bars_draw_their_first_call_at_the_left(variants) -> None:
 
 def test_genotype_calls_take_one_palette_with_one_grey_for_no_value(variants) -> None:
     from cytearc.plotting._contracts import CategoricalScale
+    from cytearc.plotting._style import resolve_category_scale
     from cytearc.plotting._style import (
         GENOTYPE_CALL_SCALE,
         MUTED_COLOR,
@@ -1862,7 +1866,9 @@ def test_genotype_calls_take_one_palette_with_one_grey_for_no_value(variants) ->
     # No evidence takes the grey of no value, and evidence that a rule did
     # not call the muted grey, as the recorder's missing and unedited sites.
     assert GENOTYPE_CALL_SCALE.palette["missing"] == NO_VALUE_COLOR
-    assert NO_VALUE_COLOR == CategoricalScale().missing_color
+    assert resolve_category_scale(["a"], CategoricalScale()).missing_color == (
+        NO_VALUE_COLOR
+    )
     assert GENOTYPE_CALL_SCALE.palette["filtered"] == MUTED_COLOR
     assert RECORDER_STATE_SCALE.palette["unedited"] == MUTED_COLOR
     # Legends name calls in words, and tables keep their tokens.

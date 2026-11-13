@@ -64,6 +64,10 @@ class _FakeStore:
         self.graph_calls = []
         self.zw = object()
 
+    def _stored_display_metadata(self, column):
+        # No column stores a display unless a test gives one.
+        return None
+
     def load_graph(self, graph=None, **kwargs):
         self.graph_calls.append((graph, kwargs))
         return self.graph_values
@@ -800,18 +804,44 @@ def test_cluster_connectivity_uses_stored_categorical_display_metadata():
     result.close()
 
 
-def test_cluster_connectivity_prefers_explicit_scale_over_stored_display():
+def test_cluster_connectivity_merges_explicit_scale_over_stored_display():
     store = _store_with_display(_STORED_CLUSTER_DISPLAY)
 
-    result = _plot(
+    # An order alone keeps the stored colors, labels, and missing label.
+    ordered = _plot(
         store,
         categorical_scale=CategoricalScale(order=("A", "B", "C")),
+        minimum_edge_weight=0.0,
     )
 
-    assert store.display_requests == []
-    assert result.tables["nodes"]["category"].tolist() == ["A", "B", "C"]
-    assert result.tables["nodes"]["displayLabel"].tolist() == ["A", "B", "C"]
-    result.close()
+    assert store.display_requests == ["cluster"]
+    nodes = ordered.tables["nodes"]
+    assert nodes["category"].tolist() == ["A", "B", "C"]
+    assert nodes["displayLabel"].tolist() == ["Alpha", "Beta", "Gamma"]
+    scale = ordered.scales[0]
+    assert scale.palette == {"A": "#aa0000", "B": "#00aa00", "C": "#0000aa"}
+    assert (scale.missing_label, scale.missing_color) == ("unassigned", "#cccccc")
+    np.testing.assert_allclose(
+        ordered.axes["cluster_connectivity"].collections[1].get_facecolors(),
+        [to_rgba(color) for color in ("#aa0000", "#00aa00", "#0000aa")],
+    )
+    ordered.close()
+
+    # Labels alone rename one category and keep the stored order and colors.
+    renamed = _plot(
+        store,
+        categorical_scale=CategoricalScale(labels={"A": "First"}),
+        minimum_edge_weight=0.0,
+    )
+    nodes = renamed.tables["nodes"]
+    assert nodes["category"].tolist() == ["C", "A", "B"]
+    assert nodes["displayLabel"].tolist() == ["Gamma", "First", "Beta"]
+    assert renamed.scales[0].palette == {
+        "C": "#0000aa",
+        "A": "#aa0000",
+        "B": "#00aa00",
+    }
+    renamed.close()
 
 
 def test_cluster_connectivity_ignores_non_categorical_stored_display():
