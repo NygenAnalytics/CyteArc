@@ -234,7 +234,7 @@ any changes you make after seeing the comparison as such.
 | `references/quality-control.md` | QC metrics, MAD/manual/per-sample filters, removal audits, cell calling and hashtags in a recipe, ambient RNA between two runs, doublet scores and removal |
 | `references/features-and-graphs.md` | HVGs, normalization, PCA dims, ANN, neighbours, graph diagnostics, branching, subclustering |
 | `references/gene-blacklists.md` | what the default HVG blacklist removes, corrected blacklists for human and mouse, Ig/TCR and haemoglobin add-ons |
-| `references/clustering-and-embedding.md` | Leiden and Paris, choosing a partition, UMAP and t-SNE, labels as arrays |
+| `references/clustering-and-embedding.md` | Leiden and Paris, choosing a partition, UMAP, LocalMAP and t-SNE, labels as arrays |
 | `references/markers-and-annotation.md` | marker tables, canonical marker panels, labelling, AUCell/WAGGR, cell cycle, potency scores and the fate maps they direct without source cells, label comparison |
 | `references/pipeline-runs-and-artifacts.md` | recipes (`rna`, `atac`, `adt`, `multimodal`, `perturbation`) and their stage keywords, CITE-seq and TEA-seq runs, migrating from `pipeline.run`, events and cancellation, run reports, artifacts, lineage, failures, handoff record |
 | `references/plotting.md` | headless figures, run mode versus ref mode, every `ds.plots` method |

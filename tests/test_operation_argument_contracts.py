@@ -886,6 +886,10 @@ _CONTRACTS = (
         },
     ),
     OperationContract(
+        EmbeddingsAccessor.localmap,
+        metadata_arguments.LocalmapArguments,
+    ),
+    OperationContract(
         EmbeddingsAccessor.tsne,
         metadata_arguments.TsneArguments,
     ),
