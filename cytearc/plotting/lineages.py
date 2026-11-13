@@ -29,6 +29,7 @@ from ._style import (
     default_point_size,
     finish_embedding_axes,
     padded_square_limits,
+    palette_for_n,
     theme_context,
 )
 
@@ -59,8 +60,22 @@ def _lineage_selection(
     return [int(column) for column in columns]
 
 
-def _lineage_palette(names: Sequence[str], cmap: str) -> dict[str, str]:
+def _lineage_palette(names: Sequence[str], cmap: str | None) -> dict[str, str]:
+    """Color each lineage, in the order of ``names``.
+
+    Without a colormap the lineages take the colorblind palette in order, as
+    ``CategoricalScale(palette_name="colorblind")`` does; a colormap name
+    spreads that colormap evenly over them.
+    """
+    if cmap is None:
+        colors = palette_for_n(len(names), palette_name="colorblind")
+        return dict(zip(names, colors, strict=True))
     return colormap_palette(list(names), cmap)
+
+
+# A node's marker shows its role in a lineage tree, so the roles differ by
+# shape as well as by color.
+_ROLE_MARKERS = {"root": "s", "candidate sink": "^", "cluster": "o"}
 
 
 @close_figures_on_error
@@ -309,7 +324,7 @@ def lineage_trends(
     features: Sequence[str | FeatureRef],
     lineages: Sequence[Any] | None = None,
     axis: Literal["progress", "pseudotime"] = "progress",
-    lineage_cmap: str = "tab10",
+    lineage_cmap: str | None = None,
     line_width: float = 2.0,
     n_columns: int | None = None,
     target: Any | None = None,
@@ -334,6 +349,13 @@ def lineage_trends(
     retained feature has that name. A name that several retained features
     share raises ``ValueError`` naming their IDs; draw one of them with
     ``FeatureRef(value=feature_id, by="id")``.
+
+    By default the lineages take the 12 colors of the colorblind palette in
+    order, as ``CategoricalScale(palette_name="colorblind")`` assigns them.
+    More than 12 lineages take evenly spaced hues instead, with a warning
+    that they may not be colorblind safe. ``lineage_cmap`` names a
+    Matplotlib colormap to sample at evenly spaced positions from 0 to 1,
+    and a single lineage then takes the colormap's first color.
     """
     show_legend = bool_argument(show_legend, "show_legend")
     show = bool_argument(show, "show")
@@ -483,7 +505,7 @@ def lineage_curves(
     layout: ArtifactRef,
     lineages: Sequence[Any] | None = None,
     df: float | None = None,
-    lineage_cmap: str = "tab10",
+    lineage_cmap: str | None = None,
     line_width: float = 2.5,
     point_size: float | None = None,
     point_alpha: float = 0.6,
@@ -508,7 +530,7 @@ def lineage_curves(
     whichever operation made its cell selection, and may hold more, such as
     every cell of the graph when the curves follow some of its cells; the
     plot draws the curves' cells. A layout that lacks one raises
-    ``ValueError``.
+    ``ValueError``. The lineages take their colors as in ``lineage_trends``.
     """
     show_legend = bool_argument(show_legend, "show_legend")
     show = bool_argument(show, "show")
@@ -635,9 +657,9 @@ def lineage_tree(
     point_size: float | None = None,
     point_alpha: float = 0.5,
     node_size: float = 80.0,
-    node_color: str = "#4e79a7",
-    root_color: str = "#59a14f",
-    leaf_color: str = "#e15759",
+    node_color: str = "#56B4E9",
+    root_color: str = "#0072B2",
+    leaf_color: str = "#D55E00",
     edge_color: str = "#555555",
     labels: bool = True,
     target: Any | None = None,
@@ -649,8 +671,11 @@ def lineage_tree(
     """Draw a cluster tree over a two-dimensional layout.
 
     Each cluster sits at the median layout position of its cells. The root
-    and the candidate sinks, the leaves other than the root, are coloured
-    apart from the other clusters, and the legend names the colours.
+    is a square in ``root_color``, the candidate sinks, the leaves other than
+    the root, are triangles in ``leaf_color``, and the other clusters are
+    circles in ``node_color``; the legend shows each role's marker. The
+    default colors come from the colorblind palette, and the shapes tell the
+    roles apart in any colors.
     ``layout`` must hold every cell of the tree, whichever operation made its
     cell selection, and may hold more, such as every cell of the graph when
     the tree joins clusters of some of its cells; the plot draws the tree's
@@ -745,6 +770,7 @@ def lineage_tree(
                 [y],
                 s=node_size,
                 c=palette[roles[cluster]],
+                marker=_ROLE_MARKERS[roles[cluster]],
                 zorder=3,
                 edgecolors="white",
             )
@@ -764,7 +790,7 @@ def lineage_tree(
                     mpl.lines.Line2D(
                         [],
                         [],
-                        marker="o",
+                        marker=_ROLE_MARKERS[role],
                         linestyle="",
                         markerfacecolor=palette[role],
                         markeredgecolor="white",

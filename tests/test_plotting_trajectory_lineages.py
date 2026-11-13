@@ -17,7 +17,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import pytest
+from loguru import logger
 from matplotlib.colors import to_hex
+from matplotlib.markers import MarkerStyle
 
 import cytearc.plotting as splt
 from cytearc.datastore.datastore import DataStore
@@ -42,6 +44,27 @@ N_BINS = 12
 N_POINTS = 40
 TREE_ROOT = 1
 PLOTS = ("lineage_heatmap", "lineage_trends", "lineage_curves", "lineage_tree")
+# The colorblind palette of CyteArc, Okabe-Ito and four extensions, copied
+# here so that a change to the default lineage colors fails these tests.
+COLORBLIND = (
+    "#0072B2",
+    "#E69F00",
+    "#009E73",
+    "#D55E00",
+    "#CC79A7",
+    "#56B4E9",
+    "#F0E442",
+    "#000000",
+    "#6F4E7C",
+    "#2E8B57",
+    "#A05195",
+    "#8C564B",
+)
+# The default colors of the three lineages, in their order.
+LINEAGE_COLORS = {"2": "#0072B2", "3": "#E69F00", "4": "#009E73"}
+# The default colors and the markers of the roles of a cluster tree.
+ROLE_COLORS = {"root": "#0072B2", "candidate sink": "#D55E00", "cluster": "#56B4E9"}
+ROLE_MARKERS = {"root": "s", "candidate sink": "^", "cluster": "o"}
 
 
 @pytest.fixture(autouse=True)
@@ -221,6 +244,19 @@ def _expected_curve(
         n_points=loaded_curves.points.shape[1],
         degrees_of_freedom=df,
     )
+
+
+def _marker_symbol(collection: Any) -> str:
+    """The symbol, of a square, a triangle or a circle, whose path a scatter drew."""
+    vertices = collection.get_paths()[0].vertices
+    found = []
+    for symbol in ("s", "^", "o"):
+        style = MarkerStyle(symbol)
+        expected = style.get_path().transformed(style.get_transform()).vertices
+        if vertices.shape == expected.shape and np.allclose(vertices, expected):
+            found.append(symbol)
+    assert len(found) == 1, "the marker is not a square, a triangle or a circle"
+    return found[0]
 
 
 def _tree_leaves(loaded_tree: Any) -> set[Any]:
@@ -443,11 +479,64 @@ def test_lineage_selection_rejects_invalid_lineages(lineages, error, message):
 def test_lineage_palette_spreads_a_colormap_over_the_lineages():
     palette = lineage_plots._lineage_palette(["4", "2", "3"], "viridis")
 
-    assert list(palette) == ["4", "2", "3"]
-    assert palette == colormap_palette(["4", "2", "3"], "viridis")
-    assert len(set(palette.values())) == 3
-    assert palette["4"] == to_hex(plt.get_cmap("viridis")(0.0))
-    assert palette["3"] == to_hex(plt.get_cmap("viridis")(1.0))
+    # viridis at 0, 0.5 and 1.
+    assert palette == {"4": "#440154", "2": "#21918c", "3": "#fde725"}
+
+
+@pytest.mark.parametrize(
+    ("cmap", "expected"),
+    [
+        # Two lineages take a colormap's first and last colors.
+        ("Set1", ["#e41a1c", "#999999"]),
+        # The earlier default samples tab10 at 0, 0.5 and 1.
+        ("tab10", ["#1f77b4", "#8c564b", "#17becf"]),
+        # A single lineage takes a colormap's first color.
+        ("Dark2", ["#1b9e77"]),
+    ],
+)
+def test_lineage_palette_samples_a_named_colormap_evenly(cmap, expected):
+    names = ["4", "2", "3"][: len(expected)]
+
+    assert lineage_plots._lineage_palette(names, cmap) == dict(
+        zip(names, expected, strict=True)
+    )
+
+
+@pytest.mark.parametrize("n", [1, 2, 4, 12])
+def test_lineage_palette_takes_the_colorblind_palette_in_order(n):
+    # Names in an order of their own, which the colors follow.
+    names = [f"lineage {index}" for index in reversed(range(n))]
+
+    palette = lineage_plots._lineage_palette(names, None)
+
+    assert list(palette) == names
+    assert list(palette.values()) == list(COLORBLIND[:n])
+
+
+def test_lineage_palette_warns_and_keeps_colors_distinct_beyond_the_palette():
+    import seaborn as sns
+
+    names = [str(index) for index in range(len(COLORBLIND) + 1)]
+    messages: list[str] = []
+    sink = logger.add(messages.append, level="WARNING", format="{message}")
+    try:
+        palette = lineage_plots._lineage_palette(names, None)
+    finally:
+        logger.remove(sink)
+
+    # Thirteen lineages take thirteen evenly spaced hues, never a repeat.
+    assert list(palette) == names
+    assert list(palette.values()) == sns.color_palette("husl", n_colors=13).as_hex()
+    assert len({to_hex(color) for color in palette.values()}) == 13
+    assert any(
+        "Requested 13 colorblind-safe colors but only 12 are available" in message
+        for message in messages
+    )
+
+
+def test_lineage_palette_rejects_an_unknown_colormap():
+    with pytest.raises(ValueError, match="not_a_colormap"):
+        lineage_plots._lineage_palette(["2"], "not_a_colormap")
 
 
 def test_layout_for_returns_the_coordinates_of_the_trajectory_cells(
@@ -946,7 +1035,7 @@ def test_lineage_trends_draw_each_lineage_against_bin_pseudotime(
     assert tuple(result.figure.get_size_inches()) == pytest.approx(
         (DEFAULT_PANEL_INCHES * 3, DEFAULT_PANEL_INCHES * 0.8)
     )
-    palette = colormap_palette(list(LINEAGES), "tab10")
+    palette = LINEAGE_COLORS
     trends = result.tables["trends"]
     assert list(trends.columns) == [
         "feature",
@@ -1161,7 +1250,8 @@ def test_lineage_trends_draw_chosen_lineages_in_a_custom_style(
         )
     )
 
-    palette = colormap_palette(["4", "2"], "Set1")
+    # Set1 at 0 and 1.
+    palette = {"4": "#e41a1c", "2": "#999999"}
     assert tuple(result.figure.get_size_inches()) == (5.0, 3.0)
     for feature in features:
         axis = result.axes[feature]
@@ -1185,6 +1275,85 @@ def test_lineage_trends_draw_chosen_lineages_in_a_custom_style(
     assert result.scales == (splt.CategoricalScale(order=("4", "2"), palette=palette),)
     assert result.provenance.extras["lineages"] == ["4", "2"]
     assert result.theme == "paper"
+
+
+@pytest.mark.parametrize(
+    ("lineage_cmap", "expected"),
+    [
+        # The first color of the colorblind palette.
+        (None, "#0072B2"),
+        # viridis at 0.
+        ("viridis", "#440154"),
+    ],
+)
+def test_lineage_trends_color_a_single_lineage(
+    closing, datastore, lineage_aggregation, feature_names, lineage_cmap, expected
+):
+    result = closing(
+        datastore.plots.lineage_trends(
+            aggregation=lineage_aggregation,
+            features=feature_names[:2],
+            lineages=[3],
+            lineage_cmap=lineage_cmap,
+            show=False,
+        )
+    )
+
+    for feature in feature_names[:2]:
+        (line,) = result.axes[feature].get_lines()
+        assert line.get_label() == "3"
+        assert line.get_color() == expected
+    assert result.scales == (
+        splt.CategoricalScale(order=("3",), palette={"3": expected}),
+    )
+
+
+def test_lineage_trends_color_more_lineages_than_the_palette_holds(
+    closing,
+    monkeypatch: pytest.MonkeyPatch,
+    datastore,
+    lineage_aggregation,
+    loaded_aggregation,
+    feature_names,
+):
+    import seaborn as sns
+
+    # Thirteen lineages, one more than the colorblind palette's 12 colors,
+    # each repeating one of the three profiles.
+    n_lineages = len(COLORBLIND) + 1
+    columns = np.arange(n_lineages) % len(LINEAGES)
+    many = dataclasses.replace(
+        loaded_aggregation,
+        data=np.asarray(loaded_aggregation.data)[:, columns],
+        lineages=tuple(f"fate {index}" for index in range(n_lineages)),
+        bin_pseudotime=np.asarray(loaded_aggregation.bin_pseudotime)[columns],
+        lineage_weight=np.asarray(loaded_aggregation.lineage_weight)[columns],
+    )
+    monkeypatch.setattr(
+        TrajectoryAccessor, "load_lineage_aggregation", lambda accessor, ref: many
+    )
+    messages: list[str] = []
+    sink = logger.add(messages.append, level="WARNING", format="{message}")
+    try:
+        result = closing(
+            splt.lineage_trends(
+                datastore,
+                aggregation=lineage_aggregation,
+                features=[feature_names[0]],
+                show=False,
+            )
+        )
+    finally:
+        logger.remove(sink)
+
+    lines = result.axes[feature_names[0]].get_lines()
+    assert [line.get_label() for line in lines] == list(many.lineages)
+    colors = [line.get_color() for line in lines]
+    # Every lineage keeps a color of its own, from evenly spaced hues.
+    assert colors == sns.color_palette("husl", n_colors=n_lineages).as_hex()
+    assert len({to_hex(color) for color in colors}) == n_lineages
+    assert result.scales[0].palette == dict(zip(many.lineages, colors, strict=True))
+    assert any("not guaranteed colorblind safe" in message for message in messages)
 
 
 @pytest.mark.parametrize(
@@ -1403,7 +1572,7 @@ def test_lineage_curves_draw_fate_weighted_curves_in_the_layout(
     assert list(table.columns) == ["lineage", "point", "x", "y"]
     assert len(table) == len(LINEAGES) * N_POINTS
     assert table["lineage"].unique().tolist() == list(LINEAGES)
-    palette = colormap_palette(list(LINEAGES), "tab10")
+    palette = LINEAGE_COLORS
     axis = result.axes["curves"]
     lines = axis.get_lines()
     assert len(lines) == 2 * len(LINEAGES)
@@ -1473,7 +1642,8 @@ def test_lineage_curves_draw_chosen_lineages_with_their_own_smoothing(
 
     table = result.tables["curves"]
     assert table["lineage"].unique().tolist() == ["4", "3"]
-    palette = colormap_palette(["4", "3"], "Dark2")
+    # Dark2 at 0 and 1.
+    palette = {"4": "#1b9e77", "3": "#666666"}
     for name in ("4", "3"):
         expected = _expected_curve(
             loaded_curves, loaded_fate, layout.coordinates, int(name), 4.0
@@ -1499,6 +1669,26 @@ def test_lineage_curves_draw_chosen_lineages_with_their_own_smoothing(
     assert result.provenance.extras["df"] == 4.0
     assert result.theme == "dark"
     assert result.figure.patch.get_alpha() == 0
+
+
+def test_lineage_curves_color_a_single_lineage_by_the_colorblind_palette(
+    closing, datastore, lineage_curves, layout
+):
+    result = closing(
+        splt.lineage_curves(
+            datastore,
+            curves=lineage_curves,
+            layout=layout.ref,
+            lineages=[4],
+            show=False,
+        )
+    )
+
+    curve, end = result.axes["curves"].get_lines()
+    assert curve.get_label() == "4"
+    # The first color of the colorblind palette, whichever lineage is drawn.
+    assert curve.get_color() == end.get_color() == "#0072B2"
+    assert result.scales[0].palette == {"4": "#0072B2"}
 
 
 def test_lineage_curves_draw_into_a_caller_axes(datastore, lineage_curves, layout):
@@ -1796,14 +1986,17 @@ def test_lineage_tree_places_clusters_at_their_layout_medians(
     for cluster, marker in zip(clusters, markers, strict=True):
         np.testing.assert_allclose(marker.get_offsets(), [position[cluster]])
         assert marker.get_sizes().tolist() == [80.0]
-        expected = (
-            "#59a14f"
+        role = (
+            "root"
             if cluster == TREE_ROOT
-            else "#e15759"
+            else "candidate sink"
             if cluster in candidates
-            else "#4e79a7"
+            else "cluster"
         )
-        assert to_hex(marker.get_facecolor()[0]) == expected
+        # The root is a blue square, the candidate sinks vermillion triangles
+        # and the other clusters sky-blue circles.
+        assert to_hex(marker.get_facecolor()[0]) == ROLE_COLORS[role].lower()
+        assert _marker_symbol(marker) == ROLE_MARKERS[role]
     assert [text.get_text() for text in axis.texts] == [str(c) for c in clusters]
     for text, cluster in zip(axis.texts, clusters, strict=True):
         assert text.xy == pytest.approx(position[cluster])
@@ -1816,16 +2009,21 @@ def test_lineage_tree_places_clusters_at_their_layout_medians(
     inner = set(clusters) - leaves - {TREE_ROOT}
     assert candidates and inner
     roles = ("root", "candidate sink", "cluster")
-    palette = {"root": "#59a14f", "candidate sink": "#e15759", "cluster": "#4e79a7"}
     assert result.legends == (
         splt.LegendSpec(kind="categorical", label="cluster role"),
     )
-    assert result.scales == (splt.CategoricalScale(order=roles, palette=palette),)
+    assert result.scales == (splt.CategoricalScale(order=roles, palette=ROLE_COLORS),)
     legend = axis.get_legend()
     assert [text.get_text() for text in legend.get_texts()] == list(roles)
+    # The legend shows each role in the color and the shape that it is drawn in.
     assert [
         to_hex(handle.get_markerfacecolor()) for handle in legend.legend_handles
-    ] == [palette[role] for role in roles]
+    ] == ["#0072b2", "#d55e00", "#56b4e9"]
+    assert [handle.get_marker() for handle in legend.legend_handles] == [
+        "s",
+        "^",
+        "o",
+    ]
     assert tuple(result.figure.get_size_inches()) == pytest.approx(
         (DEFAULT_PANEL_INCHES + 1.6, DEFAULT_PANEL_INCHES)
     )
@@ -1875,6 +2073,10 @@ def test_lineage_tree_without_cells_or_labels_in_custom_colors(
             else "#000000"
         )
         assert to_hex(marker.get_facecolor()[0]) == expected
+        # Colors that look alike leave the roles their shapes.
+        assert _marker_symbol(marker) == (
+            "s" if cluster == TREE_ROOT else "^" if cluster in candidates else "o"
+        )
     assert {line.get_color() for line in axis.get_lines()} == {"#333333"}
     assert len(axis.texts) == 0
     assert tuple(result.figure.get_size_inches()) == (4.0, 4.0)
@@ -1884,6 +2086,11 @@ def test_lineage_tree_without_cells_or_labels_in_custom_colors(
     assert [
         to_hex(handle.get_markerfacecolor()) for handle in legend.legend_handles
     ] == ["#111111", "#222222", "#000000"]
+    assert [handle.get_marker() for handle in legend.legend_handles] == [
+        "s",
+        "^",
+        "o",
+    ]
     assert result.scales[0].palette == {
         "root": "#111111",
         "candidate sink": "#222222",
@@ -1964,14 +2171,17 @@ def test_lineage_tree_without_a_root_marks_every_leaf(
     ]
     markers = result.axes["tree"].collections[1:]
     for cluster, marker in zip(loaded_tree.clusters, markers, strict=True):
-        expected = "#e15759" if cluster in leaves else "#4e79a7"
+        expected = "#d55e00" if cluster in leaves else "#56b4e9"
         assert to_hex(marker.get_facecolor()[0]) == expected
+        # No cluster is drawn as the root's square.
+        assert _marker_symbol(marker) == ("^" if cluster in leaves else "o")
     # Without a root the legend names only the roles drawn.
     legend = result.axes["tree"].get_legend()
     assert [text.get_text() for text in legend.get_texts()] == [
         "candidate sink",
         "cluster",
     ]
+    assert [handle.get_marker() for handle in legend.legend_handles] == ["^", "o"]
     assert result.scales[0].order == ("candidate sink", "cluster")
     assert result.provenance.extras["root"] is None
     assert result.provenance.extras["candidate_sinks"] == list(loaded_tree.leaves)
