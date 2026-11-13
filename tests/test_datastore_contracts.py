@@ -247,8 +247,9 @@ def test_datastore_namespace_bindings_cover_all_moved_methods_and_find():
     # clusters.connectivity, then trajectory.curves_in_layout, then
     # regulons.specificity and regulons.connection_specificity, then
     # trajectory.lineage_membership, trajectory.load_lineage_membership and
-    # trajectory.branch_cells, then scores.potency and scores.load_potency.
-    assert len(_NAMESPACE_METHODS) == 161
+    # trajectory.branch_cells, then scores.potency and scores.load_potency,
+    # then embeddings.localmap.
+    assert len(_NAMESPACE_METHODS) == 162
     assert {
         "import_receptors",
         "load_receptors",

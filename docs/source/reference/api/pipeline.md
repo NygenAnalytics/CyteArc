@@ -50,9 +50,9 @@ returns a durable, read-only {py:class}`~cytearc.PipelineRun` whose outputs are 
 
 | Recipe | Analyzes | Graph coordinates | Feature field | Off by default |
 | --- | --- | --- | --- | --- |
-| `rna` | an RNA assay | PCA of the highly variable genes | `highly_variable_features` | cell calling, hashing, Harmony, Paris, membership strength, t-SNE |
-| `atac` | an ATAC assay of peak counts | LSI of the most prevalent peaks | `prevalent_peaks` | Harmony, Paris, membership strength, t-SNE |
-| `adt` | an ADT assay of antibody counts | PCA of the antibody panel | `panel` | filtering, Harmony, Paris, membership strength, t-SNE |
+| `rna` | an RNA assay | PCA of the highly variable genes | `highly_variable_features` | cell calling, hashing, Harmony, Paris, membership strength, LocalMAP, t-SNE |
+| `atac` | an ATAC assay of peak counts | LSI of the most prevalent peaks | `prevalent_peaks` | Harmony, Paris, membership strength, LocalMAP, t-SNE |
+| `adt` | an ADT assay of antibody counts | PCA of the antibody panel | `panel` | filtering, Harmony, Paris, membership strength, LocalMAP, t-SNE |
 | `multimodal` | two or more completed runs of the same cells | none; it integrates the runs' graphs | none | Paris, membership strength, t-SNE |
 | `perturbation` | the RNA assay and the guide assay of a pooled CRISPR screen | none; E-distances and signatures read the PCA of the highly variable genes, or its Harmony correction | `highly_variable_features` | Harmony, Mixscape, association tests, clusters |
 
@@ -78,10 +78,7 @@ ds.markers.load(marker=rna["markers"], group_id=1)
 
 The `rna` recipe runs these stages in order:
 
-`input_snapshot`, `cell_calling`, `hashing`, `filtering`, `cell_cycle`, `highly_variable_features`,
-`normalization`, `pca`, `harmony`, `ann_index`, `neighbors`, `connectivity`,
-`embedding_initialization`, `umap`, one `leiden_<resolution>` stage per candidate, `paris`,
-`cluster_selection`, `membership_strength`, `tsne`, `doublets`, `markers`.
+`input_snapshot`, `cell_calling`, `hashing`, `filtering`, `cell_cycle`, `highly_variable_features`, `normalization`, `pca`, `harmony`, `ann_index`, `neighbors`, `connectivity`, `embedding_initialization`, `umap`, `localmap`, one `leiden_<resolution>` stage per candidate, `paris`, `cluster_selection`, `membership_strength`, `tsne`, `doublets`, `markers`.
 
 By default it filters cells on their QC metrics with MAD bounds, scores the cell cycle, selects
 1,000 highly variable genes, normalizes them, keeps 21 PCA dimensions, builds a graph of 11
@@ -99,10 +96,7 @@ atac["lsi"]
 atac.features.fetch("prevalent_peaks")
 ```
 
-The `atac` recipe runs `input_snapshot`, `filtering`, `prevalent_peaks`, `normalization`, `lsi`,
-`harmony`, `ann_index`, `neighbors`, `connectivity`, `embedding_initialization`, `umap`, one
-`leiden_<resolution>` stage per candidate, `paris`, `cluster_selection`, `membership_strength`,
-`tsne`, and `markers`.
+The `atac` recipe runs `input_snapshot`, `filtering`, `prevalent_peaks`, `normalization`, `lsi`, `harmony`, `ann_index`, `neighbors`, `connectivity`, `embedding_initialization`, `umap`, `localmap`, one `leiden_<resolution>` stage per candidate, `paris`, `cluster_selection`, `membership_strength`, `tsne`, and `markers`.
 
 By default it filters cells on `<assay>_nCounts` and `<assay>_nFeatures` with MAD bounds, keeps the
 10,000 most prevalent peaks (`features.prevalent_peaks` `top_n`), normalizes them with the assay's
@@ -125,10 +119,7 @@ adt = ds.pipeline.adt(cells=rna, label="adt")
 adt.features.fetch("panel")
 ```
 
-The `adt` recipe runs `input_snapshot`, `filtering`, `panel`, `normalization`, `pca`, `harmony`,
-`ann_index`, `neighbors`, `connectivity`, `embedding_initialization`, `umap`, one
-`leiden_<resolution>` stage per candidate, `paris`, `cluster_selection`, `membership_strength`,
-`tsne`, and `markers`.
+The `adt` recipe runs `input_snapshot`, `filtering`, `panel`, `normalization`, `pca`, `harmony`, `ann_index`, `neighbors`, `connectivity`, `embedding_initialization`, `umap`, `localmap`, one `leiden_<resolution>` stage per candidate, `paris`, `cluster_selection`, `membership_strength`, `tsne`, and `markers`.
 
 The assay must be of type `ADT`; an `HTO` assay is read by the RNA recipe's `hashing` stage
 instead. The panel leaves out the antibodies whose names match
@@ -176,6 +167,8 @@ without the first run's feature field.
 The integrated graph has no shared coordinates in which to compare Leiden candidates by
 silhouette. `leiden` partitions therefore default to `[1.0]`, the only candidate is the saved
 clustering, and several partitions need a `selected` resolution.
+
+LocalMAP draws its mid-near pairs in the coordinates that built its graph, which an integrated graph of several assays does not have, so `localmap` must stay `False`: a call that turns it on raises `ValueError` before anything is written. Turn LocalMAP on in a modality run instead.
 
 ### Compose runs of the same cells
 
@@ -245,12 +238,7 @@ adata = ds.to_anndata(run=screen)  # obs holds the three fields as categories
 
 Each stage keyword configures one stage:
 
-- An optional stage, `cell_calling`, `hashing`, `filtering`, `cell_cycle`, `umap`, `tsne`, `leiden`,
-  `paris`, `doublets`, `efficiency`, `edistance`, `mixscape`, `associations`, or `clusters`, takes
-  `False` to skip it, `True` to run it with its defaults, or a mapping of settings, which also runs
-  it. `None` is not a switch: `umap=None` raises `TypeError`.
-  `filtering=None` is the default of the `filtering` keyword, described in
-  [Filtering](#filtering).
+- An optional stage, `cell_calling`, `hashing`, `filtering`, `cell_cycle`, `umap`, `localmap`, `tsne`, `leiden`, `paris`, `doublets`, `efficiency`, `edistance`, `mixscape`, `associations`, or `clusters`, takes `False` to skip it, `True` to run it with its defaults, or a mapping of settings, which also runs it. `None` is not a switch: `umap=None` raises `TypeError`. `filtering=None` is the default of the `filtering` keyword, described in [Filtering](#filtering).
 - A stage that always runs, `hvg`, `normalization`, `pca`, `prevalent_peaks`, `lsi`, `panel`,
   `ann_index`, `neighbors`, `connectivity`, `embedding_initialization`, `integration`, or
   `guide_calling`, takes None for its defaults or a mapping of settings. A bool raises `TypeError`, such as
@@ -299,6 +287,7 @@ run = ds.pipeline.rna(
 | `integration` | `multimodal` | {py:meth}`~cytearc.datastore.namespaces.IntegrationAccessor.modalities` | `chunk_size`, and for WNN `l2_normalize` |
 | `embedding_initialization` | all but `perturbation` | {py:meth}`~cytearc.datastore.namespaces.EmbeddingsAccessor.initialization` | `n_centroids`, `rand_state`, `batch_size`, `kmeans_sampling`, `kmeans_batch_size` |
 | `umap` | all but `perturbation` | {py:meth}`~cytearc.datastore.namespaces.EmbeddingsAccessor.umap` | `umap_dims`, `spread`, `min_dist`, `n_epochs`, `repulsion_strength`, `initial_alpha`, `negative_sample_rate`, `use_density_map`, `dens_lambda`, `dens_frac`, `dens_var_shift`, `random_seed`, `parallel`, `symmetric_graph`, `graph_upper_only` |
+| `localmap` | `rna`, `atac`, `adt` | {py:meth}`~cytearc.datastore.namespaces.EmbeddingsAccessor.localmap` | `localmap_dims`, `n_mid_near`, `n_further`, `iterations`, `learning_rate`, `max_distance`, `random_seed` |
 | `tsne` | all but `perturbation` | {py:meth}`~cytearc.datastore.namespaces.EmbeddingsAccessor.tsne` | `tsne_dims`, `lambda_scale`, `max_iter`, `early_iter`, `alpha`, `box_h`, `symmetric_graph`, `graph_upper_only` |
 | `leiden` | all but `perturbation` | {py:meth}`~cytearc.datastore.namespaces.ClustersAccessor.leiden` | `partitions`, `selected`, `backend`, `random_seed`, `symmetric_graph`, `graph_upper_only` |
 | `paris` | all but `perturbation` | {py:meth}`~cytearc.datastore.namespaces.ClustersAccessor.paris` | `n_clusters`, `min_cluster_size` |
@@ -367,6 +356,7 @@ method where it has them:
   `max_iter`, and `alpha` must be integers of at least 1, `early_iter` an integer of at least 0,
   `lambda_scale` and `box_h` finite positive numbers, and `symmetric_graph` and
   `graph_upper_only` bools.
+- `localmap`: the checks of `embeddings.localmap`. `localmap_dims`, `n_mid_near`, and `n_further` must be integers of at least 1, `iterations` three integers of at least 1, one per phase, `learning_rate` and `max_distance` finite positive numbers, and `random_seed` an integer of at least 0. A `multimodal` run refuses `localmap` ([Multimodal](#multimodal)).
 - The graph flags: the `umap` `symmetric_graph` and `graph_upper_only` settings must be `False`,
   and a `leiden` or `tsne` `graph_upper_only` set to `True` needs `symmetric_graph=True`.
 - `harmony` `harmony_params`: the checks of `reduction.harmony`. Its keys are the keyword options
@@ -604,11 +594,9 @@ run does not filter.
 
 ### Embeddings
 
-`umap=False` skips UMAP, and the embedding initialization unless t-SNE, which uses it, runs; a
-skipped stage's artifact does not appear in the completed run. UMAP forms the fuzzy union of the
-graph itself, so `umap` `symmetric_graph` and `graph_upper_only` must stay `False`. `neighbors`
-`ann_ef` sets the search depth of the neighbor query, by default `max(200, 2 * k)` with the
-default index; the neighbors artifact records a depth other than its index's own as its `ann_ef`.
+`umap=False` skips UMAP, and the embedding initialization unless LocalMAP or t-SNE, which use it, runs; a skipped stage's artifact does not appear in the completed run. UMAP forms the fuzzy union of the graph itself, so `umap` `symmetric_graph` and `graph_upper_only` must stay `False`. `neighbors` `ann_ef` sets the search depth of the neighbor query, by default `max(200, 2 * k)` with the default index; the neighbors artifact records a depth other than its index's own as its `ann_ef`.
+
+LocalMAP lays out the run's connectivity map from the same initialization, right after UMAP; its coordinates appear as `localmap_1`, `localmap_2`, and so on. The stage runs on the datastore's threads, which do not change the layout, so `localmap={"nthreads": ...}` is rejected as an unknown setting.
 
 t-SNE embeds the run's graph from the same initialization, after the clustering stages; its
 coordinates appear as `tsne_1`, `tsne_2`, and so on. A new t-SNE embedding needs the optional
@@ -734,10 +722,7 @@ embedding_initialization, umap, leiden_0.5, leiden_0.75, leiden_1.0, leiden_1.25
 cluster_selection, clusters, doublets, markers
 ```
 
-Optional stages add their outputs in place: `cell_calling`, `called_cell_selection`, `hashing`, and
-`hashed_cell_selection` after `input_cell_selection`; `harmony` after `pca`; `paris` after the Leiden
-candidates; and `membership_strength` and `tsne` after `clusters`. A run with `leiden` `selected`
-has no `cluster_selection` output.
+Optional stages add their outputs in place: `cell_calling`, `called_cell_selection`, `hashing`, and `hashed_cell_selection` after `input_cell_selection`; `harmony` after `pca`; `localmap` after `umap`; `paris` after the Leiden candidates; and `membership_strength` and `tsne` after `clusters`. A run with `leiden` `selected` has no `cluster_selection` output.
 
 A default `atac` run has:
 
@@ -810,6 +795,7 @@ view.head(n=5)
 | the `snapshot_columns` | cells | named |
 | `s_score`, `g2m_score`, `cell_cycle_phase` | cells | an `rna` run scores the cell cycle |
 | `umap_1`, `umap_2`, ... | cells | UMAP runs |
+| `localmap_1`, `localmap_2`, ... | cells | LocalMAP runs |
 | `tsne_1`, `tsne_2`, ... | cells | t-SNE runs |
 | `leiden_<resolution>` | cells | one per Leiden candidate |
 | `paris` | cells | Paris runs |
@@ -830,7 +816,7 @@ mutation surface.
 
 Every assay of a store shares its cells, so a cell field can read an artifact of any assay, such as the guide calls of a `perturbation` run, which belong to the guide assay. The cell view checks that each artifact was computed on the run's cells, as its recorded cell selection shows, and refuses one computed on other cells. Each assay has its own features, so a feature field reads only artifacts of the run's assay. A run opens both views before it completes, so a field that a view refuses fails the run at `"finalize"`, and the run does not take its label.
 
-`snapshot_columns` cannot use the name of a field that the run produces or could produce: `I`, `ids`, `names`, `s_score`, `g2m_score`, `cell_cycle_phase`, the run's `umap_<n>`, `tsne_<n>`, and `leiden_<resolution>` fields, `paris`, `clusters`, `membership_strength`, `doublet_score`, `predicted_doublet`, and the recipe's feature field, or for a multimodal run its `weight_<assay>` fields. A `perturbation` run also reserves `guide_call`, `perturbation_label`, and `is_control`, and `mixscape_class` and `mixscape_posterior`, which a run without Mixscape does not produce.
+`snapshot_columns` cannot use the name of a field that the run produces or could produce: `I`, `ids`, `names`, `s_score`, `g2m_score`, `cell_cycle_phase`, the run's `umap_<n>`, `localmap_<n>`, `tsne_<n>`, and `leiden_<resolution>` fields, `paris`, `clusters`, `membership_strength`, `doublet_score`, `predicted_doublet`, and the recipe's feature field, or for a multimodal run its `weight_<assay>` fields. A `perturbation` run also reserves `guide_call`, `perturbation_label`, and `is_control`, and `mixscape_class` and `mixscape_posterior`, which a run without Mixscape does not produce.
 
 Pipeline execution writes immutable artifacts and run records only. It never inserts result
 columns or rewrites live `I`. Plotting, marker loading, and export stay on `DataStore`:
@@ -1043,7 +1029,7 @@ the run has, skipped stages included), and `time_ns`. The other fields depend on
 | `stage_started` | after a stage's record is written, before the stage runs | |
 | `stage_progress` | while a stage runs, as a CyteArc progress bar advances | `progress` |
 | `stage_completed` | after the stage's outputs are recorded | `metrics`, `summary`, `outputs`, `reused`, `warnings` |
-| `stage_skipped` | after a stage that the run does not compute is recorded as skipped: one that the call turned off, or one that the recipe skips, such as `cluster_selection` with a `selected` resolution, `embedding_initialization` without UMAP or t-SNE, `pca` with `dims=0`, or a perturbation run's `signature` without Mixscape and `profiles` without clusters | `metrics` |
+| `stage_skipped` | after a stage that the run does not compute is recorded as skipped: one that the call turned off, or one that the recipe skips, such as `cluster_selection` with a `selected` resolution, `embedding_initialization` without UMAP, LocalMAP, or t-SNE, `pca` with `dims=0`, or a perturbation run's `signature` without Mixscape and `profiles` without clusters | `metrics` |
 | `stage_failed` | after the stage and the run are recorded as failed | `metrics`, `warnings`, `error` |
 | `stage_interrupted` | after the stage and the run are recorded as interrupted | `metrics`, `warnings`, `error` |
 | `run_completed` | after the run record is complete | |

@@ -271,6 +271,7 @@ def resolve_multimodal(
     integration: object,
     embedding_initialization: object,
     umap: object,
+    localmap: object,
     tsne: object,
     leiden: object,
     paris: object,
@@ -293,7 +294,14 @@ def resolve_multimodal(
     _init, initialization_settings = stage_settings(
         "embedding_initialization", embedding_initialization, optional=False
     )
-    embeddings = resolve_embeddings(umap=umap, tsne=tsne)
+    embeddings = resolve_embeddings(umap=umap, localmap=localmap, tsne=tsne)
+    if embeddings.localmap:
+        raise ValueError(
+            "LocalMAP needs a single assay's connectivity map: it draws mid-near "
+            "pairs in the coordinates that built the graph, and a multimodal "
+            "run's integrated graph combines several assays. Pass "
+            "localmap=False, or turn LocalMAP on in a modality run"
+        )
     # WNN and SNN graphs have no shared coordinates in which silhouettes could
     # compare candidates, so one resolution is the default and several need a
     # selected one.

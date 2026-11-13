@@ -145,7 +145,7 @@ assay identity. The correction streams the cells in bounded row bands.
 
 ```{eval-rst}
 .. autoclass:: cytearc.datastore.namespaces.EmbeddingsAccessor
-    :members: umap, tsne
+    :members: umap, localmap, tsne
 ```
 
 ### `ds.integration`

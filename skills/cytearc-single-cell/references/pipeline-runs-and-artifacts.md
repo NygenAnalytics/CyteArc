@@ -32,13 +32,7 @@ refs, and record the analysis for handoff. Docs:
   `status.is_current` is `False`. Old refs stay valid and listed.
 - Results built on a superseded artifact keep `status.is_current` `True` (it judges only their own
   revision), and are recomputed once their input is, because the recomputed input has a new ref.
-- A recipe takes one keyword per stage. An optional stage (`cell_calling`, `hashing`, `filtering`,
-  `cell_cycle`, `umap`, `tsne`, `leiden`, `paris`, `doublets`) takes `False` to skip it, `True`
-  for its defaults, or a mapping that configures and enables it. A stage that always runs (`hvg`,
-  `normalization`, `pca`, `ann_index`, `neighbors`, `connectivity`, `embedding_initialization`;
-  ATAC `prevalent_peaks` and `lsi`; ADT `panel`; multimodal `integration`) takes `None` for its
-  defaults or a mapping; a bool raises `TypeError`. `harmony` is `None` (off) or a mapping with
-  `batch_columns`. `membership_strength` and `markers` are plain bools.
+- A recipe takes one keyword per stage. An optional stage (`cell_calling`, `hashing`, `filtering`, `cell_cycle`, `umap`, `localmap`, `tsne`, `leiden`, `paris`, `doublets`) takes `False` to skip it, `True` for its defaults, or a mapping that configures and enables it. A stage that always runs (`hvg`, `normalization`, `pca`, `ann_index`, `neighbors`, `connectivity`, `embedding_initialization`; ATAC `prevalent_peaks` and `lsi`; ADT `panel`; multimodal `integration`) takes `None` for its defaults or a mapping; a bool raises `TypeError`. `harmony` is `None` (off) or a mapping with `batch_columns`. `membership_strength` and `markers` are plain bools.
 - A setting means what the same keyword means on the stage's method (`hvg` takes the keywords of `features.hvgs`, `neighbors` those of `graph.neighbors`), and an omitted setting takes that method's default. Before anything is written, a recipe refuses an unknown key (`ValueError` listing the allowed ones) and values that a later stage would refuse, including: `cell_calling` and `hashing` values (such as `fdr` or `positive_quantile`); a per-capture column, an `hvg` `batch` (blank text counts as missing there), or a Harmony batch column that leaves an input cell unlabelled; `pca` `dims` not below the smaller of the `hvg` `top_n` and the assay's features (RNA) or the panel size (ADT); an ATAC `prevalent_peaks` `top_n` not below the assay's peak count, or below LSI `dims` plus `skip_first`; and SNN source runs of different `k`. A value that only the method itself rejects, such as `ann_metric`, Leiden `backend`, a doublet setting or `paris={"min_cluster_size": -5}`, fails its stage.
 - `cells` is a boolean cell column (default `"I"`), a datastore cell-selection ref, or a completed run, whose `analysis_cell_selection` is reused as the same ref; `cells` that select no cell are refused before anything is written. `filtering=None` (the default) filters the cells of a column (RNA, ATAC), and an `rna` run with `cell_calling` or `hashing` filters the cells those stages keep, whatever its `cells`. Otherwise a given selection's or run's cells stay as they are, and an ADT run filters only when asked.
 - A recipe writes artifacts plus a run record only. It never edits live `I` or adds metadata
@@ -63,21 +57,7 @@ refs, and record the analysis for handoff. Docs:
 
 ### Run the baseline
 
-Default `rna` outputs in record order, with their kinds: `input_cell_selection`,
-`analysis_cell_selection` (`cell_selection`), `feature_universe`, `cell_cycle`,
-`highly_variable_features` (`feature_selection`), `normalized`, `pca` (`reduction`), `ann_index`,
-`neighbors`, `connectivity_map`, `embedding_initialization`, `umap` (`embedding`), `leiden_0.5`
-... `leiden_1.25` (`cluster_labels`), `cluster_selection`, `clusters` (the selected Leiden ref
-itself, not a copy), `doublets` (`doublet_score`), `markers` (`marker_table`). Optional stages add
-keys in place: `cell_calling` and `called_cell_selection`, then `hashing` (`hto_identity`) and
-`hashed_cell_selection` before `analysis_cell_selection`; `harmony` (`batch_correction`) after
-`pca`; `paris` (`cluster_cut`) after the Leiden keys; `membership_strength` and `tsne` before
-`doublets`. Disabled stages omit their keys. Timings measured on the 10x 5K PBMC docs dataset
-when the default also ran Paris: a fresh baseline with an empty Numba cache took 109 s on local
-counts, about 90 s of it one-time compilation (graph stage 24 s, Leiden kernels 39 s, Paris and
-markers 21 s); a second run in the same process took 19 s, and a later process, which loads most
-kernels from Numba's cache, took 34 s. On remote counts expect about a minute for a few thousand
-cells.
+Default `rna` outputs in record order, with their kinds: `input_cell_selection`, `analysis_cell_selection` (`cell_selection`), `feature_universe`, `cell_cycle`, `highly_variable_features` (`feature_selection`), `normalized`, `pca` (`reduction`), `ann_index`, `neighbors`, `connectivity_map`, `embedding_initialization`, `umap` (`embedding`), `leiden_0.5` ... `leiden_1.25` (`cluster_labels`), `cluster_selection`, `clusters` (the selected Leiden ref itself, not a copy), `doublets` (`doublet_score`), `markers` (`marker_table`). Optional stages add keys in place: `cell_calling` and `called_cell_selection`, then `hashing` (`hto_identity`) and `hashed_cell_selection` before `analysis_cell_selection`; `harmony` (`batch_correction`) after `pca`; `localmap` (`embedding`) after `umap`; `paris` (`cluster_cut`) after the Leiden keys; `membership_strength` and `tsne` before `doublets`. Disabled stages omit their keys. Timings measured on the 10x 5K PBMC docs dataset when the default also ran Paris: a fresh baseline with an empty Numba cache took 109 s on local counts, about 90 s of it one-time compilation (graph stage 24 s, Leiden kernels 39 s, Paris and markers 21 s); a second run in the same process took 19 s, and a later process, which loads most kernels from Numba's cache, took 34 s. On remote counts expect about a minute for a few thousand cells.
 
 ```python
 import cytearc
@@ -103,7 +83,7 @@ run["clusters"] == run["leiden_0.5"]  # True on the 10x 5K PBMC docs dataset
 | `multimodal` | `integration` of the source runs' graphs (`method="wnn"` or `"snn"`) | none; `run.features` and `assay` are the first run's | `integrated_graph` in place of the three graph outputs; no `cluster_selection`; `markers_<assay>` per source run instead of `markers` |
 | `perturbation` | the RNA head (`filtering`, `hvg`, `normalization`, `pca`, `harmony` off) with `guide_calling` and `labels` (`controls` required) before it, and `efficiency` and `edistance` on; `signature`, `mixscape`, `associations`, `profiles` and `clusters` off | `highly_variable_features` | no graph, UMAP, Leiden or markers; `normalized`, `pca`, `harmony` (with Harmony), `guide_thresholds` (fitted calls), `guide_calls`, `perturbation_labels`, `efficiency`, `edistance`, `signature`, `mixscape`, `associations`, `profiles`, `perturbation_clusters`; `run.assay` is the RNA assay |
 
-`run.cells` holds the frozen fields of the stages that ran: `I, ids, names`, any `snapshot_columns`, `s_score, g2m_score, cell_cycle_phase` (RNA), `umap_1, umap_2`, `tsne_1, tsne_2`, `leiden_*`, `paris`, `clusters`, `membership_strength`, `doublet_score, predicted_doublet` (RNA), `weight_<assay>` for each modality of a WNN run, `guide_call, perturbation_label, is_control` for a perturbation run, and `mixscape_class, mixscape_posterior` for a perturbation run with Mixscape. A cell field can read an artifact of any assay computed on the run's cells, such as the guide assay's calls; `run.features` holds only fields of the run's assay.
+`run.cells` holds the frozen fields of the stages that ran: `I, ids, names`, any `snapshot_columns`, `s_score, g2m_score, cell_cycle_phase` (RNA), `umap_1, umap_2`, `localmap_1, localmap_2`, `tsne_1, tsne_2`, `leiden_*`, `paris`, `clusters`, `membership_strength`, `doublet_score, predicted_doublet` (RNA), `weight_<assay>` for each modality of a WNN run, `guide_call, perturbation_label, is_control` for a perturbation run, and `mixscape_class, mixscape_posterior` for a perturbation run with Mixscape. A cell field can read an artifact of any assay computed on the run's cells, such as the guide assay's calls; `run.features` holds only fields of the run's assay.
 
 ### Analyze several modalities of the same cells
 
@@ -437,7 +417,8 @@ cytearc.ArtifactRef.from_dict(saved["refs"]["fineClusters"]) == fine_clusters  #
 | `panel` (adt) | `None`: `exclude=DEFAULT_PANEL_EXCLUDE` | Controls named otherwise (`{"exclude": "(?i)control"}`); `{"exclude": None}` keeps every antibody. The run records the excluded names. |
 | `harmony` | `None` (off) | Real technical batch columns: `{"batch_columns": ["batch"]}`; see integration-and-comparisons.md. |
 | `ann_index`, `neighbors`, `connectivity`, `embedding_initialization` | `None`: `k` 11 | `neighbors={"k": 21}` for smoother graphs; other keywords of the `graph` and `embeddings` methods. Modality runs that an SNN run integrates need one `k`. |
-| `umap` | `True` | `False` skips `embedding_initialization` (unless t-SNE runs) and `umap`; a mapping sets `embeddings.umap` keywords. |
+| `umap` | `True` | `False` skips `embedding_initialization` (unless LocalMAP or t-SNE runs) and `umap`; a mapping sets `embeddings.umap` keywords. |
+| `localmap` | `False` | `True` or a mapping of `embeddings.localmap` keywords (`localmap_dims`, `n_mid_near`, `n_further`, `iterations`, `learning_rate`, `max_distance`, `random_seed`) adds a LocalMAP layout of the same graph and initialization after `umap`, as `run["localmap"]` and the `localmap_1, localmap_2` fields. A `multimodal` run refuses it with `ValueError`: LocalMAP needs a single assay's connectivity map. |
 | `tsne` | `False` | `True` or a mapping of `embeddings.tsne` keywords; a new t-SNE needs the `tsne` extra. |
 | `membership_strength` | `False` | `True` to score each cell's graph support for its cluster (a `membership_strength` field). |
 | `leiden` | `True`: 0.5, 0.75, 1.0, 1.25 with a silhouette pick (multimodal: 1.0) | Other candidates: `{"partitions": [...]}`; pin with `{"selected": ...}`; `backend`, `random_seed`. |

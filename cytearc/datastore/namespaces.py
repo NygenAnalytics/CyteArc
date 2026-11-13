@@ -139,6 +139,7 @@ class EmbeddingsAccessor(_Accessor):
 
     initialization = _bind(_GraphOperationsMixin._embeddings_initialization)
     umap = _bind(_EmbeddingOperationsMixin._embeddings_umap)
+    localmap = _bind(_EmbeddingOperationsMixin._embeddings_localmap)
     tsne = _bind(_EmbeddingOperationsMixin._embeddings_tsne)
 
 

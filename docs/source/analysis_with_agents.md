@@ -292,6 +292,7 @@ Do not copy thresholds from another tissue or protocol without inspecting the cu
 
 - Use [](tutorials/graph_construction.ipynb) for granular normalization, reduction, neighbor, and graph methods.
 - Use [](tutorials/dimensionality_reduction.ipynb) to compare dimension counts and layouts.
+- `embeddings.localmap` lays out the same connectivity map as UMAP. It keeps more of each cell's nearest neighbors and separates neighboring cell types more sharply, which helps when fine types crowd together in a large atlas; the gaps it draws between nearby clusters are therefore weaker evidence of a boundary than UMAP's.
 - Use [](tutorials/clustering.ipynb) to compare Leiden resolutions, Paris cuts, graph connectivity, membership strength, and marker specificity.
 
 There is no universally optimal partition.

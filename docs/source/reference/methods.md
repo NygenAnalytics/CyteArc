@@ -28,7 +28,7 @@ CyteArc provides complete workflows for:
 CyteArc implements a computational stage itself when an external implementation would require materializing the full matrix or would detach the result from its inputs. It uses established libraries where they fit the streaming and provenance model. The aim is one coherent execution path, not reimplementation for its own sake.
 
 - **Cell calling:** [EmptyDrops](https://doi.org/10.1186/s13059-019-1662-y) separates cells from empty droplets using a Good-Turing ambient profile, a Dirichlet-multinomial model, Monte Carlo p-values, and Benjamini-Hochberg FDR. The RNA pipeline can call cells separately for each capture before applying QC. See [](../tutorials/cell_calling.ipynb).
-- **Reduction and graph construction:** streamed normalization, exact covariance (Gram-matrix) PCA with a randomized block Krylov solver for more than 4,096 features ({ref}`details <pca_method>`), randomized streaming {term}`LSI`, approximate nearest-neighbor search, UMAP, {term}`densMAP`, and graph-based t-SNE through the optional `tsne` extra (see {ref}`Optional t-SNE <installation_tsne>`).
+- **Reduction and graph construction:** streamed normalization, exact covariance (Gram-matrix) PCA with a randomized block Krylov solver for more than 4,096 features ({ref}`details <pca_method>`), randomized streaming {term}`LSI`, approximate nearest-neighbor search, UMAP, {term}`densMAP`, LocalMAP ({ref}`details <localmap_method>`), and graph-based t-SNE through the optional `tsne` extra (see {ref}`Optional t-SNE <installation_tsne>`).
 - **Feature selection:** highly variable genes by CyteArc's mean-variance trend of normalized values, by the variance-stabilizing transformation of [Seurat v3](https://doi.org/10.1016/j.cell.2019.05.031) on raw counts, or by the variance of [analytic Pearson residuals](https://doi.org/10.1186/s13059-021-02451-7), with batch-aware selection in the order of Seurat's `SelectIntegrationFeatures`, and Pearson residual normalization.
 - **Batch correction and mapping:** CyteArc implementations of [Harmony2](https://doi.org/10.64898/2026.03.16.711825), which builds on the original [Harmony](https://doi.org/10.1038/s41592-019-0619-0) algorithm, and of [Symphony-style](https://doi.org/10.1038/s41467-021-25957-x) fixed-reference mapping, with label transfer and mapping diagnostics.
 - **Matched multi-omics:** {term}`SNN integration` and [Hao-inspired WNN](https://doi.org/10.1016/j.cell.2021.04.048) integration for two or more assays, with WNN reporting one per-cell weight per modality.
@@ -69,6 +69,30 @@ CyteArc uses HNSW approximate nearest-neighbor search. The defaults are `ann_m=2
 Across five approximately million-cell settings, including Tabula Sapiens, a lupus PBMC atlas, and a clustered synthetic dataset, these defaults reached recall@11 and recall@30 of at least 0.995 in four settings. The 50-PC PBMC setting reached recall@30 of 0.988; its missed neighbors were within 1% of the exact k-th neighbor distance. The earlier defaults reached recall@11 of 0.896 to 0.991 and left up to 0.92% of cells without a true neighbor, which motivated the deeper searches. Recall is the fraction of exact nearest neighbors recovered.
 
 See [](../tutorials/graph_construction.ipynb) for graph settings and diagnostics.
+
+(localmap_method)=
+
+## LocalMAP
+
+`embeddings.localmap` lays out a connectivity map with [LocalMAP](https://doi.org/10.1609/aaai.v39i20.35436), which extends [PaCMAP](https://jmlr.org/papers/v22/20-1061.html). Three kinds of pairs move each cell: its neighbors attract it, mid-near cells attract it weakly and hold the global arrangement, and random further cells repel it. A mid-near cell is the second closest of six random cells, measured in the coordinates the graph was built on. Adam moves the cells over three phases of 100, 100 and 250 iterations, in which the mid-near weight falls from 1000 to 3, stays at 3, and is 0. In the last phase, LocalMAP scales each neighbor's pull by `max_distance / 2 / sqrt(d)` and every tenth iteration draws each cell's further pairs again from the cells within `max_distance` of it in the layout, which pushes apart clusters that sit next to each other.
+
+PaCMAP picks 10 neighbors per cell from a neighbor search of its own. CyteArc takes them from the connectivity map, as UMAP does: each edge pulls its two cells in proportion to its weight, and the weights are scaled so that all edges pull as hard as 10 unweighted neighbors per cell. On the pancreas, Kang PBMC and Tabula Sapiens 100K examples, with three seeds each, the weighted map kept 1 to 2 percentage points more of each cell's 10 nearest PCA neighbors among its 10 nearest layout neighbors than three other choices: PaCMAP's own rule, which picks 10 of 20 neighbors by distances scaled to each cell's density; the 10 nearest neighbors, unweighted; and the fuzzy union of the map that UMAP lays out. It matched them on the other measures below.
+
+Each cell's force sums its pairs in both directions, and each cell draws its random pairs from its own key, so the layout is the same on any number of threads. The kernels were checked against pacmap 0.9.1, which holds LocalMAP's reference implementation: from the same pairs, the gradients of every phase agree to float32 precision, and the layouts after the first two phases agree to 1e-4 of their scale. Full runs, whose last phase draws pairs at random, reach the same neighbor preservation and silhouette.
+
+On the 1,136,218 cells of Tabula Sapiens, with 30 PCs, 11 neighbors and the default settings of both methods on 16 CPUs, LocalMAP took 42 s and UMAP 1,093 s, or 142 s with `parallel=True`, which is not reproducible. Both peaked at 4.1 GiB of memory. The measures compare each layout with the PCA it was built from and with the authors' 145 cell types of at least 100 cells:
+
+| Measure | UMAP | UMAP, parallel | LocalMAP |
+| --- | --- | --- | --- |
+| Share of 10 nearest PCA neighbors kept among the 10 nearest in the layout | 0.028 | 0.026 | 0.068 |
+| Share of 50 nearest PCA neighbors kept among the 50 nearest in the layout | 0.062 | 0.061 | 0.122 |
+| Share of 15 nearest layout neighbors of the same cell type | 0.382 | 0.366 | 0.467 |
+| Share of random triplets whose distance order the layout keeps | 0.662 | 0.672 | 0.700 |
+| Rank correlation of distances between cell-type centroids | 0.565 | 0.580 | 0.627 |
+
+Neighbor and cell-type shares are means over 5,000 random cells, and the triplet share is over 30,000 random triplets. On the Tabula Sapiens 100K example, LocalMAP kept 0.18 of the 10 nearest PCA neighbors against 0.13 for the example's stored UMAP, and scored higher on cell-type share, triplet order and centroid correlation.
+
+LocalMAP needs the coordinates of one assay's graph for its mid-near pairs, so it does not take an integrated graph. LocalMAP sharpens gaps between nearby clusters by design, so a gap in its layout is weaker evidence of a boundary than a gap in UMAP's.
 
 (leiden_method)=
 

@@ -19,7 +19,7 @@ chain of artifacts, then branch or subcluster it safely. Docs: <https://docs.nyg
   cell selection + `features.hvgs` (`feature_selection`) -> `features.normalize` (`normalized`) ->
   `reduction.pca` (`reduction`) -> optional `reduction.harmony` -> `graph.ann_index` (`ann_index`) ->
   `graph.neighbors` (`neighbors`) -> `graph.connectivity` (`connectivity_map`).
-  `embeddings.initialization(pca)` is a side branch that seeds UMAP and t-SNE only.
+  `embeddings.initialization(pca)` is a side branch that seeds UMAP, LocalMAP and t-SNE only.
 - Identity is operation + scientific parameters + exact inputs. An identical call returns the
   existing ref without recomputing; a changed `k` reuses normalization, PCA and the ANN index.
   Changing cells or features invalidates every downstream stage.
@@ -333,6 +333,6 @@ minimum seed ARI was 0.78. The parent had no FOXP3 group.
 
 - `gene-blacklists.md`: which gene families to pass as `blacklist=`, and why.
 - `quality-control.md`: building the cell selection this chain starts from.
-- `clustering-and-embedding.md`: Leiden, Paris, UMAP and t-SNE on the graph; choosing a partition.
+- `clustering-and-embedding.md`: Leiden, Paris, UMAP, LocalMAP and t-SNE on the graph; choosing a partition.
 - `integration-and-comparisons.md`: `reduction.harmony` between PCA and the ANN index.
 - `pipeline-runs-and-artifacts.md`: `artifacts.inspect`, lineage and reuse.

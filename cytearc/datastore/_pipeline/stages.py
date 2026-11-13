@@ -460,6 +460,30 @@ def umap_stage(
     )
 
 
+def localmap_stage(enabled: bool, settings: Mapping[str, Any]) -> PlannedStage:
+    """Lay out the run's connectivity map with LocalMAP from its embedding initialization.
+
+    The layout runs on the datastore's threads, which do not change it.
+    """
+    if not enabled:
+        return PlannedStage("localmap", None)
+
+    def action(state: RunState) -> Outputs:
+        ref = state.store._embeddings_localmap(
+            state.artifacts["connectivity_map"],
+            state.artifacts["embedding_initialization"],
+            **settings,
+        )
+        return (("localmap", ref),)
+
+    return PlannedStage(
+        "localmap",
+        action,
+        inputs=("connectivity_map", "embedding_initialization"),
+        outputs=("localmap",),
+    )
+
+
 def leiden_stages(
     partitions: Sequence[tuple[str, float]],
     settings: Mapping[str, Any],
@@ -647,22 +671,27 @@ def clustering_tail(
     leiden: Mapping[str, Any],
     paris: tuple[bool, Mapping[str, Any]],
     umap: tuple[bool, Mapping[str, Any]],
+    localmap: tuple[bool, Mapping[str, Any]],
     tsne: tuple[bool, Mapping[str, Any]],
     initialization: Mapping[str, Any],
     membership_strength: bool,
 ) -> tuple[tuple[PlannedStage, ...], tuple[PlannedStage, ...]]:
     """Return the embedding and clustering stages after the graph, in two parts.
 
-    The first part runs from embedding initialization to membership strength,
-    and the second is t-SNE; a recipe places its own stages, such as doublet
-    scoring and markers, after them.
+    The first part runs from embedding initialization, UMAP and LocalMAP to
+    membership strength, and the second is t-SNE; a recipe places its own
+    stages, such as doublet scoring and markers, after them.
     """
     umap_enabled, umap_settings = umap
+    localmap_enabled, localmap_settings = localmap
     tsne_enabled, tsne_settings = tsne
     paris_enabled, paris_settings = paris
     first = (
-        initialization_stage(umap_enabled or tsne_enabled, initialization),
+        initialization_stage(
+            umap_enabled or localmap_enabled or tsne_enabled, initialization
+        ),
         umap_stage(umap_enabled, umap_settings),
+        localmap_stage(localmap_enabled, localmap_settings),
         *leiden_stages(partitions, leiden),
         paris_stage(paris_enabled, paris_settings),
         cluster_selection_stage(partitions, selected),
@@ -695,6 +724,7 @@ def graph_output_keys(
         "connectivity_map",
         "embedding_initialization",
         "umap",
+        "localmap",
         *(f"leiden_{key}" for key, _value in partitions),
         "paris",
         "cluster_selection",
