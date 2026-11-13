@@ -132,7 +132,7 @@ _SIGNATURE_DIGESTS = {
     # ref: ArtifactRef | CellField, and the keyword-only cell_ids: bool = True.
     # source_storage_options is dict[str, Any] | None, since a mount takes the
     # options of its one source and a composite a dict of them by source name.
-    BaseDataStore: "d0385b7054c1074430a13f45bf6934097e70fca0986fbfb20b7ca85e61075bcb",
+    BaseDataStore: "d411462caec24cafbac481213b92e7a94031f732bb006b84d832e67a74caab56",
     # run_leiden_clustering gained the native backend: backend is now
     # Literal["cytearc", "igraph", "leidenalg"] with the default "cytearc".
     # The inherited constructor takes min_features_per_cell: int | None.
