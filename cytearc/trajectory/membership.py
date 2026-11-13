@@ -79,8 +79,9 @@ BRANCH_POINT_COLUMNS = (
 #: trunk probability is taken. On the pancreas maps of the lineage tutorials,
 #: every share from 1% to 30% gives the same membership, and on synthetic
 #: branching trajectories every share from 2% to 20% does; where the trunk
-#: holds 5% of the cells outside the sinks or fewer, a share of 30% reaches
-#: so far past the branch point that late cells of one branch follow another.
+#: holds about 5% of the cells outside the sinks or fewer, a share of 30%
+#: reaches so far past the branch point that late cells of one branch can
+#: follow another.
 TRUNK_SHARE = 0.1
 # The median absolute deviation of a normal distribution, in standard
 # deviations, is 1 / 1.4826.
