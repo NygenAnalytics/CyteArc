@@ -145,27 +145,47 @@ def align_features(
 
 
 def unshared_features_warning(
-    assay_name: str, alignment: FeatureAlignment, names: list[str]
+    assay_name: str,
+    alignment: FeatureAlignment,
+    names: list[str],
+    *,
+    combination: Literal["merge", "composite"],
 ) -> str | None:
     """Return the warning about the merged features that a source lacks.
 
     A merge writes zero counts for a feature in the cells of a source that
-    lacks it, which analyses then read as measured counts. The warning counts
-    the merged features of ``assay_name`` that not every source holding the
-    assay measured, then gives each such source's number of missing features
-    and names the first ``UNSHARED_FEATURE_EXAMPLES`` of them in merged order.
-    A source without the assay is left out, since the merge marks its cells as
-    not measured.
+    lacks it, and a union composite reads them, which analyses then take as
+    measured counts. The warning counts the merged features of ``assay_name``
+    that not every source holding the assay measured, then gives each such
+    source's number of missing features and names the first
+    ``UNSHARED_FEATURE_EXAMPLES`` of them in merged order. A source without
+    the assay is left out, since a merge marks its cells as not measured.
 
     Args:
         assay_name: The merged assay, named in the warning.
-        alignment: The assay's alignment from :func:`align_features`.
+        alignment: The assay's alignment from :func:`align_features`, in
+            which every source feature has a merged position.
         names: The source names, in the order of ``alignment.featOrderMap``.
+        combination: ``"merge"`` for a merge, which writes the zeros, or
+            ``"composite"`` for a union composite, which reads them and whose
+            warning names ``features='intersection'`` as the alternative.
 
     Returns:
         The warning, or None when every source that holds the assay measured
         every merged feature, or when fewer than two sources hold it.
     """
+    if combination == "merge":
+        adjective, zeros, remedy = "merged", "The merge writes", ""
+    elif combination == "composite":
+        adjective, zeros = "composite", "The composite reads"
+        remedy = (
+            " Pass features='intersection' to keep only the features that every "
+            "source measured."
+        )
+    else:
+        raise ValueError(
+            f"combination must be 'merge' or 'composite', got {combination!r}"
+        )
     holding = [
         (source_name, order_map)
         for source_name, order_map in zip(names, alignment.featOrderMap, strict=True)
@@ -196,12 +216,12 @@ def unshared_features_warning(
         return None
     unshared = int(np.count_nonzero(measured_by < len(holding)))
     return (
-        f"Assay {assay_name!r}: {unshared:,} of the {alignment.nFeats:,} merged "
-        f"features {'was' if unshared == 1 else 'were'} not measured by every "
-        "source that holds the assay. "
+        f"Assay {assay_name!r}: {unshared:,} of the {alignment.nFeats:,} "
+        f"{adjective} features {'was' if unshared == 1 else 'were'} not measured "
+        "by every source that holds the assay. "
         + " ".join(lacking)
-        + " The merge writes zero counts for a feature in the cells of each "
-        "source that lacks it, and analyses read those zeros as measured counts."
+        + f" {zeros} zero counts for a feature in the cells of each source that "
+        "lacks it, and analyses read those zeros as measured counts." + remedy
     )
 
 
