@@ -189,6 +189,7 @@ WNN is the default for `DataStore.integration.modalities`. Its integrated graph 
 
 Store-backed plotters and diagnostics generally return a `PlotResult` and render by default with `show=True`.
 Pass `show=False` before accessing, saving, or reusing an owned figure.
+In Jupyter, `PlotResult.show()` displays the figure and then closes it in pyplot, as `plt.show()` does, so the cell draws it once; this includes a figure passed with `target=` or composed with `compose_results`, which can still be saved or drawn on.
 `run_recipe` returns a `PlotRecipeResult` and defaults to `show=False`.
 Helpers differ: `label_panels` returns `None`, `theme_context` is an iterator, and `compose_results` returns a `PlotResult` without a `show` parameter.
 

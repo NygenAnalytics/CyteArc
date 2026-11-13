@@ -103,8 +103,16 @@ class PlotResult:
 
     ``figure`` is the matplotlib figure. ``axes`` maps panel keys to axes.
     ``tables`` holds any summary data used to build the plot. ``owns_figure``
-    is True when CyteArc created the figure. ``show()`` and ``close()`` release
-    owned figures without discarding the result metadata.
+    is True when CyteArc created the figure. ``close()`` closes an owned
+    figure in pyplot and keeps the result metadata.
+
+    In IPython, ``show()`` displays the figure and then closes it in pyplot,
+    as ``plt.show()`` does in Jupyter, so the end of the cell does not draw it
+    a second time. This holds for every figure, a figure passed with
+    ``target=`` or composed with :func:`compose_results` included. Outside
+    IPython, ``show()`` hands an interactive canvas to ``plt.show()`` and
+    closes only an owned figure. A closed figure can still be saved or drawn
+    on.
     """
 
     figure: Any
@@ -144,7 +152,9 @@ class PlotResult:
                 plt.show()
                 self._rendered = True
         finally:
-            if self.owns_figure:
+            # Jupyter's inline backend draws every figure a cell leaves open,
+            # so a caller's figure is closed after display as well.
+            if self.owns_figure or in_ipython:
                 plt.close(self.figure)
 
     def __repr__(self) -> str:
