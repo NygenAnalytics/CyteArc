@@ -1,5 +1,9 @@
 """Plot scale and theme behavior tests."""
 
+import os
+import subprocess
+import sys
+
 import matplotlib
 import numpy as np
 import pytest
@@ -557,3 +561,107 @@ def test_theme_context_restores_state_after_error_and_rejects_unknown_theme():
     with pytest.raises(KeyError, match="Unknown theme"):
         with theme_context("missing-theme"):
             pass
+
+
+def _rc_params_except_interactive(mpl):
+    return {
+        key: mpl.rcParams[key]
+        for key in mpl.rcParams
+        if key not in {"backend", "interactive"}
+    }
+
+
+@pytest.mark.parametrize("raises", [False, True])
+@pytest.mark.parametrize(
+    ("initial", "set_inside", "expected"),
+    [
+        # Jupyter's inline backend calls matplotlib.interactive(True) when the
+        # first figure of the session loads it inside the context.
+        (False, True, True),
+        # plt.ioff() inside the context.
+        (True, False, False),
+        # A body that leaves interactive mode alone.
+        (False, None, False),
+        (True, None, True),
+    ],
+)
+def test_theme_context_keeps_interactive_mode_and_restores_other_rc_params(
+    monkeypatch, initial, set_inside, expected, raises
+):
+    _, mpl = require_matplotlib()
+    monkeypatch.setitem(mpl.rcParams, "interactive", initial)
+    before = _rc_params_except_interactive(mpl)
+
+    def draw():
+        with theme_context("paper"):
+            assert mpl.rcParams["font.size"] == 8
+            mpl.rcParams["lines.linewidth"] = 5.0
+            if set_inside is not None:
+                mpl.interactive(set_inside)
+            if raises:
+                raise RuntimeError("plot failed")
+
+    if raises:
+        with pytest.raises(RuntimeError, match="plot failed"):
+            draw()
+    else:
+        draw()
+
+    assert mpl.is_interactive() is expected
+    assert before["font.size"] != 8
+    assert before["lines.linewidth"] != 5.0
+    assert _rc_params_except_interactive(mpl) == before
+
+
+def test_nested_theme_contexts_keep_interactive_mode_from_the_inner_body(
+    monkeypatch,
+):
+    _, mpl = require_matplotlib()
+    monkeypatch.setitem(mpl.rcParams, "interactive", False)
+    before = _rc_params_except_interactive(mpl)
+
+    with theme_context("paper"):
+        with theme_context("dark"):
+            assert mpl.rcParams["text.color"] == "#e8e8e8"
+            mpl.interactive(True)
+        assert mpl.is_interactive()
+        assert mpl.rcParams["font.size"] == 8
+        assert mpl.rcParams["text.color"] == before["text.color"]
+
+    assert mpl.is_interactive()
+    assert _rc_params_except_interactive(mpl) == before
+
+
+def test_cytearc_plot_as_first_figure_keeps_interactive_mode_its_backend_sets(
+    tmp_path,
+):
+    # Like Jupyter's inline backend, this backend turns interactive mode on
+    # when it loads, which happens when the session draws its first figure.
+    (tmp_path / "interactive_on_load_backend.py").write_text(
+        "import matplotlib\n"
+        "from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas\n"
+        "matplotlib.interactive(True)\n"
+    )
+    script = (
+        "import matplotlib\n"
+        "import numpy as np\n"
+        "import cytearc.plotting as splt\n"
+        "before = matplotlib.is_interactive()\n"
+        "splt.elbow(np.array([40.0, 12.0, 6.0, 5.0, 4.5]), show=False).close()\n"
+        "print(before, matplotlib.is_interactive())\n"
+    )
+    pythonpath = [str(tmp_path), os.environ.get("PYTHONPATH", "")]
+    env = os.environ | {
+        "MPLBACKEND": "module://interactive_on_load_backend",
+        "PYTHONPATH": os.pathsep.join(path for path in pythonpath if path),
+    }
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=300,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.split() == ["False", "True"]

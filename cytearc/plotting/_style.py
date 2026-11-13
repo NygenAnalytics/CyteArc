@@ -1114,10 +1114,26 @@ def apply_figure_chrome(figure: Any, theme: str = "notebook") -> None:
 
 @contextmanager
 def theme_context(name: str = "notebook") -> Iterator[None]:
+    """Apply a CyteArc theme's rcParams inside the context and restore them on exit.
+
+    Matplotlib's interactive mode is the exception: it stays as the body of
+    the context leaves it. Jupyter's inline backend turns interactive mode on
+    when it loads, which happens when the session draws its first figure, so
+    a session whose first figure is a CyteArc plot stays interactive. A call
+    of ``plt.ion()`` or ``plt.ioff()`` in the body also lasts beyond the
+    context.
+    """
     if name not in THEMES:
         raise KeyError(f"Unknown theme {name!r}. Choose from: {sorted(THEMES)}")
     from ._deps import require_matplotlib
 
     _, mpl = require_matplotlib()
-    with mpl.rc_context(THEMES[name]):
-        yield
+    interactive = mpl.is_interactive()
+    try:
+        with mpl.rc_context(THEMES[name]):
+            try:
+                yield
+            finally:
+                interactive = mpl.is_interactive()
+    finally:
+        mpl.interactive(interactive)
