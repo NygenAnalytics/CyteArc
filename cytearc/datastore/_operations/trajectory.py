@@ -3210,12 +3210,15 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         has not committed looks like a member of its most likely lineage.
         Progenitors also split their probability unevenly, so the rule
         measures each lineage's probability against that lineage's own
-        trunk probability: the mean probability for the lineage of the
-        earliest tenth, by the pseudotime or the score that directs the fate
-        map, of the scored cells outside the fate map's sinks in the graph
-        components that hold the lineage's sink cells. A scored cell follows
-        each lineage whose probability is still at least ``band`` times its
-        trunk probability, and only when the cell lies on the trajectory:
+        trunk probability in the cell's graph component: the mean
+        probability for the lineage of the earliest tenth, by the pseudotime
+        or the score that directs the fate map, of the component's scored
+        cells outside the fate map's sinks. A fate map that a pseudotime
+        directs covers one component; one that a score directs can cover
+        several, each with its own trunk. A scored cell follows each lineage
+        whose sink cells share its component and whose probability is still
+        at least ``band`` times its trunk probability there, and only when
+        the cell lies on the trajectory:
         within some lineage's distance limit at the cell's progress on that
         lineage's curve. A progenitor therefore follows every lineage that
         starts in its trunk, whatever share of the trunk's probability the
@@ -3225,8 +3228,9 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         probability, and a cell follows a lineage whose divided probability
         is positive and at least ``band`` times the smaller of one and its
         largest divided probability over the curves' lineages. When the
-        curves follow every sink of the fate map, the trunk probabilities
-        sum to one and that largest is at least one. When they follow some
+        curves follow every sink of the fate map, a component's trunk
+        probabilities of the lineages whose sink cells it holds sum to one,
+        and that largest is at least one. When they follow some
         of the sinks, a cell that moves toward a sink they leave out can
         have every divided probability below one, and it then follows each
         lineage whose divided probability is at least ``band`` times its
@@ -3250,9 +3254,10 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         split lies before the first cell or after the last.
         :meth:`branch_cells` selects the cells around a branch point. Pass
         them as ``cells`` to :meth:`drivers`, with ``lineages=[first,
-        second]`` to keep its table to the pair, to rank, for each of the two
-        fates, the genes whose expression rises with that fate's probability
-        among those cells, and compare the two lists.
+        second]`` to keep its table to the pair: the table holds, for each of
+        the two fates, each gene's correlation with that fate's probability
+        among those cells, by which to rank the genes whose expression rises
+        with each fate and compare the two lists.
 
         Args:
             curves: Explicit ``lineage_curves`` artifact.
@@ -3326,6 +3331,10 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
                 ArrayRequirement("branch_pseudotime", shape=(n_pairs,), dtype_kind="f"),
                 ArrayRequirement("branch_progress", shape=(n_pairs, 2), dtype_kind="f"),
                 ArrayRequirement("branch_cells", shape=(n_pairs, 2), dtype_kind="i"),
+                ArrayRequirement("trunk_components", shape=(None,), dtype_kind="i"),
+                ArrayRequirement(
+                    "trunk_probabilities", shape=(None, n_lineages), dtype_kind="f"
+                ),
             ),
             required_attributes=(
                 AttributeRequirement("payload_fingerprint", expected_types=(str,)),
@@ -3371,14 +3380,15 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         )
         # A lineage's sink cells hold its sink label; the trunk leaves out the
         # cells of every sink of the fate map, also of a sink the curves leave out.
-        trunk = _trunk_probabilities_impl(
+        lineage_sinks = np.column_stack(
+            [np.asarray(inputs.sink_values == lineage) for lineage in lineages]
+        )
+        trunk_components, trunk = _trunk_probabilities_impl(
             loaded.weights,
             pseudotime,
             loaded.valid,
             inputs.sink_cells,
-            np.column_stack(
-                [np.asarray(inputs.sink_values == lineage) for lineage in lineages]
-            ),
+            lineage_sinks,
             inputs.direction.component,
             lineages=lineages,
         )
@@ -3388,6 +3398,9 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
             loaded.progress,
             loaded.valid,
             limits,
+            inputs.direction.component,
+            lineage_sinks,
+            trunk_components,
             trunk,
             band=validated["band"],
         )
@@ -3415,6 +3428,8 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
             "branch_cells": table[["shared_cells", "parted_cells"]].to_numpy(
                 dtype=np.int64
             ),
+            "trunk_components": np.asarray(trunk_components, dtype=np.int64),
+            "trunk_probabilities": trunk,
         }
         write_cell_data_artifact(
             self.zw,
@@ -3480,6 +3495,20 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
             )
         lineages = loaded.lineages
         group = as_zarr_group(self.zw[status.path], name=status.path)
+        missing = [
+            name
+            for name in ("trunk_components", "trunk_probabilities")
+            if name not in group
+        ]
+        if missing:
+            raise ValueError(
+                "This lineage membership was saved by an earlier version of "
+                f"CyteArc, without the arrays {', '.join(missing)}; call "
+                "ds.trajectory.lineage_membership(curves, "
+                f"band={parameters['band']}, "
+                f"distance_score={parameters['distance_score']}, "
+                f"n_bins={parameters['n_bins']}) again, which saves it anew"
+            )
         if not _lineage_membership_payload_is_valid(
             group,
             n_cells=int(loaded.valid.shape[0]),
@@ -3506,6 +3535,14 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
                 "parted_cells": counted[:, 1],
             }
         )
+        trunk = pd.DataFrame(
+            np.asarray(_stored_values(group, "trunk_probabilities"), dtype=np.float64),
+            index=pd.Index(
+                np.asarray(_stored_values(group, "trunk_components"), dtype=np.int64),
+                name="component",
+            ),
+            columns=list(lineages),
+        )
         result = LineageMembershipResult(
             ref=ref,
             curves=curves,
@@ -3518,6 +3555,7 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
                 _stored_values(group, "distance_limits"), dtype=np.float64
             ),
             branch_points=table,
+            trunk_probabilities=trunk,
         )
         return result, pseudotime
 
@@ -3535,10 +3573,10 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         The selection holds the ``window`` share of the cells that follow
         either lineage, rounded up, whose pseudotime lies closest to the two
         lineages' branch point. Pass it as ``cells`` to :meth:`drivers`, with
-        ``lineages`` naming the two to keep its table to the pair, to rank,
-        for each of the two fates, the genes whose expression rises with
-        that fate's probability among the selected cells, and compare the
-        two lists.
+        ``lineages`` naming the two to keep its table to the pair: the table
+        holds, for each of the two fates, each gene's correlation with that
+        fate's probability among the selected cells, by which to rank the
+        genes that rise with each fate and compare the two lists.
 
         Args:
             membership: Explicit ``lineage_membership`` artifact.
@@ -5281,9 +5319,10 @@ class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
         lineage's probability on its own, whatever ``lineages`` names. To
         study where two lineages part, pass the cells that
         :meth:`branch_cells` selects as ``cells`` and the two lineages as
-        ``lineages``: the table then ranks, for each of the two fates, the
-        genes whose expression rises with that fate's probability among
-        those cells, to compare between the two.
+        ``lineages``: the table then holds, for each of the two fates, each
+        gene's correlation with that fate's probability among those cells,
+        by which to rank the genes that rise with each fate and compare the
+        two.
 
         Args:
             fate: Explicit fate-map artifact.

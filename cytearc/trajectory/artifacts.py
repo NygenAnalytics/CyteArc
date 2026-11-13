@@ -1175,6 +1175,8 @@ LINEAGE_MEMBERSHIP_PAYLOAD = (
     "branch_pseudotime",
     "branch_progress",
     "branch_cells",
+    "trunk_components",
+    "trunk_probabilities",
 )
 LINEAGE_RESULT_ATTRIBUTES = _RESULT_ATTRIBUTES
 LINEAGE_DRIVER_ATTRIBUTES = _RESULT_ATTRIBUTES | {"n_cells"}
@@ -1814,7 +1816,10 @@ def lineage_membership_payload_is_valid(
 
     Each label names what its row of ``members`` holds: the one lineage's
     name, ``"shared"`` for several, or ``"none"``; unscored cells follow
-    none. Branch points cover every pair of lineages in order.
+    none. Branch points cover every pair of lineages in order. The trunk
+    probabilities hold one row per graph component, numbered without
+    repeats in ascending order, of positive values or NaN, with a positive
+    value for every lineage.
     """
     if set(group.attrs) != LINEAGE_RESULT_ATTRIBUTES:
         return False
@@ -1840,6 +1845,40 @@ def lineage_membership_payload_is_valid(
         name: array for name, array in contracts.items() if array is not None
     }
     if len(arrays) != len(contracts):
+        return False
+    try:
+        stored_components = as_zarr_array(
+            group["trunk_components"], name="trunk_components"
+        )
+    except (KeyError, TypeError):
+        return False
+    if stored_components.ndim != 1:
+        return False
+    n_components = int(stored_components.shape[0])
+    components = _array_contract(
+        group,
+        "trunk_components",
+        shape=(n_components,),
+        dtype_kinds=frozenset({"i", "u"}),
+    )
+    trunk_array = _array_contract(
+        group,
+        "trunk_probabilities",
+        shape=(n_components, n_lineages),
+        dtype_kinds=frozenset({"f"}),
+    )
+    if components is None or trunk_array is None or not n_components:
+        return False
+    numbers = np.asarray(components[:], dtype=np.int64)
+    trunk = np.asarray(trunk_array[:], dtype=np.float64)
+    finite = np.isfinite(trunk)
+    if (
+        np.any(numbers < 0)
+        or np.any(np.diff(numbers) <= 0)
+        or np.any(np.isinf(trunk))
+        or np.any(trunk[finite] <= 0)
+        or not finite.any(axis=0).all()
+    ):
         return False
     valid = np.asarray(arrays["valid"][:], dtype=np.bool_)
     if not np.array_equal(valid, np.asarray(expected_valid, dtype=np.bool_)):

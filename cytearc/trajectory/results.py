@@ -624,6 +624,12 @@ class LineageMembershipResult:
     the ``shared_cells`` and ``parted_cells`` that place the split. A pair
     that never shares a cell, never parts, or whose shared cells do not come
     before its parted cells has no branch point and holds NaN.
+    ``trunk_probabilities`` holds, for each graph component that holds sink
+    cells of the lineages, indexed by its ``component`` number, each
+    lineage's trunk probability there: its mean probability over the
+    earliest tenth of the component's cells outside the sinks. It is NaN
+    where the component holds none of the lineage's sink cells, or no cell
+    outside the sinks.
     """
 
     ref: ArtifactRef
@@ -635,6 +641,7 @@ class LineageMembershipResult:
     valid: np.ndarray = field(repr=False)
     distance_limits: np.ndarray = field(repr=False)
     branch_points: pd.DataFrame = field(repr=False)
+    trunk_probabilities: pd.DataFrame = field(repr=False)
 
     def __post_init__(self) -> None:
         n_lineages = len(self.lineages)
@@ -654,5 +661,13 @@ class LineageMembershipResult:
         )
         if len(self.branch_points) != n_lineages * (n_lineages - 1) // 2:
             raise ValueError("Branch points need one row per pair of lineages")
+        if (
+            list(self.trunk_probabilities.columns) != list(self.lineages)
+            or self.trunk_probabilities.empty
+        ):
+            raise ValueError(
+                "Trunk probabilities need one column per lineage and a row per "
+                "graph component"
+            )
         for name in ("labels", "members", "valid", "distance_limits"):
             object.__setattr__(self, name, read_only_copy(getattr(self, name)))
