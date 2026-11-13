@@ -30,12 +30,13 @@ by its threads; here, as in brisc (MIT), each cell draws from its own key.
 
 import math
 from collections.abc import Callable
+from dataclasses import dataclass
 
 import numpy as np
 from numba import prange
 from scipy.sparse import csr_matrix, issparse
 
-from ..utils.arguments import integer_argument
+from ..utils.arguments import float_argument, integer_argument
 from ..utils.digest import mix64, mix64_array
 from ..utils.numba import njit, numba_threads
 from ..utils.progress import iter_progress
@@ -43,10 +44,12 @@ from ..utils.progress import iter_progress
 __all__ = [
     "LOCALMAP_ITERATIONS",
     "NEIGHBOR_PAIRS",
+    "LocalmapSettings",
     "further_pairs",
     "initial_layout",
     "localmap_layout",
     "localmap_peak_bytes",
+    "localmap_settings",
     "mid_near_pairs",
     "neighbor_partners",
     "pair_partners",
@@ -74,6 +77,61 @@ _ADAM_EPSILON = 1e-7
 # An initialization is centered and scaled to this standard deviation, as
 # the reference scales coordinates that it is given.
 _INITIAL_SCALE = 1e-4
+
+
+@dataclass(frozen=True, slots=True)
+class LocalmapSettings:
+    """LocalMAP settings as canonical Python numbers."""
+
+    localmap_dims: int
+    n_mid_near: int
+    n_further: int
+    iterations: tuple[int, int, int]
+    learning_rate: float
+    max_distance: float
+    random_seed: int
+
+
+def localmap_settings(
+    *,
+    localmap_dims: object,
+    n_mid_near: object,
+    n_further: object,
+    iterations: object,
+    learning_rate: object,
+    max_distance: object,
+    random_seed: object,
+) -> LocalmapSettings:
+    """Validate LocalMAP settings and return them as canonical Python numbers.
+
+    Raises:
+        TypeError: If a setting has the wrong type, or ``iterations`` is not
+            three values.
+        ValueError: If a setting is out of range.
+    """
+    dims = integer_argument(localmap_dims, "localmap_dims", minimum=1)
+    mid_near = integer_argument(n_mid_near, "n_mid_near", minimum=1)
+    further = integer_argument(n_further, "n_further", minimum=1)
+    if not isinstance(iterations, tuple | list) or len(iterations) != 3:
+        raise TypeError("iterations must be three integers, one per phase")
+    phases = [
+        integer_argument(value, f"iterations[{phase}]", minimum=1)
+        for phase, value in enumerate(iterations)
+    ]
+    rate = float_argument(learning_rate, "learning_rate")
+    distance = float_argument(max_distance, "max_distance")
+    for name, value in (("learning_rate", rate), ("max_distance", distance)):
+        if value <= 0:
+            raise ValueError(f"{name} must be finite and positive")
+    return LocalmapSettings(
+        localmap_dims=dims,
+        n_mid_near=mid_near,
+        n_further=further,
+        iterations=(phases[0], phases[1], phases[2]),
+        learning_rate=rate,
+        max_distance=distance,
+        random_seed=integer_argument(random_seed, "random_seed", minimum=0),
+    )
 
 
 def draw_key(random_seed: int, kind: int, round_: int = 0) -> np.uint64:

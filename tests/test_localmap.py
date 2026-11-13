@@ -509,3 +509,49 @@ def test_graph_check_copies_only_graphs_it_must_change():
     assert graph.nnz == 12 and graph.data.dtype == np.float64
     assert checked.nnz == 11 and checked.data.dtype == np.float32
     assert localmap._checked_graph(checked) is checked
+
+
+_SETTINGS = {
+    "localmap_dims": 2,
+    "n_mid_near": 5,
+    "n_further": 20,
+    "iterations": ITERATIONS,
+    "learning_rate": 1.0,
+    "max_distance": 10.0,
+    "random_seed": 4444,
+}
+
+
+def test_settings_are_returned_as_python_numbers():
+    settings = localmap.localmap_settings(
+        **{
+            **_SETTINGS,
+            "localmap_dims": np.int64(3),
+            "iterations": [np.int64(10), 20, 30],
+            "learning_rate": 1,
+            "max_distance": np.float32(8.0),
+        }
+    )
+
+    assert settings == localmap.LocalmapSettings(3, 5, 20, (10, 20, 30), 1.0, 8.0, 4444)
+    assert type(settings.localmap_dims) is int
+    assert all(type(phase) is int for phase in settings.iterations)
+    assert type(settings.learning_rate) is type(settings.max_distance) is float
+
+
+@pytest.mark.parametrize(
+    ("setting", "value", "error", "message"),
+    [
+        ("localmap_dims", True, TypeError, "^localmap_dims must be an integer$"),
+        ("n_further", 0, ValueError, "^n_further must be at least 1$"),
+        ("iterations", "abc", TypeError, "^iterations must be three integers"),
+        ("iterations", (1, 2, 3, 4), TypeError, "^iterations must be three integers"),
+        ("iterations", (1, 2.5, 3), TypeError, r"^iterations\[1\] must be an integer$"),
+        ("learning_rate", math.inf, ValueError, "^learning_rate must be finite$"),
+        ("max_distance", 0, ValueError, "^max_distance must be finite and positive$"),
+        ("random_seed", -1, ValueError, "^random_seed must be at least 0$"),
+    ],
+)
+def test_settings_refuse_invalid_values(setting, value, error, message):
+    with pytest.raises(error, match=message):
+        localmap.localmap_settings(**{**_SETTINGS, setting: value})
