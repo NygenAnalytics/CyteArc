@@ -24,11 +24,11 @@ path = repository.download_dataset(
 ds = cytearc.DataStore(f"{path}/data.zarr", zarr_mode="r")
 ```
 
-`download_dataset(name, zarr=True)` downloads the dataset's `data.zarr.tar.gz` archive and
-extracts it to `data.zarr` in the returned directory, keeping the archive beside it. Without
-`zarr=True`, it downloads the dataset's other files, such as its source count files.
-`download(path)` downloads one file, or every file under a directory, and keeps its path within
-the repository.
+`download_dataset(name, zarr=True)` downloads the dataset's `data.zarr.tar.gz` archive and extracts it to `data.zarr` in the returned directory, keeping the archive beside it. Without `zarr=True`, it downloads the dataset's other files, such as its source count files.
+
+A later call into the same `destination` reuses what is already there: files that match the bucket's current copy are not downloaded again, and an existing `data.zarr` is returned with the results saved in it. When the bucket has published a newer version of the dataset, the call raises `FileExistsError` instead of replacing the store, and `overwrite=True` downloads the current version, deleting anything saved in `data.zarr`.
+
+`download(path)` downloads one file, or every file under a directory, on every call, and keeps its path within the repository.
 
 ```{eval-rst}
 .. autofunction:: cytearc.datasets.list_repositories

@@ -1145,11 +1145,21 @@ def _resolve_derived_sources(
         if (source_path / STORE_NAME).is_dir():
             resolved[source_dataset] = source_path
             continue
-        resolved[source_dataset] = repository.download_dataset(
-            source_dataset,
-            destination=str(work),
-            zarr=True,
-        )
+        try:
+            resolved[source_dataset] = repository.download_dataset(
+                source_dataset,
+                destination=str(work),
+                zarr=True,
+            )
+        except FileExistsError:
+            # A downloaded source holds no work of this script's, so a copy of
+            # an older version is replaced.
+            resolved[source_dataset] = repository.download_dataset(
+                source_dataset,
+                destination=str(work),
+                zarr=True,
+                overwrite=True,
+            )
     return resolved
 
 
