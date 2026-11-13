@@ -4,7 +4,13 @@ from typing import Any, Literal
 import numpy as np
 import pandas as pd
 
-from ...metadata.artifacts import categorical_display, continuous_display
+from ...metadata.artifacts import (
+    categorical_display,
+    column_category_order,
+    column_display,
+    continuous_display,
+    levels_display,
+)
 from ...metadata.rows import array_block_rows
 from ...storage.arrays import linked_missing_mask
 from ...storage.artifacts import ArtifactRef, artifact_group
@@ -108,6 +114,7 @@ def _snapshot_field(
     key: str,
     axis: Literal["cells", "features"],
     snapshot: ArtifactRef,
+    display: Mapping[str, object] | None = None,
 ) -> PipelineFieldDescriptor:
     group = artifact_group(root, snapshot)
     array = as_zarr_array(group[key], name=key)
@@ -119,7 +126,29 @@ def _snapshot_field(
         source_value=key,
         dtype=array.dtype,
         missing_mask=None if missing is None else missing.basename,
+        display=display,
     )
+
+
+def _frozen_column_display(root: Any, column: str) -> dict[str, Any] | None:
+    """Return the display that a run keeps for a cell column it freezes.
+
+    A snapshot stores a column's labels and none of its attributes, so the
+    run's field records how plots draw the live column: its stored display,
+    or else, for a column stored as ordered, its categories in their stored
+    order with the default colors that plots give them in that order. Any
+    other column gets none, and plots sort its categories naturally, as they
+    sort the live column's.
+    """
+    display = column_display(root, column)
+    if display is not None:
+        return display
+    order = column_category_order(root, column)
+    if order is None:
+        return None
+    from ...plotting._style import palette_for_n
+
+    return levels_display(list(order), tuple(palette_for_n(len(order))), False)
 
 
 # The cell fields that a snapshot column may not shadow, besides the Leiden,
@@ -257,7 +286,11 @@ def cell_fields(
     )
     fields.extend(
         _snapshot_field(
-            root, key=column, axis="cells", snapshot=artifacts["column_snapshot"]
+            root,
+            key=column,
+            axis="cells",
+            snapshot=artifacts["column_snapshot"],
+            display=_frozen_column_display(root, column),
         )
         for column in snapshot_columns
     )

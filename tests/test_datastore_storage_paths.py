@@ -17,10 +17,12 @@ from zarr.storage import MemoryStore, ObjectStore, WrapperStore
 from cytearc import DataStore, mount_datastore
 from cytearc.assay import Assay, RNAassay
 from cytearc.metadata.artifacts import (
+    RecordedCategories,
     categorical_display,
     column_category_order,
     column_display,
     plan_cell_data_artifact,
+    recorded_categories,
     validate_display_metadata,
     write_cell_data_artifact,
 )
@@ -871,8 +873,39 @@ def test_column_category_order_reads_only_columns_stored_as_ordered() -> None:
     assert column_category_order(root, "tag") is None
     assert column_category_order(root, "plain") is None
     assert column_category_order(root, "absent") is None
-    with pytest.raises(TypeError, match="levels attribute must be a list"):
+    with pytest.raises(TypeError, match="Stored levels must be a list"):
         column_category_order(root, "broken")
+
+
+def test_recorded_categories_validates_the_attributes_an_import_writes() -> None:
+    display = {
+        "kind": "categorical",
+        "categories": [{"value": "b", "label": "B", "color": "#112233"}],
+    }
+    recorded = recorded_categories(
+        {"levels": ["b", "a"], "ordered": True, "display": display}
+    )
+    assert recorded.levels == ("b", "a")
+    assert recorded.ordered_levels == ("b", "a")
+    assert recorded.display == display
+    # Only True orders the levels, and missing attributes record nothing.
+    assert recorded_categories({"levels": ["b"], "ordered": 1}).ordered_levels is None
+    assert recorded_categories({}) == RecordedCategories(
+        levels=None, ordered=False, display=None
+    )
+    with pytest.raises(TypeError, match="Stored levels must be a list"):
+        recorded_categories({"levels": "ba"})
+    with pytest.raises(TypeError, match="display metadata must be a mapping"):
+        recorded_categories({"display": "viridis"})
+    with pytest.raises(ValueError, match="Display category color must be a hex"):
+        recorded_categories(
+            {
+                "display": {
+                    "kind": "categorical",
+                    "categories": [{"value": "b", "label": "B", "color": "blue"}],
+                }
+            }
+        )
 
 
 def test_categorical_display_keeps_first_seen_order_for_unorderable_values() -> None:

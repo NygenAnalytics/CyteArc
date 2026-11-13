@@ -29,7 +29,7 @@ from ._data import (
     unmeasured_extras,
 )
 from ._deps import require_matplotlib
-from ._display import resolve_categorical_scale
+from ._display import resolve_artifact_scale, resolve_categorical_scale
 from ._figure import (
     LegendSpec,
     PlotResult,
@@ -445,6 +445,8 @@ def dotplot(
             group_by,
             categorical_scale,
         )
+    elif groups is not None:
+        categorical_scale = resolve_artifact_scale(store, groups, categorical_scale)
     feature_pairs = coerce_feature_list(features)
     _check_feature_count(feature_pairs)
     resolved_features = resolve_feature_batch(
@@ -909,6 +911,8 @@ def matrixplot(
             group_by,
             categorical_scale,
         )
+    elif groups is not None:
+        categorical_scale = resolve_artifact_scale(store, groups, categorical_scale)
     plot_df = aggregate.copy()
     plot_df["group_label"] = _group_axis_labels(plot_df, _group_roles(group_keys))
     plot_df["row"] = list(

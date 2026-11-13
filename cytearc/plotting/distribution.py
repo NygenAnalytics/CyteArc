@@ -55,7 +55,7 @@ from ._data import (
     unmeasured_extras,
 )
 from ._deps import require_matplotlib, require_seaborn
-from ._display import resolve_categorical_scale
+from ._display import resolve_artifact_scale, resolve_categorical_scale
 from ._figure import (
     LegendSpec,
     PlotResult,
@@ -1253,6 +1253,8 @@ def distribution(
             grouping.key,
             categorical_scale,
         )
+    elif isinstance(grouping, ArtifactRef):
+        categorical_scale = resolve_artifact_scale(store, grouping, categorical_scale)
     if split_by is not None:
         split_scale = resolve_categorical_scale(
             store,

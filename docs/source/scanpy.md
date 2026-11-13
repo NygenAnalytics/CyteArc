@@ -48,7 +48,7 @@ The [neighbor graph tutorial](tutorials/graph_construction.ipynb) runs the chain
 |---|---|---|
 | `X`, `raw/X`, `layers` | The raw counts: inspection ranks the matrices that hold counts first, preferring `raw/X` and `layers/counts` to `X`, and `matrix_key` picks another. A file that holds only normalized values imports too; `H5adToZarr(..., values=...)` names their kind when CyteArc cannot tell it from the values | `X` holds raw counts; a run export with `matrix="normed"` holds the normalized values that the run's PCA read |
 | `obs`, `var` | The cell and feature tables; categorical columns keep their categories, order and `uns["<column>_colors"]` | The cell and feature tables |
-| Label columns of `obs` | `cluster_keys` imports them as clusterings instead of table columns | `obs={"leiden": leiden}` writes a clustering as a categorical column |
+| Label columns of `obs` | `cluster_keys` imports them as clusterings instead of table columns, with the same categories, order and colors | `obs={"leiden": leiden}` writes a clustering as a categorical column |
 | `obsm` | `embedding_roles` imports `"umap"` and `"tsne"` layouts, and latent spaces such as `X_scVI` as `"coordinates"` that a neighbor graph can be built on | `obsm={"X_pca": pca, "X_umap": umap}`; `X_pca` also writes the PCA loadings to `varm["PCs"]` |
 | `obsp`, `uns["neighbors"]` | Not imported; build the graph in CyteArc | `graph=` writes `obsp["connectivities"]`, `obsp["distances"]` and `uns["neighbors"]` in Scanpy's layout |
 

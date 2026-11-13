@@ -43,6 +43,7 @@ from ._deps import require_matplotlib
 from ._display import (
     continuous_display_scale,
     merge_categorical_scales,
+    stored_artifact_scale,
     stored_categorical_scale,
     stored_display_metadata,
 )
@@ -1666,9 +1667,9 @@ def embedding(
                 if clip_fraction > 0
                 else stored_scale
             )
-    # Each categorical color merges the caller's scale over the column's
-    # stored scale; receptor types take the colors that every repertoire
-    # figure gives them.
+    # Each categorical color merges the caller's scale over the stored scale
+    # of its column or label artifact; receptor types take the colors that
+    # every repertoire figure gives them.
     merged_categorical_scales: dict[int, CategoricalScale | None] = {}
     for index, (item, column) in enumerate(
         zip(color_items, color_columns, strict=True)
@@ -1678,6 +1679,8 @@ def embedding(
         stored = (
             RECEPTOR_TYPE_SCALE
             if isinstance(item, ArtifactRef) and item.kind == "immune_receptors"
+            else stored_artifact_scale(store, item)
+            if isinstance(item, ArtifactRef)
             else None
             if column is None
             else stored_categorical_scale(store, column)

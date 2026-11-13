@@ -679,6 +679,10 @@ def _artifact_plot(
         "_artifact_cell_selection",
         lambda _store, _ref: _SELECTION,
     )
+    # The groups record no categories of their own.
+    monkeypatch.setattr(
+        module, "resolve_artifact_scale", lambda _store, _ref, explicit: explicit
+    )
     store = _FakeStore({}, _symmetric_graph(4, [(0, 1, 1.0), (1, 2, 0.5), (2, 3, 1.0)]))
     arguments = {"groups": _GROUPS, "layout": _LAYOUT, "graph": _GRAPH}
     arguments.update(kwargs)

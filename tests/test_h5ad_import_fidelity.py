@@ -304,10 +304,11 @@ def test_stored_levels_follow_the_stored_column_type(dtype, categories, levels):
 
 
 def test_display_metadata_that_would_be_invalid_is_not_stored() -> None:
-    from cytearc.writers.h5ad import _categorical_attributes, _categorical_display
+    from cytearc.metadata.artifacts import levels_display
+    from cytearc.writers.h5ad import _categorical_attributes
 
     # Two categories that compare equal cannot both be display values.
-    assert _categorical_display([1, 1.0], None, False) is None
+    assert levels_display([1, 1.0], None, False) is None
     attributes = _categorical_attributes(
         np.dtype(np.float64),
         H5adCategories((1, 1.0), False),
