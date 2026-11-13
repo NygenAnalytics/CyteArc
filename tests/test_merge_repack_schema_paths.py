@@ -56,22 +56,24 @@ def _write_source(
     location: str | MemoryStore,
     counts: Mapping[str, np.ndarray],
     *,
-    ids: Sequence[str] | None = None,
+    ids: Sequence[str] | Mapping[str, Sequence[str]] | None = None,
     names: Sequence[str] | None = None,
     dtype: str = "uint16",
 ) -> str | MemoryStore:
     """Write a fresh import whose assays share one set of cells.
 
     ``ids`` and ``names`` describe the features of every assay; by default
-    they are ``f"{assay}{index}"``.
+    they are ``f"{assay}{index}"``. ``ids`` can instead map an assay to its
+    own IDs, which other assays then keep by default.
     """
     root = load_zarr(location, mode="w")
     (n_cells,) = {len(values) for values in counts.values()}
     _write_cells(root, n_cells)
     for assay, values in counts.items():
+        assay_ids = ids.get(assay) if isinstance(ids, Mapping) else ids
         feature_ids = (
-            list(ids)
-            if ids is not None
+            list(assay_ids)
+            if assay_ids is not None
             else [f"{assay}{index}" for index in range(values.shape[1])]
         )
         array = create_zarr_count_assay(
@@ -886,6 +888,174 @@ def test_merge_warns_when_few_features_overlap(tmp_path):
         plan = _merge([left, right], str(tmp_path / "merged.zarr")).plan()
     assert plan.assays[0].featureOverlapFraction == pytest.approx(1 / 21)
     assert any("Fewer than 10% of features overlap" in text for text in messages)
+
+
+_GENES = ["G0", "G1"]
+_ZEROS_READ_AS_COUNTS = (
+    " The merge writes zero counts for a feature in the cells of each source "
+    "that lacks it, and analyses read those zeros as measured counts."
+)
+
+
+def _panel_source(
+    panels: Mapping[str, Sequence[str]], names: Sequence[str] | None = None
+) -> DataStore:
+    """Open a source of three cells whose assays measure the features named.
+
+    Each assay's counts are 1, 2, 3, ... across the first cell's features,
+    then the next cell's.
+    """
+    counts = {
+        assay: np.arange(1, 3 * len(ids) + 1, dtype=np.uint16).reshape(3, len(ids))
+        for assay, ids in panels.items()
+    }
+    return _open(_write_source(MemoryStore(), counts, ids=panels, names=names))
+
+
+def test_merge_warns_of_the_antibodies_that_each_panel_lacks(tmp_path):
+    left = _panel_source(
+        {"RNA": _GENES, "ADT": ["CD3", "CD4", "CD8", "CD45RA", "CD27"]}
+    )
+    right = _panel_source(
+        {"RNA": _GENES, "ADT": ["CD3", "CD4", "CD8", "CD14", "CD16", "CD19"]}
+    )
+    destination = str(tmp_path / "merged.zarr")
+
+    with _captured_warnings() as messages:
+        merger = _merge([left, right], destination)
+        plan = merger.plan()
+        merger.dump()
+    # Three of the eight antibodies are shared, above the 10% that the overlap
+    # warning needs, and the panel warning is given once, by the plan.
+    adt = next(item for item in plan.assays if item.assayName == "ADT")
+    assert adt.featureOverlapFraction == pytest.approx(3 / 8)
+    assert messages == [
+        "Assay 'ADT': 5 of the 8 merged features were not measured by every "
+        "source that holds the assay. Source 'left' lacks 3: 'CD14', 'CD16', "
+        "'CD19'. Source 'right' lacks 2: 'CD45RA', 'CD27'." + _ZEROS_READ_AS_COUNTS
+    ]
+    # The merged counts hold the zeros that the warning describes.
+    root = zarr.open_group(destination, mode="r")
+    assert root["ADT/featureData/ids"][:].tolist() == [
+        "CD3",
+        "CD4",
+        "CD8",
+        "CD45RA",
+        "CD27",
+        "CD14",
+        "CD16",
+        "CD19",
+    ]
+    rows = _rows_by_cell(destination, "ADT/counts")
+    assert rows["left__c0"] == [1, 2, 3, 4, 5, 0, 0, 0]
+    assert rows["right__c0"] == [1, 2, 3, 0, 0, 4, 5, 6]
+
+
+def test_merge_names_at_most_five_of_the_genes_that_each_source_lacks(tmp_path):
+    long_name = "h0" + "x" * 300
+    left = _panel_source({"RNA": [f"g{index}" for index in range(1200)]})
+    right = _panel_source(
+        {
+            "RNA": [f"g{index}" for index in range(1000)]
+            + [long_name]
+            + [f"h{index}" for index in range(1, 3000)]
+        }
+    )
+
+    with _captured_warnings() as messages:
+        plan = _merge([left, right], str(tmp_path / "merged.zarr")).plan()
+    assert plan.assays[0].featureOverlapFraction == pytest.approx(1000 / 4200)
+    (message,) = messages
+    # A name longer than a message quotes keeps only its start and its end.
+    head, tail = message.split(" Source 'left' lacks 3,000: 'h0xxx")
+    assert head == (
+        "Assay 'RNA': 3,200 of the 4,200 merged features were not measured by "
+        "every source that holds the assay."
+    )
+    assert tail.endswith(
+        "xxx', 'h1', 'h2', 'h3', 'h4' and 2,995 more. Source 'right' lacks 200: "
+        "'g1000', 'g1001', 'g1002', 'g1003', 'g1004' and 195 more."
+        + _ZEROS_READ_AS_COUNTS
+    )
+    assert "x" * 100 not in message
+    assert len(message) < 500
+
+
+def test_merge_warns_of_a_feature_that_two_of_three_sources_measured(tmp_path):
+    panels = (["CD3", "CD4", "CD8"], ["CD8", "CD3", "CD4"], ["CD3", "CD4"])
+    sources = [_panel_source({"RNA": _GENES, "ADT": panel}) for panel in panels]
+
+    with _captured_warnings() as messages:
+        plan = DataStoreMerge(
+            sources, str(tmp_path / "merged.zarr"), ["a", "b", "c"], nthreads=1
+        ).plan()
+    # Every antibody is in at least two sources, so the overlap is complete,
+    # yet the cells of source c read zero counts of CD8.
+    adt = next(item for item in plan.assays if item.assayName == "ADT")
+    assert adt.featureOverlapFraction == 1.0
+    assert messages == [
+        "Assay 'ADT': 1 of the 3 merged features was not measured by every "
+        "source that holds the assay. Source 'c' lacks 1: 'CD8'."
+        + _ZEROS_READ_AS_COUNTS
+    ]
+
+
+_MISSING_ADT = (
+    "Source {!r} is missing assay 'ADT'; writing zeros and marking assay "
+    "membership false"
+)
+
+
+@pytest.mark.parametrize(
+    ("panels", "options", "expected"),
+    [
+        pytest.param(
+            [
+                {"RNA": _GENES, "ADT": ["CD3", "CD4", "CD8"]},
+                {"RNA": _GENES, "ADT": ["CD8", "CD3", "CD4"]},
+            ],
+            {},
+            [],
+            id="one panel in another order",
+        ),
+        pytest.param(
+            [
+                {"RNA": _GENES, "ADT": ["CD3", "CD4"]},
+                {"RNA": _GENES},
+                {"RNA": _GENES, "ADT": ["CD4", "CD3"]},
+            ],
+            {},
+            [_MISSING_ADT.format("right")],
+            id="a source without the assay",
+        ),
+        pytest.param(
+            [{"RNA": _GENES, "ADT": ["CD3", "CD4"]}, {"RNA": _GENES}],
+            {},
+            [_MISSING_ADT.format("right")],
+            id="one source with the assay",
+        ),
+        pytest.param(
+            [{"RNA": ["ENSG01", "ENSG02"]}, {"RNA": ["CD3E", "CD4"]}],
+            {"feature_key": "names"},
+            [],
+            id="one panel by name under other IDs",
+        ),
+    ],
+)
+def test_merge_of_sources_that_measured_one_panel_names_no_feature(
+    tmp_path, panels, options, expected
+):
+    names = ["left", "right", "third"][: len(panels)]
+    sources = [
+        _panel_source(panel, names=["CD3E", "CD4"] if options else None)
+        for panel in panels
+    ]
+
+    with _captured_warnings() as messages:
+        DataStoreMerge(
+            sources, str(tmp_path / "merged.zarr"), names, nthreads=1, **options
+        ).plan()
+    assert messages == expected
 
 
 def test_merge_by_name_sums_signed_counts_in_a_wider_dtype(tmp_path):

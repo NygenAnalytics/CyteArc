@@ -6,7 +6,11 @@ from typing import Any, Literal
 import numpy as np
 import pandas as pd
 
+from ..utils.arguments import quoted_value
 from ..utils.logging import logger
+
+#: The most features that the warning about unshared features names per source.
+UNSHARED_FEATURE_EXAMPLES = 5
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,6 +141,67 @@ def align_features(
         ],
         nFeats=int(merged_feats.shape[0]),
         overlapFraction=overlap,
+    )
+
+
+def unshared_features_warning(
+    assay_name: str, alignment: FeatureAlignment, names: list[str]
+) -> str | None:
+    """Return the warning about the merged features that a source lacks.
+
+    A merge writes zero counts for a feature in the cells of a source that
+    lacks it, which analyses then read as measured counts. The warning counts
+    the merged features of ``assay_name`` that not every source holding the
+    assay measured, then gives each such source's number of missing features
+    and names the first ``UNSHARED_FEATURE_EXAMPLES`` of them in merged order.
+    A source without the assay is left out, since the merge marks its cells as
+    not measured.
+
+    Args:
+        assay_name: The merged assay, named in the warning.
+        alignment: The assay's alignment from :func:`align_features`.
+        names: The source names, in the order of ``alignment.featOrderMap``.
+
+    Returns:
+        The warning, or None when every source that holds the assay measured
+        every merged feature, or when fewer than two sources hold it.
+    """
+    holding = [
+        (source_name, order_map)
+        for source_name, order_map in zip(names, alignment.featOrderMap, strict=True)
+        if order_map.size
+    ]
+    if len(holding) < 2:
+        return None
+    measured_by = np.zeros(alignment.nFeats, dtype=np.int64)
+    lacking: list[str] = []
+    feature_names = alignment.mergedFeatsMap["names"].to_numpy()
+    for source_name, order_map in holding:
+        measured = np.zeros(alignment.nFeats, dtype=bool)
+        measured[order_map] = True
+        measured_by += measured
+        missing = np.flatnonzero(~measured)
+        if missing.size == 0:
+            continue
+        listed = ", ".join(
+            quoted_value(name)
+            for name in feature_names[missing[:UNSHARED_FEATURE_EXAMPLES]].tolist()
+        )
+        more = missing.size - UNSHARED_FEATURE_EXAMPLES
+        lacking.append(
+            f"Source {source_name!r} lacks {missing.size:,}: {listed}"
+            + (f" and {more:,} more." if more > 0 else ".")
+        )
+    if not lacking:
+        return None
+    unshared = int(np.count_nonzero(measured_by < len(holding)))
+    return (
+        f"Assay {assay_name!r}: {unshared:,} of the {alignment.nFeats:,} merged "
+        f"features {'was' if unshared == 1 else 'were'} not measured by every "
+        "source that holds the assay. "
+        + " ".join(lacking)
+        + " The merge writes zero counts for a feature in the cells of each "
+        "source that lacks it, and analyses read those zeros as measured counts."
     )
 
 

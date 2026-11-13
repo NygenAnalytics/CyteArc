@@ -589,6 +589,7 @@ Pass `assays=["RNA"]` when only one assay type is needed.
 Features are matched by exact feature ID by default. Gene symbols are display labels and do not
 merge distinct IDs; suffixes such as `_1` are preserved. An assay present in multiple inputs
 raises an error if none of its IDs overlap.
+Each merged assay holds the union of its inputs' features, and the cells of an input that lacks a feature get zero counts of it, which analyses such as CLR normalization read as measured. Planning logs a warning for each assay whose inputs measured different features, such as two antibody panels: it gives the number of features that each input lacks and names up to five of them. An input without the assay is left out of the warning, since its cells are marked as not measured.
 When inputs use different identifier conventions for the same genes, for example Ensembl IDs in
 one input and gene symbols in another, pass `feature_key="names"` to match features by name.
 The merged feature IDs are then the names, and features that share a name within one input are

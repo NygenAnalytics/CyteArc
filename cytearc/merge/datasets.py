@@ -38,7 +38,12 @@ from ..storage.stores import (
 )
 from ..storage.types import as_zarr_array, as_zarr_group
 from ..utils.logging import logger
-from .features import FeatureKey, align_features, resolve_merge_dtype
+from .features import (
+    FeatureKey,
+    align_features,
+    resolve_merge_dtype,
+    unshared_features_warning,
+)
 from .metadata import (
     SOURCE_LACKS_ASSAY,
     SOURCE_MEASURES_ALL,
@@ -169,6 +174,12 @@ class DataStoreMerge:
 
     Merged counts use the common type of the source count dtypes, widened so
     that features summed by name cannot overflow it.
+
+    Each merged assay holds the union of its sources' features, and the cells
+    of a source that holds the assay but lacks one of its features get zero
+    counts of that feature. Planning then logs a warning for the assay with
+    the number of features that each such source lacks and up to five of
+    their names, so that a merge of different antibody panels is flagged.
     """
 
     def __init__(
@@ -333,9 +344,11 @@ class DataStoreMerge:
                         if source is not None
                     },
                 )
-                self._alignments[assay_name] = align_features(
-                    sources, self.names, key=self.featureKey
-                )
+                alignment = align_features(sources, self.names, key=self.featureKey)
+                self._alignments[assay_name] = alignment
+                unshared = unshared_features_warning(assay_name, alignment, self.names)
+                if unshared is not None:
+                    logger.warning(unshared)
             self._sourceMembership = self._source_membership()
         except BaseException:
             # A failed preparation leaves no partial state for a later call.
