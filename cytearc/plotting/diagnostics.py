@@ -238,7 +238,10 @@ def elbow(
     theme: str = "notebook",
     show: bool = True,
 ) -> PlotResult:
-    """Plot explained variance and mark the detected elbow."""
+    """Plot explained variance and mark the detected elbow.
+
+    Principal components are numbered from 1, as ``dims`` counts them, so the elbow line stands at the number of the PC where the curve bends. The ``variance_explained`` table holds ``pc``, ``variance_explained`` and ``is_elbow`` for each PC, and ``provenance.extras["elbow_pc"]`` holds the elbow PC's number, or None when no elbow is detected.
+    """
     show = bool_argument(show, "show")
     require_matplotlib()
     values = np.asarray(variance_explained, dtype=np.float64)
@@ -247,17 +250,17 @@ def elbow(
     if not np.isfinite(values).all():
         raise ValueError("variance_explained must contain only finite values")
 
-    components = np.arange(len(values), dtype=np.int64)
+    pcs = np.arange(1, len(values) + 1, dtype=np.int64)
     knee_locator = require_kneed()
     locator = knee_locator(
-        components,
+        pcs,
         values,
         S=1.0,
         curve="convex",
         direction="decreasing",
     )
     detected = getattr(locator, "elbow", None)
-    elbow_component = None if detected is None else int(detected)
+    elbow_pc = None if detected is None else int(detected)
     width, height = figsize
     resolved_figsize = (
         0.25 * len(values) if width is None else float(width),
@@ -271,11 +274,11 @@ def elbow(
             figsize=resolved_figsize,
         )
         ax = axes["elbow"]
-        ax.plot(components, values, linewidth=1)
-        ax.set_xticks(components)
-        if elbow_component is not None:
+        ax.plot(pcs, values, linewidth=1)
+        ax.set_xticks(pcs)
+        if elbow_pc is not None:
             ax.axvline(
-                elbow_component,
+                elbow_pc,
                 linewidth=1,
                 color="red",
                 label="Elbow",
@@ -288,9 +291,9 @@ def elbow(
 
     table = pd.DataFrame(
         {
-            "component": components,
+            "pc": pcs,
             "variance_explained": values,
-            "is_elbow": components == elbow_component,
+            "is_elbow": pcs == elbow_pc,
         }
     )
     result = PlotResult(
@@ -299,12 +302,12 @@ def elbow(
         tables={"variance_explained": table},
         legends=(
             ()
-            if elbow_component is None
+            if elbow_pc is None
             else (
                 LegendSpec(
                     kind="line",
                     label="Elbow",
-                    extras={"component": elbow_component},
+                    extras={"pc": elbow_pc},
                 ),
             )
         ),
@@ -314,7 +317,7 @@ def elbow(
             renderer="matplotlib",
             notes=("elbow",),
             extras={
-                "elbow": elbow_component,
+                "elbow_pc": elbow_pc,
                 "n_components": len(values),
                 "sensitivity": 1.0,
             },
