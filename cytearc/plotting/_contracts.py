@@ -72,22 +72,36 @@ class ColorScale:
 
 @dataclass(frozen=True, slots=True)
 class CategoricalScale:
-    """Category order and colors for discrete embeddings and compositions.
+    """Category order, colors and labels for discrete embeddings and compositions.
 
     ``order`` sets legend and axis order. ``palette`` maps each category to a
-    color string. Categories missing from ``palette`` raise an error, so pass
-    a complete map when you customize colors.
+    color string; a category that a plot shows and ``palette`` leaves out
+    raises an error, so pass a complete map when you customize colors.
+    ``labels`` maps categories to the text that ticks and legends show.
+    ``palette_name`` picks the generated colors, ``"default"`` or
+    ``"colorblind"``. ``missing_color`` and ``missing_label`` draw and name
+    cells without a category.
+
+    A column's stored display, or the order of a column stored as ordered,
+    gives the values of the fields this scale leaves unset: ``labels`` alone
+    renames categories in their stored order and colors, ``order`` alone
+    keeps the stored colors, and ``palette`` alone keeps the stored order.
+    ``labels`` merge with the stored labels category by category. A
+    ``palette_name`` replaces the stored colors and keeps the stored order.
+    Fields still unset when a plot is drawn take the defaults: the natural
+    order of the categories, colors of the ``"default"`` palette, each
+    category's own text, ``"#bdbdbd"`` and ``"NA"``.
     """
 
     order: tuple[Any, ...] | None = None
     palette: dict[Any, str] | None = None
     labels: dict[Any, str] | None = None
-    missing_color: str = "#bdbdbd"
-    missing_label: str = "NA"
-    palette_name: Literal["default", "colorblind"] = "default"
+    missing_color: str | None = None
+    missing_label: str | None = None
+    palette_name: Literal["default", "colorblind"] | None = None
 
     def __post_init__(self) -> None:
-        if self.palette_name not in ("default", "colorblind"):
+        if self.palette_name not in (None, "default", "colorblind"):
             raise ValueError("palette_name must be 'default' or 'colorblind'")
 
 

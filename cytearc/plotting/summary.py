@@ -745,6 +745,7 @@ def dotplot(
                 palette_name=(
                     categorical_scale.palette_name
                     if categorical_scale is not None
+                    and categorical_scale.palette_name is not None
                     else "default"
                 ),
             ),

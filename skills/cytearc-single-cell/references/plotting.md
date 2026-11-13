@@ -36,14 +36,7 @@ artifact refs. Docs: <https://docs.nygen.io/CyteArc/tutorials/plotting>,
 - Ref mode, everything else: `layout=run["umap"]`, `color_by=` an `ArtifactRef`, a live metadata
   column, a gene name, `FeatureRef`, `CellField`, or a list of these (one panel each). Cells come
   from the layout artifact's selection; live columns are aligned to it.
-- Helpers in `cytearc.plotting`: `CellField(key, kind="auto"|"categorical"|"continuous", label=)`,
-  `FeatureRef(value, assay=None, by="name"|"id"|"index", label=, reduction=)` (`value` is a
-  string for `name` and `id` and an integer for `index`),
-  `NormalizationSpec(source="assay"|"raw", transform="none"|"log1p")`,
-  `ColorScale(cmap, vmin, vmax, vcenter, quantiles, missing_color, scope, scale)`,
-  `CategoricalScale(order, palette, labels, missing_color, missing_label, palette_name)`,
-  `Highlight(by, groups, indices, color, dim_alpha, ...)`, `DensityOverlay`, `SizeScale`,
-  `StudyDesign`.
+- Helpers in `cytearc.plotting`: `CellField(key, kind="auto"|"categorical"|"continuous", label=)`, `FeatureRef(value, assay=None, by="name"|"id"|"index", label=, reduction=)` (`value` is a string for `name` and `id` and an integer for `index`), `NormalizationSpec(source="assay"|"raw", transform="none"|"log1p")`, `ColorScale(cmap, vmin, vmax, vcenter, quantiles, missing_color, scope, scale)`, `CategoricalScale(order, palette, labels, missing_color, missing_label, palette_name)`, whose unset fields keep the column's stored display or stored order, `Highlight(by, groups, indices, color, dim_alpha, ...)`, `DensityOverlay`, `SizeScale`, `StudyDesign`.
 - A gene name that several features share, such as MATR3 in the 10x Genomics human reference, raises `ValueError` naming their IDs wherever a `FeatureRef` is accepted, `imputation.compute_imputed` included. Pass `FeatureRef(feature_id, by="id")` for one feature, or `reduction="mean"` for their mean. `lineage_trends(features=...)` and the `show_features` of `pseudotime_heatmap` and `lineage_heatmap` take `FeatureRef` values without a reduction, and label a feature whose name another retained feature shares as `name (ID)`.
 - Plots are display. `max_points` thins only the overlaid points in `distribution`, and
   `provenance.notes` gains `"subsampled_display"`; a violin estimates its density from at most
@@ -262,7 +255,7 @@ plt.close(fig)
 | `layout` / `layout_key` | none; exactly one required (run mode: `"umap"`) | `layout_key` only for coordinates you inserted as metadata columns. |
 | `normalization` | `NormalizationSpec()` (assay normalization, no transform) | `transform="log1p"` for gene panels of RNA library-size values; CLR (ADT), `norm_lib_size_log`, and ATAC values raise, so use `NormalizationSpec()` or `source="raw"` for them. Run mode colors genes only when it is passed. |
 | `color_scale` | auto per feature | `quantiles=(0.0, 0.99)` to stop outliers washing out a gene. |
-| `categorical_scale` | default palette | Fix `order` or `palette` (dict) to keep colors identical; `palette_name` is only `"default"` or `"colorblind"`. |
+| `categorical_scale` | stored display or stored order, else natural order and default palette | Fix `order` or `palette` (dict) to keep colors identical; set only the fields to change, as `labels` alone keeps the stored order and colors; `palette_name` is only `"default"` or `"colorblind"` and replaces stored colors. |
 | `sort_values` | `None` (genes high on top) | `True` also sorts metadata colors; `False` shuffles gene colors too. |
 | `seed` (embedding) | `0` | `None` draws cells in stored order, so the last sample covers the others. |
 | `legend_loc` | `"auto"` | `"right"`, `"on_data"` or `"none"` to force placement. |

@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 
 from ._contracts import CategoricalScale
-from ._style import category_label, resolve_category_scale
+from ._style import category_label, missing_category_entry, resolve_category_scale
 
 
 def _explicit_order(
@@ -226,7 +226,7 @@ def annotation_legend_handles(
             for value in scale.order
         ]
         if absent:
-            entries.append((scale.missing_color, scale.missing_label))
+            entries.append(missing_category_entry(scale))
         handles.extend(
             mpl.lines.Line2D(
                 [],

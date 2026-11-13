@@ -29,6 +29,7 @@ from ..storage.artifacts import (
     fingerprint_array,
     fingerprint_stored_arrays,
 )
+from ..storage.categorical import CategoricalColumn
 from ..storage.diagnostics import DIAGNOSTICS_ATTRIBUTE
 from ..storage.finite_values import requires_finite_values, write_finite_array
 from ..storage.layout import column_chunk_rows
@@ -580,6 +581,39 @@ def column_display(
     if not isinstance(raw_display, Mapping):
         raise TypeError("Existing display metadata must be a mapping")
     return validate_display_metadata(raw_display)
+
+
+def column_category_order(
+    root: zarr.Group,
+    column: str,
+) -> tuple[Any, ...] | None:
+    """Return the categories of a cell column stored as ordered, in their stored order.
+
+    A categorical column is ordered when its categories array records
+    ``ordered=True``. A column of labels is ordered when its ``levels``
+    attribute, the categories of the source categorical that an import
+    keeps, comes with an ``ordered`` attribute of True. Any other column, or
+    a column the table does not hold, returns None.
+
+    Raises:
+        TypeError: If an ordered column's ``levels`` attribute is not a list.
+    """
+    cell_data = as_zarr_group(root["cellData"], name="cellData")
+    if column not in cell_data:
+        return None
+    array = as_zarr_array(cell_data[column], name=column)
+    categorical = CategoricalColumn.open(cell_data, column, values=array)
+    if categorical is not None:
+        return tuple(categorical.categories.tolist()) if categorical.ordered else None
+    if array.attrs.get("ordered") is not True or "levels" not in array.attrs:
+        return None
+    levels = array.attrs["levels"]
+    if not isinstance(levels, list):
+        raise TypeError(
+            f"Column {column!r} records its ordered categories as "
+            f"{type(levels).__name__}; its levels attribute must be a list"
+        )
+    return tuple(levels)
 
 
 def continuous_display(

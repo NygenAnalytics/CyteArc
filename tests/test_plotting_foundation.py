@@ -2,6 +2,7 @@
 
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -1800,8 +1801,12 @@ def test_grouped_violin_and_horizontal_box_follow_explicit_order(
     ]
     assert box.axes["metricB"].get_xlabel() == "value"
     assert box.axes["metricB"].get_ylabel() == "group"
-    assert violin.scales == (scale,)
-    assert box.scales == (scale,)
+    # The drawn scale fills the fields the caller left unset with their defaults.
+    drawn = replace(
+        scale, missing_color="#bdbdbd", missing_label="NA", palette_name="default"
+    )
+    assert violin.scales == (drawn,)
+    assert box.scales == (drawn,)
     violin.close()
     box.close()
 

@@ -23,6 +23,7 @@ from ._style import (
     continuous_norm,
     legend_side_columns,
     legend_side_rows,
+    missing_category_entry,
     refresh_layout_point_sizes,
     size_legend_layout,
     theme_context,
@@ -623,7 +624,7 @@ def _shared_legend_parts(result: PlotResult) -> list[_SharedLegendPart] | None:
             if not order or categorical_scale.palette is None:
                 return None
             missing = (
-                (categorical_scale.missing_color, categorical_scale.missing_label)
+                missing_category_entry(categorical_scale)
                 if legend.extras.get("missing")
                 else None
             )

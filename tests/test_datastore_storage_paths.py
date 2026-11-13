@@ -18,6 +18,7 @@ from cytearc import DataStore, mount_datastore
 from cytearc.assay import Assay, RNAassay
 from cytearc.metadata.artifacts import (
     categorical_display,
+    column_category_order,
     column_display,
     plan_cell_data_artifact,
     validate_display_metadata,
@@ -851,6 +852,27 @@ def test_column_display_returns_the_validated_stored_contract() -> None:
     assert column_display(root, "group") == display
     with pytest.raises(TypeError, match="Existing display metadata must be a mapping"):
         column_display(root, "score")
+
+
+def test_column_category_order_reads_only_columns_stored_as_ordered() -> None:
+    root = zarr.open_group(store=MemoryStore(), mode="w")
+    cell_data = root.create_group("cellData")
+    labels = cell_data.create_array("grade", data=np.asarray(["low", "high"]))
+    labels.attrs.update({"levels": ["low", "mid", "high"], "ordered": True})
+    cell_data.create_array("tag", data=np.asarray(["b", "a"])).attrs.update(
+        {"levels": ["b", "a"], "ordered": False}
+    )
+    cell_data.create_array("plain", data=np.asarray(["b", "a"]))
+    cell_data.create_array("broken", data=np.asarray(["b", "a"])).attrs.update(
+        {"levels": "b,a", "ordered": True}
+    )
+
+    assert column_category_order(root, "grade") == ("low", "mid", "high")
+    assert column_category_order(root, "tag") is None
+    assert column_category_order(root, "plain") is None
+    assert column_category_order(root, "absent") is None
+    with pytest.raises(TypeError, match="levels attribute must be a list"):
+        column_category_order(root, "broken")
 
 
 def test_categorical_display_keeps_first_seen_order_for_unorderable_values() -> None:

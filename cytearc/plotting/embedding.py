@@ -41,8 +41,9 @@ from ._data import (
 )
 from ._deps import require_matplotlib
 from ._display import (
-    categorical_display_scale,
     continuous_display_scale,
+    merge_categorical_scales,
+    stored_categorical_scale,
     stored_display_metadata,
 )
 from ._figure import (
@@ -66,7 +67,9 @@ from ._style import (
     LEGEND_SIDE_ENTRIES_PER_COLUMN,
     LEGEND_SIDE_MAX_COLUMNS,
     LEGEND_SIDE_MAX_ENTRIES,
+    MISSING_CATEGORY_LABEL,
     RECEPTOR_TYPE_SCALE,
+    missing_category_entry,
     FrameStyle,
     LegendLoc,
     _is_missing_category,
@@ -214,10 +217,10 @@ def _facet_title(facet_by: str, facet: Any, missing_label: str) -> str:
 
 def _facet_missing_label(store: Any, facet_by: str) -> str:
     """The label of a missing facet value: the stored display's, or ``NA``."""
-    display = stored_display_metadata(store, facet_by)
-    if display is not None and display["kind"] == "categorical":
-        return categorical_display_scale(display).missing_label
-    return CategoricalScale().missing_label
+    stored = stored_categorical_scale(store, facet_by)
+    if stored is None or stored.missing_label is None:
+        return MISSING_CATEGORY_LABEL
+    return stored.missing_label
 
 
 def _layout_panel_key(layout: str, panel_key: Hashable) -> Hashable:
@@ -1062,11 +1065,12 @@ def _draw_categorical(
 ) -> Any:
     codes, categories = _category_codes(vv)
     palette = scale.palette or {}
+    missing_color, _ = missing_category_entry(scale)
     # The last row colors missing values and categories outside the scale.
     colors = np.empty((len(categories) + 1, 4), dtype=np.float64)
     for value, code in categories.items():
-        colors[code] = mpl.colors.to_rgba(palette.get(value, scale.missing_color))
-    colors[-1] = mpl.colors.to_rgba(scale.missing_color)
+        colors[code] = mpl.colors.to_rgba(palette.get(value, missing_color))
+    colors[-1] = mpl.colors.to_rgba(missing_color)
     edges, lw = scatter_edges(edgecolor, edgewidth)
     return ax.scatter(
         xx,
@@ -1110,7 +1114,7 @@ def _categorical_legend_block(
         omitted = []
     entries = [(palette[value], category_label(scale, value)) for value in shown]
     if missing:
-        entries.append((scale.missing_color, scale.missing_label))
+        entries.append(missing_category_entry(scale))
     handles = [
         mpl.lines.Line2D(
             [],
@@ -1576,7 +1580,6 @@ def embedding(
         raise ValueError("max_on_data_labels must be positive")
     normalization = normalization or NormalizationSpec()
     color_scale_was_explicit = color_scale is not None
-    categorical_scale_was_explicit = categorical_scale is not None
     color_scale = color_scale or ColorScale(cmap="viridis", scope="feature")
 
     n = len(x)
@@ -1608,18 +1611,18 @@ def embedding(
         raise ValueError("point_sizes must contain finite positive values")
 
     color_items = _coerce_color_items(color_by)
-    stored_displays: list[dict[str, Any] | None] = []
-    for item in color_items:
-        column = (
-            item
-            if isinstance(item, str)
-            else item.key
-            if isinstance(item, CellField)
-            else None
-        )
-        stored_displays.append(
-            None if column is None else stored_display_metadata(store, column)
-        )
+    color_columns = [
+        item
+        if isinstance(item, str)
+        else item.key
+        if isinstance(item, CellField)
+        else None
+        for item in color_items
+    ]
+    stored_displays = [
+        None if column is None else stored_display_metadata(store, column)
+        for column in color_columns
+    ]
     metadata_columns = _cell_metadata_columns(store, color_items)
     # The cells of the layout that each feature assay did not measure.
     unmeasured: dict[str, np.ndarray] = {}
@@ -1650,11 +1653,12 @@ def embedding(
         if any(is_cat or is_uniform for _, _, is_cat, is_uniform in color_cache):
             raise ValueError("Mean contours require a continuous color_by panel")
     stored_color_scales: dict[int, ColorScale] = {}
-    stored_categorical_scales: dict[int, CategoricalScale] = {}
     for index, display in enumerate(stored_displays):
-        if display is None:
-            continue
-        if display["kind"] == "continuous" and not color_scale_was_explicit:
+        if (
+            display is not None
+            and display["kind"] == "continuous"
+            and not color_scale_was_explicit
+        ):
             stored_scale = continuous_display_scale(display)
             # Clipping redefines the value range, so stored limits no longer apply.
             stored_color_scales[index] = (
@@ -1662,16 +1666,25 @@ def embedding(
                 if clip_fraction > 0
                 else stored_scale
             )
-        elif display["kind"] == "categorical" and not categorical_scale_was_explicit:
-            stored_categorical_scales[index] = categorical_display_scale(display)
-    # Receptor types take the colors that every repertoire figure gives them.
-    for index, item in enumerate(color_items):
-        if (
-            isinstance(item, ArtifactRef)
-            and item.kind == "immune_receptors"
-            and not categorical_scale_was_explicit
-        ):
-            stored_categorical_scales[index] = RECEPTOR_TYPE_SCALE
+    # Each categorical color merges the caller's scale over the column's
+    # stored scale; receptor types take the colors that every repertoire
+    # figure gives them.
+    merged_categorical_scales: dict[int, CategoricalScale | None] = {}
+    for index, (item, column) in enumerate(
+        zip(color_items, color_columns, strict=True)
+    ):
+        if not color_cache[index][2]:
+            continue
+        stored = (
+            RECEPTOR_TYPE_SCALE
+            if isinstance(item, ArtifactRef) and item.kind == "immune_receptors"
+            else None
+            if column is None
+            else stored_categorical_scale(store, column)
+        )
+        merged_categorical_scales[index] = merge_categorical_scales(
+            stored, categorical_scale
+        )
     subset_vals = (
         _selected_metadata_column(
             store,
@@ -1758,7 +1771,7 @@ def embedding(
                 )
         color_cache = clipped
 
-    facet_missing_label = CategoricalScale().missing_label
+    facet_missing_label = MISSING_CATEGORY_LABEL
     if facet_by is not None:
         assert facet_values is not None
         if groups is not None and group_order is not None:
@@ -1820,11 +1833,7 @@ def embedding(
         if is_uniform:
             continue
         if is_cat:
-            source = (
-                categorical_scale
-                if categorical_scale_was_explicit
-                else stored_categorical_scales.get(color_index)
-            ) or CategoricalScale()
+            source = merged_categorical_scales[color_index] or CategoricalScale()
             if missing_color is not None:
                 source = replace(source, missing_color=missing_color)
             requested = (
@@ -1832,7 +1841,7 @@ def embedding(
                 if groups is not None
                 and facet_by is None
                 and color_index == groups_color_index
-                and (source.order is None or not categorical_scale_was_explicit)
+                and (categorical_scale is None or categorical_scale.order is None)
                 else None
             )
             # Categories come from every selected cell, so layouts that cannot

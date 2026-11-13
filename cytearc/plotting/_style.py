@@ -52,6 +52,11 @@ RECEPTOR_TYPE_SCALE = CategoricalScale(
 # unedited site, one muted colour.
 NO_VALUE_COLOR = "#bdbdbd"
 MUTED_COLOR = "#e2e2e2"
+# A categorical scale draws cells without a category in this colour and
+# names them with this label unless it, or the column's stored display, sets
+# others.
+MISSING_CATEGORY_COLOR = NO_VALUE_COLOR
+MISSING_CATEGORY_LABEL = "NA"
 # The colours of the chain pairings of cells, in the order of
 # cytearc.repertoire.chains.CHAIN_PAIRINGS, sharing the receptor types'
 # colours of the pairings they name.
@@ -845,12 +850,15 @@ def resolve_category_scale(
     plot of some of its cells keeps the colors of a plot of all of them.
     ``order``, such as requested groups, sets the display order instead and
     must list every observed category; it never changes colors. A ``palette``
-    gives the colors of the categories it names. Missing values are never
-    categories.
+    gives the colors of the categories it names and must name every category
+    shown. Missing values are never categories. The resolved scale fills the
+    missing color, missing label, and palette name that ``scale`` leaves
+    unset with their defaults.
     """
+    given = CategoricalScale() if scale is None else scale
     present = _distinct_categories(observed)
-    if scale is not None and scale.order is not None:
-        full_order = list(scale.order)
+    if given.order is not None:
+        full_order = list(given.order)
         if len(set(full_order)) != len(full_order):
             raise ValueError(f"{context}.order cannot contain duplicates")
         unlisted = [value for value in present if value not in full_order]
@@ -884,16 +892,16 @@ def resolve_category_scale(
         display = list(dict.fromkeys(value for value in order if value in shown))
     else:
         display = [value for value in full_order if value in shown]
-    palette = scale.palette if scale is not None else None
-    explicit_order = scale is not None and scale.order is not None
+    palette_name = given.palette_name or "default"
     colors = categorical_color_map(
-        # A palette needs the colors of the categories an explicit order lists,
-        # or else of those shown; generated colors follow the full order.
-        display if palette is not None and not explicit_order else full_order,
-        palette=palette,
-        palette_name=scale.palette_name if scale is not None else "default",
+        # A palette needs the colors of the categories shown, whichever order
+        # lists them; generated colors follow the full order.
+        display if given.palette is not None else full_order,
+        palette=given.palette,
+        palette_name=palette_name,
     )
-    labels = scale.labels if scale is not None else None
+    labels = given.labels
+    missing_color, missing_label = missing_category_entry(given)
     return CategoricalScale(
         order=tuple(display),
         palette={value: colors[value] for value in display},
@@ -902,9 +910,20 @@ def resolve_category_scale(
             if labels is None
             else {value: str(labels.get(value, value)) for value in display}
         ),
-        missing_color=scale.missing_color if scale is not None else "#bdbdbd",
-        missing_label=scale.missing_label if scale is not None else "NA",
-        palette_name=scale.palette_name if scale is not None else "default",
+        missing_color=missing_color,
+        missing_label=missing_label,
+        palette_name=palette_name,
+    )
+
+
+def missing_category_entry(scale: CategoricalScale) -> tuple[str, str]:
+    """The color that draws cells without a category, and the label that names them.
+
+    A scale that leaves either unset takes the default.
+    """
+    return (
+        MISSING_CATEGORY_COLOR if scale.missing_color is None else scale.missing_color,
+        MISSING_CATEGORY_LABEL if scale.missing_label is None else scale.missing_label,
     )
 
 
