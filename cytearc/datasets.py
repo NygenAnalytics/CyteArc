@@ -289,7 +289,9 @@ class Repository:
             # Another call placed the store meanwhile: reuse it once recorded.
             if _stores_recorded(dataset_path, plan.stores):
                 return dataset_path
-            raise FileExistsError(_appeared_message(appeared.path, action)) from None
+            raise FileExistsError(
+                _appeared_message(Path(appeared.filename), action)
+            ) from None
         if plan.files or plan.stores:
             _record_sources(dataset_path, files=plan.files, stores=plan.stores)
         return dataset_path
@@ -719,11 +721,10 @@ def _remove_path(path: Path) -> None:
 
 
 class _StoreAppeared(FileExistsError):
-    """A directory appeared where a call was about to place one."""
+    """A directory appeared where a call was about to place one.
 
-    def __init__(self, path: Path) -> None:
-        super().__init__(errno.EEXIST, "Directory appeared meanwhile", str(path))
-        self.path = path
+    Its ``filename`` names the directory.
+    """
 
 
 def _rename_new(source: Path, destination: Path) -> None:
@@ -740,7 +741,9 @@ def _rename_new(source: Path, destination: Path) -> None:
         os.rename(source, destination)
     except OSError as error:
         if _path_exists(destination):
-            raise _StoreAppeared(destination) from error
+            raise _StoreAppeared(
+                errno.EEXIST, "Directory appeared meanwhile", str(destination)
+            ) from error
         raise
 
 
