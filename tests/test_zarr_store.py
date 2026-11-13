@@ -611,7 +611,14 @@ def test_metadata_copy_shrinks_read_bands_to_fit_budget():
     store.reset()
     target = zarr.open_group(store=MemoryStore(), mode="w")
 
-    copy_zarr_group_tree(source, target, resources=ResourceBudget(2 * 1024**2, 4))
+    # A block of one chunk reads two chunks of 80,000 bytes, each held as
+    # stored and decoded, 160,000 + 625 + 1,024 bytes, and holds its values
+    # twice and a destination chunk of 100,000 rows twice. The budget holds
+    # that block and not a block of two chunks, which reads three.
+    one_chunk = 80_000 + 2 * 161_649 + 2 * 80_000 + 2 * 800_000
+    two_chunks = 160_000 + 3 * 161_649 + 2 * 160_000 + 2 * 800_000
+    budget = (one_chunk + two_chunks) // 2
+    copy_zarr_group_tree(source, target, resources=ResourceBudget(budget, 4))
 
     assert store.max_in_flight_for("column_chunk") == 1
     assert len([op for op in store.ops if op[0] == "column_chunk"]) == 10

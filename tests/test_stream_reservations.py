@@ -26,10 +26,107 @@ def test_read_bytes_follow_what_a_zarr_read_holds() -> None:
     assert sharded.readBytes(1_000, 5) == 2 * 1_000 + (5 + 5) * nominal
     assert sharded.readBytes(1_000, 5, decodes=2) == 2 * 1_000 + (5 + 2) * nominal
     assert sharded.readBytes(1_000, 5, decodes=9) == sharded.readBytes(1_000, 5)
-    # An unsharded read counts its result and the chunks it decodes.
+    # An unsharded read holds its result and each chunk it decodes at once as
+    # stored and decoded: the decoded chunk beside the bound of its compressed
+    # bytes, the decoded size plus 1/128 of it, rounded down, and 1,024 bytes.
     unsharded = ArrayGeometry(shape=(100, 40), chunks=(10, 4), shards=None, itemsize=2)
-    assert unsharded.readBytes(1_000, 5) == 1_000 + 5 * nominal
-    assert unsharded.readBytes(1_000, 5, decodes=1) == 1_000 + nominal
+    stored = nominal + nominal + 1_024
+    assert unsharded.readBytes(1_000, 5) == 1_000 + 5 * stored
+    assert unsharded.readBytes(1_000, 5, decodes=1) == 1_000 + stored
+    assert unsharded.readBytes(1_000, 5, decodes=9) == unsharded.readBytes(1_000, 5)
+    # A chunk of 2,048 bytes is bounded at 16 bytes more than itself, and the
+    # scratch a store reports is charged once per decode.
+    scratched = ArrayGeometry(
+        shape=(640, 8), chunks=(64, 8), shards=None, itemsize=4, readScratchBytes=100
+    )
+    assert scratched.readBytes(500, 3, decodes=2) == 500 + 2 * (
+        2_048 + 2_048 + 16 + 1_024 + 100
+    )
+    assert scratched.readBytes(0, 1) == 2_048 + 2_048 + 16 + 1_024 + 100
+
+
+@pytest.mark.parametrize(
+    ("shape", "chunks"),
+    [((100, 40), (10, 4)), ((1_000_000,), (100_000,)), ((5_000, 300), (512, 128))],
+)
+@pytest.mark.parametrize("concurrency", [1, 2, 64])
+def test_unsharded_read_bytes_agree_with_whole_and_band_reads(
+    shape: tuple[int, ...], chunks: tuple[int, ...], concurrency: int
+) -> None:
+    # The three costs price the same Zarr read of an unsharded array, so a
+    # plan and the memory ledger reserve the same bytes for it.
+    geometry = ArrayGeometry(shape=shape, chunks=chunks, shards=None, itemsize=8)
+    n_chunks = -(-shape[0] // chunks[0]) * geometry.bandChunks()
+    whole = shape[0] * geometry.rowBytes()
+    assert geometry.readBytes(
+        whole, n_chunks, decodes=concurrency
+    ) == geometry.wholeReadBytes(concurrency)
+    rows = min(shape[0], chunks[0])
+    assert geometry.readBytes(
+        rows * geometry.rowBytes(), geometry.bandChunks(), decodes=concurrency
+    ) == geometry.bandReadBytes(rows, concurrency)
+
+
+@pytest.mark.parametrize("profile", ["fast_local", "cloud"])
+def test_a_row_block_read_of_an_unsharded_array_holds_no_more_than_its_plan(
+    tmp_path: Any, profile: str
+) -> None:
+    import tracemalloc
+
+    from cytearc.storage.layout import normed_array_spec
+
+    # Normalized values are stored unsharded. Random bits do not compress, so
+    # each stored chunk is as large as it is decoded, the most a read holds.
+    spec = normed_array_spec(
+        2_048, 2_048, profile=profile, targetChunkBytes=2_048 * 2_048 * 4
+    )
+    assert spec.shards is None and spec.chunks == (2_048, 2_048)
+    bits = np.random.default_rng(0).integers(
+        0, 1 << 32, size=spec.shape, dtype=np.uint32
+    )
+    root = zarr.open_group(store=LocalStore(str(tmp_path)), mode="w")
+    stored = root.create_array(
+        "normed",
+        shape=spec.shape,
+        chunks=spec.chunks,
+        dtype=spec.dtype,
+        compressors=spec.compressors,
+        fill_value=spec.fillValue,
+    )
+    stored[:] = bits.view(np.float32)
+    matrix = ChunkedArray(stored)
+    np.testing.assert_array_equal(
+        matrix._materialize_range(0, 2_048).view(np.uint32), bits
+    )
+    del bits
+
+    tracemalloc.start()
+    try:
+        block = matrix._materialize_range(0, 2_048)
+        _current, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    decoded = 2_048 * 2_048 * 4
+    # The read held the compressed chunk beside its result and the decoded
+    # chunk, more than those two alone, and the plan covers all of it.
+    assert block.nbytes == decoded
+    assert peak > block.nbytes + decoded
+    assert matrix.stream_bytes() >= peak
+
+
+def test_a_row_block_stream_of_an_unsharded_array_reserves_each_stored_chunk() -> None:
+    values = np.arange(48, dtype=np.uint16).reshape(12, 4)
+    stored = zarr.array(values, chunks=(6, 4))
+    # A block of one chunk's six rows, 48 bytes, decodes that chunk, which is
+    # held as stored and decoded: 48 + 48 + 1,024 bytes.
+    needed = 48 + (48 + 48 + 1_024)
+    matrix = ChunkedArray(stored, resources=ResourceBudget(needed, 1))
+    assert matrix._block_size == 6
+    np.testing.assert_array_equal(np.vstack(list(matrix.stream_blocks())), values)
+
+    short = ChunkedArray(stored, resources=ResourceBudget(needed - 1, 1))
+    with pytest.raises(MemoryError, match=f"One unit needs about {needed} bytes"):
+        next(short.stream_blocks())
 
 
 def test_array_geometry_rejects_inconsistent_layouts() -> None:
@@ -140,13 +237,13 @@ def test_document_frequency_reserves_decode_bytes_when_fitting_blocks() -> None:
         (report,) = reports
         return report
 
-    # Stored in one chunk of all 12 rows, a block's read decodes six times
-    # what it decodes in chunks of two rows, so the budget of one block of
-    # every row in the smaller chunks reads the larger ones in several
-    # blocks, each reserved with its decode within the budget.
+    # Stored in chunks of six rows, a block's read holds a chunk of three
+    # times the values it holds in chunks of two rows, so the budget of one
+    # block of every row in the smaller chunks reads the larger ones in
+    # several blocks, each reserved with its decode within the budget.
     budget = frequency((2, 4), 1 << 20).plan.reservedBytes
     assert frequency((2, 4), budget).unitsCompleted == 1
-    larger = frequency((12, 4), budget)
+    larger = frequency((6, 4), budget)
     assert larger.unitsCompleted > 1
     assert larger.plan.reservedBytes <= budget
 
