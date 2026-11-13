@@ -10,6 +10,13 @@ import numpy as np
 import pytest
 
 from cytearc import DataStore, PipelineExecutionError
+from cytearc.assay import (
+    PearsonResidualNormalizer,
+    norm_dummy,
+    norm_lib_size,
+    norm_lib_size_log,
+    norm_pearson_residuals,
+)
 from cytearc.datastore._pipeline.filtering import FILTERING_SETTINGS
 from cytearc.datastore._pipeline.recipes.adt import resolve_adt
 from cytearc.datastore._pipeline.recipes.rna import resolve_rna
@@ -1136,6 +1143,60 @@ def test_recipe_rejects_pca_dims_zero_with_harmony_or_doublets(
     assert str(caught.value) == message
     # The recipe raised before the run record or any artifact was written.
     assert _written(store) == before
+
+
+def _pass_counts_through(_assay: Any, counts: Any) -> Any:
+    """A custom normalizer, defined at module level so provenance can name it."""
+    return counts
+
+
+@pytest.mark.parametrize(
+    ("normalizer", "name"),
+    [
+        (norm_pearson_residuals, "PearsonResidualNormalizer"),
+        (PearsonResidualNormalizer(theta=10.0, clip=5.0), "PearsonResidualNormalizer"),
+        (norm_lib_size_log, "norm_lib_size_log"),
+        (norm_dummy, "norm_dummy"),
+        (_pass_counts_through, "_pass_counts_through"),
+    ],
+    ids=["pearson", "pearson-options", "lib-size-log", "dummy", "custom"],
+)
+def test_recipe_refuses_doublets_unless_the_assay_normalizes_by_library_size(
+    readonly_store, monkeypatch, normalizer, name
+):
+    store = readonly_store
+    monkeypatch.setattr(store.RNA, "normMethod", normalizer)
+    message = (
+        f"Assay 'RNA' normalizes with {name}, but doublet scoring normalizes "
+        "its simulated doublets by library size and needs norm_lib_size; pass "
+        "doublets=False or set the assay's normMethod to "
+        "cytearc.assay.norm_lib_size"
+    )
+
+    # Doublet scoring is on by default, and a mapping of settings turns it on.
+    for doublets in (True, {"random_seed": 1}):
+        with pytest.raises(ValueError) as caught:
+            _resolve(store, doublets=doublets)
+        assert str(caught.value) == message
+    # Without doublet scoring the same normalizer passes the checks.
+    plan = _resolve(store, doublets=False)
+    assert plan.config["stages"]["doublets"] is False
+    assert {stage.name: stage.action for stage in plan.stages}["doublets"] is None
+
+
+def test_recipe_reads_the_normalizer_the_run_will_use(readonly_store, monkeypatch):
+    store = readonly_store
+    monkeypatch.setattr(store.RNA, "normMethod", norm_pearson_residuals)
+    with pytest.raises(ValueError, match="normalizes with PearsonResidualNormalizer"):
+        _resolve(store)
+
+    # The normalization stage applies the live normMethod, so setting the
+    # library-size normalizer back lets the same call schedule doublet scoring.
+    store.RNA.normMethod = norm_lib_size
+    plan = _resolve(store)
+
+    assert plan.config["stages"]["doublets"] == {}
+    assert {stage.name: stage.action for stage in plan.stages}["doublets"] is not None
 
 
 def test_pca_dims_zero_builds_the_graph_on_normalized_values(

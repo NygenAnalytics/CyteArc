@@ -17,6 +17,7 @@ import zarr
 from zarr.storage import LocalStore, MemoryStore
 
 from cytearc import CancellationToken, DataStore, PipelineRun
+from cytearc.assay import norm_lib_size, norm_pearson_residuals
 from cytearc.datastore._pipeline.executor import (
     COORDINATES,
     PlannedStage,
@@ -504,6 +505,49 @@ def test_a_plan_checks_the_call_as_the_recipe_does(completed) -> None:
         pipeline.rna(**{**SETTINGS, "pca": {"dims": 0}})
     with pytest.raises(ValueError, match=message):
         pipeline.plan("rna", **{**SETTINGS, "pca": {"dims": 0}})
+
+
+def test_a_run_and_its_plan_refuse_doublets_without_library_size_before_writing(
+    completed, tmp_path
+) -> None:
+    datastore = _copy(completed.location, tmp_path)
+    location = tmp_path / "data.zarr"
+    datastore.RNA.normMethod = norm_pearson_residuals
+    message = (
+        "Assay 'RNA' normalizes with PearsonResidualNormalizer, but doublet "
+        "scoring normalizes its simulated doublets by library size and needs "
+        "norm_lib_size; pass doublets=False or set the assay's normMethod to "
+        "cytearc.assay.norm_lib_size"
+    )
+    before = _digest(location)
+
+    with pytest.raises(ValueError) as planned:
+        datastore.pipeline.plan("rna", **SETTINGS)
+    with pytest.raises(ValueError) as ran:
+        datastore.pipeline.rna(**SETTINGS)
+
+    assert str(planned.value) == message
+    assert str(ran.value) == message
+    # Neither call wrote a run record, an artifact, or any other file.
+    assert _digest(location) == before
+    assert [run.run_id for run in datastore.pipeline.list_runs()] == [
+        completed.run.run_id
+    ]
+    # Without doublet scoring the plan goes ahead with the residuals: gene
+    # selection, whose statistics record the normalizer, is the first stage
+    # that changes.
+    plan = datastore.pipeline.plan("rna", **{**SETTINGS, "doublets": False})
+    hvg = plan["highly_variable_features"]
+    assert (hvg.status, hvg.reason) == ("computed", "changed")
+    assert hvg.changed_parameters == ("normalization_method",)
+    assert plan["normalization"].upstream == ("highly_variable_features",)
+    assert plan["doublets"].status == "skipped"
+    # With the library-size default back, the same call runs and reuses the
+    # committed doublet scores.
+    datastore.RNA.normMethod = norm_lib_size
+    run = datastore.pipeline.rna(**SETTINGS)
+    assert run.status == "completed"
+    assert run["doublets"] == completed.run["doublets"]
 
 
 # The planner over synthetic stages -------------------------------------------

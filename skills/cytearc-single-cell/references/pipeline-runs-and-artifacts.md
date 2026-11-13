@@ -423,7 +423,7 @@ cytearc.ArtifactRef.from_dict(saved["refs"]["fineClusters"]) == fine_clusters  #
 | `membership_strength` | `False` | `True` to score each cell's graph support for its cluster (a `membership_strength` field). |
 | `leiden` | `True`: 0.5, 0.75, 1.0, 1.25 with a silhouette pick (multimodal: 1.0) | Other candidates: `{"partitions": [...]}`; pin with `{"selected": ...}`; `backend`, `random_seed`. |
 | `paris` | `False` | `True` for a hierarchy to diagnose (`ds.plots.cluster_tree`); `{"n_clusters": ...}`. |
-| `doublets` (rna) | `True` | `False` to skip; `{"sample_column": "capture"}` with several captures. Needs Leiden and PCA. |
+| `doublets` (rna) | `True` | `False` to skip; `{"sample_column": "capture"}` with several captures. Needs Leiden, PCA, and the default `normMethod`, `norm_lib_size`. |
 | `markers` | `True` | `False` to skip; needs Leiden. |
 | `snapshot_columns` | `()` | Run-mode plots or `run.cells` need live columns. A new run that adds them reuses every artifact (see Pitfalls). |
 | `species` | `None` | Recorded with the run only. |
