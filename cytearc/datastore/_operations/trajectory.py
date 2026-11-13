@@ -3209,20 +3209,28 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         trajectory still splits its probability among them, and a cell that
         has not committed looks like a member of its most likely lineage.
         Progenitors also split their probability unevenly, so the rule
-        measures each lineage's probabilities against that lineage's own
-        trunk: it divides them by their mean over the earliest tenth, by the
-        pseudotime or the score that directs the fate map, of the scored
-        cells outside the fate map's sinks in the graph components that hold
-        the lineage's sink cells. A progenitor whose probabilities match the
-        trunk's split then scores one for every lineage that starts there,
-        whatever share of the trunk's probability each lineage receives and
-        however many cells its branch and sink hold, as long as the earliest
-        tenth lies before the branches part. A scored cell follows a lineage
-        when its fate probability for that lineage is positive and its
-        divided probability is at least ``band`` times its largest divided
-        probability over the curves' lineages, and when it lies on the
-        trajectory: within some lineage's distance limit at the cell's
-        progress on that lineage's curve. In each of ``n_bins`` equal bins
+        measures each lineage's probability against that lineage's own
+        trunk probability: the mean probability for the lineage of the
+        earliest tenth, by the pseudotime or the score that directs the fate
+        map, of the scored cells outside the fate map's sinks in the graph
+        components that hold the lineage's sink cells. A scored cell follows
+        each lineage whose probability is still at least ``band`` times its
+        trunk probability, and only when the cell lies on the trajectory:
+        within some lineage's distance limit at the cell's progress on that
+        lineage's curve. A progenitor therefore follows every lineage that
+        starts in its trunk, whatever share of the trunk's probability the
+        lineage receives, and as a cell commits it leaves the lineages whose
+        probability falls rather than joining the one whose probability
+        rises. Precisely, each probability is divided by the lineage's trunk
+        probability, and a cell follows a lineage whose divided probability
+        is positive and at least ``band`` times the smaller of one and its
+        largest divided probability over the curves' lineages. When the
+        curves follow every sink of the fate map, the trunk probabilities
+        sum to one and that largest is at least one. When they follow some
+        of the sinks, a cell that moves toward a sink they leave out can
+        have every divided probability below one, and it then follows each
+        lineage whose divided probability is at least ``band`` times its
+        largest. In each of ``n_bins`` equal bins
         of progress, the lineage's cells weigh by their fate probability for
         it, and their spread is their weighted median distance plus
         ``distance_score`` times their weighted median absolute deviation
@@ -3248,10 +3256,10 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
 
         Args:
             curves: Explicit ``lineage_curves`` artifact.
-            band: Share of a cell's largest divided probability, above 0 and
-                at most 1, that its divided probability for another lineage
-                must reach for the cell to follow both. Larger values call
-                fewer cells shared.
+            band: Share of a lineage's trunk probability, above 0 and at
+                most 1, that a cell's probability for the lineage must keep
+                for the cell to follow it. Larger values let a cell leave a
+                lineage sooner and call fewer cells shared.
             distance_score: Robust standard deviations beyond the median
                 distance of a lineage's cells at which a cell lies off that
                 lineage's curve. Smaller values call more cells none; cells

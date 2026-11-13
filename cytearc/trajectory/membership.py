@@ -3,31 +3,32 @@
 A fate map gives each scored cell one probability per sink, and those
 probabilities sum to one, so a cell on no trajectory still splits its
 probability among the sinks. Lineage curves add each cell's progress along
-every lineage's curve and its distance from it. A cell follows a lineage when
-its fate probability for that lineage, divided by what the lineage's trunk
-receives, lies within a band of the largest such ratio over the lineages,
-and when it lies on the trajectory: within the spread that some lineage's
-own cells show around their curve at the same progress. A cell that follows
-several lineages is shared by them, and one that lies on no curve follows
-none, whatever its probabilities. Two lineages part where their shared cells
-give way to cells that follow only one of them.
+every lineage's curve and its distance from it. A cell follows each lineage
+whose fate probability is still at least a band, a share, of what the
+lineage's trunk cells receive, and only when it lies on the trajectory:
+within the spread that some lineage's own cells show around their curve at
+the same progress. A progenitor follows every lineage that starts in its
+trunk, and as a cell commits it leaves the lineages whose probability falls,
+one after another, rather than joining the one whose probability rises. A
+cell that follows several lineages is shared by them, and one that lies on no
+curve follows none, whatever its probabilities. Two lineages part where their
+shared cells give way to cells that follow only one of them.
 
 Progenitors split their probability unevenly among the fates, so a cell's
 largest probability is no fair yardstick for a fate that the progenitors give
-a small share. Dividing each lineage's probabilities by its trunk
-probability puts every lineage on the scale of its own trunk: a progenitor
-whose probabilities match the trunk's split scores one for every lineage
-that starts there, however small the share of a lineage. A lineage's trunk
-probability is its mean probability over the earliest tenth, by the
-pseudotime or score that directs the fate map, of the scored cells outside
-the fate map's sinks in the graph components that hold the lineage's sink
-cells. It depends neither on the curves nor on how the later cells divide
-among the branches, as long as the earliest tenth lies before the branches
-part. A shorter trunk lets the earliest tenth reach past the branch point,
-which moves the trunk probabilities toward the fates whose branches start
-there. A lineage takes its trunk only from the components of its own sink
-cells, so a fate map that spans several components measures each lineage in
-its own, without a tolerance for the solver's rounding in the others.
+a small share. Measuring each lineage's probability against its trunk
+probability puts every lineage on the scale of its own trunk, however small
+the share of a lineage. A lineage's trunk probability is its mean probability
+over the earliest tenth, by the pseudotime or score that directs the fate
+map, of the scored cells outside the fate map's sinks in the graph components
+that hold the lineage's sink cells. It depends neither on the curves nor on
+how the later cells divide among the branches, as long as the earliest tenth
+lies before the branches part. A shorter trunk lets the earliest tenth reach
+past the branch point, which moves the trunk probabilities toward the fates
+whose branches start there. A lineage takes its trunk only from the
+components of its own sink cells, so a fate map that spans several components
+measures each lineage in its own, without a tolerance for the solver's
+rounding in the others.
 
 The spread is robust: the weighted median distance of a lineage's cells in
 a bin of progress, plus a multiple of their weighted median absolute
@@ -77,11 +78,12 @@ BRANCH_POINT_COLUMNS = (
 )
 #: The share of the earliest cells that can reach a lineage over which its
 #: trunk probability is taken. On the pancreas maps of the lineage tutorials,
-#: every share from 1% to 30% gives the same membership, and on synthetic
-#: branching trajectories every share from 2% to 20% does; where the trunk
-#: holds about 5% of the cells outside the sinks or fewer, a share of 30%
-#: reaches so far past the branch point that late cells of one branch can
-#: follow another.
+#: every share from 1% to 30% gives the same branch points and changes at most
+#: one cell's call. On 15 synthetic branching trajectories every share from 2%
+#: to 10% calls the trunk and the late cells of each branch alike, while on
+#: trunks that hold 1% to 3% of the cells outside the sinks, shares of 20% and
+#: 30% reach past the branch point and let up to 3 and 14 more late cells of
+#: one branch follow another lineage.
 TRUNK_SHARE = 0.1
 # The median absolute deviation of a normal distribution, in standard
 # deviations, is 1 / 1.4826.
@@ -274,11 +276,19 @@ def lineage_members(
 
     Each lineage's probabilities are divided by its probability of
     ``trunk``, from :func:`trunk_probabilities`. A cell follows lineage
-    ``l`` when its probability for ``l`` is positive and its divided
-    probability is at least ``band`` times its largest divided probability
-    over the lineages, and when it lies on some lineage's curve: within that
-    lineage's limit of ``limits`` at the cell's bin of progress on it.
-    Unscored cells follow none.
+    ``l`` when its probability for ``l`` is positive, its divided
+    probability is at least ``band`` times the smaller of one and its
+    largest divided probability over the lineages, and it lies on some
+    lineage's curve: within that lineage's limit of ``limits`` at the
+    cell's bin of progress on it. Unscored cells follow none.
+
+    When the lineages cover every sink of the fate map, the trunk
+    probabilities sum to one, so every cell's largest divided probability
+    is at least one, and a cell follows each lineage whose probability is
+    at least ``band`` times its trunk probability. When they cover some of
+    the sinks, a cell that moves toward a sink they leave out can have every
+    divided probability below one; it then follows each lineage whose
+    divided probability is at least ``band`` times its largest.
     """
     weights = np.asarray(weights, dtype=np.float64)
     if weights.ndim != 2:
@@ -301,7 +311,7 @@ def lineage_members(
     on_trajectory = valid & on_curve.any(axis=1)
     scored = np.where(valid[:, None] & np.isfinite(weights), weights, 0.0)
     divided = scored / trunk
-    largest = divided.max(axis=1, initial=0.0)
+    largest = np.minimum(divided.max(axis=1, initial=0.0), 1.0)
     compatible = (scored > 0) & (divided >= band * largest[:, None])
     members: np.ndarray = on_trajectory[:, None] & compatible
     return members
