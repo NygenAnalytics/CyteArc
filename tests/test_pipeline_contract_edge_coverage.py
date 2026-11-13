@@ -12,6 +12,7 @@ from zarr.storage import MemoryStore
 import cytearc.datastore._pipeline.ledger as ledger_module
 import cytearc.datastore._pipeline.recipes.rna as rna_module
 import cytearc.storage.pipeline_runs as run_storage
+from cytearc.assay import norm_lib_size
 from cytearc.clustering.leiden import canonical_resolution
 from cytearc.datastore._pipeline.events import PipelineEvent, PipelineEventEmitter
 from cytearc.datastore._pipeline.filtering import (
@@ -473,6 +474,8 @@ class _FakeRNA:
     feats = SimpleNamespace(N=100)
     # Default filtering and the count stages read whether it holds counts.
     holdsCounts = True
+    # Doublet scoring needs the default library-size normalization.
+    normMethod = staticmethod(norm_lib_size)
 
 
 class _RecipeStore:
