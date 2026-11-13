@@ -13,7 +13,7 @@ from ...metadata.artifacts import (
     plan_cell_data_artifact,
     write_cell_data_artifact,
 )
-from ...metadata.arguments import TsneArguments, UmapArguments
+from ...metadata.arguments import LocalmapArguments, TsneArguments, UmapArguments
 from ...storage.validation_scope import validation_scoped
 from ...storage.artifacts import (
     ArtifactRef,
@@ -655,3 +655,209 @@ class _EmbeddingOperationsMixin(_EmbeddingOperationsBase):
             nthreads=nthreads,
             invalidate_cache=invalidate_cache,
         )
+
+    @validation_scoped
+    def _embeddings_localmap(
+        self,
+        graph: ArtifactRef,
+        initialization: ArtifactRef | np.ndarray,
+        *,
+        localmap_dims: int = 2,
+        n_mid_near: int = 5,
+        n_further: int = 20,
+        iterations: tuple[int, int, int] = (100, 100, 250),
+        learning_rate: float = 1.0,
+        max_distance: float = 10.0,
+        random_seed: int = 4444,
+        nthreads: int | None = None,
+        invalidate_cache: bool = False,
+    ) -> ArtifactRef:
+        """Lay out cells with LocalMAP and return the immutable embedding artifact.
+
+        `LocalMAP <https://doi.org/10.1609/aaai.v39i20.35436>`_ extends PaCMAP.
+        Each cell is attracted by its neighbors in ``graph``, attracted weakly
+        by mid-near cells, the second closest of six random cells in the
+        coordinates the graph was built on, and repelled by random further
+        cells. In its last phase LocalMAP draws further pairs from the cells
+        near each cell in the layout, which separates clusters that sit next
+        to each other. Each edge of the graph attracts its two cells in
+        proportion to its weight, scaled so that all edges attract as much as
+        PaCMAP's 10 neighbor pairs per cell. The layout does not depend on the
+        number of threads.
+
+        Args:
+            graph: Explicit connectivity map to embed. Its lineage names the
+                coordinates of the mid-near pairs, which the layout reads whole.
+            initialization: Explicit initialization artifact from
+                `embeddings.initialization`, or a coordinate array of finite
+                real values. LocalMAP centers it and scales it to a standard
+                deviation of 1e-4, keeping its proportions.
+            localmap_dims: Dimensions of the layout. (Default value: 2)
+            n_mid_near: Mid-near pairs per cell. More pairs hold the global
+                arrangement more firmly in the first two phases.
+                (Default value: 5)
+            n_further: Further pairs per cell, which push cells apart.
+                (Default value: 20)
+            iterations: Iterations of the three phases, each at least 1: the
+                mid-near weight falls from 1000 to 3 over the first, stays at 3
+                over the second, and is 0 over the third, in which LocalMAP
+                adjusts the pairs locally. (Default value: (100, 100, 250))
+            learning_rate: Learning rate of the Adam optimizer.
+                (Default value: 1.0)
+            max_distance: Layout distance within which the last phase draws
+                further pairs, and the scale of its neighbor attraction.
+                (Default value: 10.0)
+            random_seed: Seed of the mid-near and further pairs.
+                (Default value: 4444)
+            nthreads: Threads of the layout; by default the datastore's. The
+                layout does not depend on it.
+
+        Returns:
+            Reference to the immutable embedding artifact.
+
+        Raises:
+            ValueError: If ``graph`` is not a connectivity map, an argument is
+                out of range, ``initialization`` is a reference to another
+                kind of artifact, or the graph has too few cells for the pairs.
+            MemoryError: If the coordinates, the graph and the layout exceed
+                the memory budget. The check runs before they are read.
+            PermissionError: If a new embedding is needed and the store is not
+                opened with ``zarr_mode='r+'``. The check runs before the graph
+                is read.
+        """
+        from ...embeddings.localmap import (
+            further_pairs,
+            initial_layout,
+            localmap_layout,
+            localmap_peak_bytes,
+            mid_near_pairs,
+        )
+
+        invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
+        if not isinstance(graph, ArtifactRef):
+            raise TypeError("graph must be an ArtifactRef")
+        if graph.kind != "connectivity_map":
+            raise ValueError(
+                "LocalMAP needs a connectivity_map graph, whose lineage names the "
+                "coordinates that mid-near pairs are drawn in; got a "
+                f"{graph.kind!r} artifact"
+            )
+        localmap_dims = integer_argument(localmap_dims, "localmap_dims", minimum=1)
+        n_mid_near = integer_argument(n_mid_near, "n_mid_near", minimum=1)
+        n_further = integer_argument(n_further, "n_further", minimum=1)
+        if not isinstance(iterations, tuple | list) or len(iterations) != 3:
+            raise TypeError("iterations must be three integers, one per phase")
+        phases = tuple(
+            integer_argument(value, f"iterations[{phase}]", minimum=1)
+            for phase, value in enumerate(iterations)
+        )
+        learning_rate = float_argument(learning_rate, "learning_rate")
+        max_distance = float_argument(max_distance, "max_distance")
+        for name, value in (
+            ("learning_rate", learning_rate),
+            ("max_distance", max_distance),
+        ):
+            if not np.isfinite(value) or value <= 0:
+                raise ValueError(f"{name} must be finite and positive")
+        random_seed = integer_argument(random_seed, "random_seed", minimum=0)
+        if nthreads is None:
+            nthreads = self.nthreads
+        nthreads = integer_argument(nthreads, "nthreads", minimum=1)
+        cell_selection, n_cells, initialization_input, ini_embed = (
+            self._embedding_inputs(graph, initialization, localmap_dims, None)
+        )
+        arguments = LocalmapArguments(
+            graph=graph,
+            initialization=initialization_input,
+            localmap_dims=localmap_dims,
+            n_mid_near=n_mid_near,
+            n_further=n_further,
+            iterations=(phases[0], phases[1], phases[2]),
+            learning_rate=learning_rate,
+            max_distance=max_distance,
+            random_seed=random_seed,
+            nthreads=nthreads,
+            invalidate_cache=invalidate_cache,
+        )
+        record = arguments.to_record()
+        planned = plan_cell_data_artifact(
+            self.zw,
+            scope=graph.scope,
+            assay=graph.assay,
+            kind=arguments.artifact_kind,
+            operation=arguments.operation,
+            parameters=record.parameters,
+            inputs=record.inputs,
+            execution_options=record.execution_options,
+            cell_selection=cell_selection,
+            arrays={"values": ((n_cells, localmap_dims), "f")},
+            invalidate_cache=invalidate_cache,
+        )
+        if planned.reused:
+            logger.info(
+                f"Reused {localmap_dims}-dimensional LocalMAP embedding for {n_cells} cells"
+            )
+            return planned.ref
+        self._require_writable(arguments.operation)
+        lineage = resolve_native_graph_inputs(self.zw, graph)
+        coordinates = self._coordinate_data(lineage.coordinates, batch_size=None)
+        if coordinates.shape[0] != n_cells:
+            raise ValueError(
+                f"The graph's coordinates hold {coordinates.shape[0]} cells; "
+                f"the graph has {n_cells}"
+            )
+        # The layout holds the mid-near pairs from the start, and the
+        # coordinates until the pairs are drawn, which the estimate counts
+        # throughout.
+        self._require_graph_load_budget(
+            graph,
+            symmetric=False,
+            upper_only=False,
+            held_bytes=4 * n_cells * (coordinates.shape[1] + localmap_dims),
+            working_bytes=lambda cells, entries: localmap_peak_bytes(
+                cells,
+                entries,
+                dims=localmap_dims,
+                n_mid_near=n_mid_near,
+                n_further=n_further,
+            ),
+            work="LocalMAP",
+        )
+        if ini_embed is None:
+            assert isinstance(initialization, ArtifactRef)
+            ini_embed = self._get_ini_embed(initialization, graph, localmap_dims)
+            _check_initial_shape(ini_embed, n_cells, localmap_dims)
+        start = initial_layout(ini_embed)
+        values = np.asarray(
+            coordinates.compute(nthreads=self.nthreads), dtype=np.float32
+        )
+        metric = inspect_artifact(self.zw, lineage.neighbors).parameters or {}
+        if metric.get("distance_metric") == "cosine":
+            # Unit rows order squared Euclidean distances as cosine distances.
+            norms = np.linalg.norm(values, axis=1, keepdims=True)
+            values /= np.maximum(norms, np.finfo(np.float32).tiny)
+        mid_near = mid_near_pairs(values, n_mid_near, random_seed)
+        del values
+        shutdown_checkpoint()
+        graph_matrix = self._load_graph_artifact(
+            graph, symmetric=False, upper_only=False, use_k=None
+        )
+        further = further_pairs(graph_matrix, n_further, random_seed)
+        layout = localmap_layout(
+            start,
+            graph_matrix,
+            mid_near,
+            further,
+            iterations=(phases[0], phases[1], phases[2]),
+            learning_rate=learning_rate,
+            max_distance=max_distance,
+            random_seed=random_seed,
+            nthreads=nthreads,
+            verbose=progress_enabled(),
+            on_iteration=lambda _iteration: shutdown_checkpoint(),
+        )
+        write_cell_data_artifact(self.zw, planned, {"values": layout})
+        logger.info(
+            f"Stored {localmap_dims}-dimensional LocalMAP embedding for {n_cells} cells"
+        )
+        return planned.ref

@@ -115,7 +115,7 @@ same values again reuses it and `ds.artifacts.lineage` shows where the coordinat
 
 ## Downstream consumers
 
-UMAP, t-SNE, clustering, diffusion, trajectories, graph metrics, and graph-backed plots
+UMAP, LocalMAP, t-SNE, clustering, diffusion, trajectories, graph metrics, and graph-backed plots
 require an exact graph or neighbor artifact. Analytical producers return artifacts and do not add
 live metadata fields:
 

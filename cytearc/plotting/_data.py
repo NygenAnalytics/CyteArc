@@ -77,10 +77,10 @@ def _validated_embedding_selection(
         validate_imported_embedding_artifact(store.zw, layout)
         return selection
 
-    if status.operation not in {"run_umap", "run_tsne"}:
+    if status.operation not in {"run_umap", "run_localmap", "run_tsne"}:
         raise ValueError(
             "Embedding artifact must be produced by import_dimreduc, run_umap, "
-            "or run_tsne"
+            "run_localmap, or run_tsne"
         )
     graph = status.input_ref("graph")
     if layout.scope != graph.scope or layout.assay != graph.assay:
