@@ -9,6 +9,7 @@ guard fails when a module's source defines an exception class without one.
 
 import ast
 import builtins
+import errno
 import pickle
 import threading
 from collections.abc import Callable
@@ -19,6 +20,7 @@ import pytest
 
 import cytearc
 from cytearc.clones.recorders import RefusedTokens
+from cytearc.datasets import _StoreAppeared
 from cytearc.datastore.pipeline_run import PipelineCancelled, PipelineExecutionError
 from cytearc.merge.metadata import _SourceConflict
 from cytearc.metadata.membership import UnmeasuredCellsError
@@ -61,6 +63,9 @@ SAMPLES: dict[type[BaseException], Callable[[], BaseException]] = {
     PipelineCancelled: lambda: PipelineCancelled(RUN_ID, "pca", "stopped"),
     _SourceConflict: lambda: _SourceConflict("The sources disagree on 'batch'"),
     _FetchAbandoned: lambda: _FetchAbandoned(),
+    _StoreAppeared: lambda: _StoreAppeared(
+        errno.EEXIST, "Directory appeared meanwhile", "/data/tiny/data.zarr"
+    ),
     RefusedTokens: lambda: RefusedTokens([3, 5], [("EMX1", "GTNAG"), (None, "Q")]),
     UnmeasuredCellsError: lambda: UnmeasuredCellsError(
         "run_pca", "ADT", "ADT_I", 2, 9, "graph"

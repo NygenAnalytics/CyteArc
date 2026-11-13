@@ -206,6 +206,8 @@ example repository (`cytearc.datasets.connect("cytearc_docs").list_datasets()`),
 claims against actual outputs. Keep credentials and private connection values out of sources
 and notebook outputs.
 
+A page that opens a store with `download_dataset(..., zarr=True)` gets back, when a reader runs it again in the same directory, the store that the earlier run downloaded, with the results that run saved in it. Every step that creates a named result must therefore succeed when that result already exists: open a saved run or assay when it is there, insert columns with `overwrite=True`, and leave out labels that nothing reads.
+
 ### Republishing the example stores
 
 Pages that are not about building an artifact lineage open a pre-analyzed store with `download_dataset(..., zarr=True)`.

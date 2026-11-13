@@ -343,6 +343,43 @@ def test_derived_sources_prefer_stores_built_in_same_run(tmp_path):
     assert repository.downloads == ["remote_source"]
 
 
+def test_derived_sources_replace_a_downloaded_copy_of_an_older_version(tmp_path):
+    current = tmp_path / "work" / "tabula_sapiens"
+
+    class Repository:
+        def __init__(self) -> None:
+            self.calls: list[bool] = []
+
+        def download_dataset(
+            self,
+            name: str,
+            destination: str | Path,
+            *,
+            zarr: bool,
+            overwrite: bool = False,
+        ) -> Path:
+            assert (name, Path(destination), zarr) == (
+                "tabula_sapiens",
+                tmp_path / "work",
+                True,
+            )
+            self.calls.append(overwrite)
+            if not overwrite:
+                raise FileExistsError("data.zarr is from an older version")
+            return current
+
+    repository = Repository()
+    resolved = generator._resolve_derived_sources(
+        repository=repository,
+        source_datasets=["tabula_sapiens"],
+        local_sources={},
+        work=tmp_path / "work",
+    )
+
+    assert resolved == {"tabula_sapiens": current}
+    assert repository.calls == [False, True]
+
+
 def test_derived_sources_reuse_store_from_an_earlier_invocation(tmp_path):
     source = tmp_path / "tabula_sapiens"
     store = source / generator.STORE_NAME
