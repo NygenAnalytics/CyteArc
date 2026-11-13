@@ -1221,13 +1221,18 @@ def test_each_lineage_takes_its_scale_from_its_own_graph_component() -> None:
     # A fate map directed by a score over two trajectories that share no
     # edge: A and B in the first component, E and F in the second, where F's
     # branch starts beyond a gap and its sink holds 4 cells. The earliest
-    # cells by the score all lie in the first component, where E has no
-    # probability and F, the last sink, only the solver's rounding, under
-    # 1e-6 in a few cells.
+    # cells by the score all lie in the first component, where E and F, the
+    # last sink, whose column holds one minus the solved ones, have no
+    # probability.
     branching, fate, later = _two_components(
         _TWO_ARMS, (_Arm("e", _UP), _Arm("f", _DOWN, sink_cells=4, gap=0.15))
     )
     store = branching.store
+    stored = store.trajectory.load_fate(fate)
+    assert list(stored.sink_labels) == ["a2", "b2", "e2", "f2"]
+    assert stored.valid.all()
+    np.testing.assert_array_equal(stored.values[~later, 2:], 0.0)
+    np.testing.assert_array_equal(stored.values[later, :2], 0.0)
     curves = store.trajectory.curves(fate, n_points=40, df=6.0)
     result = store.trajectory.load_lineage_membership(
         store.trajectory.lineage_membership(curves)

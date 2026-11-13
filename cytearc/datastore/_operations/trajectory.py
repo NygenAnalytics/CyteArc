@@ -1837,7 +1837,9 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         where it holds a finite value. Those cells must make up whole connected
         components of the graph, as a pseudotime's do, and the map covers those
         of them in components that hold a sink. Other components stay out of
-        the map, with a warning when the score covers them. A score given as
+        the map, with a warning when the score covers them. A walk stays in
+        its component, so a cell's probability is 0 for each sink without a
+        cell in the cell's component. A score given as
         an array is saved as a snapshot of the graph's cells, which the fate
         map records as its direction. The lineage analyses of a map that a
         score directs, such as :meth:`curves` and :meth:`lineage_markers`,
