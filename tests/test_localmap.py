@@ -494,3 +494,18 @@ def test_peak_bytes_grow_with_each_input():
     )
     with pytest.raises(ValueError, match="n_cells"):
         localmap.localmap_peak_bytes(0, 0, dims=2, n_mid_near=5, n_further=20)
+
+
+def test_graph_check_copies_only_graphs_it_must_change():
+    rows = np.array([[(i + 1) % 6, (i + 2) % 6] for i in range(6)])
+    weights = np.ones(rows.shape)
+    weights[0, 1] = 0.0
+    graph = _rows_graph(rows, weights)
+
+    checked = localmap._checked_graph(graph)
+
+    # The caller's float64 graph with a stored zero is copied, not changed.
+    assert checked is not graph
+    assert graph.nnz == 12 and graph.data.dtype == np.float64
+    assert checked.nnz == 11 and checked.data.dtype == np.float32
+    assert localmap._checked_graph(checked) is checked

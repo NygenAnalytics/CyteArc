@@ -245,7 +245,11 @@ def pair_partners(pairs: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 
 
 def _checked_graph(graph: csr_matrix) -> csr_matrix:
-    """Return the graph as CSR with int32 cells, rejecting what LocalMAP cannot use."""
+    """Return the graph as CSR with float32 weights, rejecting what LocalMAP cannot use.
+
+    A CSR graph with float32 weights and no stored zeros is returned as it
+    is; any other is copied, so the caller's matrix is never changed.
+    """
     if not issparse(graph):
         raise TypeError("The neighbor graph must be a scipy sparse matrix")
     matrix = csr_matrix(graph)
@@ -259,12 +263,14 @@ def _checked_graph(graph: csr_matrix) -> csr_matrix:
         raise ValueError("Neighbor graph weights must be finite and non-negative")
     if np.any(matrix.diagonal() != 0):
         raise ValueError("The neighbor graph must not join a cell to itself")
+    if (
+        isinstance(graph, csr_matrix)
+        and weights.dtype == np.float32
+        and np.all(weights > 0)
+    ):
+        return graph
     matrix = csr_matrix(
-        (
-            weights.astype(np.float32),
-            matrix.indices.astype(np.int32),
-            matrix.indptr.astype(np.int64),
-        ),
+        (weights.astype(np.float32), matrix.indices.copy(), matrix.indptr.copy()),
         shape=matrix.shape,
     )
     matrix.eliminate_zeros()
