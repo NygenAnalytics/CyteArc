@@ -500,6 +500,15 @@ def resolve_rna(
             "scoring needs a PCA graph; pass doublets=False or set pca dims "
             "above 0"
         )
+    # Doublet scoring projects its simulated doublets through a mapping
+    # reference of the graph, which reads the PCA's feature scaling.
+    if doublets_enabled and head.pca.get("feat_scaling", True) is False:
+        raise ValueError(
+            "pca={'feat_scaling': False} fits PCA without feature scaling, but "
+            "doublet scoring projects its simulated doublets onto the PCA "
+            "through a mapping reference, which needs feature scaling; pass "
+            "doublets=False or omit feat_scaling"
+        )
     if doublets_enabled:
         _check_doublet_normalization(store, assay_name)
     snapshots = resolve_snapshot_columns(

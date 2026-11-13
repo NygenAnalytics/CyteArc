@@ -17,6 +17,7 @@ from ...features.variability import (
     hvg_options,
 )
 from ...graph.arguments import graph_load_flags, umap_graph_flags
+from ...graph.distances import NEIGHBOR_DISTANCE_METRICS
 from ...perturbation.associations import association_settings
 from ...perturbation.clusters import cluster_settings
 from ...perturbation.edistance import edistance_settings
@@ -598,6 +599,15 @@ def _check_stage_values(stage: str, value: Mapping[str, Any]) -> None:
         validated_settings(**options)
     elif stage == "hashing" and "positive_quantile" in value:
         _validated_positive_quantile(value["positive_quantile"])
+    elif stage == "ann_index" and "ann_metric" in value:
+        # The index, and the mapping reference that doublet scoring builds on
+        # it, take these metrics only; the stage would refuse another one
+        # only after the stages before it ran.
+        metric = value["ann_metric"]
+        if not isinstance(metric, str) or metric not in NEIGHBOR_DISTANCE_METRICS:
+            raise ValueError(
+                f"ann_index['ann_metric'] must be 'l2' or 'cosine', got {metric!r}"
+            )
     elif stage in _PERTURBATION_CHECKS:
         _check_perturbation_stage(stage, value)
     # The counts and sizes that these stages take must be positive integers.

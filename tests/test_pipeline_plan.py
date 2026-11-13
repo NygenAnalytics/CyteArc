@@ -550,6 +550,63 @@ def test_a_run_and_its_plan_refuse_doublets_without_library_size_before_writing(
     assert run["doublets"] == completed.run["doublets"]
 
 
+@pytest.mark.parametrize(
+    ("changes", "message", "accepted", "changed", "doublets"),
+    [
+        (
+            {"pca": {"dims": 5, "feat_scaling": False}},
+            "pca={'feat_scaling': False} fits PCA without feature scaling, but "
+            "doublet scoring projects its simulated doublets onto the PCA through "
+            "a mapping reference, which needs feature scaling; pass doublets=False "
+            "or omit feat_scaling",
+            # Without doublet scoring, PCA may skip feature scaling; its plan
+            # names the feature scaling, which is no longer enabled.
+            {"pca": {"dims": 5, "feat_scaling": False}, "doublets": False},
+            ("pca", "enabled"),
+            "skipped",
+        ),
+        (
+            {"ann_index": {"ann_metric": "ip"}},
+            "ann_index['ann_metric'] must be 'l2' or 'cosine', got 'ip'",
+            # Doublet scoring also scores on a cosine index.
+            {"ann_index": {"ann_metric": "cosine"}},
+            ("ann_index", "ann_metric"),
+            "computed",
+        ),
+    ],
+    ids=["unscaled-pca", "inner-product-index"],
+)
+def test_a_run_and_its_plan_refuse_doublets_without_a_mapping_reference_before_writing(
+    completed, tmp_path, changes, message, accepted, changed, doublets
+) -> None:
+    datastore = _copy(completed.location, tmp_path)
+    location = tmp_path / "data.zarr"
+    before = _digest(location)
+
+    with pytest.raises(ValueError) as planned:
+        datastore.pipeline.plan("rna", **{**SETTINGS, **changes})
+    with pytest.raises(ValueError) as ran:
+        datastore.pipeline.rna(**{**SETTINGS, **changes})
+
+    assert str(planned.value) == message
+    assert str(ran.value) == message
+    # Neither call wrote a run record, an artifact, or any other file.
+    assert _digest(location) == before
+    assert [run.run_id for run in datastore.pipeline.list_runs()] == [
+        completed.run.run_id
+    ]
+    # A call that a mapping reference allows plans the changed stage again.
+    plan = datastore.pipeline.plan("rna", **{**SETTINGS, **accepted})
+    stage, parameter = changed
+    assert (plan[stage].status, plan[stage].reason) == ("computed", "changed")
+    assert plan[stage].changed_parameters == (parameter,)
+    assert plan["doublets"].status == doublets
+    # The default settings still run, and reuse the committed doublet scores.
+    run = datastore.pipeline.rna(**SETTINGS)
+    assert run.status == "completed"
+    assert run["doublets"] == completed.run["doublets"]
+
+
 # The planner over synthetic stages -------------------------------------------
 
 

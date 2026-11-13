@@ -1199,6 +1199,71 @@ def test_recipe_reads_the_normalizer_the_run_will_use(readonly_store, monkeypatc
     assert {stage.name: stage.action for stage in plan.stages}["doublets"] is not None
 
 
+def _doublet_action(plan: Any) -> Any:
+    return {stage.name: stage.action for stage in plan.stages}["doublets"]
+
+
+def test_recipe_refuses_doublets_on_a_pca_without_feature_scaling(readonly_store):
+    store = readonly_store
+    message = (
+        "pca={'feat_scaling': False} fits PCA without feature scaling, but "
+        "doublet scoring projects its simulated doublets onto the PCA through "
+        "a mapping reference, which needs feature scaling; pass doublets=False "
+        "or omit feat_scaling"
+    )
+
+    # Doublet scoring is on by default, and a mapping of settings turns it on.
+    # NumPy's False is the same setting as Python's.
+    for doublets in (True, {"random_seed": 1}):
+        for unscaled in (False, np.False_):
+            with pytest.raises(ValueError) as caught:
+                _resolve(
+                    store,
+                    pca={"dims": 10, "feat_scaling": unscaled},
+                    doublets=doublets,
+                )
+            assert str(caught.value) == message
+    # Without doublet scoring, PCA may skip feature scaling.
+    plan = _resolve(store, pca={"dims": 10, "feat_scaling": False}, doublets=False)
+    assert plan.config["stages"]["pca"] == {"dims": 10, "feat_scaling": False}
+    assert _doublet_action(plan) is None
+    # Feature scaling, given or by default, lets the call schedule doublets.
+    for pca in ({"dims": 10, "feat_scaling": True}, {"dims": 10}):
+        plan = _resolve(store, pca=pca)
+        assert plan.config["stages"]["pca"] == pca
+        assert _doublet_action(plan) is not None
+
+
+@pytest.mark.parametrize("metric", ["ip", "L2", "euclidean", "", None, 2, ["l2"]])
+def test_recipes_refuse_an_ann_metric_that_the_index_does_not_take(
+    readonly_store, adt_store, metric
+):
+    message = f"ann_index['ann_metric'] must be 'l2' or 'cosine', got {metric!r}"
+
+    # The ANN index refuses the metric whether or not doublet scoring builds
+    # a mapping reference on it, so every recipe with a graph refuses it.
+    for doublets in (True, False):
+        with pytest.raises(ValueError) as caught:
+            _resolve(
+                readonly_store, ann_index={"ann_metric": metric}, doublets=doublets
+            )
+        assert str(caught.value) == message
+    with pytest.raises(ValueError) as caught:
+        resolve_adt(
+            adt_store,
+            **{**_recipe_defaults("adt"), "ann_index": {"ann_metric": metric}},
+        )
+    assert str(caught.value) == message
+
+
+@pytest.mark.parametrize("metric", ["l2", "cosine"])
+def test_doublet_scoring_takes_either_metric_of_the_index(readonly_store, metric):
+    plan = _resolve(readonly_store, ann_index={"ann_metric": metric, "ann_m": 8})
+
+    assert plan.config["stages"]["ann_index"] == {"ann_metric": metric, "ann_m": 8}
+    assert _doublet_action(plan) is not None
+
+
 def test_pca_dims_zero_builds_the_graph_on_normalized_values(
     settings_store, monkeypatch
 ):
