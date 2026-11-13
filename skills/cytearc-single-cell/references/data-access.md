@@ -375,7 +375,7 @@ List the runs before opening one by label.
   `ValueError`; open once with `zarr_mode="r+"` and that `assay_types` to record it. Merge, subset
   and `qc.hto_demultiplexing` use the type the open resolved (`ds.get_assay(name).assayType`).
 - `download_dataset(..., zarr=True)` keeps `data.zarr.tar.gz` beside `data.zarr` (double disk). Deleting the archive is safe: later calls still reuse the store, which `.cytebase-sources.json` in the dataset directory records as extracted from the bucket's archive.
-- `download_dataset` never replaces an existing `data.zarr` on its own. A later call returns the store with the results saved in it, or raises `FileExistsError` when the bucket now serves a newer version of the dataset; `overwrite=True` downloads the current version and deletes what was saved in the store. Download into another `destination` to keep both.
+- `download_dataset` never replaces an existing `data.zarr` on its own. A later call returns the store with the results saved in it, or raises `FileExistsError` when the bucket now serves a newer version of the dataset or another call placed the store while this one downloaded; `overwrite=True` downloads the current version and deletes what was saved in the store. Download into another `destination` to keep both. A rerun of an analysis therefore finds its earlier results in the store: open a saved run or assay instead of creating one with a name already taken.
 - Public atlas matrices (CELLxGENE, Seurat submissions) can hold SCT-corrected counts in `raw.X`,
   with genes such as rRNA removed and cells already filtered. Check before QC or count models.
 

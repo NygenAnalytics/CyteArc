@@ -481,6 +481,7 @@ def _merge_kang(source_paths: dict[str, Path], store: Path) -> None:
     sources = [
         cytearc.DataStore(
             str(source_paths[dataset] / STORE_NAME),
+            zarr_mode="r",
             nthreads=ZARR_NTHREADS,
         )
         for dataset in (KANG_CONTROL_DATASET, KANG_STIMULATED_DATASET)
