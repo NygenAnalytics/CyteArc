@@ -94,6 +94,7 @@ def resolve_atac(
     connectivity: object,
     embedding_initialization: object,
     umap: object,
+    localmap: object,
     tsne: object,
     leiden: object,
     paris: object,
@@ -142,7 +143,7 @@ def resolve_atac(
         connectivity=connectivity,
         embedding_initialization=embedding_initialization,
     )
-    embeddings = resolve_embeddings(umap=umap, tsne=tsne)
+    embeddings = resolve_embeddings(umap=umap, localmap=localmap, tsne=tsne)
     partitions, selected, leiden_settings = resolve_leiden(leiden)
     paris_enabled, paris_settings = stage_settings("paris", paris, optional=True)
     if not partitions and markers:
@@ -175,6 +176,7 @@ def resolve_atac(
         leiden=leiden_settings,
         paris=(paris_enabled, paris_settings),
         umap=(embeddings.umap, embeddings.umap_settings),
+        localmap=(embeddings.localmap, embeddings.localmap_settings),
         tsne=(embeddings.tsne, embeddings.tsne_settings),
         initialization=graph.initialization,
         membership_strength=membership_strength,

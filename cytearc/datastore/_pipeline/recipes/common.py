@@ -17,6 +17,7 @@ from ..fields import reserved_fields
 from ..filtering import filter_columns, resolve_filtering, snapshot_column_values
 from ..settings import (
     HVG_TOP_N_DEFAULT,
+    LOCALMAP_DIMS_DEFAULT,
     PCA_DIMS_DEFAULT,
     TSNE_DIMS_DEFAULT,
     UMAP_DIMS_DEFAULT,
@@ -248,6 +249,9 @@ class EmbeddingSettings:
     umap: bool
     umap_settings: dict[str, Any]
     umap_dims: int
+    localmap: bool
+    localmap_settings: dict[str, Any]
+    localmap_dims: int
     tsne: bool
     tsne_settings: dict[str, Any]
     tsne_dims: int
@@ -255,18 +259,31 @@ class EmbeddingSettings:
     def to_config(self) -> dict[str, Any]:
         return {
             "umap": self.umap_settings if self.umap else False,
+            "localmap": self.localmap_settings if self.localmap else False,
             "tsne": self.tsne_settings if self.tsne else False,
         }
 
 
-def resolve_embeddings(*, umap: object, tsne: object) -> EmbeddingSettings:
+def resolve_embeddings(
+    *, umap: object, localmap: object, tsne: object
+) -> EmbeddingSettings:
     umap_enabled, umap_settings = stage_settings("umap", umap, optional=True)
+    localmap_enabled, localmap_settings = stage_settings(
+        "localmap", localmap, optional=True
+    )
     tsne_enabled, tsne_settings = stage_settings("tsne", tsne, optional=True)
     return EmbeddingSettings(
         umap=umap_enabled,
         umap_settings=umap_settings,
         umap_dims=integer_argument(
             umap_settings.get("umap_dims", UMAP_DIMS_DEFAULT), "umap_dims", minimum=1
+        ),
+        localmap=localmap_enabled,
+        localmap_settings=localmap_settings,
+        localmap_dims=integer_argument(
+            localmap_settings.get("localmap_dims", LOCALMAP_DIMS_DEFAULT),
+            "localmap_dims",
+            minimum=1,
         ),
         tsne=tsne_enabled,
         tsne_settings=tsne_settings,
@@ -578,6 +595,7 @@ def run_reserved_fields(
 ) -> frozenset[str]:
     return reserved_fields(
         umap_dims=embeddings.umap_dims,
+        localmap_dims=embeddings.localmap_dims,
         tsne_dims=embeddings.tsne_dims,
         leiden_keys=[key for key, _value in partitions],
         extra=extra,

@@ -108,6 +108,7 @@ _SKIPPED = frozenset(
         "harmony",
         "embedding_initialization",
         "umap",
+        "localmap",
         "paris",
         "membership_strength",
         "tsne",

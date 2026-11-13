@@ -120,6 +120,7 @@ ATAC_STAGES = [
     "connectivity",
     "embedding_initialization",
     "umap",
+    "localmap",
     "leiden_0.5",
     "leiden_1.0",
     "paris",
@@ -140,6 +141,7 @@ ADT_STAGES = [
     "connectivity",
     "embedding_initialization",
     "umap",
+    "localmap",
     "leiden_1.0",
     "paris",
     "cluster_selection",
@@ -450,6 +452,7 @@ def test_atac_runs_its_stages_in_order_and_records_its_recipe(atac) -> None:
         "harmony",
         "embedding_initialization",
         "umap",
+        "localmap",
         "paris",
         "membership_strength",
         "tsne",
@@ -1365,6 +1368,48 @@ def test_multimodal_checks_its_method_runs_and_settings(cite) -> None:
         ):
             datastore.pipeline.multimodal(runs, leiden=False, **settings)
     assert _run_ids(datastore) == before
+
+
+def test_multimodal_refuses_localmap_before_the_run(cite) -> None:
+    datastore = cite.datastore
+    runs = [cite.rna, cite.adt]
+    before = _run_ids(datastore)
+
+    # LocalMAP draws mid-near pairs in the coordinates that built its graph,
+    # which an integrated graph of several assays does not have.
+    for localmap in (True, np.True_, {}, {"max_distance": 8.0}):
+        with pytest.raises(
+            ValueError,
+            match=(
+                "^LocalMAP needs a single assay's connectivity map: it draws "
+                "mid-near pairs in the coordinates that built the graph"
+            ),
+        ):
+            datastore.pipeline.multimodal(runs, localmap=localmap)
+    # Its settings are checked as in any recipe.
+    with pytest.raises(ValueError, match=r"^Unknown localmap settings \['k'\]"):
+        datastore.pipeline.multimodal(runs, localmap={"k": 5})
+    assert _run_ids(datastore) == before
+    # Off, the run records LocalMAP as off and has no LocalMAP stage.
+    plan = _resolve("multimodal", datastore, runs=runs, localmap=False)
+    assert plan.config["stages"]["localmap"] is False
+    assert list(plan.stage_order) == MULTIMODAL_STAGES
+    assert "localmap" not in plan.output_keys
+
+
+def test_adt_and_atac_lay_out_their_graph_with_localmap_after_umap(cite, atac) -> None:
+    for recipe, datastore in (("adt", cite.datastore), ("atac", atac.datastore)):
+        plan = _resolve(recipe, datastore, localmap={"max_distance": 8.0})
+
+        assert plan.config["stages"]["localmap"] == {"max_distance": 8.0}, recipe
+        stages = {stage.name: stage for stage in plan.stages}
+        assert stages["localmap"].action is not None, recipe
+        assert stages["localmap"].inputs == (
+            "connectivity_map",
+            "embedding_initialization",
+        )
+        for order in (list(plan.stage_order), list(plan.output_keys)):
+            assert order[order.index("umap") + 1] == "localmap", recipe
 
 
 def test_wnn_needs_neighbors_that_record_their_coordinates(cite, monkeypatch) -> None:
@@ -2357,6 +2402,7 @@ def test_each_stage_summary_names_the_values_that_it_records(cite, full) -> None
         "connectivity": {"cells", "k"},
         "embedding_initialization": {"centroids", "dims"},
         "umap": {"cells", "dims"},
+        "localmap": None,
         "leiden_1.0": {"clusters", "largestCluster", "smallestCluster"},
         "paris": {"clusters"},
         "cluster_selection": {"selected", "scores"},
