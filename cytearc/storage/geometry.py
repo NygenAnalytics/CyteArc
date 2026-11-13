@@ -123,21 +123,21 @@ class ArrayGeometry:
         A sharded read fills a shard-level copy of the selection before it
         copies that into the result, and holds the compressed bytes of every
         inner chunk it touches in a shard, which never exceed the decoded
-        chunk, while it decodes them. An unsharded read counts its result and
-        the chunks it decodes, but not the compressed bytes of a chunk while
-        it decodes. ``chunks`` counts the inner chunks the read touches in one
-        shard and ``decodes`` the chunks Zarr decodes at once, all of them
-        unless given. Storage-provided scratch covers one shard request,
-        including its sequential inner-chunk reads. Independent shard requests
-        each need this allowance. Unsharded reads charge scratch per decode.
+        chunk, while it decodes them. An unsharded read holds its result and
+        each chunk it decodes at once as stored and decoded, as
+        :meth:`storedChunkBytes` counts, since Zarr keeps a chunk's compressed
+        bytes beside it while it decodes it. ``chunks`` counts the inner
+        chunks the read touches in one shard and ``decodes`` the chunks Zarr
+        decodes at once, all of them unless given. Storage-provided scratch
+        covers one shard request, including its sequential inner-chunk reads.
+        Independent shard requests each need this allowance. Unsharded reads
+        charge scratch per decode.
         """
         touched = max(1, int(chunks))
         decoding = touched if decodes is None else min(touched, max(1, int(decodes)))
         result = max(0, int(resultBytes))
         if self.shards is None:
-            return result + decoding * (
-                self.nominalChunkBytes() + self.readScratchBytes
-            )
+            return result + decoding * (self.storedChunkBytes() + self.readScratchBytes)
         return (
             2 * result
             + (touched + decoding) * self.nominalChunkBytes()

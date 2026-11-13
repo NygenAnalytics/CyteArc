@@ -1306,14 +1306,15 @@ def test_composite_compares_distinct_ids_whose_hashes_collide(tmp_path, monkeypa
 def test_composite_count_preparation_names_the_budget_of_one_row(tmp_path):
     from cytearc.utils.memory_budget import MemoryBudgetError
 
+    # Sixty-four cells chunk the composite's mappings in 64 entries, and tables
+    # of one chunk keep the metadata plans, so that both fit well below the
+    # preparation of the counts.
     source = _write_source(
         tmp_path / "source.zarr",
-        np.ones((4, 256), dtype=np.uint8),
+        np.ones((64, 256), dtype=np.uint8),
         [f"g{index}" for index in range(256)],
         policy=CountMatrixPolicy(1024, 256),
     )
-    # Tables of one chunk, so that the metadata plans fit well below the
-    # preparation of the counts.
     for table in (source.cells, source.RNA.feats):
         for name, array in list(table._group.arrays()):
             values, attributes = array[:], dict(array.attrs)
@@ -1344,7 +1345,9 @@ def test_composite_creation_rejects_unaffordable_work_before_count_reads(
     tmp_path, monkeypatch, phase
 ):
     metadata = phase == "metadata"
-    shape = (100, 2) if metadata else (4, 256)
+    # Sixty-four cells chunk the composite's mappings in 64 entries, so that
+    # their reads fit below the preparation of the counts.
+    shape = (100, 2) if metadata else (64, 256)
     source = _write_source(
         tmp_path / "source.zarr",
         np.ones(shape, dtype=np.uint8),

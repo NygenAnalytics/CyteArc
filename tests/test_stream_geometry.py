@@ -493,6 +493,14 @@ def test_row_band_reproduces_every_expression_it_replaced() -> None:
         assert row_band(geometry, unit="chunk", fallback=1) == expected_artifact
 
 
+# A block of four features of 25 cells holds 400 bytes of uint32 values, and
+# reading it decodes one chunk of 25 by 4 values, held as stored and decoded:
+# the 400 decoded bytes beside the bound of their compressed bytes, 400 + 3 +
+# 1,024.
+_BLOCK = 400
+_DECODE = 400 + 400 + 3 + 1_024
+
+
 def _plan_with(
     *,
     resources: ResourceBudget,
@@ -517,7 +525,7 @@ def test_a_stream_that_cannot_be_admitted_reads_one_chunk_at_a_time() -> None:
     # Room for one block beside its decode, but not for a second read on top,
     # so admission fails and the plan must not leave read-ahead concurrency on.
     plan = _plan_with(
-        resources=ResourceBudget(1_000, 8),
+        resources=ResourceBudget(_BLOCK + _DECODE + 200, 8),
         features=np.arange(32),
     )
 
@@ -529,7 +537,7 @@ def test_a_stream_without_read_ahead_uses_current_decode_concurrency() -> None:
     # A second block cannot fit, but the current block can afford two decoded
     # chunks. Preserve that inner concurrency without admitting read-ahead.
     plan = _plan_with(
-        resources=ResourceBudget(1_200, 8),
+        resources=ResourceBudget(_BLOCK + 2 * _DECODE, 8),
         features=np.arange(32),
     )
 
@@ -538,17 +546,18 @@ def test_a_stream_without_read_ahead_uses_current_decode_concurrency() -> None:
 
 
 def test_a_single_block_stream_budgets_its_own_decode_concurrency() -> None:
+    budget = _BLOCK + 3 * _DECODE
     plan = _plan_with(
-        resources=ResourceBudget(1_600, 8),
+        resources=ResourceBudget(budget, 8),
         features=np.arange(4),
     )
 
     assert len(plan.blocks) == 1
     assert plan.readWorkers == 1
-    # One 400 byte block plus three 400 byte decodes exhausts the limit, so the
-    # plan admits three concurrent decodes rather than one per worker.
+    # One block plus three decodes exhausts the limit, so the plan admits
+    # three concurrent decodes rather than one per worker.
     assert plan.ioConcurrency == 3
-    assert 400 + plan.ioConcurrency * 400 <= 1_600
+    assert _BLOCK + plan.ioConcurrency * _DECODE <= budget
 
 
 def test_an_empty_selection_plans_no_read_concurrency() -> None:
@@ -577,8 +586,11 @@ def test_streamed_row_blocks_decode_only_as_many_chunks_as_budgeted() -> None:
 
     # A row block spans the four column chunks of one chunk row, so an
     # unbounded read can hold all four decodes at once. The budget affords one
-    # 2048 byte block beside a single 512 byte chunk decode, and no more.
-    budgeted = ChunkedArray(array, resources=ResourceBudget(3_000, 4))
+    # 2048 byte block beside a single chunk of 512 bytes, held as stored and
+    # decoded, 512 + 4 + 1,024 bytes beside it, and no more.
+    budgeted = ChunkedArray(
+        array, resources=ResourceBudget(2_048 + 512 + 512 + 4 + 1_024 + 440, 4)
+    )
     store.reset()
     blocks = list(budgeted.stream_blocks())
 
@@ -599,6 +611,8 @@ def test_planned_reads_never_decode_more_chunks_than_budgeted() -> None:
     # Budget chosen so admission has to trade read depth against per-read
     # decodes: charging one decode per read admits four concurrent chunk
     # decodes, which overruns the limit once they are actually in flight.
+    # Each block holds 1,024 bytes, and each decode a chunk of 256 bytes as
+    # stored and decoded, 256 + 2 + 1,024 bytes beside it.
     store = RecordingStore(delay=0.005)
     root = zarr.open_group(store=store, mode="w")
     array = root.create_array(
@@ -612,7 +626,8 @@ def test_planned_reads_never_decode_more_chunks_than_budgeted() -> None:
     array[:] = np.arange(64 * 32, dtype=np.uint32).reshape(64, 32)
 
     cells = np.arange(64)
-    resources = ResourceBudget(4_280, 8)
+    decode = 256 + 256 + 2 + 1_024
+    resources = ResourceBudget(3 * (1_024 + decode) + 440, 8)
     block_bytes = 4 * cells.size * 4
     plan = plan_feature_stream(
         array,
@@ -639,7 +654,6 @@ def test_planned_reads_never_decode_more_chunks_than_budgeted() -> None:
     )
 
     peak = store.max_in_flight_for("get")
-    decode = plan.geometry.nominalChunkBytes()
     live = plan.readWorkers * block_bytes + peak * decode
 
     assert len(blocks) == 8

@@ -48,6 +48,12 @@ def _array(
     )
 
 
+# A chunk of 5 by 5 uint32 values decodes to 100 bytes, and a read holds it as
+# stored and decoded: the 100 decoded bytes beside the bound of their
+# compressed bytes, 100 + 1,024.
+_DECODE = 100 + 100 + 1_024
+
+
 def test_feature_stream_packs_only_adjacent_whole_bins() -> None:
     array = _array(shape=(12, 20))
     plan = plan_feature_stream(
@@ -94,7 +100,7 @@ def test_feature_stream_splits_one_bin_and_counts_repeated_tiles() -> None:
         cellAxis=0,
         featureIndices=np.arange(5),
         cellIndices=np.array([0, 6, 11]),
-        resources=ResourceBudget(350, 4),
+        resources=ResourceBudget(2 * 100 + _DECODE + 50, 4),
         blockBytes=lambda width: width * 100,
     )
 
@@ -104,7 +110,8 @@ def test_feature_stream_splits_one_bin_and_counts_repeated_tiles() -> None:
 
 def test_feature_stream_budgets_an_edge_chunk_at_its_nominal_size() -> None:
     # A 5 x 3 chunk of uint32 decodes to 60 bytes even where it overhangs the
-    # 12 x 7 array and only 2 x 1 of its elements are addressable.
+    # 12 x 7 array and only 2 x 1 of its elements are addressable, and a read
+    # holds it as stored and decoded, 60 + 60 + 1,024 bytes.
     array = _array(shape=(12, 7), chunks=(5, 3))
     kwargs = {
         "featureAxis": 1,
@@ -114,7 +121,8 @@ def test_feature_stream_budgets_an_edge_chunk_at_its_nominal_size() -> None:
         "blockBytes": lambda width: width,
     }
 
-    plan = plan_feature_stream(array, resources=ResourceBudget(61, 1), **kwargs)
+    edge = 60 + 60 + 1_024
+    plan = plan_feature_stream(array, resources=ResourceBudget(1 + edge, 1), **kwargs)
     assert plan.geometry.nominalChunkBytes() == 60
     assert len(plan.blocks) == 1
 
@@ -122,7 +130,7 @@ def test_feature_stream_budgets_an_edge_chunk_at_its_nominal_size() -> None:
         MemoryError,
         match="One index of the selection does not fit the operation budget",
     ):
-        plan_feature_stream(array, resources=ResourceBudget(60, 1), **kwargs)
+        plan_feature_stream(array, resources=ResourceBudget(edge, 1), **kwargs)
 
 
 def test_feature_stream_rejects_unaffordable_override() -> None:
@@ -137,7 +145,7 @@ def test_feature_stream_rejects_unaffordable_override() -> None:
             cellAxis=0,
             featureIndices=np.arange(10),
             cellIndices=np.arange(12),
-            resources=ResourceBudget(350, 2),
+            resources=ResourceBudget(2 * 100 + _DECODE + 50, 2),
             blockBytes=lambda width: width * 100,
             requestedBatchSize=5,
         )
@@ -151,15 +159,13 @@ def test_feature_stream_accounts_for_resident_bytes() -> None:
         cellAxis=0,
         featureIndices=np.arange(10),
         cellIndices=np.arange(12),
-        resources=ResourceBudget(1_000, 4),
+        resources=ResourceBudget(600 + 3 * 100 + _DECODE, 4),
         residentBytes=600,
         blockBytes=lambda width: width * 100,
     )
 
-    widest = max(block.indices.size for block in plan.blocks)
-    decode = plan.geometry.nominalChunkBytes()
-    assert widest == 3
-    assert 600 + widest * 100 + decode <= 1_000
+    # The budget holds the resident bytes and three features with their decode.
+    assert max(block.indices.size for block in plan.blocks) == 3
 
 
 def test_feature_stream_keeps_reads_and_their_decodes_inside_the_budget() -> None:
@@ -170,16 +176,15 @@ def test_feature_stream_keeps_reads_and_their_decodes_inside_the_budget() -> Non
         cellAxis=0,
         featureIndices=np.array([0, 10, 20, 30]),
         cellIndices=np.arange(20),
-        resources=ResourceBudget(650, 8),
+        resources=ResourceBudget(3 * (100 + _DECODE) + 50, 8),
         blockBytes=lambda _width: 100,
     )
 
-    decode = plan.geometry.nominalChunkBytes()
-    in_flight = plan.readWorkers * (100 + plan.ioConcurrency * decode)
+    in_flight = plan.readWorkers * (100 + plan.ioConcurrency * _DECODE)
 
     assert len(plan.blocks) == 4
     assert plan.readWorkers == 3
-    assert in_flight <= 650
+    assert in_flight <= 3 * (100 + _DECODE) + 50
     assert plan.readWorkers * plan.ioConcurrency <= 8
 
 

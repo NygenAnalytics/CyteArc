@@ -276,16 +276,17 @@ def test_feature_streams_name_the_budget_of_their_blocks() -> None:
             residentBytes=resident,
         )
 
-    # A 60-byte chunk decoded beside the block's one byte, which 61 bytes hold.
+    # A 60-byte chunk, held as stored and decoded, 60 + 60 + 1,024 bytes,
+    # beside the block's one byte, which 1,145 bytes hold.
     refusal = named_budget_runs(one_feature, 60, item="one feature of the selection")
-    assert refusal.needed_bytes == 61
-    # Beside 200 resident bytes the same block needs 261.
+    assert refusal.needed_bytes == 1_145
+    # Beside 200 resident bytes the same block needs 1,345.
     resident = refused(lambda: one_feature(150, 200))
     assert (resident.needed_bytes, resident.item) == (
-        261,
+        1_345,
         "one feature beside the resident data",
     )
-    one_feature(261, 200)
+    one_feature(1_345, 200)
 
     wide = _array((12, 10), (5, 5))
     refusal = named_budget_runs(
@@ -302,10 +303,11 @@ def test_feature_streams_name_the_budget_of_their_blocks() -> None:
         550,
         item="feature batches of 5 features",
     )
-    # Five features of 100 bytes each beside one decoded 100-byte chunk.
-    assert refusal.needed_bytes == 600
+    # Five features of 100 bytes each beside one 100-byte chunk, held as
+    # stored and decoded, 100 + 100 + 1,024 bytes.
+    assert refusal.needed_bytes == 1_724
     assert f"It needs at least {refusal.needed_bytes} bytes." in str(refusal)
-    # Beside 300 resident bytes the same batches need 900.
+    # Beside 300 resident bytes the same batches need 2,024.
     refusal = named_budget_runs(
         lambda memory: plan_feature_stream(
             wide,
@@ -321,7 +323,7 @@ def test_feature_streams_name_the_budget_of_their_blocks() -> None:
         850,
         item="feature batches of 5 features",
     )
-    assert refusal.needed_bytes == 900
+    assert refusal.needed_bytes == 2_024
 
 
 def test_a_predicate_that_accepts_no_index_cannot_partition_a_selection() -> None:
