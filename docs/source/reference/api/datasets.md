@@ -24,9 +24,17 @@ path = repository.download_dataset(
 ds = cytearc.DataStore(f"{path}/data.zarr", zarr_mode="r")
 ```
 
-`download_dataset(name, zarr=True)` downloads the dataset's `data.zarr.tar.gz` archive and extracts it to `data.zarr` in the returned directory, keeping the archive beside it. Without `zarr=True`, it downloads the dataset's other files, such as its source count files.
+`download_dataset(name, zarr=True)` downloads the dataset's `data.zarr.tar.gz` archive and extracts it to `data.zarr` in the returned directory, keeping the archive beside it. Without `zarr=True`, it downloads the dataset's other files, such as its source count files, and skips the store: its archive and the files under `data.zarr/` that some datasets also list unpacked for remote reads.
 
-A later call into the same `destination` reuses what is already there. A file is not downloaded again while the bucket lists it with the size and Xet hash recorded when it was downloaded, and its local copy has that size. An existing `data.zarr` is returned with the results saved in it, and is never replaced without `overwrite=True`: when the bucket has published a newer version of the dataset, or another call placed the store while this one downloaded, the call raises `FileExistsError`. `overwrite=True` downloads the current version, deleting anything saved in `data.zarr`.
+A later call into the same `destination` reuses what is already there. A file is not downloaded again while the bucket lists it with the size and Xet hash recorded when it was downloaded, and its local copy has that size. An existing `data.zarr` is returned with the results saved in it, and is never replaced without `overwrite=True`. The call raises `FileExistsError` instead when:
+
+- the bucket now lists another archive than the one `data.zarr` was extracted from, a newer version of the dataset;
+- `data.zarr` was made from another source, such as a copy from a local catalog;
+- nothing records what `data.zarr` was made from, and the archive beside it is missing or has another size than the bucket's, as for a store from an earlier CyteArc whose archive was deleted;
+- `data.zarr` is not a directory;
+- another call placed `data.zarr` while this one was downloading or extracting it, and has not recorded it as current. A call that has recorded it makes this one return the store instead.
+
+A directory extracted from any other archive that a dataset lists follows the same rules. `overwrite=True` downloads the current version, deleting anything saved in `data.zarr`.
 
 `download(path)` downloads one file, or every file under a directory, on every call, and keeps its path within the repository.
 

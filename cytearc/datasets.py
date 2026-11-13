@@ -7,6 +7,7 @@ downloads files. The CyteBase catalog of cloud-hosted datasets is the separate
 ``cytebase`` package.
 """
 
+import errno
 import gzip
 import hashlib
 import json
@@ -186,19 +187,21 @@ class Repository:
         """Download one dataset into ``destination/name`` and return that directory.
 
         Without ``zarr``, the call downloads the dataset's files other than its
-        Zarr archive, such as its source count files. With ``zarr=True``, it
-        downloads the dataset's ``data.zarr.tar.gz`` archive and extracts it to
+        Zarr store, such as its source count files. It skips the store's
+        archive and the files under the store's directory, which some datasets
+        also list unpacked for remote reads. With ``zarr=True``, it downloads
+        the dataset's ``data.zarr.tar.gz`` archive and extracts it to
         ``data.zarr``, keeping the archive beside it.
 
         A later call reuses what an earlier call placed in ``destination``.
         Each call records the bucket's listing of each file it placed, its
         path, size and Xet hash, in ``.cytebase-sources.json`` in the returned
-        directory, together with what each store there was made from. A file
-        is not downloaded again while the bucket's listing of it equals the
-        recorded one and the local copy has the listed size. An existing
-        ``data.zarr`` is returned untouched, with everything saved in it, while
-        the record says that it was made from the archive, or from the files
-        that some datasets also list unpacked, as the bucket lists them now. A
+        directory, together with the archive that each extracted directory
+        came from. A file is not downloaded again while the bucket's listing
+        of it equals the recorded one and the local copy has the listed size.
+        An existing ``data.zarr`` is returned untouched, with everything saved
+        in it, while the record says that it was extracted from the archive
+        that the bucket lists now; its archive is not needed for that. A
         ``data.zarr`` extracted before CyteArc kept this record is reused when
         the archive beside it has the size of the bucket's archive; no bytes
         are compared.
@@ -209,20 +212,23 @@ class Repository:
             zarr: Download and extract the dataset's Zarr archive instead of
                 its other files.
             overwrite: Download the selected files again and replace their
-                local copies. The ``data.zarr`` that the call makes replaces
-                the existing one, deleting anything saved in it. Without
-                ``overwrite``, an existing ``data.zarr`` is never replaced,
-                even one that another call places while this one downloads.
+                local copies. With ``zarr=True``, the extracted ``data.zarr``
+                replaces the existing one, deleting anything saved in it.
+                Without ``overwrite``, an existing ``data.zarr`` is never
+                replaced, even one that another call places while this one
+                runs.
 
         Raises:
             TypeError: If ``zarr`` or ``overwrite`` is not a boolean.
             KeyError: If the repository holds no such dataset.
             FileNotFoundError: If ``zarr`` is set and the dataset has no Zarr
-                archive.
+                archive, or if it is not set and the dataset lists no files
+                besides its Zarr store.
             FileExistsError: If ``overwrite`` is not set and ``data.zarr``
-                exists but was not made from what the bucket lists now, such
-                as a copy of an older version of the dataset, or appears while
-                the call downloads.
+                exists but the record does not say that it was extracted from
+                the archive that the bucket lists now, or if another call
+                places ``data.zarr`` while this one runs and has not recorded
+                it as current.
             ValueError: If ``.cytebase-sources.json`` is not a record that
                 CyteArc wrote, or if the archive kept beside a deleted
                 ``data.zarr`` cannot be extracted.
@@ -253,24 +259,37 @@ class Repository:
                 raise FileNotFoundError(f"No Zarr archive is available for {name!r}")
         else:
             selected = [
-                file for file in files if not file.path.endswith(_ZARR_ARCHIVE_SUFFIX)
+                file
+                for file in files
+                if not file.path.endswith(_ZARR_ARCHIVE_SUFFIX)
+                and not _inside_zarr_store(_dataset_key(self.name, file))
             ]
+            if not selected:
+                raise FileNotFoundError(
+                    f"{name!r} lists no files besides its Zarr store. Pass "
+                    "zarr=True to download the store's archive, or open the store "
+                    "remotely by its hf:// URI."
+                )
 
         dataset_path = destination / name
         plan = _plan_dataset_download(
-            self.name, name, files, selected, dataset_path, overwrite=overwrite
+            self.name, selected, dataset_path, overwrite=overwrite
         )
-        if plan.fetch:
-            _download_files(
-                self.name,
-                plan.fetch,
-                destination,
-                overwrite=overwrite,
-                unextracted=plan.unextracted,
-                directories=[PurePosixPath(name, key) for key in plan.unpacked],
-            )
-        for file in plan.extract:
-            _extract_archive_in_place(dataset_path / _dataset_key(self.name, file))
+        if plan.forget:
+            # Only a call that places these stores again may record them.
+            _record_sources(dataset_path, files={}, stores={}, forget=plan.forget)
+        action = "downloading"
+        try:
+            if plan.fetch:
+                _download_files(self.name, plan.fetch, destination, overwrite=overwrite)
+            action = "extracting its archive again"
+            for file in plan.extract:
+                _extract_archive_in_place(dataset_path / _dataset_key(self.name, file))
+        except _StoreAppeared as appeared:
+            # Another call placed the store meanwhile: reuse it once recorded.
+            if _stores_recorded(dataset_path, plan.stores):
+                return dataset_path
+            raise FileExistsError(_appeared_message(appeared.path, action)) from None
         if plan.files or plan.stores:
             _record_sources(dataset_path, files=plan.files, stores=plan.stores)
         return dataset_path
@@ -305,14 +324,29 @@ def _copy_local_dataset(store: Path, target: Path, *, overwrite: bool) -> Path:
     current = {"source": str(store.absolute()), "digest": _listing_digest(store)}
     made_from = _read_sources(target)["stores"].get(copy.name)
     if _path_exists(copy) and not overwrite:
-        _judge_store(copy, made_from, [current], preferred=current, adoptable=None)
+        _check_existing_store(copy, made_from, current)
         return target
+    if made_from is not None and not overwrite:
+        # The recorded copy is gone; only a call that copies it again may record it.
+        _record_sources(target, files={}, stores={}, forget=[copy.name])
     target.mkdir(parents=True, exist_ok=True)
     staging_path = Path(tempfile.mkdtemp(dir=target, prefix=".data.zarr.copy-"))
     try:
         staged = staging_path / "data.zarr"
         shutil.copytree(store, staged)
-        _place_directory(staged, copy, overwrite=overwrite)
+        if overwrite:
+            backup_path = staging_path / "backup"
+            backup_path.mkdir()
+            _replace_staged_paths([(staged, copy)], backup_path)
+        else:
+            _rename_new(staged, copy)
+    except _StoreAppeared:
+        # Another call copied the store meanwhile: reuse it once recorded.
+        if _stores_recorded(target, {copy.name: current}):
+            return target
+        raise FileExistsError(
+            _appeared_message(copy, "copying it from the local catalog")
+        ) from None
     finally:
         shutil.rmtree(staging_path, ignore_errors=True)
     _record_sources(target, files={}, stores={copy.name: current})
@@ -340,10 +374,10 @@ def _dataset_key(repository: str, file: BucketFile) -> str:
     return PurePosixPath(*relative.parts[1:]).as_posix()
 
 
-def _unpacked_store(key: str) -> str | None:
-    """Return the Zarr store that a file at ``key`` in a dataset lies in, if any."""
+def _inside_zarr_store(key: str) -> bool:
+    """Return whether a file at ``key`` in a dataset lies in a Zarr store's directory."""
     top = key.split("/", 1)[0]
-    return top if top != key and top.endswith(".zarr") else None
+    return top != key and top.endswith(".zarr")
 
 
 def _bucket_source(file: BucketFile) -> dict[str, Any]:
@@ -351,28 +385,33 @@ def _bucket_source(file: BucketFile) -> dict[str, Any]:
     return {"source": file.path, "size": file.size, "xetHash": file.xet_hash}
 
 
-def _unpacked_source(prefix: str, files: list[BucketFile]) -> dict[str, Any]:
-    """Return the bucket's listing of a store's unpacked files under ``prefix``, as one digest."""
-    digest = hashlib.sha256()
-    for file in sorted(files, key=lambda file: file.path):
-        digest.update(f"{file.path}\0{file.size}\0{file.xet_hash}\n".encode())
-    return {"source": prefix, "listing": digest.hexdigest()}
+# The fields of a record entry that identify its source; any other field is
+# ignored when entries are compared.
+_SOURCE_FIELDS = ("source", "size", "xetHash", "digest")
+
+
+def _same_source(
+    recorded: Mapping[str, Any] | None, current: Mapping[str, Any]
+) -> bool:
+    """Return whether the record entry ``recorded`` names the source ``current``."""
+    return recorded is not None and all(
+        recorded.get(field) == current.get(field) for field in _SOURCE_FIELDS
+    )
 
 
 def _read_sources(dataset_path: Path) -> dict[str, dict[str, Any]]:
     """Return the record of what each file and directory in ``dataset_path`` came from.
 
     ``files`` maps each downloaded file's path in the directory to the bucket's
-    listing of it. ``stores`` maps each directory extracted, downloaded or
-    copied there, such as ``data.zarr``, to the archive, unpacked files or
-    local store it was made from.
+    listing of it. ``stores`` maps each directory extracted or copied there,
+    such as ``data.zarr``, to the archive or local store it was made from.
     """
     path = dataset_path / _SOURCES_NAME
     try:
         sources = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
         return {"files": {}, "stores": {}}
-    except ValueError:
+    except (ValueError, IsADirectoryError):
         sources = None
     if not (
         isinstance(sources, dict)
@@ -397,8 +436,11 @@ def _record_sources(
     *,
     files: Mapping[str, dict[str, Any]],
     stores: Mapping[str, dict[str, Any]],
+    forget: Collection[str] = (),
 ) -> None:
     """Add what a call placed in ``dataset_path`` to its record, replacing the file whole.
+
+    ``forget`` names stores to drop from the record, ones that are gone.
 
     The record is read again first, which keeps most of what another call
     recorded meanwhile; a call that writes between that read and the
@@ -408,6 +450,8 @@ def _record_sources(
     sources = _read_sources(dataset_path)
     sources["files"].update(files)
     sources["stores"].update(stores)
+    for key in forget:
+        sources["stores"].pop(key, None)
     handle = tempfile.NamedTemporaryFile(
         "w",
         encoding="utf-8",
@@ -425,19 +469,25 @@ def _record_sources(
         raise
 
 
+def _stores_recorded(
+    dataset_path: Path, stores: Mapping[str, Mapping[str, Any]]
+) -> bool:
+    """Return whether the record now names each of ``stores`` as made from its source."""
+    recorded = _read_sources(dataset_path)["stores"]
+    return all(
+        _same_source(recorded.get(key), source) for key, source in stores.items()
+    )
+
+
 @dataclass(slots=True)
 class _DatasetPlan:
     """What one ``download_dataset`` call fetches, extracts and records."""
 
     fetch: list[BucketFile] = field(default_factory=list)
-    # The bucket paths of fetched archives to place beside a current store
-    # without extracting them.
-    unextracted: set[str] = field(default_factory=set)
-    # The stores, by path in the dataset, whose unpacked files are fetched and
-    # placed together as one directory.
-    unpacked: set[str] = field(default_factory=set)
     # Archives whose directory is gone, to extract again from their local copy.
     extract: list[BucketFile] = field(default_factory=list)
+    # Stores that the record names but that are gone, to drop before placing.
+    forget: list[str] = field(default_factory=list)
     # The record's new entries, written once everything is in place.
     files: dict[str, dict[str, Any]] = field(default_factory=dict)
     stores: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -445,28 +495,23 @@ class _DatasetPlan:
 
 def _plan_dataset_download(
     repository: str,
-    name: str,
-    files: list[BucketFile],
     selected: list[BucketFile],
     dataset_path: Path,
     *,
     overwrite: bool,
 ) -> _DatasetPlan:
-    """Plan how a call delivers ``selected``, out of the dataset's listed ``files``.
+    """Plan how a call delivers the ``selected`` files of a dataset.
 
     Without ``overwrite``, a file is fetched unless the record holds the
-    bucket's current listing of it and its local copy has the listed size.
-
-    A directory extracted from an archive, or a Zarr store whose files the
-    bucket also lists unpacked, is never fetched while it exists. It is current
-    when the record says that it was made from the archive or the unpacked
-    files that the bucket lists now; the call then skips the store's unpacked
-    files and, with ``zarr=True``, places the archive beside a store made from
-    unpacked files without extracting it. A directory that nothing records is
-    adopted as the archive's when the archive beside it has the listed size,
-    as CyteArc left it before it kept a record. Any other existing directory
-    raises. A directory that is gone is extracted again from its archive when
-    the local copy is current, and fetched otherwise.
+    bucket's listing of it and its local copy has the listed size. A
+    directory extracted from an archive is never fetched while it exists. It
+    is kept when the record says that it was extracted from the archive the
+    bucket lists now, and adopted as that archive's when nothing is recorded
+    and it is a directory with the archive beside it at the listed size, as
+    CyteArc left it before it kept a record. Only the directory is recorded
+    then, since the archive's bytes were not compared. Any other existing
+    directory raises. A directory that is gone is extracted again from its
+    archive when the local copy is recorded as current, and fetched otherwise.
 
     Raises:
         FileExistsError: If an existing directory would have to be replaced.
@@ -474,132 +519,57 @@ def _plan_dataset_download(
     """
     sources = _read_sources(dataset_path)
     plan = _DatasetPlan()
-    keys = {file.path: _dataset_key(repository, file) for file in files}
-    archives: dict[str, BucketFile] = {}
-    unpacked: dict[str, list[BucketFile]] = {}
-    for file in files:
-        key = keys[file.path]
-        if key.endswith(_ARCHIVE_SUFFIX):
-            archives[key.removesuffix(_ARCHIVE_SUFFIX)] = file
-        elif (store_key := _unpacked_store(key)) is not None:
-            unpacked.setdefault(store_key, []).append(file)
-
-    def offered(directory: str) -> list[dict[str, Any]]:
-        """Return what the bucket lists now to make ``directory`` from."""
-        sources_now = []
-        if directory in archives:
-            sources_now.append(_bucket_source(archives[directory]))
-        if directory in unpacked:
-            prefix = f"{repository}/{name}/{directory}"
-            sources_now.append(_unpacked_source(prefix, unpacked[directory]))
-        return sources_now
-
-    def complete(file: BucketFile) -> bool:
-        local = dataset_path / keys[file.path]
-        return local.is_file() and local.stat().st_size == file.size
-
-    def current_copy(file: BucketFile) -> bool:
-        recorded = sources["files"].get(keys[file.path])
-        return recorded == _bucket_source(file) and complete(file)
-
-    def adoptable(directory: str) -> dict[str, Any] | None:
-        """Return the listing of the archive beside ``directory`` if it has the listed size."""
-        archive = archives.get(directory)
-        if archive is None or not complete(archive):
-            return None
-        return _bucket_source(archive)
-
-    handled: set[str] = set()
     for file in selected:
-        key = keys[file.path]
+        key = _dataset_key(repository, file)
         source = _bucket_source(file)
-        if key.endswith(_ARCHIVE_SUFFIX):
-            directory_key = key.removesuffix(_ARCHIVE_SUFFIX)
-            directory = dataset_path / directory_key
-            if overwrite or not _path_exists(directory):
-                if overwrite or not current_copy(file):
-                    plan.fetch.append(file)
-                    plan.files[key] = source
-                else:
-                    plan.extract.append(file)
-                plan.stores[directory_key] = source
-                continue
-            made_from = sources["stores"].get(directory_key)
-            adopted = _judge_store(
-                directory,
-                made_from,
-                offered(directory_key),
-                preferred=source,
-                adoptable=adoptable(directory_key),
-            )
-            if adopted is not None:
-                plan.stores[directory_key] = adopted
-                plan.files[key] = source
-            elif made_from != source and not current_copy(file):
-                # The store came from the unpacked files: deliver the archive too.
-                plan.fetch.append(file)
-                plan.unextracted.add(file.path)
-                plan.files[key] = source
-            continue
-        store_key = _unpacked_store(key)
-        if store_key is None:
-            if overwrite or not current_copy(file):
+        local = dataset_path / key
+        complete = local.is_file() and local.stat().st_size == file.size
+        current = complete and _same_source(sources["files"].get(key), source)
+        if not key.endswith(_ARCHIVE_SUFFIX):
+            if overwrite or not current:
                 plan.fetch.append(file)
                 plan.files[key] = source
             continue
-        if store_key in handled:
+        directory_key = key.removesuffix(_ARCHIVE_SUFFIX)
+        directory = dataset_path / directory_key
+        if overwrite or not _path_exists(directory):
+            if overwrite or not current:
+                plan.fetch.append(file)
+                plan.files[key] = source
+            else:
+                plan.extract.append(file)
+            plan.stores[directory_key] = source
+            if not overwrite and directory_key in sources["stores"]:
+                plan.forget.append(directory_key)
             continue
-        handled.add(store_key)
-        unpacked_source = _unpacked_source(
-            f"{repository}/{name}/{store_key}", unpacked[store_key]
-        )
-        store = dataset_path / store_key
-        if overwrite or not _path_exists(store):
-            plan.fetch.extend(unpacked[store_key])
-            plan.unpacked.add(store_key)
-            plan.stores[store_key] = unpacked_source
+        made_from = sources["stores"].get(directory_key)
+        if made_from is None and complete and directory.is_dir():
+            plan.stores[directory_key] = source
             continue
-        adopted = _judge_store(
-            store,
-            sources["stores"].get(store_key),
-            offered(store_key),
-            preferred=unpacked_source,
-            adoptable=adoptable(store_key),
-        )
-        if adopted is not None:
-            plan.stores[store_key] = adopted
+        _check_existing_store(directory, made_from, source)
     return plan
 
 
-def _judge_store(
+def _check_existing_store(
     directory: Path,
-    made_from: dict[str, Any] | None,
-    offered: list[dict[str, Any]],
-    *,
-    preferred: dict[str, Any],
-    adoptable: dict[str, Any] | None,
-) -> dict[str, Any] | None:
-    """Keep the existing ``directory`` when it is current, and raise otherwise.
-
-    Return None when the record says that ``directory`` was made from one of
-    the sources ``offered`` now, and ``adoptable`` when nothing is recorded
-    and the caller found evidence that ``directory`` came from it.
-    ``preferred`` is the source that this call would make ``directory`` from.
+    made_from: Mapping[str, Any] | None,
+    current: Mapping[str, Any],
+) -> None:
+    """Return when the record says ``directory`` was made from ``current``, and raise otherwise.
 
     Raises:
-        FileExistsError: Saying what ``directory`` was made from, when it is
-            not current.
+        FileExistsError: Saying what ``directory`` was made from.
     """
-    if made_from in offered:
-        return None
-    if made_from is None and adoptable is not None:
-        return adoptable
-    if made_from is None:
+    if _same_source(made_from, current):
+        return
+    if made_from is None and not directory.is_dir():
+        reason = f"{directory} exists but is not a directory"
+    elif made_from is None:
         reason = (
             f"{directory} exists, but nothing records what it was made from, so "
             "it may be from an older version of the dataset"
         )
-    elif made_from["source"] in {source["source"] for source in offered}:
+    elif made_from["source"] == current["source"]:
         reason = (
             f"{directory} is from an older version of the dataset: it was made "
             f"from an earlier version of {_describe_source(made_from)}"
@@ -607,7 +577,7 @@ def _judge_store(
     else:
         reason = (
             f"{directory} was made from {_describe_source(made_from)}, not from "
-            f"{_describe_source(preferred)}"
+            f"{_describe_source(current)}"
         )
     raise FileExistsError(
         f"{reason}. Pass overwrite=True to replace {directory.name} with the "
@@ -618,11 +588,17 @@ def _judge_store(
 
 def _describe_source(source: Mapping[str, Any]) -> str:
     """Name what a record entry says a directory was made from."""
-    if "listing" in source:
-        return f"the unpacked files under {source['source']}"
     if "digest" in source:
         return f"the local store {source['source']}"
     return f"the archive {source['source']}"
+
+
+def _appeared_message(directory: Path, action: str) -> str:
+    return (
+        f"{directory} appeared while this call was {action}, so it is kept and "
+        "nothing replaced it. Call again to reuse it, or pass overwrite=True to "
+        "replace it, deleting anything saved in it."
+    )
 
 
 def _extract_archive_in_place(archive: Path) -> None:
@@ -642,17 +618,13 @@ def _download_files(
     destination: Path,
     *,
     overwrite: bool = True,
-    unextracted: Collection[str] = frozenset(),
-    directories: Collection[PurePosixPath] = (),
 ) -> list[Path]:
     """Download ``files`` below ``destination``, keeping their repository paths.
 
     Every file is downloaded into a hidden staging directory and checked
-    before anything is placed. An archive is extracted beside itself, unless
-    ``unextracted`` names its bucket path. The files below each of
-    ``directories``, given by repository path, are placed together as one
-    directory. Without ``overwrite``, an extracted or placed directory never
-    replaces one that exists by then, and raises instead.
+    before anything is placed. An archive is extracted beside itself. Without
+    ``overwrite``, an extracted directory never replaces one that exists by
+    then, and ``_StoreAppeared`` is raised instead.
     """
     destination = destination.absolute()
     destination.mkdir(parents=True, exist_ok=True)
@@ -692,25 +664,12 @@ def _download_files(
                     f"expected {file.size}"
                 )
 
-        whole = [destination.joinpath(*directory.parts) for directory in directories]
-        for file, staged_file, final_file in downloads:
-            if any(final_file.is_relative_to(directory) for directory in whole):
-                continue
+        for _, staged_file, final_file in downloads:
             final_file.parent.mkdir(parents=True, exist_ok=True)
-            if (
-                final_file.name.endswith(_ARCHIVE_SUFFIX)
-                and file.path not in unextracted
-            ):
+            if final_file.name.endswith(_ARCHIVE_SUFFIX):
                 _extract_and_replace(staged_file, final_file, overwrite=overwrite)
             else:
                 os.replace(staged_file, final_file)
-        for directory in whole:
-            directory.parent.mkdir(parents=True, exist_ok=True)
-            _place_directory(
-                staging_path / directory.relative_to(destination),
-                directory,
-                overwrite=overwrite,
-            )
     finally:
         shutil.rmtree(staging_path, ignore_errors=True)
 
@@ -759,43 +718,30 @@ def _remove_path(path: Path) -> None:
         path.unlink(missing_ok=True)
 
 
+class _StoreAppeared(FileExistsError):
+    """A directory appeared where a call was about to place one."""
+
+    def __init__(self, path: Path) -> None:
+        super().__init__(errno.EEXIST, "Directory appeared meanwhile", str(path))
+        self.path = path
+
+
 def _rename_new(source: Path, destination: Path) -> None:
     """Rename the directory ``source`` to ``destination``, which must not exist.
 
     POSIX renames a directory onto a missing or an empty directory only, and
     Windows onto a missing path only, so a directory that another process
-    filled at ``destination`` meanwhile is kept, and the rename raises.
+    filled at ``destination`` is kept.
 
     Raises:
-        FileExistsError: If ``destination`` exists.
+        _StoreAppeared: If ``destination`` exists.
     """
-    if not _path_exists(destination):
-        try:
-            os.rename(source, destination)
-            return
-        except OSError:
-            if not _path_exists(destination):
-                raise
-    raise FileExistsError(
-        f"{destination} appeared while this call was downloading, so it is kept "
-        "and nothing replaced it. Call again to reuse it, or pass overwrite=True "
-        "to replace it, deleting anything saved in it."
-    )
-
-
-def _place_directory(source: Path, destination: Path, *, overwrite: bool) -> None:
-    """Move the directory ``source`` to ``destination``, replacing it only with ``overwrite``."""
-    backup_path = Path(
-        tempfile.mkdtemp(dir=destination.parent, prefix=f".{destination.name}.backup-")
-    )
     try:
-        _replace_staged_paths(
-            [(source, destination)],
-            backup_path,
-            keep=frozenset() if overwrite else {destination},
-        )
-    finally:
-        shutil.rmtree(backup_path, ignore_errors=True)
+        os.rename(source, destination)
+    except OSError as error:
+        if _path_exists(destination):
+            raise _StoreAppeared(destination) from error
+        raise
 
 
 def _replace_staged_paths(
@@ -808,7 +754,7 @@ def _replace_staged_paths(
 
     A destination that exists is moved into ``backup_path`` and restored if a
     later move fails, except one in ``keep``, a directory that must not exist,
-    which is never moved aside, so that its move raises instead.
+    which is never moved aside, so that its move raises ``_StoreAppeared``.
     """
     replacements: list[tuple[Path, Path | None]] = []
 
@@ -866,6 +812,10 @@ def _extract_and_replace(
         with tarfile.open(archive_path, "r:gz") as archive:
             members = _safe_tar_members(archive, staging_path)
             archive.extractall(staging_path, members=members, filter="data")
+            # Read the stream to its end, so gzip checks its CRC and length.
+            stream = archive.fileobj
+            while stream is not None and stream.read(1 << 20):
+                pass
 
         extracted_paths = sorted(staging_path.iterdir(), key=lambda path: path.name)
         output_name = destination.name.removesuffix(_ARCHIVE_SUFFIX)

@@ -1087,6 +1087,8 @@ def test_overwrite_fetches_current_files_again(monkeypatch, tmp_path):
 
 @pytest.mark.parametrize("archive", ["current", "missing", "other-size"])
 def test_store_extracted_before_the_record_existed(monkeypatch, tmp_path, archive):
+    import shutil
+
     bucket = _Bucket(monkeypatch)
     bucket.files[ARCHIVE] = _store_archive(tmp_path)
     downloads = tmp_path / "downloads"
@@ -1103,6 +1105,18 @@ def test_store_extracted_before_the_record_existed(monkeypatch, tmp_path, archiv
     if archive == "current":
         assert _download(destination=downloads) == dataset
         assert _tree(downloads) == sorted([*before, "alpha/.cytebase-sources.json"])
+        assert bucket.fetched == []
+        assert (dataset / "data.zarr" / "results").read_text() == "saved analysis"
+        # Only the store is recorded: the archive's bytes were never compared,
+        # so a store deleted later comes from a fresh download of the archive.
+        record = json.loads((dataset / ".cytebase-sources.json").read_text())
+        assert (sorted(record["files"]), sorted(record["stores"])) == (
+            [],
+            ["data.zarr"],
+        )
+        shutil.rmtree(dataset / "data.zarr")
+        _download(destination=downloads)
+        assert bucket.fetched == [ARCHIVE]
         # The record now names the store's archive, so the bucket's next
         # version is reported rather than taken for the same one.
         bucket.files[ARCHIVE] = _same_size_other_bytes(bucket.files[ARCHIVE])
@@ -1118,8 +1132,34 @@ def test_store_extracted_before_the_record_existed(monkeypatch, tmp_path, archiv
             "anything saved in it, or move it elsewhere to keep it."
         )
         assert _tree(downloads) == before
+        assert bucket.fetched == []
+        assert (dataset / "data.zarr" / "results").read_text() == "saved analysis"
+
+
+@pytest.mark.parametrize("kind", ["file", "dangling symlink"])
+def test_a_store_path_that_is_not_a_directory_is_never_adopted(
+    monkeypatch, tmp_path, kind
+):
+    bucket = _Bucket(monkeypatch)
+    bucket.files[ARCHIVE] = _store_archive(tmp_path)
+    dataset = tmp_path / "downloads" / "alpha"
+    dataset.mkdir(parents=True)
+    store = dataset / "data.zarr"
+    if kind == "file":
+        store.write_text("not a store")
+    else:
+        store.symlink_to(tmp_path / "moved-away")
+    (dataset / "data.zarr.tar.gz").write_bytes(bucket.files[ARCHIVE])
+    before = _tree(dataset)
+
+    with pytest.raises(FileExistsError) as raised:
+        _download(destination=tmp_path / "downloads")
+
+    assert str(raised.value).startswith(
+        f"{store} exists but is not a directory. Pass overwrite=True"
+    )
+    assert _tree(dataset) == before
     assert bucket.fetched == []
-    assert (dataset / "data.zarr" / "results").read_text() == "saved analysis"
 
 
 def test_store_is_reused_after_its_archive_is_deleted(monkeypatch, tmp_path):
@@ -1224,118 +1264,6 @@ def test_overwrite_must_be_a_boolean(monkeypatch, tmp_path, value):
     assert not (tmp_path / "downloads").exists()
 
 
-def test_store_files_listed_beside_the_archive_keep_saved_results(
-    monkeypatch, tmp_path
-):
-    bucket = _Bucket(monkeypatch)
-    # Some datasets also list their store's files, for remote reads.
-    bucket.files["cytearc_docs/alpha/data.h5"] = b"counts"
-    bucket.files["cytearc_docs/alpha/data.zarr/X/c/0"] = b"chunk"
-    bucket.files["cytearc_docs/alpha/data.zarr/zarr.json"] = b'{"version": 1}'
-    downloads = tmp_path / "downloads"
-    dataset = _download(zarr=False, destination=downloads)
-    store = dataset / "data.zarr"
-    # Saving results rewrites the store's metadata and adds files.
-    (store / "zarr.json").write_bytes(b'{"version": 1, "results": ["saved"]}')
-    (store / "results").write_text("saved analysis")
-
-    _download(zarr=False, destination=downloads)
-    assert bucket.fetched == [
-        "cytearc_docs/alpha/data.h5",
-        "cytearc_docs/alpha/data.zarr/X/c/0",
-        "cytearc_docs/alpha/data.zarr/zarr.json",
-    ]
-
-    bucket.files["cytearc_docs/alpha/data.zarr/zarr.json"] = b'{"version": 2}'
-    with pytest.raises(FileExistsError) as raised:
-        _download(zarr=False, destination=downloads)
-    assert str(raised.value) == (
-        f"{store} is from an older version of the dataset: it was made from an "
-        "earlier version of the unpacked files under cytearc_docs/alpha/data.zarr. "
-        "Pass overwrite=True to replace data.zarr with the current version, "
-        "deleting anything saved in it, or move it elsewhere to keep it."
-    )
-    assert len(bucket.fetched) == 3
-    assert (store / "zarr.json").read_bytes() == b'{"version": 1, "results": ["saved"]}'
-
-    # overwrite=True replaces the whole store rather than mixing files into it.
-    _download(zarr=False, overwrite=True, destination=downloads)
-    assert _tree(store) == ["X", "X/c", "X/c/0", "zarr.json"]
-    assert (store / "zarr.json").read_bytes() == b'{"version": 2}'
-
-
-def test_a_store_extracted_from_the_archive_is_current_for_its_unpacked_files(
-    monkeypatch, tmp_path
-):
-    bucket = _Bucket(monkeypatch)
-    bucket.files[ARCHIVE] = _store_archive(tmp_path, b'{"version": 1}')
-    bucket.files["cytearc_docs/alpha/data.h5"] = b"counts"
-    bucket.files["cytearc_docs/alpha/data.zarr/zarr.json"] = b'{"version": 1}'
-    downloads = tmp_path / "downloads"
-    dataset = _download(destination=downloads)
-    (dataset / "data.zarr" / "zarr.json").write_bytes(b'{"results": ["saved"]}')
-
-    _download(zarr=False, destination=downloads)
-    _download(zarr=False, destination=downloads)
-
-    # The other files are delivered, and the store's unpacked files are not.
-    assert bucket.fetched == [ARCHIVE, "cytearc_docs/alpha/data.h5"]
-    assert (dataset / "data.h5").read_bytes() == b"counts"
-    assert (dataset / "data.zarr" / "zarr.json").read_bytes() == (
-        b'{"results": ["saved"]}'
-    )
-
-
-def test_store_extracted_before_the_record_existed_serves_unpacked_files(
-    monkeypatch, tmp_path
-):
-    bucket = _Bucket(monkeypatch)
-    bucket.files[ARCHIVE] = _store_archive(tmp_path)
-    bucket.files["cytearc_docs/alpha/data.h5"] = b"counts"
-    bucket.files["cytearc_docs/alpha/data.zarr/zarr.json"] = b"{}"
-    dataset = tmp_path / "downloads" / "alpha"
-    # An earlier CyteArc left the store and its archive, and no record.
-    (dataset / "data.zarr").mkdir(parents=True)
-    (dataset / "data.zarr" / "results").write_text("saved analysis")
-    (dataset / "data.zarr.tar.gz").write_bytes(bucket.files[ARCHIVE])
-
-    _download(zarr=False, destination=tmp_path / "downloads")
-
-    assert bucket.fetched == ["cytearc_docs/alpha/data.h5"]
-    assert _tree(dataset / "data.zarr") == ["results"]
-    record = json.loads((dataset / ".cytebase-sources.json").read_text())
-    assert record["stores"]["data.zarr"]["source"] == ARCHIVE
-
-
-def test_a_store_of_unpacked_files_is_current_for_the_archive(monkeypatch, tmp_path):
-    bucket = _Bucket(monkeypatch)
-    bucket.files[ARCHIVE] = _store_archive(tmp_path, b'{"version": 1}')
-    bucket.files["cytearc_docs/alpha/data.zarr/zarr.json"] = b'{"version": 1}'
-    downloads = tmp_path / "downloads"
-    dataset = _download(zarr=False, destination=downloads)
-    (dataset / "data.zarr" / "results").write_text("saved analysis")
-
-    _download(destination=downloads)
-    _download(destination=downloads)
-
-    # The archive is delivered beside the store, which it does not replace.
-    assert bucket.fetched == ["cytearc_docs/alpha/data.zarr/zarr.json", ARCHIVE]
-    assert (dataset / "data.zarr.tar.gz").read_bytes() == bucket.files[ARCHIVE]
-    assert _tree(dataset / "data.zarr") == ["results", "zarr.json"]
-    # Once the unpacked files change, the store is older for both selections.
-    bucket.files["cytearc_docs/alpha/data.zarr/zarr.json"] = b'{"version": 2}'
-    bucket.files[ARCHIVE] = _store_archive(tmp_path, b'{"version": 2}')
-    for zarr in (True, False):
-        with pytest.raises(
-            FileExistsError,
-            match="from an earlier version of the unpacked files under "
-            "cytearc_docs/alpha/data.zarr",
-        ):
-            _download(zarr=zarr, destination=downloads)
-    assert len(bucket.fetched) == 2
-    assert _tree(dataset / "data.zarr") == ["results", "zarr.json"]
-
-
 def _local_catalog(monkeypatch, tmp_path) -> Path:
     from cytearc import datasets
 
@@ -1427,6 +1355,7 @@ def test_store_made_from_another_source_is_not_replaced(monkeypatch, tmp_path):
         '{"files": {"data.h5": 5}, "stores": {}}',
         '{"files": {}, "stores": {"data.zarr": {"size": 1}}}',
         "\udcff",
+        None,
     ],
     ids=[
         "invalid",
@@ -1436,6 +1365,7 @@ def test_store_made_from_another_source_is_not_replaced(monkeypatch, tmp_path):
         "entry-not-a-mapping",
         "entry-without-source",
         "undecodable",
+        "directory",
     ],
 )
 def test_a_record_that_cytearc_did_not_write_raises(
@@ -1445,7 +1375,10 @@ def test_a_record_that_cytearc_did_not_write_raises(
     bucket.files["cytearc_docs/alpha/data.h5"] = b"counts"
     record = tmp_path / "alpha" / ".cytebase-sources.json"
     record.parent.mkdir()
-    record.write_bytes(content.encode("utf-8", "surrogateescape"))
+    if content is None:
+        record.mkdir()
+    else:
+        record.write_bytes(content.encode("utf-8", "surrogateescape"))
 
     with pytest.raises(ValueError) as raised:
         _download(zarr=False, overwrite=overwrite, destination=tmp_path)
@@ -1545,75 +1478,102 @@ def test_record_keeps_what_another_call_recorded_meanwhile(monkeypatch, tmp_path
     assert bucket.fetched == [ARCHIVE, "cytearc_docs/alpha/data.h5"]
 
 
-@pytest.mark.parametrize("selection", ["archive", "unpacked files"])
-def test_a_store_that_appears_during_the_download_is_kept(
-    monkeypatch, tmp_path, selection
+@pytest.mark.parametrize("recorded", [True, False], ids=["recorded", "unrecorded"])
+@pytest.mark.parametrize("step", ["download", "extraction in place"])
+def test_a_store_that_appears_during_the_call_is_kept(
+    monkeypatch, tmp_path, step, recorded
 ):
+    import shutil
+
+    from cytearc import datasets
+
     bucket = _Bucket(monkeypatch)
-    if selection == "archive":
-        bucket.files[ARCHIVE] = _store_archive(tmp_path, b'{"version": 1}')
-    else:
-        bucket.files["cytearc_docs/alpha/data.zarr/zarr.json"] = b'{"version": 1}'
-    zarr = selection == "archive"
+    bucket.files[ARCHIVE] = _store_archive(tmp_path, b'{"version": 1}')
     downloads = tmp_path / "downloads"
     store = downloads / "alpha" / "data.zarr"
-    fetch = bucket.download_bucket_files
-    others = [zarr]
+    if step == "extraction in place":
+        # The store was deleted, and its archive is still current.
+        _download(destination=downloads)
+        shutil.rmtree(store)
+    others = [True]
 
-    def fetch_while_another_call_finishes(bucket_id, files, **kwargs):
-        # Another notebook's first call finishes, and the notebook saves a
-        # result in the store, while this call downloads.
+    def another_call():
+        # Another notebook places the store, and saves a result in it, while
+        # this call runs: a finished call has recorded the store, one still
+        # running has not.
         if others:
-            _download(zarr=others.pop(), destination=downloads)
+            others.pop()
+            if recorded:
+                _download(destination=downloads)
+            else:
+                store.mkdir(parents=True)
+                (store / "zarr.json").write_bytes(b'{"version": 1}')
             (store / "results").write_text("saved analysis")
-        fetch(bucket_id, files, **kwargs)
 
-    monkeypatch.setattr(
-        "cytearc.datasets.download_bucket_files", fetch_while_another_call_finishes
-    )
-    with pytest.raises(FileExistsError) as raised:
-        _download(zarr=zarr, destination=downloads)
+    if step == "download":
+        fetch = bucket.download_bucket_files
 
-    assert str(raised.value) == (
-        f"{store} appeared while this call was downloading, so it is kept and "
-        "nothing replaced it. Call again to reuse it, or pass overwrite=True to "
-        "replace it, deleting anything saved in it."
-    )
+        def fetch_while_another_call_runs(bucket_id, files, **kwargs):
+            another_call()
+            fetch(bucket_id, files, **kwargs)
+
+        monkeypatch.setattr(
+            datasets, "download_bucket_files", fetch_while_another_call_runs
+        )
+    else:
+        safe_members = datasets._safe_tar_members
+
+        def extract_while_another_call_runs(archive, staging_path):
+            another_call()
+            return safe_members(archive, staging_path)
+
+        monkeypatch.setattr(
+            datasets, "_safe_tar_members", extract_while_another_call_runs
+        )
+
+    if recorded:
+        assert _download(destination=downloads) == store.parent
+    else:
+        with pytest.raises(FileExistsError) as raised:
+            _download(destination=downloads)
+        action = "downloading" if step == "download" else "extracting its archive again"
+        assert str(raised.value) == (
+            f"{store} appeared while this call was {action}, so it is kept and "
+            "nothing replaced it. Call again to reuse it, or pass overwrite=True to "
+            "replace it, deleting anything saved in it."
+        )
     assert (store / "results").read_text() == "saved analysis"
-    # No staging or backup folder is left, and the next call reuses the store.
+    # No staging, extraction or backup folder is left behind.
     assert not [
         path
         for path in _tree(downloads)
         if "/." in f"/{path}" and "sources" not in path
     ]
-    _download(zarr=zarr, destination=downloads)
-    assert len(bucket.fetched) == 2
-    assert (store / "results").read_text() == "saved analysis"
 
 
-def test_a_directory_moved_into_place_keeps_one_that_appears_first(
-    monkeypatch, tmp_path
-):
+@pytest.mark.parametrize("existing", ["filled directory", "file"])
+def test_a_directory_is_never_moved_onto_an_existing_path(tmp_path, existing):
     from cytearc import datasets
 
-    staged = tmp_path / "staged"
-    staged.mkdir()
+    work = tmp_path / "work"
+    staged = work / "staged"
+    staged.mkdir(parents=True)
     (staged / "zarr.json").write_text("new")
-    destination = tmp_path / "data.zarr"
-    rename = os.rename
+    destination = work / "data.zarr"
+    if existing == "file":
+        destination.write_text("saved")
+    else:
+        destination.mkdir()
+        (destination / "results").write_text("saved")
 
-    def rename_after_another_process(source, target):
-        # Another process fills the destination between the check and the move.
-        Path(target).mkdir()
-        (Path(target) / "results").write_text("saved analysis")
-        rename(source, target)
-
-    monkeypatch.setattr(datasets.os, "rename", rename_after_another_process)
-    with pytest.raises(FileExistsError, match="appeared while this call"):
+    with pytest.raises(FileExistsError) as raised:
         datasets._rename_new(staged, destination)
 
-    assert _tree(destination) == ["results"]
-    assert (staged / "zarr.json").read_text() == "new"
+    assert raised.value.filename == str(destination)
+    assert _tree(work) == sorted(
+        ["staged", "staged/zarr.json", "data.zarr"]
+        + ([] if existing == "file" else ["data.zarr/results"])
+    )
 
 
 def test_a_directory_that_cannot_be_moved_raises_the_move_error(monkeypatch, tmp_path):
@@ -1631,31 +1591,121 @@ def test_a_directory_that_cannot_be_moved_raises_the_move_error(monkeypatch, tmp
     assert not (tmp_path / "data.zarr").exists()
 
 
+@pytest.mark.parametrize("recorded", [True, False], ids=["recorded", "unrecorded"])
+@pytest.mark.parametrize("step", ["first copy", "copy deleted"])
 def test_a_local_catalog_store_that_appears_during_the_copy_is_kept(
-    monkeypatch, tmp_path
+    monkeypatch, tmp_path, step, recorded
 ):
+    import shutil
+
     from cytearc import datasets
 
     _local_catalog(monkeypatch, tmp_path)
     downloads = tmp_path / "downloads"
     store = downloads / "alpha" / "data.zarr"
+    if step == "copy deleted":
+        _download(destination=downloads)
+        shutil.rmtree(store)
     copy_tree = datasets.shutil.copytree
     others = [True]
 
-    def copy_while_another_call_finishes(*args, **kwargs):
+    def copy_while_another_call_runs(*args, **kwargs):
         # copytree calls itself for each folder, so only the first call waits.
         if others:
             others.pop()
-            _download(destination=downloads)
+            if recorded:
+                _download(destination=downloads)
+            else:
+                store.mkdir(parents=True)
             (store / "results").write_text("saved analysis")
         return copy_tree(*args, **kwargs)
 
-    monkeypatch.setattr(datasets.shutil, "copytree", copy_while_another_call_finishes)
-    with pytest.raises(FileExistsError, match="appeared while this call"):
-        _download(destination=downloads)
-
+    monkeypatch.setattr(datasets.shutil, "copytree", copy_while_another_call_runs)
+    if recorded:
+        assert _download(destination=downloads) == store.parent
+    else:
+        with pytest.raises(
+            FileExistsError,
+            match="appeared while this call was copying it from the local catalog",
+        ):
+            _download(destination=downloads)
     assert (store / "results").read_text() == "saved analysis"
-    assert _download(destination=downloads) == store.parent
+    assert not [path for path in _tree(store.parent) if path.startswith(".data.zarr")]
+
+
+@pytest.mark.parametrize(
+    "archive", [True, False], ids=["with archive", "unpacked only"]
+)
+def test_a_call_without_zarr_skips_the_unpacked_store(monkeypatch, tmp_path, archive):
+    bucket = _Bucket(monkeypatch)
+    bucket.files["cytearc_docs/alpha/data.h5"] = b"counts"
+    # Some datasets also list their store's files, for remote reads.
+    bucket.files["cytearc_docs/alpha/data.zarr/zarr.json"] = b'{"version": 1}'
+    bucket.files["cytearc_docs/alpha/data.zarr/X/c/0"] = b"chunk"
+    if archive:
+        bucket.files[ARCHIVE] = _store_archive(tmp_path, b'{"version": 1}')
+    downloads = tmp_path / "downloads"
+
+    dataset = _download(zarr=False, destination=downloads)
+
+    assert bucket.fetched == ["cytearc_docs/alpha/data.h5"]
+    assert sorted(path.name for path in dataset.iterdir()) == [
+        ".cytebase-sources.json",
+        "data.h5",
+    ]
+    if archive:
+        # The store comes from zarr=True, and a later call without it, even
+        # with overwrite=True, leaves the store and its results alone.
+        _download(destination=downloads)
+        (dataset / "data.zarr" / "results").write_text("saved analysis")
+        _download(zarr=False, overwrite=True, destination=downloads)
+        assert bucket.fetched == ["cytearc_docs/alpha/data.h5", ARCHIVE] + [
+            "cytearc_docs/alpha/data.h5"
+        ]
+        assert _tree(dataset / "data.zarr") == ["results", "zarr.json"]
+
+
+@pytest.mark.parametrize(
+    "unpacked", [True, False], ids=["unpacked store", "archive only"]
+)
+def test_a_call_without_zarr_on_a_dataset_of_only_a_store_raises(
+    monkeypatch, tmp_path, unpacked
+):
+    bucket = _Bucket(monkeypatch)
+    if unpacked:
+        bucket.files["cytearc_docs/alpha/data.zarr/zarr.json"] = b"{}"
+    else:
+        bucket.files[ARCHIVE] = _store_archive(tmp_path)
+
+    with pytest.raises(FileNotFoundError) as raised:
+        _download(zarr=False, destination=tmp_path / "downloads")
+
+    assert str(raised.value) == (
+        "'alpha' lists no files besides its Zarr store. Pass zarr=True to download "
+        "the store's archive, or open the store remotely by its hf:// URI."
+    )
+    assert not (tmp_path / "downloads").exists()
+
+
+def test_record_entries_are_compared_by_their_source_fields(monkeypatch, tmp_path):
+    bucket = _Bucket(monkeypatch)
+    bucket.files[ARCHIVE] = _store_archive(tmp_path)
+    bucket.files["cytearc_docs/alpha/data.h5"] = b"counts"
+    downloads = tmp_path / "downloads"
+    _download(destination=downloads)
+    _download(zarr=False, destination=downloads)
+    record_path = downloads / "alpha" / ".cytebase-sources.json"
+    record = json.loads(record_path.read_text())
+    # A later CyteArc may record more about each file.
+    for part in ("files", "stores"):
+        for entry in record[part].values():
+            entry["uploadedAt"] = "2026-11-13T00:00:00Z"
+    record_path.write_text(json.dumps(record))
+
+    _download(destination=downloads)
+    _download(zarr=False, destination=downloads)
+
+    assert bucket.fetched == [ARCHIVE, "cytearc_docs/alpha/data.h5"]
 
 
 def test_a_truncated_file_in_a_subdirectory_is_fetched_again(monkeypatch, tmp_path):
@@ -1696,25 +1746,45 @@ def test_a_directory_extracted_from_any_archive_is_kept(monkeypatch, tmp_path):
     assert _tree(dataset / "raw") == ["matrix.mtx", "notes.txt"]
 
 
-@pytest.mark.parametrize("damage", ["zeroed", "truncated-stream"])
+@pytest.mark.parametrize(
+    ("damage", "error"),
+    [
+        ("zeroed block", "zlib.error"),
+        ("zeroed end", "EOFError"),
+        ("flipped byte", "gzip.BadGzipFile"),
+        ("damaged header", "tarfile.ReadError"),
+    ],
+)
 def test_a_corrupt_archive_beside_a_deleted_store_names_the_remedy(
-    monkeypatch, tmp_path, damage
+    monkeypatch, tmp_path, damage, error
 ):
+    import gzip
     import shutil
+    import zlib
 
     bucket = _Bucket(monkeypatch)
-    payload = b'{"version": 1}' * 50
-    bucket.files[ARCHIVE] = _store_archive(tmp_path, payload)
+    # Random chunks do not compress, so deflate stores them in blocks that it
+    # copies unchecked; only the CRC at the end of the stream finds a changed
+    # byte in them.
+    chunk = os.urandom(3 * 2**20)
+    bucket.files[ARCHIVE] = _write_tar(
+        tmp_path / "large.tar.gz",
+        [(f"data.zarr/c/{index}", "file", chunk) for index in range(3)],
+    ).read_bytes()
     downloads = tmp_path / "downloads"
     dataset = _download(destination=downloads)
     shutil.rmtree(dataset / "data.zarr")
     archive = dataset / "data.zarr.tar.gz"
     data = bytearray(archive.read_bytes())
-    if damage == "zeroed":
-        data[20:-10] = bytes(len(data) - 30)
+    middle = len(data) // 2
+    if damage == "zeroed block":
+        data[middle : middle + 4096] = bytes(4096)
+    elif damage == "zeroed end":
+        data[-16:] = bytes(16)
+    elif damage == "flipped byte":
+        data[middle] ^= 0xFF
     else:
-        # Keep the size, but end the compressed stream early.
-        data[len(data) // 2 :] = bytes(len(data) - len(data) // 2)
+        data[0] ^= 0xFF
     archive.write_bytes(bytes(data))
 
     with pytest.raises(ValueError) as raised:
@@ -1723,10 +1793,17 @@ def test_a_corrupt_archive_beside_a_deleted_store_names_the_remedy(
     message = str(raised.value)
     assert message.startswith(f"{archive} cannot be extracted: ")
     assert message.endswith(". Pass overwrite=True to download it again.")
-    assert raised.value.__cause__ is not None
+    types = {
+        "zlib.error": zlib.error,
+        "EOFError": EOFError,
+        "gzip.BadGzipFile": gzip.BadGzipFile,
+        "tarfile.ReadError": tarfile.ReadError,
+    }
+    assert type(raised.value.__cause__) is types[error]
+    assert bucket.fetched == [ARCHIVE]
     assert _tree(dataset) == [".cytebase-sources.json", "data.zarr.tar.gz"]
     _download(overwrite=True, destination=downloads)
-    assert (dataset / "data.zarr" / "zarr.json").read_bytes() == payload
+    assert (dataset / "data.zarr" / "c" / "0").read_bytes() == chunk
 
 
 @pytest.mark.integration
