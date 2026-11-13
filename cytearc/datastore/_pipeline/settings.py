@@ -8,7 +8,7 @@ from typing import Any
 import numpy as np
 
 from ...clustering.leiden import canonical_resolution
-from ...embeddings import sgtsne
+from ...embeddings import localmap, sgtsne
 from ...features.gene_reference import species_registry
 from ...features.variability import (
     HVG_FLAVOR_OPTION_NAMES,
@@ -74,6 +74,9 @@ _HVG_FLAVOR_OPTION_DEFAULTS: Mapping[str, Any] = MappingProxyType(
 UMAP_DIMS_DEFAULT: int = keyword_default(
     _EmbeddingOperationsMixin._embeddings_umap, "umap_dims"
 )
+LOCALMAP_DIMS_DEFAULT: int = keyword_default(
+    _EmbeddingOperationsMixin._embeddings_localmap, "localmap_dims"
+)
 TSNE_DIMS_DEFAULT: int = keyword_default(
     _EmbeddingOperationsMixin._embeddings_tsne, "tsne_dims"
 )
@@ -92,6 +95,14 @@ _TSNE_SETTING_DEFAULTS: Mapping[str, Any] = MappingProxyType(
     {
         name: keyword_default(_EmbeddingOperationsMixin._embeddings_tsne, name)
         for name in inspect.signature(sgtsne.sgtsne_settings).parameters
+    }
+)
+# The embeddings.localmap settings, which localmap_settings checks, at the
+# embeddings.localmap defaults that localmap settings omit.
+_LOCALMAP_SETTING_DEFAULTS: Mapping[str, Any] = MappingProxyType(
+    {
+        name: keyword_default(_EmbeddingOperationsMixin._embeddings_localmap, name)
+        for name in inspect.signature(localmap.localmap_settings).parameters
     }
 )
 # The graph-loading keywords of embeddings.tsne, embeddings.umap, and
@@ -219,6 +230,17 @@ STAGE_SETTINGS: Mapping[str, frozenset[str]] = MappingProxyType(
                 "dens_var_shift",
                 "random_seed",
                 "parallel",
+            }
+        ),
+        "localmap": frozenset(
+            {
+                "localmap_dims",
+                "n_mid_near",
+                "n_further",
+                "iterations",
+                "learning_rate",
+                "max_distance",
+                "random_seed",
             }
         ),
         "tsne": frozenset(
@@ -354,6 +376,7 @@ STAGE_METHODS: Mapping[str, tuple[Callable[..., Any], ...]] = MappingProxyType(
         "integration": (_GRAPH._integration_modalities,),
         "embedding_initialization": (_GRAPH._embeddings_initialization,),
         "umap": (_EmbeddingOperationsMixin._embeddings_umap,),
+        "localmap": (_EmbeddingOperationsMixin._embeddings_localmap,),
         "tsne": (_EmbeddingOperationsMixin._embeddings_tsne,),
         "leiden": (_ClusteringOperationsMixin._clusters_leiden,),
         "membership_strength": (
@@ -555,6 +578,13 @@ def _check_stage_values(stage: str, value: Mapping[str, Any]) -> None:
                     for name, default in _TSNE_SETTING_DEFAULTS.items()
                 }
             )
+    elif stage == "localmap":
+        localmap.localmap_settings(
+            **{
+                name: value.get(name, default)
+                for name, default in _LOCALMAP_SETTING_DEFAULTS.items()
+            }
+        )
     elif stage == "harmony" and "harmony_params" in value:
         from ...embeddings.harmony import validate_harmony_parameters
 

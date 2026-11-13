@@ -509,6 +509,7 @@ def _recipe_kwargs() -> dict[str, Any]:
         "connectivity": None,
         "embedding_initialization": None,
         "umap": False,
+        "localmap": False,
         "tsne": False,
         "leiden": True,
         "paris": False,

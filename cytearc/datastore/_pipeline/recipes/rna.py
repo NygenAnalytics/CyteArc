@@ -404,6 +404,7 @@ def resolve_rna(
     connectivity: object,
     embedding_initialization: object,
     umap: object,
+    localmap: object,
     tsne: object,
     leiden: object,
     paris: object,
@@ -455,7 +456,7 @@ def resolve_rna(
         connectivity=connectivity,
         embedding_initialization=embedding_initialization,
     )
-    embeddings = resolve_embeddings(umap=umap, tsne=tsne)
+    embeddings = resolve_embeddings(umap=umap, localmap=localmap, tsne=tsne)
     partitions, selected, leiden_settings = resolve_leiden(leiden)
     paris_enabled, paris_settings = stage_settings("paris", paris, optional=True)
     doublets_enabled, doublet_settings = stage_settings(
@@ -550,6 +551,7 @@ def resolve_rna(
         leiden=leiden_settings,
         paris=(paris_enabled, paris_settings),
         umap=(embeddings.umap, embeddings.umap_settings),
+        localmap=(embeddings.localmap, embeddings.localmap_settings),
         tsne=(embeddings.tsne, embeddings.tsne_settings),
         initialization=graph.initialization,
         membership_strength=membership_strength,

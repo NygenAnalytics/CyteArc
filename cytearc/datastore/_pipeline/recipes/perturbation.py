@@ -724,6 +724,7 @@ def resolve_perturbation(
         snapshot_columns,
         reserved=reserved_fields(
             umap_dims=0,
+            localmap_dims=0,
             tsne_dims=0,
             leiden_keys=(),
             extra=("highly_variable_features", *PERTURBATION_CELL_FIELDS),
