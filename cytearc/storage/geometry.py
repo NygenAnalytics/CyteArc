@@ -78,35 +78,56 @@ class ArrayGeometry:
             for extent, chunk in zip(self.shape[1:], self.chunks[1:], strict=True)
         )
 
+    def heldDecodeBytes(self, chunks: int, decodes: int) -> int:
+        """Return the decoded chunks that a read holds from its earlier decodes.
+
+        Zarr decodes a chunk in a thread of its pool, and that thread keeps
+        the chunk it decoded until it is scheduled again. A read that decodes
+        ``chunks`` chunks ``decodes`` at a time can therefore hold one
+        previous decoded chunk for each decode under way beside it, which a
+        busy machine makes likely: one chunk per decode, and no more than the
+        decodes that follow the first ones.
+        """
+        touched = max(1, int(chunks))
+        decoding = min(touched, max(1, int(decodes)))
+        return min(decoding, touched - decoding) * self.nominalChunkBytes()
+
     def wholeReadBytes(self, concurrency: int) -> int:
         """Return what reading the whole array at ``concurrency`` holds while it runs, with the result.
 
         An unsharded array is read in one call, which decodes up to
-        ``concurrency`` chunks at once, each as stored and decoded. A sharded
-        array is read a band of inner chunks at a time, as
-        :meth:`bandReadBytes` counts, so that no fetch takes more than one
-        band of a shard.
+        ``concurrency`` chunks at once, each as stored and decoded, beside the
+        chunks that :meth:`heldDecodeBytes` counts. A sharded array is read a
+        band of inner chunks at a time, as :meth:`bandReadBytes` counts, so
+        that no fetch takes more than one band of a shard.
         """
         result = self.shape[0] * self.rowBytes()
         if self.shards is not None:
             return result + self.bandReadBytes(self.axisChunk(0), concurrency)
-        n_chunks = -(-self.shape[0] // self.axisChunk(0)) * self.bandChunks()
-        decoding = min(max(1, int(concurrency)), max(1, n_chunks))
-        return result + decoding * self.storedChunkBytes()
+        n_chunks = max(1, -(-self.shape[0] // self.axisChunk(0)) * self.bandChunks())
+        decoding = min(max(1, int(concurrency)), n_chunks)
+        return (
+            result
+            + decoding * self.storedChunkBytes()
+            + self.heldDecodeBytes(n_chunks, decoding)
+        )
 
     def bandReadBytes(self, rows: int, concurrency: int) -> int:
         """Return what reading ``rows`` rows of one band of chunks holds beside the result it fills.
 
         The read holds those rows as Zarr returns them and the band's chunks
-        that it decodes at once, each as stored and decoded; a sharded array
-        also fills a shard-level copy of the rows and holds the stored bytes
-        of every chunk of the band it fetched.
+        that it decodes at once, each as stored and decoded, beside the chunks
+        that :meth:`heldDecodeBytes` counts; a sharded array also fills a
+        shard-level copy of the rows and holds the stored bytes of every chunk
+        of the band it fetched, which covers those.
         """
         rows_bytes = max(0, int(rows)) * self.rowBytes()
         touched = self.bandChunks()
         decoding = min(max(1, int(concurrency)), touched)
         if self.shards is None:
-            band = decoding * self.storedChunkBytes()
+            band = decoding * self.storedChunkBytes() + self.heldDecodeBytes(
+                touched, decoding
+            )
         else:
             band = (
                 rows_bytes
@@ -128,22 +149,31 @@ class ArrayGeometry:
         than it decodes to. An unsharded read holds its result and each chunk
         it decodes at once as stored and decoded, as :meth:`storedChunkBytes`
         counts, since Zarr keeps a chunk's compressed bytes beside it while it
-        decodes it. ``chunks`` counts the inner chunks the read touches in one
-        shard and ``decodes`` the chunks Zarr decodes at once, all of them
-        unless given. Storage-provided scratch covers one shard request,
-        including its sequential inner-chunk reads. Independent shard requests
-        each need this allowance. Unsharded reads charge scratch per decode.
+        decodes it. Either read that decodes more chunks than it decodes at
+        once also holds the previous decoded chunks that
+        :meth:`heldDecodeBytes` counts. ``chunks`` counts the inner chunks the
+        read touches in one shard and ``decodes`` the chunks Zarr decodes at
+        once, all of them unless given. Storage-provided scratch covers one
+        shard request, including its sequential inner-chunk reads. Independent
+        shard requests each need this allowance. Unsharded reads charge
+        scratch per decode.
         """
         touched = max(1, int(chunks))
         decoding = touched if decodes is None else min(touched, max(1, int(decodes)))
         result = max(0, int(resultBytes))
+        held = self.heldDecodeBytes(touched, decoding)
         if self.shards is None:
-            return result + decoding * (self.storedChunkBytes() + self.readScratchBytes)
+            return (
+                result
+                + decoding * (self.storedChunkBytes() + self.readScratchBytes)
+                + held
+            )
         decoded = self.nominalChunkBytes()
         return (
             2 * result
             + touched * (self.storedChunkBytes() - decoded)
             + decoding * decoded
+            + held
             + self.readScratchBytes
         )
 

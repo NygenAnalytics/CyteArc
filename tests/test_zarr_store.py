@@ -1493,8 +1493,9 @@ def test_copying_a_sharded_array_reserves_its_shard_read(tmp_path, monkeypatch):
 
     # A band of all 64 rows fills Zarr's 2,048-byte shard-level copy of them,
     # holds the compressed bytes of the four 256-byte chunks of a shard, each
-    # at most 256 + 256 // 128 + 1,024 bytes, and decodes one chunk at a time.
-    assert recorded == [2_048 + 4 * (256 + 2 + 1_024) + 256]
+    # at most 256 + 256 // 128 + 1,024 bytes, and decodes one chunk at a time
+    # beside the chunk decoded before it.
+    assert recorded == [2_048 + 4 * (256 + 2 + 1_024) + 256 + 256]
     np.testing.assert_array_equal(target[:], expected)
 
 
