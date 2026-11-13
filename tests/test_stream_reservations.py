@@ -22,9 +22,14 @@ def test_read_bytes_follow_what_a_zarr_read_holds() -> None:
     )
     nominal = 10 * 4 * 2
     # The result and Zarr's shard-level copy of it, the compressed bytes of
-    # the chunks touched in a shard, and the chunks decoded at once.
-    assert sharded.readBytes(1_000, 5) == 2 * 1_000 + (5 + 5) * nominal
-    assert sharded.readBytes(1_000, 5, decodes=2) == 2 * 1_000 + (5 + 2) * nominal
+    # the chunks touched in a shard, each at the bound of its encoded size,
+    # here 1,024 bytes beyond the 80 it decodes to, and the chunks decoded at
+    # once.
+    encoded = 80 + 1_024
+    assert sharded.readBytes(1_000, 5) == 2 * 1_000 + 5 * encoded + 5 * nominal
+    assert (
+        sharded.readBytes(1_000, 5, decodes=2) == 2 * 1_000 + 5 * encoded + 2 * nominal
+    )
     assert sharded.readBytes(1_000, 5, decodes=9) == sharded.readBytes(1_000, 5)
     # An unsharded read holds its result and each chunk it decodes at once as
     # stored and decoded: the decoded chunk beside the bound of its compressed
@@ -112,6 +117,53 @@ def test_a_row_block_read_of_an_unsharded_array_holds_no_more_than_its_plan(
     assert block.nbytes == decoded
     assert peak > block.nbytes + decoded
     assert matrix.stream_bytes() >= peak
+
+
+@pytest.mark.parametrize("profile", ["fast_local", "cloud"])
+def test_a_band_read_of_a_sharded_array_holds_no_more_than_its_charge(
+    tmp_path: Any, profile: str
+) -> None:
+    import tracemalloc
+
+    from cytearc.storage.arrays import create_numeric_array
+    from cytearc.storage.geometry import array_geometry
+    from cytearc.storage.layout import row_sharded_array_spec
+
+    # Random bits do not compress, so each inner chunk is stored a few bytes
+    # larger than the 4 MiB it decodes to.
+    spec = row_sharded_array_spec(
+        (8_192, 512),
+        np.float32,
+        profile=profile,
+        band_rows=8_192,
+        target_chunk_bytes=4 * 1024**2,
+    )
+    root = zarr.open_group(store=LocalStore(str(tmp_path)), mode="w")
+    stored = create_numeric_array(root, "data", spec)
+    assert (stored.shards, stored.chunks) == ((8_192, 512), (2_048, 512))
+    bits = np.random.default_rng(0).integers(
+        0, 1 << 32, size=spec.shape, dtype=np.uint32
+    )
+    stored[:] = bits.view(np.float32)
+    del bits
+    geometry = array_geometry(stored)
+    assert geometry is not None
+
+    with zarr.config.set({"async.concurrency": 1}):
+        tracemalloc.start()
+        try:
+            base, _ = tracemalloc.get_traced_memory()
+            band = stored[:, :]
+            _current, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+
+    # The read held its result, Zarr's shard-level copy of it, the shard's
+    # four compressed chunks and one decoded chunk, more than those alone,
+    # and the charge for one decode at a time covers all of it.
+    decoded = 2_048 * 512 * 4
+    assert peak - base > 2 * band.nbytes + 5 * decoded
+    assert geometry.readBytes(band.nbytes, 4, decodes=1) >= peak - base
 
 
 def test_a_row_block_stream_of_an_unsharded_array_reserves_each_stored_chunk() -> None:
@@ -389,8 +441,9 @@ def test_sharded_feature_blocks_reserve_their_read() -> None:
 
     # A block of eight features holds its 320-byte result, Zarr's copy of it,
     # and, per decode, the compressed bytes of the two row chunks of each of
-    # its two feature chunks in a shard, beside one decoded chunk.
-    needed = 320 + 320 + (2 * 2 + 1) * chunk
+    # its two feature chunks in a shard, each at the bound of its encoded
+    # size, 1,024 bytes beyond the 40 it decodes to, beside one decoded chunk.
+    needed = 320 + 320 + 2 * 2 * (chunk + 1_024) + chunk
     planned = plan(needed)
     assert [block.bins for block in planned.blocks] == [(0, 1)]
     assert (planned.readWorkers, planned.ioConcurrency) == (1, 1)

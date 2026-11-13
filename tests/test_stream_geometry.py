@@ -215,8 +215,10 @@ def test_selected_row_cost_admits_only_touched_chunks_within_each_shard() -> Non
     narrow, _ = row_read_parts(geometry, np.array([0, 8, 16]), rows_contiguous=True)
     wide, _ = row_read_parts(geometry, np.array([0, 2, 4]), rows_contiguous=True)
     # Both selections touch three feature chunks, but only the second puts
-    # them in one shard alongside its two row chunks.
-    assert wide - narrow == 4 * geometry.nominalChunkBytes()
+    # them in one shard alongside its two row chunks: four more compressed
+    # chunks, each at the bound of its encoded size, 1,024 bytes beyond the
+    # 16 it decodes to.
+    assert wide - narrow == 4 * (geometry.nominalChunkBytes() + 1_024)
     minimum = narrow + 1
     admitted = admit_stream(
         ResourceBudget(minimum, 1), nBlocks=1, blockBytes=1, decodeBytes=narrow

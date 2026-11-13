@@ -203,7 +203,7 @@ def test_feature_stream_records_optional_shard_geometry() -> None:
         cellAxis=0,
         featureIndices=np.array([0]),
         cellIndices=np.array([0]),
-        resources=ResourceBudget(1_000, 1),
+        resources=ResourceBudget(4_000, 1),
         blockBytes=lambda _width: 1,
     )
 
@@ -353,8 +353,9 @@ def test_cell_band_admission_charges_the_zarr_read_of_each_band(
     counts_t = _counts_t_with_plan(values)
     band_bytes = 200
     # The band, Zarr's shard-level copy, and the chunk decoded next to its
-    # compressed bytes.
-    read_bytes = 2 * band_bytes + 2 * 200
+    # compressed bytes, charged at the bound of their encoded size: 200 +
+    # 200 // 128 + 1,024 bytes.
+    read_bytes = 2 * band_bytes + (200 + 1 + 1_024) + 200
     # A local and a destination index per cell, and the selected cells.
     index_bytes = 10 * 8 * 2 + 10 * 8
     metrics: dict[str, object] = {}

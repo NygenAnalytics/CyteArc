@@ -27,8 +27,13 @@ from .categorical import (
     stored_categories,
 )
 from .geometry import array_geometry
-from .layout import PROFILE_METADATA_CHUNK, ChunkRows, normed_array_spec
-from .partition import affordable_width, row_band, scan_band
+from .layout import (
+    PROFILE_METADATA_CHUNK,
+    ChunkRows,
+    array_shard_rows,
+    normed_array_spec,
+)
+from .partition import affordable_width, row_band, row_read_parts, scan_band
 from .profiles import StorageProfile
 from .sharding import write_dense_in_shard_rows
 from ..utils.memory_budget import MemoryBudgetError
@@ -51,17 +56,29 @@ def copy_zarr_array(
     msg: str | None = None,
     resources: ResourceBudget | None = None,
 ) -> None:
-    """Stream-copy a 2D Zarr array in row blocks."""
+    """Stream-copy a 2D Zarr array in row blocks.
+
+    Each block is one row band of ``dst``, read from ``src`` whole. Its plan
+    charges what that read holds beside the block, as
+    :func:`~cytearc.storage.partition.row_read_parts` prices a block of every
+    column: the source chunk it decodes at a time, as stored and decoded, and
+    for a sharded source also the shard-level copy of its rows and the
+    compressed bytes of the inner chunks it touches.
+    """
     if src.shape != dst.shape:
         raise ValueError(f"Shape mismatch: src {src.shape} vs dst {dst.shape}")
     if len(src.shape) != 2:
         raise ValueError("copy_zarr_array only supports 2D arrays")
+    fixed, per_row = row_read_parts(
+        array_geometry(src), np.arange(int(src.shape[1])), rows_contiguous=True
+    )
+    band_rows = min(array_shard_rows(dst), int(src.shape[0]))
     write_dense_in_shard_rows(
         dst,
         lambda start, end: np.asarray(src[start:end, :]),
         msg=msg or "Copying Zarr array",
         resources=resources,
-        producerBytes=int(np.prod(src.chunks)) * src.dtype.itemsize,
+        producerBytes=fixed + band_rows * per_row,
     )
 
 
