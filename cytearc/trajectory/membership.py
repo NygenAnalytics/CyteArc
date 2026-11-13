@@ -25,7 +25,7 @@ cells outside the fate map's sinks, and each cell is measured against the
 trunk of its own component. A fate map directed by a score can span several
 components, each with its own trunk and its own split among the fates; in a
 component that holds none of a lineage's sink cells, a cell's probability for
-that lineage is rounding and counts as zero, with no tolerance. The trunk
+that lineage counts as zero, with no tolerance. The trunk
 probability depends neither on the curves nor on how the later cells divide
 among the branches, as long as the earliest tenth lies before the branches
 part. A shorter trunk lets the earliest tenth reach past the branch point,

@@ -546,6 +546,7 @@ def _bellman_residual(
 def _solve_fates(
     transition: csr_matrix,
     sink_groups: np.ndarray,
+    component: np.ndarray,
     n_sinks: int,
     solver_tol: float,
     max_iterations: int,
@@ -634,6 +635,16 @@ def _solve_fates(
             "Fate probabilities exceeded numerical bounds "
             f"(minimum={minimum:.3e}, maximum={maximum:.3e})"
         )
+    # A walk stays in its graph component, so a cell reaches no sink without
+    # a cell there. In such a component the last column holds the rounding of
+    # the solved ones instead of 0, so every such probability is set to 0, and
+    # the sinks that the cell can reach must then sum to one on their own.
+    reachable = np.zeros((int(component.max()) + 1, n_sinks), dtype=bool)
+    reachable[component[absorbing], sink_groups[absorbing]] = True
+    for group in range(n_sinks):
+        reaches = reachable[component, group]
+        if not reaches.all():
+            probabilities[~reaches, group] = 0.0
     row_sums = probabilities.sum(axis=1, dtype=np.float64)
     if not np.allclose(row_sums, 1.0, rtol=0.0, atol=residual_limit):
         deviation = float(np.max(np.abs(row_sums - 1.0)))
@@ -676,7 +687,8 @@ def compute_fate_probabilities(
     meaning later, such as a direction score: an edge to a cell of lower score
     keeps ``2 / (1 + exp(beta * d))`` of its weight, where ``d`` is the drop in
     the score rescaled to [0, 1] over the cells of the components that hold a
-    sink.
+    sink. A cell's probability is exactly 0 for each sink without a cell in
+    the cell's graph component.
 
     Each sink column except the last solves a Dirichlet system with
     preconditioned, restarted GMRES. ``solver_tol`` bounds the largest
@@ -778,6 +790,7 @@ def compute_fate_probabilities(
     retained_probabilities = _solve_fates(
         transition,
         retained_sink_groups,
+        component_labels[valid],
         len(sink_labels),
         solver_tol,
         max_iterations,

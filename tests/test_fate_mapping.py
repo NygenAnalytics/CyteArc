@@ -12,6 +12,7 @@ from cytearc.storage.selections import (
     resolve_metadata_snapshot,
     resolve_stored_selection_artifact,
 )
+from cytearc.trajectory.curves import lineage_ranks
 from cytearc.trajectory.fate import (
     _make_transition,
     _normalize_pseudotime,
@@ -343,6 +344,213 @@ def test_explicit_zero_weight_does_not_connect_components():
     np.testing.assert_array_equal(probabilities[:2], [[1.0], [1.0]])
     assert np.isnan(probabilities[2]).all()
     assert graph.nnz == 3
+
+
+def _branching_path(
+    trunk: int, arms: dict[str, int]
+) -> tuple[csr_matrix, np.ndarray, np.ndarray]:
+    """Build a path of ``trunk`` cells that splits into one arm per sink label.
+
+    The pseudotime counts the steps from the first cell, and the last ten
+    cells of each arm hold its sink label.
+    """
+    edges = [(cell, cell + 1) for cell in range(trunk - 1)]
+    pseudotime = list(range(trunk))
+    labels = ["trunk"] * trunk
+    for label, length in arms.items():
+        start = len(pseudotime)
+        edges.append((trunk - 1, start))
+        edges += [(start + step, start + step + 1) for step in range(length - 1)]
+        pseudotime += [trunk + step for step in range(length)]
+        labels += ["arm"] * (length - 10) + [label] * 10
+    rows, cols = np.array(edges).T
+    n_cells = len(pseudotime)
+    graph = csr_matrix((np.ones(len(edges)), (rows, cols)), shape=(n_cells, n_cells))
+    return (
+        (graph + graph.T).tocsr(),
+        np.array(pseudotime, dtype=float),
+        np.array(labels),
+    )
+
+
+def _disconnected(
+    *parts: tuple[csr_matrix, np.ndarray, np.ndarray],
+) -> tuple[csr_matrix, np.ndarray, np.ndarray, np.ndarray]:
+    """Join graphs without an edge between them, and number each cell's graph."""
+    graphs, pseudotimes, labels = zip(*parts, strict=True)
+    component = np.concatenate(
+        [np.full(graph.shape[0], number) for number, graph in enumerate(graphs)]
+    )
+    return (
+        block_diag(graphs, format="csr"),
+        np.concatenate(pseudotimes),
+        np.concatenate(labels),
+        component,
+    )
+
+
+@pytest.mark.parametrize("sinks", [["A", "B", "C"], ["C", "B", "A"]])
+def test_a_cell_gets_no_probability_for_sinks_outside_its_component(
+    sinks: list[str],
+) -> None:
+    # Three trajectories that share no edge: the first ends in sinks A and B,
+    # the second in B and C, and the third, a path, in A alone. A walk never
+    # leaves its component, so a cell reaches only the sinks of its own,
+    # also where the last sink, which takes one minus the solved columns, is
+    # not among them.
+    graph, pseudotime, labels, component = _disconnected(
+        _branching_path(200, {"A": 100, "B": 100}),
+        _branching_path(150, {"B": 60, "C": 120}),
+        _branching_path(80, {"A": 120}),
+    )
+    held = np.array([[sink in part for sink in sinks] for part in ("AB", "BC", "A")])
+    reaches = held[component]
+
+    probabilities, valid, order = compute_fate_probabilities(
+        graph, pseudotime, labels, sinks
+    )
+
+    assert valid.all() and order == tuple(sinks)
+    np.testing.assert_array_equal(probabilities[~reaches], 0.0)
+    # The path's cells reach A alone, so their probability of A is one.
+    path = component == 2
+    np.testing.assert_array_equal(
+        probabilities[path], np.tile(held[2], (int(path.sum()), 1))
+    )
+    np.testing.assert_allclose(
+        probabilities,
+        _direct_fate_reference(graph, pseudotime, labels, sinks),
+        rtol=0.0,
+        atol=1e-5,
+    )
+    np.testing.assert_allclose(
+        probabilities.sum(axis=1, dtype=np.float64), 1.0, rtol=0.0, atol=1e-6
+    )
+    # A cell without weight has no rank along a lineage, so no cell is placed
+    # on a lineage whose sink it cannot reach.
+    ranks = lineage_ranks(pseudotime, probabilities.astype(np.float64))
+    assert not np.isfinite(ranks[~reaches]).any()
+    assert np.isfinite(ranks[reaches & (probabilities > 0)]).all()
+
+
+# The probabilities of A and B that the solver gave before it set sinks
+# outside a cell's component to zero, saved for the two Y-shaped components
+# of the next test, cell by cell. Each component holds both sinks, so they
+# must not change by a bit.
+_PROBABILITIES_OF_TWO_COMPLETE_COMPONENTS = np.array(
+    [
+        [0.5, 0.5],
+        [0.993395567, 0.00660444563],
+        [1, 0],
+        [0.00660444563, 0.993395567],
+        [0, 1],
+        [0.521363437, 0.478636533],
+        [0.993677735, 0.00632225815],
+        [1, 0],
+        [0.0490491763, 0.950950801],
+        [0.00424934272, 0.995750666],
+        [0, 1],
+    ],
+    dtype=np.float32,
+)
+
+
+@pytest.mark.parametrize("sinks", [["A", "B"], ["B", "A"]])
+def test_maps_whose_components_all_hold_every_sink_keep_their_probabilities(
+    sinks: list[str],
+) -> None:
+    # The Y graph and a second Y, without an edge between them, whose arm to
+    # B is one cell longer, so that its root leans to A.
+    longer = np.zeros((6, 6))
+    for first, second in ((0, 1), (1, 2), (0, 3), (3, 4), (4, 5)):
+        longer[first, second] = longer[second, first] = 1.0
+    y_graph, y_pseudotime, y_labels = _y_graph()
+    graph, pseudotime, labels, _ = _disconnected(
+        (y_graph, y_pseudotime, y_labels),
+        (
+            csr_matrix(longer),
+            np.array([0.0, 0.5, 1.0, 0.3, 0.6, 1.0]),
+            np.array(["root", "a-mid", "A", "b-mid", "b-mid", "B"]),
+        ),
+    )
+
+    probabilities, valid, _ = compute_fate_probabilities(
+        graph, pseudotime, labels, sinks
+    )
+
+    assert valid.all() and probabilities.dtype == np.float32
+    saved = _PROBABILITIES_OF_TWO_COMPLETE_COMPONENTS
+    np.testing.assert_array_equal(
+        probabilities, saved if sinks == ["A", "B"] else saved[:, ::-1]
+    )
+    np.testing.assert_allclose(
+        probabilities,
+        _direct_fate_reference(graph, pseudotime, labels, sinks),
+        rtol=0.0,
+        atol=1e-6,
+    )
+
+
+def test_zeroing_unreachable_sinks_does_not_hide_a_solver_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from cytearc.trajectory import fate as fate_module
+
+    # The first trajectory ends in A and B, and the second in C, the last
+    # sink, which the first cannot reach. Taking 0.01 from the solved
+    # probabilities of A and B at a trunk cell of the first leaves 0.02 to C
+    # there, which is then set to zero, so the cell's probabilities sum to
+    # 0.98, not one.
+    graph, pseudotime, labels, _ = _disconnected(
+        _branching_path(20, {"A": 15, "B": 15}),
+        _branching_path(20, {"C": 15}),
+    )
+    original_gmres = fate_module.gmres
+
+    def shifted(*args: Any, **kwargs: Any):
+        solution, info = original_gmres(*args, **kwargs)
+        solution[5] -= 0.01
+        return solution, info
+
+    monkeypatch.setattr(fate_module, "gmres", shifted)
+    with pytest.raises(RuntimeError, match="do not sum to one") as error:
+        compute_fate_probabilities(graph, pseudotime, labels, ["A", "B", "C"])
+    deviation = float(str(error.value).split("deviation=")[1].rstrip(")"))
+    assert deviation == pytest.approx(0.02, abs=1e-6)
+
+
+def test_a_solved_sink_outside_a_component_gets_no_probability_there(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from cytearc.trajectory import fate as fate_module
+
+    # The first trajectory, cells 0 to 49, ends in A and B, and the second, a
+    # path, in C alone. A is solved, not the last sink, so a solve that
+    # leaves 1e-7 of A at cell 55 of the second, within every tolerance,
+    # must still give that cell no probability of A.
+    graph, pseudotime, labels, component = _disconnected(
+        _branching_path(20, {"A": 15, "B": 15}),
+        _branching_path(20, {"C": 15}),
+    )
+    a_sink = np.flatnonzero(labels == "A")[0]
+    original_gmres = fate_module.gmres
+
+    def leaking(operator: Any, boundary: np.ndarray, **kwargs: Any):
+        solution, info = original_gmres(operator, boundary, **kwargs)
+        if boundary[a_sink] == 1.0:
+            solution[55] += 1e-7
+        return solution, info
+
+    monkeypatch.setattr(fate_module, "gmres", leaking)
+    probabilities, valid, _ = compute_fate_probabilities(
+        graph, pseudotime, labels, ["A", "B", "C"]
+    )
+
+    assert valid.all() and component[55] == 1
+    second = component == 1
+    np.testing.assert_array_equal(
+        probabilities[second], np.tile([0.0, 0.0, 1.0], (int(second.sum()), 1))
+    )
 
 
 def test_nonfinite_pseudotime_in_sinkless_component_is_rejected():
