@@ -9,6 +9,14 @@ takes those halves as sinks, and curves follow both lineages. The known
 lineages give each cell's expected membership: the trunk is shared, the ends
 of A and B follow their own lineage, and C, whose cells split their fate
 probabilities as trunk cells do, follows none.
+
+Other layouts of the same trunk make the trunk split its probability
+unevenly: a sink ten times smaller than the other, a third branch beyond a
+gap that takes 4% of the trunk's probability, and a branch four times longer
+than the other. Two trajectories in separate graph components, with a fate
+map that a score directs, check that each lineage takes its scale from its
+own curve. A slow test runs the lineage tutorials' analysis of the pancreas
+fixture, whose trunk gives Delta 0.04 against 0.45 for Beta.
 """
 
 import math
@@ -49,7 +57,6 @@ from .test_trajectory_record_paths import (
 )
 
 _SOURCES = ["t1"]
-_SINKS = ["a2", "b2"]
 
 
 def _knn_adjacency(points: np.ndarray, k: int = 5, scale: float = 0.15) -> np.ndarray:
@@ -64,41 +71,81 @@ def _knn_adjacency(points: np.ndarray, k: int = 5, scale: float = 0.15) -> np.nd
     return adjacency
 
 
-def _trajectory_cells() -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+@dataclass(frozen=True)
+class _Arm:
+    """A branch that leaves the trunk's end, with the cells of its sink at its end.
+
+    The branch holds ``n_cells`` cells in steps of ``step`` along ``heading``,
+    starting ``gap`` beyond the trunk's end, and scatters across its heading
+    by up to 0.3 at its end. Its last ``sink_cells`` cells take the label
+    ``<name>2`` and the others ``<name>1``. A gap thins the graph's edges
+    into the branch, so that the trunk gives its sink a smaller share.
+    """
+
+    name: str
+    heading: tuple[float, float]
+    n_cells: int = 40
+    sink_cells: int = 20
+    step: float = 0.075
+    gap: float = 0.0
+
+
+_UP = (1.0 / math.sqrt(2.0), 1.0 / math.sqrt(2.0))
+_DOWN = (1.0 / math.sqrt(2.0), -1.0 / math.sqrt(2.0))
+_ACROSS = (1.0, 0.0)
+_TWO_ARMS = (_Arm("a", _UP), _Arm("b", _DOWN))
+# B's sink holds 2 cells against A's 20.
+_SMALL_SINK = (_Arm("a", _UP), _Arm("b", _DOWN, sink_cells=2))
+# D leaves the trunk's end straight ahead, beyond a gap, and ends in 2 cells.
+_RARE_THIRD = (
+    _Arm("a", _UP),
+    _Arm("b", _DOWN),
+    _Arm("d", _ACROSS, sink_cells=2, gap=0.25),
+)
+# B runs four times as long as A, with 140 cells before its sink.
+_LONG_BRANCH = (_Arm("a", _UP), _Arm("b", _DOWN, n_cells=160))
+
+
+def _trajectory_cells(
+    arms: tuple[_Arm, ...] = _TWO_ARMS,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Each cell's arm, position along it, cluster label and coordinates.
 
     The trunk runs from (0, 0) along x in steps of 0.05 for 60 cells and
-    scatters across by up to 0.01. A and B leave its end at 45 degrees up
-    and down for 40 cells each, in steps of 0.075, and scatter across their
-    direction by up to 0.3 at their ends. C rises from the trunk's middle,
-    at x = 1.5, in steps of 0.1 for 5 cells, starting 0.2 above it.
+    scatters across by up to 0.01. Each arm then leaves the trunk's end, by
+    default A and B at 45 degrees up and down for 40 cells each, in steps of
+    0.075. C rises from the trunk's middle, at x = 1.5, in steps of 0.1 for
+    5 cells, starting 0.2 above it.
     """
     rng = np.random.default_rng(210)
-    arms, positions, labels, points = [], [], [], []
+    arm_names, positions, labels, points = [], [], [], []
     trunk = np.arange(60)
-    arms += ["trunk"] * 60
+    arm_names += ["trunk"] * 60
     positions += trunk.tolist()
     labels += ["t1"] * 30 + ["t2"] * 30
     points.append(np.column_stack([0.05 * trunk, rng.uniform(-0.01, 0.01, size=60)]))
     start = np.array([3.0, 0.0])
-    for arm, direction in (("a", 1.0), ("b", -1.0)):
-        along = np.arange(1, 41)
-        heading = np.array([1.0, direction]) / math.sqrt(2.0)
-        across = np.array([-direction, 1.0]) / math.sqrt(2.0)
-        spread = rng.uniform(-1.0, 1.0, size=40) * 0.3 * along / 40
-        arms += [arm] * 40
+    for arm in arms:
+        along = np.arange(1, arm.n_cells + 1)
+        heading = np.asarray(arm.heading)
+        across = np.array([-heading[1], heading[0]])
+        spread = rng.uniform(-1.0, 1.0, size=arm.n_cells) * 0.3 * along / arm.n_cells
+        arm_names += [arm.name] * arm.n_cells
         positions += along.tolist()
-        labels += [f"{arm}1"] * 20 + [f"{arm}2"] * 20
+        labels += [f"{arm.name}1"] * (arm.n_cells - arm.sink_cells)
+        labels += [f"{arm.name}2"] * arm.sink_cells
         points.append(
-            start + np.outer(0.075 * along, heading) + np.outer(spread, across)
+            start
+            + np.outer(arm.gap + arm.step * along, heading)
+            + np.outer(spread, across)
         )
     side = np.arange(5)
-    arms += ["c"] * 5
+    arm_names += ["c"] * 5
     positions += side.tolist()
     labels += ["c"] * 5
     points.append(np.column_stack([np.full(5, 1.5), 0.2 + 0.1 * side]))
     return (
-        np.asarray(arms, dtype=object),
+        np.asarray(arm_names, dtype=object),
         np.asarray(positions),
         np.asarray(labels, dtype=object),
         np.vstack(points),
@@ -130,10 +177,10 @@ class _Branching:
         )
 
 
-@cache
-def _template() -> _Branching:
-    arms, positions, labels, points = _trajectory_cells()
-    # The cells lie in the table in a shuffled order.
+def _graph_of(
+    arms: np.ndarray, positions: np.ndarray, labels: np.ndarray, points: np.ndarray
+) -> _Branching:
+    """Store cells and the graph of their five nearest neighbours, in a shuffled order."""
     order = np.random.default_rng(10).permutation(len(arms))
     arms, positions, labels, points = (
         arms[order],
@@ -162,7 +209,7 @@ def _template() -> _Branching:
     )
     _write_graph_payload(store, graph, _knn_adjacency(points))
     artifact_group(store.zw, coordinates)["data"][:] = points
-    labelled = _Branching(
+    return _Branching(
         store=store,
         graph=graph,
         selection=selection,
@@ -174,23 +221,54 @@ def _template() -> _Branching:
         fate=None,  # type: ignore[arg-type]
         curves=None,  # type: ignore[arg-type]
     )
+
+
+@cache
+def _template(layout: tuple[_Arm, ...] = _TWO_ARMS) -> _Branching:
+    labelled = _graph_of(*_trajectory_cells(layout))
+    store = labelled.store
     clusters = labelled.label_artifact()
+    sinks = [f"{arm.name}2" for arm in layout]
     pseudotime = store.trajectory.pseudotime(
-        graph, source_sink=clusters, sources=_SOURCES, sinks=_SINKS
+        labelled.graph, source_sink=clusters, sources=_SOURCES, sinks=sinks
     )
-    fate = store.trajectory.fate(pseudotime, clusters, sinks=_SINKS)
+    fate = store.trajectory.fate(pseudotime, clusters, sinks=sinks)
     curves = store.trajectory.curves(fate, n_points=40, df=6.0)
     return replace(labelled, pseudotime=pseudotime, fate=fate, curves=curves)
 
 
-def _branching() -> _Branching:
-    """Return a private copy of the store, built once."""
-    template = _template()
+def _branching(layout: tuple[_Arm, ...] = _TWO_ARMS) -> _Branching:
+    """Return a private copy of the store of a layout, built once."""
+    template = _template(layout)
     return replace(template, store=_copy_store(template.store))
 
 
 def _artifacts(store: Any, kind: str) -> list[ArtifactRef]:
     return list_artifacts(store.zw, scope="assay", assay="RNA", kind=kind)
+
+
+def _divided_probabilities(
+    branching: _Branching, limits: np.ndarray, n_bins: int
+) -> np.ndarray:
+    """Divide each lineage's probabilities by the mean at the start of its curve, by hand.
+
+    The start of a curve holds the scored cells outside the sinks whose
+    progress on it lies below ``1 / n_bins`` and whose distance from it is
+    within its first limit.
+    """
+    curves = branching.store.trajectory.load_curves(branching.curves)
+    sinks = {str(lineage) for lineage in curves.lineages}
+    scale = []
+    for lineage in range(len(curves.lineages)):
+        start = [
+            cell
+            for cell in np.flatnonzero(curves.valid)
+            if branching.labels[cell] not in sinks
+            and curves.progress[cell, lineage] * n_bins < 1
+            and curves.distance[cell, lineage] <= limits[lineage, 0]
+        ]
+        scale.append(np.mean(curves.weights[start, lineage]))
+    return np.asarray(curves.weights / np.asarray(scale))
 
 
 # The rule's parts, by hand
@@ -281,34 +359,194 @@ def test_distance_limits_take_the_median_spread_of_neighbouring_bins() -> None:
     assert np.isnan(no_weight).all()
 
 
-def test_membership_takes_a_band_of_probabilities_on_the_trajectory() -> None:
+def test_membership_rescales_each_lineage_by_the_start_of_its_curve() -> None:
+    # Two lineages over two bins of progress, each with the limit 1. Cells 0
+    # to 4 lie in the first bin of both curves and cell 12 in the first bin
+    # of A's curve only. Of them, cell 2 is a sink cell, cell 3 lies off
+    # both curves and cell 4 is unscored, so the cells at the start of A's
+    # curve are 0, 1 and 12, with mean probability (0.9 + 0.7 + 0.6) / 3 =
+    # 11 / 15 for A, and those at the start of B's curve are 0 and 1, with
+    # mean (0.1 + 0.3) / 2 = 0.2 for B.
     weights = np.array(
-        [[0.5, 0.5], [0.7, 0.3], [0.6, 0.4], [0.5, 0.5], [0.0, 0.0], [0.5, 0.5]]
+        [
+            [0.9, 0.1],
+            [0.7, 0.3],
+            [1.0, 0.0],
+            [0.2, 0.8],
+            [0.1, 0.9],
+            [0.8, 0.2],
+            [0.5, 0.5],
+            [0.9, 0.1],
+            [0.84, 0.16],
+            [0.0, 0.0],
+            [0.8, 0.2],
+            [0.87, 0.13],
+            [0.6, 0.4],
+        ]
     )
-    # Cells 0 to 2 and 4 lie on curve 0 and cell 3 on neither; cell 5 is unscored.
-    distance = np.array(
-        [[0.1, 5.0], [0.1, 5.0], [0.1, 5.0], [9.0, 9.0], [0.1, 0.1], [0.1, 0.1]]
+    distance = np.full((13, 2), 0.1)
+    distance[[3, 10]] = 5.0
+    distance[4, 1] = 5.0
+    progress = np.full((13, 2), 0.7)
+    progress[:5] = 0.1
+    progress[12, 0] = 0.1
+    valid = np.ones(13, dtype=bool)
+    valid[4] = False
+    sinks = np.zeros(13, dtype=bool)
+    sinks[2] = True
+    limits = np.ones((2, 2))
+
+    members = lineage_members(
+        weights, distance, progress, valid, limits, sinks, band=0.5, lineages=["A", 7]
     )
-    progress = np.full((6, 2), 0.5)
-    valid = np.array([True, True, True, True, True, False])
-    limits = np.array([[1.0], [1.0]])
 
-    members = lineage_members(weights, distance, progress, valid, limits, band=0.5)
-
-    # 0.3 is less than half of 0.7, and 0.4 at least half of 0.6.
+    # Divided by 11 / 15 and 0.2, a cell whose larger divided probability is
+    # A's also follows B when p_B / p_A >= 0.5 * 0.2 / (11 / 15) = 3 / 22,
+    # about 0.136, and one whose larger is B's also follows A when
+    # p_A / p_B >= 0.5 * (11 / 15) / 0.2 = 11 / 6. Cells 5 and 11, with
+    # ratios 0.25 and 0.149, follow both, as cell 8 with 0.19 does; cells 0
+    # and 7, with 0.111, follow A only, as the sink cell 2 does. Cell 6
+    # divides to (0.68, 2.5) and follows B only, and cell 12, whose ratio
+    # p_A / p_B is 1.5, does too; cell 1, with 2.33, follows both. Cells 3
+    # and 10 lie off the curves, cell 4 is unscored, and cell 9 has no
+    # probability, so they follow none.
     np.testing.assert_array_equal(
         members,
-        [[1, 1], [1, 0], [1, 1], [0, 0], [0, 0], [0, 0]],
+        [
+            [1, 0],
+            [1, 1],
+            [1, 0],
+            [0, 0],
+            [0, 0],
+            [1, 1],
+            [0, 1],
+            [1, 0],
+            [1, 1],
+            [0, 0],
+            [0, 0],
+            [1, 1],
+            [0, 1],
+        ],
     )
+    # Compared with each cell's largest probability, as before the rescale,
+    # cells 1, 5, 8 and 11 would follow A alone and cells 6 and 12 both.
     np.testing.assert_array_equal(
         membership_labels(members, ["A", 7]),
-        ["shared", "A", "shared", "none", "none", "none"],
+        ["A", "shared", "A", "none", "none", "shared", "7"]
+        + ["A", "shared", "none", "none", "shared", "7"],
     )
     with pytest.raises(ValueError, match="'shared' cannot be told apart"):
         membership_labels(members, ["shared", "B"])
     np.testing.assert_array_equal(
         progress_bins(np.array([0.0, 0.29, 0.3, 1.0, np.nan]), 10), [0, 2, 3, 9, 0]
     )
+
+
+def test_a_rare_lineage_keeps_the_trunk_that_its_progenitors_share() -> None:
+    # Three lineages over two bins. Cells 0 and 1 lie in the first bin: a
+    # trunk cell that splits 0.70, 0.27 and 0.03, a tenth of the major share
+    # for the rare fate, and a cell of no probability, which halves every
+    # mean alike.
+    trunk = np.array([0.70, 0.27, 0.03])
+    weights = np.array(
+        [
+            trunk,
+            [0.0, 0.0, 0.0],
+            trunk,
+            [0.97, 0.027, 0.003],
+            [0.40, 0.10, 0.50],
+            [0.10, 0.00, 0.90],
+            [0.69, 0.30, 0.01],
+        ]
+    )
+    distance = np.full((7, 3), 0.1)
+    progress = np.full((7, 3), 0.5)
+    valid = np.ones(7, dtype=bool)
+    sinks = np.zeros(7, dtype=bool)
+    progress[[0, 1]] = 0.1
+
+    members = lineage_members(
+        weights,
+        distance,
+        progress,
+        valid,
+        np.ones((3, 2)),
+        sinks,
+        band=0.5,
+        lineages=["major", "minor", "rare"],
+    )
+
+    # Divided by half the trunk's split, a cell with the trunk's split scores
+    # 2 for every lineage and follows all three, though 0.03 is a tenth of
+    # 0.70. A cell committed to the major lineage, whose other probabilities
+    # fall in proportion, divides to (2.77, 0.2, 0.2) and follows it alone.
+    # A cell with 0.5 for the rare lineage divides to (1.14, 0.74, 33) and
+    # follows it alone, as one close to its sink does. A cell that keeps a
+    # third of the trunk's rare share divides to (1.97, 2.22, 0.67) and
+    # follows the major and minor lineages.
+    np.testing.assert_array_equal(
+        members,
+        [
+            [1, 1, 1],
+            [0, 0, 0],
+            [1, 1, 1],
+            [1, 0, 0],
+            [0, 0, 1],
+            [0, 0, 1],
+            [1, 1, 0],
+        ],
+    )
+    # Without the cell of no probability, the trunk cell alone sets the
+    # scale, and no call changes.
+    alone = lineage_members(
+        weights[[0, 2, 3, 4, 5, 6]],
+        distance[:6],
+        progress[[0, 2, 3, 4, 5, 6]],
+        valid[:6],
+        np.ones((3, 2)),
+        sinks[:6],
+        band=0.5,
+        lineages=["major", "minor", "rare"],
+    )
+    np.testing.assert_array_equal(alone, members[[0, 2, 3, 4, 5, 6]])
+
+
+def test_membership_refuses_a_lineage_that_no_cell_at_its_start_reaches() -> None:
+    # One bin. Cell 0 is a progenitor of lineages A and B, cell 1 a sink cell
+    # of C, cell 2 an unscored cell with a probability for C, and cell 3 a
+    # cell off every curve with a probability for C.
+    weights = np.array(
+        [[0.6, 0.4, 0.0], [0.0, 0.0, 1.0], [0.0, 0.0, 1.0], [0.0, 0.5, 0.5]]
+    )
+    distance = np.full((4, 3), 0.1)
+    distance[3] = 5.0
+    progress = np.full((4, 3), 0.5)
+    valid = np.array([True, True, False, True])
+    sinks = np.array([False, True, False, False])
+    with pytest.raises(ValueError, match="no such cell has a probability for 'C'"):
+        lineage_members(
+            weights,
+            distance,
+            progress,
+            valid,
+            np.ones((3, 1)),
+            sinks,
+            band=0.5,
+            lineages=["A", "B", "C"],
+        )
+    # Without the progenitor no lineage has a cell at its start, and every
+    # such lineage is named.
+    with pytest.raises(ValueError, match="for 'A', 'B', 'C'"):
+        lineage_members(
+            weights[[1, 2, 3]],
+            distance[[1, 2, 3]],
+            progress[[1, 2, 3]],
+            valid[[1, 2, 3]],
+            np.ones((3, 1)),
+            sinks[[1, 2, 3]],
+            band=0.5,
+            lineages=["A", "B", "C"],
+        )
 
 
 def test_a_branch_point_splits_shared_cells_from_parted_ones() -> None:
@@ -324,6 +562,7 @@ def test_a_branch_point_splits_shared_cells_from_parted_ones() -> None:
         tied, np.array([1, 1, 0, 0], bool), np.array([0, 0, 1, 1], bool)
     ) == pytest.approx(0.15)
     assert math.isnan(branch_point(pseudotime, shared & False, parted))
+    assert math.isnan(branch_point(pseudotime, shared, parted & False))
     with pytest.raises(ValueError, match="both shared and parted"):
         branch_point(pseudotime, shared, shared)
     # The window holds the share of the pair's cells nearest the point.
@@ -331,6 +570,34 @@ def test_a_branch_point_splits_shared_cells_from_parted_ones() -> None:
     np.testing.assert_array_equal(window, [0, 1, 1, 1, 1, 0, 0])
     with pytest.raises(ValueError, match="no branch point"):
         branch_window(pseudotime, np.ones(7, bool), math.nan, 0.5)
+
+
+def test_a_pair_whose_shared_cells_do_not_come_first_has_no_branch_point() -> None:
+    pseudotime = np.array([0.0, 0.1, 0.2, 0.3, 0.6, 0.7, 0.8, 0.9])
+
+    def split(pattern: str, times: np.ndarray = pseudotime) -> float:
+        shared = np.array([cell == "S" for cell in pattern])
+        return branch_point(times, shared, ~shared)
+
+    # Four parted cells, two shared and two parted again: no stretch from
+    # the first cell holds more shared than parted cells, so the best split
+    # lies before the first cell, which misplaces only the two shared cells.
+    assert math.isnan(split("PPPPSSPP"))
+    # One parted cell and seven shared ones: the best split lies after the
+    # last cell, which misplaces only the parted cell.
+    assert math.isnan(split("PSSSSSSS"))
+    # A shared start parts after it, halfway between 0.1 and 0.2.
+    assert split("SSPPPPPP") == pytest.approx(0.15)
+    # One shared cell after a parted one ties with no split at all, and the
+    # earliest split wins, so the pair has no branch point.
+    assert math.isnan(split("PSPP", pseudotime[:4]))
+    # A split between cells that ties with the split after the last cell wins.
+    assert split("SSPS", pseudotime[:4]) == pytest.approx(0.15)
+    # A shared first cell at the same pseudotime as two parted cells cannot
+    # be split from them, so it makes no shared start.
+    tied = np.array([0.0, 0.0, 0.0, 0.5, 0.6])
+    assert math.isnan(split("SPPSP", tied))
+    assert split("SPPSP", np.array([0.0, 0.1, 0.2, 0.5, 0.6])) == pytest.approx(0.05)
 
 
 _SHAPES = (np.zeros((3, 2)), np.full((3, 2), 0.5), np.ones((3, 2)), np.ones(3, bool))
@@ -361,15 +628,51 @@ _SHAPES = (np.zeros((3, 2)), np.full((3, 2), 0.5), np.ones((3, 2)), np.ones(3, b
         ),
         (
             lambda: lineage_members(
-                np.ones(3), *_SHAPES[:2], _SHAPES[3], np.ones((2, 1)), band=0.5
+                np.ones(3),
+                *_SHAPES[:2],
+                _SHAPES[3],
+                np.ones((2, 1)),
+                np.zeros(3, bool),
+                band=0.5,
+                lineages=["A", "B"],
             ),
             "weights must be cells by lineages",
         ),
         (
             lambda: lineage_members(
-                _SHAPES[2], *_SHAPES[:2], _SHAPES[3], np.ones((3, 1)), band=0.5
+                _SHAPES[2],
+                *_SHAPES[:2],
+                _SHAPES[3],
+                np.ones((3, 1)),
+                np.zeros(3, bool),
+                band=0.5,
+                lineages=["A", "B"],
             ),
             "limits must be lineages by bins",
+        ),
+        (
+            lambda: lineage_members(
+                _SHAPES[2],
+                *_SHAPES[:2],
+                _SHAPES[3],
+                np.ones((2, 1)),
+                np.zeros(2, bool),
+                band=0.5,
+                lineages=["A", "B"],
+            ),
+            "sinks must hold one entry per cell",
+        ),
+        (
+            lambda: lineage_members(
+                _SHAPES[2],
+                *_SHAPES[:2],
+                _SHAPES[3],
+                np.ones((2, 1)),
+                np.zeros(3, bool),
+                band=0.5,
+                lineages=["A"],
+            ),
+            "one lineage per column",
         ),
         (lambda: membership_labels(np.ones((3, 2), bool), ["A"]), "cells by lineages"),
         (
@@ -434,7 +737,9 @@ def test_membership_of_a_branching_trajectory_follows_its_known_lineages() -> No
 
 
 def test_membership_follows_its_recorded_rule() -> None:
-    branching = _branching()
+    # B's sink is ten times smaller than A's, so the trunk splits its
+    # probability unevenly and the scale of each lineage matters.
+    branching = _branching(_SMALL_SINK)
     store = branching.store
     ref = store.trajectory.lineage_membership(
         branching.curves, band=0.6, distance_score=2.5, n_bins=8
@@ -480,8 +785,11 @@ def test_membership_follows_its_recorded_rule() -> None:
             result.distance_limits[:, index], expected_limits, rtol=1e-12
         )
     # A cell follows a lineage when it lies within some lineage's limit at
-    # its bin and its probability is at least 0.6 of its largest.
+    # its bin and its probability, divided by the mean at the start of the
+    # lineage's curve, is at least 0.6 of its largest divided probability.
+    divided = _divided_probabilities(branching, result.distance_limits, 8)
     expected = np.zeros_like(result.members)
+    undivided = np.zeros_like(result.members)
     for cell in np.flatnonzero(curves.valid):
         on = any(
             curves.distance[cell, lineage]
@@ -490,11 +798,20 @@ def test_membership_follows_its_recorded_rule() -> None:
             ]
             for lineage in range(2)
         )
-        largest = curves.weights[cell].max()
         for lineage in range(2):
             weight = curves.weights[cell, lineage]
-            expected[cell, lineage] = on and weight > 0 and weight >= 0.6 * largest
+            expected[cell, lineage] = (
+                on
+                and weight > 0
+                and divided[cell, lineage] >= 0.6 * divided[cell].max()
+            )
+            undivided[cell, lineage] = (
+                on and weight > 0 and weight >= 0.6 * curves.weights[cell].max()
+            )
     np.testing.assert_array_equal(result.members, expected)
+    # Without the division, no trunk cell would follow B.
+    trunk = branching.arms == "trunk"
+    assert expected[trunk].all() and not undivided[trunk, 1].any()
     # A wider band calls fewer cells shared.
     wide = store.trajectory.load_lineage_membership(
         store.trajectory.lineage_membership(branching.curves, band=0.9)
@@ -512,7 +829,7 @@ def test_two_lineages_part_where_their_fate_probabilities_do() -> None:
         store.trajectory.lineage_membership(branching.curves)
     )
     pseudotime = store.trajectory.load_pseudotime(branching.pseudotime).values
-    fate = store.trajectory.load_fate(branching.fate).values
+    divided = _divided_probabilities(branching, result.distance_limits, 10)
 
     (row,) = result.branch_points.itertuples(index=False)
     assert (row.first, row.second) == ("a2", "b2")
@@ -529,17 +846,20 @@ def test_two_lineages_part_where_their_fate_probabilities_do() -> None:
         )
         if errors < best_errors:
             best, best_errors = split, errors
+    # It misplaces fewer cells than a split before the first cell, which
+    # misplaces every shared cell, and no more than one after the last.
+    assert best_errors < shared.sum() and best_errors <= (pair & ~shared).sum()
     assert row.pseudotime == pytest.approx(best)
     assert row.shared_cells == shared.sum()
     assert row.parted_cells == (pair & ~shared).sum()
-    # It lies where A's and B's probabilities leave the band: walking out
-    # along each branch, the last cell whose smaller probability is at least
-    # half the larger one comes before it, and the next cell after it, within
-    # the pseudotime of a few cells.
+    # It lies where A's and B's divided probabilities leave the band: walking
+    # out along each branch, the last cell whose smaller divided probability
+    # is at least half the larger one comes before it, and the next cell
+    # after it, within the pseudotime of a few cells.
     for arm in ("a", "b"):
         on_arm = np.flatnonzero(branching.arms == arm)
         ordered = on_arm[np.argsort(branching.positions[on_arm])]
-        within = fate[ordered].min(axis=1) >= 0.5 * fate[ordered].max(axis=1)
+        within = divided[ordered].min(axis=1) >= 0.5 * divided[ordered].max(axis=1)
         last_shared = int(np.flatnonzero(within)[-1])
         assert np.all(within[: last_shared + 1])
         assert pseudotime[ordered[last_shared]] - 0.05 < row.pseudotime
@@ -554,6 +874,189 @@ def test_two_lineages_part_where_their_fate_probabilities_do() -> None:
             row.pseudotime,
             atol=1e-9,
         )
+
+
+@pytest.mark.parametrize(
+    "layout",
+    [_SMALL_SINK, _RARE_THIRD, _LONG_BRANCH],
+    ids=["sink ten times smaller", "third fate of 4%", "branch four times longer"],
+)
+def test_every_lineage_keeps_the_trunk_however_unevenly_it_splits(layout) -> None:
+    branching = _branching(layout)
+    store = branching.store
+    fate = store.trajectory.load_fate(branching.fate).values
+    pseudotime = store.trajectory.load_pseudotime(branching.pseudotime).values
+    trunk = branching.arms == "trunk"
+    # The trunk gives some fate less than half its largest probability, so a
+    # band of half the largest probability would leave that lineage no trunk.
+    split = fate[trunk].mean(axis=0)
+    assert split.min() < 0.5 * split.max()
+
+    result = store.trajectory.load_lineage_membership(
+        store.trajectory.lineage_membership(branching.curves)
+    )
+
+    # Every trunk cell follows every lineage, and beyond its first half each
+    # branch follows no other lineage, and nearly all of it its own.
+    assert result.members[trunk].all()
+    for index, arm in enumerate(layout):
+        late = (branching.arms == arm.name) & (branching.positions > arm.n_cells / 2)
+        assert not np.delete(result.members[late], index, axis=1).any()
+        assert result.members[late, index].mean() >= 0.9
+    # Every pair parts after the last trunk cell and before the first cell of
+    # either sink.
+    for row in result.branch_points.itertuples(index=False):
+        sinks = np.isin(branching.labels, [row.first, row.second])
+        assert pseudotime[trunk].max() < row.pseudotime < pseudotime[sinks].min()
+
+
+def _two_components(
+    first: tuple[_Arm, ...], second: tuple[_Arm, ...] | None
+) -> tuple[_Branching, ArtifactRef, np.ndarray]:
+    """Store two trajectories as two graph components, with a fate map that a score directs.
+
+    The second trajectory lies 30 above the first, its trunk labelled u1 and
+    u2. Without arms, the second component is a cluster of 12 cells that all
+    hold the sink label z2. The score is each cell's x coordinate, plus 10 in
+    the second component, so every cell of the second comes after the first.
+    """
+    arms, positions, labels, points = _trajectory_cells(first)
+    if second is None:
+        rng = np.random.default_rng(3)
+        other = (
+            np.full(12, "z", dtype=object),
+            np.arange(12),
+            np.full(12, "z2", dtype=object),
+            np.array([3.0, 30.0]) + rng.uniform(-0.05, 0.05, size=(12, 2)),
+        )
+    else:
+        other_arms, other_positions, other_labels, other_points = _trajectory_cells(
+            second
+        )
+        renamed = {"t1": "u1", "t2": "u2"}
+        other = (
+            np.asarray([f"{arm}+" for arm in other_arms], dtype=object),
+            other_positions,
+            np.asarray(
+                [renamed.get(label, label) for label in other_labels], dtype=object
+            ),
+            other_points + np.array([0.0, 30.0]),
+        )
+    branching = _graph_of(
+        np.concatenate([arms, other[0]]),
+        np.concatenate([positions, other[1]]),
+        np.concatenate([labels, other[2]]),
+        np.vstack([points, other[3]]),
+    )
+    later = branching.points[:, 1] > 15.0
+    score = branching.points[:, 0] + 10.0 * later
+    sinks = [f"{arm.name}2" for arm in (*first, *(second or (_Arm("z", _UP),)))]
+    fate = branching.store.trajectory.fate(
+        sink_labels=branching.label_artifact(),
+        graph=branching.graph,
+        direction=score,
+        sinks=sinks,
+    )
+    return replace(branching, fate=fate), fate, later
+
+
+def test_each_lineage_takes_its_scale_from_its_own_graph_component() -> None:
+    # A fate map directed by a score over two trajectories that share no
+    # edge: A and B in the first component, E and F in the second, where F's
+    # sink holds 2 cells. The earliest cells by the score all lie in the
+    # first component, where E and F have no probability.
+    branching, fate, later = _two_components(
+        _TWO_ARMS, (_Arm("e", _UP), _Arm("f", _DOWN, sink_cells=2))
+    )
+    store = branching.store
+    curves = store.trajectory.curves(fate, n_points=40, df=6.0)
+    result = store.trajectory.load_lineage_membership(
+        store.trajectory.lineage_membership(curves)
+    )
+    members = pd.DataFrame(result.members, columns=list(result.lineages))
+
+    # Each trunk follows the two lineages of its own component and no other.
+    first_trunk = branching.arms == "trunk"
+    second_trunk = branching.arms == "trunk+"
+    assert members.loc[first_trunk, ["a2", "b2"]].to_numpy().all()
+    assert not members.loc[first_trunk, ["e2", "f2"]].to_numpy().any()
+    assert members.loc[second_trunk, ["e2", "f2"]].to_numpy().all()
+    assert not members.loc[second_trunk, ["a2", "b2"]].to_numpy().any()
+    assert not members.loc[later, ["a2", "b2"]].to_numpy().any()
+    assert not members.loc[~later, ["e2", "f2"]].to_numpy().any()
+    # The pairs within a component part on its scores, and the pairs across
+    # components share no cell.
+    table = result.branch_points.set_index(["first", "second"])
+    assert 0.0 < table.loc[("a2", "b2"), "pseudotime"] < 10.0
+    assert 10.0 < table.loc[("e2", "f2"), "pseudotime"] < 20.0
+    across = table.drop([("a2", "b2"), ("e2", "f2")])
+    assert across["pseudotime"].isna().all() and (across["shared_cells"] == 0).all()
+
+
+def test_a_lineage_whose_curve_starts_among_its_sink_cells_is_refused() -> None:
+    # The second component holds only cells of Z's sink, so no cell outside
+    # the sinks sets the scale of Z's probabilities.
+    branching, fate, _later = _two_components(_TWO_ARMS, None)
+    store = branching.store
+    curves = store.trajectory.curves(fate, n_points=40, df=6.0)
+
+    with pytest.raises(ValueError, match="probability for 'z2'.*fit the curves"):
+        store.trajectory.lineage_membership(curves)
+    assert not _artifacts(store, "lineage_membership")
+    # Curves without Z call the membership of A and B.
+    kept = store.trajectory.curves(fate, lineages=["a2", "b2"], n_points=40, df=6.0)
+    result = store.trajectory.load_lineage_membership(
+        store.trajectory.lineage_membership(kept)
+    )
+    assert result.members[branching.arms == "trunk"].all()
+    assert not result.members[branching.arms == "z"].any()
+
+
+def test_branch_cells_say_why_a_pair_has_no_branch_point(monkeypatch) -> None:
+    from cytearc.datastore._operations import trajectory as operations
+
+    branching = _branching()
+    store = branching.store
+    pseudotime = store.trajectory.load_pseudotime(branching.pseudotime).values
+    rule = operations._lineage_members_impl
+
+    # Every cell on the trajectory follows A, and only those after pseudotime
+    # 0.9 also follow B, so the shared cells come after the parted ones.
+    def late_shared(*args: Any, **kwargs: Any) -> np.ndarray:
+        followed = rule(*args, **kwargs).any(axis=1)
+        return np.column_stack([followed, followed & (pseudotime > 0.9)])
+
+    monkeypatch.setattr(operations, "_lineage_members_impl", late_shared)
+    membership = store.trajectory.lineage_membership(branching.curves)
+    (row,) = store.trajectory.load_lineage_membership(
+        membership
+    ).branch_points.itertuples(index=False)
+    assert math.isnan(row.pseudotime)
+    assert math.isnan(row.first_progress) and math.isnan(row.second_progress)
+    assert 0 < row.shared_cells < row.parted_cells
+    with pytest.raises(
+        ValueError,
+        match=(
+            rf"'a2' and 'b2' have no branch point: the cells that follow both, "
+            rf"{row.shared_cells} of the pair's {row.shared_cells + row.parted_cells}, "
+            "do not come before"
+        ),
+    ):
+        store.trajectory.branch_cells(membership, ["a2", "b2"])
+
+    # Every cell that follows one lineage follows both: the pair never parts.
+    monkeypatch.setattr(
+        operations,
+        "_lineage_members_impl",
+        lambda *args, **kwargs: np.repeat(
+            rule(*args, **kwargs).any(axis=1)[:, None], 2, axis=1
+        ),
+    )
+    together = store.trajectory.lineage_membership(
+        branching.curves, invalidate_cache=True
+    )
+    with pytest.raises(ValueError, match="no branch point: every cell that follows"):
+        store.trajectory.branch_cells(together, ["a2", "b2"])
 
 
 def test_branch_cells_select_the_cells_around_where_two_lineages_part() -> None:
@@ -614,7 +1117,7 @@ def test_membership_and_branch_cells_check_their_arguments() -> None:
         .branch_points["pseudotime"]
         .iloc[0]
     )
-    with pytest.raises(ValueError, match="no branch point"):
+    with pytest.raises(ValueError, match="no branch point: they never share a cell"):
         store.trajectory.branch_cells(unshared, ["a2", "b2"])
     assert len(_artifacts(store, "lineage_membership")) == 2
 
@@ -739,3 +1242,84 @@ def test_drivers_take_the_cells_where_two_lineages_part(
         np.testing.assert_allclose(
             table["r_value"].to_numpy(), expected[positions], rtol=0.0, atol=1e-6
         )
+
+
+# The pancreas, where the progenitors give Delta a small share
+
+
+@pytest.mark.slow
+def test_every_pancreas_lineage_shares_the_progenitor_trunk(
+    bastidas_ponce_data, tmp_path
+) -> None:
+    from cytearc.datastore.datastore import DataStore
+    from cytearc.readers import H5adReader
+    from cytearc.writers import H5adToZarr
+
+    # The pancreas fixture analyzed as the lineage tutorials do: Ductal
+    # cells are the source and the four endocrine types the sinks.
+    reader = H5adReader(bastidas_ponce_data)
+    try:
+        H5adToZarr(reader, zarr_loc=str(tmp_path / "pancreas.zarr")).dump()
+    finally:
+        reader.h5.close()
+    ds = DataStore(str(tmp_path / "pancreas.zarr"), default_assay="RNA", nthreads=2)
+    run = ds.pipeline.rna(
+        filtering=False,
+        cell_cycle=False,
+        hvg={"top_n": 2000},
+        pca={"dims": 15},
+        neighbors={"k": 11},
+        leiden={"partitions": [0.5]},
+        doublets=False,
+        umap=False,
+        markers=False,
+    )
+    types = np.asarray(ds.cells.fetch("clusters", key="I")).astype(str)
+    fates = ["Alpha", "Beta", "Delta", "Epsilon"]
+    source_sink = np.zeros(len(types))
+    source_sink[types == "Ductal"] = -1 / (types == "Ductal").sum()
+    source_sink[np.isin(types, fates)] = 1 / np.isin(types, fates).sum()
+    pseudotime_ref = ds.trajectory.pseudotime(
+        run["connectivity_map"], ss_vec=source_sink
+    )
+    pseudotime = ds.trajectory.load_pseudotime(pseudotime_ref)
+    labels = ds.snapshot_cluster_labels(
+        "clusters", cell_selection=pseudotime.cell_selection
+    )
+    fate_ref = ds.trajectory.fate(pseudotime_ref, labels, sinks=fates)
+    fate = ds.trajectory.load_fate(fate_ref)
+    trunk = np.isin(types, ["Ductal", "Ngn3 low EP", "Ngn3 high EP"])
+    # The trunk gives Delta under a tenth of the Beta probability.
+    split = fate.values[trunk].mean(axis=0)
+    assert split[2] < 0.1 * split[1]
+
+    membership = ds.trajectory.lineage_membership(ds.trajectory.curves(fate_ref))
+    result = ds.trajectory.load_lineage_membership(membership)
+
+    # Every Ductal and Ngn3 low EP cell on the curves follows all four
+    # lineages, as do all but a few Ngn3 high EP cells at the trunk's end,
+    # and no endpoint cell follows another lineage than its own.
+    followed = result.members.any(axis=1)
+    early = np.isin(types, ["Ductal", "Ngn3 low EP"])
+    assert result.members[early & followed].all()
+    late = (types == "Ngn3 high EP") & followed
+    assert result.members[late].all(axis=1).mean() > 0.99
+    assert (trunk & followed).sum() > 0.95 * trunk.sum()
+    for column, endpoint in enumerate(fates):
+        cells = types == endpoint
+        assert not np.delete(result.members[cells], column, axis=1).any()
+    # Every pair parts among the middle 80% of the Pre-endocrine cells by
+    # pseudotime, after every Ngn3 high EP cell.
+    values = pseudotime.values
+    low, high = np.quantile(values[types == "Pre-endocrine"], [0.1, 0.9])
+    points = result.branch_points["pseudotime"].to_numpy()
+    assert np.all(points > max(low, values[types == "Ngn3 high EP"].max()))
+    assert np.all(points < high)
+    # The cells around the point where Beta and Delta part are Pre-endocrine
+    # and endpoint cells, none of the trunk.
+    window = ds.trajectory.branch_cells(membership, ["Beta", "Delta"])
+    selected = np.isin(
+        cell_selection_indices(ds.zw, result.cell_selection),
+        cell_selection_indices(ds.zw, window),
+    )
+    assert selected.any() and not (selected & trunk).any()

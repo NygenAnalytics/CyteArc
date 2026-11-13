@@ -621,8 +621,9 @@ class LineageMembershipResult:
     holds one row per pair of lineages in their order: ``first`` and
     ``second``, the ``pseudotime`` at which they part, the
     ``first_progress`` and ``second_progress`` there on their curves, and
-    the ``shared_cells`` and ``parted_cells`` that place the split; a pair
-    that never parts, or never shares a cell, holds NaN.
+    the ``shared_cells`` and ``parted_cells`` that place the split. A pair
+    that never shares a cell, never parts, or whose shared cells do not come
+    before its parted cells has no branch point and holds NaN.
     """
 
     ref: ArtifactRef

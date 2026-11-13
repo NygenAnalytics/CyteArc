@@ -534,11 +534,16 @@ class _FateDirection:
 
 @dataclass(frozen=True, slots=True)
 class _FateInputs:
-    """A fate map with the direction and sink labels that validated it."""
+    """A fate map with the direction and sink labels that validated it.
+
+    ``sink_cells`` marks the cells of the fate map's selection that hold one
+    of its sink labels.
+    """
 
     fate: FateMappingResult
     direction: _FateDirection
     sink_values: np.ndarray
+    sink_cells: np.ndarray
 
 
 def _rows_of_cells(
@@ -2270,6 +2275,7 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
             ),
             direction=directed,
             sink_values=masked_sink_values,
+            sink_cells=sink_cells,
         )
 
     def _lineage_axes(
@@ -2304,10 +2310,6 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
             "pseudotime validity mask",
             has_validity_column=True,
         )
-        scored_labels = inputs.sink_values[valid]
-        absorbing = np.zeros(len(cell_indices), dtype=bool)
-        for sink in fate_result.sink_labels:
-            absorbing |= np.asarray(scored_labels == sink, dtype=bool)
         return _LineageCells(
             fate=fate_result,
             lineages=lineage_labels,
@@ -2315,7 +2317,7 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
             cell_indices=cell_indices,
             ordering=np.asarray(ordering, dtype=np.float64),
             weights=np.asarray(fate_result.values[valid][:, columns], dtype=np.float64),
-            absorbing=absorbing,
+            absorbing=inputs.sink_cells[valid],
         )
 
     def _lineage_coordinates(
@@ -3181,15 +3183,20 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
 
     def _membership_inputs(
         self, curves: ArtifactRef
-    ) -> tuple[LineageCurvesResult, np.ndarray]:
-        """Load lineage curves with the pseudotime of their cells.
+    ) -> tuple[LineageCurvesResult, np.ndarray, np.ndarray]:
+        """Load lineage curves with the pseudotime of their cells and the sinks' cells.
 
         For curves of a fate map that a score directs, the score takes the
-        pseudotime's place.
+        pseudotime's place. The sinks' cells hold any sink label of the fate
+        map, also of a sink that the curves leave out.
         """
         loaded = self._trajectory_load_curves(curves)
-        pseudotime = self._load_fate_inputs(loaded.fate).direction.scores
-        return loaded, np.asarray(pseudotime, dtype=np.float64)
+        inputs = self._load_fate_inputs(loaded.fate)
+        return (
+            loaded,
+            np.asarray(inputs.direction.scores, dtype=np.float64),
+            np.asarray(inputs.sink_cells, dtype=bool),
+        )
 
     @validation_scoped
     def _trajectory_lineage_membership(
@@ -3205,9 +3212,17 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
 
         Fate probabilities sum to one over the sinks, so a cell on no
         trajectory still splits its probability among them, and a cell that
-        has not committed looks like a member of its most likely lineage. A
-        scored cell follows a lineage when its fate probability for that
-        lineage is positive and at least ``band`` times its largest
+        has not committed looks like a member of its most likely lineage.
+        Progenitors also split their probability unevenly, so the rule
+        measures each lineage's probabilities against that lineage's own
+        trunk: it divides them by their mean over the cells at the start of
+        the lineage's curve, the cells outside the fate map's sinks that lie
+        within its distance limit in its first bin of progress. A progenitor
+        whose probabilities match the trunk's split then scores one for
+        every lineage that starts there, whatever share of the trunk's
+        probability each lineage receives. A scored cell follows a lineage
+        when its fate probability for that lineage is positive and its
+        divided probability is at least ``band`` times its largest divided
         probability over the curves' lineages, and when it lies on the
         trajectory: within some lineage's distance limit at the cell's
         progress on that lineage's curve. In each of ``n_bins`` equal bins
@@ -3224,17 +3239,22 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         Two lineages part where their shared cells give way to cells that
         follow only one of them. Their branch point is the pseudotime that
         splits the pair's shared cells, before it, from its parted cells,
-        after it, with the fewest cells on the wrong side.
-        :meth:`branch_cells` selects the cells around it, which
-        :meth:`drivers` takes as ``cells`` to test the genes that separate
-        the two sinks where they part.
+        after it, with the fewest cells on the wrong side. A pair has no
+        branch point, NaN, when it never shares a cell, never parts, or its
+        shared cells do not come before its parted cells, so that the best
+        split lies before the first cell or after the last.
+        :meth:`branch_cells` selects the cells around a branch point. Pass
+        them as ``cells`` to :meth:`drivers`, with ``lineages=[first,
+        second]`` to keep its table to the pair, to rank, for each of the two
+        fates, the genes whose expression rises with that fate's probability
+        among those cells, and compare the two lists.
 
         Args:
             curves: Explicit ``lineage_curves`` artifact.
-            band: Share of a cell's largest fate probability, above 0 and at
-                most 1, that its probability for another lineage must reach
-                for the cell to follow both. Larger values call fewer cells
-                shared.
+            band: Share of a cell's largest divided probability, above 0 and
+                at most 1, that its divided probability for another lineage
+                must reach for the cell to follow both. Larger values call
+                fewer cells shared.
             distance_score: Robust standard deviations beyond the median
                 distance of a lineage's cells at which a cell lies off that
                 lineage's curve. Smaller values call more cells none; cells
@@ -3242,7 +3262,8 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
                 from it than its other cells, so values below 4 can call
                 some of them none.
             n_bins: Equal bins of progress along each curve, each with its
-                own distance limit.
+                own distance limit. The cells of the first bin within its
+                limit, outside the sinks, set the lineage's scale.
             invalidate_cache: Compute a new membership even when one matches.
 
         Returns:
@@ -3251,8 +3272,10 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
 
         Raises:
             ValueError: If a lineage's sink label reads ``"shared"`` or
-                ``"none"``, or ``band``, ``distance_score`` or ``n_bins`` is
-                out of range.
+                ``"none"``, ``band``, ``distance_score`` or ``n_bins`` is
+                out of range, or no cell outside the sinks at the start of a
+                lineage's curve has a probability for that lineage, as when
+                the curve starts among sink cells.
         """
         invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         if not isinstance(curves, ArtifactRef):
@@ -3260,7 +3283,7 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         validated = _validate_lineage_membership_parameters(
             {"band": band, "distance_score": distance_score, "n_bins": n_bins}
         )
-        loaded, pseudotime = self._membership_inputs(curves)
+        loaded, pseudotime, sink_cells = self._membership_inputs(curves)
         lineages = loaded.lineages
         # A lineage cannot share its name with the labels of shared cells and
         # of cells that follow none.
@@ -3312,14 +3335,15 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         if planned.reused:
             return planned.ref
         self._require_writable("call_lineage_membership")
-        # The curves' positions, distances and weights, and the pseudotime,
-        # beside each cell's bins, limits, probabilities and members for
-        # every lineage, its label, and the sorted cells of a pair.
+        # The curves' positions, distances and weights, the pseudotime and
+        # the sinks' cells, beside each cell's bins, limits, probabilities,
+        # rescaled probabilities and members for every lineage, its label,
+        # and the sorted cells of a pair.
         label_width = max(len(name) for name in (*names, "shared", "none"))
         needed = (
             3 * n_cells * n_lineages * 8
-            + n_cells * 8
-            + n_cells * (34 * n_lineages + 4 * label_width + 120)
+            + n_cells * 9
+            + n_cells * (44 * n_lineages + 4 * label_width + 120)
         )
         if needed >= self.memoryBytes:
             raise MemoryBudgetError(
@@ -3345,7 +3369,9 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
             loaded.progress,
             loaded.valid,
             limits,
+            sink_cells,
             band=validated["band"],
+            lineages=lineages,
         )
         table = _branch_points_impl(
             members, pseudotime, loaded.curve_pseudotime, lineages
@@ -3426,7 +3452,7 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         selection = parse_artifact_ref(
             inputs.get("cell_selection"), "Lineage-membership cell selection input"
         )
-        loaded, pseudotime = self._membership_inputs(curves)
+        loaded, pseudotime, _ = self._membership_inputs(curves)
         if loaded.cell_selection != selection:
             raise ValueError("Lineage membership does not use its curves' cells")
         if ref.scope != curves.scope or ref.assay != curves.assay:
@@ -3489,8 +3515,11 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
 
         The selection holds the ``window`` share of the cells that follow
         either lineage, rounded up, whose pseudotime lies closest to the two
-        lineages' branch point. Pass it as ``cells`` to :meth:`drivers` to
-        test the genes that separate the two sinks where they part.
+        lineages' branch point. Pass it as ``cells`` to :meth:`drivers`, with
+        ``lineages`` naming the two to keep its table to the pair, to rank,
+        for each of the two fates, the genes whose expression rises with
+        that fate's probability among the selected cells, and compare the
+        two lists.
 
         Args:
             membership: Explicit ``lineage_membership`` artifact.
@@ -3506,8 +3535,9 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
 
         Raises:
             ValueError: If ``lineages`` does not name two lineages of the
-                membership, or the two never share a cell or never part, so
-                that they have no branch point.
+                membership, or the two have no branch point: they never share
+                a cell, never part, or their shared cells do not come before
+                the cells that follow only one of them.
         """
         invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         if not isinstance(membership, ArtifactRef):
@@ -3533,10 +3563,21 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         )
         point = float(table["pseudotime"].iloc[row])
         if not np.isfinite(point):
+            shared = int(table["shared_cells"].iloc[row])
+            parted = int(table["parted_cells"].iloc[row])
+            if not shared:
+                reason = "they never share a cell"
+            elif not parted:
+                reason = "every cell that follows one of them follows both"
+            else:
+                reason = (
+                    f"the cells that follow both, {shared} of the pair's "
+                    f"{shared + parted}, do not come before the cells that "
+                    "follow only one of them"
+                )
             raise ValueError(
                 f"Lineages {result.lineages[first]!r} and "
-                f"{result.lineages[second]!r} never share a cell or never part, "
-                "so they have no branch point"
+                f"{result.lineages[second]!r} have no branch point: {reason}"
             )
         window_cells = _branch_window_impl(
             pseudotime,
@@ -5217,8 +5258,13 @@ class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
 
         Cells of the sinks are left out by default: their probabilities are
         fixed at zero or one by the model, so including them mostly recovers
-        the markers that defined the sinks. Restrict ``cells`` to the cells
-        around a branch to ask which genes separate its fates there.
+        the markers that defined the sinks. Each correlation concerns one
+        lineage's probability on its own, whatever ``lineages`` names. To
+        study where two lineages part, pass the cells that
+        :meth:`branch_cells` selects as ``cells`` and the two lineages as
+        ``lineages``: the table then ranks, for each of the two fates, the
+        genes whose expression rises with that fate's probability among
+        those cells, to compare between the two.
 
         Args:
             fate: Explicit fate-map artifact.
