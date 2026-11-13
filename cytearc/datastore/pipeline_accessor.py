@@ -80,9 +80,9 @@ class PipelineAccessor:
     combinations, and the setting values that can be checked without reading
     data. A call that fails these checks raises and writes nothing. The
     recipe then runs its stages in order and returns a durable
-    :class:`~cytearc.PipelineRun`. A few values, such as ``ann_index``
-    ``ann_metric`` or a Leiden ``backend``, are checked only by their stage's
-    method when the stage runs, and such a failure records a failed run.
+    :class:`~cytearc.PipelineRun`. A few values, such as a Leiden
+    ``backend``, are checked only by their stage's method when the stage
+    runs, and such a failure records a failed run.
 
     A stage keyword takes the keywords of the stage's method, which mean
     exactly what they mean there, and an omitted setting takes that method's
@@ -341,14 +341,15 @@ class PipelineAccessor:
             pca: The keywords of ``reduction.pca``. ``dims`` must be below
                 ``hvg`` ``top_n``. ``dims=0`` skips PCA and builds the graph
                 on the normalized values, which needs ``doublets=False`` and
-                no Harmony.
+                no Harmony. ``feat_scaling=False`` needs ``doublets=False``.
             harmony: ``batch_columns``, the cell columns whose batches Harmony
                 corrects, with ``harmony_params`` (the options of
                 ``cytearc.embeddings.harmony.fit_harmony``) and
                 ``batch_size``. None or False skips Harmony. A run with
                 Harmony scores doublets within each batch unless ``doublets``
                 names another ``sample_column``.
-            ann_index: The keywords of ``graph.ann_index``.
+            ann_index: The keywords of ``graph.ann_index``. ``ann_metric``
+                must be ``"l2"`` or ``"cosine"``.
             neighbors: The keywords of ``graph.neighbors``, such as ``k``.
             connectivity: The keywords of ``graph.connectivity``.
             embedding_initialization: The keywords of
@@ -366,9 +367,10 @@ class PipelineAccessor:
                 keywords of ``clusters.paris``.
             membership_strength: Score each cell's membership in its cluster.
             doublets: Doublet scoring, with the keywords of ``qc.doublets``.
-                It normalizes simulated doublets by library size, so it needs
-                the assay's ``normMethod`` to be ``norm_lib_size``, the
-                default.
+                It normalizes simulated doublets by library size and projects
+                them onto the PCA with its feature scaling, so it needs the
+                assay's ``normMethod`` to be ``norm_lib_size`` and ``pca``
+                ``feat_scaling`` to be True, both the defaults.
             markers: Rank markers for each saved cluster.
             snapshot_columns: Cell columns to freeze into the run's cell view.
             species: A species key recorded with the run.

@@ -362,20 +362,7 @@ CyteArc validates persisted data and public arguments against the following cont
   Harmony batch columns or snapshot columns now share their filtered cells and every artifact that
   does not depend on that difference, and per-capture cell calls no longer change with the
   filtering or snapshot settings.
-- Pipeline recipes check more of a call before a run record exists, with the validators of the
-  stages' methods where they have them: the `cell_calling` values `lower`, `retain`, `n_iter`,
-  `alpha`, `fdr`, and `random_seed`; the `hashing` `positive_quantile`; a capture label for every
-  input cell of per-capture cell calling, refusing a missing value or a NaN in a float column; an
-  RNA run's `pca` `dims` below its `hvg` `top_n`, and an ADT run's below its panel's antibodies; an
-  ATAC run's `prevalent_peaks` `top_n` below the assay's number of peaks, `lsi` `dims` with the
-  first component that `skip_first` leaves out at most `top_n`, and a bool `skip_first`; and, for
-  `multimodal(method="snn")`, source runs built with one `neighbors` `k`. Such a call raises
-  `TypeError` or `ValueError` and writes nothing, where its stage would otherwise fail after the
-  earlier stages with a failed run recorded; `pipeline.run()` failed in its PCA stage when the PCA
-  dimensions were not below the HVG count. An ATAC run's `prevalent_peaks` `top_n` defaults to
-  `min(10000, peaks - 1)`, and its configuration records the resolved `top_n`. Other values, such as
-  `ann_index` `ann_metric`, a Leiden `backend`, and the numeric `doublets` settings, and limits that
-  depend on the data are still checked by each stage's method when the stage runs.
+- Pipeline recipes check more of a call before a run record exists, with the validators of the stages' methods where they have them: the `cell_calling` values `lower`, `retain`, `n_iter`, `alpha`, `fdr`, and `random_seed`; the `hashing` `positive_quantile`; a capture label for every input cell of per-capture cell calling, refusing a missing value or a NaN in a float column; an RNA run's `pca` `dims` below its `hvg` `top_n`, and an ADT run's below its panel's antibodies; an ATAC run's `prevalent_peaks` `top_n` below the assay's number of peaks, `lsi` `dims` with the first component that `skip_first` leaves out at most `top_n`, and a bool `skip_first`; and, for `multimodal(method="snn")`, source runs built with one `neighbors` `k`. Such a call raises `TypeError` or `ValueError` and writes nothing, where its stage would otherwise fail after the earlier stages with a failed run recorded; `pipeline.run()` failed in its PCA stage when the PCA dimensions were not below the HVG count. An ATAC run's `prevalent_peaks` `top_n` defaults to `min(10000, peaks - 1)`, and its configuration records the resolved `top_n`. Other values, such as a Leiden `backend` and the numeric `doublets` settings, and limits that depend on the data are still checked by each stage's method when the stage runs.
 - Pipeline events are reworked. A `PipelineEvent` carries the run ID, recipe, label, stage, stage
   ordinal, number of stages, and time and, as its kind needs, the stage's progress, metrics,
   summary, outputs, reused output keys, warnings, or error; `to_dict()` returns its JSON values.

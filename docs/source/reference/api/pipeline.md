@@ -340,6 +340,7 @@ A recipe checks its call against the store before it creates a run record, and a
 - `pca={'dims': 0} builds the graph on normalized values, which Harmony cannot correct; ...` and
   `pca={'dims': 0} builds the graph on normalized values, but doublet scoring needs a PCA graph; ...`;
 - `Assay 'RNA' normalizes with ..., but doublet scoring normalizes its simulated doublets by library size and needs norm_lib_size; ...` (`rna` with doublet scoring on, when the assay's `normMethod` is not `cytearc.assay.norm_lib_size`, such as `norm_pearson_residuals`): pass `doublets=False`, or set the `normMethod` back to `norm_lib_size`;
+- `pca={'feat_scaling': False} fits PCA without feature scaling, but doublet scoring projects its simulated doublets onto the PCA through a mapping reference, which needs feature scaling; ...` (`rna` with doublet scoring on): pass `doublets=False`, or omit `feat_scaling`, which defaults to True;
 - `PCA settings need dims above 0; dims=0 skips PCA`, for other `pca` settings beside `dims=0`;
 - `leiden selected must be one of the partitions`;
 - `snapshot_columns collide with reserved run fields: [...]`;
@@ -353,6 +354,7 @@ method where it has them:
 - `pca` `dims`: an integer of at least 0 for `rna` and at least 1 for `adt`, below the number of features that PCA reads, because PCA needs `dims + 1` of them: for an `rna` run, the smaller of the `hvg` `top_n` and the assay's features, since HVG selection keeps at most both, and for an `adt` run, the panel's antibodies. When fewer genes pass the HVG filters, the PCA stage refuses the dimensions and names the features selected.
 - `prevalent_peaks` `top_n` and the `lsi` `dims` and `skip_first`, as [ATAC](#atac) describes.
 - `neighbors` `k`, `umap` `umap_dims`, and `tsne` `tsne_dims`: integers of at least 1.
+- `ann_index` `ann_metric`: `"l2"` or `"cosine"`, the metrics that the ANN index and the mapping reference of doublet scoring take; another value raises `ValueError`.
 - `tsne`: the checks of `embeddings.tsne`, because the stage runs after most others. `tsne_dims`,
   `max_iter`, and `alpha` must be integers of at least 1, `early_iter` an integer of at least 0,
   `lambda_scale` and `box_h` finite positive numbers, and `symmetric_graph` and
@@ -382,12 +384,7 @@ method where it has them:
 - `pca` `dims` of a `perturbation` run: at least 1 and below the smaller of the `hvg` `top_n` and the RNA assay's features, and at least `signature` `dims` when the run calls Mixscape.
 - `signature` settings without `mixscape`, `profiles` settings without `clusters`, a `profiles` `cells` other than `"knocked_out"` or `"labelled"`, `"knocked_out"` without `mixscape`, and `pairs`, `features`, or a table of `positive_controls` in `associations` raise `ValueError`.
 
-Every other value is checked by the stage's method when the stage runs, such as `ann_index`
-`ann_metric`, a Leiden `backend`, the numeric `doublets` settings, and the `umap` settings other
-than `umap_dims` and the graph flags, and so are limits that depend on the data, such as the memory
-that the ANN index or cluster selection needs, a sample with fewer control cells than the signature's
-`n_neighbors`, or clusters of fewer than 3 profiles. Such a value or limit fails its stage after the
-earlier stages have run: the run is recorded as failed and raises `PipelineExecutionError`.
+Every other value is checked by the stage's method when the stage runs, such as a Leiden `backend`, the other `ann_index` settings, the numeric `doublets` settings, and the `umap` settings other than `umap_dims` and the graph flags, and so are limits that depend on the data, such as the memory that the ANN index or cluster selection needs, a sample with fewer control cells than the signature's `n_neighbors`, or clusters of fewer than 3 profiles. Such a value or limit fails its stage after the earlier stages have run: the run is recorded as failed and raises `PipelineExecutionError`.
 
 A handled stage failure raises {py:class}`~cytearc.PipelineExecutionError` after the stage and
 the run are recorded as failed. Use its `run_id` to inspect the persisted failure, and its `stage`

@@ -120,15 +120,7 @@ integrates modalities, and one for pooled CRISPR screens:
   embeds and clusters it.
 - `ds.pipeline.perturbation(labels={"controls": [...]})` calls the guides of a pooled CRISPR screen, labels each cell by the genes its guides target, and measures each perturbation over the RNA recipe's highly variable genes and PCA ([Perturbation screens](#perturbation-screens)).
 
-A recipe checks its call against the store before it writes anything: its keywords and settings,
-the columns and cells that it names, the combinations of its stages, and the setting values that
-can be checked without reading data. A `TypeError`, `ValueError`, or `KeyError` from the call
-therefore means that nothing was written: correct the call and run it again. A few values, such as
-`ann_index` `ann_metric`, a Leiden `backend`, and the numeric `doublets` settings, are checked only
-when their stage runs, as are limits that depend on the data. A `PipelineExecutionError` names the
-stage that failed, and the run is recorded as failed; the stages before it keep their artifacts,
-which a corrected run reuses. A run writes immutable artifacts and a durable run ledger, but does
-not change live `I` or metadata columns.
+A recipe checks its call against the store before it writes anything: its keywords and settings, the columns and cells that it names, the combinations of its stages, and the setting values that can be checked without reading data. A `TypeError`, `ValueError`, or `KeyError` from the call therefore means that nothing was written: correct the call and run it again. A few values, such as a Leiden `backend` and the numeric `doublets` settings, are checked only when their stage runs, as are limits that depend on the data. A `PipelineExecutionError` names the stage that failed, and the run is recorded as failed; the stages before it keep their artifacts, which a corrected run reuses. A run writes immutable artifacts and a durable run ledger, but does not change live `I` or metadata columns.
 
 Configure a stage with its own keyword. Its settings are the keywords of the stage's method and
 mean what they mean there: `hvg={"top_n": 2000}` for `features.hvgs`, `pca={"dims": 30}` for
