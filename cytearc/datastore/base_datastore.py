@@ -363,11 +363,16 @@ class BaseDataStore:
     @validation_scoped
     def _artifacts_lineage(
         self,
-        target: ArtifactRef | Mapping[str, ArtifactRef],
+        target: ArtifactRef | Mapping[str, ArtifactRef | tuple[ArtifactRef, ...]],
         *,
         references: "MappingReference | Sequence[MappingReference] | None" = None,
     ) -> "ArtifactLineage":
-        """Build a read-only upstream lineage report for artifact outputs."""
+        """Build a read-only upstream lineage report for artifact outputs.
+
+        ``target`` is one ref or a mapping of names to refs, such as a
+        pipeline run. A tuple of refs, such as a run's ``leiden`` candidates,
+        names each ref by its position: ``leiden[0]``, ``leiden[1]``.
+        """
         from ..storage.lineage import ArtifactLineage
         from ..mapping.artifact import validate_mapping_reference_binding
         from ..mapping.reference import MappingReference

@@ -78,7 +78,7 @@ ds.markers.load(marker=rna["markers"], group_id=1)
 
 The `rna` recipe runs these stages in order:
 
-`input_snapshot`, `cell_calling`, `hashing`, `filtering`, `cell_cycle`, `highly_variable_features`, `normalization`, `pca`, `harmony`, `ann_index`, `neighbors`, `connectivity`, `embedding_initialization`, `umap`, `localmap`, one `leiden_<resolution>` stage per candidate, `paris`, `cluster_selection`, `membership_strength`, `tsne`, `doublets`, `markers`.
+`input_snapshot`, `cell_calling`, `hashing`, `filtering`, `cell_cycle`, `highly_variable_features`, `normalization`, `pca`, `harmony`, `ann_index`, `neighbors`, `connectivity`, `embedding_initialization`, `umap`, `localmap`, `leiden`, `paris`, `cluster_selection`, `membership_strength`, `tsne`, `doublets`, `markers`.
 
 By default it filters cells on their QC metrics with MAD bounds, scores the cell cycle, selects
 1,000 highly variable genes, normalizes them, keeps 21 PCA dimensions, builds a graph of 11
@@ -96,7 +96,7 @@ atac["lsi"]
 atac.features.fetch("prevalent_peaks")
 ```
 
-The `atac` recipe runs `input_snapshot`, `filtering`, `prevalent_peaks`, `normalization`, `lsi`, `harmony`, `ann_index`, `neighbors`, `connectivity`, `embedding_initialization`, `umap`, `localmap`, one `leiden_<resolution>` stage per candidate, `paris`, `cluster_selection`, `membership_strength`, `tsne`, and `markers`.
+The `atac` recipe runs `input_snapshot`, `filtering`, `prevalent_peaks`, `normalization`, `lsi`, `harmony`, `ann_index`, `neighbors`, `connectivity`, `embedding_initialization`, `umap`, `localmap`, `leiden`, `paris`, `cluster_selection`, `membership_strength`, `tsne`, and `markers`.
 
 By default it filters cells on `<assay>_nCounts` and `<assay>_nFeatures` with MAD bounds, keeps the
 10,000 most prevalent peaks (`features.prevalent_peaks` `top_n`), normalizes them with the assay's
@@ -119,7 +119,7 @@ adt = ds.pipeline.adt(cells=rna, label="adt")
 adt.features.fetch("panel")
 ```
 
-The `adt` recipe runs `input_snapshot`, `filtering`, `panel`, `normalization`, `pca`, `harmony`, `ann_index`, `neighbors`, `connectivity`, `embedding_initialization`, `umap`, `localmap`, one `leiden_<resolution>` stage per candidate, `paris`, `cluster_selection`, `membership_strength`, `tsne`, and `markers`.
+The `adt` recipe runs `input_snapshot`, `filtering`, `panel`, `normalization`, `pca`, `harmony`, `ann_index`, `neighbors`, `connectivity`, `embedding_initialization`, `umap`, `localmap`, `leiden`, `paris`, `cluster_selection`, `membership_strength`, `tsne`, and `markers`.
 
 The assay must be of type `ADT`; an `HTO` assay is read by the RNA recipe's `hashing` stage
 instead. The panel leaves out the antibodies whose names match
@@ -142,9 +142,7 @@ wnn.cells.fetch("weight_ADT")
 ds.markers.load(marker=wnn["markers_ADT"], group_id=1)
 ```
 
-The `multimodal` recipe runs `input_snapshot`, `integration`, `embedding_initialization`, `umap`,
-one `leiden_<resolution>` stage per candidate, `paris`, `cluster_selection`, which is always
-skipped, `membership_strength`, `tsne`, and `markers`.
+The `multimodal` recipe runs `input_snapshot`, `integration`, `embedding_initialization`, `umap`, `leiden`, `paris`, `cluster_selection`, which is always skipped, `membership_strength`, `tsne`, and `markers`.
 
 It integrates the runs' graphs with weighted nearest neighbors (`method="wnn"`, the default), which
 weighs each run's neighbors, or with shared nearest neighbors (`method="snn"`), which shares each
@@ -416,7 +414,7 @@ plan["pca"].estimate    # what PCA took when an earlier rna run computed it
 
 | `status` | Meaning |
 | --- | --- |
-| `reused` | Every artifact that the stage plans exists, complete and current. `outputs` holds the `(key, ref)` pairs that the run would record for the stage. |
+| `reused` | Every artifact that the stage plans exists, complete and current. `outputs` holds the `(key, ref)` pairs that the run would record for the stage, one pair for each Leiden candidate of the `leiden` stage. |
 | `computed` | The stage would compute an artifact, for the `reason` below. `operation` names the operation whose artifact it would compute first. |
 | `skipped` | The call turns the stage off. |
 
@@ -606,11 +604,16 @@ warning that names the extra before it creates a run record, and then runs.
 
 ### Leiden and Paris
 
-`leiden` runs one stage per resolution of `partitions`, by default 0.5, 0.75, 1.0, and 1.25, or
-1.0 for a multimodal run. `leiden=True` and `leiden={}` use the defaults. Partitions must be a
-non-empty sequence without duplicate resolutions. `selected` names one of the partitions as the
-saved clustering, `run["clusters"]`, in place of the silhouette choice, and the cluster-selection
-stage is skipped; the other partitions still run beside it.
+The `leiden` stage clusters the graph at each resolution of `partitions`, by default 0.5, 0.75, 1.0, and 1.25, or 1.0 for a multimodal run. `leiden=True` and `leiden={}` use the defaults. Partitions must be a non-empty sequence without duplicate resolutions, and the run orders them by resolution. `run["leiden"]` holds the candidates, a tuple of refs in that order, and the stage record times them together. Each candidate records its resolution among its parameters, so `ds.artifacts.find("clusters", graph=run["connectivity_map"], method="leiden", resolution=1.0)` finds one, with `graph=run["integrated_graph"]` for a multimodal run, in runs of this release and of earlier ones alike. `selected` names one of the partitions as the saved clustering, `run["clusters"]`, in place of the silhouette choice, and the cluster-selection stage is skipped; the other partitions still run beside it.
+
+```python
+run = ds.pipeline.rna(label="rna")
+run["leiden"]       # (ArtifactRef(...), ArtifactRef(...), ArtifactRef(...), ArtifactRef(...))
+fine = ds.artifacts.find(
+    "clusters", graph=run["connectivity_map"], method="leiden", resolution=1.25
+)
+ds.plots.embedding(run=run, color_by=[run["clusters"], fine])
+```
 
 `backend` defaults to `"cytearc"`, CyteArc's own multi-threaded Leiden implementation, which runs on
 the datastore's worker budget and gives the same labels for any thread count. `"igraph"` and
@@ -694,9 +697,7 @@ This silhouette comparison is a reproducible provisional baseline. It is not bio
 or ground truth. Keep alternative Leiden refs and Paris when the study question needs other
 evidence.
 
-The resulting `cluster_selection` artifact records candidate keys and refs, silhouette scores,
-the sample definition (`sampleStrategy="sharedClusterQuota"` and `minClusterQuota=2`),
-invalid-candidate reasons, deterministic tie order, and the selected key.
+The resulting `cluster_selection` artifact records each candidate's key, its resolution as text such as `"1.0"`, with its ref and silhouette score, the sample definition (`sampleStrategy="sharedClusterQuota"` and `minClusterQuota=2`), invalid-candidate reasons, deterministic tie order, and the selected key. Runs of earlier releases keyed their candidates by output name, such as `"leiden_1.0"`, so a new run on their store computes the decision once again while it reuses their Leiden candidates.
 `run["clusters"]` is the selected Leiden candidate's exact ref. It is not a copied artifact or
 metadata column. If no Leiden candidate can be scored, the stage fails. A single valid Leiden
 candidate still receives a decision artifact.
@@ -715,18 +716,17 @@ absent. A default `rna` run has:
 ```text
 input_cell_selection, analysis_cell_selection, feature_universe, cell_cycle,
 highly_variable_features, normalized, pca, ann_index, neighbors, connectivity_map,
-embedding_initialization, umap, leiden_0.5, leiden_0.75, leiden_1.0, leiden_1.25,
-cluster_selection, clusters, doublets, markers
+embedding_initialization, umap, cluster_selection, clusters, doublets, markers, leiden
 ```
 
-Optional stages add their outputs in place: `cell_calling`, `called_cell_selection`, `hashing`, and `hashed_cell_selection` after `input_cell_selection`; `harmony` after `pca`; `localmap` after `umap`; `paris` after the Leiden candidates; and `membership_strength` and `tsne` after `clusters`. A run with `leiden` `selected` has no `cluster_selection` output.
+Optional stages add their outputs in place: `cell_calling`, `called_cell_selection`, `hashing`, and `hashed_cell_selection` after `input_cell_selection`; `harmony` after `pca`; `localmap` after `umap`; `paris` after `localmap`; and `membership_strength` and `tsne` after `clusters`. A run with `leiden` `selected` has no `cluster_selection` output. `leiden`, the one output that holds several refs, comes after the others. Runs of earlier releases have one output per Leiden candidate in its place, such as `leiden_1.0` after `umap`, and no `leiden` output.
 
 A default `atac` run has:
 
 ```text
 input_cell_selection, analysis_cell_selection, feature_universe, prevalent_peaks, normalized, lsi,
-ann_index, neighbors, connectivity_map, embedding_initialization, umap,
-leiden_0.5, leiden_0.75, leiden_1.0, leiden_1.25, cluster_selection, clusters, markers
+ann_index, neighbors, connectivity_map, embedding_initialization, umap, cluster_selection, clusters,
+markers, leiden
 ```
 
 A default `adt` run has the same outputs with `panel` in place of `prevalent_peaks` and `pca` in
@@ -734,7 +734,7 @@ place of `lsi`. A default WNN `multimodal` run of an `RNA` run and an `ADT` run 
 
 ```text
 input_cell_selection, analysis_cell_selection, feature_universe, integrated_graph,
-embedding_initialization, umap, leiden_1.0, clusters, markers_RNA, markers_ADT
+embedding_initialization, umap, clusters, markers_RNA, markers_ADT, leiden
 ```
 
 Its `input_cell_selection` and `analysis_cell_selection` are both the selection that its runs share, and its `feature_universe` is the first run's. A default `perturbation` run has:
@@ -746,7 +746,7 @@ perturbation_labels, efficiency, highly_variable_features, normalized, pca, edis
 
 Its optional stages add `harmony` after `pca`, and `signature`, `mixscape`, `associations`, `profiles`, and `perturbation_clusters`, in that order, after `edistance`. Calls that fit no thresholds, with `method="fixed"` or `"top_guide"` or imported from Cell Ranger, have no `guide_thresholds`.
 
-`run.recipe` names the recipe, `"rna"`, `"atac"`, `"adt"`, `"multimodal"`, or `"perturbation"`, and `run.assay` the analyzed assay, the RNA assay of a perturbation run, or the first run's assay for a multimodal run. Normal mapping operations such as `run["pca"]`, `list(run)`, and `run.items()` are available only on a successfully completed run.
+`run.recipe` names the recipe, `"rna"`, `"atac"`, `"adt"`, `"multimodal"`, or `"perturbation"`, and `run.assay` the analyzed assay, the RNA assay of a perturbation run, or the first run's assay for a multimodal run. Normal mapping operations such as `run["pca"]`, `list(run)`, and `run.items()` are available only on a successfully completed run. Each output is one `ArtifactRef`, except `run["leiden"]`, a tuple of refs, which `len(run)` counts once.
 
 ### Run snapshots
 
@@ -794,9 +794,8 @@ view.head(n=5)
 | `umap_1`, `umap_2`, ... | cells | UMAP runs |
 | `localmap_1`, `localmap_2`, ... | cells | LocalMAP runs |
 | `tsne_1`, `tsne_2`, ... | cells | t-SNE runs |
-| `leiden_<resolution>` | cells | one per Leiden candidate |
 | `paris` | cells | Paris runs |
-| `clusters` | cells | a Leiden candidate is saved |
+| `clusters` | cells | a Leiden candidate is saved; the other candidates have no field, and `run["leiden"]` holds them all |
 | `membership_strength` | cells | `membership_strength=True` |
 | `doublet_score`, `predicted_doublet` | cells | an `rna` run scores doublets |
 | `weight_<assay>` | cells | a WNN `multimodal` run, one per assay |
@@ -813,7 +812,7 @@ mutation surface.
 
 Every assay of a store shares its cells, so a cell field can read an artifact of any assay, such as the guide calls of a `perturbation` run, which belong to the guide assay. The cell view checks that each artifact was computed on the run's cells, as its recorded cell selection shows, and refuses one computed on other cells. Each assay has its own features, so a feature field reads only artifacts of the run's assay. A run opens both views before it completes, so a field that a view refuses fails the run at `"finalize"`, and the run does not take its label.
 
-`snapshot_columns` cannot use the name of a field that the run produces or could produce: `I`, `ids`, `names`, `s_score`, `g2m_score`, `cell_cycle_phase`, the run's `umap_<n>`, `localmap_<n>`, `tsne_<n>`, and `leiden_<resolution>` fields, `paris`, `clusters`, `membership_strength`, `doublet_score`, `predicted_doublet`, and the recipe's feature field, or for a multimodal run its `weight_<assay>` fields. A `perturbation` run also reserves `guide_call`, `perturbation_label`, and `is_control`, and `mixscape_class` and `mixscape_posterior`, which a run without Mixscape does not produce.
+`snapshot_columns` cannot use the name of a field that the run produces or could produce: `I`, `ids`, `names`, `s_score`, `g2m_score`, `cell_cycle_phase`, the run's `umap_<n>`, `localmap_<n>`, and `tsne_<n>` fields, `leiden_<resolution>` for each Leiden candidate, the field that runs of earlier releases gave it, `paris`, `clusters`, `membership_strength`, `doublet_score`, `predicted_doublet`, and the recipe's feature field, or for a multimodal run its `weight_<assay>` fields. A `perturbation` run also reserves `guide_call`, `perturbation_label`, and `is_control`, and `mixscape_class` and `mixscape_posterior`, which a run without Mixscape does not produce.
 
 Pipeline execution writes immutable artifacts and run records only. It never inserts result
 columns or rewrites live `I`. Plotting, marker loading, and export stay on `DataStore`:
@@ -938,6 +937,8 @@ its compatibility inventory.
 
 Releases from before the stage resources open the runs that this release saves, but their `report()` raises on the new metric fields, and their `plan` skips those stage records with a warning.
 
+Runs of releases before the one `leiden` stage hold one `leiden_<resolution>` stage, output, and cell field for each Leiden candidate, and they keep them: `run["leiden_1.0"]` and `run.cells.fetch("leiden_1.0")` read such a run, and it plots and exports with those names, while it has no `run["leiden"]`. To read a candidate the same way in runs of every release, find it by its graph and resolution with `ds.artifacts.find("clusters", graph=run["connectivity_map"], method="leiden", resolution=1.0)`. A new run with the same settings reuses their Leiden candidates. The runs that this release saves hold the record field `outputLists`, which earlier releases do not know: they skip those runs when they list runs and raise when they open one.
+
 A cell field can read an artifact of another assay than the run's, as the guide fields of a `perturbation` run do ([Frozen fields](#frozen-fields)). Such a field is an ordinary entry of the record's `fields`, so run records keep their shape, with no new record field, schema version, or migration, and every saved run reads as before. CyteArc 1.3.0 and earlier releases read cell fields of the run's assay only: they refuse the cell view of a run with such a field, with an `ArtifactResolutionError` whose code is `pipeline_field_axis_mismatch`, while its outputs and feature view open. They do not know the artifact kinds of a `perturbation` run's guide calls and labels, such as `guide_calls`, so they open no `perturbation` run. A run keeps the fields that it recorded and gains none later: a `perturbation` run saved without the guide fields gets them only from a new run of the recipe with the same settings, under another label or none, which reuses every artifact of the earlier run.
 
 Run and stage records are otherwise strict: a missing or unknown field, or a malformed value,
@@ -963,8 +964,8 @@ cannot be computed is logged as a warning and left out. For example:
 | `filtering` | `cells`, `inputCells`, `removedCells`, and `samples`, the number of MAD groups |
 | `hashing` | `hashing` (`hashtags`, `negative`, `multiplets`) and `hashed_cell_selection` (`cells`, `inputCells`, `removedCells`) |
 | `pca` | `cells`, `dims`, `varianceRatio` (at most 50 components), `varianceExplained` |
-| `leiden_<resolution>` | `clusters`, `largestCluster`, `smallestCluster` |
-| `cluster_selection` | `selected` and the silhouette `scores` of each candidate |
+| `leiden` | `candidates`, with each candidate's `resolution`, `clusters`, `largestCluster`, `smallestCluster`, and `artifact`, its artifact ID, in resolution order |
+| `cluster_selection` | `selected`, the selected resolution, and `candidates`, with each candidate's `resolution`, silhouette `score`, and `artifact` |
 | `membership_strength` | `mean`, and `belowHalf`, the number of cells whose membership strength is below 0.5 |
 | `doublets` | `predictedDoublets`, `rate`, and `samples`, with each sample's threshold and calls |
 | `integration` | `assays` and `meanWeights`, the mean modality weight of each assay |
@@ -988,10 +989,8 @@ warnings.
 
 `run.report()` returns three entries:
 
-- `run`: the run record, with `runId`, `recipe`, `requestedLabel`, `label`, `assay`,
-  `startedAtNs`, `finishedAtNs`, `status`, `complete`, `cytearcVersion`, `config`, `stageOrder`,
-  `outputs`, `fields`, `error`, and `interruption`;
-- `stages`: each stage record written so far, skipped stages included, with `stage`, `ordinal`, `status`, its times, `outputs`, `plans`, `metrics` ([Stage resources](#stage-resources)), `error`, `interruption`, `summary`, and `warnings`;
+- `run`: the run record, with `runId`, `recipe`, `requestedLabel`, `label`, `assay`, `startedAtNs`, `finishedAtNs`, `status`, `complete`, `cytearcVersion`, `config`, `stageOrder`, `outputs`, `fields`, `error`, `interruption`, and `outputLists`, the outputs that hold several refs, such as `leiden`;
+- `stages`: each stage record written so far, skipped stages included, with `stage`, `ordinal`, `status`, its times, `outputs` and `outputLists`, each listed artifact with whether the stage reused it, `plans`, `metrics` ([Stage resources](#stage-resources)), `error`, `interruption`, `summary`, and `warnings`;
 - `summary`: `createdArtifacts`, `reusedArtifacts`, `uncleanIncomplete`, `signalProtection`, and
   `warnings`, a list of `{"stage", "message"}` entries for every stage's warnings in stage order.
 
@@ -1033,8 +1032,7 @@ the run has, skipped stages included), and `time_ns`. The other fields depend on
 | `run_failed` | after the run is recorded as failed | `error` |
 | `run_interrupted` | after the run is recorded as interrupted | `error` |
 
-`outputs` holds the `(key, ref)` pairs that a completed stage produced, and `reused` the keys whose
-artifacts were reused rather than computed. `metrics` and `summary` are the values that the stage
+`outputs` holds the `(key, ref)` pairs that a completed stage produced, one pair for each ref of an output that holds several, such as `leiden`, and `reused` the keys whose artifacts were reused rather than computed; an output of several refs counts as reused when every one of them was. `metrics` and `summary` are the values that the stage
 record holds. `error` is the exception: the stage's own for `stage_failed`, the
 `PipelineExecutionError` for `run_failed`, and the interruption for `stage_interrupted` and
 `run_interrupted`.

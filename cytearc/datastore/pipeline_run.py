@@ -1146,17 +1146,19 @@ class PipelineAxisView:
         )
 
 
-class PipelineRun(Mapping[str, ArtifactRef]):
+class PipelineRun(Mapping[str, ArtifactRef | tuple[ArtifactRef, ...]]):
     """A datastore-bound handle for one durable pipeline invocation.
 
     A recipe returns its completed run, and ``ds.pipeline.open`` and
     ``ds.pipeline.list_runs`` reopen runs of every status. A completed run is
     a read-only mapping of its output keys, such as ``"clusters"``, to exact
     :class:`~cytearc.ArtifactRef` values, and its ``cells`` and ``features``
-    views hold its frozen fields. A run of another status raises
-    ``RuntimeError`` for its outputs and views, and ``report()`` gives the
-    persisted facts of a run of any status. A handle keeps the run record
-    that it opened, so open the run again to see a later status.
+    views hold its frozen fields. The ``leiden`` output holds the Leiden
+    candidates, a tuple of refs ordered by resolution. A run of another
+    status raises ``RuntimeError`` for its outputs and views, and
+    ``report()`` gives the persisted facts of a run of any status. A handle
+    keeps the run record that it opened, so open the run again to see a
+    later status.
     """
 
     __slots__ = ("_cells_view", "_features_view", "_owner", "_outputs", "_record")
@@ -1172,7 +1174,14 @@ class PipelineRun(Mapping[str, ArtifactRef]):
             raise TypeError("PipelineRun record must be a PipelineRunRecord")
         self._owner = owner
         self._record = record
-        self._outputs = {output.key: output.artifact for output in record.outputs}
+        # Outputs of one artifact come first in record order, then outputs of
+        # several, such as the Leiden candidates.
+        self._outputs: dict[str, ArtifactRef | tuple[ArtifactRef, ...]] = {
+            output.key: output.artifact for output in record.outputs
+        }
+        self._outputs.update(
+            (output.key, output.artifacts) for output in record.output_lists
+        )
         self._cells_view: PipelineAxisView | None = None
         self._features_view: PipelineAxisView | None = None
 
@@ -1240,7 +1249,23 @@ class PipelineRun(Mapping[str, ArtifactRef]):
                 f"{operation} requires a completed run"
             )
 
-    def __getitem__(self, key: str) -> ArtifactRef:
+    # ``run["leiden"]`` is a tuple and every other output one ref; a key held
+    # in a variable is typed as one ref.
+    @overload
+    def __getitem__(  # type: ignore[overload-overlap]
+        self, key: Literal["leiden"]
+    ) -> tuple[ArtifactRef, ...]: ...
+
+    @overload
+    def __getitem__(self, key: str) -> ArtifactRef: ...
+
+    def __getitem__(self, key: str) -> ArtifactRef | tuple[ArtifactRef, ...]:
+        """Return the output ``key``: one ref, or a tuple for ``leiden``.
+
+        ``run["leiden"]`` holds the Leiden candidates ordered by resolution.
+        A run that an earlier release saved has one output per candidate
+        instead, such as ``run["leiden_1.0"]``, and no ``leiden`` output.
+        """
         self._require_completed("output access")
         return self._outputs[key]
 
@@ -1402,11 +1427,19 @@ class PipelineRun(Mapping[str, ArtifactRef]):
         if diagnostics:
             lines.extend(["", "## Diagnostics", "", *diagnostics])
         outputs = run["outputs"]
+        output_lists = run["outputLists"]
         lines.extend(["", "## Outputs", ""])
-        if outputs:
+        if outputs or output_lists:
             lines.extend(
                 f"- `{output['key']}`: `{output['artifact']['artifact_id']}`"
                 for output in outputs
+            )
+            lines.extend(
+                f"- `{output['key']}`: "
+                + ", ".join(
+                    f"`{artifact['artifact_id']}`" for artifact in output["artifacts"]
+                )
+                for output in output_lists
             )
         else:
             lines.append("No completed outputs.")
@@ -1454,11 +1487,13 @@ class PipelineRun(Mapping[str, ArtifactRef]):
           ``requestedLabel``, ``label``, ``assay``, ``startedAtNs``,
           ``finishedAtNs``, ``status``, ``complete``, ``cytearcVersion``,
           ``config``, ``stageOrder``, ``outputs``, ``fields``, ``error``,
-          and ``interruption``.
+          ``interruption``, and ``outputLists``, the outputs that hold
+          several artifacts, such as ``leiden``.
         - ``stages``: each stage record written so far, skipped stages
-          included, with its status, times, outputs, artifact plans with
-          their ``created`` or ``reused`` dispositions, ``metrics``,
-          ``error``, ``interruption``, ``summary``, and ``warnings``. The
+          included, with its status, times, outputs and ``outputLists``,
+          artifact plans with their ``created`` or ``reused`` dispositions,
+          ``metrics``, ``error``, ``interruption``, ``summary``, and
+          ``warnings``. The
           ``metrics`` hold the stage's wall and CPU time, sampled RSS, the
           process's peak RSS, OS threads, network bytes, the ``resources``
           its process had, and a ``trace`` of samples.

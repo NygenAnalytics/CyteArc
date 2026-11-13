@@ -19,11 +19,7 @@ A completed {py:class}`~cytearc.PipelineRun` can be passed to
 (`layout` names a run output, `"umap"` by default) and the cells, and every cell input comes from
 the run. There is no live fallback in run mode:
 
-- `color_by` takes one item or a list, drawn as one panel each. A string or `CellField` names a
-  frozen run cell field from `run.cells.columns`, such as `clusters`, `doublet_score`, a
-  multimodal run's `weight_<assay>` modality weights, or a column frozen with `snapshot_columns`.
-  An `ArtifactRef` must be an output of the run, such as `run["leiden_1.0"]`. Any other ref raises
-  `ValueError`; color by it with the granular `layout=run["umap"]` route instead.
+- `color_by` takes one item or a list, drawn as one panel each. A string or `CellField` names a frozen run cell field from `run.cells.columns`, such as `clusters`, `doublet_score`, a multimodal run's `weight_<assay>` modality weights, or a column frozen with `snapshot_columns`. An `ArtifactRef` must be an output of the run, such as one of its Leiden candidates in `run["leiden"]`, which `ds.artifacts.find("clusters", graph=run["connectivity_map"], method="leiden", resolution=1.0)` also finds. Any other ref raises `ValueError`; color by it with the granular `layout=run["umap"]` route instead.
 - `facet_by`, `subset_by`, `Highlight(by=...)` and `DensityOverlay(group_by=...)` name frozen run
   cell fields. A name that is neither a frozen field nor, for `color_by`, a gene raises `KeyError`
   listing the run's cell fields.

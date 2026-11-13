@@ -663,10 +663,8 @@ def resolve_rna(
         ),
         head=("cell_cycle", "highly_variable_features"),
         reduction=("pca",),
-        partitions=partitions,
         tail=("doublets", "markers"),
     )
-    leiden_keys = [key for key, _value in partitions]
 
     def fields(state: RunState) -> tuple[Any, ...]:
         return (
@@ -674,7 +672,6 @@ def resolve_rna(
                 store,
                 state.artifacts,
                 snapshot_columns=snapshots,
-                leiden_keys=leiden_keys,
             ),
             *feature_fields(
                 store,

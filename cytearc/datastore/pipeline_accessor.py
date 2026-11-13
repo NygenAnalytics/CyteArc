@@ -303,9 +303,8 @@ class PipelineAccessor:
         ``input_snapshot``, ``cell_calling``, ``hashing``, ``filtering``,
         ``cell_cycle``, ``highly_variable_features``, ``normalization``,
         ``pca``, ``harmony``, ``ann_index``, ``neighbors``, ``connectivity``,
-        ``embedding_initialization``, ``umap``, ``localmap``, one
-        ``leiden_<resolution>`` per candidate, ``paris``,
-        ``cluster_selection``, ``membership_strength``, ``tsne``,
+        ``embedding_initialization``, ``umap``, ``localmap``, ``leiden``,
+        ``paris``, ``cluster_selection``, ``membership_strength``, ``tsne``,
         ``doublets``, ``markers``.
 
         Args:
@@ -363,6 +362,8 @@ class PipelineAccessor:
                 (default 0.5, 0.75, 1.0, 1.25), an optional ``selected``
                 resolution that becomes the saved clustering in place of the
                 silhouette choice, and the keywords of ``clusters.leiden``.
+                The ``leiden`` stage clusters at every resolution, and
+                ``run["leiden"]`` holds the candidates ordered by resolution.
             paris: Paris clustering of the graph, for diagnosis, with the
                 keywords of ``clusters.paris``.
             membership_strength: Score each cell's membership in its cluster.
@@ -463,8 +464,8 @@ class PipelineAccessor:
         ``input_snapshot``, ``filtering``, ``prevalent_peaks``,
         ``normalization``, ``lsi``, ``harmony``, ``ann_index``, ``neighbors``,
         ``connectivity``, ``embedding_initialization``, ``umap``,
-        ``localmap``, one ``leiden_<resolution>`` per candidate, ``paris``,
-        ``cluster_selection``, ``membership_strength``, ``tsne``, ``markers``.
+        ``localmap``, ``leiden``, ``paris``, ``cluster_selection``,
+        ``membership_strength``, ``tsne``, ``markers``.
 
         Args:
             assay: The ATAC assay. Defaults to the default assay when it is an
@@ -551,9 +552,8 @@ class PipelineAccessor:
 
         ``input_snapshot``, ``filtering``, ``panel``, ``normalization``,
         ``pca``, ``harmony``, ``ann_index``, ``neighbors``, ``connectivity``,
-        ``embedding_initialization``, ``umap``, ``localmap``, one
-        ``leiden_<resolution>`` per candidate, ``paris``,
-        ``cluster_selection``, ``membership_strength``, ``tsne``,
+        ``embedding_initialization``, ``umap``, ``localmap``, ``leiden``,
+        ``paris``, ``cluster_selection``, ``membership_strength``, ``tsne``,
         ``markers``.
 
         Analyze ADT with the cells of an RNA run, ``cells=rna_run``, to
@@ -638,9 +638,8 @@ class PipelineAccessor:
         clusters:
 
         ``input_snapshot``, ``integration``, ``embedding_initialization``,
-        ``umap``, one ``leiden_<resolution>`` per candidate, ``paris``,
-        ``cluster_selection`` (always skipped), ``membership_strength``,
-        ``tsne``, ``markers``.
+        ``umap``, ``leiden``, ``paris``, ``cluster_selection`` (always
+        skipped), ``membership_strength``, ``tsne``, ``markers``.
 
         The runs must analyze the same cells: run each modality after the
         first with ``cells=<first run>``. WNN needs runs whose graphs were

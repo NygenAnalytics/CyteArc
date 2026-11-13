@@ -591,7 +591,10 @@ def test_the_run_cells_hold_each_cells_guide_call_and_label(runs) -> None:
             *("runId", "recipe", "requestedLabel", "label", "assay", "startedAtNs"),
             *("finishedAtNs", "status", "complete", "cytearcVersion", "config"),
             *("stageOrder", "outputs", "fields", "error", "interruption"),
+            "outputLists",
         }
+        # A perturbation run has no output of several artifacts.
+        assert record["outputLists"] == []
         fields = {
             field["key"]: field
             for field in record["fields"]

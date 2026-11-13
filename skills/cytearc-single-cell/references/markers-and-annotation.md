@@ -69,7 +69,10 @@ ds = cytearc.DataStore("analysis.zarr", nthreads=4, min_features_per_cell=-1)
 run = ds.pipeline.open(label="baseline")
 clusters, markers = run["clusters"], run["markers"]
 # Another partition needs its own table (one pass over counts):
-markers_res1 = ds.markers.search(run["leiden_1.0"], features=run["feature_universe"])
+res1 = ds.artifacts.find(
+    "clusters", graph=run["connectivity_map"], method="leiden", resolution=1.0
+)  # a candidate of run["leiden"]
+markers_res1 = ds.markers.search(res1, features=run["feature_universe"])
 
 top = ds.markers.load(marker=markers)  # frac_exp >= 0.2, auc >= 0.6, p_value_adjusted <= 0.05
 print(top.groupby("group_id", sort=False).head(8)

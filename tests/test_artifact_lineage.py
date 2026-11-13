@@ -303,6 +303,19 @@ def test_lineage_rejects_malformed_targets_inputs_and_external_roots() -> None:
             TypeError,
             "lineage output 'pca' must be an ArtifactRef",
         ),
+        # A tuple names several refs, as a run's leiden output does.
+        (
+            {"leiden": (ref, ref.to_dict())},
+            TypeError,
+            "lineage output 'leiden' must hold ArtifactRef values",
+        ),
+        ({"leiden": ()}, TypeError, "an ArtifactRef or a non-empty tuple"),
+        ({"leiden": [ref]}, TypeError, "an ArtifactRef or a non-empty tuple"),
+        (
+            {"leiden": (ref,), "leiden[0]": ref},
+            ValueError,
+            "'leiden\\[0\\]' is also the name of a listed ref",
+        ),
     ):
         with pytest.raises(error, match=message):
             ArtifactLineage.from_store(root, target)

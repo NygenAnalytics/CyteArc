@@ -39,7 +39,7 @@ from cytearc.datastore.pipeline_accessor import (
     PipelineEvent,
 )
 from cytearc.storage.artifacts import ArtifactRef, artifact_group
-from cytearc.storage.pipeline_runs import pipeline_stage_path
+from cytearc.storage.pipeline_runs import pipeline_run_path, pipeline_stage_path
 from tests import full_path
 from tests.storage_helpers import write_count_store
 from tests.test_cell_calling import _droplets
@@ -121,8 +121,7 @@ ATAC_STAGES = [
     "embedding_initialization",
     "umap",
     "localmap",
-    "leiden_0.5",
-    "leiden_1.0",
+    "leiden",
     "paris",
     "cluster_selection",
     "membership_strength",
@@ -142,7 +141,7 @@ ADT_STAGES = [
     "embedding_initialization",
     "umap",
     "localmap",
-    "leiden_1.0",
+    "leiden",
     "paris",
     "cluster_selection",
     "membership_strength",
@@ -154,7 +153,7 @@ MULTIMODAL_STAGES = [
     "integration",
     "embedding_initialization",
     "umap",
-    "leiden_1.0",
+    "leiden",
     "paris",
     "cluster_selection",
     "membership_strength",
@@ -472,10 +471,9 @@ def test_atac_runs_its_stages_in_order_and_records_its_recipe(atac) -> None:
         "ann_index",
         "neighbors",
         "connectivity_map",
-        "leiden_0.5",
-        "leiden_1.0",
         "cluster_selection",
         "clusters",
+        "leiden",
     ]
     stages = report["run"]["config"]["stages"]
     assert stages["prevalent_peaks"] == {"top_n": 2000}
@@ -510,12 +508,17 @@ def test_atac_cluster_selection_scores_the_lsi_coordinates(atac) -> None:
     selection = datastore.artifacts.inspect(run["cluster_selection"])
     assert selection.operation == "select_clusters_by_silhouette"
     assert selection.input_ref("coordinates") == run["lsi"]
-    assert selection.parameters["candidateKeys"] == ["leiden_0.5", "leiden_1.0"]
+    assert selection.parameters["candidateKeys"] == ["0.5", "1.0"]
     summary = _stages(run)["cluster_selection"]["summary"]
-    assert set(summary["scores"]) == {"leiden_0.5", "leiden_1.0"}
-    assert run["clusters"] == run[summary["selected"]]
+    candidates = run["leiden"]
+    assert [item["resolution"] for item in summary["candidates"]] == [0.5, 1.0]
+    assert [item["artifact"] for item in summary["candidates"]] == [
+        ref.artifact_id for ref in candidates
+    ]
+    assert run["clusters"] == candidates[[0.5, 1.0].index(summary["selected"])]
     np.testing.assert_array_equal(
-        run.cells.fetch("clusters"), run.cells.fetch(summary["selected"])
+        run.cells.fetch("clusters"),
+        datastore.artifacts.load(run["clusters"])["values"][:],
     )
 
 
@@ -694,9 +697,9 @@ def test_adt_analyzes_the_store_only_adt_assay(cite) -> None:
         "ann_index",
         "neighbors",
         "connectivity_map",
-        "leiden_1.0",
         "cluster_selection",
         "clusters",
+        "leiden",
     ]
     assert {adt[key].assay for key in ("panel", "normalized", "pca")} == {"assay2"}
 
@@ -921,7 +924,13 @@ def test_adt_and_atac_markers_and_membership_need_a_leiden_candidate(
         # Without them, a run clusters nothing.
         plan = _resolve(recipe, datastore, leiden=False, markers=False, **keywords)
         assert plan.config["stages"]["leiden"] is False
-        assert not [stage for stage in plan.stage_order if stage.startswith("leiden")]
+        assert [stage.name for stage in plan.stages if stage.name == "leiden"] == [
+            "leiden"
+        ]
+        assert (
+            next(stage for stage in plan.stages if stage.name == "leiden").action
+            is None
+        )
 
 
 def test_adt_with_the_cells_of_an_rna_run_reuses_its_selection(cite) -> None:
@@ -982,7 +991,7 @@ def test_wnn_integrates_the_runs_of_one_cell_selection(cite, joint) -> None:
         "integration",
         "embedding_initialization",
         "umap",
-        "leiden_1.0",
+        "leiden",
         "markers",
     ]
     assert list(wnn) == [
@@ -992,10 +1001,10 @@ def test_wnn_integrates_the_runs_of_one_cell_selection(cite, joint) -> None:
         "integrated_graph",
         "embedding_initialization",
         "umap",
-        "leiden_1.0",
         "clusters",
         "markers_RNA",
         "markers_assay2",
+        "leiden",
     ]
     selection = rna["analysis_cell_selection"]
     assert wnn["input_cell_selection"] == selection
@@ -1026,10 +1035,8 @@ def test_multimodal_saves_its_only_leiden_partition(joint) -> None:
     # The integrated graph has no coordinates in which to score silhouettes.
     assert _statuses(wnn)["cluster_selection"] == "skipped"
     assert "cluster_selection" not in wnn
-    assert wnn["clusters"] == wnn["leiden_1.0"]
-    np.testing.assert_array_equal(
-        wnn.cells.fetch("clusters"), wnn.cells.fetch("leiden_1.0")
-    )
+    assert wnn["leiden"] == (wnn["clusters"],)
+    assert "leiden_1.0" not in wnn.cells.columns
 
 
 def test_multimodal_needs_a_selected_partition_among_several(
@@ -1056,8 +1063,16 @@ def test_multimodal_needs_a_selected_partition_among_several(
         "partitions": [0.5, 1.0],
         "selected": 0.5,
     }
-    assert wnn_selected["clusters"] == wnn_selected["leiden_0.5"]
-    assert {"leiden_0.5", "leiden_1.0", "clusters"} <= set(wnn_selected.cells.columns)
+    candidates = wnn_selected["leiden"]
+    assert [
+        cite.datastore.artifacts.inspect(ref).parameters["resolution"]
+        for ref in candidates
+    ] == [0.5, 1.0]
+    assert wnn_selected["clusters"] == candidates[0]
+    assert "clusters" in wnn_selected.cells.columns
+    assert not [
+        column for column in wnn_selected.cells.columns if column.startswith("leiden")
+    ]
     assert _statuses(wnn_selected)["cluster_selection"] == "skipped"
     assert "cluster_selection" not in wnn_selected
 
@@ -1071,7 +1086,6 @@ def test_wnn_records_the_modality_weights_of_each_cell(cite, joint) -> None:
         "names",
         "umap_1",
         "umap_2",
-        "leiden_1.0",
         "clusters",
         "weight_RNA",
         "weight_assay2",
@@ -1122,7 +1136,7 @@ def test_snn_shares_the_connectivity_graphs_of_the_runs(cite, joint) -> None:
     assert "weight_RNA" not in snn.cells.columns
     assert _statuses(snn)["markers"] == "skipped"
     assert not any(key.startswith("markers") for key in snn)
-    assert snn["clusters"] == snn["leiden_1.0"]
+    assert snn["leiden"] == (snn["clusters"],)
 
 
 def test_a_joint_umap_starts_from_the_first_runs_coordinates(cite, joint) -> None:
@@ -1156,10 +1170,10 @@ def test_snn_cuts_and_scores_the_integrated_graph(cite, joint) -> None:
         "analysis_cell_selection",
         "feature_universe",
         "integrated_graph",
-        "leiden_1.0",
         "paris",
         "clusters",
         "membership_strength",
+        "leiden",
     ]
     assert (
         datastore.artifacts.inspect(snn["paris"]).input_ref("connectivity_map") == graph
@@ -1173,7 +1187,6 @@ def test_snn_cuts_and_scores_the_integrated_graph(cite, joint) -> None:
         "ids",
         "names",
         "donor",
-        "leiden_1.0",
         "paris",
         "clusters",
         "membership_strength",
@@ -1487,7 +1500,7 @@ def test_l2_normalize_applies_only_to_wnn(cite, joint, wnn_selected) -> None:
     graph = cite.datastore.artifacts.inspect(joint.wnn["integrated_graph"])
     assert graph.parameters["l2_normalize"] is True
     assert wnn_selected["integrated_graph"] == joint.wnn["integrated_graph"]
-    assert wnn_selected["leiden_1.0"] == joint.wnn["leiden_1.0"]
+    assert wnn_selected["leiden"][1] == joint.wnn["leiden"][0]
 
 
 # RNA QC stages -----------------------------------------------------------------
@@ -2295,7 +2308,6 @@ def test_harmony_and_snapshot_columns_leave_the_filtered_cells_alone(
         "ids",
         "names",
         "donor",
-        "leiden_1.0",
         "clusters",
     )
     np.testing.assert_array_equal(
@@ -2403,9 +2415,9 @@ def test_each_stage_summary_names_the_values_that_it_records(cite, full) -> None
         "embedding_initialization": {"centroids", "dims"},
         "umap": {"cells", "dims"},
         "localmap": None,
-        "leiden_1.0": {"clusters", "largestCluster", "smallestCluster"},
+        "leiden": {"candidates"},
         "paris": {"clusters"},
-        "cluster_selection": {"selected", "scores"},
+        "cluster_selection": {"selected", "candidates"},
         "membership_strength": {"mean", "belowHalf"},
         "tsne": None,
         "doublets": {"predictedDoublets", "rate", "samples"},
@@ -2426,6 +2438,27 @@ def test_each_stage_summary_names_the_values_that_it_records(cite, full) -> None
     # The embedding starts from the 5 corrected dimensions.
     assert summaries["embedding_initialization"]["dims"] == 5
     assert summaries["umap"] == {"cells": cells, "dims": 2}
+    # The Leiden stage lists each candidate; this run has one, at 1.0.
+    (candidate,) = full["leiden"]
+    clusters = full.cells.fetch("clusters")
+    sizes = np.unique(clusters, return_counts=True)[1]
+    assert summaries["leiden"] == {
+        "candidates": [
+            {
+                "resolution": 1.0,
+                "clusters": len(sizes),
+                "largestCluster": int(sizes.max()),
+                "smallestCluster": int(sizes.min()),
+                "artifact": candidate.artifact_id,
+            }
+        ]
+    }
+    assert set(summaries["cluster_selection"]["candidates"][0]) == {
+        "resolution",
+        "score",
+        "artifact",
+    }
+    assert summaries["cluster_selection"]["selected"] == 1.0
     assert summaries["paris"] == {"clusters": len(np.unique(full.cells.fetch("paris")))}
     phases, counts = np.unique(
         full.cells.fetch("cell_cycle_phase").astype(str), return_counts=True
@@ -2540,8 +2573,8 @@ def test_a_multimodal_plan_waits_on_the_integration_that_it_would_compute(
     )
     assert {stage.stage: stage.upstream for stage in plan.stages if stage.upstream} == {
         "umap": ("integration",),
-        "leiden_1.0": ("integration",),
-        "markers": ("leiden_1.0",),
+        "leiden": ("integration",),
+        "markers": ("leiden",),
     }
     # The joint embedding starts from the first run's coordinates, which exist.
     assert plan["embedding_initialization"].outputs == (
@@ -2684,7 +2717,18 @@ def test_runs_of_the_other_recipes_keep_their_records_and_views(
         *("runId", "recipe", "requestedLabel", "label", "assay", "startedAtNs"),
         *("finishedAtNs", "status", "complete", "cytearcVersion", "config"),
         *("stageOrder", "outputs", "fields", "error", "interruption"),
+        "outputLists",
     }
+    # Its only output of several artifacts is the Leiden candidates, when the
+    # run clusters.
+    clusters = record["config"]["stages"]["leiden"] is not False
+    assert [listed["key"] for listed in record["outputLists"]] == (
+        ["leiden"] if clusters else []
+    )
+    for listed in record["outputLists"]:
+        assert [
+            ArtifactRef.from_dict(artifact) for artifact in listed["artifacts"]
+        ] == list(run["leiden"])
     for field in record["fields"]:
         assert set(field) == {
             *("key", "axis", "artifact", "sourceValue", "valueIndex"),
@@ -2705,11 +2749,16 @@ def test_runs_of_the_other_recipes_keep_their_records_and_views(
 def test_a_basic_rna_analysis_record_still_opens_lists_and_reports() -> None:
     root = _root()
     written = _completed_run(root)
-    # Stage records written before stage summaries and warnings lack both.
+    # Stage records written before stage summaries and warnings lack both, and
+    # run and stage records written before output lists lack them.
     stage = root[pipeline_stage_path(written.run_id, 0)]
     attrs = dict(stage.attrs)
-    del attrs["summary"], attrs["warnings"]
+    del attrs["summary"], attrs["warnings"], attrs["outputLists"]
     stage.attrs.put(attrs)
+    group = root[pipeline_run_path(written.run_id)]
+    attrs = dict(group.attrs)
+    del attrs["outputLists"]
+    group.attrs.put(attrs)
     pipeline = PipelineAccessor(_Owner(root))
 
     run = pipeline.open(label="baseline")

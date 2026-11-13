@@ -15,6 +15,7 @@ from ...storage.pipeline_runs import (
     PipelineInterruptionRecord,
     PipelinePlanRecord,
     PipelineStageMetrics,
+    PipelineStageOutputListRecord,
     PipelineStageOutputRecord,
     PipelineStageResources,
     PipelineStageTrace,
@@ -40,7 +41,8 @@ from ..pipeline_run import PipelineExecutionError
 from .events import PipelineEventEmitter
 from .settings import parameter_value
 
-type StageOutputs = Sequence[tuple[str, ArtifactRef]]
+# Each output names one artifact, or a tuple of artifacts in a fixed order.
+type StageOutputs = Sequence[tuple[str, ArtifactRef | tuple[ArtifactRef, ...]]]
 type StageSummarizer = Callable[[str, StageOutputs], Mapping[str, Any] | None]
 
 # The record fields of each measurement that the sampler can find unavailable.
@@ -192,7 +194,7 @@ def end_pipeline_run(root: Any, run_id: str, error: BaseException) -> bool:
 
 @dataclass(frozen=True, slots=True)
 class _StageOutcome:
-    outputs: tuple[tuple[str, ArtifactRef], ...]
+    outputs: tuple[tuple[str, ArtifactRef | tuple[ArtifactRef, ...]], ...]
     completed: bool
     error: BaseException | None
     metrics: PipelineStageMetrics
@@ -260,7 +262,7 @@ class RunLedger:
         action: Callable[[], StageOutputs],
         wall_started: float,
     ) -> _StageOutcome:
-        outputs: tuple[tuple[str, ArtifactRef], ...] = ()
+        outputs: tuple[tuple[str, ArtifactRef | tuple[ArtifactRef, ...]], ...] = ()
         completed = False
         summary: Mapping[str, Any] | None = None
         caught: BaseException | None = None
@@ -323,24 +325,44 @@ class RunLedger:
         self,
         outputs: StageOutputs,
         plans: Sequence[ArtifactPlanReceipt],
-    ) -> tuple[PipelineStageOutputRecord, ...]:
+    ) -> tuple[
+        tuple[PipelineStageOutputRecord, ...],
+        tuple[PipelineStageOutputListRecord, ...],
+    ]:
+        """Return the stage's output records: single artifacts, then lists."""
         dispositions: dict[ArtifactRef, set[str]] = {}
         for plan in plans:
             dispositions.setdefault(plan.ref, set()).add(plan.disposition)
-        missing = [key for key, ref in outputs if ref not in dispositions]
+        missing = [
+            key
+            for key, value in outputs
+            for ref in (value if isinstance(value, tuple) else (value,))
+            if ref not in dispositions
+        ]
         if missing:
             raise RuntimeError(
                 "Pipeline stage outputs were not observed by artifact planning: "
                 f"{missing!r}"
             )
-        return tuple(
+        records = tuple(
             PipelineStageOutputRecord(
                 output_key=key,
-                artifact=ref,
-                reused=dispositions[ref] == {"reused"},
+                artifact=value,
+                reused=dispositions[value] == {"reused"},
             )
-            for key, ref in outputs
+            for key, value in outputs
+            if not isinstance(value, tuple)
         )
+        lists = tuple(
+            PipelineStageOutputListRecord(
+                output_key=key,
+                artifacts=value,
+                reused=tuple(dispositions[ref] == {"reused"} for ref in value),
+            )
+            for key, value in outputs
+            if isinstance(value, tuple)
+        )
+        return records, lists
 
     @staticmethod
     def _plans(
@@ -577,7 +599,7 @@ class RunLedger:
         self,
         stage: str,
         action: Callable[[], StageOutputs],
-    ) -> tuple[tuple[str, ArtifactRef], ...]:
+    ) -> tuple[tuple[str, ArtifactRef | tuple[ArtifactRef, ...]], ...]:
         shutdown_checkpoint()
         wall_started = time.perf_counter()
         ordinal = self.ordinal
@@ -609,7 +631,7 @@ class RunLedger:
         stage: str,
         ordinal: int,
         outcome: _StageOutcome,
-    ) -> tuple[tuple[str, ArtifactRef], ...]:
+    ) -> tuple[tuple[str, ArtifactRef | tuple[ArtifactRef, ...]], ...]:
         """Record a stage's outcome and return its outputs.
 
         An ``Exception`` from the stage fails the stage and the run and raises
@@ -623,15 +645,17 @@ class RunLedger:
         caught = None if outcome.error is None else _as_interruption(outcome.error)
         summary = outcome.summary
         records: tuple[PipelineStageOutputRecord, ...] = ()
+        lists: tuple[PipelineStageOutputListRecord, ...] = ()
         if caught is None:
             try:
-                records = self._records(outcome.outputs, outcome.plans)
+                records, lists = self._records(outcome.outputs, outcome.plans)
                 finish_pipeline_stage_record(
                     self.root,
                     run_id=self.run_id,
                     ordinal=ordinal,
                     status="completed",
                     outputs=records,
+                    output_lists=lists,
                     plans=plan_records,
                     metrics=outcome.metrics,
                     summary=summary,
@@ -640,7 +664,7 @@ class RunLedger:
             except Exception as error:
                 caught = error
         if caught is None:
-            self._emit_completed(stage, ordinal, outcome, records, summary)
+            self._emit_completed(stage, ordinal, outcome, records, lists, summary)
             logger.info(f"Completed pipeline stage: {stage.replace('_', ' ')}")
             return outcome.outputs
         interruption = interruption_record(caught)
@@ -648,13 +672,14 @@ class RunLedger:
             # The stage's work finished before the interruption was seen, so
             # the stage completed and the run stops between stages.
             try:
-                records = self._records(outcome.outputs, outcome.plans)
+                records, lists = self._records(outcome.outputs, outcome.plans)
                 finish_pipeline_stage_record(
                     self.root,
                     run_id=self.run_id,
                     ordinal=ordinal,
                     status="completed",
                     outputs=records,
+                    output_lists=lists,
                     plans=plan_records,
                     metrics=outcome.metrics,
                     summary=summary,
@@ -670,7 +695,7 @@ class RunLedger:
                     warnings=outcome.warnings,
                 )
                 raise PipelineExecutionError(self.run_id, stage, error) from error
-            self._emit_completed(stage, ordinal, outcome, records, summary)
+            self._emit_completed(stage, ordinal, outcome, records, lists, summary)
             self.current_stage = None
             self.interrupt_pending(caught, None)
             raise caught
@@ -701,15 +726,28 @@ class RunLedger:
         ordinal: int,
         outcome: _StageOutcome,
         records: Sequence[PipelineStageOutputRecord],
+        lists: Sequence[PipelineStageOutputListRecord],
         summary: Mapping[str, Any] | None,
     ) -> None:
+        """Emit ``stage_completed`` with one ``(key, ref)`` pair per artifact.
+
+        An output that holds several artifacts gives one pair for each, in
+        order, and counts as reused when every one of them was reused.
+        """
         self.events.emit(
             "stage_completed",
             stage=stage,
             ordinal=ordinal,
             metrics=outcome.metrics.to_dict(),
             summary=summary,
-            outputs=outcome.outputs,
-            reused=tuple(record.output_key for record in records if record.reused),
+            outputs=tuple(
+                (key, ref)
+                for key, value in outcome.outputs
+                for ref in (value if isinstance(value, tuple) else (value,))
+            ),
+            reused=(
+                *(record.output_key for record in records if record.reused),
+                *(listed.output_key for listed in lists if all(listed.reused)),
+            ),
             warnings=outcome.warnings,
         )

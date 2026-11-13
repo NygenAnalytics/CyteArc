@@ -29,7 +29,7 @@ artifact refs. Docs: <https://docs.nygen.io/CyteArc/tutorials/plotting>,
 - Run mode, embedding and embedding_raster only: `run=run`, `layout="umap"` (default). Cells are
   the run's cells, and every cell input names a frozen field from `run.cells.columns`, as a string
   or `CellField`: `color_by` (one or a list), `facet_by`, `subset_by`, `Highlight(by=...)`,
-  `DensityOverlay(group_by=...)`. `color_by` also takes run outputs (`run["leiden_1.0"]`), and genes
+  `DensityOverlay(group_by=...)`. `color_by` also takes run outputs (a candidate of `run["leiden"]`), and genes
   or `FeatureRef` with an explicit `normalization=` (live counts of the run's cells). No live
   columns, other refs, `point_sizes`, `cell_key` or other assays. `embedding_raster` takes one
   frozen field. `provenance.extras["run"]` holds `runId` and `label`.
@@ -79,16 +79,20 @@ assert plt.get_fignums() == []  # nothing left open
 ### Plot frozen run fields
 
 ```python
-for field in ("clusters", "leiden_1.0", "doublet_score", "cell_cycle_phase"):
+for field in ("clusters", "doublet_score", "cell_cycle_phase"):
     r = ds.plots.embedding(run=run, color_by=field, show=False)
     r.save(f"figures/run_{field}.png", dpi=120)
     r.close()
 r = ds.plots.embedding_raster(run=run, color_by="doublet_score", show=False)
 r.close()
 # Several panels, faceted by a column frozen with snapshot_columns=("sample_id",), plus a gene.
+# A Leiden candidate other than the saved clusters has no field; color by its ref.
+fine = ds.artifacts.find(
+    "clusters", graph=run["connectivity_map"], method="leiden", resolution=1.25
+)  # also run["leiden"][-1]
 r = ds.plots.embedding(
     run=run,
-    color_by=["clusters", run["leiden_1.0"], "CD3D"],
+    color_by=["clusters", fine, "CD3D"],
     # Genes need normalization= in run mode. log1p suits RNA library-size values; for CLR (ADT),
     # norm_lib_size_log, or ATAC values, which it rejects, use NormalizationSpec() or source="raw".
     normalization=splt.NormalizationSpec(transform="log1p"),
@@ -127,7 +131,7 @@ r = ds.plots.embedding(
 )
 r.save("figures/umap_cell_type.png", dpi=150, exact_size=False)  # keeps the outside legend
 r.close()
-ds.plots.embedding(layout=umap, color_by=run["leiden_1.0"], show=False).close()
+ds.plots.embedding(layout=umap, color_by=run["leiden"][0], show=False).close()
 ds.plots.embedding(
     layout=umap,
     color_by=None,

@@ -115,8 +115,10 @@ def test_run_embedding_draws_several_frozen_colors_in_facets_and_subsets(
 def test_run_embedding_colors_by_run_outputs(plotted_run):
     store, run = plotted_run.store, plotted_run.run
 
+    # Each Leiden candidate in run["leiden"] is an output of the run.
+    candidate = run["leiden"][-1]
     result = store.plots.embedding(
-        run=run, color_by=[run["clusters"], run["leiden_1.0"]], show=False
+        run=run, color_by=[run["clusters"], candidate], show=False
     )
     reference = store.plots.embedding(
         layout=run["umap"], color_by=run["clusters"], show=False
@@ -124,7 +126,7 @@ def test_run_embedding_colors_by_run_outputs(plotted_run):
     try:
         assert result.provenance.extras["color_artifacts"] == [
             run["clusters"].to_dict(),
-            run["leiden_1.0"].to_dict(),
+            candidate.to_dict(),
         ]
         # A run output colors the run plot as it colors the ref-mode plot.
         assert list(result.axes) == [(0, "cluster_labels"), (1, "cluster_labels")]

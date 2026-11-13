@@ -19,10 +19,10 @@ from ...storage.types import as_zarr_array
 from ...utils.logging import logger
 from ..pipeline_run import PipelineRun
 from .cluster_selection import cluster_label_values, run_cluster_selection
-from .executor import COORDINATES, FEATURE_NAMES, PlannedStage, RunState
+from .executor import COORDINATES, FEATURE_NAMES, PlannedStage, RunState, StageOutput
 from .filtering import filter_pipeline_selection
 
-type Outputs = tuple[tuple[str, ArtifactRef], ...]
+type Outputs = tuple[StageOutput, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -484,32 +484,36 @@ def localmap_stage(enabled: bool, settings: Mapping[str, Any]) -> PlannedStage:
     )
 
 
-def leiden_stages(
+def leiden_stage(
     partitions: Sequence[tuple[str, float]],
     settings: Mapping[str, Any],
     *,
     graph_key: str = "connectivity_map",
-) -> tuple[PlannedStage, ...]:
-    stages = []
-    for key, resolution in partitions:
-        output_key = f"leiden_{key}"
+) -> PlannedStage:
+    """Cluster the graph at each candidate resolution, in the order given.
 
-        def action(
-            state: RunState,
-            output_key: str = output_key,
-            resolution: float = resolution,
-        ) -> Outputs:
-            ref = state.store._run_leiden_artifact(
-                state.artifacts[graph_key],
-                resolution=resolution,
-                **settings,
-            )
-            return ((output_key, ref),)
+    The stage's ``leiden`` output holds one Leiden artifact per candidate.
+    Each artifact records its resolution among its parameters, so the
+    candidates are ordered by resolution when ``partitions`` is.
+    """
+    if not partitions:
+        return PlannedStage("leiden", None)
 
-        stages.append(
-            PlannedStage(output_key, action, inputs=(graph_key,), outputs=(output_key,))
+    def action(state: RunState) -> Outputs:
+        graph = state.artifacts[graph_key]
+        return (
+            (
+                "leiden",
+                tuple(
+                    state.store._run_leiden_artifact(
+                        graph, resolution=resolution, **settings
+                    )
+                    for _key, resolution in partitions
+                ),
+            ),
         )
-    return tuple(stages)
+
+    return PlannedStage("leiden", action, inputs=(graph_key,), outputs=("leiden",))
 
 
 def paris_stage(
@@ -536,18 +540,21 @@ def cluster_selection_stage(
 
     A requested resolution is the saved clustering and the stage is skipped;
     the other partitions stay available as candidates. Otherwise silhouette
-    scores rank the candidates in the coordinates that built the graph.
+    scores rank the candidates in the coordinates that built the graph. The
+    decision names each candidate by its resolution, such as ``"1.0"``.
     """
+    keys = [key for key, _resolution in partitions]
     if selected is not None:
+        position = keys.index(selected)
 
         def alias(state: RunState) -> None:
-            state.artifacts["clusters"] = state.artifacts[f"leiden_{selected}"]
+            state.artifacts["clusters"] = state.artifact_lists["leiden"][position]
 
         return PlannedStage(
             "cluster_selection",
             None,
             on_skip=alias,
-            inputs=(f"leiden_{selected}",),
+            inputs=("leiden",),
             outputs=("clusters",),
         )
     if not partitions:
@@ -560,14 +567,11 @@ def cluster_selection_stage(
             coordinates=state.coordinates,
             connectivity_map=state.artifacts["connectivity_map"],
             cell_selection=state.artifacts["analysis_cell_selection"],
-            candidates=[
-                (f"leiden_{key}", state.artifacts[f"leiden_{key}"])
-                for key, _resolution in partitions
-            ],
+            candidates=list(zip(keys, state.artifact_lists["leiden"], strict=True)),
         )
         # The saved clustering is the chosen candidate's own artifact.
         state.artifacts["clusters"] = selected_ref
-        logger.info(f"Selected clustering candidate: {selected_key}")
+        logger.info(f"Selected the Leiden clustering at resolution {selected_key}")
         return (("cluster_selection", decision),)
 
     return PlannedStage(
@@ -577,7 +581,7 @@ def cluster_selection_stage(
             COORDINATES,
             "connectivity_map",
             "analysis_cell_selection",
-            *(f"leiden_{key}" for key, _resolution in partitions),
+            "leiden",
         ),
         outputs=("cluster_selection", "clusters"),
     )
@@ -692,7 +696,7 @@ def clustering_tail(
         ),
         umap_stage(umap_enabled, umap_settings),
         localmap_stage(localmap_enabled, localmap_settings),
-        *leiden_stages(partitions, leiden),
+        leiden_stage(partitions, leiden),
         paris_stage(paris_enabled, paris_settings),
         cluster_selection_stage(partitions, selected),
         membership_strength_stage(membership_strength),
@@ -706,7 +710,6 @@ def graph_output_keys(
     *,
     head: Sequence[str],
     reduction: Sequence[str],
-    partitions: Sequence[tuple[str, float]],
     tail: Sequence[str],
     qc: Sequence[str] = (),
 ) -> tuple[str, ...]:
@@ -725,7 +728,7 @@ def graph_output_keys(
         "embedding_initialization",
         "umap",
         "localmap",
-        *(f"leiden_{key}" for key, _value in partitions),
+        "leiden",
         "paris",
         "cluster_selection",
         "clusters",

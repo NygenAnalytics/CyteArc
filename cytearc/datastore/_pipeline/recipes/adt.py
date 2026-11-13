@@ -253,10 +253,8 @@ def resolve_adt(
     output_keys = graph_output_keys(
         head=("panel",),
         reduction=("pca",),
-        partitions=partitions,
         tail=("markers",),
     )
-    leiden_keys = [key for key, _value in partitions]
 
     def fields(state: RunState) -> tuple[Any, ...]:
         return (
@@ -264,7 +262,6 @@ def resolve_adt(
                 store,
                 state.artifacts,
                 snapshot_columns=snapshots,
-                leiden_keys=leiden_keys,
             ),
             *feature_fields(store, assay_name, state.artifacts, selection_key="panel"),
         )

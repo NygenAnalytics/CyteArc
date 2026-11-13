@@ -667,7 +667,9 @@ def resolve_leiden(
 ) -> tuple[tuple[tuple[str, float], ...], str | None, dict[str, Any]]:
     """Return the Leiden candidates, the selected key, and the other settings.
 
-    The candidates are ``(key, resolution)`` pairs, empty when Leiden is off.
+    The candidates are ``(key, resolution)`` pairs ordered by resolution, with
+    the resolution's text as the key, such as ``("1.0", 1.0)``; they are
+    empty when Leiden is off.
     """
     enabled, settings = stage_settings("leiden", value, optional=True)
     if not enabled:
@@ -682,7 +684,7 @@ def resolve_leiden(
         raise TypeError("leiden partitions must be a non-empty sequence")
     partitions = tuple(
         (str(resolution), resolution)
-        for resolution in map(canonical_resolution, raw_partitions)
+        for resolution in sorted(map(canonical_resolution, raw_partitions))
     )
     if not partitions:
         raise ValueError("leiden partitions must not be empty")

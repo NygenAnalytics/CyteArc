@@ -57,7 +57,7 @@ refs, and record the analysis for handoff. Docs:
 
 ### Run the baseline
 
-Default `rna` outputs in record order, with their kinds: `input_cell_selection`, `analysis_cell_selection` (`cell_selection`), `feature_universe`, `cell_cycle`, `highly_variable_features` (`feature_selection`), `normalized`, `pca` (`reduction`), `ann_index`, `neighbors`, `connectivity_map`, `embedding_initialization`, `umap` (`embedding`), `leiden_0.5` ... `leiden_1.25` (`cluster_labels`), `cluster_selection`, `clusters` (the selected Leiden ref itself, not a copy), `doublets` (`doublet_score`), `markers` (`marker_table`). Optional stages add keys in place: `cell_calling` and `called_cell_selection`, then `hashing` (`hto_identity`) and `hashed_cell_selection` before `analysis_cell_selection`; `harmony` (`batch_correction`) after `pca`; `localmap` (`embedding`) after `umap`; `paris` (`cluster_cut`) after the Leiden keys; `membership_strength` and `tsne` before `doublets`. Disabled stages omit their keys. Timings measured on the 10x 5K PBMC docs dataset when the default also ran Paris: a fresh baseline with an empty Numba cache took 109 s on local counts, about 90 s of it one-time compilation (graph stage 24 s, Leiden kernels 39 s, Paris and markers 21 s); a second run in the same process took 19 s, and a later process, which loads most kernels from Numba's cache, took 34 s. On remote counts expect about a minute for a few thousand cells.
+Default `rna` outputs in record order, with their kinds: `input_cell_selection`, `analysis_cell_selection` (`cell_selection`), `feature_universe`, `cell_cycle`, `highly_variable_features` (`feature_selection`), `normalized`, `pca` (`reduction`), `ann_index`, `neighbors`, `connectivity_map`, `embedding_initialization`, `umap` (`embedding`), `cluster_selection`, `clusters` (the selected Leiden ref itself, not a copy), `doublets` (`doublet_score`), `markers` (`marker_table`), and last `leiden`, a tuple of the four `cluster_labels` refs in resolution order from the one `leiden` stage. Optional stages add keys in place: `cell_calling` and `called_cell_selection`, then `hashing` (`hto_identity`) and `hashed_cell_selection` before `analysis_cell_selection`; `harmony` (`batch_correction`) after `pca`; `localmap` (`embedding`) after `umap`; `paris` (`cluster_cut`) after `localmap`; `membership_strength` and `tsne` before `doublets`. Disabled stages omit their keys. A run saved by an earlier release has `leiden_0.5` ... `leiden_1.25` after `umap` instead of `leiden`, and the same number of `leiden_<res>` stages; `ds.artifacts.find("clusters", graph=run["connectivity_map"], method="leiden", resolution=0.5)` finds a candidate in either. Timings measured on the 10x 5K PBMC docs dataset when the default also ran Paris: a fresh baseline with an empty Numba cache took 109 s on local counts, about 90 s of it one-time compilation (graph stage 24 s, Leiden kernels 39 s, Paris and markers 21 s); a second run in the same process took 19 s, and a later process, which loads most kernels from Numba's cache, took 34 s. On remote counts expect about a minute for a few thousand cells.
 
 ```python
 import cytearc
@@ -66,7 +66,7 @@ cytearc.configure_output(level="WARNING", progress=False)
 ds = cytearc.DataStore("analysis.zarr", nthreads=4, min_features_per_cell=-1)
 run = ds.pipeline.rna(label="baseline")
 list(run.keys())
-run["clusters"] == run["leiden_0.5"]  # True on the 10x 5K PBMC docs dataset
+run["clusters"] == run["leiden"][0]  # the 0.5 candidate on the 10x 5K PBMC docs dataset
 ```
 
 ### Other modalities and their outputs
@@ -83,7 +83,7 @@ run["clusters"] == run["leiden_0.5"]  # True on the 10x 5K PBMC docs dataset
 | `multimodal` | `integration` of the source runs' graphs (`method="wnn"` or `"snn"`) | none; `run.features` and `assay` are the first run's | `integrated_graph` in place of the three graph outputs; no `cluster_selection`; `markers_<assay>` per source run instead of `markers` |
 | `perturbation` | the RNA head (`filtering`, `hvg`, `normalization`, `pca`, `harmony` off) with `guide_calling` and `labels` (`controls` required) before it, and `efficiency` and `edistance` on; `signature`, `mixscape`, `associations`, `profiles` and `clusters` off | `highly_variable_features` | no graph, UMAP, Leiden or markers; `normalized`, `pca`, `harmony` (with Harmony), `guide_thresholds` (fitted calls), `guide_calls`, `perturbation_labels`, `efficiency`, `edistance`, `signature`, `mixscape`, `associations`, `profiles`, `perturbation_clusters`; `run.assay` is the RNA assay |
 
-`run.cells` holds the frozen fields of the stages that ran: `I, ids, names`, any `snapshot_columns`, `s_score, g2m_score, cell_cycle_phase` (RNA), `umap_1, umap_2`, `localmap_1, localmap_2`, `tsne_1, tsne_2`, `leiden_*`, `paris`, `clusters`, `membership_strength`, `doublet_score, predicted_doublet` (RNA), `weight_<assay>` for each modality of a WNN run, `guide_call, perturbation_label, is_control` for a perturbation run, and `mixscape_class, mixscape_posterior` for a perturbation run with Mixscape. A cell field can read an artifact of any assay computed on the run's cells, such as the guide assay's calls; `run.features` holds only fields of the run's assay.
+`run.cells` holds the frozen fields of the stages that ran: `I, ids, names`, any `snapshot_columns`, `s_score, g2m_score, cell_cycle_phase` (RNA), `umap_1, umap_2`, `localmap_1, localmap_2`, `tsne_1, tsne_2`, `paris`, `clusters` (the other Leiden candidates have no field; a run of an earlier release also holds `leiden_<res>`), `membership_strength`, `doublet_score, predicted_doublet` (RNA), `weight_<assay>` for each modality of a WNN run, `guide_call, perturbation_label, is_control` for a perturbation run, and `mixscape_class, mixscape_posterior` for a perturbation run with Mixscape. A cell field can read an artifact of any assay computed on the run's cells, such as the guide assay's calls; `run.features` holds only fields of the run's assay.
 
 ### Analyze several modalities of the same cells
 
@@ -95,7 +95,7 @@ rna = ds.pipeline.rna(label="rna")
 adt = ds.pipeline.adt(label="adt", cells=rna)  # the RNA run's cells as they are; not filtered
 wnn = ds.pipeline.multimodal([rna, adt], label="wnn")  # weighted nearest neighbours
 snn = ds.pipeline.multimodal([rna, adt], method="snn", label="snn")  # shared nearest neighbours
-list(wnn)  # ..., integrated_graph, embedding_initialization, umap, leiden_1.0, clusters, markers_RNA, markers_ADT
+list(wnn)  # ..., integrated_graph, embedding_initialization, umap, clusters, markers_RNA, markers_ADT, leiden
 wnn.cells.fetch("weight_ADT")  # each cell's ADT weight; weights sum to 1 per cell
 ds.plots.modality_weights(graph=wnn["integrated_graph"], layout=wnn["umap"], show=False).close()
 
@@ -144,8 +144,9 @@ print(run.report(format="markdown"))  # config, stage table, diagnostics, output
 Stage summaries are small and read no matrix, so check them before loading artifacts. Each is
 computed inside its stage, so its time, memory and warnings count as the stage's. filtering
 `{"cells", "inputCells", "removedCells", "samples"}`; pca `{"cells", "dims", "varianceRatio",
-"varianceExplained"}`; each `leiden_<res>` `{"clusters", "largestCluster", "smallestCluster"}`;
-cluster_selection `{"selected", "scores"}`; membership_strength `{"mean", "belowHalf"}`;
+"varianceExplained"}`; leiden `{"candidates"}`, each `{"resolution", "clusters", "largestCluster",
+"smallestCluster", "artifact"}`; cluster_selection `{"selected", "candidates"}`, the selected
+resolution and each candidate's `{"resolution", "score", "artifact"}`; membership_strength `{"mean", "belowHalf"}`;
 doublets `{"predictedDoublets", "rate", "samples"}`; integration `{"assays", "meanWeights"}`.
 `ann_index` records `None`, and metadata snapshots add nothing to a summary. A stage with several
 summarized outputs keys its summary by output: input_snapshot `{"input_cell_selection": {"cells"}, "feature_universe":
@@ -242,7 +243,7 @@ pinned = ds.pipeline.rna(
     leiden={"partitions": [0.5, 1.0], "selected": 1.0},
     umap=False, doublets=False, markers=False, cell_cycle=False,
 )
-pinned["clusters"] == pinned["leiden_1.0"]  # True; no cluster_selection key
+pinned["clusters"] == pinned["leiden"][1]  # True; no cluster_selection key
 branch = ds.pipeline.rna(
     label="hvg2k_pc30_k21",
     hvg={"top_n": 2000}, pca={"dims": 30}, neighbors={"k": 21},
@@ -354,7 +355,7 @@ clustering-and-embedding.md.
 
 ```python
 graph = run["connectivity_map"]
-ds.clusters.leiden(graph, resolution=0.5) == run["leiden_0.5"]  # reused, no recompute
+ds.clusters.leiden(graph, resolution=0.5) == run["leiden"][0]  # reused, no recompute
 fine_clusters = ds.clusters.leiden(graph, resolution=2.0)  # new cluster_labels ref
 fine_markers = ds.markers.search(fine_clusters, features=run["feature_universe"])
 

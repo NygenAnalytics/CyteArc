@@ -18,7 +18,12 @@ from ...perturbation.edistance import EDISTANCE_STATUSES
 from ...perturbation.efficiency import EFFICIENCY_STATUSES
 from ...perturbation.mixscape import MIXSCAPE_STATUSES
 from ...perturbation.mixtures import FIT_STATUSES
-from ...storage.artifacts import ArtifactRef, artifact_group, inspect_artifact
+from ...storage.artifacts import (
+    ArtifactRef,
+    artifact_group,
+    inspect_artifact,
+    parse_artifact_ref,
+)
 from ...storage.types import as_zarr_array
 from .._operations.perturbation_profiles import _PerturbationProfileOperationsMixin
 from .._operations.perturbation_store import _status_labels
@@ -231,16 +236,40 @@ def _cluster_cut(group: Any) -> dict[str, Any]:
     return {"clusters": int(group.attrs["n_clusters"])}
 
 
-def _cluster_selection(group: Any) -> dict[str, Any]:
+def _resolution(root: Any, ref: ArtifactRef) -> float | None:
+    """Return the resolution that a Leiden artifact records, or None."""
+    resolution = (inspect_artifact(root, ref).parameters or {}).get("resolution")
+    return None if resolution is None else float(resolution)
+
+
+def _cluster_selection(root: Any, group: Any) -> dict[str, Any]:
+    """Return the selected resolution and each candidate's resolution and score.
+
+    Each candidate's resolution is read from its Leiden artifact, which the
+    decision records among ``candidateRefs``.
+    """
     keys = group.attrs.get("candidateKeys")
+    raw_refs = group.attrs.get("candidateRefs")
     scores = _array(group, "scores")
-    summary: dict[str, Any] = {"selected": group.attrs.get("selectedKey")}
-    if isinstance(keys, list | tuple) and scores is not None:
-        values = np.asarray(scores[:], dtype=np.float64)
-        summary["scores"] = {
-            str(key): _float(value) for key, value in zip(keys, values, strict=True)
-        }
-    return summary
+    if not isinstance(keys, list | tuple) or not isinstance(raw_refs, list | tuple):
+        return {}
+    refs = [parse_artifact_ref(raw, "cluster selection candidate") for raw in raw_refs]
+    resolutions = [_resolution(root, ref) for ref in refs]
+    values = (
+        [None] * len(refs)
+        if scores is None
+        else [_float(value) for value in np.asarray(scores[:], dtype=np.float64)]
+    )
+    selected = group.attrs.get("selectedKey")
+    return {
+        "selected": (
+            resolutions[list(keys).index(selected)] if selected in keys else None
+        ),
+        "candidates": [
+            {"resolution": resolution, "score": score, "artifact": ref.artifact_id}
+            for resolution, score, ref in zip(resolutions, values, refs, strict=True)
+        ],
+    }
 
 
 def _cell_cycle(group: Any) -> dict[str, Any]:
@@ -613,7 +642,6 @@ _BY_KIND: Mapping[str, Callable[[Any], dict[str, Any]]] = {
     ),
     "cluster_labels": _clusters,
     "cluster_cut": _cluster_cut,
-    "cluster_selection": _cluster_selection,
     "cell_cycle": _cell_cycle,
     "membership_strength": _membership,
     "doublet_score": _doublets,
@@ -651,10 +679,52 @@ _BY_KIND_WITH_PARAMETERS_AND_DIAGNOSTICS: Mapping[
 }
 
 
+def _summary(root: Any, ref: ArtifactRef) -> dict[str, Any]:
+    """Return the diagnostics of one artifact, by its kind."""
+    group = artifact_group(root, ref)
+    if ref.kind == "cell_selection":
+        return _selection(root, ref, group)
+    if ref.kind == "cluster_selection":
+        return _cluster_selection(root, group)
+    if ref.kind in _BY_KIND_WITH_PARAMETERS:
+        return _BY_KIND_WITH_PARAMETERS[ref.kind](
+            group, inspect_artifact(root, ref).parameters or {}
+        )
+    if ref.kind in _BY_KIND_WITH_PARAMETERS_AND_DIAGNOSTICS:
+        status = inspect_artifact(root, ref)
+        return _BY_KIND_WITH_PARAMETERS_AND_DIAGNOSTICS[ref.kind](
+            group, status.parameters or {}, status.diagnostics
+        )
+    if ref.kind in _BY_KIND_WITH_DIAGNOSTICS:
+        return _BY_KIND_WITH_DIAGNOSTICS[ref.kind](
+            group, inspect_artifact(root, ref).diagnostics
+        )
+    summarize = _BY_KIND.get(ref.kind)
+    return (
+        inspect_artifact(root, ref).diagnostics
+        if summarize is None
+        else summarize(group)
+    )
+
+
+def _candidates(root: Any, refs: Sequence[ArtifactRef]) -> dict[str, Any]:
+    """Return each Leiden candidate's resolution, diagnostics, and artifact ID."""
+    return {
+        "candidates": [
+            {
+                "resolution": _resolution(root, ref),
+                **_summary(root, ref),
+                "artifact": ref.artifact_id,
+            }
+            for ref in refs
+        ]
+    }
+
+
 def summarize_stage(
     store: Any,
     stage: str,
-    outputs: Sequence[tuple[str, ArtifactRef]],
+    outputs: Sequence[tuple[str, ArtifactRef | tuple[ArtifactRef, ...]]],
 ) -> dict[str, Any] | None:
     """Return the diagnostics of one completed stage, keyed by its outputs.
 
@@ -663,34 +733,18 @@ def summarize_stage(
     summary of its own reports the diagnostics that its operation saved, and
     one whose operation saves none, such as a metadata snapshot or an ANN
     index, reports nothing, so a stage that produced only those records None.
+    An output of several Leiden artifacts lists each candidate's resolution,
+    cluster counts, and artifact ID under ``candidates``.
     """
     del stage
     root = store.zw
     summaries: dict[str, dict[str, Any]] = {}
-    for key, ref in outputs:
-        group = artifact_group(root, ref)
-        if ref.kind == "cell_selection":
-            summary = _selection(root, ref, group)
-        elif ref.kind in _BY_KIND_WITH_PARAMETERS:
-            summary = _BY_KIND_WITH_PARAMETERS[ref.kind](
-                group, inspect_artifact(root, ref).parameters or {}
-            )
-        elif ref.kind in _BY_KIND_WITH_PARAMETERS_AND_DIAGNOSTICS:
-            status = inspect_artifact(root, ref)
-            summary = _BY_KIND_WITH_PARAMETERS_AND_DIAGNOSTICS[ref.kind](
-                group, status.parameters or {}, status.diagnostics
-            )
-        elif ref.kind in _BY_KIND_WITH_DIAGNOSTICS:
-            summary = _BY_KIND_WITH_DIAGNOSTICS[ref.kind](
-                group, inspect_artifact(root, ref).diagnostics
-            )
-        else:
-            summarize = _BY_KIND.get(ref.kind)
-            summary = (
-                inspect_artifact(root, ref).diagnostics
-                if summarize is None
-                else summarize(group)
-            )
+    for key, value in outputs:
+        summary = (
+            _candidates(root, value)
+            if isinstance(value, tuple)
+            else _summary(root, value)
+        )
         if summary:
             summaries[key] = summary
     if not summaries:

@@ -10,7 +10,9 @@ import zarr
 from .artifacts import ArtifactStatus, inspect_artifact
 from .refs import ArtifactLocator, ArtifactRef, ExternalArtifactRef
 
-type LineageTarget = ArtifactRef | Mapping[str, ArtifactRef]
+# A named output may hold several refs in order, as a pipeline run's
+# ``leiden`` output holds its Leiden candidates.
+type LineageTarget = ArtifactRef | Mapping[str, ArtifactRef | tuple[ArtifactRef, ...]]
 
 
 _DETAIL_ITEM_LIMIT = 12
@@ -123,12 +125,29 @@ def _normalize_outputs(target: LineageTarget) -> dict[str, ArtifactRef]:
     if not target:
         raise ValueError("lineage output mapping cannot be empty")
     outputs = {}
-    for name, ref in target.items():
+    for name, value in target.items():
         if not isinstance(name, str) or not name:
             raise TypeError("lineage output names must be non-empty strings")
-        if not isinstance(ref, ArtifactRef):
-            raise TypeError(f"lineage output {name!r} must be an ArtifactRef")
-        outputs[name] = ref
+        if isinstance(value, tuple) and value:
+            # Each ref of a tuple is named by its position, such as leiden[0].
+            for index, ref in enumerate(value):
+                if not isinstance(ref, ArtifactRef):
+                    raise TypeError(
+                        f"lineage output {name!r} must hold ArtifactRef values"
+                    )
+                listed = f"{name}[{index}]"
+                if listed in target:
+                    raise ValueError(
+                        f"lineage output {listed!r} is also the name of a listed ref"
+                    )
+                outputs[listed] = ref
+        elif isinstance(value, ArtifactRef):
+            outputs[name] = value
+        else:
+            raise TypeError(
+                f"lineage output {name!r} must be an ArtifactRef or a non-empty "
+                "tuple of them"
+            )
     return dict(sorted(outputs.items()))
 
 

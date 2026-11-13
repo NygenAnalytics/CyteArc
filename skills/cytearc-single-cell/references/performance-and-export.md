@@ -159,7 +159,7 @@ so it never reports the job as gone. On macOS, `timeout` is `gtimeout` from GNU 
 
 Run export uses the frozen cells and feature universe. `to_anndata(run=run)` holds `X` in memory;
 `cytearc.to_h5ad(..., run=run)` writes the same object, streams `X`, and needs no `anndata` package.
-Label fields (`clusters`, `leiden_*`, `paris`, `cell_cycle_phase`) are categoricals of string labels
+Label fields (`clusters`, `paris`, `cell_cycle_phase`) are categoricals of string labels
 in natural order with the run's colors in `uns["<field>_colors"]`, so `sc.tl.rank_genes_groups`
 and categorical plots work directly; other frozen text that repeats or has missing values is a
 categorical in natural order (`d2` before `d10`) too. The run's PCA is `obsm["X_pca"]` with its
@@ -298,7 +298,7 @@ contains no artifacts or pipeline runs. Use it to hand off, or before `to_mtx` o
 | Cells | the run's analysis selection | `to_h5ad(ds.RNA, path)` exports all rows |
 | Features | the full feature universe; the recipe's selection flag in `var` (`highly_variable_features`, `prevalent_peaks` or `panel`); `matrix="normed"`: those features only | `feature_names=` without `run` |
 | `X` | raw counts (multimodal: the first run's assay); `matrix="normed"`: the run's `normalized` artifact, float32 | |
-| `obs` | frozen fields: cell-cycle, `leiden_*`, `paris` (with `paris=True`), `clusters` (categoricals with `uns` colors), `membership_strength`, `doublet_score`, `predicted_doublet`, `weight_<assay>` (WNN), `snapshot_columns` | join `ds.cells` by `ids` |
+| `obs` | frozen fields: cell-cycle, `paris` (with `paris=True`), `clusters` (categoricals with `uns` colors; other Leiden candidates only through `obs={"leiden_1.25": ref}`), `membership_strength`, `doublet_score`, `predicted_doublet`, `weight_<assay>` (WNN), `snapshot_columns` | join `ds.cells` by `ids` |
 | `obsm`, `varm` | `X_umap`, `X_pca` (`X_pca_harmony` with Harmony), `varm["PCs"]`; ATAC `X_lsi` (`X_lsi_harmony`) | other artifacts: `obsm=` |
 | `obsp` | with `graph=run["connectivity_map"]`: connectivities, distances, `uns["neighbors"]` | |
 | markers, run report | not exported | `markers.load`, `run.report(format="markdown")` |

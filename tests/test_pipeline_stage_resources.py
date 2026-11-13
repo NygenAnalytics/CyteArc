@@ -400,7 +400,7 @@ def test_a_store_of_one_worker_records_it_and_stays_on_one_core(
         if record.metrics is not None and record.metrics.resources is not None
     }
     assert workers == dict.fromkeys(records, 1)
-    for stage in ("leiden_0.5", "leiden_1.0"):
+    for stage in ("leiden",):
         metrics = records[stage].metrics
         assert metrics is not None and metrics.cpu_seconds is not None
         # A busy machine can only lower CPU time against wall time.
@@ -420,7 +420,7 @@ def test_a_store_of_four_workers_records_them_and_the_report_shows_resource_use(
     } == {4}
 
     # The record of a stage that an earlier release wrote has no CPU time.
-    leiden = next(record for record in records if record.stage == "leiden_0.5")
+    leiden = next(record for record in records if record.stage == "leiden")
     group = store.zw[pipeline_stage_path(run.run_id, leiden.ordinal)]
     attrs = dict(group.attrs)
     attrs["metrics"] = {
@@ -454,9 +454,9 @@ def test_a_store_of_four_workers_records_them_and_the_report_shows_resource_use(
     )
     # The stage without CPU time and network bytes leaves both cells empty,
     # and its dict report holds each new value as None.
-    assert (rows["leiden_0.5"][5], rows["leiden_0.5"][7]) == ("", "")
+    assert (rows["leiden"][5], rows["leiden"][7]) == ("", "")
     report = run.report()
-    stage = next(item for item in report["stages"] if item["stage"] == "leiden_0.5")
+    stage = next(item for item in report["stages"] if item["stage"] == "leiden")
     assert {name: stage["metrics"][name] for name in _RESOURCE_FIELDS} == dict.fromkeys(
         _RESOURCE_FIELDS
     )

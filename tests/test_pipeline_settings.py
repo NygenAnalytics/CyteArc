@@ -392,9 +392,8 @@ def test_stage_settings_are_forwarded_and_recorded(settings_store):
     )
     assert store.graph.connectivity(run["neighbors"]) != run["connectivity_map"]
     assert (
-        store.clusters.leiden(run["connectivity_map"], resolution=1.0, random_seed=7)
-        == run["leiden_1.0"]
-    )
+        store.clusters.leiden(run["connectivity_map"], resolution=1.0, random_seed=7),
+    ) == run["leiden"]
 
 
 def test_omitted_settings_use_the_stage_method_defaults(settings_store):
@@ -433,10 +432,9 @@ def test_omitted_settings_use_the_stage_method_defaults(settings_store):
         )
         == run["umap"]
     )
-    assert (
-        store.clusters.leiden(run["connectivity_map"], resolution=1.0)
-        == run["leiden_1.0"]
-    )
+    assert (store.clusters.leiden(run["connectivity_map"], resolution=1.0),) == run[
+        "leiden"
+    ]
     # The default UMAP dimensions name the run's coordinate fields.
     umap_dims = _keywords(EmbeddingsAccessor.umap)["umap_dims"]
     assert [column for column in run.cells.columns if column.startswith("umap_")] == [
@@ -616,8 +614,7 @@ def test_settings_resolve_into_the_recorded_stages(readonly_store):
         "embedding_initialization",
         "umap",
         "localmap",
-        "leiden_0.5",
-        "leiden_1.0",
+        "leiden",
         "paris",
         "cluster_selection",
         "membership_strength",
@@ -922,29 +919,29 @@ def test_leiden_settings_choose_the_candidates(readonly_store):
     store = readonly_store
 
     def leiden_stages(plan: Any) -> list[str]:
-        return [stage for stage in plan.stage_order if stage.startswith("leiden_")]
+        return [stage.name for stage in plan.stages if stage.name.startswith("leiden")]
 
     default = _resolve(store)
     assert default.config["stages"]["leiden"] == {
         "partitions": list(DEFAULT_LEIDEN_PARTITIONS),
         "selected": None,
     }
-    assert leiden_stages(default) == [
-        f"leiden_{resolution}" for resolution in DEFAULT_LEIDEN_PARTITIONS
-    ]
+    # One stage clusters at every candidate resolution.
+    assert leiden_stages(default) == ["leiden"]
     # Settings without partitions keep the default candidates.
     assert _resolve(store, leiden={"random_seed": 1}).config["stages"]["leiden"] == {
         "partitions": list(DEFAULT_LEIDEN_PARTITIONS),
         "selected": None,
         "random_seed": 1,
     }
-    # Integer and float spellings of one resolution are one candidate.
-    plan = _resolve(store, leiden={"partitions": [2, 0.5], "selected": 2})
+    # Integer and float spellings of one resolution are one candidate, and
+    # the candidates are ordered by resolution.
+    plan = _resolve(store, leiden={"partitions": [2, 0.5, 1], "selected": 2})
     assert plan.config["stages"]["leiden"] == {
-        "partitions": [2.0, 0.5],
+        "partitions": [0.5, 1.0, 2.0],
         "selected": 2.0,
     }
-    assert leiden_stages(plan) == ["leiden_2.0", "leiden_0.5"]
+    assert leiden_stages(plan) == ["leiden"]
     for leiden, error, message in (
         (
             {"partitions": [0.5], "selected": 1.0},
@@ -965,7 +962,8 @@ def test_leiden_settings_choose_the_candidates(readonly_store):
     off = {"leiden": False, "doublets": False, "markers": False}
     plan = _resolve(store, **off)
     assert plan.config["stages"]["leiden"] is False
-    assert leiden_stages(plan) == []
+    (leiden,) = (stage for stage in plan.stages if stage.name == "leiden")
+    assert leiden.action is None
     with pytest.raises(
         ValueError, match="^doublets and markers require at least one Leiden candidate$"
     ):
@@ -987,20 +985,23 @@ def test_a_selected_resolution_is_the_saved_clustering(settings_store):
     )
 
     outputs = list(run)
-    assert run["clusters"] == run["leiden_1.0"]
+    lower, selected = run["leiden"]
+    assert [
+        store.artifacts.inspect(ref).parameters["resolution"] for ref in run["leiden"]
+    ] == [0.5, 1.0]
+    assert run["clusters"] == selected
     assert "cluster_selection" not in outputs
     statuses = _stage_statuses(run)
     assert statuses["cluster_selection"] == "skipped"
-    assert statuses["leiden_0.5"] == statuses["leiden_1.0"] == "completed"
-    assert {"leiden_0.5", "leiden_1.0", "clusters", "membership_strength"} <= set(
-        run.cells.columns
-    )
+    assert statuses["leiden"] == "completed"
+    assert {"clusters", "membership_strength"} <= set(run.cells.columns)
+    assert not [column for column in run.cells.columns if column.startswith("leiden")]
     np.testing.assert_array_equal(
-        run.cells.fetch("clusters"), run.cells.fetch("leiden_1.0")
+        run.cells.fetch("clusters"), store.artifacts.load(selected)["values"][:]
     )
     # Membership strength is computed on the saved clustering and run graph.
     inputs = store.artifacts.inspect(run["membership_strength"]).inputs
-    assert ArtifactRef.from_dict(inputs["clusters"]) == run["leiden_1.0"]
+    assert ArtifactRef.from_dict(inputs["clusters"]) == selected
     assert ArtifactRef.from_dict(inputs["connectivity_map"]) == run["connectivity_map"]
     strength = run.cells.fetch("membership_strength")
     assert strength.shape == run.cells.fetch("clusters").shape
@@ -1313,7 +1314,7 @@ def test_pca_dims_zero_builds_the_graph_on_normalized_values(
     decision = store.artifacts.inspect(run["cluster_selection"])
     assert decision.input_ref("coordinates") == run["normalized"]
     assert decision.input_ref("connectivityMap") == run["connectivity_map"]
-    assert run["clusters"] == run["leiden_1.0"]
+    assert run["leiden"] == (run["clusters"],)
     assert "clusters" in run.cells.columns
 
 

@@ -917,12 +917,14 @@ def test_run_export_holds_labels_as_categoricals_with_pca_and_graph(
     cytearc.to_h5ad(datastore.RNA, str(path), run=run, graph=graph)
     written = anndata.read_h5ad(path)
 
+    # The run's label field is its saved clustering; a new run gives the
+    # other Leiden candidates no field.
     labels = [
         field
         for field in run.cells.columns
-        if field == "clusters" or field.startswith("leiden_")
+        if field == "clusters" or field.startswith("leiden")
     ]
-    assert "clusters" in labels and len(labels) >= 2
+    assert labels == ["clusters"]
     for adata in (exported, written):
         for field in labels:
             values = [str(value) for value in run.cells.fetch(field).tolist()]

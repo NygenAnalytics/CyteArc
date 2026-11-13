@@ -234,10 +234,11 @@ def _run_label_categorical(
     """Return how a run export writes a frozen label field, or None.
 
     A run output with a categorical display, such as ``clusters``,
-    ``leiden_*``, ``paris``, or ``cell_cycle_phase``, is a categorical whose
-    categories are its labels as text in natural order, with the display
-    colors. A cell column that the run froze keeps its display for plots and
-    exports as the run's other frozen columns do.
+    ``paris``, ``cell_cycle_phase``, or an earlier run's
+    ``leiden_<resolution>``, is a categorical whose categories are its labels
+    as text in natural order, with the display colors. A cell column that
+    the run froze keeps its display for plots and exports as the run's other
+    frozen columns do.
     """
     from ...writers.export import H5adCategorical
 
@@ -342,8 +343,8 @@ class _PresentationOperationsMixin(_PresentationOperationsBase):
         removed from ``obs``, the run's PCA is ``obsm["X_pca"]`` (and its
         Harmony correction ``obsm["X_pca_harmony"]``), an ATAC run's LSI is
         ``obsm["X_lsi"]`` (and its Harmony correction
-        ``obsm["X_lsi_harmony"]``), and label fields (``clusters``,
-        ``leiden_*``, ``paris``) are categoricals with string categories in
+        ``obsm["X_lsi_harmony"]``), and label fields, such as ``clusters``
+        and ``paris``, are categoricals with string categories in
         natural order and the run's display colors.
 
         ``matrix="normed"`` means two different things. Without ``run``,
@@ -703,7 +704,7 @@ class _PresentationOperationsMixin(_PresentationOperationsBase):
         ``"categorical"`` columns: the plan decides which text fields are
         categoricals and in what order their categories are, for the file
         and for the object alike. A field with a categorical display, such
-        as ``clusters``, ``leiden_*``, or ``paris``, is a categorical of its
+        as ``clusters`` or ``paris``, is a categorical of its
         labels as text, in natural order, with the display's colors.
         Consecutive ``umap_<k>`` fields become ``obsm["X_umap"]``, the
         run's ``pca`` and ``harmony`` outputs ``obsm["X_pca"]`` and
