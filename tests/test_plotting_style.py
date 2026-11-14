@@ -82,7 +82,7 @@ def test_continuous_norm_supports_center_and_validates_bounds():
     _, mpl = require_matplotlib()
     norm = continuous_norm(mpl, vmin=-2, vmax=3, vcenter=0)
     assert isinstance(norm, mpl.colors.TwoSlopeNorm)
-    # Each side of the centre maps linearly onto its half of the colormap.
+    # Each side of the center maps linearly onto its half of the colormap.
     np.testing.assert_allclose(
         norm(np.array([-2.0, -1.0, 0.0, 1.5, 3.0])), [0.0, 0.25, 0.5, 0.75, 1.0]
     )
@@ -116,7 +116,7 @@ def test_square_axis_limits_and_dark_theme():
         scatter_edgecolor,
     )
 
-    # The shorter axis widens around its centre to the longer span.
+    # The shorter axis widens around its center to the longer span.
     assert square_axis_limits((0.0, 2.0), (-1.0, 0.0)) == (
         pytest.approx((0.0, 2.0)),
         pytest.approx((-1.5, 0.5)),

@@ -116,7 +116,7 @@ def pair_counts(
     groups = np.asarray(groups, dtype=np.int64)
     clones = np.asarray(clones, dtype=np.int64)
     n_codes = int(clones.max()) + 1 if len(clones) else 1
-    # Sorting and comparing neighbours counts each pair, as np.unique does,
+    # Sorting and comparing neighbors counts each pair, as np.unique does,
     # without hashing many distinct pairs.
     ordered = np.sort(groups * n_codes + clones)
     starts = np.flatnonzero(np.diff(ordered, prepend=-1) != 0)

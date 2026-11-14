@@ -271,7 +271,7 @@ def source(request, tmp_path_factory) -> SimpleNamespace:
     store.cells.insert("is_d2", TRUTH.samples == "d2")
     store.cells.insert("is_d4", TRUTH.samples == "d4")
     insert_nullable_cell_column(
-        store, "unlabelled", TRUTH.samples, np.ones(N_CELLS, dtype=bool)
+        store, "unlabeled", TRUTH.samples, np.ones(N_CELLS, dtype=bool)
     )
     return SimpleNamespace(
         store=store,
@@ -988,10 +988,10 @@ def test_a_label_artifact_of_a_kind_named_like_a_column_groups_cells(
     write_cell_data_artifact(
         store.zw, planned, {"values": TRUTH.samples.astype(object)}
     )
-    labelled = store.snapshot_cluster_labels("sample", cell_selection=every_cell(store))
+    labeled = store.snapshot_cluster_labels("sample", cell_selection=every_cell(store))
     for found, expected in zip(
         _summaries(store, source.clones, groups=planned.ref),
-        _summaries(store, source.clones, groups=labelled),
+        _summaries(store, source.clones, groups=labeled),
         strict=True,
     ):
         _assert_same_tables(found, expected)
@@ -1069,7 +1069,7 @@ def test_summaries_refuse_a_grouping_that_leaves_out_every_clone(source) -> None
         fate_bias,
     ):
         with pytest.raises(ValueError, match="No cell has both a clone and a group"):
-            summary(source.clones, group_by="unlabelled")
+            summary(source.clones, group_by="unlabeled")
 
 
 def test_summaries_name_missing_and_incomplete_clones(source, tmp_path) -> None:

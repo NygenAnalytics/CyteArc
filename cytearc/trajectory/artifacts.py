@@ -906,7 +906,7 @@ def aggregation_payload_is_valid(
     selected_features: np.ndarray,
     n_bins: int,
     n_clusters: int,
-    n_neighbours: int,
+    n_neighbors: int,
     nan_cluster_value: int,
     ann_params: Mapping[str, Any],
     expected_input_fingerprints: Sequence[str],
@@ -1034,7 +1034,7 @@ def aggregation_payload_is_valid(
             return False
     if (
         valid_count < 2
-        or not 1 <= n_neighbours < valid_count
+        or not 1 <= n_neighbors < valid_count
         or not 1 <= n_clusters <= valid_count
     ):
         return False
@@ -1543,7 +1543,7 @@ def lineage_aggregation_payload_is_valid(
     n_lineages: int,
     n_bins: int,
     n_clusters: int,
-    n_neighbours: int,
+    n_neighbors: int,
     nan_cluster_value: int,
     expected_input_fingerprints: Sequence[str],
     expected_feature_ids_fingerprint: str,
@@ -1638,7 +1638,7 @@ def lineage_aggregation_payload_is_valid(
     valid_count = int(np.count_nonzero(valid))
     if (
         valid_count < 2
-        or not 1 <= n_neighbours < valid_count
+        or not 1 <= n_neighbors < valid_count
         or not 1 <= n_clusters <= valid_count
         or np.any(clusters[~valid] != nan_cluster_value)
         or np.any(clusters[valid] < 1)

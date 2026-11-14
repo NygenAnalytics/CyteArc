@@ -543,7 +543,7 @@ class MetaData:
         return expanded, missing
 
     def _label_aligned(self, values: Any, key: str, *, name: str) -> Any:
-        """Return ``values`` in row order, aligning a labelled Series to row ids.
+        """Return ``values`` in row order, aligning a labeled Series to row ids.
 
         A pandas Series whose index is not a ``RangeIndex`` is matched by label
         to the ``ids`` of every row when it holds a value for every row, and
@@ -676,7 +676,7 @@ class MetaData:
         Raises:
             ValueError: If ``column_name`` is protected, already exists
                 without ``overwrite``, or contains ``/`` or ``\\``, which
-                Zarr reads as path separators, if a Series is labelled by
+                Zarr reads as path separators, if a Series is labeled by
                 anything other than those ids, or if two categories of
                 categorical values read alike once stored or the
                 ``fill_value`` of categorical values is not a category.
@@ -729,7 +729,7 @@ class MetaData:
         """Restrict a boolean metadata key using the supplied values.
 
         Values are matched to rows as :meth:`insert` matches them, so a pandas
-        Series labelled by ``ids`` is aligned to its rows by label.
+        Series labeled by ``ids`` is aligned to its rows by label.
         """
         validate_metadata_column_name(key)
         self._protect(key)

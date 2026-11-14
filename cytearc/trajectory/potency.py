@@ -288,7 +288,7 @@ def _score_rows(
         degree_spread += (degree[gene] - mean_degree) ** 2
     for row in prange(n_rows):
         values = np.full(n_genes, base)
-        neighbours = base * degree
+        neighbors = base * degree
         scale = scale_total / totals[row]
         found = 0
         for gene in range(n_genes):
@@ -299,23 +299,23 @@ def _score_rows(
                 values[gene] = value
                 extra = value - base
                 for edge in range(indptr[gene], indptr[gene + 1]):
-                    neighbours[indices[edge]] += extra
+                    neighbors[indices[edge]] += extra
         flux = 0.0
         weighted = 0.0
         total_value = 0.0
         for gene in range(n_genes):
-            share = values[gene] * neighbours[gene]
+            share = values[gene] * neighbors[gene]
             flux += share
-            weighted += share * (math.log(neighbours[gene]) - math.log(values[gene]))
+            weighted += share * (math.log(neighbors[gene]) - math.log(values[gene]))
             total_value += values[gene]
         entropy[row] = weighted / flux / log_lambda
         mean_value = total_value / n_genes
         spread = 0.0
         together = 0.0
         for gene in range(n_genes):
-            centred = values[gene] - mean_value
-            spread += centred * centred
-            together += centred * (degree[gene] - mean_degree)
+            centered = values[gene] - mean_value
+            spread += centered * centered
+            together += centered * (degree[gene] - mean_degree)
         if spread > 0.0:
             correlation[row] = together / math.sqrt(spread * degree_spread)
         else:
@@ -378,7 +378,7 @@ def smooth_on_graph(
 ) -> np.ndarray:
     """Smooth per-cell values by a random walk with restart on a graph.
 
-    Each step keeps ``smoothing`` of the neighbours' values, weighted by the
+    Each step keeps ``smoothing`` of the neighbors' values, weighted by the
     graph's row-normalized edges, and restarts ``1 - smoothing`` at the
     original value: ``d <- smoothing * P d + (1 - smoothing) * values``. The
     fixed point is ``(1 - smoothing) (I - smoothing P)^-1 values``, which the

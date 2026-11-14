@@ -3,7 +3,7 @@
 Tools that extract expressed lineage barcodes from sequencing reads write
 each cell's barcodes at one of three levels: one row per read, one row per
 molecule (a cell, a UMI and a barcode), or one row per pair of a cell and a
-barcode with its UMIs or reads. ``barcode_layout`` recognises a file's format
+barcode with its UMIs or reads. ``barcode_layout`` recognizes a file's format
 from its contents and resolves the columns that hold each row's cell,
 barcode, UMI and counts; ``iter_barcode_rows`` then yields the rows in
 bounded chunks. Joining cells and collapsing reads into molecules belong to
@@ -487,7 +487,7 @@ def _is_nucleotides(value: str) -> bool:
 
 
 def _headerless_format(path: str) -> str | None:
-    """Recognise a table without a header by the fields of its first line."""
+    """Recognize a table without a header by the fields of its first line."""
     lines = first_lines(path, 1)
     if not lines:
         return None
@@ -852,17 +852,17 @@ def barcode_layout(
     columns: Mapping[str, Any] | None = None,
     library: str | None = None,
 ) -> BarcodeLayout:
-    """Recognise a barcode file's format and resolve the columns to read.
+    """Recognize a barcode file's format and resolve the columns to read.
 
     The format follows from the file's contents: an HDF5 file is Cell
-    Ranger's ``molecule_info.h5`` or AnnData, and a text table is recognised
+    Ranger's ``molecule_info.h5`` or AnnData, and a text table is recognized
     by its header, or, without one, by the fields of its first row. A table
     of another tool is read with ``format`` set to ``"reads"``,
     ``"molecules"`` or ``"pairs"`` and ``columns``, which names its columns.
 
     Args:
         path: The barcode file.
-        format: One of ``BARCODE_FORMATS``, or None to recognise it.
+        format: One of ``BARCODE_FORMATS``, or None to recognize it.
         columns: Roles mapped to column names: ``"cell"`` and ``"barcode"``
             (a column, or several joined by ``COLUMN_SEPARATOR``), ``"umi"``,
             ``"umis"``, ``"reads"`` and ``"library"``, and ``"separator"``,
@@ -931,7 +931,7 @@ def barcode_layout(
         text = text_layout(name, what="a barcode table")
         return _table_layout(format, text, file_library, roles)
     # A first line of a tool's reads or molecules is no header, so tables
-    # without one are recognised before a header is read.
+    # without one are recognized before a header is read.
     headerless = _headerless_format(name)
     if format is None:
         if headerless is not None:

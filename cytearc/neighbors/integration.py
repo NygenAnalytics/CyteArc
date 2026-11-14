@@ -24,7 +24,7 @@ _KERNEL_DTYPES = (np.dtype(np.float32), np.dtype(np.float64))
 _PAIRWISE_BLOCK = 128
 # Halving any run of an int64 count leaves at most this many pending runs.
 _PAIRWISE_DEPTH = 64
-# A bandwidth at most this many nearest-neighbour distances is degenerate.
+# A bandwidth at most this many nearest-neighbor distances is degenerate.
 _TOLERANCE_SCALE = 8.0 * np.finfo(np.float64).eps
 # The smallest stored graph weight, the smallest positive normal float32.
 _TINY_WEIGHT = float(np.finfo(np.float32).tiny)
@@ -64,8 +64,8 @@ def wnn_peak_bytes(
         min(cells, _norm_band_rows(width)) * (2 * width + 1) for width in widths
     )
     # A block scores its cells in float64. Per cell, its candidates fill
-    # int64 rows: the stacked neighbour rows, their sort order, the
-    # candidates, and the neighbours' positions among them. Every modality's
+    # int64 rows: the stacked neighbor rows, their sort order, the
+    # candidates, and the neighbors' positions among them. Every modality's
     # distances to the candidates follow, then the offsets from each
     # modality's predictions with a row of scratch, the modality scores, and
     # the affinities that combine the distances.
@@ -326,13 +326,13 @@ def _candidate_pools(
     sizes: np.ndarray,
     positions: np.ndarray,
 ) -> None:
-    """Write each cell's candidates and where its neighbours sit among them.
+    """Write each cell's candidates and where its neighbors sit among them.
 
-    ``stacked`` holds each cell's neighbour rows side by side, and ``order``
+    ``stacked`` holds each cell's neighbor rows side by side, and ``order``
     the order that sorts each row. A row of ``pools`` receives the sorted
-    distinct values of the row, the union of the cell's neighbour rows, and
+    distinct values of the row, the union of the cell's neighbor rows, and
     ``sizes`` their count; ``positions`` receives the position of every
-    stacked neighbour among them. Entries of ``pools`` past a row's size are
+    stacked neighbor among them. Entries of ``pools`` past a row's size are
     not written.
     """
     n_rows, width = stacked.shape
@@ -408,13 +408,13 @@ def _prediction_offsets(
     scratch: np.ndarray,
     offsets: np.ndarray,
 ) -> None:
-    """Write each cell's offset from the mean of every modality's neighbours.
+    """Write each cell's offset from the mean of every modality's neighbors.
 
     ``offsets[i, source]`` is cell ``first_cell + i`` minus the mean of the
-    neighbours that columns ``starts[source]`` onward of ``stacked`` list for
+    neighbors that columns ``starts[source]`` onward of ``stacked`` list for
     modality ``source``, both in this embedding's coordinates, scaled by
     ``inverse`` unless it is None. As ``ndarray.mean`` does, each coordinate
-    adds the neighbours in their listed order, or pairwise when there is a
+    adds the neighbors in their listed order, or pairwise when there is a
     single coordinate, in the precision of ``zero``, and the mean is rounded
     to it before it is subtracted. Each row of ``scratch`` holds one cell's
     sums.
@@ -615,7 +615,7 @@ def _score_block(
         for embedding, inverse in zip(embeddings, inverse_norms, strict=True)
     ]
     # A row of scratch holds a cell's coordinates and squared differences, or
-    # the neighbour coordinates whose mean it takes.
+    # the neighbor coordinates whose mean it takes.
     scratch_width = max(
         2 * max(embedding.shape[1] for embedding in embeddings), int(counts.max())
     )
@@ -644,7 +644,7 @@ def _score_block(
             np.empty((rows, scratch_width), dtype=zero.dtype),
             values,
         )
-        # The nearest and the k-th of the modality's own neighbours, with
+        # The nearest and the k-th of the modality's own neighbors, with
         # NaN sorted last.
         ranked = np.sort(
             np.take_along_axis(values, positions[:, first : first + count], 1),
@@ -657,7 +657,7 @@ def _score_block(
     del positions
 
     # A modality's score against another is how much better its own
-    # neighbours predict the cell than the other modality's neighbours.
+    # neighbors predict the cell than the other modality's neighbors.
     scores = np.full((rows, n_modalities, n_modalities), -np.inf)
     for target, (embedding, inverse, zero) in enumerate(
         zip(embeddings, inverse_norms, zeros, strict=True)
@@ -877,9 +877,9 @@ def _wnn_integration_many(
 ) -> tuple[coo_matrix, np.ndarray]:
     """Build an N-modality WNN graph and per-cell modality weights.
 
-    Candidates are the union of each modality's self-free neighbour row. Each
+    Candidates are the union of each modality's self-free neighbor row. Each
     modality turns distances into affinities with its own nearest and k-th
-    neighbour distances, and rows are L2-normalized during scoring by default.
+    neighbor distances, and rows are L2-normalized during scoring by default.
     This bounded pool and bandwidth differ from Seurat's wider search and
     SNN-far bandwidth. The COO graph stores blended affinities as float32
     edge weights, and the second array holds float32 modality weights.

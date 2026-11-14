@@ -170,7 +170,7 @@ from ...trajectory.lineage_tree import (
     cluster_codes as _cluster_codes_impl,
     cluster_distances as _cluster_distances_impl,
     cluster_moments as _cluster_moments_impl,
-    labelled_tree as _labelled_tree_impl,
+    labeled_tree as _labeled_tree_impl,
     spanning_tree as _spanning_tree_impl,
     tree_ends as _tree_ends_impl,
 )
@@ -900,7 +900,7 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         by="id")``, or their mean with ``FeatureRef(value=name,
         reduction="mean")``. A metadata column whose linked missing mask flags
         a cell in the operator's cell selection raises ``ValueError``, because
-        diffusion would spread its stored placeholder to neighbouring cells.
+        diffusion would spread its stored placeholder to neighboring cells.
 
         Args:
             feature_name: One feature name, cell metadata column, or
@@ -2892,7 +2892,7 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         if missing is not None and np.any(missing):
             raise ValueError(
                 "Every cell needs a label; pass as cells a selection of the "
-                "labelled cells, or select them before building the graph"
+                "labeled cells, or select them before building the graph"
             )
         return _cluster_codes_impl(values)
 
@@ -3160,7 +3160,7 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
                 raise ValueError("Lineage-tree root or ends are not cluster labels")
         # The saved tree is named by its labels as a tree built without a
         # store is, so the two are the same.
-        tree = _labelled_tree_impl(
+        tree = _labeled_tree_impl(
             clusters,
             np.asarray(_stored_values(group, "sizes"), dtype=np.int64),
             np.asarray(_stored_values(group, "means"), dtype=np.float64),
@@ -3241,7 +3241,7 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         it, and their spread is their weighted median distance plus
         ``distance_score`` times their weighted median absolute deviation
         scaled by 1.4826, which estimates the standard deviation of a normal
-        spread. A bin's limit is the median spread of three neighbouring
+        spread. A bin's limit is the median spread of three neighboring
         bins, so a state off the trajectory that projects onto one stretch
         of a curve, such as a dead end off it, cannot widen the limit there.
         A cell that follows several lineages is shared by them, and a cell
@@ -3755,12 +3755,12 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
             graph: Explicit connectivity-map or integrated-graph artifact built
                 on the cells of ``cell_selection``. With it, the measure is
                 smoothed before it ranks the cells: each step keeps
-                ``smoothing`` of the neighbours' values and restarts at the
+                ``smoothing`` of the neighbors' values and restarts at the
                 cell's own, ``d <- smoothing * P d + (1 - smoothing) * score``
                 with ``P`` the row-normalized graph, until it is within 1e-12
                 of its fixed point. Without it the measure ranks the cells as
                 it is.
-            smoothing: The share of each step taken from the neighbours, above
+            smoothing: The share of each step taken from the neighbors, above
                 0 and at most 0.99; used only with ``graph``.
             species: ``"human"`` or ``"mouse"``. None takes the species whose
                 Ensembl gene IDs the features carry; an assay whose feature IDs
@@ -4519,7 +4519,7 @@ class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
         chunk_size: int = 50,
         smoothen: bool = True,
         z_scale: bool = True,
-        n_neighbours: int = 11,
+        n_neighbors: int = 11,
         n_clusters: int = 10,
         batch_size: int | None = None,
         ann_params: dict | None = None,
@@ -4537,7 +4537,7 @@ class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
             chunk_size: Number of pseudotime bins to create.
             smoothen: Whether to smooth expression along pseudotime.
             z_scale: Whether to standardize each retained feature.
-            n_neighbours: Number of neighbors in the feature graph.
+            n_neighbors: Number of neighbors in the feature graph.
             n_clusters: Number of feature modules to create.
             batch_size: Number of features processed per batch. When None,
                 selected features are grouped into chunk-aligned blocks that
@@ -4566,6 +4566,7 @@ class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
             if batch_size is None
             else integer_argument(batch_size, "batch_size", minimum=1)
         )
+        n_neighbors = integer_argument(n_neighbors, "n_neighbors", minimum=1)
         assay = self._pseudotime_feature_assay(pseudotime, features)
         identity = _FrozenFeatureIdentity.capture(assay)
         validated_parameters = _validate_aggregation_parameters(
@@ -4580,7 +4581,7 @@ class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
                 "chunk_size": chunk_size,
                 "smoothen": smoothen,
                 "z_scale": z_scale,
-                "n_neighbours": n_neighbours,
+                "n_neighbours": n_neighbors,
                 "n_clusters": n_clusters,
                 "ann_params": {} if ann_params is None else ann_params,
                 "nan_cluster_value": nan_cluster_value,
@@ -4590,7 +4591,7 @@ class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
         min_exp = validated_parameters["min_exp"]
         smoothen = validated_parameters["smoothen"]
         z_scale = validated_parameters["z_scale"]
-        n_neighbours = validated_parameters["n_neighbours"]
+        n_neighbors = validated_parameters["n_neighbours"]
         n_clusters = validated_parameters["n_clusters"]
         nan_cluster_value = validated_parameters["nan_cluster_value"]
         check_normalization = _normalization_guard(
@@ -4601,9 +4602,9 @@ class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
         axes = self._pseudotime_feature_cells(assay, pseudotime, features)
         if len(axes.feature_indices) < 2:
             raise ValueError("At least two selected features are required")
-        if n_neighbours >= len(axes.feature_indices):
+        if n_neighbors >= len(axes.feature_indices):
             raise ValueError(
-                "n_neighbours must be smaller than the selected feature count"
+                "n_neighbors must be smaller than the selected feature count"
             )
         if n_clusters > len(axes.feature_indices):
             raise ValueError("n_clusters cannot exceed the selected feature count")
@@ -4646,7 +4647,7 @@ class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
             chunk_size=validated_parameters["chunk_size"],
             smoothen=smoothen,
             z_scale=z_scale,
-            n_neighbours=n_neighbours,
+            n_neighbours=n_neighbors,
             n_clusters=n_clusters,
             ann_params=resolved_ann_params,
             nan_cluster_value=nan_cluster_value,
@@ -4710,7 +4711,7 @@ class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
                 selected_features=feature_indices,
                 n_bins=effective_bins,
                 n_clusters=n_clusters,
-                n_neighbours=n_neighbours,
+                n_neighbors=n_neighbors,
                 nan_cluster_value=nan_cluster_value,
                 ann_params=resolved_ann_params,
                 expected_input_fingerprints=input_fingerprints,
@@ -4739,13 +4740,13 @@ class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
             )
         )
         valid_count = int(np.count_nonzero(valid_features))
-        if valid_count < 2 or n_neighbours >= valid_count or n_clusters > valid_count:
+        if valid_count < 2 or n_neighbors >= valid_count or n_clusters > valid_count:
             raise ValueError(
                 f"Only {valid_count} of {len(stored_feature_indices)} selected "
                 f"features have mean expression above min_exp={min_exp} and a "
                 "non-constant profile. Clustering needs at least two such "
-                f"features, more than n_neighbours={n_neighbours}, and at least "
-                f"n_clusters={n_clusters}. Lower min_exp or reduce n_neighbours "
+                f"features, more than n_neighbors={n_neighbors}, and at least "
+                f"n_clusters={n_clusters}. Lower min_exp or reduce n_neighbors "
                 "or n_clusters."
             )
         valid_feature_indices = stored_feature_indices[valid_features]
@@ -4755,7 +4756,7 @@ class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
                 nthreads=self.nthreads,
                 resources=self.resources,
             ),
-            n_neighbours=n_neighbours,
+            n_neighbors=n_neighbors,
             n_clusters=n_clusters,
             nthreads=self.nthreads,
             ann_params=resolved_ann_params,
@@ -4856,7 +4857,7 @@ class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
             selected_features=record.feature_indices,
             n_bins=effective_bins,
             n_clusters=parameters["n_clusters"],
-            n_neighbours=parameters["n_neighbours"],
+            n_neighbors=parameters["n_neighbours"],
             nan_cluster_value=parameters["nan_cluster_value"],
             ann_params=ann_params,
             expected_input_fingerprints=expected_input_fingerprints,
@@ -4960,7 +4961,7 @@ class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
         ``held_bytes`` counts what the caller keeps alive besides ``weights``
         and ``regressors``, such as the fate probabilities.
         """
-        # What the caller holds, the weights, the regressors, their centred
+        # What the caller holds, the weights, the regressors, their centered
         # copy, which the stream makes once before the first block, the
         # feature names, and four result arrays per feature.
         feature_names = _feature_names_at(assay, feature_indices)
@@ -5026,7 +5027,7 @@ class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
                 that directs it, and its probabilities define the cells, their
                 order, and their weights.
             features: Explicit assay-scoped feature-selection artifact.
-            lineages: Sink labels to analyse, in order. ``None`` analyses
+            lineages: Sink labels to analyze, in order. ``None`` analyses
                 every sink.
             min_cells: Smallest fate weight, in cells, that a feature's
                 expressing cells must carry in a lineage for it to be tested.
@@ -5329,7 +5330,7 @@ class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
         Args:
             fate: Explicit fate-map artifact.
             features: Explicit assay-scoped feature-selection artifact.
-            lineages: Sink labels to analyse, in order. ``None`` analyses
+            lineages: Sink labels to analyze, in order. ``None`` analyses
                 every sink.
             cells: Cell-selection artifact within the fate map's cells to
                 correlate. ``None`` uses every scored cell.
@@ -5556,7 +5557,7 @@ class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
         smoothing: float = 2.0,
         min_exp: float = 1e-3,
         z_scale: bool = True,
-        n_neighbours: int = 11,
+        n_neighbors: int = 11,
         n_clusters: int = 10,
         batch_size: int | None = None,
         ann_params: dict | None = None,
@@ -5570,7 +5571,7 @@ class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
         lineage's fate weight is cut into ``n_bins`` bins of equal weight, a
         cell whose weight straddles a cut being shared in proportion. A
         feature's profile is its weighted mean in every bin, smoothed across
-        neighbouring bins by a Gaussian of ``smoothing`` bins, so every
+        neighboring bins by a Gaussian of ``smoothing`` bins, so every
         lineage runs from the shared start to its sink. With ``z_scale``, each
         feature is scaled by one mean and standard deviation over all
         lineages, which keeps its lineages comparable. Features with similar
@@ -5590,7 +5591,7 @@ class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
                 its profiles need this smoothing most.
             min_exp: Minimum mean normalized expression required for clustering.
             z_scale: Whether to standardize each retained feature.
-            n_neighbours: Number of neighbors in the feature graph.
+            n_neighbors: Number of neighbors in the feature graph.
             n_clusters: Number of feature modules to create.
             batch_size: Number of features processed per batch. ``None``
                 sizes batches to the memory budget.
@@ -5619,6 +5620,7 @@ class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
             if batch_size is None
             else integer_argument(batch_size, "batch_size", minimum=1)
         )
+        n_neighbors = integer_argument(n_neighbors, "n_neighbors", minimum=1)
         if lineages is not None and not isinstance(lineages, list):
             raise TypeError("lineages must be a list of sink labels or None")
         assay = self._lineage_feature_assay(fate, features)
@@ -5640,21 +5642,21 @@ class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
                 "smoothing": smoothing,
                 "min_exp": min_exp,
                 "z_scale": z_scale,
-                "n_neighbours": n_neighbours,
+                "n_neighbours": n_neighbors,
                 "n_clusters": n_clusters,
                 "ann_params": {} if ann_params is None else ann_params,
                 "nan_cluster_value": nan_cluster_value,
             }
         )
         n_bins = validated["n_bins"]
-        n_neighbours = validated["n_neighbours"]
+        n_neighbors = validated["n_neighbours"]
         n_clusters = validated["n_clusters"]
         nan_cluster_value = validated["nan_cluster_value"]
         if len(feature_indices) < 2:
             raise ValueError("At least two selected features are required")
-        if n_neighbours >= len(feature_indices):
+        if n_neighbors >= len(feature_indices):
             raise ValueError(
-                "n_neighbours must be smaller than the selected feature count"
+                "n_neighbors must be smaller than the selected feature count"
             )
         if n_clusters > len(feature_indices):
             raise ValueError("n_clusters cannot exceed the selected feature count")
@@ -5707,7 +5709,7 @@ class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
             smoothing=validated["smoothing"],
             min_exp=validated["min_exp"],
             z_scale=validated["z_scale"],
-            n_neighbours=n_neighbours,
+            n_neighbours=n_neighbors,
             n_clusters=n_clusters,
             ann_params=resolved_ann_params,
             nan_cluster_value=nan_cluster_value,
@@ -5752,7 +5754,7 @@ class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
                 n_lineages=n_lineages,
                 n_bins=n_bins,
                 n_clusters=n_clusters,
-                n_neighbours=n_neighbours,
+                n_neighbors=n_neighbors,
                 nan_cluster_value=nan_cluster_value,
                 expected_input_fingerprints=input_fingerprints,
                 expected_feature_ids_fingerprint=identity.ids_fingerprint,
@@ -5827,13 +5829,13 @@ class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
             z_scale=validated["z_scale"],
         )
         valid_count = int(np.count_nonzero(valid))
-        if valid_count < 2 or n_neighbours >= valid_count or n_clusters > valid_count:
+        if valid_count < 2 or n_neighbors >= valid_count or n_clusters > valid_count:
             raise ValueError(
                 f"Only {valid_count} of {n_selected} selected features have mean "
                 f"expression above min_exp={validated['min_exp']} and a "
                 "non-constant profile. Clustering needs at least two such "
-                f"features, more than n_neighbours={n_neighbours}, and at least "
-                f"n_clusters={n_clusters}. Lower min_exp or reduce n_neighbours "
+                f"features, more than n_neighbors={n_neighbors}, and at least "
+                f"n_clusters={n_clusters}. Lower min_exp or reduce n_neighbors "
                 "or n_clusters."
             )
         clusters = knn_clustering(
@@ -5842,7 +5844,7 @@ class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
                 nthreads=self.nthreads,
                 resources=self.resources,
             ),
-            n_neighbours=n_neighbours,
+            n_neighbors=n_neighbors,
             n_clusters=n_clusters,
             nthreads=self.nthreads,
             ann_params=resolved_ann_params,
@@ -5931,7 +5933,7 @@ class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
             n_lineages=n_lineages,
             n_bins=parameters["n_bins"],
             n_clusters=parameters["n_clusters"],
-            n_neighbours=parameters["n_neighbours"],
+            n_neighbors=parameters["n_neighbours"],
             nan_cluster_value=parameters["nan_cluster_value"],
             expected_input_fingerprints=expected_input_fingerprints,
             expected_feature_ids_fingerprint=record.ids_fingerprint,

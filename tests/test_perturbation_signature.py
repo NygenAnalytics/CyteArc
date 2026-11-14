@@ -272,7 +272,7 @@ def test_cells_without_coordinates_get_no_signature(store, template) -> None:
         )
     finally:
         logger.remove(sink)
-    assert "16 labelled cells have no coordinates and get no signature" in messages
+    assert "16 labeled cells have no coordinates and get no signature" in messages
     loaded = store.perturbation.load_signature(ref, features=["RNA2", "RNA0"])
     cells = np.flatnonzero(CARRIED != 1)
     assert loaded.values.index.tolist() == [f"cell{cell}" for cell in cells]

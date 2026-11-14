@@ -515,7 +515,7 @@ class _PhylogenyOperationsMixin(_PhylogenyOperationsBase):
             time_unit: The unit of the trees' times, such as ``"days"``, or
                 None when their lengths are not times; then the trees are cut
                 at depths only.
-            format: ``"newick"`` or ``"treedata"``, or None to recognise each
+            format: ``"newick"`` or ``"treedata"``, or None to recognize each
                 file: Zarr stores and HDF5 files hold TreeData.
             barcode_prefix: Text before each leaf's name in the cell IDs: one
                 for every file, or one per file.
@@ -902,9 +902,9 @@ class _PhylogenyOperationsMixin(_PhylogenyOperationsBase):
         label_width = max(width, len(f"node{n_nodes}"))
         if len(tree_names) > 1:
             label_width += 1 + max(map(len, tree_names.tolist()))
-        # The clones are labelled and then saved.
+        # The clones are labeled and then saved.
         ledger.hold(
-            f"labelling {n_clones} clones of {n_cells} cells",
+            f"labeling {n_clones} clones of {n_cells} cells",
             n_clones * (_CUT_BYTES_PER_CLONE + 8 * (1 + label_width))
             + n_cells * _CUT_BYTES_PER_CELL
             + max(1, int(names_array.chunks[0])) * _NAME_READ_COPIES * 4 * width,

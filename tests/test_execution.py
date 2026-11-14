@@ -597,8 +597,8 @@ def test_feature_consume_details_uses_matching_kind_after_later_reports() -> Non
 def test_pairwise_merge_tree_is_independent_of_completion_order() -> None:
     from cytearc.utils.compute import pairwise_merge_tree
 
-    # A merge that records its association shows the fixed tree: neighbours
-    # first, then neighbouring pairs, with an odd leftover promoted unchanged.
+    # A merge that records its association shows the fixed tree: neighbors
+    # first, then neighboring pairs, with an odd leftover promoted unchanged.
     def merge(left: str, right: str) -> str:
         return f"({left}+{right})"
 

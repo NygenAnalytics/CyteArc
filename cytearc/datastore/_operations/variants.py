@@ -203,8 +203,8 @@ _CLONE_SEED = 4444
 # Bytes held for each cell while called clones are saved, beside what saving
 # them holds: its position, group, cluster and status of the call.
 _CLONE_CALL_BYTES_PER_CELL = 34
-# The smallest Jaccard index of two neighbourhoods that Seurat's shared
-# neighbour graph keeps.
+# The smallest Jaccard index of two neighborhoods that Seurat's shared
+# neighbor graph keeps.
 _SHARED_NEIGHBOR_PRUNE = 1 / 15
 # The attributes that saved variant clones need to be reused.
 _CLONE_ATTRIBUTES = ("n_clones",)
@@ -276,9 +276,9 @@ _GENOTYPE_RULES = (
 
 
 def _warn_of_small_groups(groups: np.ndarray, n_groups: int, n_neighbors: int) -> None:
-    """Warn when groups of scored cells hold fewer cells than a full neighbourhood.
+    """Warn when groups of scored cells hold fewer cells than a full neighborhood.
 
-    Each cell's neighbourhood then holds every cell of its group that it
+    Each cell's neighborhood then holds every cell of its group that it
     resembles at all, so clones of the group that share a variant join.
     """
     sizes = np.bincount(groups, minlength=n_groups)
@@ -292,9 +292,9 @@ def _warn_of_small_groups(groups: np.ndarray, n_groups: int, n_neighbors: int) -
         f"hold{'s' if small == 1 else ''} fewer scored cells"
     )
     warn(
-        f"{where} than n_neighbors={n_neighbors}, so no neighbourhood there is "
+        f"{where} than n_neighbors={n_neighbors}, so no neighborhood there is "
         "full: each cell takes every cell of its group that it resembles as a "
-        "neighbour, and clones that share a variant join. Pass a smaller "
+        "neighbor, and clones that share a variant join. Pass a smaller "
         "n_neighbors."
     )
 
@@ -871,7 +871,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         the source made itself. Depth 0 means the cell was not covered at the
         site, so an allele frequency there is undefined rather than 0.
 
-        Each path is a folder or a file of one format, recognised from its
+        Each path is a folder or a file of one format, recognized from its
         contents: an mgatk folder (``<name>.A.txt.gz`` to ``.T.txt.gz``, the
         ``<contig>_refAllele.txt`` reference and the depth table), a maegatk
         folder, a cellsnp-lite or MQuad folder, a VarTrix folder of its
@@ -954,7 +954,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             format: One of ``"mgatk"``, ``"maegatk"``, ``"cellsnp_lite"``,
                 ``"mquad"``, ``"vartrix"``, ``"mito"``, ``"giftwrap"``,
                 ``"ironthrone"``, ``"got"``, ``"got_multi"``, ``"gotcha"``,
-                ``"tapestri"`` and ``"dab_seq"``, or None to recognise each
+                ``"tapestri"`` and ``"dab_seq"``, or None to recognize each
                 path's format.
             count_unit: ``"reads"``, ``"umis"`` or ``"molecules"``: what
                 cellsnp-lite, MQuad and VarTrix counted, which their files do
@@ -2339,19 +2339,19 @@ class _VariantOperationsMixin(_VariantOperationsBase):
 
         Cells that descend from one ancestor share its mitochondrial
         variants, at similar frequencies. As Signac's ``FindClonotypes``
-        does, each cell's neighbourhood holds itself and the
+        does, each cell's neighborhood holds itself and the
         ``n_neighbors - 1`` cells most similar to it by the cosine similarity
         of the square roots of their allele frequencies of the informative
-        variants; two cells that share a neighbour are joined with the
-        Jaccard index of their neighbourhoods, dropping joins below 1/15, as
-        Seurat's ``FindNeighbors`` builds its shared-neighbour graph; and the
+        variants; two cells that share a neighbor are joined with the
+        Jaccard index of their neighborhoods, dropping joins below 1/15, as
+        Seurat's ``FindNeighbors`` builds its shared-neighbor graph; and the
         Leiden algorithm partitions the graph at ``resolution`` where Signac
         uses Seurat's ``FindClusters``.
 
         Every cell is compared with every other cell, so the time grows with
         the square of the cells; ``within`` compares the cells of each group
         apart. Cells that tie, such as cells that show one informative
-        variant each, take the same few neighbours and join every other such
+        variant each, take the same few neighbors and join every other such
         cell, so the graph also grows with the square of their number, and a
         graph that does not fit the memory budget raises ``MemoryError``.
 
@@ -2364,7 +2364,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         ``ds.artifacts.inspect(clones).diagnostics`` returns, count them in
         ``cellsWithoutCoverage``, ``cellsWithoutAlternative`` and
         ``cellsWithoutNeighbors``, beside the informative ``variants``, the
-        ``cellsScored`` and the ``edges`` of the shared-neighbour graph, and,
+        ``cellsScored`` and the ``edges`` of the shared-neighbor graph, and,
         as every source's clones, ``cellsWithClone`` and
         ``largestCloneShare``. The clones cover the cells
         of the counts that ``informative`` scored, and its statistics cover
@@ -2373,7 +2373,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         The similarity counts a frequency whatever the reads behind it, so
         one stray read of a clone's variant can put a cell in that clone. The
         cells of a clone of fewer cells than ``n_neighbors`` take as
-        neighbours the cells of other clones that they resemble, so the clone
+        neighbors the cells of other clones that they resemble, so the clone
         can join the most similar one, and a smaller ``n_neighbors`` separates
         smaller clones; cells that resemble no other clone's stay apart. The
         call warns when a ``within`` group, or without ``within`` all the
@@ -2386,7 +2386,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             informative: A ``variant_selection`` artifact from
                 :meth:`~cytearc.datastore.namespaces.VariantsAccessor.informative`,
                 whose counts the frequencies are read from.
-            n_neighbors: The cells of a full neighbourhood, the cell itself
+            n_neighbors: The cells of a full neighborhood, the cell itself
                 included as Seurat counts it, at least 2.
             resolution: The Leiden resolution; larger values give more,
                 smaller clones.
@@ -2430,7 +2430,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             raise TypeError("n_neighbors must be an integer")
         if int(n_neighbors) < 2:
             raise ValueError(
-                "n_neighbors must be at least 2: a neighbourhood holds the cell "
+                "n_neighbors must be at least 2: a neighborhood holds the cell "
                 "itself and its most similar cells"
             )
         resolution = canonical_resolution(resolution)
@@ -2630,7 +2630,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
           ``Unprofiled`` beside ambiguous UMIs, is ``filtered``, and a cell
           with evidence but no call is ``filtered`` too. Tapestri and DAb-seq
           call each variant of a position apart, so each alternative of a
-          position is genotyped as a site of its own, labelled like
+          position is genotyped as a site of its own, labeled like
           ``chr1:115256513:G/T``. ``min_quality`` and ``min_depth`` filter
           the adopted calls, as Tapestri's pipeline filters genotypes by
           their quality and depth: a call whose quality, such as Tapestri's
@@ -3417,7 +3417,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         ``dropout_probability`` or ``error_probability`` holds one
         probability at every site instead. A greedy search chooses the
         number of clones by Schwarz's criterion, in which a clone costs its
-        weight and the sites at which it differs from its neighbour on a
+        weight and the sites at which it differs from its neighbor on a
         minimum spanning tree of the clones rooted at the wild type. The genotype without mutations is always a
         component: its cells, like cells without a mutant call, take no
         clone. Each cell takes its most probable clone, its posterior saved
@@ -4018,7 +4018,7 @@ def _clone_assignment(
 ) -> CloneAssignment:
     """Number called clones by size over every group, ties by their first cell.
 
-    The clones are labelled ``clone_1`` and on by rank, as every clone that
+    The clones are labeled ``clone_1`` and on by rank, as every clone that
     CyteArc calls is.
 
     Args:

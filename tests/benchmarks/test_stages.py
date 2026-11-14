@@ -66,7 +66,7 @@ def _open(path: Path):
 
 
 def _build(path: Path, n_cells: int) -> Pipeline:
-    counts, _labels = inputs.labelled_counts(n_cells)
+    counts, _labels = inputs.labeled_counts(n_cells)
     write_count_store(str(path), {"RNA": counts}, "uint16")
     store = _open(path)
     cells = store.qc.auto_filter()
@@ -157,7 +157,7 @@ def test_stage_highly_variable_features(bench, pipeline) -> None:
     def check(n_cells: int, hvgs: ArtifactRef) -> None:
         store = pipeline(n_cells).store
         indices = _feature_indices(store, store.features.resolve("RNA", hvgs))
-        counts, _labels = inputs.labelled_counts(n_cells)
+        counts, _labels = inputs.labeled_counts(n_cells)
         assert indices.size == inputs.N_HVGS
         # Selected genes vary more across the drawn programs than the rest.
         dispersion = counts.var(axis=0) / np.maximum(counts.mean(axis=0), 1e-12)
@@ -289,7 +289,7 @@ def _write_h5ad(path: Path, n_cells: int) -> Path:
     import h5py
     from scipy.sparse import csr_matrix
 
-    counts, _labels = inputs.labelled_counts(n_cells)
+    counts, _labels = inputs.labeled_counts(n_cells)
     matrix = csr_matrix(counts.astype(np.float32))
     names = np.array([f"gene{index}".encode() for index in range(inputs.N_GENES)])
     with h5py.File(path, "w") as h5:
@@ -339,7 +339,7 @@ def test_stage_create_count_store(bench, tmp_path) -> None:
     def check(n_cells: int, target: Path) -> None:
         import zarr
 
-        counts, _labels = inputs.labelled_counts(n_cells)
+        counts, _labels = inputs.labeled_counts(n_cells)
         stored = zarr.open_group(str(target), mode="r")["RNA/counts"]
         np.testing.assert_array_equal(stored[:], counts)
 
@@ -366,7 +366,7 @@ def test_stage_write_counts_t(bench, pipeline) -> None:
         )
 
     def check(n_cells: int, counts_t) -> None:
-        counts, _labels = inputs.labelled_counts(n_cells)
+        counts, _labels = inputs.labeled_counts(n_cells)
         np.testing.assert_array_equal(counts_t[:], counts.T)
 
     bench("stage.write_counts_t", make, STAGES, check=check)

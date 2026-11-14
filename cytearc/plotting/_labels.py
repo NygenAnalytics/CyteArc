@@ -8,9 +8,9 @@ import numpy as np
 
 # A label never moves more than this many label heights from its anchor.
 MAX_SHIFT_HEIGHTS = 1.0
-# A moved label stays this much nearer its own centre than the halfway point
-# to another centre, so it is always strictly nearest its own cluster.
-_CENTRE_MARGIN = 0.9
+# A moved label stays this much nearer its own center than the halfway point
+# to another center, so it is always strictly nearest its own cluster.
+_CENTER_MARGIN = 0.9
 # Room in points around each label for its halo stroke.
 _LABEL_PADDING_POINTS = 1.0
 _MAX_ITERATIONS = 200
@@ -18,10 +18,10 @@ _MAX_ITERATIONS = 200
 
 @dataclass(frozen=True, slots=True)
 class _LabelLayout:
-    """The labels of one panel and the centres of all of its clusters."""
+    """The labels of one panel and the centers of all of its clusters."""
 
     texts: tuple[Any, ...]
-    centres: np.ndarray
+    centers: np.ndarray
 
 
 # Each panel's Axes holds its labels' layout, which then lives as long as the
@@ -41,7 +41,7 @@ def _feasible_fraction(
     """Largest fraction of ``shift`` that keeps a label within its limits.
 
     The limits are convex and contain the anchor, which is the label's own
-    centre: at most ``max_shift`` away from it, strictly nearer to it than to
+    center: at most ``max_shift`` away from it, strictly nearer to it than to
     each of ``others``, and inside ``bounds`` (left, bottom, right, top) on
     each axis where the anchor itself is.
     """
@@ -51,12 +51,12 @@ def _feasible_fraction(
     fraction = min(1.0, max_shift / length)
     offsets = others - anchor
     toward = offsets @ shift
-    # A point anchor + t * shift is nearer the anchor than the centre at
+    # A point anchor + t * shift is nearer the anchor than the center at
     # anchor + offset exactly while t < |offset|^2 / (2 shift . offset).
     approaching = toward > 0
     if approaching.any():
         limits = (
-            _CENTRE_MARGIN
+            _CENTER_MARGIN
             * np.einsum("ij,ij->i", offsets[approaching], offsets[approaching])
             / (2.0 * toward[approaching])
         )
@@ -76,27 +76,27 @@ def _feasible_fraction(
 def separate_labels(
     anchors: np.ndarray,
     sizes: np.ndarray,
-    centres: np.ndarray,
+    centers: np.ndarray,
     *,
     bounds: tuple[float, float, float, float],
     max_shift: np.ndarray | None = None,
 ) -> np.ndarray:
     """Move overlapping label boxes apart within bounded, cluster-safe limits.
 
-    ``anchors`` holds each label's position at its cluster's centre, and
+    ``anchors`` holds each label's position at its cluster's center, and
     ``sizes`` the width and height of its box, in one display unit.
-    ``centres`` lists every cluster's centre with the labelled clusters first,
+    ``centers`` lists every cluster's center with the labeled clusters first,
     in the order of ``anchors``. Overlapping boxes push each other apart,
     along the axis that separates them with the smaller move. Each label then
     stays within ``max_shift`` of its anchor (one label height by default),
-    strictly nearer its own centre than any other cluster's, and with its box
+    strictly nearer its own center than any other cluster's, and with its box
     inside ``bounds`` (left, bottom, right, top) on each axis where the box
     fits at its anchor. Labels that these limits hold in place may still
     overlap.
     """
     anchors = np.asarray(anchors, dtype=np.float64).reshape(-1, 2)
     sizes = np.asarray(sizes, dtype=np.float64).reshape(-1, 2)
-    centres = np.asarray(centres, dtype=np.float64).reshape(-1, 2)
+    centers = np.asarray(centers, dtype=np.float64).reshape(-1, 2)
     n_labels = len(anchors)
     shifts = (
         MAX_SHIFT_HEIGHTS * sizes[:, 1]
@@ -120,8 +120,8 @@ def separate_labels(
         np.sign(np.subtract.outer(order, order)).astype(np.float64),
     )
     half = sizes / 2.0
-    others = [np.delete(centres, index, axis=0) for index in range(n_labels)]
-    # Each label's centre stays where its whole box fits inside the bounds.
+    others = [np.delete(centers, index, axis=0) for index in range(n_labels)]
+    # Each label's center stays where its whole box fits inside the bounds.
     label_bounds = [
         (
             bounds[0] + half[index, 0],
@@ -169,19 +169,19 @@ def separate_labels(
 def register_layout_labels(
     ax: Any,
     texts: Sequence[Any],
-    centres: np.ndarray,
+    centers: np.ndarray,
 ) -> None:
     """Mark on-data labels to separate once the panel's layout is final.
 
-    ``centres`` lists every drawn cluster's centre in data coordinates, the
-    labelled clusters first in the order of ``texts``.
+    ``centers`` lists every drawn cluster's center in data coordinates, the
+    labeled clusters first in the order of ``texts``.
     """
     setattr(
         ax,
         _LAYOUT_ATTRIBUTE,
         _LabelLayout(
             texts=tuple(texts),
-            centres=np.asarray(centres, dtype=np.float64).reshape(-1, 2),
+            centers=np.asarray(centers, dtype=np.float64).reshape(-1, 2),
         ),
     )
 
@@ -190,7 +190,7 @@ def place_layout_labels(figure: Any) -> None:
     """Separate registered on-data labels in their resolved panels.
 
     The layout is resolved without rendering. Labels restart from their
-    cluster centres, so placing them again after a new layout gives the same
+    cluster centers, so placing them again after a new layout gives the same
     result as placing them once.
     """
     marked = [
@@ -206,18 +206,18 @@ def place_layout_labels(figure: Any) -> None:
     padding = 2.0 * _LABEL_PADDING_POINTS * figure.dpi / 72.0
     for ax, layout in marked:
         n_labels = len(layout.texts)
-        for text, centre in zip(layout.texts, layout.centres, strict=False):
-            text.set_position((float(centre[0]), float(centre[1])))
+        for text, center in zip(layout.texts, layout.centers, strict=False):
+            text.set_position((float(center[0]), float(center[1])))
         extents = [text.get_window_extent() for text in layout.texts]
         sizes = np.asarray(
             [(extent.width + padding, extent.height + padding) for extent in extents]
         )
-        centres = ax.transData.transform(layout.centres)
+        centers = ax.transData.transform(layout.centers)
         box = ax.get_window_extent()
         positions = separate_labels(
-            centres[:n_labels],
+            centers[:n_labels],
             sizes,
-            centres,
+            centers,
             bounds=(box.x0, box.y0, box.x1, box.y1),
         )
         for text, position in zip(

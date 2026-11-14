@@ -31,9 +31,9 @@ class CloneNames:
     def labels(self, ids: Sequence[Any]) -> list[str]:
         """Return the label that the figure draws for each clone of ``ids``.
 
-        A clone is labelled by its ID, and a clonotype by its
+        A clone is labeled by its ID, and a clonotype by its
         representative's junction, with its number where two of ``ids``
-        share one, so the clones of one figure are labelled at once.
+        share one, so the clones of one figure are labeled at once.
 
         Raises:
             TypeError: If the store does not label the clones of figures.

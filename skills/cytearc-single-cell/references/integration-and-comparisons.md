@@ -21,9 +21,9 @@ Identify donors, samples, batches and conditions, correct a technical batch with
   parent's abundance. Excluding contaminants (erythrocytes, platelets) or unresolved cells raises
   every remaining share by `1 / (1 - excluded share)`, a factor that differs between samples.
 - **Harmony corrects coordinates only.** `reduction.harmony` returns a `batch_correction` ref that
-  replaces PCA for ANN, neighbours, graph, UMAP and clustering; counts are untouched. A batch
+  replaces PCA for ANN, neighbors, graph, UMAP and clustering; counts are untouched. A batch
   holding one condition loses that condition's signal; CyteArc ran silently with `condition`.
-- **Metrics are evidence, not a verdict.** `metric_*` take exact neighbour or graph refs and a live
+- **Metrics are evidence, not a verdict.** `metric_*` take exact neighbor or graph refs and a live
   column and return a float. iLISI (mixing) should rise while cLISI and connectivity hold.
 - **What CyteArc tests.** `compare.test` runs donor-level rank tests (a
   `statistical_tests` artifact; several keys share one BH pass). No count GLM (DESeq2, edgeR) or
@@ -265,7 +265,7 @@ transfer_ref = query.mapping.transfer_labels(          # reference column or cel
 )
 transfer = query.mapping.load_label_transfer(transfer_ref)  # reads only the query store
 calls = transfer.evidence.set_axis(pd.Index(transfer.cell_idx, name="query_row"))
-print(calls["abstentionReason"].value_counts(dropna=False))  # None = labelled
+print(calls["abstentionReason"].value_counts(dropna=False))  # None = labeled
 print(calls.loc[~calls["abstained"], "label"].value_counts())
 ```
 
@@ -310,11 +310,11 @@ an inserted copy records abstentions only as missing values and loses their reas
 - Correcting on `donor_id` or `sample_id` with a donor-level condition aligns donors and can absorb
   the condition. Prefer library or batch; otherwise recheck condition-specific clusters.
 - Harmony, WNN and SNN check their memory against `mem_budget` before reading and raise
-  `MemoryError` naming the bytes, cells, dimensions, clusters or neighbours, and the limit. Harmony
+  `MemoryError` naming the bytes, cells, dimensions, clusters or neighbors, and the limit. Harmony
   holds about 1.5 KB per cell at 30 dims and 100 clusters (`n_clusters` defaults to cells / 30, at
   most 100), plus its batch labels (about 60 bytes per cell per column): lower
   `harmony_params={"n_clusters": ...}` or the PCA dims, or raise the budget. WNN holds every assay's
-  neighbours and coordinates, SNN every graph plus a float64 matrix per graph. The estimates are
+  neighbors and coordinates, SNN every graph plus a float64 matrix per graph. The estimates are
   near-exact counts of what each step allocates, not a cap on process memory; leave headroom.
 - `reduction.harmony` and WNN reject coordinates that are normalized values (`pca={"dims": 0}`
   runs); build PCA first, or integrate such graphs with `method="snn"`.

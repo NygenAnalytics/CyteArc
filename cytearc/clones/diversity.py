@@ -114,7 +114,7 @@ class CloneSizes:
         array = np.asarray(sizes, dtype=np.int64).reshape(-1)
         if (array < 0).any():
             raise ValueError("Clone sizes must not be negative")
-        # Sorting and comparing neighbours counts each size, as np.unique
+        # Sorting and comparing neighbors counts each size, as np.unique
         # does, without hashing many distinct sizes.
         ordered = np.sort(array[array > 0])
         starts = np.flatnonzero(np.diff(ordered, prepend=0) != 0)

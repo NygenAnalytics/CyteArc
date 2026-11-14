@@ -266,7 +266,7 @@ Documentation stores rebuilt for the recipes label each saved run by its modalit
 datasets carry `"rna"`; the CITE-seq store adds `"adt"`, `"wnn"` and `"snn"`; the TEA-seq store
 carries `"rna"`, `"atac"`, `"adt"`, `"wnn"` and `"snn"`; the ATAC store only `"atac"`; and the
 full Tabula Sapiens store none. Of the stores saved by earlier releases, the RNA and CITE-seq ones
-carry one run labelled `"docs_default"` with recipe `"basic_rna_analysis"`, which still opens.
+carry one run labeled `"docs_default"` with recipe `"basic_rna_analysis"`, which still opens.
 List the runs before opening one by label.
 
 ## Parameters that matter

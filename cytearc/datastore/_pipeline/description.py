@@ -263,8 +263,8 @@ _DECLARED: Mapping[tuple[str, ...], _Declared] = MappingProxyType(
             "Literal['targets'] | None"
         ),
         ("*", "profiles", "cells"): _Declared(
-            "Literal['knocked_out', 'labelled']",
-            rule="'knocked_out' when mixscape runs, else 'labelled'",
+            "Literal['knocked_out', 'labeled']",
+            rule="'knocked_out' when mixscape runs, else 'labeled'",
             recipe_key=True,
         ),
     }

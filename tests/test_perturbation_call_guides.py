@@ -644,7 +644,7 @@ def test_guide_assay_messages_name_the_remedy_that_works(tmp_path) -> None:
         store.perturbation.call_guides(
             cells, method="fixed", min_umi=10, from_assay="Guides"
         )
-    # A misspelt name is not an assay, whatever its type.
+    # A misspelled name is not an assay, whatever its type.
     with pytest.raises(
         ValueError,
         match="^from_assay 'GUIDES' is not an assay of the store, whose assays are "

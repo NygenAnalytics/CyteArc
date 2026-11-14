@@ -188,16 +188,20 @@ def test_mixscape_classifies_each_split_apart(store, template) -> None:
     assert called.eq("GENE_A KD").to_numpy().tolist() == KNOCKED[:N_A].tolist()
 
 
-def test_cells_outside_the_labels_are_unlabelled(store) -> None:
+def test_cells_outside_the_labels_are_unlabeled(store) -> None:
     # Labels of every cell but the last ten controls.
     keep = np.ones(N_CELLS, dtype=bool)
     keep[-11:-1] = False
-    store.cells.insert("labelled", keep)
-    signature = _signature(store, store.snapshot_cell_selection("labelled"))
+    store.cells.insert("labeled", keep)
+    signature = _signature(store, store.snapshot_cell_selection("labeled"))
     result = store.perturbation.load_mixscape(store.perturbation.mixscape(signature))
     labels = result.cells["mixscape_class"]
-    assert labels.iloc[-11:-1].eq("unlabelled").all()
+    assert labels.iloc[-11:-1].eq("unlabeled").all()
     assert labels.iloc[N_A + N_B + N_C : -11].eq("control").all()
+    # The module names the class in US spelling only.
+    assert mixscape_module.UNLABELED == "unlabeled"
+    assert "UNLABELED" in mixscape_module.__all__
+    assert not hasattr(mixscape_module, "UNLABELLED")
 
 
 def test_mixscape_marks_targets_with_few_knocked_out_cells(store, template) -> None:
@@ -232,7 +236,7 @@ def test_mixscape_marks_targets_with_few_knocked_out_cells(store, template) -> N
                 ValueError,
                 f"perturbation_type '{word}' is the class of other cells",
             )
-            for word in ("NP", "control", "Negative", "Multiple", "unlabelled")
+            for word in ("NP", "control", "Negative", "Multiple", "unlabeled")
         ),
         ({"split_column": ""}, TypeError, "split_column must be a non-empty"),
         ({"split_column": "lane"}, ValueError, "'lane' not found in cell metadata"),
@@ -341,7 +345,7 @@ def test_scaling_follows_seurat() -> None:
     assert scale_like_seurat(values[:1]).tolist() == [[0.0, 0.0, 0.0]]
 
 
-def test_constrained_mixture_maximises_the_likelihood() -> None:
+def test_constrained_mixture_maximizes_the_likelihood() -> None:
     rng = np.random.default_rng(2)
     values = np.r_[rng.normal(0.0, 1.0, 300), rng.normal(4.0, 0.7, 120)]
     fit = constrained_mixture(values, 0.0, 1.0, 3.0, 1.5)

@@ -415,9 +415,9 @@ def test_harmony_reads_masked_batch_labels_as_missing(graph_store) -> None:
         )
     assert not _artifacts(store, "batch_correction")
 
-    store.cells.insert("labelled", ~missing, overwrite=True)
+    store.cells.insert("labeled", ~missing, overwrite=True)
     normalized = store.features.normalize(
-        store.snapshot_cell_selection("labelled"),
+        store.snapshot_cell_selection("labeled"),
         refs["rna_features"],
     )
     corrected = store.reduction.harmony(

@@ -96,7 +96,7 @@ def test_library_size_normalization(bench) -> None:
     from cytearc.assay.normalization import library_size_values
 
     def make(n_cells: int):
-        counts, _labels = inputs.labelled_counts(n_cells)
+        counts, _labels = inputs.labeled_counts(n_cells)
         block = np.ascontiguousarray(counts[:, : inputs.N_HVGS])
         totals = counts.sum(axis=1, dtype=np.float64)
         totals[totals == 0] = 1
@@ -109,7 +109,7 @@ def test_library_size_normalization(bench) -> None:
         )
 
     def check(n_cells: int, values) -> None:
-        counts, _labels = inputs.labelled_counts(n_cells)
+        counts, _labels = inputs.labeled_counts(n_cells)
         totals = counts.sum(axis=1, dtype=np.float64)
         totals[totals == 0] = 1
         expected = np.log1p(
@@ -124,7 +124,7 @@ def test_hvg_gene_major_statistics(bench) -> None:
     from cytearc.assay.rna import _hvg_stats_gene_major
 
     def make(n_cells: int):
-        counts, _labels = inputs.labelled_counts(n_cells)
+        counts, _labels = inputs.labeled_counts(n_cells)
         gene_major = np.ascontiguousarray(counts.T)
         totals = counts.sum(axis=1, dtype=np.float64)
         totals[totals == 0] = 1
@@ -145,7 +145,7 @@ def test_hvg_gene_major_statistics(bench) -> None:
         return call
 
     def check(n_cells: int, outputs) -> None:
-        counts, _labels = inputs.labelled_counts(n_cells)
+        counts, _labels = inputs.labeled_counts(n_cells)
         totals = counts.sum(axis=1, dtype=np.float64)
         totals[totals == 0] = 1
         values = inputs.SIZE_FACTOR * counts / totals[:, None]
@@ -160,7 +160,7 @@ def test_hvg_gene_major_statistics(bench) -> None:
 
 
 def _marker_inputs(n_cells: int):
-    counts, labels = inputs.labelled_counts(n_cells)
+    counts, labels = inputs.labeled_counts(n_cells)
     gene_major = np.ascontiguousarray(counts[:, :200].T)
     totals = counts.sum(axis=1, dtype=np.float64)
     totals[totals == 0] = 1
@@ -220,7 +220,7 @@ def test_connectivity_membership(bench) -> None:
         np.testing.assert_array_equal(edges[:, 0], np.repeat(np.arange(n_cells), 11))
         np.testing.assert_array_equal(edges[:, 1], indices.ravel())
         assert np.all((weights > 0) & (weights <= 1))
-        # With local_connectivity=1 every cell's nearest neighbour has weight 1.
+        # With local_connectivity=1 every cell's nearest neighbor has weight 1.
         np.testing.assert_allclose(weights.reshape(n_cells, -1)[:, 0], 1.0)
 
     bench("graph.connectivity_membership", make, CELLS, check=check)
@@ -256,7 +256,7 @@ def test_umap_layout(bench) -> None:
     def check(n_cells: int, embedding) -> None:
         assert embedding.shape == (n_cells, 2)
         assert np.isfinite(embedding).all()
-        # Neighbours in the graph end up closer than random pairs of cells.
+        # Neighbors in the graph end up closer than random pairs of cells.
         graph = inputs.connectivity_graph(n_cells).tocoo()
         linked = np.linalg.norm(embedding[graph.row] - embedding[graph.col], axis=1)
         rng = np.random.default_rng(0)
@@ -279,7 +279,7 @@ def test_leiden_partition(bench) -> None:
         return lambda: leiden_membership(graph, 1.0, 4444)
 
     def check(n_cells: int, labels) -> None:
-        _coordinates, truth = inputs.labelled_coordinates(n_cells)
+        _coordinates, truth = inputs.labeled_coordinates(n_cells)
         assert labels.shape == (n_cells,)
         assert labels.min() == 1
         # Clusters may split a drawn group but must not mix two of them.
@@ -297,7 +297,7 @@ def test_paris_hierarchy(bench) -> None:
         return lambda: fit_paris_hierarchy(graph, nthreads=1)
 
     def check(n_cells: int, hierarchy) -> None:
-        _coordinates, truth = inputs.labelled_coordinates(n_cells)
+        _coordinates, truth = inputs.labeled_coordinates(n_cells)
         labels = fixed_cut(hierarchy, inputs.N_GROUPS)
         # Cutting at the drawn group count recovers the drawn groups.
         assert len(np.unique(labels)) == inputs.N_GROUPS
@@ -393,7 +393,7 @@ def test_gram_pca(bench) -> None:
     from cytearc.matrix.chunked import ChunkedArray
 
     def normalized(n_cells: int) -> np.ndarray:
-        counts, _labels = inputs.labelled_counts(n_cells)
+        counts, _labels = inputs.labeled_counts(n_cells)
         totals = counts.sum(axis=1, dtype=np.float64)
         totals[totals == 0] = 1
         return np.log1p(
@@ -437,7 +437,7 @@ def test_kmeans_initialization(bench) -> None:
     )
 
     def make(n_cells: int):
-        coordinates, _labels = inputs.labelled_coordinates(n_cells)
+        coordinates, _labels = inputs.labeled_coordinates(n_cells)
         stream = ChunkedCoordinateStream(
             ChunkedArray.from_numpy(coordinates, block_size=2_000), nthreads=1
         )
@@ -451,7 +451,7 @@ def test_kmeans_initialization(bench) -> None:
         )
 
     def check(n_cells: int, fitted) -> None:
-        coordinates, _labels = inputs.labelled_coordinates(n_cells)
+        coordinates, _labels = inputs.labeled_coordinates(n_cells)
         points = coordinates.astype(np.float64)
         centers = np.asarray(fitted.model.cluster_centers_, dtype=np.float64)
         assert centers.shape == (1_000, inputs.N_DIMS)
@@ -460,14 +460,12 @@ def test_kmeans_initialization(bench) -> None:
             - 2 * points @ centers.T
             + (centers**2).sum(axis=1)[None, :]
         )
-        labelled = distances[np.arange(n_cells), fitted.labels.astype(np.intp)]
-        # Every cell is labelled with its nearest centroid, up to the float32
+        labeled = distances[np.arange(n_cells), fitted.labels.astype(np.intp)]
+        # Every cell is labeled with its nearest centroid, up to the float32
         # rounding that separates near-ties among 1,000 dense centroids. The
         # absolute term covers cells that are themselves a centroid, against
         # squared distances in the hundreds between drawn clusters.
-        np.testing.assert_allclose(
-            labelled, distances.min(axis=1), rtol=1e-4, atol=1e-6
-        )
+        np.testing.assert_allclose(labeled, distances.min(axis=1), rtol=1e-4, atol=1e-6)
 
     # The production funnel fits 1,000 centroids, so the smoke size holds more.
     ladder = Ladder(sizes=CELLS.sizes, smoke=2_000)

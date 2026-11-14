@@ -5,7 +5,7 @@ mgatk's ``<name>.A.txt.gz`` or cellsnp-lite's ``cellSNP.tag.AD.mtx``, often
 renamed with a prefix or gzip-compressed when deposited. These helpers find a
 folder's files by suffix, read VCF records and barcode lists, and identify a
 folder by the digests of the files it holds. ``folder_format`` and
-``hdf5_format`` recognise the format of a folder or an HDF5 file. Files open
+``hdf5_format`` recognize the format of a folder or an HDF5 file. Files open
 through :mod:`cytearc.utils.files`, and Matrix Market entries are read by
 :mod:`cytearc.readers._matrix_market`.
 """
@@ -225,7 +225,7 @@ _GIFT_READS = r"(.*_)?probe_reads\.tsv(\.gz)?"
 
 
 def folder_format(folder: str) -> str:
-    """Recognise the format of a folder by the names of its files.
+    """Recognize the format of a folder by the names of its files.
 
     Raises:
         ValueError: If the folder holds no known files.
@@ -254,7 +254,7 @@ _DAB_SEQ_ARRAYS = ("AD", "RD", "DP", "GT", "VARIANTS", "CELL_BARCODES")
 
 
 def hdf5_format(path: str) -> str:
-    """Recognise giftwrap's counts, MiTo's allele frequency matrix, Tapestri's
+    """Recognize giftwrap's counts, MiTo's allele frequency matrix, Tapestri's
     DNA variants or DAb-seq's genotypes.
 
     Raises:

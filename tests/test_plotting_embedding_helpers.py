@@ -557,7 +557,7 @@ def _screen_labels(store, selection):
 
 
 def _palette(store, layout, labels):
-    """The colour of each label drawn on ``layout``."""
+    """The color of each label drawn on ``layout``."""
     result = splt_embedding(store, layout=layout, color_by=labels, show=False)
     try:
         (scale,) = [found for found in result.scales if hasattr(found, "palette")]
@@ -569,7 +569,7 @@ def _palette(store, layout, labels):
 @pytest.mark.parametrize(
     "source", ["every cell", "the layout's cells, selected again", "the layout's"]
 )
-def test_labels_of_cells_that_hold_the_layouts_colour_each_cell(screen, source):
+def test_labels_of_cells_that_hold_the_layouts_color_each_cell(screen, source):
     from matplotlib.colors import to_rgba
 
     from cytearc.plotting._data import _artifact_cell_selection
@@ -597,7 +597,7 @@ def test_labels_of_cells_that_hold_the_layouts_colour_each_cell(screen, source):
         offsets = np.asarray(points.get_offsets())
         drawn = np.rint(offsets[:, 0]).astype(np.int64)
         # Each cell of the layout is drawn once, at its own place, in the
-        # colour of its own label.
+        # color of its own label.
         np.testing.assert_array_equal(np.sort(drawn), LAYOUT_CELLS)
         np.testing.assert_array_equal(offsets[:, 1], drawn % 7)
         colors = [to_rgba(scale.palette[label_of[ids[cell]]]) for cell in drawn]
@@ -606,7 +606,7 @@ def test_labels_of_cells_that_hold_the_layouts_colour_each_cell(screen, source):
         result.close()
 
 
-def test_labels_of_more_cells_keep_their_colours_on_a_layout_of_fewer(screen):
+def test_labels_of_more_cells_keep_their_colors_on_a_layout_of_fewer(screen):
     store, layouts = screen
     labels = _screen_labels(store, store.select_measured_cells("CRISPR"))
 
@@ -614,7 +614,7 @@ def test_labels_of_more_cells_keep_their_colours_on_a_layout_of_fewer(screen):
     kept = _palette(store, layouts["kept"], labels)
 
     # A1, which only the cells left out of "kept" carry, sorts between A and
-    # B, and still takes its place among the default colours.
+    # B, and still takes its place among the default colors.
     assert list(every) == ["A", "A1", "B", "control"]
     assert kept == {label: every[label] for label in ("A", "B", "control")}
 

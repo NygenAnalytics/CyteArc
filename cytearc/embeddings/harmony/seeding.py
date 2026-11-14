@@ -1,10 +1,10 @@
-"""k-means++ seeding of the Harmony2 clusters on unit-normalised cells.
+"""k-means++ seeding of the Harmony2 clusters on unit-normalized cells.
 
-Harmony2 replaces the k-means initialisation of the 2019 method with k-means++
+Harmony2 replaces the k-means initialization of the 2019 method with k-means++
 seeding (Arthur and Vassilvitskii, 2007): the first seed is a uniformly random
 cell, and every further seed is a cell drawn with probability proportional to its
 squared distance from the nearest seed chosen so far. The clustering compares
-unit vectors, so the distances are those between unit-normalised cells, for which
+unit vectors, so the distances are those between unit-normalized cells, for which
 ``||a - b||^2 = 2 (1 - a.b)`` is the clustering's own distance term.
 
 The draw is an exponential race: with ``e_j ~ Exp(1)``, the smallest
@@ -80,7 +80,7 @@ def kmeans_plus_plus_seeds(
     n_clusters: int,
     rng: np.random.Generator,
 ) -> np.ndarray:
-    """Return (dims, n_clusters) unit centroids seeded by k-means++ on unit-normalised cells.
+    """Return (dims, n_clusters) unit centroids seeded by k-means++ on unit-normalized cells.
 
     Args:
         cells: ``(cells, dims)`` cell-major coordinates.
@@ -94,7 +94,7 @@ def kmeans_plus_plus_seeds(
         the origin gives a zero column.
     """
     n_cells = cells.shape[0]
-    # Squared norm of each unit-normalised cell: 1, or 0 at the origin.
+    # Squared norm of each unit-normalized cell: 1, or 0 at the origin.
     unit_squares = np.sign(inverse_norms)
     nearest = np.empty(n_cells, dtype=np.float64)
     distances = np.empty(n_cells, dtype=np.float64)

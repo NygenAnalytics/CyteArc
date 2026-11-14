@@ -9,14 +9,14 @@ set the threshold from the fitted parameters:
 - ``poisson_gaussian`` follows Replogle et al. 2022 as crispat and pertpy fit
   it. It models x = log2(count) of the cells with at least one UMI of the guide
   as a Poisson background, extended to non-integer x through the Gamma
-  function and left unnormalised, plus a Gaussian. The parameters are maximum
+  function and left unnormalized, plus a Gaussian. The parameters are maximum
   a posteriori estimates under crispat's priors, found by expectation
-  maximisation from 15 starting points as pertpy does, and the admissible start
+  maximization from 15 starting points as pertpy does, and the admissible start
   with the lowest loss wins. The threshold is the smallest count, from 1 to the
   guide's largest, whose Gaussian posterior exceeds one half.
 - ``gaussian`` follows Cell Ranger's documentation. It fits two Gaussians with
   one shared variance to x = log10(count + 1) of every cell, including cells
-  with no UMI of the guide, by expectation maximisation from several splits of
+  with no UMI of the guide, by expectation maximization from several splits of
   the values into two groups, and the fit with the highest likelihood wins.
   The threshold is the smallest count whose higher-mean component has a
   posterior above one half.
@@ -84,7 +84,7 @@ _NEWTON_STEPS = 12
 # Gaussian above.
 _SPLIT_QUANTILES = np.array([0.5, 0.75, 0.9, 0.97, 0.99])
 # Each prior start holds the medians of 15 draws from each prior, as crispat
-# starts Pyro's optimiser with init_to_median, as (Poisson rate, Gaussian mean,
+# starts Pyro's optimizer with init_to_median, as (Poisson rate, Gaussian mean,
 # Gaussian standard deviation) with Gaussian weight 0.5. They were drawn once
 # with numpy.random.default_rng(2024) and are fixed, so every guide starts from
 # the same points and its fit depends on its own counts only.
@@ -582,7 +582,7 @@ def _gaussian_splits(
     Split ``k`` starts the lower component on ``values[: k + 1]`` and the higher
     on the rest. The starts are the split with the smallest within-group sum of
     squares, which solves two-means exactly, the split at the widest gap
-    between neighbouring values, and the splits that give the higher component
+    between neighboring values, and the splits that give the higher component
     the top ``tails`` share of the cells.
     """
     size = values.shape[0]

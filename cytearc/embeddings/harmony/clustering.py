@@ -1,6 +1,6 @@
 """Maximum-diversity soft clustering of Harmony2.
 
-The clustering compares unit-normalised cells with unit centroids and minimises
+The clustering compares unit-normalized cells with unit centroids and minimizes
 
     J(R, Y) = sum_i sum_k R_ik [2 (1 - y_k . ztilde_i) / sigma_k + log R_ik]
             + sum_k sum_g theta_g O_kg log((O_kg + E_kg + 1) / (E_kg + 1))
@@ -8,14 +8,14 @@ The clustering compares unit-normalised cells with unit centroids and minimises
 over soft assignments ``R`` (rows on the simplex) and centroids ``Y``, where
 ``O_kg`` is the assignment mass of level ``g`` in cluster ``k`` and
 ``E_kg = Pr_g n_k`` the mass expected if batch and cluster were independent.
-This is the stabilised objective of Harmony2 divided by ``sigma_k`` per cluster,
+This is the stabilized objective of Harmony2 divided by ``sigma_k`` per cluster,
 which makes a per-cluster ``sigma`` exact. The penalties of several batch columns
 add. With ``O`` and ``E`` held fixed, the assignment of one cell is the softmax of
 ``(y_k . ztilde_i - 1) 2 / sigma_k - sum_c theta log1p(O / (E + 1))``, the
-exact minimiser of the cell's part of ``J``.
+exact minimizer of the cell's part of ``J``.
 
 As in the 2019 method, cells are updated in blocks, with ``O`` and ``E`` computed
-on the cells outside the block, and the centroids are the normalised
+on the cells outside the block, and the centroids are the normalized
 assignment-weighted sums of the unit cells (spherical k-means). The paper leaves
 the order of the cells open. Here the blocks follow one random order, drawn once
 per fit, because the input order could put a whole batch in one block, where its
@@ -144,7 +144,7 @@ def cosine_centroids(
     assignments: np.ndarray,
     workspace: ClusteringWorkspace,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Return the unit centroids ``Y`` and the norms of the weighted sums they normalise.
+    """Return the unit centroids ``Y`` and the norms of the weighted sums they normalize.
 
     ``S_k = sum_i R_ik ztilde_i`` and ``y_k = S_k / ||S_k||``. A cluster whose cells
     cancel keeps a zero centroid and a zero norm. Cancellation is judged against

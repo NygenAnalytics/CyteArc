@@ -57,32 +57,32 @@ def _offsets(result, key):
 # On-data labels
 
 
-def _clustered_store(centres, n_per, *, spread=1.0, seed=0):
+def _clustered_store(centers, n_per, *, spread=1.0, seed=0):
     rng = np.random.default_rng(seed)
-    x = np.concatenate([rng.normal(cx, spread, n_per) for cx, _ in centres])
-    y = np.concatenate([rng.normal(cy, spread, n_per) for _, cy in centres])
+    x = np.concatenate([rng.normal(cx, spread, n_per) for cx, _ in centers])
+    y = np.concatenate([rng.normal(cy, spread, n_per) for _, cy in centers])
     labels = np.repeat(
-        np.asarray([f"c{index:02d}" for index in range(len(centres))], dtype=object),
+        np.asarray([f"c{index:02d}" for index in range(len(centers))], dtype=object),
         n_per,
     )
     return _store({"U1": x, "U2": y, "cl": labels}), x, y, labels
 
 
 def _label_geometry(result, x, y, labels):
-    """Each label's text, display position, own-centre offset, and height."""
+    """Each label's text, display position, own-center offset, and height."""
     figure = result.figure
     ax = next(iter(result.axes.values()))
     renderer = figure.canvas.get_renderer()
     names = sorted(set(labels))
-    centres = np.asarray(
+    centers = np.asarray(
         [(np.median(x[labels == name]), np.median(y[labels == name])) for name in names]
     )
-    centre_pixels = ax.transData.transform(centres)
+    center_pixels = ax.transData.transform(centers)
     rows = []
     for text in ax.texts:
         position = ax.transData.transform(text.get_position())
         own = names.index(text.get_text())
-        distances = np.hypot(*(centre_pixels - position).T)
+        distances = np.hypot(*(center_pixels - position).T)
         rows.append(
             (
                 text.get_text(),
@@ -97,8 +97,8 @@ def _label_geometry(result, x, y, labels):
 def test_on_data_labels_stay_on_their_clusters_in_a_grid():
     # 30 clusters on a 6 x 5 grid, where labels sorted by height used to
     # climb onto the clusters above them.
-    centres = [(cx * 10.0, cy * 10.0) for cy in range(5) for cx in range(6)]
-    store, x, y, labels = _clustered_store(centres, 200)
+    centers = [(cx * 10.0, cy * 10.0) for cy in range(5) for cx in range(6)]
+    store, x, y, labels = _clustered_store(centers, 200)
     result = splt.embedding(
         store, layout_key="U", color_by="cl", legend_loc="on_data", show=False
     )
@@ -156,7 +156,7 @@ def test_separate_labels_moves_overlaps_apart_within_limits():
     bounds = (0.0, 0.0, 100.0, 100.0)
     sizes = np.full((2, 2), 10.0)
     # Two labels side by side overlap by 6 in x and 10 in y: each moves 3 in
-    # x, away from the other's centre.
+    # x, away from the other's center.
     moved = separate_labels(
         np.array([[50.0, 50.0], [54.0, 50.0]]),
         sizes,
@@ -166,9 +166,9 @@ def test_separate_labels_moves_overlaps_apart_within_limits():
     )
     np.testing.assert_allclose(moved, [[47.0, 50.0], [57.0, 50.0]])
 
-    # A third cluster centred 6 below the lower label stops it 0.9 of the way
+    # A third cluster centered 6 below the lower label stops it 0.9 of the way
     # to the halfway point, 2.7 below its anchor, so it stays nearer its own
-    # centre; the upper label then moves the rest of the way alone.
+    # center; the upper label then moves the rest of the way alone.
     held = separate_labels(
         np.array([[50.0, 50.0], [50.0, 52.0]]),
         sizes,
@@ -231,8 +231,8 @@ def test_on_data_labels_separate_on_a_vector_canvas():
 
     # Two clusters whose medians nearly coincide, on a figure that only an
     # SVG canvas can draw.
-    centres = [(0.0, 0.0), (0.05, 0.0), (8.0, 8.0)]
-    store, _, _, _ = _clustered_store(centres, 40, spread=0.05)
+    centers = [(0.0, 0.0), (0.05, 0.0), (8.0, 8.0)]
+    store, _, _, _ = _clustered_store(centers, 40, spread=0.05)
     figure = Figure(figsize=(3.0, 3.0), layout="constrained")
     FigureCanvasSVG(figure)
     axis = figure.add_subplot()
@@ -255,8 +255,8 @@ def test_on_data_labels_separate_on_a_vector_canvas():
 def test_placing_labels_again_gives_the_same_positions():
     from cytearc.plotting._labels import place_layout_labels
 
-    centres = [(0.0, 0.0), (1.0, 0.2), (0.4, 0.5), (8.0, 8.0)]
-    store, _, _, _ = _clustered_store(centres, 50, spread=0.2)
+    centers = [(0.0, 0.0), (1.0, 0.2), (0.4, 0.5), (8.0, 8.0)]
+    store, _, _, _ = _clustered_store(centers, 50, spread=0.2)
     result = splt.embedding(
         store, layout_key="U", color_by="cl", legend_loc="on_data", show=False
     )
@@ -446,7 +446,7 @@ def test_gene_colors_draw_high_values_on_top_by_default():
 # Facets
 
 
-def test_cells_without_a_facet_value_get_a_labelled_panel():
+def test_cells_without_a_facet_value_get_a_labeled_panel():
     n = 9
     facet = np.asarray(["x", "y", None] * 3, dtype=object)
     store = _store(
@@ -484,7 +484,7 @@ def test_cells_without_a_facet_value_get_a_labelled_panel():
         "missing_label": "unassigned",
         "missing_color": "#cccccc",
     }
-    labelled = _store(
+    labeled = _store(
         {
             "U1": np.arange(n, dtype=float),
             "U2": np.zeros(n),
@@ -495,7 +495,7 @@ def test_cells_without_a_facet_value_get_a_labelled_panel():
         displays={"facet": display},
     )
     layouts = splt.embedding(
-        labelled, layout_key=["U", "other"], facet_by="facet", show=False
+        labeled, layout_key=["U", "other"], facet_by="facet", show=False
     )
     try:
         assert ("U", "cells", None) in layouts.axes
@@ -716,7 +716,7 @@ def test_a_composed_embedding_lists_its_cells_without_a_group(legend_loc):
         )
         assert child.legends[0].extras["missing"] is True
         splt.compose_results(figure, [child], panel_labels=False)
-        # The cells drawn in the missing colour keep their entry, last.
+        # The cells drawn in the missing color keep their entry, last.
         assert _composed_legends(figure) == [("group", ["a", "b", "NA"])]
         handles = figure.legends[0].legend_handles
         assert to_hex(handles[-1].get_markerfacecolor()) == "#123456"
@@ -785,7 +785,7 @@ def test_two_composed_embeddings_share_one_legend_with_the_missing_entry(
             key == "I" for key in keys
         ]
         splt.compose_results(figure, children, panel_labels=False)
-        # One legend for the colours they share, with the entry one needs.
+        # One legend for the colors they share, with the entry one needs.
         assert _composed_legends(figure) == [("group", ["a", "b", "NA"])]
     finally:
         plt.close(figure)

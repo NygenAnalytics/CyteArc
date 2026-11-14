@@ -128,7 +128,7 @@ def test_make_bulk_respects_explicit_subset_selection(leiden_clustering, datasto
         feature_label="index",
     ).profiles
 
-    # Columns are labelled by the clusters' integer labels.
+    # Columns are labeled by the clusters' integer labels.
     groups = np.unique(labels).tolist()
     assert list(full.columns) == list(sub.columns) == groups
     # Group totals over every feature equal the per-cell totals recorded at

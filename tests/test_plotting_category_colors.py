@@ -71,7 +71,7 @@ STORED_COLORS = {
 
 
 def _stored_display(**missing):
-    """The stored display: each category labelled in capitals."""
+    """The stored display: each category labeled in capitals."""
     return {
         "kind": "categorical",
         "categories": [
@@ -348,7 +348,7 @@ def test_composition_keeps_category_colors_for_a_cell_key_subset():
         subset.close()
 
 
-def test_label_artifact_colors_range_over_all_labelled_cells(tmp_path):
+def test_label_artifact_colors_range_over_all_labeled_cells(tmp_path):
     from matplotlib.colors import to_hex as hex_color
 
     x = np.arange(12, dtype=np.float64)
@@ -478,7 +478,7 @@ def test_category_scale_assigns_colors_over_the_universe_and_orders_requests():
     assert pairs.order == (("a", 1), ("b", 2))
 
 
-def _labelled_scale(values):
+def _labeled_scale(values):
     return splt.CategoricalScale(labels={value: f"<{value}>" for value in values})
 
 
@@ -486,7 +486,7 @@ def test_distribution_ticks_and_legends_show_category_labels():
     store = _store()
     grouping = splt.CellField("cluster")
     groups = ["Beta", "Alpha"]
-    scale = _labelled_scale(CATEGORIES)
+    scale = _labeled_scale(CATEGORIES)
     expected = ["<Beta>", "<Alpha>"]
     try:
         for kind in ("violin", "box", "stacked_violin"):
@@ -532,7 +532,7 @@ def test_distribution_ticks_and_legends_show_category_labels():
             "metric",
             grouping=grouping,
             split_by="batch",
-            split_scale=_labelled_scale(["b1", "b2"]),
+            split_scale=_labeled_scale(["b1", "b2"]),
             max_points=0,
             show=False,
         )
@@ -550,7 +550,7 @@ def test_summary_plot_ticks_show_category_labels():
                 store,
                 features=["GeneA"],
                 group_by="cluster",
-                categorical_scale=_labelled_scale(CATEGORIES),
+                categorical_scale=_labeled_scale(CATEGORIES),
                 swap_axes=swap_axes,
                 show=False,
             )

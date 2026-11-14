@@ -4,8 +4,8 @@ The model is SCClone's mixture of clone genotypes with a dropout and an error
 rate per site (:mod:`cytearc.variants.genotype_mixture`). The number of clones
 is chosen by Schwarz's criterion ("Estimating the Dimension of a Model",
 Annals of Statistics 6:461-464, 1978, doi:10.1214/aos/1176344136) as a score
-to maximise, ``loglik - log(cells) / 2 * (clones + edits)``, where the edits
-are the sites that each genotype differs from its neighbour on a minimum
+to maximize, ``loglik - log(cells) / 2 * (clones + edits)``, where the edits
+are the sites that each genotype differs from its neighbor on a minimum
 spanning tree rooted at the wild type, so a subclone costs the mutations it
 adds rather than every site. SCClone chooses the number of clones by an
 inter-cluster score over every pair of cells, which does not scale to
@@ -297,7 +297,7 @@ def tree_length(genotypes: np.ndarray) -> int:
 
 
 def schwarz_score(loglik: float, genotypes: np.ndarray, n_cells: int) -> float:
-    """Schwarz's criterion as a score to maximise: each clone costs its weight and its tree edits."""
+    """Schwarz's criterion as a score to maximize: each clone costs its weight and its tree edits."""
     n_params = len(genotypes) + tree_length(genotypes)
     return loglik - 0.5 * math.log(max(n_cells, 2)) * n_params
 
@@ -1194,13 +1194,13 @@ def _removal_deltas(fit: MixtureFit, n_cells: int) -> np.ndarray:
     lost = removal_logliks(arrays.relative, log_weights, arrays.posteriors, N_CHUNKS)
     # The weight that the rest keep, the log of the sum of their weights,
     # which stays exact where one component holds nearly all the weight.
-    renormalised = np.array(
+    renormalized = np.array(
         [
             np.logaddexp.reduce(np.delete(log_weights, component))
             for component in range(len(log_weights))
         ]
     )
-    deltas: np.ndarray = lost - n_cells * renormalised
+    deltas: np.ndarray = lost - n_cells * renormalized
     return deltas
 
 

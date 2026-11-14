@@ -166,7 +166,7 @@ GUIDE_FIELDS = ["guide_call", "perturbation_label", "is_control"]
 def _designed_calls() -> pd.DataFrame:
     """Return the guide call, label and control flag that each cell's guides give.
 
-    A cell with one guide is called by the guide's ID and labelled by its
+    A cell with one guide is called by the guide's ID and labeled by its
     target, or ``"control"`` for a non-targeting guide; a cell without a guide
     is ``"Negative"``, and a cell with guides of two genes ``"Multiple"``.
     """
@@ -581,7 +581,7 @@ def test_the_run_cells_hold_each_cells_guide_call_and_label(runs) -> None:
         assert view["is_control"].tolist() == labels["is_control"].tolist()
         # And as each cell's guides give them: a cell without a guide is
         # "Negative", one with guides of two genes "Multiple", and one with a
-        # non-targeting guide is called by the guide and labelled "control".
+        # non-targeting guide is called by the guide and labeled "control".
         for key in GUIDE_FIELDS:
             assert view[key].tolist() == designed.loc[view.index, key].tolist()
         # The record keeps its keys, and each field is an ordinary descriptor
@@ -639,7 +639,7 @@ def test_a_run_export_writes_the_guide_fields_as_categories(runs) -> None:
     for key, values in expected.items():
         assert isinstance(obs[key].dtype, pd.CategoricalDtype)
         assert obs[key].astype(str).tolist() == values.tolist()
-        # Text categories in natural order, each with the run's colour.
+        # Text categories in natural order, each with the run's color.
         categories = obs[key].cat.categories.tolist()
         assert categories == sorted(set(values))
         assert len(exported.uns[f"{key}_colors"]) == len(categories)
@@ -749,10 +749,10 @@ def test_each_stage_summary_equals_its_loader(runs) -> None:
             "multiple": int((n_guides > 1).sum()),
             "calledGuides": calls.calls["guide"].nunique(),
         }
-    labelled = store.perturbation.load_labels(runs.full["perturbation_labels"])
-    cells = labelled.cells
+    labeled = store.perturbation.load_labels(runs.full["perturbation_labels"])
+    cells = labeled.cells
     targets = sorted(
-        labelled.guides.loc[~labelled.guides["is_control"], "target"].unique()
+        labeled.guides.loc[~labeled.guides["is_control"], "target"].unique()
     )
     single = cells.loc[cells["n_targets"] == 1, "label"].value_counts()
     per_target = single.reindex(targets, fill_value=0)
@@ -1024,13 +1024,13 @@ def test_the_recipe_reuses_the_artifacts_of_standalone_calls(screen, tmp_path) -
     assert run.report()["run"]["config"]["profileLabels"] == "perturbation_labels"
 
 
-def test_a_run_with_mixscape_can_profile_every_labelled_cell(runs, tmp_path) -> None:
+def test_a_run_with_mixscape_can_profile_every_labeled_cell(runs, tmp_path) -> None:
     store = _copy(runs.location, tmp_path)
     full = runs.full
     labels, hvgs = full["perturbation_labels"], full["highly_variable_features"]
     # A call with the labels profiles every cell of each target.
     standalone = store.perturbation.profiles(labels, hvgs, sample_column="lane")
-    settings = {"sample_column": "lane", "cells": "labelled"}
+    settings = {"sample_column": "lane", "cells": "labeled"}
 
     run = store.pipeline.perturbation(labels=LABELS, **{**FULL, "profiles": settings})
 
@@ -1308,8 +1308,8 @@ def test_an_import_after_qc_filtering_warns_only_about_unknown_barcodes(
     )
 
     selection = store.artifacts.load(run["analysis_cell_selection"])
-    analysed = np.asarray(selection["values"][:], dtype=bool)
-    removed = int(np.count_nonzero((GUIDE_COUNTS > 10).any(axis=1) & ~analysed))
+    analyzed = np.asarray(selection["values"][:], dtype=bool)
+    removed = int(np.count_nonzero((GUIDE_COUNTS > 10).any(axis=1) & ~analyzed))
     assert removed
     summary = _stages(run)["guide_calling"]["summary"]
     assert (summary["unmatchedBarcodes"], summary["unselectedBarcodes"]) == (0, removed)
@@ -1407,9 +1407,9 @@ def test_one_call_file_reaches_the_cells_of_one_sample(screen, tmp_path) -> None
         **HEAD,
     )
     selection = store.artifacts.load(run["analysis_cell_selection"])
-    analysed = np.asarray(selection["values"][:], dtype=bool)
+    analyzed = np.asarray(selection["values"][:], dtype=bool)
     called = (GUIDE_COUNTS > 10).any(axis=1)
-    removed = int(np.count_nonzero(called & (LANES == "L1") & ~analysed))
+    removed = int(np.count_nonzero(called & (LANES == "L1") & ~analyzed))
     assert removed
     summary = _stages(run)["guide_calling"]["summary"]
     assert (
@@ -1421,11 +1421,11 @@ def test_one_call_file_reaches_the_cells_of_one_sample(screen, tmp_path) -> None
         1 + int(np.count_nonzero(called & (LANES == "L2"))),
         removed,
     )
-    # Every analysed cell that the file calls has its calls.
+    # Every analyzed cell that the file calls has its calls.
     cells = store.perturbation.load_guide_calls(run["guide_calls"]).cells
     assert cells.index.str.startswith("L1__").all()
     assert int((cells["n_guides"] > 0).sum()) == int(
-        np.count_nonzero(called & analysed)
+        np.count_nonzero(called & analyzed)
     )
 
 
@@ -1758,7 +1758,7 @@ def test_a_called_guide_without_a_target_fails_the_labels_stage(
     screen, tmp_path
 ) -> None:
     store = _copy(screen, tmp_path)
-    # Guide 5 loses its target; cells call it, which only labelling finds.
+    # Guide 5 loses its target; cells call it, which only labeling finds.
     targets = np.asarray([target for target, _ in GUIDES], dtype=object)
     targets[5] = ""
     store._get_assay("CRISPR").feats.insert("target_gene_name", targets, overwrite=True)
@@ -1829,15 +1829,15 @@ def test_a_resolved_call_runs_its_stages_in_order(readonly) -> None:
     plan = _resolve(readonly, clusters=True, profiles={"min_cells": 10}, **HEAD)
     assert plan.config["profileLabels"] == "perturbation_labels"
     assert plan.config["stages"]["profiles"] == {"min_cells": 10}
-    plan = _resolve(readonly, clusters=True, profiles={"cells": "labelled"}, **HEAD)
+    plan = _resolve(readonly, clusters=True, profiles={"cells": "labeled"}, **HEAD)
     assert plan.config["profileLabels"] == "perturbation_labels"
     # With Mixscape they average the knocked-out cells, unless they take every
-    # labelled cell.
+    # labeled cell.
     with_mixscape = {"mixscape": True, "signature": {"dims": 5}, "clusters": True}
     for profiles, labels in (
         (None, "mixscape"),
         ({"cells": "knocked_out"}, "mixscape"),
-        ({"cells": "labelled", "min_cells": 10}, "perturbation_labels"),
+        ({"cells": "labeled", "min_cells": 10}, "perturbation_labels"),
     ):
         plan = _resolve(readonly, profiles=profiles, **with_mixscape, **HEAD)
         assert plan.config["profileLabels"] == labels
@@ -2259,17 +2259,23 @@ def test_the_guide_assay_is_the_only_crispr_assay_or_the_named_one(
         (
             {"clusters": True, "profiles": {"cells": "every"}},
             ValueError,
-            r"profiles\['cells'\] must be 'knocked_out' or 'labelled', not 'every'",
+            r"profiles\['cells'\] must be 'knocked_out' or 'labeled', not 'every'",
+        ),
+        # The setting takes the US spelling only.
+        (
+            {"clusters": True, "profiles": {"cells": "labelled"}},
+            ValueError,
+            r"profiles\['cells'\] must be 'knocked_out' or 'labeled', not 'labelled'",
         ),
         (
             {
                 "mixscape": True,
                 "signature": {"dims": 5},
                 "clusters": True,
-                "profiles": {"cells": ["labelled"]},
+                "profiles": {"cells": ["labeled"]},
             },
             ValueError,
-            r"must be 'knocked_out' or 'labelled', not \['labelled'\]",
+            r"must be 'knocked_out' or 'labeled', not \['labeled'\]",
         ),
         # The run's assays, cells and fields.
         ({"assay": "CRISPR"}, TypeError, "The perturbation recipe analyzes RNA"),

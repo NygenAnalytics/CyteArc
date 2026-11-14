@@ -250,7 +250,7 @@ def test_raw_source_sink_scoring_owns_the_vector_before_validation_and_snapshot(
     np.testing.assert_array_equal(source_sink, -expected)
 
 
-def test_source_sink_vector_rejects_fully_labelled_cells():
+def test_source_sink_vector_rejects_fully_labeled_cells():
     labels = pd.Series(["source", "sink"])
     with pytest.raises(ValueError, match="All selected cells"):
         _make_source_sink_vector(labels, ["source"], ["sink"])
@@ -591,7 +591,7 @@ def test_aggregation_logs_the_configured_normalizer(
     arguments = {
         "features": few_features,
         "n_clusters": 3,
-        "n_neighbours": 5,
+        "n_neighbors": 5,
         "window_size": 50,
         "chunk_size": 10,
     }
@@ -802,6 +802,37 @@ def test_aggregation_provenance_records_resolved_ann_defaults(
         datastore.trajectory.aggregation(**arguments, ann_params={"random_seed": 445})
         == overridden
     )
+
+
+def test_aggregation_takes_n_neighbors_and_saves_it_under_the_released_key(
+    datastore,
+    pseudotime_aggregation,
+    few_features,
+):
+    result = datastore.trajectory.load_aggregation(pseudotime_aggregation)
+    arguments = {
+        "pseudotime": result.pseudotime,
+        "features": few_features,
+        "n_clusters": 3,
+        "window_size": 50,
+        "chunk_size": 10,
+    }
+    four = datastore.trajectory.aggregation(**arguments, n_neighbors=4)
+
+    # 1.3.0 saved the argument as n_neighbours, and the record keeps that key
+    # so that the results it computed are still reused.
+    parameters = datastore.artifacts.inspect(four).parameters or {}
+    assert parameters["n_neighbours"] == 4
+    assert "n_neighbors" not in parameters
+    assert datastore.trajectory.aggregation(**arguments, n_neighbors=4) == four
+    assert datastore.trajectory.aggregation(**arguments, n_neighbors=3) != four
+
+    with pytest.raises(TypeError, match="unexpected keyword argument 'n_neighbours'"):
+        datastore.trajectory.aggregation(**arguments, n_neighbours=4)
+    with pytest.raises(ValueError, match="^n_neighbors must be at least 1$"):
+        datastore.trajectory.aggregation(**arguments, n_neighbors=0)
+    with pytest.raises(TypeError, match="^n_neighbors must be an integer$"):
+        datastore.trajectory.aggregation(**arguments, n_neighbors=4.0)
 
 
 @pytest.mark.parametrize(
@@ -1087,7 +1118,7 @@ def test_aggregation_normalization_change_discards_the_artifact(
                 features=few_features,
                 window_size=10,
                 chunk_size=5,
-                n_neighbours=11,
+                n_neighbors=11,
                 n_clusters=3,
                 invalidate_cache=True,
             )
@@ -1196,9 +1227,9 @@ def test_knn_clustering_rejects_infeasible_parameters():
         knn_clustering(_ShapeOnlyArray((3,)), 1, 1, 1)
     with pytest.raises(ValueError, match="At least two"):
         knn_clustering(_ShapeOnlyArray((1, 3)), 1, 1, 1)
-    with pytest.raises(TypeError, match="n_neighbours"):
+    with pytest.raises(TypeError, match="n_neighbors"):
         knn_clustering(_ShapeOnlyArray((3, 3)), True, 2, 1)
-    with pytest.raises(ValueError, match="n_neighbours"):
+    with pytest.raises(ValueError, match="n_neighbors"):
         knn_clustering(_ShapeOnlyArray((3, 3)), np.int64(3), np.int32(2), 1)
     with pytest.raises(ValueError, match="n_clusters"):
         knn_clustering(_ShapeOnlyArray((3, 3)), np.int32(1), np.int64(4), 1)
@@ -1345,7 +1376,7 @@ def test_knn_clustering_reports_disconnected_feature_graph():
 
     with pytest.raises(ValueError, match="3 disconnected components") as error:
         knn_clustering(ChunkedArray.from_numpy(profiles), 2, 2, 1)
-    assert "n_neighbours" in str(error.value)
+    assert "n_neighbors" in str(error.value)
 
     labels = knn_clustering(ChunkedArray.from_numpy(profiles), 2, 3, 1)
     assert sorted(np.unique(labels)) == [1, 2, 3]
@@ -1357,7 +1388,7 @@ def test_knn_clustering_never_exceeds_requested_clusters_on_tied_heights():
     from cytearc.matrix import ChunkedArray
 
     n_features = 12
-    # The two nearest neighbours of each ring point are its ring neighbours,
+    # The two nearest neighbors of each ring point are its ring neighbors,
     # so the feature graph is a cycle whose Paris merges tie in height.
     profiles = ChunkedArray.from_numpy(_ring_profiles(n_features))
     for n_clusters in range(1, n_features + 1):
@@ -1381,7 +1412,7 @@ def test_aggregation_rejects_infeasible_clustering_before_starting_artifact(
 ):
     before = _aggregation_artifacts(datastore)
 
-    # With one neighbour, mutual nearest pairs split the feature graph into
+    # With one neighbor, mutual nearest pairs split the feature graph into
     # far more components than two modules can hold.
     with pytest.raises(ValueError, match="disconnected components"):
         datastore.trajectory.aggregation(
@@ -1389,7 +1420,7 @@ def test_aggregation_rejects_infeasible_clustering_before_starting_artifact(
             features=few_features,
             window_size=10,
             chunk_size=5,
-            n_neighbours=1,
+            n_neighbors=1,
             n_clusters=2,
             invalidate_cache=True,
         )
@@ -1411,7 +1442,7 @@ def test_aggregation_min_exp_filter_failure_creates_no_artifact(
             min_exp=1e12,
             window_size=10,
             chunk_size=5,
-            n_neighbours=3,
+            n_neighbors=3,
             n_clusters=2,
             invalidate_cache=True,
         )
@@ -1426,7 +1457,7 @@ def test_aggregation_and_marker_search_complete_within_a_small_budget(tmp_path):
 
     from cytearc.datastore.datastore import DataStore
     from cytearc.writers import SparseToZarr
-    from tests.fixtures_datastore import build_neighbourhood_graph
+    from tests.fixtures_datastore import build_neighborhood_graph
 
     # All 2000 features form one 32 MB read group, so a 128 MiB budget holds
     # the reads but not every normalized value together with its scratch,
@@ -1462,7 +1493,7 @@ def test_aggregation_and_marker_search_complete_within_a_small_budget(tmp_path):
     )
     cells = datastore.snapshot_cell_selection("I")
     features = datastore.features.universe(from_assay="RNA")
-    graph = build_neighbourhood_graph(
+    graph = build_neighborhood_graph(
         datastore,
         cell_selection=cells,
         features=datastore.features.hvgs(
@@ -1502,9 +1533,9 @@ def test_aggregation_and_marker_search_complete_within_a_small_budget(tmp_path):
 
 
 def _clusters_on_a_tree(n_cells: int, n_clusters: int, seed: int = 0) -> csr_matrix:
-    """Return a neighbour graph of Gaussian clusters, each one step from another.
+    """Return a neighbor graph of Gaussian clusters, each one step from another.
 
-    Neighbouring clusters share few edges, so the smallest singular values of
+    Neighboring clusters share few edges, so the smallest singular values of
     the graph's Laplacian lie close together, as on a large atlas.
     """
     from scipy.spatial import cKDTree

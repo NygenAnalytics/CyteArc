@@ -82,8 +82,8 @@ CyteArc is copyright Nygen Analytics AB and is licensed under the BSD 3-Clause L
   `TopDEGenesMixscape` in the same file, the filters, fold change and Bonferroni adjustment of
   `FindMarkers` and `FoldChange` in `R/differential_expression.R`, and the scaling of
   `FastDenseRowScale` in `src/data_manipulation.cpp`), and `cytearc/neighbors/graph.py`
-  (`shared_neighbor_graph`: the Jaccard index of two neighbourhoods and the pruning below 1/15 of
-  `ComputeSNN` in `src/snn.cpp`, with each cell counted among its own neighbours as
+  (`shared_neighbor_graph`: the Jaccard index of two neighborhoods and the pruning below 1/15 of
+  `ComputeSNN` in `src/snn.cpp`, with each cell counted among its own neighbors as
   `FindNeighbors` in `R/clustering.R` counts it, read at the main branch in October 2026).
 
 ### mgatk
@@ -105,8 +105,8 @@ CyteArc is copyright Nygen Analytics AB and is licensed under the BSD 3-Clause L
 - License: MIT
 - Used in: `cytearc/variants/statistics.py` (the thresholds of the `"atac"` preset, as
   `vignettes/mito.Rmd` applies them) and `cytearc/variants/frequencies.py` (the method of
-  `FindClonotypes` in `R/mito.R`: square-root allele frequencies, cosine neighbours with `k = 10`
-  and clustering of the shared-neighbour graph), at commit 12d1ff82774890b08e55b3101f36fab83e674b88.
+  `FindClonotypes` in `R/mito.R`: square-root allele frequencies, cosine neighbors with `k = 10`
+  and clustering of the shared-neighbor graph), at commit 12d1ff82774890b08e55b3101f36fab83e674b88.
 
 ### MAESTER-2021
 
@@ -219,7 +219,7 @@ CyteArc is copyright Nygen Analytics AB and is licensed under the BSD 3-Clause L
 - Source: <https://github.com/scverse/pertpy>
 - Copyright (c) 2021, Lukas Heumos; Copyright (c) 2025, scverse®
 - License: MIT
-- Used in: `cytearc/perturbation/mixtures.py` (the Poisson-Gaussian guide fit: its expectation maximisation steps, its starting points, the rules that reject a fit, and the threshold rule, adapted from `pertpy/preprocessing/_guide_rna_mixture.py` at commit `9b5c53b`).
+- Used in: `cytearc/perturbation/mixtures.py` (the Poisson-Gaussian guide fit: its expectation maximization steps, its starting points, the rules that reject a fit, and the threshold rule, adapted from `pertpy/preprocessing/_guide_rna_mixture.py` at commit `9b5c53b`).
 
 ### crispat
 
@@ -233,7 +233,7 @@ CyteArc is copyright Nygen Analytics AB and is licensed under the BSD 3-Clause L
 - Source: <https://github.com/ShouWenWang-Lab/cospar>
 - Copyright (c) 2020 Shou-Wen Wang
 - License: MIT
-- Used in: `cytearc/clones/fate.py`, whose fate coupling methods follow the definitions of CoSpar 0.5.0's `get_normalized_covariance` and `coarse_grain_clone_over_cell_clusters` (the `"SW"`, `"Weinreb"` and `"Jaccard"` methods and the normalisation of each group and then each clone), whose null shuffles labels as `pvalue_for_fate_coupling` does, and whose fate fractions and Fisher tests follow `compute_state_potential` on the clonal transition map of `infer_Tmap_from_clonal_info_alone` and `clonal_fate_bias`, written from that source without its pseudocounts. `tests/cospar_0_5_0_golden.json` holds CoSpar 0.5.0's outputs on a synthetic experiment that the test suite compares with.
+- Used in: `cytearc/clones/fate.py`, whose fate coupling methods follow the definitions of CoSpar 0.5.0's `get_normalized_covariance` and `coarse_grain_clone_over_cell_clusters` (the `"SW"`, `"Weinreb"` and `"Jaccard"` methods and the normalization of each group and then each clone), whose null shuffles labels as `pvalue_for_fate_coupling` does, and whose fate fractions and Fisher tests follow `compute_state_potential` on the clonal transition map of `infer_Tmap_from_clonal_info_alone` and `clonal_fate_bias`, written from that source without its pseudocounts. `tests/cospar_0_5_0_golden.json` holds CoSpar 0.5.0's outputs on a synthetic experiment that the test suite compares with.
 
 ### scirpy
 

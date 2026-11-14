@@ -255,7 +255,7 @@ def _stamp_inputs() -> dict[str, zarr.Array]:
             "plain", data=_ids(), chunks=(8,), compressors=None
         ),
         "other_attributes": root.create_array(
-            "labelled", data=_ids(), chunks=(8,), attributes={"note": 1}
+            "labeled", data=_ids(), chunks=(8,), attributes={"note": 1}
         ),
     }
 

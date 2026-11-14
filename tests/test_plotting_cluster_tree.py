@@ -217,7 +217,7 @@ def test_cluster_tree_shows_owned_results_by_default(monkeypatch):
     assert not plt.fignum_exists(result.figure.number)
 
 
-def test_cluster_tree_keeps_missing_clusters_grey_under_a_uniform_fill():
+def test_cluster_tree_keeps_missing_clusters_gray_under_a_uniform_fill():
     def node_colors(values, missing):
         result = splt.cluster_tree(
             _tree_store(values, color_missing=missing),

@@ -50,7 +50,7 @@ _MAPPING_REFERENCE = ExternalArtifactRef(
         artifact_id="a" * 64,
     ),
 )
-# Three query cells with two neighbors each: the first is labelled A, the
+# Three query cells with two neighbors each: the first is labeled A, the
 # second abstains on a tie, and the third falls below the vote threshold.
 _NEIGHBOR_CODES = np.array([[0, 0], [0, 1], [1, 0]])
 _DISTANCES = np.array([[1.0, 2.0], [1.0, 1.0], [1.0, 1.5]])
@@ -258,7 +258,7 @@ def test_loader_rejects_malformed_parameters(parameters, message) -> None:
         load_label_transfer(store.root, ref)
 
 
-def test_loader_rejects_foreign_missing_and_relabelled_artifacts() -> None:
+def test_loader_rejects_foreign_missing_and_relabeled_artifacts() -> None:
     store = _store()
     ref = _transfer(store)
     missing = ArtifactRef(

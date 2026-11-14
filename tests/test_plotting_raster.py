@@ -1071,7 +1071,7 @@ def test_raster_squares_extent_before_binning_without_stretching_points():
         pixels=100,
     )
 
-    # The y window widens to the x span around its centre, 0.5.
+    # The y window widens to the x span around its center, 0.5.
     assert canvas.extent == pytest.approx((-0.1, 10.1, -4.6, 5.6))
     occupied = sorted(zip(*np.nonzero(canvas.counts)))
     assert occupied == [(45, 0), (45, 99), (54, 0), (54, 99)]
@@ -1351,7 +1351,7 @@ def test_embedding_raster_uses_frozen_continuous_display_defaults():
     assert image.cmap.name == "magma"
     assert image.get_clim() == (0.0, 3.0)
     assert result.legends[0].extras == {"vmin": 0.0, "vmax": 3.0}
-    # Cells without a value take the scale's grey; empty pixels stay blank.
+    # Cells without a value take the scale's gray; empty pixels stay blank.
     assert result.provenance.extras["missing_color"] == "#bdbdbd"
     result.close()
 

@@ -52,7 +52,7 @@ __all__ = [
 # many inches, and small multiples fill rows of at most three.
 _PANEL_INCHES = (4.2, 3.6)
 _SMALL_MULTIPLES = 3
-# Room in inches beside a heatmap for its colour bar.
+# Room in inches beside a heatmap for its color bar.
 _COLORBAR_INCHES = 1.2
 # The indices that clonal_diversity draws unless told otherwise: the clones,
 # Shannon entropy and the inverse Simpson index, the observed Hill numbers of
@@ -118,7 +118,7 @@ def _two_lines(title: str) -> str:
     """Break a title of several words at the space nearest its middle.
 
     Panels of a row stand beside a legend within the page, and a title is
-    centred over its panel whatever its width, so two lines keep the titles
+    centered over its panel whatever its width, so two lines keep the titles
     of narrow panels apart.
     """
     spaces = [at for at, character in enumerate(title) if character == " "]
@@ -193,7 +193,7 @@ def clone_abundance(
     panel counts clones by their number of cells on log scales: in most
     experiments many clones hold one or a few cells, and expanded clones form
     the tail. The second panel draws the ``max_clones`` clones with the most
-    cells, labelled with their IDs. Clonotypes are labelled instead by the
+    cells, labeled with their IDs. Clonotypes are labeled instead by the
     junction amino acids of their representative cell's ``VDJ_1`` chain, or
     of its ``VJ_1`` chain without a VDJ chain, such as ``CASSLGQAYEQYF``, and
     those defined by ``receptor_arms="VJ"`` by the ``VJ_1`` chain first,
@@ -217,7 +217,7 @@ def clone_abundance(
     summary counts them, so their groups are the receptor types, or each
     group's receptor types, named like ``"s1, TCR"``; clonotypes defined
     across receptor types are counted by each cell's clonotype within its
-    type, labelled as the clonotypes within types label its cells, by its
+    type, labeled as the clonotypes within types label its cells, by its
     own representative's junction, then its type, such as ``CASSB (TCR 2)``.
 
     Tables: ``sizes`` (``group``, ``clone_size``, ``n_clones``) and ``top``,
@@ -520,7 +520,7 @@ def clonal_expansion(
     noun = names.singular.capitalize()
     counted = "cells" if count == "cells" else names.plural
     shown_windows = windows.loc[:, windows.sum(axis=0) > 0]
-    # Categories take colours in size order, as do the windows of ranks.
+    # Categories take colors in size order, as do the windows of ranks.
     window_palette = colormap_palette(window_names, "viridis")
     category_colors = CategoricalScale(
         order=tuple(category_names),
@@ -640,7 +640,7 @@ def clonal_rarefaction(
     Raises:
         TypeError: If ``rarefaction`` is not a ``Rarefaction`` record,
             another argument has the wrong type, or the store does not name
-            clones for figures or give the labels that the groups' colours
+            clones for figures or give the labels that the groups' colors
             range over.
         ValueError: If ``base`` is neither ``"size"`` nor ``"coverage"``, or
             the record holds no curve.
@@ -776,7 +776,7 @@ def clonal_diversity(
     table, by default ``("n_clones", "shannon", "inverse_simpson")``: the
     clones, Shannon entropy and the inverse Simpson index, which are the
     observed Hill numbers of orders 0, 1, as its logarithm, and 2. Each
-    panel draws one bar per group, in the groups' colours, and the panels
+    panel draws one bar per group, in the groups' colors, and the panels
     fill rows of three, with one legend of the groups beside the first row;
     the groups stand in one order in every panel, so a panel directly right
     of another leaves their names to it, also on caller axes.
@@ -797,7 +797,7 @@ def clonal_diversity(
     Raises:
         TypeError: If ``diversity`` is not a ``ClonalDiversity`` record,
             another argument has the wrong type, or the store does not name
-            clones for figures or give the labels that the groups' colours
+            clones for figures or give the labels that the groups' colors
             range over.
         ValueError: If ``indices`` is empty, names an index twice or one that
             ``ds.clones.diversity`` does not measure, or the record holds no
@@ -887,10 +887,10 @@ def clonal_diversity(
 def _matrix_figure_size(
     n_groups: int, *, extra_height: float = 0.0
 ) -> tuple[float, float]:
-    """The default size of a heatmap of groups by groups, beside its colour bar.
+    """The default size of a heatmap of groups by groups, beside its color bar.
 
     Its side grows by 0.55 inches a group from at least 4 and stops where
-    the colour bar still fits on the page.
+    the color bar still fits on the page.
     """
     side = min(
         item_inches(n_groups, per_item=0.55, base=2.5, minimum=4.0),
@@ -920,10 +920,10 @@ def clone_overlap(
     groups. ``index`` is one of its indices: ``"shared"``, ``"jaccard"``,
     ``"sorensen"``, ``"overlap"``, ``"cosine"``, ``"morisita_horn"`` (the
     default) and ``"abundance_cosine"``. The diagonal is left blank so that
-    the colours span the pairs, and pairs that were not compared take the
-    scale's missing colour; the ``matrix`` table holds each group's clones
+    the colors span the pairs, and pairs that were not compared take the
+    scale's missing color; the ``matrix`` table holds each group's clones
     on its diagonal for ``"shared"`` and 1 otherwise. ``color_scale`` sets
-    the colour map and limits, viridis over the pairs' values by default,
+    the color map and limits, viridis over the pairs' values by default,
     so two figures can share them.
 
     ``groups``, a ``NamedCellArtifact`` of the label artifact that the
@@ -939,7 +939,7 @@ def clone_overlap(
         ValueError: If ``index`` is not an overlap index, or the record
             compares no pair.
         KeyError: If ``theme`` names no theme, ``color_scale`` names no
-            colour map, or the store does not hold the record's clones.
+            color map, or the store does not hold the record's clones.
         RuntimeError: If the record's clones are incomplete, as a call that
             stopped before it finished leaves them.
     """
@@ -1020,7 +1020,7 @@ def clone_tracking(
     clones and sets the groups: the ``top_n`` clones with the most cells in
     each group, or the clones it was given. Each clone draws one line across
     the groups, such as time points or cell types, of its fraction of each
-    group's cells with a clone. A line is labelled with its clone's ID, or
+    group's cells with a clone. A line is labeled with its clone's ID, or
     for a clonotype with its representative's junction, such as ``CASSA``,
     and also its number where two of the clonotypes followed share a
     junction, such as ``CASSA 1`` and ``CASSA 3``, as ``clone_abundance``
@@ -1064,7 +1064,7 @@ def clone_tracking(
     if not tracking.tracked:
         raise ValueError("The tracking follows no clone, so there is nothing to plot")
     names = clone_names(store, tracking.clones)
-    # Every followed clone is labelled at once, so that the junctions which
+    # Every followed clone is labeled at once, so that the junctions which
     # two followed clonotypes share are found among the lines of this figure.
     line_labels = dict(
         zip(tracking.tracked, names.labels(tracking.tracked), strict=True)
@@ -1103,7 +1103,7 @@ def clone_tracking(
         positions = [str(name) for name in order]
         if sorted(positions) != sorted(map(str, present)):
             raise ValueError(f"order must list the groups {present}")
-    # The clones' colours, in the order they were chosen, the largest first.
+    # The clones' colors, in the order they were chosen, the largest first.
     labels = [line_labels[clone] for clone in tracking.tracked]
     colors = CategoricalScale(
         order=tuple(labels),
@@ -1176,9 +1176,9 @@ def clone_coupling(
     deviations, which checks whether a pair beats chance. The groups follow
     the result's average-linkage order, whose dendrogram is drawn above the
     matrix. The diagonal is left blank, and pairs that were not compared and
-    z-scores that are not finite take the scale's missing colour; z-scores
+    z-scores that are not finite take the scale's missing color; z-scores
     of a coupling measured without permutations are refused, since it has
-    none. By default z-scores, and couplings below 0, take a scale centred
+    none. By default z-scores, and couplings below 0, take a scale centered
     on 0, from minus to plus their largest size, and other couplings
     viridis; ``color_scale`` sets the map and limits instead, so two figures
     can share them.
@@ -1197,7 +1197,7 @@ def clone_coupling(
             coupling measured without permutations, the record compares no
             pair, or the coupling's order does not follow its linkage.
         KeyError: If ``theme`` names no theme, ``color_scale`` names no
-            colour map, or the store does not hold the record's clones.
+            color map, or the store does not hold the record's clones.
         RuntimeError: If the record's clones are incomplete, as a call that
             stopped before it finished leaves them.
     """
@@ -1311,9 +1311,9 @@ def clone_fate_bias(
     fewest; clones whose late cells tie between fates come last. The lower
     panel stacks each clone's late cells by fate, the first fate on top, or
     their fractions with ``normalize=True``, and the upper panel draws its
-    early cells. The fates take the colours of their groups, as every
-    figure grouped by the same columns colours them, and a title that drops
-    clones says how many it draws of how many. Clones are labelled as
+    early cells. The fates take the colors of their groups, as every
+    figure grouped by the same columns colors them, and a title that drops
+    clones says how many it draws of how many. Clones are labeled as
     ``clone_abundance`` labels them: by their IDs, and clonotypes by their
     representative's junction, with their number where two drawn share one.
 
@@ -1331,7 +1331,7 @@ def clone_fate_bias(
     Raises:
         TypeError: If an argument has the wrong type, or the store does not
             load or name clones for figures, or give the labels that the
-            fates' colours range over.
+            fates' colors range over.
         ValueError: If ``bias`` is not a ``clone_fate_bias`` artifact, or no
             clone of the early cells has late cells.
         KeyError: If the store holds no such artifact.

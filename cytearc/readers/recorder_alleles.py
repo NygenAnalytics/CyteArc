@@ -1,6 +1,6 @@
 """Read the allele tables that lineage recorder pipelines write.
 
-``allele_layout`` recognises a file's format from its contents, resolves the
+``allele_layout`` recognizes a file's format from its contents, resolves the
 columns that hold each row's cell, integration, sites and counts, and gives
 the format's tokens for each state of a site (:class:`SiteRules`);
 ``iter_allele_rows`` then yields the rows in bounded chunks and
@@ -1393,11 +1393,11 @@ def allele_layout(
     columns: Mapping[str, Any] | None = None,
     integrations: Any = None,
 ) -> AlleleLayout:
-    """Recognise a file's format and find what each of its rows holds.
+    """Recognize a file's format and find what each of its rows holds.
 
     Args:
         path: The file, a CARLIN pair's file or folder, or a ``.zarr`` store.
-        format: One of ``ALLELE_FORMATS``, or None to recognise it.
+        format: One of ``ALLELE_FORMATS``, or None to recognize it.
         columns: For ``format="table"``, the columns to read by role.
         integrations: This file's item of the import's ``integrations``:
             the name of the one integration of a file that holds one, or a

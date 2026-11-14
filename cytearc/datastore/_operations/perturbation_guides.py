@@ -139,10 +139,10 @@ _GUIDE_CHECK_BYTES_PER_GUIDE = 16
 # separator of a merged store's samples, beside a copy of the IDs that hold
 # it.
 _CELL_CHECK_BYTES_PER_CELL = 18
-# Summarising a cell's guide counts holds its top guide, its top UMIs and its
+# Summarizing a cell's guide counts holds its top guide, its top UMIs and its
 # total UMIs.
 _SUMMARY_BYTES_PER_CELL = 4 + 4 + 8
-# The bytes that summarising the guide counts makes of each row of a block:
+# The bytes that summarizing the guide counts makes of each row of a block:
 # its total, its top guide and its top UMIs, and their masked copies.
 _SUMMARY_BYTES_PER_ROW = 48
 # Each call holds its cell, its guide and its UMIs.
@@ -273,7 +273,7 @@ def _require_call_file_cells(
     Cell Ranger writes a call file for each sample, and the import matches
     each of its barcodes to the cell whose ID is ``barcode_prefix`` followed
     by the barcode and ``barcode_suffix``. A cell that no barcode can reach
-    would be labelled ``"Negative"``. With a prefix, every cell's ID must
+    would be labeled ``"Negative"``. With a prefix, every cell's ID must
     start with it, and with a suffix end with it; without a prefix, the
     cells must not come from several samples of a merged store, which names
     each cell ``<sample>__<barcode>``.
@@ -999,7 +999,7 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
         store prefixes each sample's barcodes with its name and two
         underscores, so import each sample's file with its own prefix and a
         cell selection of that sample; a selection whose cells the file cannot
-        reach is refused, since its other cells would be labelled
+        reach is refused, since its other cells would be labeled
         ``"Negative"``. The artifact's diagnostics, which
         ``ds.artifacts.inspect(calls).diagnostics`` returns, count the file's
         barcodes by the cell ID they name in ``fileBarcodes``, those that
@@ -1016,7 +1016,7 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
         pass before the file is parsed: the parsed file, the selected cells'
         IDs, the cell IDs that the prefix, suffix and pattern derive and the
         join's matching of them, the padded calls, as wide as the most calls
-        of one row, the guide counts that stream to summarise each cell, and
+        of one row, the guide counts that stream to summarize each cell, and
         the text of the labels. A refusal names the step and the budget that
         passes it, before anything is written.
 
@@ -1198,8 +1198,8 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
             ledger,
             counts,
             nthreads=self.nthreads,
-            msg=f"({assay.name}) Summarising guide counts",
-            item="the guide counts read to summarise each cell's guides",
+            msg=f"({assay.name}) Summarizing guide counts",
+            item="the guide counts read to summarize each cell's guides",
             scratch_bytes_per_row=_SUMMARY_BYTES_PER_ROW,
         )
         summary = summarize_guide_counts(blocks, n_cells, len(guide_ids))
@@ -1605,7 +1605,7 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
           them exceeds ``fraction_threshold`` (default 0.8), as the maximum
           rule of the SCEPTRE book does. A cell gets at most one call; a cell
           with fewer guide UMIs, or whose top guide holds a smaller share, is
-          labelled ``"Negative"``.
+          labeled ``"Negative"``.
 
         The fitted methods fit each guide in each sample of ``sample_column``
         separately and save the fits, the thresholds and each guide's
@@ -2132,7 +2132,7 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
         guides target one gene, with or without control guides, and
         ``"Multiple"`` when they target several. With
         ``policy="combinations"``, a cell whose guides target several genes is
-        labelled with the genes, sorted and joined by ``"+"``, such as
+        labeled with the genes, sorted and joined by ``"+"``, such as
         ``"GENE1+GENE2"``.
 
         Each guide's target comes from ``target_column`` of the guide assay's
@@ -2180,7 +2180,7 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
                 target, or ``policy`` is unknown.
             PermissionError: If the store is read-only and the labels are not
                 saved yet.
-            MemoryError: If the labelling does not fit the memory budget.
+            MemoryError: If the labeling does not fit the memory budget.
         """
         invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         _require_ref(calls, "calls", GuideCallImportArguments.artifact_kind)
@@ -2191,7 +2191,7 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
         codes = as_zarr_array(group["guide_codes"], name="guide_codes")
         n_cells, width = (int(size) for size in codes.shape)
         ledger = MemoryLedger(
-            self.memoryBytes, f"Labelling {n_cells} cells", codec_threads=self.nthreads
+            self.memoryBytes, f"Labeling {n_cells} cells", codec_threads=self.nthreads
         )
         guide_ids = read_whole(ledger, group, "guides", item="the guide IDs").astype(
             str
@@ -2300,7 +2300,7 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
             },
         )
         logger.info(
-            f"Labelled {n_cells} cells: "
+            f"Labeled {n_cells} cells: "
             f"{int(np.count_nonzero(arrays.n_targets == 1))} with one gene, "
             f"{int(np.count_nonzero(arrays.n_targets > 1))} with several, "
             f"{int(np.count_nonzero(arrays.is_control))} controls"

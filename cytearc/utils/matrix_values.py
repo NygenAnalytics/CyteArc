@@ -165,7 +165,7 @@ def decide_matrix_values(
     """
     if value_range.negative:
         raise ValueError(
-            f"Assay {assay!r} holds negative values, as values centred or scaled "
+            f"Assay {assay!r} holds negative values, as values centered or scaled "
             "for PCA do. CyteArc imports counts and normalized values, which are "
             "never negative; import the counts or the normalized values instead"
         )

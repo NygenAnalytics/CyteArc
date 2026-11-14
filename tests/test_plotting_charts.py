@@ -67,7 +67,7 @@ def _stacked() -> pd.DataFrame:
 def _bars(
     ax, *, horizontal: bool = True
 ) -> dict[tuple[float, str], tuple[float, float]]:
-    """Each bar by its item's position and its colour: its start and its length."""
+    """Each bar by its item's position and its color: its start and its length."""
     found = {}
     for patch in ax.patches:
         x, y = patch.get_xy()
@@ -119,7 +119,7 @@ def test_horizontal_bars_stack_their_segments_from_the_left_in_the_legends_order
     assert [tick.get_text() for tick in ax.get_yticklabels()] == ["a", "b"]
     assert ax.get_xlabel() == "Cells"
     # The legend lists the segments in their stacking order, each in the
-    # colour of its bars, and the result reports it with its scale.
+    # color of its bars, and the result reports it with its scale.
     assert _legend(ax) == ("Segment", ["s1", "s2", "s3"], [RED, GREEN, BLUE])
     assert drawn.legend.kind == "categorical" and drawn.legend.label == "Segment"
     assert drawn.scale.order == ("s1", "s2", "s3")
@@ -216,7 +216,7 @@ def test_a_value_that_is_not_a_number_draws_no_bar_and_shifts_none(ax) -> None:
     assert bars[(0.0, GREEN)] == (0.0, 0.5) and bars[(0.0, BLUE)] == (0.5, 0.5)
 
 
-def test_plain_bars_take_one_colour_or_their_items_colours(ax) -> None:
+def test_plain_bars_take_one_color_or_their_items_colors(ax) -> None:
     table = pd.DataFrame({"group": ["y", "x"], "value": [2.0, 5.0]})
     assert (
         draw_bars(
@@ -236,7 +236,7 @@ def test_plain_bars_take_one_colour_or_their_items_colours(ax) -> None:
         value_label="",
         legend_title="group",
     )
-    # Bars follow the table, y on top, each in its item's colour; the legend
+    # Bars follow the table, y on top, each in its item's color; the legend
     # lists the items in the scale's order.
     bars = _bars(ax)
     assert bars[(1.0, BLUE)][1] == 2.0 and bars[(0.0, RED)][1] == 5.0
@@ -355,7 +355,7 @@ def test_bars_refuse_what_they_cannot_draw(ax) -> None:
             value_label="",
         )
     table = _stacked().assign(segment=["s3", "s1", "s2", "s1", "s9"])
-    with pytest.raises(ValueError, match="give no colour to 's9'"):
+    with pytest.raises(ValueError, match="give no color to 's9'"):
         draw_bars(
             ax,
             table,
@@ -387,13 +387,13 @@ def test_bars_refuse_what_they_cannot_draw(ax) -> None:
             value_label="",
         )
     unnamed = CategoricalScale(order=("x",), palette={"x": RED})
-    with pytest.raises(ValueError, match="give no colour to 'a'"):
+    with pytest.raises(ValueError, match="give no color to 'a'"):
         draw_bars(
             ax, _stacked(), item="item", value="value", colors=unnamed, value_label=""
         )
 
 
-def test_charts_refuse_scales_without_an_order_or_a_colour(ax) -> None:
+def test_charts_refuse_scales_without_an_order_or_a_color(ax) -> None:
     table = pd.DataFrame({"group": ["x"], "value": [1.0]})
     with pytest.raises(ValueError, match="need an order and a palette"):
         draw_bars(
@@ -404,7 +404,7 @@ def test_charts_refuse_scales_without_an_order_or_a_colour(ax) -> None:
             colors=CategoricalScale(palette={"x": RED}),
             value_label="",
         )
-    with pytest.raises(ValueError, match="give no colour to 'y'"):
+    with pytest.raises(ValueError, match="give no color to 'y'"):
         draw_bars(
             ax,
             table,
@@ -529,7 +529,7 @@ def test_lines_along_named_positions_leave_gaps(ax) -> None:
             dashed="dashed",
             y_label="",
         )
-    with pytest.raises(ValueError, match="give no colour to 'r'"):
+    with pytest.raises(ValueError, match="give no color to 'r'"):
         draw_lines(
             ax,
             table.assign(clone=["p", "r", "q"]),
@@ -639,7 +639,7 @@ def _matrix() -> pd.DataFrame:
     )
 
 
-def test_heatmaps_colour_through_their_scale_and_blank_the_diagonal(ax) -> None:
+def test_heatmaps_color_through_their_scale_and_blank_the_diagonal(ax) -> None:
     scale = ColorScale(cmap="viridis", missing_color="#ff00ff")
     drawn = draw_matrix(
         ax,
@@ -657,12 +657,12 @@ def test_heatmaps_colour_through_their_scale_and_blank_the_diagonal(ax) -> None:
         [False, True, True],
         [False, True, True],
     ]
-    # The pair without a value takes the missing colour, and the diagonal
+    # The pair without a value takes the missing color, and the diagonal
     # is blank in both layers.
     layer = missing.get_array()
     assert tuple(layer[1, 2]) == tuple(layer[2, 1]) == to_rgba("#ff00ff")
     assert layer[0, 0][3] == layer[1, 1][3] == 0.0 and layer[0, 1][3] == 0.0
-    # Each coloured value is printed, dark on the light top of viridis and
+    # Each colored value is printed, dark on the light top of viridis and
     # light on its dark bottom.
     texts = {text.get_position(): text for text in ax.texts}
     # The four pairs off the diagonal with a value, by column and row.
@@ -670,7 +670,7 @@ def test_heatmaps_colour_through_their_scale_and_blank_the_diagonal(ax) -> None:
     assert texts[(0, 1)].get_text() == "0" and texts[(0, 2)].get_text() == "1"
     assert texts[(2, 0)].get_text() == "1" and texts[(2, 0)].get_color() == "black"
     assert texts[(1, 0)].get_text() == "0" and texts[(1, 0)].get_color() == "white"
-    # The colour bar names the value and the result reports its limits.
+    # The color bar names the value and the result reports its limits.
     colorbar = ax.figure.axes[-1]
     assert colorbar.get_ylabel() == "Jaccard index"
     assert drawn.legend.kind == "colorbar"
@@ -678,7 +678,7 @@ def test_heatmaps_colour_through_their_scale_and_blank_the_diagonal(ax) -> None:
     assert drawn.scale is scale
 
 
-def test_heatmaps_take_their_scales_limits_and_centre(ax) -> None:
+def test_heatmaps_take_their_scales_limits_and_center(ax) -> None:
     scale = ColorScale(cmap="RdBu_r", vmin=-2.0, vmax=2.0, vcenter=0.0)
     draw_matrix(
         ax, _matrix() - 0.5, color_scale=scale, value_label="", show_legend=False
@@ -687,7 +687,7 @@ def test_heatmaps_take_their_scales_limits_and_centre(ax) -> None:
     assert image.get_clim() == (-2.0, 2.0) and image.cmap.name == "RdBu_r"
     # 0 sits at the middle of the map.
     assert image.norm(0.0) == pytest.approx(0.5)
-    # Without the legend, no colour bar is drawn.
+    # Without the legend, no color bar is drawn.
     assert len(ax.figure.axes) == 1
 
 
@@ -769,7 +769,7 @@ def test_a_trees_leaves_stand_over_the_matrixs_columns(ax) -> None:
     )
     inset = draw_dendrogram(ax, tree, side="top", color="#333333")
     segments = np.concatenate(inset.collections[0].get_segments())
-    # The tree's leaves, at height 0, stand at the matrix's column centres.
+    # The tree's leaves, at height 0, stand at the matrix's column centers.
     leaves = sorted(set(segments[segments[:, 1] == 0, 0].tolist()))
     assert leaves == list(range(5))
     assert inset.get_xlim() == ax.get_xlim()
@@ -791,7 +791,7 @@ def test_figures_stop_at_the_page_width() -> None:
     assert figure_size(2, panel=(3.0, 2.0), columns=3) == ((6.0, 2.0), 2)
 
 
-def test_plot_groups_keep_each_groups_colour_in_every_subset() -> None:
+def test_plot_groups_keep_each_groups_color_in_every_subset() -> None:
     read = []
 
     def colors() -> CategoricalScale:
@@ -806,11 +806,11 @@ def test_plot_groups_keep_each_groups_colour_in_every_subset() -> None:
         codes=np.empty(0, dtype=np.int64),
         colors=colors,
     )
-    # The colours are read only when a figure colours its groups.
+    # The colors are read only when a figure colors its groups.
     assert read == []
     assert every.title == "sample"
     subset = every.scale(["d7", "d4"])
-    # The colours' order, and each group's colour, whatever is drawn.
+    # The colors' order, and each group's color, whatever is drawn.
     assert subset.order == ("d4", "d7")
     assert subset.palette == {"d4": GREEN, "d7": BLUE}
     assert read == [True]
@@ -822,7 +822,7 @@ def test_plot_groups_keep_each_groups_colour_in_every_subset() -> None:
         codes=np.empty(0, dtype=np.int64),
         colors=lambda: None,
     )
-    # Groups of several columns take colours over the groups drawn.
+    # Groups of several columns take colors over the groups drawn.
     assert combined.title == "sample, type"
     assert combined.scale(["d4, x"]).palette == {"d4, x": "#1f77b4"}
 
@@ -848,7 +848,7 @@ def test_bars_side_by_side_stand_in_their_items_slot_in_the_legends_order(
         legend_title="Segment",
     )
     # Three parts share each slot of 0.8, a third each, from 0, the first
-    # at the left: centred at -0.8/3, 0 and +0.8/3 of the item's position.
+    # at the left: centered at -0.8/3, 0 and +0.8/3 of the item's position.
     third = 0.8 / 3
     found = {
         (
@@ -886,12 +886,12 @@ def test_horizontal_bars_side_by_side_put_their_first_part_on_top(ax) -> None:
     )
     # Item a stands at 1, above b at 0, and its first part at the top.
     third = 0.8 / 3
-    centres = {
+    centers = {
         to_hex(patch.get_facecolor()): patch.get_y() + patch.get_height() / 2
         for patch in ax.patches
         if patch.get_width() and patch.get_y() > 0.5
     }
-    assert centres == pytest.approx({RED: 1 + third, GREEN: 1.0, BLUE: 1 - third})
+    assert centers == pytest.approx({RED: 1 + third, GREEN: 1.0, BLUE: 1 - third})
     assert all(patch.get_x() == 0.0 for patch in ax.patches)
 
 
@@ -909,8 +909,8 @@ def test_bars_at_numeric_items_keep_their_axis(ax) -> None:
     )
     # Each bar stands at its length, the gaps between them kept, and the
     # axis keeps a numeric locator rather than naming each bar.
-    centres = [patch.get_x() + patch.get_width() / 2 for patch in ax.patches]
-    assert centres == pytest.approx([9.0, 13.0, 10.0])
+    centers = [patch.get_x() + patch.get_width() / 2 for patch in ax.patches]
+    assert centers == pytest.approx([9.0, 13.0, 10.0])
     assert [patch.get_height() for patch in ax.patches] == [0.25, 0.5, 0.25]
     assert type(ax.xaxis.get_major_locator()).__name__ == "AutoLocator"
     with pytest.raises(ValueError, match="take numbers as their length"):
@@ -935,7 +935,7 @@ def test_bars_at_numeric_items_keep_their_axis(ax) -> None:
         )
 
 
-def test_heatmaps_of_one_scale_share_one_colour_bar() -> None:
+def test_heatmaps_of_one_scale_share_one_color_bar() -> None:
     figure, axes = plt.subplots(1, 2, layout="constrained")
     try:
         scale = ColorScale(cmap="viridis", vmin=0.0, vmax=0.8)
@@ -957,7 +957,7 @@ def test_heatmaps_of_one_scale_share_one_colour_bar() -> None:
             colorbar_beside=list(axes),
         )
         (colorbar,) = [ax for ax in figure.axes if ax not in set(axes)]
-        # The one colour bar stands beside both heatmaps, with their limits.
+        # The one color bar stands beside both heatmaps, with their limits.
         assert set(colorbar._colorbar_info["parents"]) == set(axes)
         assert colorbar.get_ylim() == (0.0, 0.8)
         assert drawn.legend.extras == {"vmin": 0.0, "vmax": 0.8}
@@ -1042,7 +1042,7 @@ def test_histograms_count_each_series_over_bins_they_share(ax) -> None:
         title="Depth per cell",
         legend_title="Sample",
     )
-    # One outline per series, in the scale's order and colours.
+    # One outline per series, in the scale's order and colors.
     first, second = ax.patches
     assert [to_hex(patch.get_edgecolor()) for patch in ax.patches] == [RED, BLUE]
     assert not first.get_fill() and not second.get_fill()
@@ -1191,7 +1191,7 @@ def test_histogram_legends_list_at_most_80_series(ax, n_series, title) -> None:
 def test_histograms_refuse_what_they_cannot_draw(ax) -> None:
     table = _histogram_table()
     options = dict(value="value", series="series", x_label="", y_label="")
-    with pytest.raises(ValueError, match="give no colour to 'b'"):
+    with pytest.raises(ValueError, match="give no color to 'b'"):
         draw_histograms(
             ax,
             table,
@@ -1246,14 +1246,14 @@ def test_log_axes_of_values_read_plain_numbers(ax) -> None:
         if tick.get_text() and 0.1 <= tick.get_position()[0] <= 100.0
     ]
     # Every decade drawn reads as a plain number, never as a power of ten,
-    # and the ticks between decades of an axis of several are not labelled.
+    # and the ticks between decades of an axis of several are not labeled.
     assert sorted(labels, key=lambda label: float(label.replace(",", ""))) == [
         "0.1",
         "1",
         "10",
         "100",
     ]
-    # Axes down to a millionth and up to a hundred billion, whose labelled
+    # Axes down to a millionth and up to a hundred billion, whose labeled
     # decades Matplotlib versions thin differently, write theirs out too.
     for low, high in ((1e-6, 0.9), (1e-3, 1e11)):
         figure, axis = plt.subplots(figsize=(4, 3))
@@ -1380,7 +1380,7 @@ def test_a_tree_draws_a_branch_to_each_node_and_joins_each_opened_nodes_children
     assert to_hex(lines.get_edgecolor()) == "#333333"
 
 
-def test_a_wedge_is_a_triangle_to_nine_tenths_of_its_slot_in_its_colour(ax) -> None:
+def test_a_wedge_is_a_triangle_to_nine_tenths_of_its_slot_in_its_color(ax) -> None:
     _draw_tree(ax)
     wedges = {
         to_hex(patch.get_facecolor()): patch.get_path().vertices.tolist()
@@ -1471,8 +1471,8 @@ def test_a_tree_legend_lists_the_categories_of_its_wedges_and_at_most_80(ax) -> 
     assert plain is None
 
 
-def test_a_tree_colours_categories_that_its_legend_leaves_out(ax) -> None:
-    # The order names s1 alone: s2 and s3 take their colours, unlisted, and
+def test_a_tree_colors_categories_that_its_legend_leaves_out(ax) -> None:
+    # The order names s1 alone: s2 and s3 take their colors, unlisted, and
     # the title counts them.
     listed = CategoricalScale(order=("s1",), palette=dict(SEGMENTS.palette))
     drawn = draw_tree(
@@ -1500,7 +1500,7 @@ def test_trees_refuse_what_they_cannot_draw(ax) -> None:
     options = {"colors": SEGMENTS, "line_color": "#333333", "x_label": "Time"}
     with pytest.raises(ValueError, match="needs a node"):
         draw_tree(ax, _tree().iloc[:0], categories=TREE_KINDS[:0], **options)
-    with pytest.raises(ValueError, match="no colour to 's9'"):
+    with pytest.raises(ValueError, match="no color to 's9'"):
         draw_tree(
             ax,
             _tree(),

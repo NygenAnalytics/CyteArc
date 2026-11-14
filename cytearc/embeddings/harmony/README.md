@@ -25,12 +25,12 @@ Symphony-style reference mapping reads.
 Each round clusters the cells softly, then corrects them:
 
 - **Clustering.** Cells are scaled to unit length and assigned softly to clusters.
-  - The diversity penalty takes Harmony2's stabilised form, which stays bounded when a batch is
+  - The diversity penalty takes Harmony2's stabilized form, which stays bounded when a batch is
     missing from a cluster. With several batch columns the penalties add, so the assignment factor
     is a product over the columns.
   - Cells are updated in blocks against batch counts that leave the block out.
 - **Correction.** Each cluster runs a ridge regression of the original coordinates on an
-  unpenalised intercept and one term per batch level.
+  unpenalized intercept and one term per batch level.
   - The penalty is dynamic by default: 0.2 times the level's expected mass in the cluster.
   - Levels with almost no mass in a cluster are pruned from its regression.
   - Cells subtract the batch terms, weighted by their assignments, and keep the intercepts.
@@ -67,7 +67,7 @@ other Harmony or Symphony implementation, and their tool use was audited.
 - **Dense references.** `tests/test_harmony_algorithm.py` checks each step against a calculation
   written directly from the equations:
   - the ridge solves, pruning and the dynamic penalty;
-  - the assignment update, as the exact minimiser of each cell's objective;
+  - the assignment update, as the exact minimizer of each cell's objective;
   - a whole clustering pass, against a dense pass of the 2019 algorithm;
   - the objective and the seeding distribution;
   - a synthetic set whose two groups of batches share no cell types. Over seeds 0, 1 and 2,

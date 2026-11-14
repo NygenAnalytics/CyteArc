@@ -60,7 +60,7 @@ RENAMED_HARMONY_PARAMETERS: Mapping[str, str] = MappingProxyType(
 REMOVED_HARMONY_PARAMETERS: Mapping[str, str] = MappingProxyType(
     {
         "cluster_fn": (
-            "Harmony2 seeds its clusters with k-means++ and has no initialisation hook"
+            "Harmony2 seeds its clusters with k-means++ and has no initialization hook"
         ),
     }
 )
@@ -283,7 +283,7 @@ _OPTION_CHECKS: Mapping[str, Callable[[object], Any]] = MappingProxyType(
 
 
 def check_harmony_options(**options: Any) -> dict[str, Any]:
-    """Validate option values that do not depend on the data; return them normalised (Python ints and floats, float64 arrays for array-capable options).
+    """Validate option values that do not depend on the data; return them normalized (Python ints and floats, float64 arrays for array-capable options).
 
     Only the options given are checked. ``theta``, ``sigma`` and
     ``ridge_penalty`` come back as new float64 arrays: zero-dimensional for a

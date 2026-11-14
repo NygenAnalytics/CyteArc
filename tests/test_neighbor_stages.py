@@ -846,7 +846,7 @@ def test_kmeans_fit_mode_follows_the_batch_size_not_the_stream_blocks() -> None:
         gathered.model.cluster_centers_, in_memory.model.cluster_centers_
     )
     np.testing.assert_array_equal(gathered.labels, in_memory.labels)
-    # A smaller batch size streams sampling, fitting, and labelling passes,
+    # A smaller batch size streams sampling, fitting, and labeling passes,
     # even over one block that holds every row.
     streamed, streamed_reads = fit(25, 60)
     one_block, one_block_reads = fit(n_rows, 60)
@@ -997,7 +997,7 @@ def test_kmeans_fit_memory_counts_what_each_mode_holds() -> None:
         "kmeans_batch_size": 1_000,
     }
     streamed = kmeans_fit_memory(batch_size=2_000, nthreads=1, **options)
-    # The labelling pass holds one uint32 label per cell while it reads.
+    # The labeling pass holds one uint32 label per cell while it reads.
     assert streamed.streamResidentBytes >= 200_000 * 4
     # Each thread holds its own distances and centroid sums.
     threads = kmeans_fit_memory(batch_size=2_000, nthreads=2, **options)

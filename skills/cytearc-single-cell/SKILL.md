@@ -1,6 +1,6 @@
 ---
 name: cytearc-single-cell
-description: Analyze single-cell data with core CyteArc, the out-of-core Zarr DataStore library with immutable artifacts and pipeline runs. Covers opening, converting and mounting stores (including public CyteBase datasets opened by their hf:// URIs), QC with removal audits, HVG/PCA/neighbour graphs, Leiden/Paris clustering, UMAP, markers and cautious annotation, batch correction and donor-level comparisons, RNA, ATAC, ADT, multimodal (WNN) and CRISPR screen pipeline recipes, headless plotting, provenance and export. Use when a task involves a CyteArc .zarr store, a CyteBase dataset, cytearc.DataStore, ds.pipeline, or converting H5AD/10x/MTX/Seurat data for CyteArc. For CyteBase catalog search in depth, use the cytebase skill.
+description: Analyze single-cell data with core CyteArc, the out-of-core Zarr DataStore library with immutable artifacts and pipeline runs. Covers opening, converting and mounting stores (including public CyteBase datasets opened by their hf:// URIs), QC with removal audits, HVG/PCA/neighbor graphs, Leiden/Paris clustering, UMAP, markers and cautious annotation, batch correction and donor-level comparisons, RNA, ATAC, ADT, multimodal (WNN) and CRISPR screen pipeline recipes, headless plotting, provenance and export. Use when a task involves a CyteArc .zarr store, a CyteBase dataset, cytearc.DataStore, ds.pipeline, or converting H5AD/10x/MTX/Seurat data for CyteArc. For CyteBase catalog search in depth, use the cytebase skill.
 license: BSD-3-Clause
 compatibility: Requires Python 3.13+ and a cytearc release after 1.3.0, which adds the ds.pipeline.rna/atac/adt/multimodal recipes (pip install "cytearc[extra]>1.3.0", plus --pre for a release candidate; CyteBase datasets need network access, and searching their catalog needs the separate cytebase package; add the tsne extra for t-SNE and the regulons extra for cisTarget ranking databases).
 metadata:
@@ -232,10 +232,10 @@ any changes you make after seeing the comparison as such.
 |---|---|
 | `references/data-access.md` | opening, inspecting, converting (H5AD, 10x, MTX, Seurat), CyteBase search, open and mount |
 | `references/quality-control.md` | QC metrics, MAD/manual/per-sample filters, removal audits, cell calling and hashtags in a recipe, ambient RNA between two runs, doublet scores and removal |
-| `references/features-and-graphs.md` | HVGs, normalization, PCA dims, ANN, neighbours, graph diagnostics, branching, subclustering |
-| `references/gene-blacklists.md` | what the default HVG blacklist removes, corrected blacklists for human and mouse, Ig/TCR and haemoglobin add-ons |
+| `references/features-and-graphs.md` | HVGs, normalization, PCA dims, ANN, neighbors, graph diagnostics, branching, subclustering |
+| `references/gene-blacklists.md` | what the default HVG blacklist removes, corrected blacklists for human and mouse, Ig/TCR and hemoglobin add-ons |
 | `references/clustering-and-embedding.md` | Leiden and Paris, choosing a partition, UMAP, LocalMAP and t-SNE, labels as arrays |
-| `references/markers-and-annotation.md` | marker tables, canonical marker panels, labelling, AUCell/WAGGR, cell cycle, potency scores and the fate maps they direct without source cells, label comparison |
+| `references/markers-and-annotation.md` | marker tables, canonical marker panels, labeling, AUCell/WAGGR, cell cycle, potency scores and the fate maps they direct without source cells, label comparison |
 | `references/pipeline-runs-and-artifacts.md` | recipes (`rna`, `atac`, `adt`, `multimodal`, `perturbation`) and their stage keywords, CITE-seq and TEA-seq runs, migrating from `pipeline.run`, events and cancellation, run reports, artifacts, lineage, failures, handoff record |
 | `references/plotting.md` | headless figures, run mode versus ref mode, every `ds.plots` method |
 | `references/integration-and-comparisons.md` | study design and units, donors in two arms, composition tests, Harmony and its safety, merging, mapping, condition comparisons |

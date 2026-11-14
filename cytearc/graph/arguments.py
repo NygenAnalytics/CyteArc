@@ -327,7 +327,7 @@ class NeighborQueryArguments(OperationArguments):
     operation: ClassVar[str] = "query_neighbors"
     artifact_kind: ClassVar[str] = "neighbors"
     # The percentage of cells that the search returned among their own
-    # nearest neighbours.
+    # nearest neighbors.
     diagnostics: ClassVar[tuple[str, ...]] = ("selfHitRate",)
     call: ClassVar[str | None] = "ds.graph.neighbors"
 

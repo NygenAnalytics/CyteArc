@@ -149,8 +149,8 @@ def test_writing_refuses_arrays_that_no_source_adds(store) -> None:
         )
 
 
-def _labelled(width: int, *, probabilities: bool = False) -> CloneAssignment:
-    """The truth's clones, each labelled by ``width`` characters."""
+def _labeled(width: int, *, probabilities: bool = False) -> CloneAssignment:
+    """The truth's clones, each labeled by ``width`` characters."""
     codes, clone_ids, clone_sizes = ranked_clones(
         TRUTH.clones,
         [f"{'c' * (width - 4)}{clone:04d}" for clone in range(TRUTH.n_clones)],
@@ -169,7 +169,7 @@ def test_the_save_check_counts_the_probabilities(store) -> None:
     # the budget that saves the clones without probabilities refuses them
     # with probabilities.
     planned = _plan(store, _arguments(store))
-    without, given = _labelled(12), _labelled(12, probabilities=True)
+    without, given = _labeled(12), _labeled(12, probabilities=True)
     with pytest.raises(MemoryError) as refused:
         write_clones(
             store.zw,

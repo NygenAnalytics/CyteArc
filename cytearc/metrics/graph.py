@@ -164,7 +164,7 @@ def neighbor_label_agreement(
         raise TypeError("Label codes must contain integers")
     n_cells = len(label_codes)
     if tuple(edges.shape) != (n_cells * k, 2):
-        raise ValueError("Graph edges must hold k rows for each labelled cell")
+        raise ValueError("Graph edges must hold k rows for each labeled cell")
     if not np.issubdtype(edges.dtype, np.integer):
         raise TypeError("Graph edges must contain integers")
     agreement = np.empty(n_cells, dtype=np.float64)

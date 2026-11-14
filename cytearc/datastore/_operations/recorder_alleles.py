@@ -294,7 +294,7 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
         ``columns``. The clones API reference lists the formats and their
         tokens.
 
-        Each file's format is recognised from its contents unless ``format``
+        Each file's format is recognized from its contents unless ``format``
         names it. A file that holds one array, as a CARLIN pair does, has
         its array named by ``integrations``, never inferred; the arrays of
         one library, such as DARLIN's ``CA``, ``TA`` and ``RA``, must share
@@ -327,7 +327,7 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
                 ``"cassiopeia_parquet"``, ``"petracer"``,
                 ``"petracer_characters"``, ``"typewriter"``,
                 ``"typewriter_chains"``, ``"treedata"``, ``"laml"`` and
-                ``"table"``, or None to recognise each file's format.
+                ``"table"``, or None to recognize each file's format.
             integrations: For a file that holds one array, its name, such as
                 ``"CA"``; for DNA Typewriter's ordered slots, a mapping of
                 each integration shorter than the recorder's arrays to its
@@ -1576,7 +1576,7 @@ def _check_named_tapes(
 ) -> None:
     """Refuse slots of contracted tapes that no row of the import names.
 
-    A misspelt integration would otherwise leave its tape at the recorder's
+    A misspelled integration would otherwise leave its tape at the recorder's
     full length without a word.
     """
     given = {

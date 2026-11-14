@@ -124,7 +124,7 @@ def straight_cut(dendrogram: np.ndarray, n_clusters: int) -> np.ndarray:
 
     As in scikit-network, only merges strictly below the cut height are
     applied, so tied heights can leave more clusters than requested. Clusters
-    are labelled from 1 by decreasing size, and equal sizes by node order.
+    are labeled from 1 by decreasing size, and equal sizes by node order.
     """
     if dendrogram.ndim != 2 or dendrogram.shape[1] != 4:
         raise ValueError("dendrogram must have shape (n_leaves - 1, 4)")
@@ -188,7 +188,7 @@ def _merge_tied_overflow(
 
 
 def fixed_cut(hierarchy: ParisHierarchy, n_clusters: int) -> np.ndarray:
-    """Cut a Paris hierarchy into exactly ``n_clusters`` clusters labelled from 1.
+    """Cut a Paris hierarchy into exactly ``n_clusters`` clusters labeled from 1.
 
     :func:`straight_cut` can leave extra clusters when merge heights tie at the
     cut. Tied merges inside components are then applied in ascending height,

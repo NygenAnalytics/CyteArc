@@ -187,7 +187,7 @@ def _association_rules(by: str, moi: str) -> tuple[DiagnosticRule, ...]:
             return _UNCHECKED_CALIBRATION[status]
         if moi == "high":
             return (
-                "No labelled cell carries a control guide, which a calibration "
+                "No labeled cell carries a control guide, which a calibration "
                 "group needs, so no calibration check was run"
             )
         n_guides = int(numbers["controlGuides"])
@@ -379,14 +379,14 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
         In a high-MOI screen each cell carries several guides, so few cells
         carry a target alone and almost none carry control guides only. With
         ``moi="high"``, as in SCEPTRE's high-MOI test (Barry et al. 2021,
-        2024), a target's treatment cells are the labelled cells whose guides
+        2024), a target's treatment cells are the labeled cells whose guides
         target it, or with ``"singleton"`` the cells that carry the guide,
-        whatever else they carry, and every other labelled cell is its
+        whatever else they carry, and every other labeled cell is its
         comparison: cells of other targets or of sibling guides, cells with
-        control guides and cells without a called guide. Every labelled cell
+        control guides and cells without a called guide. Every labeled cell
         is tested, so each one needs a sample label, covariate values, and
         guide UMIs, since the covariates add log detected guides and log guide
-        UMIs of the guide assay. Each gene is fitted once on all labelled
+        UMIs of the guide assay. Each gene is fitted once on all labeled
         cells, and all of its pairs share that fit.
         ``resampling="conditional"``, the default at high MOI, fits a logistic
         regression of each group's cells on the covariates and draws every
@@ -395,10 +395,10 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
         both the detection of guides and the expression of genes;
         ``"permutation"`` draws as many cells as the group uniformly from all
         cells. The calibration groups take any control guide called in a
-        labelled cell, as many guides as the median target or all of them when
+        labeled cell, as many guides as the median target or all of them when
         fewer, and their treatment cells, the cells that carry any guide of
-        the group, are compared with all other labelled cells, so one control
-        guide is enough; the grade is ``"none"`` when no labelled cell carries
+        the group, are compared with all other labeled cells, so one control
+        guide is enough; the grade is ``"none"`` when no labeled cell carries
         one. QC counts the expressing cells of each group against all other
         cells, and a target whose cells are exactly the cells of samples, or
         of a binary covariate, has no statistic.
@@ -472,7 +472,7 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
                 below the smallest first-round p-value,
                 ``resampling="conditional"`` goes with ``moi="low"``, trans
                 pairs have no ``features``, a table
-                of pairs is malformed, at low MOI no labelled cell carries
+                of pairs is malformed, at low MOI no labeled cell carries
                 control guides only, or a tested cell has no sample label, a
                 covariate value that is missing or not finite, or at high MOI
                 no guide UMIs.
@@ -605,15 +605,15 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
                 "There is no pair to test; pass pairs or positive controls"
             )
         cell_index = cell_selection_indices(self.zw, cell_selection)
-        n_labelled = len(cell_index)
+        n_labeled = len(cell_index)
         used = np.unique(np.concatenate([discovery[0], positive[0]]))
         compact = np.full(n_rows, -1, dtype=np.int64)
         compact[used] = np.arange(len(used))
         if high:
-            # Every labelled cell is tested, as a treatment cell of its
+            # Every labeled cell is tested, as a treatment cell of its
             # groups and a comparison cell of the others.
-            tested = np.arange(n_labelled, dtype=np.int64)
-            needing = "every labelled cell needs one"
+            tested = np.arange(n_labeled, dtype=np.int64)
+            needing = "every labeled cell needs one"
         else:
             # The tested cells: the control cells, then the cells of each
             # tested row, row by row. Only their samples and covariates enter
@@ -803,10 +803,10 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
     ) -> AssociationTables:
         """Test each tested row against the control cells, and each calibration group.
 
-        ``cell_index`` holds every labelled cell's position in the store, and
+        ``cell_index`` holds every labeled cell's position in the store, and
         ``controls`` and ``targets_cells`` the positions among them of the
         control cells and of the cells that carry a tested row alone, row by
-        row, as ``target_row`` gives each labelled cell's tested row, or -1.
+        row, as ``target_row`` gives each labeled cell's tested row, or -1.
         A calibration group's treatment cells are the control cells whose one
         guide is in the group, compared with the other control cells. The
         counts are read once for the QC, every feature of the assay when a
@@ -935,7 +935,7 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
                 n_calibration_pairs,
             )
         )
-        # Each labelled cell's position, row and flags; each tested cell's
+        # Each labeled cell's position, row and flags; each tested cell's
         # positions, sample, unit and control guide, and its covariates as read
         # and as fitted; and the treatment cells of every group.
         resident = len(cell_index) * 48 + groups.members.nbytes
@@ -1199,12 +1199,12 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
         resampling: str,
         operation: str,
     ) -> AssociationTables:
-        """Test each tested row and calibration group against all other labelled cells.
+        """Test each tested row and calibration group against all other labeled cells.
 
-        A row's treatment cells are the labelled cells whose guides target it,
+        A row's treatment cells are the labeled cells whose guides target it,
         or with ``by="guide"`` that carry the guide, and a calibration group's
         those that carry any of its control guides; ``cells`` are every
-        labelled cell's positions in the store. The counts are read once for
+        labeled cell's positions in the store. The counts are read once for
         the QC, every feature of the assay when a calibration check runs, and
         held for the tests when they fit half the memory left; the tests take
         bands of genes, each gene fitted once on all cells. The store must be
@@ -1235,7 +1235,7 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
         label_group = artifact_group(self.zw, labels)
         guide_names = read_array(calls, "guides").astype(str)
         target_is_control = read_array(label_group, "target_is_control").astype(bool)
-        # Each labelled cell's called guides, and by target the targets of its
+        # Each labeled cell's called guides, and by target the targets of its
         # guides, as stored: cells x the most of one cell, padded with -1. A
         # few cells with many guides widen every row, so the codes are read a
         # stored chunk of rows at a time, first to count each code's cells and,
@@ -1261,13 +1261,13 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
         _require_budget(
             counting_bytes,
             self.memoryBytes,
-            f"Counting the cells of each {counted_codes} over {n_cells} labelled "
+            f"Counting the cells of each {counted_codes} over {n_cells} labeled "
             "cells holds about",
             beside=" with the cells' guides read a stored chunk at a time",
             remedy=f"Raise mem_budget to at least {counting_bytes} bytes.",
         )
         guide_cells = code_counts(_code_blocks(guide_codes), len(guide_names))
-        # The control guides that some labelled cell carries make up the
+        # The control guides that some labeled cell carries make up the
         # calibration groups, which hold the median target's guides, or every
         # control guide when there are fewer; one is enough, since a group is
         # compared with all other cells.
@@ -1343,7 +1343,7 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
                 n_groups_nt, n_features, n_discovery, n_calibration_pairs
             )
         )
-        # Each labelled cell's positions, sample, totals and covariates as read
+        # Each labeled cell's positions, sample, totals and covariates as read
         # and as fitted; each guide's and target's cells; every group's cells,
         # with the cells' groups that the QC finds; every pair's arrays; and
         # the QC counts.
@@ -1387,7 +1387,7 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
         _require_budget(
             needed,
             self.memoryBytes,
-            f"Testing one gene over {n_cells} labelled cells holds about",
+            f"Testing one gene over {n_cells} labeled cells holds about",
             beside=(
                 " with the tests, their random sets and the cells' guides, read "
                 "a stored chunk at a time"

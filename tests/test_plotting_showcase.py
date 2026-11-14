@@ -229,7 +229,7 @@ def test_clone_figures_match_visual_references(tmp_path):
     figures.update(
         variant_figure_calls(store, import_truth_variants(store, truth, reads))
     )
-    # The truth's phylogeny drawn at five wedges: four clones and a grey
+    # The truth's phylogeny drawn at five wedges: four clones and a gray
     # wedge of the other four.
     _phylogeny, cut = import_truth_phylogeny(store, truth, tmp_path)
     figures["phylogeny"] = lambda **options: store.plots.phylogeny(

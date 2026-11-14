@@ -4,7 +4,7 @@ Importers identify each file they read by the SHA-256 of its bytes, and a
 folder of files, such as a Zarr store, by the paths and bytes of the files it
 holds: :func:`file_sha256`, :func:`directory_sha256` and :func:`path_sha256`.
 
-SplitMix64's finaliser (Steele, Lea and Flood 2014) mixes a 64-bit integer
+SplitMix64's finalizer (Steele, Lea and Flood 2014) mixes a 64-bit integer
 into one whose bits each depend on all of its bits. The row digests and the
 set hashes of clone calling mix with :func:`mix64`, and every counter-based
 generator keys its streams through it or :func:`mix64_array`: Leiden's, the
@@ -116,22 +116,22 @@ def path_sha256(path: str | os.PathLike[str]) -> str:
 
 @njit(cache=True, inline="always")
 def mix64(value: np.uint64) -> np.uint64:
-    """Return the SplitMix64 finaliser of a 64-bit unsigned integer."""
+    """Return the SplitMix64 finalizer of a 64-bit unsigned integer."""
     value = (value ^ (value >> np.uint64(30))) * _M1
     value = (value ^ (value >> np.uint64(27))) * _M2
     return value ^ (value >> np.uint64(31))
 
 
 def mix64_array(values: np.ndarray) -> np.ndarray:
-    """Return the SplitMix64 finaliser of each unsigned 64-bit integer.
+    """Return the SplitMix64 finalizer of each unsigned 64-bit integer.
 
     Each value equals :func:`mix64` of it; array products wrap around without
     warnings, as the compiled products do.
     """
     mixed = (values ^ (values >> np.uint64(30))) * _M1
     mixed = (mixed ^ (mixed >> np.uint64(27))) * _M2
-    finalised: np.ndarray = mixed ^ (mixed >> np.uint64(31))
-    return finalised
+    finalized: np.ndarray = mixed ^ (mixed >> np.uint64(31))
+    return finalized
 
 
 @njit(cache=True, nogil=True)

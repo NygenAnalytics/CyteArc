@@ -385,7 +385,7 @@ def test_files_of_each_sample_join_by_prefix_and_keep_their_clones_apart(
             barcode_suffix="-1",
         )
 
-    # Equal clone numbers of two files are two clones, labelled by prefix.
+    # Equal clone numbers of two files are two clones, labeled by prefix.
     assert loaded_partition(shared.store, ref) == TRUTH.partition(
         split_by=TRUTH.samples
     )

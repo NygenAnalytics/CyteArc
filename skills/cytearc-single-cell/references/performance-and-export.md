@@ -273,7 +273,7 @@ design.to_csv("pseudobulk_design.csv")
 print(design.groupby(["group", "condition"])["donor_id"].nunique().unstack(fill_value=0))
 ```
 
-`compare.compute_bulk` returns a `BulkProfiles` record. `bulk.profiles` holds one column per group x subgroup pair with cells, labelled by a MultiIndex of `group` and `subgroup`, and `bulk.columns` holds each column's `n_cells` under the same labels, so a design joins on the labels themselves and never parses a joined name. `remove_empty_columns=False` keeps pairs without cells as NaN, never zeros, with `n_cells` 0, and `count_detected=True` adds `bulk.detected`, the cells of each column whose count of each feature is above zero, and `bulk.detected_fraction`. Sums are exact: integral counts sum in an integer dtype (uint64 for unsigned
+`compare.compute_bulk` returns a `BulkProfiles` record. `bulk.profiles` holds one column per group x subgroup pair with cells, labeled by a MultiIndex of `group` and `subgroup`, and `bulk.columns` holds each column's `n_cells` under the same labels, so a design joins on the labels themselves and never parses a joined name. `remove_empty_columns=False` keeps pairs without cells as NaN, never zeros, with `n_cells` 0, and `count_detected=True` adds `bulk.detected`, the cells of each column whose count of each feature is above zero, and `bulk.detected_fraction`. Sums are exact: integral counts sum in an integer dtype (uint64 for unsigned
 counts, int64 for signed and bool counts) and floating-point counts in float64. Means average each
 group's rows of `normed`, so a cell without counts adds zeros and still counts toward its group.
 Model one population at a time with donor-level terms; with repeated samples per donor, include the

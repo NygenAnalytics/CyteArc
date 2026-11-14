@@ -23,9 +23,9 @@ class GrnResult:
             activating from repressing links.
         regulators: Names of the factors offered to every target model.
         artifact: Immutable ``grn_adjacencies`` artifact backing the result.
-        assay: Name of the RNA assay whose counts were modelled.
-        cell_selection: Cells whose counts were modelled.
-        feature_selection: Genes that were modelled as targets and regulators.
+        assay: Name of the RNA assay whose counts were modeled.
+        cell_selection: Cells whose counts were modeled.
+        feature_selection: Genes that were modeled as targets and regulators.
         method: Inference method, ``"grnboost2"``.
         random_seed: Random state of every target's regressor.
     """

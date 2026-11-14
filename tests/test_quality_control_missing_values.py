@@ -18,10 +18,10 @@ from cytearc.storage.artifacts import (
     fingerprint_strings,
 )
 from cytearc.storage.selections import read_stored_selection_mask
-from tests.fixtures_datastore import build_neighbourhood_graph
+from tests.fixtures_datastore import build_neighborhood_graph
 from tests.storage_helpers import insert_nullable_cell_column
 from tests.qc_helpers import (
-    create_labelled_qc_store,
+    create_labeled_qc_store,
     open_qc_store,
     open_small_store,
     fresh_qc_store,
@@ -135,7 +135,7 @@ def _imported_graph(store: DataStore, cells: ArtifactRef) -> ArtifactRef:
         max_cells=np.inf,
         blacklist="",
     )
-    return build_neighbourhood_graph(
+    return build_neighborhood_graph(
         store,
         cell_selection=cells,
         features=features,
@@ -374,23 +374,23 @@ def test_auto_filter_cells_rejects_masked_integer_sample_labels(small_store) -> 
         "sample column 'nullable_donor' contains missing labels among active cells"
     )
 
-    labelled = active & ~missing
-    store.cells.insert("labelled_cells", labelled)
+    labeled = active & ~missing
+    store.cells.insert("labeled_cells", labeled)
     ref = store.qc.auto_filter(
         attrs=["RNA_nCounts"],
-        cell_selection=store.snapshot_cell_selection("labelled_cells"),
+        cell_selection=store.snapshot_cell_selection("labeled_cells"),
         sample_column="nullable_donor",
         min_cells_per_sample=2,
     )
     counts = np.asarray(store.cells.fetch_all("RNA_nCounts"), dtype=float)
     expected = np.zeros(store.cells.N, dtype=bool)
-    expected[labelled] = reference_mad_keep(
-        {"RNA_nCounts": counts[labelled]}, labels[labelled], min_cells=2
+    expected[labeled] = reference_mad_keep(
+        {"RNA_nCounts": counts[labeled]}, labels[labeled], min_cells=2
     )
     np.testing.assert_array_equal(_selection_mask(store, ref), expected)
     assert store.artifacts.inspect(ref).parameters["sample_sizes"] == {
-        "1": int(np.sum(labelled & (labels == 1))),
-        "2": int(np.sum(labelled & (labels == 2))),
+        "1": int(np.sum(labeled & (labels == 1))),
+        "2": int(np.sum(labeled & (labels == 2))),
     }
 
 
@@ -399,8 +399,8 @@ def test_merged_partial_integer_column_cannot_seed_a_fake_qc_sample(
 ) -> None:
     from cytearc.merge import DataStoreMerge
 
-    left = create_labelled_qc_store(tmp_path / "left")
-    right = create_labelled_qc_store(tmp_path / "right")
+    left = create_labeled_qc_store(tmp_path / "left")
+    right = create_labeled_qc_store(tmp_path / "right")
     left.cells.insert("donor", np.array([1, 1, 2, 2, 1, 2], dtype=np.int64))
     destination = str(tmp_path / "merged")
     DataStoreMerge([left, right], destination, ["left", "right"], nthreads=1).dump()
@@ -408,17 +408,17 @@ def test_merged_partial_integer_column_cannot_seed_a_fake_qc_sample(
     active = np.asarray(merged.cells.fetch_all("I"), dtype=bool)
     missing = merged.cells._get_missing_mask_array("orig_donor")
     assert missing is not None
-    unlabelled = np.asarray(missing[:], dtype=bool)
+    unlabeled = np.asarray(missing[:], dtype=bool)
     ids = np.asarray(merged.cells.fetch_all("ids")).astype(str)
-    # The right store has no donor column, so exactly its cells are unlabelled.
-    np.testing.assert_array_equal(unlabelled, np.char.startswith(ids, "right__"))
+    # The right store has no donor column, so exactly its cells are unlabeled.
+    np.testing.assert_array_equal(unlabeled, np.char.startswith(ids, "right__"))
     donors = dict(zip([f"left__c{i}" for i in range(6)], [1, 1, 2, 2, 1, 2]))
     np.testing.assert_array_equal(
-        merged.cells.fetch_all("orig_donor")[~unlabelled],
-        [donors[cell] for cell in ids[~unlabelled]],
+        merged.cells.fetch_all("orig_donor")[~unlabeled],
+        [donors[cell] for cell in ids[~unlabeled]],
     )
-    assert np.any(active & unlabelled)
-    np.testing.assert_array_equal(merged.cells.fetch_all("orig_donor")[unlabelled], 0)
+    assert np.any(active & unlabeled)
+    np.testing.assert_array_equal(merged.cells.fetch_all("orig_donor")[unlabeled], 0)
 
     with pytest.raises(ValueError, match="contains missing labels among active"):
         merged.qc.auto_filter(
@@ -588,8 +588,8 @@ def test_select_cells_excludes_missing_artifact_labels(nullable) -> None:
         _selection_mask(store, zero),
         (codes == 0) & ~missing,
     )
-    labelled = store.select_cells(nullable.clusters, low=-1.0)
-    np.testing.assert_array_equal(_selection_mask(store, labelled), ~missing)
+    labeled = store.select_cells(nullable.clusters, low=-1.0)
+    np.testing.assert_array_equal(_selection_mask(store, labeled), ~missing)
 
 
 def test_doublet_detection_rejects_missing_cluster_labels(nullable) -> None:
@@ -617,7 +617,7 @@ def test_label_producers_reject_missing_cluster_labels(nullable) -> None:
     ):
         store.clusters.membership_strength(clusters, graph)
     both = (
-        r"contains missing labels\. Select the cells labelled in both artifacts "
+        r"contains missing labels\. Select the cells labeled in both artifacts "
         r"with select_cells\(\.\.\., include=\[\.\.\.\]\) and freeze both over "
         r"that selection with snapshot_cluster_labels\(\.\.\., cell_selection=\.\.\.\)$"
     )
@@ -631,7 +631,7 @@ def test_label_producers_reject_missing_cluster_labels(nullable) -> None:
 
 def test_make_bulk_excludes_missing_artifact_labels(nullable) -> None:
     store, clusters = nullable.store, nullable.clusters
-    labelled = store.select_cells(clusters, low=-1.0)
+    labeled = store.select_cells(clusters, low=-1.0)
     options: dict[str, Any] = {
         "aggr_type": "sum",
         "feature_label": "id",
@@ -640,12 +640,12 @@ def test_make_bulk_excludes_missing_artifact_labels(nullable) -> None:
 
     masked = store.compare.compute_bulk(clusters, **options).profiles
     restricted = store.compare.compute_bulk(
-        clusters, cell_selection=labelled, **options
+        clusters, cell_selection=labeled, **options
     ).profiles
 
     assert list(masked.columns) == [0, 1, 2]
     pd.testing.assert_frame_equal(masked, restricted)
-    # Each bulk column sums the raw counts of its labelled cells only.
+    # Each bulk column sums the raw counts of its labeled cells only.
     raw = np.asarray(store.RNA.rawData[np.arange(store.cells.N)].compute())
     for code in range(3):
         rows = (nullable.codes == code) & ~nullable.missing

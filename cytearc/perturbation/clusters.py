@@ -65,7 +65,7 @@ _EMBEDDING_EPOCHS = 500
 # this standard deviation that separates equal profiles, as umap-learn starts.
 _START_SPAN = 10.0
 _START_NOISE = 1e-4
-# The rows of distances that one step of the neighbour search sorts at once.
+# The rows of distances that one step of the neighbor search sorts at once.
 _SORT_ROWS = 256
 # The columns of the random matrices of scikit-learn's randomized PCA of the
 # starting layout: its 2 components and 10 more.
@@ -162,7 +162,7 @@ def perturbation_names(perturbations: object) -> list[str]:
 
 
 def _unit_rows(values: np.ndarray) -> np.ndarray:
-    """Return each row centred and scaled to length 1, or 0 when it is constant.
+    """Return each row centered and scaled to length 1, or 0 when it is constant.
 
     The dot product of two such rows is the Pearson correlation of the rows.
     """
@@ -300,11 +300,11 @@ def nearest_profiles(
 
     Args:
         distances: The distances, perturbations x perturbations.
-        n_neighbors: The neighbours of each perturbation, fewer than the
+        n_neighbors: The neighbors of each perturbation, fewer than the
             perturbations.
 
     Returns:
-        The neighbours' positions and their distances, perturbations x
+        The neighbors' positions and their distances, perturbations x
         ``n_neighbors``.
     """
     n = len(distances)
@@ -330,7 +330,7 @@ def embed_profiles(
     UMAP layout optimizes, with umap-learn's default spread of 1, smallest
     distance of 0.1 and 500 epochs, on one thread so that the layout depends
     only on ``seed``. The layout starts from the first two principal
-    components of the profiles as the metric sees them, centred and scaled
+    components of the profiles as the metric sees them, centered and scaled
     rows for ``"correlation"``, whose Euclidean distances follow 1 - r, scaled
     to span 10 units with noise of standard deviation 1e-4, as umap-learn
     starts from a PCA.
@@ -393,7 +393,7 @@ def cluster_memory_bytes(n_perturbations: int, n_features: int) -> int:
     """Estimate the bytes that :func:`cluster_profiles` holds at its peak.
 
     The float64 profiles stay while each step runs. The distances take the
-    centred profiles and a copy of the distances that makes them symmetric;
+    centered profiles and a copy of the distances that makes them symmetric;
     then, beside the distances, HDBSCAN holds its copy of them with the core
     distances and its tree, the linkage holds the condensed distances and
     its copy, and the layout's PCA holds copies of the profiles beside

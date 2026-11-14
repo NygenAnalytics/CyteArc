@@ -874,7 +874,7 @@ def prepare_site(*, preview: bool = False) -> Path:
                 "Saved execution is missing for:\n  "
                 + "\n  ".join(missing)
                 + "\nExecute these pages before building HTML, or use --preview "
-                "for a labelled source preview."
+                "for a labeled source preview."
             )
         print(
             "Unexecuted notebooks:\n  " + "\n  ".join(missing),

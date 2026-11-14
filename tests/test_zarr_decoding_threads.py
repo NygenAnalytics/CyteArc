@@ -272,7 +272,7 @@ def test_the_repertoire_operations_decode_their_own_charged_reads_on_the_stores_
         write_lines,
     )
 
-    def labelled(function, label):
+    def labeled(function, label):
         def run(*args, **kwargs):
             token = _READER.set(label)
             try:
@@ -283,10 +283,10 @@ def test_the_repertoire_operations_decode_their_own_charged_reads_on_the_stores_
         return run
 
     for name in ("_decoded_values", "_value_lengths"):
-        monkeypatch.setattr(repertoire, name, labelled(getattr(repertoire, name), name))
+        monkeypatch.setattr(repertoire, name, labeled(getattr(repertoire, name), name))
     for name in ("measure", "scan"):
         method = getattr(repertoire._ExportContigs, name)
-        monkeypatch.setattr(repertoire._ExportContigs, name, labelled(method, name))
+        monkeypatch.setattr(repertoire._ExportContigs, name, labeled(method, name))
     store = receptor_store(tmp_path, nthreads=2)
     path = write_lines(tmp_path, "clonal.csv", CELLRANGER_HEADER, CLONAL_ROWS)
     receptors = store.repertoire.import_receptors(

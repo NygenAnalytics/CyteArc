@@ -86,7 +86,7 @@ def _texts(result) -> list[str]:
 
 
 def _drawn_colors(ax) -> set[str]:
-    """The colours of what a panel draws: its bars and its lines."""
+    """The colors of what a panel draws: its bars and its lines."""
     colors = {to_hex(patch.get_facecolor()) for patch in ax.patches}
     colors |= {to_hex(line.get_color()) for line in ax.get_lines()}
     return colors
@@ -126,8 +126,8 @@ def test_legends_are_reported_with_their_scales_and_agree_with_the_drawing(
         ]
         assert len(drawn) == len(categorical)
         for (legend, scale), artist in zip(categorical, drawn, strict=True):
-            # The drawn legend lists the reported scale, in its colours, and
-            # each colour is one that its panel draws.
+            # The drawn legend lists the reported scale, in its colors, and
+            # each color is one that its panel draws.
             assert artist.get_title().get_text() == legend.label
             labels = [category_label(scale, value) for value in scale.order]
             assert [text.get_text() for text in artist.get_texts()] == labels
@@ -225,7 +225,7 @@ def test_figures_of_clonotypes_name_clonotypes(truth, name) -> None:
     result = truth.calls["clonotypes"][name](show=False)
     try:
         texts = _texts(result)
-        # Clonotypes are labelled by their junctions, never their IDs, and no
+        # Clonotypes are labeled by their junctions, never their IDs, and no
         # text that names them says "clone".
         assert not [text for text in texts if "clonotype_" in text]
         assert not [
@@ -445,9 +445,9 @@ def _empty_fate_bias(store):
 
 def test_figures_with_nothing_to_draw_raise(truth) -> None:
     store, clones = truth.store, truth.clones
-    if "unlabelled" not in store.cells.columns:
+    if "unlabeled" not in store.cells.columns:
         insert_nullable_cell_column(
-            store, "unlabelled", TRUTH.samples, np.ones(N_CELLS, dtype=bool)
+            store, "unlabeled", TRUTH.samples, np.ones(N_CELLS, dtype=bool)
         )
     plots = store.plots
     rarefaction = store.clones.rarefaction(clones, group_by="sample")
@@ -462,9 +462,9 @@ def test_figures_with_nothing_to_draw_raise(truth) -> None:
         late=store.snapshot_cell_selection("is_d4"),
     )
     empty = [
-        lambda: plots.clone_abundance(clones, group_by="unlabelled", show=False),
+        lambda: plots.clone_abundance(clones, group_by="unlabeled", show=False),
         lambda: plots.clonal_expansion(
-            store.clones.expansion(clones), group_by="unlabelled", show=False
+            store.clones.expansion(clones), group_by="unlabeled", show=False
         ),
         lambda: plots.clonal_rarefaction(
             replace(rarefaction, curves=rarefaction.curves.iloc[:0]), show=False
@@ -494,7 +494,7 @@ def _line_colors(ax) -> dict[str, str]:
     return {line.get_label(): to_hex(line.get_color()) for line in ax.get_lines()}
 
 
-def test_group_colours_follow_a_stored_palette(truth) -> None:
+def test_group_colors_follow_a_stored_palette(truth) -> None:
     store, clones = truth.store, truth.clones
     display = categorical_display(np.asarray(["d2", "d4"], dtype=object))
     for category, color in zip(
@@ -528,7 +528,7 @@ def test_group_colours_follow_a_stored_palette(truth) -> None:
         del column.attrs["display"]
 
 
-def test_a_subset_of_cells_never_recolours_a_group(truth) -> None:
+def test_a_subset_of_cells_never_recolors_a_group(truth) -> None:
     store, clones = truth.store, truth.clones
     every = store.plots.clonal_rarefaction(
         store.clones.rarefaction(clones, group_by="sample"), show=False
@@ -542,7 +542,7 @@ def test_a_subset_of_cells_never_recolours_a_group(truth) -> None:
         show=False,
     )
     try:
-        # d4 alone keeps the colour it takes beside d2, which colours are
+        # d4 alone keeps the color it takes beside d2, which colors are
         # assigned over every label of the column.
         assert d4.scales[0].palette == {"d4": every.scales[0].palette["d4"]}
         assert _line_colors(d4.axes["order_0"])["d4"] == every.scales[0].palette["d4"]
@@ -552,7 +552,7 @@ def test_a_subset_of_cells_never_recolours_a_group(truth) -> None:
         d4.close()
 
 
-def test_receptor_types_take_their_vocabularys_colours(truth) -> None:
+def test_receptor_types_take_their_vocabularys_colors(truth) -> None:
     result = truth.store.plots.clone_abundance(truth.clonotypes, show=False)
     try:
         scale = result.scales[0]
@@ -567,7 +567,7 @@ def test_receptor_types_take_their_vocabularys_colours(truth) -> None:
         result.close()
 
 
-def test_label_artifacts_colour_groups_over_all_their_labels(truth) -> None:
+def test_label_artifacts_color_groups_over_all_their_labels(truth) -> None:
     store, clones = truth.store, truth.clones
     labels = store.snapshot_cluster_labels(
         "cell_type", cell_selection=every_cell(store)
@@ -575,7 +575,7 @@ def test_label_artifacts_colour_groups_over_all_their_labels(truth) -> None:
     store.cells.insert("not_monocyte", TRUTH.cell_types != "Monocyte", overwrite=True)
     every = store.plots.clone_abundance(clones, groups=labels, show=False)
     # Without the monocytes, the first label, the two other types keep the
-    # second and third colours, which colours over the groups drawn would
+    # second and third colors, which colors over the groups drawn would
     # not give them.
     rest = store.plots.clonal_rarefaction(
         store.clones.rarefaction(
@@ -614,11 +614,11 @@ def _insert_masked_labels(store) -> None:
         )
 
 
-def test_missing_labels_take_no_colour(truth) -> None:
+def test_missing_labels_take_no_color(truth) -> None:
     store, clones = truth.store, truth.clones
     _insert_masked_labels(store)
     # A missing label, which would sort before x as the text of no label,
-    # takes no colour.
+    # takes no color.
     result = store.plots.clone_abundance(clones, group_by="masked_xy", show=False)
     try:
         assert result.scales[0].order == ("x", "y")
@@ -687,12 +687,12 @@ def test_each_figure_draws_in_a_composite_with_its_legends_once(truth, name) -> 
         assert len(colorbars) == kinds.count("colorbar")
         assert len(composite.legends) == len(result.legends)
         # The composite names every axis that the figure still draws, a
-        # matrix's tree included, and none of the colour bars it replaced.
+        # matrix's tree included, and none of the color bars it replaced.
         assert {key for _, key in composite.axes} == {
             key for key, ax in result.axes.items() if not is_colorbar_axes(ax)
         }
         if "dendrogram" in result.axes:
-            # The tree stays above its matrix, which the colour bar spans.
+            # The tree stays above its matrix, which the color bar spans.
             assert result.axes["dendrogram"] in result.axes["matrix"].child_axes
     finally:
         plt.close(figure)
@@ -832,17 +832,17 @@ def test_a_hidden_repertoire_legend_is_still_reported(repertoire, name) -> None:
 
 
 def _stacks(ax) -> dict[float, list[tuple[float, str]]]:
-    """Each vertical bar's parts with a height, from its top: their heights and colours."""
+    """Each vertical bar's parts with a height, from its top: their heights and colors."""
     bars: dict[float, list[tuple[float, float, str]]] = {}
     for patch in ax.patches:
         if patch.get_height() > 0:
-            centre = round(patch.get_x() + patch.get_width() / 2, 6)
-            bars.setdefault(centre, []).append(
+            center = round(patch.get_x() + patch.get_width() / 2, 6)
+            bars.setdefault(center, []).append(
                 (patch.get_y(), patch.get_height(), to_hex(patch.get_facecolor()))
             )
     return {
-        centre: [(height, color) for _y, height, color in sorted(parts, reverse=True)]
-        for centre, parts in sorted(bars.items())
+        center: [(height, color) for _y, height, color in sorted(parts, reverse=True)]
+        for center, parts in sorted(bars.items())
     }
 
 
@@ -866,7 +866,7 @@ def test_stacked_bars_draw_their_first_part_on_top(repertoire) -> None:
             stacks = _stacks(qc.axes[panel])
             groups = list(dict.fromkeys(table["group"]))
             assert len(stacks) == len(groups)
-            for (_centre, parts), group in zip(stacks.items(), groups, strict=True):
+            for (_center, parts), group in zip(stacks.items(), groups, strict=True):
                 # From the top, the group's categories with cells in the
                 # legend's order, each its fraction of the group's cells.
                 rows = table[table["group"] == group].set_index(panel)["n_cells"]
@@ -899,15 +899,15 @@ def test_stacked_bars_draw_their_first_part_on_top(repertoire) -> None:
         states.close()
 
 
-def test_locus_panels_share_one_colour_limit(repertoire) -> None:
+def test_locus_panels_share_one_color_limit(repertoire) -> None:
     for name, table in (("gene_usage", "usage"), ("gene_pairing", "pairs")):
         result = repertoire.calls[name](show=False)
         try:
             fractions = result.tables[table]["fraction"]
             loci = sorted(set(result.tables[table]["locus"]))
             assert list(result.axes) == loci
-            # Every locus panel colours its fractions from 0 to the largest of
-            # any locus, and the one colour bar stands beside them all.
+            # Every locus panel colors its fractions from 0 to the largest of
+            # any locus, and the one color bar stands beside them all.
             for locus in loci:
                 (image,) = result.axes[locus].images
                 assert (image.norm.vmin, image.norm.vmax) == (0.0, fractions.max())
@@ -920,7 +920,7 @@ def test_locus_panels_share_one_colour_limit(repertoire) -> None:
             result.close()
 
 
-def test_each_vocabulary_takes_one_palette_with_one_colour_for_no_value(
+def test_each_vocabulary_takes_one_palette_with_one_color_for_no_value(
     repertoire,
 ) -> None:
     from cytearc.clones.recorders import STATES
@@ -952,11 +952,11 @@ def test_each_vocabulary_takes_one_palette_with_one_colour_for_no_value(
     for scale, values in vocabularies:
         assert scale.order == tuple(values)
         assert set(scale.palette) == set(values)
-        # Each value of a vocabulary takes a colour of its own.
+        # Each value of a vocabulary takes a color of its own.
         assert len(set(scale.palette.values())) == len(values)
     # Every state of a site but not applicable is drawn.
     assert set(RECORDER_STATE_SCALE.order) == set(STATES) - {"not_applicable"}
-    # No value takes the missing colour of every scale, in every vocabulary.
+    # No value takes the missing color of every scale, in every vocabulary.
     assert resolve_category_scale(["a"], CategoricalScale()).missing_color == (
         NO_VALUE_COLOR
     )
@@ -964,7 +964,7 @@ def test_each_vocabulary_takes_one_palette_with_one_colour_for_no_value(
     assert CHAIN_PAIRING_SCALE.palette[NO_RECEPTOR] == NO_VALUE_COLOR
     assert RECORDER_STATE_SCALE.palette["missing"] == NO_VALUE_COLOR
     assert RECORDER_STATE_SCALE.palette["unedited"] == MUTED_COLOR != NO_VALUE_COLOR
-    # A pairing named like a receptor type takes the receptor type's colour.
+    # A pairing named like a receptor type takes the receptor type's color.
     for value in ("ambiguous", "multichain"):
         assert CHAIN_PAIRING_SCALE.palette[value] == RECEPTOR_TYPE_SCALE.palette[value]
     # Legends name states in words, and tables keep their tokens.
@@ -980,7 +980,7 @@ def test_each_vocabulary_takes_one_palette_with_one_colour_for_no_value(
         assert "unknown_mark" in set(result.tables["site_states"]["state"])
     finally:
         result.close()
-    # Ungrouped, the cells without a receptor are drawn in the grey of no value.
+    # Ungrouped, the cells without a receptor are drawn in the gray of no value.
     qc = repertoire.store.plots.receptor_qc(repertoire.receptors, show=False)
     try:
         for panel in ("receptor_type", "chain_pairing"):
@@ -1106,9 +1106,9 @@ def test_repertoire_figures_of_many_groups_stop_at_the_page_width(
 
 def test_repertoire_figures_with_nothing_to_draw_raise(repertoire) -> None:
     store, receptors = repertoire.store, repertoire.receptors
-    if "unlabelled" not in store.cells.columns:
+    if "unlabeled" not in store.cells.columns:
         insert_nullable_cell_column(
-            store, "unlabelled", TRUTH.samples, np.ones(N_CELLS, dtype=bool)
+            store, "unlabeled", TRUTH.samples, np.ones(N_CELLS, dtype=bool)
         )
     store.cells.insert("nobody", np.zeros(N_CELLS, dtype=bool), overwrite=True)
     nobody = store.snapshot_cell_selection("nobody")
@@ -1126,7 +1126,7 @@ def test_repertoire_figures_with_nothing_to_draw_raise(repertoire) -> None:
         )
     )
     empty = [
-        lambda: plots.receptor_qc(receptors, group_by="unlabelled", show=False),
+        lambda: plots.receptor_qc(receptors, group_by="unlabeled", show=False),
         lambda: plots.gene_usage(
             store.repertoire.gene_usage(receptors, cell_selection=nobody), show=False
         ),
@@ -1261,7 +1261,7 @@ def _patch_colors(ax) -> list[str]:
     return [to_hex(patch.get_facecolor()) for patch in ax.patches]
 
 
-def test_receptor_qc_draws_the_categories_with_cells_in_their_vocabularys_colours(
+def test_receptor_qc_draws_the_categories_with_cells_in_their_vocabularys_colors(
     repertoire,
 ) -> None:
     from cytearc.plotting._style import CHAIN_ARM_SCALE, CHAIN_PAIRING_SCALE
@@ -1284,13 +1284,13 @@ def test_receptor_qc_draws_the_categories_with_cells_in_their_vocabularys_colour
             assert [patch.get_width() for patch in ax.patches] == [
                 counts[value] for value in held
             ]
-            # Grouped, the legend lists the same categories in the same colours.
+            # Grouped, the legend lists the same categories in the same colors.
             legend = grouped.axes[panel].get_legend()
             assert [text.get_text() for text in legend.get_texts()] == held
             assert [
                 to_hex(handle.get_facecolor()) for handle in legend.legend_handles
             ] == [vocabulary.palette[value] for value in held]
-        # The chains of each arm stand side by side in the arm's colour, the
+        # The chains of each arm stand side by side in the arm's color, the
         # VJ chains at the left, at the counts of the table.
         chains = plain.tables["chains_per_cell"]
         ax = plain.axes["chains_per_cell"]
@@ -1312,8 +1312,8 @@ def test_receptor_qc_draws_the_categories_with_cells_in_their_vocabularys_colour
             if to_hex(p.get_facecolor()) == CHAIN_ARM_SCALE.palette["VDJ"]
         )
         assert vj < vdj
-        # A colour of the figure means one thing: the arms take none of the
-        # receptor types' or pairings' colours.
+        # A color of the figure means one thing: the arms take none of the
+        # receptor types' or pairings' colors.
         assert not set(CHAIN_ARM_SCALE.palette.values()) & (
             set(RECEPTOR_TYPE_SCALE.palette.values())
             | set(CHAIN_PAIRING_SCALE.palette.values())
@@ -1329,7 +1329,7 @@ def test_receptor_qc_draws_the_categories_with_cells_in_their_vocabularys_colour
         grouped.close()
 
 
-def test_bars_of_a_locus_take_the_locus_colour(repertoire) -> None:
+def test_bars_of_a_locus_take_the_locus_color(repertoire) -> None:
     from cytearc.plotting._style import LOCUS_SCALE
 
     store, receptors = repertoire.store, repertoire.receptors
@@ -1351,7 +1351,7 @@ def test_bars_of_a_locus_take_the_locus_colour(repertoire) -> None:
         lengths.close()
 
 
-def test_a_spectratype_of_some_cells_keeps_each_groups_colour(repertoire) -> None:
+def test_a_spectratype_of_some_cells_keeps_each_groups_color(repertoire) -> None:
     store, receptors = repertoire.store, repertoire.receptors
     store.cells.insert("not_monocyte", TRUTH.cell_types != "Monocyte", overwrite=True)
     full = store.plots.spectratype(
@@ -1369,7 +1369,7 @@ def test_a_spectratype_of_some_cells_keeps_each_groups_colour(repertoire) -> Non
         palette = full.scales[0].palette
         assert list(palette) == ["Monocyte", "Neutrophil", "Undifferentiated"]
         # Without the monocytes, the first label, the other two keep the
-        # colours they take beside it, which colours over the groups drawn
+        # colors they take beside it, which colors over the groups drawn
         # would not give them.
         assert rest.scales[0].order == ("Neutrophil", "Undifferentiated")
         assert rest.scales[0].palette == {
@@ -1388,10 +1388,10 @@ def test_a_spectratype_of_some_cells_keeps_each_groups_colour(repertoire) -> Non
         rest.close()
 
 
-def test_barcode_libraries_take_colours_over_every_library(repertoire) -> None:
+def test_barcode_libraries_take_colors_over_every_library(repertoire) -> None:
     loaded = repertoire.store.clones.load_barcodes(repertoire.barcodes)
     # A library listed first that holds no record draws in neither panel,
-    # and keeps its colour from the others.
+    # and keeps its color from the others.
     extra = loaded.libraries.iloc[:1].assign(library="aaa", n_records=0)
     padded = replace(loaded, libraries=pd.concat([extra, loaded.libraries]))
     store = SimpleNamespace(clones=SimpleNamespace(load_barcodes=lambda ref: padded))
@@ -1707,7 +1707,7 @@ _VARIANT_PANELS = {
 
 
 def _painted_colors(ax) -> set[str]:
-    """The colours that a panel paints: bars, outlines, lines, points and a strip's colours."""
+    """The colors that a panel paints: bars, outlines, lines, points and a strip's colors."""
     colors = {
         to_hex(patch.get_facecolor() if patch.get_fill() else patch.get_edgecolor())
         for patch in ax.patches
@@ -1807,17 +1807,17 @@ def test_a_hidden_variant_legend_is_still_reported(variants, name) -> None:
 
 
 def _rows_of_parts(ax) -> list[list[tuple[float, str]]]:
-    """Each horizontal bar's parts with a width, from the left: their widths and colours, top bar first."""
+    """Each horizontal bar's parts with a width, from the left: their widths and colors, top bar first."""
     bars: dict[float, list[tuple[float, float, str]]] = {}
     for patch in ax.patches:
         if patch.get_width() > 0:
-            centre = round(patch.get_y() + patch.get_height() / 2, 6)
-            bars.setdefault(centre, []).append(
+            center = round(patch.get_y() + patch.get_height() / 2, 6)
+            bars.setdefault(center, []).append(
                 (patch.get_x(), patch.get_width(), to_hex(patch.get_facecolor()))
             )
     return [
         [(width, color) for _x, width, color in sorted(parts)]
-        for _centre, parts in sorted(bars.items(), reverse=True)
+        for _center, parts in sorted(bars.items(), reverse=True)
     ]
 
 
@@ -1849,7 +1849,7 @@ def test_genotype_bars_draw_their_first_call_at_the_left(variants) -> None:
         result.close()
 
 
-def test_genotype_calls_take_one_palette_with_one_grey_for_no_value(variants) -> None:
+def test_genotype_calls_take_one_palette_with_one_gray_for_no_value(variants) -> None:
     from cytearc.plotting._contracts import CategoricalScale
     from cytearc.plotting._style import resolve_category_scale
     from cytearc.plotting._style import (
@@ -1863,8 +1863,8 @@ def test_genotype_calls_take_one_palette_with_one_grey_for_no_value(variants) ->
     assert GENOTYPE_CALL_SCALE.order == CALLS
     assert set(GENOTYPE_CALL_SCALE.palette) == set(CALLS)
     assert len(set(GENOTYPE_CALL_SCALE.palette.values())) == len(CALLS)
-    # No evidence takes the grey of no value, and evidence that a rule did
-    # not call the muted grey, as the recorder's missing and unedited sites.
+    # No evidence takes the gray of no value, and evidence that a rule did
+    # not call the muted gray, as the recorder's missing and unedited sites.
     assert GENOTYPE_CALL_SCALE.palette["missing"] == NO_VALUE_COLOR
     assert resolve_category_scale(["a"], CategoricalScale()).missing_color == (
         NO_VALUE_COLOR
@@ -2050,9 +2050,9 @@ def test_variant_figures_with_nothing_to_draw_raise(variants, tmp_path) -> None:
     import warnings
 
     store = variants.store
-    if "unlabelled" not in store.cells.columns:
+    if "unlabeled" not in store.cells.columns:
         insert_nullable_cell_column(
-            store, "unlabelled", TRUTH.samples, np.ones(N_CELLS, dtype=bool)
+            store, "unlabeled", TRUTH.samples, np.ones(N_CELLS, dtype=bool)
         )
     store.cells.insert("only_first_cell", np.arange(N_CELLS) == 0, overwrite=True)
     nobody = tmp_path / "nobody.tsv"
@@ -2073,7 +2073,7 @@ def test_variant_figures_with_nothing_to_draw_raise(variants, tmp_path) -> None:
         lambda: plots.variant_depth(unnamed, show=False),
         lambda: plots.variant_statistics(one_cell, show=False),
         lambda: plots.allele_frequencies(none_informative, show=False),
-        lambda: plots.genotypes(variants.genotypes, group_by="unlabelled", show=False),
+        lambda: plots.genotypes(variants.genotypes, group_by="unlabeled", show=False),
     ]
     assert len(empty) == len(VARIANT_FIGURES)
     figures = set(plt.get_fignums())
@@ -2103,7 +2103,7 @@ def test_each_variant_figure_draws_in_a_composite_with_its_legends_once(
         assert len(colorbars) == kinds.count("colorbar")
         assert len(composite.legends) == len(result.legends)
         # The composite names every axis that the figure still draws, a
-        # strip of clone colours included, and none of the colour bars it
+        # strip of clone colors included, and none of the color bars it
         # replaced.
         assert {key for _, key in composite.axes} == {
             key for key, ax in result.axes.items() if not is_colorbar_axes(ax)
@@ -2309,7 +2309,7 @@ def phylogeny(tmp_path_factory) -> SimpleNamespace:
 
 
 def _tree_colors(ax) -> set[str]:
-    """The colours that a tree's panel fills: its wedges and points."""
+    """The colors that a tree's panel fills: its wedges and points."""
     colors = {to_hex(patch.get_facecolor()) for patch in ax.patches if patch.get_fill()}
     for collection in ax.collections:
         colors |= {to_hex(color) for color in collection.get_facecolors()}

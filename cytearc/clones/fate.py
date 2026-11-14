@@ -60,7 +60,7 @@ COUPLING_METHODS = (
 )
 _SHARE_COSINE, _ABUNDANCE_COSINE, _NORMALIZED_COVARIANCE, _JACCARD = range(4)
 
-# SplitMix64 (Steele, Lea and Flood 2014): the finaliser of a key plus a
+# SplitMix64 (Steele, Lea and Flood 2014): the finalizer of a key plus a
 # counter gives each draw, so a draw depends only on its stream and counter.
 _GOLDEN = np.uint64(0x9E3779B97F4A7C15)
 _SALT = np.uint64(0x2545F4914F6CDD1D)

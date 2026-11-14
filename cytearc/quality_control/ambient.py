@@ -14,7 +14,7 @@ gene ``g`` contributes.
 
 - The soup profile ``b_g`` is the share of gene ``g`` among the summed counts
   of droplets that hold no cell (equation S1).
-- Genes that some cells cannot express, such as haemoglobin genes outside
+- Genes that some cells cannot express, such as hemoglobin genes outside
   erythroid cells, measure contamination: in such a cell every count of those
   genes comes from the soup. A cell expresses a gene set when its counts of the
   set are significantly larger than the soup alone would give it, a Poisson

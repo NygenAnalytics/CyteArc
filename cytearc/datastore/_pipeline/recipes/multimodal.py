@@ -52,7 +52,7 @@ _MODALITIES = "modalities"
 
 
 def _coordinates(store: Any, neighbors: ArtifactRef) -> ArtifactRef:
-    """Return the coordinates that built a run's neighbour graph."""
+    """Return the coordinates that built a run's neighbor graph."""
     raw = (inspect_artifact(store.zw, neighbors).inputs or {}).get("coordinates")
     if not isinstance(raw, Mapping):
         raise ValueError(

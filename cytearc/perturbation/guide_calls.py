@@ -8,10 +8,10 @@ molecules, so a guide is called in a cell only when a calling method, such as
 Cell Ranger's or CyteArc's own, decides that the cell carries it.
 
 These functions turn calls into the arrays of a ``guide_calls`` artifact and
-summarise each cell's guide counts. They read count blocks that a caller
+summarize each cell's guide counts. They read count blocks that a caller
 streams and never touch storage.
 
-- A cell with one called guide is labelled with the guide's ID, a cell with
+- A cell with one called guide is labeled with the guide's ID, a cell with
   none with ``"Negative"``, and a cell with two or more with ``"Multiple"``.
 - A cell's called guides are ordered by UMIs, most first, and guides with equal
   UMIs by their position in the assay, so the order never depends on the

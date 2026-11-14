@@ -1040,13 +1040,13 @@ class BarcodeTruth:
             ``sample``, ``cell_barcode`` (its 16 bases, without ``-1``),
             ``umi``, ``barcode`` as sequenced, ``true_barcode`` as an error
             correction gives it, ``reads`` and ``kind``.
-        unlabelled: The ``sample`` and ``cell_barcode`` of each cell without a
+        unlabeled: The ``sample`` and ``cell_barcode`` of each cell without a
             molecule.
     """
 
     clone_barcodes: tuple[tuple[str, ...], ...]
     molecules: pd.DataFrame
-    unlabelled: pd.DataFrame
+    unlabeled: pd.DataFrame
 
     def sample_molecules(self, sample: str) -> pd.DataFrame:
         """The molecules of one sample's cells, and for ``d2`` of the droplets outside."""
@@ -1186,12 +1186,12 @@ def barcode_truth(truth: CloneTruth, seed: int = 0) -> BarcodeTruth:
                 kind="outside",
             )
     molecules = pd.DataFrame(rows)
-    labelled = set(molecules["cell"])
-    quiet = [cell for cell in range(N_CELLS) if cell not in labelled]
+    labeled = set(molecules["cell"])
+    quiet = [cell for cell in range(N_CELLS) if cell not in labeled]
     return BarcodeTruth(
         clone_barcodes=tuple(clone_barcodes),
         molecules=molecules,
-        unlabelled=pd.DataFrame(
+        unlabeled=pd.DataFrame(
             {"sample": truth.samples[quiet], "cell_barcode": truth.barcodes[quiet]}
         ),
     )
@@ -1351,7 +1351,7 @@ def write_quicat(barcodes: BarcodeTruth, path: Path, *, sample: str) -> Path:
         f"{sample},{row.cell_barcode}-1,{row.barcode},{row.umis}"
         for row in pairs.itertuples(index=False)
     ]
-    quiet = barcodes.unlabelled[barcodes.unlabelled["sample"] == sample]
+    quiet = barcodes.unlabeled[barcodes.unlabeled["sample"] == sample]
     lines += [f"{sample},{cell}-1,," for cell in quiet["cell_barcode"]]
     return _write(path, lines)
 
@@ -1768,13 +1768,13 @@ def calling_truth(
                 for _ in range(5):
                     add(cell, barcode, 20, "crowded")
     molecules = pd.DataFrame(rows)
-    labelled = set(molecules["cell"])
-    quiet = [cell for cell in range(N_CELLS) if cell not in labelled]
+    labeled = set(molecules["cell"])
+    quiet = [cell for cell in range(N_CELLS) if cell not in labeled]
     return CallingTruth(
         barcodes=BarcodeTruth(
             clone_barcodes=clone_barcodes,
             molecules=molecules,
-            unlabelled=pd.DataFrame(
+            unlabeled=pd.DataFrame(
                 {"sample": truth.samples[quiet], "cell_barcode": truth.barcodes[quiet]}
             ),
         ),

@@ -609,10 +609,10 @@ def test_graph_consumers_reject_unusable_graph_references(tmp_path: Path) -> Non
     [
         # One row more than the graph's cell selection holds.
         (17, 1, np.zeros((17, 2), np.uint64), "align with the selected cell count"),
-        # No neighbours, with the empty edge table that agrees with that.
-        (16, 0, np.zeros((0, 2), np.uint64), "at least one neighbour per cell"),
+        # No neighbors, with the empty edge table that agrees with that.
+        (16, 0, np.zeros((0, 2), np.uint64), "at least one neighbor per cell"),
     ],
-    ids=["extra_row", "no_neighbours"],
+    ids=["extra_row", "no_neighbors"],
 )
 def test_membership_strength_rejects_hand_edited_graph_dimensions(
     monkeypatch: pytest.MonkeyPatch,
@@ -729,13 +729,13 @@ def test_smart_label_needs_one_cell_selection_and_handles_no_cells(
         datastore.clusters.relabel_by_overlap(everyone, half)
 
     empty = datastore.snapshot_cell_selection("nobody")
-    relabelled = datastore.clusters.relabel_by_overlap(
+    relabeled = datastore.clusters.relabel_by_overlap(
         datastore.snapshot_cluster_labels("group", cell_selection=empty),
         datastore.snapshot_cluster_labels("base", cell_selection=empty),
     )
-    assert relabelled.kind == "smart_label"
-    assert datastore.artifacts.load(relabelled)["values"].shape == (0,)
-    assert inspect_artifact(datastore.zw, relabelled).inputs["cell_selection"] == (
+    assert relabeled.kind == "smart_label"
+    assert datastore.artifacts.load(relabeled)["values"].shape == (0,)
+    assert inspect_artifact(datastore.zw, relabeled).inputs["cell_selection"] == (
         empty.to_dict()
     )
 
@@ -820,7 +820,7 @@ def test_smart_label_needs_one_cell_selection_and_handles_no_cells(
             "missing_label must be a string",
         ),
         (
-            {"kind": "categorical", "categories": [], "missing_color": "grey"},
+            {"kind": "categorical", "categories": [], "missing_color": "gray"},
             ValueError,
             "missing_color must be a hex color",
         ),

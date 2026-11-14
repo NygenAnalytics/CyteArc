@@ -334,7 +334,7 @@ def test_variants_are_refused_for_other_formats(store, tmp_path) -> None:
 def test_a_tapestri_import_is_reused_and_warns_again(store, tmp_path) -> None:
     path = write_tapestri(TRUTH, tmp_path / "run.h5")
     first, _ = _import(store, path)
-    # The format is recognised from the file, so naming it reuses the import,
+    # The format is recognized from the file, so naming it reuses the import,
     # which warns once, from its saved diagnostics.
     with pytest.warns(DiagnosticWarning, match=_SKIPPED) as caught:
         again = store.variants.import_counts(
@@ -577,7 +577,7 @@ def test_the_store_reader_gives_every_read_in_batches(tmp_path) -> None:
     )
 
 
-def test_tapestri_and_dab_seq_files_are_recognised(tmp_path) -> None:
+def test_tapestri_and_dab_seq_files_are_recognized(tmp_path) -> None:
     from cytearc.readers._variant_files import hdf5_format
 
     assert hdf5_format(str(write_tapestri(TRUTH, tmp_path / "a.h5"))) == "tapestri"
@@ -841,7 +841,7 @@ def _call_name(
 
 
 #: Tapestri's genotype units, by column of ``TAPESTRI_VARIANTS``, in the
-#: order of the counts' alleles. A unit is labelled by its site and alleles,
+#: order of the counts' alleles. A unit is labeled by its site and alleles,
 #: Tapestri's name unless the reference was extended, as chr1:2000:T/G is.
 _TAPESTRI_UNITS = {
     0: "chr1:1000:G/A",

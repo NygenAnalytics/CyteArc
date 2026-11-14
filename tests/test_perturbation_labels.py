@@ -376,7 +376,7 @@ def test_labels_refuse_calls_they_cannot_label(tmp_path, monkeypatch) -> None:
             source.perturbation.labels(calls, controls=["Non-Targeting"])
     targets = {"CRISPR1": "GENE_A", "CRISPR4": "Non-Targeting"}
     monkeypatch.setattr(store, "memoryBytes", 100)
-    with pytest.raises(MemoryError, match="Labelling 9 cells"):
+    with pytest.raises(MemoryError, match="Labeling 9 cells"):
         store.perturbation.labels(calls, controls=["Non-Targeting"], targets=targets)
     assert not store.artifacts.list(kind="perturbation_labels")
 
@@ -405,7 +405,7 @@ def test_label_arrays_without_targets_keep_one_column() -> None:
     )
     assert arrays.values.tolist() == [CONTROL, NEGATIVE]
     assert arrays.target_codes.tolist() == [[-1], [-1]]
-    # g0 has no target, so a cell that carries it cannot be labelled.
+    # g0 has no target, so a cell that carries it cannot be labeled.
     with pytest.raises(ValueError, match="1 called guides have no target"):
         perturbation_label_arrays(np.asarray([[0], [1]]), targets, policy="single")
     cells, per_target, guides = perturbation_label_frames(
@@ -542,7 +542,7 @@ def wide_calls(tmp_path_factory) -> SimpleNamespace:
 
 @pytest.mark.slow
 @pytest.mark.parametrize("policy", POLICIES)
-def test_labelling_refuses_a_small_budget_before_it_writes(
+def test_labeling_refuses_a_small_budget_before_it_writes(
     wide_calls, tmp_path, policy
 ) -> None:
     path = copy_store(wide_calls.path, tmp_path).zarr_loc
@@ -555,7 +555,7 @@ def test_labelling_refuses_a_small_budget_before_it_writes(
     # The refusal names the step that it refused, before anything is written.
     small = open_store(path, mem_budget=10_000)
     saved = written(small)
-    with pytest.raises(MemoryError, match="^Labelling 4000 cells holds about"):
+    with pytest.raises(MemoryError, match="^Labeling 4000 cells holds about"):
         label(small)
     assert written(open_store(path)) == saved
     store = open_store(path)

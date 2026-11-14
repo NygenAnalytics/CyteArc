@@ -60,7 +60,7 @@ def test_gene_programs_recover_planted_programs():
 
 
 def test_gene_programs_find_none_in_noise_at_metacell_scale():
-    # Few samples make chance correlations strong; nearest-neighbour graphs of
+    # Few samples make chance correlations strong; nearest-neighbor graphs of
     # noise genes must still not pass as programs.
     for samples in (30, 50, 120):
         profiles = np.random.default_rng(samples).standard_normal((samples, 1500))

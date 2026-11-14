@@ -234,7 +234,7 @@ def test_cluster_connectivity_aggregates_reciprocals_once():
     lines, node_points = ax.collections
     assert isinstance(lines, LineCollection)
     assert lines.get_zorder() < node_points.get_zorder()
-    # One segment joins the two node centres of every retained edge.
+    # One segment joins the two node centers of every retained edge.
     assert [segment.tolist() for segment in lines.get_segments()] == [
         [[0.0, 0.0], [2.0, 1.0]],
         [[0.0, 0.0], [4.0, 0.0]],

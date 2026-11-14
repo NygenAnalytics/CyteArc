@@ -3,7 +3,7 @@
 The store holds a branching trajectory in two dimensions: a narrow trunk that
 splits into branches A and B, which widen toward their ends, and a side
 branch C off the middle of the trunk that no sink ends. The graph links each
-cell to its five nearest neighbours with Gaussian weights. A pseudotime runs
+cell to its five nearest neighbors with Gaussian weights. A pseudotime runs
 from the trunk's first half to the second halves of A and B, its fate map
 takes those halves as sinks, and curves follow both lineages. The known
 lineages give each cell's expected membership: the trunk is shared, the ends
@@ -204,7 +204,7 @@ class _Branching:
 def _graph_of(
     arms: np.ndarray, positions: np.ndarray, labels: np.ndarray, points: np.ndarray
 ) -> _Branching:
-    """Store cells and the graph of their five nearest neighbours, in a shuffled order."""
+    """Store cells and the graph of their five nearest neighbors, in a shuffled order."""
     order = np.random.default_rng(10).permutation(len(arms))
     arms, positions, labels, points = (
         arms[order],
@@ -249,16 +249,16 @@ def _graph_of(
 
 @cache
 def _template(layout: tuple[_Arm, ...] = _TWO_ARMS) -> _Branching:
-    labelled = _graph_of(*_trajectory_cells(layout))
-    store = labelled.store
-    clusters = labelled.label_artifact()
+    labeled = _graph_of(*_trajectory_cells(layout))
+    store = labeled.store
+    clusters = labeled.label_artifact()
     sinks = [f"{arm.name}2" for arm in layout]
     pseudotime = store.trajectory.pseudotime(
-        labelled.graph, source_sink=clusters, sources=_SOURCES, sinks=sinks
+        labeled.graph, source_sink=clusters, sources=_SOURCES, sinks=sinks
     )
     fate = store.trajectory.fate(pseudotime, clusters, sinks=sinks)
     curves = store.trajectory.curves(fate, n_points=40, df=6.0)
-    return replace(labelled, pseudotime=pseudotime, fate=fate, curves=curves)
+    return replace(labeled, pseudotime=pseudotime, fate=fate, curves=curves)
 
 
 def _branching(layout: tuple[_Arm, ...] = _TWO_ARMS) -> _Branching:
@@ -317,7 +317,7 @@ def test_a_weighted_median_and_its_spread_by_hand() -> None:
         weighted_median(np.array([1.0, 2.0]), np.array([1.0, -1.0]))
 
 
-def test_distance_limits_take_the_median_spread_of_neighbouring_bins() -> None:
+def test_distance_limits_take_the_median_spread_of_neighboring_bins() -> None:
     # Lineage 0 over four bins of progress. Bin 0 holds distances 1 and 1,
     # bin 1 distance 2, and bin 3 distance 3, each without deviation. Bin 2
     # holds a cell of the lineage at 0.5 and a side state at 9 of three
@@ -353,7 +353,7 @@ def test_distance_limits_take_the_median_spread_of_neighbouring_bins() -> None:
     # The spreads 1, 2, 9 and 3 give bins 0 and 1 the median of the first
     # three, 2, and bins 2 and 3 that of the last three, 3, so the side state
     # does not widen bin 2. Lineage 1's one spread, 4 in bin 3, serves the
-    # bins whose three neighbours hold it, and the others have no limit.
+    # bins whose three neighbors hold it, and the others have no limit.
     np.testing.assert_allclose(
         limits, [[2.0, 2.0, 3.0, 3.0], [np.nan, np.nan, 4.0, 4.0]]
     )
@@ -926,7 +926,7 @@ def test_membership_follows_its_recorded_rule() -> None:
     # Each bin's spread is the weighted median distance of its cells plus 2.5
     # times their weighted median absolute deviation and 1.4826, each median
     # the smallest value whose weight, with that of smaller values, reaches
-    # half; each limit is the median spread of three neighbouring bins.
+    # half; each limit is the median spread of three neighboring bins.
     def lower_median(values: np.ndarray, weights: np.ndarray) -> float:
         total = weights.sum()
         return min(
@@ -1166,7 +1166,7 @@ def _two_components(
 ) -> tuple[_Branching, ArtifactRef, np.ndarray]:
     """Store two trajectories as two graph components, with a fate map that a score directs.
 
-    The second trajectory lies 30 above the first, its trunk labelled u1 and
+    The second trajectory lies 30 above the first, its trunk labeled u1 and
     u2. Without arms, the second component is a cluster of 12 cells that all
     hold the sink label z2. The score is each cell's x coordinate, plus
     ``offset`` in the second component, so that by default every cell of the
@@ -1273,7 +1273,7 @@ def test_each_lineage_takes_its_scale_from_its_own_graph_component() -> None:
 def test_a_sink_label_in_two_components_takes_a_trunk_in_each(
     first, second, offset
 ) -> None:
-    # Both components end in sinks labelled a2 and b2, and their trunks
+    # Both components end in sinks labeled a2 and b2, and their trunks
     # split the probability differently: in the second, B's branch starts
     # beyond a gap and takes about 4%.
     branching, fate, later = _two_components(first, second, offset)

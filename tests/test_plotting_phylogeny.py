@@ -46,21 +46,21 @@ TRUTH = clone_truth()
 # The truth's clones, largest first: their labels and cells.
 LABELS = [str(clone + 1) for clone in range(TRUTH.n_clones)]
 SIZES = [9, 6, 5, 4, 3, 2, 2, 1]
-# Clones take the colours of the 20-colour palette, by rank, without its two
-# greys and the four pale colours near them: a blue, a cyan, a lavender and a
-# greyish brown.
-NEAR_GREY = ("#aec7e8", "#9edae5", "#c5b0d5", "#c49c94")
+# Clones take the colors of the 20-color palette, by rank, without its two
+# grays and the four pale colors near them: a blue, a cyan, a lavender and a
+# grayish brown.
+NEAR_GRAY = ("#aec7e8", "#9edae5", "#c5b0d5", "#c49c94")
 CLONE_COLORS = [
     color
     for color in CUSTOM_PALETTES[20]
-    if color not in ("#7f7f7f", "#c7c7c7", *NEAR_GREY)
+    if color not in ("#7f7f7f", "#c7c7c7", *NEAR_GRAY)
 ]
 assert len(CLONE_COLORS) == 14
 MIXED = "#969696"
 
 
 def _lab(color: str) -> np.ndarray:
-    """A colour's CIELAB coordinates, from seaborn's CIE XYZ of it under D65."""
+    """A color's CIELAB coordinates, from seaborn's CIE XYZ of it under D65."""
     from seaborn.external import husl
 
     rgb = [int(color[at : at + 2], 16) / 255 for at in (1, 3, 5)]
@@ -173,7 +173,7 @@ def _cut_lines(ax) -> list[float]:
 
 
 def _wedge_colors(ax) -> list[str]:
-    """The colours of the wedges drawn, one path for each colour."""
+    """The colors of the wedges drawn, one path for each color."""
     return [
         to_hex(patch.get_facecolor())
         for patch in ax.patches
@@ -212,7 +212,7 @@ def test_each_clone_of_the_cut_is_a_wedge_of_its_cells(truth, drawn) -> None:
     assert result.provenance.n_cells == sum(SIZES)
 
 
-def test_a_clade_of_several_clones_is_grey_and_says_how_many(truth, drawn) -> None:
+def test_a_clade_of_several_clones_is_gray_and_says_how_many(truth, drawn) -> None:
     result = drawn(truth.clones, max_leaves=5)
     wedges = _wedges(result)
     # The four largest clones, then the other four as one wedge.
@@ -232,7 +232,7 @@ def test_a_clade_of_several_clones_is_grey_and_says_how_many(truth, drawn) -> No
     assert legend.get_title().get_text() == "Clone"
     assert labels == ["Mixed", "1", "2", "3", "4"]
     scale = result.scales[0]
-    # A clone's colour comes from its rank, the largest first.
+    # A clone's color comes from its rank, the largest first.
     assert [scale.palette[value] for value in scale.order] == [
         MIXED,
         *CLONE_COLORS[:4],
@@ -244,11 +244,11 @@ def test_a_clade_of_several_clones_is_grey_and_says_how_many(truth, drawn) -> No
     assert [text.get_text() for text in seven.figure.axes[0].texts] == ["2 clones"]
 
 
-def test_a_wedge_takes_a_clones_colour_only_when_all_its_cells_are_in_it(
+def test_a_wedge_takes_a_clones_color_only_when_all_its_cells_are_in_it(
     truth, drawn
 ) -> None:
     # The second tree of the mixed forest drawn as one wedge holds its one
-    # clone and a cell before the cut: grey, saying it holds one clone.
+    # clone and a cell before the cut: gray, saying it holds one clone.
     whole = drawn(truth.mixed, tree="mixed_forest_2", max_leaves=1)
     (row,) = whole.tables["nodes"].to_dict("records")
     # Every node of the tree has a name, so the clone takes its leaf's.
@@ -264,8 +264,8 @@ def test_a_wedge_takes_a_clones_colour_only_when_all_its_cells_are_in_it(
     assert [
         category_label(whole.scales[0], value) for value in whole.scales[0].order
     ] == ["Mixed"]
-    # Opened, the cell before the cut is a point of the missing grey and the
-    # clone a wedge of its colour.
+    # Opened, the cell before the cut is a point of the missing gray and the
+    # clone a wedge of its color.
     opened = drawn(truth.mixed, tree="mixed_forest_2", max_leaves=10)
     wedges = _wedges(opened)
     assert wedges[["n_cells", "n_clones"]].values.tolist() == [[1, 0], [1, 1]]
@@ -275,7 +275,7 @@ def test_a_wedge_takes_a_clones_colour_only_when_all_its_cells_are_in_it(
         CLONE_COLORS[5],
     ]
     # The second and third trees together hold one clone and three cells
-    # before the cut: one grey wedge of two trees.
+    # before the cut: one gray wedge of two trees.
     grouped = drawn(truth.mixed, max_leaves=2)
     nodes = grouped.tables["nodes"]
     assert nodes[["tree", "n_cells", "n_clones", "n_trees"]].values.tolist() == [
@@ -297,7 +297,7 @@ def test_a_wedge_a_fortieth_of_the_height_is_listed(truth, drawn) -> None:
     assert len(result.scales[0].order) == 2
 
 
-def test_a_clone_keeps_its_colour_whatever_else_is_drawn(truth, drawn) -> None:
+def test_a_clone_keeps_its_color_whatever_else_is_drawn(truth, drawn) -> None:
     every = drawn(truth.clones)
     some = drawn(truth.clones, max_leaves=3)
     whole = every.scales[0].palette
@@ -324,7 +324,7 @@ def test_the_cut_is_a_dashed_line_at_its_time_or_depth(truth, drawn) -> None:
     assert all(float(tick).is_integer() for tick in deep.get_xticks())
 
 
-def test_cells_that_end_before_the_cut_take_the_missing_grey(truth, drawn) -> None:
+def test_cells_that_end_before_the_cut_take_the_missing_gray(truth, drawn) -> None:
     result = drawn(truth.by_depth)
     wedges = _wedges(result)
     # One cell of the truth ends one branching below its root, before depth
@@ -548,30 +548,30 @@ def test_the_legend_lists_the_clones_tall_enough_to_see(random_tree) -> None:
         tall = wedges[wedges["high"] - wedges["low"] >= wedges["high"].max() / 40]
         listed = tall[tall["n_clones"] == 1]
         thin = wedges[(wedges["n_clones"] == 1) & ~wedges.index.isin(listed.index)]
-        # Some clones are too thin to list, and every grey is listed first.
+        # Some clones are too thin to list, and every gray is listed first.
         assert len(listed) and len(thin)
-        greys = ["Mixed"] if (wedges["n_clones"] >= 2).any() else []
-        greys += ["No clone"] if (wedges["n_clones"] == 0).any() else []
+        grays = ["Mixed"] if (wedges["n_clones"] >= 2).any() else []
+        grays += ["No clone"] if (wedges["n_clones"] == 0).any() else []
         legend = next(
             artist
             for artist in result.figure.axes[0].get_children()
             if isinstance(artist, Legend)
         )
         labels = [text.get_text() for text in legend.get_texts()]
-        clones = labels[len(greys) :]
-        assert labels[: len(greys)] == greys
+        clones = labels[len(grays) :]
+        assert labels[: len(grays)] == grays
         # The clones listed, the largest first, which their rank orders.
         assert sorted(clones) == sorted(listed["label"])
-        ranks = [result.scales[0].order[len(greys) + at] for at in range(len(clones))]
+        ranks = [result.scales[0].order[len(grays) + at] for at in range(len(clones))]
         assert ranks == sorted(ranks)
-        n_drawn = len(greys) + int((wedges["n_clones"] == 1).sum())
+        n_drawn = len(grays) + int((wedges["n_clones"] == 1).sum())
         assert legend.get_title().get_text() == f"Clone ({len(labels)} of {n_drawn})"
         assert result.legends[0].label == legend.get_title().get_text()
     finally:
         result.close()
 
 
-def test_the_legend_gives_each_clone_a_colour_of_its_own_away_from_grey(
+def test_the_legend_gives_each_clone_a_color_of_its_own_away_from_gray(
     random_tree, tmp_path
 ) -> None:
     # A root of 30 clades of three cells each, cut into 30 clones, each a
@@ -593,20 +593,20 @@ def test_the_legend_gives_each_clone_a_colour_of_its_own_away_from_grey(
         scale = result.scales[0]
         listed = [code for code in scale.order if code >= 0]
         colors = [scale.palette[code].lower() for code in listed]
-        # More clones than the 18 colours that once repeated, each its own.
+        # More clones than the 18 colors that once repeated, each its own.
         assert len(listed) == 30
         assert len(set(colors)) == len(colors)
-        # The largest clones take the 20-colour palette's colours by rank.
+        # The largest clones take the 20-color palette's colors by rank.
         ranked = {code: color for code, color in zip(listed, colors, strict=True)}
         for code in range(len(CLONE_COLORS)):
             if code in ranked:
                 assert ranked[code] == CLONE_COLORS[code]
-        # No clone's colour is near a grey or another clone's, by the CIE
+        # No clone's color is near a gray or another clone's, by the CIE
         # distance of seaborn's own conversion to CIELAB.
         points = {color: _lab(color) for color in colors}
-        for grey in (NO_VALUE_COLOR, MIXED):
+        for gray in (NO_VALUE_COLOR, MIXED):
             assert (
-                min(np.linalg.norm(point - _lab(grey)) for point in points.values())
+                min(np.linalg.norm(point - _lab(gray)) for point in points.values())
                 >= 25
             )
         pairs = [
@@ -615,7 +615,7 @@ def test_the_legend_gives_each_clone_a_colour_of_its_own_away_from_grey(
             for second in colors[at + 1 :]
         ]
         assert min(pairs) >= 20
-        assert not set(colors) & {*NEAR_GREY, "#006fa6"}
+        assert not set(colors) & {*NEAR_GRAY, "#006fa6"}
     finally:
         result.close()
 

@@ -103,7 +103,7 @@ def lineage_heatmap(
     Rows are features, grouped by module and, within a module, ordered by
     where their profile peaks. Each lineage's panel runs from the shared
     start to its sink, with a strip of the bins' mean pseudotime above it.
-    Colours span ``vmin`` to ``vmax``. By default that is -2 to 2 for
+    Colors span ``vmin`` to ``vmax``. By default that is -2 to 2 for
     z-scaled profiles, and from the smallest mean to the 99th percentile for
     profiles stored without z-scaling, which the colorbar labels as mean
     expression.

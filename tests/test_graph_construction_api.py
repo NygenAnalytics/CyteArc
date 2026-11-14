@@ -695,8 +695,8 @@ def test_embedding_initialization_persists_expected_payload(graph_store) -> None
     assert set(np.unique(labels)) <= set(range(5))
     # Each stored label names the stored centroid nearest to its cell.
     squared = np.square(coordinates[:, np.newaxis, :] - centers[np.newaxis]).sum(axis=2)
-    labelled = squared[np.arange(len(labels)), labels]
-    np.testing.assert_allclose(labelled, squared.min(axis=1), rtol=1e-5, atol=1e-6)
+    labeled = squared[np.arange(len(labels)), labels]
+    np.testing.assert_allclose(labeled, squared.min(axis=1), rtol=1e-5, atol=1e-6)
     # Centroids are averages of cells, so they lie inside the coordinate range.
     assert np.all(centers >= coordinates.min(axis=0) - 1e-6)
     assert np.all(centers <= coordinates.max(axis=0) + 1e-6)
@@ -1216,8 +1216,8 @@ def test_default_graph_chain_is_closer_to_exact_knn_than_the_released_one(
             set(row) != set(truth) for row, truth in zip(indices, exact, strict=True)
         )
 
-    # The released settings missed true neighbours of four cells, two of them
-    # their nearest; the default settings miss one neighbour of one cell.
+    # The released settings missed true neighbors of four cells, two of them
+    # their nearest; the default settings miss one neighbor of one cell.
     assert missed_rows(np.load(full_path("knn_indices.npy"))) == 4
     assert missed_rows(found) <= 1
 

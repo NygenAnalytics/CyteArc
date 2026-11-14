@@ -271,7 +271,7 @@ def test_profiles_are_log_cpm_of_each_groups_summed_counts(store_path):
     sums = np.vstack([counts[groups == group].sum(axis=0) for group in range(3)])
     expected = np.log1p(sums / sums.sum(axis=1, keepdims=True) * 1e6)
     assert profiles.columns.tolist() == [f"RNA{index}" for index in range(8)]
-    # Rows are labelled by the groups' integer labels, as compute_bulk labels
+    # Rows are labeled by the groups' integer labels, as compute_bulk labels
     # its columns.
     assert profiles.index.tolist() == [0, 1, 2]
     assert profiles.index.name == "group"
@@ -633,7 +633,7 @@ def test_specificity_does_not_depend_on_the_chunks_of_the_stored_scores(
         )
 
 
-def test_specificity_refuses_unlabelled_or_unscored_cells_and_negative_scores(
+def test_specificity_refuses_unlabeled_or_unscored_cells_and_negative_scores(
     scored, tmp_path
 ):
     path, auc = scored
@@ -641,11 +641,11 @@ def test_specificity_refuses_unlabelled_or_unscored_cells_and_negative_scores(
     store = _open(copy)
     labels = np.asarray(store.cells.fetch_all("groups"), dtype=object)
     labels[3] = None
-    store.cells.insert("unlabelled", labels, overwrite=True)
+    store.cells.insert("unlabeled", labels, overwrite=True)
     with pytest.raises(
         ValueError, match=f"groups holds no label for 1 of the {store.cells.N} cells"
     ):
-        store.regulons.specificity(auc, "unlabelled")
+        store.regulons.specificity(auc, "unlabeled")
 
     # Scores of some of the cells hold none of the others.
     store.cells.insert("first", np.arange(store.cells.N) < 100, overwrite=True)

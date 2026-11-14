@@ -1,4 +1,4 @@
-"""Minimum spanning trees over cluster centres, a diagnostic for lineages.
+"""Minimum spanning trees over cluster centers, a diagnostic for lineages.
 
 Following Slingshot (Street et al. 2018, doi:10.1186/s12864-018-4772-0),
 clusters are joined by a minimum spanning tree whose edge lengths compare
@@ -25,7 +25,7 @@ __all__ = [
     "cluster_codes",
     "cluster_distances",
     "cluster_moments",
-    "labelled_tree",
+    "labeled_tree",
     "spanning_tree",
     "tree_ends",
     "tree_lineages",
@@ -233,7 +233,7 @@ def spanning_tree(
             f"The tree can join clusters {first!r} and {second!r} only across an "
             "infinite distance: their means differ in a dimension where neither "
             "cluster varies. Merge clusters without spread, such as single-cell "
-            "clusters, into neighbouring clusters"
+            "clusters, into neighboring clusters"
         )
     leaves, lineages = tree_lineages(n_clusters, edge_array, root)
     return SpanningTree(
@@ -259,17 +259,17 @@ def tree_lineages(
     leaves = np.flatnonzero(degree == 1).astype(np.int64)
     if root is None:
         return leaves, ()
-    neighbours: dict[int, list[int]] = {cluster: [] for cluster in range(n_clusters)}
+    neighbors: dict[int, list[int]] = {cluster: [] for cluster in range(n_clusters)}
     for first, second in edge_array.tolist():
-        neighbours[first].append(second)
-        neighbours[second].append(first)
+        neighbors[first].append(second)
+        neighbors[second].append(first)
     parent = {root: -1}
     queue = [root]
     for cluster in queue:
-        for neighbour in sorted(neighbours[cluster]):
-            if neighbour not in parent:
-                parent[neighbour] = cluster
-                queue.append(neighbour)
+        for neighbor in sorted(neighbors[cluster]):
+            if neighbor not in parent:
+                parent[neighbor] = cluster
+                queue.append(neighbor)
     paths = []
     for leaf in leaves.tolist():
         if leaf == root:
@@ -331,7 +331,7 @@ def tree_ends(
     return root_index, [index for index, _ in pairs], tuple(end for _, end in pairs)
 
 
-def labelled_tree(
+def labeled_tree(
     clusters: Sequence[Any],
     sizes: np.ndarray,
     means: np.ndarray,
@@ -450,7 +450,7 @@ def build_cluster_tree(
         ends=end_indices,
         labels=clusters,
     )
-    return labelled_tree(
+    return labeled_tree(
         clusters,
         counts,
         means,

@@ -11,7 +11,7 @@ GOLDEN = 0x9E3779B97F4A7C15
 
 
 def splitmix64(value: int) -> int:
-    """SplitMix64's finaliser of a 64-bit integer."""
+    """SplitMix64's finalizer of a 64-bit integer."""
     value = ((value ^ (value >> 30)) * 0xBF58476D1CE4E5B9) & MASK
     value = ((value ^ (value >> 27)) * 0x94D049BB133111EB) & MASK
     return value ^ (value >> 31)
@@ -23,7 +23,7 @@ def child_key(key: int, value: int) -> int:
 
 
 def draw(key: int, counter: int) -> int:
-    """Draw ``counter`` of stream ``key``: the finaliser of the key plus ``counter`` increments."""
+    """Draw ``counter`` of stream ``key``: the finalizer of the key plus ``counter`` increments."""
     return splitmix64((key + counter * GOLDEN) & MASK)
 
 

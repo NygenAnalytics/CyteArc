@@ -24,7 +24,7 @@ def _missing_rows(table: MetaData, column: str) -> list[bool]:
     return [False] * table.N if mask is None else np.asarray(mask[:]).tolist()
 
 
-def test_series_labelled_by_ids_is_assigned_by_label_not_position():
+def test_series_labeled_by_ids_is_assigned_by_label_not_position():
     table = _table()
     # The annotation table lists the cells in another order than the store.
     labels = pd.Series({"c3": "T", "c0": "B", "c2": "NK", "c1": "Mono"})
@@ -48,7 +48,7 @@ def test_series_for_the_key_rows_is_aligned_to_the_ids_that_key_selects():
     assert _missing_rows(table, "score") == [False, True, False, False]
 
 
-def test_labelled_nullable_values_keep_their_missing_rows_after_alignment():
+def test_labeled_nullable_values_keep_their_missing_rows_after_alignment():
     table = _table()
     labels = pd.Series(
         pd.Categorical(["T", None, "B", "B"]), index=["c3", "c1", "c0", "c2"]
@@ -70,7 +70,7 @@ def test_labelled_nullable_values_keep_their_missing_rows_after_alignment():
     ],
     ids=["range-index", "offset-range-index", "array", "list"],
 )
-def test_unlabelled_values_are_still_assigned_by_position(values):
+def test_unlabeled_values_are_still_assigned_by_position(values):
     table = _table()
 
     table.insert("letter", values)
@@ -144,7 +144,7 @@ def test_frame_rows_of_a_key_are_refused_rather_than_misplaced():
     assert table.fetch("doubled").tolist() == [0.0, 4.0, 6.0]
 
 
-def test_update_key_aligns_a_labelled_boolean_series():
+def test_update_key_aligns_a_labeled_boolean_series():
     table = _table()
     keep = pd.Series([True, False, True, True], index=["c1", "c3", "c0", "c2"])
 

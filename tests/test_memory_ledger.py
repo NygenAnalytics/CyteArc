@@ -432,11 +432,11 @@ def test_a_cell_selection_beyond_the_budget_is_refused_before_it_is_read(
 
 
 @pytest.fixture(scope="module")
-def labelled_store(tmp_path_factory):
+def labeled_store(tmp_path_factory):
     """A store of 50,000 cells with labels of 30 clusters, frozen for every cell."""
     from tests.storage_helpers import open_store, write_count_store
 
-    path = tmp_path_factory.mktemp("labelled") / "store.zarr"
+    path = tmp_path_factory.mktemp("labeled") / "store.zarr"
     n_cells = 50_000
     write_count_store(str(path), {"RNA": np.ones((n_cells, 1), dtype=int)}, "uint16")
     store = open_store(path)
@@ -451,12 +451,12 @@ def labelled_store(tmp_path_factory):
 
 @pytest.mark.parametrize("selection", ["every_cell", "half"])
 def test_reading_a_label_artifact_gives_the_cells_of_its_selection(
-    labelled_store, selection
+    labeled_store, selection
 ) -> None:
     from cytearc.metadata.selection import resolve_cell_aligned_artifact
 
-    # 50,000 labelled cells, read for each of them or for half.
-    store, labels = labelled_store
+    # 50,000 labeled cells, read for each of them or for half.
+    store, labels = labeled_store
     cells = (
         None if selection == "every_cell" else store.snapshot_cell_selection(selection)
     )

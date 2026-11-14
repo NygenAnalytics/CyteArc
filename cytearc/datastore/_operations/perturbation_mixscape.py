@@ -13,7 +13,7 @@ from ...metadata.arguments import (
 from ...metadata.artifacts import write_cell_data_artifact
 from ...metadata.rows import array_row_selection_parts, read_metadata_rows_chunkwise
 from ...metadata.selection import cell_selection_indices
-from ...perturbation.mixscape import UNLABELLED, MixscapeResult, mixscape_settings
+from ...perturbation.mixscape import UNLABELED, MixscapeResult, mixscape_settings
 from ...perturbation.signature import PerturbationSignature, signature_settings
 from ...storage.artifacts import ArtifactRef, artifact_group, require_complete_artifact
 from ...storage.geometry import array_geometry
@@ -102,12 +102,12 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
     ) -> tuple[np.ndarray, int]:
         """Return which cells of ``cell_index`` the labels call controls.
 
-        Also returns the number of labelled cells that ``cell_index`` lacks.
+        Also returns the number of labeled cells that ``cell_index`` lacks.
         """
         status = require_complete_artifact(self.zw, labels)
-        labelled = cell_selection_indices(self.zw, status.input_ref("cell_selection"))
+        labeled = cell_selection_indices(self.zw, status.input_ref("cell_selection"))
         flags = read_array(artifact_group(self.zw, labels), "is_control").astype(bool)
-        positions, present = _positions_in(cell_index, labelled)
+        positions, present = _positions_in(cell_index, labeled)
         is_control = np.zeros(len(cell_index), dtype=bool)
         is_control[positions[present & flags]] = True
         return is_control, int(np.count_nonzero(~present))
@@ -143,7 +143,7 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
 
         With ``sample_column``, each cell takes its neighbors from the control
         cells of its own sample, such as its replicate, as Seurat's
-        ``split.by`` does. Labelled cells without coordinates have no
+        ``split.by`` does. Labeled cells without coordinates have no
         signature, and a log message counts them.
 
         Args:
@@ -306,7 +306,7 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
             return planned.ref
         if n_missing:
             logger.info(
-                f"{n_missing} labelled cells have no coordinates and get no signature"
+                f"{n_missing} labeled cells have no coordinates and get no signature"
             )
         controls = np.flatnonzero(is_control)
         n_controls = len(controls)
@@ -594,12 +594,12 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, int]:
         """Return each cell's label, its single target's code, the targets, and the longest label.
 
-        A cell outside the labels is ``"unlabelled"``; a cell without a single
+        A cell outside the labels is ``"unlabeled"``; a cell without a single
         target that is not a control has the code -1.
         """
         status = require_complete_artifact(self.zw, labels)
         group = artifact_group(self.zw, labels)
-        labelled = cell_selection_indices(self.zw, status.input_ref("cell_selection"))
+        labeled = cell_selection_indices(self.zw, status.input_ref("cell_selection"))
 
         values = read_array(group, "values").astype(str)
         single = (read_array(group, "n_targets") == 1) & ~read_array(
@@ -608,12 +608,12 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
         codes = np.where(single, read_array(group, "target_codes")[:, 0], -1).astype(
             np.int64
         )
-        positions, present = _positions_in(cell_index, labelled)
-        cell_labels = np.full(len(cell_index), UNLABELLED, dtype=object)
+        positions, present = _positions_in(cell_index, labeled)
+        cell_labels = np.full(len(cell_index), UNLABELED, dtype=object)
         cell_labels[positions[present]] = values[present]
         cell_codes = np.full(len(cell_index), -1, dtype=np.int64)
         cell_codes[positions[present]] = codes[present]
-        longest = max(len(UNLABELLED), values.dtype.itemsize // values.dtype.alignment)
+        longest = max(len(UNLABELED), values.dtype.itemsize // values.dtype.alignment)
         return (
             cell_labels,
             cell_codes,
@@ -673,7 +673,7 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
         A cell's class is ``"<target> KO"`` (``perturbation_type`` replaces
         ``"KO"``) or ``"<target> NP"``, ``"control"`` for a control cell, and
         its label otherwise, such as ``"Negative"`` or ``"Multiple"``, or
-        ``"unlabelled"`` for a cell of the signature outside the labels.
+        ``"unlabeled"`` for a cell of the signature outside the labels.
 
         Args:
             signature: A ``perturbation_signature`` artifact from

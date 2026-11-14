@@ -12,7 +12,7 @@ and each cell is projected onto the difference between the mean of the cells
 currently called KO and the mean of the control cells. A mixture of two normal
 distributions fits the projections: the control component keeps the mean and
 standard deviation of the control cells' projections, and the other component
-and the mixing weights are fitted by expectation maximisation. A cell of the
+and the mixing weights are fitted by expectation maximization. A cell of the
 target is called KO when its likelihood under the perturbed component exceeds
 that under the control component, Seurat's rule, which leaves out the mixing
 weights. The calls are repeated with the new KO cells until they stop changing.
@@ -43,7 +43,7 @@ __all__ = [
     "MIXSCAPE_FITTED",
     "MIXSCAPE_NO_FIT",
     "MIXSCAPE_STATUSES",
-    "UNLABELLED",
+    "UNLABELED",
     "MixscapeClasses",
     "MixscapeFit",
     "MixscapeResult",
@@ -61,10 +61,10 @@ __all__ = [
 #: Target statuses, stored as positions in this tuple.
 MIXSCAPE_STATUSES = ("fitted", "few_de_genes", "few_cells", "no_fit")
 #: The class of a cell of the signature that the labels do not cover.
-UNLABELLED = "unlabelled"
+UNLABELED = "unlabeled"
 # The classes that perturbation_type may not take, since other cells take
 # them: a target's escapers, and the cells without a single target.
-_OTHER_CLASSES = ("NP", CONTROL, NEGATIVE, MULTIPLE, UNLABELLED)
+_OTHER_CLASSES = ("NP", CONTROL, NEGATIVE, MULTIPLE, UNLABELED)
 #: The mixture classified the target's cells.
 MIXSCAPE_FITTED = 0
 #: Fewer DE genes than ``min_de_genes``: every cell is an escaper.
@@ -465,9 +465,9 @@ def band_de_genes(
 
 
 def scale_like_seurat(values: np.ndarray, scale_max: float = 10.0) -> np.ndarray:
-    """Centre and scale each column over the rows, as Seurat's ``ScaleData``.
+    """Center and scale each column over the rows, as Seurat's ``ScaleData``.
 
-    Each column, a gene over cells, is centred on its mean and divided by its
+    Each column, a gene over cells, is centered on its mean and divided by its
     standard deviation with n - 1 degrees of freedom; a column without spread
     becomes 0. Seurat clips its scaled values above ``scale_max``. Its
     signatures are the negative of CyteArc's, so this clips below
@@ -539,7 +539,7 @@ def constrained_mixture(
 
     The first component keeps ``control_mean`` and ``control_sd``. The second
     component starts at ``start_mean`` and ``start_sd``, the weights at one
-    half each, and expectation maximisation updates the weights and the second
+    half each, and expectation maximization updates the weights and the second
     component until the log-likelihood rises by less than ``tolerance`` or
     after ``max_steps`` steps. This is the model that ``RunMixscape`` fits with
     mixtools' ``normalmixEM`` and its ``mean.constr`` and ``sd.constr``, and
@@ -796,7 +796,7 @@ def mixscape_classes(
 
     Args:
         labels: Each cell's label, such as ``"Negative"``, ``"Multiple"`` or
-            ``"unlabelled"``.
+            ``"unlabeled"``.
         is_control: Whether each cell is a control cell.
         row_cells: Each row's cells, as positions among the cells.
         row_targets: Each row's target.

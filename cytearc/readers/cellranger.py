@@ -689,7 +689,7 @@ class ProtospacerCallsSize:
 def _open_call_file(path: str | os.PathLike[str]) -> Any:
     """Open the call file for reading bytes, decompressed when it is gzip-compressed.
 
-    A gzip stream is recognised by its first bytes, whatever the file's name.
+    A gzip stream is recognized by its first bytes, whatever the file's name.
     """
     return open_binary(path)
 

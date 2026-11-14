@@ -3,7 +3,7 @@
 Guide calling reads the CRISPR counts twice. The first pass counts how many
 cells hold each UMI count of each guide, the fits set each guide's threshold
 from its histogram, and the second pass calls the guides of every cell and
-summarises its counts. Each benchmark runs the kernel of one step on a
+summarizes its counts. Each benchmark runs the kernel of one step on a
 simulated screen of 1,000 guides, in which every cell holds ambient guide
 molecules and most cells carry one guide, and checks the result, so it doubles
 as a test at the smoke size.

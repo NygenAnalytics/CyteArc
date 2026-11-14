@@ -306,7 +306,7 @@ def _analyze_tabula_sample(store: Any) -> None:
     )
 
 
-def _labelled_cluster_mask(values: Any) -> np.ndarray:
+def _labeled_cluster_mask(values: Any) -> np.ndarray:
     labels = np.asarray(values).astype(str)
     labels = np.char.strip(labels)
     return (labels != "") & (np.char.lower(labels) != "nan")
@@ -359,23 +359,23 @@ def _drop_retired_assay_state(root: Any) -> tuple[str, ...]:
     return tuple(removed)
 
 
-def _derive_labelled_kang_store(
+def _derive_labeled_kang_store(
     source_paths: dict[str, Path],
     store: Path,
 ) -> None:
     import cytearc
 
     if len(source_paths) != 1:
-        raise ValueError("A labelled Kang store requires exactly one source")
+        raise ValueError("A labeled Kang store requires exactly one source")
     source_dataset, source_path = next(iter(source_paths.items()))
     source = cytearc.DataStore(
         str(source_path / STORE_NAME),
         nthreads=ZARR_NTHREADS,
         zarr_mode="r",
     )
-    keep = _labelled_cluster_mask(source.cells.fetch_all("cluster_labels"))
+    keep = _labeled_cluster_mask(source.cells.fetch_all("cluster_labels"))
     if not keep.any():
-        raise RuntimeError(f"No labelled cells remain in {source_dataset}")
+        raise RuntimeError(f"No labeled cells remain in {source_dataset}")
 
     cytearc.SubsetZarr(
         zarr_loc=str(store),
@@ -389,7 +389,7 @@ def _derive_labelled_kang_store(
     removed = int((~keep).sum())
     print(
         f"Derived {store} from {source_dataset}: physically removed "
-        f"{removed} unlabelled cells and retained {kept}"
+        f"{removed} unlabeled cells and retained {kept}"
     )
 
 
@@ -881,7 +881,7 @@ RECIPES: dict[str, DatasetRecipe] = {
         analyze=_analyze_tabula_sample,
         summary=(
             "100,000 cells sampled proportionally by tissue and donor with seed 4466; "
-            "all sampled cells retained, 2,000 variable genes, 30 PCs, 21 neighbours, "
+            "all sampled cells retained, 2,000 variable genes, 30 PCs, 21 neighbors, "
             "Leiden resolution 1.0 and markers, without batch correction"
         ),
         attribution=TABULA_SAPIENS_ATTRIBUTION,
@@ -952,7 +952,7 @@ RECIPES: dict[str, DatasetRecipe] = {
         cell_selection=(
             "Retain all 7,069 imported cells and activate the 6,194 exact "
             "matches to the 6,333 Figure 4 labels from well W3. The pinned "
-            "Zenodo RDS omits 139 publication-labelled barcodes."
+            "Zenodo RDS omits 139 publication-labeled barcodes."
         ),
         import_memory_bytes=24 * (1 << 30),
         analysis_memory_bytes=8 * (1 << 30),
@@ -1020,19 +1020,19 @@ RECIPES: dict[str, DatasetRecipe] = {
     ),
     KANG_CONTROL_DATASET: DerivedDatasetRecipe(
         source_datasets=(KANG_CONTROL_DATASET,),
-        derive=_derive_labelled_kang_store,
+        derive=_derive_labeled_kang_store,
         analyze=_analyze_kang,
         summary=(
-            "Physical removal of unlabelled cells, manual QC, 2000 HVGs, "
+            "Physical removal of unlabeled cells, manual QC, 2000 HVGs, "
             "PCA 25, k=21 graph, UMAP, and Leiden 1.0"
         ),
     ),
     KANG_STIMULATED_DATASET: DerivedDatasetRecipe(
         source_datasets=(KANG_STIMULATED_DATASET,),
-        derive=_derive_labelled_kang_store,
+        derive=_derive_labeled_kang_store,
         analyze=_analyze_kang,
         summary=(
-            "Physical removal of unlabelled cells, manual QC, 2000 HVGs, "
+            "Physical removal of unlabeled cells, manual QC, 2000 HVGs, "
             "PCA 25, k=21 graph, UMAP, and Leiden 1.0"
         ),
     ),

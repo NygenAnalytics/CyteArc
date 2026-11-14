@@ -33,7 +33,7 @@ refs, and record the analysis for handoff. Docs:
 - Results built on a superseded artifact keep `status.is_current` `True` (it judges only their own
   revision), and are recomputed once their input is, because the recomputed input has a new ref.
 - A recipe takes one keyword per stage. An optional stage (`cell_calling`, `hashing`, `filtering`, `cell_cycle`, `umap`, `localmap`, `tsne`, `leiden`, `paris`, `doublets`) takes `False` to skip it, `True` for its defaults, or a mapping that configures and enables it. A stage that always runs (`hvg`, `normalization`, `pca`, `ann_index`, `neighbors`, `connectivity`, `embedding_initialization`; ATAC `prevalent_peaks` and `lsi`; ADT `panel`; multimodal `integration`) takes `None` for its defaults or a mapping; a bool raises `TypeError`. `harmony` is `None` (off) or a mapping with `batch_columns`. `membership_strength` and `markers` are plain bools.
-- A setting means what the same keyword means on the stage's method (`hvg` takes the keywords of `features.hvgs`, `neighbors` those of `graph.neighbors`), and an omitted setting takes that method's default. Before anything is written, a recipe refuses an unknown key (`ValueError` listing the allowed ones) and values that a later stage would refuse, including: `cell_calling` and `hashing` values (such as `fdr` or `positive_quantile`); a per-capture column, an `hvg` `batch` (blank text counts as missing there), or a Harmony batch column that leaves an input cell unlabelled; `pca` `dims` not below the smaller of the `hvg` `top_n` and the assay's features (RNA) or the panel size (ADT); an `ann_index` `ann_metric` other than `"l2"` or `"cosine"`; an ATAC `prevalent_peaks` `top_n` not below the assay's peak count, or below LSI `dims` plus `skip_first`; and SNN source runs of different `k`. A value that only the method itself rejects, such as Leiden `backend`, a doublet setting or `paris={"min_cluster_size": -5}`, fails its stage.
+- A setting means what the same keyword means on the stage's method (`hvg` takes the keywords of `features.hvgs`, `neighbors` those of `graph.neighbors`), and an omitted setting takes that method's default. Before anything is written, a recipe refuses an unknown key (`ValueError` listing the allowed ones) and values that a later stage would refuse, including: `cell_calling` and `hashing` values (such as `fdr` or `positive_quantile`); a per-capture column, an `hvg` `batch` (blank text counts as missing there), or a Harmony batch column that leaves an input cell unlabeled; `pca` `dims` not below the smaller of the `hvg` `top_n` and the assay's features (RNA) or the panel size (ADT); an `ann_index` `ann_metric` other than `"l2"` or `"cosine"`; an ATAC `prevalent_peaks` `top_n` not below the assay's peak count, or below LSI `dims` plus `skip_first`; and SNN source runs of different `k`. A value that only the method itself rejects, such as Leiden `backend`, a doublet setting or `paris={"min_cluster_size": -5}`, fails its stage.
 - `cells` is a boolean cell column (default `"I"`), a datastore cell-selection ref, or a completed run, whose `analysis_cell_selection` is reused as the same ref; `cells` that select no cell are refused before anything is written. `filtering=None` (the default) filters the cells of a column (RNA, ATAC), and an `rna` run with `cell_calling` or `hashing` filters the cells those stages keep, whatever its `cells`. Otherwise a given selection's or run's cells stay as they are, and an ADT run filters only when asked.
 - A recipe writes artifacts plus a run record only. It never edits live `I` or adds metadata
   columns, and needs `zarr_mode="r+"` (the default); a read-only store raises `PermissionError`,
@@ -93,8 +93,8 @@ integrate. Multiome and TEA-seq follow the same pattern with `ds.pipeline.atac(c
 ```python
 rna = ds.pipeline.rna(label="rna")
 adt = ds.pipeline.adt(label="adt", cells=rna)  # the RNA run's cells as they are; not filtered
-wnn = ds.pipeline.multimodal([rna, adt], label="wnn")  # weighted nearest neighbours
-snn = ds.pipeline.multimodal([rna, adt], method="snn", label="snn")  # shared nearest neighbours
+wnn = ds.pipeline.multimodal([rna, adt], label="wnn")  # weighted nearest neighbors
+snn = ds.pipeline.multimodal([rna, adt], method="snn", label="snn")  # shared nearest neighbors
 list(wnn)  # ..., integrated_graph, embedding_initialization, umap, clusters, markers_RNA, markers_ADT, leiden
 wnn.cells.fetch("weight_ADT")  # each cell's ADT weight; weights sum to 1 per cell
 ds.plots.modality_weights(graph=wnn["integrated_graph"], layout=wnn["umap"], show=False).close()
@@ -249,9 +249,9 @@ branch = ds.pipeline.rna(
     hvg={"top_n": 2000}, pca={"dims": 30}, neighbors={"k": 21},
     paris=True, membership_strength=True,  # off by default
 )
-labelled = ds.pipeline.rna(label="with_labels", snapshot_columns=["cell_type"])  # reuses baseline
-"cell_type" in labelled.cells.columns  # True
-labelled["clusters"] == run["clusters"]  # True: same cells, same artifacts
+labeled = ds.pipeline.rna(label="with_labels", snapshot_columns=["cell_type"])  # reuses baseline
+"cell_type" in labeled.cells.columns  # True
+labeled["clusters"] == run["clusters"]  # True: same cells, same artifacts
 ```
 
 `cell_type` stands for a label column you own; never snapshot held-out author labels.
@@ -330,7 +330,7 @@ status.input_ref("normalized") == run["normalized"]  # True
 status.execution_options, status.created_at_ns, status.cytearc_version
 status.revision, status.current_revision, status.is_current  # 1, 1, True until a fix
 group = ds.artifacts.load(run["pca"])  # zarr group: data, loadings, center
-group["data"].shape  # (analysed cells, 21)
+group["data"].shape  # (analyzed cells, 21)
 
 ds.artifacts.list(complete_only=True)  # assay scope, default assay
 ds.artifacts.list(kind="cell_selection", scope="datastore")
@@ -474,7 +474,7 @@ cytearc.ArtifactRef.from_dict(saved["refs"]["fineClusters"]) == fine_clusters  #
 
 - quality-control.md: filtering policies behind `analysis_cell_selection`, cell calling, hashtags,
   ambient RNA and doublet removal with recipes.
-- features-and-graphs.md: explicit normalization, PCA, ANN, neighbours and graph chains.
+- features-and-graphs.md: explicit normalization, PCA, ANN, neighbors and graph chains.
 - clustering-and-embedding.md: re-clustering, UMAP/t-SNE branches, partition comparison.
 - markers-and-annotation.md: `markers.load`, marker tables and labels.
 - plotting.md: `ds.plots.*(run=run, ...)` versus explicit refs.

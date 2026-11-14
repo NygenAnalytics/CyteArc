@@ -57,7 +57,7 @@ def _paired_profile_store(store_type=_ArrayStore):
         ("GeneScores", "feature", "Standardized mean of GeneScores"),
     ],
 )
-def test_the_colour_bar_names_the_assay_whose_means_it_draws(
+def test_the_color_bar_names_the_assay_whose_means_it_draws(
     plot, assay, standardize, label
 ):
     store = _paired_profile_store(
@@ -85,7 +85,7 @@ def test_the_colour_bar_names_the_assay_whose_means_it_draws(
 
 
 @pytest.mark.parametrize("plot", [splt.dotplot, splt.matrixplot])
-def test_the_colour_bar_names_every_assay_of_features_from_several(plot):
+def test_the_color_bar_names_every_assay_of_features_from_several(plot):
     from cytearc.metadata.selection import FeatureRef
 
     store = _paired_profile_store(_TwoAssayStore)
@@ -113,7 +113,7 @@ def test_the_colour_bar_names_every_assay_of_features_from_several(plot):
         (_TwoAssayStore, ("RNA", "GeneScores"), "mean of GeneScores and RNA"),
     ],
 )
-def test_the_stacked_violins_colour_bar_names_the_assay_whose_means_it_draws(
+def test_the_stacked_violins_color_bar_names_the_assay_whose_means_it_draws(
     store_type, assays, label
 ):
     from cytearc.metadata.selection import FeatureRef
@@ -306,7 +306,7 @@ def test_a_dendrogram_removed_before_composing_is_left_out():
     try:
         child = _clustered_matrixplot(ax)
         child.axes["row_dendrogram"].remove()
-        # The shared colour bar spans the matrix alone, so composing lays out.
+        # The shared color bar spans the matrix alone, so composing lays out.
         composite = splt.compose_results(figure, {"matrix": child})
         figure.canvas.draw()
         assert set(composite.axes) == {
@@ -336,7 +336,7 @@ def test_matrixplot_annotation_legends_list_missing_annotations():
         **annotations,
     )
     try:
-        # The grey strip of GeneB has its entry, last among the panel's.
+        # The gray strip of GeneB has its entry, last among the panel's.
         (legend,) = result.figure.legends
         assert _legend_texts(legend) == [
             "panel: x",
@@ -531,7 +531,7 @@ def test_a_composed_composition_lists_its_missing_category(kind, sample_by):
         assert child.legends[0].extras["missing"] is True
         splt.compose_results(figure, [child], panel_labels=False)
         # The composed legend keeps the NA category, last and in the missing
-        # grey, as the composition draws it.
+        # gray, as the composition draws it.
         (legend,) = figure.legends
         assert legend.get_title().get_text() == "category"
         assert [text.get_text() for text in legend.get_texts()] == [

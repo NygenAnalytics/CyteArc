@@ -690,14 +690,14 @@ def test_optional_name_argument_takes_a_name_or_none():
 
 
 def _splitmix64(value: int) -> int:
-    """SplitMix64's finaliser in Python integers, from its published constants."""
+    """SplitMix64's finalizer in Python integers, from its published constants."""
     mask = (1 << 64) - 1
     value = ((value ^ (value >> 30)) * 0xBF58476D1CE4E5B9) & mask
     value = ((value ^ (value >> 27)) * 0x94D049BB133111EB) & mask
     return value ^ (value >> 31)
 
 
-def test_mix64_is_splitmix64s_finaliser_compiled_and_on_arrays():
+def test_mix64_is_splitmix64s_finalizer_compiled_and_on_arrays():
     values = np.array([0, 1, 2**63, 2**64 - 1, 0x9E3779B97F4A7C15], dtype=np.uint64)
     expected = [_splitmix64(int(value)) for value in values]
 

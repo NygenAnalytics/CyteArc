@@ -655,13 +655,13 @@ def test_lineage_heatmap_orders_features_by_module_and_peak(
         palette[module] for module in modules
     ]
     assert cluster_ax.get_ylabel() == f"{n_features} features"
-    centres = {text.get_text(): text.get_position()[1] for text in cluster_ax.texts}
-    assert set(centres) == {str(module) for module in modules}
+    centers = {text.get_text(): text.get_position()[1] for text in cluster_ax.texts}
+    assert set(centers) == {str(module) for module in modules}
     for module in modules:
         rows = np.flatnonzero(features["cluster"].to_numpy() == module)
-        # Each module is one contiguous block of rows, labelled at its centre.
+        # Each module is one contiguous block of rows, labeled at its center.
         assert rows.max() - rows.min() + 1 == rows.size
-        assert centres[str(module)] == pytest.approx(rows.mean())
+        assert centers[str(module)] == pytest.approx(rows.mean())
     assert result.axes["colorbar"].get_ylabel() == "standardized expression"
 
     assert result.scales == (
@@ -939,7 +939,7 @@ def test_lineage_heatmap_shows_unscaled_profiles_as_mean_expression(
         )
     )
 
-    # Means are not z-scores, so the colours span the data, not -2 to 2.
+    # Means are not z-scores, so the colors span the data, not -2 to 2.
     low, high = float(data.min()), float(np.percentile(data, 99.0))
     assert result.axes["colorbar"].get_ylabel() == "mean expression"
     assert result.scales[0] == splt.ColorScale(cmap="coolwarm", vmin=low, vmax=high)

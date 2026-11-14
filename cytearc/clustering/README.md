@@ -12,7 +12,7 @@ that implementation. The Paris hierarchy is described in the methods documentati
 | --- | --- |
 | `leiden.py` | `leiden_membership`: argument checks and the choice of backend. The `"igraph"` and `"leidenalg"` backends call those GPL-licensed packages, which CyteArc does not install |
 | `_leiden_native.py` | The `"cytearc"` driver: iterations, levels, refinement retries, shutdown checkpoints, the thread count, and the constants that fix the labels |
-| `_leiden_graph.py` | Input checks, the symmetric graph `A = W + W^T`, weight normalisation and fixed-point node strengths |
+| `_leiden_graph.py` | Input checks, the symmetric graph `A = W + W^T`, weight normalization and fixed-point node strengths |
 | `_leiden_primitives.py` | Deterministic parallel building blocks: counter-based random numbers, per-worker hash accumulators, prefix sums, stable bucketing, conflict-free scatter and fixed-order sums |
 | `_leiden_moving.py` | Local moving: the paper's sequential queue and the grouped parallel sweeps |
 | `_leiden_refine.py` | Refinement of each community into well-connected parts |
@@ -28,7 +28,7 @@ entry `(i, j, w)` of the input matrix is one undirected edge, so the adjacency i
 Each iteration starts from the previous partition, the first from singletons, and repeats three
 phases level by level:
 
-1. local moving of nodes to their best neighbouring community;
+1. local moving of nodes to their best neighboring community;
 2. refinement of each community: only singletons that are well connected to the community join,
    and only refined communities that are themselves well connected, chosen at random with a
    probability that grows with the quality gain;
@@ -37,7 +37,7 @@ phases level by level:
 
 The backend runs three iterations.
 
-The backend parallelises every phase, and its labels do not depend on the thread count:
+The backend parallelizes every phase, and its labels do not depend on the thread count:
 
 - **Local moving.** On large levels each sweep splits the active nodes into 64 random groups. The
   nodes of a group decide from the state at the start of the group, and their moves are applied
@@ -111,7 +111,7 @@ The same work removed igraph and leidenalg from CyteArc's dependencies.
 
 ## How it compares with other implementations
 
-**Graphs.** Directed k-nearest-neighbour graphs with k = 11 and CyteArc's UMAP weights, which is
+**Graphs.** Directed k-nearest-neighbor graphs with k = 11 and CyteArc's UMAP weights, which is
 what `clusters.leiden` receives by default. The 808-cell graph is the test fixture; the 3,696-cell
 graph is the Bastidas-Ponce pancreas. The others are synthetic: "hard" graphs have overlapping
 cell types.

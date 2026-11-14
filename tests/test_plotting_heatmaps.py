@@ -384,7 +384,7 @@ def test_marker_heatmap_accepts_explicit_order_annotations_and_target(marker_sto
     matrix = result.tables["matrix"]
     assert matrix.index.tolist() == row_order
     assert matrix.columns.tolist() == column_order
-    # Tables name their axes like matrixplot's; the drawn axes stay unlabelled.
+    # Tables name their axes like matrixplot's; the drawn axes stay unlabeled.
     assert (matrix.index.name, matrix.columns.name) == ("feature", "group")
     assert result.tables["row_annotations"].index.name == "feature"
     assert result.tables["column_annotations"].index.name == "group"
@@ -645,7 +645,7 @@ def test_marker_heatmap_annotation_legends_list_missing_annotations(marker_store
         show=False,
     )
     try:
-        # The grey strip of group 1 has its entry, last among the kinds.
+        # The gray strip of group 1 has its entry, last among the kinds.
         (legend,) = result.figure.legends
         assert [text.get_text() for text in legend.get_texts()] == [
             "kind: x",

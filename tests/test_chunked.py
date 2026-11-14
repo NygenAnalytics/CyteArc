@@ -331,7 +331,7 @@ class TestNumpySemantics:
         with pytest.raises(TypeError, match="two ChunkedArrays"):
             ca + ca
 
-    def test_array_conversion_honours_copy(self):
+    def test_array_conversion_honors_copy(self):
         values = np.arange(6, dtype=np.float64).reshape(2, 3)
         ca = ChunkedArray.from_numpy(values)
         np.testing.assert_array_equal(np.asarray(ca, copy=True), values)

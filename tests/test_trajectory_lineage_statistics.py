@@ -233,7 +233,7 @@ def test_kish_effective_sizes_follow_the_definition():
     assert LINEAGE_SCRATCH_ITEMSIZE == 8
 
 
-def test_centered_regressors_are_weighted_centred_after_a_power_of_two_scale():
+def test_centered_regressors_are_weighted_centered_after_a_power_of_two_scale():
     rng = np.random.default_rng(1)
     weights = rng.uniform(0.0, 1.0, size=(30, 3))
     regressors = np.column_stack(

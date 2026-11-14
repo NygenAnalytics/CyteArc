@@ -1,7 +1,7 @@
 #!/usr/bin/env Rscript
 # Produces the Seurat side of tests/seurat_wnn_5_5_1_golden.json.
 # Driven by scripts/export_seurat_wnn_golden.py, which supplies the shared
-# embeddings and neighbour indices and consumes the tables written here.
+# embeddings and neighbor indices and consumes the tables written here.
 #
 # The matched tables come from Seurat's own routines applied to CyteArc's
 # candidate pool and bandwidth: L2Norm, PredictAssay, impute_dist and NNdist do
@@ -46,7 +46,7 @@ reductions <- spec$reduction
 embeddings <- setNames(lapply(seq_len(nrow(spec)), function(i) {
   read_matrix(paste0(spec$stem[[i]], "_embedding.tsv"))
 }), reductions)
-# Python writes zero-based, self-free neighbour rows.
+# Python writes zero-based, self-free neighbor rows.
 indices <- setNames(lapply(seq_len(nrow(spec)), function(i) {
   read_matrix(paste0(spec$stem[[i]], "_indices.tsv")) + 1
 }), reductions)
@@ -58,7 +58,7 @@ if (
   any(vapply(indices, nrow, integer(1)) != n_cells) ||
   any(vapply(indices, ncol, integer(1)) != k)
 ) {
-  stop("all modalities must use the same cell count and neighbour count")
+  stop("all modalities must use the same cell count and neighbor count")
 }
 cell_names <- paste0("cell", seq_len(n_cells))
 for (r in reductions) {
@@ -95,15 +95,15 @@ for (r in reductions) {
   )
 }
 
-# nearest.dist is the closest non-self neighbour and sigma is the k-th non-self
-# neighbour minus that, which is the bandwidth CyteArc uses. Seurat reaches the
+# nearest.dist is the closest non-self neighbor and sigma is the k-th non-self
+# neighbor minus that, which is the bandwidth CyteArc uses. Seurat reaches the
 # same two quantities as Distances(nn)[, 2] and Distances(nn)[, sigma.idx] on a
-# neighbour object whose first column is the cell itself.
+# neighbor object whose first column is the cell itself.
 own_distances <- lapply(reductions, function(r) {
   embedding <- normed[[r]]
   t(sapply(seq_len(n_cells), function(i) {
-    neighbours <- embedding[indices[[r]][i, ], , drop = FALSE]
-    sqrt(rowSums(sweep(neighbours, 2, embedding[i, ], FUN = "-")^2))
+    neighbors <- embedding[indices[[r]][i, ], , drop = FALSE]
+    sqrt(rowSums(sweep(neighbors, 2, embedding[i, ], FUN = "-")^2))
   }))
 })
 names(own_distances) <- reductions

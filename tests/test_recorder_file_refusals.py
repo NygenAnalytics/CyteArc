@@ -45,7 +45,7 @@ def _rows(path, **options) -> list:
 # Text tables
 
 
-def test_an_empty_file_has_no_header_to_recognise(tmp_path):
+def test_an_empty_file_has_no_header_to_recognize(tmp_path):
     path = tmp_path / "alleles.csv"
     path.write_text("")
     with pytest.raises(ValueError, match="is empty; an allele table needs a header"):

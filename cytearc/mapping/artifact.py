@@ -760,7 +760,7 @@ def validate_mapping_reference_binding(
     a handle. Later operations compare the artifact record and its attributes
     with the handle and the handle's arrays with the digest recorded at load,
     so a bound handle costs a few metadata reads per operation rather than a
-    pass over the payload, the index and the neighbours. Callers check the
+    pass over the payload, the index and the neighbors. Callers check the
     live reference dataset with ``MappingReference.validate_dataset_fingerprint``.
     """
     if not isinstance(reference, MappingReference):

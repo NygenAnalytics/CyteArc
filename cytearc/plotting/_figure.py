@@ -66,7 +66,7 @@ def categorical_legend(
     """Return the spec of a categorical legend.
 
     ``missing`` says whether the plot draws values without a category in the
-    scale's missing colour. Every legend of such a plot, the shared legend of
+    scale's missing color. Every legend of such a plot, the shared legend of
     :func:`compose_results` included, then lists the scale's missing label
     last.
     """
@@ -294,7 +294,7 @@ class PlotResult:
         # Exact-size export must not crop; tight bbox changes physical size.
         kwargs["bbox_inches"] = None if exact_size else "tight"
         _, mpl = require_matplotlib()
-        # Honour explicit transparent=False even when the active theme prefers none.
+        # Honor explicit transparent=False even when the active theme prefers none.
         export_rc: dict[str, Any] = {"savefig.bbox": None} if exact_size else {}
         figure_face = self.figure.patch.get_facecolor()
         figure_alpha = self.figure.patch.get_alpha()

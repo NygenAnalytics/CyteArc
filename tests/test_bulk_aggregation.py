@@ -357,7 +357,7 @@ def test_bulk_leaves_nan_none_and_blank_labels_out_of_every_group(tmp_path):
 @pytest.mark.parametrize("aggregation", ["sum", "mean"])
 def test_bulk_columns_keep_apart_labels_that_join_to_one_name(tmp_path, aggregation):
     # The groups a_b with c and a with b_c both joined into "a_b_c", which
-    # was refused; a column is now labelled by its group and sub-group.
+    # was refused; a column is now labeled by its group and sub-group.
     counts = np.arange(1, 25, dtype=np.uint16).reshape(6, 4)
     store, cells = _bulk_store(tmp_path, counts)
     store.cells.insert("group", np.array(["a_b", "a_b", "a", "a", "a", "a_b"]))

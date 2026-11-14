@@ -602,7 +602,7 @@ def stores(tmp_path_factory) -> dict[str, object]:
             )
             store.cells.insert("sample", pd.Categorical(samples))
             assert isinstance(store.cells._get_array("cell_type"), CategoricalColumn)
-        store.cells.insert("labelled", ~np.array(MISSING))
+        store.cells.insert("labeled", ~np.array(MISSING))
         opened[layout] = store
     return opened
 
@@ -664,8 +664,8 @@ def test_label_snapshots_samples_and_groups_fingerprint_the_labels(stores) -> No
 
     found = {}
     for layout, store in stores.items():
-        labelled = store.snapshot_cell_selection("labelled")
-        snapshot = store.snapshot_cluster_labels("cell_type", cell_selection=labelled)
+        labeled = store.snapshot_cell_selection("labeled")
+        snapshot = store.snapshot_cluster_labels("cell_type", cell_selection=labeled)
         samples = read_cell_samples(
             store,
             MemoryLedger(None, "Grouping samples"),
@@ -762,9 +762,9 @@ def test_a_stamp_covers_the_categories_as_well_as_the_codes(stores) -> None:
 def test_clones_from_a_column_read_the_labels_of_either_layout(stores) -> None:
     found = {}
     for layout, store in stores.items():
-        labelled = store.snapshot_cell_selection("labelled")
+        labeled = store.snapshot_cell_selection("labeled")
         clones = store.clones.load_clones(
-            store.clones.from_column("cell_type", cell_selection=labelled)
+            store.clones.from_column("cell_type", cell_selection=labeled)
         )
         found[layout] = clones.cells["clone"].astype(object).to_dict()
 
@@ -979,7 +979,7 @@ def test_partial_categorical_inserts_fill_or_flag_the_other_rows() -> None:
     assert "refused" not in table._group
 
 
-def test_a_labelled_series_of_categories_is_assigned_by_cell_id() -> None:
+def test_a_labeled_series_of_categories_is_assigned_by_cell_id() -> None:
     table = _table()
     ids = [f"cell{index}" for index in range(N)]
     series = pd.Series(pd.Categorical(LABELS, categories=CATEGORIES), index=ids)

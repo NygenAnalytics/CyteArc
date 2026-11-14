@@ -162,7 +162,7 @@ def receptor_qc(
     or more in the last bar. Many ``"orphan VDJ"`` or ``"orphan VJ"`` cells
     point to chains lost in capture, and many ``"multichain"`` or
     ``"ambiguous"`` cells to doublets. The panels stand in one column, the
-    categories that hold cells in the colours of their vocabulary.
+    categories that hold cells in the colors of their vocabulary.
 
     ``group_by`` names cell metadata columns, one or several, such as the
     sample, and ``groups`` a cell-label artifact, such as a clustering; the
@@ -373,7 +373,7 @@ def _gene_axis(field: str, level: str, shown: int, held: int) -> str:
 
 
 def _shared_fractions(matrices: Sequence[pd.DataFrame]) -> ColorScale:
-    """One colour scale of fractions from 0 for every locus panel of a figure."""
+    """One color scale of fractions from 0 for every locus panel of a figure."""
     values = np.concatenate(
         [matrix.to_numpy(dtype=np.float64).ravel() for matrix in matrices]
     )
@@ -388,7 +388,7 @@ def _locus_heatmaps(
     value_label: str,
     show_legend: bool,
 ) -> Drawn:
-    """Draw a heatmap per locus under one colour scale, beside one colour bar."""
+    """Draw a heatmap per locus under one color scale, beside one color bar."""
     scale = _shared_fractions(list(matrices.values()))
     loci = list(matrices)
     drawn: Drawn | None = None
@@ -432,8 +432,8 @@ def gene_usage(
     for groups of ``group_by`` columns or a ``groups`` artifact, a heatmap of
     each gene's fraction of each group's chains of that locus, which names
     the group even where one group holds the locus, the panels of every
-    locus sharing one colour bar from 0 to the largest fraction drawn, two
-    panels to a row; without, bars in the locus's colour, three panels to a
+    locus sharing one color bar from 0 to the largest fraction drawn, two
+    panels to a row; without, bars in the locus's color, three panels to a
     row. With ``count="clonotypes"`` the fractions count clonotypes, or
     clonotype clusters for clonotypes that a distance metric linked. The
     plot raises ``ValueError`` when ``usage`` counts several gene fields or
@@ -573,7 +573,7 @@ def gene_pairing(
     the locus's chains with each pair of its ``max_genes`` V genes and
     ``max_genes`` J genes with the most chains, its axes saying how many of
     how many they draw when they leave some out. The panels stand two to a
-    row and share one colour bar, from 0 to the largest fraction drawn. The
+    row and share one color bar, from 0 to the largest fraction drawn. The
     plot raises ``ValueError`` when ``usage`` counts other gene fields or
     groups of cells, or no chain has both calls.
 
@@ -696,7 +696,7 @@ def spectratype(
     ``spectratype`` is the result of ``ds.repertoire.spectratype``, which
     sets the groups, the sequence, the slots and what is counted. Each panel
     draws, for one locus, each group's fraction of chains at each junction
-    length, one line per group in its colour, or bars in the locus's colour
+    length, one line per group in its color, or bars in the locus's color
     for one group. The panels stand three to a row, with one legend of the
     groups, titled by the grouping, beside the first row. With
     ``count="clonotypes"`` the fractions count clonotypes, or clonotype
@@ -712,13 +712,13 @@ def spectratype(
     Raises:
         TypeError: If ``spectratype`` is not a ``Spectratype`` record, or
             another argument has the wrong type, or the store does not give
-            the labels that the groups' colours range over.
+            the labels that the groups' colors range over.
         ValueError: If no chain has a junction.
         KeyError: If the store does not hold the clonotypes that
             ``spectratype`` counts.
         RuntimeError: If those clonotypes are incomplete, as a call that
             stopped before it finished leaves them.
-        MemoryError: If reading the labels that the groups' colours range
+        MemoryError: If reading the labels that the groups' colors range
             over does not fit the memory budget.
     """
     show_legend = bool_argument(show_legend, "show_legend")

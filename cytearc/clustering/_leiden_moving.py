@@ -3,10 +3,10 @@
 This is the fast local moving phase (MoveNodesFast) of the Leiden algorithm of
 Traag, Waltman and van Eck (2019), Algorithm A.2 lines 13-25, for modularity
 with a resolution parameter. A node moves only when the move strictly raises
-the quality, to the best neighbouring community or to an empty one, and the
-neighbours outside its new community are queued again.
+the quality, to the best neighboring community or to an empty one, and the
+neighbors outside its new community are queued again.
 
-Notation (all weights are the normalised weights of ``_leiden_graph``): for a
+Notation (all weights are the normalized weights of ``_leiden_graph``): for a
 node ``v`` and a set ``X`` not containing ``v``, ``a(v, X)`` is the weight from
 ``v`` to ``X`` (self-loops excluded) and ``f(v, X) = a(v, X) - c_v * K_X`` with
 ``c_v = gamma * k_v / 2m`` and ``K_X`` the total strength of ``X``. Moving
@@ -22,7 +22,7 @@ Two schedules apply the same moves rule:
 - On large levels (``move_nodes_level``) each sweep splits the active nodes
   into random groups. All nodes of a group choose their moves from the state
   at the start of the group, in parallel; the moves are then applied
-  together and the neighbours of moved nodes are activated. Decisions read
+  together and the neighbors of moved nodes are activated. Decisions read
   only that snapshot and moves are ordered by node id, so the result does
   not depend on the number of threads. To stop two singletons from swapping
   communities in the same group, the singlet minimum-label rule of Lu,
@@ -96,10 +96,10 @@ def best_move(
     current = labels[v]
     n_used = int(np.int64(0))
     for position in range(indptr[v], indptr[v + 1]):
-        neighbour = indices[position]
-        if neighbour != v:
+        neighbor = indices[position]
+        if neighbor != v:
             n_used = acc_add(
-                keys, vals, used, n_used, labels[neighbour], weights[position], shift
+                keys, vals, used, n_used, labels[neighbor], weights[position], shift
             )
     node_strength = strengths[v]
     c_v = null_coef * np.float64(node_strength)
@@ -245,13 +245,13 @@ def move_nodes_queue(
         labels[v] = target
         moves += 1
         for position in range(indptr[v], indptr[v + 1]):
-            neighbour = indices[position]
-            if neighbour != v and labels[neighbour] != target and inq[neighbour] == 0:
+            neighbor = indices[position]
+            if neighbor != v and labels[neighbor] != target and inq[neighbor] == 0:
                 tail = head + count
                 if tail >= n:
                     tail -= n
-                queue[tail] = neighbour
-                inq[neighbour] = 1
+                queue[tail] = neighbor
+                inq[neighbor] = 1
                 count += 1
     return evaluations, moves, capped
 
@@ -592,16 +592,16 @@ def _activate_from(
     labels: np.ndarray,
     active: np.ndarray,
 ) -> None:
-    """Activate the neighbours of a moved node outside its new community."""
+    """Activate the neighbors of a moved node outside its new community."""
     own = labels[v]
     for position in range(indptr[v], indptr[v + 1]):
-        neighbour = indices[position]
-        if neighbour != v and labels[neighbour] != own:
-            active[neighbour] = 1
+        neighbor = indices[position]
+        if neighbor != v and labels[neighbor] != own:
+            active[neighbor] = 1
 
 
 @njit(cache=True, nogil=True, parallel=True)
-def _activate_neighbours(
+def _activate_neighbors(
     movers: np.ndarray,
     indptr: np.ndarray,
     indices: np.ndarray,
@@ -610,7 +610,7 @@ def _activate_neighbours(
     n_workers: int,
     parallel_min_items: int,
 ) -> None:
-    """Activate the neighbours of every mover after all labels are updated.
+    """Activate the neighbors of every mover after all labels are updated.
 
     Several workers may store the constant 1 into the same flag; every store
     writes the same value, so the final flags do not depend on the order.
@@ -784,7 +784,7 @@ def move_nodes_level(
                     n_workers,
                     parallel_min_items,
                 )
-                _activate_neighbours(
+                _activate_neighbors(
                     movers,
                     indptr,
                     indices,

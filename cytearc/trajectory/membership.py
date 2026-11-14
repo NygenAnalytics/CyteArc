@@ -38,7 +38,7 @@ deviation scaled to a normal standard deviation, so a separate state with
 less weight than the lineage's own cells there cannot widen it. A state off
 the trajectory, such as a dead end off a lineage, projects onto one stretch
 of the curve, where it can outweigh the lineage's own cells, so each bin
-takes the median limit of three neighbouring bins.
+takes the median limit of three neighboring bins.
 """
 
 import math
@@ -141,7 +141,7 @@ def distance_limits(
     score * 1.4826 * mad``, with ``m`` the weighted median of their
     distances to the curve and ``mad`` the weighted median of their absolute
     deviations from ``m``. A bin's limit is the median spread of three
-    neighbouring bins, the bin and one on each side, or the first or last
+    neighboring bins, the bin and one on each side, or the first or last
     three at either end, leaving out bins without weight. With fewer than
     three bins, every bin takes the median of all, and a lineage without
     weight has no limit, NaN, so no cell lies on it.
@@ -178,11 +178,11 @@ def distance_limits(
                 np.abs(cell_distances[rows] - center), cell_weights[rows]
             )
             limits[lineage, index] = center + score * _MAD_SCALE * spread
-    return _neighbouring_medians(limits)
+    return _neighboring_medians(limits)
 
 
-def _neighbouring_medians(spreads: np.ndarray) -> np.ndarray:
-    """Return each bin's median spread over three neighbouring bins, without empty ones."""
+def _neighboring_medians(spreads: np.ndarray) -> np.ndarray:
+    """Return each bin's median spread over three neighboring bins, without empty ones."""
     n_bins = spreads.shape[1]
     medians = np.full(spreads.shape, np.nan)
     for index in range(n_bins):

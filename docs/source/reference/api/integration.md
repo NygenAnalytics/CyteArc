@@ -170,7 +170,7 @@ creates a run record. Keys of the earlier Harmony implementation raise `ValueErr
 | `nclust` | `n_clusters` | `Unsupported Harmony parameter 'nclust': it was renamed to 'n_clusters'` |
 | `max_iter_kmeans` | `max_iter_cluster` | `Unsupported Harmony parameter 'max_iter_kmeans': it was renamed to 'max_iter_cluster'` |
 | `lamb` | `ridge_penalty` for a fixed penalty, or nothing for the dynamic penalty | `Unsupported Harmony parameter 'lamb': it was renamed to 'ridge_penalty'; ridge_penalty is a fixed penalty, so leave it out to use Harmony2's dynamic penalty` |
-| `cluster_fn` | nothing; clusters are seeded with k-means++ | `Unsupported Harmony parameter 'cluster_fn': Harmony2 seeds its clusters with k-means++ and has no initialisation hook` |
+| `cluster_fn` | nothing; clusters are seeded with k-means++ | `Unsupported Harmony parameter 'cluster_fn': Harmony2 seeds its clusters with k-means++ and has no initialization hook` |
 
 `max_iter_harmony=0`, which clustered without correcting, now raises `max_iter_harmony must be at
 least 1`, and `ridge_penalty` must be positive where `lamb` accepted 0. Other unknown keys raise

@@ -1,6 +1,6 @@
 """Call clones from lineage barcodes, by the rules of the method that made them.
 
-Cells that carry the same lineage barcodes descend from one labelled cell.
+Cells that carry the same lineage barcodes descend from one labeled cell.
 The barcodes that extraction tools report hold noise that each method's
 published rules remove before grouping cells: molecules of few reads, which
 are mostly sequencing errors and chimeras; barcodes a few substitutions or

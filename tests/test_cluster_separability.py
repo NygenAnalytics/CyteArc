@@ -213,7 +213,7 @@ def test_confusion_fractions_use_the_true_cluster_as_denominator():
         1,
     )
     assert set(result.cluster_scores["cluster_label"]) == {"big", "small"}
-    # The two clusters differ in size, so normalising by the predicted cluster
+    # The two clusters differ in size, so normalizing by the predicted cluster
     # instead would report different off-diagonal fractions.
     off_diagonal = confusion["true_cluster"] != confusion["predicted_cluster"]
     assert (confusion["n_cells"][off_diagonal] > 0).any()

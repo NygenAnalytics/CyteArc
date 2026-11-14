@@ -34,7 +34,7 @@ _MASK = 2**64 - 1
 
 
 def _mix(value: int) -> int:
-    """The SplitMix64 finaliser of Steele, Lea and Flood (2014), on Python integers."""
+    """The SplitMix64 finalizer of Steele, Lea and Flood (2014), on Python integers."""
     value = ((value ^ (value >> 30)) * 0xBF58476D1CE4E5B9) & _MASK
     value = ((value ^ (value >> 27)) * 0x94D049BB133111EB) & _MASK
     return value ^ (value >> 31)
@@ -362,13 +362,13 @@ def test_estimate_contamination_warns_about_each_estimate_of_zero():
             used,
             clusters=np.array(["a", "b", "b", "c"]),
             level="cluster",
-            set_names=["haemoglobin", "immunoglobulin"],
+            set_names=["hemoglobin", "immunoglobulin"],
         )
 
     # The bounds are -log(0.05) / 30, / 40, and / 4.
     assert [str(warning.message) for warning in caught] == [
         _zero_estimate_message(
-            "The contamination estimate from gene set 'haemoglobin'",
+            "The contamination estimate from gene set 'hemoglobin'",
             "3 cells",
             "the set",
             "30",
@@ -419,14 +419,14 @@ def test_the_contamination_fit_returns_each_estimate_of_zero_without_warning():
             used,
             clusters=np.array(["a", "b", "b", "c"]),
             level="cluster",
-            set_names=["haemoglobin", "immunoglobulin"],
+            set_names=["hemoglobin", "immunoglobulin"],
         )
 
     np.testing.assert_array_equal(fit.cluster_fractions, [4 / 30, 0.0, 0.0])
     # The bounds are -log(0.05) / 30, / 40, and / 4.
     examples = [zero.example() for zero in zeros]
     assert examples == [
-        "gene set 'haemoglobin' (no count in 3 cells where pure soup would give "
+        "gene set 'hemoglobin' (no count in 3 cells where pure soup would give "
         "30, so below 0.0999)",
         "cluster 'b' (no count in 2 cells where pure soup would give 40, so below "
         "0.0749)",
@@ -463,7 +463,7 @@ def test_estimate_contamination_warns_once_for_a_global_estimate_of_zero():
             [[0.0], [0.0], [5.0]],
             [[10.0], [34.8], [10.0]],
             [[True], [True], [False]],
-            set_names=["haemoglobin"],
+            set_names=["hemoglobin"],
         )
 
     assert [str(warning.message) for warning in caught] == [
@@ -490,7 +490,7 @@ def test_estimate_contamination_does_not_warn_about_positive_or_missing_estimate
             [[True, True], [True, False]],
             clusters=["a", "b"],
             level="cluster",
-            set_names=["haemoglobin", "immunoglobulin"],
+            set_names=["hemoglobin", "immunoglobulin"],
         )
     assert fit.fraction == pytest.approx(0.15)
     assert np.isnan(fit.set_fractions[1])
@@ -507,7 +507,7 @@ def test_rounding_draws_are_splitmix64_streams_of_the_seed_and_row_key():
     np.testing.assert_array_equal(
         _row_uniforms(2**64 + 3, keys), _row_uniforms(3, keys)
     )
-    # The finaliser is utils.digest's, which cell calling compiles, applied
+    # The finalizer is utils.digest's, which cell calling compiles, applied
     # to whole arrays.
     values = np.array([0, 1, 2**63 + 5, 2**64 - 1], dtype=np.uint64)
     with np.errstate(over="ignore"):

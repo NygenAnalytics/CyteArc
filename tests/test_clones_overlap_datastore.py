@@ -4,7 +4,7 @@ The store and its clones are written once, as a template, and shared by the
 tests that only measure, since overlap and tracking save nothing; tests that
 change cell metadata or the memory budget copy the template. Expected values
 are counted cell by cell from the truth. The truth's clones keep their rank
-as codes, so clone ``k`` is labelled ``str(k + 1)``.
+as codes, so clone ``k`` is labeled ``str(k + 1)``.
 """
 
 from dataclasses import replace
@@ -138,8 +138,8 @@ def test_overlap_groups_by_labels_columns_and_selections(shared) -> None:
     )
     found = TRUTH.group_clone_cells(keys)
     assert crossed.group_sizes["group"].tolist() == sorted(found)
-    labelled = crossed.group_sizes.join(crossed.group_keys, on="group")
-    assert (labelled["sample"] + ", " + labelled["cell_type"]).tolist() == sorted(found)
+    labeled = crossed.group_sizes.join(crossed.group_keys, on="group")
+    assert (labeled["sample"] + ", " + labeled["cell_type"]).tolist() == sorted(found)
     assert len(crossed.pairs) == 15
     _check_pairs(crossed.pairs, {name: found[name] for name in sorted(found)})
     # Only the cells of d2, compared between cell types.
@@ -281,8 +281,8 @@ def test_track_follows_the_largest_clones_of_each_group(shared, top) -> None:
     assert tracked.tracked == tuple(number_label(clone) for clone in chosen)
     cells = tracked.table
     assert cells.columns.tolist() == ["clone", "group", "n_cells", "fraction"]
-    labelled = cells.join(tracked.group_keys, on="group")
-    assert (labelled["group"] == labelled["sample"]).all()
+    labeled = cells.join(tracked.group_keys, on="group")
+    assert (labeled["group"] == labeled["sample"]).all()
     expected = _expected_rows(by_sample, chosen)
     assert cells[["clone", "group", "n_cells"]].values.tolist() == [
         row[:3] for row in expected
@@ -305,7 +305,7 @@ def test_track_breaks_ties_by_the_larger_clone(shared) -> None:
     assert two.tracked == ("1", "2", "4")
 
 
-def test_track_follows_labelled_clones_through_every_group(shared) -> None:
+def test_track_follows_labeled_clones_through_every_group(shared) -> None:
     store, clones = shared.store, shared.clones
     labels = store.snapshot_cluster_labels("cell_type", cell_selection=shared.cells)
     # Clone 8, of one d4 cell, and clone 3, named in any order and twice.
@@ -347,7 +347,7 @@ def test_track_follows_labelled_clones_through_every_group(shared) -> None:
         ({"labels": np.asarray([["1"]])}, TypeError, "labels must be a sequence"),
         ({"labels": np.asarray([1])}, TypeError, "labels must be a sequence"),
         ({"labels": []}, ValueError, "labels must name at least one clone"),
-        ({"labels": ["9"]}, ValueError, "No clone is labelled"),
+        ({"labels": ["9"]}, ValueError, "No clone is labeled"),
     ],
 )
 def test_track_arguments_are_checked(shared, kwargs, error, message) -> None:

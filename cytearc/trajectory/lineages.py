@@ -108,7 +108,7 @@ def _centered_regressors(
     totals = weights.sum(axis=0)
     if np.any(totals <= 0.0):
         raise ValueError("Every lineage needs a positive total weight")
-    # One cells-by-lineages copy is scaled and centred in place, and the
+    # One cells-by-lineages copy is scaled and centered in place, and the
     # weighted sums contract without temporaries, so this holds no more than
     # the weights, the regressors, and the result.
     centered = np.array(regressors, dtype=np.float64, order="C", copy=True)
@@ -123,9 +123,9 @@ def _prepare_regressors(
     weights: np.ndarray,
     regressors: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Validate weights and regressors and centre the regressors once.
+    """Validate weights and regressors and center the regressors once.
 
-    Returns the C-ordered float64 weights, the lineage totals, the centred
+    Returns the C-ordered float64 weights, the lineage totals, the centered
     regressors, and their weighted sums of squares.
     """
     cell_weights = np.ascontiguousarray(weights, dtype=np.float64)
@@ -338,8 +338,8 @@ def stream_weighted_correlations(
 
     ``blocks`` yields cells-by-features values with the feature labels of
     their columns, which must follow ``feature_order`` without gaps. The
-    weights and regressors are validated and centred once, before the first
-    block, and the centred regressors are the only cells-by-lineages array
+    weights and regressors are validated and centered once, before the first
+    block, and the centered regressors are the only cells-by-lineages array
     this adds while blocks stream. ``feature_names``, aligned with
     ``feature_order``, name features in errors instead of their labels.
 

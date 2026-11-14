@@ -306,9 +306,9 @@ def test_membership_strength_matches_reference_counts(
     n_cells, k = 61, 7
     store, _backing = _presentation_store()
     selection = _write_cell_selection(store.zw, np.ones(n_cells, dtype=bool))
-    neighbours = rng.integers(0, n_cells, size=(n_cells, k))
+    neighbors = rng.integers(0, n_cells, size=(n_cells, k))
     edges = np.stack(
-        (np.repeat(np.arange(n_cells), k), neighbours.ravel()),
+        (np.repeat(np.arange(n_cells), k), neighbors.ravel()),
         axis=1,
     ).astype(np.uint64)
     graph_ref = _write_complete_artifact(
@@ -341,11 +341,11 @@ def test_membership_strength_matches_reference_counts(
     ref = store.clusters.membership_strength(clusters, graph_ref)
 
     stored = np.asarray(store.zw[artifact_path(ref)]["values"][:])
-    # The share of each cell's neighbours that carry its own label; NaN
+    # The share of each cell's neighbors that carry its own label; NaN
     # labels count as one label.
-    neighbour_labels = labels[neighbours]
+    neighbor_labels = labels[neighbors]
     own = labels[:, None]
-    shared = (neighbour_labels == own) | (pd.isna(neighbour_labels) & pd.isna(own))
+    shared = (neighbor_labels == own) | (pd.isna(neighbor_labels) & pd.isna(own))
     reference = (np.count_nonzero(shared, axis=1) / k).round(3)
     assert stored.dtype == np.float64
     assert stored.tobytes() == reference.tobytes()

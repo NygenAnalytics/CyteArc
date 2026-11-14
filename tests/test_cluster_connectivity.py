@@ -333,7 +333,7 @@ def clustered(tmp_path_factory):
     )
     kept = store.snapshot_cell_selection("kept")
     with warnings.catch_warnings():
-        # The few cells of the store draw warnings from the neighbour search.
+        # The few cells of the store draw warnings from the neighbor search.
         warnings.simplefilter("ignore")
         normalized = store.features.normalize(
             kept, store.features.universe(from_assay="RNA")

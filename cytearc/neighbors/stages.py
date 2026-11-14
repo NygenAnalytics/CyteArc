@@ -530,9 +530,9 @@ def kmeans_fit_memory(
         steps = (
             n_rows * fit_itemsize + update_rows * fit_itemsize + max(draw, minibatch)
         )
-        labelling = n_rows * (fit_itemsize + 4) + update_rows * (fit_itemsize + 8)
+        labeling = n_rows * (fit_itemsize + 4) + update_rows * (fit_itemsize + 8)
         return KMeansFitMemory(
-            peakBytes=matrix + held + max(seed, steps, labelling) + model + threads,
+            peakBytes=matrix + held + max(seed, steps, labeling) + model + threads,
             streamResidentBytes=0 if block >= n_rows else n_rows * dims * itemsize,
         )
     # The seeding sample and its sorted row indices, beside the unsorted
@@ -560,14 +560,14 @@ def kmeans_fit_memory(
         + model
         + threads
     )
-    labelling = (
+    labeling = (
         n_rows * 4
         + update_rows * 4
         + block * (dims * copy_itemsize + fit_itemsize + 4)
         + model
         + threads
     )
-    resident = max(sampling, updating, labelling)
+    resident = max(sampling, updating, labeling)
     return KMeansFitMemory(
         peakBytes=max(resident, seed),
         streamResidentBytes=resident,

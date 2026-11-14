@@ -607,11 +607,11 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
                 self.zw, self.cells, batch, cell_selection=cell_selection
             )
             labels, missing, column = resolved.labels, resolved.missing_mask, None
-        unlabelled = int((~valid_category_mask(labels, missing_mask=missing)).sum())
-        if unlabelled:
+        unlabeled = int((~valid_category_mask(labels, missing_mask=missing)).sum())
+        if unlabeled:
             raise ValueError(
-                f"The batch labels miss {unlabelled} selected cells; select the "
-                "labelled cells with select_cells before selecting highly "
+                f"The batch labels miss {unlabeled} selected cells; select the "
+                "labeled cells with select_cells before selecting highly "
                 "variable genes by batch"
             )
         names, codes = np.unique(np.asarray(labels).astype(str), return_inverse=True)
@@ -2211,7 +2211,7 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
             PermissionError: If no matching result exists and the store is
                 not opened with ``zarr_mode='r+'``. The check runs before
                 the search.
-            UnmeasuredCellsError: If the assay did not measure a labelled cell.
+            UnmeasuredCellsError: If the assay did not measure a labeled cell.
         """
         invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         reject_unknown_normalization_params(
@@ -3010,7 +3010,7 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
         ``None``, blank text, and values flagged by a linked missing mask.
 
         Each bulk column is one group, one group and sub-group combination,
-        or one pseudo-replicate of either, and is labelled by them: by its
+        or one pseudo-replicate of either, and is labeled by them: by its
         group label alone, or by a MultiIndex of the levels ``group``,
         ``subgroup``, and ``replicate`` (numbered from 1) that the call uses,
         so labels that hold ``_`` keep their columns apart. A column without
@@ -3149,13 +3149,13 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
             if isinstance(groups, str) and cell_selection is None
             else None
         )
-        group_values, resolved_selection, active_idx, labelled = resolve_groups(
+        group_values, resolved_selection, active_idx, labeled = resolve_groups(
             groups,
             cell_selection,
             live_idx,
         )
         # Cells with a missing label join no group.
-        groups_set = _held_labels(group_values, labelled)
+        groups_set = _held_labels(group_values, labeled)
         secondary: tuple[NDArray[Any] | pd.Categorical, list[Any]] | None = None
         if secondary_groups is not None:
             # Sub-groups are read over the cells of the primary groups'
@@ -3164,7 +3164,7 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
                 secondary_groups, resolved_selection, live_idx
             )
             secondary = (sec_group_values, _held_labels(sec_group_values, sec_valid))
-            labelled &= sec_valid
+            labeled &= sec_valid
 
         if from_assay is None and isinstance(groups, ArtifactRef):
             from_assay = groups.assay
@@ -3178,7 +3178,7 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
         columns, column_rows = bulk_column_rows(
             group_values,
             groups_set,
-            labelled,
+            labeled,
             active_idx,
             secondary=secondary,
             null_vals=null_vals,
@@ -3421,7 +3421,7 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
         - ``"wilcoxon"``: paired samples on aggregated (pseudobulk) data.
           Requires ``sample_by`` and ``pair_by``.
         - ``"welch"`` (alias ``"t_test"``): cell-level Welch's t-test on raw
-          normalized values for exactly two groups, honouring
+          normalized values for exactly two groups, honoring
           ``alternative``. Descriptive only; no sample aggregation.
         - ``"one_way_anova"``: cell-level one-way ANOVA omnibus test on raw
           normalized values. Descriptive only; no post-hoc yet.
@@ -3464,7 +3464,7 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
             posthoc: Pairwise test to run after Kruskal-Wallis (``"dunn"``).
             adjustment: Multiple-testing correction across keys and rows.
             alternative: Direction of the alternative hypothesis. Only the
-                Welch t-test honours it; other tests remain two-sided.
+                Welch t-test honors it; other tests remain two-sided.
             sample_by: Cell metadata column identifying biological samples.
             study_design: Study design supplying ``sample_by`` and, for the
                 Wilcoxon test only, the pairing column.

@@ -11,7 +11,7 @@ strengths are ``S^T q``, so the quality of every partition is preserved.
 The aggregate graph is built as a compressed sparse row matrix with prefix
 sums and per-worker hash tables, the approach of GVE-Leiden (Sahu, Kothapalli
 and Banerjee, 2024), but with an exact counting pass instead of over-allocated
-rows: the first pass counts the distinct neighbours of each aggregate node, a
+rows: the first pass counts the distinct neighbors of each aggregate node, a
 prefix sum turns the counts into row offsets, and the second pass accumulates
 the weights and writes each row sorted by column. Each row is summed in a
 fixed order (members ascending, then CSR order), so the result does not
@@ -186,7 +186,7 @@ def _count_row(
     used: np.ndarray,
     shift: np.uint64,
 ) -> int:
-    """Return the number of distinct aggregate neighbours of one aggregate node."""
+    """Return the number of distinct aggregate neighbors of one aggregate node."""
     n_used = int(np.int64(0))
     for position in range(agg_start[node], agg_start[node + 1]):
         member = agg_members[position]
@@ -396,17 +396,17 @@ def split_into_components(
     """Split every community into its connected components.
 
     Only edges whose two ends share a label are kept. Each component is
-    labelled by its smallest node (a union-find in which the smaller root
+    labeled by its smallest node (a union-find in which the smaller root
     always wins). Used as a safety stop when refinement merges nothing.
     """
     n = labels.shape[0]
     parent = np.arange(n).astype(np.int32)
     for node in range(n):
         for edge in range(indptr[node], indptr[node + 1]):
-            neighbour = indices[edge]
-            if neighbour > node and labels[neighbour] == labels[node]:
+            neighbor = indices[edge]
+            if neighbor > node and labels[neighbor] == labels[node]:
                 root_a = _find_root(parent, node)
-                root_b = _find_root(parent, neighbour)
+                root_b = _find_root(parent, neighbor)
                 if root_a < root_b:
                     parent[root_b] = root_a
                 elif root_b < root_a:

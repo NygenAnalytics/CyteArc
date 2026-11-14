@@ -53,14 +53,14 @@ _MARKED_POINT_SIZE = 4.0
 # The room that a heatmap's row or column name takes along its axis, in
 # multiples of the size of its text.
 _NAME_PITCH = 1.4
-# A tree's wedge fills this share of its slot, so that neighbours stay apart,
+# A tree's wedge fills this share of its slot, so that neighbors stay apart,
 # its lines are this wide, and a wedge that ends where it starts, such as one
 # leaf, is a point of this area.
 _WEDGE_EXTENT = 0.9
 _TREE_LINE_WIDTH = 0.8
 _TREE_POINT_AREA = 9.0
 # What drawing a tree holds: each legend entry; each text; and for each node
-# drawn its branch, wedge and colour, and the figure's table and labels of it.
+# drawn its branch, wedge and color, and the figure's table and labels of it.
 _TREE_BYTES_PER_ENTRY = 30 * 1024
 _TREE_BYTES_PER_TEXT = 4 * 1024
 _TREE_BYTES_PER_ROW = 448
@@ -69,11 +69,11 @@ _TREE_BYTES_PER_ROW = 448
 def _ordered(scale: CategoricalScale, what: str) -> tuple[list[Any], dict[Any, str]]:
     """Return a scale's order and palette, which a chart needs both of."""
     if scale.order is None or scale.palette is None:
-        raise ValueError(f"The colours of the {what} need an order and a palette")
+        raise ValueError(f"The colors of the {what} need an order and a palette")
     missing = [value for value in scale.order if value not in scale.palette]
     if missing:
         raise ValueError(
-            f"The colours of the {what} give no colour to {quoted_value(missing[0])}"
+            f"The colors of the {what} give no color to {quoted_value(missing[0])}"
         )
     return list(scale.order), dict(scale.palette)
 
@@ -134,13 +134,13 @@ def draw_bars(
 
     ``table`` holds one row per item, or with ``segment`` one row per item
     and segment, and a segment that an item lacks is 0. With ``segment``,
-    ``colors`` gives each segment's colour and its order the order of each
+    ``colors`` gives each segment's color and its order the order of each
     bar's parts: the first at the left of a horizontal bar and at the top of
     a vertical one, as the legend lists them. ``side_by_side`` draws the
     parts beside each other in the item's slot instead, the first at the
     left of a vertical slot and at the top of a horizontal one, for parts
     that are no part of one whole. Without ``segment``, ``colors`` is one
-    colour, or a scale of each item's colour whose legend lists the items.
+    color, or a scale of each item's color whose legend lists the items.
     ``normalize`` draws each item's parts as fractions of its total, 0
     without one, and a value that is not a number draws no bar.
     ``numeric_items`` stands each bar at its item's value on a numeric axis,
@@ -150,13 +150,13 @@ def draw_bars(
     the first, as many as the axis holds, at most ``MAX_NAMED_ITEMS``.
 
     Returns:
-        The legend of the segments, or of the items' colours, drawn beside
+        The legend of the segments, or of the items' colors, drawn beside
         the panel when ``show_legend`` is true, and its scale; or None
-        without ``legend_title``, or for bars of one colour, which draw no
+        without ``legend_title``, or for bars of one color, which draw no
         legend.
 
     Raises:
-        ValueError: If the table is empty, an item or segment has no colour,
+        ValueError: If the table is empty, an item or segment has no color,
             an item takes one segment twice, ``side_by_side`` comes without
             ``segment``, or ``numeric_items`` with an item that is not a
             number.
@@ -181,7 +181,7 @@ def draw_bars(
         unknown = [name for name in items if scaled and name not in palette]
         if unknown:
             raise ValueError(
-                f"The colours of the bars give no colour to {quoted_value(unknown[0])}"
+                f"The colors of the bars give no color to {quoted_value(unknown[0])}"
             )
         fills: list[Any] = [[palette[name] for name in items] if scaled else colors]
         drawn = set(items)
@@ -192,7 +192,7 @@ def draw_bars(
         if (parts < 0).any():
             unlisted = table[segment].to_numpy(dtype=object)[parts < 0][0]
             raise ValueError(
-                f"The colours of the bars give no colour to {quoted_value(unlisted)}"
+                f"The colors of the bars give no color to {quoted_value(unlisted)}"
             )
         fills = [palette[name] for name in segments]
         entries = segments
@@ -335,7 +335,7 @@ def _count_formatter_type() -> type:
 
 
 def _log_counts(axis: Any) -> None:
-    """Put an axis of counts on a log scale labelled with whole numbers."""
+    """Put an axis of counts on a log scale labeled with whole numbers."""
     formatter = _count_formatter_type()
     axis.set_major_formatter(formatter())
     axis.set_minor_formatter(formatter())
@@ -394,7 +394,7 @@ def draw_lines(
     legend_title: str | None = None,
     show_legend: bool = True,
 ) -> Drawn | None:
-    """Draw one line per series in the order of ``colors``, in its colour.
+    """Draw one line per series in the order of ``colors``, in its color.
 
     Each series' rows run in the order of the table. With ``positions``, the
     ``x`` values name positions on the axis, in that order, and a series
@@ -402,7 +402,7 @@ def draw_lines(
     value; ``dashed``, a column of flags, draws the flagged rows dashed,
     from the last row before them, such as the extrapolated part of a
     curve; and ``marked``, another, draws a point at each flagged row, such
-    as a curve's observed size. A log axis of counts is labelled with whole
+    as a curve's observed size. A log axis of counts is labeled with whole
     numbers.
 
     Each series draws, in order, its solid line, then its dashed line with
@@ -414,7 +414,7 @@ def draw_lines(
         ``legend_title``, which draws no legend.
 
     Raises:
-        ValueError: If a series has no colour or takes a position twice,
+        ValueError: If a series has no color or takes a position twice,
             or ``positions`` lacks an ``x`` value or comes with ``dashed``
             or ``marked``.
     """
@@ -423,7 +423,7 @@ def draw_lines(
     unknown = [name for name in pd.unique(values) if name not in palette]
     if unknown:
         raise ValueError(
-            f"The colours of the lines give no colour to {quoted_value(unknown[0])}"
+            f"The colors of the lines give no color to {quoted_value(unknown[0])}"
         )
     if positions is not None and (dashed is not None or marked is not None):
         raise ValueError("Lines along named positions take neither dashed nor marked")
@@ -541,10 +541,10 @@ def draw_histograms(
     legend_title: str | None = None,
     show_legend: bool = True,
 ) -> Drawn | None:
-    """Draw one step histogram per series in the order of ``colors``, in its colour.
+    """Draw one step histogram per series in the order of ``colors``, in its color.
 
     The series share ``bins`` bins, which span the values of every series
-    evenly, or with ``log_x`` evenly on a log axis labelled with plain
+    evenly, or with ``log_x`` evenly on a log axis labeled with plain
     numbers, which leaves out values at or below 0; values that are all
     equal, or too close to split into bins, take bins around them. A value
     that is not finite is left out, and a series without a value draws a
@@ -557,7 +557,7 @@ def draw_histograms(
 
     Raises:
         TypeError: If ``bins`` is not an integer.
-        ValueError: If ``bins`` is below 1, a series has no colour, or no
+        ValueError: If ``bins`` is below 1, a series has no color, or no
             value can be drawn.
     """
     _, mpl = require_matplotlib()
@@ -567,7 +567,7 @@ def draw_histograms(
     unknown = [name for name in pd.unique(labels) if name not in palette]
     if unknown:
         raise ValueError(
-            f"The colours of the histograms give no colour to {quoted_value(unknown[0])}"
+            f"The colors of the histograms give no color to {quoted_value(unknown[0])}"
         )
     values = table[value].to_numpy(dtype=np.float64)
     placed = np.isfinite(values) & ((values > 0) if log_x else True)
@@ -660,24 +660,24 @@ def draw_matrix(
     show_legend: bool = True,
     colorbar_beside: Sequence[Any] | None = None,
 ) -> Drawn:
-    """Draw a table as a heatmap through a colour scale, with a colour bar.
+    """Draw a table as a heatmap through a color scale, with a color bar.
 
-    A cell without a value the scale can colour, such as NaN, an infinite
+    A cell without a value the scale can color, such as NaN, an infinite
     value or one at or below 0 on a log scale, takes the scale's
     ``missing_color``, and with ``blank_diagonal`` the diagonal is left
-    blank and out of the colour limits, so the colours span the other cells.
+    blank and out of the color limits, so the colors span the other cells.
     A table of at most ``MAX_PRINTED_VALUES`` rows and columns prints each
-    coloured value, dark on light colours and light on dark ones. Each axis
+    colored value, dark on light colors and light on dark ones. Each axis
     names as many of its rows or columns as its length holds once the
     figure is laid out, at most ``MAX_NAMED_ITEMS``: every one, or else
     every second, third or nth.
     ``colorbar_beside`` names the panels whose heatmaps share this one's
-    scale and limits, beside all of which the colour bar stands; by
+    scale and limits, beside all of which the color bar stands; by
     default it stands beside this panel alone.
 
     Returns:
-        The colour bar's legend, with the limits drawn, and the scale; the
-        colour bar is drawn beside the panel when ``show_legend`` is true.
+        The color bar's legend, with the limits drawn, and the scale; the
+        color bar is drawn beside the panel when ``show_legend`` is true.
     """
     _, mpl = require_matplotlib()
     values = matrix.to_numpy(dtype=np.float64)
@@ -698,7 +698,7 @@ def draw_matrix(
     )
     missing = ~colored & ~blank
     if missing.any():
-        # Cells without a value take the missing colour, in a layer over the
+        # Cells without a value take the missing color, in a layer over the
         # blank cells of the image.
         layer = np.zeros((n_rows, n_columns, 4), dtype=np.float64)
         layer[missing] = mpl.colors.to_rgba(color_scale.missing_color)
@@ -807,7 +807,7 @@ def draw_tree(
     ``y``, ``low`` and ``high``, its middle and extent down the y axis, which
     runs from 0 at the top. A node opened joins its children with a line
     at its ``x``. A wedge runs from its node to a base at ``end`` as tall as
-    nine tenths of its extent, in the colour that the palette of ``colors``
+    nine tenths of its extent, in the color that the palette of ``colors``
     gives its category in ``categories``; a wedge that ends where it starts,
     such as one leaf, is a point. ``texts`` holds what each wedge says at its
     base, empty for nothing, and ``cut`` draws a dashed line at that ``x``.
@@ -827,7 +827,7 @@ def draw_tree(
 
     Raises:
         ValueError: If the table is empty, the categories or texts are not
-            one for each row, a wedge's category has no colour, or the
+            one for each row, a wedge's category has no color, or the
             scale's order, with a legend title, lists no category drawn.
     """
     _, mpl = require_matplotlib()
@@ -853,7 +853,7 @@ def draw_tree(
     ]
     if unknown:
         raise ValueError(
-            f"The colours of the wedges give no colour to {quoted_value(unknown[0])}"
+            f"The colors of the wedges give no color to {quoted_value(unknown[0])}"
         )
     # Each node's branch from where it starts, and each opened node's line
     # from its first child to its last, as one path of segments.
@@ -886,23 +886,23 @@ def draw_tree(
                 capstyle="butt",
             )
         )
-    # Each wedge a triangle from its node to its base, one path of a colour's
-    # wedges for each colour.
+    # Each wedge a triangle from its node to its base, one path of a color's
+    # wedges for each color.
     middle = (low + high) / 2
     spread = (high - low) * _WEDGE_EXTENT / 2
     wide = wedge & (end != x)
     outline = np.asarray(
         [Path.MOVETO, Path.LINETO, Path.LINETO, Path.CLOSEPOLY], dtype=Path.code_type
     )
-    # Each wedge's colour as a position among the colours, through its
-    # category's position in the palette, which also colours the categories
+    # Each wedge's color as a position among the colors, through its
+    # category's position in the palette, which also colors the categories
     # that the legend leaves out.
-    coloured = list(palette)
-    shades = list(dict.fromkeys(palette[value] for value in coloured))
+    colored = list(palette)
+    shades = list(dict.fromkeys(palette[value] for value in colored))
     shade_of = {shade: at for at, shade in enumerate(shades)}
     shading = np.asarray(
-        [shade_of[palette[value]] for value in coloured], dtype=np.int64
-    )[pd.Index(coloured).get_indexer(kinds)]
+        [shade_of[palette[value]] for value in colored], dtype=np.int64
+    )[pd.Index(colored).get_indexer(kinds)]
     shading[~wide] = -1
     for at, shade in enumerate(shades):
         drawn = shading == at
@@ -970,9 +970,7 @@ def draw_tree(
     drawn = set(pd.unique(kinds[wedge]).tolist())
     entries = [value for value in order if value in drawn]
     if not entries:
-        raise ValueError(
-            "The colours of the wedges list no category that a wedge holds"
-        )
+        raise ValueError("The colors of the wedges list no category that a wedge holds")
     # Only the entries that the legend lists get handles, under a title that
     # counts every category drawn.
     shown = entries[:LEGEND_SIDE_MAX_ENTRIES]

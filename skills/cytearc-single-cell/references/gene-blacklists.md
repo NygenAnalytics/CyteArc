@@ -1,7 +1,7 @@
 # Gene blacklists for HVG selection
 
 What `features.hvgs(blacklist=...)` removes, how to check it on your store, the corrected strings to
-pass today, and when to add the clonotype or haemoglobin add-ons. Docs:
+pass today, and when to add the clonotype or hemoglobin add-ons. Docs:
 <https://docs.nygen.io/CyteArc/tutorials/feature-selection>, <https://docs.nygen.io/CyteArc/api/pipeline.html>.
 
 ## When to use
@@ -10,10 +10,10 @@ pass today, and when to add the clonotype or haemoglobin add-ons. Docs:
 - The store's histone symbols are neither the pre-2020 `HIST1H*` names nor the current HGNC and
   MGI ones (`H2AC*`, `H2BC*`, `H3C*`, `H4C*`, `H1-1` to `H1-6`, mouse `H1f1` to `H1f6`), which
   the default matches since 1.3.0.
-- Tumour, islet or proliferating-tissue data, where `CCND1`/`CCND2` carry biology that the
+- Tumor, islet or proliferating-tissue data, where `CCND1`/`CCND2` carry biology that the
   default cyclin family (`^CCN[A-Z]`) hides. Before 1.3.0 the default `^CCN` also removed
   `CCN1`/`CCN2` (CYR61/CTGF); it no longer does.
-- Plasma-cell-rich or B-cell-rich samples, mouse data, or haemoglobin genes among the top HVGs.
+- Plasma-cell-rich or B-cell-rich samples, mouse data, or hemoglobin genes among the top HVGs.
 
 ## Key concepts
 
@@ -64,7 +64,7 @@ HUMAN_BLACKLIST = "|".join([MITO, RIBO, r"^HLA-", HISTONE,
 MOUSE_BLACKLIST = "|".join([MITO, RIBO, r"^H2-", HISTONE,
     r"^XIST$|^TSIX$|^DDX3Y$|^EIF2S3Y$|^KDM5D$|^UTY$|^ZFY[12]$|^SRY$"])
 CLONOTYPE_ADDON = r"^IG[HKL]V|^IG[HKL]J\d|^IGHD\d"  # V, J, D segments; not IGHD or IGKC/IGLC
-HAEMOGLOBIN_ADDON = r"^HB[ABDEGMQZ]\d*$|^HB[AB]-"  # spares HBEGF, HBP1, HBS1L
+HEMOGLOBIN_ADDON = r"^HB[ABDEGMQZ]\d*$|^HB[AB]-"  # spares HBEGF, HBP1, HBS1L
 ```
 
 Add-ons are appended: `HUMAN_BLACKLIST + "|" + CLONOTYPE_ADDON`. Patterns are case-insensitive,
@@ -143,7 +143,7 @@ print(frac.round(2).to_string())
   with `HUMAN_BLACKLIST + "|" + CLONOTYPE_ADDON` under a new label and confirm that the plasma
   clusters now differ by isotype (`IGHA1`, `IGHG1`, `IGHM`) or state (`MKI67`), not light chain.
   Skip it when expanded clones are the question; use VDJ data then.
-- Haemoglobin add-on: use it when `HBB`/`HBA1` are among the HVGs and are detected at low
+- Hemoglobin add-on: use it when `HBB`/`HBA1` are among the HVGs and are detected at low
   fractions across clusters that lack `ALAS2`, `CA1`, `AHSP` and `SLC4A1` (ambient RNA). Do not
   use it when a cluster expresses those erythroid markers; remove contaminating red cells at QC.
 

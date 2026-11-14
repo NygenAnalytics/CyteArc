@@ -1,7 +1,7 @@
 """Draw the random sets of cells that the association tests compare each group with.
 
 Every random number comes from a counter-based generator: SplitMix64's
-finaliser of a key plus a counter. A group's key in a round comes from the
+finalizer of a key plus a counter. A group's key in a round comes from the
 seed, the group's code and the round; each set's key from the group's key and
 the set's index; and each uniform within a set from the set's key and a
 counter. A set therefore depends only on those numbers, so results do not

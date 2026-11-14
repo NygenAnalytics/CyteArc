@@ -303,7 +303,7 @@ def test_every_format_recovers_the_truth(shared, tmp_path, case) -> None:
     # without one, and the truth's other files no empty row; each droplet
     # holds a row at least, beside the rows of the cells.
     assert diagnostics["emptyRows"] == (
-        len(BARCODES.unlabelled) if case == "quicat" else 0
+        len(BARCODES.unlabeled) if case == "quicat" else 0
     )
     assert diagnostics["unmatchedRows"] >= diagnostics["unmatchedBarcodes"]
     assert diagnostics["fileRows"] - diagnostics["unmatchedRows"] >= len(loaded.records)

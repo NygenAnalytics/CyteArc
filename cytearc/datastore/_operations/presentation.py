@@ -1088,8 +1088,8 @@ class _PresentationOperationsMixin(_PresentationOperationsBase):
                 "Graph edges do not match the stored cell and k dimensions"
             )
         if k < 1:
-            raise ValueError("Graph must record at least one neighbour per cell")
-        # NaN labels share one integer code, so cells labelled NaN agree.
+            raise ValueError("Graph must record at least one neighbor per cell")
+        # NaN labels share one integer code, so cells labeled NaN agree.
         cluster_codes, _uniques = pd.factorize(cluster_values, use_na_sentinel=False)
         values = neighbor_label_agreement(edges, cluster_codes, k=k)
         write_cell_data_artifact(
@@ -1135,19 +1135,19 @@ class _PresentationOperationsMixin(_PresentationOperationsBase):
         """
         invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         remedy = (
-            "Select the cells labelled in both artifacts with select_cells(..., "
+            "Select the cells labeled in both artifacts with select_cells(..., "
             "include=[...]) and freeze both over that selection with "
             "snapshot_cluster_labels(..., cell_selection=...)"
         )
-        relabelled = resolve_complete_labels(
+        relabeled = resolve_complete_labels(
             self.zw, to_relabel, name="to_relabel", remedy=remedy
         )
         base = resolve_complete_labels(
             self.zw, base_label, name="base_label", remedy=remedy
         )
-        values_to_relabel = relabelled.values
+        values_to_relabel = relabeled.values
         base_values = base.values
-        selection = relabelled.source_cell_selection
+        selection = relabeled.source_cell_selection
         if base.source_cell_selection != selection:
             raise ValueError("Label artifacts must share one cell selection")
         arguments = SmartLabelArguments(

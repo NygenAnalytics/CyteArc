@@ -8,10 +8,10 @@ that carries no alternative allele.
 
 :func:`band_frequencies` turns the stored rows of a band of cells into a
 dense block of frequencies. :func:`frequency_clones` calls clones from those
-frequencies as Signac's ``FindClonotypes`` does: each cell's neighbourhood
+frequencies as Signac's ``FindClonotypes`` does: each cell's neighborhood
 is itself and the cells most similar to it by the cosine similarity of
-square-root allele frequencies; neighbourhoods give a shared-neighbour graph
-whose edges weigh the Jaccard index of two neighbourhoods, as Seurat's
+square-root allele frequencies; neighborhoods give a shared-neighbor graph
+whose edges weigh the Jaccard index of two neighborhoods, as Seurat's
 ``FindNeighbors`` builds it; and the Leiden algorithm partitions the graph
 where Seurat uses SLM. The similarity of two cells counts only the variants
 that both cover. Cells that cover no chosen variant, that show none, or
@@ -52,25 +52,25 @@ CLONE_STATUSES: tuple[str, ...] = (
     "no_neighbor",
     "no_group",
 )
-# Similarities are rounded to this many decimals before neighbours are
+# Similarities are rounded to this many decimals before neighbors are
 # ranked, so that the last bits of matrix products, which may depend on the
 # BLAS library, do not reorder ties.
 _SIMILARITY_DECIMALS = 12
 # Arrays of the size of a block of similarities held at once while
-# neighbours are chosen: the products, the similarities, and the masks and
+# neighbors are chosen: the products, the similarities, and the masks and
 # ranks of the selection.
 _BLOCK_ARRAYS = 8
-# Bytes per cell and variant held while a group's neighbourhoods are found:
+# Bytes per cell and variant held while a group's neighborhoods are found:
 # the square-root frequencies, the covered values, their squares and the
 # coverage weights as float64, and the coverage mask, rounded up.
 _VALUE_BYTES = 40
 # Bytes per cell of the per-cell arrays: its group, status and clone.
 _CELL_BYTES = 24
-# Bytes per neighbourhood slot while the shared-neighbour graph is built:
-# the neighbourhoods, the matrix of who holds whom and its transpose, and
+# Bytes per neighborhood slot while the shared-neighbor graph is built:
+# the neighborhoods, the matrix of who holds whom and its transpose, and
 # the arrays that build them and bound each cell's joins.
 _SLOT_BYTES = 64
-# Bytes of a kept join of the shared-neighbour graph (its cells and weight,
+# Bytes of a kept join of the shared-neighbor graph (its cells and weight,
 # and their copies while the blocks' joins are merged), and of a candidate
 # join while a block is computed (the product's entries, their cells,
 # Jaccard indices, masks and order).
@@ -159,29 +159,29 @@ def _value_range(values: np.ndarray) -> tuple[float, float]:
 def cosine_neighborhoods(
     values: np.ndarray, *, n_neighbors: int, block_rows: int
 ) -> np.ndarray:
-    """Find each cell's neighbourhood by the cosine similarity of its values.
+    """Find each cell's neighborhood by the cosine similarity of its values.
 
     ``values`` are square-root allele frequencies, NaN where a cell was not
     covered. The similarity of two cells is the cosine of their values over
     the variants that both cover; it is 0 when they share no covered variant
-    or one of them shows none of the shared ones. A cell's neighbourhood is
+    or one of them shows none of the shared ones. A cell's neighborhood is
     the cell itself and its ``n_neighbors - 1`` most similar other cells, as
-    Seurat counts a cell among its own neighbours, ranked by similarity and
-    then by position; cells of similarity 0 are never neighbours, so a
-    neighbourhood can hold fewer cells. Every similarity is exact up to the
-    rounding of matrix products, so the neighbourhoods do not depend on
+    Seurat counts a cell among its own neighbors, ranked by similarity and
+    then by position; cells of similarity 0 are never neighbors, so a
+    neighborhood can hold fewer cells. Every similarity is exact up to the
+    rounding of matrix products, so the neighborhoods do not depend on
     ``block_rows``.
 
     Args:
         values: Values shaped (cells, variants), non-negative, NaN where a
             cell was not covered.
-        n_neighbors: The cells of a full neighbourhood, the cell included.
+        n_neighbors: The cells of a full neighborhood, the cell included.
         block_rows: The cells whose similarities to every cell are computed
             at once.
 
     Returns:
-        Each cell's neighbourhood shaped (cells, ``n_neighbors``): the cell
-        itself, then its neighbours from the most similar, then -1.
+        Each cell's neighborhood shaped (cells, ``n_neighbors``): the cell
+        itself, then its neighbors from the most similar, then -1.
 
     Raises:
         ValueError: If ``values`` is not a matrix of non-negative values, or
@@ -219,7 +219,7 @@ def cosine_neighborhoods(
             weights.T,
         )
         rows = np.arange(stop - start)
-        # A cell is its own first neighbour, never one of the others.
+        # A cell is its own first neighbor, never one of the others.
         similarity[rows, rows + start] = 0.0
         neighborhoods[start:stop, 1 : others + 1] = _most_similar(
             similarity, others, columns
@@ -260,10 +260,10 @@ def _most_similar(
 ) -> np.ndarray:
     """Each row's ``others`` most similar positive columns, by decreasing
     similarity and then by position, padded with -1; ``others`` is below the
-    columns, since a cell is never its own neighbour."""
+    columns, since a cell is never its own neighbor."""
     n_rows = similarity.shape[0]
     chosen = np.full((n_rows, others), -1, dtype=np.int64)
-    # The value of each row's last neighbour; ties at it are taken from the
+    # The value of each row's last neighbor; ties at it are taken from the
     # lowest positions.
     threshold = -np.partition(-similarity, others - 1, axis=1)[:, others - 1]
     above = similarity > threshold[:, None]
@@ -293,7 +293,7 @@ class FrequencyClones:
         groups: Each cell's group, -1 for none.
         status: Why each cell has or lacks a clone, as a position in
             ``CLONE_STATUSES``.
-        n_edges: The edges of the shared-neighbour graphs.
+        n_edges: The edges of the shared-neighbor graphs.
     """
 
     clusters: np.ndarray
@@ -314,13 +314,13 @@ def frequency_clones(
 ) -> FrequencyClones:
     """Call clones from allele frequencies, as Signac's ``FindClonotypes`` does.
 
-    Within each group, each cell's neighbourhood holds itself and its most
+    Within each group, each cell's neighborhood holds itself and its most
     similar cells by :func:`cosine_neighborhoods` of the square roots of its
-    frequencies. Two cells that share a neighbour are joined with the Jaccard
-    index of their neighbourhoods, the shared cells over the cells in either,
+    frequencies. Two cells that share a neighbor are joined with the Jaccard
+    index of their neighborhoods, the shared cells over the cells in either,
     and joins below 1/15 are dropped, as in Seurat's ``FindNeighbors``. Cells
     that tie, such as cells that each show one variant, take the same few
-    cells as neighbours and join every other such cell, so the graph grows
+    cells as neighbors and join every other such cell, so the graph grows
     with the square of their number. The Leiden algorithm partitions each
     group's graph at ``resolution``. A cell without coverage of any variant,
     without an alternative allele at any covered variant, or without a join,
@@ -331,7 +331,7 @@ def frequency_clones(
             a cell was not covered.
         groups: Each cell's group, -1 for a cell without one, or None for one
             group. Clones never join cells of two groups.
-        n_neighbors: The cells of a full neighbourhood, the cell included.
+        n_neighbors: The cells of a full neighborhood, the cell included.
         resolution: The Leiden resolution.
         random_seed: The Leiden seed.
         memory_bytes: The bytes that the call may hold beside its input.
@@ -436,7 +436,7 @@ def frequency_clones(
         )
         if leiden_bytes > memory_bytes:
             raise MemoryError(
-                f"Partitioning the shared-neighbour graph of {len(kept)} cells needs "
+                f"Partitioning the shared-neighbor graph of {len(kept)} cells needs "
                 f"about {leiden_bytes} bytes, more than {budget}. Raise mem_budget."
             )
         labels = leiden_membership(subgraph, resolution, random_seed, nthreads=nthreads)
@@ -449,10 +449,10 @@ def frequency_clones(
 def _shared_neighbor_graph(
     neighborhoods: np.ndarray, *, memory_bytes: int, budget: str
 ) -> "coo_matrix":
-    """Seurat's shared-neighbour graph of a group's neighbourhoods, built in
+    """Seurat's shared-neighbor graph of a group's neighborhoods, built in
     blocks of candidate joins within ``memory_bytes``.
 
-    A quarter of the room beside the neighbourhoods holds a block of
+    A quarter of the room beside the neighborhoods holds a block of
     candidate joins, at least the candidates of the cell with the most, and
     the rest the kept joins; the graph does not depend on the split.
     """
@@ -466,7 +466,7 @@ def _shared_neighbor_graph(
     max_joins = (room - _CANDIDATE_BYTES * max_entries) // _JOIN_BYTES
     if max_joins < 1:
         raise MemoryError(
-            f"The shared-neighbour graph of {n_members} cells needs about "
+            f"The shared-neighbor graph of {n_members} cells needs about "
             f"{fixed + _CANDIDATE_BYTES * max_entries + _JOIN_BYTES} bytes before it "
             f"holds a join, more than {budget}. Raise mem_budget, lower "
             "n_neighbors, or call clones within smaller groups."
@@ -477,9 +477,9 @@ def _shared_neighbor_graph(
         )
     except MemoryError as error:
         raise MemoryError(
-            f"The shared-neighbour graph of {n_members} cells does not fit {budget}: "
+            f"The shared-neighbor graph of {n_members} cells does not fit {budget}: "
             f"{error}. Cells that tie, such as cells that each show one informative "
-            "variant, take the same few neighbours and join every other such cell. "
+            "variant, take the same few neighbors and join every other such cell. "
             "Raise mem_budget, or call clones within smaller groups."
         ) from error
 

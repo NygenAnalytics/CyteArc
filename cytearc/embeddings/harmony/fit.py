@@ -57,15 +57,15 @@ def fit_harmony(
 ) -> HarmonyResult:
     """Correct batch effects in reduced coordinates with Harmony2.
 
-    Harmony alternates two steps. A soft clustering of the unit-normalised cells
-    favours clusters in which every batch is represented in proportion to its
+    Harmony alternates two steps. A soft clustering of the unit-normalized cells
+    favors clusters in which every batch is represented in proportion to its
     size; then, within each cluster, a ridge regression of the original
     coordinates on the batch design estimates each batch's offset, and every
     cell subtracts the offsets of its batches, weighted by its cluster
-    assignments. The regression keeps an unpenalised intercept per cluster, so
+    assignments. The regression keeps an unpenalized intercept per cluster, so
     the cell-type structure stays. The two steps repeat until the clustering
     objective settles between rounds. This is CyteArc's implementation of
-    Harmony2: k-means++ seeding, the stabilised diversity penalty, a dynamic
+    Harmony2: k-means++ seeding, the stabilized diversity penalty, a dynamic
     ridge penalty and batch pruning, with the online block updates of the 2019
     method.
 

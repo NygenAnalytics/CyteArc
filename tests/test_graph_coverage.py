@@ -31,7 +31,7 @@ from cytearc.storage.selections import (
     read_stored_selection_mask,
     resolve_stored_selection_artifact,
 )
-from tests.qc_helpers import create_labelled_qc_store
+from tests.qc_helpers import create_labeled_qc_store
 
 
 class _MemoryGraphStore(GraphDataStore):
@@ -1475,7 +1475,7 @@ def test_query_neighbors_guards_ann_indices_and_coordinate_row_count(
 def test_reused_graph_stages_skip_expensive_compute(tmp_path, monkeypatch) -> None:
     from cytearc.storage.artifacts import artifact_group
 
-    store = create_labelled_qc_store(tmp_path / "reuse")
+    store = create_labeled_qc_store(tmp_path / "reuse")
     store.cells.reset_key("I")
     selection = store.snapshot_cell_selection("I")
     coordinate_values = np.arange(12, dtype=np.float32).reshape(6, 2)

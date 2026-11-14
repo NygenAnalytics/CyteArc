@@ -307,6 +307,8 @@ class PseudotimeAggregationArguments(OperationArguments):
     chunk_size: int = parameter()
     smoothen: bool = parameter()
     z_scale: bool = parameter()
+    # The n_neighbors argument, saved under the key that 1.3.0 records, so
+    # that results computed by 1.3.0 are still reused.
     n_neighbours: int = parameter()
     n_clusters: int = parameter()
     ann_params: dict[str, Any] = parameter()
@@ -388,6 +390,8 @@ class LineageAggregationArguments(OperationArguments):
     smoothing: float = parameter()
     min_exp: float = parameter()
     z_scale: bool = parameter()
+    # The n_neighbors argument, saved under the same key as the pseudotime
+    # aggregation's, so that both artifacts record one name.
     n_neighbours: int = parameter()
     n_clusters: int = parameter()
     ann_params: dict[str, Any] = parameter()
@@ -875,7 +879,7 @@ class FrequencyCloneArguments(OperationArguments):
     resolution: float = parameter()
     within: tuple[str, ...] = parameter()
     # Fixed choices of the method: the Leiden seed and the smallest Jaccard
-    # index of the shared-neighbour graph that Seurat keeps.
+    # index of the shared-neighbor graph that Seurat keeps.
     random_seed: int = parameter()
     shared_neighbor_prune: float = parameter()
     invalidate_cache: bool = execution()
@@ -1230,7 +1234,7 @@ class PerturbationAssociationArguments(OperationArguments):
     # The fingerprint of each cell's sample and of the covariate columns over
     # the tested cells, or None without them: at low MOI the control cells
     # and the cells of the tested targets or guides, at high MOI every
-    # labelled cell.
+    # labeled cell.
     sample_assignments_fingerprint: str | None = artifact_input()
     covariates_fingerprint: str | None = artifact_input()
     integration: str = parameter()

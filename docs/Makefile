@@ -4,7 +4,7 @@ UVRUN ?= uv run
 
 help:
 	@echo 'make html                         Render saved notebook outputs and the API'
-	@echo 'make preview                      Allow clearly labelled unexecuted pages'
+	@echo 'make preview                      Allow clearly labeled unexecuted pages'
 	@echo 'make check-reference              Build and check the Sphinx API'
 	@echo 'make execute-docs-modal PAGES="tea_seq cell_cycle" MODAL_ENVIRONMENT=...'
 

@@ -96,7 +96,7 @@ def open_qc_store(store: RecordingStore, **overrides) -> DataStore:
     return DataStore(store, **options)
 
 
-def create_labelled_qc_store(path):
+def create_labeled_qc_store(path):
     root = zarr.open_group(str(path), mode="w")
     create_cell_data(
         root,

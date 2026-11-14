@@ -244,7 +244,7 @@ def parse_flags(
         The flags as int8.
 
     Raises:
-        ValueError: If a value is not a recognised true, false or missing token.
+        ValueError: If a value is not a recognized true, false or missing token.
     """
     text, absent = _stripped(values, missing)
     numbers = _lines_of(lines, len(text))

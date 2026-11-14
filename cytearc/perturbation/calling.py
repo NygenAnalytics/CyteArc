@@ -50,7 +50,7 @@ def _call_block(
     call_codes: np.ndarray,
     call_umis: np.ndarray,
 ) -> int:
-    """Summarise and call one row block.
+    """Summarize and call one row block.
 
     Writes each row's top guide, its UMIs and the row's total, and writes calls
     while there is room. Returns the number of calls, which may exceed the

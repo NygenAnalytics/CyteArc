@@ -567,7 +567,7 @@ def test_the_graph_is_the_same_on_one_thread_and_on_four() -> None:
 
 
 def test_pruning_judges_every_edge_on_the_graph_as_given() -> None:
-    # On a path a-b-c, each edge's ends share no neighbour while b has two,
+    # On a path a-b-c, each edge's ends share no neighbor while b has two,
     # so both go together; removed one at a time, the second would stay.
     kept, removed = pruned_edges(3, _edges([(0, 1), (1, 2)]))
     assert _pairs(kept) == [] and removed == 2
@@ -576,9 +576,9 @@ def test_pruning_judges_every_edge_on_the_graph_as_given() -> None:
 @pytest.mark.parametrize(
     ("n_nodes", "pairs", "kept"),
     [
-        # One edge whose ends have no other neighbour stays.
+        # One edge whose ends have no other neighbor stays.
         (2, [(0, 1)], [(0, 1)]),
-        # Every edge of a triangle has a common neighbour.
+        # Every edge of a triangle has a common neighbor.
         (3, [(0, 1), (0, 2), (1, 2)], [(0, 1), (0, 2), (1, 2)]),
         # The edge between two triangles has none, and goes.
         (
@@ -593,7 +593,7 @@ def test_pruning_judges_every_edge_on_the_graph_as_given() -> None:
         (4, [(0, 1), (0, 2), (1, 2), (2, 3)], [(0, 1), (0, 2), (1, 2)]),
     ],
 )
-def test_pruning_removes_edges_whose_ends_share_no_neighbour(
+def test_pruning_removes_edges_whose_ends_share_no_neighbor(
     n_nodes, pairs, kept
 ) -> None:
     result, removed = pruned_edges(n_nodes, _edges(pairs))
@@ -607,13 +607,13 @@ def test_pruning_removes_edges_whose_ends_share_no_neighbour(
 @pytest.mark.parametrize(
     ("n_nodes", "pairs", "cut"),
     [
-        # The middle of a path holds two neighbours that nothing else links.
+        # The middle of a path holds two neighbors that nothing else links.
         (3, [(0, 1), (1, 2)], [1]),
-        # A triangle's nodes see their neighbours linked.
+        # A triangle's nodes see their neighbors linked.
         (3, [(0, 1), (0, 2), (1, 2)], []),
-        # A star's centre, whose three leaves are apart.
+        # A star's center, whose three leaves are apart.
         (4, [(0, 1), (0, 2), (0, 3)], [0]),
-        # A node joining two triangles by two neighbours on each side.
+        # A node joining two triangles by two neighbors on each side.
         (
             7,
             [
@@ -630,14 +630,12 @@ def test_pruning_removes_edges_whose_ends_share_no_neighbour(
             ],
             [6],
         ),
-        # The neighbours of node 4 are linked through each other, so it is
+        # The neighbors of node 4 are linked through each other, so it is
         # not a cut vertex though removing it changes the graph.
         (5, [(0, 1), (1, 2), (0, 4), (1, 4), (2, 4), (2, 3)], [2]),
     ],
 )
-def test_cut_vertices_are_nodes_whose_neighbours_fall_apart(
-    n_nodes, pairs, cut
-) -> None:
+def test_cut_vertices_are_nodes_whose_neighbors_fall_apart(n_nodes, pairs, cut) -> None:
     found = local_cut_vertices(n_nodes, _edges(pairs), np.ones(n_nodes, dtype=bool))
     assert found.tolist() == cut
 
@@ -762,16 +760,16 @@ def test_a_cell_that_agrees_with_two_clones_where_it_knows_is_a_doublet() -> Non
 
 
 def _ambiguous_nodes_by_hand(rows, unknown_rows, pairs) -> set[int]:
-    """The nodes, here one per cell, that agree with two neighbours that
+    """The nodes, here one per cell, that agree with two neighbors that
     disagree at an item the node holds unknown, checked pair by pair."""
     held = [set(row) for row in rows]
     lost = [set(row) for row in unknown_rows]
-    neighbours: dict[int, set[int]] = {node: set() for node in range(len(rows))}
+    neighbors: dict[int, set[int]] = {node: set() for node in range(len(rows))}
     for a, b in pairs:
-        neighbours[a].add(b)
-        neighbours[b].add(a)
+        neighbors[a].add(b)
+        neighbors[b].add(a)
     found = set()
-    for node, others in neighbours.items():
+    for node, others in neighbors.items():
         for item in lost[node]:
             holders = [other for other in others if item in held[other]]
             knowers = [
@@ -784,13 +782,13 @@ def _ambiguous_nodes_by_hand(rows, unknown_rows, pairs) -> set[int]:
     return found
 
 
-def test_a_node_is_ambiguous_when_two_neighbours_disagree_where_it_does_not_know() -> (
+def test_a_node_is_ambiguous_when_two_neighbors_disagree_where_it_does_not_know() -> (
     None
 ):
     # Cells 0 and 1 are a founder (0) and its subclone (0 and 1); cell 2 holds
     # 0 with 1 unknown and agrees with both; cell 3 holds 1 with 0 unknown and
     # agrees with the subclone alone; cell 4 holds 2 and 3 known where its
-    # partial neighbours 5 (3 unknown) and 6 (2 unknown) share nothing.
+    # partial neighbors 5 (3 unknown) and 6 (2 unknown) share nothing.
     rows = [[0], [0, 1], [0], [1], [2, 3], [2], [3]]
     unknown_rows = [[], [], [1], [0], [], [3], [2]]
     pairs = [(0, 2), (1, 2), (1, 3), (4, 5), (4, 6)]
@@ -805,7 +803,7 @@ def test_a_node_is_ambiguous_when_two_neighbours_disagree_where_it_does_not_know
     plain = identical_sets(sets)
     assert not ambiguous_nodes(plain, _edges([(0, 1)])).any()
     assert not ambiguous_nodes(nodes, _edges([])).any()
-    with pytest.raises(MemoryError, match="lists of neighbours"):
+    with pytest.raises(MemoryError, match="lists of neighbors"):
         ambiguous_nodes(nodes, edges, ledger=budgeted(100))
 
 
@@ -1013,8 +1011,8 @@ def test_a_cut_vertex_of_several_cells_is_kept() -> None:
 def test_the_second_round_prunes_what_the_first_round_of_doublets_left() -> None:
     # A, B and C (two cells) form a triangle with C-D; X links C and D to Y
     # and Z. Nothing is pruned at first; X is the one doublet, its
-    # neighbours {C, D} and {Y, Z} falling apart; then C-D has no common
-    # neighbour, and goes.
+    # neighbors {C, D} and {Y, Z} falling apart; then C-D has no common
+    # neighbor, and goes.
     a, b, c, d, x, y, z = range(7)
     pairs = [(a, b), (a, c), (b, c), (c, d), (x, c), (x, d), (x, y), (x, z), (y, z)]
     rows = _graph_sets(7, pairs)
@@ -1040,7 +1038,7 @@ def test_the_second_round_prunes_what_the_first_round_of_doublets_left() -> None
     assert removed == {x}
 
 
-def test_pruning_isolates_a_doublet_whose_ends_share_no_neighbour() -> None:
+def test_pruning_isolates_a_doublet_whose_ends_share_no_neighbor() -> None:
     # A cell linked to one node of each triangle loses both edges to pruning
     # first, and stays a clone of its own rather than a doublet.
     pairs = [(0, 1), (0, 2), (1, 2), (3, 4), (3, 5), (4, 5), (6, 2), (6, 3)]

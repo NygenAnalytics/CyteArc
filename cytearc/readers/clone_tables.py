@@ -1,7 +1,7 @@
 """Read clone assignments from the files that lineage tracing tools write.
 
 Each format lists, for each cell, the clone it belongs to. ``clone_layout``
-recognises a file's format from its contents and resolves the columns that
+recognizes a file's format from its contents and resolves the columns that
 hold each cell's barcode, its clone and, where the format gives one, the
 probability of that clone. ``iter_clone_rows`` then yields the rows of a
 table or an AnnData file in bounded chunks, and the ``matrix_*`` functions
@@ -25,7 +25,7 @@ Formats:
 - ``"numbat"``: Numbat's ``clone_post_{i}.tsv``: ``cell``, ``clone_opt`` and
   its posterior ``p_opt``.
 - ``"table"``: any delimited table whose columns ``columns`` names, one row
-  per cell or several, or one clone column per labelling round, such as the
+  per cell or several, or one clone column per labeling round, such as the
   Biddy et al. workflow's ``celltag_data.txt``, which takes cells from its R
   row names.
 - ``"matrix"``: a Matrix Market clone matrix with a cell list beside it:
@@ -536,7 +536,7 @@ def clone_layout(
     format: str | None = None,
     columns: Mapping[str, str | Sequence[str]] | None = None,
 ) -> CloneLayout:
-    """Recognise a clone file's format and resolve the columns to read.
+    """Recognize a clone file's format and resolve the columns to read.
 
     The format follows from the file's contents: an HDF5 file is AnnData, a
     file that starts with ``%%MatrixMarket`` a clone matrix, and a text file
@@ -546,7 +546,7 @@ def clone_layout(
 
     Args:
         path: The clone file.
-        format: One of ``CLONE_FORMATS``, or None to recognise it.
+        format: One of ``CLONE_FORMATS``, or None to recognize it.
         columns: ``"cell"``, ``"clone"`` and ``"probability"`` mapped to
             column names; ``"cell"`` may list several columns, which are
             joined by ``CELL_ID_SEPARATOR``.

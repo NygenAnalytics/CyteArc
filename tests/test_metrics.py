@@ -102,7 +102,7 @@ def test_compute_lisi_uses_all_stored_neighbors():
         perplexity=1,
     )
 
-    # Every row weighs cells 0, 1 and 2 equally, labelled 1, 0 and 0, so its
+    # Every row weighs cells 0, 1 and 2 equally, labeled 1, 0 and 0, so its
     # inverse Simpson index is 1 / (1/9 + 4/9).
     np.testing.assert_allclose(scores, np.full((4, 1), 1.8), rtol=1e-15)
 
@@ -562,7 +562,7 @@ def _cell_major_edges(neighbors: np.ndarray, dtype=np.uint32) -> np.ndarray:
 
 
 def test_neighbor_label_agreement_counts_only_the_cell_label():
-    # Cell 0 is labelled 0 and all its neighbors are labelled 1, so its
+    # Cell 0 is labeled 0 and all its neighbors are labeled 1, so its
     # neighborhood is pure but gives its own label no support.
     neighbors = np.array([[1, 2, 3], [0, 2, 3], [0, 1, 3], [0, 1, 2]])
     labels = np.array([0, 1, 1, 1])
@@ -1216,7 +1216,7 @@ def test_silhouette_scoring_missing_cluster_labels(datastore):
     assert result is None
 
 
-class _LabelledCells:
+class _LabeledCells:
     """Cell metadata holding one cluster column for silhouette scoring."""
 
     def __init__(self, labels: np.ndarray) -> None:
@@ -1235,7 +1235,7 @@ def _silhouette(labels, data, *, graph=None, **options):
     if graph is None and "neighbor_indices" not in options:
         graph = csr_matrix(np.ones((len(labels), len(labels))) - np.eye(len(labels)))
     return silhouette_scoring(
-        SimpleNamespace(cells=_LabelledCells(labels)),
+        SimpleNamespace(cells=_LabeledCells(labels)),
         graph,
         np.asarray(data, dtype=np.float64),
         "RNA",

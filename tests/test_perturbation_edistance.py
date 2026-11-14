@@ -242,7 +242,7 @@ def test_edistance_by_guide_takes_each_cell_with_one_guide(store, template) -> N
 
 def test_cells_without_coordinates_are_left_out(store, template) -> None:
     labels = template.labels
-    # Coordinates of every cell but the GENE_C and unlabelled ones.
+    # Coordinates of every cell but the GENE_C and unlabeled ones.
     cells = store.select_cells(
         labels, include=["GENE_A", "GENE_B", "control", "Multiple"]
     )
@@ -342,9 +342,7 @@ def test_edistance_refuses_inputs_it_cannot_measure(
     with pytest.raises(ValueError, match="normalized artifact, not 'cell_selection'"):
         store.perturbation.edistance(labels, cells)
     # Labels whose controls are GENE_D, which no cell carries, have no control cell.
-    with pytest.raises(
-        ValueError, match="No labelled cell carries control guides only"
-    ):
+    with pytest.raises(ValueError, match="No labeled cell carries control guides only"):
         store.perturbation.edistance(template.without_controls, coordinates)
     monkeypatch.setattr(store, "memoryBytes", 100)
     with pytest.raises(MemoryError, match="E-distances of 15 cells in 3 dimensions"):
@@ -543,7 +541,7 @@ def test_the_memory_check_refuses_a_small_budget_before_it_writes(
         # By guide, the labels of every cell were read before the check, and
         # their read's refusal named a budget that the check refused again.
         ("guide", 2_000),
-        # The labels of every labelled cell and the check of the imported
+        # The labels of every labeled cell and the check of the imported
         # coordinates' cell order hold more than the 5 compared cells, which
         # 150,000 cells show beside the old count of 8 MiB of draws.
         pytest.param("target", 150_000, marks=pytest.mark.slow),

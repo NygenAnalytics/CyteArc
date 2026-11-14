@@ -296,7 +296,7 @@ class PipelineAccessor:
         hashtags, filters cells on their QC metrics, scores the cell cycle,
         selects highly variable genes, normalizes them by library size and
         log, reduces them with PCA, optionally corrects batches with Harmony,
-        builds a neighbour graph, embeds it with UMAP, clusters it with Leiden
+        builds a neighbor graph, embeds it with UMAP, clusters it with Leiden
         at several resolutions, saves the candidate with the best silhouette,
         scores doublets, and ranks markers:
 
@@ -631,9 +631,9 @@ class PipelineAccessor:
     ) -> PipelineRun:
         """Integrate completed modality runs of the same cells into one graph.
 
-        The recipe combines the runs' graphs with weighted nearest neighbours
+        The recipe combines the runs' graphs with weighted nearest neighbors
         (``method="wnn"``, the default for modalities measured in the same
-        cells) or shared nearest neighbours (``"snn"``), embeds and clusters
+        cells) or shared nearest neighbors (``"snn"``), embeds and clusters
         the integrated graph, and ranks each modality's markers for the joint
         clusters:
 
@@ -810,7 +810,7 @@ class PipelineAccessor:
                 the highly variable genes, and ``cells``, the cells that a
                 target's profile averages: ``"knocked_out"``, the default
                 with ``mixscape``, takes its knocked-out cells, and
-                ``"labelled"``, the default and only choice without
+                ``"labeled"``, the default and only choice without
                 ``mixscape``, every cell of its label. Settings without
                 ``clusters`` are refused.
             clusters: Clusters of the perturbations whose profiles agree, with

@@ -1169,11 +1169,11 @@ def test_each_sample_is_demultiplexed_as_a_call_on_its_own_cells(tmp_path: Path)
     # Other labels for the same pools make another artifact with the same calls.
     store.cells.insert("pool", np.where(first, "a", "c"), overwrite=True)
     with threadpool_limits(limits=1):
-        relabelled = store.qc.hto_demultiplexing(
+        relabeled = store.qc.hto_demultiplexing(
             store.snapshot_cell_selection("I"), sample_column="pool"
         )
-    assert relabelled != ref
-    np.testing.assert_array_equal(store.artifacts.load(relabelled)["values"][:], truth)
+    assert relabeled != ref
+    np.testing.assert_array_equal(store.artifacts.load(relabeled)["values"][:], truth)
 
 
 def test_a_mapping_leaves_out_another_pools_hashtag_with_a_stray_count(
@@ -1424,13 +1424,13 @@ def test_unbalanced_pools_assign_each_singlet_its_positive_tag():
     # The CLR argmax, which named singlets before, is a tag called negative
     # for dozens of them here.
     max_id = _hto_clr_diagnostics(counts)["max_id"].to_numpy()
-    relabelled = np.flatnonzero(singlets & (max_id != identity))
-    assert len(relabelled) >= 30
+    relabeled = np.flatnonzero(singlets & (max_id != identity))
+    assert len(relabeled) >= 30
     np.testing.assert_array_equal(
-        max_id[relabelled] != truth[relabelled], np.ones(len(relabelled), bool)
+        max_id[relabeled] != truth[relabeled], np.ones(len(relabeled), bool)
     )
-    columns = [counts.columns.get_loc(tag) for tag in max_id[relabelled]]
-    assert not positive.to_numpy()[relabelled, columns].any()
+    columns = [counts.columns.get_loc(tag) for tag in max_id[relabeled]]
+    assert not positive.to_numpy()[relabeled, columns].any()
 
 
 def test_hto_diagnostics_name_the_two_highest_clr_tags():

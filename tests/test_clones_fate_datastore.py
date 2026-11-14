@@ -3,7 +3,7 @@
 The store and its clones are written once, as a template; tests that save
 results, change cell metadata or the memory budget copy it. Expected values
 are counted cell by cell from the truth, whose clones keep their rank as
-codes, so clone ``k`` is labelled ``str(k + 1)``.
+codes, so clone ``k`` is labeled ``str(k + 1)``.
 """
 
 from collections import Counter
@@ -45,7 +45,7 @@ def template(tmp_path_factory) -> SimpleNamespace:
     store.cells.insert("is_d4", LATE)
     store.cells.insert("cell", np.asarray([f"c{at:02d}" for at in range(N_CELLS)]))
     insert_nullable_cell_column(
-        store, "unlabelled", TRUTH.samples, np.ones(N_CELLS, dtype=bool)
+        store, "unlabeled", TRUTH.samples, np.ones(N_CELLS, dtype=bool)
     )
     return SimpleNamespace(path=folder / "store.zarr", clones=clones)
 
@@ -243,7 +243,7 @@ def test_coupling_runs_on_no_more_threads_than_numba_has(copied, monkeypatch) ->
 def test_coupling_needs_two_groups_with_a_clone(copied) -> None:
     store, clones = copied.store, copied.clones
     with pytest.raises(ValueError, match="No cell has both a clone and a group"):
-        store.clones.coupling(clones, group_by="unlabelled")
+        store.clones.coupling(clones, group_by="unlabeled")
     with pytest.raises(ValueError, match="at least two groups"):
         store.clones.coupling(clones, group_by="sample", cell_selection=copied.early)
     # A column named like the result's own columns groups the cells as any
@@ -262,7 +262,7 @@ def test_coupling_needs_two_groups_with_a_clone(copied) -> None:
 
 # Clones that keep labels apart, as clonotypes keep receptor types apart,
 # label every cell of a clone alike: here clones 1 to 4 "A" and 5 to 8 "B".
-# The cells without a clone are labelled "A" too, as a source may label every
+# The cells without a clone are labeled "A" too, as a source may label every
 # cell.
 LINEAGES = np.where(TRUTH.clones < 4, "A", "B").astype(object)
 
@@ -553,7 +553,7 @@ def test_fate_bias_arguments_are_checked(copied) -> None:
     with pytest.raises(ValueError, match="^late selects no cell$"):
         store.clones.fate_bias(clones, group_by="cell_type", early=early, late=none)
     with pytest.raises(ValueError, match="No cell has both a clone and a group"):
-        store.clones.fate_bias(clones, group_by="unlabelled", early=early, late=late)
+        store.clones.fate_bias(clones, group_by="unlabeled", early=early, late=late)
     with pytest.raises(ValueError, match="at least two fates"):
         store.clones.fate_bias(clones, group_by="sample", early=early, late=late)
     assert store.artifacts.list(kind="clone_fate_bias", scope="datastore") == []

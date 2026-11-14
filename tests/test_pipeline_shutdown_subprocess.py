@@ -119,7 +119,7 @@ _CANCEL_THEN_SIGNAL_CHILD = textwrap.dedent(
         print("READY", flush=True)
         while token.signal_record is None:
             time.sleep(0.01)
-        print("SIGNALLED", token.signal_record.signal_name, flush=True)
+        print("SIGNALED", token.signal_record.signal_name, flush=True)
         shutdown_checkpoint()
 
     type(store)._reduction_pca = cancelled_pca
@@ -281,7 +281,7 @@ def test_a_signal_after_a_cancellation_takes_effect_once_the_run_is_recorded(
     # the signal took its usual effect only once the run was recorded.
     assert process.returncode == returncode, stderr
     lines = stdout.splitlines()
-    assert f"SIGNALLED {signum.name}" in lines, stdout
+    assert f"SIGNALED {signum.name}" in lines, stdout
     assert [line for line in lines if line.startswith("RAISED")] == raised, stdout
     root = DataStore(str(location), default_assay="RNA").zw
     runs = list_pipeline_run_records(root, limit=100)

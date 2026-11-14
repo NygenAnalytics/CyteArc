@@ -24,7 +24,7 @@ def write_doublet_target_zarr(
     policy: CountMatrixPolicy | None = None,
     io: StorageIoPolicy | None = None,
 ) -> zarr.Group:
-    """Materialise simulated doublet counts as a minimal CyteArc Zarr hierarchy."""
+    """Materialize simulated doublet counts as a minimal CyteArc Zarr hierarchy."""
     from cytearc.storage.schema import (
         create_cell_data,
         create_zarr_count_assay,

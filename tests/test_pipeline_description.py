@@ -213,9 +213,9 @@ _OWN: dict[tuple[str, str, str], tuple[str | None, str | None, Any, str | None]]
     ),
     (_ALL, "profiles", "cells"): (
         None,
-        "Literal['knocked_out', 'labelled']",
+        "Literal['knocked_out', 'labeled']",
         None,
-        "'knocked_out' when mixscape runs, else 'labelled'",
+        "'knocked_out' when mixscape runs, else 'labeled'",
     ),
 }
 # Whether each stage runs when its keyword is omitted, where that differs
@@ -541,5 +541,5 @@ def test_the_profiled_cells_follow_their_described_rule(
     # Profiles average Mixscape's knocked-out cells when it runs, and every
     # cell of each label otherwise.
     cells = PipelineAccessor.describe("perturbation")["profiles"]["cells"]
-    assert cells.rule == "'knocked_out' when mixscape runs, else 'labelled'"
+    assert cells.rule == "'knocked_out' when mixscape runs, else 'labeled'"
     assert plan.config["profileLabels"] == labels

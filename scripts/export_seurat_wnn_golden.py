@@ -5,7 +5,7 @@ The default mode loads explicitly named reduction artifacts from the public
 CITE-seq store. Pass one ``--reduction ASSAY=ARTIFACT_ID`` for every assay. The
 ``--synthetic-three-way`` mode creates deterministic RNA, ATAC, and ADT
 embeddings without an external dataset. Both modes compute exact self-free
-neighbour rows and hand an arbitrary ordered modality list to the R companion.
+neighbor rows and hand an arbitrary ordered modality list to the R companion.
 
 Needs an R installation carrying Seurat. Point --rscript at it, for example a
 conda environment created with `conda create -p /tmp/cytearc-seurat-env
@@ -114,7 +114,7 @@ def synthetic_three_way_embeddings(
 
 
 def exact_neighbors(embedding: np.ndarray, k: int) -> np.ndarray:
-    """Self-free neighbour rows ordered by ascending float64 distance."""
+    """Self-free neighbor rows ordered by ascending float64 distance."""
     gram = embedding @ embedding.T
     square = np.diag(gram)
     distances = np.sqrt(np.maximum(square[:, None] - 2.0 * gram + square[None, :], 0.0))

@@ -511,8 +511,8 @@ def test_symphony_query_correction_applies_the_upstream_unit_penalty():
 
     correction = solve_query_correction(counts, sums, correction_model)
 
-    # One cluster of mass 4 centred on the origin and one query batch holding a
-    # single cell at (5, 0). Upstream Symphony penalises each batch term by a
+    # One cluster of mass 4 centered on the origin and one query batch holding a
+    # single cell at (5, 0). Upstream Symphony penalizes each batch term by a
     # fixed unit ridge, so the design cross-product is [[5, 1], [1, 2]] and the
     # batch offset solves to 20 / 9. Any other penalty moves this number.
     np.testing.assert_allclose(

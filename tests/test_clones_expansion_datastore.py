@@ -185,9 +185,9 @@ def test_expansion_counts_cells_within_samples(shared) -> None:
             for size, sample in zip(expected.tolist(), TRUTH.samples, strict=True)
         ],
     )
-    labelled = cells.join(keys, on="group")
+    labeled = cells.join(keys, on="group")
     assert [
-        None if pd.isna(sample) else sample for sample in labelled["sample"].tolist()
+        None if pd.isna(sample) else sample for sample in labeled["sample"].tolist()
     ] == [
         sample if clone >= 0 else None
         for sample, clone in zip(TRUTH.samples, TRUTH.clones, strict=True)
@@ -408,10 +408,10 @@ def test_group_columns_may_take_the_names_of_the_results_columns(copied) -> None
         label = name if name not in loaded.categories.columns else f"{name}_key"
         assert joined[label].tolist() == joined["group"].tolist()
     # A clones artifact as labels has the key column "clones".
-    labelled = store.clones.load_expansion(
+    labeled = store.clones.load_expansion(
         store.clones.expansion(copied.clones, groups=copied.clones)
     )
-    assert labelled.group_keys.columns.tolist() == ["clones"]
+    assert labeled.group_keys.columns.tolist() == ["clones"]
 
 
 @pytest.mark.parametrize(
@@ -497,8 +497,8 @@ def test_the_group_keys_order_the_groups_naturally(copied) -> None:
     assert loaded.group_keys["site"].tolist() == ["s2", "s10"]
     assert loaded.cells["group"].cat.categories.tolist() == ["s2", "s10"]
     assert loaded.categories["group"].drop_duplicates().tolist() == ["s2", "s10"]
-    labelled = loaded.cells.join(loaded.group_keys, on="group")
-    assert [None if pd.isna(site) else site for site in labelled["site"].tolist()] == [
+    labeled = loaded.cells.join(loaded.group_keys, on="group")
+    assert [None if pd.isna(site) else site for site in labeled["site"].tolist()] == [
         site if clone >= 0 else None
         for site, clone in zip(sites, TRUTH.clones, strict=True)
     ]
@@ -581,7 +581,7 @@ def test_expansion_refuses_cells_without_a_clone_and_a_group(copied) -> None:
     store.cells.insert("no_clone", np.full(N_CELLS, "", dtype=object))
     empty = store.clones.from_column("no_clone", cell_selection=copied.cells)
     insert_nullable_cell_column(
-        store, "unlabelled", TRUTH.samples, np.ones(N_CELLS, dtype=bool)
+        store, "unlabeled", TRUTH.samples, np.ones(N_CELLS, dtype=bool)
     )
     store.cells.insert("without_clone", TRUTH.clones < 0)
     others = store.snapshot_cluster_labels(
@@ -590,7 +590,7 @@ def test_expansion_refuses_cells_without_a_clone_and_a_group(copied) -> None:
     for clones, options in (
         (empty, {}),
         (empty, {"group_by": "sample"}),
-        (copied.clones, {"group_by": "unlabelled"}),
+        (copied.clones, {"group_by": "unlabeled"}),
         (copied.clones, {"groups": others}),
     ):
         with pytest.raises(ValueError, match="No cell has both a clone and a group"):
@@ -607,14 +607,14 @@ def test_labels_that_a_source_keeps_apart_follow_the_measured_cells(shared) -> N
     source = store._read_clone_input(shared.clones, ledger)
     assert source.kept_apart == () and source.clone_ids is None
     kinds = np.asarray([f"kind{cell % 3}" for cell in range(N_CELLS)], dtype=object)
-    labelled = replace(source, kept_apart=(("kind", kinds),))
+    labeled = replace(source, kept_apart=(("kind", kinds),))
     # The clones' own cells keep the labels as they are.
-    cells, codes, kept = store._measured_clone_cells(labelled, None, ledger)
+    cells, codes, kept = store._measured_clone_cells(labeled, None, ledger)
     assert cells == shared.cells and kept[0][1] is kinds
     d2 = TRUTH.samples == "d2"
     store.cells.insert("is_d2", d2, overwrite=True)
     selection = store.snapshot_cell_selection("is_d2")
-    cells, codes, kept = store._measured_clone_cells(labelled, selection, ledger)
+    cells, codes, kept = store._measured_clone_cells(labeled, selection, ledger)
     assert cells == selection
     np.testing.assert_array_equal(codes, source.codes[d2])
     ((name, labels),) = kept

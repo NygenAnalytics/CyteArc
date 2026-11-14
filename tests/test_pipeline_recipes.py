@@ -88,7 +88,7 @@ ATAC_SETTINGS: dict[str, Any] = {
 CELL_CALLING: dict[str, Any] = {"n_iter": 500, "fdr": 0.01, "random_seed": 3}
 # Every RNA stage but the QC stages of raw droplets and hashtags, t-SNE, which
 # needs sgtsnepi, and markers, with Harmony over the batch column and 7
-# neighbours instead of 5.
+# neighbors instead of 5.
 FULL_RNA_SETTINGS: dict[str, Any] = {
     **RNA_SETTINGS,
     "cell_cycle": True,
@@ -303,7 +303,7 @@ def full(cite: SimpleNamespace) -> PipelineRun:
     """An RNA run of the store's cells through nearly every stage.
 
     It corrects the batch column with Harmony, which also splits doublet
-    scoring, and builds its graph of 7 neighbours instead of 5.
+    scoring, and builds its graph of 7 neighbors instead of 5.
     """
     return cite.datastore.pipeline.rna(label="full", **FULL_RNA_SETTINGS)
 
@@ -774,13 +774,13 @@ def test_adt_and_atac_check_the_harmony_labels_of_the_run_cells_only(
     every_fifth = np.arange(n_cells) % 5 == 4
     lane = np.where(every_fifth, None, _labels(n_cells, ("L1", "L2"))).astype(object)
     datastore.cells.insert("lane", lane)
-    datastore.cells.insert("labelled", datastore.cells.fetch_all("I") & ~every_fifth)
+    datastore.cells.insert("labeled", datastore.cells.fetch_all("I") & ~every_fifth)
 
     # The cells without a lane lie outside the run, so the recipe resolves.
     plan = _resolve(
         recipe,
         datastore,
-        cells=datastore.snapshot_cell_selection("labelled"),
+        cells=datastore.snapshot_cell_selection("labeled"),
         harmony={"batch_columns": ["lane"]},
         **_HARMONY_ONLY[recipe],
     )
@@ -1010,7 +1010,7 @@ def test_wnn_integrates_the_runs_of_one_cell_selection(cite, joint) -> None:
     assert wnn["input_cell_selection"] == selection
     assert wnn["analysis_cell_selection"] == selection
     assert wnn["feature_universe"] == rna["feature_universe"]
-    # WNN weighs each run's neighbours in the coordinates that found them.
+    # WNN weighs each run's neighbors in the coordinates that found them.
     graph = cite.datastore.artifacts.inspect(wnn["integrated_graph"])
     assert graph.parameters["method"] == "wnn"
     assert graph.parameters["assays"] == ["RNA", "assay2"]
@@ -1260,10 +1260,10 @@ def test_multimodal_integrates_modality_runs_not_joint_runs(cite, joint) -> None
     assert _run_ids(cite.datastore) == before
 
 
-def test_snn_needs_modality_runs_of_one_neighbour_count(cite, full) -> None:
+def test_snn_needs_modality_runs_of_one_neighbor_count(cite, full) -> None:
     before = _run_ids(cite.datastore)
     runs = [full, cite.adt]
-    # The runs share one cell selection, so only their neighbour counts differ.
+    # The runs share one cell selection, so only their neighbor counts differ.
     assert full["analysis_cell_selection"] == cite.adt["analysis_cell_selection"]
 
     with pytest.raises(ValueError) as caught:
@@ -1275,7 +1275,7 @@ def test_snn_needs_modality_runs_of_one_neighbour_count(cite, full) -> None:
         "the smallest k"
     )
     assert _run_ids(cite.datastore) == before
-    # WNN weighs the runs' neighbours as they are.
+    # WNN weighs the runs' neighbors as they are.
     assert _resolve("multimodal", cite.datastore, runs=runs).config["method"] == "wnn"
 
 
@@ -1686,14 +1686,14 @@ def test_cell_calling_per_capture_needs_a_label_for_every_input_cell(
     assert re.fullmatch(_unlabeled_cells("capture_gaps", "1"), str(caught.value))
     assert _run_ids(datastore) == before
     # Only the run's own cells need a label.
-    labelled = np.ones(datastore.cells.N, dtype=bool)
-    labelled[[5, 7, 8]] = False
-    datastore.cells.insert("labelled", labelled)
+    labeled = np.ones(datastore.cells.N, dtype=bool)
+    labeled[[5, 7, 8]] = False
+    datastore.cells.insert("labeled", labeled)
     for column in ("capture_gaps", "capture_codes"):
         _resolve(
             "rna",
             datastore,
-            cells="labelled",
+            cells="labeled",
             cell_calling={**CELL_CALLING, "sample_column": column},
             **SMALL_RNA_SETTINGS,
         )

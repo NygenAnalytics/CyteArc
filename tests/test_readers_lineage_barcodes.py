@@ -1,6 +1,6 @@
-"""Reading barcode files: formats recognised from their contents, and their rows.
+"""Reading barcode files: formats recognized from their contents, and their rows.
 
-Each tool's header is recognised, as are pycashier's and FateMap's tables
+Each tool's header is recognized, as are pycashier's and FateMap's tables
 without one; tables of other tools are read by the columns that ``columns``
 names. Cell Ranger's ``molecule_info.h5`` is read in its documented layout,
 with UMIs decoded as Cell Ranger packs them.
@@ -134,7 +134,7 @@ _HEADERS = {
 
 
 @pytest.mark.parametrize("case", sorted(_HEADERS))
-def test_each_tool_is_recognised_by_its_header(tmp_path, case) -> None:
+def test_each_tool_is_recognized_by_its_header(tmp_path, case) -> None:
     text, format, level, columns = _HEADERS[case]
     path = _file(tmp_path, "file.txt", text)
 
@@ -159,7 +159,7 @@ def test_each_tool_is_recognised_by_its_header(tmp_path, case) -> None:
         ),
     ],
 )
-def test_tables_without_a_header_are_recognised_by_their_rows(
+def test_tables_without_a_header_are_recognized_by_their_rows(
     tmp_path, text, format, names
 ) -> None:
     path = _file(tmp_path, "rows.txt", text)
@@ -1817,7 +1817,7 @@ def test_a_fatemap_table_without_a_header_names_its_short_row(tmp_path) -> None:
 
 
 def test_a_gzip_file_of_no_text_is_refused_as_empty(tmp_path) -> None:
-    # Its bytes are a gzip header, but it holds no line to recognise.
+    # Its bytes are a gzip header, but it holds no line to recognize.
     path = tmp_path / "molecules.txt.gz"
     path.write_bytes(gzip.compress(b""))
     with pytest.raises(ValueError, match="is empty; a barcode table needs a header"):

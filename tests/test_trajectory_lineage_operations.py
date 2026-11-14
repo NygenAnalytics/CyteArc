@@ -484,10 +484,10 @@ def test_lineage_aggregation_arguments_are_checked(datastore, lineage_fate, mark
         aggregate(lineage_fate, features=mark_hvgs, lineages=(2,))
     with pytest.raises(ValueError, match="At least two selected features"):
         aggregate(lineage_fate, features=one)
-    with pytest.raises(ValueError, match="n_neighbours must be smaller"):
-        aggregate(lineage_fate, features=two, n_neighbours=2, n_clusters=1)
+    with pytest.raises(ValueError, match="n_neighbors must be smaller"):
+        aggregate(lineage_fate, features=two, n_neighbors=2, n_clusters=1)
     with pytest.raises(ValueError, match="n_clusters cannot exceed"):
-        aggregate(lineage_fate, features=two, n_neighbours=1, n_clusters=3)
+        aggregate(lineage_fate, features=two, n_neighbors=1, n_clusters=3)
     with pytest.raises(ValueError, match="below n_bins"):
         aggregate(lineage_fate, features=mark_hvgs, n_bins=100_000)
     # The error names the light lineage by its sink label.
@@ -499,6 +499,30 @@ def test_lineage_aggregation_arguments_are_checked(datastore, lineage_fate, mark
         aggregate(lineage_fate, features=mark_hvgs, nan_cluster_value=1)
     with pytest.raises(ValueError, match="batch_size"):
         aggregate(lineage_fate, features=mark_hvgs, batch_size=0)
+
+
+def test_lineage_aggregation_takes_n_neighbors_under_the_aggregation_key(
+    datastore, lineage_fate, mark_hvgs, lineage_aggregation
+):
+    # The record keeps the key of the pseudotime aggregation, which 1.3.0
+    # saved as n_neighbours, so both artifacts name the argument alike.
+    parameters = inspect_artifact(datastore.zw, lineage_aggregation).parameters
+    assert parameters["n_neighbours"] == 11
+    assert "n_neighbors" not in parameters
+    assert (
+        datastore.trajectory.lineage_aggregation(
+            lineage_fate, features=mark_hvgs, n_bins=12, n_clusters=5, n_neighbors=11
+        )
+        == lineage_aggregation
+    )
+
+    aggregate = datastore.trajectory.lineage_aggregation
+    with pytest.raises(TypeError, match="unexpected keyword argument 'n_neighbours'"):
+        aggregate(lineage_fate, features=mark_hvgs, n_neighbours=11)
+    with pytest.raises(ValueError, match="^n_neighbors must be at least 1$"):
+        aggregate(lineage_fate, features=mark_hvgs, n_neighbors=0)
+    with pytest.raises(TypeError, match="^n_neighbors must be an integer$"):
+        aggregate(lineage_fate, features=mark_hvgs, n_neighbors=True)
 
 
 def test_lineage_aggregation_reuse_builds_no_bin_operator(
@@ -542,7 +566,7 @@ def test_lineage_streams_reserve_the_arrays_their_callers_hold(
     weights = scored["weights"].nbytes
     markers, drivers, aggregation = reserved
     # The fate probabilities and the cells' weights stay allocated, and the
-    # correlations also hold their regressors and a centred copy of them.
+    # correlations also hold their regressors and a centered copy of them.
     assert markers >= probabilities + 3 * weights
     assert drivers >= probabilities + weights
     assert aggregation >= probabilities + weights
@@ -976,7 +1000,7 @@ def test_lineage_tree_arguments_are_checked(
             tree(connectivity_graph, other)
 
 
-def test_lineage_tree_refuses_unlabelled_cells_and_bad_shapes(
+def test_lineage_tree_refuses_unlabeled_cells_and_bad_shapes(
     datastore, connectivity_graph, leiden_clustering, monkeypatch
 ):
     selection = datastore.trajectory.load_lineage_tree(
@@ -1074,7 +1098,7 @@ def test_sink_labels_missing_outside_the_sinks_give_the_same_lineages(
     assert fate_ref != lineage_fate
     np.testing.assert_array_equal(fate.valid, expected.valid)
     np.testing.assert_array_equal(fate.values, expected.values)
-    # Only the cells labelled with the first sink are fixed at its probability one.
+    # Only the cells labeled with the first sink are fixed at its probability one.
     np.testing.assert_array_equal(
         np.flatnonzero(fate.values[:, 0] == 1.0),
         np.flatnonzero(fate.valid & (labels == LINEAGE_SINKS[0])),

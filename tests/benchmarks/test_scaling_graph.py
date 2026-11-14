@@ -1,7 +1,7 @@
 """Benchmarks of graph integration and of the work that follows a Paris fit.
 
 Each benchmark times the function a production stage calls, on inputs shaped
-like the recorded 1M-cell funnel with 11 neighbours per cell, and checks the
+like the recorded 1M-cell funnel with 11 neighbors per cell, and checks the
 result against an independent oracle, so it doubles as a test at the smoke
 size. The integration benchmarks merge an RNA modality with a protein
 modality of the same cells, as ``integrate_assays`` does. The Paris
@@ -68,12 +68,12 @@ def _nearest_other_cells(values: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 
 @lru_cache(maxsize=8)
 def _protein_modality(n_cells: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Return protein coordinates of the RNA cells, their neighbours and distances.
+    """Return protein coordinates of the RNA cells, their neighbors and distances.
 
     Every cell keeps its RNA group, so both modalities agree on cell identity,
     while the protein coordinates have their own centers and noise.
     """
-    _coordinates, labels = inputs.labelled_coordinates(n_cells)
+    _coordinates, labels = inputs.labeled_coordinates(n_cells)
     rng = np.random.default_rng(inputs.SEED + 1)
     centers = rng.normal(0.0, 3.0, size=(inputs.N_GROUPS, PROTEIN_DIMS))
     values = centers[labels] + rng.normal(size=(n_cells, PROTEIN_DIMS))
@@ -83,8 +83,8 @@ def _protein_modality(n_cells: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]
 
 
 def _wnn_modalities(n_cells: int) -> list[tuple[str, np.ndarray, np.ndarray]]:
-    """Return both modalities as WNN loads them: uint32 neighbours, float32 values."""
-    rna, _labels = inputs.labelled_coordinates(n_cells)
+    """Return both modalities as WNN loads them: uint32 neighbors, float32 values."""
+    rna, _labels = inputs.labeled_coordinates(n_cells)
     rna_indices, _distances = inputs.neighbors(n_cells)
     protein, protein_indices, _protein_distances = _protein_modality(n_cells)
     return [
@@ -104,7 +104,7 @@ def _euclidean(first: list[float], second: list[float]) -> float:
 
 
 def _affinity(distance: float, nearest: float, span: float) -> float:
-    """One at the nearest neighbour, decaying over the span to the k-th one."""
+    """One at the nearest neighbor, decaying over the span to the k-th one."""
     excess = max(distance - nearest, 0.0)
     tolerance = 8.0 * sys.float_info.epsilon * nearest
     if span <= tolerance:
@@ -118,11 +118,11 @@ def _wnn_reference_row(
 ) -> tuple[dict[int, float], tuple[float, float]]:
     """Rebuild one cell's WNN candidate affinities and modality weights in scalars.
 
-    Candidates are the union of the cell's two neighbour rows. Each modality
+    Candidates are the union of the cell's two neighbor rows. Each modality
     L2-normalizes its coordinates and scores distances over the span from its
-    nearest to its k-th own neighbour. A modality's weight is the softmax of
-    how much better its own neighbours predict the cell than the other
-    modality's neighbours do, and a candidate's affinity is the weighted sum
+    nearest to its k-th own neighbor. A modality's weight is the softmax of
+    how much better its own neighbors predict the cell than the other
+    modality's neighbors do, and a candidate's affinity is the weighted sum
     of its two modality affinities.
     """
     own = [[int(node) for node in indices[cell]] for _name, indices, _ in modalities]
@@ -185,14 +185,14 @@ def test_wnn_two_modalities(bench) -> None:
     def check(n_cells: int, value) -> None:
         graph, modality_weights = value
         modalities = _wnn_modalities(n_cells)
-        _coordinates, truth = inputs.labelled_coordinates(n_cells)
+        _coordinates, truth = inputs.labeled_coordinates(n_cells)
         k = inputs.N_NEIGHBORS
         assert graph.shape == (n_cells, n_cells)
         np.testing.assert_array_equal(graph.row, np.repeat(np.arange(n_cells), k))
         columns = graph.col.reshape(n_cells, k).astype(np.int64)
         weights = graph.data.reshape(n_cells, k)
         own_rows = np.hstack([indices for _name, indices, _ in modalities])
-        # Every edge is a distinct candidate from the cell's own neighbour rows.
+        # Every edge is a distinct candidate from the cell's own neighbor rows.
         np.testing.assert_array_equal(
             (columns[:, :, None] == own_rows[:, None, :]).any(axis=2),
             np.ones((n_cells, k), dtype=bool),
@@ -225,8 +225,8 @@ def test_wnn_two_modalities(bench) -> None:
 
 @lru_cache(maxsize=8)
 def _chromatin_modality(n_cells: int) -> tuple[np.ndarray, np.ndarray]:
-    """Return chromatin coordinates of the RNA cells and their neighbours."""
-    _coordinates, labels = inputs.labelled_coordinates(n_cells)
+    """Return chromatin coordinates of the RNA cells and their neighbors."""
+    _coordinates, labels = inputs.labeled_coordinates(n_cells)
     rng = np.random.default_rng(inputs.SEED + 2)
     centers = rng.normal(0.0, 2.0, size=(inputs.N_GROUPS, ATAC_DIMS))
     values = centers[labels] + rng.normal(size=(n_cells, ATAC_DIMS))
@@ -269,7 +269,7 @@ def test_wnn_three_modalities(bench) -> None:
         np.testing.assert_array_equal(graph.col, columns)
         assert graph.data.tobytes() == weights.tobytes()
         assert modality_weights.tobytes() == expected.tobytes()
-        _coordinates, truth = inputs.labelled_coordinates(n_cells)
+        _coordinates, truth = inputs.labeled_coordinates(n_cells)
         # All three modalities agree on the drawn groups.
         selected = graph.col.reshape(n_cells, k)
         assert np.mean(truth[selected] == truth[:, None]) > 0.99
@@ -278,7 +278,7 @@ def test_wnn_three_modalities(bench) -> None:
 
 
 def _connectivity(indices: np.ndarray, distances: np.ndarray) -> sparse.csr_matrix:
-    """Return the connectivity map of these neighbours as the datastore loads it."""
+    """Return the connectivity map of these neighbors as the datastore loads it."""
     from cytearc.neighbors.graph import build_connectivity_arrays
 
     edges, weights = build_connectivity_arrays(
@@ -299,7 +299,7 @@ def _snn_reference_row(
     row: int,
     graphs: list[sparse.csr_matrix],
 ) -> dict[int, tuple[float, set[float]]]:
-    """Score one row's candidates as edge weight plus shared-neighbour fraction.
+    """Score one row's candidates as edge weight plus shared-neighbor fraction.
 
     Each candidate keeps its best score over the graphs, with the edge
     weights that reach that score.
@@ -307,13 +307,13 @@ def _snn_reference_row(
     best: dict[int, tuple[float, set[float]]] = {}
     for graph in graphs:
 
-        def neighbours(node: int, graph: sparse.csr_matrix = graph) -> list[int]:
+        def neighbors(node: int, graph: sparse.csr_matrix = graph) -> list[int]:
             return graph.indices[graph.indptr[node] : graph.indptr[node + 1]].tolist()
 
-        own = neighbours(row)
+        own = neighbors(row)
         weights = graph.data[graph.indptr[row] : graph.indptr[row + 1]].tolist()
         for node, weight in zip(own, weights, strict=True):
-            shared = len(set(own) & set(neighbours(node)))
+            shared = len(set(own) & set(neighbors(node)))
             score = weight + shared / (len(own) - 1)
             previous = best.get(node)
             if previous is None or score > previous[0]:
@@ -332,7 +332,7 @@ def test_snn_merge(bench) -> None:
 
     def check(n_cells: int, merged) -> None:
         graphs = _snn_graphs(n_cells)
-        _coordinates, truth = inputs.labelled_coordinates(n_cells)
+        _coordinates, truth = inputs.labeled_coordinates(n_cells)
         k = inputs.N_NEIGHBORS
         assert merged.shape == (n_cells, n_cells)
         np.testing.assert_array_equal(merged.row, np.repeat(np.arange(n_cells), k))
@@ -415,7 +415,7 @@ def test_paris_fixed_cut(bench) -> None:
 
     def check(n_cells: int, labels) -> None:
         hierarchy = _paris_hierarchy(n_cells)
-        _coordinates, truth = inputs.labelled_coordinates(n_cells)
+        _coordinates, truth = inputs.labeled_coordinates(n_cells)
         assert labels.shape == (n_cells,)
         np.testing.assert_array_equal(
             np.unique(labels), np.arange(1, FIXED_CLUSTERS + 1)
@@ -490,7 +490,7 @@ def test_paris_adaptive_cut(bench) -> None:
         collapse_equal_height_plateaus,
     )
 
-    # The datastore default: one more cell than the graph's neighbour count.
+    # The datastore default: one more cell than the graph's neighbor count.
     min_cluster_size = inputs.N_NEIGHBORS + 1
 
     def make(n_cells: int):
@@ -514,7 +514,7 @@ def test_paris_adaptive_cut(bench) -> None:
     def check(n_cells: int, value) -> None:
         forest, gains, result = value
         hierarchy = _paris_hierarchy(n_cells)
-        _coordinates, truth = inputs.labelled_coordinates(n_cells)
+        _coordinates, truth = inputs.labeled_coordinates(n_cells)
         n_leaves = hierarchy.n_leaves
         children = np.asarray(hierarchy.children, dtype=np.int64)
         merges = np.arange(n_leaves - 1)

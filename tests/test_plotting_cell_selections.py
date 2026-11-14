@@ -31,7 +31,7 @@ N_CELLS = 60
 # Every tenth cell is left out of the graphs, which hold the 54 kept cells.
 LEFT_OUT = np.arange(N_CELLS) % 10 == 0
 KEPT = np.flatnonzero(~LEFT_OUT)
-# Three blocks of 20 cells, labelled A, B and C, except the cells left out,
+# Three blocks of 20 cells, labeled A, B and C, except the cells left out,
 # which carry AB: it sorts between A and B, and no kept cell carries it.
 CLUSTERS = np.where(LEFT_OUT, "AB", np.repeat(["A", "B", "C"], 20)).astype(object)
 SAMPLES = np.asarray(["s1", "s2", "s3"] * 20, dtype=object)
@@ -79,7 +79,7 @@ def cells(tmp_path_factory):
         "every": every,
     }
     with warnings.catch_warnings():
-        # The few cells of the store draw warnings from the neighbour search.
+        # The few cells of the store draw warnings from the neighbor search.
         warnings.simplefilter("ignore")
         neighbors = []
         for assay in ("RNA", "ADT"):
@@ -252,7 +252,7 @@ def test_cluster_connectivity_draws_inputs_on_the_graphs_cells_alike(
         one_selection.close()
 
 
-def test_cluster_connectivity_colours_groups_of_more_cells_as_an_embedding_does(
+def test_cluster_connectivity_colors_groups_of_more_cells_as_an_embedding_does(
     cells,
 ):
     groups = _labels(cells, "cluster", "every")
@@ -261,7 +261,7 @@ def test_cluster_connectivity_colours_groups_of_more_cells_as_an_embedding_does(
     )
     try:
         (scale,) = [found for found in drawn.scales if hasattr(found, "palette")]
-        every_colour = dict(scale.palette)
+        every_color = dict(scale.palette)
     finally:
         drawn.close()
     result = cluster_connectivity(
@@ -274,15 +274,15 @@ def test_cluster_connectivity_colours_groups_of_more_cells_as_an_embedding_does(
 
     try:
         # AB, which only the cells outside the graph carry, sorts between A
-        # and B and keeps its place among the default colours.
-        assert list(every_colour) == ["A", "AB", "B", "C"]
+        # and B and keeps its place among the default colors.
+        assert list(every_color) == ["A", "AB", "B", "C"]
         palette = result.scales[0].palette
         assert {label: palette[label] for label in "ABC"} == {
-            label: every_colour[label] for label in "ABC"
+            label: every_color[label] for label in "ABC"
         }
         nodes = result.axes["cluster_connectivity"].collections[-1]
         np.testing.assert_allclose(
-            nodes.get_facecolors(), [to_rgba(every_colour[label]) for label in "ABC"]
+            nodes.get_facecolors(), [to_rgba(every_color[label]) for label in "ABC"]
         )
     finally:
         result.close()

@@ -234,7 +234,7 @@ def _counts(kind: str, size: int) -> np.ndarray:
     """Return the counts of a store kind; see the ``stores`` fixture."""
     if kind == "features":
         return _sparse_rows(size)
-    counts, _labels = inputs.labelled_counts(size)
+    counts, _labels = inputs.labeled_counts(size)
     if kind == "cells":
         return counts
     # A merge source holds one half of the cells of the merged size.

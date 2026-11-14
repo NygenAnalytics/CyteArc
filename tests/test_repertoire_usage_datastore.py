@@ -477,7 +477,7 @@ def _counts(table, *columns: str) -> dict[tuple, int]:
     }
 
 
-def _labelled(result) -> pd.DataFrame:
+def _labeled(result) -> pd.DataFrame:
     """A record's table with its groups' labels after each row's group name."""
     table = result.table.copy()
     labels = result.group_keys.loc[table["group"]]
@@ -754,13 +754,13 @@ def test_gene_usage_recovers_the_truths_genes_in_each_sample(tmp_path) -> None:
             # clonotype.
             clone = (int(truth.clones[cell]), row.receptor_type)
             clones_of.setdefault(key, set()).add(clone)
-    usage = _labelled(
+    usage = _labeled(
         store.repertoire.gene_usage(
             receptors, genes=("v_call", "j_call"), level="allele", group_by="sample"
         )
     )
     assert _counts(usage, "sample", "locus", "v_call", "j_call") == dict(by_cells)
-    once = _labelled(
+    once = _labeled(
         store.repertoire.gene_usage(
             clonotypes,
             genes=("v_call", "j_call"),
@@ -783,7 +783,7 @@ def test_gene_usage_recovers_the_truths_genes_in_each_sample(tmp_path) -> None:
     # At the gene level the alleles of the truth's calls fall away.
     genes_only = store.repertoire.gene_usage(receptors, group_by="sample").table
     assert not genes_only["v_call"].str.contains("*", regex=False).any()
-    lengths = _labelled(store.repertoire.spectratype(receptors, group_by="sample"))
+    lengths = _labeled(store.repertoire.spectratype(receptors, group_by="sample"))
     expected_lengths: Counter = Counter()
     for cell, row in enumerate(expected.itertuples()):
         for slot in ("VJ_1", "VDJ_1"):
