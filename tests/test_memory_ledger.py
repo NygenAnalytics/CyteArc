@@ -281,10 +281,14 @@ def test_a_whole_read_lowers_its_concurrency_to_the_room_left(tmp_path) -> None:
         return getitem(self, selection)
 
     # A budget that holds what a read decodes at one, ten or five chunks at
-    # once reads them that many at once, and gives the same values.
+    # once reads them that many at once, and gives the same values. Five at
+    # a time also hold the five chunks decoded before them, which ten at a
+    # time, all the chunks, do not.
+    five = geometry.wholeReadBytes(5)
+    assert one < five < ten
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(zarr.Array, "__getitem__", read)
-        for budget, expected in ((one, 1), (ten, 10), (one + (ten - one) // 2, 5)):
+        for budget, expected in ((one, 1), (ten, 10), (five, 5), (five - 1, 4)):
             ledger = MemoryLedger(budget, "Reading")
             with zarr_io_concurrency(10):
                 result = read_whole(ledger, root, "values", item="the values")

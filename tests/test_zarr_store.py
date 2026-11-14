@@ -1431,6 +1431,125 @@ def test_copy_array_and_metadata_tree(tmp_path):
     assert copied_metadata["score"].attrs["display"] == {"label": "Score"}
 
 
+def _recorded_producer_bytes(monkeypatch):
+    """Record the producer bytes that each copy plans with."""
+    import cytearc.storage.copy as copy_module
+
+    recorded = []
+    write = copy_module.write_dense_in_shard_rows
+
+    def recording(*args, **kwargs):
+        recorded.append(kwargs["producerBytes"])
+        return write(*args, **kwargs)
+
+    monkeypatch.setattr(copy_module, "write_dense_in_shard_rows", recording)
+    return recorded
+
+
+def test_copying_an_unsharded_array_reserves_its_chunk_as_stored_and_decoded(
+    tmp_path, monkeypatch
+):
+    recorded = _recorded_producer_bytes(monkeypatch)
+    source_root = zarr.open_group(str(tmp_path / "source.zarr"), mode="w")
+    source = create_numeric_array(
+        source_root,
+        "data",
+        normed_array_spec(64, 8, profile="fast_local", targetChunkBytes=16 * 8 * 4),
+    )
+    assert source.chunks == (16, 8)
+    expected = np.random.default_rng(1).random((64, 8), dtype=np.float32)
+    source[:] = expected
+    target = create_or_open_staged_normed_array(str(tmp_path / "staged"), (64, 8))
+
+    copy_zarr_array(source, target, resources=ResourceBudget(1024**2, 1))
+
+    # Each read decodes one 512-byte chunk beside its compressed bytes, at
+    # most 512 + 512 // 128 + 1,024 bytes.
+    assert recorded == [512 + 512 + 4 + 1_024]
+    np.testing.assert_array_equal(target[:], expected)
+
+
+def test_copying_a_sharded_array_reserves_its_shard_read(tmp_path, monkeypatch):
+    recorded = _recorded_producer_bytes(monkeypatch)
+    source_root = zarr.open_group(str(tmp_path / "source.zarr"), mode="w")
+    source = create_numeric_array(
+        source_root,
+        "data",
+        row_sharded_array_spec(
+            (64, 8),
+            np.float32,
+            profile="fast_local",
+            band_rows=32,
+            target_chunk_bytes=8 * 8 * 4,
+        ),
+    )
+    assert (source.shards, source.chunks) == ((32, 8), (8, 8))
+    expected = np.random.default_rng(2).random((64, 8), dtype=np.float32)
+    source[:] = expected
+    target = create_or_open_staged_normed_array(str(tmp_path / "staged"), (64, 8))
+    assert target.chunks == (64, 8)
+
+    copy_zarr_array(source, target, resources=ResourceBudget(1024**2, 1))
+
+    # A band of all 64 rows fills Zarr's 2,048-byte shard-level copy of them,
+    # holds the compressed bytes of the four 256-byte chunks of a shard, each
+    # at most 256 + 256 // 128 + 1,024 bytes, and decodes one chunk at a time
+    # beside the chunk decoded before it.
+    assert recorded == [2_048 + 4 * (256 + 2 + 1_024) + 256 + 256]
+    np.testing.assert_array_equal(target[:], expected)
+
+
+def test_a_copy_from_larger_chunks_reserves_what_each_band_read_holds(
+    tmp_path, monkeypatch
+):
+    import tracemalloc
+
+    recorded = _recorded_producer_bytes(monkeypatch)
+    # Each band of the destination's 16-row chunks reads an 8 MiB source
+    # chunk of random bits, which do not compress, so the read holds the
+    # chunk twice, decoded and as stored, beside its 256 KiB band. At this
+    # size the bound on the stored bytes also covers the few kilobytes that
+    # Zarr's own bookkeeping holds during a read.
+    source_root = zarr.open_group(str(tmp_path / "source.zarr"), mode="w")
+    source = create_numeric_array(
+        source_root,
+        "data",
+        normed_array_spec(
+            512, 4_096, profile="fast_local", targetChunkBytes=8 * 1024**2
+        ),
+    )
+    bits = np.random.default_rng(3).integers(
+        0, 1 << 32, size=(512, 4_096), dtype=np.uint32
+    )
+    source[:] = bits.view(np.float32)
+    target_root = zarr.open_group(str(tmp_path / "target.zarr"), mode="w")
+    target = create_numeric_array(
+        target_root,
+        "data",
+        normed_array_spec(
+            512, 4_096, profile="fast_local", targetChunkBytes=16 * 4_096 * 4
+        ),
+    )
+    assert (source.chunks, target.chunks) == ((512, 4_096), (16, 4_096))
+
+    tracemalloc.start()
+    try:
+        base, _ = tracemalloc.get_traced_memory()
+        band = np.asarray(source[16:32, :])
+        _current, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    copy_zarr_array(source, target, resources=ResourceBudget(1024**3, 1))
+
+    # The plan charges the band itself apart, and the read's other bytes,
+    # the chunk twice, as the producer's.
+    (producer,) = recorded
+    assert band.nbytes == 16 * 4_096 * 4
+    assert peak - base > band.nbytes + 2 * 8 * 1024**2
+    assert producer + band.nbytes >= peak - base
+    np.testing.assert_array_equal(target[:].view(np.uint32), bits)
+
+
 def test_copy_zarr_array_rejects_shape_and_rank_mismatch(tmp_path):
     source_root = zarr.open_group(str(tmp_path / "source.zarr"), mode="w")
     target_root = zarr.open_group(str(tmp_path / "target.zarr"), mode="w")
