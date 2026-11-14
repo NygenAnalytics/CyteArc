@@ -765,6 +765,7 @@ def test_minimal_pipeline_is_artifact_only_cold_openable_and_ordered(
         ("embedding_initialization", "skipped"),
         ("umap", "skipped"),
         ("localmap", "skipped"),
+        ("leiden", "skipped"),
         ("paris", "skipped"),
         ("cluster_selection", "skipped"),
         ("membership_strength", "skipped"),
@@ -1356,21 +1357,74 @@ def test_default_clustering_is_selected_by_a_persisted_silhouette_decision(
     options["leiden"] = True
     run = datastore.pipeline.rna(label="leiden-defaults", **options)
 
-    partitions = ("leiden_0.5", "leiden_0.75", "leiden_1.0", "leiden_1.25")
-    assert all(key in run for key in partitions)
+    # One stage clusters at every resolution, and one output holds the
+    # candidates in resolution order; no stage or output names a resolution.
+    resolutions = (0.5, 0.75, 1.0, 1.25)
+    stage_order = run.report()["run"]["stageOrder"]
+    assert stage_order.count("leiden") == 1
+    assert not [name for name in [*stage_order, *run] if name.startswith("leiden_")]
+    candidates = run["leiden"]
+    assert isinstance(candidates, tuple) and len(candidates) == 4
+    assert [
+        datastore.artifacts.inspect(ref).parameters["resolution"] for ref in candidates
+    ] == list(resolutions)
+    # Each candidate is the one artifact found by its graph and resolution.
+    for resolution, ref in zip(resolutions, candidates, strict=True):
+        assert (
+            datastore.artifacts.find(
+                "clusters",
+                graph=run["connectivity_map"],
+                method="leiden",
+                resolution=resolution,
+            )
+            == ref
+        )
     assert "cluster_selection" in run
     decision = artifact_group(datastore.zw, run["cluster_selection"])
-    assert tuple(decision.attrs["candidateKeys"]) == partitions
-    assert tuple(decision.attrs["tieOrder"]) == partitions
+    keys = ("0.5", "0.75", "1.0", "1.25")
+    assert tuple(decision.attrs["candidateKeys"]) == keys
+    assert tuple(decision.attrs["tieOrder"]) == keys
+    assert [ArtifactRef.from_dict(ref) for ref in decision.attrs["candidateRefs"]] == (
+        list(candidates)
+    )
     assert "paris" not in decision.attrs["candidateKeys"]
     selected_key = decision.attrs["selectedKey"]
-    assert run["clusters"] == run[selected_key]
+    assert run["clusters"] == candidates[keys.index(selected_key)]
     scores = np.asarray(decision["scores"][:], dtype=float)
     assert scores.shape == (4,)
     assert np.isfinite(scores).any()
     # The first candidate in tie order with the highest silhouette wins.
     best = int(np.flatnonzero(scores == np.nanmax(scores))[0])
-    assert selected_key == partitions[best]
+    assert selected_key == keys[best]
+    # The stage summaries name each candidate by resolution and artifact.
+    summaries = {stage["stage"]: stage["summary"] for stage in run.report()["stages"]}
+    assert summaries["cluster_selection"] == {
+        "selected": resolutions[best],
+        "candidates": [
+            {
+                "resolution": resolution,
+                "score": None if not np.isfinite(score) else round(float(score), 4),
+                "artifact": ref.artifact_id,
+            }
+            for resolution, score, ref in zip(
+                resolutions, scores, candidates, strict=True
+            )
+        ],
+    }
+    leiden_summary = summaries["leiden"]["candidates"]
+    assert [item["resolution"] for item in leiden_summary] == list(resolutions)
+    assert [item["artifact"] for item in leiden_summary] == [
+        ref.artifact_id for ref in candidates
+    ]
+    for item, ref in zip(leiden_summary, candidates, strict=True):
+        sizes = np.unique(
+            artifact_group(datastore.zw, ref)["values"][:], return_counts=True
+        )[1]
+        assert (
+            item["clusters"],
+            item["largestCluster"],
+            item["smallestCluster"],
+        ) == (len(sizes), int(sizes.max()), int(sizes.min()))
     n_cells = int(np.count_nonzero(run.cells.fetch_all("I")))
     sample_size = min(n_cells, 10_000)
     assert decision["sample_indices"].shape == (sample_size,)
@@ -1389,7 +1443,8 @@ def test_default_clustering_is_selected_by_a_persisted_silhouette_decision(
         ArtifactRef.from_dict(status.inputs["connectivityMap"])
         == run["connectivity_map"]
     )
-    assert run.cells.columns[-5:] == (*partitions, "clusters")
+    # The run's cells hold the saved clustering, not each candidate.
+    assert run.cells.columns == ("I", "ids", "names", "clusters")
     assert "RNA_clusters" not in datastore.cells.columns
     assert "hvgs" not in datastore.get_assay("RNA").feats.columns
 
@@ -1410,18 +1465,15 @@ def test_custom_leiden_uses_only_the_requested_candidate_set(
     options["paris"] = True
     run = datastore.pipeline.rna(**options)
 
-    assert "leiden_0.4" in run
-    assert "leiden_0.8" in run
+    candidates = run["leiden"]
+    assert [
+        datastore.artifacts.inspect(ref).parameters["resolution"] for ref in candidates
+    ] == [0.4, 0.8]
     decision = artifact_group(datastore.zw, run["cluster_selection"])
-    assert tuple(decision.attrs["candidateKeys"]) == (
-        "leiden_0.4",
-        "leiden_0.8",
-    )
-    assert run["clusters"] == run[decision.attrs["selectedKey"]]
-    assert [key for key in run if key.startswith("leiden_")] == [
-        "leiden_0.4",
-        "leiden_0.8",
-    ]
+    assert tuple(decision.attrs["candidateKeys"]) == ("0.4", "0.8")
+    selected = decision.attrs["selectedKey"]
+    assert run["clusters"] == candidates[("0.4", "0.8").index(selected)]
+    assert not [key for key in run if key.startswith("leiden_")]
     # Paris runs beside the candidates as a diagnostic and is never one.
     assert "paris" in run
     assert "paris" not in decision.attrs["candidateKeys"]
@@ -1450,11 +1502,10 @@ def test_pipeline_runs_umap_and_leiden_stages_one_at_a_time(
     assert umap_threads == [threading.current_thread()]
     records = load_pipeline_stage_records(datastore.zw, run.run_id)
     stages = [stage for stage in records if stage.status != "skipped"]
-    assert [stage.stage for stage in stages][-5:] == [
+    assert [stage.stage for stage in stages][-4:] == [
         "embedding_initialization",
         "umap",
-        "leiden_0.5",
-        "leiden_1.0",
+        "leiden",
         "cluster_selection",
     ]
     for earlier, later in pairwise(stages):
@@ -1979,6 +2030,7 @@ def test_empty_filtering_mapping_uses_automatic_defaults(
     assert filtering["enabled"] is True
     assert filtering["method"] == "mad"
     assert plan.config["stages"]["leiden"] is False
+    assert "leiden" in plan.stage_order
     assert not any(stage.startswith("leiden_") for stage in plan.stage_order)
 
 
@@ -2343,8 +2395,8 @@ def test_pipeline_fields_describe_only_the_leiden_partitions_that_ran(
 ) -> None:
     run = minimal_base.run
     plan = _minimal_plan(minimal_base.datastore, leiden=True)
-    assert any(stage.startswith("leiden_") for stage in plan.stage_order)
-    assert not any(key.startswith("leiden_") for key in run)
+    assert plan.stage_order.count("leiden") == 1
+    assert "leiden" not in run
 
     # A partition without an artifact adds no field.
     state = plan.start(minimal_base.datastore)
@@ -2403,14 +2455,12 @@ def test_rich_pipeline_views_plots_and_markers_remain_frozen_after_live_i_drift(
         "connectivity_map",
         "embedding_initialization",
         "umap",
-        "leiden_0.5",
-        "leiden_0.75",
-        "leiden_1.0",
-        "leiden_1.25",
         "cluster_selection",
         "clusters",
         "doublets",
         "markers",
+        # Outputs that hold several artifacts follow the others.
+        "leiden",
     ]
     assert run.cells.columns == (
         "I",
@@ -2421,17 +2471,14 @@ def test_rich_pipeline_views_plots_and_markers_remain_frozen_after_live_i_drift(
         "cell_cycle_phase",
         "umap_1",
         "umap_2",
-        "leiden_0.5",
-        "leiden_0.75",
-        "leiden_1.0",
-        "leiden_1.25",
         "clusters",
         "doublet_score",
         "predicted_doublet",
     )
     decision = artifact_group(datastore.zw, run["cluster_selection"])
-    assert run["clusters"] == run[decision.attrs["selectedKey"]]
-    assert decision.attrs["selectedKey"].startswith("leiden_")
+    keys = ["0.5", "0.75", "1.0", "1.25"]
+    assert decision.attrs["candidateKeys"] == keys
+    assert run["clusters"] == run["leiden"][keys.index(decision.attrs["selectedKey"])]
     assert "paris" not in decision.attrs["candidateKeys"]
     assert set(datastore.cells.columns) == set(cell_values_before)
     assert set(assay.feats.columns) == set(feature_values_before)
@@ -2551,7 +2598,7 @@ def test_harmony_doublets_are_scored_within_each_batch_without_another_graph(
         ArtifactRef.from_dict(status.inputs["connectivityMap"])
         == run["connectivity_map"]
     )
-    assert tuple(decision.attrs["candidateKeys"]) == ("leiden_1.0",)
+    assert tuple(decision.attrs["candidateKeys"]) == ("1.0",)
     assert not any(key.startswith("uncorrected_") for key in run)
     stages = {item["stage"]: item for item in run.report()["stages"]}
     assert "doublet_graph" not in stages
@@ -2599,11 +2646,12 @@ def test_paris_only_pipeline_keeps_paris_as_a_diagnostic_without_clusters(
     assert "paris" in run
     assert "clusters" not in run
     assert "cluster_selection" not in run
-    assert "leiden_1.0" not in run
+    assert "leiden" not in run
     assert list(run).count("paris") == 1
     assert run["paris"].kind == "cluster_cut"
     statuses = {stage["stage"]: stage["status"] for stage in run.report()["stages"]}
-    assert (statuses["paris"], statuses["cluster_selection"]) == (
+    assert (statuses["leiden"], statuses["paris"], statuses["cluster_selection"]) == (
+        "skipped",
         "completed",
         "skipped",
     )

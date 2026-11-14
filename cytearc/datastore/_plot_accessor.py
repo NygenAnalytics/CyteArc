@@ -148,6 +148,13 @@ def _require_run(
         layout_name = layout
     else:
         raise TypeError("layout must name a pipeline output")
+    # A run that did not complete refuses its outputs when the plot reads them.
+    layout_output = run._outputs.get(layout_name)
+    if layout_output is not None and not isinstance(layout_output, ArtifactRef):
+        raise ValueError(
+            f"layout must name an embedding output of the run, such as 'umap'; "
+            f"{layout_name!r} holds several artifacts"
+        )
     return run, layout_name
 
 
@@ -205,7 +212,8 @@ def _check_run_embedding_colors(
     A string names a frozen cell field, or else a gene of the run's assay.
     Gene names and ``FeatureRef`` colors need an explicit normalization,
     because a run freezes no gene values. An ``ArtifactRef`` must be an
-    output of the run.
+    output of the run, such as one of the Leiden candidates in
+    ``run["leiden"]``.
     """
     if color_by is None:
         return
@@ -231,7 +239,12 @@ def _check_run_embedding_colors(
             _require_run_fields(cells, item.key)
         elif isinstance(item, ArtifactRef):
             if outputs is None:
-                outputs = set(run.values())
+                # Every Leiden candidate of the run's ``leiden`` output counts.
+                outputs = {
+                    ref
+                    for value in run.values()
+                    for ref in (value if isinstance(value, tuple) else (value,))
+                }
             if item not in outputs:
                 raise ValueError(_RUN_ARTIFACT_COLOR_MESSAGE)
         elif isinstance(item, FeatureRef):

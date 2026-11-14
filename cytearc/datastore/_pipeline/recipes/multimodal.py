@@ -26,7 +26,7 @@ from ..stages import (
     cluster_selection_stage,
     frozen_feature_names,
     initialization_stage,
-    leiden_stages,
+    leiden_stage,
     membership_strength_stage,
     paris_stage,
     tsne_stage,
@@ -350,7 +350,7 @@ def resolve_multimodal(
             embeddings.umap or embeddings.tsne, initialization_settings
         ),
         umap_stage(embeddings.umap, embeddings.umap_settings, graph_key=_GRAPH),
-        *leiden_stages(partitions, leiden_settings, graph_key=_GRAPH),
+        leiden_stage(partitions, leiden_settings, graph_key=_GRAPH),
         paris_stage(paris_enabled, paris_settings, graph_key=_GRAPH),
         cluster_selection_stage(partitions, selected),
         membership_strength_stage(membership_strength, graph_key=_GRAPH),
@@ -387,14 +387,13 @@ def resolve_multimodal(
         _GRAPH,
         "embedding_initialization",
         "umap",
-        *(f"leiden_{key}" for key, _value in partitions),
+        "leiden",
         "paris",
         "clusters",
         "membership_strength",
         "tsne",
         *(f"markers_{assay}" for assay in assays),
     )
-    leiden_keys = [key for key, _value in partitions]
 
     def fields(state: RunState) -> tuple[Any, ...]:
         return (
@@ -402,7 +401,6 @@ def resolve_multimodal(
                 store,
                 state.artifacts,
                 snapshot_columns=snapshots,
-                leiden_keys=leiden_keys,
             ),
             *feature_fields(store, assays[0], state.artifacts, selection_key=None),
         )

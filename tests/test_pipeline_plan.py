@@ -135,9 +135,17 @@ def assert_plan_reuses_run(plan: PipelinePlan, run: PipelineRun) -> None:
             assert (stage.status, stage.outputs) == ("skipped", ()), stage.stage
             continue
         assert (stage.status, stage.reason, stage.estimate) == ("reused", None, None)
-        assert stage.outputs == tuple(
-            (output["outputKey"], ArtifactRef.from_dict(output["artifact"]))
-            for output in record["outputs"]
+        # A stage output of several artifacts gives one pair for each.
+        assert stage.outputs == (
+            *(
+                (output["outputKey"], ArtifactRef.from_dict(output["artifact"]))
+                for output in record["outputs"]
+            ),
+            *(
+                (listed["outputKey"], ArtifactRef.from_dict(item["artifact"]))
+                for listed in record["outputLists"]
+                for item in listed["artifacts"]
+            ),
         ), stage.stage
     assert plan.computed == ()
     config = report["run"]["config"]
@@ -254,9 +262,8 @@ def test_a_changed_setting_computes_its_stage_and_every_stage_that_reads_it(
         "connectivity": ("neighbors",),
         "embedding_initialization": ("pca",),
         "umap": ("connectivity", "embedding_initialization"),
-        "leiden_0.5": ("connectivity",),
-        "leiden_1.0": ("connectivity",),
-        "cluster_selection": ("pca", "connectivity", "leiden_0.5", "leiden_1.0"),
+        "leiden": ("connectivity",),
+        "cluster_selection": ("pca", "connectivity", "leiden"),
         "doublets": ("connectivity", "cluster_selection"),
         "markers": ("cluster_selection",),
     }
@@ -282,7 +289,10 @@ def test_a_stage_that_reads_no_changed_value_stays_reused(completed, tmp_path) -
         completed.run["umap"],
     )
     # The Leiden candidates and the stages after them read the graph, not UMAP.
-    assert plan["leiden_0.5"].outputs == (("leiden_0.5", completed.run["leiden_0.5"]),)
+    assert plan["leiden"].outputs == tuple(
+        ("leiden", ref) for ref in completed.run["leiden"]
+    )
+    assert len(plan["leiden"].outputs) == 2
     assert plan["markers"].status == "reused"
     run = _copy(completed.location, tmp_path).pipeline.rna(**changed)
     assert _dispositions(run) == {stage.stage: stage.status for stage in plan.stages}

@@ -226,10 +226,8 @@ def resolve_atac(
     output_keys = graph_output_keys(
         head=("prevalent_peaks",),
         reduction=("lsi",),
-        partitions=partitions,
         tail=("markers",),
     )
-    leiden_keys = [key for key, _value in partitions]
 
     def fields(state: RunState) -> tuple[Any, ...]:
         return (
@@ -237,7 +235,6 @@ def resolve_atac(
                 store,
                 state.artifacts,
                 snapshot_columns=snapshots,
-                leiden_keys=leiden_keys,
             ),
             *feature_fields(
                 store,

@@ -219,11 +219,11 @@ def _record_teaching_columns(
     return copied
 
 
-def test_embedding_columns_name_the_umap_and_leiden_fields_of_a_run():
-    assert generator._embedding_columns("ADT", "1.0") == {
+def test_embedding_columns_copy_the_umap_and_saved_clusters_of_a_run():
+    assert generator._embedding_columns("ADT") == {
         "ADT_UMAP1": "umap_1",
         "ADT_UMAP2": "umap_2",
-        "ADT_leiden_cluster": "leiden_1.0",
+        "ADT_leiden_cluster": "clusters",
     }
 
 
@@ -253,12 +253,12 @@ def test_citeseq_analysis_integrates_modality_runs_of_the_same_cells(monkeypatch
     assert rna[2]["markers"] is False
     # The teaching columns keep the names that the tutorials read.
     assert copied == [
-        ("adt", generator._embedding_columns("ADT", "1.0"), False),
-        ("snn", generator._embedding_columns("RNA+ADT", "1.75"), False),
-        ("wnn", generator._embedding_columns("RNA+ADT_wnn", "1.75"), False),
+        ("adt", generator._embedding_columns("ADT"), False),
+        ("snn", generator._embedding_columns("RNA+ADT"), False),
+        ("wnn", generator._embedding_columns("RNA+ADT_wnn"), False),
         (
             "rna",
-            {**generator._embedding_columns("RNA", "1.0"), "RNA_clusters": "clusters"},
+            {**generator._embedding_columns("RNA"), "RNA_clusters": "clusters"},
             True,
         ),
     ]

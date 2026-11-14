@@ -122,7 +122,9 @@ class PipelineStagePlan:
         operation: The operation whose artifact the stage would compute
             first, or None.
         outputs: The ``(key, ref)`` pairs that a reused stage would record,
-            the run's own refs; empty for other stages.
+            the run's own refs; empty for other stages. An output that holds
+            several artifacts, such as ``leiden``, gives one pair for each,
+            in order.
         existing: The stored artifact that the reason concerns: the one that
             a revision supersedes, that was interrupted, that lacks
             diagnostics, or that fails its checks, or the closest one of the
@@ -215,15 +217,15 @@ class PipelinePlan:
         }
 
 
-class _StageArtifacts(dict[str, ArtifactRef]):
-    """The run's artifacts as one stage of a plan sees them.
+class _StageArtifacts[V](dict[str, V]):
+    """The run's artifacts, or artifact lists, as one stage of a plan sees them.
 
     The stage reads only the keys it declares as inputs and adds only those
     it declares as outputs, so a declaration that misses a key fails loudly
     instead of hiding a stage that would wait on another.
     """
 
-    def __init__(self, artifacts: dict[str, ArtifactRef], stage: PlannedStage) -> None:
+    def __init__(self, artifacts: dict[str, V], stage: PlannedStage) -> None:
         super().__init__(artifacts)
         self._stage = stage
 
@@ -234,7 +236,7 @@ class _StageArtifacts(dict[str, ArtifactRef]):
                 f"not declare among its {role}"
             )
 
-    def __getitem__(self, key: str) -> ArtifactRef:
+    def __getitem__(self, key: str) -> V:
         self._require(key, self._stage.inputs, "inputs")
         return super().__getitem__(key)
 
@@ -242,7 +244,7 @@ class _StageArtifacts(dict[str, ArtifactRef]):
         self._require(key, self._stage.inputs, "inputs")
         return super().get(key, default)
 
-    def __setitem__(self, key: str, value: ArtifactRef) -> None:
+    def __setitem__(self, key: str, value: V) -> None:
         self._require(key, self._stage.outputs, "outputs")
         super().__setitem__(key, value)
 
@@ -254,15 +256,18 @@ def _run_declared[T](
 
     The state keeps the step's additions only when the step returns.
     """
-    artifacts = state.artifacts
+    artifacts, lists = state.artifacts, state.artifact_lists
     seen = _StageArtifacts(artifacts, stage)
-    state.artifacts = seen
+    seen_lists = _StageArtifacts(lists, stage)
+    state.artifacts, state.artifact_lists = seen, seen_lists
     try:
         result = step(state)
     finally:
-        state.artifacts = artifacts
+        state.artifacts, state.artifact_lists = artifacts, lists
     artifacts.clear()
     artifacts.update(seen)
+    lists.clear()
+    lists.update(seen_lists)
     return result
 
 
@@ -280,6 +285,7 @@ def _set_pending(
     for key in keys:
         pending[key] = owners
         state.artifacts.pop(key, None)
+        state.artifact_lists.pop(key, None)
         if key == COORDINATES:
             state.coordinates = None
         elif key == FEATURE_NAMES:
@@ -433,11 +439,20 @@ def plan_recipe(store: Any, plan: RecipePlan) -> PipelinePlan:
                 f"Pipeline stage {stage.name!r} returned {undeclared!r}, which it "
                 "does not declare among its outputs"
             )
-        state.artifacts.update(outputs)
+        state.add(outputs)
         for key in stage.outputs:
             pending.pop(key, None)
         planned.append(
-            PipelineStagePlan(stage.name, ordinal, "reused", outputs=outputs)
+            PipelineStagePlan(
+                stage.name,
+                ordinal,
+                "reused",
+                outputs=tuple(
+                    (key, ref)
+                    for key, value in outputs
+                    for ref in (value if isinstance(value, tuple) else (value,))
+                ),
+            )
         )
     estimates = _estimates(
         store, plan, {stage.stage for stage in planned if stage.status == "computed"}

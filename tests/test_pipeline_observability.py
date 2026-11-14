@@ -86,7 +86,7 @@ from cytearc.utils.shutdown import (
 from cytearc.utils.warnings import warn
 
 _LABEL = "observed"
-_PARTITIONS = ("leiden_0.5", "leiden_1.0")
+_PARTITIONS = (0.5, 1.0)
 # Small settings that still filter cells and choose between two Leiden
 # candidates, so every summarized stage of the recipe runs.
 _OPTIONS: dict[str, Any] = {
@@ -272,11 +272,26 @@ def test_run_events_follow_the_recorded_stages(observed_base: SimpleNamespace) -
         assert event.metrics == record["metrics"]
         assert event.summary == record["summary"]
         assert list(event.warnings) == record["warnings"]
+        # An output of several artifacts gives one pair for each, and counts
+        # as reused when every one of them was.
         assert [(key, ref.to_dict()) for key, ref in event.outputs] == [
-            (output["outputKey"], output["artifact"]) for output in record["outputs"]
+            *(
+                (output["outputKey"], output["artifact"])
+                for output in record["outputs"]
+            ),
+            *(
+                (listed["outputKey"], item["artifact"])
+                for listed in record["outputLists"]
+                for item in listed["artifacts"]
+            ),
         ]
         assert list(event.reused) == [
-            output["outputKey"] for output in record["outputs"] if output["reused"]
+            *(output["outputKey"] for output in record["outputs"] if output["reused"]),
+            *(
+                listed["outputKey"]
+                for listed in record["outputLists"]
+                if all(item["reused"] for item in listed["artifacts"])
+            ),
         ]
         assert (event.progress, event.error) == (None, None)
     skipped = {
@@ -386,18 +401,32 @@ def test_stage_summaries_describe_the_completed_stages(
         sum(pca["varianceRatio"]), abs=1e-3
     )
 
-    for key in _PARTITIONS:
-        labels, counts = np.unique(run.cells.fetch(key), return_counts=True)
-        assert summaries[key] == {
-            "clusters": len(labels),
-            "largestCluster": int(counts.max()),
-            "smallestCluster": int(counts.min()),
-        }
+    # The one Leiden stage lists each candidate in resolution order.
+    candidates = run["leiden"]
+    expected = []
+    for resolution, ref in zip(_PARTITIONS, candidates, strict=True):
+        labels, counts = np.unique(
+            observed_base.store.artifacts.load(ref)["values"][:],
+            return_counts=True,
+        )
+        expected.append(
+            {
+                "resolution": resolution,
+                "clusters": len(labels),
+                "largestCluster": int(counts.max()),
+                "smallestCluster": int(counts.min()),
+                "artifact": ref.artifact_id,
+            }
+        )
+    assert summaries["leiden"] == {"candidates": expected}
 
     selection = summaries["cluster_selection"]
-    assert set(selection["scores"]) == set(_PARTITIONS)
+    assert [item["resolution"] for item in selection["candidates"]] == list(_PARTITIONS)
+    assert [item["artifact"] for item in selection["candidates"]] == [
+        ref.artifact_id for ref in candidates
+    ]
     assert selection["selected"] in _PARTITIONS
-    assert run["clusters"] == run[selection["selected"]]
+    assert run["clusters"] == candidates[_PARTITIONS.index(selection["selected"])]
     assert all(summaries[stage] is None for stage in _SKIPPED)
 
 

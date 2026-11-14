@@ -8,6 +8,7 @@ import numpy as np
 from ...storage.artifacts import ArtifactRef
 from ...storage.pipeline_runs import (
     PipelineFieldDescriptor,
+    PipelineOutputListRecord,
     PipelineOutputRecord,
     PipelineRunRecord,
     complete_pipeline_run_record,
@@ -33,7 +34,10 @@ from ..pipeline_run import (
 from .events import PipelineCallback, PipelineEventEmitter, run_callbacks
 from .ledger import RunLedger, StageSummarizer, end_pipeline_run, interruption_record
 
-type StageAction = Callable[["RunState"], Sequence[tuple[str, ArtifactRef]]]
+# A stage output names one artifact, or a tuple of artifacts in a fixed order,
+# such as the Leiden candidates ordered by resolution.
+type StageOutput = tuple[str, ArtifactRef | tuple[ArtifactRef, ...]]
+type StageAction = Callable[["RunState"], Sequence[StageOutput]]
 
 # The names under which a stage declares the run state's coordinates and
 # frozen feature names among its inputs and outputs, beside artifact keys.
@@ -45,18 +49,29 @@ FEATURE_NAMES = "feature_names"
 class RunState:
     """What the stages of one run share while it executes.
 
-    ``artifacts`` maps every stage output key to its ref, the run's outputs
-    and the stages' private inputs alike. The other attributes hold values
-    that later stages read: the assay object, the frozen feature names, and
-    the coordinates that built the graph.
+    ``artifacts`` maps every stage output key that names one artifact to its
+    ref, the run's outputs and the stages' private inputs alike, and
+    ``artifact_lists`` maps each key that names several artifacts to them,
+    in order. The other attributes hold values that later stages read: the
+    assay object, the frozen feature names, and the coordinates that built
+    the graph.
     """
 
     store: Any
     assay: Any
     artifacts: dict[str, ArtifactRef] = field(default_factory=dict)
+    artifact_lists: dict[str, tuple[ArtifactRef, ...]] = field(default_factory=dict)
     feature_names: np.ndarray | None = None
     coordinates: ArtifactRef | None = None
     extras: dict[str, Any] = field(default_factory=dict)
+
+    def add(self, outputs: Sequence[StageOutput]) -> None:
+        """Add a stage's outputs, each to the mapping that holds its kind."""
+        for key, value in outputs:
+            if isinstance(value, tuple):
+                self.artifact_lists[key] = value
+            else:
+                self.artifacts[key] = value
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,7 +107,8 @@ class RecipePlan:
         config: The JSON settings the run records.
         stages: Every stage in order, skipped ones included.
         output_keys: The run outputs, in record order; a key that no stage
-            produced is left out.
+            produced is left out. A key whose stage produced several
+            artifacts is recorded among the run's output lists.
         fields: Builds the frozen field descriptors once the stages are done.
         summarize: Computes a completed stage's diagnostics, or None.
         start: Builds the shared state before the first stage.
@@ -300,9 +316,9 @@ def _execute(
 
         def run_stage(
             action: StageAction = action,
-        ) -> Sequence[tuple[str, ArtifactRef]]:
+        ) -> Sequence[StageOutput]:
             outputs = tuple(action(state))
-            state.artifacts.update(outputs)
+            state.add(outputs)
             return outputs
 
         ledger.run(stage.name, run_stage)
@@ -312,6 +328,11 @@ def _execute(
         for key in plan.output_keys
         if key in state.artifacts
     )
+    output_lists = tuple(
+        PipelineOutputListRecord(key=key, artifacts=state.artifact_lists[key])
+        for key in plan.output_keys
+        if key in state.artifact_lists
+    )
     try:
         fields = plan.fields(state)
         _open_views(store, record, outputs, fields)
@@ -320,6 +341,7 @@ def _execute(
             store.zw,
             run_id=record.run_id,
             outputs=outputs,
+            output_lists=output_lists,
             fields=fields,
         )
     except Exception as error:

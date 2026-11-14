@@ -61,6 +61,8 @@ _RUN_FIELDS = frozenset(
         "interruption",
     }
 )
+# Run fields that a later 1.x release added; a record without them still reads.
+_RUN_OPTIONAL_FIELDS = frozenset({"outputLists"})
 _STAGE_FIELDS = frozenset(
     {
         "stage",
@@ -77,11 +79,14 @@ _STAGE_FIELDS = frozenset(
     }
 )
 # Stage fields that later 1.x releases added; a record without them still reads.
-_STAGE_OPTIONAL_FIELDS = frozenset({"summary", "warnings"})
+_STAGE_OPTIONAL_FIELDS = frozenset({"summary", "warnings", "outputLists"})
 # A stage record keeps at most this many warnings, each bounded like a message.
 STAGE_WARNING_LIMIT = 50
 _OUTPUT_FIELDS = frozenset({"key", "artifact"})
+_OUTPUT_LIST_FIELDS = frozenset({"key", "artifacts"})
 _STAGE_OUTPUT_FIELDS = frozenset({"outputKey", "artifact", "reused"})
+_STAGE_OUTPUT_LIST_FIELDS = frozenset({"outputKey", "artifacts"})
+_STAGE_LISTED_ARTIFACT_FIELDS = frozenset({"artifact", "reused"})
 _PLAN_FIELDS = frozenset({"operation", "ref", "disposition"})
 _FIELD_DESCRIPTOR_FIELDS = frozenset(
     {
@@ -453,6 +458,111 @@ class PipelineStageOutputRecord:
             output_key=_validate_non_empty_string(raw["outputKey"], "output key"),
             artifact=parse_artifact_ref(raw["artifact"], "stage output artifact"),
             reused=_validate_bool(raw["reused"], "stage output reused"),
+        )
+
+
+def _sequence(value: Any, name: str) -> Sequence[Any]:
+    if not isinstance(value, Sequence) or isinstance(value, str | bytes):
+        raise TypeError(f"{name} must be a sequence")
+    return value
+
+
+def _validate_listed_artifacts(artifacts: Any, name: str) -> None:
+    if not isinstance(artifacts, tuple) or any(
+        not isinstance(artifact, ArtifactRef) for artifact in artifacts
+    ):
+        raise TypeError(f"{name} must be a tuple of ArtifactRef values")
+    if not artifacts:
+        raise ValueError(f"{name} must hold at least one artifact")
+    if len(set(artifacts)) != len(artifacts):
+        raise ValueError(f"{name} must not repeat an artifact")
+
+
+@dataclass(frozen=True, slots=True)
+class PipelineOutputListRecord:
+    """A run output that holds several artifacts, in a fixed order.
+
+    The ``leiden`` output of a recipe holds its Leiden candidates, ordered by
+    resolution.
+    """
+
+    key: str
+    artifacts: tuple[ArtifactRef, ...]
+
+    def __post_init__(self) -> None:
+        _validate_non_empty_string(self.key, "output list key")
+        _validate_listed_artifacts(self.artifacts, "output list artifacts")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "key": self.key,
+            "artifacts": [artifact.to_dict() for artifact in self.artifacts],
+        }
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "PipelineOutputListRecord":
+        raw = _exact_mapping(value, _OUTPUT_LIST_FIELDS, "pipeline output list")
+        return cls(
+            key=_validate_non_empty_string(raw["key"], "output list key"),
+            artifacts=tuple(
+                parse_artifact_ref(item, "output list artifact")
+                for item in _sequence(raw["artifacts"], "output list artifacts")
+            ),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class PipelineStageOutputListRecord:
+    """A stage output that holds several artifacts, each created or reused."""
+
+    output_key: str
+    artifacts: tuple[ArtifactRef, ...]
+    reused: tuple[bool, ...]
+
+    def __post_init__(self) -> None:
+        _validate_non_empty_string(self.output_key, "stage output list key")
+        _validate_listed_artifacts(self.artifacts, "stage output list artifacts")
+        if not isinstance(self.reused, tuple) or len(self.reused) != len(
+            self.artifacts
+        ):
+            raise ValueError(
+                "stage output list reused must hold one flag for each artifact"
+            )
+        for flag in self.reused:
+            _validate_bool(flag, "stage output list reused")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "outputKey": self.output_key,
+            "artifacts": [
+                {"artifact": artifact.to_dict(), "reused": reused}
+                for artifact, reused in zip(self.artifacts, self.reused, strict=True)
+            ],
+        }
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "PipelineStageOutputListRecord":
+        raw = _exact_mapping(
+            value, _STAGE_OUTPUT_LIST_FIELDS, "pipeline stage output list"
+        )
+        items = [
+            _exact_mapping(
+                item, _STAGE_LISTED_ARTIFACT_FIELDS, "pipeline stage listed artifact"
+            )
+            for item in _sequence(raw["artifacts"], "stage output list artifacts")
+        ]
+        return cls(
+            output_key=_validate_non_empty_string(
+                raw["outputKey"], "stage output list key"
+            ),
+            artifacts=tuple(
+                parse_artifact_ref(item["artifact"], "stage output list artifact")
+                for item in items
+            ),
+            reused=tuple(
+                _validate_bool(item["reused"], "stage output list reused")
+                for item in items
+            ),
         )
 
 
@@ -1024,6 +1134,8 @@ class PipelineStageRecord:
     summary: Mapping[str, Any] | None = None
     # The warnings logged while the stage ran, oldest first.
     warnings: tuple[str, ...] = ()
+    # The outputs that hold several artifacts, such as the Leiden candidates.
+    output_lists: tuple[PipelineStageOutputListRecord, ...] = ()
 
     def __post_init__(self) -> None:
         _validate_non_empty_string(self.stage, "stage")
@@ -1062,13 +1174,27 @@ class PipelineStageRecord:
             not isinstance(plan, PipelinePlanRecord) for plan in self.plans
         ):
             raise TypeError("stage plans must be PipelinePlanRecord values")
-        output_keys = [output.output_key for output in self.outputs]
+        if not isinstance(self.output_lists, tuple) or any(
+            not isinstance(output, PipelineStageOutputListRecord)
+            for output in self.output_lists
+        ):
+            raise TypeError(
+                "stage output lists must be PipelineStageOutputListRecord values"
+            )
+        output_keys = [output.output_key for output in self.outputs] + [
+            output.output_key for output in self.output_lists
+        ]
         if len(output_keys) != len(set(output_keys)):
             raise ValueError("stage output keys must be unique")
         if self.status == "running":
             if self.complete or self.finished_at_ns is not None:
                 raise ValueError("running stages cannot be complete or finished")
-            if self.outputs or self.plans or self.metrics is not None:
+            if (
+                self.outputs
+                or self.output_lists
+                or self.plans
+                or self.metrics is not None
+            ):
                 raise ValueError("running stages cannot contain receipts")
             if self.error is not None or self.interruption is not None:
                 raise ValueError("running stages cannot contain terminal details")
@@ -1079,7 +1205,7 @@ class PipelineStageRecord:
             raise ValueError("terminal stages require finish time and metrics")
         if self.summary is not None and self.status != "completed":
             raise ValueError("only completed stages can hold a summary")
-        if self.status == "skipped" and self.outputs:
+        if self.status == "skipped" and (self.outputs or self.output_lists):
             raise ValueError("skipped stages cannot claim outputs")
         if self.status == "failed":
             if self.error is None or self.interruption is not None:
@@ -1087,7 +1213,7 @@ class PipelineStageRecord:
         elif self.status == "interrupted":
             if self.interruption is None or self.error is not None:
                 raise ValueError("interrupted stages require only interruption details")
-            if self.outputs:
+            if self.outputs or self.output_lists:
                 raise ValueError("interrupted stages cannot claim complete outputs")
         elif self.error is not None or self.interruption is not None:
             raise ValueError("successful stages cannot contain terminal details")
@@ -1109,6 +1235,7 @@ class PipelineStageRecord:
             ),
             "summary": None if self.summary is None else dict(self.summary),
             "warnings": list(self.warnings),
+            "outputLists": [output.to_dict() for output in self.output_lists],
         }
 
     @classmethod
@@ -1123,6 +1250,7 @@ class PipelineStageRecord:
         warnings = raw.get("warnings", ())
         if not isinstance(warnings, Sequence) or isinstance(warnings, str | bytes):
             raise TypeError("stage warnings must be a sequence")
+        output_lists = _sequence(raw.get("outputLists", ()), "stage outputLists")
         status = raw["status"]
         if status not in {
             "running",
@@ -1181,6 +1309,12 @@ class PipelineStageRecord:
             ),
             summary=None if summary is None else _mapping(summary, "stage summary"),
             warnings=tuple(warnings),
+            output_lists=tuple(
+                PipelineStageOutputListRecord.from_dict(
+                    _mapping(item, "stage output list")
+                )
+                for item in output_lists
+            ),
         )
 
 
@@ -1202,6 +1336,8 @@ class PipelineRunRecord:
     fields: tuple[PipelineFieldDescriptor, ...]
     error: PipelineErrorRecord | None
     interruption: PipelineInterruptionRecord | None
+    # The outputs that hold several artifacts, such as the Leiden candidates.
+    output_lists: tuple[PipelineOutputListRecord, ...] = ()
 
     def __post_init__(self) -> None:
         _validate_run_id(self.run_id)
@@ -1235,7 +1371,14 @@ class PipelineRunRecord:
             not isinstance(field, PipelineFieldDescriptor) for field in self.fields
         ):
             raise TypeError("fields must be PipelineFieldDescriptor values")
-        output_keys = [output.key for output in self.outputs]
+        if not isinstance(self.output_lists, tuple) or any(
+            not isinstance(output, PipelineOutputListRecord)
+            for output in self.output_lists
+        ):
+            raise TypeError("output_lists must be PipelineOutputListRecord values")
+        output_keys = [output.key for output in self.outputs] + [
+            output.key for output in self.output_lists
+        ]
         field_keys = [(field.axis, field.key) for field in self.fields]
         if len(output_keys) != len(set(output_keys)):
             raise ValueError("run output keys must be unique")
@@ -1244,7 +1387,7 @@ class PipelineRunRecord:
         if self.status == "running":
             if self.complete or self.finished_at_ns is not None:
                 raise ValueError("running runs cannot be complete or finished")
-            if self.label is not None or self.outputs or self.fields:
+            if self.label is not None or self._results:
                 raise ValueError("running runs cannot contain terminal results")
             if self.error is not None or self.interruption is not None:
                 raise ValueError("running runs cannot contain terminal details")
@@ -1257,15 +1400,19 @@ class PipelineRunRecord:
             if self.label != self.requested_label:
                 raise ValueError("completed run label must equal requested_label")
         elif self.status == "failed":
-            if self.label is not None or self.outputs or self.fields:
+            if self.label is not None or self._results:
                 raise ValueError("failed runs cannot expose results or a label")
             if self.error is None or self.interruption is not None:
                 raise ValueError("failed runs require only an error")
         else:
-            if self.label is not None or self.outputs or self.fields:
+            if self.label is not None or self._results:
                 raise ValueError("interrupted runs cannot expose results or a label")
             if self.interruption is None or self.error is not None:
                 raise ValueError("interrupted runs require only interruption details")
+
+    @property
+    def _results(self) -> bool:
+        return bool(self.outputs or self.output_lists or self.fields)
 
     @property
     def successfully_completed(self) -> bool:
@@ -1291,11 +1438,15 @@ class PipelineRunRecord:
             "interruption": (
                 None if self.interruption is None else self.interruption.to_dict()
             ),
+            "outputLists": [output.to_dict() for output in self.output_lists],
         }
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "PipelineRunRecord":
-        raw = _exact_mapping(value, _RUN_FIELDS, "pipeline run")
+        raw = _exact_mapping(
+            value, _RUN_FIELDS, "pipeline run", optional=_RUN_OPTIONAL_FIELDS
+        )
+        output_lists = _sequence(raw.get("outputLists", ()), "run outputLists")
         status = raw["status"]
         if status not in {"running", "completed", "failed", "interrupted"}:
             raise ValueError(f"Invalid pipeline run status: {status!r}")
@@ -1364,6 +1515,10 @@ class PipelineRunRecord:
                 else PipelineInterruptionRecord.from_dict(
                     _mapping(interruption, "run interruption")
                 )
+            ),
+            output_lists=tuple(
+                PipelineOutputListRecord.from_dict(_mapping(item, "run output list"))
+                for item in output_lists
             ),
         )
 
@@ -1831,6 +1986,7 @@ def finish_pipeline_stage_record(
     finished_at_ns: int | None = None,
     summary: Mapping[str, Any] | None = None,
     warnings: Sequence[str] = (),
+    output_lists: Sequence[PipelineStageOutputListRecord] = (),
 ) -> PipelineStageRecord:
     run = load_pipeline_run_record(root, run_id)
     if run.complete or run.status != "running":
@@ -1839,11 +1995,19 @@ def finish_pipeline_stage_record(
     if current.complete or current.status != "running":
         raise ValueError("Pipeline stage is already terminal")
     resolved_outputs = tuple(outputs)
+    resolved_lists = tuple(output_lists)
     resolved_plans = tuple(plans)
     for output in resolved_outputs:
         if not isinstance(output, PipelineStageOutputRecord):
             raise TypeError("outputs must contain PipelineStageOutputRecord values")
         require_complete_artifact(root, output.artifact)
+    for listed in resolved_lists:
+        if not isinstance(listed, PipelineStageOutputListRecord):
+            raise TypeError(
+                "output_lists must contain PipelineStageOutputListRecord values"
+            )
+        for artifact in listed.artifacts:
+            require_complete_artifact(root, artifact)
     resolved_error = (
         PipelineErrorRecord.from_exception(error)
         if isinstance(error, BaseException)
@@ -1866,6 +2030,7 @@ def finish_pipeline_stage_record(
         warnings=tuple(
             bounded_record_text(str(warning)) for warning in warnings if warning
         )[:STAGE_WARNING_LIMIT],
+        output_lists=resolved_lists,
     )
     _write_terminal_attrs(
         _get_group(root, pipeline_stage_path(run_id, ordinal), "Pipeline stage"),
@@ -1895,17 +2060,24 @@ def complete_pipeline_run_record(
     outputs: Sequence[PipelineOutputRecord],
     fields: Sequence[PipelineFieldDescriptor],
     finished_at_ns: int | None = None,
+    output_lists: Sequence[PipelineOutputListRecord] = (),
 ) -> PipelineRunRecord:
     run = load_pipeline_run_record(root, run_id)
     if run.complete or run.status != "running":
         raise ValueError("Pipeline run is already terminal")
     _validate_successful_stages(root, run)
     resolved_outputs = tuple(outputs)
+    resolved_lists = tuple(output_lists)
     resolved_fields = tuple(fields)
     for output in resolved_outputs:
         if not isinstance(output, PipelineOutputRecord):
             raise TypeError("outputs must contain PipelineOutputRecord values")
         require_complete_artifact(root, output.artifact)
+    for listed in resolved_lists:
+        if not isinstance(listed, PipelineOutputListRecord):
+            raise TypeError("output_lists must contain PipelineOutputListRecord values")
+        for artifact in listed.artifacts:
+            require_complete_artifact(root, artifact)
     for field in resolved_fields:
         if not isinstance(field, PipelineFieldDescriptor):
             raise TypeError("fields must contain PipelineFieldDescriptor values")
@@ -1941,6 +2113,7 @@ def complete_pipeline_run_record(
         status="completed",
         complete=True,
         outputs=resolved_outputs,
+        output_lists=resolved_lists,
         fields=resolved_fields,
         error=None,
         interruption=None,
@@ -1974,6 +2147,7 @@ def fail_pipeline_run_record(
         status="failed",
         complete=True,
         outputs=(),
+        output_lists=(),
         fields=(),
         error=resolved_error,
         interruption=None,
@@ -2002,6 +2176,7 @@ def interrupt_pipeline_run_record(
         status="interrupted",
         complete=True,
         outputs=(),
+        output_lists=(),
         fields=(),
         error=None,
         interruption=interruption,

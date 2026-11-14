@@ -195,7 +195,11 @@ def reserved_fields(
     leiden_keys: Sequence[str],
     extra: Sequence[str] = (),
 ) -> frozenset[str]:
-    """Return the field names that a run's snapshot columns may not use."""
+    """Return the field names that a run's snapshot columns may not use.
+
+    The ``leiden_<key>`` names stay reserved for each candidate: runs of
+    earlier releases hold a field of that name for each Leiden candidate.
+    """
     return frozenset(
         {
             *RESERVED_CELL_FIELDS,
@@ -251,15 +255,15 @@ def cell_fields(
     artifacts: Mapping[str, ArtifactRef],
     *,
     snapshot_columns: Sequence[str],
-    leiden_keys: Sequence[str],
 ) -> list[PipelineFieldDescriptor]:
     """Return a run's cell fields: its selection, snapshots, and results.
 
     Results appear in one order for every recipe: cell cycle scores, UMAP,
-    LocalMAP, and t-SNE coordinates, Leiden candidates, Paris, the saved
-    clustering, membership strength, doublet calls, guide calls, perturbation
-    labels, Mixscape classes, and WNN modality weights. A result the run did
-    not produce has no field.
+    LocalMAP, and t-SNE coordinates, Paris, the saved clustering, membership
+    strength, doublet calls, guide calls, perturbation labels, Mixscape
+    classes, and WNN modality weights. A result the run did not produce has
+    no field. The Leiden candidates other than the saved clustering have no
+    field; the run's ``leiden`` output holds them.
     """
     root = store.zw
     cell_snapshot = artifacts["cell_snapshot"]
@@ -316,14 +320,6 @@ def cell_fields(
             )
             for index in range(values.shape[1])
         )
-    for key in leiden_keys:
-        output_key = f"leiden_{key}"
-        if output_key in artifacts:
-            fields.append(
-                _categorical(
-                    root, key=output_key, ref=artifacts[output_key], source="values"
-                )
-            )
     if "paris" in artifacts:
         fields.append(
             _categorical(root, key="paris", ref=artifacts["paris"], source="labels")

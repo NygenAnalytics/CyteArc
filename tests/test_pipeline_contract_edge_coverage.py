@@ -572,9 +572,10 @@ def test_pipeline_recipe_helper_validation() -> None:
         {},
     )
     assert resolve_leiden(False) == ((), None, {})
-    # Integer and float spellings of one resolution share one key.
-    assert resolve_leiden({"partitions": [2, 0.5], "selected": 2}) == (
-        (("2.0", 2.0), ("0.5", 0.5)),
+    # Integer and float spellings of one resolution share one key, and the
+    # candidates are ordered by resolution, whatever order the call gives.
+    assert resolve_leiden({"partitions": [2, 0.5, 1.25], "selected": 2}) == (
+        (("0.5", 0.5), ("1.25", 1.25), ("2.0", 2.0)),
         "2.0",
         {},
     )
@@ -896,8 +897,29 @@ def test_run_ledger_records_and_interruption_helpers(
         ArtifactPlanReceipt("op", _ref(), "created"),
     )
     # An output counts as reused only when every plan for it reused it.
-    assert ledger._records((("out", _ref()),), plans)[0].reused is False
-    assert ledger._records((("out", _ref()),), plans[:1])[0].reused is True
+    assert ledger._records((("out", _ref()),), plans)[0][0].reused is False
+    assert ledger._records((("out", _ref()),), plans[:1])[0][0].reused is True
+    # An output of several artifacts records each artifact's own reuse, in
+    # order, apart from the outputs of one artifact.
+    listed_plans = (
+        ArtifactPlanReceipt("op", _ref("b"), "created"),
+        ArtifactPlanReceipt("op", _ref("c"), "reused"),
+        ArtifactPlanReceipt("op", _ref(), "reused"),
+    )
+    records, lists = ledger._records(
+        (("out", _ref()), ("many", (_ref("c"), _ref("b")))), listed_plans
+    )
+    assert [(record.output_key, record.artifact) for record in records] == [
+        ("out", _ref())
+    ]
+    assert [(item.output_key, item.artifacts, item.reused) for item in lists] == [
+        ("many", (_ref("c"), _ref("b")), (True, False))
+    ]
+    # Every artifact of such an output must have been planned.
+    with pytest.raises(
+        RuntimeError, match=r"not observed by artifact planning: \['many'\]"
+    ):
+        ledger._records((("many", (_ref("c"), _ref("d"))),), listed_plans)
     assert [
         (plan.operation, plan.ref, plan.disposition) for plan in ledger._plans(plans)
     ] == [("op", _ref(), "reused"), ("op", _ref(), "created")]

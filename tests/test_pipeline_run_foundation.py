@@ -1,4 +1,5 @@
 import multiprocessing
+from dataclasses import replace
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
 from typing import Any
@@ -34,10 +35,13 @@ from cytearc.storage.feature_selection import (
 from cytearc.storage.pipeline_runs import (
     PipelineFieldDescriptor,
     PipelineInterruptionRecord,
+    PipelineOutputListRecord,
     PipelineOutputRecord,
     PipelineRunRecord,
     PipelineStageMetrics,
+    PipelineStageOutputListRecord,
     PipelineStageOutputRecord,
+    PipelineStageRecord,
     complete_pipeline_run_record,
     create_pipeline_run_record,
     fail_pipeline_run_record,
@@ -551,6 +555,7 @@ def test_strict_run_lifecycle_and_scan_based_label_lookup() -> None:
         "fields",
         "error",
         "interruption",
+        "outputLists",
     }
     assert stored.successfully_completed
     assert open_pipeline_run_record(root, label="baseline") == stored
@@ -1837,3 +1842,239 @@ def test_completed_records_with_overlapping_stage_windows_still_read() -> None:
     assert [(stage.started_at_ns, stage.finished_at_ns) for stage in stages] == windows
     completed = PipelineRun(_Owner(root), load_pipeline_run_record(root, run.run_id))
     assert completed.report()["run"]["status"] == "completed"
+
+
+def _candidate(value: str) -> ArtifactRef:
+    return ArtifactRef(
+        scope="assay", assay="RNA", kind="cluster_labels", artifact_id=value * 64
+    )
+
+
+def test_an_output_list_holds_distinct_refs_in_order_and_round_trips() -> None:
+    first, second = _candidate("a"), _candidate("b")
+    listed = PipelineOutputListRecord(key="leiden", artifacts=(second, first))
+    # The record keeps the given order, which a run gives by resolution.
+    assert listed.to_dict() == {
+        "key": "leiden",
+        "artifacts": [second.to_dict(), first.to_dict()],
+    }
+    assert PipelineOutputListRecord.from_dict(listed.to_dict()) == listed
+    with pytest.raises(ValueError, match="at least one artifact"):
+        PipelineOutputListRecord(key="leiden", artifacts=())
+    with pytest.raises(ValueError, match="must not repeat"):
+        PipelineOutputListRecord(key="leiden", artifacts=(first, first))
+    with pytest.raises(TypeError, match="tuple of ArtifactRef"):
+        PipelineOutputListRecord(key="leiden", artifacts=[first])  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="do not match the contract"):
+        PipelineOutputListRecord.from_dict({**listed.to_dict(), "artifact": None})
+    with pytest.raises(TypeError, match="must be a sequence"):
+        PipelineOutputListRecord.from_dict({"key": "leiden", "artifacts": "a"})
+
+    stage = PipelineStageOutputListRecord(
+        output_key="leiden", artifacts=(first, second), reused=(True, False)
+    )
+    assert stage.to_dict() == {
+        "outputKey": "leiden",
+        "artifacts": [
+            {"artifact": first.to_dict(), "reused": True},
+            {"artifact": second.to_dict(), "reused": False},
+        ],
+    }
+    assert PipelineStageOutputListRecord.from_dict(stage.to_dict()) == stage
+    with pytest.raises(ValueError, match="one flag for each artifact"):
+        PipelineStageOutputListRecord(
+            output_key="leiden", artifacts=(first, second), reused=(True,)
+        )
+    with pytest.raises(TypeError, match="reused"):
+        PipelineStageOutputListRecord(
+            output_key="leiden",
+            artifacts=(first,),
+            reused=(1,),  # type: ignore[arg-type]
+        )
+    with pytest.raises(ValueError, match="do not match the contract"):
+        PipelineStageOutputListRecord.from_dict(
+            {
+                "outputKey": "leiden",
+                "artifacts": [{"artifact": first.to_dict(), "reused": True, "x": 1}],
+            }
+        )
+
+
+def test_a_run_record_without_output_lists_reads_and_one_with_them_round_trips() -> (
+    None
+):
+    root = _root()
+    completed = _completed_run(root)
+    raw = dict(root[f"pipeline/runs/{completed.run_id}"].attrs)
+    # Every record that this release writes holds the field, empty here.
+    assert raw["outputLists"] == []
+    earlier = {key: value for key, value in raw.items() if key != "outputLists"}
+    record = PipelineRunRecord.from_dict(earlier)
+    assert record.output_lists == ()
+    assert record.to_dict() == raw
+
+    listed = PipelineOutputListRecord(
+        key="leiden", artifacts=(_candidate("a"), _candidate("b"))
+    )
+    with_lists = PipelineRunRecord.from_dict({**raw, "outputLists": [listed.to_dict()]})
+    assert with_lists.output_lists == (listed,)
+    assert PipelineRunRecord.from_dict(with_lists.to_dict()) == with_lists
+    run = PipelineRun(_Owner(root), with_lists)
+    # The list follows the outputs of one artifact, and counts once.
+    assert list(run) == [*(output.key for output in record.outputs), "leiden"]
+    assert len(run) == len(record.outputs) + 1
+    assert run["leiden"] == (_candidate("a"), _candidate("b"))
+    assert "- `leiden`: `" + "a" * 64 + "`, `" + "b" * 64 + "`" in run.report(
+        format="markdown"
+    )
+
+    # An output key names one output, whether of one artifact or several.
+    clash = PipelineOutputListRecord(
+        key=record.outputs[0].key, artifacts=(_candidate("a"),)
+    )
+    with pytest.raises(ValueError, match="output keys must be unique"):
+        PipelineRunRecord.from_dict({**raw, "outputLists": [clash.to_dict()]})
+    with pytest.raises(ValueError, match="do not match the contract"):
+        PipelineRunRecord.from_dict({**raw, "outputList": []})
+    with pytest.raises(TypeError, match="outputLists must be a sequence"):
+        PipelineRunRecord.from_dict({**raw, "outputLists": "leiden"})
+    # Only a completed run exposes its outputs.
+    for status, details in (
+        ("failed", {"error": {"type": "ValueError", "message": "x"}}),
+        ("running", {"finishedAtNs": None, "complete": False}),
+    ):
+        with pytest.raises(ValueError, match="cannot (contain|expose)"):
+            PipelineRunRecord.from_dict(
+                {
+                    **raw,
+                    **details,
+                    "status": status,
+                    "label": None,
+                    "outputs": [],
+                    "fields": [],
+                    "outputLists": [listed.to_dict()],
+                }
+            )
+
+
+def test_a_stage_record_without_output_lists_reads_and_only_completed_ones_hold_them() -> (
+    None
+):
+    root = _root()
+    completed = _completed_run(root)
+    (stage,) = load_pipeline_stage_records(root, completed.run_id)
+    raw = stage.to_dict()
+    assert raw["outputLists"] == []
+    earlier = {key: value for key, value in raw.items() if key != "outputLists"}
+    assert PipelineStageRecord.from_dict(earlier).output_lists == ()
+
+    listed = PipelineStageOutputListRecord(
+        output_key="leiden", artifacts=(_candidate("a"),), reused=(False,)
+    )
+    with_lists = PipelineStageRecord.from_dict(
+        {**raw, "outputLists": [listed.to_dict()]}
+    )
+    assert with_lists.output_lists == (listed,)
+    assert PipelineStageRecord.from_dict(with_lists.to_dict()) == with_lists
+    with pytest.raises(ValueError, match="skipped stages cannot claim outputs"):
+        PipelineStageRecord.from_dict(
+            {
+                **raw,
+                "status": "skipped",
+                "outputs": [],
+                "summary": None,
+                "outputLists": [listed.to_dict()],
+            }
+        )
+    clash = PipelineStageOutputListRecord(
+        output_key=stage.outputs[0].output_key,
+        artifacts=(_candidate("a"),),
+        reused=(False,),
+    )
+    with pytest.raises(ValueError, match="stage output keys must be unique"):
+        PipelineStageRecord.from_dict({**raw, "outputLists": [clash.to_dict()]})
+
+
+def test_output_lists_must_be_records_of_completed_runs_and_stages() -> None:
+    root = _root()
+    completed = _completed_run(root)
+    record = load_pipeline_run_record(root, completed.run_id)
+    (stage,) = load_pipeline_stage_records(root, completed.run_id)
+    run_list = PipelineOutputListRecord(key="leiden", artifacts=(_candidate("a"),))
+    stage_list = PipelineStageOutputListRecord(
+        output_key="leiden", artifacts=(_candidate("a"),), reused=(True,)
+    )
+    with pytest.raises(TypeError, match="PipelineOutputListRecord values"):
+        replace(record, output_lists=[run_list])
+    with pytest.raises(TypeError, match="PipelineStageOutputListRecord values"):
+        replace(stage, output_lists=(run_list,))
+    # A running or interrupted stage claims no output, of one artifact or several.
+    with pytest.raises(ValueError, match="running stages cannot contain receipts"):
+        replace(
+            stage,
+            status="running",
+            complete=False,
+            finished_at_ns=None,
+            outputs=(),
+            plans=(),
+            metrics=None,
+            summary=None,
+            warnings=(),
+            output_lists=(stage_list,),
+        )
+    with pytest.raises(ValueError, match="interrupted stages cannot claim"):
+        replace(
+            stage,
+            status="interrupted",
+            outputs=(),
+            summary=None,
+            interruption=PipelineInterruptionRecord(
+                kind="keyboard_interrupt", message="stop", requested_at_ns=1
+            ),
+            output_lists=(stage_list,),
+        )
+
+    # The writers refuse other values, and artifacts that are not complete.
+    run = create_pipeline_run_record(
+        root,
+        recipe="rna",
+        requested_label=None,
+        assay="RNA",
+        config={},
+        stage_order=("leiden",),
+        cytearc_version="1.0.0",
+    )
+    start_pipeline_stage_record(root, run_id=run.run_id, ordinal=0, stage="leiden")
+    with pytest.raises(TypeError, match="PipelineStageOutputListRecord values"):
+        finish_pipeline_stage_record(
+            root,
+            run_id=run.run_id,
+            ordinal=0,
+            status="completed",
+            metrics=_metrics(),
+            output_lists=(run_list,),  # type: ignore[arg-type]
+        )
+    with pytest.raises(KeyError, match="Artifact does not exist"):
+        finish_pipeline_stage_record(
+            root,
+            run_id=run.run_id,
+            ordinal=0,
+            status="completed",
+            metrics=_metrics(),
+            output_lists=(stage_list,),
+        )
+    finish_pipeline_stage_record(
+        root, run_id=run.run_id, ordinal=0, status="completed", metrics=_metrics()
+    )
+    with pytest.raises(TypeError, match="PipelineOutputListRecord values"):
+        complete_pipeline_run_record(
+            root,
+            run_id=run.run_id,
+            outputs=(),
+            fields=(),
+            output_lists=(stage_list,),  # type: ignore[arg-type]
+        )
+    with pytest.raises(KeyError, match="Artifact does not exist"):
+        complete_pipeline_run_record(
+            root, run_id=run.run_id, outputs=(), fields=(), output_lists=(run_list,)
+        )

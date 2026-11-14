@@ -925,9 +925,7 @@ def resolve_perturbation(
 
     def fields(state: RunState) -> tuple[Any, ...]:
         return (
-            *cell_fields(
-                store, state.artifacts, snapshot_columns=snapshots, leiden_keys=()
-            ),
+            *cell_fields(store, state.artifacts, snapshot_columns=snapshots),
             *feature_fields(
                 store,
                 assay_name,

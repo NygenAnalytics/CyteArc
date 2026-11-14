@@ -23,8 +23,11 @@ t-SNE layouts, and extract labels and coordinates as cell-aligned arrays. Docs:
 - Payload rows follow the graph's frozen cell selection in stored-axis order, not every cell in
   the store (3,847 of 5,025 cells in the 10x 5K PBMC docs dataset baseline). Recover that
   selection with `ds.artifacts.inspect(ref).input_ref("cell_selection")`.
-- The `rna`, `atac` and `adt` recipes store `leiden_0.5`, `leiden_0.75`, `leiden_1.0` and
-  `leiden_1.25`; `paris=True` adds `paris` (off by default). `run["clusters"]` is the Leiden
+- The `rna`, `atac` and `adt` recipes cluster at 0.5, 0.75, 1.0 and 1.25 in one `leiden` stage;
+  `run["leiden"]` is a tuple of the four refs in resolution order, and
+  `ds.artifacts.find("clusters", graph=run["connectivity_map"], method="leiden", resolution=1.0)`
+  finds one, also in a run of an earlier release, which stored `run["leiden_1.0"]` instead.
+  `paris=True` adds `paris` (off by default). `run["clusters"]` is the Leiden
   candidate with the best silhouette in the coordinates that built the graph (PCA, Harmony, or
   ATAC LSI), recorded in `run["cluster_selection"]`. Silhouette favours few compact clusters and
   can merge distinct lineages or states. Treat that pick as a reproducible baseline only. A
@@ -207,14 +210,19 @@ print(ds.artifacts.load(umap_tight)["values"].shape, ds.artifacts.load(tsne)["va
 
 ```python
 cells = run.cells.to_pandas_dataframe(  # add "paris" for a paris=True run
-    ["ids", "clusters", "leiden_1.0", "umap_1", "umap_2", "doublet_score"])
+    ["ids", "clusters", "umap_1", "umap_2", "doublet_score"])
+# The other Leiden candidates have no field; read one from its artifact, in the same row order.
+fine = ds.artifacts.find("clusters", graph=graph, method="leiden", resolution=1.25)
+cells["leiden_1.25"] = labels_of(fine)
 print(cells.head())  # one row per run cell, in stored-axis order
 full = run.cells.fetch_all("clusters")  # length ds.cells.N; -1 for cells outside the run
 print(len(full), (full == -1).sum())
 ```
 
-`run.cells.columns` lists the frozen fields. `fetch(...)` returns run cells only. `fetch_all(...)`
-fills cells outside the run with -1 (integers), NaN (floats) or "" (strings).
+`run.cells.columns` lists the frozen fields: a new run's hold its saved `clusters` only, while a
+run of an earlier release also holds a `leiden_<resolution>` field per candidate. `fetch(...)`
+returns run cells only. `fetch_all(...)` fills cells outside the run with -1 (integers), NaN
+(floats) or "" (strings).
 
 ### Get labels and coordinates from explicit artifacts
 

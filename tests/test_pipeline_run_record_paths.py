@@ -89,6 +89,7 @@ _GRAPH_STAGE_STATUSES = (
     ("embedding_initialization", "skipped"),
     ("umap", "skipped"),
     ("localmap", "skipped"),
+    ("leiden", "skipped"),
     ("paris", "skipped"),
     ("cluster_selection", "skipped"),
     ("membership_strength", "skipped"),

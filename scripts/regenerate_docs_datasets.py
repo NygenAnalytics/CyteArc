@@ -410,7 +410,7 @@ def _analyze_pbmc(store: Any) -> None:
         {
             "RNA_UMAP1": "umap_1",
             "RNA_UMAP2": "umap_2",
-            "RNA_leiden_cluster": "leiden_0.5",
+            "RNA_leiden_cluster": "clusters",
             "RNA_clusters": "clusters",
             "RNA_paris_cluster": "paris",
             "RNA_S_score": "s_score",
@@ -439,7 +439,7 @@ def _analyze_pancreas(store: Any) -> None:
         {
             "RNA_UMAP1": "umap_1",
             "RNA_UMAP2": "umap_2",
-            "RNA_leiden_cluster": "leiden_0.5",
+            "RNA_leiden_cluster": "clusters",
             "RNA_clusters": "clusters",
         },
         set_selection=True,
@@ -468,7 +468,7 @@ def _analyze_kang(store: Any) -> None:
         {
             "RNA_UMAP1": "umap_1",
             "RNA_UMAP2": "umap_2",
-            "RNA_leiden_cluster": "leiden_1.0",
+            "RNA_leiden_cluster": "clusters",
             "RNA_clusters": "clusters",
         },
         set_selection=True,
@@ -519,19 +519,23 @@ def _analyze_kang_integration(store: Any) -> None:
         {
             "RNA_UMAP1": "umap_1",
             "RNA_UMAP2": "umap_2",
-            "RNA_integration_clusters": "leiden_1.0",
+            "RNA_integration_clusters": "clusters",
             "RNA_clusters": "clusters",
         },
         set_selection=True,
     )
 
 
-def _embedding_columns(prefix: str, resolution: str) -> dict[str, str]:
-    """Name the teaching columns of a run's UMAP and Leiden fields."""
+def _embedding_columns(prefix: str) -> dict[str, str]:
+    """Name the teaching columns of a run's UMAP and Leiden clusters.
+
+    Each run that fills them clusters at one Leiden resolution, so its saved
+    ``clusters`` field holds its only Leiden candidate.
+    """
     return {
         f"{prefix}_UMAP1": "umap_1",
         f"{prefix}_UMAP2": "umap_2",
-        f"{prefix}_leiden_cluster": f"leiden_{resolution}",
+        f"{prefix}_leiden_cluster": "clusters",
     }
 
 
@@ -555,7 +559,7 @@ def _analyze_citeseq(store: Any) -> None:
         markers=False,
     )
     _materialize_run_cell_columns(
-        store, adt, _embedding_columns("ADT", "1.0"), set_selection=False
+        store, adt, _embedding_columns("ADT"), set_selection=False
     )
     for method, label, prefix in (
         ("snn", SNN_RUN_LABEL, "RNA+ADT"),
@@ -569,12 +573,12 @@ def _analyze_citeseq(store: Any) -> None:
             markers=False,
         )
         _materialize_run_cell_columns(
-            store, joint, _embedding_columns(prefix, "1.75"), set_selection=False
+            store, joint, _embedding_columns(prefix), set_selection=False
         )
     _materialize_run_cell_columns(
         store,
         rna,
-        {**_embedding_columns("RNA", "1.0"), "RNA_clusters": "clusters"},
+        {**_embedding_columns("RNA"), "RNA_clusters": "clusters"},
         set_selection=True,
     )
 
@@ -591,7 +595,7 @@ def _analyze_atac(store: Any) -> None:
         markers=False,
     )
     _materialize_run_cell_columns(
-        store, run, _embedding_columns("ATAC", "0.6"), set_selection=True
+        store, run, _embedding_columns("ATAC"), set_selection=True
     )
 
 
@@ -764,7 +768,7 @@ def _analyze_teaseq(store: Any) -> None:
     )
     for prefix, run in (("RNA", rna), ("ATAC", atac), ("ADT", adt)):
         _materialize_run_cell_columns(
-            store, run, _embedding_columns(prefix, "1.0"), set_selection=False
+            store, run, _embedding_columns(prefix), set_selection=False
         )
     for method, label, prefix in (
         ("snn", SNN_RUN_LABEL, "RNA+ATAC+ADT"),
@@ -780,7 +784,7 @@ def _analyze_teaseq(store: Any) -> None:
             markers=False,
         )
         _materialize_run_cell_columns(
-            store, joint, _embedding_columns(prefix, "1.0"), set_selection=False
+            store, joint, _embedding_columns(prefix), set_selection=False
         )
 
 
