@@ -108,7 +108,7 @@ def _imported_plot_store(
     genes=("CD3E", "MS4A1", "LYZ", "NKG7", "GNLY", "FCGR3A"),
     seed=7,
 ):
-    """Import a small AnnData file with one embedding and one cluster labelling.
+    """Import a small AnnData file with one embedding and one cluster labeling.
 
     The store holds real immutable artifacts (an imported embedding, cluster
     labels and their shared cell selection) without building a graph, so

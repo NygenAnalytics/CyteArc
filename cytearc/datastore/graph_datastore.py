@@ -15,7 +15,7 @@ class GraphDataStore(
     BaseDataStore,
 ):
     """This class extends BaseDataStore by providing methods required to
-    generate a cell-cell neighbourhood graph.
+    generate a cell-cell neighborhood graph.
 
     It also contains all the methods that use the KNN graphs as primary input like UMAP/tSNE embedding calculation,
     clustering and trajectory analysis.

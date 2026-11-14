@@ -38,13 +38,13 @@ from ._style import (
     theme_context,
 )
 
-# Colours by role, which every screen figure shares. The highlight marks what
+# Colors by role, which every screen figure shares. The highlight marks what
 # a figure is about: called cells, fitted fits, significant rows and pairs,
-# knocked-out cells, discovery pairs and positive controls; the muted grey
+# knocked-out cells, discovery pairs and positive controls; the muted gray
 # marks the rest, cells without a call among them. Cells with several called
-# guides take red, and the reference colour marks what a figure is read
+# guides take red, and the reference color marks what a figure is read
 # against: thresholds, the Benjamini-Hochberg cut, the fitted perturbed
-# component and the negative controls. The mid grey keeps thin bars and lines
+# component and the negative controls. The mid gray keeps thin bars and lines
 # visible on white and still recedes on the dark theme.
 _HIGHLIGHT_COLOR = "#2b6cb0"
 _MUTED_COLOR = "#9e9e9e"
@@ -53,9 +53,9 @@ _SEVERAL_GUIDES_COLOR = "#d1495b"
 _REFERENCE_COLOR = "#d55e00"
 
 _PANELS = ("guides_per_cell", "cells_per_guide", "top_fraction")
-# A library of at most this many guides gets one labelled bar per guide; a
+# A library of at most this many guides gets one labeled bar per guide; a
 # larger one is drawn as guides ranked by their cells.
-_LABELLED_GUIDES = 40
+_LABELED_GUIDES = 40
 _CALL_GROUPS = (
     ("No guide called", _UNCALLED_COLOR),
     ("One guide called", _HIGHLIGHT_COLOR),
@@ -104,7 +104,7 @@ _EDISTANCE_PANEL = "edistance"
 _CLASSES_PANEL = "classes"
 _SCORES_PANEL = "scores"
 _NP_LABEL = "NP (not perturbed)"
-# A bar's share of the space between two neighbouring targets.
+# A bar's share of the space between two neighboring targets.
 _CLASS_BAR_HEIGHT = 0.7
 _CONTROL_CURVE_LABEL = "Fitted control component"
 _PERTURBED_CURVE_LABEL = "Fitted perturbed component"
@@ -148,16 +148,16 @@ _HEATMAP_PANEL = "heatmap"
 _EMBEDDING_PANEL = "embedding"
 # HDBSCAN's cluster of a perturbation that it leaves unassigned.
 _UNASSIGNED = -1
-# Clusters take CyteArc's colourblind-safe palette without its black, its
-# yellow and the two colours that read as grey, in the order in which they
-# first appear in the leaf order, and the ninth takes the first colour again.
+# Clusters take CyteArc's colorblind-safe palette without its black, its
+# yellow and the two colors that read as gray, in the order in which they
+# first appear in the leaf order, and the ninth takes the first color again.
 _CLUSTER_COLORS = tuple(
     color
     for color in COLORBLIND_PALETTE
     if color not in {"#F0E442", "#000000", "#6F4E7C", "#8C564B"}
 )
-# The grey of unassigned perturbations recedes on each theme and stays apart
-# from every cluster colour, even with colour vision deficiency.
+# The gray of unassigned perturbations recedes on each theme and stays apart
+# from every cluster color, even with color vision deficiency.
 _UNASSIGNED_COLOR = "#d4d4d4"
 _DARK_UNASSIGNED_COLOR = "#4d4d4d"
 _UNASSIGNED_LABEL = "Unassigned"
@@ -219,7 +219,7 @@ def guide_calls(
     The first panel counts cells by their number of called guides; its last
     bar gathers the cells with ``max_guides_per_cell`` or more. The second counts, for each guide, the
     cells in which it is the one called guide and the cells in which it is one
-    of several: one labelled bar per guide for a library of at most 40 guides,
+    of several: one labeled bar per guide for a library of at most 40 guides,
     and guides ranked by their cells for a larger one. The third shows the top
     guide's share of each cell's guide UMIs, for cells with guide UMIs, by
     call. A cell with several called guides whose top guide holds nearly all
@@ -280,9 +280,9 @@ def guide_calls(
             },
         }
     )
-    labelled = len(guide_ids) <= _LABELLED_GUIDES
+    labeled = len(guide_ids) <= _LABELED_GUIDES
     if figsize is None and target is None:
-        figsize = (13.0, max(3.6, 0.22 * len(guide_ids) + 1.2) if labelled else 3.6)
+        figsize = (13.0, max(3.6, 0.22 * len(guide_ids) + 1.2) if labeled else 3.6)
     require_matplotlib()
     with theme_context(theme):
         figure, axes, owns = normalize_axes_target(
@@ -303,7 +303,7 @@ def guide_calls(
         # A series is named in the legend only when its counts hold a cell.
         one_label = _CALL_GROUPS[1][0] if one_guide.any() else None
         several_label = _CALL_GROUPS[2][0] if several_guides.any() else None
-        if labelled:
+        if labeled:
             positions = np.arange(len(cells_per_guide))[::-1]
             ax.barh(positions, one_guide, color=_HIGHLIGHT_COLOR, label=one_label)
             ax.barh(
@@ -485,7 +485,7 @@ def _exp_minus_one(values: np.ndarray) -> np.ndarray:
 def _log_count_scale(ax: Any, axis: str, largest: float) -> None:
     """Put counts on a log scale of count + 1, which keeps a place for 0.
 
-    Labelled ticks fall at 0 and the powers of ten, and also at 2 and 5 times
+    Labeled ticks fall at 0 and the powers of ten, and also at 2 and 5 times
     each power when the counts, up to ``largest``, stay below 100.
     """
     from matplotlib.ticker import FixedLocator, StrMethodFormatter
@@ -539,7 +539,7 @@ def _place_legend(
     loc: str = "best",
     bbox_to_anchor: tuple[float, float] | None = None,
 ) -> None:
-    """Centre the legend right of the plot's own figure, clear of a long title.
+    """Center the legend right of the plot's own figure, clear of a long title.
 
     In a caller's figure the legend goes in ``ax`` at ``loc``, so that a
     composed figure keeps it with its panel.
@@ -824,7 +824,7 @@ def guide_thresholds(
     With ``guides``, any collection of guide IDs such as the ``guides`` index of
     the loaded record, each selected guide gets one panel per sample. Bars count
     the cells at each UMI count of the guide, blue where the count is called
-    and grey where it is not, on log scales; the UMI axis is a log scale of
+    and gray where it is not, on log scales; the UMI axis is a log scale of
     count + 1, so the cells without a UMI of the guide appear at 0. A line on
     the right axis shows the posterior of the guide population, the model's
     probability that a cell with that count carries the guide, at counts from
@@ -992,7 +992,7 @@ def _axis_limits(values: np.ndarray) -> tuple[float, float, float]:
 def _row_figsize(
     n_rows: int, n_title: int, *, legend_inches: float
 ) -> tuple[float, float]:
-    """Size a figure of ``n_rows`` labelled rows under ``n_title`` lines of title."""
+    """Size a figure of ``n_rows`` labeled rows under ``n_title`` lines of title."""
     return (6.2 + legend_inches, max(3.0, 0.22 * n_rows + 1.0 + 0.25 * n_title))
 
 
@@ -1005,7 +1005,7 @@ def _draw_rows(
     *,
     foreground: str,
 ) -> None:
-    """Draw one labelled row per perturbation, the first at the top.
+    """Draw one labeled row per perturbation, the first at the top.
 
     Each row's point is highlighted when it is significant, grows with its
     ``n_cells``, and marks minus infinity at the left edge.
@@ -1050,7 +1050,7 @@ def _row_legend(
 ) -> tuple[list[Any], list[str]]:
     """Return the legend handles and labels of the drawn rows.
 
-    Filled points give the colours of the rows, unless ``significant`` is None
+    Filled points give the colors of the rows, unless ``significant`` is None
     because no row has a p-value. Hollow markers give the marker of the rows
     that ``no_counts`` marks, if any, and the point areas of the smallest,
     middle and largest perturbed cell counts.
@@ -1099,12 +1099,12 @@ def efficiency(
     :meth:`ds.perturbation.load_efficiency
     <cytearc.datastore.namespaces.PerturbationAccessor.load_efficiency>`
     reads it. Each tested target, or each tested guide when the efficiency was
-    measured by guide, gets one row labelled with its name. A point marks the
+    measured by guide, gets one row labeled with its name. A point marks the
     log2 fold change of the target gene's mean expression in the cells that
     carry the perturbation against control cells, so a knockdown falls left of
     the line at 0 and an activation right of it. A point is blue when the row
     is significant at the false discovery rate ``alpha``, its adjusted p-value
-    at most ``alpha``, and grey otherwise, and its area grows with the cells
+    at most ``alpha``, and gray otherwise, and its area grows with the cells
     that carry the perturbation. When those cells hold no counts of the gene,
     the fold change is minus infinity: a triangle at the left edge marks it,
     and the row's label ends in "(no counts)".
@@ -1239,14 +1239,14 @@ def edistance(
     :meth:`ds.perturbation.load_edistance
     <cytearc.datastore.namespaces.PerturbationAccessor.load_edistance>` reads
     it. Each tested target, or each tested guide when the E-distances were
-    measured by guide, gets one row labelled with its name. A point marks the
+    measured by guide, gets one row labeled with its name. A point marks the
     E-distance between the cells that carry the perturbation and the control
     cells in the coordinates it was measured in, such as a PCA; it grows as the
     perturbation moves its cells away from the control cells. The E-distance
     is an unbiased estimate, so a perturbation whose cells look like the
     control cells can fall a little left of the line at 0. A point is blue when
     the row is significant at the false discovery rate ``alpha``, its adjusted
-    p-value at most ``alpha``, and grey otherwise, and its area grows with the
+    p-value at most ``alpha``, and gray otherwise, and its area grows with the
     cells that carry the perturbation. When the E-distances
     were measured without permutation tests, no row has a p-value: every point
     is blue, and the title says so.
@@ -1714,9 +1714,9 @@ def mixscape(
     knocked out (KO, or the ``perturbation_type`` of the classes) or an
     escaper (NP, not perturbed).
 
-    With ``panel="classes"``, each target gets one bar, labelled with its name
+    With ``panel="classes"``, each target gets one bar, labeled with its name
     and its cells in every split. The blue part of the bar is the share of its
-    cells called KO and the grey part the share called NP. The bars run from
+    cells called KO and the gray part the share called NP. The bars run from
     the largest KO share at the top to the smallest, ties broken by name. A
     target fitted in no split, because it had too few DE genes or KO cells or
     its fit collapsed, has only NP cells, and the title counts such targets by
@@ -1727,7 +1727,7 @@ def mixscape(
     With ``panel="scores"``, each target with a fitted split gets a panel: a
     histogram of its cells' scores, their projections onto the target's
     perturbation direction, with the KO cells in blue below the NP cells in
-    grey. Two curves show the normal distributions of the fit in the target's
+    gray. Two curves show the normal distributions of the fit in the target's
     first fitted split: the control component, which keeps the mean and
     standard deviation of the control cells' scores, scaled to the NP cells of
     the histogram, and the perturbed component, scaled to its KO cells. When
@@ -1945,7 +1945,7 @@ def _place_labels(
             for side in (start, -start)
         ]
         # In a slot, the label's left or right edge sits at the slot's offset,
-        # which centres the label vertically.
+        # which centers the label vertically.
         boxes = []
         for dx, dy in slots:
             left = anchor_x + dx * scale - (0.0 if dx > 0 else width)
@@ -2077,7 +2077,7 @@ def association_volcano(
     against the counts that its null fit predicts for them, fitted on the
     target's and the control cells, or on all cells in tests at high MOI,
     and at -log10 of its p-value. A point is blue when the pair is
-    significant at the false discovery rate of the tests and grey otherwise.
+    significant at the false discovery rate of the tests and gray otherwise.
     A dashed line marks the largest p-value of a significant pair, the cut of
     the Benjamini-Hochberg procedure, which runs over the pairs of every
     target. When the tests are one-sided, the label of the p-value axis names
@@ -2088,7 +2088,7 @@ def association_volcano(
     the target's cells hold no counts of the gene, is drawn as a triangle at
     the left edge. The ``label_top`` pairs with the smallest p-values, ties
     broken by the larger size of ``z`` and then by target and gene, are
-    labelled ``target:feature_name`` beside their points, with the gene's
+    labeled ``target:feature_name`` beside their points, with the gene's
     name from the record's ``feature_name`` column, and ``label_top=0``
     labels none. A label that would overlap a label of a smaller p-value
     moves to the other side of its point, or above or below it with a thin
@@ -2101,7 +2101,7 @@ def association_volcano(
     because they were not tested. The table ``"volcano"`` holds the drawn
     pairs with every column of the record, from the smallest p-value to the
     largest, ties broken as for the labels, so its first ``label_top`` rows
-    are the labelled pairs.
+    are the labeled pairs.
     """
     show_legend = bool_argument(show_legend, "show_legend")
     show = bool_argument(show, "show")
@@ -2211,13 +2211,13 @@ def association_volcano(
                 linewidth=1.2,
                 zorder=3.5,
             )
-        labelled = drawn.head(label_top)
+        labeled = drawn.head(label_top)
         # Labels name genes by name, such as IFNGR1, rather than by ID.
         texts = [
             f"{target}:{feature}"
             for target, feature in zip(
-                labelled["target"].tolist(),
-                labelled["feature_name"].tolist(),
+                labeled["target"].tolist(),
+                labeled["feature_name"].tolist(),
                 strict=True,
             )
         ]
@@ -2735,7 +2735,7 @@ def association_calibration(
             cell_key=None,
             # The cells that each negative-control pair splits into its
             # group's cells and the others: the control cells, or at high MOI
-            # every labelled cell.
+            # every labeled cell.
             n_cells=int(
                 (calibration["n_cells"] + calibration["n_control_cells"]).max()
             ),
@@ -2769,10 +2769,10 @@ def association_calibration(
 
 
 def _cluster_palette(codes: np.ndarray) -> dict[int, str]:
-    """Colour the clusters in the order in which they first appear in ``codes``.
+    """Color the clusters in the order in which they first appear in ``codes``.
 
     ``codes`` holds the cluster of every clustered perturbation in leaf order,
-    so a cluster keeps its colour whatever a plot draws.
+    so a cluster keeps its color whatever a plot draws.
     """
     first = pd.unique(codes[codes != _UNASSIGNED])
     return {
@@ -2890,7 +2890,7 @@ def _cluster_heatmap(
 ) -> tuple[Any, Any, pd.DataFrame, tuple[float, float]]:
     """Draw the profiles' correlations or distances and the cluster bar.
 
-    Returns the image, the bar's axes, the drawn matrix and its colour
+    Returns the image, the bar's axes, the drawn matrix and its color
     limits.
     """
     from matplotlib.colors import to_rgba
@@ -2907,7 +2907,7 @@ def _cluster_heatmap(
         # distance is 0.
         limits = (0.0, float(matrix.max()) or 1.0)
     # A heatmap with more perturbations than pixels averages the values that
-    # each pixel covers before colouring it, and a smaller one draws each cell
+    # each pixel covers before coloring it, and a smaller one draws each cell
     # as a block. The image fills the axes, whose box the plot's own figure
     # makes square: a box of fixed aspect would leave the layout to place the
     # bar's numbers against a box it then moves.
@@ -2963,7 +2963,7 @@ def _cluster_map(
     show_legend: bool,
     theme: str,
 ) -> tuple[pd.DataFrame, list[Any], list[Any], bool]:
-    """Draw each perturbation at its place in the layout, coloured by cluster.
+    """Draw each perturbation at its place in the layout, colored by cluster.
 
     Returns the drawn clusters with their medians, the clusters' numbers, the
     labels of the named perturbations, and whether the points are
@@ -3007,11 +3007,11 @@ def _cluster_map(
         # of an embedding do, and moves aside when it overlaps another.
         text_color = "#f5f5f5" if theme == "dark" else "#222222"
         stroke = "#222222" if theme == "dark" else "#ffffff"
-        centres = clusters[["x", "y"]].to_numpy(dtype=np.float64)
+        centers = clusters[["x", "y"]].to_numpy(dtype=np.float64)
         numbers = [
             ax.text(
-                centre_x,
-                centre_y,
+                center_x,
+                center_y,
                 str(cluster),
                 ha="center",
                 va="center",
@@ -3021,11 +3021,11 @@ def _cluster_map(
                 zorder=5,
                 in_layout=False,
             )
-            for cluster, (centre_x, centre_y) in zip(
-                clusters["cluster"].tolist(), centres.tolist(), strict=True
+            for cluster, (center_x, center_y) in zip(
+                clusters["cluster"].tolist(), centers.tolist(), strict=True
             )
         ]
-        register_layout_labels(ax, numbers, centres)
+        register_layout_labels(ax, numbers, centers)
     labels: list[Any] = []
     if named:
         foreground = foreground_color(theme)
@@ -3081,8 +3081,8 @@ def perturbation_clusters(
     the Pearson correlation of two profiles, on a diverging scale from -1 in
     blue through 0 in white to 1 in red. When the clusters were found by
     Euclidean distance, each cell holds the distance instead, from 0 in dark
-    blue to the largest drawn distance in white. A bar on the left colours
-    each perturbation by its cluster, grey when HDBSCAN left it unassigned,
+    blue to the largest drawn distance in white. A bar on the left colors
+    each perturbation by its cluster, gray when HDBSCAN left it unassigned,
     and numbers each cluster beside the middle of the longest run of its
     rows; a number that would overlap the number of a longer run is left
     out. The names of the perturbations run beside the rows and below the
@@ -3097,8 +3097,8 @@ def perturbation_clusters(
     is ``numbered``.
 
     With ``panel="embedding"``, each perturbation is a point at its place in
-    the clustering's two-dimensional layout, coloured by its cluster, with
-    the unassigned perturbations in grey beneath the others. Each cluster is
+    the clustering's two-dimensional layout, colored by its cluster, with
+    the unassigned perturbations in gray beneath the others. Each cluster is
     numbered at the median of its points, and a number that overlaps another
     moves aside by at most about its height. ``label`` names those
     perturbations: each gets a ring around its point and its name beside it,
@@ -3109,11 +3109,11 @@ def perturbation_clusters(
     ``n_perturbations`` and the median ``x`` and ``y`` of its points, where
     its number starts.
 
-    A cluster has the same colour in both panels and whatever the plot
-    draws. The clusters take eight colours, CyteArc's colourblind-safe
-    palette without its black, its yellow and its two greyish colours, in the
+    A cluster has the same color in both panels and whatever the plot
+    draws. The clusters take eight colors, CyteArc's colorblind-safe
+    palette without its black, its yellow and its two grayish colors, in the
     order in which they first appear in the leaf order; the ninth takes the
-    first colour again, and its number tells it apart.
+    first color again, and its number tells it apart.
 
     ``perturbations`` keeps those perturbations, and ``cluster_ids`` keeps
     the perturbations of those clusters, -1 for the unassigned ones; they
@@ -3196,7 +3196,7 @@ def perturbation_clusters(
     correlation = metric == "correlation"
     counts = f"{n_clusters:,} cluster{'' if n_clusters == 1 else 's'}"
     if n_unassigned:
-        counts += f", {n_unassigned:,} unassigned in grey"
+        counts += f", {n_unassigned:,} unassigned in gray"
     kept = "" if n_drawn == n_clustered else f"{n_drawn:,} of "
     title = [
         (

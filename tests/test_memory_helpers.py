@@ -18,7 +18,7 @@ def test_named_budget_reads_the_budget_that_a_refusal_closes_with() -> None:
     assert (
         named_budget(
             MemoryError(
-                "Labelling holds about 812 bytes. Raise mem_budget to at least 812 "
+                "Labeling holds about 812 bytes. Raise mem_budget to at least 812 "
                 "bytes, or pass a smaller cell_selection."
             )
         )
@@ -35,11 +35,11 @@ def test_named_budget_reads_the_budget_that_a_refusal_closes_with() -> None:
     "message",
     [
         # A budget other than the bytes the call holds.
-        "Labelling holds about 812 bytes. Raise mem_budget to at least 900 bytes.",
+        "Labeling holds about 812 bytes. Raise mem_budget to at least 900 bytes.",
         # No closing budget.
-        "Labelling holds about 812 bytes, more than the budget.",
+        "Labeling holds about 812 bytes, more than the budget.",
         # A closing request that says nothing of what the call holds.
-        "Labelling does not fit. Raise mem_budget.",
+        "Labeling does not fit. Raise mem_budget.",
     ],
 )
 def test_named_budget_refuses_a_refusal_that_names_no_budget_it_holds(

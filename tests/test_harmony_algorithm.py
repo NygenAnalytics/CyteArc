@@ -607,7 +607,7 @@ def _run_assignment_kernel(coordinates, centroids, sigma, penalty, codes):
 
 
 @pytest.mark.parametrize("n_columns", [1, 2])
-def test_assignment_update_is_the_minimiser_of_the_cell_objective(
+def test_assignment_update_is_the_minimizer_of_the_cell_objective(
     n_columns: int,
 ) -> None:
     coordinates, centroids, sigma, theta, observed, expected_mass, codes = (
@@ -767,7 +767,7 @@ def test_objective_does_not_increase_without_diversity_penalty(
         epsilon_cluster=0.0,
     )
 
-    # With theta = 0 every block update and every centroid update minimises
+    # With theta = 0 every block update and every centroid update minimizes
     # the objective exactly, so it never rises.
     objectives = summary.objectives
     assert len(objectives) >= 2
@@ -1067,7 +1067,7 @@ def test_rows_of_assignments_sum_to_one_and_centroids_match() -> None:
 
 
 def _normalized_entropy(neighbors: np.ndarray, labels: np.ndarray) -> np.ndarray:
-    """Shannon entropy of each cell's neighbour labels over log(min(k, levels))."""
+    """Shannon entropy of each cell's neighbor labels over log(min(k, levels))."""
     codes = np.unique(labels, return_inverse=True)[1]
     n_labels = int(codes.max()) + 1
     k = neighbors.shape[1]
@@ -1137,7 +1137,7 @@ def test_harmony_mixes_batches_without_merging_non_overlapping_cell_types(
     mixing_after, purity_after = _mixing_and_purity(result.corrected.T, batches, types)
     assert purity_before >= 0.98
     assert purity_after >= 0.98
-    # A correct neighbourhood holds the four batches of its own group, so
+    # A correct neighborhood holds the four batches of its own group, so
     # mixing cannot exceed about log 4 / log 8 = 0.667.
     assert mixing_after >= 0.5
     assert mixing_after >= mixing_before + 0.3

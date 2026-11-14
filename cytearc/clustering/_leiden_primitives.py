@@ -4,11 +4,11 @@ The native backend implements the Leiden algorithm of Traag, Waltman and van
 Eck (2019). This module holds the pieces that all of its phases share:
 
 - a counter-based random number generator, in which every draw is a pure
-  function of a 64-bit key and a counter (SplitMix64's finaliser,
+  function of a 64-bit key and a counter (SplitMix64's finalizer,
   ``utils.digest.mix64``, used as a mixing function), so no generator state
   is shared between threads;
 - a small open-addressing hash accumulator that one worker uses to collect
-  edge weights per neighbouring community;
+  edge weights per neighboring community;
 - parallel primitives (prefix sums, stable bucket sorts, conflict-free
   scatter-adds, fixed-block floating-point sums) whose results do not depend on
   the number of worker threads.

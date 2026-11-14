@@ -336,7 +336,7 @@ def test_an_allowlist_holds_distinct_text() -> None:
         allowlist_texts(A)
 
 
-def test_clones_are_labelled_by_rank() -> None:
+def test_clones_are_labeled_by_rank() -> None:
     assert ranked_clone_labels(3).tolist() == ["clone_1", "clone_2", "clone_3"]
     assert ranked_clone_labels(0).tolist() == []
 

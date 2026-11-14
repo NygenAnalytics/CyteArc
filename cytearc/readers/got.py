@@ -33,7 +33,7 @@ GoT-Multi's channels are sites of their own, ``BCOR (geneseq)`` and
 are kept as the source wrote them, on the mutant allele, and ``NA`` or an
 empty field means no call; empty or ``NA`` counts mean the cell was not
 covered. These readers follow the tools' documentation and output files
-only, since the tools carry no licence or a non-commercial one.
+only, since the tools carry no license or a non-commercial one.
 """
 
 import os
@@ -182,7 +182,7 @@ def _target_name(path: str) -> str:
 
 
 def got_table_format(path: str | os.PathLike[str]) -> str:
-    """Recognise a GoT table by its columns.
+    """Recognize a GoT table by its columns.
 
     Raises:
         ValueError: If the columns fit no GoT format.
@@ -203,7 +203,7 @@ def got_table_format(path: str | os.PathLike[str]) -> str:
         return "got"
     raise ValueError(
         f"{text} is not a table of mgatk, cellsnp-lite, VarTrix, giftwrap, MiTo or "
-        "GoT counts that CyteArc recognises; pass format to name its format"
+        "GoT counts that CyteArc recognizes; pass format to name its format"
     )
 
 

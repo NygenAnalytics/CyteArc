@@ -7,7 +7,7 @@ cells of the cell's own sample, such as its GEM group:
 1. Each cell's counts are scaled so that its total, the sum of its counts
    over every feature of the assay, equals the median total of the control
    cells, ``x = count / total * target``.
-2. Within each sample, each feature's scaled values are centred on the mean
+2. Within each sample, each feature's scaled values are centered on the mean
    of the sample's control cells and divided by their standard deviation with
    the n - 1 divisor, ``z = (x - mean) / sd``, for every cell, control cells
    included.
@@ -55,7 +55,7 @@ __all__ = [
     "z_score_sums",
 ]
 
-#: The control cells' variance divides their centred sum of squares by their
+#: The control cells' variance divides their centered sum of squares by their
 #: number minus this, the n - 1 divisor of Replogle et al.'s profiles.
 CONTROL_SD_DDOF = 1
 # The features that one thread of a kernel takes at a time.
@@ -282,11 +282,11 @@ def z_score_sums(
     sums = np.asarray(totals, dtype=np.float64)
     codes = np.asarray(samples, dtype=np.int64)
     rows = np.asarray(groups, dtype=np.int64)
-    centre = np.ascontiguousarray(means, dtype=np.float64)
+    center = np.ascontiguousarray(means, dtype=np.float64)
     spread = np.ascontiguousarray(sds, dtype=np.float64)
-    if centre.ndim != 2 or spread.shape != centre.shape:
+    if center.ndim != 2 or spread.shape != center.shape:
         raise ValueError("means and sds must both be samples x features")
-    n_samples, n_features = centre.shape
+    n_samples, n_features = center.shape
     if codes.shape != sums.shape or rows.shape != sums.shape:
         raise ValueError("samples and groups must hold one entry per cell")
     if len(codes) and (
@@ -304,7 +304,7 @@ def z_score_sums(
             float(target),
             codes[start:stop],
             rows[start:stop],
-            centre,
+            center,
             spread,
             out,
         )

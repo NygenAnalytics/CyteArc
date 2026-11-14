@@ -399,8 +399,8 @@ def test_xv_seq_got_tables_count_wild_type_and_mutant_umis(
     assert loaded.alleles["role"].tolist() == ["alternative", "reference"]
 
 
-# The formats each folder or file is recognised as.
-def test_formats_are_recognised_from_files(tmp_path) -> None:
+# The formats each folder or file is recognized as.
+def test_formats_are_recognized_from_files(tmp_path) -> None:
     assert folder_format(str(DATA / "signac_test_mgatk")) == "mgatk"
     assert folder_format(str(DATA / "mito_maester")) == "mgatk"
     assert folder_format(str(DATA / "cellsnp_lite")) == "cellsnp_lite"

@@ -720,7 +720,7 @@ def test_guide_calls_refuse_cells_that_the_suffix_cannot_reach(tmp_path) -> None
     path = write_guide_call_file(tmp_path / "calls.csv", ["AAAC", "CCCG"])
     saved = written(store)
 
-    # GGGT-2 would be labelled Negative, since no barcode can name it.
+    # GGGT-2 would be labeled Negative, since no barcode can name it.
     with pytest.raises(
         ValueError,
         match="^"

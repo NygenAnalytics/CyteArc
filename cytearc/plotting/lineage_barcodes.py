@@ -95,7 +95,7 @@ def barcode_calls(
     reads appear in the table only. Barcodes of one or two UMIs and
     molecules of one read are mostly errors and ambient molecules. A library
     that counts no UMIs or no reads is left out of its panel, and a panel
-    that no library fills says so. The libraries take colours over every
+    that no library fills says so. The libraries take colors over every
     library of the artifact, under one legend beside the last panel that
     draws them.
 

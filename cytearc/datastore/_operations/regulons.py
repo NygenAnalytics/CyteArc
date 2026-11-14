@@ -205,8 +205,8 @@ class _RegulonOperationsMixin(_RegulonOperationsBase):
         float32, so select a representative subset of cells for large data.
 
         Args:
-            cell_selection: Cells whose counts are modelled.
-            features: Feature selection of the genes modelled as targets; the
+            cell_selection: Cells whose counts are modeled.
+            features: Feature selection of the genes modeled as targets; the
                 factors among them are the regulators. Genes whose name occurs
                 more than once in the selection are left out, because regulons
                 name genes.
@@ -716,7 +716,7 @@ class _RegulonOperationsMixin(_RegulonOperationsBase):
             raise ValueError(
                 f"groups holds no label for {int(missing.sum())} of the "
                 f"{n_cells} cells to score; pass a cell_selection of the "
-                "labelled cells"
+                "labeled cells"
             )
         categories = sort_categories(pd.unique(labels).tolist())
         codes = label_codes(labels, categories)
@@ -781,7 +781,7 @@ class _RegulonOperationsMixin(_RegulonOperationsBase):
                 Every scored cell when omitted.
 
         Returns:
-            A symmetric regulons-by-regulons DataFrame, indexed and labelled by
+            A symmetric regulons-by-regulons DataFrame, indexed and labeled by
             the regulons of ``scores``. A regulon of constant scores correlates
             0 with every regulon. The indices equal those of
             ``connection_specificity`` for the same cells' scores, except where

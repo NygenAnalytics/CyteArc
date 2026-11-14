@@ -885,7 +885,7 @@ def test_profiles_refuse_inputs_they_cannot_use(tmp_path) -> None:
     )
     with pytest.raises(
         ValueError,
-        match="No labelled cell carries control guides only, and each perturbation "
+        match="No labeled cell carries control guides only, and each perturbation "
         "is compared with such cells; check the controls passed to "
         "perturbation.labels, or in a screen whose cells carry several guides, test "
         "associations with moi='high'",

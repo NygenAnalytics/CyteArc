@@ -1256,7 +1256,7 @@ def _elongated_y_graph(
     points = np.vstack([stem, branch_a, branch_b])
     points += rng.normal(scale=0.02, size=points.shape)
     # Pseudotime is the arc position of each noisy point, so it is smooth on
-    # the neighbourhood graph as a scored pseudotime would be.
+    # the neighborhood graph as a scored pseudotime would be.
     pseudotime = np.concatenate(
         [
             points[:n_stem, 0],

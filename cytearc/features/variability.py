@@ -590,7 +590,7 @@ def fit_loess(
     fitted = np.empty(n_points, dtype=np.float64)
     if n_points == 0:
         return fitted
-    neighbours = min(n_points, max(int(np.floor(span * n_points)), degree + 1))
+    neighbors = min(n_points, max(int(np.floor(span * n_points)), degree + 1))
     order = np.argsort(predictor, kind="stable")
     sorted_x = np.ascontiguousarray(predictor[order])
     sorted_y = np.ascontiguousarray(response[order])
@@ -603,7 +603,7 @@ def fit_loess(
     )
     values = np.empty(points.shape[0], dtype=np.float64)
     slopes = np.empty(points.shape[0], dtype=np.float64)
-    _fit_loess_points(sorted_x, sorted_y, neighbours, degree, points, values, slopes)
+    _fit_loess_points(sorted_x, sorted_y, neighbors, degree, points, values, slopes)
     if surface == "direct":
         fitted[order] = values
         return fitted

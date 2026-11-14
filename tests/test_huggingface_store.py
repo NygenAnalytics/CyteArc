@@ -475,7 +475,7 @@ def test_retry_delay_without_a_response_uses_exponential_backoff():
         ({"RateLimit": '"api";r=3;t=55'}, 2.0),
     ],
 )
-def test_retry_delay_honours_server_headers(monkeypatch, headers, expected):
+def test_retry_delay_honors_server_headers(monkeypatch, headers, expected):
     monkeypatch.setattr(huggingface, "time", SimpleNamespace(time=lambda: NOW))
     assert huggingface.retry_delay(_status_error(503, headers), 0) == expected
 

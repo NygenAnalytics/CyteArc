@@ -26,7 +26,7 @@ def regex_match_mask(values: Sequence[str] | np.ndarray, pattern: str) -> np.nda
 def has_duplicates(values: Any) -> bool:
     """Return whether a one-dimensional array repeats a value.
 
-    Sorting and comparing neighbours stays fast where ``np.unique`` is slow on
+    Sorting and comparing neighbors stays fast where ``np.unique`` is slow on
     many distinct integers; increasing values skip the sort.
     """
     array = np.asarray(values)
@@ -46,7 +46,7 @@ def _integer_vector(values: Any, name: str) -> np.ndarray:
 def sorted_unique(values: Any) -> np.ndarray:
     """Return the distinct values of a one-dimensional integer array, ascending.
 
-    It equals ``np.unique(values)``, by sorting and comparing neighbours, which
+    It equals ``np.unique(values)``, by sorting and comparing neighbors, which
     stays fast where ``np.unique`` hashes many distinct integers slowly.
     """
     array = _integer_vector(values, "sorted_unique")

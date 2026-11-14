@@ -3,7 +3,7 @@
 An import encodes the parsed contigs chunk by chunk, holding each distinct
 gene call and junction once, and then ranks each cell's chains and labels its
 receptor; clonotypes group the cells by identical chains, and clonotype
-clusters by junctions within a distance, which the neighbour search of
+clusters by junctions within a distance, which the neighbor search of
 ``cytearc.clones.sequences`` finds. Each benchmark runs
 one step on a simulated T cell repertoire in which most cells carry one alpha
 and one beta chain, some a second alpha chain, and clones of many sizes share

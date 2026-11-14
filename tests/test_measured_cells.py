@@ -47,7 +47,7 @@ from cytearc.metadata.membership import (
 from cytearc.metadata.selection import CellField, FeatureRef, NormalizationSpec
 from cytearc.storage.artifacts import ArtifactRef, fingerprint_array, list_artifacts
 from cytearc.writers._store import write_membership_column
-from tests.fixtures_datastore import build_neighbourhood_graph
+from tests.fixtures_datastore import build_neighborhood_graph
 from tests.storage_helpers import write_count_store
 from tests.test_hto import planted_hto_counts
 from tests.test_mapping_reference import mapping_counts
@@ -141,7 +141,7 @@ def _mapping_reference(full: DataStore) -> MappingReference:
 def _graph(
     store: DataStore, assay: str, cells: ArtifactRef, features: ArtifactRef
 ) -> ArtifactRef:
-    return build_neighbourhood_graph(
+    return build_neighborhood_graph(
         store,
         from_assay=assay,
         cell_selection=cells,
@@ -924,7 +924,7 @@ def test_plots_draw_unmeasured_cells_as_missing(measured) -> None:
         (axis,) = layout.axes.values()
         points = axis.collections[0]
         rows = np.asarray(points.get_offsets())[:, 0].astype(int)
-        grey = np.all(
+        gray = np.all(
             np.isclose(
                 points.get_facecolors(),
                 matplotlib.colors.to_rgba(plotting.ColorScale().missing_color),
@@ -933,7 +933,7 @@ def test_plots_draw_unmeasured_cells_as_missing(measured) -> None:
         )
         # Unmeasured cells take the color of missing values, and the color
         # limits come from measured values only.
-        np.testing.assert_array_equal(grey, ~membership[rows])
+        np.testing.assert_array_equal(gray, ~membership[rows])
         assert layout.provenance.extras["color_limits"] == {
             "RNA0": (float(expression.min()), float(expression.max()))
         }

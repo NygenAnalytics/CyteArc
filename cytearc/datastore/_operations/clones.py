@@ -397,7 +397,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         write which clone each cell belongs to, and the import joins each of
         those cells to a selected cell by barcode and saves the clones as a
         ``clones`` artifact, which every clone source writes. Each file's
-        format is recognised from its contents: CoSpar's clone table, TREX's
+        format is recognized from its contents: CoSpar's clone table, TREX's
         ``clones.txt`` of every release, CellTag-multi's and CellTagR's clone
         tables, STICR's cell metadata, Cassiopeia's allele table, Numbat's
         ``clone_post_{i}.tsv``, a Matrix Market clone matrix with its cell
@@ -456,12 +456,12 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             format: One of ``"cospar"``, ``"trex"``, ``"celltag_multi"``,
                 ``"celltagr"``, ``"sticr"``, ``"cassiopeia"``, ``"numbat"``,
                 ``"table"``, ``"matrix"``, ``"cospar_h5ad"``, ``"mito"`` and
-                ``"h5ad"``, or None to recognise each file's format.
+                ``"h5ad"``, or None to recognize each file's format.
             columns: The columns to read: ``"cell"`` (a column, or a list of
                 columns whose values are joined by ``"__"``, such as
                 ``["Library", "Cell barcode"]`` of LARRY's metadata),
                 ``"clone"`` and ``"probability"``. A table read by row names,
-                such as a wide table with one clone column per labelling
+                such as a wide table with one clone column per labeling
                 round, needs only ``"clone"``, and a clone matrix takes only
                 ``"cell"``, the columns of its cell list.
             multiple: ``"error"`` or ``"drop"``, for a cell listed in two
@@ -830,12 +830,12 @@ class _CloneOperationsMixin(_CloneOperationsBase):
     def _clones_load_clones(self, clones: ArtifactRef) -> Clones:
         """Read saved clones as a table of cells and a table of clones.
 
-        Clonotypes read as clones too, labelled ``clonotype_1`` and so on,
+        Clonotypes read as clones too, labeled ``clonotype_1`` and so on,
         and their table of cells also holds each cell's ``receptor_type``,
         whose labels every clone summary measures apart. Clonotypes defined
         across receptor types also hold each cell's ``within_type_clone``, its
         clonotype within its receptor type, which every clone summary
-        measures, labelled as the summaries label it, such as
+        measures, labeled as the summaries label it, such as
         ``clonotype_1 (TCR 2)``.
 
         Args:
@@ -1086,7 +1086,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         across receptor types are read by each cell's clonotype within its
         type, which they save, as the summaries measure them, unless
         ``within_types`` is False, as the clones' own loads and exports read
-        them: each such clonotype is labelled as a part of its clonotype
+        them: each such clonotype is labeled as a part of its clonotype
         across types, by :func:`~cytearc.repertoire.clonotypes.within_type_parts`.
         Each read is charged to ``ledger``, and what the input holds stays
         charged, ``nbytes`` of it.
@@ -1189,7 +1189,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         """Read and name each cell's clonotype within its receptor type, as the summaries measure clonotypes across types.
 
         Each cell's clonotype across types and within its type are read, and
-        each clonotype within a type is labelled by its clonotype's label and
+        each clonotype within a type is labeled by its clonotype's label and
         the text that :func:`~cytearc.repertoire.clonotypes.within_type_parts`
         adds. Each read and step is charged to ``ledger``, which keeps the
         codes within types, the labels and each one's clonotype charged.
@@ -1319,7 +1319,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
     ) -> np.ndarray:
         """The labels that one figure gives some clones of a clone artifact.
 
-        A clone is labelled by its ID. A clonotype is labelled by the junction
+        A clone is labeled by its ID. A clonotype is labeled by the junction
         amino acids of its representative cell's ``VDJ_1`` chain, or of its
         ``VJ_1`` chain without a VDJ chain, such as ``CASSLGQAYEQYF``, since
         immunologists read clonotypes by their junctions; clonotypes defined
@@ -1329,7 +1329,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         ``clonotype_1`` and ``clonotype_3``. Clonotypes defined across
         receptor types are given as their summaries label the clonotypes
         within receptor types that they measure, such as ``clonotype_1 (TCR
-        2)``, and each is labelled as ``within_receptor_type=True`` labels it,
+        2)``, and each is labeled as ``within_receptor_type=True`` labels it,
         by its own representative's junction, with its number among those
         where two given share one, then the text that its label adds, such as
         ``CASSB (TCR 2)``. The clonotypes' IDs, or those labels, are read to
@@ -1369,13 +1369,13 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         fewer = "label fewer clonotypes"
         ledger = MemoryLedger(
             self.memoryBytes,
-            "Labelling clonotypes by their junctions",
+            "Labeling clonotypes by their junctions",
             remedy=None if across else fewer,
             codec_threads=self.nthreads,
         )
         # Each clone given, as its ID, code and label, is held throughout.
         ledger.hold(
-            f"the {len(given)} clonotypes labelled",
+            f"the {len(given)} clonotypes labeled",
             _FIGURE_LABEL_BYTES * len(given),
             remedy=fewer,
         )
@@ -1406,7 +1406,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         ledger.release(read_bytes)
         if (codes < 0).any():
             unknown = given[codes < 0].tolist()
-            raise ValueError(f"No clonotype is labelled {unknown[:5]}")
+            raise ValueError(f"No clonotype is labeled {unknown[:5]}")
         junctions = self._representative_junctions(
             clones, codes, ledger=ledger, within_types=across
         )
@@ -2439,7 +2439,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         clonotype is followed through the groups of its own receptor type.
         Clonotypes that ``within_receptor_type=False`` defines across receptor
         types are followed, as every summary measures them, by each cell's
-        clonotype within its type, labelled such as ``clonotype_1 (TCR 2)``;
+        clonotype within its type, labeled such as ``clonotype_1 (TCR 2)``;
         a clonotype's own label in ``labels`` follows each of its clonotypes
         within types. Nothing is saved.
 
@@ -2522,7 +2522,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
                     clones, ledger, source.clonotypes, found, unknown
                 )
             if unknown:
-                raise ValueError(f"No clone is labelled {unknown[:5]}")
+                raise ValueError(f"No clone is labeled {unknown[:5]}")
             chosen = sorted_unique(found)
         strata = _kept_apart_strata(source, keys)
         if strata is None:
@@ -2916,7 +2916,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             ledger, self.zw, planned_late, item="the late cells' positions"
         )
         # Both selections' positions joined and sorted, and the flags of
-        # neighbours that are equal.
+        # neighbors that are equal.
         ledger.peak(
             f"checking that none of {n_early} early cells is among {n_late} late cells",
             9 * (n_early + n_late),

@@ -5,12 +5,12 @@ Traag, Waltman and van Eck (2019), Algorithm A.2 lines 26-43, for modularity.
 Inside every community ``S`` of the partition left by local moving, the
 refined partition starts from singletons. Nodes that are well connected to
 the rest of ``S`` are visited in random order; a node that is still a
-singleton may join a refined community ``D`` of a neighbour in ``S`` when
+singleton may join a refined community ``D`` of a neighbor in ``S`` when
 ``D`` is itself well connected to ``S`` and the join does not lower the
 quality. Among the eligible communities, and staying alone, one is drawn
 with probability proportional to ``exp(gain / theta)``.
 
-In the notation of ``_leiden_moving`` (normalised weights, fixed-point
+In the notation of ``_leiden_moving`` (normalized weights, fixed-point
 strengths, ``c_v = gamma * k_v / 2m``):
 
 - node ``v`` is well connected when ``a(v, S - v) >= c_v * (K_S - k_v)``;
@@ -98,8 +98,8 @@ def merge_nodes_subset(
         v = members[position]
         inside = 0.0
         for edge in range(indptr[v], indptr[v + 1]):
-            neighbour = indices[edge]
-            if neighbour != v and labels[neighbour] == c:
+            neighbor = indices[edge]
+            if neighbor != v and labels[neighbor] == c:
                 inside += weights[edge]
         eext[v] = inside
         c_v = null_coef * np.float64(strengths[v])
@@ -122,10 +122,10 @@ def merge_nodes_subset(
             continue
         n_used = int(np.int64(0))
         for edge in range(indptr[v], indptr[v + 1]):
-            neighbour = indices[edge]
-            if neighbour != v and labels[neighbour] == c:
+            neighbor = indices[edge]
+            if neighbor != v and labels[neighbor] == c:
                 n_used = acc_add(
-                    keys, vals, used, n_used, refined[neighbour], weights[edge], shift
+                    keys, vals, used, n_used, refined[neighbor], weights[edge], shift
                 )
         c_v = null_coef * np.float64(strengths[v])
         n_candidates = int(np.int64(0))

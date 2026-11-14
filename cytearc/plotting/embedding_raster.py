@@ -276,7 +276,7 @@ def embedding_raster(
     treated as continuous. Categorical colors are not supported here.
     Empty pixels show the axes background, white in the light themes. A
     pixel whose cells all lack a color value takes the missing color, as such
-    cells do in :func:`embedding`: ``ColorScale.missing_color``, grey by
+    cells do in :func:`embedding`: ``ColorScale.missing_color``, gray by
     default, or ``missing_color`` as an explicit override. Pass ``subset_by``
     to keep cells marked ``True`` in a boolean cell-metadata column.
     """

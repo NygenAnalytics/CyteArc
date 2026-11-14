@@ -33,7 +33,7 @@ CYTEARC_ROOT = Path(cytearc.__file__).parent
 #: none. Every other module, the clone and screen operations' included,
 #: refuses with MemoryBudgetError.
 PLAIN_MEMORY_ERRORS = {
-    # Variant counts, genotypes and frequency clones, with the shared-neighbour
+    # Variant counts, genotypes and frequency clones, with the shared-neighbor
     # graph that frequency clones build.
     "datastore/_operations/variants.py": 8,
     "neighbors/graph.py": 2,

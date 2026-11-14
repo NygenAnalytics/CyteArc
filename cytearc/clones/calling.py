@@ -23,9 +23,9 @@ mark:
   never compared;
 - or links through any item that two nodes share, which joins the nodes of
   each item without listing every pair of them;
-- pruning, as TREX does: edges whose two ends share no neighbour are removed
-  when either end has another neighbour;
-- doublets, as TREX finds them: nodes of one cell whose neighbours fall apart
+- pruning, as TREX does: edges whose two ends share no neighbor are removed
+  when either end has another neighbor;
+- doublets, as TREX finds them: nodes of one cell whose neighbors fall apart
   into two or more components once the node is removed, local cut vertices,
   are removed with their cells;
 - connected components of what remains, which are the clones.
@@ -82,7 +82,7 @@ _JOINED_PAIR_BYTES = 48
 # while the pointers are summed.
 _SET_CELL_BYTES = 16
 # Bytes of each cell while identical sets are found: its two hashes, size and
-# group with their sorted copies and order, the comparisons of neighbours in
+# group with their sorted copies and order, the comparisons of neighbors in
 # that order, its run, its node and their order, and its node's first cell,
 # size, group and pointer; and of each item of a node, the item and the
 # checks of its order.
@@ -113,7 +113,7 @@ _ITEM_CODE_NODE_BYTES = 16
 # the product never makes a prefix too short.
 _PREFIX_MARGIN = 1e-9
 # Bytes of each edge kept: its two ends; and while the graph is pruned or its
-# cut vertices found, each edge twice in the lists of neighbours with their
+# cut vertices found, each edge twice in the lists of neighbors with their
 # order, and each node's pointer, marks and stack.
 _EDGE_BYTES = 16
 _ADJACENCY_EDGE_BYTES = 80
@@ -1212,8 +1212,8 @@ def _shared_item_edges(nodes: SetNodes, *, ledger: MemoryLedger) -> Edges:
     return Edges(first=item_nodes[later - 1], second=item_nodes[later])
 
 
-def _neighbours(n_nodes: int, edges: Edges) -> tuple[np.ndarray, np.ndarray]:
-    """Each node's neighbours, ascending, as CSR pointers and positions."""
+def _neighbors(n_nodes: int, edges: Edges) -> tuple[np.ndarray, np.ndarray]:
+    """Each node's neighbors, ascending, as CSR pointers and positions."""
     ends = np.concatenate([edges.first, edges.second])
     others = np.concatenate([edges.second, edges.first])
     order = np.lexsort((others, ends))
@@ -1228,9 +1228,9 @@ def _adjacency_bytes(n_nodes: int, n_edges: int) -> int:
 
 @njit(cache=True)
 def _bridges(
-    first: np.ndarray, second: np.ndarray, indptr: np.ndarray, neighbours: np.ndarray
+    first: np.ndarray, second: np.ndarray, indptr: np.ndarray, neighbors: np.ndarray
 ) -> np.ndarray:
-    """Whether each edge's ends share no neighbour while either has another."""
+    """Whether each edge's ends share no neighbor while either has another."""
     removed = np.zeros(len(first), dtype=np.bool_)
     for edge in range(len(first)):
         left = first[edge]
@@ -1243,8 +1243,8 @@ def _bridges(
             continue
         common = False
         while left_start < left_end and right_start < right_end:
-            a = neighbours[left_start]
-            b = neighbours[right_start]
+            a = neighbors[left_start]
+            b = neighbors[right_start]
             if a == b:
                 common = True
                 break
@@ -1259,10 +1259,10 @@ def _bridges(
 def pruned_edges(
     n_nodes: int, edges: Edges, *, ledger: MemoryLedger | None = None
 ) -> tuple[Edges, int]:
-    """Remove the edges whose ends share no neighbour, as TREX removes bridges.
+    """Remove the edges whose ends share no neighbor, as TREX removes bridges.
 
-    An edge is removed when its two ends have no common neighbour and either
-    end has a neighbour besides the other, TREX's rule for an edge that
+    An edge is removed when its two ends have no common neighbor and either
+    end has a neighbor besides the other, TREX's rule for an edge that
     joins two groups of cells which a doublet or a shared barcode bridged.
     The rule is local: it does not test whether removing the edge splits a
     component. Every edge is judged on the graph as given, then the removed
@@ -1271,27 +1271,27 @@ def pruned_edges(
     Args:
         n_nodes: The nodes.
         edges: The edges.
-        ledger: The caller's memory ledger, which the lists of neighbours are
+        ledger: The caller's memory ledger, which the lists of neighbors are
             charged to; None for no limit.
 
     Returns:
         The edges kept, in their order, and the number removed.
 
     Raises:
-        MemoryBudgetError: If the lists of neighbours do not fit the ledger's budget.
+        MemoryBudgetError: If the lists of neighbors do not fit the ledger's budget.
     """
     ledger = _ledger(ledger)
-    _peak(ledger, "the lists of neighbours", _adjacency_bytes(n_nodes, len(edges)))
-    indptr, neighbours = _neighbours(n_nodes, edges)
-    removed = _bridges(edges.first, edges.second, indptr, neighbours)
+    _peak(ledger, "the lists of neighbors", _adjacency_bytes(n_nodes, len(edges)))
+    indptr, neighbors = _neighbors(n_nodes, edges)
+    removed = _bridges(edges.first, edges.second, indptr, neighbors)
     return edges.kept(~removed), int(np.count_nonzero(removed))
 
 
 @njit(cache=True)
 def _cut_vertices(
-    indptr: np.ndarray, neighbours: np.ndarray, eligible: np.ndarray
+    indptr: np.ndarray, neighbors: np.ndarray, eligible: np.ndarray
 ) -> np.ndarray:
-    """Whether each eligible node's neighbours fall apart without it."""
+    """Whether each eligible node's neighbors fall apart without it."""
     n_nodes = len(indptr) - 1
     cut = np.zeros(n_nodes, dtype=np.bool_)
     marked = np.full(n_nodes, -1, dtype=np.int64)
@@ -1303,8 +1303,8 @@ def _cut_vertices(
         if not eligible[node] or end - start < 2:
             continue
         for at in range(start, end):
-            marked[neighbours[at]] = node
-        head = neighbours[start]
+            marked[neighbors[at]] = node
+        head = neighbors[start]
         seen[head] = node
         stack[0] = head
         depth = 1
@@ -1313,7 +1313,7 @@ def _cut_vertices(
             depth -= 1
             current = stack[depth]
             for at in range(indptr[current], indptr[current + 1]):
-                other = neighbours[at]
+                other = neighbors[at]
                 if marked[other] == node and seen[other] != node:
                     seen[other] = node
                     stack[depth] = other
@@ -1330,10 +1330,10 @@ def local_cut_vertices(
     *,
     ledger: MemoryLedger | None = None,
 ) -> np.ndarray:
-    """Find the nodes whose neighbours fall apart once the node is removed.
+    """Find the nodes whose neighbors fall apart once the node is removed.
 
-    A node with two or more neighbours is a local cut vertex when the graph
-    that its neighbours and the edges between them form has two or more
+    A node with two or more neighbors is a local cut vertex when the graph
+    that its neighbors and the edges between them form has two or more
     components, TREX's test for a doublet: a cell that carries the marks of
     two clones links cells that are otherwise unrelated. Only ``eligible``
     nodes are tested, such as those of a single cell, as TREX tests them.
@@ -1343,15 +1343,15 @@ def local_cut_vertices(
 
     Raises:
         ValueError: If ``eligible`` does not hold one flag per node.
-        MemoryBudgetError: If the lists of neighbours do not fit the ledger's budget.
+        MemoryBudgetError: If the lists of neighbors do not fit the ledger's budget.
     """
     ledger = _ledger(ledger)
     flags = np.asarray(eligible, dtype=bool)
     if flags.shape != (n_nodes,):
         raise ValueError("eligible must hold one flag per node")
-    _peak(ledger, "the lists of neighbours", _adjacency_bytes(n_nodes, len(edges)))
-    indptr, neighbours = _neighbours(n_nodes, edges)
-    return np.flatnonzero(_cut_vertices(indptr, neighbours, flags)).astype(np.int64)
+    _peak(ledger, "the lists of neighbors", _adjacency_bytes(n_nodes, len(edges)))
+    indptr, neighbors = _neighbors(n_nodes, edges)
+    return np.flatnonzero(_cut_vertices(indptr, neighbors, flags)).astype(np.int64)
 
 
 @njit(cache=True)
@@ -1371,13 +1371,13 @@ def _holds(indptr: np.ndarray, items: np.ndarray, node: int, item: int) -> bool:
 @njit(cache=True)
 def _ambiguous(
     indptr: np.ndarray,
-    neighbours: np.ndarray,
+    neighbors: np.ndarray,
     set_indptr: np.ndarray,
     set_items: np.ndarray,
     unknown_indptr: np.ndarray,
     unknown_items: np.ndarray,
 ) -> np.ndarray:
-    """Whether two of each node's neighbours disagree at one of its unknown items."""
+    """Whether two of each node's neighbors disagree at one of its unknown items."""
     n_nodes = len(indptr) - 1
     flags = np.zeros(n_nodes, dtype=np.bool_)
     for node in range(n_nodes):
@@ -1388,7 +1388,7 @@ def _ambiguous(
             held = False
             absent = False
             for at in range(indptr[node], indptr[node + 1]):
-                other = neighbours[at]
+                other = neighbors[at]
                 if _holds(set_indptr, set_items, other, item):
                     held = True
                 elif not _holds(unknown_indptr, unknown_items, other, item):
@@ -1407,30 +1407,30 @@ def ambiguous_nodes(
     """Find the nodes whose sets agree with two nodes that disagree.
 
     With unknown items, a node is linked to the nodes it agrees with wherever
-    both know. When two of its neighbours disagree at an item that the node
+    both know. When two of its neighbors disagree at an item that the node
     holds unknown, one holding the item and the other knowing it absent, the
     node cannot tell which of them its cells belong with: they are ambiguous,
-    however many there are. Neighbours that share no known item do not
+    however many there are. Neighbors that share no known item do not
     disagree, so a node whose cells were read where its partly read
-    neighbours were not stays. A node without unknown items is never
+    neighbors were not stays. A node without unknown items is never
     ambiguous.
 
     Returns:
         Whether each node is ambiguous.
 
     Raises:
-        MemoryBudgetError: If the lists of neighbours do not fit the ledger's budget.
+        MemoryBudgetError: If the lists of neighbors do not fit the ledger's budget.
     """
     ledger = _ledger(ledger)
     n_nodes = nodes.n_nodes
     if nodes.unknown is None or not len(edges):
         return np.zeros(n_nodes, dtype=bool)
-    _peak(ledger, "the lists of neighbours", _adjacency_bytes(n_nodes, len(edges)))
-    indptr, neighbours = _neighbours(n_nodes, edges)
+    _peak(ledger, "the lists of neighbors", _adjacency_bytes(n_nodes, len(edges)))
+    indptr, neighbors = _neighbors(n_nodes, edges)
     return np.asarray(
         _ambiguous(
             indptr,
-            neighbours,
+            neighbors,
             np.asarray(nodes.sets.indptr, dtype=np.int64),
             np.asarray(nodes.sets.items, dtype=np.int64),
             np.asarray(nodes.unknown.indptr, dtype=np.int64),

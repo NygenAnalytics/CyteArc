@@ -221,7 +221,7 @@ class _PerturbationEffectOperationsMixin(_PerturbationEffectOperationsBase):
             ValueError: If ``labels`` is not a ``perturbation_labels``
                 artifact, ``from_assay`` is not an assay, ``by`` is unknown,
                 ``id_column`` is not a feature column of the guide assay, no
-                labelled cell carries control guides only, or no compared cell
+                labeled cell carries control guides only, or no compared cell
                 holds a UMI of ``from_assay``.
             PermissionError: If the store is read-only and the table is not
                 saved yet.
@@ -458,7 +458,7 @@ class _PerturbationEffectOperationsMixin(_PerturbationEffectOperationsBase):
         twice the mean squared distance between the groups, minus the mean
         squared distance within each group over distinct pairs. Its expected
         value is twice the squared distance between the group means, so it
-        grows as a perturbation moves the centre of its cells away from the
+        grows as a perturbation moves the center of its cells away from the
         controls, and a change in their spread alone leaves it near 0. A
         permutation test
         draws ``n_permutations`` groups of the perturbed group's size from the

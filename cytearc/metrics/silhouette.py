@@ -129,7 +129,7 @@ def silhouette_scoring(
     ):
         raise ValueError(
             f"Cluster column {cluster_column!r} contains missing values. Use a "
-            "cell_key that selects only labelled cells"
+            "cell_key that selects only labeled cells"
         )
     clusters = np.asarray(categorical.codes, dtype=np.int64)
     if hvg_data.shape[0] != len(clusters):

@@ -231,9 +231,9 @@ def test_removal_scores_equal_the_log_likelihood_without_each_component() -> Non
     full = np.logaddexp.reduce(totals, axis=1)
     for component in range(1, 7):
         kept = np.delete(totals, component, axis=1)
-        renormalised = np.logaddexp.reduce(np.delete(fit.log_weights, component))
+        renormalized = np.logaddexp.reduce(np.delete(fit.log_weights, component))
         expected = float(
-            (np.logaddexp.reduce(kept, axis=1) - renormalised - full).sum()
+            (np.logaddexp.reduce(kept, axis=1) - renormalized - full).sum()
         )
         assert deltas[component] == pytest.approx(expected, rel=1e-9, abs=1e-6)
 

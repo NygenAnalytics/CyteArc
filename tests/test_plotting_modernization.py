@@ -2300,7 +2300,7 @@ def test_stacked_violin_mean_color_constant_row():
         table = result.tables["constant"]
         np.testing.assert_array_equal(table["display_value"], np.zeros(12))
         # Tied means follow the shared limit policy: the tied value takes the
-        # low end and the colourbar still renders a unit range.
+        # low end and the colorbar still renders a unit range.
         assert result.provenance.extras["vmin"] == pytest.approx(0.0)
         assert result.provenance.extras["vmax"] == pytest.approx(1.0)
         colorbar = next(

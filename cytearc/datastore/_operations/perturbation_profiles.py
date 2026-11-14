@@ -140,7 +140,7 @@ class _PerturbationProfileOperationsMixin(_PerturbationProfileOperationsBase):
         a control guide only those that Mixscape called knocked out count.
 
         Raises:
-            ValueError: If no labelled cell carries control guides only.
+            ValueError: If no labeled cell carries control guides only.
         """
         classes = None
         perturbation_labels = labels
@@ -464,7 +464,7 @@ class _PerturbationProfileOperationsMixin(_PerturbationProfileOperationsBase):
                 arguments, inspect_artifact(self.zw, planned.ref).diagnostics, left_out
             )
             return planned.ref
-        # Each labelled cell's position, perturbation and flag, each read
+        # Each labeled cell's position, perturbation and flag, each read
         # cell's position, sample and total, the float32 profiles, and each
         # sample's control mean and standard deviation of every feature.
         held = (
@@ -932,7 +932,7 @@ class _PerturbationProfileOperationsMixin(_PerturbationProfileOperationsBase):
         n_clustered = len(names)
         n_features = int(values.shape[1])
         # The distances and their symmetric copy, and the profiles as read,
-        # as float64 and centred.
+        # as float64 and centered.
         n_bytes = 16 * n_clustered * n_clustered + 20 * n_clustered * n_features
         _require_budget(
             n_bytes,

@@ -373,7 +373,7 @@ Text is read as written, so Cassiopeia's `None` stays an uncut site where pandas
 
 ### Integrations
 
-A CARLIN pair and a `darlin` table hold one array without naming it, so `integrations` names it: one for every file, or one per file. It is never inferred, from folder names or otherwise. Files of different arrays with the same `barcode_prefix`, `barcode_suffix` and `barcode_pattern` hold the arrays of one library, such as DARLIN's three, and each must share a cell with another, so a file of another library's barcodes is refused. For DNA Typewriter's tapes, `integrations` maps each integration shorter than the recorder's arrays to its number of slots, as the HEK293T line of 2022 has three tapes of four slots and one of two; a tape that no row or column of the import names is refused, as a misspelt name would leave its tape at full length.
+A CARLIN pair and a `darlin` table hold one array without naming it, so `integrations` names it: one for every file, or one per file. It is never inferred, from folder names or otherwise. Files of different arrays with the same `barcode_prefix`, `barcode_suffix` and `barcode_pattern` hold the arrays of one library, such as DARLIN's three, and each must share a cell with another, so a file of another library's barcodes is refused. For DNA Typewriter's tapes, `integrations` maps each integration shorter than the recorder's arrays to its number of slots, as the HEK293T line of 2022 has three tapes of four slots and one of two; a tape that no row or column of the import names is refused, as a misspelled name would leave its tape at full length.
 
 ```python
 # DARLIN's three arrays of one skull library, each a CARLIN pair.

@@ -1,6 +1,6 @@
 """Graph preparation for CyteArc's native Leiden backend.
 
-The Leiden algorithm of Traag, Waltman and van Eck (2019) optimises
+The Leiden algorithm of Traag, Waltman and van Eck (2019) optimizes
 modularity on an undirected weighted graph. CyteArc reads its input as
 follows. Every stored entry ``(i, j, w)`` of the canonical matrix ``W``
 (duplicates summed) is one undirected edge of weight ``w``, so the effective
@@ -315,13 +315,13 @@ def build_leiden_graph(
             (results are identical).
 
     Returns:
-        The symmetric CSR matrix ``A = W + W^T`` with normalised weights and
+        The symmetric CSR matrix ``A = W + W^T`` with normalized weights and
         fixed-point node strengths.
 
     Raises:
         TypeError: If ``graph`` is not sparse or its weights are not real.
         ValueError: If ``graph`` is not square, has too many nodes, or has a
-            negative, NaN or infinite weight, or if the symmetrised total
+            negative, NaN or infinite weight, or if the symmetrized total
             weight overflows.
     """
     source = _validated_stored_values(graph)

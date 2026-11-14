@@ -1,7 +1,7 @@
 """Bulk aggregation of cell groups over stored or normalized matrices.
 
 It also builds the bulk profiles that ``ds.compare.compute_bulk`` returns: the
-cells of each bulk column, labelled by its group, sub-group and
+cells of each bulk column, labeled by its group, sub-group and
 pseudo-replicate, each column's mean or summed feature profile, and the
 number of its cells that detect each feature.
 """
@@ -39,12 +39,12 @@ class BulkProfiles:
     """The bulk profiles of groups of cells, as ``compare.compute_bulk`` returns them.
 
     Each bulk column holds the cells of one group, of one group and
-    sub-group, or of one pseudo-replicate of either, and is labelled by them:
+    sub-group, or of one pseudo-replicate of either, and is labeled by them:
     by its group label alone, or by a MultiIndex of the levels ``group``,
     ``subgroup``, and ``replicate`` (numbered from 1) that the call uses. The
     columns of ``profiles`` and ``detected`` and the rows of ``columns``
     carry the same labels, in the same order. Rows of ``profiles`` and
-    ``detected`` are features, labelled as ``feature_label`` asks.
+    ``detected`` are features, labeled as ``feature_label`` asks.
 
     Attributes:
         profiles: Each bulk column's mean or summed feature profile. A column
@@ -410,7 +410,7 @@ def _index_label(value: Any) -> Any:
 def bulk_column_rows(
     group_values: NDArray[Any] | pd.Categorical,
     group_order: Sequence[Any],
-    labelled: NDArray[np.bool_],
+    labeled: NDArray[np.bool_],
     cell_idx: NDArray[np.int64],
     *,
     secondary: tuple[NDArray[Any] | pd.Categorical, Sequence[Any]] | None,
@@ -423,7 +423,7 @@ def bulk_column_rows(
 
     Every combination of a group with a sub-group, and every pseudo-replicate,
     gets a column, so a column holds no cells when a group has no cells of a
-    sub-group or fewer cells than ``pseudo_reps``. A column is labelled by
+    sub-group or fewer cells than ``pseudo_reps``. A column is labeled by
     its group alone, or by a MultiIndex of the levels ``group``,
     ``subgroup``, and ``replicate`` (numbered from 1) that the call uses, so
     labels never join into a name that two columns could share. Labels may
@@ -445,7 +445,7 @@ def bulk_column_rows(
     for g in group_order:
         if g in null_vals:
             continue
-        in_group = (group_values == g) & labelled
+        in_group = (group_values == g) & labeled
         for sg in subgroups:
             if secondary is None:
                 selected = in_group
@@ -616,7 +616,7 @@ def bulk_profiles(
     remove_empty_columns: bool,
     feature_label: str,
 ) -> BulkProfiles:
-    """Return the bulk profiles, labelled by feature and by bulk column, as a record.
+    """Return the bulk profiles, labeled by feature and by bulk column, as a record.
 
     ``columns`` labels every bulk column and ``n_cells`` gives each one's
     number of cells, in the same order; ``profiles`` and ``detected`` hold

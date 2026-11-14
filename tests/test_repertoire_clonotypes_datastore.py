@@ -208,9 +208,9 @@ def test_within_columns_keep_donors_apart(tmp_path) -> None:
         "d1": {"donor": "d1"},
         "d2": {"donor": "d2"},
     }
-    labelled = loaded.clonotypes.join(loaded.group_keys, on="group")
-    assert labelled.set_index("clonotype").loc[first, "donor"] == "d1"
-    donors = set(labelled["donor"])
+    labeled = loaded.clonotypes.join(loaded.group_keys, on="group")
+    assert labeled.set_index("clonotype").loc[first, "donor"] == "d1"
+    donors = set(labeled["donor"])
     assert donors == {"d1", "d2"}
     status = store.artifacts.inspect(ref)
     assert status.parameters["within"] == ["donor"]
@@ -459,9 +459,9 @@ def test_figure_labels_name_clonotypes_by_their_representatives_junction(
         ref, ["clonotype_4", "clonotype_2", "clonotype_1", "clonotype_3"]
     ).tolist() == ["CASSA 4", "CARW", "CASSA 1", "CASSA 3"]
     assert store._clone_figure_labels(ref, []).tolist() == []
-    with pytest.raises(ValueError, match=r"No clonotype is labelled \['clonotype_9'\]"):
+    with pytest.raises(ValueError, match=r"No clonotype is labeled \['clonotype_9'\]"):
         store._clone_figure_labels(ref, ["clonotype_1", "clonotype_9"])
-    # Imported clones are labelled by their IDs alone.
+    # Imported clones are labeled by their IDs alone.
     path = tmp_path / "clonotypes.csv"
     store.clones.export_clones(ref, path)
     imported = store.clones.import_clones(
@@ -500,13 +500,13 @@ def test_figure_labels_refuse_ids_that_only_resemble_a_clonotype_id(tmp_path) ->
     ]
     with pytest.raises(ValueError) as refused:
         store._clone_figure_labels(ref, ["clonotype_2", *near, "clonotype_2"])
-    assert str(refused.value) == f"No clonotype is labelled {near[:5]}"
+    assert str(refused.value) == f"No clonotype is labeled {near[:5]}"
     # IDs given as numbers are their text, which names no clonotype either.
-    with pytest.raises(ValueError, match=r"No clonotype is labelled \['1'\]"):
+    with pytest.raises(ValueError, match=r"No clonotype is labeled \['1'\]"):
         store._clone_figure_labels(ref, [1])  # type: ignore[list-item]
     # Nor does an ID that ends in a NUL character, which a comparison of
     # fixed-width NumPy text ignores.
-    with pytest.raises(ValueError, match=r"labelled \['clonotype_1\\x00'\]"):
+    with pytest.raises(ValueError, match=r"labeled \['clonotype_1\\x00'\]"):
         store._clone_figure_labels(ref, ["clonotype_1\x00"])
 
 
@@ -526,7 +526,7 @@ def test_figure_labels_name_a_clone_given_many_times_by_its_long_junction(
     assert store._clone_figure_labels(ref, [clonotype] * 20).tolist() == [junction] * 20
     monkeypatch.setattr(store, "memoryBytes", 1_000)
     with pytest.raises(
-        MemoryError, match="^Labelling clonotypes by their junctions holds about"
+        MemoryError, match="^Labeling clonotypes by their junctions holds about"
     ):
         store._clone_figure_labels(ref, [clonotype])
 
@@ -561,8 +561,8 @@ def test_figure_labels_name_the_clonotypes_by_their_junctions(tmp_path) -> None:
     labels = store._clone_figure_labels(ref, ["clonotype_1"])
     assert labels.tolist() == ["CASSA"]
     # The junctions of the representatives, read on the caller's ledger.
-    ledger = MemoryLedger(None, "Labelling clonotypes by their junctions")
-    ledger.hold("the clonotypes labelled", 400)
+    ledger = MemoryLedger(None, "Labeling clonotypes by their junctions")
+    ledger.hold("the clonotypes labeled", 400)
     junctions = store._representative_junctions(ref, np.asarray([0]), ledger=ledger)
     assert junctions.tolist() == ["CASSA"]
 
@@ -685,10 +685,10 @@ def test_the_tracking_plot_labels_clonotypes_by_their_junctions(tmp_path) -> Non
         ]
     finally:
         result.close()
-    unlabelled = _NamesOnly(store)
-    del unlabelled._clone_figure_labels
+    unlabeled = _NamesOnly(store)
+    del unlabeled._clone_figure_labels
     with pytest.raises(TypeError, match="does not provide the figure labels"):
-        plotting.clone_tracking(unlabelled, tracking, show=False)
+        plotting.clone_tracking(unlabeled, tracking, show=False)
 
 
 def test_the_tracking_plot_numbers_clonotypes_that_share_a_junction(
@@ -1092,7 +1092,7 @@ def test_clonotypes_across_receptor_types_save_each_cells_clonotype_within_its_t
     assert "codes_within_type" not in within
     assert across["codes"][:].tolist() == [0, 0, 0, 1, 1, 0, 0, 0]
     # Loaded as clones, the clonotypes across types are those that they
-    # define, beside each cell's clonotype within its type, labelled by its
+    # define, beside each cell's clonotype within its type, labeled by its
     # clonotype and type, and by its clonotype alone where that holds no
     # other.
     cells = store.clones.load_clones(together).cells
@@ -1261,7 +1261,7 @@ def test_the_fates_plot_draws_a_bar_for_each_clonotype_within_a_type(
         ["clonotype_1 (ambiguous)", "CASSA 4 (ambiguous)", "y, ambiguous", 0, 1],
         ["clonotype_2", "CASSB", "y, TCR", 1, 1],
     ]
-    # Each bar is labelled as the clonotypes within types label its cells,
+    # Each bar is labeled as the clonotypes within types label its cells,
     # by its own representative's junction, with the type of its label.
     assert table["label"].tolist() == _within_type_labels(
         store, spanning.together, spanning.apart, table["clone"].tolist()
@@ -1303,9 +1303,9 @@ def test_the_fates_plot_draws_a_bar_for_each_clonotype_within_a_type(
         "CASSB",
     ]
     for unknown in (["clonotype_3 (TCR)"], ["clonotype_1 (XYZ 9)"], ["clonotype_1"]):
-        with pytest.raises(ValueError, match="No clonotype is labelled"):
+        with pytest.raises(ValueError, match="No clonotype is labeled"):
             names.labels(unknown)
-    with pytest.raises(ValueError, match="No clonotype is labelled"):
+    with pytest.raises(ValueError, match="No clonotype is labeled"):
         clone_names(store, spanning.apart).labels(["clonotype_1 (TCR)"])
 
 
@@ -1408,7 +1408,7 @@ def test_the_largest_clonotypes_and_their_tracks_draw_each_clonotype_within_a_ty
         "clonotype_2",
         "clonotype_1 (ambiguous)",
     )
-    with pytest.raises(ValueError, match="No clone is labelled"):
+    with pytest.raises(ValueError, match="No clone is labeled"):
         store.clones.track(spanning.together, labels=["clonotype_3"])
 
 
@@ -1511,7 +1511,7 @@ def test_doublets_that_share_a_b_cell_clone_leave_t_cell_clonotypes_apart(
     for clonotypes in (apart, together):
         usage = store.repertoire.gene_usage(clonotypes, count="clonotypes").table
         assert usage.loc[usage["locus"] == "TRB", "n_clonotypes"].tolist() == [3]
-    # Each part is labelled by its own representative's junction, as within
+    # Each part is labeled by its own representative's junction, as within
     # types: B's T cells by CASSB and the B cell by CARW, where clonotype_1 is
     # named by CASSA; parts that share CASSA take their numbers within types.
     abundance = store.plots.clone_abundance(together, show=False)
@@ -1604,23 +1604,23 @@ def test_each_clonotype_within_a_type_is_named_by_its_own_representative(
     assert whole.loc[0, "VDJ_1_junction_aa"] in junctions
 
 
-def test_labelling_clonotypes_across_types_suggests_fewer_only_where_fewer_fit(
+def test_labeling_clonotypes_across_types_suggests_fewer_only_where_fewer_fit(
     spanning, monkeypatch
 ) -> None:
     store, together = spanning.store, spanning.together
     # 1 kB holds the one clonotype given but not every cell's clonotype within
-    # its type, which labelling clonotypes across types reads whatever the
+    # its type, which labeling clonotypes across types reads whatever the
     # clonotypes given: the refusal asks for a larger budget alone.
     monkeypatch.setattr(store, "memoryBytes", 1_000)
     with pytest.raises(MemoryError) as refused:
         store._clone_figure_labels(together, ["clonotype_1 (TCR)"])
-    assert str(refused.value).startswith("Labelling clonotypes by their junctions")
+    assert str(refused.value).startswith("Labeling clonotypes by their junctions")
     assert "label fewer" not in str(refused.value), refused.value
     # The clonotypes given are held throughout, so where they do not fit,
     # fewer would.
     monkeypatch.setattr(store, "memoryBytes", 1)
     with pytest.raises(
-        MemoryError, match=r"the 1 clonotypes labelled.*, or label fewer clonotypes\.$"
+        MemoryError, match=r"the 1 clonotypes labeled.*, or label fewer clonotypes\.$"
     ):
         store._clone_figure_labels(together, ["clonotype_1 (TCR)"])
 
@@ -1906,10 +1906,10 @@ def test_within_labels_are_an_array_that_opening_the_artifact_never_reads(
     assert loaded.group_keys.index.tolist() == ["d1, s2", "d1, s10", "d2, s2"]
     first = loaded.cells.loc["cell0", "clonotype"]
     assert _members(loaded)[first] == ["cell0", "cell4"]
-    labelled = loaded.clonotypes.join(loaded.group_keys, on="group")
-    row = labelled.set_index("clonotype").loc[first]
+    labeled = loaded.clonotypes.join(loaded.group_keys, on="group")
+    row = labeled.set_index("clonotype").loc[first]
     assert row[["group", "donor", "site"]].tolist() == ["d1, s10", "d1", "s10"]
-    cell1 = labelled.set_index("clonotype").loc[loaded.cells.loc["cell1", "clonotype"]]
+    cell1 = labeled.set_index("clonotype").loc[loaded.cells.loc["cell1", "clonotype"]]
     assert cell1[["group", "donor", "site"]].tolist() == ["d2, s2", "d2", "s2"]
     # Clonotypes without within columns store no labels.
     assert "within_labels" not in artifact_group(

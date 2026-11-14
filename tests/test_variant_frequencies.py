@@ -1,4 +1,4 @@
-"""Allele frequencies, masked cosine neighbourhoods, the shared-neighbour graph and
+"""Allele frequencies, masked cosine neighborhoods, the shared-neighbor graph and
 the clones they give, against values derived by hand."""
 
 import numpy as np
@@ -84,7 +84,7 @@ def _cosine(left: np.ndarray, right: np.ndarray) -> float:
     return float(a @ b / norm) if norm > 0 else 0.0
 
 
-def test_neighbourhoods_rank_cells_by_cosine_over_shared_coverage() -> None:
+def test_neighborhoods_rank_cells_by_cosine_over_shared_coverage() -> None:
     values = np.sqrt(
         np.asarray(
             [
@@ -114,8 +114,8 @@ def test_neighbourhoods_rank_cells_by_cosine_over_shared_coverage() -> None:
     assert neighborhoods[0, 1] == 1
 
 
-def test_neighbourhoods_break_ties_by_position_whatever_the_blocks() -> None:
-    # Six identical cells: each takes the lowest positions as neighbours.
+def test_neighborhoods_break_ties_by_position_whatever_the_blocks() -> None:
+    # Six identical cells: each takes the lowest positions as neighbors.
     values = np.full((6, 2), 0.5)
     for block_rows in (1, 4, 6):
         neighborhoods = cosine_neighborhoods(
@@ -131,7 +131,7 @@ def test_neighbourhoods_break_ties_by_position_whatever_the_blocks() -> None:
         ]
 
 
-def test_neighbourhoods_of_small_inputs_and_bad_arguments() -> None:
+def test_neighborhoods_of_small_inputs_and_bad_arguments() -> None:
     assert cosine_neighborhoods(
         np.ones((1, 2)), n_neighbors=10, block_rows=5
     ).tolist() == [[0] + [-1] * 9]
@@ -144,7 +144,7 @@ def test_neighbourhoods_of_small_inputs_and_bad_arguments() -> None:
 
 
 def _jaccard_by_sets(neighborhoods: np.ndarray) -> dict[tuple[int, int], float]:
-    """The Jaccard index of every pair of cells that share a neighbour."""
+    """The Jaccard index of every pair of cells that share a neighbor."""
     sets = [set(row[row >= 0].tolist()) for row in neighborhoods]
     pairs = {}
     for first in range(len(sets)):
@@ -155,7 +155,7 @@ def _jaccard_by_sets(neighborhoods: np.ndarray) -> dict[tuple[int, int], float]:
     return pairs
 
 
-def test_shared_neighbour_graph_weighs_the_jaccard_index_of_neighbourhoods() -> None:
+def test_shared_neighbor_graph_weighs_the_jaccard_index_of_neighborhoods() -> None:
     rng = np.random.default_rng(3)
     neighborhoods = np.stack(
         [
@@ -168,7 +168,7 @@ def test_shared_neighbour_graph_weighs_the_jaccard_index_of_neighbourhoods() -> 
             for cell in range(30)
         ]
     )
-    neighborhoods[7, 3:] = -1  # a cell with two neighbours
+    neighborhoods[7, 3:] = -1  # a cell with two neighbors
     graph = shared_neighbor_graph(neighborhoods, prune=0.0)
     expected = _jaccard_by_sets(neighborhoods)
     found = {
@@ -197,7 +197,7 @@ def test_shared_neighbour_graph_weighs_the_jaccard_index_of_neighbourhoods() -> 
     assert len(exact.data) == len(expected)
     with pytest.raises(MemoryError, match="holds more than the 99 joins"):
         shared_neighbor_graph(neighborhoods, prune=0.0, max_joins=99, max_entries=40)
-    with pytest.raises(MemoryError, match="may share neighbours with"):
+    with pytest.raises(MemoryError, match="may share neighbors with"):
         shared_neighbor_graph(neighborhoods, max_entries=3)
 
 
@@ -226,7 +226,7 @@ def test_a_jaccard_index_of_one_fifteenth_is_kept_and_less_is_dropped() -> None:
 
 
 def test_cells_that_tie_join_every_other_such_cell_as_seurat_joins_them() -> None:
-    # 200 identical cells take the lowest positions as neighbours, so every
+    # 200 identical cells take the lowest positions as neighbors, so every
     # pair shares them and Seurat's graph joins every pair: 9/11 between two
     # cells beyond the first ten, which share nine of eleven cells.
     values = np.full((200, 3), 0.5)
@@ -254,7 +254,7 @@ def test_cells_that_tie_join_every_other_such_cell_as_seurat_joins_them() -> Non
     assert "holds more than" in str(raised.value)
 
 
-def test_shared_neighbour_graph_refuses_malformed_neighbourhoods() -> None:
+def test_shared_neighbor_graph_refuses_malformed_neighborhoods() -> None:
     with pytest.raises(ValueError, match="integer matrix"):
         shared_neighbor_graph(np.ones((2, 2), dtype=float))
     with pytest.raises(ValueError, match="outside 0"):
@@ -430,7 +430,7 @@ def test_frequency_clones_refuse_a_partition_beyond_the_budget(monkeypatch) -> N
     # the budget before Leiden runs, here an estimate far beyond it.
     monkeypatch.setattr(leiden, "native_leiden_peak_bytes", lambda *_args: 10**9)
     with pytest.raises(
-        MemoryError, match="Partitioning the shared-neighbour graph of 2 cells"
+        MemoryError, match="Partitioning the shared-neighbor graph of 2 cells"
     ):
         frequency_clones(
             np.asarray([[0.5, 0.0], [0.6, 0.0], [0.0, 0.7]]),
@@ -456,7 +456,7 @@ def test_frequency_clones_refuse_a_budget_below_the_coverage_masks() -> None:
         )
 
 
-def test_shared_neighbour_graph_is_symmetric_once_mirrored() -> None:
+def test_shared_neighbor_graph_is_symmetric_once_mirrored() -> None:
     neighborhoods = np.asarray([[0, 1, 2], [1, 0, 2], [2, 1, 0], [3, 2, -1]])
     graph = shared_neighbor_graph(neighborhoods, prune=0.0)
     assert np.all(graph.row < graph.col)

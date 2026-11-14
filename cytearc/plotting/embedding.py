@@ -993,20 +993,20 @@ def _draw_density_overlay(
         max_hotspots=overlay.max_hotspots,
     )
     surface_max = float(np.nanmax(surface))
-    xcentres = np.linspace(
+    xcenters = np.linspace(
         padded_xlim[0],
         padded_xlim[1],
         grid_pixels,
         endpoint=False,
     )
-    ycentres = np.linspace(
+    ycenters = np.linspace(
         padded_ylim[0],
         padded_ylim[1],
         grid_pixels,
         endpoint=False,
     )
-    xcentres += (padded_xlim[1] - padded_xlim[0]) / (2 * grid_pixels)
-    ycentres += (padded_ylim[1] - padded_ylim[0]) / (2 * grid_pixels)
+    xcenters += (padded_xlim[1] - padded_xlim[0]) / (2 * grid_pixels)
+    ycenters += (padded_ylim[1] - padded_ylim[0]) / (2 * grid_pixels)
     color = overlay.color or ("#f0f0f0" if theme == "dark" else "#202020")
     contour_surface = np.ma.masked_invalid(surface)
     if overlay.kind == "filled":
@@ -1014,8 +1014,8 @@ def _draw_density_overlay(
         fill_levels = np.unique(np.append(levels, upper))
         if len(fill_levels) >= 2:
             ax.contourf(
-                xcentres,
-                ycentres,
+                xcenters,
+                ycenters,
                 contour_surface,
                 levels=fill_levels,
                 cmap=overlay.cmap,
@@ -1026,8 +1026,8 @@ def _draw_density_overlay(
             )
     else:
         contours = ax.contour(
-            xcentres,
-            ycentres,
+            xcenters,
+            ycenters,
             contour_surface,
             levels=levels,
             cmap=overlay.cmap,
@@ -1208,7 +1208,7 @@ def _add_on_data_labels(
     panel's layout is final, overlapping labels move apart by at most about
     one label height and stay nearer their own median than any other
     cluster's (see :func:`~cytearc.plotting._labels.separate_labels`).
-    Returns the categories left unlabelled beyond ``max_labels``.
+    Returns the categories left unlabeled beyond ``max_labels``.
     """
     from matplotlib import patheffects
 
@@ -1936,7 +1936,7 @@ def embedding(
         )
         for color_index, scale in categorical_maps.items()
     }
-    # Whether each categorical colour draws cells without a value, whatever
+    # Whether each categorical color draws cells without a value, whatever
     # its legend_loc: its side legend and a composite's shared legend list
     # them last.
     drawn_missing = {
@@ -2024,7 +2024,7 @@ def embedding(
     omitted_labels: dict[str, list[Any]] = {}
     omitted_legend_entries: dict[str, list[str]] = {}
     sized_artists: list[tuple[str, Any]] = []
-    labelled_panels = False
+    labeled_panels = False
     legend_blocks: list[tuple[str | None, list[Any], int]] = []
 
     with theme_context(theme):
@@ -2136,7 +2136,7 @@ def embedding(
                             theme=theme,
                             max_labels=max_on_data_labels,
                         )
-                        labelled_panels = True
+                        labeled_panels = True
                         if omitted:
                             omitted_labels[str(panel_key)] = omitted
                     elif panel_legend == "right" and fac_i == n_facets - 1:
@@ -2302,7 +2302,7 @@ def embedding(
                 if not show_titles:
                     title = None
                 elif facet_by is None:
-                    # A labelled colorbar already names the panel.
+                    # A labeled colorbar already names the panel.
                     title = None if (not is_cat and add_cb) else label
                 else:
                     facet_title = _facet_title(facet_by, fac, facet_missing_label)
@@ -2335,7 +2335,7 @@ def embedding(
                 rows=min(rows for _, _, rows in legend_blocks),
             )
         apply_figure_chrome(fig, theme)
-        if sized_artists or labelled_panels:
+        if sized_artists or labeled_panels:
             # Constrained layout settles over two passes before sizes and
             # labels are final. Neither pass renders the points.
             fig.draw_without_rendering()

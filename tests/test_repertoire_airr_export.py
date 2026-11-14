@@ -1796,10 +1796,10 @@ def test_fields_may_name_the_columns_that_are_always_written(tmp_path) -> None:
     plain = store.repertoire.export_airr(
         receptors, tmp_path / "cells.tsv", fields=["cell_id", "v_call"]
     )
-    labelled = store.repertoire.export_airr(
+    labeled = store.repertoire.export_airr(
         clonotypes, tmp_path / "clones.tsv", fields=["clone_id", "cell_id"]
     )
-    assert plain.rows == labelled.rows == len(CLONAL_ROWS)
+    assert plain.rows == labeled.rows == len(CLONAL_ROWS)
     columns = _read(tmp_path / "cells.tsv").columns.tolist()
     assert columns.count("cell_id") == 1 and "clone_id" not in columns
     columns = _read(tmp_path / "clones.tsv").columns.tolist()

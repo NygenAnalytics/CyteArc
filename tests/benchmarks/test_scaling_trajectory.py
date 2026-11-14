@@ -33,11 +33,11 @@ def _lineage_inputs(n_cells: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     rng = np.random.default_rng(inputs.SEED)
     ordering = rng.random(n_cells)
-    favoured = rng.integers(0, N_LINEAGES, size=n_cells)
+    favored = rng.integers(0, N_LINEAGES, size=n_cells)
     concentration = np.full((n_cells, N_LINEAGES), 1.0)
-    concentration[np.arange(n_cells), favoured] += 20.0 * ordering
+    concentration[np.arange(n_cells), favored] += 20.0 * ordering
     weights = np.vstack([rng.dirichlet(row) for row in concentration])
-    counts, _labels = inputs.labelled_counts(n_cells)
+    counts, _labels = inputs.labeled_counts(n_cells)
     totals = np.maximum(counts.sum(axis=1, dtype=np.float64), 1.0)
     values = np.log1p(
         inputs.SIZE_FACTOR * counts[:, :N_FEATURES] / totals[:, np.newaxis]
@@ -119,7 +119,7 @@ def test_lineage_equal_mass_profiles(bench) -> None:
 
 def _curve_inputs(n_cells: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     ordering, weights, _values = _lineage_inputs(n_cells)
-    coordinates, _labels = inputs.labelled_coordinates(n_cells)
+    coordinates, _labels = inputs.labeled_coordinates(n_cells)
     return ordering, weights, np.asarray(coordinates, dtype=np.float64)
 
 
@@ -196,7 +196,7 @@ def test_lineage_cluster_tree(bench) -> None:
     )
 
     def make(n_cells: int):
-        coordinates, labels = inputs.labelled_coordinates(n_cells)
+        coordinates, labels = inputs.labeled_coordinates(n_cells)
         values = np.asarray(coordinates, dtype=np.float64)
         blocks = [
             (start, values[start : start + 4_096]) for start in range(0, n_cells, 4_096)
@@ -215,7 +215,7 @@ def test_lineage_cluster_tree(bench) -> None:
         return run
 
     def check(n_cells: int, result) -> None:
-        coordinates, labels = inputs.labelled_coordinates(n_cells)
+        coordinates, labels = inputs.labeled_coordinates(n_cells)
         counts, means, tree = result
         np.testing.assert_array_equal(counts, np.bincount(labels))
         for cluster in range(inputs.N_GROUPS):

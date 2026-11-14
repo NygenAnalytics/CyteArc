@@ -1,9 +1,9 @@
 """Mixture-of-experts ridge correction of Harmony2.
 
 Each cluster ``k`` is an expert: a ridge regression of the ORIGINAL coordinates on
-an unpenalised intercept and one indicator per batch level, with every cell
+an unpenalized intercept and one indicator per batch level, with every cell
 weighted by its assignment ``R_ik``. For the active levels ``A_k`` of cluster
-``k`` it minimises
+``k`` it minimizes
 
     sum_i R_ik ||Z_i - w_0 - sum_{g in A_k} [i in g] w_g||^2 + sum_{g in A_k} lambda_kg ||w_g||^2.
 
@@ -353,7 +353,7 @@ def _eliminate_cluster(
     combination_share *= weights
 
     # A22 over the intercept and the other columns' levels; Fortran order lets
-    # the Cholesky factorisation work in place.
+    # the Cholesky factorization work in place.
     schur = np.zeros((size, size), dtype=np.float64, order="F")
     diagonal_index = np.arange(1, size)
     schur[diagonal_index, diagonal_index] = mass[others] + cluster_penalties[others]

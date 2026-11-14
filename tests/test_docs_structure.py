@@ -59,8 +59,8 @@ def _anchors(path: Path) -> set[str]:
     )
     return labels | {
         re.sub(r"[^\w\s-]", "", heading).strip().lower().replace(" ", "-")
-        for labelled, heading in headings
-        if not labelled
+        for labeled, heading in headings
+        if not labeled
     }
 
 
@@ -397,7 +397,7 @@ def test_every_linked_doi_has_a_local_citation() -> None:
 
 
 def test_the_notices_open_and_close_each_code_fence_on_a_line_of_its_own() -> None:
-    # A licence whose last line lacks a line break once swallowed the fence
+    # A license whose last line lacks a line break once swallowed the fence
     # that closes it, and the notices after it rendered as its code.
     notices = (_REPOSITORY_ROOT / "THIRD_PARTY_NOTICES.md").read_text()
     lines = notices.splitlines()
@@ -538,22 +538,47 @@ def test_links_within_a_built_page_name_a_label() -> None:
     # MyST warns of a link to a heading's words on its own page, and a label
     # names the heading whatever its words become.
     excluded = _project()["exclude"]
-    unlabelled = []
+    unlabeled = []
     for path in _pages():
         page = path.relative_to(_DOCS_SOURCE).as_posix()
         if any(fnmatch(page, rule) for rule in excluded):
             continue
         text = _prose(path)
         labels = set(re.findall(r"^\(([^)\s]+)\)=\s*$", text, re.MULTILINE))
-        unlabelled += [
+        unlabeled += [
             (page, anchor)
             for anchor in re.findall(r"\]\(#([^)\s]+)\)", text)
             if anchor not in labels
         ]
-    assert not unlabelled
+    assert not unlabeled
 
 
-def test_labels_of_built_pages_stay_apart_once_normalised() -> None:
+def test_every_ref_names_a_label_of_the_documentation() -> None:
+    # A {ref} to a label that no page defines renders as plain text, which
+    # the build only warns of.
+    labels = {
+        label
+        for path in _pages()
+        for label in re.findall(r"^\(([^)\s]+)\)=\s*$", _source_text(path), re.M)
+    }
+    refs = [
+        (path.relative_to(_DOCS_SOURCE).as_posix(), target)
+        for path in _pages()
+        for target in re.findall(
+            r"\{ref\}`(?:[^`<]*<)?([^`<>]+)>?`", _source_text(path)
+        )
+    ]
+    assert refs
+    assert [(page, target) for page, target in refs if target not in labels] == []
+
+
+def test_the_neighbor_search_method_is_labeled_in_us_spelling() -> None:
+    anchors = _anchors(_DOCS_SOURCE / "reference" / "methods.md")
+    assert "neighbor_search" in anchors
+    assert "neighbour_search" not in anchors
+
+
+def test_labels_of_built_pages_stay_apart_once_normalized() -> None:
     # MyST writes a label's underscores as hyphens, so (a_b)= beside (a-b)= is
     # one label twice, which the build warns of.
     excluded = _project()["exclude"]

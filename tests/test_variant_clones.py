@@ -66,8 +66,8 @@ def test_clones_recover_the_truths_clones(store) -> None:
     counts, selection = _inputs(store)
     clones = store.variants.frequency_clones(selection)
     called = _called(store, clones)
-    labelled = TRUTH.clones.clones >= 0
-    assert adjusted_rand_score(TRUTH.clones.clones[labelled], called[labelled]) > 0.9
+    labeled = TRUTH.clones.clones >= 0
+    assert adjusted_rand_score(TRUTH.clones.clones[labeled], called[labeled]) > 0.9
     # Each true clone is held mostly by one called clone of its own.
     dominant = {}
     for clone in range(TRUTH.clones.n_clones):
@@ -140,7 +140,7 @@ def test_cells_without_evidence_get_no_clone_and_are_counted(store) -> None:
     assert diagnostics["cellsWithoutAlternative"] == len(covered - shown)
     assert diagnostics["cellsWithoutCoverage"] != diagnostics["cellsWithoutAlternative"]
     # Every cell that shows an informative variant shares it with a clone,
-    # so none lacks neighbours, and a cell without a clone shows none.
+    # so none lacks neighbors, and a cell without a clone shows none.
     assert diagnostics["cellsWithoutNeighbors"] == 0
     for cell, label in zip(TRUTH.clones.cell_ids, called, strict=True):
         if label == "":
@@ -157,25 +157,25 @@ def test_within_keeps_groups_apart_and_numbers_clones_over_every_group(store) ->
     # Each clone holds the cells of one sample.
     for label in set(labels):
         assert len({samples[cell] for cell in labels.index[labels == label]}) == 1
-    # One ranking over both samples, largest first, labelled clone_1 and on.
+    # One ranking over both samples, largest first, labeled clone_1 and on.
     sizes = labels.value_counts()
     ranked = [f"clone_{rank}" for rank in range(1, len(sizes) + 1)]
     assert loaded.clones["clone"].tolist() == ranked
     assert [int(sizes[label]) for label in ranked] == sorted(sizes, reverse=True)
     # The truth's clones span both samples, so each splits in two.
     called = _called(store, clones)
-    labelled = TRUTH.clones.clones >= 0
+    labeled = TRUTH.clones.clones >= 0
     split = np.asarray(
         [
             f"{sample}:{clone}"
             for sample, clone in zip(
-                TRUTH.clones.samples[labelled],
-                TRUTH.clones.clones[labelled],
+                TRUTH.clones.samples[labeled],
+                TRUTH.clones.clones[labeled],
                 strict=True,
             )
         ]
     )
-    assert adjusted_rand_score(split, called[labelled]) > 0.8
+    assert adjusted_rand_score(split, called[labeled]) > 0.8
 
 
 def test_two_within_columns_keep_every_combination_apart(store) -> None:
@@ -211,7 +211,7 @@ def test_two_within_columns_keep_every_combination_apart(store) -> None:
     )
 
 
-def test_groups_smaller_than_a_neighbourhood_are_warned_of(store) -> None:
+def test_groups_smaller_than_a_neighborhood_are_warned_of(store) -> None:
     from cytearc.utils.logging import collect_warnings
 
     _counts, selection = _inputs(store)
@@ -221,8 +221,8 @@ def test_groups_smaller_than_a_neighbourhood_are_warned_of(store) -> None:
     )
     expected = (
         "Of the 2 within groups, 1 holds fewer scored cells than n_neighbors=10, "
-        "so no neighbourhood there is full: each cell takes every cell of its "
-        "group that it resembles as a neighbour, and clones that share a "
+        "so no neighborhood there is full: each cell takes every cell of its "
+        "group that it resembles as a neighbor, and clones that share a "
         "variant join. Pass a smaller n_neighbors."
     )
     with collect_warnings() as messages:
@@ -232,7 +232,7 @@ def test_groups_smaller_than_a_neighbourhood_are_warned_of(store) -> None:
     with collect_warnings() as messages:
         assert store.variants.frequency_clones(selection, within="tiny") == clones
     assert messages == [expected]
-    # Neighbourhoods of four fit every group, and the samples of over 100
+    # Neighborhoods of four fit every group, and the samples of over 100
     # cells hold ten.
     for options in ({"within": "tiny", "n_neighbors": 4}, {"within": "sample"}, {}):
         with collect_warnings() as messages:
@@ -243,9 +243,9 @@ def test_groups_smaller_than_a_neighbourhood_are_warned_of(store) -> None:
         store.variants.frequency_clones(selection, n_neighbors=TRUTH.n_cells + 1)
     assert messages == [
         f"The {TRUTH.n_cells} scored cells are fewer than "
-        f"n_neighbors={TRUTH.n_cells + 1}, so no neighbourhood there is full: "
+        f"n_neighbors={TRUTH.n_cells + 1}, so no neighborhood there is full: "
         "each cell takes every cell of its group that it resembles as a "
-        "neighbour, and clones that share a variant join. Pass a smaller "
+        "neighbor, and clones that share a variant join. Pass a smaller "
         "n_neighbors."
     ]
     # Statistics of 120 of the counts' cells score only those, which are
@@ -261,8 +261,8 @@ def test_groups_smaller_than_a_neighbourhood_are_warned_of(store) -> None:
         store.variants.frequency_clones(scored, n_neighbors=121)
     assert messages == [
         "The 120 scored cells are fewer than n_neighbors=121, so no "
-        "neighbourhood there is full: each cell takes every cell of its group "
-        "that it resembles as a neighbour, and clones that share a variant "
+        "neighborhood there is full: each cell takes every cell of its group "
+        "that it resembles as a neighbor, and clones that share a variant "
         "join. Pass a smaller n_neighbors."
     ]
 
@@ -310,12 +310,12 @@ def test_scored_cells_without_a_label_are_refused(store) -> None:
     ):
         store.variants.frequency_clones(selection, within="donor")
     # A cell outside the selection's statistics needs no label: the
-    # statistics of the labelled cells alone call clones within the donors.
-    store.cells.insert("labelled", ~pd.isna(groups))
-    labelled = store.variants.informative(
-        counts, cell_selection=store.snapshot_cell_selection("labelled"), preset="atac"
+    # statistics of the labeled cells alone call clones within the donors.
+    store.cells.insert("labeled", ~pd.isna(groups))
+    labeled = store.variants.informative(
+        counts, cell_selection=store.snapshot_cell_selection("labeled"), preset="atac"
     )
-    called = _called(store, store.variants.frequency_clones(labelled, within="donor"))
+    called = _called(store, store.variants.frequency_clones(labeled, within="donor"))
     assert (called[:10] == "").all()
     assert (called[10:] != "").any()
 
@@ -369,8 +369,8 @@ def test_clones_of_scattered_cells_do_not_depend_on_the_budget(store) -> None:
     )
     whole = _called(store, store.variants.frequency_clones(selection))
     assert (whole[~in_d2] == "").all()
-    labelled = in_d2 & (TRUTH.clones.clones >= 0)
-    assert adjusted_rand_score(TRUTH.clones.clones[labelled], whole[labelled]) > 0.9
+    labeled = in_d2 & (TRUTH.clones.clones >= 0)
+    assert adjusted_rand_score(TRUTH.clones.clones[labeled], whole[labeled]) > 0.9
     # Bands of 5,000 rows, a few cells each, with cells of d4 between the
     # chosen ones; the rest of the budget holds the graph.
     group = store.artifacts.load(counts)

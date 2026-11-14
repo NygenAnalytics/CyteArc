@@ -191,7 +191,7 @@ def test_statistics_agree_with_signac_1_17_1(name, tmp_path) -> None:
         rtol=1e-9,
     )
     # Where every cell is covered, the variance is Signac's without its
-    # stabilisation; elsewhere Signac counts uncovered cells as 0.
+    # stabilization; elsewhere Signac counts uncovered cells as 0.
     covered = shown["n_cells_covered"] == len(golden["cells"])
     np.testing.assert_allclose(
         shown.loc[covered, "variance"],
@@ -216,7 +216,7 @@ def test_statistics_agree_with_signac_1_17_1(name, tmp_path) -> None:
 
 def test_clones_agree_with_signac_find_clonotypes(tmp_path) -> None:
     golden = SIGNAC["inputs"]["mito_clone_truth"]
-    # Seurat counts each cell among its own ten neighbours, as CyteArc does;
+    # Seurat counts each cell among its own ten neighbors, as CyteArc does;
     # annoy returns a tied copy instead of the cell for a few of them.
     assert golden["nn_neighbors"] == [10] and golden["nn_self"] >= 0.9 * 230
     truth = mito_clone_truth()
@@ -234,12 +234,12 @@ def test_clones_agree_with_signac_find_clonotypes(tmp_path) -> None:
     assigned = called.dropna()
     signac = pd.Series(golden["clones"])
     assert adjusted_rand_score(signac.loc[assigned.index], assigned.astype(str)) > 0.75
-    labelled = pd.Series(truth.clones.clones, index=truth.clones.cell_ids)
-    labelled = labelled[labelled >= 0]
-    # Both over the labelled cells that CyteArc gives a clone.
-    common = labelled.index.intersection(assigned.index)
-    ours = adjusted_rand_score(labelled.loc[common], assigned.loc[common].astype(str))
-    theirs = adjusted_rand_score(labelled.loc[common], signac.loc[common])
+    labeled = pd.Series(truth.clones.clones, index=truth.clones.cell_ids)
+    labeled = labeled[labeled >= 0]
+    # Both over the labeled cells that CyteArc gives a clone.
+    common = labeled.index.intersection(assigned.index)
+    ours = adjusted_rand_score(labeled.loc[common], assigned.loc[common].astype(str))
+    theirs = adjusted_rand_score(labeled.loc[common], signac.loc[common])
     assert ours > 0.95 and ours > theirs
 
 

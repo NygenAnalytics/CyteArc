@@ -1,4 +1,4 @@
-"""The digests that identify the files an import reads, and the one SplitMix64 finaliser.
+"""The digests that identify the files an import reads, and the one SplitMix64 finalizer.
 
 Importers identify a file by the SHA-256 of its bytes and a folder, such as a
 Zarr store, by the paths and bytes of its files. A saved import is reused only
@@ -183,9 +183,9 @@ def test_a_file_whose_size_reads_as_zero_is_read_to_its_end() -> None:
     assert data and file_sha256(path) == hashlib.sha256(data).hexdigest()
 
 
-def test_splitmix64s_multipliers_live_only_in_the_one_finaliser() -> None:
+def test_splitmix64s_multipliers_live_only_in_the_one_finalizer() -> None:
     # Every module of the package and of the profiling tools mixes with
-    # utils.digest's mix64 or mix64_array; another copy of the finaliser
+    # utils.digest's mix64 or mix64_array; another copy of the finalizer
     # would be another place for a seeded result to change.
     multipliers = re.compile(
         r"0x(?:BF58476D1CE4E5B9|94D049BB133111EB)|13787848793156543929"

@@ -172,8 +172,8 @@ def test_group_columns_may_take_the_names_of_the_results_columns(copied) -> None
         label = f"{name}_key" if name in found.indices.columns else name
         assert joined[label].tolist() == ["d2", "d4"]
     # A clones artifact as labels has the key column "clones".
-    labelled = store.clones.diversity(clones, groups=clones)
-    assert labelled.group_keys.columns.tolist() == ["clones"]
+    labeled = store.clones.diversity(clones, groups=clones)
+    assert labeled.group_keys.columns.tolist() == ["clones"]
 
 
 def test_cells_without_a_label_are_left_out(copied) -> None:

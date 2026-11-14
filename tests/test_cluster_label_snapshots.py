@@ -14,11 +14,11 @@ from cytearc.storage.arrays import MISSING_MASK_PREFIX
 from cytearc.storage.artifacts import ArtifactRef, artifact_group, fingerprint_array
 from cytearc.storage.errors import ArtifactResolutionError
 from cytearc.storage.types import as_zarr_group
-from tests.fixtures_datastore import build_neighbourhood_graph
+from tests.fixtures_datastore import build_neighborhood_graph
 
 N_CELLS = 120
 N_GENES = 30
-UNLABELLED = 6
+UNLABELED = 6
 CELL_TYPES = np.array(["T", "B", "NK"])[np.arange(N_CELLS) % 3]
 DISEASE = np.array(["normal", "covid"])[(np.arange(N_CELLS) // 3) % 2]
 LEIDEN = np.arange(N_CELLS) % 3
@@ -30,7 +30,7 @@ COVID_GENES = {f"G{index}" for index in range(20, 25)}
 def _write_h5ad(path: Path) -> None:
     """Write cell types with planted markers and covid genes within each type.
 
-    The first ``UNLABELLED`` cells have no ``leiden`` label and the
+    The first ``UNLABELED`` cells have no ``leiden`` label and the
     ``NO_DONOR`` cells have no ``donor``. Both are nullable integers, which
     the import stores as 0 under a linked missing mask. ``leiden_float``
     holds the ``leiden`` ids as float64 with NaN, as pandas stores integer
@@ -45,9 +45,9 @@ def _write_h5ad(path: Path) -> None:
         counts[CELL_TYPES == cell_type, offset * 5 : offset * 5 + 5] += 8
     counts[DISEASE == "covid", 20:25] += 6
     leiden = pd.array(LEIDEN, dtype="Int64")
-    leiden[:UNLABELLED] = pd.NA
+    leiden[:UNLABELED] = pd.NA
     leiden_float = LEIDEN.astype(np.float64)
-    leiden_float[:UNLABELLED] = np.nan
+    leiden_float[:UNLABELED] = np.nan
     donor = pd.array(DONOR, dtype="Int64")
     donor[NO_DONOR] = pd.NA
     obs = pd.DataFrame(
@@ -326,7 +326,7 @@ def test_snapshot_identity_ignores_the_text_encoding(store_path, encode):
 
 
 @pytest.mark.parametrize("key", ["leiden", "leiden_float"])
-def test_snapshot_narrows_imported_labels_to_the_labelled_cells(
+def test_snapshot_narrows_imported_labels_to_the_labeled_cells(
     store_path, imported_store, import_selection, key
 ):
     imported = imported_store[1][key]
@@ -334,30 +334,30 @@ def test_snapshot_narrows_imported_labels_to_the_labelled_cells(
     features = ds.features.universe(from_assay="RNA")
     with pytest.raises(
         ValueError,
-        match=r"^clusters contains missing labels\. Select the labelled cells with "
+        match=r"^clusters contains missing labels\. Select the labeled cells with "
         r"select_cells\(clusters, include=\[\.\.\.\]\) and freeze their labels "
         r"with snapshot_cluster_labels\(clusters, cell_selection=\.\.\.\)$",
     ):
         ds.markers.search(imported, features=features)
 
-    labelled = ds.select_cells(imported, include=[0, 1, 2])
-    narrowed = ds.snapshot_cluster_labels(imported, cell_selection=labelled)
+    labeled = ds.select_cells(imported, include=[0, 1, 2])
+    narrowed = ds.snapshot_cluster_labels(imported, cell_selection=labeled)
     markers = ds.markers.search(narrowed, features=features)
 
-    assert ds.snapshot_cluster_labels(imported, cell_selection=labelled) == narrowed
+    assert ds.snapshot_cluster_labels(imported, cell_selection=labeled) == narrowed
     status = ds.artifacts.inspect(narrowed)
     assert status.parameters == {}
     assert status.input_ref("source_labels") == imported
-    assert status.input_ref("cell_selection") == labelled
+    assert status.input_ref("cell_selection") == labeled
     # Whole float64 ids are stored as the int64 labels of the integer import.
-    assert status.inputs["values_fingerprint"] == fingerprint_array(LEIDEN[UNLABELLED:])
+    assert status.inputs["values_fingerprint"] == fingerprint_array(LEIDEN[UNLABELED:])
     stored = _labels(ds, narrowed)
     assert stored.dtype == np.int64
-    np.testing.assert_array_equal(stored, LEIDEN[UNLABELLED:])
+    np.testing.assert_array_equal(stored, LEIDEN[UNLABELED:])
     assert _marker_groups(ds, markers) == {"0", "1", "2"}
     lineage = ds.artifacts.lineage(markers).graph
     assert lineage.edges[imported, narrowed]["inputs"] == ("source_labels",)
-    assert lineage.edges[labelled, narrowed]["inputs"] == ("cell_selection",)
+    assert lineage.edges[labeled, narrowed]["inputs"] == ("cell_selection",)
     assert import_selection in lineage
 
 
@@ -368,13 +368,13 @@ def test_snapshot_restricts_labels_to_a_subset_of_clusters(store_path, leiden):
     labels = ds.snapshot_cluster_labels(leiden, cell_selection=subset)
     markers = ds.markers.search(labels, features=ds.features.universe(from_assay="RNA"))
 
-    in_subset = (np.arange(N_CELLS) >= UNLABELLED) & (LEIDEN != 0)
+    in_subset = (np.arange(N_CELLS) >= UNLABELED) & (LEIDEN != 0)
     np.testing.assert_array_equal(_labels(ds, labels), LEIDEN[in_subset])
     assert _marker_groups(ds, markers) == {"1", "2"}
 
 
 @pytest.mark.parametrize(
-    ("values", "unlabelled"),
+    ("values", "unlabeled"),
     [
         (np.where(np.arange(N_CELLS) < 2, "", DISEASE), 2),
         (np.where(np.arange(N_CELLS) == 0, "  ", DISEASE), 1),
@@ -383,15 +383,15 @@ def test_snapshot_restricts_labels_to_a_subset_of_clusters(store_path, leiden):
     ],
     ids=["blank", "whitespace", "none", "nan"],
 )
-def test_snapshot_rejects_unlabelled_column_values(store_path, values, unlabelled):
+def test_snapshot_rejects_unlabeled_column_values(store_path, values, unlabeled):
     ds = _open(store_path)
     all_cells = ds.snapshot_cell_selection()
     ds.cells.insert("condition", values, overwrite=True)
 
     with pytest.raises(
         ValueError,
-        match=rf"^{unlabelled} of {N_CELLS} selected cells have no label in "
-        r"column 'condition'\. Pass a cell_selection of labelled cells only, "
+        match=rf"^{unlabeled} of {N_CELLS} selected cells have no label in "
+        r"column 'condition'\. Pass a cell_selection of labeled cells only, "
         r"such as snapshot_cell_selection of a boolean column that marks them$",
     ):
         ds.snapshot_cluster_labels("condition", cell_selection=all_cells)
@@ -405,7 +405,7 @@ def test_snapshot_rejects_rows_that_a_linked_missing_mask_flags(
     all_cells = ds.snapshot_cell_selection()
     # The masked rows store 0, which would otherwise pass as a label.
     assert not ds.cells.fetch_all("donor")[NO_DONOR].any()
-    assert not _labels(ds, leiden)[:UNLABELLED].any()
+    assert not _labels(ds, leiden)[:UNLABELED].any()
     # A masked placeholder is not a label, so its fraction is no type error.
     levels = DONOR.astype(np.float64)
     levels[NO_DONOR] = 0.5
@@ -424,8 +424,8 @@ def test_snapshot_rejects_rows_that_a_linked_missing_mask_flags(
             ds.snapshot_cluster_labels(column, cell_selection=all_cells)
     with pytest.raises(
         ValueError,
-        match=rf"^{UNLABELLED} of {N_CELLS} selected cells have no label in the "
-        r"cluster_labels artifact\. Pass a cell_selection of labelled cells "
+        match=rf"^{UNLABELED} of {N_CELLS} selected cells have no label in the "
+        r"cluster_labels artifact\. Pass a cell_selection of labeled cells "
         r"only, such as select_cells\(labels, include=\[\.\.\.\]\)$",
     ):
         ds.snapshot_cluster_labels(leiden, cell_selection=import_selection)
@@ -445,7 +445,7 @@ def test_snapshot_rejects_invalid_sources_and_selections(store_path):
     collected = np.datetime64("2020-03-01") + np.arange(N_CELLS)
     ds.cells.insert("collected", collected, overwrite=True)
     # The type is checked first, so a missing float label is not reported as
-    # an unlabelled cell.
+    # an unlabeled cell.
     scores = np.linspace(0.0, 1.0, N_CELLS)
     scores[0] = np.nan
     ds.cells.insert("score", scores, overwrite=True)
@@ -557,14 +557,14 @@ def test_label_consumers_accept_a_snapshot(store_path, leiden):
         (CELL_TYPES == "T") & (DISEASE == "covid"),
     )
 
-    labelled = ds.select_cells(leiden, include=[0, 1, 2])
-    clusters = ds.snapshot_cluster_labels(leiden, cell_selection=labelled)
-    cell_types = ds.snapshot_cluster_labels("cell_type", cell_selection=labelled)
+    labeled = ds.select_cells(leiden, include=[0, 1, 2])
+    clusters = ds.snapshot_cluster_labels(leiden, cell_selection=labeled)
+    cell_types = ds.snapshot_cluster_labels("cell_type", cell_selection=labeled)
     assert ds.clusters.compute_concordance(clusters, cell_types) == pytest.approx(1.0)
-    relabelled = _labels(ds, ds.clusters.relabel_by_overlap(clusters, cell_types))
+    relabeled = _labels(ds, ds.clusters.relabel_by_overlap(clusters, cell_types))
     assert all(
         label.startswith(cell_type)
-        for label, cell_type in zip(relabelled, CELL_TYPES[UNLABELLED:], strict=True)
+        for label, cell_type in zip(relabeled, CELL_TYPES[UNLABELED:], strict=True)
     )
 
 
@@ -572,10 +572,10 @@ def test_membership_strength_takes_labels_frozen_over_the_graph_cell_selection(
     store_path, leiden
 ):
     ds = _open(store_path)
-    labelled = ds.select_cells(leiden, include=[0, 1, 2])
-    graph = build_neighbourhood_graph(
+    labeled = ds.select_cells(leiden, include=[0, 1, 2])
+    graph = build_neighborhood_graph(
         ds,
-        cell_selection=labelled,
+        cell_selection=labeled,
         features=ds.features.universe(from_assay="RNA"),
         dims=5,
         k=5,
@@ -591,11 +591,11 @@ def test_membership_strength_takes_labels_frozen_over_the_graph_cell_selection(
     ):
         ds.clusters.membership_strength(leiden, graph)
 
-    clusters = ds.snapshot_cluster_labels(leiden, cell_selection=labelled)
+    clusters = ds.snapshot_cluster_labels(leiden, cell_selection=labeled)
     strength = _labels(ds, ds.clusters.membership_strength(clusters, graph))
 
-    # The clusters are the planted cell types, so neighbours share them.
-    assert strength.shape == (N_CELLS - UNLABELLED,)
+    # The clusters are the planted cell types, so neighbors share them.
+    assert strength.shape == (N_CELLS - UNLABELED,)
     assert strength.mean() > 0.9
 
 

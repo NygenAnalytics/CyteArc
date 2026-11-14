@@ -560,7 +560,7 @@ def _mean_color_limits(
     means_by_panel: Sequence[pd.Series],
     color_scale: ColorScale,
 ) -> tuple[list[tuple[float, float]], tuple[float, float]]:
-    """Resolve per-panel and reference colour limits from group means.
+    """Resolve per-panel and reference color limits from group means.
 
     ``scope="shared"`` gives every stacked row the limits that
     :func:`~cytearc.plotting._style.resolve_color_limits` derives from all pooled
@@ -583,7 +583,7 @@ def _mean_color_limits(
     ]
     pooled = np.concatenate(arrays) if arrays else np.array([], dtype=np.float64)
     if pooled[np.isfinite(pooled)].size == 0:
-        raise ValueError("No finite expression values to colour by")
+        raise ValueError("No finite expression values to color by")
 
     if color_scale.scope == "panel":
         limits: list[tuple[float, float]] = []
@@ -904,11 +904,11 @@ def _mean_colorbar_label(
     all_features: bool,
     assays: Collection[str],
 ) -> str:
-    """Label for the colour bar of group means, adapted to the value scale.
+    """Label for the color bar of group means, adapted to the value scale.
 
     ``assays`` holds the assays of the features drawn. Means of the RNA assay
     are "mean expression", and means of another assay name it, such as "mean
-    of GeneScores", as the colour bar of a dot plot does.
+    of GeneScores", as the color bar of a dot plot does.
     """
     if color_scale.scope == "panel":
         return (
@@ -930,7 +930,7 @@ def _mean_group_palette(
     lo: float,
     hi: float,
 ) -> dict[Any, str]:
-    """Map each group to a colour by its mean expression in ``means``."""
+    """Map each group to a color by its mean expression in ``means``."""
     from matplotlib import colormaps
     from matplotlib.colors import to_hex
 
@@ -1065,8 +1065,8 @@ def distribution(
     ``run_statistical_testing``; incompatible or incomplete results are skipped
     with a warning. Statistical overlays cannot be combined with ``split_by``.
 
-    For ``kind="stacked_violin"``, pass ``color_by="mean"`` to colour each
-    stacked violin by its group mean on a continuous scale, whose colour bar
+    For ``kind="stacked_violin"``, pass ``color_by="mean"`` to color each
+    stacked violin by its group mean on a continuous scale, whose color bar
     names the means: "mean expression" for the RNA assay and otherwise the
     assay, such as "mean of GeneScores". Pass a
     ``ColorScale`` to control the mapping: ``cmap`` chooses the colormap,
@@ -1650,7 +1650,7 @@ def distribution(
                 max_width=max_figure_width,
             )
 
-    # Mean colouring needs a small prepass to resolve shared colour limits.
+    # Mean coloring needs a small prepass to resolve shared color limits.
     # Retain only one Series of group means per panel, not every cell-level
     # display frame. The latter can be very large for marker panels.
     panel_group_means: list[pd.Series] | None = None
@@ -1674,7 +1674,7 @@ def distribution(
             panel_group_means,
             color_scale,
         )
-    # Limits drawn on the colourbar. Panel scope colours each row by its own
+    # Limits drawn on the colorbar. Panel scope colors each row by its own
     # 0-to-1 relative scale, so the single colorbar shows the unit range.
     render_limits: tuple[float, float] | None = None
     if mean_limits is not None:

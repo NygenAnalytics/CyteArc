@@ -233,7 +233,7 @@ def test_embedding_draws_cells_without_a_clonotype_as_missing(receptors) -> None
             for scale in result.scales
             if isinstance(scale, plotting.CategoricalScale)
         )
-        # Blank labels are missing: drawn in the missing colour, not as a category.
+        # Blank labels are missing: drawn in the missing color, not as a category.
         assert "" not in scale.palette
         assert set(scale.palette) == set(labels[labels.astype(str) != ""])
         drawn = _drawn_colors(result)

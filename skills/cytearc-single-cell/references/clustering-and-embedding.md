@@ -29,7 +29,7 @@ t-SNE layouts, and extract labels and coordinates as cell-aligned arrays. Docs:
   finds one, also in a run of an earlier release, which stored `run["leiden_1.0"]` instead.
   `paris=True` adds `paris` (off by default). `run["clusters"]` is the Leiden
   candidate with the best silhouette in the coordinates that built the graph (PCA, Harmony, or
-  ATAC LSI), recorded in `run["cluster_selection"]`. Silhouette favours few compact clusters and
+  ATAC LSI), recorded in `run["cluster_selection"]`. Silhouette favors few compact clusters and
   can merge distinct lineages or states. Treat that pick as a reproducible baseline only. A
   multimodal run has no shared coordinates, so it saves its one partition: 1.0 by default, or
   the one resolution that `leiden={"partitions": [...]}` names. Several partitions need a
@@ -109,8 +109,8 @@ print(dict(zip(selection.attrs["candidateKeys"], np.asarray(selection["scores"][
 print("selected:", selection.attrs["selectedKey"], "invalid:", selection.attrs["invalidReasons"])
 ```
 
-Membership strength is the fraction of a cell's graph neighbours that carry its own cluster
-label, so a weak cell (below 0.5) has most of its neighbours in other clusters.
+Membership strength is the fraction of a cell's graph neighbors that carry its own cluster
+label, so a weak cell (below 0.5) has most of its neighbors in other clusters.
 Separability needs `run["pca"]`: it raises `ValueError` for anything but a `reduction.pca` reduction,
 a Harmony ref included. On a Harmony graph, score PCA and say so.
 
@@ -159,7 +159,7 @@ Combine the evidence; no single score decides.
    mitochondrial or ambient). Do not count markers by `score`, which falls as clusters multiply
    and shrink, and would bias the choice towards coarse partitions.
 4. Graph support: added clusters keep high mean membership strength and few weak cells, so
-   most of their cells' neighbours share their label.
+   most of their cells' neighbors share their label.
 5. QC and doublets: a split explained by counts, mito or doublet score is not a cell type. Keep it
    as `unresolved` (`markers-and-annotation.md`) instead of naming it.
 6. Representation: boundaries that survive an HVG, PC or `k` branch are robust; those that move
@@ -276,7 +276,7 @@ The same helper works for membership strength, doublet scores, cell cycle and en
   ID; join on cell IDs or use `clusters.relabel_by_overlap`. The default backend numbers clusters
   by size (1 is the largest), which says nothing about identity across partitions.
 - `backend="igraph"` or `"leidenalg"` raises `ImportError` when those GPL packages, which CyteArc
-  does not install, are missing; a stored clustering of that backend is still reused. Stores analysed
+  does not install, are missing; a stored clustering of that backend is still reused. Stores analyzed
   by earlier releases hold `"igraph"` clusterings (the former default): a default call computes a
   new `"cytearc"` clustering beside them instead of reusing them, with different labels.
 - `clusters.compute_concordance` requires both artifacts to share the exact cell-selection ref. For

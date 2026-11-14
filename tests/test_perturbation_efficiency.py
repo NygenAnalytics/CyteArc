@@ -368,9 +368,7 @@ def test_efficiency_refuses_labels_it_cannot_measure(
     with pytest.raises(ValueError, match="not 'cell_selection'"):
         store.perturbation.efficiency(cells)
     # Labels whose controls are GENE_D, which no cell carries, have no control cell.
-    with pytest.raises(
-        ValueError, match="No labelled cell carries control guides only"
-    ):
+    with pytest.raises(ValueError, match="No labeled cell carries control guides only"):
         store.perturbation.efficiency(template.without_controls)
     monkeypatch.setattr(store, "memoryBytes", 100)
     # RNA1, RNA2, RNA4 and RNA5 over the 8 perturbed and 4 control cells.

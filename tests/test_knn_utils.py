@@ -1693,7 +1693,7 @@ def test_wnn_integration_is_scale_invariant_at_near_degenerate_bandwidth():
     ]
     baseline, baseline_weights = results[0]
 
-    # Equidistant neighbours differ only by rounding noise in the distance
+    # Equidistant neighbors differ only by rounding noise in the distance
     # reduction, so neither may be demoted below an unrelated candidate.
     np.testing.assert_array_equal(
         baseline.col.reshape(len(indices1), -1),
@@ -1842,7 +1842,7 @@ def test_wnn_integration_stays_close_to_seurat_defaults():
 
     Seurat's defaults search a wider pool and use an SNN-far bandwidth, so exact
     agreement is not expected. The floors sit below the values measured when the
-    fixture was written (0.89 neighbour overlap, 0.76 weight correlation) and
+    fixture was written (0.89 neighbor overlap, 0.76 weight correlation) and
     exist to catch the gap widening.
     """
     expected = _seurat_golden()["seuratDefault"]

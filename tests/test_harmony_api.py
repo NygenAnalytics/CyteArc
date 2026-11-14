@@ -1,4 +1,4 @@
-"""Public contracts of CyteArc's Harmony2: facade, validation, records and fit behaviour."""
+"""Public contracts of CyteArc's Harmony2: facade, validation, records and fit behavior."""
 
 import dataclasses
 import inspect
@@ -58,7 +58,7 @@ def test_harmony_facade_exports_its_public_objects() -> None:
         assert getattr(harmony, name).__module__ == "cytearc.embeddings.harmony"
     assert cytearc.embeddings.fit_harmony is harmony.fit_harmony
     assert cytearc.embeddings.HarmonyResult is harmony.HarmonyResult
-    # Retired names do not come back, and there is no initialisation hook.
+    # Retired names do not come back, and there is no initialization hook.
     for module in (cytearc.embeddings, harmony):
         for name in (
             "run_harmony",
@@ -304,7 +304,7 @@ def test_validate_harmony_parameters_returns_a_new_equal_dict() -> None:
             "ridge_penalty is a fixed penalty, so leave it out to use Harmony2's "
             "dynamic penalty",
         ),
-        ({"cluster_fn": "kmeans"}, ValueError, "no initialisation hook"),
+        ({"cluster_fn": "kmeans"}, ValueError, "no initialization hook"),
         ({"nthreads": 2}, ValueError, "nthreads"),
         ({"values": 2}, ValueError, "the DataStore supplies the coordinates"),
         ({"n_clusters": 0}, ValueError, "n_clusters must be at least 1"),
@@ -348,7 +348,7 @@ def test_validate_harmony_parameters_refuses_invalid_options(
         validate_harmony_parameters(parameters)  # type: ignore[arg-type]
 
 
-# Fit behaviour
+# Fit behavior
 
 
 def test_original_is_an_independent_float64_copy() -> None:
@@ -462,7 +462,7 @@ def test_an_exactly_zero_objective_converges_without_warnings() -> None:
     values = np.array([[2.0, 3.0, 5.0, 7.0]])
     metadata = pd.DataFrame({"batch": ["a", "b", "a", "b"]})
 
-    # Under Harmony2's stabilised penalty a balanced cluster still has a
+    # Under Harmony2's stabilized penalty a balanced cluster still has a
     # positive diversity term, so the objective is zero only with theta = 0.
     with warnings.catch_warnings():
         warnings.simplefilter("error")

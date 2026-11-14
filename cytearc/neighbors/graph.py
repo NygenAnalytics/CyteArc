@@ -419,25 +419,25 @@ def snn_merge_peak_bytes(
 
 
 def _checked_neighborhoods(neighborhoods: np.ndarray) -> np.ndarray:
-    """Return neighbourhoods as int64, after checking their entries."""
+    """Return neighborhoods as int64, after checking their entries."""
     array = np.asarray(neighborhoods)
     if array.ndim != 2 or not np.issubdtype(array.dtype, np.integer):
         raise ValueError("neighborhoods must be an integer matrix of cells by slots")
     array = array.astype(np.int64, copy=False)
     n_cells = array.shape[0]
     if np.any(array < -1) or np.any(array >= n_cells):
-        raise ValueError("Neighbourhoods name cells outside 0 to the cells - 1")
+        raise ValueError("Neighborhoods name cells outside 0 to the cells - 1")
     ordered = np.sort(array, axis=1)
     if np.any((ordered[:, 1:] == ordered[:, :-1]) & (ordered[:, 1:] >= 0)):
-        raise ValueError("A neighbourhood lists a cell twice")
+        raise ValueError("A neighborhood lists a cell twice")
     return array
 
 
 def shared_neighbor_bounds(neighborhoods: np.ndarray) -> np.ndarray:
     """Bound each cell's joins in :func:`shared_neighbor_graph`.
 
-    A cell shares a neighbour ``j`` with the cells whose neighbourhoods hold
-    ``j``, so the sum over its neighbours of how many neighbourhoods hold
+    A cell shares a neighbor ``j`` with the cells whose neighborhoods hold
+    ``j``, so the sum over its neighbors of how many neighborhoods hold
     each bounds the cells it shares one with.
     """
     array = _checked_neighborhoods(neighborhoods)
@@ -452,25 +452,25 @@ def shared_neighbor_graph(
     max_joins: int | None = None,
     max_entries: int = 1 << 24,
 ) -> coo_matrix:
-    """Join cells by the overlap of their neighbourhoods, as Seurat's SNN does.
+    """Join cells by the overlap of their neighborhoods, as Seurat's SNN does.
 
-    Each row of ``neighborhoods`` holds a cell's neighbourhood, the cell
+    Each row of ``neighborhoods`` holds a cell's neighborhood, the cell
     itself included as Seurat's ``FindNeighbors`` includes it, padded with
-    -1. Two cells that share a neighbour are joined with the Jaccard index of
-    their neighbourhoods: the cells they share over the cells in either,
+    -1. Two cells that share a neighbor are joined with the Jaccard index of
+    their neighborhoods: the cells they share over the cells in either,
     which for full rows of ``k`` cells is Seurat's
     ``shared / (k + (k - shared))``. Joins below ``prune`` are dropped, as
     Seurat's ``ComputeSNN`` drops them, and a cell is not joined to itself.
 
     Cells that tie, such as cells with one profile, take the same few cells
-    as neighbours, and every pair of them shares those, so the graph grows
+    as neighbors, and every pair of them shares those, so the graph grows
     with the square of their number. The joins are computed for blocks of
     cells whose bounded joins number at most ``max_entries``, which leaves
     them unchanged, and a graph that would hold more than ``max_joins``
     joins is refused.
 
     Args:
-        neighborhoods: Cells by neighbourhood slots, entries from -1 to the
+        neighborhoods: Cells by neighborhood slots, entries from -1 to the
             cells - 1, each cell at most once per row.
         prune: The smallest Jaccard index kept, in [0, 1].
         max_joins: The most joins the graph may hold, or None for no limit.
@@ -481,7 +481,7 @@ def shared_neighbor_graph(
         row and then column, so that ``W + W^T`` is the symmetric graph.
 
     Raises:
-        ValueError: If the neighbourhoods are malformed, ``prune`` lies
+        ValueError: If the neighborhoods are malformed, ``prune`` lies
             outside [0, 1], or ``max_joins`` or ``max_entries`` is below 1.
         MemoryError: If one cell's candidate joins exceed ``max_entries``, or
             the graph holds more than ``max_joins`` joins.
@@ -506,7 +506,7 @@ def shared_neighbor_graph(
     if n_cells and int(bounds.max()) > max_entries:
         cell = int(np.argmax(bounds))
         raise MemoryError(
-            f"Cell {cell} may share neighbours with {int(bounds[cell])} cells, more "
+            f"Cell {cell} may share neighbors with {int(bounds[cell])} cells, more "
             f"than the {max_entries} joins that fit at once"
         )
     firsts: list[np.ndarray] = []
@@ -533,7 +533,7 @@ def shared_neighbor_graph(
         n_joins += int(np.count_nonzero(kept))
         if max_joins is not None and n_joins > max_joins:
             raise MemoryError(
-                f"The shared-neighbour graph of {n_cells} cells holds more than "
+                f"The shared-neighbor graph of {n_cells} cells holds more than "
                 f"the {max_joins} joins that fit"
             )
         row, column, jaccard = row[kept], column[kept], jaccard[kept]

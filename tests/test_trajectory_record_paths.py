@@ -650,7 +650,7 @@ def test_pseudotime_scoring_keeps_requested_modes_and_raw_potential(
     assert parameters["min_max_norm_ptime"] is False
     assert raw != normalized
     raw_values = store.trajectory.load_pseudotime(raw).values
-    # The raw potential is centred, so it spans zero instead of [0, 1].
+    # The raw potential is centered, so it spans zero instead of [0, 1].
     assert raw_values.min() < 0.0 < raw_values.max()
     np.testing.assert_allclose(
         (raw_values - raw_values.min()) / np.ptp(raw_values),
@@ -1199,12 +1199,12 @@ def test_aggregation_needs_more_features_than_its_feature_graph_uses(
         (single, {}, "At least two selected features are required"),
         (
             triple,
-            {"n_neighbours": 3},
-            "n_neighbours must be smaller than the selected feature count",
+            {"n_neighbors": 3},
+            "n_neighbors must be smaller than the selected feature count",
         ),
         (
             triple,
-            {"n_neighbours": 2, "n_clusters": 4},
+            {"n_neighbors": 2, "n_clusters": 4},
             "n_clusters cannot exceed the selected feature count",
         ),
     ):
@@ -1547,9 +1547,9 @@ def test_fate_payload_validation_spans_blocks_without_boundary_cells() -> None:
 
 
 def test_fate_payload_requires_a_valid_boundary_cell_for_every_sink() -> None:
-    relabelled = np.where(_FATE_LABELS == "B", "C", _FATE_LABELS)
+    relabeled = np.where(_FATE_LABELS == "B", "C", _FATE_LABELS)
 
-    assert not _fate_is_valid(_fate_group(), sink_values=relabelled)
+    assert not _fate_is_valid(_fate_group(), sink_values=relabeled)
 
 
 _FATE_PAYLOAD_TAMPERS: dict[str, Callable[[zarr.Group], None]] = {
@@ -1664,7 +1664,7 @@ def _aggregation_payload(
             selected_features=np.array([0, 2, 3]),
             n_bins=2,
             n_clusters=2,
-            n_neighbours=1,
+            n_neighbors=1,
             nan_cluster_value=-1,
             ann_params=resolve_aggregation_ann_params(None, dim=2),
             expected_input_fingerprints=["cells", "features", "ordering"],
@@ -1718,7 +1718,7 @@ _AGGREGATION_PAYLOAD_TAMPERS: dict[str, Callable[[zarr.Group], None]] = {
         AGGREGATION_PAYLOAD, "data", 1, np.array([0.5, 0.0])
     ),
     "one-valid-feature": _keep_one_valid_feature,
-    "relabelled-module": _set_and_refresh(AGGREGATION_PAYLOAD, "cluster_values", 0, 2),
+    "relabeled-module": _set_and_refresh(AGGREGATION_PAYLOAD, "cluster_values", 0, 2),
 }
 
 

@@ -176,7 +176,9 @@ _SIGNATURE_DIGESTS = {
     # pool, simulation_ratio, heterotypic_fraction, save_k, smoothing_t, and
     # normalize_scores; select_cells gained value. source_storage_options is
     # dict[str, Any] | None: a mount's source options, or a composite's by name.
-    DataStore: "340e9f5ec90337969d0417d35bc5e905fbc509fd1164d6c89b3e5c80340c7768",
+    # run_pseudotime_aggregation takes n_neighbors: int = 11 in place of
+    # n_neighbours.
+    DataStore: "6f3e8e41ace18075174d2689254a511c61a11999501b2e89dbd397b930e9154c",
     # artifacts.prune_incomplete(*, dry_run: bool = True) -> list[str] was added.
     ArtifactAccessor: "6d4befabbbc91b00684038f44e0b3063905c84437587be0994c26370efa2570c",
 }

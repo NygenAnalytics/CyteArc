@@ -104,7 +104,7 @@ def test_one_detected_gene_on_a_path_of_three_genes_is_worked_by_hand():
     rate = float((flux * logs).sum() / flux.sum())
     # The path's largest eigenvalue is sqrt(2).
     assert entropy[0] == pytest.approx(rate / math.log(math.sqrt(2)), rel=1e-12)
-    # x = (x0, b, b) against degrees (1, 2, 1): both centred, x0 - mean = 2,
+    # x = (x0, b, b) against degrees (1, 2, 1): both centered, x0 - mean = 2,
     # the others -1, and the degrees (-1/3, 2/3, -1/3).
     xc = np.array([2.0, -1.0, -1.0])
     kc = np.array([-1.0, 2.0, -1.0]) / 3

@@ -1090,7 +1090,7 @@ def _cancel_at_pca(
     return events
 
 
-@pytest.mark.filterwarnings("ignore:Only .* nearest neighbours:UserWarning")
+@pytest.mark.filterwarnings("ignore:Only .* nearest neighbors:UserWarning")
 def test_a_callback_cancels_the_running_stage_and_a_rerun_reuses_the_rest(
     observed_store: DataStore,
 ) -> None:
@@ -1461,14 +1461,14 @@ def test_a_signal_after_a_cancellation_is_the_first_signal() -> None:
     assert not token.request(reason="received SIGINT", signal_number=int(signal.SIGINT))
 
     first = token.request_record
-    signalled = token.signal_record
-    assert first is not None and signalled is not None
+    signaled = token.signal_record
+    assert first is not None and signaled is not None
     assert (first.reason, first.cancelled, first.signal_number) == (
         "stopped by the user",
         True,
         None,
     )
-    assert (signalled.reason, signalled.cancelled, signalled.signal_name) == (
+    assert (signaled.reason, signaled.cancelled, signaled.signal_name) == (
         "received SIGTERM",
         False,
         "SIGTERM",

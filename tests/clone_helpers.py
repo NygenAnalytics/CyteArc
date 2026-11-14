@@ -134,10 +134,10 @@ def ids_read_bytes(store: "DataStore", n_cells: int) -> int:
 def loaded_partition(store: "DataStore", clones: "ArtifactRef") -> set[frozenset[str]]:
     """The saved clones as sets of cell IDs, from the cells table of load_clones."""
     cells = store.clones.load_clones(clones).cells
-    labelled = cells["clone"].dropna()
+    labeled = cells["clone"].dropna()
     return {
         frozenset(str(cell) for cell in members)
-        for members in labelled.groupby(labelled, observed=True).groups.values()
+        for members in labeled.groupby(labeled, observed=True).groups.values()
     }
 
 
@@ -400,7 +400,7 @@ def import_truth_variants(
     rng = np.random.default_rng(7)
     angles = 2 * np.pi * (truth.clones + 1) / (truth.n_clones + 1)
     radius = np.where(truth.clones >= 0, 4.0, 0.0)
-    centres = np.column_stack([radius * np.cos(angles), radius * np.sin(angles)])
+    centers = np.column_stack([radius * np.cos(angles), radius * np.sin(angles)])
     return {
         "counts": counts,
         "informative": informative,
@@ -409,7 +409,7 @@ def import_truth_variants(
             targets, method="threshold", min_mutant_umis=1
         ),
         "layout": write_embedding(
-            store, "every_cell", centres + rng.normal(0, 0.8, centres.shape)
+            store, "every_cell", centers + rng.normal(0, 0.8, centers.shape)
         ),
     }
 
@@ -473,7 +473,7 @@ def names_every_nth_item(axis: Any, items: Sequence[str]) -> int:
 
 
 def names_keep_apart(axis: Any) -> bool:
-    """Whether no two neighbouring names of a drawn axis overlap."""
+    """Whether no two neighboring names of a drawn axis overlap."""
     extents = [label.get_window_extent() for label in axis.get_ticklabels()]
     return not any(a.overlaps(b) for a, b in zip(extents, extents[1:], strict=False))
 

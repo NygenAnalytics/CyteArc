@@ -407,7 +407,7 @@ def _relative_tree(
 def _posteriors(
     relative: np.ndarray, log_weights: np.ndarray, out: np.ndarray, sums: np.ndarray
 ) -> None:
-    """Normalise each cell's relative log-likelihoods plus log weights into ``out``, with each cell's log sum in ``sums``."""
+    """Normalize each cell's relative log-likelihoods plus log weights into ``out``, with each cell's log sum in ``sums``."""
     n_cells, n_components = relative.shape
     for cell in prange(n_cells):
         top = -np.inf

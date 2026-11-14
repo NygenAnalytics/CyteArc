@@ -13,8 +13,8 @@ import pytest
 from scripts import regenerate_docs_datasets as generator
 
 
-def test_labelled_cluster_mask_rejects_blank_and_nan_values():
-    mask = generator._labelled_cluster_mask(
+def test_labeled_cluster_mask_rejects_blank_and_nan_values():
+    mask = generator._labeled_cluster_mask(
         ["B", "nan", "NaN", "", "  ", "CD4 T"],
     )
 
@@ -303,7 +303,7 @@ def test_kang_recipes_subset_current_sources_by_cluster_labels():
 
         assert isinstance(recipe, generator.DerivedDatasetRecipe)
         assert recipe.source_datasets == (dataset,)
-        assert recipe.derive is generator._derive_labelled_kang_store
+        assert recipe.derive is generator._derive_labeled_kang_store
 
 
 def test_derived_sources_prefer_stores_built_in_same_run(tmp_path):

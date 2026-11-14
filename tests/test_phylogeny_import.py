@@ -200,10 +200,10 @@ def truth_phylogeny_ref(shared):
 
 def _clone_sets(store, clones) -> dict[str, frozenset[str]]:
     cells = store.clones.load_clones(clones).cells
-    labelled = cells["clone"].dropna()
+    labeled = cells["clone"].dropna()
     return {
         str(label): frozenset(str(cell) for cell in members)
-        for label, members in labelled.groupby(labelled, observed=True).groups.items()
+        for label, members in labeled.groupby(labeled, observed=True).groups.items()
     }
 
 
@@ -921,7 +921,7 @@ def test_a_clade_named_by_a_padded_missing_token_is_refused_by_the_table_export(
 ) -> None:
     a, b, c, d = _cell_ids(4)
     path = tmp_path / "padded.nwk"
-    # A quoted name keeps its spaces, so a clone is labelled ' NA', which a
+    # A quoted name keeps its spaces, so a clone is labeled ' NA', which a
     # clone table strips and then reads as no clone.
     path.write_text(f"(({a},{b})' NA',({c},{d})x)r;")
     phylogeny, _messages = _import(store, path)

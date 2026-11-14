@@ -205,7 +205,7 @@ def test_a_small_library_labels_one_bar_per_guide() -> None:
         result.close()
 
 
-def test_cells_without_a_call_take_the_grey_of_the_threshold_panels() -> None:
+def test_cells_without_a_call_take_the_gray_of_the_threshold_panels() -> None:
     result = guide_calls(_store(5), CALLS, max_guides_per_cell=3, show=False)
 
     try:
@@ -978,7 +978,7 @@ def _row_labels(ax: Any) -> list[str]:
 
 
 def _check_efficiency_rows(result: Any, *, alpha: float) -> None:
-    """Check that each row of the table is drawn at its height, colour and area."""
+    """Check that each row of the table is drawn at its height, color and area."""
     ax = result.axes["efficiency"]
     table = result.tables["efficiency"]
     fold = table["log2_fold_change"].to_numpy()
@@ -1352,7 +1352,7 @@ def _edistance_record(
 
 
 def _check_edistance_rows(result: Any, *, alpha: float) -> None:
-    """Check that each row of the table is drawn at its height, colour and area."""
+    """Check that each row of the table is drawn at its height, color and area."""
     ax = result.axes["edistance"]
     table = result.tables["edistance"]
     distances = table["edistance"].to_numpy()
@@ -2704,9 +2704,9 @@ def _check_points(
     *,
     rasterized: bool,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Check each scatter's marker, colour and rasterization against ``groups``.
+    """Check each scatter's marker, color and rasterization against ``groups``.
 
-    Each group is the rows of a scatter, its marker and its colour. Returns
+    Each group is the rows of a scatter, its marker and its color. Returns
     each row's drawn position.
     """
     assert len(collections) == len(groups)
@@ -2836,7 +2836,7 @@ def test_association_volcano_draws_each_tested_discovery_pair() -> None:
             "6 of 11 tested pairs significant at FDR 0.1",
             "Not plotted: 2 untested pairs",
         ]
-        # The ten smallest p-values are labelled at their points.
+        # The ten smallest p-values are labeled at their points.
         labels = ax.texts
         assert [label.get_text() for label in labels] == VOLCANO_ORDER[:10]
         for row, label in enumerate(labels):
@@ -3931,7 +3931,7 @@ def _clusters_record(
 
 
 def _cluster_hexes(record: PerturbationClusters) -> dict[int, str]:
-    """Each cluster's colour, by the order in which it first appears in leaf order."""
+    """Each cluster's color, by the order in which it first appears in leaf order."""
     in_order = record.table["cluster"].reindex(record.order).tolist()
     first = list(dict.fromkeys(code for code in in_order if code >= 0))
     return {code: CLUSTER_HEXES[rank % 8] for rank, code in enumerate(first)}
@@ -3940,12 +3940,12 @@ def _cluster_hexes(record: PerturbationClusters) -> dict[int, str]:
 def _drawn_colors(
     result: Any, record: PerturbationClusters, theme: str = "notebook"
 ) -> np.ndarray:
-    """Each drawn perturbation's colour, grey when it is unassigned."""
+    """Each drawn perturbation's color, gray when it is unassigned."""
     hexes = _cluster_hexes(record)
-    grey = DARK_UNASSIGNED if theme == "dark" else UNASSIGNED
+    gray = DARK_UNASSIGNED if theme == "dark" else UNASSIGNED
     return np.asarray(
         [
-            to_rgba(hexes[code]) if code >= 0 else grey
+            to_rgba(hexes[code]) if code >= 0 else gray
             for code in result.tables["perturbations"]["cluster"].tolist()
         ]
     )
@@ -4019,7 +4019,7 @@ def _check_heatmap(
 def _check_map(
     result: Any, record: PerturbationClusters, *, theme: str = "notebook"
 ) -> None:
-    """Check that each drawn perturbation is a point at its place and colour."""
+    """Check that each drawn perturbation is a point at its place and color."""
     ax = result.axes["embedding"]
     drawn = result.tables["perturbations"]
     names = drawn.index.tolist()
@@ -4106,7 +4106,7 @@ def test_cluster_heatmap_draws_the_correlations_in_leaf_order() -> None:
         assert [label.get_text() for label in ax.get_xticklabels()] == CLUSTER_ORDER
         assert ax.yaxis.get_ticks_position() == "right"
         assert {label.get_rotation() for label in ax.get_xticklabels()} == {90.0}
-        # Cluster 2 comes first in the leaf order and takes the first colour.
+        # Cluster 2 comes first in the leaf order and takes the first color.
         # Cluster 1's number sits beside its run of three, not beside RPL7.
         assert result.tables["clusters"].to_dict("list") == {
             "cluster": [0, 1, 2],
@@ -4119,7 +4119,7 @@ def test_cluster_heatmap_draws_the_correlations_in_leaf_order() -> None:
         np.testing.assert_allclose(colorbar.get_yticks(), [-1.0, -0.5, 0.0, 0.5, 1.0])
         assert ax.get_title().splitlines() == [
             "Correlation between perturbation profiles",
-            "12 perturbations: 3 clusters, 2 unassigned in grey",
+            "12 perturbations: 3 clusters, 2 unassigned in gray",
         ]
         # The plot's own figure makes the heatmap's box square.
         box = ax.get_window_extent()
@@ -4183,11 +4183,11 @@ def test_cluster_heatmap_keeps_the_chosen_perturbations_or_clusters() -> None:
 
     try:
         # The named perturbations run in leaf order, once each, and keep the
-        # colours of their clusters.
+        # colors of their clusters.
         assert named.tables["perturbations"].index.tolist() == ["CCT2", "MYC", "RPL7"]
         _check_heatmap(named, record)
         assert named.axes["heatmap"].get_title().splitlines()[1] == (
-            "3 of 12 perturbations: 2 clusters, 1 unassigned in grey"
+            "3 of 12 perturbations: 2 clusters, 1 unassigned in gray"
         )
         assert named.provenance.extras["perturbations"] == ["MYC", "CCT2", "RPL7"]
         assert named.provenance.extras["n_perturbations"] == 3
@@ -4203,7 +4203,7 @@ def test_cluster_heatmap_keeps_the_chosen_perturbations_or_clusters() -> None:
         _check_heatmap(chosen, record)
         assert chosen.tables["clusters"]["row"].tolist() == [1.0]
         assert chosen.axes["heatmap"].get_title().splitlines()[1] == (
-            "6 of 12 perturbations: 1 cluster, 2 unassigned in grey"
+            "6 of 12 perturbations: 1 cluster, 2 unassigned in gray"
         )
         assert chosen.provenance.extras["cluster_ids"] == [1, -1]
         assert all(
@@ -4240,7 +4240,7 @@ def test_cluster_heatmap_by_euclidean_distance() -> None:
         assert alone.axes["heatmap"].images[0].get_clim() == (0.0, 1.0)
         assert alone.tables["clusters"].empty
         assert alone.axes["heatmap"].get_title().splitlines()[1] == (
-            "1 of 12 perturbations: 0 clusters, 1 unassigned in grey"
+            "1 of 12 perturbations: 0 clusters, 1 unassigned in gray"
         )
     finally:
         every.close()
@@ -4329,7 +4329,7 @@ def test_cluster_heatmap_keeps_a_chosen_figure_size() -> None:
         result.close()
 
 
-def test_clusters_take_eight_colours_in_leaf_order_and_keep_them() -> None:
+def test_clusters_take_eight_colors_in_leaf_order_and_keep_them() -> None:
     # Ten clusters of two, which first appear in the leaf order from 9 down.
     rows: list[ClusterRow] = [
         (f"P{index:02d}", index // 2, 30, float(index), 0.0) for index in range(20)
@@ -4343,7 +4343,7 @@ def test_clusters_take_eight_colours_in_leaf_order_and_keep_them() -> None:
     try:
         _check_heatmap(every, record)
         _check_heatmap(some, record)
-        # The ninth cluster to appear, 1, takes the first colour again.
+        # The ninth cluster to appear, 1, takes the first color again.
         assert every.scales[1].palette == {
             9: "#0072B2",
             8: "#E69F00",
@@ -4356,14 +4356,14 @@ def test_clusters_take_eight_colours_in_leaf_order_and_keep_them() -> None:
             1: "#0072B2",
             0: "#E69F00",
         }
-        # The drawn clusters keep their colours.
+        # The drawn clusters keep their colors.
         assert some.scales[1].palette == {0: "#E69F00", 1: "#0072B2"}
     finally:
         every.close()
         some.close()
 
 
-def test_cluster_map_draws_each_perturbation_coloured_by_cluster() -> None:
+def test_cluster_map_draws_each_perturbation_colored_by_cluster() -> None:
     requests: list[ArtifactRef] = []
     record = _clusters_record()
 
@@ -4394,7 +4394,7 @@ def test_cluster_map_draws_each_perturbation_coloured_by_cluster() -> None:
             assert number.get_path_effects()
         assert ax.get_title().splitlines() == [
             "UMAP of perturbation profiles",
-            "12 perturbations: 3 clusters, 2 unassigned in grey",
+            "12 perturbations: 3 clusters, 2 unassigned in gray",
         ]
         assert ax.get_xticks().size == 0 and ax.get_yticks().size == 0
         assert result.legends == (
@@ -4486,7 +4486,7 @@ def test_cluster_map_keeps_the_chosen_clusters(
 
 
 @pytest.mark.parametrize("panel", ["heatmap", "embedding"])
-def test_cluster_plots_without_a_cluster_draw_every_perturbation_grey(
+def test_cluster_plots_without_a_cluster_draw_every_perturbation_gray(
     panel: str,
 ) -> None:
     loners: list[ClusterRow] = [
@@ -4501,7 +4501,7 @@ def test_cluster_plots_without_a_cluster_draw_every_perturbation_grey(
     try:
         ax = result.axes[panel]
         assert ax.get_title().splitlines()[1] == (
-            "12 perturbations: 0 clusters, 12 unassigned in grey"
+            "12 perturbations: 0 clusters, 12 unassigned in gray"
         )
         assert result.tables["clusters"].empty
         assert result.scales[-1].order == ()
@@ -5069,7 +5069,7 @@ def test_composed_cluster_plots_share_their_cluster_legend(panel: str) -> None:
 
         # Every legend of the clusters has a scale, so the composed figure
         # draws the clusters beside the panel and the colorbar below it; the
-        # legend lists the unassigned perturbations that the panel draws grey.
+        # legend lists the unassigned perturbations that the panel draws gray.
         assert [
             (
                 legend.get_title().get_text(),

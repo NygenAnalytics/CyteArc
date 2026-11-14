@@ -456,7 +456,7 @@ def test_sample_aware_mask_skips_small_and_zero_mad_groups():
     ]
 
 
-def _labelled_filter(labels, active=None, values=None):
+def _labeled_filter(labels, active=None, values=None):
     labels = np.asarray(labels)
     n_cells = len(labels)
     return filter_cell_metrics(
@@ -486,7 +486,7 @@ def _labelled_filter(labels, active=None, values=None):
 def test_mad_sample_labels_of_each_kind_group_cells(labels, keys, kind):
     values = np.array([1.0, 2.0, 3.0, 40.0, 10.0, 11.0, 12.0, -50.0])
 
-    result = _labelled_filter(labels, values=values)
+    result = _labeled_filter(labels, values=values)
 
     assert result.mad_provenance["sample_sizes"] == dict.fromkeys(keys, 4)
     np.testing.assert_array_equal(

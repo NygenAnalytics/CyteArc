@@ -1351,10 +1351,10 @@ def test_the_chance_of_edits_follows_every_pattern_of_agreeing_positions(
 
 
 @pytest.mark.parametrize(
-    ("cutoff", "neighbours"), [(1, 12), (2, 12 + 54), (3, 12 + 54 + 108), (4, 255)]
+    ("cutoff", "neighbors"), [(1, 12), (2, 12 + 54), (3, 12 + 54 + 108), (4, 255)]
 )
 def test_every_text_of_a_length_expects_its_pairs_from_the_share_that_agree(
-    cutoff, neighbours
+    cutoff, neighbors
 ) -> None:
     # Of the 255 others of each of the 256 texts of four bases, 63 share its
     # base at a position, so two of them agree there with chance 63/255, and
@@ -1371,7 +1371,7 @@ def test_every_text_of_a_length_expects_its_pairs_from_the_share_that_agree(
         math.comb(4, mismatches) * (1 - agree) ** mismatches * agree ** (4 - mismatches)
         for mismatches in range(1, cutoff + 1)
     ) / (1 - agree**4)
-    assert len(found) == 256 * neighbours // 2
+    assert len(found) == 256 * neighbors // 2
     assert expected == pytest.approx(256 * 255 / 2 * chance, rel=1e-12)
     assert expected <= len(found)
 

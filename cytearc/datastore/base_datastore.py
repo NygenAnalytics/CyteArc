@@ -1303,7 +1303,7 @@ class BaseDataStore:
         ``select_cells``, ``clusters.relabel_by_overlap``, and ``clusters.compute_concordance``
         take exact label artifacts. This method makes one from a cell
         metadata column, such as an annotation or a condition, or narrows an
-        existing label artifact to some of its cells, such as the labelled
+        existing label artifact to some of its cells, such as the labeled
         cells of an imported clustering or a few of its clusters. A consumer
         that pairs the labels with another input, such as a graph in
         ``clusters.membership_strength`` or a second label artifact in
@@ -1314,7 +1314,7 @@ class BaseDataStore:
         ``smart_label``, or ``label_transfer``, must have a cell selection
         that contains ``cell_selection``. Every selected cell needs a label:
         a missing label, including a row that a linked missing mask flags,
-        or a blank label is rejected. Select the labelled cells first, with
+        or a blank label is rejected. Select the labeled cells first, with
         ``select_cells(labels, include=[...])`` for an artifact or with
         ``snapshot_cell_selection`` of a boolean column that marks them.
         Text labels are stored at the width of the selected labels, and

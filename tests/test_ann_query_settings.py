@@ -257,7 +257,7 @@ def test_index_depth_queries_reuse_neighbors_saved_before_depths_were_recorded(
     # The store fixture copies the template to this path.
     read_only = _open(tmp_path / "store.zarr", zarr_mode="r")
 
-    # Eleven neighbours search max(50, 2 * 11) = 50 candidates, the index's
+    # Eleven neighbors search max(50, 2 * 11) = 50 candidates, the index's
     # own depth, which the saved query searched too.
     for opened in (datastore, read_only):
         assert opened.graph.neighbors(ann, k=11) == saved
@@ -278,7 +278,7 @@ def test_a_deeper_default_query_records_its_depth_and_is_computed_again(
     calls = _configured(monkeypatch)
     read_only = _open(tmp_path / "store.zarr", zarr_mode="r")
 
-    # Thirty neighbours search max(50, 2 * 30) = 60 candidates, more than the
+    # Thirty neighbors search max(50, 2 * 30) = 60 candidates, more than the
     # saved query's 50, so a read-only store holds no such neighbors.
     with pytest.raises(
         PermissionError,
@@ -313,7 +313,7 @@ def test_an_explicit_index_depth_has_the_default_identity(store, monkeypatch) ->
 
     explicit = datastore.graph.neighbors(ann, k=11, ann_ef=200)
 
-    # The index's ann_ef is the depth a default query of eleven neighbours
+    # The index's ann_ef is the depth a default query of eleven neighbors
     # searches, so the explicit query records no ann_ef and the default query
     # returns its artifact.
     assert calls == [(200, 1)]
@@ -331,7 +331,7 @@ def test_the_index_depth_is_at_least_k_plus_one(store, monkeypatch) -> None:
     calls = _configured(monkeypatch)
 
     # hnswlib searches at least k + 1 candidates, so this index's own depth
-    # for eleven neighbours is 12, which records no ann_ef, while the default
+    # for eleven neighbors is 12, which records no ann_ef, while the default
     # depth is 2 * 11.
     own = datastore.graph.neighbors(shallow, k=11, ann_ef=8)
     assert calls == [(12, 1)]
@@ -443,7 +443,7 @@ def test_a_low_self_hit_rate_warns_when_computed_and_when_reused(store) -> None:
     datastore, _pca = store
     # The two genes with the most zeros leave most cells without counts, so
     # their normalized values coincide, and a cell among more than k + 1
-    # equal neighbours is often not returned for itself.
+    # equal neighbors is often not returned for itself.
     sparsest = np.argsort((_counts() == 0).sum(axis=0))[-2:]
     cells = datastore.snapshot_cell_selection()
     sparse = datastore.features.snapshot(
@@ -477,7 +477,7 @@ def test_a_low_self_hit_rate_warns_when_computed_and_when_reused(store) -> None:
         )
         assert str(message).startswith(
             f"Only {rate:.2f}% of cells found themselves among their 4 nearest "
-            "neighbours in the ANN index (below 99.5%)"
+            "neighbors in the ANN index (below 99.5%)"
         )
 
 
@@ -526,7 +526,7 @@ def _clustered(n_cells: int, dims: int, clusters: int, seed: int) -> np.ndarray:
 @pytest.mark.slow
 def test_default_index_finds_the_exact_neighbors_of_separated_clusters() -> None:
     # The former defaults, ann_efc=50 and ann_m=48, missed every true
-    # neighbour of 48 of these cells (recall 0.9968); exact KNN is the
+    # neighbor of 48 of these cells (recall 0.9968); exact KNN is the
     # reference.
     n_cells, dims, k = 20_000, 21, 11
     coordinates = _clustered(n_cells, dims, 25, seed=0)

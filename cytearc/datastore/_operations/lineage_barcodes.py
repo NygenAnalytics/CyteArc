@@ -84,7 +84,7 @@ _IMPORT_ATTRIBUTES = ("fields", "libraries")
 _CHUNK_SHARE = 20
 # Bytes that the key of each row of a TREX molecule table takes at the peak
 # of finding a cell and UMI that it lists twice: the key, its sorted copy and
-# the comparison of neighbours.
+# the comparison of neighbors.
 _KEY_BYTES = 40
 # Bytes that the per-cell arrays and the arrays written take per selected cell.
 _CELL_BYTES = 64
@@ -161,7 +161,7 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
         :meth:`~cytearc.datastore.namespaces.ClonesAccessor.load_barcodes`
         reads back.
 
-        Each file's format is recognised from its contents: TREX's
+        Each file's format is recognized from its contents: TREX's
         ``molecules.txt`` and ``molecules_corrected.txt`` of every release,
         pycashier's per-read table with or without its header, CellTag-multi's
         and the Biddy et al. workflow's per-read tables, FateMap's
@@ -223,7 +223,7 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
                 ``"fatemap"``, ``"quicat"``, ``"quicat_wide"``, ``"bartab"``,
                 ``"bartab_annotation"``, ``"molecule_info"``, ``"h5ad"``,
                 ``"reads"``, ``"molecules"`` and ``"pairs"``, or None to
-                recognise each file's format.
+                recognize each file's format.
             columns: For ``format="reads"``, ``"molecules"`` or ``"pairs"``,
                 the columns to read: ``"cell"`` and ``"barcode"`` (a column,
                 or a list of columns whose values are joined by ``"__"``, such
@@ -790,7 +790,7 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
     ) -> ArtifactRef:
         """Call clones from imported lineage barcodes.
 
-        Cells that carry the same lineage barcodes descend from one labelled
+        Cells that carry the same lineage barcodes descend from one labeled
         cell. The barcodes of each cell pass the rules of the method that
         made them, in this order: molecules with fewer than ``min_reads``
         reads are dropped; barcodes within ``max_distance`` of each other by
@@ -867,8 +867,8 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
             similarity: The Jaccard index that links two cells, from 0 to 1;
                 or two, within one library and across libraries.
             inclusive: Whether an index equal to the similarity links.
-            prune: Remove the edges whose ends share no neighbour.
-            doublets: Remove the cells whose neighbours fall apart without
+            prune: Remove the edges whose ends share no neighbor.
+            doublets: Remove the cells whose neighbors fall apart without
                 them.
             trex_rules: Apply TREX's rules for partial cloneIDs: None with
                 ``preset="trex"`` alone, or True or False in any call.

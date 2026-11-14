@@ -386,7 +386,7 @@ def test_projection_kernel_matches_its_python_source_and_a_dense_search():
 
 
 def test_project_onto_curve_places_rows_on_a_hand_made_polyline_exactly():
-    # The curve's mean is (4, 2), so every centred value is a small integer.
+    # The curve's mean is (4, 2), so every centered value is a small integer.
     points = np.array([[0.0, 0.0], [4.0, 0.0], [4.0, 4.0], [8.0, 4.0]])
     progress = np.array([0.0, 0.5, 0.75, 1.0])
     rows = np.array(

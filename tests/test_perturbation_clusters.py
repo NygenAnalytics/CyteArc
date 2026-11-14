@@ -32,8 +32,8 @@ def _planted(seed: int = 0) -> tuple[np.ndarray, np.ndarray]:
     other and the others, unrelated, sit farther from every group.
     """
     rng = np.random.default_rng(seed)
-    centres = rng.normal(size=200) + rng.normal(size=(4, 200))
-    grouped = np.repeat(centres, 8, axis=0) + rng.normal(scale=0.3, size=(32, 200))
+    centers = rng.normal(size=200) + rng.normal(size=(4, 200))
+    grouped = np.repeat(centers, 8, axis=0) + rng.normal(scale=0.3, size=(32, 200))
     values = np.vstack([grouped, rng.normal(size=(6, 200))])
     return values, np.r_[np.repeat(np.arange(4), 8), np.full(6, -1)]
 
@@ -150,12 +150,12 @@ def test_layout_depends_only_on_the_seed_and_separates_the_groups() -> None:
     assert not np.array_equal(
         embed_profiles(values, distances, metric="correlation", seed=1), layout
     )
-    centres = np.stack([layout[planted == group].mean(axis=0) for group in range(4)])
+    centers = np.stack([layout[planted == group].mean(axis=0) for group in range(4)])
     spread = max(
-        np.linalg.norm(layout[planted == group] - centres[group], axis=1).max()
+        np.linalg.norm(layout[planted == group] - centers[group], axis=1).max()
         for group in range(4)
     )
-    assert spread < pdist(centres).min()
+    assert spread < pdist(centers).min()
     euclidean = profile_distances(values, "euclidean")
     assert embed_profiles(values, euclidean, metric="euclidean", seed=0).shape == (
         38,

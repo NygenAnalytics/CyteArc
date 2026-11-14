@@ -20,7 +20,7 @@ attraction and repulsion for a graph of any number of neighbors.
 Each cell's gradient sums the forces of every pair it belongs to, its own
 pairs and the pairs that name it, so cells are computed independently and the
 layout does not depend on the number of threads. Every random draw comes from
-SplitMix64's finaliser of a key that the seed, the kind of draw and the cell
+SplitMix64's finalizer of a key that the seed, the kind of draw and the cell
 give, plus a counter, so pairs do not depend on threads either.
 
 Adapted from the PaCMAP package 0.9.1 (Apache-2.0), which holds the LocalMAP

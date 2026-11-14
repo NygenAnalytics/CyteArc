@@ -34,7 +34,7 @@ from cytearc.storage.selections import (
     read_stored_selection_indices,
     resolve_generated_selection_artifact,
 )
-from tests.fixtures_datastore import build_neighbourhood_graph
+from tests.fixtures_datastore import build_neighborhood_graph
 from tests.storage_helpers import write_count_store
 
 
@@ -49,7 +49,7 @@ def _ensure_graph(datastore) -> ArtifactRef:
         max_cells=np.inf,
         blacklist="^MT-|^RPS|^RPL|^MRPS|^MRPL|^CCN|^HLA-|^H2-|^HIST",
     )
-    return build_neighbourhood_graph(
+    return build_neighborhood_graph(
         datastore,
         from_assay="RNA",
         cell_selection=cell_selection,
@@ -896,7 +896,7 @@ def shared_name_store(tmp_path_factory) -> SimpleNamespace:
     depth = counts.sum(axis=1).astype(np.float64)
     store.cells.insert("depth", depth)
     cells = store.snapshot_cell_selection("I")
-    graph = build_neighbourhood_graph(
+    graph = build_neighborhood_graph(
         store,
         from_assay="RNA",
         cell_selection=cells,

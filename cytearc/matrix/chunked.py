@@ -34,7 +34,7 @@ type Backing = np.ndarray | zarr.Array
 type BlockFn[T] = Callable[[int, int, int], T]
 type Axis = Literal[0, 1] | None
 
-# Ufunc keywords a lazy operation can honour; others would be silently dropped.
+# Ufunc keywords a lazy operation can honor; others would be silently dropped.
 _UFUNC_KEYWORDS = frozenset({"dtype", "out"})
 
 

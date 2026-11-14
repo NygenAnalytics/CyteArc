@@ -323,7 +323,7 @@ def _treedata_layout(path: Path, container: str) -> TreeFileLayout:
 def tree_file_layout(
     path: str | os.PathLike[str], format: str | None = None
 ) -> TreeFileLayout:
-    """Recognise a tree file and count what reading it will hold.
+    """Recognize a tree file and count what reading it will hold.
 
     A Zarr store or an HDF5 file holds TreeData trees; other files hold
     Newick text, plain or gzip-compressed. ``format`` names the format the
@@ -716,11 +716,11 @@ def _read_newick(layout: TreeFileLayout, *, ledger: MemoryLedger) -> FileTrees:
             )
         ]
     # Unquoted numbers on internal nodes are support values, not names.
-    labelled = np.flatnonzero(
+    labeled = np.flatnonzero(
         (flags[:n_nodes] & (_INTERNAL | _HAS_LABEL | _QUOTED_LABEL))
         == (_INTERNAL | _HAS_LABEL)
     )
-    for node in labelled.tolist():
+    for node in labeled.tolist():
         if _SUPPORT.fullmatch(names[node]):
             names[node] = ""
     return FileTrees(

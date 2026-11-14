@@ -800,12 +800,12 @@ def _summarize_resolved_features(
     group_keys, cell_idx, group_cols, group_missing = grouping
     roles = _group_roles(group_keys)
     base = pd.DataFrame(dict(zip(roles, group_cols, strict=True)))
-    labelled = (
+    labeled = (
         np.ones(len(cell_idx), dtype=bool)
         if group_missing is None
         else ~np.asarray(group_missing, dtype=bool)
     )
-    n_groups = int(base.loc[labelled].drop_duplicates().shape[0])
+    n_groups = int(base.loc[labeled].drop_duplicates().shape[0])
     if n_groups > _MAX_SUMMARY_GROUPS:
         raise ValueError(
             f"Too many groups ({n_groups} > {_MAX_SUMMARY_GROUPS}). "
@@ -832,7 +832,7 @@ def _summarize_resolved_features(
                     "condition_by is not constant within sample(s): "
                     + ", ".join(map(str, list(bad.index[:10])))
                 )
-        valid = labelled & pd.notna(samples) & (np.asarray(samples, dtype=object) != "")
+        valid = labeled & pd.notna(samples) & (np.asarray(samples, dtype=object) != "")
         if int(valid.sum()) == 0:
             raise ValueError("No cells with valid sample_by values")
         uniq_samples = pd.unique(np.asarray(samples)[valid])
@@ -846,7 +846,7 @@ def _summarize_resolved_features(
         base["sample"] = np.asarray(samples)[valid]
         gb_keys.insert(0, "sample")
     else:
-        base = base.loc[labelled]
+        base = base.loc[labeled]
 
     masks: dict[str, np.ndarray] = {}
     summary = _summarize_feature_blocks(

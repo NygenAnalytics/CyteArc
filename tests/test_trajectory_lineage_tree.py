@@ -2,16 +2,18 @@ import numpy as np
 import pytest
 
 from cytearc.trajectory import build_cluster_tree
+from cytearc.trajectory import lineage_tree
 from cytearc.trajectory.lineage_tree import (
     SpanningTree,
     cluster_distances,
     cluster_moments,
+    labeled_tree,
     spanning_tree,
     tree_lineages,
 )
 
-# Cluster centres of a Y: a stem 0-1-2 that forks into 3-4 and 5-6.
-_Y_CENTRES = np.array(
+# Cluster centers of a Y: a stem 0-1-2 that forks into 3-4 and 5-6.
+_Y_CENTERS = np.array(
     [
         [0.0, 0.0],
         [2.0, 0.0],
@@ -29,13 +31,13 @@ def _clustered_cells(seed: int) -> tuple[np.ndarray, np.ndarray]:
     """Forty-one cells in four 3D clusters, the last a single cell, shuffled."""
     rng = np.random.default_rng(seed)
     codes = np.repeat([0, 1, 2, 3], [12, 15, 13, 1])
-    centres = np.array(
+    centers = np.array(
         [[0.0, 0.0, 0.0], [5.0, 1.0, -2.0], [1.0, 6.0, 3.0], [9.0, 9.0, 9.0]]
     )
     spread = np.array(
         [[1.0, 0.5, 2.0], [0.3, 1.5, 0.7], [2.0, 2.0, 0.2], [1.0, 1.0, 1.0]]
     )
-    data = centres[codes] + rng.normal(size=(codes.size, 3)) * spread[codes]
+    data = centers[codes] + rng.normal(size=(codes.size, 3)) * spread[codes]
     order = rng.permutation(codes.size)
     return codes[order], data[order]
 
@@ -67,7 +69,7 @@ def _prim_edges(distances: np.ndarray) -> list[list[int]]:
 def _y_tree_distances(seed: int = 0) -> np.ndarray:
     rng = np.random.default_rng(seed)
     codes = np.repeat(np.arange(7), 30)
-    data = _Y_CENTRES[codes] + rng.normal(scale=0.3, size=(codes.size, 2))
+    data = _Y_CENTERS[codes] + rng.normal(scale=0.3, size=(codes.size, 2))
     _, means, covariances = cluster_moments(
         _blocks(data, (0, 50, 210)), codes, n_clusters=7, n_dims=2
     )
@@ -462,6 +464,37 @@ def test_tree_lineages_trace_breadth_first_paths_from_the_root():
     assert from_inner == ((3, 1, 0), (3, 1, 2), (3, 4))
 
 
+def test_labeled_tree_names_the_y_by_its_cluster_labels():
+    # The Y's stem a-b-c forks into d-e and f-g; a, e and g end one branch
+    # each, and with the root a the lineages run from it to e and to g.
+    clusters = ["a", "b", "c", "d", "e", "f", "g"]
+    sizes = np.arange(1, 8)
+    lengths = np.array([2.0, 2.0, 8.0, 8.0, 8.0, 8.0])
+
+    tree = labeled_tree(
+        clusters, sizes, _Y_CENTERS, np.array(_Y_EDGES), lengths, root="a", ends=["g"]
+    )
+
+    assert tree.clusters == tuple(clusters)
+    np.testing.assert_array_equal(tree.sizes, sizes)
+    np.testing.assert_array_equal(tree.means, _Y_CENTERS)
+    assert tree.edges.values.tolist() == [
+        ["a", "b", 2.0],
+        ["b", "c", 2.0],
+        ["c", "d", 8.0],
+        ["c", "f", 8.0],
+        ["d", "e", 8.0],
+        ["f", "g", 8.0],
+    ]
+    assert tree.root == "a"
+    assert tree.ends == ("g",)
+    assert tree.leaves == ("a", "e", "g")
+    assert tree.lineages == (("a", "b", "c", "d", "e"), ("a", "b", "c", "f", "g"))
+    # The module names the function in US spelling only.
+    assert "labeled_tree" in lineage_tree.__all__
+    assert not hasattr(lineage_tree, "labelled_tree")
+
+
 def test_tree_lineages_of_a_single_cluster_have_no_leaves():
     leaves, lineages = tree_lineages(1, np.empty((0, 2), dtype=np.int64), 0)
 
@@ -473,15 +506,15 @@ def test_tree_lineages_of_a_single_cluster_have_no_leaves():
 
 
 def test_a_tree_built_by_hand_over_three_clusters_on_a_line():
-    # Three cells about each centre, 0, 12 and 20, each cluster with a sample
+    # Three cells about each center, 0, 12 and 20, each cluster with a sample
     # variance of 1, so Slingshot's distance between clusters is the squared
     # gap of their means over 2: 72 from c1 to c2, 32 from c2 to c10 and 200
     # from c1 to c10. The cells come in an order that mixes the clusters.
-    centres = {"c1": 0.0, "c2": 12.0, "c10": 20.0}
+    centers = {"c1": 0.0, "c2": 12.0, "c10": 20.0}
     cells = [
-        (label, centre + offset)
+        (label, center + offset)
         for offset in (-1.0, 0.0, 1.0)
-        for label, centre in centres.items()
+        for label, center in centers.items()
     ]
     labels = np.asarray([label for label, _ in cells], dtype=object)
     coordinates = np.asarray([[value] for _, value in cells])

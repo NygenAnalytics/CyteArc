@@ -124,8 +124,8 @@ def communities_connected(W, labels: np.ndarray) -> bool:
     return n_components == np.unique(labels).size
 
 
-def valid_labelling(labels: np.ndarray, n: int) -> bool:
-    """Whether ``labels`` is an int64 labelling ``1..r`` of ``n`` nodes."""
+def valid_labeling(labels: np.ndarray, n: int) -> bool:
+    """Whether ``labels`` is an int64 labeling ``1..r`` of ``n`` nodes."""
     return (
         labels.dtype == np.int64
         and labels.shape == (n,)
@@ -476,7 +476,7 @@ def test_best_move_tie_rules():
     target, gain = _call_best_move(0, [(0, 3, 2.0)], 4, [0, 0, 1, 2], [4, 1, 5, 2])
     assert target == 2
     assert gain == 1.0
-    # Without that neighbour the node leaves for an empty community.
+    # Without that neighbor the node leaves for an empty community.
     target, gain = _call_best_move(0, [(1, 3, 2.0)], 4, [0, 0, 1, 2], [4, 1, 5, 2])
     assert (target, gain) == (NEW_COMMUNITY, 1.0)
     # A singleton never moves to an empty community.
@@ -792,7 +792,7 @@ def test_parallel_primitives_match_numpy(min_items):
 
 
 # ---------------------------------------------------------------------------
-# 7.2 Behaviour on small graphs
+# 7.2 Behavior on small graphs
 # ---------------------------------------------------------------------------
 
 
@@ -864,7 +864,7 @@ def test_communities_are_connected(gamma):
     W = knn_graph(2000, 10)
     for seed in (1, 2, 3):
         labels = native_leiden_membership(W, gamma, seed, None)
-        assert valid_labelling(labels, 2000)
+        assert valid_labeling(labels, 2000)
         assert communities_connected(W, labels)
     forced = native_leiden_membership(W, gamma, 1, None, **FORCED)
     assert communities_connected(W, forced)
@@ -909,7 +909,7 @@ def test_seeds_are_repeatable_and_valid():
     for seed in (5, 2**40):
         first = leiden_membership(W, 1.0, seed)
         np.testing.assert_array_equal(leiden_membership(W, 1.0, seed), first)
-        assert valid_labelling(first, 2000)
+        assert valid_labeling(first, 2000)
         assert communities_connected(W, first)
     # Seeds are reduced modulo 2**64.
     np.testing.assert_array_equal(
@@ -922,10 +922,10 @@ def _grouped_graph(groups: list[list[int]]) -> sp.csr_matrix:
     rows, cols = [], []
     for group in groups:
         for cell in group:
-            for neighbour in group:
-                if neighbour != cell:
+            for neighbor in group:
+                if neighbor != cell:
                     rows.append(cell)
-                    cols.append(neighbour)
+                    cols.append(neighbor)
     return sp.csr_matrix((np.ones(len(rows)), (rows, cols)), shape=(n, n))
 
 
@@ -1169,7 +1169,7 @@ def test_refinement_is_retried_when_it_merges_nothing():
         ]
     for labels in runs[1:]:
         np.testing.assert_array_equal(labels, runs[0])
-    assert valid_labelling(runs[0], 4)
+    assert valid_labeling(runs[0], 4)
     assert communities_connected(_STALLING_CYCLE, runs[0])
     assert any("refinement retry=1 of 8" in message for message in messages)
     assert not any("end=safety-stop" in message for message in messages)
@@ -1184,7 +1184,7 @@ def test_safety_stop_splits_when_refinement_never_merges(monkeypatch):
         ]
     for labels in runs[1:]:
         np.testing.assert_array_equal(labels, runs[0])
-    assert valid_labelling(runs[0], 4)
+    assert valid_labeling(runs[0], 4)
     assert communities_connected(_STALLING_CYCLE, runs[0])
     assert any("end=safety-stop" in message for message in messages)
 
@@ -1484,7 +1484,7 @@ def test_sequential_queue_cap_stops_local_moving(monkeypatch):
     with _debug_messages() as messages:
         runs = [native_leiden_membership(W, 1.0, 1, threads) for threads in (1, 3)]
     np.testing.assert_array_equal(runs[1], runs[0])
-    assert valid_labelling(runs[0], 50)
+    assert valid_labeling(runs[0], 50)
     assert communities_connected(W, runs[0])
     assert any("stopped at its cap" in message for message in messages)
 
@@ -1511,7 +1511,7 @@ def test_adversarial_star():
         shape=(n_leaves + 1, n_leaves + 1),
     )
     labels = native_leiden_membership(W, 1.0, 1, 4)
-    assert valid_labelling(labels, n_leaves + 1)
+    assert valid_labeling(labels, n_leaves + 1)
     assert communities_connected(W, labels)
     np.testing.assert_array_equal(native_leiden_membership(W, 1.0, 1, 1), labels)
 
@@ -1520,7 +1520,7 @@ def test_adversarial_weight_range():
     W, _ = planted(8, 60, 0.12, 0.02, 3)
     W.data = 10.0 ** np.random.default_rng(8).uniform(-150.0, 150.0, size=W.nnz)
     labels = native_leiden_membership(W, 1.0, 1, None)
-    assert valid_labelling(labels, W.shape[0])
+    assert valid_labeling(labels, W.shape[0])
     assert communities_connected(W, labels)
     _assert_gamma_separated(W, labels, 1.0)
     for factor in (2.0**-200, 2.0**200):
@@ -1532,14 +1532,14 @@ def test_adversarial_weight_range():
 def test_adversarial_zero_strength_node():
     # Node 10 hangs on node 0 by a weight of 1e-40, so its fixed-point strength
     # rounds to 0 (no null-model term and no move margin). Joining its only
-    # neighbour's community is still the one move with a positive gain.
+    # neighbor's community is still the one move with a positive gain.
     W = cliques_graph([10], 1).tolil()
     W[0, 10] = 1e-40
     W = W.tocsr()
     assert build_leiden_graph(W, 1).strengths[10] == 0
     labels = native_leiden_membership(W, 1.0, 1, None)
     assert labels[10] == labels[0]
-    assert valid_labelling(labels, 11)
+    assert valid_labeling(labels, 11)
     assert communities_connected(W, labels)
 
 
@@ -1588,7 +1588,7 @@ def leiden_store_template(datastore_zarr_root, tmp_path_factory):
     half of the build, so the graph uses the 100 most often detected genes.
     """
     from cytearc.datastore.datastore import DataStore
-    from tests.fixtures_datastore import build_neighbourhood_graph
+    from tests.fixtures_datastore import build_neighborhood_graph
 
     path = tmp_path_factory.mktemp("native_leiden") / "store.zarr"
     shutil.copytree(datastore_zarr_root, path)
@@ -1599,7 +1599,7 @@ def leiden_store_template(datastore_zarr_root, tmp_path_factory):
         from_assay="RNA",
         feature_indexes=np.sort(np.argsort(-detected, kind="stable")[:100]).tolist(),
     )
-    graph = build_neighbourhood_graph(
+    graph = build_neighborhood_graph(
         datastore,
         from_assay="RNA",
         cell_selection=cells,
@@ -1772,7 +1772,7 @@ def test_kernels_run_as_python_give_the_compiled_labels(
         actual = native_leiden_membership(graph, gamma, seed, 2, **path)
 
     np.testing.assert_array_equal(actual, expected)
-    assert valid_labelling(actual, graph.shape[0])
+    assert valid_labeling(actual, graph.shape[0])
 
 
 def _one_community_level(n_workers: int, parallel_min_items: int, last_id: bool):
@@ -2032,7 +2032,7 @@ def _merge_subset(merge, graph, labels, members, gamma: float):
 
 
 @pytest.mark.usefixtures("kernel_mode")
-def test_a_member_whose_neighbours_are_poorly_connected_stays_alone():
+def test_a_member_whose_neighbors_are_poorly_connected_stays_alone():
     # Node 0 is well connected to its community {0, 1, 2}, but nodes 1 and 2
     # lean on nodes outside it, so neither is a community node 0 may join.
     W = sp.csr_matrix(
@@ -2084,7 +2084,7 @@ def test_the_group_count_is_a_power_of_two():
 
 
 @pytest.mark.filterwarnings("ignore:overflow encountered in ldexp:RuntimeWarning")
-def test_strengths_that_overflow_after_normalisation_are_rejected():
+def test_strengths_that_overflow_after_normalization_are_rejected():
     # The symmetrized weights have a finite total, but scaling them by the tiny
     # mean off-diagonal weight sends the self-loop's strength to infinity.
     graph = sp.csr_matrix(

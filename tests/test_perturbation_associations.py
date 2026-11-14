@@ -2423,7 +2423,7 @@ def test_association_warnings_name_up_to_five_and_say_why_no_check_ran() -> None
     }
     few = {**unchecked, "calibrationStatus": "few_control_guides", "controlGuides": 0}
     assert _warnings_of(few, moi="high") == {
-        "calibrationStatus": "No labelled cell carries a control guide, which a "
+        "calibrationStatus": "No labeled cell carries a control guide, which a "
         "calibration group needs, so no calibration check was run"
     }
 

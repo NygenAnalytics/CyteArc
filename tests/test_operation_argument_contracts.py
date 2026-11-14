@@ -404,7 +404,7 @@ _CONTRACTS = (
             # The clones label the cells of the selection's counts; the within
             # columns' labels are recorded by their fingerprint.
             **_classified("resolved_input", "cell_selection", "within_fingerprint"),
-            # The Leiden seed and Seurat's pruning of the shared-neighbour
+            # The Leiden seed and Seurat's pruning of the shared-neighbor
             # graph are fixed choices of the method.
             **_classified("algorithm_policy", "random_seed", "shared_neighbor_prune"),
         },
@@ -702,6 +702,8 @@ _CONTRACTS = (
         aliases={
             "features": "feature_selection",
             "norm_params": "normalization",
+            # The record keeps the key that 1.3.0 saved the argument under.
+            "n_neighbors": "n_neighbours",
         },
         model_only=_classified(
             "resolved_input",
@@ -796,6 +798,8 @@ _CONTRACTS = (
         aliases={
             "features": "feature_selection",
             "norm_params": "normalization",
+            # The record keeps the key that 1.3.0 saved the argument under.
+            "n_neighbors": "n_neighbours",
         },
         model_only=_classified(
             "resolved_input",

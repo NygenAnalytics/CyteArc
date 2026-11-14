@@ -135,7 +135,7 @@ def _legacy_wnn(
 def _neighbors(
     rng: np.random.Generator, n_cells: int, k: int, dtype: type = np.int64
 ) -> np.ndarray:
-    """Return ``k`` distinct neighbours of every cell, without the cell itself."""
+    """Return ``k`` distinct neighbors of every cell, without the cell itself."""
     indices = np.empty((n_cells, k), dtype=dtype)
     for cell in range(n_cells):
         choice = rng.choice(n_cells - 1, size=k, replace=False)
@@ -226,7 +226,7 @@ def test_kernel_affinity_of_a_bandwidth_within_rounding_keeps_the_nearest():
     tolerance = 8.0 * np.finfo(np.float64).eps * nearest
     distances = np.array([2.0, np.nextafter(2.0, 3.0), 2.5, 1.0])
 
-    # A bandwidth within the tolerance keeps, at full affinity, the neighbours
+    # A bandwidth within the tolerance keeps, at full affinity, the neighbors
     # at the nearest distance up to rounding, at any scale of the embedding.
     for scale in (1.0, 1e-6, 1e6):
         np.testing.assert_array_equal(
@@ -260,7 +260,7 @@ def test_wnn_matches_the_loop_where_every_bandwidth_is_degenerate(dtype, l2_norm
     rng = np.random.default_rng(5)
     modalities = _modalities(rng, 40, (6, 6), (3, 2), dtype)
     # Every cell of the second modality has the same coordinates, so all its
-    # neighbour distances and bandwidths are zero. Big-endian coordinates are
+    # neighbor distances and bandwidths are zero. Big-endian coordinates are
     # scored one cell at a time.
     modalities[1][2][:] = 1.0
 
@@ -271,7 +271,7 @@ def test_wnn_matches_the_loop_where_every_bandwidth_is_degenerate(dtype, l2_norm
 @pytest.mark.parametrize("dtype", [np.float32, np.float64])
 def test_wnn_kernels_match_on_wide_and_single_coordinates(dtype, l2_normalize):
     # 300 coordinates sum in NumPy's split pairwise order, and twelve
-    # neighbours of a single coordinate average pairwise.
+    # neighbors of a single coordinate average pairwise.
     rng = np.random.default_rng(8)
     modalities = _modalities(rng, 40, (12, 12), (300, 1), dtype)
 
@@ -383,7 +383,7 @@ def test_wnn_kernels_report_non_finite_weights_like_the_loop(
             _modalities(rng, 8, (3, 3), (3, 2), np.float64), overflowing, strict=True
         )
     ]
-    # Every cell's neighbours, so overflowing distances reach the graph.
+    # Every cell's neighbors, so overflowing distances reach the graph.
     for _name, indices, _coordinates in modalities:
         indices[:] = [
             [neighbor for neighbor in range(8) if neighbor != cell][:3]
@@ -625,7 +625,7 @@ def _graph(
 def _sharing_neighbors(
     rng: np.random.Generator, neighbors: np.ndarray, shared: int
 ) -> np.ndarray:
-    """Return other neighbour rows that keep ``shared`` of each row's neighbours."""
+    """Return other neighbor rows that keep ``shared`` of each row's neighbors."""
     n_cells, k = neighbors.shape
     rows = np.empty_like(neighbors)
     for cell in range(n_cells):
@@ -678,7 +678,7 @@ def test_snn_merge_matches_with_mixed_index_and_weight_dtypes():
 
 
 def test_snn_merge_rejects_rows_with_too_few_distinct_neighbors():
-    # A non-canonical row lists neighbour 1 three times.
+    # A non-canonical row lists neighbor 1 three times.
     graph = csr_matrix(
         (
             np.ones(12),

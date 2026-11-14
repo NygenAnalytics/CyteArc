@@ -40,7 +40,7 @@ def assign_cells(
 
     Args:
         similarity: ``(chunk, clusters)`` products ``y_k . Z_i`` of the chunk's
-            unnormalised cells with the centroids; overwritten as scratch.
+            unnormalized cells with the centroids; overwritten as scratch.
         cells: ``(chunk,)`` int64 indices of the chunk's cells.
         inverse_norms: ``(cells,)`` inverse norm of every cell, 0 at the origin.
         two_over_sigma: ``(clusters,)`` values ``2 / sigma_k``.

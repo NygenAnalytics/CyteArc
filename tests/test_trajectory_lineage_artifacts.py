@@ -819,13 +819,13 @@ def test_aggregation_record_accepts_unassigned_labels_outside_the_clusters(
             {"n_neighbours": 0},
             ValueError,
             "n_neighbours must be at least 1",
-            id="no-neighbours",
+            id="no-neighbors",
         ),
         pytest.param(
             {"n_neighbours": np.float64(11)},
             TypeError,
             "n_neighbours must be an integer",
-            id="real-neighbours",
+            id="real-neighbors",
         ),
         pytest.param(
             {"ann_params": [("M", 16)]},
@@ -1342,7 +1342,7 @@ def _aggregation_payload(chunk_rows: int | None) -> _Stored:
             "n_lineages": 2,
             "n_bins": 3,
             "n_clusters": 2,
-            "n_neighbours": 2,
+            "n_neighbors": 2,
             "nan_cluster_value": -1,
             "expected_input_fingerprints": list(_INPUT_FINGERPRINTS),
         },
@@ -1784,14 +1784,14 @@ _AGGREGATION_TAMPERS: dict[str, _Tamper] = {
         "feature_indices", lambda values: values[[1, 0, 2, 3]]
     ),
     "one-valid-feature": _exclude(2, 3),
-    "as-many-valid-features-as-neighbours": _exclude(3),
+    "as-many-valid-features-as-neighbors": _exclude(3),
     "unassigned-module-for-valid-feature": _relabel(0, 0),
     "module-beyond-the-modules": _relabel(0, 3),
     "other-unassigned-module": _set("feature_clusters", 1, -2),
     "profile-of-excluded-feature": _set("data", (1, 0, 1), 0.5),
     "nan-profile": _set("data", (0, 1, 2), _NAN),
     "infinite-profile": _set("data", (3, 0, 0), -np.inf),
-    "relabelled-module-value": _set("cluster_values", 0, 2),
+    "relabeled-module-value": _set("cluster_values", 0, 2),
     "module-value-of-unselected-feature": _set("cluster_values", 5, 1),
     "module-value-of-excluded-feature": _set("cluster_values", 2, 1),
 }
@@ -1817,10 +1817,10 @@ def test_aggregation_payload_tolerates_rounding_in_bin_pseudotime() -> None:
 
 
 def test_aggregation_payload_allows_a_module_for_each_valid_feature() -> None:
-    # Three features are valid: one or two neighbours and up to three modules.
+    # Three features are valid: one or two neighbors and up to three modules.
     candidate = _candidate("lineage_aggregation")
 
-    assert candidate.is_valid(n_neighbours=1, n_clusters=3)
+    assert candidate.is_valid(n_neighbors=1, n_clusters=3)
 
 
 def _score_unscored_cell(candidate: _Candidate) -> None:
@@ -1966,11 +1966,11 @@ def test_tree_payload_accepts_any_spanning_tree(edges: list[list[int]]) -> None:
         pytest.param("lineage_aggregation", {"n_bins": 4}, id="aggregation-bins"),
         pytest.param(
             "lineage_aggregation",
-            {"n_neighbours": 3},
-            id="aggregation-neighbours-for-every-valid-feature",
+            {"n_neighbors": 3},
+            id="aggregation-neighbors-for-every-valid-feature",
         ),
         pytest.param(
-            "lineage_aggregation", {"n_neighbours": 0}, id="aggregation-no-neighbours"
+            "lineage_aggregation", {"n_neighbors": 0}, id="aggregation-no-neighbors"
         ),
         pytest.param(
             "lineage_aggregation",

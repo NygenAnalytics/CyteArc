@@ -136,14 +136,14 @@ def _run_isolated(code: str, **environment: str) -> subprocess.CompletedProcess:
     )
 
 
-# Loguru colours its default handler on CI services and in PyCharm even when
-# stderr is a pipe, so other code's records are compared without the colours.
-_ANSI_COLOUR = re.compile(r"\x1b\[[0-9;]*m")
+# Loguru colors its default handler on CI services and in PyCharm even when
+# stderr is a pipe, so other code's records are compared without the colors.
+_ANSI_COLOR = re.compile(r"\x1b\[[0-9;]*m")
 
 
 def _stderr_lines(result: subprocess.CompletedProcess) -> list[str]:
-    """Return the lines of ``result``'s stderr without terminal colours."""
-    return _ANSI_COLOUR.sub("", result.stderr).splitlines()
+    """Return the lines of ``result``'s stderr without terminal colors."""
+    return _ANSI_COLOR.sub("", result.stderr).splitlines()
 
 
 def test_host_loguru_output_keeps_its_default_handler_and_level():

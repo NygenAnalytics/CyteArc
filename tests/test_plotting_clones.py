@@ -82,7 +82,7 @@ def test_without_groups_the_plot_counts_every_cell(plotted) -> None:
         "clone_size": [1, 3],
         "n_clones": [1, 1],
     }
-    # Clones are labelled by their IDs, and every cell is in one group.
+    # Clones are labeled by their IDs, and every cell is in one group.
     assert result.tables["top"].to_dict("list") == {
         "clone": ["a", "b"],
         "label": ["a", "b"],
@@ -257,7 +257,7 @@ def test_clones_of_equal_size_list_in_rank_order(plotted) -> None:
 
     result = clone_abundance(store, tied, show=False)
 
-    # Clones are labelled by their IDs, in the same order.
+    # Clones are labeled by their IDs, in the same order.
     assert result.tables["top"].to_dict("list") == {
         "clone": ["9", "10", "x"],
         "label": ["9", "10", "x"],
@@ -450,13 +450,13 @@ def test_the_expansion_plot_checks_its_arguments(
 
 def test_the_expansion_plot_of_a_grouping_without_labels(truth_plot) -> None:
     store = truth_plot.store
-    if "unlabelled" not in store.cells.columns:
+    if "unlabeled" not in store.cells.columns:
         insert_nullable_cell_column(
-            store, "unlabelled", TRUTH.samples, np.ones(N_CELLS, dtype=bool)
+            store, "unlabeled", TRUTH.samples, np.ones(N_CELLS, dtype=bool)
         )
     # No cell has a label, so no group holds a cell to draw.
     with pytest.raises(ValueError, match="^No cell with a group has an expansion"):
-        clonal_expansion(store, truth_plot.by_sample, group_by="unlabelled", show=False)
+        clonal_expansion(store, truth_plot.by_sample, group_by="unlabeled", show=False)
 
 
 def _joined(*columns: np.ndarray) -> np.ndarray:
@@ -754,7 +754,7 @@ def test_the_diversity_plot_draws_each_groups_indices(truth_plot) -> None:
         assert result.axes["n_clones"].get_title() == "Clones"
         assert result.axes["chao1"].get_title() == "Chao1"
         # One legend of the samples, beside the last panel of the first row,
-        # in the colours of the bars.
+        # in the colors of the bars.
         legend = result.axes["chao1"].get_legend()
         assert [text.get_text() for text in legend.get_texts()] == ["d2", "d4"]
         assert result.axes["d50"].get_legend() is None
@@ -883,21 +883,21 @@ def test_the_diversity_plot_checks_its_indices(
 def test_record_groups_need_a_store_that_gives_their_labels(truth_plot) -> None:
     store, clones = truth_plot.store, truth_plot.clones
     grouped = store.clones.rarefaction(clones, group_by="sample")
-    # The colours of one column's groups range over the column's labels.
-    # They are read only when a figure colours its groups.
+    # The colors of one column's groups range over the column's labels.
+    # They are read only when a figure colors its groups.
     unread = table_groups(object(), grouped)
     assert unread.title == "sample"
     with pytest.raises(TypeError, match="^store does not provide the labels of its"):
         unread.scale(["d2"])
     with pytest.raises(TypeError, match="^store does not provide the labels of its"):
         clonal_rarefaction(_NamesOnly(store), grouped, show=False)
-    # A figure that does not colour the groups never reads their labels.
+    # A figure that does not color the groups never reads their labels.
     drawn = clone_overlap(
         _NamesOnly(store), store.clones.overlap(clones, group_by="sample"), show=False
     )
     assert drawn.provenance.extras["grouping"] == "sample"
     drawn.close()
-    # Labels kept apart that are no vocabulary take colours over the groups
+    # Labels kept apart that are no vocabulary take colors over the groups
     # drawn, as groups of several columns do.
     kept = SimpleNamespace(
         group_keys=pd.DataFrame(
@@ -1142,7 +1142,7 @@ def test_the_tracking_plot_draws_one_line_per_clone(truth_plot) -> None:
         )
     table = result.tables["tracking"]
     assert table["n_cells"].tolist() == [3, 6, 2, 4, 3, 1]
-    # Clones are labelled by their IDs, beside them in the table.
+    # Clones are labeled by their IDs, beside them in the table.
     assert table["clone"].tolist() == ["1", "1", "2", "2", "4", "4"]
     assert table["label"].tolist() == table["clone"].tolist()
     # The record's own table is left as it was.
@@ -1326,7 +1326,7 @@ def test_the_overlap_plot_prints_values_of_at_most_12_groups(many_groups) -> Non
     assert len(ax.texts) == 12 * 11
     shown = {text.get_position(): text for text in ax.texts}
     assert shown[(1, 0)].get_text() == "1" and shown[(2, 0)].get_text() == "0"
-    # Dark text on the light colour of 1, light text on the dark colour of 0.
+    # Dark text on the light color of 1, light text on the dark color of 0.
     assert shown[(1, 0)].get_color() == "black"
     assert shown[(2, 0)].get_color() == "white"
     plt.close(twelve.figure)
@@ -1368,7 +1368,7 @@ def test_the_overlap_plot_grows_to_the_width_of_a_page(many_groups) -> None:
         sizes[n_groups] = result.figure.get_size_inches().tolist()
         plt.close(result.figure)
     # A side of 0.55 inches per group and 2.5 more, at least 4 and at most
-    # 6.3, beside 1.2 inches for the colour bar: 7.5 inches at most.
+    # 6.3, beside 1.2 inches for the color bar: 7.5 inches at most.
     assert sizes == {
         2: pytest.approx([5.2, 4.0]),
         8: pytest.approx([7.5, 6.3]),
@@ -1460,11 +1460,11 @@ def test_the_coupling_plot_draws_z_scores_in_the_order_of_the_tree(truth_plot) -
     ax = result.axes["matrix"]
     assert ax.get_title() == "Cosine of clone shares, z-score"
     assert [tick.get_text() for tick in ax.get_yticklabels()] == order
-    # Six cells off the diagonal print their z-scores, on a scale centred on 0.
+    # Six cells off the diagonal print their z-scores, on a scale centered on 0.
     assert len(ax.texts) == 6
     low, high = ax.images[0].get_clim()
     assert low == -high == -np.abs(coupling.pairs["z_score"]).max()
-    # z-scores take a scale centred on 0 even when all lie above it.
+    # z-scores take a scale centered on 0 even when all lie above it.
     above = replace(
         coupling,
         pairs=coupling.pairs.assign(z_score=np.abs(coupling.pairs["z_score"]) + 1),
@@ -1516,7 +1516,7 @@ def test_the_coupling_plot_blanks_values_that_are_not_finite(truth_plot) -> None
     assert np.isinf(result.tables["matrix"].to_numpy()).sum() == 2
     plt.close(result.figure)
     # The truth's covariances are all above 0, which a sequential scale
-    # draws; covariances below 0 take a scale centred on 0.
+    # draws; covariances below 0 take a scale centered on 0.
     assert coupling.pairs["coupling"].gt(0).all()
     values = clone_coupling(store, coupling, value="coupling", show=False)
     assert values.axes["matrix"].images[0].cmap.name == "viridis"
@@ -1613,7 +1613,7 @@ def test_the_fates_plot_groups_clones_by_their_dominant_fate(fates_plot) -> None
 
     ordered = sorted(tested, key=rank)
     assert table["clone"].tolist() == [str(clone + 1) for clone in ordered]
-    # Clones are labelled by their IDs.
+    # Clones are labeled by their IDs.
     assert table["label"].tolist() == table["clone"].tolist()
     assert [
         name if isinstance(name, str) else None for name in table["fate"].tolist()

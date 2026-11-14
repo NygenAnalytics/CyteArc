@@ -1164,7 +1164,7 @@ class DataStorePlotAccessor:
         ``stats_results`` overlays significance brackets from
         ``compare.test`` results onto the drawn violins or
         boxes; see :func:`cytearc.plotting.distribution` for the full
-        behaviour. ``max_points`` defaults to ``10000``; explicit ``None``
+        behavior. ``max_points`` defaults to ``10000``; explicit ``None``
         disables the point overlay for stacked violins and otherwise uses
         ``10000``. Each violin's density uses at most ``max_density_points``
         values.

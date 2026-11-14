@@ -552,7 +552,7 @@ def _label_rows(
 
 
 _NO_CONTROL_CELLS = (
-    "No labelled cell carries control guides only, and each perturbation is "
+    "No labeled cell carries control guides only, and each perturbation is "
     "compared with such cells; check the controls passed to perturbation.labels, "
     "or in a screen whose cells carry several guides, test associations with "
     "moi='high'"
@@ -574,7 +574,7 @@ _COMPARED_BYTES_PER_CELL = 48
 
 @dataclass(frozen=True, slots=True)
 class _CellRowArrays:
-    """The stored arrays that give each labelled cell the row it carries alone.
+    """The stored arrays that give each labeled cell the row it carries alone.
 
     A cell carries a target alone when its called guides target that gene and
     no other, and a guide alone when it is the cell's one called guide: by
@@ -618,7 +618,7 @@ class _CellRowArrays:
 def _cell_row_arrays(
     store: Any, labels: ArtifactRef, rows: _LabelRows, by: str
 ) -> _CellRowArrays:
-    """Return the stored arrays from which each labelled cell's row is read."""
+    """Return the stored arrays from which each labeled cell's row is read."""
     group = artifact_group(store.zw, labels)
     if by == "target":
         row_of = np.full(len(rows.target_names), -1, dtype=np.int64)
@@ -640,13 +640,13 @@ def _cell_row_arrays(
 def _label_groups(
     store: Any, labels: ArtifactRef, rows: _LabelRows, by: str
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Return the row that each labelled cell carries alone, or -1, and its control flag.
+    """Return the row that each labeled cell carries alone, or -1, and its control flag.
 
     A cell carries a target alone when its called guides target that gene
     and no other, and a guide alone when it is the cell's one called guide.
 
     Raises:
-        ValueError: If no labelled cell carries control guides only.
+        ValueError: If no labeled cell carries control guides only.
     """
     arrays = _cell_row_arrays(store, labels, rows, by)
     control = np.asarray(arrays.is_control[:], dtype=bool)
@@ -662,15 +662,15 @@ def _compared_cells(
     """Return the cells that a per-perturbation table compares, and the bytes that finding them holds.
 
     The labels are read a block of cells at a time, so that only the arrays of
-    the compared cells grow with the cells: a screen with many labelled cells
+    the compared cells grow with the cells: a screen with many labeled cells
     and few compared ones holds little. The bytes are the most that finding
     the compared cells holds beside what the caller holds.
 
     Raises:
-        ValueError: If no labelled cell carries control guides only.
+        ValueError: If no labeled cell carries control guides only.
     """
     arrays = _cell_row_arrays(store, labels, rows, by)
-    n_labelled = int(arrays.is_control.shape[0])
+    n_labeled = int(arrays.is_control.shape[0])
     # The labels' cells are checked against the cell IDs before any array
     # of the compared cells is held.
     selection = rows.status.input_ref("cell_selection")
@@ -679,8 +679,8 @@ def _compared_cells(
     chunk_rows = max(1, int(arrays.codes.chunks[0]))
     block_rows = max(chunk_rows, _LABEL_BLOCK_ROWS // chunk_rows * chunk_rows)
     positions, groups, control = [], [], []
-    for start in range(0, n_labelled, block_rows):
-        row, flag = arrays.rows(start, min(start + block_rows, n_labelled))
+    for start in range(0, n_labeled, block_rows):
+        row, flag = arrays.rows(start, min(start + block_rows, n_labeled))
         kept = np.flatnonzero((row >= 0) | flag)
         positions.append(kept + start)
         groups.append(row[kept])
@@ -698,7 +698,7 @@ def _compared_cells(
         _cell_selection_check_bytes(store),
         len(cells) * _COMPARED_BYTES_PER_CELL
         + max(
-            arrays.block_bytes(min(block_rows, n_labelled)),
+            arrays.block_bytes(min(block_rows, n_labeled)),
             _selection_block_bytes(store, selection),
         ),
     )

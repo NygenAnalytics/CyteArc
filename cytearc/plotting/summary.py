@@ -72,10 +72,10 @@ def _wrap_tick_labels(values: Sequence[Any], width: int | None) -> list[str]:
 
 
 def _mean_label(features: Sequence[Any], standardize: str) -> str:
-    """Name what the colours of means draw: expression for the RNA assay, otherwise its assay.
+    """Name what the colors of means draw: expression for the RNA assay, otherwise its assay.
 
     A dot plot or matrix plot of an assay of gene scores, say, draws the mean
-    gene scores, so its colour bar names the assay, such as "Mean of
+    gene scores, so its color bar names the assay, such as "Mean of
     GeneScores".
     """
     assays = sorted({feature.assay for feature in features})
@@ -155,7 +155,7 @@ def _draw_feature_group_brackets(
             4.0 * ax.figure.dpi / (72.0 * axes_width),
         )
     for label, start, end in grouped_ranges:
-        centre = (start + end) / 2
+        center = (start + end) / 2
         if swap_axes:
             transform = ax.get_xaxis_transform()
             line = ax.plot(
@@ -175,7 +175,7 @@ def _draw_feature_group_brackets(
                 clip_on=False,
             )
             ax.text(
-                centre,
+                center,
                 1.07,
                 label,
                 transform=transform,
@@ -210,7 +210,7 @@ def _draw_feature_group_brackets(
             )
             group_label = ax.text(
                 0,
-                centre,
+                center,
                 label,
                 transform=text_transform,
                 ha="right",
@@ -409,7 +409,7 @@ def dotplot(
 ) -> PlotResult:
     """Dotplot of expression by group.
 
-    Color is the mean value in the group, and the colour bar names it: "Mean
+    Color is the mean value in the group, and the color bar names it: "Mean
     expression" for the RNA assay and otherwise the assay, such as "Mean of
     GeneScores". Dot size is the fraction of measured cells above
     ``expression_cutoff``. Pass ``features`` as a list of genes, or

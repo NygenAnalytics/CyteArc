@@ -294,14 +294,14 @@ def mapping_consumer_context(mapping_source, query_source, tmp_path):
 
 
 @pytest.fixture(scope="module")
-def labelled_reference(mapping_source, tmp_path_factory):
+def labeled_reference(mapping_source, tmp_path_factory):
     """A read-only reference store and its plain reference, shared by the module.
 
     The store holds the labels that ``_write_reference_labels`` writes. Tests
     that only read the reference share it, and opening it read-only keeps any
     of them from changing it for the others.
     """
-    path = tmp_path_factory.mktemp("labelled_reference") / "reference.zarr"
+    path = tmp_path_factory.mktemp("labeled_reference") / "reference.zarr"
     writable = mapping_source.open_copy(path)
     _write_reference_labels(writable.mapping.load_reference(mapping_source.reference))
     reference_store = DataStore(str(path), default_assay="RNA", zarr_mode="r")
@@ -311,18 +311,18 @@ def labelled_reference(mapping_source, tmp_path_factory):
 
 
 @pytest.fixture
-def labelled_consumer_context(labelled_reference, query_source, tmp_path):
-    """The shared labelled reference store, its reference, and a writable query."""
-    reference_store, reference = labelled_reference
+def labeled_consumer_context(labeled_reference, query_source, tmp_path):
+    """The shared labeled reference store, its reference, and a writable query."""
+    reference_store, reference = labeled_reference
     shutil.copytree(query_source, tmp_path / "query.zarr")
     query = DataStore(str(tmp_path / "query.zarr"), default_assay="RNA")
     return reference_store, reference, query
 
 
 def test_mapping_result_requires_explicit_ref_and_reference_after_cold_reopen(
-    labelled_consumer_context,
+    labeled_consumer_context,
 ):
-    reference_store, reference, query = labelled_consumer_context
+    reference_store, reference, query = labeled_consumer_context
     result = _write_projection(
         query,
         reference,
@@ -377,9 +377,9 @@ def test_mapping_result_requires_explicit_ref_and_reference_after_cold_reopen(
 
 
 def test_mapping_scores_exclude_uninformative_rows_and_preserve_groups(
-    labelled_consumer_context,
+    labeled_consumer_context,
 ):
-    _, reference, query = labelled_consumer_context
+    _, reference, query = labeled_consumer_context
     result = _write_projection(
         query,
         reference,
@@ -449,9 +449,9 @@ def test_mapping_scores_exclude_uninformative_rows_and_preserve_groups(
 
 
 def test_mapping_scores_keep_missing_target_groups_distinct(
-    labelled_consumer_context,
+    labeled_consumer_context,
 ):
-    _, reference, query = labelled_consumer_context
+    _, reference, query = labeled_consumer_context
     result = _write_projection(
         query,
         reference,
@@ -487,11 +487,11 @@ def test_mapping_scores_keep_missing_target_groups_distinct(
 
 @pytest.mark.parametrize("weighted", [True, False])
 def test_mapping_score_data_reads_projection_once(
-    labelled_consumer_context,
+    labeled_consumer_context,
     monkeypatch,
     weighted,
 ):
-    _, reference, query = labelled_consumer_context
+    _, reference, query = labeled_consumer_context
     indices = np.array([[0, 1], [2, 3], [1, 2], [3, 0], [0, 2], [1, 3], [2, 1]])
     distances = np.arange(1, 15, dtype=np.float64).reshape(7, 2)
     uninformative = np.array([False, False, True, False, False, False, False])
@@ -554,9 +554,9 @@ def _transfer(query, result, reference, labels="reference_labels", **options):
 
 
 def test_label_transfer_saves_labels_frozen_inputs_and_evidence(
-    labelled_consumer_context,
+    labeled_consumer_context,
 ):
-    _, reference, query = labelled_consumer_context
+    _, reference, query = labeled_consumer_context
     result = _write_projection(
         query,
         reference,
@@ -852,9 +852,9 @@ def test_saved_label_transfer_survives_reference_reannotation(
 
 
 def test_label_transfer_reuses_matches_and_refuses_read_only_writes(
-    labelled_consumer_context,
+    labeled_consumer_context,
 ):
-    _, reference, query = labelled_consumer_context
+    _, reference, query = labeled_consumer_context
     result = _write_projection(
         query,
         reference,
@@ -959,10 +959,10 @@ def test_label_transfer_reads_reference_label_artifacts(
     assert "unresolved external" not in lineage.to_markdown()
 
 
-def test_label_transfer_is_a_cell_label_artifact(labelled_consumer_context):
+def test_label_transfer_is_a_cell_label_artifact(labeled_consumer_context):
     from cytearc.metadata.selection import resolve_complete_labels, resolve_grouping
 
-    _, reference, query = labelled_consumer_context
+    _, reference, query = labeled_consumer_context
     result = _write_projection(
         query,
         reference,
@@ -993,10 +993,10 @@ def test_label_transfer_is_a_cell_label_artifact(labelled_consumer_context):
     np.testing.assert_array_equal(selected, loaded.cell_idx[[0, 2]])
 
 
-def test_label_transfer_rejects_a_changed_payload(labelled_consumer_context):
+def test_label_transfer_rejects_a_changed_payload(labeled_consumer_context):
     from cytearc.storage.artifacts import artifact_group
 
-    _, reference, query = labelled_consumer_context
+    _, reference, query = labeled_consumer_context
     result = _write_projection(
         query,
         reference,
@@ -1013,8 +1013,8 @@ def test_label_transfer_rejects_a_changed_payload(labelled_consumer_context):
     assert _transfer(query, result, reference)[0] != transfer
 
 
-def test_label_vote_shares_calibrate_prediction_sets(labelled_consumer_context):
-    _, reference, query = labelled_consumer_context
+def test_label_vote_shares_calibrate_prediction_sets(labeled_consumer_context):
+    _, reference, query = labeled_consumer_context
     result = _write_projection(
         query,
         reference,
@@ -1044,8 +1044,8 @@ def test_label_vote_shares_calibrate_prediction_sets(labelled_consumer_context):
     assert narrow.tolist() == [("winner",), (), ("runner_up",)]
 
 
-def test_label_transfer_reads_its_payload_once(labelled_consumer_context, monkeypatch):
-    _, reference, query = labelled_consumer_context
+def test_label_transfer_reads_its_payload_once(labeled_consumer_context, monkeypatch):
+    _, reference, query = labeled_consumer_context
     result = _write_projection(
         query,
         reference,
@@ -1104,10 +1104,10 @@ def test_label_transfer_reads_its_payload_once(labelled_consumer_context, monkey
 
 
 def test_label_transfer_loads_votes_only_on_request_without_copies(
-    labelled_consumer_context,
+    labeled_consumer_context,
     monkeypatch,
 ):
-    _, reference, query = labelled_consumer_context
+    _, reference, query = labeled_consumer_context
     result = _write_projection(
         query,
         reference,
@@ -1154,11 +1154,11 @@ def test_label_transfer_loads_votes_only_on_request_without_copies(
 
 
 def test_label_transfer_result_copies_arrays_that_callers_can_change(
-    labelled_consumer_context,
+    labeled_consumer_context,
 ):
     from dataclasses import replace as replace_fields
 
-    _, reference, query = labelled_consumer_context
+    _, reference, query = labeled_consumer_context
     result = _write_projection(
         query,
         reference,
@@ -1195,13 +1195,13 @@ def test_label_transfer_result_copies_arrays_that_callers_can_change(
 
 
 def test_label_transfer_writes_with_the_datastore_storage_profile(
-    labelled_consumer_context,
+    labeled_consumer_context,
     monkeypatch,
 ):
     import cytearc.mapping.label_transfer as label_transfer
     from cytearc.storage.artifacts import artifact_group
 
-    _, reference, query = labelled_consumer_context
+    _, reference, query = labeled_consumer_context
     result = _write_projection(
         query,
         reference,
@@ -1286,10 +1286,10 @@ def test_confidence_helpers_reject_invalid_shapes_calibration_and_alpha() -> Non
 
 
 def test_mapping_consumers_stream_projection_arrays(
-    labelled_consumer_context,
+    labeled_consumer_context,
     monkeypatch,
 ):
-    _, reference, query = labelled_consumer_context
+    _, reference, query = labeled_consumer_context
     result = _write_projection(
         query,
         reference,
@@ -1325,10 +1325,10 @@ def test_mapping_consumers_stream_projection_arrays(
 
 
 def test_conformal_label_scores_are_allocated_one_row_at_a_time(
-    labelled_consumer_context,
+    labeled_consumer_context,
     monkeypatch,
 ):
-    _, reference, query = labelled_consumer_context
+    _, reference, query = labeled_consumer_context
     labels = reference.fetch_cell_column("reference_labels")
     result = _write_projection(
         query,
@@ -1395,9 +1395,9 @@ def test_reference_layout_reads_explicit_immutable_artifact(
 
 
 def test_every_mapping_consumer_rejects_old_projection_artifacts(
-    labelled_consumer_context,
+    labeled_consumer_context,
 ):
-    _, reference, query = labelled_consumer_context
+    _, reference, query = labeled_consumer_context
     planned = plan_artifact(
         query.zw,
         scope="assay",
@@ -1427,13 +1427,13 @@ def test_every_mapping_consumer_rejects_old_projection_artifacts(
 
 
 def test_bound_reference_repeats_label_transfer_without_rereading_its_payload(
-    labelled_consumer_context,
+    labeled_consumer_context,
     monkeypatch,
 ):
 
     from cytearc.storage.artifacts import artifact_group
 
-    reference_store, reference, query = labelled_consumer_context
+    reference_store, reference, query = labeled_consumer_context
     result = _write_projection(
         query,
         reference,
@@ -1491,10 +1491,10 @@ def test_bound_reference_repeats_label_transfer_without_rereading_its_payload(
     assert not any(key.startswith("cellData/I/") for key in chunk_keys)
 
 
-def test_binding_rejects_a_handle_whose_arrays_were_replaced(labelled_consumer_context):
+def test_binding_rejects_a_handle_whose_arrays_were_replaced(labeled_consumer_context):
     from cytearc.mapping.models import ScaledPCAProjectionModel
 
-    _, reference, query = labelled_consumer_context
+    _, reference, query = labeled_consumer_context
     result = _write_projection(
         query,
         reference,

@@ -1249,8 +1249,8 @@ def test_high_moi_groups_hold_every_cell_that_carries_their_guides(
         names = discovery["guide"]
     assert sorted(set(names)) == sorted(guides_of)
     assert len(discovery) == len(guides_of) * N_SCREEN_GENES
-    # Each group holds the labelled cells that carry any of its guides, each
-    # once, and every other labelled cell is its comparison: cells of other
+    # Each group holds the labeled cells that carry any of its guides, each
+    # once, and every other labeled cell is its comparison: cells of other
     # targets or of sibling guides, cells with control guides and cells
     # without a call.
     for name, row in zip(names, discovery.itertuples(), strict=True):
@@ -1260,7 +1260,7 @@ def test_high_moi_groups_hold_every_cell_that_carries_their_guides(
     assert discovery["pass_qc"].all()
 
 
-def test_high_moi_statistics_are_those_of_one_fit_on_every_labelled_cell(
+def test_high_moi_statistics_are_those_of_one_fit_on_every_labeled_cell(
     screen,
 ) -> None:
     store, labels, _ = screen
@@ -1374,7 +1374,7 @@ def test_high_moi_without_a_called_control_guide_runs_no_check(tmp_path) -> None
     tests, messages = _warned(store, labels, **arguments)
 
     assert messages == [
-        "No labelled cell carries a control guide, which a calibration group "
+        "No labeled cell carries a control guide, which a calibration group "
         "needs, so no calibration check was run"
     ]
     saved = store.artifacts.inspect(tests).diagnostics
@@ -1477,7 +1477,7 @@ def test_high_moi_refuses_a_budget_without_room_for_one_gene(screen) -> None:
     # to test a gene.
     budgeted = open_store(store.zarr_loc, mem_budget=named_budget(counting.value))
 
-    with pytest.raises(MemoryError, match="one gene over 400 labelled cells"):
+    with pytest.raises(MemoryError, match="one gene over 400 labeled cells"):
         budgeted.perturbation.associations(labels, **arguments)
 
 
@@ -1498,7 +1498,7 @@ def test_high_moi_refuses_counting_guides_before_reading_them(
     # comes before the codes are read.
     with pytest.raises(
         MemoryError,
-        match="^Counting the cells of each guide and target over 400 labelled cells",
+        match="^Counting the cells of each guide and target over 400 labeled cells",
     ):
         open_store(
             store.zarr_loc, nthreads=2, mem_budget=1000
@@ -1519,7 +1519,7 @@ def test_high_moi_checks_the_budget_before_the_store_must_be_writable(
     reader = open_store(
         store.zarr_loc, zarr_mode="r", mem_budget=named_budget(counting.value)
     )
-    with pytest.raises(MemoryError, match="one gene over 400 labelled cells"):
+    with pytest.raises(MemoryError, match="one gene over 400 labeled cells"):
         reader.perturbation.associations(labels, **arguments)
     reader = open_store(store.zarr_loc, zarr_mode="r")
     with pytest.raises(PermissionError, match="perturbation_associations"):
@@ -1536,7 +1536,7 @@ def test_high_moi_refuses_a_small_budget_and_tests_alike_within_another(screen) 
     def run(budgeted):
         return budgeted.perturbation.associations(labels, **arguments)
 
-    # The tests hold far more than this budget, the labelled cells' arrays
+    # The tests hold far more than this budget, the labeled cells' arrays
     # alone. Counting each guide's and target's cells comes first.
     with pytest.raises(MemoryError, match="^Counting the cells"):
         run(open_store(store.zarr_loc, nthreads=2, mem_budget=1000))
@@ -1582,7 +1582,7 @@ def test_high_moi_plans_only_the_calibration_pairs_a_check_can_draw(
     mib = 1 << 20
     monkeypatch.setattr(operations, "_ASSOCIATION_PAIR_BYTES", mib)
     arguments = {"features": genes, "moi": "high", "invalidate_cache": True, **FAST}
-    with pytest.raises(MemoryError, match="one gene over 400 labelled cells"):
+    with pytest.raises(MemoryError, match="one gene over 400 labeled cells"):
         open_store(store.zarr_loc, mem_budget=48 * mib).perturbation.associations(
             labels, **arguments
         )
@@ -1717,14 +1717,14 @@ def test_high_moi_needs_guide_umis_samples_and_covariates_on_every_cell(
         store.perturbation.associations(
             labels, features=_every_screen_gene(store), moi="high"
         )
-    # At high MOI every labelled cell needs a sample label and covariates.
+    # At high MOI every labeled cell needs a sample label and covariates.
     guided = stores["guided"]
     arguments = {
         "labels": _screen_labels(guided),
         "features": _every_screen_gene(guided),
         "moi": "high",
     }
-    with pytest.raises(ValueError, match="so every labelled cell needs one"):
+    with pytest.raises(ValueError, match="so every labeled cell needs one"):
         guided.perturbation.associations(sample_column="run_gap", **arguments)
     with pytest.raises(ValueError, match="'score_gap' has values that are not"):
         guided.perturbation.associations(covariates=["score_gap"], **arguments)

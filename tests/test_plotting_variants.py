@@ -638,11 +638,11 @@ def test_genotypes_draw_each_sites_calls_by_group(plotted) -> None:
     assert crossed.provenance.extras["grouping"] == "group, half"
     assert crossed.provenance.n_cells == 4
     plt.close(crossed.figure)
-    # A label artifact of the labelled cells draws the groups of the column.
-    labelled = np.asarray([group is not None for group in GROUPS])
-    store.cells.insert("labelled", labelled, overwrite=True)
+    # A label artifact of the labeled cells draws the groups of the column.
+    labeled = np.asarray([group is not None for group in GROUPS])
+    store.cells.insert("labeled", labeled, overwrite=True)
     labels = store.snapshot_cluster_labels(
-        "group", cell_selection=store.snapshot_cell_selection("labelled")
+        "group", cell_selection=store.snapshot_cell_selection("labeled")
     )
     by_labels = genotypes(store, called, groups=labels, show=False)
     assert _shares(by_labels) == _shares(grouped)
@@ -655,7 +655,7 @@ def test_genotypes_draw_each_sites_calls_by_group(plotted) -> None:
     plt.close(named.figure)
 
 
-def test_genotypes_colour_a_layout_by_one_sites_calls(plotted) -> None:
+def test_genotypes_color_a_layout_by_one_sites_calls(plotted) -> None:
     store, targets, _positions = plotted
     called = store.variants.genotypes(targets, method="threshold", min_mutant_umis=1)
     layout = write_embedding(
@@ -677,7 +677,7 @@ def test_genotypes_colour_a_layout_by_one_sites_calls(plotted) -> None:
     assert panel.get_title() == "Calls at CALR"
     assert result.provenance.extras["layout"] == layout.to_dict()
     assert result.provenance.extras["site"] == "CALR"
-    # One scatter of every cell in its call's colour, the cells without a
+    # One scatter of every cell in its call's color, the cells without a
     # call, c3 and c4, drawn first so the others sit on top of them.
     (points,) = panel.collections
     drawn = [
@@ -751,7 +751,7 @@ def test_genotypes_refuse_an_embedding_of_as_many_other_cells(
     plt.close(drawn.figure)
 
 
-def test_genotypes_colour_a_layout_of_their_cells_that_another_selection_holds(
+def test_genotypes_color_a_layout_of_their_cells_that_another_selection_holds(
     plotted,
 ) -> None:
     store, targets, _positions = plotted
@@ -1029,7 +1029,7 @@ def test_allele_frequencies_say_how_many_cells_they_draw_and_name_their_clones(
         ]
         assert [tick.get_text() for tick in strip.get_yticklabels()] == ["Clone"]
         assert [legend.label for legend in whole.legends] == [
-            "Allele frequency (grey: not covered)",
+            "Allele frequency (gray: not covered)",
             "Clone",
         ]
         assert whole.legends[0].extras == {"vmin": 0.0, "vmax": 1.0}
@@ -1038,7 +1038,7 @@ def test_allele_frequencies_say_how_many_cells_they_draw_and_name_their_clones(
         ax = whole.axes["frequencies"]
         assert [tick.get_text() for tick in ax.get_yticklabels()] == named
         assert not ax.get_xticklabels()
-        # Uncovered entries take the grey of no value, in a layer over the
+        # Uncovered entries take the gray of no value, in a layer over the
         # frequencies.
         frequencies = whole.tables["frequencies"].pivot(
             index="variant", columns="ids", values="frequency"
@@ -1055,7 +1055,7 @@ def test_allele_frequencies_say_how_many_cells_they_draw_and_name_their_clones(
         whole.close()
 
 
-def test_genotype_calls_take_one_palette_with_greys_for_no_call(plotted) -> None:
+def test_genotype_calls_take_one_palette_with_grays_for_no_call(plotted) -> None:
     store, targets, _positions = plotted
     # Of the four UMIs or fewer that c0 to c3 read at CALR, c1's two and
     # c3's none fall short of three, so a rule does not call them; c4 is
@@ -1106,7 +1106,7 @@ def test_genotype_calls_take_one_palette_with_greys_for_no_call(plotted) -> None
         drawn.close()
 
 
-def test_a_layout_colours_the_calls_of_cells_without_a_group(plotted) -> None:
+def test_a_layout_colors_the_calls_of_cells_without_a_group(plotted) -> None:
     store, targets, _positions = plotted
     called = store.variants.genotypes(targets, method="threshold", min_mutant_umis=1)
     # Only c1, wild type at CALR, and c3, missing there, have a group, while

@@ -2,7 +2,7 @@
 
 Modal's runner heartbeat interval is about 900 seconds and is not configurable.
 The GPL backends ``"igraph"`` and ``"leidenalg"`` hold the GIL for the whole
-optimisation, so a parent that called one inline would emit no heartbeat or
+optimization, so a parent that called one inline would emit no heartbeat or
 progress until it returned. The default ``"cytearc"`` backend releases the GIL
 inside its kernels, but every backend is profiled the same way, in this child.
 ``profiling.stages`` polls this child every 30 seconds and warns at 1800 seconds

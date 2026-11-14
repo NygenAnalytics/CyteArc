@@ -10,7 +10,7 @@ from cytearc.storage.artifacts import ArtifactRef
 from . import full_path, remove, chunked_total_sum
 
 
-def build_neighbourhood_graph(
+def build_neighborhood_graph(
     datastore,
     *,
     from_assay: str | None = None,
@@ -225,7 +225,7 @@ def analyzed_datastore_zarr_root(datastore_zarr_root, tmp_path_factory):
         max_cells=np.inf,
         blacklist="^MT-|^RPS|^RPL|^MRPS|^MRPL|^CCN|^HLA-|^H2-|^HIST",
     )
-    graph = build_neighbourhood_graph(
+    graph = build_neighborhood_graph(
         datastore,
         cell_selection=filtered,
         features=hvg_ref,
@@ -275,7 +275,7 @@ def detected_features(auto_filter_cells, datastore):
 
 @pytest.fixture(scope="session")
 def connectivity_graph(auto_filter_cells, mark_hvgs, datastore):
-    return build_neighbourhood_graph(
+    return build_neighborhood_graph(
         datastore,
         cell_selection=auto_filter_cells,
         features=mark_hvgs,
@@ -402,7 +402,7 @@ def mark_prevalent_peaks(atac_datastore):
 
 @pytest.fixture(scope="session")
 def atac_connectivity_graph(mark_prevalent_peaks, atac_datastore):
-    return build_neighbourhood_graph(
+    return build_neighborhood_graph(
         atac_datastore,
         features=mark_prevalent_peaks,
         reduction_method="lsi",

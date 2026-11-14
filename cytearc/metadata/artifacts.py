@@ -507,26 +507,26 @@ def snapshot_cluster_labels(
     valid = valid_category_mask(resolved.labels, missing_mask=resolved.missing_mask)
     kind = resolved.labels.dtype.kind
     if kind == "f":
-        # Checked before completeness but over labelled cells only, so neither
+        # Checked before completeness but over labeled cells only, so neither
         # NaN nor a masked placeholder decides whether the floats are ids.
-        labelled = resolved.labels[valid]
-        whole = (labelled >= -_INT64_BOUND) & (labelled < _INT64_BOUND)
-        whole &= labelled == np.trunc(labelled)
+        labeled = resolved.labels[valid]
+        whole = (labeled >= -_INT64_BOUND) & (labeled < _INT64_BOUND)
+        whole &= labeled == np.trunc(labeled)
         if not whole.all():
             raise TypeError(
                 "Floating-point cluster labels must be whole numbers within the "
-                f"int64 range, but {described} holds {labelled[~whole][0]!s}"
+                f"int64 range, but {described} holds {labeled[~whole][0]!s}"
             )
     elif kind not in _LABEL_KINDS:
         raise TypeError(
             "Cluster labels must be text, integer, boolean, or whole-number "
             f"values, but {described} holds {resolved.labels.dtype} values"
         )
-    unlabelled = int(np.count_nonzero(~valid))
-    if unlabelled:
+    unlabeled = int(np.count_nonzero(~valid))
+    if unlabeled:
         raise ValueError(
-            f"{unlabelled} of {valid.size} selected cells have no label in "
-            f"{described}. Pass a cell_selection of labelled cells only, such "
+            f"{unlabeled} of {valid.size} selected cells have no label in "
+            f"{described}. Pass a cell_selection of labeled cells only, such "
             f"as {example}"
         )
     values = _decode_metadata_values(resolved.labels)

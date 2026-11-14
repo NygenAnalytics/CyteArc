@@ -530,7 +530,7 @@ class _AmbientOperationsMixin(_AmbientOperationsBase):
         ambient RNA contamination from droplet-based single-cell RNA
         sequencing data", GigaScience 9:giaa151, it is measured with
         ``gene_sets``: sets of genes that some cells do not express, such as
-        haemoglobin genes outside erythroid cells or immunoglobulin genes
+        hemoglobin genes outside erythroid cells or immunoglobulin genes
         outside B and plasma cells. In such a cell, every count of the set
         comes from the soup.
 
@@ -684,7 +684,7 @@ class _AmbientOperationsMixin(_AmbientOperationsBase):
                 raise ValueError(
                     "clusters has no label for some selected cells. Freeze the "
                     "labels of the selected cells with snapshot_cluster_labels("
-                    "clusters, cell_selection=...) after selecting labelled cells"
+                    "clusters, cell_selection=...) after selecting labeled cells"
                 )
             labels = np.asarray(grouping.labels)
             inputs["clusters"] = clusters

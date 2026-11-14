@@ -442,7 +442,7 @@ def cell_groups(
                     refused.budget_bytes,
                     remedy=ledger.remedy,
                 ) from refused
-            n_labelled = len(resolved.cell_idx)
+            n_labeled = len(resolved.cell_idx)
             labels = np.asarray(resolved.labels)
             if labels.dtype.kind == "U":
                 # Stored text becomes the Python strings that coding hashes,
@@ -455,12 +455,12 @@ def cell_groups(
                     + python_text_bytes(len(labels), characters, widest=widest),
                 )
                 labels = labels.astype(object)
-            labelled = ledger.charged - entry
+            labeled = ledger.charged - entry
             codes, names = category_codes(labels, resolved.missing_mask, ledger=ledger)
-            ledger.hold("each labelled cell's code", codes.nbytes)
+            ledger.hold("each labeled cell's code", codes.nbytes)
             ledger.peak(
                 "the groups artifact's cells",
-                hash_table_bytes(n_labelled) + 8 * n_labelled + 16 * n_grouped,
+                hash_table_bytes(n_labeled) + 8 * n_labeled + 16 * n_grouped,
             )
             at = pd.Index(np.asarray(resolved.cell_idx, dtype=np.int64)).get_indexer(
                 grouped_index
@@ -468,10 +468,10 @@ def cell_groups(
             aligned = np.full(n_grouped, -1, dtype=np.int64)
             aligned[at >= 0] = codes[at[at >= 0]]
             ledger.hold("each cell's code of the groups artifact", aligned.nbytes)
-            labelled_codes = codes.nbytes
+            labeled_codes = codes.nbytes
             _hold_names(ledger, names)
             del resolved, labels, at, codes
-            ledger.release(labelled + labelled_codes)
+            ledger.release(labeled + labeled_codes)
             coded.append((aligned, names))
         for name, labels in kept_apart:
             # The labels kept apart are the caller's; their grouped cells' are
@@ -598,10 +598,10 @@ def within_groups(
         cell_selection=None,
         ledger=ledger,
     )
-    unlabelled = int(np.count_nonzero(members & (grouped.codes < 0)))
-    if unlabelled:
+    unlabeled = int(np.count_nonzero(members & (grouped.codes < 0)))
+    if unlabeled:
         raise ValueError(
-            f"The within columns have no label for {unlabelled} cells with {what}. "
+            f"The within columns have no label for {unlabeled} cells with {what}. "
             f"Every cell with {what} needs a label in the within columns."
         )
     # Each cell's group in place of its code, which is let go, and the

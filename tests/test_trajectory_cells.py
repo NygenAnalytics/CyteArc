@@ -3,8 +3,8 @@
 The store holds a branching trajectory in two dimensions: a trunk that splits
 into branches A and B, a branch C off the middle of the trunk, a separate ring
 of cells, and two cells that the graph leaves out. The graph links each cell
-to its five nearest neighbours with Gaussian weights, in one direction per
-pair, as a k-nearest-neighbour graph does. Scoring some of the graph's cells
+to its five nearest neighbors with Gaussian weights, in one direction per
+pair, as a k-nearest-neighbor graph does. Scoring some of the graph's cells
 with ``cells=`` must give what a graph built by hand on those cells alone
 gives, a graph that holds the graph's edges among them with their weights.
 """
@@ -246,7 +246,7 @@ def _store() -> _Store:
     return replace(template, store=_copy_store(template.store))
 
 
-def _labelled(trajectory: _Store, **overrides: Any) -> dict[str, Any]:
+def _labeled(trajectory: _Store, **overrides: Any) -> dict[str, Any]:
     return {
         "source_sink": trajectory.label_artifact("graph"),
         "sources": _SOURCES,
@@ -268,11 +268,11 @@ def test_scoring_some_cells_equals_scoring_a_graph_of_those_cells(method: str) -
         method_arguments["n_singular_vals"] = 12
 
     some = store.trajectory.pseudotime(
-        trajectory.graph, cells=part, **_labelled(trajectory), **method_arguments
+        trajectory.graph, cells=part, **_labeled(trajectory), **method_arguments
     )
     alone = store.trajectory.pseudotime(
         trajectory.alone["part"],
-        **_labelled(trajectory, source_sink=trajectory.label_artifact("part")),
+        **_labeled(trajectory, source_sink=trajectory.label_artifact("part")),
         **method_arguments,
     )
 
@@ -295,7 +295,7 @@ def test_scoring_some_cells_equals_scoring_a_graph_of_those_cells(method: str) -
     # A second call reuses the artifact.
     assert (
         store.trajectory.pseudotime(
-            trajectory.graph, cells=part, **_labelled(trajectory), **method_arguments
+            trajectory.graph, cells=part, **_labeled(trajectory), **method_arguments
         )
         == some
     )
@@ -305,7 +305,7 @@ def test_the_subgraph_of_the_cells_holds_the_graphs_edges_among_them() -> None:
     trajectory = _store()
     store = trajectory.store
     ref = store.trajectory.pseudotime(
-        trajectory.graph, cells=trajectory.selections["part"], **_labelled(trajectory)
+        trajectory.graph, cells=trajectory.selections["part"], **_labeled(trajectory)
     )
 
     subgraph = store._load_pseudotime_scoring_with_graph(ref).graph.toarray()
@@ -345,7 +345,7 @@ def test_cells_that_split_the_graph_are_scored_by_their_own_components() -> None
     )
 
     # The graph is connected among the trunk, A and B, but the trunk's first
-    # 20 cells lie 0.5 from A and B, beyond any of their five neighbours.
+    # 20 cells lie 0.5 from A and B, beyond any of their five neighbors.
     assert some.component_sizes == alone.component_sizes == (40, 20)
     np.testing.assert_array_equal(
         some.valid, np.isin(trajectory.arms[split_rows], ["a", "b"])
@@ -359,11 +359,11 @@ def test_cells_that_split_the_graph_are_scored_by_their_own_components() -> None
 def test_the_graphs_own_cells_give_the_pseudotime_without_cells() -> None:
     trajectory = _store()
     store = trajectory.store
-    every = store.trajectory.pseudotime(trajectory.graph, **_labelled(trajectory))
+    every = store.trajectory.pseudotime(trajectory.graph, **_labeled(trajectory))
 
     assert (
         store.trajectory.pseudotime(
-            trajectory.graph, cells=trajectory.graph_cells, **_labelled(trajectory)
+            trajectory.graph, cells=trajectory.graph_cells, **_labeled(trajectory)
         )
         == every
     )
@@ -387,7 +387,7 @@ def test_cells_outside_the_graph_are_refused() -> None:
     )
     with pytest.raises(ValueError, match=message):
         store.trajectory.pseudotime(
-            trajectory.graph, cells=wide, **_labelled(trajectory)
+            trajectory.graph, cells=wide, **_labeled(trajectory)
         )
     with pytest.raises(ValueError, match=message):
         store.trajectory.lineage_tree(
@@ -397,7 +397,7 @@ def test_cells_outside_the_graph_are_refused() -> None:
         store.trajectory.pseudotime(
             trajectory.graph,
             cells=trajectory.label_artifact("part"),
-            **_labelled(trajectory),
+            **_labeled(trajectory),
         )
     with pytest.raises(TypeError, match="cells must be a cell-selection ArtifactRef"):
         store.trajectory.lineage_tree(
@@ -417,7 +417,7 @@ def test_labels_of_the_graph_or_of_the_cells_give_the_same_scores() -> None:
             store.trajectory.pseudotime(
                 trajectory.graph,
                 cells=part,
-                **_labelled(trajectory, source_sink=trajectory.label_artifact(name)),
+                **_labeled(trajectory, source_sink=trajectory.label_artifact(name)),
             )
         )
         for name in ("graph", "part")
@@ -432,7 +432,7 @@ def test_labels_of_the_graph_or_of_the_cells_give_the_same_scores() -> None:
         store.trajectory.pseudotime(
             trajectory.graph,
             cells=trajectory.selections["split"],
-            **_labelled(trajectory, source_sink=trajectory.label_artifact("part")),
+            **_labeled(trajectory, source_sink=trajectory.label_artifact("part")),
         )
 
 
@@ -473,7 +473,7 @@ def test_a_record_of_cells_outside_its_graph_is_refused() -> None:
     trajectory = _store()
     store = trajectory.store
     ref = store.trajectory.pseudotime(
-        trajectory.graph, cells=trajectory.selections["part"], **_labelled(trajectory)
+        trajectory.graph, cells=trajectory.selections["part"], **_labeled(trajectory)
     )
     _rewrite_inputs(store, ref, cell_selection=trajectory.selections["wide"])
 
@@ -499,11 +499,11 @@ def _lineages() -> _Lineages:
     store = trajectory.store
     part = trajectory.selections["part"]
     some_pseudotime = store.trajectory.pseudotime(
-        trajectory.graph, cells=part, **_labelled(trajectory)
+        trajectory.graph, cells=part, **_labeled(trajectory)
     )
     alone_pseudotime = store.trajectory.pseudotime(
         trajectory.alone["part"],
-        **_labelled(trajectory, source_sink=trajectory.label_artifact("part")),
+        **_labeled(trajectory, source_sink=trajectory.label_artifact("part")),
     )
     some_fate = store.trajectory.fate(
         some_pseudotime, trajectory.label_artifact("graph"), sinks=_SINKS

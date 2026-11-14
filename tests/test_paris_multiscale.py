@@ -266,7 +266,7 @@ def test_strict_multiway_folding_selects_the_nearest_valid_ancestor() -> None:
     assert diagnostic.decision_margin is None
 
 
-def test_disconnected_components_and_isolates_are_forced_and_relabelled() -> None:
+def test_disconnected_components_and_isolates_are_forced_and_relabeled() -> None:
     graph = csr_matrix(
         np.asarray(
             [

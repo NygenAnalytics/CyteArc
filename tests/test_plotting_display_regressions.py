@@ -433,7 +433,7 @@ def test_summary_tables_keep_a_sample_grouping_apart_from_sample_by():
         result.close()
 
 
-def test_matrixplot_returns_its_matrix_for_a_group_labelled_feature():
+def test_matrixplot_returns_its_matrix_for_a_group_labeled_feature():
     labels = np.repeat(["other", "feature"], 4)
     store = _keyed_summary_store(group=labels)
     values = store.RNA._values
@@ -936,7 +936,7 @@ def _matrixplot_drawing_missing(drawn: bool) -> splt.PlotResult:
 
 
 # Every plot that draws values without a category in the scale's missing
-# colour, the annotation strips of marker_heatmap aside, which need a store of
+# color, the annotation strips of marker_heatmap aside, which need a store of
 # markers (tests/test_plotting_heatmaps.py).
 _DRAWS_MISSING_VALUES = {
     "embedding": _embedding_drawing_missing,

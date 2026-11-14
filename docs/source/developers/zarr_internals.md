@@ -147,7 +147,7 @@ A `marker_table` artifact from `markers.search` holds three arrays with one valu
 
 Each child group is named by its group's label, and the slot's `skipped_groups` attribute maps the label of each group too small to test to its cell count. Some labels cannot name a child group, because Zarr would refuse the name or read it as a path or as another node in either Zarr format, or because the slot already uses it: an empty label, one that contains `/`, `\` or a NUL character, the paths `.` and `..`, the metadata documents `zarr.json`, `.zattrs`, `.zgroup`, `.zarray` and `.zmetadata`, and the names of the slot's arrays. Any other label, `.x` among them, names its child group as in earlier releases. A table with a label that cannot stores its groups by code instead, as AnnData stores a categorical. The slot's `group_labels` attribute lists every label, in the order that the search sorts them, which is the categories; each tested group's child group is named by its code, the position of its label in `group_labels`; and `skipped_group_codes` maps the code of each skipped group to its cell count. `markers.load`, `markers.export_csv` and `marker_heatmap` read either layout and show labels in the same natural order, and `markers.search` reuses a table of either layout for the same labels.
 
-A table whose labels can all name child groups keeps the layout of earlier releases byte for byte, so they read it as before. A table stored by code needs a release that reads that layout: an earlier release finds no `skipped_groups` in it and raises `ValueError` rather than showing codes as labels. No earlier table is stored by code: earlier releases refused labels with `/` or `\` and the labels `.` and `..` before they searched, and failed on `zarr.json`, a NUL character and the slot's array names when they wrote the table. They stored a group labelled `.zattrs`, `.zgroup`, `.zarray` or `.zmetadata` under that name in a Zarr v3 store, where it is no metadata document; this release stores such a label by code and still reads and reuses those tables.
+A table whose labels can all name child groups keeps the layout of earlier releases byte for byte, so they read it as before. A table stored by code needs a release that reads that layout: an earlier release finds no `skipped_groups` in it and raises `ValueError` rather than showing codes as labels. No earlier table is stored by code: earlier releases refused labels with `/` or `\` and the labels `.` and `..` before they searched, and failed on `zarr.json`, a NUL character and the slot's array names when they wrote the table. They stored a group labeled `.zattrs`, `.zgroup`, `.zarray` or `.zmetadata` under that name in a Zarr v3 store, where it is no metadata document; this release stores such a label by code and still reads and reuses those tables.
 
 ## Pipeline records and snapshots
 
@@ -581,7 +581,7 @@ uv run python -m cytearc.tools.repack_zarr input.zarr output.zarr --profile fast
 Without `--data-only`, `repack_zarr` accepts only a prepared source and preserves its results after
 verifying that the destination has the same dataset identity.
 
-After a rewrite, recompute HVG, normalization, PCA, graph, and marker artefacts.
+After a rewrite, recompute HVG, normalization, PCA, graph, and marker artifacts.
 Do not resume them from pre-rewrite lineage.
 
 Non-RNA assays in a multi-assay store remain usable when tooling opens without forcing every assay class to construct.

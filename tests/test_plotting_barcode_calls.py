@@ -232,7 +232,7 @@ def test_bins_of_barcodes_stand_on_a_ticked_axis_of_counts(imported) -> None:
                 (patch.get_x() + patch.get_width() / 2, patch.get_height())
                 for patch in ax.patches
             )
-            assert [centre for centre, _height in bars] == pytest.approx(
+            assert [center for center, _height in bars] == pytest.approx(
                 list(range(cap + 1))
             )
             assert bars[-1][1] == float((per_cell >= cap).sum())

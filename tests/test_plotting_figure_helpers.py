@@ -246,8 +246,8 @@ def test_plot_result_show_in_ipython_closes_a_caller_figure_that_stays_usable(
     width, height = figure.get_size_inches()
     pixels = plt.imread(output)
     assert pixels.shape[:2] == (round(height * 50), round(width * 50))
-    centre = pixels[pixels.shape[0] // 2, pixels.shape[1] // 2]
-    np.testing.assert_allclose(centre[:3], (1.0, 0.0, 0.0), atol=1 / 255)
+    center = pixels[pixels.shape[0] // 2, pixels.shape[1] // 2]
+    np.testing.assert_allclose(center[:3], (1.0, 0.0, 0.0), atol=1 / 255)
     assert figure.number not in plt.get_fignums()
 
 
@@ -1432,7 +1432,7 @@ def test_composition_leaves_out_a_childs_colorbar_that_it_replaces():
 
 
 def _group_child(figure, axis, *, missing: bool) -> PlotResult:
-    """A child coloured by groups a and b, with or without cells without a group."""
+    """A child colored by groups a and b, with or without cells without a group."""
     scale = splt.CategoricalScale(
         order=("a", "b"),
         palette={"a": "#1f77b4", "b": "#ff7f0e"},
@@ -1463,7 +1463,7 @@ def test_a_shared_legend_lists_the_missing_entry_when_any_child_draws_it(missing
 
     compose_results(figure, children, panel_labels=False)
 
-    # One legend for the shared colours, whichever child draws missing values.
+    # One legend for the shared colors, whichever child draws missing values.
     (legend,) = figure.legends
     texts = [text.get_text() for text in legend.get_texts()]
     colors = [to_hex(handle.get_markerfacecolor()) for handle in legend.legend_handles]

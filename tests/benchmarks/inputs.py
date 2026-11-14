@@ -1,7 +1,7 @@
 """Deterministic synthetic inputs shaped like the production funnel's data.
 
 Sizes follow the recorded 1M-cell configuration: 1,000 highly variable
-features, 21 principal components, and 11 neighbours. Builders are cached
+features, 21 principal components, and 11 neighbors. Builders are cached
 per size so that benchmarks sharing an input build it once per session.
 """
 
@@ -20,7 +20,7 @@ SIZE_FACTOR = 1_000.0
 
 
 @lru_cache(maxsize=4)
-def labelled_counts(n_cells: int) -> tuple[np.ndarray, np.ndarray]:
+def labeled_counts(n_cells: int) -> tuple[np.ndarray, np.ndarray]:
     """Return cells-by-genes uint16 counts and the program label of each cell.
 
     Cells draw Poisson counts from one of ``N_GROUPS`` expression programs
@@ -42,7 +42,7 @@ def labelled_counts(n_cells: int) -> tuple[np.ndarray, np.ndarray]:
 
 
 @lru_cache(maxsize=4)
-def labelled_coordinates(n_cells: int) -> tuple[np.ndarray, np.ndarray]:
+def labeled_coordinates(n_cells: int) -> tuple[np.ndarray, np.ndarray]:
     """Return float32 coordinates in well-separated Gaussian clusters, and labels.
 
     The coordinates are shaped like PCA output, and the label of each cell
@@ -60,7 +60,7 @@ def neighbors(n_cells: int) -> tuple[np.ndarray, np.ndarray]:
     """Return the ``N_NEIGHBORS`` nearest other cells and their L2 distances."""
     from cytearc.neighbors.index import fix_knn_query, instantiate_knn_index
 
-    data, _labels = labelled_coordinates(n_cells)
+    data, _labels = labeled_coordinates(n_cells)
     index = instantiate_knn_index(
         "l2",
         N_DIMS,
@@ -97,7 +97,7 @@ def connectivity_graph(n_cells: int) -> sparse.csr_matrix:
 
 def initial_layout(n_cells: int) -> np.ndarray:
     """Return a deterministic two-dimensional UMAP starting layout."""
-    data, _labels = labelled_coordinates(n_cells)
+    data, _labels = labeled_coordinates(n_cells)
     return np.ascontiguousarray(data[:, :2] / np.abs(data[:, :2]).max() * 10.0)
 
 

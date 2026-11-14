@@ -515,8 +515,8 @@ def test_mapping_plot_families_use_query_result_and_reference_semantics(
     table = calibration.tables["calibration"]
     assert {"coverage", "accuracy", "accuracyLower", "accuracyUpper"} <= set(table)
     # Every informative cell has vote fraction 1, so the sampled thresholds
-    # collapse to 1.0 beside the chosen 0.75. Both keep the five labelled cells
-    # of the six known ones, and each of them is labelled correctly.
+    # collapse to 1.0 beside the chosen 0.75. Both keep the five labeled cells
+    # of the six known ones, and each of them is labeled correctly.
     np.testing.assert_array_equal(table["threshold"], [0.75, 1.0])
     np.testing.assert_array_equal(table["nAccepted"], [5, 5])
     np.testing.assert_array_equal(table["coverage"], [5 / 6, 5 / 6])
@@ -643,7 +643,7 @@ def test_mapping_score_box_kind_groups_by_reference_class():
     )
 
     axis = plot.axes["all"]
-    # The unlabelled reference cell joins no box.
+    # The unlabeled reference cell joins no box.
     assert [text.get_text() for text in axis.get_xticklabels()] == ["A", "B"]
     assert all(text.get_ha() == "right" for text in axis.get_xticklabels())
     np.testing.assert_allclose(
@@ -688,7 +688,7 @@ def test_mapping_calibration_allows_genuine_zero_accuracy(
 
     from scipy.stats import binomtest
 
-    # Each of the five labelled cells contradicts its known label, so both the
+    # Each of the five labeled cells contradicts its known label, so both the
     # sampled vote fraction 1.0 and the transfer's own 0.5 keep all five at
     # zero accuracy, with the Wilson interval of no successes in five.
     table = plot.tables["calibration"]
@@ -1117,7 +1117,7 @@ def test_mapping_calibration_keeps_the_transfers_other_rules():
         plot.close()
         return {"coverage": row["coverage"], "accuracy": row["accuracy"]}
 
-    # Another metric is calibrated among the cells the transfer labelled.
+    # Another metric is calibrated among the cells the transfer labeled.
     assert first_row("topTwoMargin") == {"coverage": 1 / 3, "accuracy": 1.0}
     # Sweeping a rule's own metric replaces that rule and keeps the other one.
     assert first_row("voteFraction") == {"coverage": 2 / 3, "accuracy": 1.0}
@@ -1147,7 +1147,7 @@ def _producer_evidence(uninformative: np.ndarray) -> pd.DataFrame:
     """Evidence decided by the saved-transfer producer, as the loader frames it.
 
     Every cell has two neighbors of class A at distance 1, so each informative
-    cell is labelled A and each uninformative cell abstains without evidence.
+    cell is labeled A and each uninformative cell abstains without evidence.
     """
     from cytearc.mapping.label_transfer import (
         ABSTENTION_REASONS,
@@ -1219,7 +1219,7 @@ def test_mapping_calibration_counts_cells_without_evidence_in_coverage():
     assert calibration.provenance.extras["n_without_evidence"] == 9
     assert calibration.tables["evidence"]["correct"].tolist() == [True] + [False] * 9
     # Coverage counts the same cells as the confusion matrix: the transfer
-    # labelled every cell that is not in its "Abstained" column.
+    # labeled every cell that is not in its "Abstained" column.
     abstained_share = confusion.tables["matrix"]["Abstained"].sum()
     assert abstained_share == pytest.approx(0.9)
     assert table["coverage"].max() == pytest.approx(1 - abstained_share)
@@ -1580,8 +1580,8 @@ def _confusion_store():
 @pytest.mark.parametrize(
     ("normalize", "expected"),
     [
-        # Known A cells were labelled A, A, B and abstained once; both known B
-        # cells were labelled B.
+        # Known A cells were labeled A, A, B and abstained once; both known B
+        # cells were labeled B.
         ("none", [[2, 1, 1], [0, 0, 2]]),
         ("true", [[0.5, 0.25, 0.25], [0, 0, 1]]),
         ("predicted", [[1, 1, 1 / 3], [0, 0, 2 / 3]]),

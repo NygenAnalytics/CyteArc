@@ -89,7 +89,7 @@ _BLOCK_BYTES = 64 * 1024**2
 # Counter-based random numbers: every draw is a pure function of the seed,
 # the iteration, and the draw's position in it, so no state is shared between
 # threads. They follow the SplitMix64 generator (Steele, Lea and Flood 2014,
-# doi:10.1145/2714064.2660195): its golden-ratio increment, and its finaliser,
+# doi:10.1145/2714064.2660195): its golden-ratio increment, and its finalizer,
 # mix64. Changing these constants or mix64's changes every p-value, so they
 # are fixed.
 _GOLDEN = np.uint64(0x9E3779B97F4A7C15)
@@ -327,7 +327,7 @@ def good_turing_proportions(counts: Any) -> np.ndarray:
 
     Implements the Simple Good-Turing method of Gale and Sampson (1995). For
     each count ``r`` observed for ``N_r`` species, the averaging transform
-    ``Z_r = N_r / (0.5 * (t - q))``, with ``q`` and ``t`` the neighbouring
+    ``Z_r = N_r / (0.5 * (t - q))``, with ``q`` and ``t`` the neighboring
     observed counts, is fitted by least squares as ``log Z = a + b log r``.
     The adjusted count ``r*`` is the Turing estimate ``(r + 1) N_{r+1} / N_r``
     while it differs from the smoothed estimate ``(r + 1) (1 + 1/r)^b`` by

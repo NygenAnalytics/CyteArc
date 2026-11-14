@@ -419,7 +419,7 @@ def test_admit_stream_without_decode_bytes_matches_a_flat_task_cost() -> None:
     assert admission.readWorkers * 250 <= resources.memoryBytes
 
 
-def test_admit_stream_honours_resident_bytes_and_a_requested_depth() -> None:
+def test_admit_stream_honors_resident_bytes_and_a_requested_depth() -> None:
     resources = ResourceBudget(1_000, 8)
 
     admission = admit_stream(

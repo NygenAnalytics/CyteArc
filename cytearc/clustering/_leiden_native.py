@@ -76,7 +76,7 @@ for a node of degree ``10**7`` at 8 threads.
 Further fixed values live next to the code that uses them: the random number
 constants (``GOLDEN``, ``SEED_SALT`` and the phase ids) and
 ``FLOAT_SUM_BLOCK = 65536`` in ``_leiden_primitives``, the two multipliers of
-the ``mix64`` finaliser in ``utils.digest``, and ``MAX_NODES = 2**30 - 1`` in
+the ``mix64`` finalizer in ``utils.digest``, and ``MAX_NODES = 2**30 - 1`` in
 ``_leiden_graph``. ``PARALLEL_MIN_ITEMS = 256`` and the other block sizes only
 decide between loops that compute the same values, so they do not change
 results.

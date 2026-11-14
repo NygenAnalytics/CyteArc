@@ -24,7 +24,7 @@ from cytearc.storage.stores import (
     resolve_matrix_source,
     zarr_root_path,
 )
-from tests.fixtures_datastore import build_neighbourhood_graph
+from tests.fixtures_datastore import build_neighborhood_graph
 from tests.storage_helpers import serve_uris, stored_bytes
 from cytearc.storage.schema import create_cell_data
 from cytearc.writers import create_zarr_count_assay
@@ -1135,7 +1135,7 @@ def test_mounted_store_normalization_and_graph(tmp_path):
     feature_mask = np.zeros(ds.RNA.feats.N, dtype=bool)
     feature_mask[:12] = True
     features = ds.features.snapshot(mask=feature_mask)
-    graph = build_neighbourhood_graph(
+    graph = build_neighborhood_graph(
         ds,
         features=features,
         k=3,

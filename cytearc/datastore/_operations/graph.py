@@ -202,9 +202,9 @@ def _self_hit_rules(k: int) -> tuple[DiagnosticRule, ...]:
             applies=lambda numbers: numbers["selfHitRate"] < _MIN_SELF_HIT_RATE,
             message=lambda numbers: (
                 f"Only {numbers['selfHitRate']:.2f}% of cells found themselves "
-                f"among their {k + 1} nearest neighbours in the ANN index (below "
+                f"among their {k + 1} nearest neighbors in the ANN index (below "
                 f"{_MIN_SELF_HIT_RATE}%), so the search likely missed true "
-                "neighbours of other cells as well. Rebuild the index with "
+                "neighbors of other cells as well. Rebuild the index with "
                 "graph.ann_index and a larger ann_efc or ann_m, or query it with "
                 "a larger ann_ef. Cells with identical coordinates also lower "
                 "this rate."
@@ -2465,7 +2465,7 @@ class _GraphOperationsMixin(_GraphOperationsBase):
             ann_efc: Candidate list size while the index is built
                 (``ef_construction``). Keep it at least ``2 * ann_m``: a smaller
                 list builds a graph in which searches on well-separated
-                clusters can miss a cell's true neighbours.
+                clusters can miss a cell's true neighbors.
             ann_ef: The smallest search depth (hnswlib ``ef``) of the index's
                 queries. ``graph.neighbors`` searches ``max(ann_ef, 2 * k)``
                 candidates unless it is given its own ``ann_ef``. It does not
@@ -2627,7 +2627,7 @@ class _GraphOperationsMixin(_GraphOperationsBase):
         Every cell is queried against the index for itself and its ``k``
         nearest other cells, on the datastore's ``nthreads`` threads; the
         neighbors do not depend on the thread count. The percentage of cells
-        that the search returns among their own neighbours is saved as the
+        that the search returns among their own neighbors is saved as the
         ``selfHitRate`` diagnostic, which
         ``ds.artifacts.inspect(ref).diagnostics`` returns. A rate below 99.5%
         gives a ``DiagnosticWarning``, each time the query is computed or
@@ -3058,7 +3058,7 @@ class _GraphOperationsMixin(_GraphOperationsBase):
         upper_only: bool | None = None,
         use_k: int | None = None,
     ) -> csr_matrix:
-        """Load the cell neighbourhood as a scipy sparse matrix.
+        """Load the cell neighborhood as a scipy sparse matrix.
 
         Args:
             graph: Connectivity-map or integrated-graph artifact.
@@ -3068,11 +3068,11 @@ class _GraphOperationsMixin(_GraphOperationsBase):
                 ``a + b - a * b`` rather than the sum of its two weights.
             upper_only: If True, then only the values from upper triangular of the matrix are returned. This is only
                        used when symmetric is True.
-            use_k: Number of top k-nearest neighbours to keep in the graph. It must be an integer from 1 to the
-                   graph's k. By default, all neighbours are used. (Default value: None)
+            use_k: Number of top k-nearest neighbors to keep in the graph. It must be an integer from 1 to the
+                   graph's k. By default, all neighbors are used. (Default value: None)
 
         Returns:
-            A scipy sparse matrix representing cell neighbourhood graph.
+            A scipy sparse matrix representing cell neighborhood graph.
         """
         symmetric = optional_bool_argument(symmetric, "symmetric")
         upper_only = optional_bool_argument(upper_only, "upper_only")
@@ -3089,7 +3089,7 @@ class _GraphOperationsMixin(_GraphOperationsBase):
             if not 1 <= use_k <= k:
                 raise ValueError(
                     f"use_k must be between 1 and the graph's k ({k}), "
-                    "or None to use every neighbour"
+                    "or None to use every neighbor"
                 )
         return self._load_graph_artifact(
             graph,
@@ -3112,7 +3112,7 @@ class _GraphOperationsMixin(_GraphOperationsBase):
         SNN combines shared edge support across two or more assays. WNN accepts
         two or more assays and uses Hao-inspired per-cell modality weights.
         CyteArc WNN scores only the union of the existing self-free KNN rows and
-        uses the distance span from the nearest to the k-th neighbour as its
+        uses the distance span from the nearest to the k-th neighbor as its
         bandwidth, so it is not bit-identical to Seurat's default wider search
         and SNN-far bandwidth. WNN neighbors of different counts give a graph
         of the smallest count, and a warning says so each time the graph is
@@ -3122,7 +3122,7 @@ class _GraphOperationsMixin(_GraphOperationsBase):
             sources: Connectivity-map refs for SNN or neighbor refs for WNN.
             method: Choose a method for modality integration. Available options:
                 'wnn': Hao-inspired weighted nearest neighbor integration and
-                'snn': shared nearest neighbour integration.
+                'snn': shared nearest neighbor integration.
             chunk_size: Number of cells per stored chunk of the integrated edge,
                 weight, and modality-weight arrays. It does not bound memory:
                 integration holds every source graph, and for WNN every

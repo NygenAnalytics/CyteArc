@@ -21,22 +21,22 @@ from cytearc.writers.subset import SubsetZarr
 from tests.storage_helpers import finalize_test_counts
 from tests.qc_helpers import (
     QC_VALUES,
-    create_labelled_qc_store,
+    create_labeled_qc_store,
     open_qc_store,
     fresh_qc_store,
 )
 
 
 @pytest.fixture(scope="module")
-def labelled_template(tmp_path_factory) -> Path:
-    """The labelled QC store, written once; tests open copies of it."""
-    path = tmp_path_factory.mktemp("labelled") / "store.zarr"
-    create_labelled_qc_store(path)
+def labeled_template(tmp_path_factory) -> Path:
+    """The labeled QC store, written once; tests open copies of it."""
+    path = tmp_path_factory.mktemp("labeled") / "store.zarr"
+    create_labeled_qc_store(path)
     return path
 
 
-def _labelled_copy(template: Path, path: Path) -> DataStore:
-    """Open a copy of the labelled store as ``create_labelled_qc_store`` opens it."""
+def _labeled_copy(template: Path, path: Path) -> DataStore:
+    """Open a copy of the labeled store as ``create_labeled_qc_store`` opens it."""
     shutil.copytree(template, path)
     return DataStore(
         str(path), default_assay="RNA", min_features_per_cell=0, nthreads=1
@@ -74,12 +74,12 @@ def test_construction_retry_finishes_interrupted_transpose():
 
 
 def test_merge_preserves_feature_annotations_and_missing_flags(
-    labelled_template, tmp_path
+    labeled_template, tmp_path
 ):
     from cytearc.merge import DataStoreMerge
 
-    left = _labelled_copy(labelled_template, tmp_path / "left")
-    right = _labelled_copy(labelled_template, tmp_path / "right")
+    left = _labeled_copy(labeled_template, tmp_path / "left")
+    right = _labeled_copy(labeled_template, tmp_path / "right")
     for store in (left, right):
         features = store.RNA.z["featureData"]
         features.create_array("label", data=np.array(["a", "", "c", "d", "e", "f"]))
@@ -156,11 +156,11 @@ def test_separate_metadata_handle_cannot_replace_protected_columns(table, column
 
 @pytest.mark.parametrize("operation", ["mount", "repack"])
 def test_unchanged_copy_preserves_percentage_proof_and_missing_values(
-    labelled_template, tmp_path, operation
+    labeled_template, tmp_path, operation
 ):
     source = tmp_path / "source.zarr"
     target = tmp_path / "target.zarr"
-    original = _labelled_copy(labelled_template, source)
+    original = _labeled_copy(labeled_template, source)
     if operation == "mount":
         mount_datastore(str(source), str(target))
     else:
@@ -187,9 +187,9 @@ def test_unchanged_copy_preserves_percentage_proof_and_missing_values(
 
 
 def test_subset_maps_missing_flags_and_recomputes_statistics(
-    labelled_template, tmp_path
+    labeled_template, tmp_path
 ):
-    source = _labelled_copy(labelled_template, tmp_path / "source.zarr")
+    source = _labeled_copy(labeled_template, tmp_path / "source.zarr")
     target = tmp_path / "subset.zarr"
     rows = np.array([5, 1, 3])
     writer = SubsetZarr(str(target), [source.RNA], cell_idx=rows, nthreads=1)
@@ -211,11 +211,11 @@ def test_subset_maps_missing_flags_and_recomputes_statistics(
 
 
 def test_data_only_rebuild_discards_broken_generated_metadata(
-    labelled_template, tmp_path
+    labeled_template, tmp_path
 ):
     source = tmp_path / "source.zarr"
     target = tmp_path / "rebuilt.zarr"
-    original = _labelled_copy(labelled_template, source)
+    original = _labeled_copy(labeled_template, source)
     root = zarr.open_group(str(source), mode="r+")
     root["cellData/RNA_nCounts"][:] = 999
     root["cellData/RNA_nCounts"].attrs["missing_mask"] = "missing-array"

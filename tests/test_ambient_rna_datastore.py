@@ -47,11 +47,11 @@ N_EMPTY = 2000
 N_LARGE = 20
 N_ZERO = 3
 RHO = 0.1
-HAEMOGLOBIN = ["HBB", "HBA1", "HBA2", "HBD"]
+HEMOGLOBIN = ["HBB", "HBA1", "HBA2", "HBD"]
 IMMUNOGLOBULIN = ["IGKC", "IGHM", "IGLC2", "JCHAIN"]
 T_CELL = ["CD3E", "CD3D", "IL7R", "LTB"]
 NAMES = [
-    *HAEMOGLOBIN,
+    *HEMOGLOBIN,
     *IMMUNOGLOBULIN,
     *T_CELL,
     *(f"GENE{index}" for index in range(N_GENES - 14)),
@@ -61,7 +61,7 @@ NAMES = [
 MARKERS = (np.arange(0, 4), np.arange(4, 8), np.arange(8, 12))
 # Cells of the third cluster express this gene, but the soup holds none of it.
 CELL_ONLY = N_GENES - 2
-GENE_SETS = {"haemoglobin": HAEMOGLOBIN, "immunoglobulin": IMMUNOGLOBULIN}
+GENE_SETS = {"hemoglobin": HEMOGLOBIN, "immunoglobulin": IMMUNOGLOBULIN}
 CLUSTER_NAMES = np.array(["k0", "k1", "k2"])
 
 
@@ -393,7 +393,7 @@ def test_contamination_recovers_the_simulated_fraction(store):
     assert "evidence" not in repr(result)
     assert (result.method, result.level) == ("gene_sets", "global")
     assert abs(result.estimate - RHO) < 0.01
-    assert set(result.set_estimates) == {"haemoglobin", "immunoglobulin"}
+    assert set(result.set_estimates) == {"hemoglobin", "immunoglobulin"}
     assert all(abs(value - RHO) < 0.015 for value in result.set_estimates.values())
     assert result.cluster_estimates == {}
     reference = _reference_evidence(
@@ -454,7 +454,7 @@ def test_contamination_recovers_the_simulated_fraction(store):
     status = store.artifacts.inspect(ref)
     assert status.parameters == {
         "method": "gene_sets",
-        "gene_sets": {"haemoglobin": [0, 1, 2, 3], "immunoglobulin": [4, 5, 6, 7]},
+        "gene_sets": {"hemoglobin": [0, 1, 2, 3], "immunoglobulin": [4, 5, 6, 7]},
         "level": "global",
         "max_contamination": 1.0,
         "fdr": 0.05,
@@ -609,7 +609,7 @@ def _masked_clusters(store: DataStore, cells: ArtifactRef) -> ArtifactRef:
         (
             "shared_genes",
             ValueError,
-            "'immunoglobulin' shares genes with gene set 'haemoglobin'",
+            "'immunoglobulin' shares genes with gene set 'hemoglobin'",
         ),
         ("absent_soup", ValueError, "'absent' hold no counts in the soup profile"),
         ("no_cells", ValueError, "cell_selection must select at least one cell"),
@@ -660,15 +660,15 @@ def test_contamination_validates_its_arguments(store, case, error, message):
     elif case == "cluster_level_alone":
         keywords["level"] = "cluster"
     elif case == "sets_not_mapping":
-        keywords["gene_sets"] = [HAEMOGLOBIN]
+        keywords["gene_sets"] = [HEMOGLOBIN]
     elif case == "no_sets":
         keywords["gene_sets"] = {}
     elif case == "set_name":
-        keywords["gene_sets"] = {"": HAEMOGLOBIN}
+        keywords["gene_sets"] = {"": HEMOGLOBIN}
     elif case == "text_set":
-        keywords["gene_sets"] = {"haemoglobin": "HBB"}
+        keywords["gene_sets"] = {"hemoglobin": "HBB"}
     elif case == "set_values":
-        keywords["gene_sets"] = {"haemoglobin": ["HBB", 3]}
+        keywords["gene_sets"] = {"hemoglobin": ["HBB", 3]}
     elif case == "unmatched_set":
         keywords["gene_sets"] = {"mouse": ["Hbb-bs", "Hba-a1"]}
     elif case == "shared_genes":
@@ -690,7 +690,7 @@ def test_contamination_validates_its_arguments(store, case, error, message):
         keywords["clusters"] = _masked_clusters(store, cells)
     elif case == "cluster_without_evidence":
         keywords.update(
-            gene_sets={"haemoglobin": HAEMOGLOBIN}, clusters=clusters, level="cluster"
+            gene_sets={"hemoglobin": HEMOGLOBIN}, clusters=clusters, level="cluster"
         )
     elif case == "everywhere":
         # Every cell of the second cluster expresses immunoglobulin genes.
@@ -714,16 +714,16 @@ def test_contamination_logs_unmatched_genes(store):
     )
     try:
         matched = store.qc.ambient_contamination(
-            cells, profile, gene_sets={"haemoglobin": [*HAEMOGLOBIN, "hbm"]}
+            cells, profile, gene_sets={"hemoglobin": [*HEMOGLOBIN, "hbm"]}
         )
     finally:
         logger.remove(sink)
 
     assert messages == [
-        "1 of 5 genes of gene set 'haemoglobin' are not assay features: hbm"
+        "1 of 5 genes of gene set 'hemoglobin' are not assay features: hbm"
     ]
     assert store.artifacts.inspect(matched).parameters["gene_sets"] == {
-        "haemoglobin": [0, 1, 2, 3]
+        "hemoglobin": [0, 1, 2, 3]
     }
 
 
@@ -868,7 +868,7 @@ def test_contamination_warns_about_an_estimate_of_zero_and_keeps_it(store):
     # With a second gene set the global estimate is positive, and the warning
     # names the set of the estimate of 0.
     both = warned_twice(
-        {"rare": ["GENE5"], "haemoglobin": HAEMOGLOBIN}, f"gene set 'rare' {measured}"
+        {"rare": ["GENE5"], "hemoglobin": HEMOGLOBIN}, f"gene set 'rare' {measured}"
     )
     result = store.qc.load_ambient_contamination(both)
     assert result.set_estimates["rare"] == 0.0
@@ -1045,10 +1045,10 @@ def test_corrected_counts_remove_the_estimated_soup(store):
     assert after < 0.2 * before
 
     def correlations(values: np.ndarray) -> np.ndarray:
-        centred = values - values.mean(axis=1, keepdims=True)
+        centered = values - values.mean(axis=1, keepdims=True)
         reference = truth - truth.mean(axis=1, keepdims=True)
-        return (centred * reference).sum(axis=1) / np.sqrt(
-            (centred**2).sum(axis=1) * (reference**2).sum(axis=1)
+        return (centered * reference).sum(axis=1) / np.sqrt(
+            (centered**2).sum(axis=1) * (reference**2).sum(axis=1)
         )
 
     raw_correlation = correlations(raw[:N_CELLS].astype(np.float64))

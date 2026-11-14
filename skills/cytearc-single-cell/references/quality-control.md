@@ -7,7 +7,7 @@ selections, audit removals without author labels, and score doublets. Docs:
 
 ## When to use
 
-- Before the first graph on a new store, or whenever the analysed cell population changes.
+- Before the first graph on a new store, or whenever the analyzed cell population changes.
 - When the store comes from a public atlas, CELLxGENE or a Seurat submission: counts may be
   corrected, genes removed, or cells already filtered.
 - When a run kept fewer cells than expected, and after a first clustering (doublets, QC clusters).
@@ -93,7 +93,7 @@ holds, any visible prior bounds, and why QC was gentle. Count models need raw UM
 ### Unfiltered droplet matrices: call cells first
 
 A raw droplet matrix (Cell Ranger `raw_feature_bc_matrix`) is mostly empty droplets: MAD bounds
-centre on them and remove the cells. Call cells with EmptyDrops first, then run QC and the pipeline
+center on them and remove the cells. Call cells with EmptyDrops first, then run QC and the pipeline
 on the called cells. The `rna` recipe's `cell_calling` stage does both in one run; call by hand to
 inspect the calls first.
 
@@ -323,7 +323,7 @@ first = ds.pipeline.rna(label="called_cells", cell_calling=True, filtering=False
                         cell_cycle=False, doublets=False)  # or cells=<your called-cell column>
 profile = ds.qc.ambient_profile(total_counts=(2, 10))  # or ds.qc.ambient_profile(empty_selection)
 soup = ds.qc.load_ambient_profile(profile)  # name, counts, fraction per feature
-gene_sets = {"haemoglobin": ["HBA1", "HBA2", "HBB"],  # keep genes the store has
+gene_sets = {"hemoglobin": ["HBA1", "HBA2", "HBB"],  # keep genes the store has
              "immunoglobulin": ["IGKC", "IGHM", "IGLC2", "JCHAIN"]}
 rho = ds.qc.ambient_contamination(first["analysis_cell_selection"], profile,
                                   gene_sets=gene_sets, clusters=first["clusters"])

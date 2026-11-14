@@ -232,7 +232,7 @@ class PerturbationAssociations:
     ``skew_shape``. ``n_cells`` counts a pair's treatment cells and
     ``n_control_cells`` the cells they are compared with: at low MOI the
     control cells, or for a calibration group the other control cells, and
-    at high MOI every other labelled cell.
+    at high MOI every other labeled cell.
 
     Attributes:
         discovery: The pairs asked about.

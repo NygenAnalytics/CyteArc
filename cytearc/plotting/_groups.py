@@ -1,14 +1,14 @@
-"""The groups of the figures of clones, receptors and variants, and their colours.
+"""The groups of the figures of clones, receptors and variants, and their colors.
 
 Figures group cells as the clone summaries do, through the store's
 ``_figure_groups``, and figures of a summary take the groups of its record.
-A group keeps its colour in every figure: a grouping by one cell metadata
-column takes the column's stored display palette, or colours assigned over
-every label of the column, as master's figures colour categories; a label
-artifact's groups take colours over every label of the artifact; receptor
+A group keeps its color in every figure: a grouping by one cell metadata
+column takes the column's stored display palette, or colors assigned over
+every label of the column, as master's figures color categories; a label
+artifact's groups take colors over every label of the artifact; receptor
 types take their vocabulary's palette; and groups of several columns take
-colours over the groups drawn. The labels that colours range over are read
-only when a figure colours its groups: a column's a stored chunk at a time,
+colors over the groups drawn. The labels that colors range over are read
+only when a figure colors its groups: a column's a stored chunk at a time,
 and a label artifact's within the store's memory budget.
 """
 
@@ -49,13 +49,13 @@ __all__ = [
     "table_groups",
 ]
 
-# The key columns whose labels are a vocabulary of fixed colours.
+# The key columns whose labels are a vocabulary of fixed colors.
 _VOCABULARY_SCALES = {"receptor_type": RECEPTOR_TYPE_SCALE}
 
 
 @dataclass(frozen=True, slots=True)
 class PlotGroups:
-    """The groups of one figure: their names, each cell's group and their colours.
+    """The groups of one figure: their names, each cell's group and their colors.
 
     Attributes:
         names: The groups' names, the labels of each joined by commas, in
@@ -64,10 +64,10 @@ class PlotGroups:
         columns: The grouping's key columns, empty without one.
         codes: Each cell's group, a position in ``names``, -1 for none; empty
             for the groups of a summary's record, whose tables name them.
-        colors: Returns every group's colour when the grouping keeps colours
-            across figures, or None when groups take colours over those
-            drawn; :meth:`scale` calls it, so the labels that colours range
-            over are read only for a figure that colours its groups.
+        colors: Returns every group's color when the grouping keeps colors
+            across figures, or None when groups take colors over those
+            drawn; :meth:`scale` calls it, so the labels that colors range
+            over are read only for a figure that colors its groups.
         titles: The title of each key column in the figure: a column's own
             name, and for the label artifact's kind, the artifact's name or
             title. Empty takes the key columns.
@@ -85,12 +85,12 @@ class PlotGroups:
         return ", ".join(self.titles or self.columns) or None
 
     def scale(self, drawn: Sequence[str]) -> CategoricalScale:
-        """Return the colours of the groups that a figure draws.
+        """Return the colors of the groups that a figure draws.
 
         Raises:
             ValueError: If a drawn group is not a group of the figure.
             TypeError: If the store does not give the labels that the
-                groups' colours range over.
+                groups' colors range over.
             MemoryError: If reading a label artifact's labels does not fit
                 the memory budget.
         """
@@ -163,11 +163,11 @@ def _as_text(scale: CategoricalScale | None) -> CategoricalScale | None:
 
 
 def _store_labels(store: Any) -> None:
-    """Refuse a store that cannot give the labels which group colours range over."""
+    """Refuse a store that cannot give the labels which group colors range over."""
     if not hasattr(store, "zw") or not hasattr(store, "cells"):
         raise TypeError(
             "store does not provide the labels of its cells, over which group "
-            "colours are assigned"
+            "colors are assigned"
         )
 
 
@@ -223,7 +223,7 @@ def _colors(
     group_by: Sequence[str],
     groups: ArtifactRef | None,
 ) -> CategoricalScale | None:
-    """Every group's colour, when the groups are those of one column or vocabulary."""
+    """Every group's color, when the groups are those of one column or vocabulary."""
     if len(columns) != 1:
         return None
     (column,) = columns
@@ -249,7 +249,7 @@ def _colors(
 
 
 def _no_colors() -> None:
-    """The colours of a figure's one group, which take the first colour drawn."""
+    """The colors of a figure's one group, which take the first color drawn."""
     return None
 
 
@@ -336,7 +336,7 @@ def table_groups(
     artifact is titled by ``groups``, a ``NamedCellArtifact`` of that
     artifact, or else by its own record.
 
-    Nothing is read from the store until a figure colours the groups.
+    Nothing is read from the store until a figure colors the groups.
 
     Raises:
         TypeError: If ``groups`` is not a ``NamedCellArtifact`` or None.

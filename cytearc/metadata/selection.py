@@ -502,11 +502,11 @@ def category_codes(
         factorized, distinct = pd.factorize(array, use_na_sentinel=True)
     except TypeError:
         # Unhashable labels, such as lists, are coded by their text.
-        labelled = valid_category_mask(array)
+        labeled = valid_category_mask(array)
         as_text = np.full(len(array), None, dtype=object)
         if ledger is not None:
             # Each value's text, measured one at a time, and its hashing.
-            characters = sum(len(str(value)) for value in array[labelled].tolist())
+            characters = sum(len(str(value)) for value in array[labeled].tolist())
             ledger.peak(
                 f"coding {n_values} labels by their text",
                 object_array_bytes(n_values)
@@ -515,7 +515,7 @@ def category_codes(
                 + (_FACTORIZE_BYTES_PER_VALUE * n_values)
                 + object_array_bytes(n_values),
             )
-        as_text[labelled] = [str(value) for value in array[labelled].tolist()]
+        as_text[labeled] = [str(value) for value in array[labeled].tolist()]
         factorized, distinct = pd.factorize(as_text, use_na_sentinel=True)
     distinct_values = np.asarray(distinct, dtype=object)
     texts = [str(value) for value in distinct_values.tolist()]
@@ -1607,7 +1607,7 @@ def resolve_complete_labels(
     placeholder as a label, so labels whose linked mask flags a row are
     rejected before any result is reused or written. The error ends with
     ``remedy``, which says how to make labels that the caller accepts. The
-    default narrows the labels to their labelled cells, which suits a
+    default narrows the labels to their labeled cells, which suits a
     caller that takes labels over any cell selection.
     """
     if not isinstance(labels, ArtifactRef):
@@ -1621,7 +1621,7 @@ def resolve_complete_labels(
     if resolved.missing_mask is not None and bool(resolved.missing_mask.any()):
         if remedy is None:
             remedy = (
-                f"Select the labelled cells with select_cells({name}, include=[...]) "
+                f"Select the labeled cells with select_cells({name}, include=[...]) "
                 f"and freeze their labels with snapshot_cluster_labels({name}, "
                 "cell_selection=...)"
             )

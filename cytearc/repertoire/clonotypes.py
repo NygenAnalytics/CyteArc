@@ -126,7 +126,7 @@ def within_type_parts(
     clone, and cells of two types, such as doublets, can join two clonotypes
     of one type. Each clonotype within a type lies within one clonotype
     across types, and every clone summary measures it as a clonotype of its
-    own, labelled by its clonotype across types and, where that clonotype
+    own, labeled by its clonotype across types and, where that clonotype
     holds others, by its type, and by its number where its type holds
     several: ``clonotype_1 (TCR 2)`` is clonotype_1's second clonotype of T
     cells, and ``clonotype_1 (BCR)`` its only one of B cells.
@@ -884,7 +884,7 @@ _NEAR_PAIR_BYTES = 32
 # budget.
 _LINKING_REMEDY = "require the same V and J genes, or lower max_distance"
 # The bytes that each link holds while the cells are linked: its two nodes,
-# and its two places among the nodes' neighbours while candidate cells are
+# and its two places among the nodes' neighbors while candidate cells are
 # drawn through it. A link joins two nodes of one group: near chains, or
 # under dual_ir="all", arms whose chains match one by one, which are then
 # collected and joined.
@@ -961,9 +961,9 @@ def _node_links(
 def _neighbor_lists(
     n_nodes: int, firsts: np.ndarray, seconds: np.ndarray
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Each node's neighbours, itself and the nodes it links to, grouped by node.
+    """Each node's neighbors, itself and the nodes it links to, grouped by node.
 
-    Returns where each node's neighbours start, and the neighbours.
+    Returns where each node's neighbors start, and the neighbors.
     """
     starts = np.zeros(n_nodes + 1, dtype=np.int64)
     for node in range(n_nodes):
@@ -997,9 +997,9 @@ def _candidate_pairs(
     member_nodes: np.ndarray,
     members: np.ndarray,
 ) -> Iterator[tuple[np.ndarray, np.ndarray]]:
-    """Yield, in bounded chunks, each anchor with the members of its node's neighbours.
+    """Yield, in bounded chunks, each anchor with the members of its node's neighbors.
 
-    A node's neighbours are the node itself and the nodes it links to. An
+    A node's neighbors are the node itself and the nodes it links to. An
     anchor never pairs with itself, and a pair can come more than once.
     """
     starts, neighbors = _neighbor_lists(n_nodes, link_firsts, link_seconds)
@@ -1044,8 +1044,8 @@ def _fill_pairs(
 ) -> int:
     """Write the next pairs from ``state`` until the buffers fill; return how many.
 
-    Each anchor of a node pairs with every member of the node's neighbours.
-    ``state`` holds the node and the positions of the anchor, the neighbour
+    Each anchor of a node pairs with every member of the node's neighbors.
+    ``state`` holds the node and the positions of the anchor, the neighbor
     and the member, and holds the number of nodes once every pair is written.
     """
     n_nodes = len(starts) - 1

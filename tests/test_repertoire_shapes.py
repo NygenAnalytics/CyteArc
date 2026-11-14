@@ -29,7 +29,7 @@ pytestmark = pytest.mark.slow
 # than one chunk of cell IDs holds.
 N_SINGLETONS = 50_000
 # Clonotypes of one cell each, named by long junctions of wide characters.
-N_LABELLED = 5_000
+N_LABELED = 5_000
 # Cells of long beta chains, whose junctions span many stored chunks.
 N_LONG_JUNCTIONS = 20_000
 
@@ -75,8 +75,8 @@ def wide_junctions(tmp_path_factory) -> SimpleNamespace:
     """
     rng = np.random.default_rng(17)
     path = tmp_path_factory.mktemp("wide_junctions") / "store.zarr"
-    ids = [f"cell{i:06d}-1" for i in range(N_LABELLED)]
-    counts = np.ones((N_LABELLED, 2), dtype=np.uint16)
+    ids = [f"cell{i:06d}-1" for i in range(N_LABELED)]
+    counts = np.ones((N_LABELED, 2), dtype=np.uint16)
     write_count_store(str(path), {"RNA": counts}, "uint16", cell_ids=np.asarray(ids))
     store = open_store(path)
     wide = np.asarray([chr(0x1F600 + k) for k in range(20)])
@@ -102,9 +102,9 @@ def wide_junctions(tmp_path_factory) -> SimpleNamespace:
 
 def test_labels_of_long_wide_junctions_name_each_clonotype(wide_junctions) -> None:
     store, clonotypes = wide_junctions.store, wide_junctions.clonotypes
-    ids = [f"clonotype_{rank}" for rank in range(1, N_LABELLED + 1)]
+    ids = [f"clonotype_{rank}" for rank in range(1, N_LABELED + 1)]
     labels = store._clone_figure_labels(clonotypes, ids).tolist()
-    assert len(set(labels)) == N_LABELLED
+    assert len(set(labels)) == N_LABELED
     assert {len(label) for label in labels} == {302}
 
 

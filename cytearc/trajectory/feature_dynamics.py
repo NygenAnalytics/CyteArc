@@ -141,7 +141,7 @@ def aggregate_feature_profiles(
 
 def knn_clustering(
     d_array: "cytearc.matrix.ChunkedArray",
-    n_neighbours: int,
+    n_neighbors: int,
     n_clusters: int,
     nthreads: int,
     ann_params: dict[str, Any] | None = None,
@@ -162,14 +162,14 @@ def knn_clustering(
     n_genes = int(d_array.shape[0])
     if n_genes < 2:
         raise ValueError("At least two retained genes are required for clustering")
-    if isinstance(n_neighbours, (bool, np.bool_)) or not isinstance(
-        n_neighbours,
+    if isinstance(n_neighbors, (bool, np.bool_)) or not isinstance(
+        n_neighbors,
         (int, np.integer),
     ):
-        raise TypeError("n_neighbours must be an integer")
-    n_neighbours = int(n_neighbours)
-    if not 1 <= n_neighbours < n_genes:
-        raise ValueError(f"n_neighbours must satisfy 1 <= n_neighbours < {n_genes}")
+        raise TypeError("n_neighbors must be an integer")
+    n_neighbors = int(n_neighbors)
+    if not 1 <= n_neighbors < n_genes:
+        raise ValueError(f"n_neighbors must satisfy 1 <= n_neighbors < {n_genes}")
     if isinstance(n_clusters, (bool, np.bool_)) or not isinstance(
         n_clusters,
         (int, np.integer),
@@ -227,7 +227,7 @@ def knn_clustering(
             raise ValueError(
                 f"The feature KNN graph has {n_components} disconnected "
                 f"components, which cannot form n_clusters={n_cluster} modules. "
-                "Increase n_neighbours or n_clusters."
+                "Increase n_neighbors or n_clusters."
             )
         return fixed_cut(hierarchy, n_cluster)
 
@@ -278,7 +278,7 @@ def knn_clustering(
     return fix_cluster_order(
         d_array,
         make_clusters(
-            make_knn_mat(d_array, n_neighbours, nthreads),
+            make_knn_mat(d_array, n_neighbors, nthreads),
             n_clusters,
         ),
         nthreads,

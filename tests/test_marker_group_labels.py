@@ -79,7 +79,7 @@ def _store(directory, labels: np.ndarray, counts: np.ndarray) -> DataStore:
 
 
 @pytest.fixture(scope="module")
-def labelled(tmp_path_factory):
+def labeled(tmp_path_factory):
     """One store, its marker table under ``SIZES``' labels, and under their twins.
 
     Feature ``2 * k`` marks the cells of the ``k``-th group of ten.
@@ -111,9 +111,9 @@ def _slot(store: DataStore, marker) -> zarr.Group:
 
 
 def test_a_table_of_labels_that_cannot_name_child_groups_stores_groups_by_code(
-    labelled,
+    labeled,
 ) -> None:
-    store, _, tables = labelled
+    store, _, tables = labeled
     slot = _slot(store, tables["labels"][1])
 
     assert slot.attrs["group_labels"] == BY_CODE_POINT
@@ -126,9 +126,9 @@ def test_a_table_of_labels_that_cannot_name_child_groups_stores_groups_by_code(
 
 
 def test_marker_readers_name_every_group_by_its_label_in_natural_order(
-    labelled, tmp_path
+    labeled, tmp_path
 ) -> None:
-    store, _, tables = labelled
+    store, _, tables = labeled
     marker = tables["labels"][1]
 
     with pytest.warns(UserWarning, match=r"'rare/1' \(1 cell\)"):
@@ -158,9 +158,9 @@ def test_marker_readers_name_every_group_by_its_label_in_natural_order(
 
 
 def test_statistics_do_not_depend_on_whether_labels_name_child_groups(
-    labelled,
+    labeled,
 ) -> None:
-    store, _, tables = labelled
+    store, _, tables = labeled
     twin_slot = _slot(store, tables["twins"][1])
     assert dict(twin_slot.attrs["skipped_groups"]) == {"f_rare_1": 1}
     assert "group_labels" not in twin_slot.attrs
@@ -180,8 +180,8 @@ def test_statistics_do_not_depend_on_whether_labels_name_child_groups(
     )
 
 
-def test_tables_of_either_layout_are_reused(labelled, monkeypatch) -> None:
-    store, features, tables = labelled
+def test_tables_of_either_layout_are_reused(labeled, monkeypatch) -> None:
+    store, features, tables = labeled
     monkeypatch.setattr(marker_algorithms, "find_markers_by_rank", _refuse_search)
 
     for clusters, marker in tables.values():
@@ -189,10 +189,10 @@ def test_tables_of_either_layout_are_reused(labelled, monkeypatch) -> None:
             assert store.markers.search(clusters, features=features) == marker
 
 
-def test_marker_heatmap_and_run_summary_read_groups_stored_by_code(labelled) -> None:
+def test_marker_heatmap_and_run_summary_read_groups_stored_by_code(labeled) -> None:
     from cytearc.plotting.heatmaps import _prepare_marker_heatmap
 
-    store, _, tables = labelled
+    store, _, tables = labeled
     marker = tables["labels"][1]
 
     prepared = _prepare_marker_heatmap(store, marker=marker, topn=1, log_transform=None)
@@ -243,8 +243,8 @@ def test_a_table_of_an_earlier_release_with_labels_now_stored_by_code_is_read_an
     assert store.markers.search(clusters, features=features) == marker
 
 
-def test_a_blank_label_is_refused_before_the_search(labelled, monkeypatch) -> None:
-    store, features, tables = labelled
+def test_a_blank_label_is_refused_before_the_search(labeled, monkeypatch) -> None:
+    store, features, tables = labeled
     clusters, _ = tables["labels"]
     resolved = resolve_complete_labels(store.zw, clusters, name="clusters")
     values = np.asarray(resolved.values, dtype=object)

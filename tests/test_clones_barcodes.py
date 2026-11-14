@@ -1,4 +1,4 @@
-"""Collapsing barcode rows into molecules and pairs, and summarising them.
+"""Collapsing barcode rows into molecules and pairs, and summarizing them.
 
 ``BarcodeCounter`` is checked against pandas' group-by of the same rows,
 however they are split into chunks and however often the chunks merge, and

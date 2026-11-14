@@ -13,7 +13,7 @@ def _read_block(
 
     A basic slice is used only for an index run that is provably contiguous
     (consecutive ascending integers), so it selects exactly the requested
-    positions and never includes neighbouring rows or columns. Any other
+    positions and never includes neighboring rows or columns. Any other
     selection falls back to orthogonal (fancy) indexing, which preserves the
     order of the index arrays. This centralizes the read path so callers never
     hand-roll ``slice(idx[0], idx[-1] + 1)``. It is ``read_selection``, kept on

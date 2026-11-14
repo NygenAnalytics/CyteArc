@@ -778,7 +778,7 @@ def mapping_calibration(
     The thresholds replace the transfer's own rule on the swept metric,
     ``threshold_fraction`` for ``voteFraction`` and ``max_distance`` for
     ``nearestDistance``, and every other saved rule still applies. Any other
-    metric is therefore calibrated among the cells that the transfer labelled.
+    metric is therefore calibrated among the cells that the transfer labeled.
 
     ``chosen_threshold`` is added to the thresholds and marked. Without it, the
     transfer's own rule on the swept metric, when it has one, is marked: it

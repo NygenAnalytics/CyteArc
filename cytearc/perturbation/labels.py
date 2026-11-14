@@ -46,7 +46,7 @@ __all__ = [
 CONTROL = "control"
 #: Labels that no target may take, since they label cells without one target.
 RESERVED_TARGETS = frozenset({CONTROL, NEGATIVE, MULTIPLE})
-#: How a cell whose guides target several genes is labelled.
+#: How a cell whose guides target several genes is labeled.
 POLICIES = ("single", "combinations")
 _SEPARATOR = "+"
 
@@ -126,7 +126,7 @@ def guide_targets(
             names[position] = str(target).strip()
     distinct = np.asarray(sorted({name for name in names if name}), dtype=object)
     # A control target never becomes a label: a cell with control guides only
-    # is labelled "control" whatever their targets are called.
+    # is labeled "control" whatever their targets are called.
     reserved = sorted(
         RESERVED_TARGETS.intersection(distinct.tolist()).difference(controls)
     )
@@ -300,7 +300,7 @@ def perturbation_label_arrays(
         policy: ``"single"`` labels a cell whose guides target several genes
             ``"Multiple"``; ``"combinations"`` joins the genes, sorted, with
             ``"+"``.
-        ledger: The caller's memory ledger, which holds the codes: labelling
+        ledger: The caller's memory ledger, which holds the codes: labeling
             charges it what :func:`label_memory_bytes` states before it
             allocates, and the labels stay charged. None charges nothing.
 
@@ -310,7 +310,7 @@ def perturbation_label_arrays(
 
     Raises:
         ValueError: If a called guide has no target.
-        MemoryBudgetError: If labelling would pass the ledger's budget.
+        MemoryBudgetError: If labeling would pass the ledger's budget.
     """
     codes = np.asarray(guide_codes)
     if ledger is not None:

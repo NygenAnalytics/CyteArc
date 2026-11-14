@@ -817,7 +817,7 @@ def test_cassiopeia_parquet_refuses_attributes_it_cannot_read(
         ("cell_barcode,intID1-EMX1", "petracer_characters"),
     ],
 )
-def test_each_format_is_recognised_from_its_header(tmp_path, header, format):
+def test_each_format_is_recognized_from_its_header(tmp_path, header, format):
     path = tmp_path / "file.txt"
     separator = "\t" if "\t" in header else ","
     path.write_text(

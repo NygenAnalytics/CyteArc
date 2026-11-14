@@ -87,7 +87,7 @@ def records_of(store, ref) -> pd.DataFrame:
     return frame.sort_values(_COLUMNS[:5], na_position="first").reset_index(drop=True)
 
 
-def _normalised(frame: pd.DataFrame) -> pd.DataFrame:
+def _normalized(frame: pd.DataFrame) -> pd.DataFrame:
     """Records with text as Python objects, None where an allele is missing."""
     found = frame.loc[:, _COLUMNS].copy()
     for name in ("cell", "integration", "site", "state", "allele"):
@@ -100,7 +100,7 @@ def _normalised(frame: pd.DataFrame) -> pd.DataFrame:
 
 def assert_records(store, ref, expected: pd.DataFrame) -> None:
     pd.testing.assert_frame_equal(
-        _normalised(records_of(store, ref)), _normalised(expected)
+        _normalized(records_of(store, ref)), _normalized(expected)
     )
 
 
@@ -900,7 +900,7 @@ def test_split_alleles_of_another_number_of_sites_are_refused(store, tmp_path):
 def test_slots_of_tapes_that_no_row_names_are_refused(
     store, truth, recorders, tmp_path
 ):
-    """A misspelt tape would otherwise keep the recorder's full length."""
+    """A misspelled tape would otherwise keep the recorder's full length."""
     from tests.clone_truth import write_typewriter, write_typewriter_chains
 
     cells = every_cell(store)

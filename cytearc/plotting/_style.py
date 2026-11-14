@@ -33,7 +33,7 @@ LEGEND_SIDE_MAX_ENTRIES = LEGEND_SIDE_ENTRIES_PER_COLUMN * LEGEND_SIDE_MAX_COLUM
 # their tables hold every item.
 MAX_NAMED_ITEMS = 40
 MAX_PRINTED_VALUES = 12
-# The colours of immune receptor types, in the order of
+# The colors of immune receptor types, in the order of
 # cytearc.repertoire.chains.RECEPTOR_TYPES, for every figure whose bars or
 # groups are receptor types.
 RECEPTOR_TYPE_SCALE = CategoricalScale(
@@ -47,19 +47,19 @@ RECEPTOR_TYPE_SCALE = CategoricalScale(
     },
 )
 # A vocabulary's value for no value, such as a cell without a receptor chain
-# or a recorder site without a read, takes the missing colour of every scale,
-# the receptor types' grey, and a value that carries nothing, such as an
-# unedited site, one muted colour.
+# or a recorder site without a read, takes the missing color of every scale,
+# the receptor types' gray, and a value that carries nothing, such as an
+# unedited site, one muted color.
 NO_VALUE_COLOR = "#bdbdbd"
 MUTED_COLOR = "#e2e2e2"
-# A categorical scale draws cells without a category in this colour and
+# A categorical scale draws cells without a category in this color and
 # names them with this label unless it, or the column's stored display, sets
 # others.
 MISSING_CATEGORY_COLOR = NO_VALUE_COLOR
 MISSING_CATEGORY_LABEL = "NA"
-# The colours of the chain pairings of cells, in the order of
+# The colors of the chain pairings of cells, in the order of
 # cytearc.repertoire.chains.CHAIN_PAIRINGS, sharing the receptor types'
-# colours of the pairings they name.
+# colors of the pairings they name.
 CHAIN_PAIRING_SCALE = CategoricalScale(
     order=(
         "single pair",
@@ -84,13 +84,13 @@ CHAIN_PAIRING_SCALE = CategoricalScale(
         "no IR": NO_VALUE_COLOR,
     },
 )
-# The colours of the two arms of a receptor, VJ chains (TRA, TRG, IGK, IGL)
+# The colors of the two arms of a receptor, VJ chains (TRA, TRG, IGK, IGL)
 # and VDJ chains (TRB, TRD, IGH), which no receptor type or chain pairing
-# takes, so that a colour of receptor_qc means one thing.
+# takes, so that a color of receptor_qc means one thing.
 CHAIN_ARM_SCALE = CategoricalScale(
     order=("VJ", "VDJ"), palette={"VJ": "#cc79a7", "VDJ": "#b7791f"}
 )
-# The colours of the loci of receptor chains, in the order of
+# The colors of the loci of receptor chains, in the order of
 # cytearc.repertoire.chains.LOCI: T cell loci in blues and teals, B cell
 # loci in oranges.
 LOCUS_SCALE = CategoricalScale(
@@ -105,7 +105,7 @@ LOCUS_SCALE = CategoricalScale(
         "IGH": "#dd6b20",
     },
 )
-# The colours and words of the states of a recorder site that figures draw,
+# The colors and words of the states of a recorder site that figures draw,
 # of cytearc.clones.recorders.STATES, in the order of their stacks: a site
 # that does not apply to a cell is drawn in no state.
 RECORDER_STATE_SCALE = CategoricalScale(
@@ -123,9 +123,9 @@ RECORDER_STATE_SCALE = CategoricalScale(
         "missing": "Missing",
     },
 )
-# The colours and words of the genotype calls of cytearc.variants.CALLS, in
-# its order: a cell without evidence at a site takes no value's grey, and
-# evidence that a rule did not call the muted grey.
+# The colors and words of the genotype calls of cytearc.variants.CALLS, in
+# its order: a cell without evidence at a site takes no value's gray, and
+# evidence that a rule did not call the muted gray.
 GENOTYPE_CALL_SCALE = CategoricalScale(
     order=(
         "wild_type",
@@ -1070,7 +1070,7 @@ def square_axis_limits(
 def scatter_edgecolor(theme: str = "notebook") -> str:
     """Marker edge color that stays readable on light and dark themes."""
     if theme == "dark":
-        # Mid grey keeps dark fills legible without turning markers into rings.
+        # Mid gray keeps dark fills legible without turning markers into rings.
         return "#8f8f8f"
     return "#333333"
 

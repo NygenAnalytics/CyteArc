@@ -46,7 +46,7 @@ def validate_source_sink_labels(
 ) -> None:
     """Check that ``labels`` hold every source and sink label.
 
-    ``context`` names the labelled cells in the message. A label that no cell
+    ``context`` names the labeled cells in the message. A label that no cell
     holds raises :class:`SourceSinkLabelsError`, which carries
     ``missing_from`` and, for ``"scored component"``, ``component_sizes``,
     the cell counts of the graph's components, largest first.
@@ -88,17 +88,17 @@ def make_source_sink_vector(
 ) -> np.ndarray:
     sink_mask = labels.isin(sinks).to_numpy(dtype=bool)
     source_mask = labels.isin(sources).to_numpy(dtype=bool)
-    labelled = sink_mask | source_mask
-    if labelled.all():
+    labeled = sink_mask | source_mask
+    if labeled.all():
         raise ValueError(
-            "All selected cells are labelled as sources or sinks, so the "
-            "source/sink vector cannot be balanced over unlabelled cells"
+            "All selected cells are labeled as sources or sinks, so the "
+            "source/sink vector cannot be balanced over unlabeled cells"
         )
 
     vector = np.zeros(labels.shape[0], dtype=float)
     vector[sink_mask] = 1.0
     vector[source_mask] = -1.0
-    vector[~labelled] = -vector.sum() / int((~labelled).sum())
+    vector[~labeled] = -vector.sum() / int((~labeled).sum())
     return vector
 
 
@@ -495,7 +495,7 @@ def pba_potential(
     pseudoinverse drops it. ``L V = R`` is then ``L_sym (D^1/2 V) = D^1/2 R``
     for the symmetric Laplacian ``L_sym = I - D^-1/2 W D^-1/2``, which SciPy's
     ``minres`` solves after it checks that the operator is symmetric. The
-    potential is centred at zero, as the pseudoinverse centres it.
+    potential is centered at zero, as the pseudoinverse centers it.
 
     ``solver_tol`` is MINRES's ``rtol``: the solve stops once its residual
     falls below ``solver_tol`` times the estimated norms of ``L_sym`` and of

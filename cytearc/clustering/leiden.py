@@ -153,7 +153,7 @@ def leiden_membership(
 ) -> np.ndarray:
     """Cluster a sparse graph with the Leiden algorithm.
 
-    The Leiden algorithm (Traag, Waltman and van Eck, 2019) maximises
+    The Leiden algorithm (Traag, Waltman and van Eck, 2019) maximizes
     modularity with a resolution parameter ``gamma`` (the configuration null
     model). Every stored entry ``(i, j, w)`` of ``graph`` is one undirected
     edge of weight ``w``, so the adjacency is ``A = W + W^T``; explicitly

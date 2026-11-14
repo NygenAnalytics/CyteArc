@@ -1614,7 +1614,7 @@ class TestDataStore:
         unique = np.unique(labels)
         np.testing.assert_array_equal(unique, np.arange(1, unique.size + 1))
         assert unique.size >= 2
-        # Leiden maximises modularity, so that is the main check: the default
+        # Leiden maximizes modularity, so that is the main check: the default
         # backend's labels score 0.752-0.759 on this graph over many seeds.
         graph = datastore.graph.load(connectivity_graph)
         assert _modularity(graph, labels, 1.0) >= 0.745

@@ -70,7 +70,7 @@ _PANEL_TITLE_INCHES = 0.35
 # The smallest VMR drawn on the log scale; variants that no covered cell
 # varies in sit there.
 _VMR_FLOOR = 1e-6
-# The colour of the selection's thresholds.
+# The color of the selection's thresholds.
 _THRESHOLD_COLOR = "#c0392b"
 # What the legend of variant_statistics calls each kind of variant, and its
 # marker and area.
@@ -79,7 +79,7 @@ _VARIANT_KINDS = {
     "masked": ("Masked", "x", 18.0),
     "other": ("Not informative", "o", 6.0),
 }
-# The height of the bar of clone colours above the heatmap.
+# The height of the bar of clone colors above the heatmap.
 _CLONE_BAR_INCHES = 0.25
 # The calls panel of genotypes is this wide alone, and grows by this many
 # inches for each bar it names; beside a layout, the two panels share the
@@ -196,7 +196,7 @@ def variant_depth(
     by their labels joined by commas, and a ``NamedCellArtifact`` as
     ``groups`` titles the artifact by its name. With a grouping, the second
     panel draws
-    one histogram per group in the group's colour, under a legend titled by
+    one histogram per group in the group's color, under a legend titled by
     the grouping, and says so when no cell of a group has depth. Cells
     without a group, and cells that no file names, are left out of it.
 
@@ -286,7 +286,7 @@ def variant_depth(
         ax = axes["cells"]
         x_label = f"Mean depth per site ({unit})"
         if (cells_table["mean_depth"] > 0).any():
-            # The groups with a cell, in their colours' order.
+            # The groups with a cell, in their colors' order.
             held = set(cells_table["group"].tolist())
             drawn.append(
                 draw_histograms(
@@ -352,8 +352,8 @@ def variant_statistics(
     cells, against the ratio of the variance of its allele frequency to its
     mean, on a log scale, as mgatk draws it. Sequencing errors sit on one
     strand and spread evenly across cells, so informative variants sit at
-    the top right. Informative variants take a colour, the others the muted
-    grey, masked ones drawn as crosses, under a legend of the kinds drawn,
+    the top right. Informative variants take a color, the others the muted
+    gray, masked ones drawn as crosses, under a legend of the kinds drawn,
     and the selection's VMR and strand correlation thresholds are drawn as
     dotted lines. A variant without a strand correlation, such as one that a
     single cell shows, is left out; for counts without strands, the x axis
@@ -507,14 +507,14 @@ def allele_frequencies(
 
     ``variants`` is a ``variant_selection`` artifact from
     ``ds.variants.informative``; its informative variants are the rows, in
-    their order along the genome, and cells are the columns, coloured from
+    their order along the genome, and cells are the columns, colored from
     0 to 1. With ``clones``, such as one from ``ds.variants.frequency_clones``,
     the cells with a clone are drawn ordered by clone, largest first, under
-    a bar of clone colours whose legend names the clones as their artifact
+    a bar of clone colors whose legend names the clones as their artifact
     does, and clonotypes across receptor types by each cell's clonotype
     within its type, as the clone summaries measure them; without it, the
     cells that the statistics covered are drawn in their order. A cell that was not covered at a variant's site has no
-    allele frequency and is drawn in the grey of no value, apart from a
+    allele frequency and is drawn in the gray of no value, apart from a
     frequency of 0. At most ``max_cells`` cells are drawn, chosen evenly
     along the order so that each clone keeps its share, and the axis says
     how many of how many it draws.
@@ -633,7 +633,7 @@ def allele_frequencies(
                 color_scale=ColorScale(
                     cmap="viridis", vmin=0.0, vmax=1.0, missing_color=NO_VALUE_COLOR
                 ),
-                value_label="Allele frequency (grey: not covered)",
+                value_label="Allele frequency (gray: not covered)",
                 show_legend=show_legend,
             )
         ]
@@ -646,7 +646,7 @@ def allele_frequencies(
             else f"Cells ({len(cell_ids):,} of {n_ordered:,})"
         )
         if names is not None:
-            # A bar of clone colours, a quarter inch high, above the cells.
+            # A bar of clone colors, a quarter inch high, above the cells.
             height = _CLONE_BAR_INCHES / max(
                 figure.get_figheight() * ax.get_position().height, 1e-6
             )
@@ -735,11 +735,11 @@ def genotypes(
     operation made its cell selection, such as a UMAP of the cells whose
     counts were imported, the second panel draws the cells at the
     embedding's coordinates, as ``embedding(layout=...)`` draws them,
-    coloured by their call at the one site that ``sites`` names or the
+    colored by their call at the one site that ``sites`` names or the
     genotypes hold; cells without a call there are drawn under the others.
     The calls take one palette, named in words under one legend beside the
-    last panel, missing in the grey of no value and filtered in the muted
-    grey.
+    last panel, missing in the gray of no value and filtered in the muted
+    gray.
 
     Tables: ``calls`` (``site``, ``group``, ``call``, ``n_cells``,
     ``share``) and, with a layout, ``cells`` (``ids``, ``x``, ``y``,
@@ -841,7 +841,7 @@ def genotypes(
                 "call": np.asarray(calls, dtype=object)[chosen],
             }
         )
-    # One bar for each site and group, labelled by both when grouped.
+    # One bar for each site and group, labeled by both when grouped.
     bars = calls_table.assign(
         bar=calls_table["site"]
         if not plotted.columns
@@ -952,7 +952,7 @@ def _draw_layout_calls(
     theme: str,
     title: str,
 ) -> None:
-    """Draw each cell at its embedding coordinates in its call's colour, as embeddings draw cells.
+    """Draw each cell at its embedding coordinates in its call's color, as embeddings draw cells.
 
     The cells draw in the seeded shuffle of ``embedding``, those without a
     call first, at the point sizes, square limits and rasterization of

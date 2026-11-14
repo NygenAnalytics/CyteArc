@@ -399,7 +399,7 @@ def test_an_import_reaches_the_cells_of_one_sample_of_a_merged_store(
     remedy = "or call the guides from their counts with perturbation.call_guides"
     saved = written(merged)
 
-    # Without a prefix, every cell of the other sample would be labelled
+    # Without a prefix, every cell of the other sample would be labeled
     # Negative; with one, every selected cell outside its sample would be.
     with pytest.raises(
         ValueError,
@@ -791,7 +791,7 @@ def test_loading_refuses_other_artifact_kinds(shared_store, template) -> None:
     assert written(shared_store) == saved
 
 
-def test_guide_calls_plot_summarises_the_calls(store, template, tmp_path) -> None:
+def test_guide_calls_plot_summarizes_the_calls(store, template, tmp_path) -> None:
     ref = store.perturbation.import_guide_calls(
         _call_file(tmp_path), cell_selection=template.selection
     )
@@ -899,7 +899,7 @@ def test_samples_of_any_column_are_numbered_as_before_within_the_ledger(
     )
     from cytearc.metadata.selection import sample_codes
 
-    # 20,000 cells, labelled by text, by numbers, and by text with gaps, and a
+    # 20,000 cells, labeled by text, by numbers, and by text with gaps, and a
     # selection of every other cell.
     n_cells = 20_000
     rng = np.random.default_rng(5)

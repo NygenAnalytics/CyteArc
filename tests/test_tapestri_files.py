@@ -2,7 +2,7 @@
 
 Both files are downloaded when the tests run and are never checked in:
 Mission Bio's example (Zenodo 10.5281/zenodo.20818440) is CC BY-SA 4.0, and
-GEO serves GSM9567643 without a stated licence. The expected numbers were
+GEO serves GSM9567643 without a stated license. The expected numbers were
 computed from the files with h5py and NumPy alone: depth rows are the
 positions' DP above 0, Tapestri's alternative reads AF × DP / 100 rounded,
 and the calls each NGT or GT of a cell with reads at its variant.

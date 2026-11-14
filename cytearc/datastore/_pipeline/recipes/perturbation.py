@@ -107,7 +107,7 @@ TRANS_PAIRS_ONLY = (
 )
 # The cells that the profiles average, by the output that holds them: every
 # cell of each label, or the cells that Mixscape calls knocked out.
-PROFILE_CELLS = {"labelled": "perturbation_labels", "knocked_out": "mixscape"}
+PROFILE_CELLS = {"labeled": "perturbation_labels", "knocked_out": "mixscape"}
 # The stage keywords whose stages compare each perturbation with the cells that
 # carry control guides only, which a high-MOI screen hardly holds: the
 # efficiency, the E-distances, Mixscape with its signature, and the clusters
@@ -160,7 +160,7 @@ def _resolve_labels(
 ) -> tuple[dict[str, Any], np.ndarray, GuideTargets]:
     """Return the label settings, the guide IDs, and each guide's target.
 
-    Every guide's target is checked as labelling resolves it.
+    Every guide's target is checked as labeling resolves it.
     """
     # The settings check refuses a mapping without controls; None takes the
     # method's defaults unchecked, and controls have no default.
@@ -172,7 +172,7 @@ def _resolve_labels(
         for name in ("target_column", "targets", "policy")
     )
     controls = label_settings(settings["controls"], target_column, targets, policy)
-    # The targets that the guide assay gives, as labelling resolves them; a
+    # The targets that the guide assay gives, as labeling resolves them; a
     # called guide without a target needs the calls, so its stage refuses it.
     guide_ids = validated_guide_ids(guide.feats.fetch_all("ids"))
     resolved = guide_targets(
@@ -261,17 +261,17 @@ def _profile_labels(settings: Mapping[str, Any], mixscape: bool) -> str:
 
     The profiles' ``cells`` setting chooses: ``"knocked_out"``, the default
     of a run with Mixscape, averages the cells that Mixscape calls knocked
-    out, so that escapers do not dilute the profiles, and ``"labelled"``,
+    out, so that escapers do not dilute the profiles, and ``"labeled"``,
     the default otherwise, every cell of each label.
 
     Raises:
         ValueError: If ``cells`` is neither, or is ``"knocked_out"`` in a run
             without Mixscape.
     """
-    cells = settings.get("cells", "knocked_out" if mixscape else "labelled")
+    cells = settings.get("cells", "knocked_out" if mixscape else "labeled")
     if not isinstance(cells, str) or cells not in PROFILE_CELLS:
         raise ValueError(
-            f"profiles['cells'] must be 'knocked_out' or 'labelled', not {cells!r}"
+            f"profiles['cells'] must be 'knocked_out' or 'labeled', not {cells!r}"
         )
     if cells == "knocked_out" and not mixscape:
         raise ValueError(
@@ -504,7 +504,7 @@ def _check_call_file_cells(
     Cell Ranger writes a call file for each sample, and the import matches
     each of its barcodes to the cell whose ID is ``barcode_prefix``, the
     barcode and ``barcode_suffix``. A cell that no barcode can reach would
-    be labelled ``"Negative"`` and left out of every later stage.
+    be labeled ``"Negative"`` and left out of every later stage.
 
     Returns:
         The input cells' IDs, as fixed-width text, and the ledger of the

@@ -308,7 +308,7 @@ def edistance_arrays(
     grouped = np.flatnonzero(groups >= 0)
     members = grouped[np.argsort(groups[grouped], kind="stable")]
     # The control cells come first and then the cells of each row in turn,
-    # centred on the control mean, which keeps the sums small and limits
+    # centered on the control mean, which keeps the sums small and limits
     # cancellation in the traces.
     values = values[np.concatenate([controls, members])]
     values -= values[:n_c].mean(axis=0)
