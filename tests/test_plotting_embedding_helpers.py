@@ -34,7 +34,7 @@ def test_embedding_helper_labels_duplicate_panels_and_explicit_facets(monkeypatc
         ],
     )
 
-    assert _color_labels(store, [None, "group", "gene"], from_assay=None) == [
+    assert _color_labels(store, [None, "group", "gene"], {}, from_assay=None) == [
         "cells",
         "group",
         "resolved feature",

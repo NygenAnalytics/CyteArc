@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 
 from ..clones.assignments import WITHIN_TYPE_CLONE
+from ..metadata.selection import NamedCellArtifact
 from ..storage.refs import ArtifactRef
 from ..utils.arguments import bool_argument, integer_argument, quoted_value
 from ..utils.arrays import sorted_unique
@@ -170,7 +171,7 @@ def variant_depth(
     counts: ArtifactRef,
     *,
     group_by: str | Sequence[str] | None = None,
-    groups: ArtifactRef | None = None,
+    groups: ArtifactRef | NamedCellArtifact | None = None,
     target: Any | None = None,
     figsize: tuple[float, float] | None = None,
     theme: str = "notebook",
@@ -192,7 +193,9 @@ def variant_depth(
     ``group_by`` names cell metadata columns, one or several, such as the
     sample, and ``groups`` a cell-label artifact; the groups are the
     combinations of their labels, as the clone summaries group cells, named
-    by their labels joined by commas. With a grouping, the second panel draws
+    by their labels joined by commas, and a ``NamedCellArtifact`` as
+    ``groups`` titles the artifact by its name. With a grouping, the second
+    panel draws
     one histogram per group in the group's colour, under a legend titled by
     the grouping, and says so when no cell of a group has depth. Cells
     without a group, and cells that no file names, are left out of it.
@@ -704,7 +707,7 @@ def genotypes(
     *,
     sites: Any | None = None,
     group_by: str | Sequence[str] | None = None,
-    groups: ArtifactRef | None = None,
+    groups: ArtifactRef | NamedCellArtifact | None = None,
     layout: ArtifactRef | None = None,
     target: Any | None = None,
     figsize: tuple[float, float] | None = None,
@@ -723,7 +726,9 @@ def genotypes(
     ``missing`` there. ``group_by`` names cell metadata columns, one or
     several, such as the cell type, and ``groups`` a cell-label artifact;
     the groups are the combinations of their labels, as the clone summaries
-    group cells, named by their labels joined by commas. Without either,
+    group cells, named by their labels joined by commas, and a
+    ``NamedCellArtifact`` as ``groups`` titles the artifact by its name.
+    Without either,
     each site has one bar of all cells. Cells without a group are left out.
 
     With ``layout``, an embedding artifact of the genotypes' cells, whichever

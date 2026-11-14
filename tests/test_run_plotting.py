@@ -129,10 +129,14 @@ def test_run_embedding_colors_by_run_outputs(plotted_run):
             candidate.to_dict(),
         ]
         # A run output colors the run plot as it colors the ref-mode plot.
-        assert list(result.axes) == [(0, "cluster_labels"), (1, "cluster_labels")]
+        # The run's one Leiden candidate, at resolution 1.0, is its saved
+        # clustering, so both panels take the title of that one artifact.
+        title = "Leiden, resolution 1.0"
+        assert run["clusters"] == candidate
+        assert list(result.axes) == [(0, title), (1, title)]
         np.testing.assert_allclose(
-            _facecolors(result, (0, "cluster_labels")),
-            _facecolors(reference, "cluster_labels"),
+            _facecolors(result, (0, title)),
+            _facecolors(reference, title),
         )
     finally:
         result.close()

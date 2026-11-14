@@ -5,6 +5,7 @@ from typing import Any, Hashable, Literal
 import numpy as np
 import pandas as pd
 
+from ..metadata.selection import NamedCellArtifact
 from ..storage.artifacts import ArtifactRef
 from ._contracts import CategoricalScale, PlotProvenance, StudyDesign
 from ._data import (
@@ -16,6 +17,7 @@ from ._data import (
 )
 from ._deps import require_matplotlib
 from ._display import resolve_artifact_scale, resolve_categorical_scale
+from ._titles import artifact_titles, label_artifact
 from ._figure import (
     LegendSpec,
     PlotResult,
@@ -337,10 +339,10 @@ def composition(
     store: Any,
     *,
     category_by: str | None = None,
-    categories: ArtifactRef | None = None,
+    categories: ArtifactRef | NamedCellArtifact | None = None,
     cell_key: str = "I",
     sample_by: str | None = None,
-    grouping: ArtifactRef | None = None,
+    grouping: ArtifactRef | NamedCellArtifact | None = None,
     subject_by: str | None = None,
     pair_by: str | None = None,
     condition_by: str | None = None,
@@ -372,7 +374,9 @@ def composition(
     composition. Beside ``categories``, its labels are read for the cells of
     ``categories``, which its own cells must include, so a grouping of more
     cells, such as labels of every cell, serves; a grouping that holds no
-    label for some of them raises ``ValueError``.
+    label for some of them raises ``ValueError``. A ``NamedCellArtifact`` as
+    ``categories`` or ``grouping`` titles the legend or the bar axis by its
+    name; a bare artifact takes the title of its record.
     ``kind="per_sample"`` draws one point per sample in each category (requires
     ``sample_by`` or a :class:`StudyDesign`).
 
@@ -409,6 +413,20 @@ def composition(
         raise ValueError("segment_linewidth must be non-negative")
     if not 0 <= label_min_fraction <= 1:
         raise ValueError("label_min_fraction must be between 0 and 1")
+    # Named artifacts are read as their artifacts and title their legend or axis.
+    categories, categories_name = label_artifact(categories, "categories")
+    grouping, grouping_name = label_artifact(grouping, "grouping")
+    titled = {
+        argument: (artifact, name)
+        for argument, artifact, name in (
+            ("categories", categories, categories_name),
+            ("grouping", grouping, grouping_name),
+        )
+        if artifact is not None
+    }
+    artifact_title_of = dict(
+        zip(titled, artifact_titles(store, list(titled.values())), strict=True)
+    )
     if grouping is not None:
         if sample_by is not None or study_design is not None:
             raise ValueError(
@@ -490,7 +508,7 @@ def composition(
         assert category_values is not None
         categorical_scale = resolve_artifact_scale(store, categories, categorical_scale)
         cats = np.asarray(category_values[0], dtype=object).copy()
-        category_axis_label = "categories"
+        category_axis_label = artifact_title_of["categories"]
     if len(cats) == 0:
         raise ValueError(f"No cells selected by cell_key {cell_key!r}")
     # Default colors range over every label of the category column, so a
@@ -552,7 +570,9 @@ def composition(
                 cell_idx=cell_indices,
                 labels=True,
             )
-        sample_axis_label = "grouping" if grouping is not None else sample_by
+        sample_axis_label = (
+            artifact_title_of["grouping"] if grouping is not None else sample_by
+        )
         valid = pd.notna(samples) & (np.asarray(samples, dtype=object) != "")
         if not valid.any():
             raise ValueError(f"No cells have valid values for {sample_axis_label!r}")

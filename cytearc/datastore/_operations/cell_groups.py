@@ -27,6 +27,7 @@ from ...metadata.rows import (
     read_text_rows,
 )
 from ...metadata.selection import (
+    NamedCellArtifact,
     category_codes,
     hashed_text_bytes,
     plan_cell_selection_read,
@@ -61,6 +62,7 @@ __all__ = [
     "CellGroups",
     "cell_groups",
     "group_columns",
+    "grouping_artifact",
     "selection_chunk_bytes",
     "within_groups",
 ]
@@ -112,6 +114,19 @@ def group_columns(value: Any, name: str = "group_by") -> tuple[str, ...]:
     if len(set(names)) != len(names):
         raise ValueError(f"{name} names a column twice")
     return tuple(names)
+
+
+def grouping_artifact(
+    groups: ArtifactRef | NamedCellArtifact | None,
+) -> ArtifactRef | None:
+    """Return the label artifact that groups cells, the artifact of a ``NamedCellArtifact``.
+
+    A name only titles figures, so a summary groups by the artifact alone: its
+    record, grouping fingerprint and identity are those of the bare artifact,
+    and naming it another way reuses the same summary. Any other value is
+    returned as it is, for the grouping to refuse.
+    """
+    return groups.artifact if isinstance(groups, NamedCellArtifact) else groups
 
 
 @dataclass(frozen=True, slots=True)

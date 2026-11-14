@@ -123,6 +123,7 @@ _EXPECTED_PLOTTING_EXPORTS = (
     "FeatureRef",
     "Highlight",
     "LegendSpec",
+    "NamedCellArtifact",
     "NormalizationSpec",
     "PlotProvenance",
     "PlotOutput",

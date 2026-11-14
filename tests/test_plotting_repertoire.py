@@ -138,7 +138,8 @@ def test_receptor_qc_groups_by_labels_of_fewer_cells(receptors) -> None:
         assert table.sum().tolist() == [2, 2]
         assert result.provenance.n_cells == 4
         assert result.tables["chains_per_cell"].sum().tolist() == [4, 4]
-        assert result.provenance.extras["grouping"] == "cluster_labels"
+        # The labels are titled by the column they copied.
+        assert result.provenance.extras["grouping"] == "cluster"
     finally:
         result.close()
 
@@ -343,7 +344,16 @@ def test_receptor_qc_groups_cells_by_several_columns(receptors) -> None:
             "b, q",
         ]
         assert both.provenance.n_cells == 6
-        assert both.provenance.extras["grouping"] == "sample, cluster_labels"
+        assert both.provenance.extras["grouping"] == "sample, lane"
+        named = plotting.receptor_qc(
+            store,
+            ref,
+            group_by="sample",
+            groups=plotting.NamedCellArtifact("Lane", labels),
+            show=False,
+        )
+        assert named.provenance.extras["grouping"] == "sample, Lane"
+        named.close()
     finally:
         both.close()
 

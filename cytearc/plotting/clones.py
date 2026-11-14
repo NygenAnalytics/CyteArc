@@ -11,6 +11,7 @@ from ..clones.diversity import INDEX_COLUMNS, ClonalDiversity, Rarefaction
 from ..clones.expansion import DEFAULT_RANK_SPLITS, rank_window_labels, rank_windows
 from ..clones.fate import CloneCoupling, dominant_fates
 from ..clones.overlap import OVERLAP_INDICES, CloneOverlap, CloneTracking
+from ..metadata.selection import NamedCellArtifact
 from ..storage.refs import ArtifactRef
 from ..utils.arguments import bool_argument, integer_argument, quoted_value
 from ..utils.arrays import sort_categories, sorted_unique
@@ -177,7 +178,7 @@ def clone_abundance(
     clones: ArtifactRef,
     *,
     group_by: str | Sequence[str] | None = None,
-    groups: ArtifactRef | None = None,
+    groups: ArtifactRef | NamedCellArtifact | None = None,
     max_clones: int = 20,
     target: Any | None = None,
     figsize: tuple[float, float] | None = None,
@@ -206,7 +207,9 @@ def clone_abundance(
     ``group_by`` names cell metadata columns, one or several, such as the
     sample or time point, and ``groups`` a cell-label artifact, such as a
     clustering; the groups are the combinations of their labels, as the clone
-    summaries group cells, named by their labels joined by commas. With a
+    summaries group cells, named by their labels joined by commas. A
+    ``NamedCellArtifact`` as ``groups`` titles the artifact by its name in
+    the legend, and a bare artifact takes the title of its record. With a
     grouping, the first panel draws one line per group, counting the cells of
     each clone within the group, and the second stacks each clone's cells by
     group, with one legend of the groups. Cells without a group are left
@@ -386,7 +389,7 @@ def clonal_expansion(
     expansion: ArtifactRef,
     *,
     group_by: str | Sequence[str] | None = None,
-    groups: ArtifactRef | None = None,
+    groups: ArtifactRef | NamedCellArtifact | None = None,
     count: str = "cells",
     normalize: bool = True,
     splits: Sequence[int] = DEFAULT_RANK_SPLITS,
@@ -413,7 +416,8 @@ def clonal_expansion(
     ``group_by`` names cell metadata columns, one or several, such as the
     cell type, or ``groups`` a cell-label artifact, such as a clustering; the
     plotted groups are then the combinations of their labels, as the clone
-    summaries group cells. Each cell keeps the category measured within its
+    summaries group cells, and a ``NamedCellArtifact`` as ``groups`` titles
+    the artifact by its name. Each cell keeps the category measured within its
     expansion group, so grouping the cells by cell type shows which cell
     types hold the expanded cells of their samples; the ranks are counted
     within the plotted groups. Labels that the clones keep apart stay apart:
@@ -452,8 +456,9 @@ def clonal_expansion(
     category_names = list(loaded.labels)
     window_names = list(rank_window_labels(splits))
     if groups is None and not names_columns(group_by):
-        # The expansion's own groups, which the loaded tables count.
-        group_name = ", ".join(key_columns) or None
+        # The expansion's own groups, which the loaded tables count, titled
+        # as a summary's groups are.
+        group_name = table_groups(store, loaded).title
         order = sort_categories(pd.unique(loaded.categories["group"].to_numpy(object)))
         wide = (
             loaded.categories.pivot(
@@ -603,6 +608,7 @@ def clonal_rarefaction(
     rarefaction: Rarefaction,
     *,
     base: str = "size",
+    groups: NamedCellArtifact | None = None,
     target: Any | None = None,
     figsize: tuple[float, float] | None = None,
     theme: str = "notebook",
@@ -622,6 +628,10 @@ def clonal_rarefaction(
     is. Curves that keep rising at the observed point have not reached their
     plateau: more cells would find more clones. The panels fill rows of
     three, and one legend of the groups stands beside the first row.
+
+    ``groups``, a ``NamedCellArtifact`` of the label artifact that the
+    record groups by, titles the artifact by its name; without it, the
+    figure takes the title of the artifact's record.
 
     Tables: ``curves``, the record's curves (``group``, ``order``, ``size``,
     ``method``, ``diversity``, ``coverage``); the record's ``group_keys``
@@ -649,7 +659,7 @@ def clonal_rarefaction(
     if curves.empty:
         raise ValueError("The rarefaction holds no curve, so there is nothing to plot")
     names = clone_names(store, rarefaction.clones)
-    plotted = table_groups(store, rarefaction)
+    plotted = table_groups(store, rarefaction, groups)
     held = set(curves["group"].tolist())
     colors = plotted.scale([name for name in plotted.names if name in held])
     panels = [f"order_{order}" for order in rarefaction.orders]
@@ -752,6 +762,7 @@ def clonal_diversity(
     diversity: ClonalDiversity,
     *,
     indices: str | Sequence[str] = _DIVERSITY_INDICES,
+    groups: NamedCellArtifact | None = None,
     target: Any | None = None,
     figsize: tuple[float, float] | None = None,
     theme: str = "notebook",
@@ -775,6 +786,10 @@ def clonal_diversity(
     index grows with the cells of a group, so compare groups of different
     sizes by the Hill numbers at a common coverage or size, which the
     record's ``hill`` table holds.
+
+    ``groups``, a ``NamedCellArtifact`` of the label artifact that the
+    record groups by, titles the artifact by its name; without it, the
+    figure takes the title of the artifact's record.
 
     Tables: ``indices``, the record's indices; the record's ``group_keys``
     holds each group's labels.
@@ -805,7 +820,7 @@ def clonal_diversity(
             f"No group has a value of {', '.join(chosen)}, so there is nothing to plot"
         )
     names = clone_names(store, diversity.clones)
-    plotted = table_groups(store, diversity)
+    plotted = table_groups(store, diversity, groups)
     colors = plotted.scale(table["group"].tolist())
     titles = _index_titles(names)
     legend_panel = chosen[min(_SMALL_MULTIPLES, len(chosen)) - 1]
@@ -892,6 +907,7 @@ def clone_overlap(
     *,
     index: str = "morisita_horn",
     color_scale: ColorScale | None = None,
+    groups: NamedCellArtifact | None = None,
     target: Any | None = None,
     figsize: tuple[float, float] | None = None,
     theme: str = "notebook",
@@ -909,6 +925,10 @@ def clone_overlap(
     on its diagonal for ``"shared"`` and 1 otherwise. ``color_scale`` sets
     the colour map and limits, viridis over the pairs' values by default,
     so two figures can share them.
+
+    ``groups``, a ``NamedCellArtifact`` of the label artifact that the
+    record groups by, titles the artifact by its name; without it, the
+    figure takes the title of the artifact's record.
 
     Tables: ``matrix`` (groups by groups) and ``pairs``, the record's pairs.
 
@@ -972,7 +992,7 @@ def clone_overlap(
         drawn=[drawn],
         inputs={"clones": overlap.clones},
         settings={
-            "grouping": table_groups(store, overlap).title,
+            "grouping": table_groups(store, overlap, groups).title,
             "index": index,
             "groups": names,
         },
@@ -987,6 +1007,7 @@ def clone_tracking(
     tracking: CloneTracking,
     *,
     order: Sequence[str] | None = None,
+    groups: NamedCellArtifact | None = None,
     target: Any | None = None,
     figsize: tuple[float, float] | None = None,
     theme: str = "notebook",
@@ -1009,6 +1030,10 @@ def clone_tracking(
     the name, such as time points as integers, and by default the names
     follow their natural order. The legend lists the clones, the largest
     first.
+
+    ``groups``, a ``NamedCellArtifact`` of the label artifact that the
+    record groups by, titles the artifact by its name; without it, the
+    figure takes the title of the artifact's record.
 
     Tables: ``tracking``, the record's ``table`` with each clone's ``label``
     after its ``clone`` (``clone``, ``label``, ``group``, ``n_cells`` and
@@ -1120,7 +1145,7 @@ def clone_tracking(
         drawn=[drawn],
         inputs={"clones": tracking.clones},
         settings={
-            "grouping": table_groups(store, tracking).title,
+            "grouping": table_groups(store, tracking, groups).title,
             "tracked": list(tracking.tracked),
             "order": positions,
         },
@@ -1136,6 +1161,7 @@ def clone_coupling(
     *,
     value: str = "coupling",
     color_scale: ColorScale | None = None,
+    groups: NamedCellArtifact | None = None,
     target: Any | None = None,
     figsize: tuple[float, float] | None = None,
     theme: str = "notebook",
@@ -1156,6 +1182,10 @@ def clone_coupling(
     on 0, from minus to plus their largest size, and other couplings
     viridis; ``color_scale`` sets the map and limits instead, so two figures
     can share them.
+
+    ``groups``, a ``NamedCellArtifact`` of the label artifact that the
+    record groups by, titles the artifact by its name; without it, the
+    figure takes the title of the artifact's record.
 
     Tables: ``matrix`` (groups by groups, in the drawn order) and ``pairs``.
 
@@ -1234,7 +1264,7 @@ def clone_coupling(
         drawn=[drawn],
         inputs={"clones": coupling.clones},
         settings={
-            "grouping": table_groups(store, coupling).title,
+            "grouping": table_groups(store, coupling, groups).title,
             "method": coupling.method,
             "value": value,
             "groups": names,
@@ -1264,6 +1294,7 @@ def clone_fate_bias(
     *,
     max_clones: int = 40,
     normalize: bool = False,
+    groups: NamedCellArtifact | None = None,
     target: Any | None = None,
     figsize: tuple[float, float] | None = None,
     theme: str = "notebook",
@@ -1285,6 +1316,10 @@ def clone_fate_bias(
     clones says how many it draws of how many. Clones are labelled as
     ``clone_abundance`` labels them: by their IDs, and clonotypes by their
     representative's junction, with their number where two drawn share one.
+
+    ``groups``, a ``NamedCellArtifact`` of the label artifact that the
+    record groups by, titles the artifact by its name; without it, the
+    figure takes the title of the artifact's record.
 
     Tables: ``clones``, one row per clone drawn, in the drawn order
     (``clone``, ``label``, ``fate``, the dominant fate, missing for a tie,
@@ -1359,7 +1394,7 @@ def clone_fate_bias(
             "n_cells": cells[chosen].reshape(-1),
         }
     )
-    fates = table_groups(store, loaded)
+    fates = table_groups(store, loaded, groups)
     title = (
         f"The {len(chosen)} of {len(codes)} {names.plural} with the most late cells"
         if len(chosen) < len(codes)

@@ -36,6 +36,7 @@ from ...metadata.rows import (
     text_read_bytes,
 )
 from ...metadata.selection import (
+    NamedCellArtifact,
     plan_cell_selection_read,
     read_cell_selection,
 )
@@ -107,7 +108,7 @@ from .cell_barcodes import (
     barcode_files,
     unmatched_barcode_rules,
 )
-from .cell_groups import cell_groups, group_columns, within_groups
+from .cell_groups import cell_groups, group_columns, grouping_artifact, within_groups
 from .clone_artifacts import clone_diagnostics
 from .clone_steps import (
     CODES_WITHIN_TYPE,
@@ -2026,7 +2027,7 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         slots: str | Sequence[str] = ("VJ_1", "VDJ_1"),
         count: str = "cells",
         group_by: str | Sequence[str] | None = None,
-        groups: ArtifactRef | None = None,
+        groups: ArtifactRef | NamedCellArtifact | None = None,
         cell_selection: ArtifactRef | None = None,
     ) -> GeneUsage:
         """Count the genes of the chains of groups of cells.
@@ -2060,7 +2061,9 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             slots: The chain slots to count.
             count: ``"cells"`` or ``"clonotypes"``.
             group_by: Cell metadata columns whose labels define the groups.
-            groups: A cell-label artifact whose labels define the groups.
+            groups: A cell-label artifact whose labels define the groups,
+                or a ``NamedCellArtifact`` of one, whose name titles only
+                the figures of the result.
             cell_selection: Only these cells, or None for every cell.
 
         Returns:
@@ -2083,6 +2086,7 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
                 holding the chains and counting them, or decoding the gene
                 calls does not fit the memory budget.
         """
+        groups = grouping_artifact(groups)
         fields = (genes,) if isinstance(genes, str) else genes
         if not isinstance(fields, tuple | list) or not fields:
             raise TypeError("genes must be a gene field or a sequence of gene fields")
@@ -2163,7 +2167,7 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         slots: str | Sequence[str] = ("VJ_1", "VDJ_1"),
         count: str = "cells",
         group_by: str | Sequence[str] | None = None,
-        groups: ArtifactRef | None = None,
+        groups: ArtifactRef | NamedCellArtifact | None = None,
         cell_selection: ArtifactRef | None = None,
     ) -> Spectratype:
         """Count the junction lengths of the chains of groups of cells.
@@ -2184,7 +2188,9 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             slots: The chain slots to count.
             count: ``"cells"`` or ``"clonotypes"``.
             group_by: Cell metadata columns whose labels define the groups.
-            groups: A cell-label artifact whose labels define the groups.
+            groups: A cell-label artifact whose labels define the groups,
+                or a ``NamedCellArtifact`` of one, whose name titles only
+                the figures of the result.
             cell_selection: Only these cells, or None for every cell.
 
         Returns:
@@ -2207,6 +2213,7 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
                 holding the chains and counting them, or measuring the
                 junctions does not fit the memory budget.
         """
+        groups = grouping_artifact(groups)
         if sequence not in SEQUENCES:
             raise ValueError(f"sequence must be one of {', '.join(SEQUENCES)}")
         field_name = "junction_aa" if sequence == "aa" else "junction"

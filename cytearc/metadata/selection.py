@@ -845,7 +845,13 @@ class CellField:
 
 @dataclass(frozen=True, slots=True)
 class NamedCellArtifact:
-    """One semantic name bound to an exact cell-aligned artifact."""
+    """One semantic name bound to an exact cell-aligned artifact.
+
+    Plots take it wherever they take a label artifact and title the artifact
+    by ``name`` in panels, axes and legends, as ``CellField.label`` titles a
+    live column. QC filtering names its artifact metrics by it. The name
+    never enters a summary, a grouping or an artifact's identity.
+    """
 
     name: str
     artifact: ArtifactRef

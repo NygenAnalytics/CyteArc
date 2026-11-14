@@ -24,6 +24,7 @@ from ..plotting._contracts import (
     FrameStyle,
     Highlight,
     LegendLoc,
+    NamedCellArtifact,
     NormalizationSpec,
     SizeScale,
     StudyDesign,
@@ -211,20 +212,22 @@ def _check_run_embedding_colors(
 
     A string names a frozen cell field, or else a gene of the run's assay.
     Gene names and ``FeatureRef`` colors need an explicit normalization,
-    because a run freezes no gene values. An ``ArtifactRef`` must be an
-    output of the run, such as one of the Leiden candidates in
-    ``run["leiden"]``.
+    because a run freezes no gene values. An ``ArtifactRef``, or the
+    artifact of a ``NamedCellArtifact``, must be an output of the run, such
+    as one of the Leiden candidates in ``run["leiden"]``.
     """
     if color_by is None:
         return
-    if isinstance(color_by, str | ArtifactRef | FeatureRef | CellField):
+    if isinstance(
+        color_by, str | ArtifactRef | FeatureRef | CellField | NamedCellArtifact
+    ):
         items: list[object] = [color_by]
     elif isinstance(color_by, Iterable):
         items = list(color_by)
     else:
         raise TypeError(
             "color_by must be a frozen cell field, CellField, FeatureRef, "
-            "ArtifactRef, or a sequence of them"
+            "ArtifactRef, NamedCellArtifact, or a sequence of them"
         )
     cells = store.cells
     genes = _run_feature_names(
@@ -237,7 +240,7 @@ def _check_run_embedding_colors(
             continue
         if isinstance(item, CellField):
             _require_run_fields(cells, item.key)
-        elif isinstance(item, ArtifactRef):
+        elif isinstance(item, ArtifactRef | NamedCellArtifact):
             if outputs is None:
                 # Every Leiden candidate of the run's ``leiden`` output counts.
                 outputs = {
@@ -245,7 +248,8 @@ def _check_run_embedding_colors(
                     for value in run.values()
                     for ref in (value if isinstance(value, tuple) else (value,))
                 }
-            if item not in outputs:
+            artifact = item.artifact if isinstance(item, NamedCellArtifact) else item
+            if artifact not in outputs:
                 raise ValueError(_RUN_ARTIFACT_COLOR_MESSAGE)
         elif isinstance(item, FeatureRef):
             if item.assay is not None and item.assay != run.assay:
@@ -265,7 +269,7 @@ def _check_run_embedding_colors(
         else:
             raise TypeError(
                 "color_by items must be frozen cell fields, CellField, "
-                f"FeatureRef, or ArtifactRef; got {type(item).__name__}"
+                f"FeatureRef, ArtifactRef, or NamedCellArtifact; got {type(item).__name__}"
             )
 
 
@@ -371,7 +375,8 @@ class DataStorePlotAccessor:
             " | ArtifactRef"
             " | FeatureRef"
             " | CellField"
-            " | Sequence[str | ArtifactRef | FeatureRef | CellField]"
+            " | NamedCellArtifact"
+            " | Sequence[str | ArtifactRef | FeatureRef | CellField | NamedCellArtifact]"
             " | None"
         ) = None,
         facet_by: str | None = None,
@@ -591,7 +596,7 @@ class DataStorePlotAccessor:
         clones: ArtifactRef,
         *,
         group_by: str | Sequence[str] | None = None,
-        groups: ArtifactRef | None = None,
+        groups: ArtifactRef | NamedCellArtifact | None = None,
         max_clones: int = 20,
         target: Any | None = None,
         figsize: tuple[float, float] | None = None,
@@ -607,7 +612,7 @@ class DataStorePlotAccessor:
         expansion: ArtifactRef,
         *,
         group_by: str | Sequence[str] | None = None,
-        groups: ArtifactRef | None = None,
+        groups: ArtifactRef | NamedCellArtifact | None = None,
         count: str = "cells",
         normalize: bool = True,
         splits: Sequence[int] = (10, 100, 1_000, 10_000, 30_000, 100_000),
@@ -625,6 +630,7 @@ class DataStorePlotAccessor:
         diversity: ClonalDiversity,
         *,
         indices: str | Sequence[str] = ("n_clones", "shannon", "inverse_simpson"),
+        groups: NamedCellArtifact | None = None,
         target: Any | None = None,
         figsize: tuple[float, float] | None = None,
         theme: str = "notebook",
@@ -639,6 +645,7 @@ class DataStorePlotAccessor:
         rarefaction: Rarefaction,
         *,
         base: str = "size",
+        groups: NamedCellArtifact | None = None,
         target: Any | None = None,
         figsize: tuple[float, float] | None = None,
         theme: str = "notebook",
@@ -654,6 +661,7 @@ class DataStorePlotAccessor:
         *,
         index: str = "morisita_horn",
         color_scale: ColorScale | None = None,
+        groups: NamedCellArtifact | None = None,
         target: Any | None = None,
         figsize: tuple[float, float] | None = None,
         theme: str = "notebook",
@@ -668,6 +676,7 @@ class DataStorePlotAccessor:
         tracking: CloneTracking,
         *,
         order: Sequence[str] | None = None,
+        groups: NamedCellArtifact | None = None,
         target: Any | None = None,
         figsize: tuple[float, float] | None = None,
         theme: str = "notebook",
@@ -683,6 +692,7 @@ class DataStorePlotAccessor:
         *,
         value: str = "coupling",
         color_scale: ColorScale | None = None,
+        groups: NamedCellArtifact | None = None,
         target: Any | None = None,
         figsize: tuple[float, float] | None = None,
         theme: str = "notebook",
@@ -698,6 +708,7 @@ class DataStorePlotAccessor:
         *,
         max_clones: int = 40,
         normalize: bool = False,
+        groups: NamedCellArtifact | None = None,
         target: Any | None = None,
         figsize: tuple[float, float] | None = None,
         theme: str = "notebook",
@@ -727,7 +738,7 @@ class DataStorePlotAccessor:
         receptors: ArtifactRef,
         *,
         group_by: str | Sequence[str] | None = None,
-        groups: ArtifactRef | None = None,
+        groups: ArtifactRef | NamedCellArtifact | None = None,
         normalize: bool | None = None,
         target: Any | None = None,
         figsize: tuple[float, float] | None = None,
@@ -743,6 +754,7 @@ class DataStorePlotAccessor:
         usage: GeneUsage,
         *,
         max_genes: int = 30,
+        groups: NamedCellArtifact | None = None,
         target: Any | None = None,
         figsize: tuple[float, float] | None = None,
         theme: str = "notebook",
@@ -770,6 +782,7 @@ class DataStorePlotAccessor:
         self,
         spectratype: Spectratype,
         *,
+        groups: NamedCellArtifact | None = None,
         target: Any | None = None,
         figsize: tuple[float, float] | None = None,
         theme: str = "notebook",
@@ -798,7 +811,7 @@ class DataStorePlotAccessor:
         counts: ArtifactRef,
         *,
         group_by: str | Sequence[str] | None = None,
-        groups: ArtifactRef | None = None,
+        groups: ArtifactRef | NamedCellArtifact | None = None,
         target: Any | None = None,
         figsize: tuple[float, float] | None = None,
         theme: str = "notebook",
@@ -842,7 +855,7 @@ class DataStorePlotAccessor:
         *,
         sites: Any | None = None,
         group_by: str | Sequence[str] | None = None,
-        groups: ArtifactRef | None = None,
+        groups: ArtifactRef | NamedCellArtifact | None = None,
         layout: ArtifactRef | None = None,
         target: Any | None = None,
         figsize: tuple[float, float] | None = None,
@@ -996,7 +1009,7 @@ class DataStorePlotAccessor:
             "Sequence[str | FeatureRef] | Mapping[str, Sequence[str | FeatureRef]]"
         ),
         group_by: str | tuple[str, ...] | None = None,
-        groups: ArtifactRef | None = None,
+        groups: ArtifactRef | NamedCellArtifact | None = None,
         cell_key: str = "I",
         from_assay: str | None = None,
         sample_by: str | None = None,
@@ -1031,7 +1044,7 @@ class DataStorePlotAccessor:
             "Sequence[str | FeatureRef] | Mapping[str, Sequence[str | FeatureRef]]"
         ),
         group_by: str | tuple[str, ...] | None = None,
-        groups: ArtifactRef | None = None,
+        groups: ArtifactRef | NamedCellArtifact | None = None,
         cell_key: str = "I",
         from_assay: str | None = None,
         sample_by: str | None = None,
@@ -1068,10 +1081,10 @@ class DataStorePlotAccessor:
         self,
         *,
         category_by: str | None = None,
-        categories: ArtifactRef | None = None,
+        categories: ArtifactRef | NamedCellArtifact | None = None,
         cell_key: str = "I",
         sample_by: str | None = None,
-        grouping: ArtifactRef | None = None,
+        grouping: ArtifactRef | NamedCellArtifact | None = None,
         subject_by: str | None = None,
         pair_by: str | None = None,
         condition_by: str | None = None,
@@ -1104,7 +1117,7 @@ class DataStorePlotAccessor:
             " | Sequence[str | CellField | FeatureRef]"
         ),
         *,
-        grouping: ArtifactRef | CellField | None = None,
+        grouping: ArtifactRef | CellField | NamedCellArtifact | None = None,
         cell_selection: ArtifactRef | None = None,
         groups: Sequence[Any] | None = None,
         split_by: str | None = None,
@@ -1212,7 +1225,7 @@ class DataStorePlotAccessor:
         *,
         group_by: str | None = None,
         layout_key: str | None = None,
-        groups: ArtifactRef | None = None,
+        groups: ArtifactRef | NamedCellArtifact | None = None,
         layout: ArtifactRef | None = None,
         graph: ArtifactRef,
         cell_key: str = "I",

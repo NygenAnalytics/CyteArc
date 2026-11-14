@@ -1002,14 +1002,14 @@ _FOREIGN_REF = ArtifactRef(
             {"color_by": 3},
             TypeError,
             "color_by must be a frozen cell field, CellField, FeatureRef, "
-            "ArtifactRef, or a sequence of them",
+            "ArtifactRef, NamedCellArtifact, or a sequence of them",
         ),
         (
             "embedding",
             {"color_by": ["clusters", 3]},
             TypeError,
             "color_by items must be frozen cell fields, CellField, FeatureRef, "
-            "or ArtifactRef; got int",
+            "ArtifactRef, or NamedCellArtifact; got int",
         ),
         (
             "embedding",

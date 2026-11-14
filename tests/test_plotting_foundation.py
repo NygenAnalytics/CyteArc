@@ -2034,7 +2034,7 @@ _CELL_CYCLE_REF = ArtifactRef(
             "metricA",
             {"grouping": "group"},
             TypeError,
-            "grouping must be an ArtifactRef, CellField, or None",
+            "grouping must be an ArtifactRef, NamedCellArtifact, CellField, or None",
             id="grouping-type",
         ),
         pytest.param(

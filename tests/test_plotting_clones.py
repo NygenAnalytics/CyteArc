@@ -147,7 +147,8 @@ def test_a_label_artifact_of_fewer_cells_leaves_the_others_ungrouped(plotted) ->
         "group": ["x", "y", "x", "y"],
         "n_cells": [2, 1, 1, 0],
     }
-    assert result.legends[0].label == "cluster_labels"
+    # The legend is titled by the column that the labels copied.
+    assert result.legends[0].label == "group"
     plt.close(result.figure)
 
 
@@ -238,7 +239,7 @@ def test_plot_groups_align_labels_to_clones_of_later_cells(plotted) -> None:
     # The clones' cells, c2 to c4, lie in y, x and y; the labels' first
     # cells, c0 and c1, lie in x.
     found = plot_groups(store, middle, group_by=None, groups=labels, n_cells=3)
-    assert _grouped(found) == ([1, 0, 1], ("x", "y"), "cluster_labels")
+    assert _grouped(found) == ([1, 0, 1], ("x", "y"), "group")
 
 
 def test_clones_of_equal_size_list_in_rank_order(plotted) -> None:
@@ -404,7 +405,7 @@ def test_the_expansion_plot_groups_cells_by_labels(truth_plot) -> None:
     ref = store.clones.expansion(truth_plot.clones)
     result = clonal_expansion(store, ref, groups=truth_plot.labels, show=False)
     assert result.tables["categories"]["group"].unique().tolist() == sorted(CELL_TYPES)
-    assert result.provenance.extras["grouping"] == "cluster_labels"
+    assert result.provenance.extras["grouping"] == "cell_type"
     plt.close(result.figure)
     ungrouped = clonal_expansion(store, ref, show=False, show_legend=False)
     assert ungrouped.tables["categories"]["group"].unique().tolist() == ["all cells"]
@@ -501,7 +502,7 @@ def test_figures_group_cells_by_columns_and_labels_together(truth_plot) -> None:
     found = TRUTH.group_clone_cells(_joined(TRUTH.samples, TRUTH.cell_types))
     top = abundance.tables["top"]
     assert top["group"].drop_duplicates().tolist() == sorted(found)
-    assert abundance.legends[0].label == "sample, cluster_labels"
+    assert abundance.legends[0].label == "sample, cell_type"
     expansion = clonal_expansion(
         store, truth_plot.by_sample, group_by="sample", groups=labels, show=False
     )
@@ -510,7 +511,7 @@ def test_figures_group_cells_by_columns_and_labels_together(truth_plot) -> None:
     assert table.groupby("group", sort=False)["n_cells"].sum().to_dict() == {
         group: sum(cells.values()) for group, cells in found.items()
     }
-    assert expansion.provenance.extras["grouping"] == "sample, cluster_labels"
+    assert expansion.provenance.extras["grouping"] == "sample, cell_type"
     expansion.close()
     diversity = store.clones.diversity(clones, group_by="sample", groups=labels)
     assert table["group"].unique().tolist() == diversity.indices["group"].tolist()
@@ -1855,3 +1856,46 @@ def test_default_figure_sizes_follow_the_clones_and_groups_drawn(
     qc.close()
     assert qc.tables["receptor_type"]["group"].nunique() == N_CELLS
     assert size == pytest.approx((7.5, 3 * 2.4))
+
+
+def test_each_summarys_figure_titles_its_named_artifact(truth_plot) -> None:
+    from cytearc.plotting import NamedCellArtifact
+
+    store, clones, labels = truth_plot.store, truth_plot.clones, truth_plot.labels
+    named = NamedCellArtifact("Cell type", labels)
+    store.cells.insert("is_d2", TRUTH.samples == "d2", overwrite=True)
+    store.cells.insert("is_d4", TRUTH.samples == "d4", overwrite=True)
+    # Each summary groups by the named artifact, and its figure takes the
+    # name; the record keeps the artifact alone.
+    cases = [
+        (
+            clonal_rarefaction,
+            store.clones.rarefaction(clones, groups=named, orders=(0,)),
+        ),
+        (clonal_diversity, store.clones.diversity(clones, groups=named)),
+        (clone_overlap, store.clones.overlap(clones, groups=named)),
+        (clone_tracking, store.clones.track(clones, groups=named, top_n=2)),
+        (
+            clone_coupling,
+            store.clones.coupling(clones, groups=named, n_permutations=20),
+        ),
+        (
+            clone_fate_bias,
+            store.clones.fate_bias(
+                clones,
+                groups=named,
+                early=store.snapshot_cell_selection("is_d2"),
+                late=store.snapshot_cell_selection("is_d4"),
+            ),
+        ),
+    ]
+    for figure, record in cases:
+        result = figure(store, record, groups=named, show=False)
+        try:
+            assert result.provenance.extras["grouping"] == "Cell type", figure
+            # Without the name, the figure takes the column the labels copied.
+            bare = figure(store, record, show=False)
+            assert bare.provenance.extras["grouping"] == "cell_type", figure
+            bare.close()
+        finally:
+            result.close()

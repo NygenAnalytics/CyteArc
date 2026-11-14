@@ -368,7 +368,8 @@ def test_label_artifact_colors_range_over_all_labelled_cells(tmp_path):
             store, layout=layout, color_by=clusters, subset_by="no_one", show=False
         )
         assert _category_scale(subset).palette == {2: colors[2], 10: colors[10]}
-        (points,) = subset.axes["cluster_labels"].collections
+        # The panel takes the obs key of the imported clusters as its title.
+        (points,) = subset.axes["clusters"].collections
         cells = np.asarray(points.get_offsets())[:, 0].astype(int)
         assert [hex_color(color) for color in points.get_facecolors()] == [
             colors[labels[cell]] for cell in cells
