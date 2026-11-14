@@ -2058,7 +2058,10 @@ def test_composition_uses_two_exact_artifact_axes(
     assert result.provenance.n_samples is None
     assert result.provenance.extras["categories"] == cell_cycle_scoring.to_dict()
     assert result.provenance.extras["grouping"] == leiden_clustering.to_dict()
-    assert result.axes["composition"].get_xlabel() == "grouping"
+    # The bar axis takes the title of the Leiden clustering's record, and the
+    # legend that of the cell cycle phases' kind.
+    assert result.axes["composition"].get_xlabel() == "Leiden, resolution 1.0"
+    assert result.figure.legends[0].get_title().get_text() == "Cell cycle"
     result.close()
 
     with pytest.raises(ValueError, match="mutually exclusive"):

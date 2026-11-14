@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 
 from ..features.values import resolve_feature_batch
+from ..metadata.selection import NamedCellArtifact
 from ..storage.artifacts import ArtifactRef
 
 from ._contracts import (
@@ -30,6 +31,7 @@ from ._data import (
 )
 from ._deps import require_matplotlib
 from ._display import resolve_artifact_scale, resolve_categorical_scale
+from ._titles import artifact_titles, label_artifact
 from ._figure import (
     LegendSpec,
     PlotResult,
@@ -380,7 +382,7 @@ def dotplot(
     *,
     features: Sequence[str | FeatureRef] | Mapping[str, Sequence[str | FeatureRef]],
     group_by: str | tuple[str, ...] | None = None,
-    groups: ArtifactRef | None = None,
+    groups: ArtifactRef | NamedCellArtifact | None = None,
     cell_key: str = "I",
     from_assay: str | None = None,
     sample_by: str | None = None,
@@ -419,6 +421,10 @@ def dotplot(
     With ``sample_by`` (or ``study_design.sample_by``), each sample contributes
     equally: CyteArc first summarizes within sample, then averages across samples.
     Without it, every cell contributes equally.
+
+    The group axis is titled by the ``group_by`` columns, or by the name of a
+    ``NamedCellArtifact`` as ``groups``, or else by the title of the label
+    artifact's record.
     """
     swap_axes = bool_argument(swap_axes, "swap_axes")
     italicize_features = bool_argument(italicize_features, "italicize_features")
@@ -430,6 +436,8 @@ def dotplot(
         raise NotImplementedError("dotplot currently supports only linear color scales")
     size_scale_is_explicit = size_scale is not None
     normalization = normalization or NormalizationSpec()
+    # A named artifact groups by its artifact and titles the group axis.
+    groups, groups_name = label_artifact(groups, "groups")
     grouping = _resolve_grouping(
         store,
         group_by=group_by,
@@ -437,6 +445,11 @@ def dotplot(
         cell_key=cell_key,
     )
     group_keys, cell_indices, _group_values, group_missing = grouping
+    group_axis_title = (
+        " / ".join(group_keys)
+        if groups is None
+        else artifact_titles(store, [(groups, groups_name)])[0]
+    )
     if marker_linewidth < 0:
         raise ValueError("marker_linewidth must be non-negative")
     if isinstance(group_by, str):
@@ -582,7 +595,7 @@ def dotplot(
             # The first group reads at the top, as in the unswapped plot.
             ax.invert_yaxis()
             ax.set_xlabel("")
-            ax.set_ylabel(" / ".join(group_keys))
+            ax.set_ylabel(group_axis_title)
         else:
             ax.set_xticks(range(len(resolved_group_order)))
             ax.set_xticklabels(
@@ -601,7 +614,7 @@ def dotplot(
             ax.set_xlim(-0.5, len(resolved_group_order) - 0.5)
             ax.set_ylim(-0.5, len(resolved_feature_order) - 0.5)
             ax.invert_yaxis()
-            ax.set_xlabel(" / ".join(group_keys))
+            ax.set_xlabel(group_axis_title)
             ax.set_ylabel("")
         bracket_count = _draw_feature_group_brackets(
             ax,
@@ -801,7 +814,7 @@ def matrixplot(
     *,
     features: Sequence[str | FeatureRef] | Mapping[str, Sequence[str | FeatureRef]],
     group_by: str | tuple[str, ...] | None = None,
-    groups: ArtifactRef | None = None,
+    groups: ArtifactRef | NamedCellArtifact | None = None,
     cell_key: str = "I",
     from_assay: str | None = None,
     sample_by: str | None = None,
@@ -853,7 +866,8 @@ def matrixplot(
     per feature and group, so a feature listed under two groups keeps a row in
     each, and brackets each group's rows. The matrix table is then indexed by
     ``feature_group`` and ``feature``. Grouped rows keep their groups, so they
-    cannot be clustered.
+    cannot be clustered. ``groups`` takes a ``NamedCellArtifact`` as
+    :func:`dotplot` does; the matrix draws no group axis title.
     """
     cluster_features = bool_argument(cluster_features, "cluster_features")
     cluster_groups = bool_argument(cluster_groups, "cluster_groups")
@@ -879,6 +893,7 @@ def matrixplot(
             "matrixplot currently supports only linear color scales"
         )
     normalization = normalization or NormalizationSpec()
+    groups, _groups_name = label_artifact(groups, "groups")
     grouping = _resolve_grouping(
         store,
         group_by=group_by,

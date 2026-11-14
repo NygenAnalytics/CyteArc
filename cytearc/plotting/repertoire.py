@@ -8,6 +8,7 @@ import pandas as pd
 
 from ..repertoire.chains import CHAIN_PAIRINGS, RECEPTOR_TYPES
 from ..repertoire.usage import GeneUsage, Spectratype
+from ..metadata.selection import NamedCellArtifact
 from ..storage.refs import ArtifactRef
 from ..utils.arguments import bool_argument, integer_argument, optional_bool_argument
 from ..utils.arrays import sort_categories
@@ -143,7 +144,7 @@ def receptor_qc(
     receptors: ArtifactRef,
     *,
     group_by: str | Sequence[str] | None = None,
-    groups: ArtifactRef | None = None,
+    groups: ArtifactRef | NamedCellArtifact | None = None,
     normalize: bool | None = None,
     target: Any | None = None,
     figsize: tuple[float, float] | None = None,
@@ -166,7 +167,8 @@ def receptor_qc(
     ``group_by`` names cell metadata columns, one or several, such as the
     sample, and ``groups`` a cell-label artifact, such as a clustering; the
     groups are the combinations of their labels, as the clone summaries group
-    cells, named by their labels joined by commas. With a grouping, the first
+    cells, named by their labels joined by commas. A ``NamedCellArtifact`` as
+    ``groups`` titles the artifact by its name. With a grouping, the first
     two panels draw one bar per group, stacked by category, the first on
     top as its legend lists them, of the fraction of the group's cells by
     default (``normalize``), and cells without a group are left out. A
@@ -411,6 +413,7 @@ def gene_usage(
     usage: GeneUsage,
     *,
     max_genes: int = 30,
+    groups: NamedCellArtifact | None = None,
     target: Any | None = None,
     figsize: tuple[float, float] | None = None,
     theme: str = "notebook",
@@ -435,6 +438,10 @@ def gene_usage(
     clonotype clusters for clonotypes that a distance metric linked. The
     plot raises ``ValueError`` when ``usage`` counts several gene fields or
     no chain has a call of its field.
+
+    ``groups``, a ``NamedCellArtifact`` of the label artifact that the
+    record groups by, titles the artifact by its name; without it, the
+    figure takes the title of the artifact's record.
 
     Tables: ``usage``, the record's rows.
 
@@ -464,7 +471,7 @@ def gene_usage(
     table = usage.table
     loci = _locus_panels(table, f"a {gene}")
     counted = _counted(store, source, count)
-    grouping = table_groups(store, usage).title
+    grouping = table_groups(store, usage, groups).title
     grouped = bool(usage.group_by) or usage.groups is not None
     by_locus = dict(tuple(table.groupby("locus", sort=False)))
     ranked = {locus: _ranked(by_locus[locus], gene, count) for locus in loci}
@@ -677,6 +684,7 @@ def spectratype(
     store: Any,
     spectratype: Spectratype,
     *,
+    groups: NamedCellArtifact | None = None,
     target: Any | None = None,
     figsize: tuple[float, float] | None = None,
     theme: str = "notebook",
@@ -694,6 +702,10 @@ def spectratype(
     ``count="clonotypes"`` the fractions count clonotypes, or clonotype
     clusters for clonotypes that a distance metric linked. The plot raises
     ``ValueError`` when no chain has a junction.
+
+    ``groups``, a ``NamedCellArtifact`` of the label artifact that the
+    record groups by, titles the artifact by its name; without it, the
+    figure takes the title of the artifact's record.
 
     Tables: ``spectratype``, the record's rows.
 
@@ -723,7 +735,7 @@ def spectratype(
     table = spectratype.table
     loci = _locus_panels(table, "a junction")
     counted = _counted(store, source, count)
-    plotted = table_groups(store, spectratype)
+    plotted = table_groups(store, spectratype, groups)
     held = set(table["group"].astype(str))
     group_order = [name for name in plotted.names if name in held]
     by_locus = dict(tuple(table.groupby("locus", sort=False)))

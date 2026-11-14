@@ -87,6 +87,7 @@ from ...metadata.rows import (
 from ...metadata.selection import (
     CELL_VALUE_NAMES,
     CellSelectionRead,
+    NamedCellArtifact,
     category_codes,
     plan_cell_selection_read,
     read_cell_selection,
@@ -125,6 +126,7 @@ from .cell_groups import (
     CellGroups,
     cell_groups,
     group_columns,
+    grouping_artifact,
 )
 from .clone_artifacts import (
     SOURCE_ARRAYS,
@@ -1691,7 +1693,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         clones: ArtifactRef,
         *,
         group_by: str | Sequence[str] | None = None,
-        groups: ArtifactRef | None = None,
+        groups: ArtifactRef | NamedCellArtifact | None = None,
         cell_selection: ArtifactRef | None = None,
         breakpoints: Sequence[int] | None = None,
         frequency_breakpoints: Sequence[float] | None = None,
@@ -1738,7 +1740,9 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             clones: A clone artifact, such as ``clones`` or ``clonotypes``.
             group_by: Cell metadata columns whose labels define the groups,
                 such as the sample.
-            groups: A cell-label artifact whose labels define the groups.
+            groups: A cell-label artifact whose labels define the groups,
+                or a ``NamedCellArtifact`` of one, whose name titles only
+                the figures of the result.
             cell_selection: The cells to measure, or None for every cell of
                 the clones.
             breakpoints: Strictly increasing bounds in cells, or None.
@@ -1770,6 +1774,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
                 measurement, about 300 bytes per cell, does not fit the memory
                 budget.
         """
+        groups = grouping_artifact(groups)
         invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         if breakpoints is not None and frequency_breakpoints is not None:
             raise ValueError("Pass breakpoints or frequency_breakpoints, not both")
@@ -2080,7 +2085,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         clones: ArtifactRef,
         *,
         group_by: str | Sequence[str] | None = None,
-        groups: ArtifactRef | None = None,
+        groups: ArtifactRef | NamedCellArtifact | None = None,
         cell_selection: ArtifactRef | None = None,
         size: int | None = None,
         coverage: float | None = None,
@@ -2109,7 +2114,9 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         Args:
             clones: A clone artifact, such as ``clones`` or ``clonotypes``.
             group_by: Cell metadata columns whose labels define the groups.
-            groups: A cell-label artifact whose labels define the groups.
+            groups: A cell-label artifact whose labels define the groups,
+                or a ``NamedCellArtifact`` of one, whose name titles only
+                the figures of the result.
             cell_selection: Only these cells, or None for every cell of the
                 clones.
             size: The common size in cells, or None for the default.
@@ -2133,6 +2140,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             MemoryError: If reading the clones or grouping the cells does not
                 fit the memory budget.
         """
+        groups = grouping_artifact(groups)
         if size is not None:
             if isinstance(size, bool) or not isinstance(size, int | np.integer):
                 raise TypeError("size must be a positive integer or None")
@@ -2173,7 +2181,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         clones: ArtifactRef,
         *,
         group_by: str | Sequence[str] | None = None,
-        groups: ArtifactRef | None = None,
+        groups: ArtifactRef | NamedCellArtifact | None = None,
         cell_selection: ArtifactRef | None = None,
         orders: Sequence[int] = ORDERS,
         sizes: Sequence[int] | None = None,
@@ -2199,7 +2207,9 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         Args:
             clones: A clone artifact, such as ``clones`` or ``clonotypes``.
             group_by: Cell metadata columns whose labels define the groups.
-            groups: A cell-label artifact whose labels define the groups.
+            groups: A cell-label artifact whose labels define the groups,
+                or a ``NamedCellArtifact`` of one, whose name titles only
+                the figures of the result.
             cell_selection: Only these cells, or None for every cell of the
                 clones.
             orders: Orders of the Hill numbers, from 0, 1 and 2.
@@ -2226,6 +2236,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             MemoryError: If reading the clones, grouping the cells, or the
                 curves do not fit the memory budget.
         """
+        groups = grouping_artifact(groups)
         listed_orders = _listed(orders)
         if listed_orders is None:
             raise TypeError("orders must be a sequence of 0, 1 and 2")
@@ -2302,7 +2313,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         clones: ArtifactRef,
         *,
         group_by: str | Sequence[str] | None = None,
-        groups: ArtifactRef | None = None,
+        groups: ArtifactRef | NamedCellArtifact | None = None,
         cell_selection: ArtifactRef | None = None,
     ) -> CloneOverlap:
         """Compare groups of cells by the clones they share.
@@ -2330,7 +2341,9 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         Args:
             clones: A clone artifact, such as ``clones`` or ``clonotypes``.
             group_by: Cell metadata columns whose labels define the groups.
-            groups: A cell-label artifact whose labels define the groups.
+            groups: A cell-label artifact whose labels define the groups,
+                or a ``NamedCellArtifact`` of one, whose name titles only
+                the figures of the result.
             cell_selection: Only these cells, or None for every cell of the
                 clones.
 
@@ -2353,6 +2366,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             MemoryError: If reading the clones, grouping the cells, or the
                 pairs of groups do not fit the memory budget.
         """
+        groups = grouping_artifact(groups)
         ledger = self._clone_ledger(clones, "Comparing the groups of the clones")
         source = self._read_clone_input(clones, ledger)
         keys, pair_groups, pair_codes, pair_cells, grouping = self._clone_pair_counts(
@@ -2407,7 +2421,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         clones: ArtifactRef,
         *,
         group_by: str | Sequence[str] | None = None,
-        groups: ArtifactRef | None = None,
+        groups: ArtifactRef | NamedCellArtifact | None = None,
         cell_selection: ArtifactRef | None = None,
         top_n: int = 10,
         labels: Sequence[str] | None = None,
@@ -2432,7 +2446,9 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         Args:
             clones: A clone artifact, such as ``clones`` or ``clonotypes``.
             group_by: Cell metadata columns whose labels define the groups.
-            groups: A cell-label artifact whose labels define the groups.
+            groups: A cell-label artifact whose labels define the groups,
+                or a ``NamedCellArtifact`` of one, whose name titles only
+                the figures of the result.
             cell_selection: Only these cells, or None for every cell of the
                 clones.
             top_n: The clones with the most cells to take from each group.
@@ -2459,6 +2475,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
                 table of the chosen clones' groups does not fit the memory
                 budget.
         """
+        groups = grouping_artifact(groups)
         if isinstance(top_n, bool) or not isinstance(top_n, int | np.integer):
             raise TypeError("top_n must be a positive integer")
         if top_n < 1:
@@ -2584,7 +2601,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         clones: ArtifactRef,
         *,
         group_by: str | Sequence[str] | None = None,
-        groups: ArtifactRef | None = None,
+        groups: ArtifactRef | NamedCellArtifact | None = None,
         cell_selection: ArtifactRef | None = None,
         method: str = COUPLING_METHODS[0],
         n_permutations: int = 1000,
@@ -2631,7 +2648,9 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         Args:
             clones: A clone artifact, such as ``clones`` or ``clonotypes``.
             group_by: Cell metadata columns whose labels define the groups.
-            groups: A cell-label artifact whose labels define the groups.
+            groups: A cell-label artifact whose labels define the groups,
+                or a ``NamedCellArtifact`` of one, whose name titles only
+                the figures of the result.
             cell_selection: Only these cells, or None for every cell of the
                 clones.
             method: ``"share_cosine"``, ``"abundance_cosine"``,
@@ -2665,6 +2684,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
                 coupling and one worker of its null do not fit the memory
                 budget.
         """
+        groups = grouping_artifact(groups)
         if not isinstance(method, str) or method not in COUPLING_METHODS:
             raise ValueError(
                 f"method must be one of {', '.join(COUPLING_METHODS)}, not {quoted_value(method)}"
@@ -2784,7 +2804,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         clones: ArtifactRef,
         *,
         group_by: str | Sequence[str] | None = None,
-        groups: ArtifactRef | None = None,
+        groups: ArtifactRef | NamedCellArtifact | None = None,
         early: ArtifactRef,
         late: ArtifactRef,
         invalidate_cache: bool = False,
@@ -2838,7 +2858,9 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         Args:
             clones: A clone artifact, such as ``clones`` or ``clonotypes``.
             group_by: Cell metadata columns whose labels define the fates.
-            groups: A cell-label artifact whose labels define the fates.
+            groups: A cell-label artifact whose labels define the fates,
+                or a ``NamedCellArtifact`` of one, whose name titles only
+                the figures of the result.
             early: The early cells, a cell selection.
             late: The late cells, a cell selection.
             invalidate_cache: Measure again instead of reusing a saved result.
@@ -2868,6 +2890,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             MemoryError: If reading the clones, grouping the late cells, or
                 the measurement does not fit the memory budget.
         """
+        groups = grouping_artifact(groups)
         invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         for name, selection in (("early", early), ("late", late)):
             if not isinstance(selection, ArtifactRef):

@@ -27,6 +27,7 @@ from ..metadata.rows import (
     metadata_missing_mask,
 )
 from ..metadata.selection import (
+    NamedCellArtifact,
     cell_value_spec,
     resolve_cell_aligned_artifact,
     valid_category_mask,
@@ -38,6 +39,7 @@ from ._contracts import CategoricalScale
 from ._data import store_method
 from ._display import stored_artifact_scale, stored_categorical_scale
 from ._style import RECEPTOR_TYPE_SCALE, palette_for_n, resolve_category_scale
+from ._titles import artifact_titles, label_artifact
 
 __all__ = [
     "PlotGroups",
@@ -66,17 +68,21 @@ class PlotGroups:
             across figures, or None when groups take colours over those
             drawn; :meth:`scale` calls it, so the labels that colours range
             over are read only for a figure that colours its groups.
+        titles: The title of each key column in the figure: a column's own
+            name, and for the label artifact's kind, the artifact's name or
+            title. Empty takes the key columns.
     """
 
     names: tuple[str, ...]
     columns: tuple[str, ...]
     codes: np.ndarray
     colors: Callable[[], CategoricalScale | None] = field(repr=False, compare=False)
+    titles: tuple[str, ...] = ()
 
     @property
     def title(self) -> str | None:
-        """The grouping's name, its key columns joined by commas, or None without one."""
-        return ", ".join(self.columns) or None
+        """The grouping's title, its key columns' titles joined by commas, or None without one."""
+        return ", ".join(self.titles or self.columns) or None
 
     def scale(self, drawn: Sequence[str]) -> CategoricalScale:
         """Return the colours of the groups that a figure draws.
@@ -247,12 +253,27 @@ def _no_colors() -> None:
     return None
 
 
+def _key_titles(
+    store: Any,
+    columns: Sequence[str],
+    *,
+    n_group_by: int,
+    groups: ArtifactRef | None,
+    name: str | None,
+) -> tuple[str, ...]:
+    """The title of each key column: the label artifact's kind, after the ``group_by`` columns, takes its name or title."""
+    titles = [str(column) for column in columns]
+    if groups is not None:
+        (titles[n_group_by],) = artifact_titles(store, [(groups, name)])
+    return tuple(titles)
+
+
 def plot_groups(
     store: Any,
     artifact: ArtifactRef,
     *,
     group_by: str | Sequence[str] | None,
-    groups: ArtifactRef | None,
+    groups: ArtifactRef | NamedCellArtifact | None,
     kept_apart: Sequence[tuple[str, np.ndarray]] = (),
     n_cells: int,
 ) -> PlotGroups:
@@ -267,7 +288,9 @@ def plot_groups(
     label artifact may hold fewer cells than ``artifact``: the cells it lacks
     have no group, nor do cells with a missing or blank label. Without a
     grouping, the artifact's ``n_cells`` cells are one group, ``"all
-    cells"``, and the store is not read.
+    cells"``, and the store is not read. A ``NamedCellArtifact`` groups by
+    its artifact and titles the artifact's key column with its name in the
+    figure; the grouping itself names the column by the artifact's kind.
 
     Raises:
         TypeError: If the store does not group cells for figures, or an
@@ -276,6 +299,7 @@ def plot_groups(
             apart already, or two groups get one name.
         MemoryError: If grouping the cells does not fit the memory budget.
     """
+    groups, name = label_artifact(groups, "groups")
     if not names_columns(group_by) and groups is None and not kept_apart:
         return PlotGroups(
             names=("all cells",),
@@ -294,19 +318,45 @@ def plot_groups(
         columns=columns,
         codes=np.asarray(grouped.codes, dtype=np.int64),
         colors=partial(_colors, store, names, columns, group_by=by, groups=groups),
+        titles=_key_titles(
+            store, columns, n_group_by=len(by), groups=groups, name=name
+        ),
     )
 
 
-def table_groups(store: Any, record: Any) -> PlotGroups:
+def table_groups(
+    store: Any, record: Any, groups: NamedCellArtifact | None = None
+) -> PlotGroups:
     """Return the groups of a summary's record, which its tables name.
 
     ``record`` is a summary's record, such as a ``Rarefaction``: its
     ``group_keys`` holds one row per group, indexed by the group's name,
     and its ``group_by`` and ``groups`` name the grouping, after which the
-    key columns hold the labels the clones keep apart.
+    key columns hold the labels the clones keep apart. The record's label
+    artifact is titled by ``groups``, a ``NamedCellArtifact`` of that
+    artifact, or else by its own record.
 
     Nothing is read from the store until a figure colours the groups.
+
+    Raises:
+        TypeError: If ``groups`` is not a ``NamedCellArtifact`` or None.
+        ValueError: If ``groups`` names another artifact than the record's.
     """
+    if groups is not None and not isinstance(groups, NamedCellArtifact):
+        raise TypeError(
+            "groups must be a NamedCellArtifact that names the record's label "
+            f"artifact, not {type(groups).__name__}"
+        )
+    if groups is not None and groups.artifact != record.groups:
+        raise ValueError(
+            f"groups names the {groups.artifact.kind} artifact "
+            f"{groups.artifact.artifact_id[:12]}, but the record groups its cells by "
+            + (
+                "no label artifact"
+                if record.groups is None
+                else f"the {record.groups.kind} artifact {record.groups.artifact_id[:12]}"
+            )
+        )
     keys: pd.DataFrame = record.group_keys
     names = tuple(str(name) for name in keys.index.tolist())
     columns = tuple(str(column) for column in keys.columns)
@@ -321,6 +371,13 @@ def table_groups(store: Any, record: Any) -> PlotGroups:
             columns,
             group_by=tuple(record.group_by),
             groups=record.groups,
+        ),
+        titles=_key_titles(
+            store,
+            columns,
+            n_group_by=len(record.group_by),
+            groups=record.groups,
+            name=None if groups is None else groups.name,
         ),
     )
 

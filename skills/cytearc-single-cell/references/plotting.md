@@ -36,7 +36,7 @@ artifact refs. Docs: <https://docs.nygen.io/CyteArc/tutorials/plotting>,
 - Ref mode, everything else: `layout=run["umap"]`, `color_by=` an `ArtifactRef`, a live metadata
   column, a gene name, `FeatureRef`, `CellField`, or a list of these (one panel each). Cells come
   from the layout artifact's selection; live columns are aligned to it.
-- Helpers in `cytearc.plotting`: `CellField(key, kind="auto"|"categorical"|"continuous", label=)`, `FeatureRef(value, assay=None, by="name"|"id"|"index", label=, reduction=)` (`value` is a string for `name` and `id` and an integer for `index`), `NormalizationSpec(source="assay"|"raw", transform="none"|"log1p")`, `ColorScale(cmap, vmin, vmax, vcenter, quantiles, missing_color, scope, scale)`, `CategoricalScale(order, palette, labels, missing_color, missing_label, palette_name)`, whose unset fields keep the column's stored display or stored order, `Highlight(by, groups, indices, color, dim_alpha, ...)`, `DensityOverlay`, `SizeScale`, `StudyDesign`.
+- Helpers in `cytearc.plotting`: `CellField(key, kind="auto"|"categorical"|"continuous", label=)`, `NamedCellArtifact(name, artifact)` (titles a label artifact in panels, axes and legends wherever a plot or a clone summary takes one; without it a plot titles the artifact from its record, such as `"Leiden, resolution 1.0"` or the copied column), `FeatureRef(value, assay=None, by="name"|"id"|"index", label=, reduction=)` (`value` is a string for `name` and `id` and an integer for `index`), `NormalizationSpec(source="assay"|"raw", transform="none"|"log1p")`, `ColorScale(cmap, vmin, vmax, vcenter, quantiles, missing_color, scope, scale)`, `CategoricalScale(order, palette, labels, missing_color, missing_label, palette_name)`, whose unset fields keep the column's stored display or stored order, `Highlight(by, groups, indices, color, dim_alpha, ...)`, `DensityOverlay`, `SizeScale`, `StudyDesign`.
 - A gene name that several features share, such as MATR3 in the 10x Genomics human reference, raises `ValueError` naming their IDs wherever a `FeatureRef` is accepted, `imputation.compute_imputed` included. Pass `FeatureRef(feature_id, by="id")` for one feature, or `reduction="mean"` for their mean. `lineage_trends(features=...)` and the `show_features` of `pseudotime_heatmap` and `lineage_heatmap` take `FeatureRef` values without a reduction, and label a feature whose name another retained feature shares as `name (ID)`.
 - Plots are display. `max_points` thins only the overlaid points in `distribution`, and
   `provenance.notes` gains `"subsampled_display"`; a violin estimates its density from at most
@@ -112,13 +112,13 @@ read (seconds on remote counts).
 umap = run["umap"]
 r = ds.plots.embedding(
     layout=umap,
-    color_by=[run["clusters"], "CD3D", "MS4A1", "LYZ"],
+    # NamedCellArtifact titles an artifact's panel and legend; r.axes["Leiden"] is its panel.
+    color_by=[splt.NamedCellArtifact("Leiden", run["clusters"]), "CD3D", "MS4A1", "LYZ"],
     normalization=splt.NormalizationSpec(transform="log1p"),  # RNA library-size values only
     color_scale=splt.ColorScale(cmap="viridis", quantiles=(0.0, 0.99)),
     sort_values=True,
     show=False,
 )
-r.axes["cluster_labels"].set_title("Leiden (selected)")  # ref panels are keyed by kind
 r.save("figures/umap_genes.png", dpi=150)
 r.close()
 

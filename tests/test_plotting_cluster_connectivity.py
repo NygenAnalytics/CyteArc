@@ -62,7 +62,8 @@ class _FakeStore:
         self.graph_values = graph
         self.graph = SimpleNamespace(load=self.load_graph)
         self.graph_calls = []
-        self.zw = object()
+        # Graph and selection reads are patched; no artifact records a title.
+        self.zw = None
 
     def _stored_display_metadata(self, column):
         # No column stores a display unless a test gives one.
@@ -701,7 +702,8 @@ def test_cluster_connectivity_reads_aligned_group_and_layout_artifacts(monkeypat
     # Incident weights: x = 1 + (1 + 0.5) = 2.5 and y = (0.5 + 1) + 1 = 2.5.
     np.testing.assert_allclose(edges["rawWeight"], [0.5])
     np.testing.assert_allclose(edges["normalizedWeight"], [0.5 / 2.5])
-    assert result.legends[0].label == "groups"
+    # Without a record of the cluster cut, its legend takes the kind in words.
+    assert result.legends[0].label == "Cluster cut"
     assert result.provenance.cell_key is None
     assert result.provenance.notes == ("cluster_connectivity", "artifact")
     assert result.provenance.extras["groups"] == _GROUPS.to_dict()

@@ -14,6 +14,7 @@ from ..clustering.connectivity import (
     label_codes,
 )
 from ..graph.feature_projection import graph_cell_selection
+from ..metadata.selection import NamedCellArtifact
 from ..storage.artifacts import ArtifactRef
 from ..storage.selections import (
     selections_hold_same_cells,
@@ -29,6 +30,7 @@ from ._data import (
     _resolve_layout,
 )
 from ._display import resolve_artifact_scale, resolve_categorical_scale
+from ._titles import artifact_titles, label_artifact
 from ._figure import (
     LegendSpec,
     PlotResult,
@@ -179,7 +181,7 @@ def cluster_connectivity(
     *,
     group_by: str | None = None,
     layout_key: str | None = None,
-    groups: ArtifactRef | None = None,
+    groups: ArtifactRef | NamedCellArtifact | None = None,
     layout: ArtifactRef | None = None,
     graph: ArtifactRef,
     cell_key: str = "I",
@@ -218,7 +220,8 @@ def cluster_connectivity(
     selection. ``groups`` are read for the graph's cells, which their own
     cells must include, so labels of more cells serve. A layout of other
     cells, or groups without a label for some of the graph's cells, raise
-    ``ValueError``.
+    ``ValueError``. A ``NamedCellArtifact`` as ``groups`` titles the groups'
+    legend by its name; a bare artifact takes the title of its record.
     """
     show_cells = bool_argument(show_cells, "show_cells")
     labels = bool_argument(labels, "labels")
@@ -247,6 +250,8 @@ def cluster_connectivity(
 
     if not isinstance(graph, ArtifactRef):
         raise TypeError("graph must be an ArtifactRef")
+    # A named artifact groups by its artifact and titles the groups' legend.
+    groups, groups_name = label_artifact(groups, "groups")
     selection = graph_cell_selection(store.zw, graph)
     group_universe: np.ndarray | None = None
     uses_artifacts = groups is not None or layout is not None
@@ -301,7 +306,7 @@ def cluster_connectivity(
             )
             group_universe = all_labels[0]
         categorical_scale = resolve_artifact_scale(store, groups, categorical_scale)
-        group_label = "groups"
+        group_label = artifact_titles(store, [(groups, groups_name)])[0]
     else:
         if group_by is None or layout_key is None:
             raise ValueError("group_by and layout_key must be provided together")

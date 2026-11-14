@@ -343,8 +343,23 @@ def test_gene_usage_of_a_label_artifact_alone_draws_a_heatmap(tmp_path) -> None:
         ax = result.axes["TRA"]
         assert not ax.patches and len(ax.images) == 1
         assert [tick.get_text() for tick in ax.get_xticklabels()] == ["s1", "s2"]
+        # The labels are titled by the column they copied.
+        assert ax.get_xlabel() == "sample"
     finally:
         result.close()
+    # A named artifact groups the summary as the bare one does, and titles
+    # the figure; the spectratype takes the name too.
+    named = plotting.NamedCellArtifact("Sample", labels)
+    assert store.repertoire.gene_usage(receptors, groups=named).groups == labels
+    renamed = store.plots.gene_usage(usage, groups=named, show=False)
+    spectratype = store.repertoire.spectratype(receptors, groups=named)
+    lengths = store.plots.spectratype(spectratype, groups=named, show=False)
+    try:
+        assert renamed.axes["TRA"].get_xlabel() == "Sample"
+        assert lengths.provenance.extras["grouping"] == "Sample"
+    finally:
+        renamed.close()
+        lengths.close()
 
 
 def test_gene_pairing_plot_draws_v_against_j(tmp_path) -> None:

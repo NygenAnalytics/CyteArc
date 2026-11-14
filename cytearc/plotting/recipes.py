@@ -21,6 +21,7 @@ from ._contracts import (
     DensityOverlay,
     FeatureRef,
     Highlight,
+    NamedCellArtifact,
     NormalizationSpec,
     SizeScale,
     StudyDesign,
@@ -182,16 +183,61 @@ def _contract_from_mapping(
         raise type(error)(f"Invalid {context}: {error}") from error
 
 
+@dataclass(frozen=True, slots=True)
+class _NamedArtifactSlot:
+    """A named label artifact of a recipe step, whose artifact the runner supplies by name.
+
+    A recipe names the artifact as ``artifactKwargs`` does, by its key in the
+    ``artifacts`` mapping of :func:`run_recipe`, and the step receives
+    ``NamedCellArtifact(name, artifacts[artifact])``.
+    """
+
+    name: str
+    artifact: str
+
+
+_NAMED_ARTIFACT_KEYS = frozenset({"name", "artifact"})
+# The plot keywords that take a label artifact, as one value.
+_LABEL_ARTIFACT_KWARGS = ("categories", "grouping", "groups")
+
+
+def _is_named_artifact(value: Any) -> bool:
+    """Whether a serialized value names a label artifact: a mapping with ``artifact``."""
+    return isinstance(value, Mapping) and "artifact" in value
+
+
+def _named_artifact_slot(
+    value: Mapping[Any, Any], *, context: str
+) -> _NamedArtifactSlot:
+    """Read a serialized named artifact, ``{"name": ..., "artifact": ...}``."""
+    _validate_keys(value, _NAMED_ARTIFACT_KEYS, context=context)
+    name, artifact = value.get("name"), value.get("artifact")
+    if not isinstance(name, str) or not name.strip() or name != name.strip():
+        raise ValueError(
+            f"{context} name must be non-empty text without surrounding whitespace"
+        )
+    if not isinstance(artifact, str) or not artifact:
+        raise TypeError(f"{context} artifact must be the name of a recipe artifact")
+    return _NamedArtifactSlot(name=name, artifact=artifact)
+
+
 def _coerce_feature_reference(value: Any, *, context: str) -> Any:
     if isinstance(value, Mapping):
         return _contract_from_mapping(FeatureRef, value, context=context)
     return value
 
 
-def _coerce_field_or_feature(value: Any, *, context: str) -> Any:
-    """Read a serialized ``CellField`` (with ``key``) or ``FeatureRef``."""
+def _coerce_field_or_feature(
+    value: Any, *, context: str, artifacts: bool = False
+) -> Any:
+    """Read a serialized ``CellField`` (with ``key``) or ``FeatureRef``.
+
+    With ``artifacts``, a mapping with ``artifact`` names a label artifact.
+    """
     if not isinstance(value, Mapping):
         return value
+    if artifacts and _is_named_artifact(value):
+        return _named_artifact_slot(value, context=context)
     contract = CellField if "key" in value else FeatureRef
     return _contract_from_mapping(contract, value, context=context)
 
@@ -226,6 +272,10 @@ def _coerce_serialized_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
             )
             for annotation, scale in out["annotation_scales"].items()
         }
+    # A label artifact is named as {"name": ..., "artifact": ...}.
+    for name in _LABEL_ARTIFACT_KWARGS:
+        if _is_named_artifact(out.get(name)):
+            out[name] = _named_artifact_slot(out[name], context=name)
     if isinstance(out.get("grouping"), Mapping):
         out["grouping"] = _contract_from_mapping(
             CellField,
@@ -236,12 +286,16 @@ def _coerce_serialized_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
         if name not in out:
             continue
         value = out[name]
+        artifacts = name == "color_by"
         if isinstance(value, Sequence) and not isinstance(value, str | bytes):
             out[name] = [
-                _coerce_field_or_feature(item, context=context) for item in value
+                _coerce_field_or_feature(item, context=context, artifacts=artifacts)
+                for item in value
             ]
         else:
-            out[name] = _coerce_field_or_feature(value, context=context)
+            out[name] = _coerce_field_or_feature(
+                value, context=context, artifacts=artifacts
+            )
     if "features" in out:
         feature_value = out["features"]
         if isinstance(feature_value, Mapping):
@@ -634,6 +688,15 @@ def _log_failure(step_name: str, failure: str) -> None:
     logger.exception(f"Plot recipe step {step_name!r} failed: {failure}")
 
 
+def _named_artifacts(value: Any, artifacts: Mapping[str, Any]) -> Any:
+    """Replace a step's named artifact slots, alone or in a list, with ``NamedCellArtifact`` values."""
+    if isinstance(value, _NamedArtifactSlot):
+        return NamedCellArtifact(value.name, artifacts[value.artifact])
+    if isinstance(value, list):
+        return [_named_artifacts(item, artifacts) for item in value]
+    return value
+
+
 def _run_step(
     store: Any,
     step: PlotStep,
@@ -645,12 +708,21 @@ def _run_step(
 ) -> PlotOutput:
     plot = _resolve_plot(step.plot)
     kwargs = dict(step.kwargs)
-    if step.artifact_kwargs:
+    slots = [
+        slot
+        for value in kwargs.values()
+        for slot in (value if isinstance(value, list) else [value])
+        if isinstance(slot, _NamedArtifactSlot)
+    ]
+    if step.artifact_kwargs or slots:
         if artifacts is None:
             raise ValueError(f"Recipe step {step.name!r} requires an artifact mapping")
         missing = [
             artifact_name
-            for artifact_name in step.artifact_kwargs.values()
+            for artifact_name in (
+                *step.artifact_kwargs.values(),
+                *(slot.artifact for slot in slots),
+            )
             if artifact_name not in artifacts
         ]
         if missing:
@@ -658,6 +730,10 @@ def _run_step(
                 f"Recipe step {step.name!r} is missing artifacts: "
                 + ", ".join(map(repr, missing))
             )
+        kwargs = {
+            keyword: _named_artifacts(value, artifacts)
+            for keyword, value in kwargs.items()
+        }
         kwargs.update(
             {
                 plot_keyword: artifacts[artifact_name]

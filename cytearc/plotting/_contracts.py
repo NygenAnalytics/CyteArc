@@ -10,6 +10,7 @@ import numpy as np
 from ..metadata.selection import (
     CellField as CellField,
     FeatureRef as FeatureRef,
+    NamedCellArtifact as NamedCellArtifact,
     NormalizationSpec as NormalizationSpec,
     StudyDesign as StudyDesign,
 )

@@ -11,6 +11,7 @@ from ..features.values import normalization_is_cell_local, resolve_feature_batch
 from ..metadata.rows import apply_missing_mask
 from ..metadata.selection import (
     CellFieldKind,
+    NamedCellArtifact,
     cell_value_spec,
     valid_category_mask,
 )
@@ -56,6 +57,7 @@ from ._figure import (
     normalize_axes_target,
 )
 from ._labels import place_layout_labels, register_layout_labels
+from ._titles import artifact_titles
 from ..utils.arguments import (
     bool_argument,
     clip_fraction_argument,
@@ -119,14 +121,45 @@ def _coerce_color_items(
     | ArtifactRef
     | FeatureRef
     | CellField
-    | Sequence[str | ArtifactRef | FeatureRef | CellField]
+    | NamedCellArtifact
+    | Sequence[str | ArtifactRef | FeatureRef | CellField | NamedCellArtifact]
     | None,
-) -> list[str | ArtifactRef | FeatureRef | CellField | None]:
+) -> list[str | ArtifactRef | FeatureRef | CellField | NamedCellArtifact | None]:
     if color_by is None:
         return [None]
-    if isinstance(color_by, (str, ArtifactRef, FeatureRef, CellField)):
+    if isinstance(
+        color_by, (str, ArtifactRef, FeatureRef, CellField, NamedCellArtifact)
+    ):
         return [color_by]
     return list(color_by)
+
+
+def _named_color_items(
+    store: Any,
+    items: Sequence[
+        str | ArtifactRef | FeatureRef | CellField | NamedCellArtifact | None
+    ],
+) -> tuple[list[str | ArtifactRef | FeatureRef | CellField | None], dict[int, str]]:
+    """Return the color items, each named artifact as its artifact, and each artifact's title by position.
+
+    A named artifact takes its name as its title, and an artifact without one
+    the title of its record, as :func:`~cytearc.plotting._titles.artifact_titles`
+    gives them.
+    """
+    unwrapped: list[str | ArtifactRef | FeatureRef | CellField | None] = []
+    artifacts: list[tuple[int, ArtifactRef, str | None]] = []
+    for index, item in enumerate(items):
+        if isinstance(item, NamedCellArtifact):
+            unwrapped.append(item.artifact)
+            artifacts.append((index, item.artifact, item.name))
+            continue
+        unwrapped.append(item)
+        if isinstance(item, ArtifactRef):
+            artifacts.append((index, item, None))
+    titles = artifact_titles(store, [(ref, name) for _, ref, name in artifacts])
+    return unwrapped, {
+        index: title for (index, _, _), title in zip(artifacts, titles, strict=True)
+    }
 
 
 def _coerce_layout_items(layout_key: str | Sequence[str]) -> list[str]:
@@ -145,6 +178,7 @@ def _coerce_layout_items(layout_key: str | Sequence[str]) -> list[str]:
 def _color_labels(
     store: Any,
     color_items: Sequence[str | ArtifactRef | FeatureRef | CellField | None],
+    titles: dict[int, str],
     *,
     from_assay: str | None,
 ) -> list[str]:
@@ -152,11 +186,11 @@ def _color_labels(
     labels: list[str] = []
     feature_slots: list[int] = []
     features: list[str | FeatureRef] = []
-    for item in color_items:
+    for index, item in enumerate(color_items):
         if item is None:
             labels.append("cells")
         elif isinstance(item, ArtifactRef):
-            labels.append(item.kind)
+            labels.append(titles[index])
         elif isinstance(item, CellField):
             labels.append(item.label or item.key)
         elif isinstance(item, str) and item in metadata_columns:
@@ -268,7 +302,8 @@ def _embedding_multiple_layouts(
     | ArtifactRef
     | FeatureRef
     | CellField
-    | Sequence[str | ArtifactRef | FeatureRef | CellField]
+    | NamedCellArtifact
+    | Sequence[str | ArtifactRef | FeatureRef | CellField | NamedCellArtifact]
     | None,
     facet_by: str | None,
     facet_order: Sequence[Any] | None,
@@ -285,10 +320,10 @@ def _embedding_multiple_layouts(
     show: bool,
     child_kwargs: dict[str, Any],
 ) -> PlotResult:
-    color_items = _coerce_color_items(color_by)
+    color_items, titles = _named_color_items(store, _coerce_color_items(color_by))
     if not color_items:
         raise ValueError("color_by must contain at least one item")
-    labels = _color_labels(store, color_items, from_assay=from_assay)
+    labels = _color_labels(store, color_items, titles, from_assay=from_assay)
     facets = _multi_layout_facets(
         store,
         facet_by=facet_by,
@@ -1382,7 +1417,8 @@ def embedding(
     | ArtifactRef
     | FeatureRef
     | CellField
-    | Sequence[str | ArtifactRef | FeatureRef | CellField]
+    | NamedCellArtifact
+    | Sequence[str | ArtifactRef | FeatureRef | CellField | NamedCellArtifact]
     | None = None,
     facet_by: str | None = None,
     facet_order: Sequence[Any] | None = None,
@@ -1466,7 +1502,11 @@ def embedding(
       for dark notebook themes.
 
     An artifact in ``color_by`` takes an embedding artifact as ``layout``, and
-    its cells must include the layout's: its values are read for the layout's
+    its cells must include the layout's. ``NamedCellArtifact(name, artifact)``
+    titles its panel and legend, and keys its panel, by ``name``; a bare
+    artifact takes the title of its record, such as the column that a
+    snapshot copied or "Leiden, resolution 1.0". Its values are read for the
+    layout's cells: its values are read for the layout's
     cells, so labels computed on every cell can color a run's layout of fewer
     cells. An artifact that holds no value for some cells of the layout raises
     ValueError; compute it on cells that include the layout's, such as the
@@ -1611,7 +1651,9 @@ def embedding(
     if not np.all(np.isfinite(size_arr)) or np.any(size_arr <= 0):
         raise ValueError("point_sizes must contain finite positive values")
 
-    color_items = _coerce_color_items(color_by)
+    color_items, artifact_color_titles = _named_color_items(
+        store, _coerce_color_items(color_by)
+    )
     color_columns = [
         item
         if isinstance(item, str)
@@ -1648,6 +1690,8 @@ def embedding(
         cell_kind = item.kind if isinstance(item, CellField) else "auto"
         if display is not None and cell_kind == "auto":
             is_categorical = display["kind"] == "categorical"
+        # An artifact's panel and legend take its title.
+        label = artifact_color_titles.get(index, label)
         classified_cache.append((values, label, is_categorical, is_uniform))
     color_cache = classified_cache
     if density_overlay is not None and density_overlay.statistic == "mean":

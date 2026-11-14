@@ -141,7 +141,7 @@ def test_plots_of_imported_cluster_labels_draw_the_files_order_and_colors(import
         )
         # Each cell, found by its coordinates, takes its label's color from
         # the file.
-        (points,) = embedding.axes["cluster_labels"].collections
+        (points,) = embedding.axes["clusters"].collections
         coordinates = np.asarray(store.artifacts.load_values(layout).values)
         labels = np.asarray(store.artifacts.load_values(clusters).values)
         row = {tuple(point): index for index, point in enumerate(coordinates)}

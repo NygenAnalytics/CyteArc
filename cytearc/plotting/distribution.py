@@ -19,6 +19,7 @@ from ..features.statistical import (
 from ..features.values import ResolvedFeature, resolve_feature_batch
 from ..metadata.rows import read_metadata_missing_rows, read_metadata_rows
 from ..metadata.selection import (
+    NamedCellArtifact,
     resolve_grouping as resolve_grouping_source,
     valid_category_mask,
 )
@@ -56,6 +57,7 @@ from ._data import (
 )
 from ._deps import require_matplotlib, require_seaborn
 from ._display import resolve_artifact_scale, resolve_categorical_scale
+from ._titles import artifact_titles, label_artifact
 from ._figure import (
     LegendSpec,
     PlotResult,
@@ -960,7 +962,7 @@ def distribution(
         | Sequence[str | CellField | FeatureRef]
     ),
     *,
-    grouping: ArtifactRef | CellField | None = None,
+    grouping: ArtifactRef | CellField | NamedCellArtifact | None = None,
     cell_selection: ArtifactRef | None = None,
     groups: Sequence[Any] | None = None,
     split_by: str | None = None,
@@ -1009,7 +1011,9 @@ def distribution(
     canonical ``s_score`` and ``g2m_score`` arrays. ``kind`` selects the
     display: ``"violin"``, ``"box"``, ``"hist"``, or ``"ecdf"``. With
     With ``grouping``, each category gets its own distribution along the
-    x-axis and a distinct color.
+    x-axis and a distinct color. A ``CellField`` label or a
+    ``NamedCellArtifact`` name titles the group axis; a bare artifact takes
+    the title of its record.
 
     Cell selection (same knobs as embeddings):
 
@@ -1157,8 +1161,16 @@ def distribution(
         raise ValueError("row_standardize is available only for stacked_violin")
     if share_y is not None and kind not in ("violin", "stacked_violin", "box"):
         raise ValueError("share_y applies only to violin and box plots")
-    if grouping is not None and not isinstance(grouping, ArtifactRef | CellField):
-        raise TypeError("grouping must be an ArtifactRef, CellField, or None")
+    if grouping is not None and not isinstance(
+        grouping, ArtifactRef | CellField | NamedCellArtifact
+    ):
+        raise TypeError(
+            "grouping must be an ArtifactRef, NamedCellArtifact, CellField, or None"
+        )
+    # A named artifact groups by its artifact and titles the group axis.
+    grouping_name: str | None = None
+    if isinstance(grouping, NamedCellArtifact):
+        grouping, grouping_name = label_artifact(grouping, "grouping")
     if cell_selection is not None and not isinstance(cell_selection, ArtifactRef):
         raise TypeError("cell_selection must be an ArtifactRef or None")
     if isinstance(stats_results, ArtifactRef):
@@ -1316,7 +1328,7 @@ def distribution(
         resolved_group_by = (
             resolved_grouping.source.label or resolved_grouping.source.key
             if isinstance(resolved_grouping.source, CellField)
-            else resolved_grouping.source.kind
+            else artifact_titles(store, [(resolved_grouping.source, grouping_name)])[0]
         )
     elif cell_selection is not None:
         base_cell_idx = read_stored_selection_indices(

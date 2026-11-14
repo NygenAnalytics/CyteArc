@@ -6,7 +6,7 @@ import pytest
 
 from matplotlib.colors import to_hex
 
-from cytearc.plotting import genotypes, variant_depth
+from cytearc.plotting import NamedCellArtifact, genotypes, variant_depth
 from cytearc.plotting._style import (
     GENOTYPE_CALL_SCALE,
     MUTED_COLOR,
@@ -148,8 +148,17 @@ def test_groups_of_several_columns_split_the_cells(plotted) -> None:
     # A column and a label artifact group the cells together.
     both = variant_depth(store, targets, group_by="group", groups=labels, show=False)
     assert both.tables["cells"]["group"].tolist() == ["x, a", "x, b", "y, a", "y, b"]
-    assert both.provenance.extras["grouping"] == "group, cluster_labels"
+    assert both.provenance.extras["grouping"] == "group, half"
     plt.close(both.figure)
+    named = variant_depth(
+        store,
+        targets,
+        group_by="group",
+        groups=NamedCellArtifact("Half", labels),
+        show=False,
+    )
+    assert named.provenance.extras["grouping"] == "group, Half"
+    plt.close(named.figure)
 
 
 def test_groups_are_drawn_in_the_natural_order_of_their_labels(plotted) -> None:
@@ -637,8 +646,13 @@ def test_genotypes_draw_each_sites_calls_by_group(plotted) -> None:
     )
     by_labels = genotypes(store, called, groups=labels, show=False)
     assert _shares(by_labels) == _shares(grouped)
-    assert by_labels.provenance.extras["grouping"] == "cluster_labels"
+    assert by_labels.provenance.extras["grouping"] == "group"
     plt.close(by_labels.figure)
+    named = genotypes(
+        store, called, groups=NamedCellArtifact("Group", labels), show=False
+    )
+    assert named.provenance.extras["grouping"] == "Group"
+    plt.close(named.figure)
 
 
 def test_genotypes_colour_a_layout_by_one_sites_calls(plotted) -> None:
