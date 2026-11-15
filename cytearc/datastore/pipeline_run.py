@@ -1242,6 +1242,38 @@ class PipelineRun(Mapping[str, ArtifactRef | tuple[ArtifactRef, ...]]):
         """
         return self._record.finished_at_ns
 
+    def settings(self) -> dict[str, Any]:
+        """Return the keywords of the recipe call that this run records.
+
+        They are every keyword of the run's recipe method but ``label``,
+        ``callback``, and ``cancel``, with the values that the run recorded:
+        the settings that the call gave, and the defaults that the recipe
+        fits to its data resolved, such as an ATAC run's
+        ``prevalent_peaks`` ``top_n``. A run given as ``cells``, and a
+        multimodal run's source ``runs``, are reopened by their run IDs.
+        Passing the keywords to the recipe, as
+        ``getattr(ds.pipeline, run.recipe)(**run.settings())``, analyzes the
+        run's cells again and reuses the run's artifacts while the store's
+        cell columns and the release's defaults are unchanged;
+        :meth:`~cytearc.datastore.pipeline_accessor.PipelineAccessor.rerun`
+        takes them with changes. A run records its settings when it starts,
+        so a run of any status returns them.
+
+        Raises:
+            ValueError: If the run's recipe is not one of this release's, as
+                for a run that ``pipeline.run()`` of an earlier release saved,
+                or the run records other keywords than its recipe takes in
+                this release, as a run recorded before the recipe gained a
+                keyword does.
+
+        Example:
+            >>> run.settings()["leiden"]
+            {'partitions': [0.5, 0.75, 1.0, 1.25], 'selected': None}
+        """
+        from .pipeline_accessor import recorded_settings
+
+        return recorded_settings(self._owner, self._record)
+
     def _require_completed(self, operation: str) -> None:
         if not self._record.successfully_completed:
             raise RuntimeError(

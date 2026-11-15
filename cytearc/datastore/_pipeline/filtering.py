@@ -218,6 +218,45 @@ def resolve_filtering(
     }
 
 
+# The recorded name of each automatic filtering option that keeps its call name
+# only in the ``filtering`` keyword.
+_RECORDED_AUTOMATIC_OPTIONS = {
+    "minP": "min_p",
+    "maxP": "max_p",
+    "nMads": "n_mads",
+    "minCellsPerSample": "min_cells_per_sample",
+}
+
+
+def filtering_argument(recorded: Mapping[str, Any]) -> bool | dict[str, Any]:
+    """Return the ``filtering`` keyword that resolves to the settings a run recorded.
+
+    The keyword names the method and the QC columns, and only the options that
+    differ from their defaults, so a rerun that changes the method with
+    ``filtering={"method": ...}`` keeps no option of the earlier method that
+    it did not set. A hashed run's ``sampleSource`` follows from the run's
+    hashing, not from the keyword, so the keyword leaves it out.
+    """
+    if not recorded["enabled"]:
+        return False
+    keyword: dict[str, Any] = {
+        "method": recorded["method"],
+        "attrs": list(recorded["attrs"]),
+    }
+    if recorded["method"] == "manual":
+        keyword["lows"] = list(recorded["lows"])
+        keyword["highs"] = list(recorded["highs"])
+        if recorded["keepBounds"]:
+            keyword["keep_bounds"] = True
+        return keyword
+    if recorded["sampleColumn"] is not None:
+        keyword["sample_column"] = recorded["sampleColumn"]
+    for name, option in _RECORDED_AUTOMATIC_OPTIONS.items():
+        if recorded[name] != _FILTER_DEFAULTS[option]:
+            keyword[option] = recorded[name]
+    return keyword
+
+
 def filter_columns(config: Mapping[str, Any]) -> tuple[str, ...]:
     """Return the cell columns that a filtering config reads."""
     columns = tuple(config.get("attrs", ()))

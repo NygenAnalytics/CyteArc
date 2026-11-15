@@ -2786,3 +2786,40 @@ def test_a_basic_rna_analysis_record_still_opens_lists_and_reports() -> None:
     assert "| 0 | input_snapshot | completed |" in markdown
     assert "## Diagnostics" not in markdown
     np.testing.assert_array_equal(run.cells.fetch("clusters"), [0, 2])
+
+
+# Settings of earlier runs ----------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("store", "fixture", "attribute"),
+    [
+        ("cite", "cite", "rna"),
+        # A run given an earlier run as its cells.
+        ("cite", "cite", "adt"),
+        ("cite", "joint", "wnn"),
+        ("cite", "joint", "snn"),
+        ("cite", "full", None),
+        ("cite", "snapshot", None),
+        ("cite", "wnn_selected", None),
+        ("cite", "adt_own", None),
+        # A run given a cell selection as its cells.
+        ("cite", "rna_of_selection", None),
+        ("cite", "rna_unreduced", None),
+        ("atac", "atac", "run"),
+        ("atac", "atac_harmony", None),
+        ("droplets", "droplets", "single"),
+        ("droplets", "droplets", "per_capture"),
+        ("droplets", "droplets", "filtered"),
+        # A run whose MAD bounds come from each hashtag's cells.
+        ("hashed", "hashed", "run"),
+    ],
+)
+def test_a_plan_of_a_run_with_its_own_settings_reuses_every_stage(
+    request, store: str, fixture: str, attribute: str | None
+) -> None:
+    value = request.getfixturevalue(fixture)
+    run = value if attribute is None else getattr(value, attribute)
+    datastore = request.getfixturevalue(store).datastore
+
+    assert_plan_reuses_run(datastore.pipeline.plan(run), run)

@@ -33,7 +33,7 @@ from ..stages import (
     umap_stage,
 )
 from ..summaries import summarize_stage
-from ...pipeline_run import PipelineRun
+from ...pipeline_run import PipelineRun, open_pipeline_run
 from ....utils.arguments import bool_argument
 from .common import (
     check_tsne,
@@ -416,3 +416,22 @@ def resolve_multimodal(
         start=start,
         summarize=lambda stage, outputs: summarize_stage(store, stage, outputs),
     )
+
+
+def recorded_call(
+    store: Any, assay: str, config: Mapping[str, Any]
+) -> dict[str, object]:
+    """Return the keywords of the ``multimodal`` call that recorded ``config``.
+
+    The source runs are reopened from ``store`` by their run IDs. The run's
+    ``assay`` is its first source run's, which the call does not take.
+    """
+    return {
+        "runs": [
+            open_pipeline_run(store, run_id=source["runId"])
+            for source in config["sources"]
+        ],
+        "method": config["method"],
+        **config["stages"],
+        "snapshot_columns": list(config["snapshotColumns"]),
+    }

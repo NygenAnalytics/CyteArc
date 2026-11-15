@@ -1,9 +1,14 @@
+import copy
 import inspect
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any, Literal
 
 from ..storage.artifacts import ArtifactRef
-from ..storage.pipeline_runs import abandon_pipeline_label_claim
+from ..storage.pipeline_runs import (
+    PipelineRunRecord,
+    abandon_pipeline_label_claim,
+    load_pipeline_run_record,
+)
 from ..storage.validation_scope import validation_scoped
 from ..utils.shutdown import CancellationToken
 from ._pipeline.description import (
@@ -27,10 +32,17 @@ from ._pipeline.planning import (
     plan_recipe,
 )
 from ._pipeline.recipes.adt import DEFAULT_PANEL_EXCLUDE as DEFAULT_PANEL_EXCLUDE
+from ._pipeline.recipes.adt import recorded_call as recorded_adt_call
 from ._pipeline.recipes.adt import resolve_adt
+from ._pipeline.recipes.atac import recorded_call as recorded_atac_call
 from ._pipeline.recipes.atac import resolve_atac
+from ._pipeline.recipes.multimodal import recorded_call as recorded_multimodal_call
 from ._pipeline.recipes.multimodal import resolve_multimodal
+from ._pipeline.recipes.perturbation import (
+    recorded_call as recorded_perturbation_call,
+)
 from ._pipeline.recipes.perturbation import resolve_perturbation
+from ._pipeline.recipes.rna import recorded_call as recorded_rna_call
 from ._pipeline.recipes.rna import resolve_rna
 from .pipeline_run import (
     PipelineRun,
@@ -59,8 +71,58 @@ _RESOLVERS: dict[str, Callable[..., RecipePlan]] = {
     "multimodal": resolve_multimodal,
     "perturbation": resolve_perturbation,
 }
+# Each recipe's keywords from the settings that its runs record.
+type RecordedCall = Callable[[Any, str, Mapping[str, Any]], dict[str, object]]
+_RECORDED_CALLS: dict[str, RecordedCall] = {
+    "rna": recorded_rna_call,
+    "atac": recorded_atac_call,
+    "adt": recorded_adt_call,
+    "multimodal": recorded_multimodal_call,
+    "perturbation": recorded_perturbation_call,
+}
 # The keywords of a recipe that belong to its run, which a plan does not start.
 _RUN_KEYWORDS = ("callback", "cancel")
+# The keywords of a recipe that a run does not record as settings: its label,
+# unique in the store, and the keywords of the run itself.
+_UNRECORDED_KEYWORDS = ("self", "label", *_RUN_KEYWORDS)
+
+
+def recorded_settings(store: Any, record: PipelineRunRecord) -> dict[str, Any]:
+    """Return the keywords of the recipe call that ``record`` records.
+
+    ``PipelineRun.settings`` documents them. The settings are copies, so
+    changing them leaves the record as it is.
+    """
+    translate = _RECORDED_CALLS.get(record.recipe)
+    if translate is None:
+        saved_by = (
+            ", which pipeline.run() of an earlier release saved; translate its "
+            "configuration into pipeline.rna keywords"
+            if record.recipe == "basic_rna_analysis"
+            else ""
+        )
+        raise ValueError(
+            f"Pipeline run {record.run_id} records the recipe {record.recipe!r}, "
+            f"which is not one of {sorted(_RECORDED_CALLS)!r}{saved_by}"
+        )
+    settings = translate(store, record.assay, copy.deepcopy(record.config))
+    parameters = inspect.signature(getattr(PipelineAccessor, record.recipe)).parameters
+    keywords = set(parameters) - set(_UNRECORDED_KEYWORDS)
+    missing = sorted(keywords - set(settings))
+    unknown = sorted(set(settings) - keywords)
+    if missing or unknown:
+        recipe = f"this release's {record.recipe} recipe"
+        differences = [
+            *([f"no setting for {missing!r}, which {recipe} takes"] if missing else []),
+            *([f"{unknown!r}, which {recipe} does not take"] if unknown else []),
+        ]
+        raise ValueError(
+            f"Pipeline run {record.run_id}, recorded by CyteArc "
+            f"{record.cytearc_version}, records {' and '.join(differences)}; "
+            "report()['run']['config'] holds the settings that it recorded"
+        )
+    return settings
+
 
 type CellsArgument = str | ArtifactRef | PipelineRun
 """A boolean cell column, a cell-selection artifact, or a completed run."""
@@ -140,7 +202,9 @@ class PipelineAccessor:
         return PipelineRun(self._store, record)
 
     @validation_scoped
-    def plan(self, recipe: str, /, *args: object, **settings: object) -> PipelinePlan:
+    def plan(
+        self, recipe: str | PipelineRun, /, *args: object, **settings: object
+    ) -> PipelinePlan:
         """Report what a recipe call would reuse and compute, without running it.
 
         The plan resolves and checks the call as the recipe does before it
@@ -165,9 +229,10 @@ class PipelineAccessor:
 
         Args:
             recipe: ``"rna"``, ``"atac"``, ``"adt"``, ``"multimodal"``, or
-                ``"perturbation"``.
+                ``"perturbation"``, or a run, whose settings the call takes
+                with ``settings`` changing them, as :meth:`rerun` does.
             *args: The positional arguments of the recipe's method: the
-                ``runs`` of ``"multimodal"``.
+                ``runs`` of ``"multimodal"``. A plan of a run takes none.
             **settings: The keywords of the recipe's method, as a call would
                 pass them, without ``callback`` and ``cancel``.
 
@@ -182,17 +247,25 @@ class PipelineAccessor:
         Example:
             >>> plan = ds.pipeline.plan("rna", label="tuned", hvg={"top_n": 1000})
             >>> [(stage.stage, stage.status, stage.reason) for stage in plan.stages]
+            >>> ds.pipeline.plan(run, leiden={"partitions": [2.0]}).computed
         """
-        resolver = _RESOLVERS.get(recipe) if isinstance(recipe, str) else None
-        if resolver is None:
-            raise ValueError(
-                f"recipe must be one of {sorted(_RESOLVERS)!r}, not {recipe!r}"
-            )
         passed = [name for name in _RUN_KEYWORDS if name in settings]
         if passed:
             raise TypeError(
                 f"plan reports a call without running it, so it takes no "
                 f"{' or '.join(passed)}"
+            )
+        if isinstance(recipe, PipelineRun):
+            if args:
+                raise TypeError(
+                    "A plan of a run takes its changed settings as keywords, "
+                    "not positional arguments"
+                )
+            recipe, settings = self._rerun_call(recipe, settings)
+        resolver = _RESOLVERS.get(recipe) if isinstance(recipe, str) else None
+        if resolver is None:
+            raise ValueError(
+                f"recipe must be one of {sorted(_RESOLVERS)!r}, not {recipe!r}"
             )
         bound = inspect.signature(getattr(PipelineAccessor, recipe)).bind(
             self, *args, **settings
@@ -863,3 +936,95 @@ class PipelineAccessor:
             snapshot_columns=snapshot_columns,
         )
         return execute_recipe(self._store, plan, callback=callback, cancel=cancel)
+
+    def _rerun_call(
+        self, run: object, overrides: Mapping[str, object]
+    ) -> tuple[str, dict[str, object]]:
+        """Return the recipe of ``run`` and the keywords that run it with ``overrides``."""
+        if not isinstance(run, PipelineRun):
+            raise TypeError(f"run must be a PipelineRun, not {type(run).__name__}")
+        try:
+            record = load_pipeline_run_record(self._store.zw, run.run_id)
+        except (KeyError, TypeError, ValueError) as error:
+            raise ValueError(
+                f"run must be a pipeline run of this datastore; run {run.run_id} "
+                "is not recorded in it"
+            ) from error
+        keywords = recorded_settings(self._store, record)
+        unknown = sorted(set(overrides) - set(keywords) - {"label"})
+        if unknown:
+            raise TypeError(
+                f"A run of the {record.recipe} recipe takes the keywords of "
+                f"pipeline.{record.recipe}, which do not include {unknown!r}"
+            )
+        for name, value in overrides.items():
+            recorded = keywords.get(name)
+            if isinstance(recorded, dict) and isinstance(value, Mapping):
+                value = {**recorded, **value}
+            keywords[name] = value
+        return record.recipe, keywords
+
+    @validation_scoped
+    def rerun(
+        self,
+        run: PipelineRun,
+        /,
+        *,
+        label: str | None = None,
+        callback: PipelineCallback | None = None,
+        cancel: CancellationToken | None = None,
+        **overrides: object,
+    ) -> PipelineRun:
+        """Run a run's recipe again with the settings it recorded, changing some of them.
+
+        Each keyword of the run's recipe that the call does not pass takes
+        the run's setting, which :meth:`PipelineRun.settings` returns, so a
+        call passes only what it changes. A stage whose settings and inputs
+        are unchanged reuses the run's artifacts, and the stages that read a
+        changed stage compute again with the run's other settings.
+        :meth:`plan` with the run and the same keywords reports which stages
+        would compute.
+
+        A mapping changes a stage's settings key by key:
+        ``leiden={"partitions": [2.0]}`` keeps the run's other Leiden
+        settings, among them its ``selected`` resolution, which must be one
+        of the new partitions or None. A mapping inside a stage's settings,
+        such as Harmony's ``harmony_params``, is replaced whole. Any other
+        value replaces the run's: ``False`` turns an optional stage off,
+        ``True`` runs it with its defaults, and None takes the keyword's
+        default, such as ``filtering=None`` to filter new ``cells`` as a call
+        that omits it would. The new run takes ``label``, never the run's
+        label.
+
+        A run records its settings when it starts, so a run of any status can
+        run again, such as a failed run with the setting that failed changed.
+
+        Args:
+            run: A run of this datastore.
+            label: An immutable label for the new run, unique in the store.
+            callback: Called with each :class:`PipelineEvent` of the run.
+            cancel: A :class:`~cytearc.CancellationToken` that stops the run.
+            **overrides: Keywords of the run's recipe, which change its
+                settings.
+
+        Raises:
+            PermissionError: If the store is read-only.
+            TypeError: If ``run`` is not a :class:`~cytearc.PipelineRun`, an
+                override is not a keyword of the run's recipe, or the call
+                fails the recipe's checks.
+            ValueError: If ``run`` is not recorded in this datastore, its
+                settings are not its recipe's keywords in this release, as
+                :meth:`PipelineRun.settings` explains, or the call fails the
+                recipe's checks.
+
+        The recipe raises its other errors as its method documents them.
+
+        Example:
+            >>> base = ds.pipeline.open(label="baseline")
+            >>> ds.pipeline.plan(base, leiden={"partitions": [2.0]}).computed
+            >>> fine = ds.pipeline.rerun(base, label="fine", leiden={"partitions": [2.0]})
+        """
+        self._require_runnable(callback)
+        recipe, keywords = self._rerun_call(run, overrides)
+        method: Callable[..., PipelineRun] = getattr(self, recipe)
+        return method(**keywords, label=label, callback=callback, cancel=cancel)

@@ -867,14 +867,16 @@ def test_pipeline_accessor_has_a_public_import_path():
         if not name.startswith("_") and callable(value)
     }
     # One recipe per modality replaced the single run method, with no alias,
-    # a plan reports what a recipe call would do without running it, and a
-    # description gives each recipe's stage settings and defaults.
+    # a plan reports what a recipe call would do without running it, a
+    # description gives each recipe's stage settings and defaults, and a rerun
+    # runs a run's recipe again with some of its settings changed.
     assert public_methods == {
         "open",
         "list_runs",
         "abandon_label_claim",
         "plan",
         "describe",
+        "rerun",
         "rna",
         "atac",
         "adt",

@@ -1,6 +1,7 @@
 """The ADT recipe: an antibody panel, CLR, PCA, a graph, embeddings, clusters."""
 
 import re
+from collections.abc import Mapping
 from typing import Any
 
 import numpy as np
@@ -38,6 +39,7 @@ from .common import (
     check_tsne,
     harmony_config,
     modality_assay,
+    recorded_modality_call,
     resolve_embeddings,
     resolve_graph,
     resolve_harmony,
@@ -277,3 +279,19 @@ def resolve_adt(
         start=lambda store: RunState(store=store, assay=store._get_assay(assay_name)),
         summarize=lambda stage, outputs: summarize_stage(store, stage, outputs),
     )
+
+
+def recorded_call(
+    store: Any, assay: str, config: Mapping[str, Any]
+) -> dict[str, object]:
+    """Return the keywords of the ``adt`` call that recorded ``config``.
+
+    The run records the antibodies that its panel excluded beside the
+    ``exclude`` pattern, which the keyword takes alone.
+    """
+    call = recorded_modality_call(store, assay, config)
+    return {
+        **call,
+        "panel": {"exclude": config["stages"]["panel"]["exclude"]},
+        "species": config["species"],
+    }

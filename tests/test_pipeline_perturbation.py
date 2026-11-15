@@ -900,6 +900,13 @@ def test_the_plans_of_the_committed_screen_calls_reuse_their_runs(runs) -> None:
         assert_plan_reuses_run(plan, run)
 
 
+@pytest.mark.parametrize("name", ["default", "full"])
+def test_a_plan_of_a_run_with_its_own_settings_reuses_every_stage(runs, name) -> None:
+    run = getattr(runs, name)
+
+    assert_plan_reuses_run(runs.store.pipeline.plan(run), run)
+
+
 def test_a_mixscape_change_computes_only_the_stages_that_read_its_classes(runs) -> None:
     plan = runs.store.pipeline.plan(
         "perturbation", labels=LABELS, **{**FULL, "mixscape": {"min_cells": 6}}

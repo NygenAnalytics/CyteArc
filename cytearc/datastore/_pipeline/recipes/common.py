@@ -14,7 +14,12 @@ from ....storage.types import as_zarr_group
 from ....utils.arguments import bool_argument, integer_argument
 from ..executor import PlannedStage
 from ..fields import reserved_fields
-from ..filtering import filter_columns, resolve_filtering, snapshot_column_values
+from ..filtering import (
+    filter_columns,
+    filtering_argument,
+    resolve_filtering,
+    snapshot_column_values,
+)
 from ..settings import (
     HVG_TOP_N_DEFAULT,
     LOCALMAP_DIMS_DEFAULT,
@@ -28,6 +33,7 @@ from ..settings import (
 )
 from ..stages import (
     CellSource,
+    cells_argument,
     harmony_stage,
     hvg_stage,
     normalization_stage,
@@ -600,3 +606,22 @@ def run_reserved_fields(
         leiden_keys=[key for key, _value in partitions],
         extra=extra,
     )
+
+
+def recorded_modality_call(
+    store: Any, assay: str, config: Mapping[str, Any]
+) -> dict[str, object]:
+    """Return the keywords of a single-modality recipe call that a run recorded.
+
+    They are the run's assay, cells, and snapshot columns, and its stage
+    keywords as it recorded them, with ``filtering`` as a call gives it. A
+    recipe adds the keywords that it records otherwise.
+    """
+    stages = dict(config["stages"])
+    return {
+        "assay": assay,
+        "cells": cells_argument(store, config["cells"]),
+        **stages,
+        "filtering": filtering_argument(stages["filtering"]),
+        "snapshot_columns": list(config["snapshotColumns"]),
+    }
