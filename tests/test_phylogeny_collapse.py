@@ -14,8 +14,10 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from cytearc.clones import phylogeny as phylogeny_module
 from cytearc.clones.phylogeny import PhylogenyCut, collapse_phylogeny
 from tests.memory_helpers import budgeted
+from tests.perturbation_helpers import use_python_kernels
 
 AT_TIME = PhylogenyCut(time=0.5, depth=None)
 
@@ -102,6 +104,7 @@ POLYTOMY = [
 POLYTOMY_CODES = np.asarray([1, 1, 1, 2, 2, 3, 0, 0, 0, 0])
 
 
+@pytest.mark.parametrize("python_kernels", [False, True])
 @pytest.mark.parametrize(
     ("max_leaves", "wedges"),
     [
@@ -118,7 +121,11 @@ POLYTOMY_CODES = np.asarray([1, 1, 1, 2, 2, 3, 0, 0, 0, 0])
         (50, [(9, 4, 1, 1), (1, 3, 1, 1), (5, 2, 1, 1), (8, 1, 1, 1)]),
     ],
 )
-def test_a_polytomy_opens_one_child_at_a_time_largest_first(max_leaves, wedges) -> None:
+def test_a_polytomy_opens_one_child_at_a_time_largest_first(
+    monkeypatch, max_leaves, wedges, python_kernels
+) -> None:
+    if python_kernels:
+        use_python_kernels(monkeypatch, phylogeny_module)
     parent, times, cells, offsets = _forest([POLYTOMY])
     frame = collapse_phylogeny(
         parent,
@@ -279,6 +286,7 @@ FOREST = [
 FOREST_CODES = np.asarray([0] * 5 + [2] * 2 + [1] * 3)
 
 
+@pytest.mark.parametrize("python_kernels", [False, True])
 @pytest.mark.parametrize(
     ("max_leaves", "rows"),
     [
@@ -293,8 +301,10 @@ FOREST_CODES = np.asarray([0] * 5 + [2] * 2 + [1] * 3)
     ],
 )
 def test_a_forest_of_more_trees_than_the_cap_groups_its_smallest(
-    max_leaves, rows
+    monkeypatch, max_leaves, rows, python_kernels
 ) -> None:
+    if python_kernels:
+        use_python_kernels(monkeypatch, phylogeny_module)
     parent, times, cells, offsets = _forest(FOREST)
     frame = collapse_phylogeny(
         parent,
@@ -412,7 +422,12 @@ def test_a_cap_far_above_the_cells_collapses_within_a_small_budget() -> None:
     pd.testing.assert_frame_equal(found, expected)
 
 
-def test_the_last_clade_of_a_group_opens_in_its_turn() -> None:
+@pytest.mark.parametrize("python_kernels", [False, True])
+def test_the_last_clade_of_a_group_opens_in_its_turn(
+    monkeypatch, python_kernels
+) -> None:
+    if python_kernels:
+        use_python_kernels(monkeypatch, phylogeny_module)
     # Below the root, the clade A of five cells and B of three at time 1, and
     # X at time 0.2, above the cut, over the clades X1 and X2 of one cell.
     tree = [
@@ -492,6 +507,7 @@ def test_cells_that_end_before_the_cut_are_wedges_without_a_clone() -> None:
     assert frame.iloc[0]["n_cells"] == 3
 
 
+@pytest.mark.parametrize("python_kernels", [False, True])
 @pytest.mark.parametrize(
     ("codes", "match"),
     [
@@ -503,7 +519,11 @@ def test_cells_that_end_before_the_cut_are_wedges_without_a_clone() -> None:
         (np.asarray([-1, 0, 1]), "not those of the cut"),
     ],
 )
-def test_clones_that_are_not_the_cuts_are_refused(codes, match) -> None:
+def test_clones_that_are_not_the_cuts_are_refused(
+    monkeypatch, codes, match, python_kernels
+) -> None:
+    if python_kernels:
+        use_python_kernels(monkeypatch, phylogeny_module)
     tree = [
         (-1, 0.0, False),
         (0, 0.2, True),
@@ -518,7 +538,10 @@ def test_clones_that_are_not_the_cuts_are_refused(codes, match) -> None:
         )
 
 
-def test_wrong_arguments_are_refused() -> None:
+@pytest.mark.parametrize("python_kernels", [False, True])
+def test_wrong_arguments_are_refused(monkeypatch, python_kernels) -> None:
+    if python_kernels:
+        use_python_kernels(monkeypatch, phylogeny_module)
     parent, times, cells, offsets = _forest([POLYTOMY])
     options = {"cut": AT_TIME}
     for value, error, match in (
@@ -859,8 +882,15 @@ def _cut_codes(parent, times, cells, offsets, cut) -> np.ndarray:
     return codes
 
 
-@pytest.mark.parametrize("seed", range(200))
-def test_the_passes_equal_a_recursive_reference_on_random_forests(seed) -> None:
+@pytest.mark.parametrize(
+    ("seed", "python_kernels"),
+    [*((seed, False) for seed in range(200)), *((seed, True) for seed in range(40))],
+)
+def test_the_passes_equal_a_recursive_reference_on_random_forests(
+    monkeypatch, seed, python_kernels
+) -> None:
+    if python_kernels:
+        use_python_kernels(monkeypatch, phylogeny_module)
     rng = np.random.default_rng(seed)
     trees = []
     for _tree in range(int(rng.integers(1, 4))):

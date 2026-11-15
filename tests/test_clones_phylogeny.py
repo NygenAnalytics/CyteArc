@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from cytearc.clones import phylogeny as phylogeny_module
 from cytearc.clones.phylogeny import (
     clade_roots,
     clade_labels,
@@ -19,6 +20,7 @@ from cytearc.clones.phylogeny import (
     phylogeny_frames,
     tree_codes,
 )
+from tests.perturbation_helpers import use_python_kernels
 
 NAN = np.nan
 # A tree in preorder:
@@ -34,12 +36,22 @@ LENGTH = np.asarray([0.5, 1.0, 2.0, 1.0, 1.0, 2.0, 3.0])
 OFFSETS = np.asarray([0, 7])
 
 
-def test_node_times_add_lengths_from_the_root_and_its_stem() -> None:
+@pytest.mark.parametrize("python_kernels", [False, True])
+def test_node_times_add_lengths_from_the_root_and_its_stem(
+    monkeypatch, python_kernels
+) -> None:
+    if python_kernels:
+        use_python_kernels(monkeypatch, phylogeny_module)
     times = node_times(PARENT, LENGTH, np.full(7, NAN), OFFSETS)
     assert times.tolist() == [0.5, 1.5, 3.5, 4.5, 4.5, 5.5, 3.5]
 
 
-def test_a_nodes_own_time_wins_over_its_branch_length() -> None:
+@pytest.mark.parametrize("python_kernels", [False, True])
+def test_a_nodes_own_time_wins_over_its_branch_length(
+    monkeypatch, python_kernels
+) -> None:
+    if python_kernels:
+        use_python_kernels(monkeypatch, phylogeny_module)
     given = np.full(7, NAN)
     given[2] = 10.0
     times = node_times(PARENT, LENGTH, given, OFFSETS)
@@ -47,7 +59,12 @@ def test_a_nodes_own_time_wins_over_its_branch_length() -> None:
     assert times.tolist() == [0.5, 1.5, 10.0, 11.0, 11.0, 12.0, 3.5]
 
 
-def test_a_root_without_time_or_stem_starts_at_zero() -> None:
+@pytest.mark.parametrize("python_kernels", [False, True])
+def test_a_root_without_time_or_stem_starts_at_zero(
+    monkeypatch, python_kernels
+) -> None:
+    if python_kernels:
+        use_python_kernels(monkeypatch, phylogeny_module)
     length = LENGTH.copy()
     length[0] = NAN
     assert node_times(PARENT, length, np.full(7, NAN), OFFSETS)[:2].tolist() == [
@@ -56,7 +73,12 @@ def test_a_root_without_time_or_stem_starts_at_zero() -> None:
     ]
 
 
-def test_a_branch_without_a_length_leaves_its_subtree_without_times() -> None:
+@pytest.mark.parametrize("python_kernels", [False, True])
+def test_a_branch_without_a_length_leaves_its_subtree_without_times(
+    monkeypatch, python_kernels
+) -> None:
+    if python_kernels:
+        use_python_kernels(monkeypatch, phylogeny_module)
     length = LENGTH.copy()
     length[2] = NAN
     times = node_times(PARENT, length, np.full(7, NAN), OFFSETS)
@@ -64,7 +86,12 @@ def test_a_branch_without_a_length_leaves_its_subtree_without_times() -> None:
     assert np.isnan(times[2:6]).all()
 
 
-def test_trees_without_any_length_or_time_have_no_times() -> None:
+@pytest.mark.parametrize("python_kernels", [False, True])
+def test_trees_without_any_length_or_time_have_no_times(
+    monkeypatch, python_kernels
+) -> None:
+    if python_kernels:
+        use_python_kernels(monkeypatch, phylogeny_module)
     # Two trees: the first without lengths, the second with one.
     parent = np.asarray([-1, 0, 0, -1, 3])
     length = np.asarray([NAN, NAN, NAN, NAN, 2.0])
@@ -73,7 +100,12 @@ def test_trees_without_any_length_or_time_have_no_times() -> None:
     assert times[3:].tolist() == [0.0, 2.0]
 
 
-def test_depths_count_branchings_with_single_child_nodes_merged() -> None:
+@pytest.mark.parametrize("python_kernels", [False, True])
+def test_depths_count_branchings_with_single_child_nodes_merged(
+    monkeypatch, python_kernels
+) -> None:
+    if python_kernels:
+        use_python_kernels(monkeypatch, phylogeny_module)
     # root branches (to X and d), X has one child, Y branches.
     assert collapsed_depths(PARENT).tolist() == [0, 1, 1, 2, 2, 2, 1]
     # 0 has one child, 1, which merges with it; 1 branches to 2 and 5, and 2
@@ -83,7 +115,12 @@ def test_depths_count_branchings_with_single_child_nodes_merged() -> None:
     assert collapsed_depths(np.asarray([-1])).tolist() == [0]
 
 
-def test_clades_start_at_the_first_node_at_or_past_the_cut() -> None:
+@pytest.mark.parametrize("python_kernels", [False, True])
+def test_clades_start_at_the_first_node_at_or_past_the_cut(
+    monkeypatch, python_kernels
+) -> None:
+    if python_kernels:
+        use_python_kernels(monkeypatch, phylogeny_module)
     times = node_times(PARENT, LENGTH, np.full(7, NAN), OFFSETS)
     # At 1.5, X is the first past the cut below the root; d reaches it too.
     assert clade_roots(PARENT, times >= 1.5).tolist() == [-1, 1, 1, 1, 1, 1, 6]
@@ -96,7 +133,12 @@ def test_clades_start_at_the_first_node_at_or_past_the_cut() -> None:
     assert clade_roots(PARENT, times >= 99).tolist() == [-1] * 7
 
 
-def test_a_path_that_crosses_the_cut_twice_belongs_to_the_first_crossing() -> None:
+@pytest.mark.parametrize("python_kernels", [False, True])
+def test_a_path_that_crosses_the_cut_twice_belongs_to_the_first_crossing(
+    monkeypatch, python_kernels
+) -> None:
+    if python_kernels:
+        use_python_kernels(monkeypatch, phylogeny_module)
     # root 0 -> a 5 -> b 4 -> c 6, with a negative length below a.
     parent = np.asarray([-1, 0, 1, 2])
     times = node_times(
@@ -106,7 +148,10 @@ def test_a_path_that_crosses_the_cut_twice_belongs_to_the_first_crossing() -> No
     assert clade_roots(parent, times >= 4.5).tolist() == [-1, 1, 1, 1]
 
 
-def test_nodes_without_a_time_are_never_past_a_cut() -> None:
+@pytest.mark.parametrize("python_kernels", [False, True])
+def test_nodes_without_a_time_are_never_past_a_cut(monkeypatch, python_kernels) -> None:
+    if python_kernels:
+        use_python_kernels(monkeypatch, phylogeny_module)
     parent = np.asarray([-1, 0, 0])
     assert clade_roots(parent, np.asarray([NAN, NAN, 2.0]) >= 1.0).tolist() == [
         -1,
