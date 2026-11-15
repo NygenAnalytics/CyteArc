@@ -1052,6 +1052,11 @@ def test_a_feature_id_needs_to_be_unique_only_within_its_assay(tmp_path) -> None
             "feature_ids must map each assay to its feature IDs",
         ),
         (
+            lambda a: a.update(feature_names=_features(_CITE_VALUES)),
+            TypeError,
+            "feature_names must map assays to their feature names, or be None",
+        ),
+        (
             lambda a: a.update(csr_mat={}),
             ValueError,
             "needs at least one assay",
@@ -1065,6 +1070,7 @@ def test_a_feature_id_needs_to_be_unique_only_within_its_assay(tmp_path) -> None
         "values of no assay",
         "assay_name beside a mapping",
         "feature_ids not a mapping",
+        "feature_names not a mapping",
         "no assay",
     ],
 )
@@ -1918,6 +1924,49 @@ def test_a_seurat_import_holds_no_earlier_batch_while_it_reads_the_next(
     np.testing.assert_array_equal(root["RNA/counts"][:], values)
     assert len(batches) > 2
     assert max(alive) == 0
+
+
+@pytest.mark.parametrize("first", ["dense", "coo"])
+def test_a_seurat_import_stores_the_counts_of_dense_and_coo_blocks_of_a_sparse_source(
+    tmp_path, monkeypatch, first
+):
+    from cytearc.readers.seurat import _OwnedMatrixSource
+
+    # A sparse source may return a block of cells dense, as COO or as CSR.
+    # Here each window of cells comes in one of them, by where it starts; the
+    # count scan reads every cell in one window, which comes as ``first``.
+    order = ["dense", "coo", "csr"] if first == "dense" else ["coo", "csr", "dense"]
+    read = _OwnedMatrixSource.read_cells
+    returned: list[tuple[str, int, int]] = []
+
+    def any_block(self, start, stop):
+        block = read(self, start, stop)
+        kind = order[start // 2 % 3]
+        returned.append((kind, start, stop))
+        if kind == "dense":
+            return block.toarray()
+        return block.tocoo() if kind == "coo" else block
+
+    monkeypatch.setattr(_OwnedMatrixSource, "read_cells", any_block)
+    rng = np.random.default_rng(2)
+    values = np.where(rng.random((12, 5)) < 0.5, rng.integers(1, 9, (12, 5)), 0)
+    values[3] = 0
+    reader = _source("seurat", tmp_path, values, "sparse")
+    try:
+        writer = SeuratToZarr(reader, str(tmp_path / "counts.zarr"), nthreads=1)
+        # The scan counts the values that each cell stores.
+        np.testing.assert_array_equal(
+            np.diff(writer._cellValues["RNA"]), np.count_nonzero(values, axis=1)
+        )
+        writer.dump(batch_size=2)
+    finally:
+        reader.close()
+
+    assert returned == [(first, 0, 12)] + [
+        (order[start // 2 % 3], start, start + 2) for start in range(0, 12, 2)
+    ]
+    root = zarr.open_group(str(tmp_path / "counts.zarr"), mode="r")
+    np.testing.assert_array_equal(root["RNA/counts"][:], values)
 
 
 @pytest.mark.parametrize("encoding", ["integer", "real"])

@@ -1970,6 +1970,21 @@ def test_pseudotime_heatmap_labels_one_feature_of_a_shared_name():
     result.close()
 
 
+def test_pseudotime_heatmap_labels_a_feature_ref_of_a_unique_name_by_that_name():
+    result = splt.pseudotime_heatmap(
+        _shared_name_pseudotime_store(),
+        aggregation=_AGGREGATION,
+        show_features=[splt.FeatureRef("ENSG05", by="id")],
+        show=False,
+    )
+
+    # The row's stored name, without the ID that a shared name needs.
+    heatmap = result.axes["heatmap"]
+    assert [text.get_text() for text in heatmap.get_yticklabels()] == ["g5"]
+    np.testing.assert_array_equal(heatmap.get_yticks(), [0])
+    result.close()
+
+
 def test_pseudotime_heatmap_refuses_a_shared_name_and_names_its_ids(figures_closed):
     store = _shared_name_pseudotime_store()
 

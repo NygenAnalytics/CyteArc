@@ -171,6 +171,32 @@ def test_coding_labels_refuses_before_it_hashes_them() -> None:
     assert codes.tolist() == expected_codes.tolist()
 
 
+def test_coding_unhashable_labels_refuses_before_it_makes_their_texts() -> None:
+    # Lists cannot be hashed, so each label is coded by its text.
+    values = np.empty(1_000, dtype=object)
+    values[:] = [["label", "x" * 100, index % 3] for index in range(1_000)]
+    texts = np.asarray([str(value) for value in values], dtype=object)
+
+    hashing = MemoryLedger(1, "Coding labels")
+    with pytest.raises(MemoryBudgetError) as refused:
+        category_codes(values, ledger=hashing)
+    assert refused.value.item == "coding 1000 labels"
+    texting = MemoryLedger(refused.value.needed_bytes, "Coding labels")
+    with pytest.raises(MemoryBudgetError) as refused_texts:
+        category_codes(values, ledger=texting)
+    assert refused_texts.value.item == "coding 1000 labels by their text"
+    assert texting.charged == 0
+    # The texts take at least a byte for each of their characters.
+    characters = sum(len(text) for text in texts)
+    assert refused_texts.value.needed_bytes - refused.value.needed_bytes >= characters
+
+    codes, names = category_codes(values, ledger=MemoryLedger(None, "Coding"))
+    expected_codes, expected_names = category_codes(texts)
+    assert names == expected_names
+    assert names == [str(["label", "x" * 100, index]) for index in range(3)]
+    assert codes.tolist() == expected_codes.tolist()
+
+
 @pytest.mark.parametrize(
     ("n_cells", "width", "n_samples", "columns"),
     [
