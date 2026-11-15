@@ -50,6 +50,7 @@ from cytearc.storage.artifacts import artifact_group
 from cytearc.utils.memory_budget import MemoryBudgetError
 from tests.perturbation_helpers import record_cell_reads, warned
 from tests.test_pipeline_plan import assert_plan_reuses_run, read_only_plan
+from tests.test_pipeline_rerun import assert_settings_name_every_keyword
 from tests.storage_helpers import (
     insert_nullable_cell_column,
     rechunk_column,
@@ -898,6 +899,16 @@ def test_the_plans_of_the_committed_screen_calls_reuse_their_runs(runs) -> None:
             **settings,
         )
         assert_plan_reuses_run(plan, run)
+
+
+@pytest.mark.parametrize("name", ["default", "full"])
+def test_a_run_records_every_keyword_and_its_plan_reuses_every_stage(
+    runs, name
+) -> None:
+    run = getattr(runs, name)
+
+    assert_settings_name_every_keyword(run)
+    assert_plan_reuses_run(runs.store.pipeline.plan(run), run)
 
 
 def test_a_mixscape_change_computes_only_the_stages_that_read_its_classes(runs) -> None:

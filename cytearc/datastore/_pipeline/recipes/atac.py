@@ -36,6 +36,7 @@ from .common import (
     check_tsne,
     harmony_config,
     modality_assay,
+    recorded_modality_call,
     resolve_embeddings,
     resolve_graph,
     resolve_harmony,
@@ -255,3 +256,13 @@ def resolve_atac(
         start=lambda store: RunState(store=store, assay=store._get_assay(assay_name)),
         summarize=lambda stage, outputs: summarize_stage(store, stage, outputs),
     )
+
+
+def recorded_call(
+    store: Any, assay: str, config: Mapping[str, Any]
+) -> dict[str, object]:
+    """Return the keywords of the ``atac`` call that recorded ``config``."""
+    return {
+        **recorded_modality_call(store, assay, config),
+        "species": config["species"],
+    }

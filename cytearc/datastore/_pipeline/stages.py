@@ -17,7 +17,7 @@ from ...storage.selections import (
 )
 from ...storage.types import as_zarr_array
 from ...utils.logging import logger
-from ..pipeline_run import PipelineRun
+from ..pipeline_run import PipelineRun, open_pipeline_run
 from .cluster_selection import cluster_label_values, run_cluster_selection
 from .executor import COORDINATES, FEATURE_NAMES, PlannedStage, RunState, StageOutput
 from .filtering import filter_pipeline_selection
@@ -55,6 +55,20 @@ class CellSource:
                 "selection": self.selection.to_dict(),
             }
         return {"selection": self.selection.to_dict()}
+
+
+def cells_argument(
+    store: Any, recorded: Mapping[str, Any]
+) -> str | ArtifactRef | PipelineRun:
+    """Return the ``cells`` keyword that ``CellSource.to_config`` recorded.
+
+    A run given as ``cells`` is reopened from ``store`` by its run ID.
+    """
+    if "column" in recorded:
+        return str(recorded["column"])
+    if "run" in recorded:
+        return open_pipeline_run(store, run_id=recorded["run"]["runId"])
+    return ArtifactRef.from_dict(recorded["selection"])
 
 
 def resolve_cells(

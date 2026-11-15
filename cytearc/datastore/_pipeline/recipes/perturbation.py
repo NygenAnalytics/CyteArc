@@ -67,6 +67,7 @@ from .common import (
     check_labeled_cells,
     input_cell_mask,
     modality_assay,
+    recorded_modality_call,
     resolve_label,
     resolve_rna_head,
     count_stages,
@@ -945,3 +946,18 @@ def resolve_perturbation(
         start=lambda store: RunState(store=store, assay=store._get_assay(assay_name)),
         summarize=lambda stage, outputs: summarize_stage(store, stage, outputs),
     )
+
+
+def recorded_call(
+    store: Any, assay: str, config: Mapping[str, Any]
+) -> dict[str, object]:
+    """Return the keywords of the ``perturbation`` call that recorded ``config``.
+
+    The run records ``False`` for the signature without Mixscape and for the
+    profiles without clusters, whose keywords then take None.
+    """
+    call = recorded_modality_call(store, assay, config)
+    for keyword in ("signature", "profiles"):
+        if call[keyword] is False:
+            call[keyword] = None
+    return {**call, "guide_assay": config["guideAssay"]}

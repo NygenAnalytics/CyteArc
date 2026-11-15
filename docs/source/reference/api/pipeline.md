@@ -32,6 +32,7 @@ returns a durable, read-only {py:class}`~cytearc.PipelineRun` whose outputs are 
    cytearc.datastore.pipeline_accessor.PipelineAccessor.multimodal
    cytearc.datastore.pipeline_accessor.PipelineAccessor.perturbation
    cytearc.datastore.pipeline_accessor.PipelineAccessor.plan
+   cytearc.datastore.pipeline_accessor.PipelineAccessor.rerun
    cytearc.datastore.pipeline_accessor.PipelineAccessor.describe
    cytearc.datastore.pipeline_accessor.PipelineAccessor.open
    cytearc.datastore.pipeline_accessor.PipelineAccessor.list_runs
@@ -433,6 +434,21 @@ An artifact's identity includes the identities of its inputs. A stage that reads
 A computed stage's `estimate`, a {py:class}`~cytearc.datastore.pipeline_accessor.PipelineStageEstimate`, holds what the stage took in the latest earlier run of the same recipe and assay that computed it, with that run's ID: its wall and CPU time, sampled RSS peaks, OS thread peak, network bytes, the process's peak RSS when the stage raised it, and the `resources` that its process had, such as `workers` and `memoryLimitBytes` ([Stage resources](#stage-resources)). A run that reused every artifact of the stage does not count, and with no such run `estimate` is None. A value that the earlier run did not record, as runs of releases before these measurements record no CPU time, is None. It is a past measurement, not a model: that run's cells and settings can differ, and its `resources` describe the machine it ran on.
 
 A plan raises the errors that the call raises before it writes, such as a `ValueError` for an already completed label, and a `TypeError` for `callback` or `cancel`, which belong to a run. A stage's method checks some values only when the stage runs ([Validation before a run starts](#validation-before-a-run-starts)): when every stage before it would be reused, the plan reaches that check and raises the stage's error, as the run would. The plan goes through each stage until the stage would compute an artifact, so a reused stage warns from its saved diagnostics as it does in a run.
+
+## Rerun a run with changed settings
+
+`ds.pipeline.rerun` runs a run's recipe again with the settings that the run recorded, so a call passes only what it changes. `run.settings()` returns those settings as the keywords of the recipe's method, every keyword but `label`, `callback`, and `cancel`, and `ds.pipeline.plan` takes a run in place of a recipe's name to report what the rerun would compute.
+
+```python
+base = ds.pipeline.open(label="baseline")
+base.settings()["leiden"]    # {'partitions': [0.5, 0.75, 1.0, 1.25], 'selected': None}
+ds.pipeline.plan(base, leiden={"partitions": [2.0]}).computed
+fine = ds.pipeline.rerun(base, label="fine", leiden={"partitions": [2.0]})
+```
+
+A mapping changes a stage's settings key by key: `leiden={"partitions": [2.0]}` keeps the run's other Leiden settings, among them its `selected` resolution, which must be one of the new partitions or None. A mapping inside a stage's settings, such as Harmony's `harmony_params`, is replaced whole. `False` turns an optional stage off, `True` runs it with its defaults, None takes the keyword's default, and every other value replaces the run's. A rerun with new `cells` therefore keeps the run's filtering, and `filtering=None` filters the new cells as a call that omits `filtering` would. Stages whose settings and inputs are unchanged reuse the run's artifacts, and the new run takes its own `label`.
+
+The settings are those that the call gave, with the defaults that the recipe fits to its data resolved, such as an `atac` run's `prevalent_peaks` `top_n`: a rerun that changes the cells or the panel keeps them, and the recipe refuses a value that no longer fits. A `cells` column is passed by its name, so a rerun reads the column as it is now, and settings that the run did not set take this release's defaults ([Runs saved by other releases](#runs-saved-by-other-releases)). A run records its settings when it starts, so a failed or interrupted run reruns too, with the setting that failed changed. A run recorded before its recipe gained a keyword or a stage setting, such as an `rna` run recorded before `localmap`, reruns with that setting's default, which matches what the earlier release did, so the plan reuses the run's stages and a call can turn the new stage on. `run.settings()` raises `ValueError` for a run whose recipe this release lacks, such as one that `pipeline.run()` saved, and for a run that records a keyword its recipe no longer takes.
 
 ## Describe a recipe
 
@@ -1197,7 +1213,7 @@ confirm that the process has stopped before treating such a run as abandoned.
 
 ```{eval-rst}
 .. autoclass:: cytearc.datastore.pipeline_accessor.PipelineAccessor
-    :members: rna, atac, adt, multimodal, perturbation, plan, describe, open, list_runs, abandon_label_claim
+    :members: rna, atac, adt, multimodal, perturbation, plan, rerun, describe, open, list_runs, abandon_label_claim
 
 .. autoclass:: cytearc.PipelineRun
     :members:
