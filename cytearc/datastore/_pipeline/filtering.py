@@ -234,8 +234,10 @@ def filtering_argument(recorded: Mapping[str, Any]) -> bool | dict[str, Any]:
     The keyword names the method and the QC columns, and only the options that
     differ from their defaults, so a rerun that changes the method with
     ``filtering={"method": ...}`` keeps no option of the earlier method that
-    it did not set. A hashed run's ``sampleSource`` follows from the run's
-    hashing, not from the keyword, so the keyword leaves it out.
+    it did not set. An option that the run did not record, as a run recorded
+    before the option existed does not, is left out and takes its default. A
+    hashed run's ``sampleSource`` follows from the run's hashing, not from the
+    keyword, so the keyword leaves it out.
     """
     if not recorded["enabled"]:
         return False
@@ -246,14 +248,15 @@ def filtering_argument(recorded: Mapping[str, Any]) -> bool | dict[str, Any]:
     if recorded["method"] == "manual":
         keyword["lows"] = list(recorded["lows"])
         keyword["highs"] = list(recorded["highs"])
-        if recorded["keepBounds"]:
+        if recorded.get("keepBounds", False):
             keyword["keep_bounds"] = True
         return keyword
-    if recorded["sampleColumn"] is not None:
+    if recorded.get("sampleColumn") is not None:
         keyword["sample_column"] = recorded["sampleColumn"]
     for name, option in _RECORDED_AUTOMATIC_OPTIONS.items():
-        if recorded[name] != _FILTER_DEFAULTS[option]:
-            keyword[option] = recorded[name]
+        value = recorded.get(name, _FILTER_DEFAULTS[option])
+        if value != _FILTER_DEFAULTS[option]:
+            keyword[option] = value
     return keyword
 
 

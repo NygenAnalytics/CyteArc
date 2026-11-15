@@ -17,14 +17,23 @@ from typing import Any
 
 import numpy as np
 import pytest
+import zarr
 
 from cytearc import DataStore, PipelineExecutionError, PipelineRun
 from cytearc.datastore._pipeline.filtering import (
     filtering_argument,
     resolve_filtering,
 )
-from cytearc.datastore.pipeline_accessor import PipelineAccessor, PipelineEvent
-from cytearc.storage.pipeline_runs import load_pipeline_run_record
+from cytearc.datastore.pipeline_accessor import (
+    _RECORDED_CALLS,
+    _RESOLVERS,
+    PipelineAccessor,
+    PipelineEvent,
+)
+from cytearc.storage.pipeline_runs import (
+    load_pipeline_run_record,
+    pipeline_run_path,
+)
 from tests.test_pipeline_plan import (
     _digest,
     _dispositions,
@@ -76,6 +85,18 @@ def _stage_config(run: PipelineRun) -> dict[str, Any]:
     return run.report()["run"]["config"]["stages"]
 
 
+def assert_settings_name_every_keyword(run: PipelineRun) -> None:
+    """Check that a run of this release records every keyword of its recipe.
+
+    A run recorded by an earlier release may lack a keyword that the recipe
+    gained since, but a run of this release lacks one only when its recipe's
+    ``recorded_call`` leaves it out.
+    """
+    recipe = getattr(PipelineAccessor, run.recipe)
+    keywords = set(inspect.signature(recipe).parameters)
+    assert set(run.settings()) == keywords - {"self", "label", "callback", "cancel"}
+
+
 # Settings --------------------------------------------------------------------
 
 
@@ -109,8 +130,11 @@ def test_settings_are_the_keywords_that_the_run_was_called_with(completed) -> No
         "species": None,
     }
     # They are every keyword of the recipe but those of a new run.
-    keywords = set(inspect.signature(PipelineAccessor.rna).parameters)
-    assert set(settings) == keywords - {"self", "label", "callback", "cancel"}
+    assert_settings_name_every_keyword(completed.run)
+
+
+def test_every_recipe_turns_its_record_back_into_its_keywords() -> None:
+    assert set(_RECORDED_CALLS) == set(_RESOLVERS)
 
 
 def test_settings_are_copies_that_leave_the_record_unchanged(completed) -> None:
@@ -191,6 +215,25 @@ def test_the_filtering_keyword_names_only_the_options_that_differ_from_defaults(
     manual = {"method": "manual", "attrs": ["RNA_nCounts"], "lows": [1], "highs": [9]}
     assert argument(manual) == manual
     assert argument({**manual, "keep_bounds": False}) == manual
+
+
+def test_the_filtering_keyword_leaves_out_options_that_the_run_did_not_record(
+    completed,
+) -> None:
+    store = completed.datastore
+    mad = resolve_filtering(store, {"method": "mad"}, default_attrs=QC_COLUMNS)
+    manual = {"method": "manual", "attrs": ["RNA_nCounts"], "lows": [1], "highs": [9]}
+    bounds = resolve_filtering(store, manual, default_attrs=QC_COLUMNS)
+    options = {"minP", "maxP", "nMads", "minCellsPerSample", "sampleColumn"}
+
+    # A run recorded before an option existed takes the option's default.
+    earlier_mad = {key: value for key, value in mad.items() if key not in options}
+    earlier_manual = {
+        key: value for key, value in bounds.items() if key != "keepBounds"
+    }
+
+    assert filtering_argument(earlier_mad) == {"method": "mad", "attrs": QC_COLUMNS}
+    assert filtering_argument(earlier_manual) == manual
 
 
 # Plans of a run -----------------------------------------------------------------
@@ -419,28 +462,64 @@ def test_a_run_of_a_recipe_this_release_lacks_has_no_settings(completed) -> None
     )
 
 
-def test_a_run_that_recorded_other_keywords_is_refused(completed) -> None:
+# Runs of earlier releases -----------------------------------------------------
+
+
+def _record_as_an_earlier_release(location: Path, run_id: str, edit: Any) -> None:
+    """Rewrite a stored run record as an earlier release would have written it."""
+    group = zarr.open_group(str(location), mode="r+")[pipeline_run_path(run_id)]
+    attrs = dict(group.attrs)
+    edit(attrs["config"])
+    attrs["cytearcVersion"] = "1.3.5"
+    group.attrs.put(attrs)
+
+
+def test_a_run_recorded_before_a_setting_existed_takes_its_default(
+    completed, tmp_path
+) -> None:
+    location = tmp_path / "data.zarr"
+    shutil.copytree(completed.location, location)
+    run_id = completed.run.run_id
+
+    def before_localmap(config: dict[str, Any]) -> None:
+        # A run recorded before the recipe gained LocalMAP, and before
+        # filtering took min_cells_per_sample.
+        del config["stages"]["localmap"]
+        del config["stages"]["filtering"]["minCellsPerSample"]
+
+    _record_as_an_earlier_release(location, run_id, before_localmap)
+    datastore = DataStore(str(location), default_assay="RNA")
+    earlier = datastore.pipeline.open(run_id=run_id)
+
+    expected = completed.run.settings()
+    del expected["localmap"]
+    assert earlier.settings() == expected
+    # The defaults reproduce the run, so its plan reuses every stage with the
+    # run's artifacts and resolves the settings that a run records today.
+    plan = datastore.pipeline.plan(earlier)
+    current = completed.datastore.pipeline.plan(completed.run)
+    assert [(stage.stage, stage.status, stage.outputs) for stage in plan.stages] == [
+        (stage.stage, stage.status, stage.outputs) for stage in current.stages
+    ]
+    assert plan.computed == ()
+    assert plan.config == current.config
+    # A call turns the new stage on, and only that stage computes.
+    assert datastore.pipeline.plan(earlier, localmap=True).computed == ("localmap",)
+
+
+def test_a_run_that_records_a_keyword_the_recipe_no_longer_takes_is_refused(
+    completed,
+) -> None:
     datastore = completed.datastore
     record = load_pipeline_run_record(datastore.zw, completed.run.run_id)
+    stages = {**record.config["stages"], "retired": False}
+    config = {**record.config, "stages": stages}
+    retired = dataclasses.replace(record, config=config, cytearc_version="1.3.5")
 
-    def recorded(stages: dict[str, Any]) -> PipelineRun:
-        config = {**record.config, "stages": stages}
-        return PipelineRun(
-            datastore,
-            dataclasses.replace(record, config=config, cytearc_version="1.3.5"),
-        )
-
-    # A run recorded before the recipe gained LocalMAP.
-    without = {key: value for key, value in record.config["stages"].items()}
-    del without["localmap"]
     with pytest.raises(ValueError) as caught:
-        recorded(without).settings()
+        PipelineRun(datastore, retired).settings()
     assert str(caught.value) == (
-        f"Pipeline run {record.run_id}, recorded by CyteArc 1.3.5, records no "
-        "setting for ['localmap'], which this release's rna recipe takes; "
+        f"Pipeline run {record.run_id}, recorded by CyteArc 1.3.5, records "
+        "['retired'], which this release's rna recipe does not take; "
         "report()['run']['config'] holds the settings that it recorded"
     )
-    # A keyword that the recipe no longer takes.
-    retired = {**record.config["stages"], "retired": False}
-    with pytest.raises(ValueError, match=re.escape("['retired'], which this rel")):
-        recorded(retired).settings()

@@ -48,6 +48,7 @@ from tests.test_cell_calling_datastore import _write_store as _write_droplets
 from tests.test_hto import planted_hto_counts, two_pool_hto_counts
 from tests.test_pipeline_run_foundation import _completed_run, _Owner, _root
 from tests.test_pipeline_plan import assert_plan_reuses_run, read_only_plan
+from tests.test_pipeline_rerun import assert_settings_name_every_keyword
 
 # Small settings keep each run to a few seconds: one Leiden partition, and no
 # cell cycle, UMAP, doublet, or marker stage unless a test needs one.
@@ -2815,11 +2816,12 @@ def test_a_basic_rna_analysis_record_still_opens_lists_and_reports() -> None:
         ("hashed", "hashed", "run"),
     ],
 )
-def test_a_plan_of_a_run_with_its_own_settings_reuses_every_stage(
+def test_a_run_records_every_keyword_and_its_plan_reuses_every_stage(
     request, store: str, fixture: str, attribute: str | None
 ) -> None:
     value = request.getfixturevalue(fixture)
     run = value if attribute is None else getattr(value, attribute)
     datastore = request.getfixturevalue(store).datastore
 
+    assert_settings_name_every_keyword(run)
     assert_plan_reuses_run(datastore.pipeline.plan(run), run)

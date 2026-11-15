@@ -87,6 +87,12 @@ _RUN_KEYWORDS = ("callback", "cancel")
 _UNRECORDED_KEYWORDS = ("self", "label", *_RUN_KEYWORDS)
 
 
+def recipe_keywords(recipe: str) -> frozenset[str]:
+    """Return the keywords of a recipe method that a run records."""
+    parameters = inspect.signature(getattr(PipelineAccessor, recipe)).parameters
+    return frozenset(parameters) - frozenset(_UNRECORDED_KEYWORDS)
+
+
 def recorded_settings(store: Any, record: PipelineRunRecord) -> dict[str, Any]:
     """Return the keywords of the recipe call that ``record`` records.
 
@@ -106,19 +112,15 @@ def recorded_settings(store: Any, record: PipelineRunRecord) -> dict[str, Any]:
             f"which is not one of {sorted(_RECORDED_CALLS)!r}{saved_by}"
         )
     settings = translate(store, record.assay, copy.deepcopy(record.config))
-    parameters = inspect.signature(getattr(PipelineAccessor, record.recipe)).parameters
-    keywords = set(parameters) - set(_UNRECORDED_KEYWORDS)
-    missing = sorted(keywords - set(settings))
-    unknown = sorted(set(settings) - keywords)
-    if missing or unknown:
-        recipe = f"this release's {record.recipe} recipe"
-        differences = [
-            *([f"no setting for {missing!r}, which {recipe} takes"] if missing else []),
-            *([f"{unknown!r}, which {recipe} does not take"] if unknown else []),
-        ]
+    # A keyword that the recipe gained after the run started is not recorded,
+    # and the recipe gives it its default; a keyword that the recipe lost has
+    # no default to stand in for the run's setting.
+    unknown = sorted(set(settings) - recipe_keywords(record.recipe))
+    if unknown:
         raise ValueError(
             f"Pipeline run {record.run_id}, recorded by CyteArc "
-            f"{record.cytearc_version}, records {' and '.join(differences)}; "
+            f"{record.cytearc_version}, records {unknown!r}, which this "
+            f"release's {record.recipe} recipe does not take; "
             "report()['run']['config'] holds the settings that it recorded"
         )
     return settings
@@ -951,7 +953,7 @@ class PipelineAccessor:
                 "is not recorded in it"
             ) from error
         keywords = recorded_settings(self._store, record)
-        unknown = sorted(set(overrides) - set(keywords) - {"label"})
+        unknown = sorted(set(overrides) - recipe_keywords(record.recipe) - {"label"})
         if unknown:
             raise TypeError(
                 f"A run of the {record.recipe} recipe takes the keywords of "
@@ -1012,8 +1014,8 @@ class PipelineAccessor:
             TypeError: If ``run`` is not a :class:`~cytearc.PipelineRun`, an
                 override is not a keyword of the run's recipe, or the call
                 fails the recipe's checks.
-            ValueError: If ``run`` is not recorded in this datastore, its
-                settings are not its recipe's keywords in this release, as
+            ValueError: If ``run`` is not recorded in this datastore, this
+                release cannot read its settings, as
                 :meth:`PipelineRun.settings` explains, or the call fails the
                 recipe's checks.
 
