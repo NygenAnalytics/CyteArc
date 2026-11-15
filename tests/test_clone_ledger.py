@@ -400,6 +400,22 @@ def test_clones_of_a_column_read_in_blocks_are_the_clones_of_one_read(
     pd.testing.assert_frame_equal(loaded[small].clones, loaded[1 << 34].clones)
 
 
+def test_clone_rows_are_read_in_chunks_that_half_the_room_holds() -> None:
+    chunk_rows = clone_operations._chunk_rows
+    # Half of 2,000,000 bytes holds 10,000 rows of 100 bytes.
+    assert chunk_rows(MemoryLedger(2_000_000, "Importing clones"), 100) == 10_000
+    # A million bytes held leave room for half as many.
+    ledger = MemoryLedger(2_000_000, "Importing clones")
+    ledger.hold("the labels read", 1_000_000)
+    assert chunk_rows(ledger, 100) == 5_000
+    # A full ledger still reads 1,000 rows at a time, and a chunk never holds
+    # more than a million rows, however large the budget or without one.
+    ledger.hold("the hashes of barcodes", 1_000_000)
+    assert chunk_rows(ledger, 100) == 1_000
+    assert chunk_rows(MemoryLedger(10**15, "Importing clones"), 100) == 1_000_000
+    assert chunk_rows(MemoryLedger(None, "Importing clones"), 100) == 1_000_000
+
+
 # The groups' labels of clonal expansion.
 
 

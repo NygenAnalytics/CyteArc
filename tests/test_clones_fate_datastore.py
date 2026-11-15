@@ -532,6 +532,36 @@ def test_fate_bias_names_late_when_none_of_its_cells_has_a_clone(copied) -> None
     assert store.artifacts.list(kind="clone_fate_bias", scope="datastore") == []
 
 
+def test_late_cells_that_are_the_clones_own_test_each_clone_as_every_cell_does(
+    copied, tmp_path
+) -> None:
+    store = copied.store
+    # Clones imported on the late cells alone, so the late cells are the
+    # clones' own and no early cell has a clone.
+    own = import_truth_clones(store, TRUTH, tmp_path, cell_selection=copied.late)
+    options = {"group_by": "cell_type", "early": copied.early, "late": copied.late}
+    found = store.clones.load_fate_bias(store.clones.fate_bias(own, **options))
+    every = store.clones.load_fate_bias(
+        store.clones.fate_bias(copied.clones, **options)
+    )
+    cells = found.cells
+    assert cells.index.tolist() == TRUTH.cell_ids[EARLY].tolist()
+    assert cells["clone"].isna().all() and cells["fate"].isna().all()
+    assert (cells["n_late_cells"] == 0).all()
+    # Each clone's late cells are tested as those of clones of every cell;
+    # the clones rank by their late cells alone, so the rows match by label.
+    assert (found.clone_fates["n_early_cells"] == 0).all()
+
+    def by_label(table: pd.DataFrame) -> pd.DataFrame:
+        table = table.drop(columns="n_early_cells").astype({"clone": str})
+        return table.sort_values(["clone", "fate"], ignore_index=True)
+
+    pd.testing.assert_frame_equal(
+        by_label(found.clone_fates), by_label(every.clone_fates)
+    )
+    pd.testing.assert_frame_equal(found.fates, every.fates)
+
+
 def test_fate_bias_arguments_are_checked(copied) -> None:
     store, clones = copied.store, copied.clones
     early, late = copied.early, copied.late
