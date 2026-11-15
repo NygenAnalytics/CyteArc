@@ -56,7 +56,7 @@ SETTINGS: dict[str, Any] = {
 # The QC columns that preparation wrote for the store's RNA assay.
 QC_COLUMNS = ["RNA_nCounts", "RNA_nFeatures", "RNA_percentMito", "RNA_percentRibo"]
 # The stages that a change to the Leiden partitions computes again.
-LEIDEN_STAGES = {"leiden_2.0", "cluster_selection", "markers"}
+LEIDEN_STAGES = {"leiden", "cluster_selection", "markers"}
 
 
 @pytest.fixture(scope="module")
@@ -256,7 +256,7 @@ def test_a_changed_setting_computes_only_the_stages_that_read_it(completed) -> N
         stage.stage: stage.reason for stage in plan.stages if stage.status == "computed"
     }
     assert computed == {
-        "leiden_2.0": "changed",
+        "leiden": "changed",
         "cluster_selection": "upstream",
         "markers": "upstream",
     }
@@ -394,7 +394,7 @@ def test_a_failed_run_runs_again_with_the_failing_setting_changed(
     with pytest.raises(PipelineExecutionError) as caught:
         datastore.pipeline.rerun(base, label="retry", leiden={"backend": "nope"})
     failed = datastore.pipeline.open(run_id=caught.value.run_id)
-    assert (failed.status, caught.value.stage) == ("failed", "leiden_0.5")
+    assert (failed.status, caught.value.stage) == ("failed", "leiden")
 
     retried = datastore.pipeline.rerun(
         failed, label="retry", leiden={"backend": "cytearc"}
@@ -408,7 +408,7 @@ def test_a_failed_run_runs_again_with_the_failing_setting_changed(
     }
     dispositions = _dispositions(retried)
     stages = list(dispositions)
-    before_leiden = stages[: stages.index("leiden_0.5")]
+    before_leiden = stages[: stages.index("leiden")]
     assert {dispositions[stage] for stage in before_leiden} <= {"reused", "skipped"}
 
 

@@ -980,8 +980,8 @@ class PipelineAccessor:
         """Run a run's recipe again with the settings it recorded, changing some of them.
 
         Each keyword of the run's recipe that the call does not pass takes
-        the run's setting, which :meth:`PipelineRun.settings` returns, so a
-        call passes only what it changes. A stage whose settings and inputs
+        the run's setting, which :meth:`~cytearc.PipelineRun.settings`
+        returns, so a call passes only what it changes. A stage whose settings and inputs
         are unchanged reuses the run's artifacts, and the stages that read a
         changed stage compute again with the run's other settings.
         :meth:`plan` with the run and the same keywords reports which stages
@@ -1016,8 +1016,8 @@ class PipelineAccessor:
                 fails the recipe's checks.
             ValueError: If ``run`` is not recorded in this datastore, this
                 release cannot read its settings, as
-                :meth:`PipelineRun.settings` explains, or the call fails the
-                recipe's checks.
+                :meth:`~cytearc.PipelineRun.settings` explains, or the call
+                fails the recipe's checks.
 
         The recipe raises its other errors as its method documents them.
 
