@@ -1142,6 +1142,35 @@ def _failing_numba_restore(_threads: int) -> Iterator[None]:
     raise RuntimeError("restore failed")
 
 
+def test_a_compute_worker_whose_numba_count_fails_to_restore_reports_it(
+    monkeypatch,
+):
+    ended: list[str] = []
+
+    @contextmanager
+    def numba_threads(_threads: int) -> Iterator[None]:
+        # A compute worker enters its count as it starts, on its own thread.
+        worker = threading.current_thread().name.startswith("cytearc-compute")
+        yield
+        ended.append("worker" if worker else "operation")
+        if worker:
+            raise RuntimeError("worker restore failed")
+
+    monkeypatch.setattr("cytearc.storage.async_execution.numba_threads", numba_threads)
+    runner = _runner(ResourceBudget(100, 1))
+
+    async def operation(active: AsyncStorageRunner) -> int:
+        return await active.compute(lambda: 3)
+
+    with pytest.raises(RuntimeError, match="^worker restore failed$"):
+        runner.run(operation)
+    # The operation's own count is restored after the worker's fails.
+    assert ended == ["worker", "operation"]
+    assert runner._worker_numba == []
+    assert runner._compute_pool._shutdown
+    assert runner._codec_pool._shutdown
+
+
 def test_cleanup_failure_does_not_skip_pool_shutdown(monkeypatch):
     monkeypatch.setattr(
         "cytearc.storage.async_execution.numba_threads", _failing_numba_restore

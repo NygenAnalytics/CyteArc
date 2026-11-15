@@ -16,6 +16,7 @@ when the deadline passes, after which the gate opens so nothing hangs.
 """
 
 import asyncio
+import concurrent.futures
 import contextvars
 import threading
 from collections.abc import Callable, Iterator
@@ -259,12 +260,70 @@ def test_close_stops_a_read_before_the_next_operation_of_its_block(
         assert reads.threads and set(reads.threads) == {"zarr_io"}
 
 
-def test_a_cancellation_that_no_stop_made_keeps_its_meaning():
+@pytest.mark.parametrize("path", ["own loop", "Zarr's loop"])
+def test_a_cancellation_that_no_stop_made_keeps_its_meaning(path):
     async def cancelled() -> None:
         raise asyncio.CancelledError
 
-    with read_stop_scope(ReadStop()), pytest.raises(asyncio.CancelledError):
-        run_read(cancelled())
+    read = run_read if path == "own loop" else run_on_zarr_loop
+    # Zarr's sync() reports a cancelled read as concurrent.futures does.
+    expected = (
+        asyncio.CancelledError
+        if path == "own loop"
+        else concurrent.futures.CancelledError
+    )
+    with read_stop_scope(ReadStop()), pytest.raises(expected):
+        read(cancelled())
+
+
+@pytest.mark.parametrize("path", ["own loop", "Zarr's loop"])
+def test_a_read_that_starts_after_its_stream_stopped_stops_at_its_first_await(path):
+    steps: list[str] = []
+
+    async def value() -> int:
+        steps.append("started")
+        await asyncio.sleep(0)
+        steps.append("resumed")
+        return 1
+
+    stop = ReadStop()
+    stop.stop()
+    read = run_read if path == "own loop" else run_on_zarr_loop
+    with read_stop_scope(stop), pytest.raises(ReadStopped):
+        read(value())
+    assert steps == ["started"]
+
+
+def test_a_stop_that_reaches_a_read_after_it_ended_leaves_its_result():
+    # A stop calls the cancels registered with it one after another, so it can
+    # reach a read's cancel only after the read has returned and closed its
+    # event loop. That cancel then has nothing to stop.
+    stop = ReadStop()
+    reading, stopping, ended = threading.Event(), threading.Event(), threading.Event()
+    results: list[int] = []
+
+    def slow_cancel() -> None:
+        stopping.set()
+        assert ended.wait(10)
+
+    async def value() -> int:
+        reading.set()
+        await asyncio.to_thread(stopping.wait, 10)
+        return 7
+
+    def reader() -> None:
+        with read_stop_scope(stop):
+            results.append(run_read(value()))
+        ended.set()
+
+    with stop.cancelling(slow_cancel):
+        thread = threading.Thread(target=reader)
+        thread.start()
+        assert reading.wait(10)
+        stop.stop()
+    thread.join(timeout=10)
+    assert results == [7]
+    assert stop.stopped
 
 
 def test_an_interruption_keeps_its_meaning_under_a_stream_stop():

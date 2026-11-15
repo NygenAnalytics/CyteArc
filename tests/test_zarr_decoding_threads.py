@@ -236,6 +236,22 @@ def test_the_installed_pool_keeps_the_size_of_the_pool_zarr_ran_before(
         pools.shutdown()
 
 
+def test_the_pools_on_zarrs_loop_become_zarrs_pool_when_zarr_holds_none(
+    monkeypatch, _decoding_pools
+) -> None:
+    # Zarr holds no pool of its own while CyteArc's pools run on its loop.
+    loop = zarr_sync._get_loop()
+    monkeypatch.setattr(zarr_sync, "_executor", None)
+    assert loop._default_executor is _decoding_pools
+
+    assert ensure_zarr_host_ceiling() == _HOST_THREADS
+
+    assert zarr_sync._executor is _decoding_pools
+    # So Zarr makes no pool of its own to replace them on the loop.
+    assert zarr_sync._get_executor() is _decoding_pools
+    assert loop._default_executor is _decoding_pools
+
+
 def test_a_reinstall_finds_the_pools_it_made_beside_zarrs_own(monkeypatch) -> None:
     # Where Zarr made its own pool first, the pools that take its place on
     # the loop become Zarr's too, so that once another executor replaces

@@ -1,5 +1,7 @@
 import gc
 import os
+import signal
+import sys
 import threading
 import time
 import types
@@ -669,6 +671,86 @@ def test_failed_pool_shutdown_still_closes_the_source(monkeypatch):
     # Closing early is no failure of its own, so the cleanup error stands alone.
     with pytest.raises(RuntimeError, match="pool shutdown interrupted"):
         stream.close()
+    assert closed == ["source"]
+
+
+@pytest.mark.skipif(
+    threading.current_thread() is not threading.main_thread()
+    or signal.getsignal(signal.SIGINT) is not signal.default_int_handler,
+    reason="needs Python's Ctrl-C handler in the main thread",
+)
+def test_a_second_interruption_while_closing_waits_for_a_read_is_reported(
+    monkeypatch,
+):
+    # Ctrl-C interrupts the pool's shutdown and leaves a read running. The
+    # close then waits for that read, and a second Ctrl-C interrupts the wait.
+    # Both interruptions are reported, and the source is still closed.
+    from concurrent.futures import ThreadPoolExecutor
+
+    import cytearc.storage.parallel as parallel
+
+    class InterruptedShutdown(ThreadPoolExecutor):
+        def shutdown(self, wait=True, *, cancel_futures=False):
+            super().shutdown(wait=False, cancel_futures=cancel_futures)
+            raise KeyboardInterrupt("first interruption")
+
+    monkeypatch.setattr(parallel, "ThreadPoolExecutor", InterruptedShutdown)
+    main = threading.main_thread().ident
+    assert main is not None
+    reading, release = threading.Event(), threading.Event()
+    interrupted = []
+
+    def waiting_for_the_read() -> bool:
+        frame = sys._current_frames().get(main)
+        names = []
+        while frame is not None:
+            names.append(frame.f_code.co_name)
+            frame = frame.f_back
+        # Blocked in Condition.wait, below the wait for the read's outcome.
+        return bool(names) and names[0] == "wait" and "_collect_failure" in names
+
+    def read(item: int) -> int:
+        if item == 0:
+            return item
+        reading.set()
+        deadline = time.monotonic() + 10
+        while not waiting_for_the_read():
+            if time.monotonic() > deadline or release.is_set():
+                return item
+            time.sleep(0.001)
+        interrupted.append(item)
+        signal.pthread_kill(main, signal.SIGINT)
+        assert release.wait(10)
+        return item
+
+    closed = []
+
+    def source():
+        try:
+            yield from range(4)
+        finally:
+            closed.append("source")
+
+    stream = stream_shards(source(), read, workers=2)
+    raised: list[BaseExceptionGroup] = []
+    try:
+        assert next(stream) == 0
+        assert reading.wait(10)
+        try:
+            stream.close()
+        except BaseExceptionGroup as group:
+            raised.append(group)
+        except KeyboardInterrupt as error:
+            # Reported as a failure rather than ending the test session.
+            pytest.fail(f"An interruption left the close: {error!r}")
+    finally:
+        release.set()
+    [group] = raised
+    assert group.message == "Block stream failed during cleanup"
+    errors = group.exceptions
+    assert [type(error) for error in errors] == [KeyboardInterrupt] * 2
+    assert str(errors[0]) == "first interruption"
+    assert interrupted == [1]
     assert closed == ["source"]
 
 

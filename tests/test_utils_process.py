@@ -572,6 +572,116 @@ def test_sampler_counts_cpu_threads_network_and_high_water_between_its_readings(
     assert (trace.network_rx_bytes, trace.network_tx_bytes) == ((0, 3_000), (0, 30))
 
 
+def test_a_peak_mark_that_raises_leaves_the_window_without_one() -> None:
+    def failing_mark() -> int:
+        raise OSError("getrusage failed")
+
+    readers = ProcessReaders(
+        sample=lambda: ResourceSample(1.0, threads=2),
+        high_water_bytes=failing_mark,
+        rss_unavailable_reason="the test reads no RSS",
+        unavailable={NETWORK: "the test reads no network counters"},
+    )
+    with sample_process_resources(
+        interval_seconds=3600.0, readers=readers
+    ) as measurement:
+        during = measurement()
+
+    final = measurement()
+    for observed in (during, final):
+        assert observed.unavailable == {
+            NETWORK: "the test reads no network counters",
+            HIGH_WATER: "getrusage could not read the peak RSS",
+        }
+        assert observed.high_water_start_bytes is None
+        assert observed.high_water_end_bytes is None
+        assert observed.threads_peak == 2
+
+
+def test_a_window_without_a_recorded_sample_has_nothing_to_measure() -> None:
+    window = process_module._ResourceWindow(
+        ProcessReaders(sample=lambda: ResourceSample(0.0)), 0.1
+    )
+    with pytest.raises(RuntimeError, match="^A resource window holds no sample yet$"):
+        window.measurement()
+    # A reading that raised counts as a failed RSS sample but adds no point.
+    window.record(None, 0.0)
+    with pytest.raises(RuntimeError, match="^A resource window holds no sample yet$"):
+        window.measurement()
+    window.record(ResourceSample(2.0, rss_bytes=50), 0.3)
+
+    final = window.measurement()
+    assert (final.sample_count, final.sampling_error_count) == (2, 1)
+    assert (final.trace.seconds, final.trace.rss_bytes) == ((0.0,), (50,))
+
+
+def test_a_platform_without_getrusage_samples_cpu_and_names_the_missing_peak(
+    tmp_path, monkeypatch
+):
+    # Windows has neither /proc nor the resource module.
+    monkeypatch.setattr(process_module, "_PROC_ROOT", tmp_path / "missing")
+    monkeypatch.setitem(sys.modules, "resource", None)
+    monkeypatch.setattr(process_module.time, "process_time", lambda: 5.0)
+    reason = "the peak RSS requires getrusage, which this platform does not provide"
+
+    readers = process_module.default_process_readers()
+
+    assert readers.high_water_bytes is None
+    assert readers.unavailable[HIGH_WATER] == reason
+    # Children that ended add no CPU time where nothing counts them.
+    assert readers.sample() == ResourceSample(5.0)
+    with sample_process_resources(interval_seconds=3600.0) as measurement:
+        pass
+    final = measurement()
+    assert final.unavailable[HIGH_WATER] == reason
+    assert (final.high_water_start_bytes, final.high_water_end_bytes) == (None, None)
+    assert final.cpu_seconds == 0.0
+    assert final.trace.cpu_seconds == (0.0, 0.0)
+
+
+@pytest.mark.parametrize("waitid", ["missing", "failing", "no children"])
+def test_a_sampler_that_cannot_rule_out_children_walks_the_process_tree(
+    tmp_path, monkeypatch, waitid
+):
+    pid = os.getpid()
+    child = pid + 1
+    proc_root = tmp_path / "proc"
+    _write_proc_tree(
+        proc_root,
+        {
+            pid: (1, "Threads:\t3\nVmRSS:\t8 kB\n", {pid: [child]}),
+            child: (pid, "Threads:\t1\nVmRSS:\t4 kB\n", {child: []}),
+        },
+    )
+    ticks = process_module._clock_ticks_per_second()
+    # The child's user and system ticks, and those of the children it waited
+    # for: three seconds of CPU time.
+    (proc_root / str(child) / "stat").write_text(
+        f"{child} (child) S {pid} 0 0 0 -1 0 0 0 0 0 {ticks} {ticks} {ticks} 0 20 0"
+    )
+    monkeypatch.setattr(process_module, "_PROC_ROOT", proc_root)
+    monkeypatch.setitem(sys.modules, "resource", None)
+    monkeypatch.setattr(process_module.time, "process_time", lambda: 5.0)
+    if waitid == "missing":
+        # Windows has no os.waitid.
+        monkeypatch.delattr(os, "waitid")
+    else:
+        error = ChildProcessError if waitid == "no children" else PermissionError
+
+        def refuse(*_args: object) -> None:
+            raise error("waitid")
+
+        monkeypatch.setattr(os, "waitid", refuse)
+
+    sample = process_module.default_process_readers().sample()
+
+    if waitid == "no children":
+        # The process's own status holds the tree's RSS and threads.
+        assert sample == ResourceSample(5.0, 8 * 1024, 3)
+    else:
+        assert sample == ResourceSample(8.0, 12 * 1024, 4)
+
+
 def test_network_counters_that_fall_leave_the_window_without_network_bytes() -> None:
     readers = _scripted(
         [
@@ -710,6 +820,10 @@ def test_proc_files_parse_into_threads_cpu_ticks_and_network_bytes() -> None:
     stat = "1234 (py (x) y) S 1 1234 1234 0 -1 4194560 100 0 0 0 250 50 7 3 20 0"
     assert process_module._parse_proc_stat_cpu_ticks(stat) == 310
     assert process_module._parse_proc_stat_cpu_ticks("1234 (py) S 1 2 3") is None
+    # A tick count that is not a non-negative integer leaves the ticks unread.
+    for ticks in ("250 x 7 3", "250 50 -7 3"):
+        malformed = f"1234 (py) S 1 1234 1234 0 -1 4194560 100 0 0 0 {ticks} 20 0"
+        assert process_module._parse_proc_stat_cpu_ticks(malformed) is None
     header = (
         "Inter-|   Receive                                                |  "
         "Transmit\n face |bytes    packets errs drop fifo frame compressed "
@@ -735,6 +849,10 @@ def test_proc_files_parse_into_threads_cpu_ticks_and_network_bytes() -> None:
         123_456_789 + 20,
     )
     assert process_module._parse_net_dev(gvisor) == (552, 0)
+    # A line that names no interface is passed over.
+    assert process_module._parse_net_dev(
+        header + "\n  eth0: 7 0 0 0 0 0 0 0 9 0 0 0 0 0 0 0\n"
+    ) == (7, 9)
     assert process_module._parse_net_dev("eth0: 1 2 3\n") is None
     assert process_module._parse_net_dev(header + "  eth0: 1 2 3\n") is None
     assert process_module._parse_net_dev(header + "  eth0: x 0 0 0 0 0 0 0 0\n") is None

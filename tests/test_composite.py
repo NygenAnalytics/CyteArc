@@ -384,6 +384,58 @@ def test_composite_metadata_prefetch_never_evicts(tmp_path, monkeypatch):
         cache.close()
 
 
+def test_composite_metadata_prefetch_raises_every_fetch_that_failed(
+    tmp_path, monkeypatch
+):
+    import asyncio
+
+    from cytearc.composite.create import (
+        _CachedMetadataTable,
+        _prefetch_metadata,
+        _TableReads,
+    )
+    from cytearc.composite.source_cache import SourceCache
+    from cytearc.storage.budget import ResourceBudget
+
+    handles = _CachedMetadataTable(_warmable_table(tmp_path / "cells.zarr"))
+    cache = SourceCache()
+    handles.use_source_cache(cache)
+    entered: list[str] = []
+    both = asyncio.Event()
+    get = LocalStore.get
+
+    async def lost(store, key, *args, **kwargs):
+        if "/c/" not in key:
+            return await get(store, key, *args, **kwargs)
+        # Both fetches are in flight before either fails, as when the source
+        # goes away under them.
+        entered.append(key)
+        if len(entered) == 2:
+            both.set()
+        async with asyncio.timeout(10):
+            await both.wait()
+        raise OSError(f"lost {key}")
+
+    monkeypatch.setattr(LocalStore, "get", lost)
+    try:
+        with pytest.raises(BaseExceptionGroup) as raised:
+            _prefetch_metadata(
+                [_TableReads(handles, lambda extent: np.arange(4))],
+                ResourceBudget(1024**2, 4),
+                cache=cache,
+                resident_bytes=0,
+                read_workers=2,
+            )
+    finally:
+        cache.close()
+    # One failure would be raised as itself; two stay together.
+    assert len(entered) == 2
+    assert sorted(str(error) for error in raised.value.exceptions) == sorted(
+        f"lost {key}" for key in entered
+    )
+    assert all(type(error) is OSError for error in raised.value.exceptions)
+
+
 def test_composite_count_prefetch_starts_shards_past_a_slow_one(tmp_path, monkeypatch):
     import asyncio
 
@@ -2514,6 +2566,18 @@ def test_composite_source_locations_require_persistent_credential_free_paths(
     local = WrapperStore(LocalStore(sources["a"].z.store.root))
     source = SimpleNamespace(zarr_loc=local, z=zarr.open_group(store=local, mode="r"))
     assert _source_location(source) == str(sources["a"].z.store.root.resolve())
+    # An fsspec store names its location by URL: a local file system's
+    # resolves to the path, and any other stays a URL.
+    root = sources["a"].z.store.root
+    for url, expected in (
+        (f"file://{root}", str(root.resolve())),
+        ("memory://composite/a.zarr", "memory:///composite/a.zarr"),
+    ):
+        fsspec_store = WrapperStore(FsspecStore.from_url(url, read_only=True))
+        source = SimpleNamespace(
+            zarr_loc=fsspec_store, z=SimpleNamespace(store=fsspec_store)
+        )
+        assert _source_location(source) == expected
     memory = SimpleNamespace(zarr_loc=MemoryStore(), z=zarr.group())
     with pytest.raises(ValueError, match="persistent filesystem location"):
         _source_location(memory)

@@ -611,3 +611,33 @@ def test_a_forecast_names_an_artifact_that_fails_its_payload_checks() -> None:
     assert recompute.describe() == (
         "The call asks to compute the forecast_test_counts artifact again"
     )
+
+
+def test_a_forecast_passes_over_records_it_cannot_read_or_that_name_no_request() -> (
+    None
+):
+    from cytearc.storage.artifacts import artifact_group
+
+    root = zarr.open_group(store=MemoryStore(), mode="w")
+    near = _stored(
+        root,
+        diagnostics={"forecastCount": 1},
+        parameters={"log_transform": True, "scale": 3},
+    )
+    # A newer record, as close to the request, edited by hand so that its
+    # completion flag no longer reads as one.
+    edited = _stored(
+        root,
+        diagnostics={"forecastCount": 1},
+        parameters={"log_transform": True, "scale": 4},
+    )
+    artifact_group(root, edited).attrs["complete"] = "yes"
+    # The newest is an artifact of the request whose write stopped before it
+    # recorded its provenance, so nothing says what it was computing.
+    unrecorded = _stored(root, diagnostics={"forecastCount": 1}, complete=False)
+    del artifact_group(root, unrecorded).attrs["provenance"]
+
+    computation = _forecast(root)
+
+    assert (computation.reason, computation.existing) == ("changed", near)
+    assert computation.changed_parameters == ("scale",)

@@ -196,6 +196,65 @@ def test_stage_metrics_reject_inconsistent_resource_use(build, message) -> None:
         build()
 
 
+def _null_trace_threads(stored: dict[str, Any]) -> None:
+    stored["trace"]["threads"] = None
+
+
+def _null_trace_network(stored: dict[str, Any]) -> None:
+    stored["trace"]["networkRxBytes"] = None
+
+
+def _text_trace_seconds(stored: dict[str, Any]) -> None:
+    stored["trace"]["seconds"] = "0.0 0.7 1.4"
+
+
+@pytest.mark.parametrize(
+    ("edit", "error", "message"),
+    [
+        (_text_trace_seconds, TypeError, "^trace seconds must be a sequence$"),
+        (
+            lambda stored: stored.update(trace=None),
+            TypeError,
+            "^metrics trace must be PipelineStageTrace$",
+        ),
+        (
+            lambda stored: stored.update(unavailable={"threadsPeak": "x" * 513}),
+            ValueError,
+            "^metrics unavailable threadsPeak exceeds the record limit$",
+        ),
+        (
+            _null_trace_threads,
+            ValueError,
+            "^The trace holds threads exactly when threads_peak exists$",
+        ),
+        (
+            _null_trace_network,
+            ValueError,
+            "^The trace holds network_rx_bytes exactly when the stage does$",
+        ),
+    ],
+    ids=["text-seconds", "no-trace", "long-reason", "no-threads", "no-network"],
+)
+def test_a_stage_record_edited_into_contradicting_metrics_is_refused(
+    edit, error, message
+) -> None:
+    root, ledger = _ledger("work")
+    ledger.run("work", lambda: ())
+    stage = root[pipeline_stage_path(ledger.run_id, 0)]
+    stored = json.loads(json.dumps(dict(stage.attrs)))
+    stored["metrics"] = json.loads(json.dumps(_metrics().to_dict()))
+    stage.attrs.put(stored)
+    # The record reads before the edit.
+    (record,) = load_pipeline_stage_records(root, ledger.run_id)
+    assert record.metrics == _metrics()
+
+    edit(stored["metrics"])
+    stage.attrs.put(stored)
+
+    with pytest.raises(error, match=message):
+        load_pipeline_stage_records(root, ledger.run_id)
+
+
 def test_a_null_beside_its_reason_reads_and_a_value_beside_one_does_not() -> None:
     reason = "OS thread counts require the Linux /proc filesystem"
     metrics = _metrics(
