@@ -37,6 +37,7 @@ from cytearc.storage.pipeline_runs import (
     load_pipeline_stage_records,
     pipeline_stage_path,
 )
+from cytearc.utils.logging import collect_warnings
 from tests.test_metadata_store_reads import _CountingStore
 
 # A run of every stage after the graph but Paris, membership strength, and
@@ -494,6 +495,30 @@ def test_estimates_from_records_without_resource_use_hold_none(
     ) == (None,) * 6
 
 
+def test_a_run_whose_stage_records_cannot_be_read_gives_no_estimate(
+    completed, tmp_path
+) -> None:
+    datastore = _copy(completed.location, tmp_path)
+    # The record of the run's first stage names another stage's place.
+    run_id = completed.run.run_id
+    datastore.zw[pipeline_stage_path(run_id, 0)].attrs["ordinal"] = 1
+
+    with collect_warnings() as warnings:
+        plan = datastore.pipeline.plan("rna", **{**SETTINGS, "hvg": {"top_n": 150}})
+
+    assert [text for text in warnings if text.startswith("Skipped")] == [
+        f"Skipped the stage records of pipeline run {run_id} for plan estimates: "
+        "Pipeline stage path 0 contains 1"
+    ]
+    # The run is the only one that computed each stage, so no stage that
+    # the plan computes has an estimate.
+    computed = [stage for stage in plan.stages if stage.status == "computed"]
+    assert {"highly_variable_features", "normalization", "markers"} <= {
+        stage.stage for stage in computed
+    }
+    assert {stage.estimate for stage in computed} == {None}
+
+
 def test_a_plan_checks_the_call_as_the_recipe_does(completed) -> None:
     pipeline = completed.datastore.pipeline
 
@@ -734,3 +759,20 @@ def test_a_stage_that_uses_an_undeclared_artifact_key_is_refused() -> None:
         RuntimeError, match=r"'first' returned \['first'\], which it does not declare"
     ):
         _plan(PlannedStage("first", lambda state: (("first", _ref(1)),)))
+
+
+def test_a_stage_gets_a_declared_input_or_the_default_of_one_that_is_absent() -> None:
+    seen = []
+
+    def reader(state: RunState) -> Any:
+        # "later" is declared but no stage has added it.
+        seen.append(state.artifacts.get("later", "absent"))
+        return (("read", state.artifacts.get("first")),)
+
+    plan = _plan(
+        PlannedStage("first", lambda state: (("first", _ref(1)),), outputs=("first",)),
+        PlannedStage("reader", reader, inputs=("first", "later"), outputs=("read",)),
+    )
+
+    assert seen == ["absent"]
+    assert plan["reader"].outputs == (("read", _ref(1)),)

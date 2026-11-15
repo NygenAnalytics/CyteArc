@@ -1322,6 +1322,12 @@ def test_each_sample_takes_every_hashtag_or_its_own():
         checked_sample_hashtags({1: ["HTO_A"]}, ids, ["1"], sample_column="pool")
     with pytest.raises(TypeError, match="^For sample 'x', hashtags must be a list"):
         checked_sample_hashtags({"x": "HTO_A"}, ids, ["x"], sample_column="pool")
+    # Without a sample column, every cell is one sample, which a mapping
+    # cannot name.
+    with pytest.raises(
+        ValueError, match="^hashtags maps samples to their hashtags, which needs"
+    ):
+        checked_sample_hashtags({"x": ["HTO_A"]}, ids, [None], sample_column=None)
 
 
 def test_each_positive_quantile_has_its_own_hto_identity_artifact(tmp_path: Path):

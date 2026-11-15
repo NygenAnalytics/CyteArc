@@ -21,6 +21,7 @@ from cytearc.perturbation import PerturbationEDistance
 from cytearc.perturbation.edistance import (
     edistance_arrays,
     edistance_from_sums,
+    edistance_memory_bytes,
 )
 from cytearc.storage.artifacts import inspect_artifact
 from cytearc.utils.logging import logger
@@ -476,6 +477,34 @@ def test_edistance_from_sums_equals_the_mean_distances() -> None:
         x.sum(axis=0), float((x**2).sum()), 7, y.sum(axis=0), float((y**2).sum()), 9
     )
     assert distance == pytest.approx(_brute(x, y))
+
+
+def test_rows_too_small_to_test_draw_no_permutations_from_the_budget() -> None:
+    # 5 control cells and rows of 1, 0 and 1 cells in 3 dimensions: no row
+    # has two cells, so the measurement holds only the cells' coordinates
+    # twice, 16 bytes per dimension, at most 41 bytes per cell beside them,
+    # and 128 bytes per row, however many permutations and threads it has.
+    held = 7 * (16 * 3 + 41) + 3 * 128
+    for n_permutations, nthreads in ((0, 1), (99, 1), (9_999, 8)):
+        assert (
+            edistance_memory_bytes(
+                np.array([1, 0, 1]),
+                5,
+                3,
+                n_permutations=n_permutations,
+                nthreads=nthreads,
+            )
+            == held
+        )
+
+    # A row of two cells is tested, so its thread draws permutations beside
+    # the cells, more of them for more permutations.
+    def with_a_pair(n_permutations: int) -> int:
+        return edistance_memory_bytes(
+            np.array([2, 0, 1]), 5, 3, n_permutations=n_permutations
+        )
+
+    assert 8 * (16 * 3 + 41) + 3 * 128 < with_a_pair(9) < with_a_pair(99)
 
 
 @pytest.fixture(scope="module")

@@ -368,8 +368,14 @@ def test_defaults_that_json_cannot_hold_are_written_as_text():
         [setting.name for setting in associations.settings].index("n_resamples")
     ]["default"] == [499, 4999, 24999]
     assert description._json_value(np.float32(np.nan)) == "nan"
+    # A mapping's keys become text, and its values JSON values in turn.
+    assert description._json_value(
+        {1: np.float64(-np.inf), "dims": (np.int64(2), None)}
+    ) == {"1": "-inf", "dims": [2, None]}
     with pytest.raises(TypeError, match="must be a JSON value"):
         description._json_value(object())
+    with pytest.raises(TypeError, match="must be a JSON value"):
+        description._json_value({"default": object()})
 
 
 def test_a_description_refuses_unknown_recipes_stages_and_settings():

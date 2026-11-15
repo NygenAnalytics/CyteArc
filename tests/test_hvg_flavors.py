@@ -1744,6 +1744,41 @@ def test_a_batch_of_too_few_candidates_warns_when_computed_and_when_reused(
     }
 
 
+def test_batches_that_together_hold_too_few_candidates_warn_of_both(
+    tmp_path,
+) -> None:
+    store = _store_of_batches(tmp_path / "hvg.zarr")
+    cells = store.snapshot_cell_selection()
+
+    def select() -> Any:
+        return store.features.hvgs(
+            cells, batch="batch", top_n=500, min_mean=-1, show_plot=False
+        )
+
+    computed, first = _hvg_warnings(select)
+    reused, second = _hvg_warnings(select)
+
+    assert reused == computed
+    # Batch a's 27 candidates hold batch b's 2, and every candidate of some
+    # batch is selected.
+    selected = int(np.count_nonzero(store.artifacts.load(computed)["values"][:]))
+    assert selected == 27
+    expected = [
+        "2 of 2 batches have fewer HVG candidates than top_n=500, so all of their "
+        "candidates count as highly variable in them: a (27), b (2)",
+        "Only 27 features are highly variable in some batch, fewer than "
+        "top_n=500; all of them are selected",
+    ]
+    assert [str(warning) for warning in first] == expected
+    assert [str(warning) for warning in second] == expected
+    assert store.artifacts.inspect(computed).diagnostics == {
+        "selectedFeatures": 27,
+        "batches": 2,
+        "batchesBelowTopN": 2,
+        "batchBelowTopNExamples": ["a (27)", "b (2)"],
+    }
+
+
 def test_a_selection_of_enough_candidates_gives_no_warning(tmp_path) -> None:
     store = _store_of_batches(tmp_path / "hvg.zarr")
     cells = store.snapshot_cell_selection()

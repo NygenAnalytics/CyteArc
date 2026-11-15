@@ -21,7 +21,12 @@ from cytearc.datastore._operations import perturbation_guides as operations
 from cytearc.datastore.datastore import DataStore
 from cytearc.perturbation import MULTIPLE, NEGATIVE, GuideThresholds
 from cytearc.perturbation.guide_thresholds import call_thresholds
-from cytearc.perturbation.histograms import guide_count_histograms
+from cytearc.perturbation.histograms import (
+    DENSE_COUNTS,
+    HistogramMemoryError,
+    guide_count_histograms,
+    histogram_bytes,
+)
 from cytearc.perturbation.mixtures import (
     FIT_STATUSES,
     fit_gaussian,
@@ -855,6 +860,65 @@ def test_call_guides_refuses_a_small_budget_before_it_writes(tmp_path, options) 
     with pytest.raises(MemoryBudgetError, match=f"^{first}.* Raise mem_budget"):
         store.perturbation.call_guides(cells, **options)
     assert written(open_store(path)) == saved
+
+
+def test_histograms_that_outgrow_the_budget_name_what_every_row_needs(
+    tmp_path,
+) -> None:
+    # Each of 2,000 cells holds a count of each of 20 guides above the dense
+    # range, drawn from 60,000 values, so that the histograms keep almost
+    # every count apart. Half of what the histograms of every distinct count
+    # hold passes their least beside a block of counts, but not the counts.
+    n_cells, n_guides = 2_000, 20
+    rng = np.random.default_rng(23)
+    counts = DENSE_COUNTS + 1 + rng.integers(0, 60_000, size=(n_cells, n_guides))
+    path = tmp_path / "store.zarr"
+    store = write_screen(
+        path, rng.poisson(1.0, size=(n_cells, 3)) + 1, counts.astype(np.uint16)
+    )
+    store.cells.insert("every", np.ones(n_cells, dtype=bool))
+    cells = store.snapshot_cell_selection("every")
+    rechunk_feature_tables(path)
+    distinct = len(np.unique(np.arange(n_guides) * 2**32 + counts))
+    budget = histogram_bytes(1, n_guides, n_cells, n_distinct=distinct) // 2
+    small = open_store(path, mem_budget=budget)
+    saved = written(small)
+
+    with pytest.raises(MemoryBudgetError) as refused:
+        small.perturbation.call_guides(cells)
+    error = refused.value
+    # The refusal names the distinct counts and the rows that remained, and
+    # what the histograms of every row need at the rate of the rows read.
+    found = re.fullmatch(
+        r"Fitting guide thresholds for 2000 cells and calling their guides holds "
+        r"about (\d+) bytes for the guide count histograms of (\d+) distinct "
+        r"counts, while (\d+) of 2000 rows of counts remain to be read, and at "
+        r"the rate of the rows read the histograms of every row need about (\d+) "
+        rf"bytes, more than the memory budget of {budget} bytes\. Raise mem_budget "
+        r"to at least \1 bytes, or pass a smaller cell_selection or fewer samples\.",
+        str(error),
+    )
+    assert found is not None, str(error)
+    needed, n_distinct, remaining, every_row = map(int, found.groups())
+    assert (error.needed_bytes, error.budget_bytes) == (needed, budget)
+    stopped = error.__cause__
+    assert isinstance(stopped, HistogramMemoryError)
+    assert stopped.n_distinct == n_distinct < distinct
+    assert stopped.rows_read == n_cells - remaining
+    assert 0 < stopped.rows_read < n_cells
+    # Beside what the call holds, every row needs more than the histograms
+    # needed where they stopped, and no more than they needed for each row
+    # read, times the rows.
+    held = needed - every_row
+    at_stop = stopped.needed_bytes - held
+    assert at_stop < every_row <= -(-at_stop * n_cells // stopped.rows_read)
+    assert written(open_store(path)) == saved
+    # The budget named gets past the point where the histograms stopped.
+    try:
+        open_store(path, mem_budget=needed).perturbation.call_guides(cells)
+    except MemoryBudgetError as later:
+        left = re.search(r"while (\d+) of 2000 rows", str(later))
+        assert left is None or int(left.group(1)) < remaining, str(later)
 
 
 def test_gaussian_warns_when_most_calls_carry_several_guides(tmp_path) -> None:

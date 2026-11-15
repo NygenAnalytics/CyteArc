@@ -34,6 +34,7 @@ from cytearc.plotting._style import (
     padded_square_limits,
 )
 from cytearc.storage import ArtifactRef
+from cytearc.storage.artifacts import artifact_group
 from cytearc.trajectory.curves import smooth_against_progress
 from cytearc.utils.memory_budget import MemoryBudgetError
 from tests.clone_helpers import write_selection_embedding
@@ -1890,6 +1891,38 @@ def test_curves_in_layout_take_any_selection_of_the_curves_cells(
         f"The layout lacks 1 of the trajectory's {len(layout.cell_indices)} "
         "cells; draw an embedding that holds them, such as a UMAP of the "
         "trajectory's graph",
+    )
+
+
+def test_curves_in_layout_refuse_layouts_other_than_two_finite_columns(
+    other_selections, lineage_curves, layout
+):
+    # The layout's values as a hand-edited store holds them: an imported
+    # layout refuses values that are not finite when it is saved.
+    store = other_selections.store
+    ref = write_selection_embedding(store, layout.selection, layout.coordinates)
+    group = artifact_group(store.zw, ref)
+    stored = np.asarray(group["values"][:])
+    infinite = stored.copy()
+    infinite[3, 1] = np.inf
+    for values, error, message in (
+        (
+            np.column_stack([stored, stored[:, 0]]),
+            ValueError,
+            "Embedding must have two columns and one row per selected cell",
+        ),
+        (infinite, ValueError, "Embedding coordinates must be finite"),
+        (stored > 0, TypeError, "Embedding coordinates must be numeric"),
+    ):
+        del group["values"]
+        group.create_array("values", data=values)
+        with pytest.raises(error, match=f"^{message}$"):
+            store.trajectory.curves_in_layout(lineage_curves, ref)
+    del group["values"]
+    group.create_array("values", data=stored)
+    pd.testing.assert_frame_equal(
+        store.trajectory.curves_in_layout(lineage_curves, ref),
+        store.trajectory.curves_in_layout(lineage_curves, layout.ref),
     )
 
 

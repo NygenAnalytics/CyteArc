@@ -55,6 +55,7 @@ from cytearc.trajectory.membership import (
     trunk_probabilities,
     weighted_median,
 )
+from cytearc.utils.memory_budget import MemoryBudgetError
 
 from .test_graph_coverage import _memory_graph_store
 from .test_graph_feature_projection import _native_chain
@@ -63,6 +64,7 @@ from .test_trajectory_record_paths import (
     _refresh_fingerprint,
     _rewrite_inputs,
     _rewrite_parameters,
+    _rewrite_record,
     _write_graph_payload,
 )
 
@@ -1561,6 +1563,187 @@ def test_the_membership_loader_refuses_changed_records() -> None:
         store.trajectory.load_lineage_membership(ref)
 
 
+@cache
+def _membership_template() -> tuple[_Branching, ArtifactRef]:
+    """The two-armed trajectory with its lineage membership, computed once."""
+    branching = _branching()
+    return branching, branching.store.trajectory.lineage_membership(branching.curves)
+
+
+def _membership_copy() -> tuple[_Branching, ArtifactRef]:
+    """A private copy of the store of the membership template, and its membership."""
+    branching, ref = _membership_template()
+    return replace(branching, store=_copy_store(branching.store)), ref
+
+
+def _replace_array(group: Any, name: str, values: np.ndarray) -> None:
+    del group[name]
+    group.create_array(name, data=values)
+
+
+def _add_attribute(group: Any) -> None:
+    group.attrs["note"] = "edited by hand"
+
+
+def _members_as_integers(group: Any) -> None:
+    _replace_array(group, "members", np.asarray(group["members"][:], dtype=np.int8))
+
+
+def _attribute_on_an_array(group: Any) -> None:
+    group["valid"].attrs["unit"] = "flag"
+
+
+def _trunk_components_in_a_column(group: Any) -> None:
+    components = np.asarray(group["trunk_components"][:])
+    _replace_array(group, "trunk_components", components.reshape(-1, 1))
+
+
+def _trunk_components_as_floats(group: Any) -> None:
+    components = np.asarray(group["trunk_components"][:], dtype=np.float64)
+    _replace_array(group, "trunk_components", components)
+
+
+def _no_graph_component(group: Any) -> None:
+    _replace_array(group, "trunk_components", np.zeros(0, dtype=np.int64))
+    _replace_array(group, "trunk_probabilities", np.zeros((0, 2)))
+
+
+def _scored_cell_marked_unscored(group: Any) -> None:
+    # The cell follows none and is labeled so, but its curves scored it.
+    for name, value in (("valid", False), ("members", False), ("values", "none")):
+        values = np.asarray(group[name][:])
+        values[0] = value
+        group[name][:] = values
+
+
+def _relabeled_cell(group: Any, label: str, relabeled: str) -> None:
+    labels = np.asarray(group["values"][:])
+    labels[np.flatnonzero(labels == label)[0]] = relabeled
+    group["values"][:] = labels
+
+
+@pytest.mark.parametrize(
+    "edit",
+    [
+        _add_attribute,
+        _members_as_integers,
+        _attribute_on_an_array,
+        _trunk_components_in_a_column,
+        _trunk_components_as_floats,
+        _no_graph_component,
+        _scored_cell_marked_unscored,
+        lambda group: _relabeled_cell(group, "a2", "b2"),
+        lambda group: _relabeled_cell(group, "shared", "a2"),
+        lambda group: _relabeled_cell(group, "a2", "none"),
+    ],
+    ids=[
+        "attribute-of-its-own",
+        "members-as-integers",
+        "attribute-on-an-array",
+        "trunk-components-in-a-column",
+        "trunk-components-as-floats",
+        "no-graph-component",
+        "scored-cell-marked-unscored",
+        "one-lineage-labeled-as-another",
+        "shared-cell-labeled-as-one-lineage",
+        "member-labeled-none",
+    ],
+)
+def test_a_hand_edited_membership_is_refused_and_computed_anew(edit) -> None:
+    branching, ref = _membership_copy()
+    store = branching.store
+    group = artifact_group(store.zw, ref)
+    edit(group)
+    # The edited arrays are fingerprinted again, so that the checks of the
+    # payload, not its fingerprint, have to find the edit.
+    _refresh_fingerprint(group, LINEAGE_MEMBERSHIP_PAYLOAD)
+
+    with pytest.raises(ValueError, match="^Lineage-membership artifact payload is"):
+        store.trajectory.load_lineage_membership(ref)
+    # A call with the same curves and rule does not reuse the edited
+    # membership, and saves the arrays of the template again.
+    again = store.trajectory.lineage_membership(branching.curves)
+    assert again != ref
+    assert len(_artifacts(store, "lineage_membership")) == 2
+    template, _ = _membership_template()
+    saved = artifact_group(template.store.zw, ref)
+    for name in LINEAGE_MEMBERSHIP_PAYLOAD:
+        np.testing.assert_array_equal(
+            artifact_group(store.zw, again)[name][:], saved[name][:]
+        )
+
+
+def test_the_membership_loader_refuses_a_missing_or_unfinished_record() -> None:
+    branching, ref = _membership_copy()
+    store = branching.store
+    absent = replace(ref, artifact_id="f" * 64)
+    message = "^Lineage-membership artifact is unavailable or invalid$"
+    with pytest.raises(ValueError, match=message):
+        store.trajectory.load_lineage_membership(absent)
+    with pytest.raises(ValueError, match=message):
+        store.trajectory.branch_cells(absent, ["a2", "b2"])
+    # A record of another operation, and an unfinished record, are refused
+    # alike.
+    _rewrite_record(store, ref, operation="call_lineage_curves")
+    with pytest.raises(ValueError, match=message):
+        store.trajectory.load_lineage_membership(ref)
+    _rewrite_record(store, ref, operation="call_lineage_membership")
+    assert store.trajectory.load_lineage_membership(ref).ref == ref
+    artifact_group(store.zw, ref).attrs["complete"] = False
+    with pytest.raises(ValueError, match=message):
+        store.trajectory.load_lineage_membership(ref)
+
+
+def test_a_membership_moved_out_of_its_curves_scope_is_refused() -> None:
+    # A copy of the RNA membership among the store's own artifacts, as a
+    # hand-edited store could hold it.
+    branching, ref = _membership_copy()
+    store = branching.store
+    moved = ArtifactRef(
+        scope="datastore", kind="lineage_membership", artifact_id=ref.artifact_id
+    )
+    source = artifact_group(store.zw, ref)
+    target = store.zw.require_group(f"artifacts/lineage_membership/{ref.artifact_id}")
+    target.attrs.update(dict(source.attrs))
+    for name, array in source.arrays():
+        target.create_array(name, data=np.asarray(array[:]))
+
+    assert store.trajectory.load_lineage_membership(ref).ref == ref
+    with pytest.raises(
+        ValueError,
+        match="^Lineage-membership artifact does not share its curves' scope$",
+    ):
+        store.trajectory.load_lineage_membership(moved)
+
+
+def test_membership_refuses_a_small_budget_before_it_writes() -> None:
+    branching, ref = _membership_copy()
+    store = branching.store
+    # A budget of the curves' three arrays of each cell and lineage, which
+    # hold 8 bytes a value, leaves no room to work in.
+    n_cells = len(branching.arms)
+    store.memoryBytes = 3 * n_cells * 2 * 8
+    with pytest.raises(MemoryBudgetError) as refused:
+        store.trajectory.lineage_membership(branching.curves, invalidate_cache=True)
+    error = refused.value
+    assert str(error).startswith(
+        f"Lineage membership needs about {error.needed_bytes - 1} bytes of working "
+        f"memory, which exceeds the memory budget of {store.memoryBytes} bytes."
+    )
+    assert error.budget_bytes == store.memoryBytes < error.needed_bytes
+    assert error.item == "the lineage membership of every cell"
+    assert _artifacts(store, "lineage_membership") == [ref]
+    # The budget that the refusal names computes the membership that a
+    # budget of 64 MiB computed.
+    store.memoryBytes = error.needed_bytes
+    again = store.trajectory.lineage_membership(branching.curves, invalidate_cache=True)
+    assert again != ref
+    np.testing.assert_array_equal(
+        store.trajectory.load_lineage_membership(again).members,
+        store.trajectory.load_lineage_membership(ref).members,
+    )
+
+
 def test_a_sink_named_like_a_membership_label_is_refused() -> None:
     with pytest.raises(ValueError, match="'none' cannot be told apart"):
         membership_labels(np.zeros((1, 2), dtype=bool), ["none", "B"])
@@ -1606,6 +1789,87 @@ def test_a_sink_named_like_a_membership_label_is_refused() -> None:
             ),
             trunk_probabilities=pd.DataFrame([[0.5]], columns=["A"]),
         )
+
+
+def _membership_of_three_lineages(**changed: Any) -> LineageMembershipResult:
+    """A membership of two cells and lineages A, B and C, with some fields changed."""
+    fields: dict[str, Any] = {
+        "ref": ArtifactRef(
+            scope="datastore", kind="lineage_membership", artifact_id="0" * 64
+        ),
+        "curves": ArtifactRef(
+            scope="datastore", kind="lineage_curves", artifact_id="1" * 64
+        ),
+        "cell_selection": ArtifactRef(
+            scope="datastore", kind="cell_selection", artifact_id="2" * 64
+        ),
+        "lineages": ("A", "B", "C"),
+        "labels": np.array(["A", "shared"]),
+        "members": np.array([[True, False, False], [True, True, False]]),
+        "valid": np.ones(2, dtype=bool),
+        "distance_limits": np.zeros((3, 4)),
+        "branch_points": pd.DataFrame(
+            [
+                [first, second, np.nan, np.nan, np.nan, 0, 0]
+                for first, second in (("A", "B"), ("A", "C"), ("B", "C"))
+            ],
+            columns=list(BRANCH_POINT_COLUMNS),
+        ),
+        "trunk_probabilities": pd.DataFrame(
+            [[0.5, 0.25, 0.25]], columns=["A", "B", "C"]
+        ),
+    }
+    return LineageMembershipResult(**{**fields, **changed})
+
+
+@pytest.mark.parametrize(
+    ("changed", "message"),
+    [
+        (
+            {"valid": np.ones((2, 1), dtype=bool)},
+            "Membership validity must be one-dimensional",
+        ),
+        ({"labels": np.array(["A"])}, "Membership labels must hold one label per cell"),
+        (
+            {"labels": np.array([["A", "shared"]])},
+            "Membership labels must hold one label per cell",
+        ),
+        (
+            {"members": np.zeros((2, 2), dtype=bool)},
+            "Membership must be cells by lineages",
+        ),
+        ({"members": np.zeros((3, 3), dtype=bool)}, "Membership must be cells by"),
+        ({"distance_limits": np.zeros(3)}, "Distance limits must be lineages by bins"),
+        (
+            {"distance_limits": np.zeros((2, 4))},
+            "Distance limits must be lineages by bins",
+        ),
+        # Three lineages part in three pairs, not one.
+        (
+            {
+                "branch_points": pd.DataFrame(
+                    [["A", "B", np.nan, np.nan, np.nan, 0, 0]],
+                    columns=list(BRANCH_POINT_COLUMNS),
+                )
+            },
+            "Branch points need one row per pair of lineages",
+        ),
+    ],
+)
+def test_a_membership_refuses_arrays_that_do_not_fit_its_cells_and_lineages(
+    changed, message
+) -> None:
+    with pytest.raises(ValueError, match=f"^{message}"):
+        _membership_of_three_lineages(**changed)
+
+
+def test_a_membership_of_fitting_arrays_holds_read_only_copies() -> None:
+    members = np.array([[True, False, False], [True, True, False]])
+    result = _membership_of_three_lineages(members=members)
+    members[0, 0] = False
+    assert result.members.tolist() == [[True, False, False], [True, True, False]]
+    assert not result.members.flags.writeable
+    assert len(result.branch_points) == 3
 
 
 # Drivers where two lineages part, on the 1K PBMC store

@@ -2515,6 +2515,27 @@ def test_untruncated_solver_bounds_are_checked_before_the_solve(
         )
 
 
+def test_a_solver_error_other_than_asymmetry_reaches_the_caller_unchanged(
+    monkeypatch,
+):
+    import cytearc.trajectory.pseudotime as pseudotime_module
+    from cytearc.trajectory import pba_potential
+
+    # SciPy's MINRES also refuses an indefinite preconditioner, which says
+    # nothing about the graph's symmetry.
+    refusal = ValueError("indefinite preconditioner")
+
+    def refusing_minres(*_args, **_kwargs):
+        raise refusal
+
+    monkeypatch.setattr(pseudotime_module, "minres", refusing_minres)
+
+    with pytest.raises(ValueError) as raised:
+        pba_potential(_clusters_on_a_tree(40, 4), _first_to_last_source_sink(40))
+    assert raised.value is refusal
+    assert raised.value.__cause__ is None
+
+
 @pytest.mark.parametrize("max_iterations", [200, None], ids=["bounded", "unbounded"])
 def test_the_untruncated_solve_reports_progress_to_observers_and_the_log(
     max_iterations, monkeypatch
