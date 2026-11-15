@@ -20,6 +20,20 @@ from tests.clone_helpers import link_count_variance
 from cytearc.utils.memory_budget import MemoryLedger
 from tests.memory_helpers import budgeted, climb_refusals, named_budget
 from tests.clone_helpers import within_distance as _within
+from tests.perturbation_helpers import use_python_kernels
+
+
+def _python_kernels(monkeypatch, python_kernels: bool) -> None:
+    """Run the search's kernels as Python, so that coverage sees their lines.
+
+    Their 64-bit products wrap around, as the compiled products do, which
+    NumPy's scalars warn of; pytest restores the filters after the test.
+    """
+    if python_kernels:
+        use_python_kernels(monkeypatch, sequences)
+        warnings.filterwarnings(
+            "ignore", "overflow encountered in scalar", RuntimeWarning
+        )
 
 
 def _pairs(first: np.ndarray, second: np.ndarray) -> set[tuple[int, int]]:
@@ -222,10 +236,14 @@ def test_a_cutoff_beyond_every_length_links_every_pair() -> None:
         assert _pairs(*found) == {(0, 4)}
 
 
+@pytest.mark.parametrize("python_kernels", [False, True])
 @pytest.mark.parametrize(
     ("metric", "cutoff"), [("hamming", 1), ("hamming", 2), ("levenshtein", 2)]
 )
-def test_neighbor_pairs_split_keys_into_passes(monkeypatch, metric, cutoff) -> None:
+def test_neighbor_pairs_split_keys_into_passes(
+    monkeypatch, metric, cutoff, python_kernels
+) -> None:
+    _python_kernels(monkeypatch, python_kernels)
     rng = np.random.default_rng(3)
     texts = sorted(
         {
@@ -240,15 +258,17 @@ def test_neighbor_pairs_split_keys_into_passes(monkeypatch, metric, cutoff) -> N
     assert _pairs(first, second) == _expected(texts, metric, cutoff)
 
 
+@pytest.mark.parametrize("python_kernels", [False, True])
 @pytest.mark.parametrize("path", ["keyed", "pairwise"])
 @pytest.mark.parametrize("alphabet", ["AC", "ACGT", "ACDEFGHIKLMNPQRSTVWY"])
 def test_keys_and_pairwise_comparisons_find_every_pair(
-    monkeypatch, path, alphabet
+    monkeypatch, path, alphabet, python_kernels
 ) -> None:
     # Either search, wherever it applies, finds every pair within each cutoff:
     # of texts of 0 to 12 letters and their variants, with runs of one letter
     # whose deletions coincide, a repeated text, and blocks.
     _force(monkeypatch, path)
+    _python_kernels(monkeypatch, python_kernels)
     rng = np.random.default_rng(len(alphabet))
     texts = _families(rng, alphabet, 20, 12) + ["AAAA", "AAAA", "AAA", "AACAA", "A"]
     blocks = rng.integers(0, 2, size=len(texts))
@@ -277,16 +297,19 @@ def test_keys_and_pairwise_comparisons_find_every_pair(
                 assert _pairs(first, second) == want, (metric, cutoff, chosen)
 
 
+@pytest.mark.parametrize("python_kernels", [False, True])
 @pytest.mark.parametrize("codes", ["zero", "four values"])
 @pytest.mark.parametrize(
     ("metric", "cutoff"), [("hamming", 1), ("hamming", 3), ("levenshtein", 2)]
 )
 def test_texts_whose_keys_share_a_hash_by_chance_are_compared(
-    monkeypatch, codes, metric, cutoff
+    monkeypatch, codes, metric, cutoff, python_kernels
 ) -> None:
     # With every code zero, or drawn from four values, most keys share a hash
     # with keys of other variants; those texts are compared and left out, and
-    # most passes stay empty.
+    # most passes stay empty. Each text's keys then share one hash, so a run
+    # repeats its rows, and texts of lengths more edits apart than the cutoff
+    # meet. Kernels run as Python on fewer texts.
     values = np.random.default_rng(0).integers(0, 2**63, size=4).astype(np.uint64)
 
     def table(width: int) -> np.ndarray:
@@ -297,8 +320,9 @@ def test_texts_whose_keys_share_a_hash_by_chance_are_compared(
     monkeypatch.setattr(sequences, "_zobrist_table", table)
     monkeypatch.setattr(sequences, "_KEYS_PER_PASS", 500)
     _force(monkeypatch, "keyed")
+    _python_kernels(monkeypatch, python_kernels)
     rng = np.random.default_rng(4)
-    texts = sorted(set(_families(rng, "ACG", 30, 8)))
+    texts = sorted(set(_families(rng, "ACG", 6 if python_kernels else 30, 8)))
     first, second = neighbor_pairs(texts, metric, cutoff)
     assert _pairs(first, second) == _expected(texts, metric, cutoff)
 
@@ -485,23 +509,28 @@ def test_many_blocks_pair_only_the_texts_of_each_block(metric, near) -> None:
     )
 
 
+@pytest.mark.parametrize("python_kernels", [False, True])
 @pytest.mark.parametrize("metric", ["hamming", "levenshtein"])
 @pytest.mark.parametrize("path", ["keyed", "pairwise"])
 def test_a_budget_below_the_pairs_found_raises_memory_error(
-    monkeypatch, path, metric
+    monkeypatch, path, metric, python_kernels
 ) -> None:
     _force(monkeypatch, path)
-    expected = _expected(_VARIANTS, metric, 1)
+    _python_kernels(monkeypatch, python_kernels)
     # The base pairs with each of its 36 variants, and the 9 variants at each
     # position pair with each other; variants at two positions are two
-    # substitutions or edits apart.
-    assert len(expected) == 36 + 4 * 9 * 8 // 2
+    # substitutions or edits apart. The climb below runs the search again for
+    # each pair, so kernels run as Python on the base and the variants at the
+    # first position alone.
+    texts = _VARIANTS[:10] if python_kernels else _VARIANTS
+    expected = _expected(texts, metric, 1)
+    assert len(expected) == (9 + 9 * 8 // 2 if python_kernels else 36 + 4 * 9 * 8 // 2)
     # From one byte, each refusal names the budget that passes its step: one
     # of them refuses the pairs, which keys under substitutions find in runs
     # that outgrow the buffer of the pairs found as it doubles, and the last
     # budget finds every pair.
     refusals, found = climb_refusals(
-        lambda budget: neighbor_pairs(_VARIANTS, metric, 1, ledger=budgeted(budget))
+        lambda budget: neighbor_pairs(texts, metric, 1, ledger=budgeted(budget))
     )
     step = (
         "for the pairs within max_distance"
@@ -966,14 +995,18 @@ def _segment_choices(length: int, limit: int) -> list[int]:
     ][:4] + ([length] if limit <= 3 else [])
 
 
-@pytest.mark.parametrize("cutoff", range(6))
+@pytest.mark.parametrize(
+    ("cutoff", "python_kernels"),
+    [*((cutoff, False) for cutoff in range(6)), (0, True), (5, True)],
+)
 def test_keys_find_every_pair_of_cut_cloneids_within_each_distance(
-    monkeypatch, cutoff
+    monkeypatch, cutoff, python_kernels
 ) -> None:
     # CloneIDs of 24 bases, some cut at one end or with a deletion, within 0
     # to 5 mismatches on the bases both hold, through keys of several
     # segment counts. The buffers of the pairs found and of the rows of a
     # run start at one, so every run outgrows them and is read again.
+    _python_kernels(monkeypatch, python_kernels)
     rng = np.random.default_rng(40 + cutoff)
     texts = _cloneids(rng, 40, length=24)
     blocks = rng.integers(0, 2, size=len(texts))
@@ -1001,12 +1034,16 @@ def test_keys_find_every_pair_of_cut_cloneids_within_each_distance(
         assert _pairs(*found) == expected, chosen
 
 
+@pytest.mark.parametrize("python_kernels", [False, True])
 @pytest.mark.parametrize("n_codes", [1, 2, 4, 5, 16, 17, 60])
-def test_packed_rows_differ_in_a_lane_wherever_their_codes_differ(n_codes) -> None:
+def test_packed_rows_differ_in_a_lane_wherever_their_codes_differ(
+    monkeypatch, n_codes, python_kernels
+) -> None:
     # Rows of 1 to 70 codes drawn from n_codes values pack 2, 4 or 8 bits to
     # a code, across words: the lanes in which two rows differ are the
     # positions where their codes differ, and the padding after the last
     # position never differs.
+    _python_kernels(monkeypatch, python_kernels)
     rng = np.random.default_rng(n_codes)
     for width in (1, 7, 8, 9, 15, 16, 17, 31, 32, 33, 63, 64, 65, 70):
         values = rng.choice(256, size=n_codes, replace=False).astype(np.uint8)
@@ -1029,6 +1066,41 @@ def test_packed_rows_differ_in_a_lane_wherever_their_codes_differ(n_codes) -> No
                 for word in range(n_words)
             )
             assert lanes == int(np.sum(codes[first] != codes[second])), (width, first)
+
+
+@pytest.mark.parametrize("python_kernels", [False, True])
+def test_runs_of_keys_pair_each_row_once_and_only_across_a_split(
+    monkeypatch, python_kernels
+) -> None:
+    # Keys hold a hash above their low 3 bits and a row in them: rows 0, 2
+    # and 5 share one hash, row 2 under two keys of it, rows 1 and 6 another,
+    # and row 3 a hash alone. With a split, only a row below it pairs with a
+    # row at or above it; the search of edits passes none, so the kernel is
+    # called directly.
+    _python_kernels(monkeypatch, python_kernels)
+    bits, n_rows = 3, 8
+    runs = {1: [0, 2, 2, 5], 2: [1, 6], 3: [3]}
+    keys = np.sort(
+        np.asarray(
+            [(code << bits) | row for code, rows in runs.items() for row in rows],
+            dtype=np.uint64,
+        )
+    )
+    for split in (0, 1, 2, 3, 6, 7):
+        expected = {
+            (first, second)
+            for rows in runs.values()
+            for first in rows
+            for second in rows
+            if first < second and (not split or first < split <= second)
+        }
+        counted = sequences._run_pairs(
+            keys, bits, n_rows, np.empty(0, dtype=np.int64), split
+        )
+        out = np.empty(counted, dtype=np.int64)
+        assert sequences._run_pairs(keys, bits, n_rows, out, split) == counted
+        assert counted == len(expected), split
+        assert set(zip(*np.divmod(out, n_rows), strict=True)) == expected, split
 
 
 def test_the_search_is_the_same_on_one_thread_and_on_four() -> None:
@@ -1350,11 +1422,12 @@ def test_the_chance_of_edits_follows_every_pattern_of_agreeing_positions(
     assert chance == pytest.approx(exact, rel=1e-12, abs=1e-15)
 
 
+@pytest.mark.parametrize("python_kernels", [False, True])
 @pytest.mark.parametrize(
     ("cutoff", "neighbors"), [(1, 12), (2, 12 + 54), (3, 12 + 54 + 108), (4, 255)]
 )
 def test_every_text_of_a_length_expects_its_pairs_from_the_share_that_agree(
-    cutoff, neighbors
+    monkeypatch, cutoff, neighbors, python_kernels
 ) -> None:
     # Of the 255 others of each of the 256 texts of four bases, 63 share its
     # base at a position, so two of them agree there with chance 63/255, and
@@ -1363,6 +1436,7 @@ def test_every_text_of_a_length_expects_its_pairs_from_the_share_that_agree(
     # has 4 * 3 others one substitution away, 6 * 3 * 3 two away, 4 * 3 * 3 *
     # 3 three away, and every other within four, which the search finds; the
     # whole space holds a few more than independent draws from it would.
+    _python_kernels(monkeypatch, python_kernels)
     texts = ["".join(bases) for bases in itertools.product("ACGT", repeat=4)]
     found, _second = neighbor_pairs(texts, "hamming", cutoff)
     expected = expected_chance_pairs(texts, "hamming", cutoff)
