@@ -9,11 +9,27 @@ from scipy.sparse import csr_matrix
 
 from cytearc.embeddings import localmap
 from cytearc.utils.numba import numba_threads
+from tests.perturbation_helpers import use_python_kernels
+from tests.random_stream_helpers import child_key, draw
 
 REFERENCE = np.load(
     Path(__file__).parent / "data" / "localmap" / "pacmap_0_9_1_reference.npz"
 )
 ITERATIONS = (100, 100, 250)
+
+
+def _python_kernels(monkeypatch: pytest.MonkeyPatch, python_kernels: bool) -> None:
+    """Run the kernels uncompiled, whose 64-bit products wrap as compiled ones do."""
+    if python_kernels:
+        use_python_kernels(monkeypatch, localmap)
+        np.seterr(over="ignore")
+
+
+@pytest.fixture(autouse=True)
+def _restore_floating_point_errors():
+    previous = np.geterr()
+    yield
+    np.seterr(**previous)
 
 
 def _rows_graph(rows: np.ndarray, weights: np.ndarray | None = None) -> csr_matrix:
@@ -57,8 +73,10 @@ def _reference_inputs() -> tuple[tuple[np.ndarray, ...], ...]:
     )
 
 
+@pytest.mark.parametrize("python_kernels", [False, True])
 @pytest.mark.parametrize("iteration", [0, 50, 150, 200])
-def test_gradient_matches_pacmap(iteration):
+def test_gradient_matches_pacmap(monkeypatch, iteration, python_kernels):
+    _python_kernels(monkeypatch, python_kernels)
     neighbors, mid_near, further = _reference_inputs()
     w_mid_near, w_neighbors, w_further = localmap.phase_weights(iteration, ITERATIONS)
     state = REFERENCE["state"]
@@ -80,7 +98,9 @@ def test_gradient_matches_pacmap(iteration):
     assert _relative_error(gradient, REFERENCE[f"gradient_{iteration}"]) < 1e-5
 
 
-def test_local_gradient_matches_pacmap():
+@pytest.mark.parametrize("python_kernels", [False, True])
+def test_local_gradient_matches_pacmap(monkeypatch, python_kernels):
+    _python_kernels(monkeypatch, python_kernels)
     neighbors, mid_near, further = _reference_inputs()
     w_mid_near, w_neighbors, w_further = localmap.phase_weights(300, ITERATIONS)
     state = REFERENCE["state"]
@@ -145,7 +165,41 @@ def test_three_phases_from_fixed_pairs_match_pacmap():
     assert _relative_error(layout, REFERENCE["layout_450"]) < 2e-2
 
 
-def test_weighted_gradient_sums_each_edge_in_both_directions():
+@pytest.mark.parametrize("python_kernels", [False, True])
+def test_adam_steps_follow_the_bias_corrected_moments(monkeypatch, python_kernels):
+    _python_kernels(monkeypatch, python_kernels)
+    rng = np.random.default_rng(8)
+    signs = rng.choice([-1.0, 1.0], size=(4, 6, 2))
+    gradients = (rng.uniform(1.0, 5.0, size=(4, 6, 2)) * signs).astype(np.float32)
+    layout = np.zeros((6, 2), dtype=np.float32)
+    first, second = np.zeros_like(layout), np.zeros_like(layout)
+    expected = np.zeros((6, 2))
+    mean, square = np.zeros((6, 2)), np.zeros((6, 2))
+
+    for t, gradient in enumerate(gradients, start=1):
+        # The step that localmap_layout passes, at a learning rate of 0.5.
+        step = 0.5 * math.sqrt(1 - 0.999**t) / (1 - 0.9**t)
+        localmap._adam_step(layout, gradient, first, second, step)
+        mean = 0.9 * mean + 0.1 * gradient
+        square = 0.999 * square + 0.001 * gradient.astype(float) ** 2
+        # Adam's epsilon of 1e-7, which this leaves out, moves each of these
+        # steps, about 0.5 long, by under 2e-6.
+        expected -= 0.5 * (mean / (1 - 0.9**t)) / np.sqrt(square / (1 - 0.999**t))
+        if t == 1:
+            # The first step moves each coordinate by the learning rate,
+            # against its gradient, whatever the gradient's size.
+            np.testing.assert_allclose(layout, -0.5 * signs[0], rtol=1e-5)
+
+    np.testing.assert_allclose(first, mean, rtol=1e-5)
+    np.testing.assert_allclose(second, square, rtol=1e-5)
+    np.testing.assert_allclose(layout, expected, rtol=0, atol=1e-5)
+
+
+@pytest.mark.parametrize("python_kernels", [False, True])
+def test_weighted_gradient_sums_each_edge_in_both_directions(
+    monkeypatch, python_kernels
+):
+    _python_kernels(monkeypatch, python_kernels)
     rng = np.random.default_rng(5)
     n_cells = 30
     rows = np.stack(
@@ -212,8 +266,12 @@ def _partners_by_definition(indptr, indices, weights):
     return partners
 
 
+@pytest.mark.parametrize("python_kernels", [False, True])
 @pytest.mark.parametrize("n_chunks", [1, 2, 7, 50])
-def test_partners_list_both_directions_in_a_fixed_order(n_chunks):
+def test_partners_list_both_directions_in_a_fixed_order(
+    monkeypatch, n_chunks, python_kernels
+):
+    _python_kernels(monkeypatch, python_kernels)
     rng = np.random.default_rng(3)
     degrees = rng.integers(0, 6, size=50)
     indptr = np.concatenate([[0], np.cumsum(degrees)]).astype(np.int64)
@@ -232,7 +290,9 @@ def test_partners_list_both_directions_in_a_fixed_order(n_chunks):
     assert out_weights.tolist() == [weight for row in expected for _, weight in row]
 
 
-def test_pair_partners_carry_no_weights():
+@pytest.mark.parametrize("python_kernels", [False, True])
+def test_pair_partners_carry_no_weights(monkeypatch, python_kernels):
+    _python_kernels(monkeypatch, python_kernels)
     pairs = np.array([[1, 2], [2, 0], [0, 1]], dtype=np.int32)
 
     indptr, partners = localmap.pair_partners(pairs)
@@ -302,6 +362,46 @@ def test_mid_near_pairs_are_second_closest_of_six():
     assert all(len(set(row)) == row.size for row in pairs)
 
 
+@pytest.mark.parametrize("python_kernels", [False, True])
+def test_each_mid_near_pair_ranks_second_of_six_among_the_cells_left(
+    monkeypatch, python_kernels
+):
+    _python_kernels(monkeypatch, python_kernels)
+    # Cells at powers of two, so no two distances from a cell tie, and five
+    # pairs, which leave seven cells for the six candidates of the last pair.
+    positions = 2.0 ** np.arange(12)
+
+    pairs = localmap.mid_near_pairs(positions[:, None], 5, 3)
+
+    for cell, row in enumerate(pairs.tolist()):
+        for pair, partner in enumerate(row):
+            left = sorted(
+                (
+                    other
+                    for other in range(12)
+                    if other != cell and other not in row[:pair]
+                ),
+                key=lambda other: abs(positions[other] - positions[cell]),
+            )
+            # The second closest of six distinct candidates has one of them
+            # closer and four farther.
+            assert 1 <= left.index(partner) <= len(left) - 5
+
+
+@pytest.mark.parametrize("python_kernels", [False, True])
+def test_cell_keys_and_draws_are_splitmix64_streams(monkeypatch, python_kernels):
+    _python_kernels(monkeypatch, python_kernels)
+    key = localmap.draw_key(7, 2)
+
+    for cell in (0, 1, 2**31 - 2):
+        assert int(localmap._cell_key(key, cell)) == child_key(int(key), cell)
+    for counter, bound in ((0, 1), (1, 6), (5, 1000), (2**40, 2**31 - 1)):
+        drawn = localmap._random_below(key, counter, bound)
+        # The top 32 bits of the draw, scaled to the bound.
+        assert drawn == (draw(int(key), counter) >> 32) * bound >> 32
+        assert 0 <= drawn < bound
+
+
 def test_mid_near_pairs_depend_on_the_seed_only():
     cells, _ = _clusters()
 
@@ -323,7 +423,9 @@ def test_mid_near_pairs_reject_too_few_cells_and_invalid_coordinates():
         localmap.mid_near_pairs(np.zeros(20), 5, 0)
 
 
-def test_further_pairs_avoid_the_cell_and_its_neighbors():
+@pytest.mark.parametrize("python_kernels", [False, True])
+def test_further_pairs_avoid_the_cell_and_its_neighbors(monkeypatch, python_kernels):
+    _python_kernels(monkeypatch, python_kernels)
     cells, _ = _clusters()
     neighbors = _nearest(cells, 10)
 
@@ -341,6 +443,20 @@ def test_further_pairs_avoid_the_cell_and_its_neighbors():
     assert counts.max() < 45
 
 
+@pytest.mark.parametrize("python_kernels", [False, True])
+def test_further_pairs_take_every_other_cell_when_just_enough_remain(
+    monkeypatch, python_kernels
+):
+    _python_kernels(monkeypatch, python_kernels)
+    # Six cells in a ring, each naming the next, leave four cells for four pairs.
+    graph = _rows_graph(np.array([[(row + 1) % 6] for row in range(6)]))
+
+    pairs = localmap.further_pairs(graph, 4, 5)
+
+    for cell, row in enumerate(pairs.tolist()):
+        assert sorted(row) == sorted(set(range(6)) - {cell, (cell + 1) % 6})
+
+
 def test_further_pairs_reject_too_few_cells():
     graph = _rows_graph(np.array([[(row + 1) % 5] for row in range(5)]))
 
@@ -348,7 +464,9 @@ def test_further_pairs_reject_too_few_cells():
         localmap.further_pairs(graph, 4, 0)
 
 
-def test_redraw_keeps_pairs_without_a_nearby_candidate():
+@pytest.mark.parametrize("python_kernels", [False, True])
+def test_redraw_keeps_pairs_without_a_nearby_candidate(monkeypatch, python_kernels):
+    _python_kernels(monkeypatch, python_kernels)
     cells, _ = _clusters()
     n_cells = cells.shape[0]
     neighbors = _nearest(cells, 10)
@@ -509,6 +627,25 @@ def test_graph_check_copies_only_graphs_it_must_change():
     assert graph.nnz == 12 and graph.data.dtype == np.float64
     assert checked.nnz == 11 and checked.data.dtype == np.float32
     assert localmap._checked_graph(checked) is checked
+
+
+def test_graphs_of_more_cells_than_int32_partners_hold_are_refused():
+    # SciPy keeps int64 offsets for 2**31 rows, so one stored zero repeated by
+    # a zero stride stands for the offsets of a graph without edges, and the
+    # graph holds a few bytes, not 16 GiB. Below 2**31 rows SciPy would copy
+    # the offsets into int32.
+    n_cells = 2**31
+    offsets = np.broadcast_to(np.zeros(1, dtype=np.int64), (n_cells + 1,))
+    graph = csr_matrix(
+        (np.zeros(0, dtype=np.float32), np.zeros(0, dtype=np.int64), offsets),
+        shape=(n_cells, n_cells),
+    )
+    assert graph.indptr.strides == (0,)
+
+    with pytest.raises(ValueError, match=r"fewer than 2\*\*31 - 1 cells"):
+        localmap.neighbor_partners(graph)
+    with pytest.raises(ValueError, match=r"fewer than 2\*\*31 - 1 cells"):
+        localmap.further_pairs(graph, 4, 0)
 
 
 _SETTINGS = {

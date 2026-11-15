@@ -17,6 +17,7 @@ from cytearc.regulons.specificity import (
     regulon_modules,
     regulon_specificity,
 )
+from tests.perturbation_helpers import use_python_kernels
 from tests.regulon_helpers import csi_by_definition, rss_by_definition
 
 
@@ -273,14 +274,22 @@ def _passes(values: np.ndarray, rows: int):
 
 
 @pytest.mark.parametrize(
-    ("n_cells", "n_regulons", "n_groups"),
-    [(200, 6, 4), (1500, 25, 40), (60, 3, 60)],
+    ("n_cells", "n_regulons", "n_groups", "python_kernels"),
+    [
+        (200, 6, 4, False),
+        (1500, 25, 40, False),
+        (60, 3, 60, False),
+        (200, 6, 4, True),
+    ],
 )
 def test_specificity_scores_sum_any_blocks_of_cells_into_the_pyscenic_scores(
-    n_cells, n_regulons, n_groups
+    monkeypatch, n_cells, n_regulons, n_groups, python_kernels
 ):
+    from cytearc.regulons import specificity
     from cytearc.regulons.specificity import specificity_scores
 
+    if python_kernels:
+        use_python_kernels(monkeypatch, specificity)
     rng = np.random.default_rng(n_cells)
     values = rng.uniform(0, 0.4, size=(n_cells, n_regulons)).astype(np.float32)
     # A regulon without activity, one active in three cells, and a group of
@@ -301,7 +310,14 @@ def test_specificity_scores_sum_any_blocks_of_cells_into_the_pyscenic_scores(
     assert not np.isnan(scores[:, 1:]).any()
 
 
-def test_regulon_specificity_gives_the_scores_derived_by_hand():
+@pytest.mark.parametrize("python_kernels", [False, True])
+def test_regulon_specificity_gives_the_scores_derived_by_hand(
+    monkeypatch, python_kernels
+):
+    from cytearc.regulons import specificity
+
+    if python_kernels:
+        use_python_kernels(monkeypatch, specificity)
     activity = pd.DataFrame({"X": [2.0, 2.0, 0.0, 0.0], "Y": [1.0, 1.0, 1.0, 1.0]})
 
     rss = regulon_specificity(activity, ["a", "a", "b", "b"])
@@ -332,11 +348,14 @@ def test_a_regulon_active_only_and_evenly_in_a_group_scores_one(size, value):
     assert rss.loc["out", 0] == pytest.approx(1 - np.sqrt(np.log(2)), abs=1e-12)
 
 
+@pytest.mark.parametrize("python_kernels", [False, True])
 def test_in_memory_specificity_reads_its_table_a_block_of_rows_at_a_time(
-    monkeypatch,
+    monkeypatch, python_kernels
 ):
     from cytearc.regulons import specificity
 
+    if python_kernels:
+        use_python_kernels(monkeypatch, specificity)
     rng = np.random.default_rng(5)
     values = rng.integers(0, 9, size=(101, 5))
     labels = np.asarray([None, "B", "C"] * 33 + ["B", "C"], dtype=object)
@@ -418,8 +437,29 @@ def test_activity_correlation_merges_blocks_without_cancelling_large_sums(rows):
     assert not correlation[5].any() and not correlation[:, 5].any()
 
 
+def test_activity_correlation_skips_blocks_without_cells():
+    from cytearc.regulons.specificity import activity_correlation
+
+    values = np.random.default_rng(9).normal(size=(40, 4))
+    empty = np.empty((0, 4))
+    # A block without cells has NaN means, which would turn every sum NaN if
+    # it were merged after another block.
+    blocks = [empty, values[:13], empty, values[13:], empty]
+
+    correlation = activity_correlation(iter(blocks), 4)
+
+    np.testing.assert_allclose(correlation, np.corrcoef(values.T), rtol=0, atol=1e-12)
+
+
+@pytest.mark.parametrize("python_kernels", [False, True])
 @pytest.mark.parametrize("margin", [0.0, 0.05, 0.3])
-def test_connection_specificity_counts_the_regulons_below_each_pair(margin):
+def test_connection_specificity_counts_the_regulons_below_each_pair(
+    monkeypatch, margin, python_kernels
+):
+    from cytearc.regulons import specificity
+
+    if python_kernels:
+        use_python_kernels(monkeypatch, specificity)
     rng = np.random.default_rng(4)
     base = rng.normal(size=(400, 3))
     values = np.column_stack(
@@ -434,10 +474,16 @@ def test_connection_specificity_counts_the_regulons_below_each_pair(margin):
     assert csi.index.tolist() == csi.columns.tolist() == list(activity.columns)
 
 
+@pytest.mark.parametrize("python_kernels", [False, True])
 @pytest.mark.parametrize("value", [-0.5, np.nan, np.inf])
-def test_specificity_scores_refuse_negative_or_non_finite_activity(value):
+def test_specificity_scores_refuse_negative_or_non_finite_activity(
+    monkeypatch, value, python_kernels
+):
+    from cytearc.regulons import specificity
     from cytearc.regulons.specificity import specificity_scores
 
+    if python_kernels:
+        use_python_kernels(monkeypatch, specificity)
     values = np.asarray([[1.0, 2.0], [3.0, value]])
 
     with pytest.raises(ValueError, match="AUCs must be finite and non-negative"):

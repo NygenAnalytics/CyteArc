@@ -681,6 +681,9 @@ def test_specificity_rejects_invalid_requests(scored):
         store.regulons.connection_specificity(everyone)
     with pytest.raises(TypeError, match="ArtifactRef or a cell column name"):
         store.regulons.specificity(auc, 3)
+    # An artifact without labels keeps the error that names what it lacks.
+    with pytest.raises(ValueError, match="must contain categorical cell labels"):
+        store.regulons.specificity(auc, auc)
     with pytest.raises(TypeError, match="cell_selection must be an ArtifactRef"):
         store.regulons.specificity(auc, "groups", cell_selection="everyone")
 

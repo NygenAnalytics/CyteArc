@@ -33,6 +33,7 @@ from cytearc.utils.memory_budget import MemoryBudgetError
 from cytearc.writers import H5adToZarr
 from scripts.build_string_networks import write_npz
 from tests.network_helpers import NETWORK_SKIP, hub_or_skip
+from tests.perturbation_helpers import use_python_kernels
 
 LOG2_1_1 = math.log2(1.1)
 GOLDEN_RATIO = (1 + math.sqrt(5)) / 2
@@ -89,7 +90,12 @@ def explicit_entropy_rate(adjacency: np.ndarray, x: np.ndarray) -> float:
 # The measures
 
 
-def test_one_detected_gene_on_a_path_of_three_genes_is_worked_by_hand():
+@pytest.mark.parametrize("python_kernels", [False, True])
+def test_one_detected_gene_on_a_path_of_three_genes_is_worked_by_hand(
+    monkeypatch, python_kernels
+):
+    if python_kernels:
+        use_python_kernels(monkeypatch, potency)
     network = path_network(3)
     # 10,000 * 77 / 100,000 + 1.1 = 8.8 = 8 * 1.1, so x0 = 3 + b with b = log2(1.1).
     block = np.array([[77, 0, 0]])
@@ -114,7 +120,12 @@ def test_one_detected_gene_on_a_path_of_three_genes_is_worked_by_hand():
     assert detected.tolist() == [1]
 
 
-def test_uniform_expression_on_a_path_of_four_genes_is_worked_by_hand():
+@pytest.mark.parametrize("python_kernels", [False, True])
+def test_uniform_expression_on_a_path_of_four_genes_is_worked_by_hand(
+    monkeypatch, python_kernels
+):
+    if python_kernels:
+        use_python_kernels(monkeypatch, potency)
     network = path_network(4)
     assert math.exp(network.log_lambda) == pytest.approx(GOLDEN_RATIO, rel=1e-12)
     entropy, correlation, detected = potency.network_scores(
@@ -156,7 +167,12 @@ def test_the_rate_is_the_explicit_entropy_rate_over_the_largest_rate(seed):
         assert 0 < entropy[row] <= 1 + 1e-12
 
 
-def test_the_kernel_matches_a_dense_reference_on_sparse_counts():
+@pytest.mark.parametrize("python_kernels", [False, True])
+def test_the_kernel_matches_a_dense_reference_on_sparse_counts(
+    monkeypatch, python_kernels
+):
+    if python_kernels:
+        use_python_kernels(monkeypatch, potency)
     rng = np.random.default_rng(7)
     network = random_network(rng, 300, 900)
     counts = rng.poisson(0.4, size=(50, 300)).astype(np.uint16)
