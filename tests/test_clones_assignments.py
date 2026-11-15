@@ -1,5 +1,7 @@
 """Clone labels, assignment and ranking, checked against hand-derived values."""
 
+import sys
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -344,5 +346,25 @@ def test_a_label_beyond_the_budget_is_refused_before_it_is_kept() -> None:
     # The refused label was not kept, so the cells keep their clones, which
     # ranking them without a budget shows.
     assert assigner.n_labels == 1
+    assert assigner.label_bytes == sys.getsizeof("a")
     ledger.budget = None
     assert assigner.finish().clone_ids.tolist() == ["a"]
+
+
+def test_label_bytes_count_each_distinct_label_once_as_a_python_string() -> None:
+    # An ASCII string takes a byte per character beside the bytes of the
+    # empty string.
+    empty = sys.getsizeof("")
+    assigner, ledger = _assigner()
+    cells = ledger.charged
+    assert assigner.label_bytes == 0
+    assigner.add(np.asarray([0, 1, 2]), _labels("x", "y" * 101, "x"))
+    assert assigner.label_bytes == 2 * empty + 1 + 101
+    two_entries = ledger.charged - cells - assigner.label_bytes
+    # A label given again adds nothing, and a new one its string.
+    assigner.add(np.asarray([3, 4]), _labels("x", "zz"))
+    assert assigner.label_bytes == 3 * empty + 1 + 101 + 2
+    # Beside the labels' strings, the ledger holds one entry of equal bytes
+    # for each label.
+    three_entries = ledger.charged - cells - assigner.label_bytes
+    assert two_entries / 2 == three_entries / 3 > 0

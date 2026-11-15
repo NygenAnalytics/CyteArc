@@ -881,6 +881,25 @@ def test_counting_the_distinct_barcodes_without_correction_checks_the_budget() -
         )
 
 
+def test_the_calls_returned_stay_charged_to_the_ledger_as_their_bytes() -> None:
+    # Cells 0 and 1 share A and cell 2 holds B, two clones; cell 3 holds no
+    # barcode. Each of the 4 cells keeps its clone (int64), doublet and
+    # ambiguity flags (a byte each) and barcodes (int32), and each clone its
+    # size (int64).
+    rows = _molecules(0, A, 3) + _molecules(1, A, 3) + _molecules(2, B, 3)
+    ledger = budgeted(2**30)
+    called = barcode_clone_calls(
+        _records(rows),
+        4,
+        groups=np.zeros(4, dtype=np.int64),
+        settings=barcode_call_settings(method="sets"),
+        ledger=ledger,
+    )
+    assert called.calls.n_clones == 2
+    assert called.nbytes == 4 * (8 + 1 + 1 + 4) + 2 * 8
+    assert ledger.charged == called.nbytes
+
+
 def test_barcodes_of_two_groups_or_libraries_never_merge() -> None:
     rows = _molecules(0, A, 5) + _molecules(1, A1, 1)
     groups = np.asarray([0, 1])
