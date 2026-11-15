@@ -38,6 +38,7 @@ from tests.clone_helpers import (
 )
 from cytearc.utils.memory_budget import MemoryLedger
 from tests.memory_helpers import climb_refusals, named_budget
+from tests.perturbation_helpers import use_python_kernels
 
 # Contig IDs repeat across the three files: X takes _3 and then _4, since the
 # TCR file names a contig X_2, and Z takes _3, or _2 when only chains are
@@ -493,7 +494,12 @@ def test_the_writer_refuses_blocks_without_their_columns(tmp_path) -> None:
     assert path.read_text() == "\t".join([*AIRR_REQUIRED_FIELDS, "cell_id"]) + "\n"
 
 
-def test_the_writer_writes_values_as_they_are(tmp_path) -> None:
+@pytest.mark.parametrize("python_kernels", [False, True])
+def test_the_writer_writes_values_as_they_are(
+    tmp_path, monkeypatch, python_kernels
+) -> None:
+    if python_kernels:
+        use_python_kernels(monkeypatch, airr_writer)
     path = tmp_path / "unquoted.tsv"
     # Double quotes at the start, within and at the end, ', @, # and text
     # beyond ASCII: the AIRR file format quotes no value.
@@ -649,7 +655,12 @@ def test_a_table_refusal_names_the_first_contig_of_a_later_chunk(
     assert not path.exists()
 
 
-def test_the_writer_refuses_a_block_before_writing_any_of_it(tmp_path) -> None:
+@pytest.mark.parametrize("python_kernels", [False, True])
+def test_the_writer_refuses_a_block_before_writing_any_of_it(
+    tmp_path, monkeypatch, python_kernels
+) -> None:
+    if python_kernels:
+        use_python_kernels(monkeypatch, airr_writer)
     path = tmp_path / "blocks.tsv"
     with AirrRearrangementWriter(path, ["cell_id"]) as writer:
         writer.write({"sequence_id": ["a"], "cell_id": ["c1"]})
@@ -1598,7 +1609,12 @@ def test_measuring_counts_the_codes_of_values_that_hold_forbidden_characters(
     assert contigs._contig_id(0) == "x_contig_1"
 
 
-def test_rows_are_marked_by_the_value_that_holds_a_forbidden_byte() -> None:
+@pytest.mark.parametrize("python_kernels", [False, True])
+def test_rows_are_marked_by_the_value_that_holds_a_forbidden_byte(
+    monkeypatch, python_kernels
+) -> None:
+    if python_kernels:
+        use_python_kernels(monkeypatch, airr_writer)
     # Five values: one that starts with a tab, an empty one, as a missing
     # value is, one that ends with a newline, one without, and one of a
     # carriage return and a tab within it.
@@ -1611,6 +1627,84 @@ def test_rows_are_marked_by_the_value_that_holds_a_forbidden_byte() -> None:
             piece = data[start : start + step].copy()
             airr_writer._mark_forbidden_rows(piece, start, bounds, marks)
         assert marks.tolist() == [True, False, True, False, True], step
+
+
+def _packed_values(values: list[str]) -> tuple[np.ndarray, np.ndarray]:
+    """Pack text as the writer does: UTF-8 bytes, with each value's offsets."""
+    encoded = [value.encode("utf-8") for value in values]
+    data = np.frombuffer(b"".join(encoded), dtype=np.uint8).copy()
+    offsets = np.zeros(len(values) + 1, dtype=np.int64)
+    np.cumsum([len(value) for value in encoded], out=offsets[1:])
+    return data, offsets
+
+
+@pytest.mark.parametrize("python_kernels", [False, True])
+@pytest.mark.parametrize(
+    "values",
+    [
+        # No value holds a forbidden byte: discouraged characters, an empty
+        # value and text beyond ASCII are allowed.
+        ["IGHV1", "", "é@#\"'", "TRBV2"],
+        [],
+        # Several do: one starts with a tab, one ends with a newline, one
+        # holds two forbidden bytes and counts once, and the last ends with a
+        # carriage return.
+        ["\tA", "", "B", "C\n", "D\r\tE", "F", "G\r"],
+    ],
+)
+def test_forbidden_values_are_counted_and_found_by_their_positions(
+    monkeypatch, python_kernels, values
+) -> None:
+    if python_kernels:
+        use_python_kernels(monkeypatch, airr_writer)
+    data, offsets = _packed_values(values)
+    positions = [
+        position
+        for position, value in enumerate(values)
+        if {"\t", "\n", "\r"} & set(value)
+    ]
+    assert airr_writer._count_forbidden_values(data, offsets) == len(positions)
+    # The writer asks for the first value alone, and an export for them all.
+    for count in range(len(positions) + 1):
+        found = airr_writer._forbidden_values(data, offsets, count)
+        assert found.dtype == np.int64
+        assert found.tolist() == positions[:count]
+
+
+@pytest.mark.parametrize("python_kernels", [False, True])
+def test_rows_are_marked_by_the_code_of_a_forbidden_value(
+    monkeypatch, python_kernels
+) -> None:
+    if python_kernels:
+        use_python_kernels(monkeypatch, airr_writer)
+    # Each contig's code of a text field, -1 for a missing value, and 7 past
+    # the largest code that is marked.
+    codes = np.asarray([-1, 0, 2, 5, 2, 3, 7], dtype=np.int64)
+    # Each contig's cell, and each cell's clonotype code, -1 for none.
+    cells = np.asarray([0, 1, 2, 3, 3, 0], dtype=np.int64)
+    clonotypes = np.asarray([1, -1, 0, 2], dtype=np.int64)
+    cases = [
+        (codes, [2, 5], None),
+        (codes, [], None),
+        (cells, [1], clonotypes),
+        (cells, [0, 1, 2], clonotypes),
+        (cells, [], clonotypes),
+    ]
+    for values, marked, through in cases:
+        coded = [
+            int(value if through is None or value < 0 else through[value])
+            for value in values
+        ]
+        expected = [code >= 0 and code in marked for code in coded]
+        marks = np.zeros(len(values), dtype=np.bool_)
+        airr_writer._mark_coded_rows(
+            values,
+            np.asarray(marked, dtype=np.int64),
+            airr_writer._NO_CODES if through is None else through,
+            through is not None,
+            marks,
+        )
+        assert marks.tolist() == expected, (marked, through is not None)
 
 
 def test_exported_values_read_back_through_an_import_as_they_were(tmp_path) -> None:
@@ -1630,7 +1724,12 @@ def test_exported_values_read_back_through_an_import_as_they_were(tmp_path) -> N
     assert cells.loc["cell0", "VJ_1_v_call"] == "TRAV1@B"
 
 
-def test_integers_of_every_length_are_written_whole(tmp_path) -> None:
+@pytest.mark.parametrize("python_kernels", [False, True])
+def test_integers_of_every_length_are_written_whole(
+    tmp_path, monkeypatch, python_kernels
+) -> None:
+    if python_kernels:
+        use_python_kernels(monkeypatch, airr_writer)
     values = [0, 9, 10, 99, 100, *(10**k for k in range(3, 19)), -10, -100]
     values += [-(10**18), 2**63 - 1]
     table = pd.DataFrame(
@@ -1642,6 +1741,34 @@ def test_integers_of_every_length_are_written_whole(tmp_path) -> None:
     write_airr_rearrangements(table, tmp_path / "digits.tsv")
     written = _read(tmp_path / "digits.tsv")["np1_length"].tolist()
     assert written == [str(value) for value in values]
+
+
+@pytest.mark.parametrize("python_kernels", [False, True])
+def test_each_integer_width_is_written_to_its_extremes_as_python_writes_it(
+    tmp_path, monkeypatch, python_kernels
+) -> None:
+    if python_kernels:
+        use_python_kernels(monkeypatch, airr_writer)
+    columns: dict[str, object] = {"sequence_id": [f"s{k}" for k in range(7)]}
+    expected = {}
+    for dtype in ("int8", "int16", "int32", "int64", "uint8", "uint16", "uint32"):
+        info = np.iinfo(dtype)
+        middle = [-1, 0, 9] if info.min < 0 else [9, 10, 99]
+        values = [int(info.min), int(info.min) + 1, *middle, int(info.max) - 1]
+        values.append(int(info.max))
+        columns[dtype] = np.asarray(values, dtype=dtype)
+        expected[dtype] = [str(value) for value in values]
+        # The nullable array of the same width, with its fourth value missing.
+        nullable = dtype.replace("uint", "UInt").replace("int", "Int")
+        columns[nullable] = pd.array([*values[:3], None, *values[4:]], dtype=nullable)
+        expected[nullable] = [*expected[dtype][:3], "", *expected[dtype][4:]]
+    write_airr_rearrangements(pd.DataFrame(columns), tmp_path / "widths.tsv")
+    written = _read(tmp_path / "widths.tsv")
+    for name, texts in expected.items():
+        assert written[name].tolist() == texts, name
+    # The smallest and largest values reach the width's own digits.
+    assert written["int64"].tolist()[0] == "-9223372036854775808"
+    assert written["UInt32"].tolist()[-1] == "4294967295"
 
 
 def test_zero_counts_are_written_as_zero(tmp_path) -> None:
