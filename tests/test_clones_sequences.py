@@ -1069,14 +1069,10 @@ def test_packed_rows_differ_in_a_lane_wherever_their_codes_differ(
 
 
 @pytest.mark.parametrize("python_kernels", [False, True])
-def test_runs_of_keys_pair_each_row_once_and_only_across_a_split(
-    monkeypatch, python_kernels
-) -> None:
+def test_runs_of_keys_pair_each_row_once(monkeypatch, python_kernels) -> None:
     # Keys hold a hash above their low 3 bits and a row in them: rows 0, 2
     # and 5 share one hash, row 2 under two keys of it, rows 1 and 6 another,
-    # and row 3 a hash alone. With a split, only a row below it pairs with a
-    # row at or above it; the search of edits passes none, so the kernel is
-    # called directly.
+    # and row 3 a hash alone.
     _python_kernels(monkeypatch, python_kernels)
     bits, n_rows = 3, 8
     runs = {1: [0, 2, 2, 5], 2: [1, 6], 3: [3]}
@@ -1086,21 +1082,11 @@ def test_runs_of_keys_pair_each_row_once_and_only_across_a_split(
             dtype=np.uint64,
         )
     )
-    for split in (0, 1, 2, 3, 6, 7):
-        expected = {
-            (first, second)
-            for rows in runs.values()
-            for first in rows
-            for second in rows
-            if first < second and (not split or first < split <= second)
-        }
-        counted = sequences._run_pairs(
-            keys, bits, n_rows, np.empty(0, dtype=np.int64), split
-        )
-        out = np.empty(counted, dtype=np.int64)
-        assert sequences._run_pairs(keys, bits, n_rows, out, split) == counted
-        assert counted == len(expected), split
-        assert set(zip(*np.divmod(out, n_rows), strict=True)) == expected, split
+    expected = {(0, 2), (0, 5), (2, 5), (1, 6)}
+    counted = sequences._run_pairs(keys, bits, n_rows, np.empty(0, dtype=np.int64))
+    out = np.empty(counted, dtype=np.int64)
+    assert sequences._run_pairs(keys, bits, n_rows, out) == counted == len(expected)
+    assert set(zip(*np.divmod(out, n_rows), strict=True)) == expected
 
 
 def test_the_search_is_the_same_on_one_thread_and_on_four() -> None:
@@ -2099,3 +2085,21 @@ def test_the_frequencies_of_edited_texts_count_against_the_budget() -> None:
     assert expected == pytest.approx(
         expected_chance_pairs(texts, "levenshtein", 1), rel=1e-12
     )
+
+
+def test_a_loop_that_stopped_short_is_never_returned_as_its_pairs() -> None:
+    from cytearc.utils.memory_budget import MemoryBudgetError
+
+    pairs = np.asarray([0, 1], dtype=np.int64)
+    stopped = (pairs, pairs, False)
+    # Within a budget, the pairs a stopped loop would need are refused.
+    budgeted = sequences._Found(MemoryLedger(1_000, "Finding pairs"), [], [])
+    with pytest.raises(MemoryBudgetError):
+        budgeted.looped(stopped)
+    # Without one, a loop never stops short, so one that did is a fault rather
+    # than a partial result.
+    unbudgeted = sequences._Found(MemoryLedger(None, "Finding pairs"), [], [])
+    with pytest.raises(AssertionError, match="stopped collecting pairs"):
+        unbudgeted.looped(stopped)
+    first, second = unbudgeted.looped((pairs, pairs, True))
+    assert first is pairs and second is pairs

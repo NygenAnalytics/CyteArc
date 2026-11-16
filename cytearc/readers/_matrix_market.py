@@ -246,7 +246,8 @@ def matrix_market_entries(
 ) -> Iterator[tuple[np.ndarray, np.ndarray, np.ndarray | None]]:
     """Yield the entries of a Matrix Market coordinate matrix in chunks.
 
-    Lines that start with ``%`` hold no entry. Coordinates are parsed as
+    Each chunk holds at least one entry. Lines that start with ``%`` hold no
+    entry. Coordinates are parsed as
     whole numbers and values as the matrix's field declares: int64 for
     ``"integer"`` and float64 for ``"real"``, so scipy's ``3.71E2`` in a real
     matrix reads as 371. An entry holds its row and column, and a value

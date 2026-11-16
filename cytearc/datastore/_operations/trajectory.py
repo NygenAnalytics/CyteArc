@@ -548,17 +548,14 @@ class _FateInputs:
 
 
 def _rows_of_cells(
-    values: np.ndarray,
-    missing: np.ndarray | None,
-    places: np.ndarray | None,
+    values: np.ndarray, missing: np.ndarray | None, places: np.ndarray
 ) -> tuple[np.ndarray, np.ndarray | None]:
     """Take the rows of a trajectory's cells from values of its graph's cells.
 
-    ``places`` gives the trajectory's cells among the graph's, or is None
-    when the values already hold the trajectory's cells.
+    ``places`` gives the trajectory's cells among the graph's. Callers take
+    rows only when the trajectory's cells differ from the graph's, so the
+    graph's own selection, which has no places, never reaches here.
     """
-    if places is None:
-        return values, missing
     return values[places], None if missing is None else missing[places]
 
 
@@ -1320,6 +1317,7 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
                 raise ValueError("Source/sink labels do not align with graph rows")
             if label_selection != stored_selection:
                 # Labels of the graph's cells, read at the cells scored.
+                assert places is not None
                 raw_labels, label_missing = _rows_of_cells(
                     raw_labels, label_missing, places
                 )
@@ -1617,6 +1615,7 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         if source_selection not in (selection, graph_selection):
             raise ValueError("Pseudotime source/sink input uses a different selection")
         if source_selection != selection:
+            assert places is not None
             source_values, source_missing = _rows_of_cells(
                 source_values, source_missing, places
             )
@@ -1961,6 +1960,7 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
             raise ValueError(selection_refusal)
         if sink_selection != stored_selection:
             # Labels of the graph's cells, read at the pseudotime's cells.
+            assert places is not None
             raw_sink_values, sink_missing = _rows_of_cells(
                 raw_sink_values, sink_missing, places
             )
@@ -2221,6 +2221,7 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
                 graph_selection,
                 cell_selection_indices(self.zw, graph_selection),
             )
+            assert places is not None
             sink_values, sink_missing = _rows_of_cells(
                 sink_values, sink_missing, places
             )

@@ -93,6 +93,13 @@ def hub_offline(monkeypatch, tmp_path):
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("USERPROFILE", str(home))
+    # huggingface_hub fixed its token files when imported, so a machine's login
+    # would still be read, and an OAuth token near expiry refreshed over the
+    # network and written back.
+    monkeypatch.setattr(hf_constants, "HF_TOKEN_PATH", str(home / "hf_token"))
+    monkeypatch.setattr(
+        hf_constants, "HF_STORED_TOKENS_PATH", str(home / "hf_stored_tokens")
+    )
     return home
 
 

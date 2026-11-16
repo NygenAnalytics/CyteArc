@@ -1081,3 +1081,36 @@ def test_suppress_native_output_handles_closed_streams(
     captured = capfd.readouterr()
     assert captured.out == "visible\n"
     assert captured.err == "visible error\n"
+
+
+@pytest.mark.parametrize(
+    ("n_points", "kept"),
+    [
+        # The first point stays and each later pair merges into its later
+        # point; a point left without a pair stays as it is.
+        (5, [0, 2, 4]),
+        (6, [0, 2, 4, 5]),
+    ],
+)
+def test_merging_a_trace_keeps_the_first_point_and_the_later_of_each_pair(
+    n_points, kept
+) -> None:
+    rss = [7, 3, 9, 2, 1, 4]
+    threads = [1, 5, 2, None, 6, 3]
+    points = [
+        process_module._Point(
+            seconds=float(index),
+            cpu_seconds=10.0 * index,
+            rss_bytes=rss[index],
+            threads=threads[index],
+            network_rx_bytes=None,
+            network_tx_bytes=index,
+        )
+        for index in range(n_points)
+    ]
+    merged = process_module._merge_trace(points)
+    assert [point.seconds for point in merged] == kept
+    assert [point.cpu_seconds for point in merged] == [10.0 * i for i in kept]
+    # A merged point takes the larger RSS and thread count of its pair.
+    assert [point.rss_bytes for point in merged] == [7, 9, 2, 4][: len(kept)]
+    assert [point.threads for point in merged] == [1, 5, 6, 3][: len(kept)]

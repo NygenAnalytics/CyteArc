@@ -269,37 +269,29 @@ def _product_bound(n_cells: int, n_modes: int, max_iterations: int) -> int:
 class _SolveProgress:
     """Count the Laplacian products of a pseudotime solve and report them.
 
-    A progress bar counts the products against ``bound``, the most that
-    ``max_iterations`` allows, or without a total when ``max_iterations`` is
-    None, and an INFO record reports them every
+    ``limit`` holds the solve's ``max_iterations`` and the most products
+    they allow, or is None for an unbounded solve. A progress bar counts the
+    products against that most, or without a total when the solve is
+    unbounded, and an INFO record reports them every
     ``_PROGRESS_INTERVAL_SECONDS``. ``solving`` names what the solve finds,
     such as ``"for 30 singular modes"``.
     """
 
     def __init__(
-        self,
-        n_cells: int,
-        solving: str,
-        max_iterations: int | None,
-        bound: int | None,
+        self, n_cells: int, solving: str, limit: tuple[int, int] | None
     ) -> None:
-        if (max_iterations is None) != (bound is None):
-            raise ValueError(
-                "bound must be given with max_iterations, and only with it"
-            )
         self.products = 0
         self._n_cells = n_cells
         self._solving = solving
-        self._max_iterations = max_iterations
-        self._bound = bound
-        if self._bound is None:
+        self._limit = limit
+        if limit is None:
             # Without a total, the bar shows the count and its rate.
             self._bar = tqdmbar(
                 desc="Pseudotime solve",
                 bar_format="{desc}: {n_fmt} operator products [{elapsed}, {rate_fmt}]",
             )
         else:
-            self._bar = tqdmbar(total=self._bound, desc="Pseudotime solve")
+            self._bar = tqdmbar(total=limit[1], desc="Pseudotime solve")
         self._started = self._recorded = self._shown = time.monotonic()
         self._shown_products = 0
 
@@ -318,12 +310,13 @@ class _SolveProgress:
         self._shown = now
 
     def _record(self, now: float) -> None:
-        if self._bound is None:
+        if self._limit is None:
             count = f"{self.products} operator products"
             bound = "; set max_iterations to bound the solve"
         else:
-            count = f"{self.products} of at most {self._bound} operator products"
-            bound = f" (max_iterations={self._max_iterations})"
+            max_iterations, most = self._limit
+            count = f"{self.products} of at most {most} operator products"
+            bound = f" (max_iterations={max_iterations})"
         logger.info(
             f"Pseudotime scoring: {count} after {now - self._started:.0f} s, "
             f"solving {self._solving} of {self._n_cells} cells{bound}"
@@ -332,8 +325,8 @@ class _SolveProgress:
     def close(self, converged: bool) -> None:
         """Show the last count, or a full bar when a bounded solve converged."""
         try:
-            if converged and self._bound is not None:
-                self._bar.update(max(0, self._bound - self._shown_products))
+            if converged and self._limit is not None:
+                self._bar.update(max(0, self._limit[1] - self._shown_products))
             else:
                 self._show(time.monotonic())
         finally:
@@ -410,10 +403,12 @@ def truncated_pba_potential(
     progress = _SolveProgress(
         n_cells,
         f"for {n_singular_vals} singular modes",
-        max_iterations,
         None
         if max_iterations is None
-        else _product_bound(n_cells, n_singular_vals, max_iterations),
+        else (
+            max_iterations,
+            _product_bound(n_cells, n_singular_vals, max_iterations),
+        ),
     )
     converged = False
     try:
@@ -558,8 +553,9 @@ def pba_potential(
     progress = _SolveProgress(
         n_cells,
         "for the untruncated potential",
-        max_iterations,
-        None if max_iterations is None else max_iterations + _SYMMETRY_CHECK_PRODUCTS,
+        None
+        if max_iterations is None
+        else (max_iterations, max_iterations + _SYMMETRY_CHECK_PRODUCTS),
     )
 
     def counted(vector: np.ndarray) -> np.ndarray:

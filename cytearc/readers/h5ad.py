@@ -1151,8 +1151,6 @@ class H5adReader:
         return int(self._convertedCsr.indptr.nbytes)
 
     def _csr_indptr(self) -> np.ndarray | None:
-        if self.matrixOrientation == "dense":
-            return None
         if self._convertedCsr is not None:
             return np.asarray(self._convertedCsr.indptr)
         if self.matrixOrientation != "csr":
@@ -1180,8 +1178,6 @@ class H5adReader:
 
     def _dense_chunk_rows(self) -> int | None:
         """Return the rows of a dense matrix's HDF5 chunks, or None if unchunked."""
-        if self.matrixOrientation != "dense":
-            return None
         chunks = self.h5[self.matrixKey].chunks
         return None if chunks is None else int(chunks[0])
 

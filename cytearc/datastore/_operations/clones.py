@@ -362,9 +362,9 @@ def _chunk_rows(ledger: MemoryLedger, row_bytes: int) -> int:
     clone labels and the hashes of barcodes that match no cell; a chunk
     holds 1,000 rows at least and 1,000,000 at most.
     """
+    # The store's budget always gives the ledger room.
     room = ledger.room
-    if room is None:
-        return _MAX_CHUNK_ROWS
+    assert room is not None
     return int(min(_MAX_CHUNK_ROWS, max(_MIN_CHUNK_ROWS, room // (2 * row_bytes))))
 
 

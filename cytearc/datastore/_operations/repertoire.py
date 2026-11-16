@@ -332,12 +332,10 @@ def _encode_contigs(
         per_row = _PARSE_BYTES_PER_FIELD * source.n_columns
         # The encoder holds the contigs encoded so far, which the room leaves
         # out; a chunk takes half of what the room and they leave together.
+        # The store's budget always gives the ledger room.
         room = ledger.room
-        fitting = (
-            _MOST_PARSED_ROWS
-            if room is None
-            else (room - encoder.nbytes) // 2 // per_row
-        )
+        assert room is not None
+        fitting = (room - encoder.nbytes) // 2 // per_row
         chunk_rows = min(_MOST_PARSED_ROWS, max(_LEAST_PARSED_ROWS, fitting))
         chunks = _iter_source(source, chunk_rows)
         # The reader keeps a chunk's text until it parses the next, so a
