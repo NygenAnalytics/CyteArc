@@ -1,5 +1,6 @@
 """Validation and edge paths of the H5AD reader and the Seurat matrix sources."""
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -182,7 +183,7 @@ def test_h5ad_reader_rejects_unusable_matrix_and_table_slots(tmp_path) -> None:
     missing_indices = _write_h5ad(tmp_path / "missing_indices.h5ad")
     with h5py.File(missing_indices, "a") as h5:
         del h5["X/indices"]
-    with pytest.raises(ValueError, match="`X` is missing: indices"):
+    with pytest.raises(ValueError, match="holding `data`, `indptr` but not `indices`"):
         H5adReader(str(missing_indices))
 
     without_matrix = _write_h5ad(tmp_path / "without_matrix.h5ad")
@@ -197,6 +198,136 @@ def test_h5ad_reader_rejects_unusable_matrix_and_table_slots(tmp_path) -> None:
         h5["obs"].create_group("nested").attrs["encoding-type"] = "dict"
     with pytest.raises(KeyError, match="`obs` key doesn't contain any child node"):
         H5adReader(str(unsized))
+
+
+_MATRIX_EXPECTED = (
+    "H5adReader reads a matrix from a two-dimensional dense dataset, or from a "
+    "CSR or CSC group holding `data`, `indices` and `indptr`."
+)
+
+
+def _empty_matrix_group(h5: h5py.File) -> None:
+    del h5["X"]
+    h5.create_group("X")
+
+
+def _drop_sparse_arrays(h5: h5py.File) -> None:
+    for key in ("data", "indices", "indptr"):
+        del h5["X"][key]
+
+
+@pytest.mark.parametrize(
+    ("edit", "contents"),
+    [
+        # An empty matrix group used to be taken for a missing slot, which
+        # raised "X is neither Dataset or Group type".
+        (_empty_matrix_group, "an empty group"),
+        (_drop_sparse_arrays, "an empty group encoded as `csr_matrix`"),
+    ],
+)
+def test_h5ad_reader_refuses_an_empty_matrix_group(tmp_path, edit, contents) -> None:
+    path = _write_h5ad(tmp_path / "counts.h5ad")
+    with h5py.File(path, "a") as h5:
+        edit(h5)
+    message = f"ERROR: Matrix `X` is {contents}. {_MATRIX_EXPECTED}"
+    with pytest.raises(ValueError, match=re.escape(message)):
+        H5adReader(str(path))
+
+
+@pytest.mark.parametrize("encoding", ["csr", "csc"])
+@pytest.mark.parametrize(
+    ("lacking", "held"),
+    [
+        ("data", "`indices`, `indptr`"),
+        ("indices", "`data`, `indptr`"),
+        ("indptr", "`data`, `indices`"),
+    ],
+)
+def test_h5ad_reader_names_the_arrays_that_a_sparse_matrix_group_lacks(
+    tmp_path, encoding, lacking, held
+) -> None:
+    path = _write_h5ad(tmp_path / "counts.h5ad", encoding=encoding)
+    with h5py.File(path, "a") as h5:
+        del h5["X"][lacking]
+    message = (
+        f"ERROR: Matrix `X` is a group encoded as `{encoding}_matrix` holding "
+        f"{held} but not `{lacking}`. {_MATRIX_EXPECTED}"
+    )
+    with pytest.raises(ValueError, match=re.escape(message)):
+        H5adReader(str(path))
+
+
+def test_h5ad_reader_refuses_a_layer_group_that_holds_no_matrix(tmp_path) -> None:
+    path = _write_h5ad(tmp_path / "counts.h5ad")
+    with h5py.File(path, "a") as h5:
+        layers = h5.create_group("layers")
+        layers.create_group("counts")
+        for name in "abcdef":
+            layers.create_dataset(name, data=_COUNTS)
+    # A layer reads through matrix_key, as X does.
+    message = f"ERROR: Matrix `layers/counts` is an empty group. {_MATRIX_EXPECTED}"
+    with pytest.raises(ValueError, match=re.escape(message)):
+        H5adReader(str(path), matrix_key="layers/counts")
+    # The group of layers is no matrix either; its members are listed up to five.
+    message = (
+        "ERROR: Matrix `layers` is a group holding `a`, `b`, `c`, `counts`, `d` "
+        "and 2 more members but not `data`, `indices`, `indptr`. "
+        f"{_MATRIX_EXPECTED}"
+    )
+    with pytest.raises(ValueError, match=re.escape(message)):
+        H5adReader(str(path), matrix_key="layers")
+
+
+@pytest.mark.parametrize(
+    ("encoding", "matrix_key", "code"),
+    [
+        ("dense", "X", 1),
+        ("csr", "X", 2),
+        ("csc", "X", 2),
+        ("csr", "layers/counts", 2),
+    ],
+)
+def test_h5ad_reader_opens_valid_matrices_as_before(
+    tmp_path, encoding, matrix_key, code
+) -> None:
+    path = _write_h5ad(tmp_path / "counts.h5ad", encoding=encoding)
+    if matrix_key != "X":
+        with h5py.File(path, "a") as h5:
+            h5.create_group("layers")
+            h5.move("X", matrix_key)
+            h5.create_dataset("X", data=np.zeros(_COUNTS.shape, dtype=np.float32))
+    reader = H5adReader(str(path), matrix_key=matrix_key, temp_dir=tmp_path)
+    try:
+        assert reader.groupCodes[matrix_key] == code
+        assert reader.matrixOrientation == encoding
+        assert (reader.nCells, reader.nFeatures) == _COUNTS.shape
+        rows = np.vstack([batch.toarray() for batch in reader.consume(3)])
+        np.testing.assert_array_equal(rows, _COUNTS)
+    finally:
+        reader.close()
+
+
+def test_h5ad_reader_still_takes_empty_table_groups_for_absent_tables(
+    tmp_path,
+) -> None:
+    path = _write_h5ad(tmp_path / "counts.h5ad")
+    with h5py.File(path, "a") as h5:
+        for group in ("obs", "var"):
+            del h5[group]
+            h5.create_group(group)
+        h5.create_group("obsm")
+    reader = H5adReader(str(path))
+    try:
+        assert reader.groupCodes == {"obs": 0, "var": 0, "obsm": 0, "X": 2}
+        assert (reader.nCells, reader.nFeatures) == _COUNTS.shape
+        np.testing.assert_array_equal(
+            reader.cell_ids(), ["cell_0", "cell_1", "cell_2", "cell_3"]
+        )
+        np.testing.assert_array_equal(
+            reader.feat_ids(), ["feature_0", "feature_1", "feature_2"]
+        )
+    finally:
+        reader.close()
 
 
 def test_h5ad_reader_treats_named_datatypes_as_absent(tmp_path) -> None:
