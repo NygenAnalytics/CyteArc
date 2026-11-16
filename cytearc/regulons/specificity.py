@@ -12,6 +12,7 @@ from collections.abc import Callable, Iterable, Iterator, Sequence
 import numpy as np
 import pandas as pd
 
+from ..metadata.selection import valid_category_mask
 from ..utils.arguments import float_argument, integer_argument
 from ..utils.numba import njit
 
@@ -64,11 +65,9 @@ def _add_group_terms(
 
     A cell of group ``g`` adds ``p`` to ``in_group[g]`` and
     ``p ln(p / m) + q ln(q / m)`` to ``terms[g]``, with ``p`` its activity over
-    the regulon's total, ``q = weights[g]`` and ``m = (p + q) / 2``. A cell in
-    no group adds ``p`` to the last row of ``in_group``.
+    the regulon's total, ``q = weights[g]`` and ``m = (p + q) / 2``.
     """
     n_rows, n_columns = values.shape
-    outside = in_group.shape[0] - 1
     for row in range(n_rows):
         group = codes[row]
         for column in range(n_columns):
@@ -76,9 +75,6 @@ def _add_group_terms(
             if total <= 0.0:
                 continue
             p = np.float64(values[row, column]) / total
-            if group < 0:
-                in_group[outside, column] += p
-                continue
             q = weights[group]
             m = (p + q) / 2.0
             term = q * np.log(q / m)
@@ -91,10 +87,10 @@ def _add_group_terms(
 def specificity_bytes(n_groups: int, n_regulons: int) -> int:
     """Return the bytes that :func:`specificity_scores` holds beside the blocks it reads.
 
-    Each regulon's total, the sums of each group and regulon and of the
-    cells in no group, and the scores it returns, all float64.
+    Each regulon's total, the sums of each group and regulon, and the
+    scores it returns, all float64.
     """
-    sums = n_regulons * (1 + (n_groups + 1) + n_groups) + 2 * n_groups
+    sums = n_regulons * (1 + 2 * n_groups) + 2 * n_groups
     return _FLOAT_BYTES * (sums + n_groups * n_regulons)
 
 
@@ -120,16 +116,14 @@ def specificity_scores(
     of each group and regulon, each cell adding to its own group, so the
     sums hold two values for each group and regulon whatever the cells.
     The share of a regulon's activity outside a group is the sum of every
-    group's ``P`` and of the cells in no group, less the group's own, which
-    is exactly 0 for a regulon active only in the group, and a divergence
-    that rounding leaves below 0 counts as 0.
+    group's ``P`` less the group's own, which is exactly 0 for a regulon
+    active only in the group, and a divergence that rounding leaves below 0
+    counts as 0.
 
     Args:
         blocks: Called once for each pass, it returns the cells' activity
             in blocks of rows, cells by regulons, in the order of ``codes``.
-        codes: Each cell's group, from 0 to ``n_groups - 1``, or -1 for a
-            cell in no group, whose activity counts in each regulon's total
-            only.
+        codes: Each cell's group, from 0 to ``n_groups - 1``.
         n_groups: The groups.
         n_regulons: The regulons, the columns of every block.
         name: What holds the activity, as errors name it.
@@ -139,17 +133,19 @@ def specificity_scores(
         activity and for a group without cells.
 
     Raises:
-        ValueError: If a value of activity is negative or not finite, or the
-            blocks do not hold one row for each code.
+        ValueError: If a code is negative or not below ``n_groups``, a value
+            of activity is negative or not finite, or the blocks do not hold
+            one row for each code.
     """
     codes = np.asarray(codes, dtype=np.int64)
-    if codes.ndim != 1 or (
-        len(codes) and (int(codes.min()) < -1 or int(codes.max()) >= n_groups)
-    ):
-        raise ValueError(f"codes must name groups from 0 to {n_groups - 1}, or -1")
-    sizes = np.bincount(codes[codes >= 0], minlength=n_groups)
+    # The kernel indexes each group's sums by its code unchecked, so a code
+    # past the last group is refused here, and NumPy's count of each group's
+    # cells refuses a negative code.
+    if codes.ndim != 1 or (len(codes) and int(codes.max()) >= n_groups):
+        raise ValueError(f"codes must name groups from 0 to {n_groups - 1}")
+    sizes = np.bincount(codes, minlength=n_groups)
     totals = np.zeros(n_regulons, dtype=np.float64)
-    in_group = np.zeros((n_groups + 1, n_regulons), dtype=np.float64)
+    in_group = np.zeros((n_groups, n_regulons), dtype=np.float64)
     terms = np.zeros((n_groups, n_regulons), dtype=np.float64)
     with np.errstate(divide="ignore"):
         weights = 1.0 / sizes.astype(np.float64)
@@ -180,7 +176,7 @@ def specificity_scores(
         raise ValueError(f"{name} holds {start} rows for {len(codes)} cells")
     # The share of each regulon's activity outside each group, then the
     # divergence and the score, in the array that is returned.
-    scores = in_group.sum(axis=0)[None, :] - in_group[:n_groups]
+    scores = in_group.sum(axis=0)[None, :] - in_group
     scores *= np.log(2.0)
     scores += terms
     scores *= 0.5
@@ -212,16 +208,31 @@ def regulon_specificity(
     Args:
         activity: Cells-by-regulons non-negative activity, such as AUCell AUCs.
         labels: Group of each cell, aligned by position with ``activity``.
+            Every cell needs a label.
 
     Returns:
         A groups-by-regulons DataFrame, groups in order of first appearance.
         A regulon without activity scores NaN.
+
+    Raises:
+        ValueError: If ``labels`` does not hold one label for each row of
+            ``activity``, a label is missing or blank (None, NaN, ``pd.NA``,
+            ``pd.NaT``, a missing categorical value, or empty or whitespace
+            text), or a value of activity is negative or not finite.
     """
     values = np.asarray(activity)
     groups = np.asarray(labels, dtype=object)
     if values.ndim != 2 or len(groups) != values.shape[0]:
         raise ValueError("labels must align with the activity rows")
+    unlabeled = int(np.count_nonzero(~valid_category_mask(groups)))
+    if unlabeled:
+        raise ValueError(
+            f"labels holds no label for {unlabeled} of the {len(groups)} cells to "
+            "score; pass the activity and labels of the labeled cells"
+        )
     order = list(dict.fromkeys(groups.tolist()))
+    # A cell whose label equals none of the labels keeps -1, which
+    # specificity_scores refuses.
     codes = np.full(len(groups), -1, dtype=np.int64)
     for code, group in enumerate(order):
         codes[groups == group] = code
