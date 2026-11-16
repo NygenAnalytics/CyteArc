@@ -85,6 +85,18 @@ def _is_missing_name(value: Any) -> bool:
     return not as_text(value).strip()
 
 
+def _matrix_group_contents(group: h5py.Group) -> str:
+    """Describe what a matrix group holds: its declared encoding and members."""
+    declared = group.attrs.get("encoding-type", group.attrs.get("h5sparse_format"))
+    encoded = "" if declared is None else f" encoded as `{as_text(declared)}`"
+    members = sorted(group.keys())
+    if not members:
+        return f"an empty group{encoded}"
+    shown = ", ".join(f"`{name}`" for name in members[:5])
+    more = f" and {len(members) - 5} more members" if len(members) > 5 else ""
+    return f"a group{encoded} holding {shown}{more}"
+
+
 @dataclass(frozen=True)
 class _H5adAssayFeatures:
     featureIndexes: np.ndarray
@@ -197,7 +209,7 @@ class H5adReader:
                 self.cellAttrsKey: self._validate_group(self.cellAttrsKey),
                 self.featureAttrsKey: self._validate_group(self.featureAttrsKey),
                 self.obsmAttrsKey: self._validate_group(self.obsmAttrsKey),
-                self.matrixKey: self._validate_group(self.matrixKey),
+                self.matrixKey: self._matrix_slot_code(),
             }
             # A malformed column-order must fail here, before a writer opens
             # its destination.
@@ -297,9 +309,14 @@ class H5adReader:
         group = self.h5[self.matrixKey]
         missing = SPARSE_KEYS.difference(group.keys())
         if missing:
+            contents = _matrix_group_contents(group)
+            if len(group):
+                lacking = ", ".join(f"`{key}`" for key in sorted(missing))
+                contents += f" but not {lacking}"
             raise ValueError(
-                f"ERROR: Sparse matrix group `{self.matrixKey}` is missing: "
-                f"{', '.join(sorted(missing))}"
+                f"ERROR: Matrix `{self.matrixKey}` is {contents}. H5adReader reads "
+                "a matrix from a two-dimensional dense dataset, or from a CSR or "
+                "CSC group holding `data`, `indices` and `indptr`."
             )
 
         encoding = sparse_encoding(group)
@@ -312,6 +329,18 @@ class H5adReader:
                 "is not supported. H5adReader supports CSR and CSC encoding."
             )
         return encoding
+
+    def _matrix_slot_code(self) -> int:
+        """Return the group code of the matrix slot.
+
+        An empty table group stands for an absent table, but an empty matrix
+        group holds no matrix, so any group keeps code 2 for
+        :meth:`_validate_sparse_matrix` to check. A missing slot, a dataset,
+        or another kind of node takes the code of :meth:`_validate_group`.
+        """
+        if isinstance(self.h5.get(self.matrixKey), h5py.Group):
+            return 2
+        return self._validate_group(self.matrixKey)
 
     def _validate_group(self, group: str) -> int:
         if group not in self.h5:

@@ -96,3 +96,80 @@ def test_metadata_partial_float_fill_does_not_cast_uninitialized_values(dummy_me
     np.testing.assert_array_equal(filled[selected], values)
     assert np.isnan(filled[~selected]).all()
     np.testing.assert_array_equal(missing, ~selected)
+
+
+def _cell_table(path, scalar=None, *, beside_columns=True):
+    """Return a ``cellData`` group of nine rows, with a 0-d ``scalar`` array if given."""
+    import zarr
+
+    group = zarr.open_group(str(path), mode="w").create_group("cellData")
+    if beside_columns:
+        group.create_array("I", data=np.ones(9, dtype=bool))
+        group.create_array("ids", data=np.array([f"c{i}" for i in range(9)]))
+        group.create_array("score", data=np.arange(9.0))
+    if scalar is not None:
+        group.create_array("scalar", data=np.asarray(scalar))
+    return group
+
+
+@pytest.mark.parametrize("beside_columns", [True, False])
+@pytest.mark.parametrize("scalar", [5, 1.5, True, "text"])
+def test_metadata_table_refuses_a_zero_dimensional_column(
+    tmp_path, scalar, beside_columns
+):
+    import re
+
+    from cytearc.metadata import MetaData
+
+    group = _cell_table(tmp_path / "s.zarr", scalar, beside_columns=beside_columns)
+    # A 0-d array used to fail with a bare IndexError, naming no column.
+    message = (
+        "Column 'scalar' of metadata table '/cellData' has shape (), but a "
+        "metadata column holds one value per row"
+    )
+    with pytest.raises(ValueError, match=re.escape(message)):
+        MetaData(group)
+
+
+@pytest.mark.parametrize("table", ["cellData", "RNA/featureData"])
+def test_datastore_open_names_a_zero_dimensional_metadata_column(tmp_path, table):
+    import re
+
+    import zarr
+
+    from cytearc import DataStore
+    from tests.storage_helpers import write_count_store
+
+    path = str(tmp_path / "store.zarr")
+    write_count_store(path, {"RNA": np.arange(12).reshape(4, 3)}, "uint16")
+    zarr.open_group(path, mode="r+")[table].create_array("scalar", data=np.array(5))
+    message = f"Column 'scalar' of metadata table '/{table}' has shape ()"
+    with pytest.raises(ValueError, match=re.escape(message)):
+        DataStore(path, default_assay="RNA", min_features_per_cell=0, nthreads=1)
+
+
+def test_metadata_table_opens_valid_columns_as_before(tmp_path):
+    import pandas as pd
+
+    from cytearc.metadata import MetaData
+
+    group = _cell_table(tmp_path / "valid.zarr")
+    table = MetaData(group)
+    labels = pd.Categorical(["a", "b", "a", "b", "a", "b", "a", "b", "a"])
+    table.insert("group", labels)
+    table.update_key(np.arange(9) < 5, "I")
+    # The rows that I leaves out are flagged in a missing mask.
+    table.insert("value", np.arange(5.0))
+    # The categories and the missing mask are arrays of other lengths and
+    # layouts beside the columns; reopening counts the rows of the columns.
+    reopened = MetaData(group)
+    assert reopened.N == 9
+    assert reopened.columns == ["I", "ids", "names", "group", "score", "value"]
+    assert reopened.fetch_categorical("group", key=None).tolist() == labels.tolist()
+    frame = reopened.to_pandas_dataframe(["value"])["value"]
+    assert frame.isna().tolist() == [i >= 5 for i in range(9)]
+
+    # Columns of unequal lengths are still refused as before.
+    group.create_array("short", data=np.arange(4))
+    with pytest.raises(ValueError, match="Not all columns are of same length"):
+        MetaData(group)
