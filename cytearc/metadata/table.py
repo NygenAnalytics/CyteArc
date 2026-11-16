@@ -104,6 +104,17 @@ class MetaData:
                     "CyteArc stores the I, ids and names columns as their values; "
                     "write the column again from its labels"
                 )
+        # The metadata column writers refuse a scalar, but Zarr itself, or the
+        # generic create_zarr_dataset, can put a 0-d array in a table, and
+        # such an array has no rows to count.
+        for key, child in sorted(arrays.items()):
+            if child.ndim == 0:
+                raise ValueError(
+                    f"Column {key!r} of metadata table {zgrp.name!r} has shape "
+                    f"{child.shape}, but a metadata column holds one value per "
+                    "row; remove the array from the store, or write it again "
+                    "with one value per row"
+                )
         sizes = {child.shape[0] for child in arrays.values()}
         if not sizes:
             raise ValueError("Attempted to get size of empty zarr group")
