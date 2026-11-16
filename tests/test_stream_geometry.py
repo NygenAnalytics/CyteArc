@@ -20,6 +20,7 @@ from cytearc.storage.partition import (
     partition_indices,
     row_band,
     row_read_parts,
+    scan_band,
     widest_chunk_span,
 )
 from cytearc.storage.virtual_arrays import read_selection
@@ -122,6 +123,21 @@ def test_row_band_follows_the_requested_stored_unit() -> None:
 def test_row_band_uses_the_fallback_without_geometry() -> None:
     assert row_band(None, fallback=10_000) == 10_000
     assert row_band(None, fallback=0) == 1
+
+
+def test_scan_band_reads_whole_chunks_up_to_64_mib_or_the_fallback() -> None:
+    # Chunks of 100 rows of 1,000 four-byte values hold 400,000 bytes, and
+    # 167 of them fit in 64 MiB.
+    narrow = _geometry(shape=(100_000, 1_000), chunks=(100, 1_000))
+    assert scan_band(narrow, fallback=1) == 167 * 100
+    # A chunk larger than 64 MiB is still read whole.
+    wide = _geometry(shape=(100_000, 1_000), chunks=(20_000, 1_000))
+    assert scan_band(wide, fallback=1) == 20_000
+    # An array without stored chunks, such as one in memory, reads the
+    # fallback's rows, at least one.
+    assert scan_band(None, fallback=100_000) == 100_000
+    assert scan_band(None, fallback=0) == 1
+    assert scan_band(None, fallback=-5) == 1
 
 
 def test_a_block_read_of_sharded_rows_and_columns_in_reverse_gives_them() -> None:

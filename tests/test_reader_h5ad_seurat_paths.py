@@ -339,8 +339,18 @@ def test_h5ad_reader_batch_bounds(tmp_path) -> None:
         with pytest.raises(ValueError, match="batch_size must be positive"):
             list(reader.consume(0))
         assert reader.max_batch_nnz(3) == 5
+        # Producing a batch of three rows holds at least the four int32
+        # pointers that the file stores for them.
+        assert reader.producer_batch_staging_bytes(3) >= 4 * 4
     finally:
         reader.close()
+
+    dense = H5adReader(str(_write_h5ad(tmp_path / "dense.h5ad", encoding="dense")))
+    try:
+        # A dense matrix has no row pointers to hold while a batch is produced.
+        assert dense.producer_batch_staging_bytes(3) == 0
+    finally:
+        dense.close()
 
     csc = H5adReader(str(_write_h5ad(tmp_path / "csc.h5ad", encoding="csc")))
     try:

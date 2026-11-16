@@ -1,7 +1,8 @@
 import numpy as np
 import pytest
 
-from cytearc.neighbors.index import fix_knn_query
+from cytearc.neighbors import index
+from cytearc.neighbors.index import ann_index_peak_bytes, fix_knn_query
 
 
 def test_fix_knn_query_removes_leading_self_matches():
@@ -97,3 +98,30 @@ def test_fix_knn_query_removes_only_the_first_repeated_self_label():
 def test_fix_knn_query_rejects_incompatible_shapes(indices, distances, ref_idx):
     with pytest.raises(ValueError, match="incompatible shapes"):
         fix_knn_query(indices, distances, ref_idx)
+
+
+@pytest.mark.parametrize(
+    ("platform_name", "machine", "runtime_bytes"),
+    [
+        ("win32", "AMD64", 80 + 96),
+        ("darwin", "arm64", 64 + 56),
+        ("linux", "aarch64", 48 + 56),
+        ("linux", "x86_64", 40 + 56),
+        ("freebsd14", "amd64", 40 + 56),
+    ],
+)
+def test_index_estimate_counts_each_platforms_mutex_and_label_entry(
+    monkeypatch, platform_name, machine, runtime_bytes
+):
+    def estimate(platform_name: str, machine: str) -> int:
+        monkeypatch.setattr(index.sys, "platform", platform_name)
+        monkeypatch.setattr(index.platform, "machine", lambda: machine)
+        return ann_index_peak_bytes(1000, 3, 2)
+
+    x86_64_linux = estimate("linux", "x86_64")
+
+    # Each cell holds one std::mutex and one entry of the label map: on
+    # x86-64 Linux, glibc's 40-byte mutex and libstdc++'s 56-byte entry.
+    assert estimate(platform_name, machine) - x86_64_linux == 1000 * (
+        runtime_bytes - (40 + 56)
+    )

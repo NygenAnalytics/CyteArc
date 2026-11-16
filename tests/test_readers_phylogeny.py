@@ -17,6 +17,8 @@ import pytest
 import zarr
 
 from cytearc.clones.phylogeny import node_times
+from cytearc.readers import _treedata as treedata_module
+from cytearc.readers import phylogeny as phylogeny_module
 from cytearc.readers.phylogeny import (
     FORMATS,
     FileTrees,
@@ -24,6 +26,7 @@ from cytearc.readers.phylogeny import (
     tree_file_layout,
 )
 from tests.memory_helpers import budgeted
+from tests.perturbation_helpers import use_python_kernels
 
 DATA = Path(__file__).parent / "data" / "phylogenies"
 NAN = float("nan")
@@ -50,7 +53,12 @@ def _lengths(trees: FileTrees) -> list[float | None]:
     return [None if np.isnan(value) else float(value) for value in trees.length]
 
 
-def test_a_tree_reads_in_preorder_with_its_labels_and_lengths(tmp_path) -> None:
+@pytest.mark.parametrize("python_kernels", [False, True])
+def test_a_tree_reads_in_preorder_with_its_labels_and_lengths(
+    tmp_path, monkeypatch, python_kernels
+) -> None:
+    if python_kernels:
+        use_python_kernels(monkeypatch, phylogeny_module)
     trees = _parse(tmp_path, "((A:1,B:2)C:3,D:4)E;")
     # E, then C and its leaves A and B, then D.
     assert trees.names.tolist() == ["E", "C", "A", "B", "D"]
@@ -84,7 +92,12 @@ def test_zero_negative_and_scientific_lengths_read_as_written(tmp_path) -> None:
     assert times[3] == 999.5 and times[1] == 1000.0
 
 
-def test_quoted_labels_hold_marks_spaces_and_doubled_quotes(tmp_path) -> None:
+@pytest.mark.parametrize("python_kernels", [False, True])
+def test_quoted_labels_hold_marks_spaces_and_doubled_quotes(
+    tmp_path, monkeypatch, python_kernels
+) -> None:
+    if python_kernels:
+        use_python_kernels(monkeypatch, phylogeny_module)
     trees = _parse(
         tmp_path,
         "('a b':1,'it''s':2,'x,y(z):[w];':3,'':4,'''':5)'root node':0;",
@@ -95,7 +108,12 @@ def test_quoted_labels_hold_marks_spaces_and_doubled_quotes(tmp_path) -> None:
     assert _lengths(_parse(tmp_path, "(A:'1.5');")) == [None, 1.5]
 
 
-def test_comments_are_skipped_wherever_they_fall_and_may_nest(tmp_path) -> None:
+@pytest.mark.parametrize("python_kernels", [False, True])
+def test_comments_are_skipped_wherever_they_fall_and_may_nest(
+    tmp_path, monkeypatch, python_kernels
+) -> None:
+    if python_kernels:
+        use_python_kernels(monkeypatch, phylogeny_module)
     trees = _parse(
         tmp_path,
         "[&R] ((A[&rate=1]:1,B:[&x]2[&&NHX:S=x])C[a [nested [deeper]] note]:1,"
@@ -105,7 +123,12 @@ def test_comments_are_skipped_wherever_they_fall_and_may_nest(tmp_path) -> None:
     assert _lengths(trees) == [None, 1.0, 1.0, 2.0, 1.0]
 
 
-def test_whitespace_between_marks_is_dropped_and_inside_labels_kept(tmp_path) -> None:
+@pytest.mark.parametrize("python_kernels", [False, True])
+def test_whitespace_between_marks_is_dropped_and_inside_labels_kept(
+    tmp_path, monkeypatch, python_kernels
+) -> None:
+    if python_kernels:
+        use_python_kernels(monkeypatch, phylogeny_module)
     trees = _parse(tmp_path, " (\r\n A b : 1 ,\n\t B : 2 ) \r\n ;\r\n")
     assert trees.names.tolist() == ["", "A b", "B"]
     assert _lengths(trees) == [None, 1.0, 2.0]
@@ -125,7 +148,12 @@ def test_underscores_and_unicode_labels_are_kept_as_written(tmp_path) -> None:
     ]
 
 
-def test_several_trees_read_one_after_another(tmp_path) -> None:
+@pytest.mark.parametrize("python_kernels", [False, True])
+def test_several_trees_read_one_after_another(
+    tmp_path, monkeypatch, python_kernels
+) -> None:
+    if python_kernels:
+        use_python_kernels(monkeypatch, phylogeny_module)
     trees = _parse(tmp_path, "(A:1,B:1);\n\n;(C:2,(D:1,E:1)F:1)G;\n[end]\n")
     assert trees.names.tolist() == ["", "A", "B", "G", "C", "F", "D", "E"]
     # Each tree's parents count within the file's nodes.
@@ -137,7 +165,12 @@ def test_several_trees_read_one_after_another(tmp_path) -> None:
     assert _parse(tmp_path, "A;").parent.tolist() == [-1]
 
 
-def test_empty_groups_make_unnamed_leaves(tmp_path) -> None:
+@pytest.mark.parametrize("python_kernels", [False, True])
+def test_empty_groups_make_unnamed_leaves(
+    tmp_path, monkeypatch, python_kernels
+) -> None:
+    if python_kernels:
+        use_python_kernels(monkeypatch, phylogeny_module)
     trees = _parse(tmp_path, "(,(,):1,());")
     assert trees.parent.tolist() == [-1, 0, 0, 2, 2, 0, 5]
     assert trees.leaf.tolist() == [False, True, False, True, True, False, True]
@@ -176,6 +209,7 @@ def test_a_polytomy_of_a_million_leaves_reads_in_one_group(tmp_path) -> None:
     assert (trees.length[1:] == 0.5).all()
 
 
+@pytest.mark.parametrize("python_kernels", [False, True])
 @pytest.mark.parametrize(
     ("text", "message"),
     [
@@ -199,7 +233,11 @@ def test_a_polytomy_of_a_million_leaves_reads_in_one_group(tmp_path) -> None:
         ("(A:;", "an unexpected ';' inside parentheses or after ':'"),
     ],
 )
-def test_malformed_newick_is_refused_with_its_place(tmp_path, text, message) -> None:
+def test_malformed_newick_is_refused_with_its_place(
+    tmp_path, text, message, monkeypatch, python_kernels
+) -> None:
+    if python_kernels:
+        use_python_kernels(monkeypatch, phylogeny_module)
     with pytest.raises(ValueError, match=message):
         _parse(tmp_path, text)
 
@@ -213,6 +251,7 @@ def test_errors_quote_the_text_around_the_mistake(tmp_path) -> None:
         _parse(tmp_path, text)
 
 
+@pytest.mark.parametrize("python_kernels", [False, True])
 @pytest.mark.parametrize(
     ("text", "message"),
     [
@@ -221,7 +260,11 @@ def test_errors_quote_the_text_around_the_mistake(tmp_path) -> None:
         ("[only a comment]\n;;", "holds no tree"),
     ],
 )
-def test_text_without_a_tree_is_refused(tmp_path, text, message) -> None:
+def test_text_without_a_tree_is_refused(
+    tmp_path, text, message, monkeypatch, python_kernels
+) -> None:
+    if python_kernels:
+        use_python_kernels(monkeypatch, phylogeny_module)
     with pytest.raises(ValueError, match=message):
         _parse(tmp_path, text)
 
@@ -686,6 +729,7 @@ def test_zarr_stores_that_cannot_be_opened_are_refused(tmp_path) -> None:
         tree_file_layout(folder)
 
 
+@pytest.mark.parametrize("python_kernels", [False, True])
 @pytest.mark.parametrize(
     ("before", "after"),
     [
@@ -702,8 +746,10 @@ def test_zarr_stores_that_cannot_be_opened_are_refused(tmp_path) -> None:
     ],
 )
 def test_a_file_rewritten_at_the_same_size_is_refused_not_overrun(
-    tmp_path, before, after
+    tmp_path, monkeypatch, before, after, python_kernels
 ) -> None:
+    if python_kernels:
+        use_python_kernels(monkeypatch, phylogeny_module)
     path = _write(tmp_path, before)
     layout = tree_file_layout(path)
     path.write_text(after)
@@ -727,7 +773,12 @@ def test_a_damaged_gzip_stream_is_refused_as_unreadable(tmp_path) -> None:
         read_trees(layout, ledger=budgeted(10**9))
 
 
-def test_a_label_after_a_length_or_a_group_after_a_group_is_refused(tmp_path) -> None:
+@pytest.mark.parametrize("python_kernels", [False, True])
+def test_a_label_after_a_length_or_a_group_after_a_group_is_refused(
+    tmp_path, monkeypatch, python_kernels
+) -> None:
+    if python_kernels:
+        use_python_kernels(monkeypatch, phylogeny_module)
     with pytest.raises(
         ValueError, match="a label after its length at byte 6 of its text"
     ):
@@ -771,9 +822,13 @@ def test_files_of_the_earliest_treedata_name_their_layout(tmp_path) -> None:
         tree_file_layout(path)
 
 
-def test_the_json_scan_counts_objects_members_and_the_values_held() -> None:
-    from cytearc.readers._treedata import _scan_json
-
+@pytest.mark.parametrize("python_kernels", [False, True])
+def test_the_json_scan_counts_objects_members_and_the_values_held(
+    monkeypatch, python_kernels
+) -> None:
+    if python_kernels:
+        use_python_kernels(monkeypatch, treedata_module)
+    _scan_json = treedata_module._scan_json
     # Worked by hand: the open containers hold at most 7 values, at the ','
     # before "c"; the strings' marks, an escaped quote among them, count for
     # nothing.

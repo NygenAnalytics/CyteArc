@@ -113,6 +113,15 @@ def test_a_categorical_is_coded_as_its_labels_are(case) -> None:
     assert got_codes.dtype == np.int64
 
 
+def test_coding_a_categorical_refuses_a_missing_mask_of_other_cells() -> None:
+    categorical = _categorical([0, 1, -1, 0], ["a", "b"])
+    for mask in ([False, True, False], [False] * 5, [[False]] * 4):
+        with pytest.raises(
+            ValueError, match="^missing mask must align with category values$"
+        ):
+            category_codes(categorical, missing_mask=mask)
+
+
 def test_the_text_case_is_coded_by_hand() -> None:
     codes, categories, _missing = _CODING_CASES["text"]
     coded, names = category_codes(_categorical(codes, categories))

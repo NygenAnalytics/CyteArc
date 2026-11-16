@@ -688,6 +688,43 @@ def test_a_csc_conversion_names_the_budget_of_its_pointers(tmp_path: Path) -> No
     assert refusal.needed_bytes > refusal.budget_bytes == 1
 
 
+def test_a_csc_conversion_names_the_budget_of_its_rows_beside_its_pointers(
+    tmp_path: Path,
+) -> None:
+    from cytearc.readers import H5adReader
+
+    values = np.random.default_rng(3).poisson(1.5, size=(40, 30)).astype(np.uint16)
+    source = _h5ad(tmp_path / "csc.h5ad", values, encoding="csc")
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    pointers = (values.shape[1] + 1) * np.dtype(np.int64).itemsize
+
+    def convert(budget: int) -> np.ndarray:
+        reader = H5adReader(str(source), temp_dir=scratch)
+        try:
+            try:
+                reader.materialize_csc(maxBytes=budget)
+            except MemoryBudgetError:
+                assert reader._convertedCsr is None
+                assert list(scratch.iterdir()) == []
+                raise
+            return np.vstack([batch.toarray() for batch in reader.consume(7)])
+        finally:
+            reader.close()
+
+    # The budget that passes the pointers and one entry is too small for the
+    # rows beside the column pointers.
+    pointers_and_entry = refused(lambda: convert(1)).needed_bytes
+    refusal = named_budget_runs(
+        convert, pointers_and_entry, item="one sparse row of the conversion"
+    )
+    assert f"Beside the {pointers} bytes of the matrix's column pointers" in str(
+        refusal
+    )
+    np.testing.assert_array_equal(convert(refusal.needed_bytes), values)
+    assert list(scratch.iterdir()) == []
+
+
 def test_an_h5ad_import_lets_an_allocation_failure_of_a_producer_split_through(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -748,6 +785,44 @@ def test_a_sparse_matrix_import_refuses_a_budget_of_one_byte_at_its_matrix(
     )
     # The matrix that the writer holds refuses first.
     assert refusal.item == "the sparse matrix"
+
+
+def test_a_sparse_matrix_import_names_the_budget_of_its_scan_beside_the_matrix(
+    tmp_path: Path,
+) -> None:
+    from cytearc.storage.sharding import sparse_matrix_bytes
+    from cytearc.writers import SparseToZarr
+
+    matrix = csr_matrix(
+        np.random.default_rng(5).poisson(2.0, size=(30, 20)).astype(np.uint32) + 1
+    )
+    held = sparse_matrix_bytes(matrix)
+    destination = tmp_path / "sparse.zarr"
+
+    def construct(budget: int) -> None:
+        SparseToZarr(
+            matrix,
+            zarr_loc=str(destination),
+            cell_ids=[f"c{i}" for i in range(30)],
+            feature_ids=[f"f{i}" for i in range(20)],
+            mem_budget=budget,
+            nthreads=1,
+        )
+
+    # A budget one byte above the matrix holds no room to scan it.
+    refusal = refused(lambda: construct(held + 1))
+    assert refusal.item == "scanning one compressed vector"
+    assert refusal.budget_bytes == held + 1
+    assert f"Beside the {held} bytes of the matrix, the import needs at least" in (
+        str(refusal)
+    )
+    assert not destination.exists()
+    below = refused(lambda: construct(refusal.needed_bytes - 1))
+    assert (below.needed_bytes, below.item) == (refusal.needed_bytes, refusal.item)
+    # The budget it names passes the scan, and the layout refuses next.
+    beyond = refused(lambda: construct(refusal.needed_bytes))
+    assert beyond.item == "the default count-matrix policy"
+    assert not destination.exists()
 
 
 def test_a_dense_batch_beyond_its_reservation_names_the_write_it_would_reserve() -> (

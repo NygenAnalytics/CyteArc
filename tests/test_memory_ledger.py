@@ -30,6 +30,7 @@ from cytearc.utils.memory_budget import (
     MemoryLedger,
     memory_refusal,
     python_text_bytes,
+    sort_bytes,
 )
 from tests.memory_helpers import (
     named_budget,
@@ -140,6 +141,48 @@ def test_a_ledger_without_a_budget_refuses_nothing_and_has_no_room() -> None:
     assert ledger.room is None
 
 
+@pytest.mark.parametrize("threads", [0, -2, True, 2.0, "2"])
+def test_a_ledger_refuses_codec_threads_that_are_not_a_count(threads) -> None:
+    with pytest.raises(
+        ValueError,
+        match=re.escape(
+            f"codec_threads must be a number of threads of at least 1, not {threads!r}"
+        ),
+    ):
+        MemoryLedger(100, "Counting", codec_threads=threads)
+    assert MemoryLedger(100, "Counting", codec_threads=3).codec_threads == 3
+
+
+@pytest.mark.parametrize(
+    ("dtype", "stable", "order", "expected"),
+    [
+        # np.sort returns a 1,000-value copy and sorts it in place.
+        (np.uint8, False, False, 1_000),
+        (np.float32, False, False, 4_000),
+        # A stable sort radix-sorts values of one or two bytes into a second
+        # buffer as large as the copy.
+        (np.uint8, True, False, 2_000),
+        (np.int16, True, False, 4_000),
+        # Wider values merge through a buffer half the copy's size; 1,000
+        # float32 values hold 4,000 bytes and the buffer 2,000.
+        (np.float32, True, False, 6_000),
+        (np.int64, True, False, 12_000),
+        # np.argsort returns 1,000 int64 positions whatever the values' width.
+        (np.uint8, False, True, 8_000),
+        (np.int64, False, True, 8_000),
+        # Its stable sort holds a radix buffer as large as the positions, or a
+        # merge buffer half their size.
+        (np.int16, True, True, 16_000),
+        (np.float32, True, True, 12_000),
+    ],
+)
+def test_sort_bytes_count_the_copy_or_order_and_the_stable_buffer(
+    dtype, stable, order, expected
+) -> None:
+    itemsize = np.dtype(dtype).itemsize
+    assert sort_bytes(1_000, itemsize, stable=stable, order=order) == expected
+
+
 # Steps that charge the ledger
 
 
@@ -168,6 +211,32 @@ def test_coding_labels_refuses_before_it_hashes_them() -> None:
     codes, names = category_codes(values[::-1], ledger=MemoryLedger(None, "Coding"))
     expected_codes, expected_names = category_codes(values[::-1])
     assert names == expected_names
+    assert codes.tolist() == expected_codes.tolist()
+
+
+def test_coding_unhashable_labels_refuses_before_it_makes_their_texts() -> None:
+    # Lists cannot be hashed, so each label is coded by its text.
+    values = np.empty(1_000, dtype=object)
+    values[:] = [["label", "x" * 100, index % 3] for index in range(1_000)]
+    texts = np.asarray([str(value) for value in values], dtype=object)
+
+    hashing = MemoryLedger(1, "Coding labels")
+    with pytest.raises(MemoryBudgetError) as refused:
+        category_codes(values, ledger=hashing)
+    assert refused.value.item == "coding 1000 labels"
+    texting = MemoryLedger(refused.value.needed_bytes, "Coding labels")
+    with pytest.raises(MemoryBudgetError) as refused_texts:
+        category_codes(values, ledger=texting)
+    assert refused_texts.value.item == "coding 1000 labels by their text"
+    assert texting.charged == 0
+    # The texts take at least a byte for each of their characters.
+    characters = sum(len(text) for text in texts)
+    assert refused_texts.value.needed_bytes - refused.value.needed_bytes >= characters
+
+    codes, names = category_codes(values, ledger=MemoryLedger(None, "Coding"))
+    expected_codes, expected_names = category_codes(texts)
+    assert names == expected_names
+    assert names == [str(["label", "x" * 100, index]) for index in range(3)]
     assert codes.tolist() == expected_codes.tolist()
 
 

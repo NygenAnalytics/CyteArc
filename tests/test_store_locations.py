@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 import zarr
 from scipy.sparse import csr_matrix
-from zarr.storage import LocalStore
+from zarr.storage import LocalStore, WrapperStore
 
 from cytearc import DataStore, mount_datastore
 from cytearc.composite import create_composite
@@ -379,9 +379,13 @@ def test_a_relative_source_needs_the_location_of_its_store(tmp_path):
             match=re.escape(f"{subject} is recorded at 'source.zarr', a path relative"),
         ):
             DataStore(object_store_copy(folder / name), zarr_mode="r", nthreads=1)
-    # A local store says where it is.
+    # A local store says where it is, also inside a store that wraps it.
     mounted = DataStore(LocalStore(folder / "mount.zarr"), nthreads=1)
     np.testing.assert_array_equal(mounted.RNA.rawData.compute(), _COUNTS)
+    wrapped = DataStore(WrapperStore(LocalStore(folder / "mount.zarr")), nthreads=1)
+    np.testing.assert_array_equal(wrapped.RNA.rawData.compute(), _COUNTS)
+    joint = DataStore(WrapperStore(LocalStore(folder / "joint.zarr")), nthreads=1)
+    np.testing.assert_array_equal(joint.RNA.rawData.compute(), _composite_counts(joint))
 
 
 @pytest.mark.parametrize(

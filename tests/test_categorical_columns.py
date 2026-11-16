@@ -17,11 +17,13 @@ from cytearc.datastore._operations.cell_samples import read_cell_samples
 from cytearc.metadata import MetaData
 from cytearc.metadata.encoding import categorical_codes
 from cytearc.metadata.rows import (
+    category_values_bytes,
     iter_metadata_column_blocks,
     metadata_column_fingerprint,
     metadata_column_stamp,
     metadata_column_stamp_bytes,
     metadata_missing_mask,
+    read_categorical_rows,
     read_metadata_missing_rows,
     read_metadata_rows,
     read_metadata_rows_chunkwise,
@@ -371,6 +373,75 @@ def test_ledger_reads_return_the_labels_of_either_layout(layout: str) -> None:
         read_whole_text(ledger, table._group, "labels", item="labels").tolist()
         == STORED
     )
+
+
+def test_whole_text_reads_refuse_a_column_without_text_before_reading_it() -> None:
+    table = _table()
+    table.insert("counts", np.arange(N, dtype=np.int64))
+    table.insert("scores", pd.Categorical(np.arange(N) % 3 * 0.5))
+    assert isinstance(table._get_array("scores"), CategoricalColumn)
+
+    for name, dtype in (("counts", "int64"), ("scores", "float64")):
+        ledger = MemoryLedger(None, "Reading labels")
+        with pytest.raises(
+            TypeError, match=f"^{name} must be stored as text, not as {dtype}$"
+        ):
+            read_whole_text(ledger, table._group, name, item=name)
+        assert ledger.held_bytes == 0
+
+
+def test_rows_of_an_array_in_memory_are_planned_without_a_chunk_to_decode() -> None:
+    rows = np.array([7, 2, 5])
+    planned = {}
+    for n_rows in (10, 10_000):
+        values = np.arange(n_rows, dtype=np.int64) * 3
+        ledger = _RecordingLedger()
+        assert read_rows(ledger, values, rows, item="values").tolist() == [21, 6, 15]
+        planned[n_rows] = read_rows_bytes(values, len(rows))
+        assert ledger.most <= planned[n_rows]
+
+    # An array in memory has no chunk to decode, so the plan for three rows
+    # does not grow with the array, while a stored array of one chunk
+    # decodes all of it.
+    assert planned[10] == planned[10_000]
+    stored = zarr.open_group(store=MemoryStore(), mode="w").create_array(
+        "values", data=np.arange(10_000, dtype=np.int64) * 3, chunks=(10_000,)
+    )
+    assert read_rows_bytes(stored, len(rows)) >= stored.nbytes > planned[10_000]
+
+
+@pytest.mark.parametrize(
+    ("categories", "codes_dtype"),
+    [
+        ([f"c{index}" for index in range(126)], np.int8),
+        # pandas codes 127 categories or more in int16, while the store keeps
+        # the codes of up to 128 in int8.
+        ([f"c{index}" for index in range(127)], np.int16),
+        ([f"c{index}" for index in range(128)], np.int16),
+        ([index / 4 for index in range(128)], np.int16),
+    ],
+    ids=["126 texts", "127 texts", "128 texts", "128 numbers"],
+)
+def test_a_categorical_read_charges_the_codes_it_returns_beside_its_categories(
+    categories: list, codes_dtype: type
+) -> None:
+    n_rows = 300
+    table = _rows_table(n_rows)
+    labels = [categories[(index * 7) % len(categories)] for index in range(n_rows)]
+    table.insert("labels", pd.Categorical(labels, categories=categories))
+    column = table._get_array("labels")
+    assert column.codes.dtype == np.dtype(np.int8)
+    rows = np.array([299, 0, 150, 7])
+
+    ledger = MemoryLedger(None, "Reading labels")
+    values = read_categorical_rows(ledger, column, rows, item="labels")
+
+    assert values.codes.dtype == np.dtype(codes_dtype)
+    assert values.categories.tolist() == categories
+    assert values.tolist() == [labels[row] for row in rows]
+    # The codes stay charged once, at the width returned, beside the
+    # categories; codes that pandas widened replace the stored ones.
+    assert ledger.held_bytes == values.codes.nbytes + category_values_bytes(column)
 
 
 @pytest.mark.parametrize("layout", ["text", "categorical"])

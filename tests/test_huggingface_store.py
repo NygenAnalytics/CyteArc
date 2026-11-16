@@ -28,7 +28,7 @@ from cytearc.storage.preparation import (
     _claim_document,
     preparation_claim,
 )
-from tests.fixtures_hub import BUCKET_ID
+from tests.fixtures_hub import BUCKET_ID, REPOSITORY_ID
 
 pytestmark = pytest.mark.usefixtures("hub_offline")
 
@@ -990,6 +990,113 @@ def test_read_store_reads_a_missing_store_as_empty(loopback_hub):
     assert _received(loopback_hub, "file") == []
 
 
+@pytest.mark.parametrize(
+    ("missing", "uri"),
+    [
+        ("bucket", f"hf://buckets/{BUCKET_ID}/data.zarr"),
+        ("repository", f"hf://datasets/{REPOSITORY_ID}/data.zarr"),
+    ],
+)
+def test_read_store_reads_a_store_whose_bucket_or_repository_is_missing_as_empty(
+    loopback_hub, missing, uri
+):
+    loopback_hub.plan[missing] = [(404, {"X-Error-Code": "RepoNotFound"})]
+    store = _loopback_store(loopback_hub, uri=uri)
+    try:
+        exists = sync(store.exists("zarr.json"), timeout=GUARD_SECONDS)
+        keys = sync(_names(store.list()), timeout=GUARD_SECONDS)
+        value = sync(store.get("zarr.json", _PROTOTYPE), timeout=GUARD_SECONDS)
+        with pytest.raises(FileNotFoundError):
+            sync(store.getsize("zarr.json"), timeout=GUARD_SECONDS)
+    finally:
+        store.close()
+    assert not exists and keys == [] and value is None
+    # The lookup that found nothing is the only request: nothing is listed.
+    assert loopback_hub.requests == [(missing, "")]
+
+
+def test_read_store_lists_and_reads_a_dataset_repository(loopback_hub):
+    uri = f"hf://datasets/{REPOSITORY_ID}/data.zarr"
+    store = _loopback_store(loopback_hub, uri=uri)
+    published = loopback_hub.root / "data.zarr"
+    keys = sorted(
+        path.relative_to(published).as_posix()
+        for path in published.rglob("*")
+        if path.is_file()
+    )
+    chunk = (published / "c/1/0").read_bytes()
+    try:
+        listed = sync(_names(store.list()), timeout=GUARD_SECONDS)
+        children = sync(_names(store.list_dir("c")), timeout=GUARD_SECONDS)
+        part = sync(
+            store.get("c/1/0", _PROTOTYPE, RangeByteRequest(1, 6)),
+            timeout=GUARD_SECONDS,
+        )
+        array = zarr.open_array(store=store, mode="r", zarr_format=3)
+        values = array[2:7, 1:6]
+    finally:
+        store.close()
+    # The repository lists folders too, which the store leaves out.
+    assert listed == keys
+    assert children == ["0", "1"]
+    assert part.to_bytes() == chunk[1:6]
+    np.testing.assert_array_equal(
+        values, np.arange(64, dtype=np.int32).reshape(8, 8)[2:7, 1:6]
+    )
+    assert _received(loopback_hub, "repository") == [("", None)]
+    assert _received(loopback_hub, "tree") == [("data.zarr", "recursive")]
+    assert ("data.zarr/c/1/0", "bytes=1-5") in _received(loopback_hub, "file")
+
+
+def test_read_store_takes_the_asked_bytes_from_a_server_that_ignores_ranges(
+    loopback_hub,
+):
+    store = _loopback_store(loopback_hub)
+    chunk = (loopback_hub.root / "data.zarr/c/1/0").read_bytes()
+    try:
+        assert sync(store.exists("c/1/0"), timeout=GUARD_SECONDS)
+        loopback_hub.plan["file"] = ["whole"]
+        part = sync(
+            store.get("c/1/0", _PROTOTYPE, RangeByteRequest(2, 9)),
+            timeout=GUARD_SECONDS,
+        )
+    finally:
+        store.close()
+    assert part.to_bytes() == chunk[2:9]
+    assert _received(loopback_hub, "file") == [("data.zarr/c/1/0", "bytes=2-8")]
+
+
+@pytest.mark.parametrize("change", ["shrunk", "grew under a server ignoring ranges"])
+def test_read_store_raises_when_a_listed_key_changed_size(loopback_hub, change):
+    store = _loopback_store(loopback_hub)
+    chunk = loopback_hub.root / "data.zarr/c/1/0"
+    listed = chunk.read_bytes()
+    try:
+        assert sync(store.getsize("c/1/0"), timeout=GUARD_SECONDS) == len(listed)
+        # The object is replaced after the store listed it.
+        if change == "shrunk":
+            chunk.write_bytes(listed[:-3])
+        else:
+            chunk.write_bytes(listed + b"more")
+            loopback_hub.plan["file"] = ["whole"]
+        with pytest.raises(OSError) as raised:
+            sync(store.get("c/1/0", _PROTOTYPE), timeout=GUARD_SECONDS)
+    finally:
+        store.close()
+    returned = len(listed) - 3 if change == "shrunk" else len(listed) + 4
+    # Not FileNotFoundError, which Zarr reads as a missing chunk, and not
+    # retried.
+    assert type(raised.value) is OSError
+    assert str(raised.value) == (
+        f"Reading bytes 0 to {len(listed)} of 'c/1/0' from {LOOPBACK_URI} returned "
+        f"{returned} bytes: the store changed after it was listed. Open the store "
+        "again to read what it holds now."
+    )
+    assert _received(loopback_hub, "file") == [
+        ("data.zarr/c/1/0", f"bytes=0-{len(listed) - 1}")
+    ]
+
+
 def test_read_store_shares_its_listing_across_callers_and_event_loops(
     loopback_hub, monkeypatch
 ):
@@ -1084,6 +1191,30 @@ def test_writable_read_store_reads_through_the_file_system(loopback_hub):
     listings = _received(loopback_hub, "tree")
     assert ("data.zarr/c/1", "directory") in listings
     assert all(detail == "directory" for _, detail in listings)
+
+
+def test_writable_read_store_lists_its_keys_through_the_file_system(
+    loopback_hub, monkeypatch
+):
+    def snapshot(*_args):
+        raise AssertionError("a writable store must not list a snapshot")
+
+    # A writable store sees keys written after it opened.
+    monkeypatch.setattr(huggingface, "_list_store", snapshot)
+    store = _loopback_store(loopback_hub, read_only=False)
+    published = loopback_hub.root / "data.zarr"
+    keys = sorted(
+        path.relative_to(published).as_posix()
+        for path in published.rglob("*")
+        if path.is_file()
+    )
+    try:
+        listed = sync(_names(store.list()), timeout=GUARD_SECONDS)
+        under_c = sync(_names(store.list_prefix("c/1")), timeout=GUARD_SECONDS)
+    finally:
+        store.close()
+    assert sorted(listed) == keys
+    assert sorted(under_c) == [key for key in keys if key.startswith("c/1/")]
 
 
 def _accept_uploads(hub, store, monkeypatch):

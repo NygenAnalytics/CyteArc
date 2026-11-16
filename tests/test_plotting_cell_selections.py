@@ -179,6 +179,23 @@ def test_composition_refuses_a_grouping_without_labels_for_some_categories(cells
     )
 
 
+def test_composition_passes_on_the_refusal_of_a_grouping_that_is_not_labels(cells):
+    with pytest.raises(ValueError) as raised:
+        composition(
+            cells.store,
+            categories=_labels(cells, "cluster", "kept"),
+            grouping=cells.selections["kept"],
+            show=False,
+        )
+
+    # Only labels that miss some cells of categories are refused in terms of
+    # categories; the read's other refusals reach the caller as they are.
+    assert str(raised.value).startswith(
+        "'cell_selection' is not a cell-aligned artifact kind; the cell-aligned "
+        "kinds are "
+    )
+
+
 def test_composition_draws_a_grouping_beside_a_column_on_the_groupings_cells(
     cells,
 ):

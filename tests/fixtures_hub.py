@@ -23,6 +23,8 @@ from huggingface_hub import constants as hf_constants
 from huggingface_hub.errors import EntryNotFoundError
 
 BUCKET_ID = "test/cytearc"
+# The dataset repository that ``LoopbackHub`` serves at revision ``main``.
+REPOSITORY_ID = "test/cytearc-data"
 
 
 class NetworkAccessBlocked(BaseException):
@@ -258,11 +260,18 @@ class FakeHub:
 class LoopbackHub(ThreadingHTTPServer):
     """Serve a directory as the Hugging Face bucket ``BUCKET_ID`` on a loopback port.
 
+    The same directory is also the dataset repository ``REPOSITORY_ID`` at
+    revision ``main``, whose recursive listings name folders as well as files,
+    as the Hub lists a repository.
+
     ``plan[kind]`` lists what the next requests of a kind meet, in order:
     ``"stall"`` holds a request unanswered until the hub closes, which ends it
-    with status 410, and a status, or a status with headers, answers with that
+    with status 410, ``"whole"`` answers a file request with the whole file
+    and status 200 whatever range it asked for, as a server that ignores
+    ranges does, and a status, or a status with headers, answers with that
     status. The kinds are
-    ``"bucket"``, the bucket's lookup, ``"tree"``, a listing, and ``"file"``,
+    ``"bucket"``, the bucket's lookup, ``"repository"``, the repository's,
+    ``"tree"``, a listing, and ``"file"``,
     a file's bytes. A request that its plan does not cover is served, and
     ``requests`` records the kind and path of each. ``received`` records them
     with what else the request asked: ``"recursive"`` or ``"directory"`` for a
@@ -327,12 +336,22 @@ class _LoopbackHandler(BaseHTTPRequestHandler):
         url = urlsplit(self.path)
         api = f"/api/buckets/{BUCKET_ID}"
         files = f"/buckets/{BUCKET_ID}/resolve/"
+        repository = f"/api/datasets/{REPOSITORY_ID}"
+        repository_files = f"/datasets/{REPOSITORY_ID}/resolve/main/"
+        in_repository = url.path.startswith((repository, repository_files))
         if url.path == api:
             kind, path = "bucket", ""
         elif url.path.startswith(f"{api}/tree"):
             kind, path = "tree", unquote(url.path.removeprefix(f"{api}/tree"))
         elif url.path.startswith(files):
             kind, path = "file", unquote(url.path.removeprefix(files))
+        elif url.path in (repository, f"{repository}/revision/main"):
+            kind, path = "repository", ""
+        elif url.path.startswith(f"{repository}/tree/main"):
+            kind = "tree"
+            path = unquote(url.path.removeprefix(f"{repository}/tree/main"))
+        elif url.path.startswith(repository_files):
+            kind, path = "file", unquote(url.path.removeprefix(repository_files))
         else:
             self._json(404, {"error": f"No route for {url.path}"})
             return
@@ -352,11 +371,16 @@ class _LoopbackHandler(BaseHTTPRequestHandler):
             # it sends nothing more.
             self.server.closing.wait(timeout=60)
             planned = 410
+        if planned == "whole" and kind == "file":
+            self._file(path, whole=True)
+            return
         if planned != "serve":
             status, headers = planned if isinstance(planned, tuple) else (planned, {})
             self._json(status, {"error": f"Planned status {status}"}, headers)
             return
-        if kind == "bucket":
+        if kind == "repository":
+            self._json(200, {"id": REPOSITORY_ID, "sha": "0" * 40})
+        elif kind == "bucket":
             self._json(
                 200,
                 {
@@ -368,18 +392,19 @@ class _LoopbackHandler(BaseHTTPRequestHandler):
                 },
             )
         elif kind == "tree":
-            self._tree(path, recursive)
+            self._tree(path, recursive, repository=in_repository)
         else:
             self._file(path)
 
-    def _tree(self, prefix: str, recursive: bool) -> None:
+    def _tree(self, prefix: str, recursive: bool, *, repository: bool) -> None:
         base = self.server.root
         if recursive:
-            # The Hub matches a recursive listing's prefix as text and lists files only.
+            # The Hub matches a recursive listing's prefix as text, and lists
+            # only the files of a bucket.
             entries = [
                 path
                 for path in sorted(base.rglob("*"))
-                if path.is_file()
+                if (repository or path.is_file())
                 and path.relative_to(base).as_posix().startswith(prefix)
             ]
         else:
@@ -388,6 +413,8 @@ class _LoopbackHandler(BaseHTTPRequestHandler):
         if not entries:
             self._json(404, {"error": "No entries"}, {"X-Error-Code": "EntryNotFound"})
             return
+        # A repository names each entry's git object.
+        identity = {"oid": "0" * 40} if repository else {}
         self._json(
             200,
             [
@@ -396,21 +423,26 @@ class _LoopbackHandler(BaseHTTPRequestHandler):
                     "path": path.relative_to(base).as_posix(),
                     "size": path.stat().st_size,
                     "xetHash": "test-hash",
+                    **identity,
                 }
                 if path.is_file()
-                else {"type": "directory", "path": path.relative_to(base).as_posix()}
+                else {
+                    "type": "directory",
+                    "path": path.relative_to(base).as_posix(),
+                    **identity,
+                }
                 for path in entries
             ],
         )
 
-    def _file(self, path: str) -> None:
+    def _file(self, path: str, *, whole: bool = False) -> None:
         source = self.server.root / path
         if not source.is_file():
             self._json(404, {"error": "No file"}, {"X-Error-Code": "EntryNotFound"})
             return
         data = source.read_bytes()
         requested = self.headers.get("Range")
-        if requested is None:
+        if requested is None or whole:
             self._answer(200, data, content_type="application/octet-stream")
             return
         first, _, last = requested.removeprefix("bytes=").partition("-")

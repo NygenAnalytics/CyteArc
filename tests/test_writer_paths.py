@@ -230,6 +230,92 @@ def test_h5ad_producer_sends_no_band_after_the_parent_stops(
         reader.close()
 
 
+def test_dense_h5ad_producer_sends_no_band_after_the_parent_stops(
+    tmp_path, monkeypatch
+) -> None:
+    from cytearc.writers import h5ad as h5ad_writer
+
+    values = np.arange(24, dtype=np.uint8).reshape(8, 3)
+    source = _write_h5ad(tmp_path / "dense.h5ad", values, encoding="dense")
+    # 12 bytes of uint8 counts make bands of four cells.
+    plan = plan_count_matrix_pair(
+        8, 3, np.uint8, policy=CountMatrixPolicy(unitBytes=12, chunkBytes=12)
+    )
+    reader = H5adReader(str(source), feature_name_key="feature_name")
+    try:
+
+        def produce(stop: threading.Event, connection: _Connection) -> list:
+            # Batches of four cells, each of which fills a band.
+            h5ad_writer._read_dense_h5ad_process_window(
+                reader._clone_kwargs(),
+                4,
+                0,
+                8,
+                {"RNA": plan.counts},
+                None,
+                connection,
+                stop,
+                {},
+            )
+            assert connection.closed
+            return [
+                (payload[1].start, payload[1].end)
+                for kind, payload in connection.messages
+                if kind == "band"
+            ]
+
+        # A window that is not stopped sends each band of its rows, then done.
+        complete = _Connection()
+        assert produce(threading.Event(), complete) == [(0, 4), (4, 8)]
+        assert [kind for kind, _payload in complete.messages] == [
+            "band",
+            "band",
+            "done",
+        ]
+        np.testing.assert_array_equal(
+            np.vstack([band.values for _kind, (_name, band) in complete.messages[:2]]),
+            values,
+        )
+
+        # A stop that arrives while a band is sent ends the window after it.
+        stop = threading.Event()
+        connection = _Connection(on_send=stop.set)
+        assert produce(stop, connection) == [(0, 4)]
+        assert [kind for kind, _payload in connection.messages] == ["band"]
+
+        # A stop that arrives while the next batch is read ends the window
+        # before that batch fills a band.
+        stop = threading.Event()
+        read_batches = H5adReader.consume_dense_rows
+
+        def stop_after_the_first_batch(self, *args, **kwargs):
+            for batch in read_batches(self, *args, **kwargs):
+                yield batch
+                stop.set()
+
+        with monkeypatch.context() as patch:
+            patch.setattr(H5adReader, "consume_dense_rows", stop_after_the_first_batch)
+            connection = _Connection()
+            assert produce(stop, connection) == [(0, 4)]
+        assert [kind for kind, _payload in connection.messages] == ["band"]
+
+        # A stop that arrives while a band is cut keeps that band unsent.
+        stop = threading.Event()
+        cut_bands = h5ad_writer._dense_count_bands
+
+        def stop_while_cutting(*args):
+            for item in cut_bands(*args):
+                stop.set()
+                yield item
+
+        monkeypatch.setattr(h5ad_writer, "_dense_count_bands", stop_while_cutting)
+        connection = _Connection()
+        assert produce(stop, connection) == []
+        assert connection.messages == []
+    finally:
+        reader.close()
+
+
 def _complex_matrix(wire: _Wire, values: list[float]) -> bytes:
     """Encode an R complex matrix of two genes and the three test cells."""
     return (

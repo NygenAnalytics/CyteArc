@@ -1981,6 +1981,16 @@ def test_hashing_demultiplexes_each_sample_with_its_own_hashtags(tmp_path) -> No
             "hashing['sample_column'] 'lane' not found in cell metadata",
         ),
         (
+            {"sample_column": 3},
+            TypeError,
+            "hashing['sample_column'] must be a cell column name or None",
+        ),
+        (
+            {"sample_column": " "},
+            TypeError,
+            "hashing['sample_column'] must be a cell column name or None",
+        ),
+        (
             {"hashtags": {"a": ["HTO0"]}},
             ValueError,
             "hashing['hashtags'] maps samples to their hashtags, which needs "

@@ -1179,7 +1179,12 @@ def test_an_artifact_that_lost_a_table_is_not_reused(store, tmp_path) -> None:
     fifth, _ = _import(store, folder)
     assert fifth not in (first, second, third, fourth)
     del writable(fifth).attrs["call_fields"]
-    assert _import(store, folder)[0] not in (first, second, third, fourth, fifth)
+    sixth, _ = _import(store, folder)
+    assert sixth not in (first, second, third, fourth, fifth)
+    # Counts that list a call field CyteArc does not store are imported again.
+    writable(sixth).attrs["call_fields"] = ["strand"]
+    seventh, _ = _import(store, folder)
+    assert seventh not in (first, second, third, fourth, fifth, sixth)
 
 
 def test_repeated_calls_must_agree_in_their_quality() -> None:
@@ -1674,6 +1679,8 @@ def test_got_multi_reads_come_with_every_call_that_has_umis(store, tmp_path) -> 
 def test_a_budget_without_room_for_the_rewritten_chunks_writes_nothing(
     store, tmp_path
 ) -> None:
+    import re
+
     # The rows parse and spill within a few megabytes, but appending them
     # rewrites chunks of about four times the 536,000 rows' 4-byte values.
     ids = [str(cell) for cell in store.cells.fetch_all("ids")]
@@ -1693,3 +1700,41 @@ def test_a_budget_without_room_for_the_rewritten_chunks_writes_nothing(
     with pytest.raises(MemoryError, match="the stored chunks that it rewrites"):
         run()
     assert store.artifacts.list(kind="variant_counts") == saved
+    store.memoryBytes = 1_500_000
+    with pytest.raises(
+        MemoryBudgetError, match=r"holds about \d+ bytes for a chunk of 1000 parsed"
+    ) as refused:
+        run()
+    named = re.search(r"holds about (\d+) bytes", str(refused.value))
+    assert named is not None and int(named.group(1)) > 1_600_000
+    assert store.artifacts.list(kind="variant_counts") == saved
+
+
+def test_the_band_refusal_names_the_least_budget_at_which_a_band_fits() -> None:
+    from cytearc.datastore._operations.variants import (
+        _BUFFER_SHARE,
+        _SPILL_BUFFERS,
+        _band_budget,
+    )
+
+    # Each byte of budget above 1,000 adds a byte of room, and the sort
+    # buffers take _SPILL_BUFFERS bytes more each time the room passes a
+    # multiple of _BUFFER_SHARE. The least budget at which the band fits
+    # beside them is found here by trying every budget upward.
+    def least_budget(room: int, left: int, needed: int) -> int:
+        extra = 1
+        while (
+            left
+            + extra
+            - _SPILL_BUFFERS * ((room + extra) // _BUFFER_SHARE - room // _BUFFER_SHARE)
+            < needed
+        ):
+            extra += 1
+        return 1_000 + extra
+
+    for room in range(25):
+        for left in (0, 3, 11):
+            for needed in range(left + 1, left + 45):
+                assert _band_budget(1_000, room, left, needed) == least_budget(
+                    room, left, needed
+                ), (room, left, needed)

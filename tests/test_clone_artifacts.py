@@ -147,6 +147,23 @@ def test_writing_refuses_arrays_that_no_source_adds(store) -> None:
             source_arrays={"clone_probability": np.ones(N_CELLS)},
             **_ROOMY,
         )
+    # A per-cell array is not an array of the sites, nor is a misspelled site
+    # array.
+    for name in ("n_barcodes", "site_label"):
+        with pytest.raises(
+            ValueError,
+            match=f"'{name}' is not an array of the sites that a clone source saves; "
+            "those are site_labels, dropout_probability, error_probability$",
+        ):
+            write_clones(
+                store.zw,
+                planned,
+                assignment,
+                {"n_clones": len(assignment.clone_ids)},
+                site_arrays={name: np.zeros(3, dtype=np.int64)},
+                **_ROOMY,
+            )
+    assert not store.artifacts.inspect(planned.ref).exists
 
 
 def _labeled(width: int, *, probabilities: bool = False) -> CloneAssignment:

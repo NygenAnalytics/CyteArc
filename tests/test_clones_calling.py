@@ -9,6 +9,7 @@ TREX's documented rules.
 import itertools
 import os
 import time
+import warnings
 
 import networkx as nx
 import numpy as np
@@ -30,6 +31,21 @@ from cytearc.clones.calling import (
 from cytearc.utils.memory_budget import MemoryBudgetError
 from tests.clone_helpers import clone_partition
 from tests.memory_helpers import budgeted
+from tests.perturbation_helpers import use_python_kernels
+
+
+def _python_kernels(monkeypatch, python_kernels: bool) -> None:
+    """Run the calling steps' kernels as Python, so that coverage sees their lines.
+
+    The hashes of the sets wrap their 64-bit sums and products around, as
+    the compiled ones do, which NumPy's scalars warn of; pytest restores the
+    filters after the test.
+    """
+    if python_kernels:
+        use_python_kernels(monkeypatch, calling)
+        warnings.filterwarnings(
+            "ignore", "overflow encountered in scalar", RuntimeWarning
+        )
 
 
 def _sets(rows: list[list[int]]) -> CellSets:
@@ -113,7 +129,11 @@ def test_sets_refuse_cells_and_items_out_of_range() -> None:
 # Identical sets.
 
 
-def test_identical_sets_of_a_group_share_a_node_numbered_by_its_first_cell() -> None:
+@pytest.mark.parametrize("python_kernels", [False, True])
+def test_identical_sets_of_a_group_share_a_node_numbered_by_its_first_cell(
+    monkeypatch, python_kernels
+) -> None:
+    _python_kernels(monkeypatch, python_kernels)
     sets = _sets([[4], [1, 2], [], [2, 1], [1, 2], [4], [7]])
     nodes = identical_sets(sets, groups=np.asarray([0, 0, 0, 0, 1, 0, 0]))
     # {4} first at cell 0, {1, 2} of group 0 at cell 1, {1, 2} of group 1 at
@@ -125,7 +145,11 @@ def test_identical_sets_of_a_group_share_a_node_numbered_by_its_first_cell() -> 
     assert nodes.sets.items.tolist() == [4, 1, 2, 1, 2, 7]
 
 
-def test_colliding_hashes_never_merge_different_sets(monkeypatch) -> None:
+@pytest.mark.parametrize("python_kernels", [False, True])
+def test_colliding_hashes_never_merge_different_sets(
+    monkeypatch, python_kernels
+) -> None:
+    _python_kernels(monkeypatch, python_kernels)
     rows = [[1, 2], [3, 4], [1, 2], [5, 6], [3, 4]]
     honest = identical_sets(_sets(rows))
 
@@ -248,7 +272,11 @@ def test_the_jaccard_graph_refuses_settings_it_cannot_use() -> None:
         )
 
 
-def test_the_graph_matches_every_pair_compared_by_python_sets() -> None:
+@pytest.mark.parametrize("python_kernels", [False, True])
+def test_the_graph_matches_every_pair_compared_by_python_sets(
+    monkeypatch, python_kernels
+) -> None:
+    _python_kernels(monkeypatch, python_kernels)
     rng = np.random.default_rng(3)
     rows = [
         sorted(rng.choice(30, size=int(rng.integers(1, 6)), replace=False).tolist())
@@ -336,10 +364,13 @@ def _force_way(monkeypatch, way: str) -> None:
         )
 
 
-@pytest.mark.parametrize("way", ["chosen", "prefixes", "product"])
+@pytest.mark.parametrize(
+    ("way", "python_kernels"),
+    [("chosen", False), ("prefixes", False), ("product", False), ("prefixes", True)],
+)
 @pytest.mark.parametrize("giant_share", [0.0, 0.5, 0.95])
 def test_prefixes_give_the_sparse_products_edges_in_order(
-    monkeypatch, giant_share, way
+    monkeypatch, giant_share, way, python_kernels
 ) -> None:
     # Items drawn with Zipf frequencies give many items held by equally many
     # nodes, whose ranks tie; about one cell in seven holds no item and joins
@@ -347,11 +378,13 @@ def test_prefixes_give_the_sparse_products_edges_in_order(
     # that correction merged many into, enters almost no prefix. Every
     # similarity, strict or inclusive, within and across modalities, gives
     # the edges of the sparse product and of Python's sets, in the same
-    # order, through the prefixes or every item.
+    # order, through the prefixes or every item. Kernels run as Python on
+    # fewer cells, through the prefixes beside the sparse product.
     _force_way(monkeypatch, way)
+    _python_kernels(monkeypatch, python_kernels)
     rng = np.random.default_rng(int(100 * giant_share))
     rows = []
-    for _ in range(700):
+    for _ in range(150 if python_kernels else 700):
         row = set(np.minimum(rng.zipf(1.4, size=int(rng.integers(0, 7))), 60).tolist())
         if row and rng.random() < giant_share:
             row.add(61)
@@ -381,15 +414,17 @@ def test_prefixes_give_the_sparse_products_edges_in_order(
     assert 0 < linked < 21 * len(indices)
 
 
+@pytest.mark.parametrize("python_kernels", [False, True])
 @pytest.mark.parametrize("pair_first", [True, False])
 def test_a_pair_at_the_similarity_whose_bound_rounds_up_is_linked(
-    monkeypatch, pair_first
+    monkeypatch, pair_first, python_kernels
 ) -> None:
     # 7 shared of 25 items is 0.28 in floating point, but 0.28 * 25 is
     # 7.000000000000001: a bound of the overlap rounded up from it would keep
     # 18 of the larger set's 25 items, which miss the 7 it shares, its most
     # common. The 7 shared items' three other holders make them so.
     _force_way(monkeypatch, "prefixes")
+    _python_kernels(monkeypatch, python_kernels)
     assert 7 / 25 == 0.28 and 0.28 * 25 > 7
     larger = list(range(18)) + list(range(100, 107))
     shared = list(range(100, 107))
@@ -593,9 +628,11 @@ def test_pruning_judges_every_edge_on_the_graph_as_given() -> None:
         (4, [(0, 1), (0, 2), (1, 2), (2, 3)], [(0, 1), (0, 2), (1, 2)]),
     ],
 )
+@pytest.mark.parametrize("python_kernels", [False, True])
 def test_pruning_removes_edges_whose_ends_share_no_neighbor(
-    n_nodes, pairs, kept
+    monkeypatch, n_nodes, pairs, kept, python_kernels
 ) -> None:
+    _python_kernels(monkeypatch, python_kernels)
     result, removed = pruned_edges(n_nodes, _edges(pairs))
     assert _pairs(result) == kept
     assert removed == len(pairs) - len(kept)
@@ -635,12 +672,20 @@ def test_pruning_removes_edges_whose_ends_share_no_neighbor(
         (5, [(0, 1), (1, 2), (0, 4), (1, 4), (2, 4), (2, 3)], [2]),
     ],
 )
-def test_cut_vertices_are_nodes_whose_neighbors_fall_apart(n_nodes, pairs, cut) -> None:
+@pytest.mark.parametrize("python_kernels", [False, True])
+def test_cut_vertices_are_nodes_whose_neighbors_fall_apart(
+    monkeypatch, n_nodes, pairs, cut, python_kernels
+) -> None:
+    _python_kernels(monkeypatch, python_kernels)
     found = local_cut_vertices(n_nodes, _edges(pairs), np.ones(n_nodes, dtype=bool))
     assert found.tolist() == cut
 
 
-def test_only_eligible_nodes_are_tested_for_cutting() -> None:
+@pytest.mark.parametrize("python_kernels", [False, True])
+def test_only_eligible_nodes_are_tested_for_cutting(
+    monkeypatch, python_kernels
+) -> None:
+    _python_kernels(monkeypatch, python_kernels)
     edges = _edges([(0, 1), (0, 2), (0, 3)])
     eligible = np.asarray([False, True, True, True])
     assert local_cut_vertices(4, edges, eligible).tolist() == []
@@ -701,7 +746,11 @@ def test_the_index_compares_the_items_that_both_nodes_know() -> None:
     assert _jaccard([[1, 2, 3], [1, 2], [1, 4]], 0.5, True) == [(0, 1)]
 
 
-def test_the_graph_with_unknown_items_matches_python_sets() -> None:
+@pytest.mark.parametrize("python_kernels", [False, True])
+def test_the_graph_with_unknown_items_matches_python_sets(
+    monkeypatch, python_kernels
+) -> None:
+    _python_kernels(monkeypatch, python_kernels)
     rng = np.random.default_rng(16)
     rows, unknown_rows = [], []
     for _ in range(400):
@@ -782,9 +831,10 @@ def _ambiguous_nodes_by_hand(rows, unknown_rows, pairs) -> set[int]:
     return found
 
 
-def test_a_node_is_ambiguous_when_two_neighbors_disagree_where_it_does_not_know() -> (
-    None
-):
+@pytest.mark.parametrize("python_kernels", [False, True])
+def test_a_node_is_ambiguous_when_two_neighbors_disagree_where_it_does_not_know(
+    monkeypatch, python_kernels
+) -> None:
     # Cells 0 and 1 are a founder (0) and its subclone (0 and 1); cell 2 holds
     # 0 with 1 unknown and agrees with both; cell 3 holds 1 with 0 unknown and
     # agrees with the subclone alone; cell 4 holds 2 and 3 known where its
@@ -792,6 +842,7 @@ def test_a_node_is_ambiguous_when_two_neighbors_disagree_where_it_does_not_know(
     rows = [[0], [0, 1], [0], [1], [2, 3], [2], [3]]
     unknown_rows = [[], [], [1], [0], [], [3], [2]]
     pairs = [(0, 2), (1, 2), (1, 3), (4, 5), (4, 6)]
+    _python_kernels(monkeypatch, python_kernels)
     sets, unknown = _unknown_sets(rows, unknown_rows)
     nodes = identical_sets(sets, unknown=unknown)
     order = nodes.cell_nodes
@@ -807,7 +858,11 @@ def test_a_node_is_ambiguous_when_two_neighbors_disagree_where_it_does_not_know(
         ambiguous_nodes(nodes, edges, ledger=budgeted(100))
 
 
-def test_random_sets_flag_the_ambiguous_nodes_found_pair_by_pair() -> None:
+@pytest.mark.parametrize("python_kernels", [False, True])
+def test_random_sets_flag_the_ambiguous_nodes_found_pair_by_pair(
+    monkeypatch, python_kernels
+) -> None:
+    _python_kernels(monkeypatch, python_kernels)
     rng = np.random.default_rng(31)
     n_cells = 60
     rows, unknown_rows = [], []
@@ -901,7 +956,9 @@ def test_components_are_numbered_by_their_lowest_node() -> None:
     assert connected_components(6, edges).tolist() == [0, 1, 2, 0, 1, 0]
 
 
-def test_removed_nodes_belong_to_no_component() -> None:
+@pytest.mark.parametrize("python_kernels", [False, True])
+def test_removed_nodes_belong_to_no_component(monkeypatch, python_kernels) -> None:
+    _python_kernels(monkeypatch, python_kernels)
     present = np.asarray([True, False, True, True])
     components = connected_components(4, _edges([(2, 3)]), present)
     assert components.tolist() == [0, -1, 1, 1]
@@ -911,7 +968,11 @@ def test_removed_nodes_belong_to_no_component() -> None:
         connected_components(4, _edges([]), np.ones(3, dtype=bool))
 
 
-def test_components_match_networkx_on_random_graphs() -> None:
+@pytest.mark.parametrize("python_kernels", [False, True])
+def test_components_match_networkx_on_random_graphs(
+    monkeypatch, python_kernels
+) -> None:
+    _python_kernels(monkeypatch, python_kernels)
     rng = np.random.default_rng(5)
     for _ in range(20):
         n_nodes = int(rng.integers(1, 60))

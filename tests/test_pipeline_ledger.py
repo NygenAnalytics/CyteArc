@@ -70,6 +70,22 @@ def _statuses(root: zarr.Group, ledger: RunLedger) -> dict[str, str]:
     }
 
 
+@pytest.mark.parametrize("name", ["workers", "memory_budget_bytes"])
+@pytest.mark.parametrize("value", [0, -1, True, 2.0, None, "4"])
+def test_a_ledger_needs_positive_integer_workers_and_budget(name, value) -> None:
+    root, ledger, _events = _ledger("first")
+    resources = {"workers": 1, "memory_budget_bytes": 2**30, name: value}
+    with pytest.raises(
+        ValueError, match=f"^{name} must be a positive integer, not {value!r}$"
+    ):
+        RunLedger(root, ledger.run_id, ledger.events, **resources)
+    # One worker and a budget of one byte are positive integers.
+    accepted = RunLedger(
+        root, ledger.run_id, ledger.events, workers=1, memory_budget_bytes=1
+    )
+    assert (accepted.workers, accepted.memory_budget_bytes) == (1, 1)
+
+
 def test_grouped_interruption_ends_the_stage_as_that_interruption() -> None:
     root, ledger, events = _ledger("first", "second")
     interruption = KeyboardInterrupt("stop")

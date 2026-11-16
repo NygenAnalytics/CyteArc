@@ -275,6 +275,46 @@ def test_what_the_caller_holds_counts_beside_the_grouping(store) -> None:
         _group(store, group_by=["sample", "batch"], ledger=ledger)
 
 
+def test_a_label_artifact_too_large_for_the_budget_is_refused_in_the_ledgers_words(
+    tmp_path,
+) -> None:
+    # Labels of 2,000 characters each, whose read outgrows a budget of 4 kB
+    # that groups the same cells by labels of one character.
+    path = tmp_path / "store.zarr"
+    write_count_store(str(path), {"RNA": np.ones((N_CELLS, 3), dtype=int)}, "uint16")
+    store = open_store(path)
+    store.cells.insert("every_cell", np.ones(N_CELLS, dtype=bool))
+    store.cells.insert("cluster", CLUSTERS.astype(object))
+    store.cells.insert("long", np.char.multiply(CLUSTERS, 2_000).astype(object))
+    every_cell = store.snapshot_cell_selection("every_cell")
+    short = store.snapshot_cluster_labels("cluster", cell_selection=every_cell)
+    long = store.snapshot_cluster_labels("long", cell_selection=every_cell)
+    budget = 4_096
+    grouped = _group(store, groups=short, ledger=MemoryLedger(budget, "Grouping cells"))
+    assert grouped.codes.tolist() == [0, 1] * 4
+
+    with pytest.raises(MemoryBudgetError) as refused:
+        _group(store, groups=long, ledger=MemoryLedger(budget, "Grouping cells"))
+    error = refused.value
+    assert str(error) == (
+        f"Grouping cells holds about {error.needed_bytes} bytes for reading "
+        "'values' of the cluster_labels artifact for 8 cells, more than the "
+        f"memory budget of {budget} bytes. Raise mem_budget to at least "
+        f"{error.needed_bytes} bytes."
+    )
+    assert error.budget_bytes == budget < error.needed_bytes
+    # The budget that the refusal names groups the cells as the short labels
+    # do.
+    regrouped = _group(
+        store, groups=long, ledger=MemoryLedger(error.needed_bytes, "Grouping cells")
+    )
+    assert regrouped.codes.tolist() == grouped.codes.tolist()
+    assert [key["cluster_labels"] for key in regrouped.keys] == [
+        "x" * 2_000,
+        "y" * 2_000,
+    ]
+
+
 def test_within_groups_give_each_cell_the_code_of_its_group(store) -> None:
     within = MemoryLedger(None, "Grouping cells")
     codes, keys, _fingerprint = within_groups(

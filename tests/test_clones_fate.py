@@ -14,6 +14,7 @@ import pandas as pd
 import pytest
 from scipy.stats import fisher_exact
 
+from cytearc.clones import fate as fate_module
 from cytearc.clones.fate import (
     COUPLING_METHODS,
     clone_coupling,
@@ -28,7 +29,14 @@ from cytearc.clones.fate import (
 from cytearc.clones.groups import pair_counts
 from cytearc.clones.overlap import overlap_pairs
 from tests.clone_helpers import benjamini_hochberg, coupling_reference
+from tests.perturbation_helpers import use_python_kernels
 from tests.random_stream_helpers import child_key, splitmix64, uniform
+
+# SplitMix64's products wrap around at 2**64, as the compiled kernels' do;
+# NumPy's scalars warn of each wrap when the kernels run as Python.
+_WRAPPING = pytest.mark.filterwarnings(
+    "ignore:overflow encountered in scalar:RuntimeWarning"
+)
 
 
 def _pairs(groups, clones):
@@ -49,6 +57,7 @@ def _table(groups, clones) -> dict[int, Counter]:
 SHARED_ONE = (np.array([0, 0, 1, 1]), np.array([0, 1, 0, 2]), np.array([2, 3, 1, 4]))
 
 
+@pytest.mark.parametrize("python_kernels", [False, True])
 @pytest.mark.parametrize(
     ("method", "expected"),
     [
@@ -66,8 +75,10 @@ SHARED_ONE = (np.array([0, 0, 1, 1]), np.array([0, 1, 0, 2]), np.array([2, 3, 1,
     ],
 )
 def test_two_groups_that_share_one_clone_couple_as_derived_by_hand(
-    method, expected
+    monkeypatch, method, expected, python_kernels
 ) -> None:
+    if python_kernels:
+        use_python_kernels(monkeypatch, fate_module)
     pairs, tree = clone_coupling(*SHARED_ONE, 2, method=method, n_permutations=0)
     assert pairs.columns.tolist() == [
         "first",
@@ -180,7 +191,13 @@ def _shuffled_by_hand(labels, bounds, seed: int, permutation: int) -> list[int]:
     return shuffled
 
 
-def test_each_permutation_shuffles_by_its_own_splitmix64_stream() -> None:
+@_WRAPPING
+@pytest.mark.parametrize("python_kernels", [False, True])
+def test_each_permutation_shuffles_by_its_own_splitmix64_stream(
+    monkeypatch, python_kernels
+) -> None:
+    if python_kernels:
+        use_python_kernels(monkeypatch, fate_module)
     # The null's shuffles follow SplitMix64 to the bit, so a seed gives the
     # same null in every release and on every number of threads.
     labels = np.array([0, 0, 1, 2, 2, 2, 3, 4, 4, 5, 5, 5, 5, 6], dtype=np.int32)
@@ -248,10 +265,14 @@ def test_the_null_matches_every_arrangement_of_the_labels(method) -> None:
         )
 
 
+@_WRAPPING
+@pytest.mark.parametrize("python_kernels", [False, True])
 @pytest.mark.parametrize("method", COUPLING_METHODS)
 def test_the_null_is_the_coupling_of_the_arrangements_permuted_labels_draws(
-    method,
+    monkeypatch, method, python_kernels
 ) -> None:
+    if python_kernels:
+        use_python_kernels(monkeypatch, fate_module)
     rng = np.random.default_rng(6)
     clones = np.minimum(rng.zipf(1.8, size=60), 9) - 1
     groups = rng.integers(0, 3, size=60)

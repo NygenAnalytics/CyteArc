@@ -4,7 +4,9 @@ The kernels are checked against direct counterparts written from the model's
 definition, each call's probability under each genotype; the search's bound
 against the log-likelihood that EM then finds in every round; and the calls
 against synthetic truths whose clones and dropout and error rates are drawn
-first, which the code under test never computes.
+first, which the code under test never computes. Tests parametrized by
+``python_kernels`` run the kernels a second time as Python, so that coverage
+sees their bodies.
 """
 
 import warnings
@@ -16,12 +18,14 @@ from typing import Any
 import numpy as np
 import pytest
 from scipy.sparse.csgraph import minimum_spanning_tree
+from scipy.special import xlogy
 from sklearn.metrics import adjusted_rand_score
 
 from cytearc import DiagnosticWarning
 from cytearc.storage.artifacts import artifact_path
 from cytearc.utils.logging import collect_warnings
 from cytearc.utils.memory_budget import MemoryLedger
+from cytearc.variants import genotype_clones as clones_module
 from cytearc.variants import genotype_mixture as mixture_module
 from cytearc.variants.genotype_clones import (
     _removal_deltas,
@@ -35,13 +39,11 @@ from cytearc.variants.genotype_mixture import (
     SiteRates,
     bit_pairs,
     call_patterns,
-    hard_call_sums,
-    pack_calls,
     pack_mask,
-    spanning_tree,
 )
 from tests.clone_helpers import every_cell, write_cells_store
 from tests.memory_helpers import climb_refusals
+from tests.perturbation_helpers import use_python_kernels
 from tests.variant_truth import (
     DOUBLET_CELL,
     DropoutTruth,
@@ -90,7 +92,10 @@ def _random_calls(rng: np.random.Generator, n_cells: int, n_sites: int) -> np.nd
     )
 
 
-def test_word_bit_counts_match_python_integers() -> None:
+@pytest.mark.parametrize("python_kernels", [False, True])
+def test_word_bit_counts_match_python_integers(monkeypatch, python_kernels) -> None:
+    if python_kernels:
+        use_python_kernels(monkeypatch, mixture_module)
     rng = np.random.default_rng(1)
     words = rng.integers(0, 2**63, size=500, dtype=np.uint64) * np.uint64(
         2
@@ -106,8 +111,13 @@ def test_word_bit_counts_match_python_integers() -> None:
             )
 
 
+@pytest.mark.parametrize("python_kernels", [False, True])
 @pytest.mark.parametrize("n_sites", [1, 40, 64, 65, 130])
-def test_packed_calls_hold_one_bit_per_known_call_at_a_chosen_site(n_sites) -> None:
+def test_packed_calls_hold_one_bit_per_known_call_at_a_chosen_site(
+    monkeypatch, n_sites, python_kernels
+) -> None:
+    if python_kernels:
+        use_python_kernels(monkeypatch, mixture_module)
     rng = np.random.default_rng(n_sites)
     n_cells, n_stored = 30, n_sites + 5
     # Call codes 0 to 5 at stored sites, five of which are not chosen.
@@ -122,7 +132,7 @@ def test_packed_calls_hold_one_bit_per_known_call_at_a_chosen_site(n_sites) -> N
     words = mixture_module.n_words(n_sites)
     mutant_bits = np.zeros((n_cells, words), dtype=np.uint64)
     wild_bits = np.zeros((n_cells, words), dtype=np.uint64)
-    pack_calls(
+    mixture_module.pack_calls(
         cells, stored.astype(np.int32), codes, rank, is_mutant, mutant_bits, wild_bits
     )
     dense = np.full((n_cells, n_stored), -1)
@@ -134,8 +144,83 @@ def test_packed_calls_hold_one_bit_per_known_call_at_a_chosen_site(n_sites) -> N
     np.testing.assert_array_equal(wild_bits, pack_mask(expected == 0))
 
 
+@pytest.mark.parametrize("python_kernels", [False, True])
+@pytest.mark.parametrize("n_sites", [63, 64, 65, 128])
+def test_row_and_site_bit_counts_equal_those_of_the_unpacked_mask(
+    monkeypatch, n_sites, python_kernels
+) -> None:
+    if python_kernels:
+        use_python_kernels(monkeypatch, mixture_module)
+    rng = np.random.default_rng(n_sites)
+    mask = rng.random((12, n_sites)) < 0.1
+    # Rows without a bit, and rows whose one bit is the first or the last site.
+    mask[:5] = False
+    mask[3, -1] = mask[4, 0] = True
+    bits = pack_mask(mask)
+    # Each row starts at the opposite answer, so each must be written.
+    found = ~mask.any(axis=1)
+    mixture_module.any_bits(bits, found)
+    np.testing.assert_array_equal(found, mask.any(axis=1))
+    np.testing.assert_array_equal(
+        mixture_module.column_counts(bits, n_sites), mask.sum(axis=0)
+    )
+    rows = np.array([4, 3, 7, 7, 11])
+    np.testing.assert_array_equal(
+        mixture_module.site_counts(bits, rows, n_sites), mask[rows].sum(axis=0)
+    )
+
+
+@pytest.mark.parametrize("python_kernels", [False, True])
+def test_other_state_local_and_weighted_calls_equal_those_of_the_unpacked_calls(
+    monkeypatch, python_kernels
+) -> None:
+    if python_kernels:
+        use_python_kernels(monkeypatch, mixture_module)
+    rng = np.random.default_rng(27)
+    n_sites = 130
+    calls = _random_calls(rng, 30, n_sites)
+    mutant_bits, wild_bits = _packed(calls)
+    rows = np.array([0, 5, 5, 17, 29])
+    picked = calls[rows]
+    # The calls of the state that a genotype lacks: wild type where it
+    # carries a site, mutant where not.
+    carried = rng.random(n_sites) < 0.4
+    other = mixture_module.other_state_bits(
+        mutant_bits, wild_bits, rows, pack_mask(carried[None, :])[0]
+    )
+    np.testing.assert_array_equal(
+        other, pack_mask(np.where(carried, picked == 0, picked == 1))
+    )
+    # More than 64 sites on both sides of the word boundaries, packed from
+    # bit 0 of their own words.
+    sites = np.union1d(rng.choice(n_sites, 67, replace=False), [63, 64, 129])
+    local_mutant, local_wild = mixture_module.local_bits(
+        mutant_bits, wild_bits, rows, sites
+    )
+    assert local_mutant.shape == (5, 2)
+    np.testing.assert_array_equal(local_mutant, pack_mask(picked[:, sites] == 1))
+    np.testing.assert_array_equal(local_wild, pack_mask(picked[:, sites] == 0))
+    none_mutant, none_wild = mixture_module.local_bits(
+        mutant_bits, wild_bits, rows, np.empty(0, dtype=np.int64)
+    )
+    assert none_mutant.shape == none_wild.shape == (5, 1)
+    assert not none_mutant.any() and not none_wild.any()
+    # Rows of no weight add nothing, and the chunks outnumber the rows.
+    weights = np.array([0.5, 0.0, 2.0, 1.0, 0.0])
+    mutant, wild = mixture_module.weighted_site_counts(
+        mutant_bits, wild_bits, rows, weights, n_sites, N_CHUNKS
+    )
+    np.testing.assert_allclose(mutant, weights @ (picked == 1), rtol=1e-12)
+    np.testing.assert_allclose(wild, weights @ (picked == 0), rtol=1e-12)
+
+
+@pytest.mark.parametrize("python_kernels", [False, True])
 @pytest.mark.parametrize("n_sites", [7, 64, 150])
-def test_the_tree_e_step_equals_each_genotype_summed_over_every_call(n_sites) -> None:
+def test_the_tree_e_step_equals_each_genotype_summed_over_every_call(
+    monkeypatch, n_sites, python_kernels
+) -> None:
+    if python_kernels:
+        use_python_kernels(monkeypatch, mixture_module)
     rng = np.random.default_rng(n_sites)
     calls = _random_calls(rng, 300, n_sites)
     # Genotypes near one another and far apart, so the spanning tree has
@@ -166,12 +251,26 @@ def test_the_tree_e_step_equals_each_genotype_summed_over_every_call(n_sites) ->
     np.testing.assert_allclose(relative, expected, rtol=1e-10, atol=1e-9)
 
 
-def test_the_m_step_sums_equal_the_posterior_weighted_calls() -> None:
+@pytest.mark.parametrize("python_kernels", [False, True])
+@pytest.mark.parametrize("n_sites", [63, 64, 130])
+def test_the_m_step_sums_equal_the_posterior_weighted_calls(
+    monkeypatch, n_sites, python_kernels
+) -> None:
+    if python_kernels:
+        use_python_kernels(monkeypatch, mixture_module)
     rng = np.random.default_rng(3)
-    n_cells, n_sites, n_components = 500, 130, 6
+    n_cells, n_components = (100 if python_kernels else 500), 6
     calls = _random_calls(rng, n_cells, n_sites)
     genotypes = rng.random((n_components - 1, n_sites)) < 0.3
     posteriors = rng.dirichlet(np.ones(n_components), size=n_cells)
+    # The last component is no cell's most probable, and a fifth of the
+    # posteriors are 0, so the sums meet components without mass.
+    posteriors[:, -1] *= 0.01
+    zero = rng.random(posteriors.shape) < 0.2
+    zero[:, 0] = False
+    posteriors[zero] = 0.0
+    posteriors /= posteriors.sum(axis=1, keepdims=True)
+    assert (posteriors.argmax(axis=1) < n_components - 1).all()
     mutant_bits, wild_bits = _packed(calls)
     gbits = pack_mask(np.vstack([np.zeros((1, n_sites), dtype=bool), genotypes]))
     words = mutant_bits.shape[1]
@@ -195,14 +294,19 @@ def test_the_m_step_sums_equal_the_posterior_weighted_calls() -> None:
     np.testing.assert_allclose(wild, posteriors.T @ (calls == 0), rtol=1e-9, atol=1e-9)
 
 
-def test_hard_call_sums_count_the_calls_of_each_component_cells() -> None:
+@pytest.mark.parametrize("python_kernels", [False, True])
+def test_hard_call_sums_count_the_calls_of_each_component_cells(
+    monkeypatch, python_kernels
+) -> None:
+    if python_kernels:
+        use_python_kernels(monkeypatch, mixture_module)
     rng = np.random.default_rng(4)
     calls = _random_calls(rng, 400, 70)
     hard = rng.integers(0, 5, size=400)
     mutant_bits, wild_bits = _packed(calls)
     mutant = np.empty((5, 70))
     wild = np.empty((5, 70))
-    hard_call_sums(
+    mixture_module.hard_call_sums(
         mutant_bits, wild_bits, hard, 70, np.empty((2, N_CHUNKS, 5, 70)), mutant, wild
     )
     for component in range(5):
@@ -238,8 +342,41 @@ def test_removal_scores_equal_the_log_likelihood_without_each_component() -> Non
         assert deltas[component] == pytest.approx(expected, rel=1e-9, abs=1e-6)
 
 
+@pytest.mark.parametrize("python_kernels", [False, True])
+@pytest.mark.parametrize("n_chunks", [4, N_CHUNKS])
+def test_posteriors_and_removal_scores_equal_sums_over_the_components(
+    monkeypatch, n_chunks, python_kernels
+) -> None:
+    if python_kernels:
+        use_python_kernels(monkeypatch, mixture_module)
+    rng = np.random.default_rng(28)
+    relative = rng.normal(0.0, 3.0, size=(40, 5))
+    # A cell all but certain of one component, whose log(1 - posterior)
+    # rounds to -inf unless it is summed from the other components.
+    relative[0, 2] = 400.0
+    log_weights = np.log(rng.dirichlet(np.ones(5)))
+    posteriors = np.empty((40, 5))
+    sums = np.empty(40)
+    mixture_module._posteriors(relative, log_weights, posteriors, sums)
+    totals = relative + log_weights
+    full = np.logaddexp.reduce(totals, axis=1)
+    np.testing.assert_allclose(sums, full, rtol=1e-12)
+    np.testing.assert_allclose(posteriors, np.exp(totals - full[:, None]), rtol=1e-9)
+    assert (posteriors >= 0.5).any() and (posteriors < 0.5).any()
+    lost = mixture_module.removal_logliks(relative, log_weights, posteriors, n_chunks)
+    for component in range(5):
+        kept = np.logaddexp.reduce(np.delete(totals, component, axis=1), axis=1)
+        assert lost[component] == pytest.approx(float((kept - full).sum()), rel=1e-9)
+    assert lost[2] < -300
+
+
+@pytest.mark.parametrize("python_kernels", [False, True])
 @pytest.mark.parametrize("n_local", [3, 10, 12, 40, 70])
-def test_call_patterns_group_equal_rows_and_sum_their_weights(n_local) -> None:
+def test_call_patterns_group_equal_rows_and_sum_their_weights(
+    monkeypatch, n_local, python_kernels
+) -> None:
+    if python_kernels:
+        use_python_kernels(monkeypatch, mixture_module)
     rng = np.random.default_rng(n_local)
     calls = rng.choice(
         np.array([-1, 0, 1], dtype=np.int8), size=(800, n_local), p=[0.1, 0.6, 0.3]
@@ -270,12 +407,18 @@ def test_call_patterns_group_equal_rows_and_sum_their_weights(n_local) -> None:
         )
 
 
-def test_the_spanning_tree_is_as_short_as_a_minimum_spanning_tree() -> None:
+@pytest.mark.parametrize("python_kernels", [False, True])
+def test_the_spanning_tree_is_as_short_as_a_minimum_spanning_tree(
+    monkeypatch, python_kernels
+) -> None:
+    if python_kernels:
+        use_python_kernels(monkeypatch, mixture_module)
     rng = np.random.default_rng(9)
     genotypes = rng.random((12, 90)) < 0.2
     nodes = np.vstack([np.zeros((1, 90), dtype=bool), genotypes])
-    total, parent, order = spanning_tree(pack_mask(nodes))
+    total, parent, order = mixture_module.spanning_tree(pack_mask(nodes))
     distance = (nodes[:, None, :] != nodes[None, :, :]).sum(axis=2)
+    np.testing.assert_array_equal(mixture_module.distances(pack_mask(nodes)), distance)
     assert total == int(minimum_spanning_tree(distance).sum())
     # Each node joins after its parent, and the tree's edges sum to its length.
     joined = np.empty(13, dtype=np.int64)
@@ -286,14 +429,22 @@ def test_the_spanning_tree_is_as_short_as_a_minimum_spanning_tree() -> None:
     assert sum(distance[node, parent[node]] for node in range(1, 13)) == total
 
 
-def test_bit_pairs_list_each_mutant_call_and_each_unread_site() -> None:
+@pytest.mark.parametrize("python_kernels", [False, True])
+@pytest.mark.parametrize("n_sites", [63, 64, 70])
+def test_bit_pairs_list_each_mutant_call_and_each_unread_site(
+    monkeypatch, n_sites, python_kernels
+) -> None:
+    if python_kernels:
+        use_python_kernels(monkeypatch, mixture_module)
     rng = np.random.default_rng(10)
-    calls = _random_calls(rng, 50, 70)
+    calls = _random_calls(rng, 50, n_sites)
     mutant, wild = _packed(calls)
     rows = np.array([1, 4, 9, 30])
     ledger = MemoryLedger(None, "Calling clones")
     for unknown, value in ((False, 1), (True, -1)):
-        cells, sites, _held = bit_pairs(ledger, mutant, wild, rows, 70, unknown=unknown)
+        cells, sites, _held = bit_pairs(
+            ledger, mutant, wild, rows, n_sites, unknown=unknown
+        )
         expected_cells, expected_sites = np.nonzero(calls[rows] == value)
         np.testing.assert_array_equal(cells, rows[expected_cells])
         np.testing.assert_array_equal(sites, expected_sites)
@@ -947,7 +1098,53 @@ def test_a_nested_truth_with_a_held_dropout_rate_keeps_its_subclone() -> None:
     assert adjusted_rand_score(called.codes, both.codes) > 0.95
 
 
-def test_removing_the_one_component_a_cell_can_take_loses_it_entirely() -> None:
+@pytest.mark.parametrize("python_kernels", [False, True])
+@pytest.mark.parametrize(
+    "rules",
+    [{}, {"dropout_probability": 0.1, "error_probability": 0.01}],
+    ids=["estimated rates", "held rates"],
+)
+def test_a_small_nested_truth_gives_its_clones_with_the_kernels_run_as_python(
+    monkeypatch, rules, python_kernels
+) -> None:
+    # The nested truth above at 180 cells and a dropout of 0.1, small enough
+    # for the search to run its kernels as Python, which must call what the
+    # compiled kernels call.
+    rng = np.random.default_rng(23)
+    genotypes = np.zeros((3, 12), dtype=bool)
+    genotypes[0, :3] = genotypes[1, :5] = genotypes[2, 5:8] = True
+    truth = np.repeat([0, 1, 2, -1], [60, 50, 50, 20])
+    carried = np.zeros((180, 12), dtype=bool)
+    carried[truth >= 0] = genotypes[truth[truth >= 0]]
+    draw = rng.random(carried.shape)
+    calls = np.where(np.where(carried, draw >= 0.1, draw < 0.01), 1, 0).astype(np.int8)
+    calls[rng.random(calls.shape) < 0.05] = -1
+    called = _call(calls, **rules)
+    if python_kernels:
+        compiled = called
+        use_python_kernels(monkeypatch, mixture_module, clones_module)
+        called = _call(calls, **rules)
+        np.testing.assert_array_equal(called.codes, compiled.codes)
+        np.testing.assert_array_equal(called.genotypes, compiled.genotypes)
+        np.testing.assert_allclose(called.probability, compiled.probability)
+        np.testing.assert_allclose(called.dropout, compiled.dropout)
+        np.testing.assert_allclose(called.error, compiled.error)
+        assert called.loglik == pytest.approx(compiled.loglik, rel=1e-12)
+        np.testing.assert_allclose(called.bound_checks, compiled.bound_checks)
+    found = {tuple(np.flatnonzero(genotype)) for genotype in called.genotypes}
+    assert found == {(0, 1, 2), (0, 1, 2, 3, 4), (5, 6, 7)}
+    assert adjusted_rand_score(truth, called.codes) > 0.9
+    if rules:
+        np.testing.assert_array_equal(called.dropout, np.full(12, 0.1))
+        np.testing.assert_array_equal(called.error, np.full(12, 0.01))
+
+
+@pytest.mark.parametrize("python_kernels", [False, True])
+def test_removing_the_one_component_a_cell_can_take_loses_it_entirely(
+    monkeypatch, python_kernels
+) -> None:
+    if python_kernels:
+        use_python_kernels(monkeypatch, mixture_module)
     from cytearc.variants.genotype_mixture import removal_logliks
 
     # The wild type has no weight, so each cell's only component is the
@@ -1037,7 +1234,30 @@ def test_the_rates_are_shrunk_toward_the_pooled_rates_by_their_priors() -> None:
     assert rates.error[0] == pytest.approx(31 / 1002)
 
 
-def test_a_site_rate_stays_below_its_caps_and_held_rates_are_kept() -> None:
+@pytest.mark.parametrize("python_kernels", [False, True])
+def test_a_site_term_is_the_expected_log_likelihood_of_its_calls(
+    monkeypatch, python_kernels
+) -> None:
+    if python_kernels:
+        use_python_kernels(monkeypatch, mixture_module)
+    from cytearc.variants.genotype_mixture import site_term
+
+    # 2 wild-type calls among 10 at carried sites and 3 mutant calls among
+    # 100 at absent sites, by hand.
+    expected = 2 * np.log(0.2) + 8 * np.log(0.8) + 3 * np.log(0.01) + 97 * np.log(0.99)
+    assert site_term(2.0, 10.0, 3.0, 100.0, 0.2, 0.01) == pytest.approx(expected)
+    # Rates of 0 are kept 1e-12 inside (0, 1), so a wild-type call at a
+    # carried site and a mutant call at an absent one each cost a finite
+    # log(1e-12) instead of -inf.
+    assert site_term(1.0, 1.0, 1.0, 1.0, 0.0, 0.0) == pytest.approx(2 * np.log(1e-12))
+
+
+@pytest.mark.parametrize("python_kernels", [False, True])
+def test_a_site_rate_stays_below_its_caps_and_held_rates_are_kept(
+    monkeypatch, python_kernels
+) -> None:
+    if python_kernels:
+        use_python_kernels(monkeypatch, mixture_module)
     from cytearc.variants.genotype_mixture import rate_update
 
     # 50 mutant calls among 100 at absent sites, pooled error 0.02: the
@@ -1055,6 +1275,119 @@ def test_a_site_rate_stays_below_its_caps_and_held_rates_are_kept() -> None:
     assert rate_update(
         10.0, 100.0, 50.0, 100.0, 0.2, 0.02, 20.0, 200.0, 5.0, 0.3, 0.05
     ) == (0.3, 0.05)
+
+
+@pytest.mark.parametrize("python_kernels", [False, True])
+@pytest.mark.parametrize(
+    ("wild_type", "held", "max_iter"),
+    [(False, False, 30), (True, False, 30), (False, True, 30), (False, False, 1)],
+    ids=["clone", "wild type", "held rates", "one iteration"],
+)
+def test_a_split_fit_gains_the_evidence_bound_of_its_planted_children(
+    monkeypatch, wild_type, held, max_iter, python_kernels
+) -> None:
+    if python_kernels:
+        use_python_kernels(monkeypatch, mixture_module)
+    # A clone of sites 0 and 1 splits into a child adding sites 2 and 3 and
+    # one adding site 4; the wild type splits into a child of sites 2 and 3
+    # and itself. No cell carries site 5. Beside the clone's 40 cells, 12
+    # cells of another component read at the same sites: the wild type's,
+    # or for the wild type's split a clone's of sites 0 and 1.
+    rng = np.random.default_rng(5)
+    n_sites = 6
+    parent = np.zeros(n_sites, dtype=bool)
+    other = np.zeros(n_sites, dtype=bool)
+    (other if wild_type else parent)[:2] = True
+    children = np.vstack([parent, parent])
+    children[0, 2:4] = True
+    children[1, 4] = not wild_type
+
+    def drawn(carried: np.ndarray) -> np.ndarray:
+        draw = rng.random(carried.shape)
+        calls = np.where(np.where(carried, draw >= 0.15, draw < 0.02), 1, 0)
+        calls[rng.random(calls.shape) < 0.1] = -1
+        return calls.astype(np.int8)
+
+    calls = drawn(children[np.repeat([0, 1], [24, 16])])
+    rest = drawn(np.tile(other, (12, 1)))
+    # A cell of no posterior of the clone adds nothing.
+    weights = np.ones(40)
+    weights[-1] = 0.0
+    mutant, wild = calls == 1, calls == 0
+    clone_mutant, clone_wild = weights @ mutant, weights @ wild
+    rest_mutant, rest_wild = (rest == 1).sum(axis=0), (rest == 0).sum(axis=0)
+    carried_wild = np.where(parent, clone_wild, 0) + np.where(other, rest_wild, 0)
+    carried_all = np.where(parent, clone_mutant + clone_wild, 0) + np.where(
+        other, rest_mutant + rest_wild, 0
+    )
+    absent_mutant = np.where(parent, 0, clone_mutant) + np.where(other, 0, rest_mutant)
+    absent_all = np.where(parent, 0, clone_mutant + clone_wild) + np.where(
+        other, 0, rest_mutant + rest_wild
+    )
+    old_dropout, old_error = np.full(n_sites, 0.1), np.full(n_sites, 0.01)
+    settings = (
+        (0.15, 0.02, 20.0, 200.0, -1.0, 0.15, 0.02)
+        if held
+        else (0.1, 0.01, 20.0, 200.0, 5.0, -1.0, -1.0)
+    )
+    # The first child starts a site short, as a seed's majority calls may.
+    first = children[0].copy()
+    first[3] = False
+    second = parent.copy()
+    shares = np.empty(40)
+    site_gain, rest_gain, share, dropout, error, first_mutant, first_wild, steps = (
+        mixture_module.split_fit(
+            *_packed(calls),
+            weights,
+            shares,
+            parent.copy(),
+            first,
+            second,
+            clone_mutant,
+            clone_wild,
+            carried_wild,
+            carried_all,
+            absent_mutant,
+            absent_all,
+            old_dropout,
+            old_error,
+            *settings,
+            max_iter,
+            1e-9,
+            wild_type,
+            0.5,
+        )
+    )
+    assert 1 <= steps <= max_iter
+    np.testing.assert_allclose(first_mutant, (weights * shares) @ mutant, rtol=1e-12)
+    np.testing.assert_allclose(first_wild, (weights * shares) @ wild, rtol=1e-12)
+    assert share == pytest.approx((weights * shares).sum() / weights.sum(), rel=1e-12)
+    if held:
+        np.testing.assert_array_equal(dropout, np.full(n_sites, 0.15))
+        np.testing.assert_array_equal(error, np.full(n_sites, 0.02))
+    # The gain is the evidence lower bound of the split, summed cell by cell
+    # under the new rates, less the log-likelihood under the parent.
+    before = weights @ _model_loglik(calls, parent, old_dropout, old_error)
+    before += _model_loglik(rest, other, old_dropout, old_error).sum()
+    rest_after = _model_loglik(rest, other, dropout, error).sum()
+    first_loglik = np.log(share) + _model_loglik(calls, first, dropout, error)
+    second_loglik = np.log1p(-share) + _model_loglik(calls, second, dropout, error)
+    entropy = -xlogy(shares, shares) - xlogy(1 - shares, 1 - shares)
+    bound = rest_after + weights @ (
+        shares * first_loglik + (1 - shares) * second_loglik + entropy
+    )
+    exact = rest_after + weights @ np.logaddexp(first_loglik, second_loglik)
+    assert before + site_gain + rest_gain == pytest.approx(bound, rel=1e-10)
+    assert bound <= exact + 1e-9
+    if max_iter > 1:
+        # Converged, each cell's share is its posterior of the first child,
+        # at which the bound is the log-likelihood, and the children are the
+        # planted ones.
+        assert steps < max_iter
+        assert bound == pytest.approx(exact, rel=1e-9)
+        assert site_gain + rest_gain > 0
+        np.testing.assert_array_equal(first, children[0])
+        np.testing.assert_array_equal(second, children[1])
 
 
 def test_a_site_that_no_cell_of_a_clone_was_read_at_keeps_its_state() -> None:

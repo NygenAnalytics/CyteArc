@@ -13,6 +13,7 @@ from cytearc.repertoire.clonotypes import (
 )
 from cytearc.utils.memory_budget import MemoryLedger
 from tests.clone_helpers import within_distance as _within
+from tests.perturbation_helpers import use_python_kernels
 
 
 def _pairwise_partition(
@@ -229,9 +230,14 @@ def test_cluster_assignment_checks_its_arguments() -> None:
     assert chainless.codes.tolist() == [-1, -1]
 
 
-def test_clusters_do_not_depend_on_the_chunks_of_pairs(monkeypatch) -> None:
+@pytest.mark.parametrize("python_kernels", [False, True])
+def test_clusters_do_not_depend_on_the_chunks_of_pairs(
+    monkeypatch, python_kernels
+) -> None:
     from cytearc.repertoire import clonotypes
 
+    if python_kernels:
+        use_python_kernels(monkeypatch, clonotypes)
     # Many cells share one of two near alpha chains, as invariant T cells do,
     # with second alpha chains and beta chains of their own.
     rng = np.random.default_rng(5)

@@ -2850,6 +2850,59 @@ def test_source_preparation_restores_limits_when_resident_data_exhausts_budget()
     np.testing.assert_array_equal(source.read_cells(0, 4), np.ones((4, 3)))
 
 
+def test_source_preparation_names_the_budget_of_a_row_that_its_limit_refuses(
+    tmp_path,
+):
+    from cytearc.readers._seurat.sources import (
+        prepare_matrix_sources,
+        release_temporary_storage,
+    )
+
+    # Two features of 50 cells: each cell of the transpose holds 50 values,
+    # which its row conversion holds at once.
+    matrix = csc_matrix(np.arange(1, 101, dtype=np.uint16).reshape(2, 50))
+
+    def source() -> TransposeMatrixSource:
+        transposed = TransposeMatrixSource(
+            CscMatrixSource(matrix.data, matrix.indices, matrix.indptr, matrix.shape)
+        )
+        transposed._tempDir = tmp_path
+        return transposed
+
+    def refusal(max_bytes: int) -> MemoryBudgetError:
+        refused = source()
+        limits = refused._limits
+        with pytest.raises(MemoryBudgetError) as raised:
+            prepare_matrix_sources(refused, max_bytes=max_bytes)
+        assert refused._rowStore is None
+        assert refused._limits is limits
+        assert list(tmp_path.iterdir()) == []
+        return raised.value
+
+    # The budget leaves room to prepare one cell, but the block limit it sets
+    # refuses a row; the refusal names the whole budget that passes it.
+    budget = source().resident_bytes + 2000
+    refused = refusal(budget)
+    assert refused.item == "one sparse row of the conversion"
+    assert refused.budget_bytes == budget
+    assert refused.needed_bytes > budget
+    assert str(refused).startswith("One sparse row exceeds the conversion memory")
+    assert str(refused).endswith(f"It needs at least {refused.needed_bytes} bytes.")
+    below = refusal(refused.needed_bytes - 1)
+    assert (below.needed_bytes, below.item) == (refused.needed_bytes, refused.item)
+
+    prepared = source()
+    try:
+        prepare_matrix_sources(prepared, max_bytes=refused.needed_bytes)
+        assert prepared._rowStore is not None
+        np.testing.assert_array_equal(
+            prepared.read_cells(0, 2).toarray(), matrix.toarray()
+        )
+    finally:
+        release_temporary_storage(prepared)
+    assert list(tmp_path.iterdir()) == []
+
+
 def test_shared_sparse_transpose_prepares_and_releases_one_row_store(tmp_path):
     from cytearc.readers._seurat.sources import (
         prepare_matrix_sources,

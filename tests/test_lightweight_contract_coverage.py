@@ -138,6 +138,98 @@ def test_fate_and_pseudotime_results_reject_each_invalid_dimension() -> None:
         )
 
 
+def _pseudotime_of_components(
+    valid: list[bool], component: Any, sizes: tuple[Any, ...]
+) -> PseudotimeScoreResult:
+    refs = _trajectory_refs()
+    return PseudotimeScoreResult(
+        refs["pseudotime"],
+        refs["graph"],
+        refs["cells"],
+        np.linspace(0.0, 1.0, len(valid)),
+        np.asarray(valid),
+        np.asarray(component),
+        sizes,
+    )
+
+
+@pytest.mark.parametrize(
+    ("valid", "component", "sizes", "message"),
+    [
+        # One component number for each of four cells is needed.
+        (
+            [True] * 4,
+            [0, 0, 1],
+            (2, 1),
+            "Pseudotime components must align with the values",
+        ),
+        (
+            [True] * 4,
+            [0.0, 0.0, 1.0, 1.0],
+            (2, 2),
+            "Pseudotime components must be non-negative integers",
+        ),
+        (
+            [True] * 4,
+            [0, 0, -1, 1],
+            (2, 1, 1),
+            "Pseudotime components must be non-negative integers",
+        ),
+        (
+            [True, False, False, False],
+            [1, 0, 0, 0],
+            (1, 3),
+            "Pseudotime component sizes must be largest first",
+        ),
+        # Component 0 holds three cells, not two.
+        (
+            [True, True, True, False],
+            [0, 0, 0, 1],
+            (2, 2),
+            "Pseudotime component sizes must count the components",
+        ),
+        # A third component that no cell is in.
+        (
+            [True, True, True, False],
+            [0, 0, 0, 1],
+            (3, 1, 1),
+            "Pseudotime component sizes must count the components",
+        ),
+        # The valid cells leave out a cell of the scored component.
+        (
+            [True, True, False, False],
+            [0, 0, 0, 1],
+            (3, 1),
+            "Valid pseudotime cells must form one whole component",
+        ),
+        # The valid cells span two components.
+        (
+            [True, True, True, True],
+            [0, 0, 0, 1],
+            (3, 1),
+            "Valid pseudotime cells must form one whole component",
+        ),
+    ],
+)
+def test_pseudotime_results_refuse_components_that_do_not_fit_their_cells(
+    valid, component, sizes, message
+) -> None:
+    with pytest.raises(ValueError, match=f"^{message}$"):
+        _pseudotime_of_components(valid, component, sizes)
+
+
+def test_pseudotime_results_keep_component_sizes_as_integers() -> None:
+    # The scored component is the smaller one, and no cell of an unscored
+    # pseudotime is valid.
+    scored = _pseudotime_of_components(
+        [False, False, False, True], [0, 0, 0, 1], (np.int64(3), np.int32(1))
+    )
+    assert scored.component_sizes == (3, 1)
+    assert all(type(size) is int for size in scored.component_sizes)
+    unscored = _pseudotime_of_components([False] * 3, np.array([0, 0, 0]), (3,))
+    assert unscored.component_sizes == (3,)
+
+
 def test_pseudotime_marker_rejects_a_feature_selection_from_another_assay() -> None:
     refs = _trajectory_refs()
     table = pd.DataFrame(

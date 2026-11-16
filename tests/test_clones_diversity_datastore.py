@@ -13,6 +13,7 @@ import pytest
 
 from cytearc.clones import ClonalDiversity, Rarefaction
 from cytearc.clones import diversity as dv
+from cytearc.storage.artifacts import artifact_group
 from tests.clone_helpers import (
     every_cell,
     import_truth_clones,
@@ -228,6 +229,33 @@ def test_diversity_refuses_other_artifacts_and_large_stores(
         MemoryBudgetError, match="for each cell's clone, .* Raise mem_budget"
     ):
         store.clones.diversity(clones)
+
+
+def test_codes_stored_as_narrower_integers_are_read_and_as_floats_refused(
+    copied,
+) -> None:
+    store, clones = copied.store, copied.clones
+    expected = store.clones.diversity(clones).indices
+    group = artifact_group(store.zw, clones)
+    stored = group["codes"]
+    codes, chunks = stored[:], stored.chunks
+    assert codes.dtype == np.int32
+
+    def store_codes_as(dtype: type) -> None:
+        del group["codes"]
+        group.create_array("codes", data=codes.astype(dtype), chunks=chunks)
+
+    # Codes stored narrower are widened into the same clones.
+    store_codes_as(np.int8)
+    pd.testing.assert_frame_equal(store.clones.diversity(clones).indices, expected)
+    # Codes stored as floats are refused rather than cut to integers.
+    store_codes_as(np.float64)
+    for read in (store.clones.diversity, store.clones.load_clones):
+        with pytest.raises(
+            TypeError,
+            match="^each cell's clone must be stored as integers, not as float64$",
+        ):
+            read(clones)
 
 
 def test_a_label_of_its_own_for_each_cell_makes_groups_of_one_cell(copied) -> None:

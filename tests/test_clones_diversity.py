@@ -11,6 +11,7 @@ import pytest
 
 from cytearc.clones import diversity as dv
 from cytearc.clones.diversity import CloneSizes
+from tests.perturbation_helpers import use_python_kernels
 
 # Two abundance vectors, used as clone sizes here, whose outputs below come
 # from running iNEXT 3.0.2 and vegan 2.7.6 on them.
@@ -33,6 +34,7 @@ def test_clone_sizes_are_summarized_by_size() -> None:
         _clones([2, -1])
 
 
+@pytest.mark.parametrize("python_kernels", [False, True])
 @pytest.mark.parametrize(
     ("sizes", "observed", "estimated"),
     [
@@ -66,7 +68,11 @@ def test_clone_sizes_are_summarized_by_size() -> None:
         ([7], (1, 1, 1), (1, 1, 1)),
     ],
 )
-def test_hill_numbers_match_inext(sizes, observed, estimated) -> None:
+def test_hill_numbers_match_inext(
+    monkeypatch, sizes, observed, estimated, python_kernels
+) -> None:
+    if python_kernels:
+        use_python_kernels(monkeypatch, dv)
     clones = _clones(sizes)
     for order in dv.ORDERS:
         assert dv.observed_hill(clones, order) == pytest.approx(
@@ -93,6 +99,7 @@ def test_coverage_matches_inext_with_and_without_doubletons() -> None:
     assert np.isnan(dv.coverage(_clones([])))
 
 
+@pytest.mark.parametrize("python_kernels", [False, True])
 @pytest.mark.parametrize(
     ("sizes", "m", "method", "values", "coverage"),
     [
@@ -134,8 +141,10 @@ def test_coverage_matches_inext_with_and_without_doubletons() -> None:
     ],
 )
 def test_rarefaction_and_extrapolation_match_inext(
-    sizes, m, method, values, coverage
+    monkeypatch, sizes, m, method, values, coverage, python_kernels
 ) -> None:
+    if python_kernels:
+        use_python_kernels(monkeypatch, dv)
     clones = _clones(sizes)
     for order in dv.ORDERS:
         value, got = dv.diversity_at(clones, m, order)
@@ -186,8 +195,11 @@ def _subsamples(sizes, m):
         yield chosen, cells, counts
 
 
+@pytest.mark.parametrize("python_kernels", [False, True])
 @pytest.mark.parametrize("sizes", [[3, 2, 1, 1], [4, 1, 1, 1, 1], [2, 2, 2], [5, 2]])
-def test_rarefaction_equals_every_subsample(sizes) -> None:
+def test_rarefaction_equals_every_subsample(monkeypatch, sizes, python_kernels) -> None:
+    if python_kernels:
+        use_python_kernels(monkeypatch, dv)
     clones = _clones(sizes)
     n = sum(sizes)
     for m in range(1, n):
@@ -471,6 +483,7 @@ def _exact_entropy(sizes, m) -> float:
     return float(np.sum(np.sort(terms)))
 
 
+@pytest.mark.parametrize("python_kernels", [False, True])
 @pytest.mark.parametrize(
     ("sizes", "m"),
     [
@@ -480,7 +493,11 @@ def _exact_entropy(sizes, m) -> float:
         ([5, 4, 1], 1),
     ],
 )
-def test_rarefied_entropy_equals_exact_hypergeometric_sums(sizes, m) -> None:
+def test_rarefied_entropy_equals_exact_hypergeometric_sums(
+    monkeypatch, sizes, m, python_kernels
+) -> None:
+    if python_kernels:
+        use_python_kernels(monkeypatch, dv)
     # Large clones and samples need windows of more than 64 terms each.
     clones = _clones(sizes)
     expected = np.exp(_exact_entropy(sizes, m))
@@ -1053,10 +1070,15 @@ def test_grouped_clone_sizes_refuse_positions_outside_the_groups() -> None:
             grouped.take(positions)
 
 
+@pytest.mark.parametrize("python_kernels", [False, True])
 @pytest.mark.parametrize(
     ("n", "a"), [(100, 0.3), (60, 0.5), (16, 0.44), (100_000, 1e-4)]
 )
-def test_entropy_tail_series_is_summed_exactly(n, a) -> None:
+def test_entropy_tail_series_is_summed_exactly(
+    monkeypatch, n, a, python_kernels
+) -> None:
+    if python_kernels:
+        use_python_kernels(monkeypatch, dv)
     # Where the factor (1 - a) ** (1 - n) is large the tail is summed as its
     # series, sum((1 - a) ** j / (j + n - 1), j >= 1), here exactly over its
     # terms until they fall below e**-50 of the first; a series that shrinks
