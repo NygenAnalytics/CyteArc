@@ -7,7 +7,7 @@ description: Mount remote single-cell datasets, analyze large cell atlases, and 
 
 **Analyze single-cell datasets on local disk or in object storage, without loading the count matrix into memory.**
 
-CyteArc analyzed Tahoe-100M, a single-cell perturbation dataset of 100 million cells, in under 20 hours on commodity hardware, from cell filtering through UMAP, clustering and marker genes, without downsampling the data or using GPUs.
+On a single CPU node reading from cloud storage, CyteArc analyzed all 95.6 million cells of Tahoe-100M, a single-cell perturbation atlas, from cell filtering through UMAP, clustering and marker genes, without downsampling the data or using GPUs.
 
 Open a published atlas, plot marker expression, and save your own annotations. Counts stay in object storage, and your results are saved to a store you control. CyteArc supports RNA, ATAC, and multimodal analysis on your computer, an HPC cluster, or cloud compute.
 
