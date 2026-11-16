@@ -1846,12 +1846,10 @@ def lineage_membership_payload_is_valid(
     }
     if len(arrays) != len(contracts):
         return False
-    try:
-        stored_components = as_zarr_array(
-            group["trunk_components"], name="trunk_components"
-        )
-    except (KeyError, TypeError):
-        return False
+    # The payload's fingerprint check found trunk_components among the arrays.
+    stored_components = as_zarr_array(
+        group["trunk_components"], name="trunk_components"
+    )
     if stored_components.ndim != 1:
         return False
     n_components = int(stored_components.shape[0])

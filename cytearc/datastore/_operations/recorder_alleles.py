@@ -640,11 +640,11 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
         """
         from ...readers.recorder_alleles import classified_rows, iter_allele_rows
 
-        # A chunk takes a twentieth of the room left when the file is planned.
+        # A chunk takes a twentieth of the room left when the file is planned;
+        # the store's budget always gives the ledger room.
         room = ledger.room
-        chunk_rows = layout.chunk_rows(
-            self.memoryBytes // _CHUNK_SHARE if room is None else room // _CHUNK_SHARE
-        )
+        assert room is not None
+        chunk_rows = layout.chunk_rows(room // _CHUNK_SHARE)
         # A smaller selection holds the file's names and chunks all the same.
         reading = ledger.hold(
             f"the allele file's names and a chunk of {chunk_rows} rows",

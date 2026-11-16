@@ -792,12 +792,9 @@ class _EmbeddingOperationsMixin(_EmbeddingOperationsBase):
             return planned.ref
         self._require_writable(arguments.operation)
         lineage = resolve_native_graph_inputs(self.zw, graph)
+        # Planning refused a graph whose cells differ from its selection's, and
+        # resolving the coordinates refused rows that differ from it too.
         coordinates = self._coordinate_data(lineage.coordinates, batch_size=None)
-        if coordinates.shape[0] != n_cells:
-            raise ValueError(
-                f"The graph's coordinates hold {coordinates.shape[0]} cells; "
-                f"the graph has {n_cells}"
-            )
         # The layout holds the mid-near pairs from the start, and the
         # coordinates until the pairs are drawn, which the estimate counts
         # throughout.

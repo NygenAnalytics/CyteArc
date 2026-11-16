@@ -409,11 +409,10 @@ def test_clone_rows_are_read_in_chunks_that_half_the_room_holds() -> None:
     ledger.hold("the labels read", 1_000_000)
     assert chunk_rows(ledger, 100) == 5_000
     # A full ledger still reads 1,000 rows at a time, and a chunk never holds
-    # more than a million rows, however large the budget or without one.
+    # more than a million rows, however large the budget.
     ledger.hold("the hashes of barcodes", 1_000_000)
     assert chunk_rows(ledger, 100) == 1_000
     assert chunk_rows(MemoryLedger(10**15, "Importing clones"), 100) == 1_000_000
-    assert chunk_rows(MemoryLedger(None, "Importing clones"), 100) == 1_000_000
 
 
 # The groups' labels of clonal expansion.

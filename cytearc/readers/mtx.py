@@ -917,8 +917,6 @@ class _MtxEngine:
             np.maximum.at(feature_maxima, features, values)
 
         for features, cells, values in self._raw_chunks(lines_in_mem):
-            if features.size == 0:
-                continue
             if cell_major or feature_major:
                 if cell_major:
                     cell_previous = (
@@ -1012,8 +1010,6 @@ class _MtxEngine:
         pending: tuple[int, int, np.uint64] | None = None
         parsed = 0
         for features, cells, values in self._raw_chunks(lines_in_mem):
-            if features.size == 0:
-                continue
             if self.coordinateOrder != "unordered":
                 first, second = (
                     (cells, features)

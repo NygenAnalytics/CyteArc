@@ -20,7 +20,6 @@ import zarr
 
 from ...clones.groups import group_names
 from ...metadata.rows import (
-    array_row_selection_parts,
     metadata_missing_mask,
     read_categorical_rows,
     read_rows,
@@ -37,12 +36,10 @@ from ...metadata.selection import (
 from ...metadata.table import MetaData
 from ...storage.artifacts import (
     ValueFingerprintBuilder,
-    artifact_group,
     canonical_bytes,
 )
 from ...storage.categorical import CategoricalColumn
 from ...storage.refs import ArtifactRef
-from ...storage.types import as_zarr_array
 from ...storage.validation_scope import validation_scope
 from ...utils.arrays import unique_rows
 from ...utils.arguments import quoted_value
@@ -63,7 +60,6 @@ __all__ = [
     "cell_groups",
     "group_columns",
     "grouping_artifact",
-    "selection_chunk_bytes",
     "within_groups",
 ]
 
@@ -207,16 +203,6 @@ class CellGroups:
         builder.update_bytes("keys", canonical_bytes(self.keys))
         builder.update_array("codes", np.asarray(self.codes, dtype=np.int64))
         return builder.hexdigest()
-
-
-def selection_chunk_bytes(zw: zarr.Group, selection: ArtifactRef) -> int:
-    """The bytes of one stored chunk of a cell selection, which reading it holds.
-
-    A selection stores a flag for each cell of the store, so the chunk can
-    outweigh the cells it selects.
-    """
-    values = as_zarr_array(artifact_group(zw, selection)["values"], name="values")
-    return array_row_selection_parts(values)[0]
 
 
 def _column_values(

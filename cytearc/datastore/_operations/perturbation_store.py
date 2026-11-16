@@ -275,8 +275,10 @@ def _count_stream(
     """
     _least, block = _stream_bytes(counts, scratch_bytes_per_row)
     ledger.peak(item, block)
+    # The store's budget always gives the ledger room.
     room = ledger.room
-    ledger.peak(item, block if room is None else max(block, room))
+    assert room is not None
+    ledger.peak(item, max(block, room))
     blocks: Iterable[np.ndarray] = counts._stream_blocks(
         nthreads=nthreads,
         msg=msg,

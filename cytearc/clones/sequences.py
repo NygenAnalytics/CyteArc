@@ -761,16 +761,12 @@ def _near_run_pairs(
 
 
 @njit(cache=True)
-def _run_pairs(
-    keys: np.ndarray, bits: int, n_rows: int, out: np.ndarray, split: int
-) -> int:
+def _run_pairs(keys: np.ndarray, bits: int, n_rows: int, out: np.ndarray) -> int:
     """Pair the rows of each run of keys with equal hashes; return how many pairs.
 
     The keys are sorted, so the rows of a run ascend and a row that a run
-    repeats is paired once. With a ``split`` above 0, only the rows below it
-    pair, with those at or above it. A pair is written as
-    ``first * n_rows + second``; with an empty output, the pairs are only
-    counted.
+    repeats is paired once. A pair is written as ``first * n_rows + second``;
+    with an empty output, the pairs are only counted.
     """
     shift = np.uint64(bits)
     low = np.uint64((1 << bits) - 1)
@@ -783,17 +779,11 @@ def _run_pairs(
         end = start + 1
         while end < n_keys and keys[end] >> shift == value:
             end += 1
-        # The rows of the run at or above the split follow those below it.
-        middle = end - 1
-        if split:
-            middle = start
-            while middle < end and np.int64(keys[middle] & low) < split:
-                middle += 1
-        for left in range(start, middle):
+        for left in range(start, end - 1):
             if left > start and keys[left] == keys[left - 1]:
                 continue
             first = np.int64(keys[left] & low) * n_rows
-            for right in range(middle if split else left + 1, end):
+            for right in range(left + 1, end):
                 if keys[right] != keys[right - 1]:
                     if write:
                         out[at] = first + np.int64(keys[right] & low)
@@ -960,8 +950,8 @@ def _keyed_pairs(
 
     Under substitutions the texts share one length, split into ``segments``
     runs of positions, or one per position for 0, of which each key masks
-    ``limit``. With a ``split`` above 0, only the rows below it pair, with
-    those at or above it.
+    ``limit``. With a ``split`` above 0, which only substitutions take, only
+    the rows below it pair, with those at or above it.
 
     A key holds its hash with the row in the low bits, so one sort in place
     brings the rows of each hash together, ascending. Under substitutions,
@@ -1065,7 +1055,7 @@ def _keyed_pairs(
             # Texts within the edits share several deletion variants, so the
             # candidate pairs are written and sorted, and each distinct pair
             # is checked once by the edit distance.
-            n_candidates = _run_pairs(keys, bits, n_rows, no_counts, split)
+            n_candidates = _run_pairs(keys, bits, n_rows, no_counts)
             # The slice of the keys written keeps the whole buffer of the pass.
             _check(
                 ledger,
@@ -1073,7 +1063,7 @@ def _keyed_pairs(
                 "the candidate pairs of texts that share variant keys",
             )
             pairs = np.empty(n_candidates, dtype=np.int64)
-            _run_pairs(keys, bits, n_rows, pairs, split)
+            _run_pairs(keys, bits, n_rows, pairs)
             del keys
             pairs.sort()
             kept = _check_edit_pairs(codes, lengths, pairs, n_rows, limit)

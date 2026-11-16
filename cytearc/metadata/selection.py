@@ -1048,15 +1048,13 @@ class CellSelectionRead:
     Attributes:
         selection: The cell selection.
         cells: The cells it selects.
-        geometry: The geometry of its stored flags, or None when they have
-            no chunks.
-        rows: The rows of its flags, one for each cell of the store.
+        geometry: The geometry of its stored flags, one for each cell of the
+            store.
     """
 
     selection: ArtifactRef
     cells: int
-    geometry: ArrayGeometry | None
-    rows: int
+    geometry: ArrayGeometry
 
 
 def plan_cell_selection_read(
@@ -1070,15 +1068,20 @@ def plan_cell_selection_read(
     caller that knows the cells that the selection holds, as an artifact
     aligned to it records them, passes them as ``cells``; the identity check
     then runs as :func:`read_cell_selection` reads the positions.
+
+    Raises:
+        ValueError: If the selection's stored flags are a single value rather
+            than one for each cell of the store.
     """
     n_selected = _selection_count(root, selection) if cells is None else int(cells)
     values = as_zarr_array(artifact_group(root, selection)["values"], name="values")
-    return CellSelectionRead(
-        selection=selection,
-        cells=n_selected,
-        geometry=array_geometry(values),
-        rows=int(values.shape[0]),
-    )
+    geometry = array_geometry(values)
+    if geometry is None:
+        raise ValueError(
+            f"Cell selection {selection.artifact_id} stores its flags as a single "
+            "value; a selection holds one flag for each cell of the store"
+        )
+    return CellSelectionRead(selection=selection, cells=n_selected, geometry=geometry)
 
 
 def read_cell_selection(
@@ -1108,10 +1111,7 @@ def read_cell_selection(
 def _selection_read_bytes(planned: CellSelectionRead) -> int:
     """What :func:`read_cell_selection` charges to read ``planned``'s positions."""
     positions = 3 * _INDEX_BYTES * planned.cells
-    geometry = planned.geometry
-    if geometry is None:
-        return planned.rows + positions
-    return geometry.wholeReadBytes(operation_concurrency()) + positions
+    return planned.geometry.wholeReadBytes(operation_concurrency()) + positions
 
 
 def _selection_count(root: Any, selection: ArtifactRef) -> int:

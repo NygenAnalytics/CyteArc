@@ -360,17 +360,6 @@ class CloneAssigner:
         self._labels: dict[str, int] = {}
         self._label_list: list[str] = []
         self._label_sources: list[int] = []
-        self._label_bytes = 0
-
-    @property
-    def n_labels(self) -> int:
-        """The distinct clone labels given so far."""
-        return len(self._label_list)
-
-    @property
-    def label_bytes(self) -> int:
-        """The bytes of the distinct labels given so far, as Python strings."""
-        return self._label_bytes
 
     def _label_codes(self, labels: np.ndarray, source: int) -> np.ndarray:
         """Return each label's code, numbering labels not seen before.
@@ -387,7 +376,6 @@ class CloneAssigner:
                 f"{len(self._label_list) + len(new)} clone labels",
                 text + _LABEL_ENTRY_BYTES * len(new),
             )
-            self._label_bytes += text
         mapped = np.empty(len(listed), dtype=np.int64)
         for index, label in enumerate(listed):
             code = self._labels.get(label)

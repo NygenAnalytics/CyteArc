@@ -481,6 +481,25 @@ def test_a_selection_read_planned_with_its_cells_known_skips_the_check(
         assert positions.tolist() == np.flatnonzero(flags).tolist()
 
 
+def test_a_selection_whose_flags_were_replaced_by_one_value_is_refused(
+    tmp_path,
+) -> None:
+    from cytearc.storage.artifacts import artifact_group
+    from cytearc.storage.errors import ArtifactResolutionError
+
+    root, ref = _selection_store(tmp_path / "store.zarr", np.ones(10, dtype=bool))
+    group = artifact_group(root, ref)
+    del group["values"]
+    group.create_array("values", data=np.asarray(True))
+    # A caller that knows the cells plans the read before the flags are
+    # checked, so the plan refuses them itself.
+    with pytest.raises(ValueError, match="flags as a single value"):
+        plan_cell_selection_read(root, ref, cells=10)
+    # Otherwise the check refuses them first.
+    with pytest.raises(ArtifactResolutionError):
+        plan_cell_selection_read(root, ref)
+
+
 def test_a_cell_selection_beyond_the_budget_is_refused_before_it_is_read(
     tmp_path, monkeypatch
 ) -> None:

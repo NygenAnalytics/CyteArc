@@ -248,11 +248,11 @@ def _mapped_row_objects(mapping: np.ndarray) -> Callable[[int], np.ndarray]:
 
 
 def _object_requests(
-    array: zarr.Array, row_objects: np.ndarray | None
+    array: zarr.Array, geometry: ArrayGeometry, row_objects: np.ndarray | None
 ) -> list[tuple[CachedSourceStore, str, int]]:
     """Return the store, key and fetch limit of stored objects of ``array``.
 
-    ``row_objects`` are the indices of the objects along the rows, or None
+    ``geometry`` is the array's geometry. ``row_objects`` are the indices of the objects along the rows, or None
     for every object. An object is a shard of a sharded array, or a chunk,
     and a fetch keeps at most one decoded chunk's bytes, as
     ``_PrefetchingMetadataStore`` reads it, or ``SMALLEST_FETCH_LIMIT`` bytes
@@ -260,9 +260,6 @@ def _object_requests(
     """
     store = array.store
     assert isinstance(store, CachedSourceStore)
-    geometry = array_geometry(array)
-    if geometry is None:
-        return []
     size = max(geometry.nominalChunkBytes(), SMALLEST_FETCH_LIMIT)
     counts = [
         -(-extent // geometry.axisShard(axis))
@@ -332,12 +329,13 @@ def _prefetch_metadata(
             ):
                 if array is None:
                     continue
+                # A metadata table holds no 0-d array, so every array has chunks.
                 geometry = array_geometry(array)
-                if geometry is None:
-                    continue
+                assert geometry is not None
                 requests.extend(
                     _object_requests(
                         array,
+                        geometry,
                         None if full else reads.row_objects(geometry.axisShard(0)),
                     )
                 )
