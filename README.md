@@ -7,13 +7,13 @@
   <a href="https://pypi.org/project/cytearc"><img src="https://img.shields.io/pypi/v/cytearc.svg?color=4c72b0" alt="PyPI"></a>
 </p>
 
-CyteArc is a Python framework for **single-cell RNA, ATAC, protein, and matched multi-omic analysis**. Its Zarr layout and read engine are designed together for efficient access by cell or gene, locally or directly from remote storage.
+Analyze single-cell data where it is stored, on local disk or in cloud storage, without loading the count matrix into memory. CyteArc covers RNA, ATAC, protein, and matched multi-omic data, along with the CRISPR screens, lineage tracing, immune repertoires, and DNA variants measured in the same cells.
 
-CyteArc analyzed **Tahoe-100M in under 20 hours on commodity hardware**, from cell filtering through UMAP, clustering, and marker gene identification, **without downsampling the dataset or using GPUs**. The same workflow processed one million cells within 15 minutes.
+- **Atlas scale on CPUs.** Counts are stored by cell and by gene and streamed within a memory budget you set, so whole atlases are analyzed without GPUs or subsampling. On a single CPU node reading from cloud storage, CyteArc analyzed all 95.6 million cells of Tahoe-100M, from cell filtering through UMAP, clustering, and marker genes.
+- **Remote data and cohorts in place.** Mount a published store and analyze it where it is, with your results saved to a store you control, or combine studies into a composite dataset without copying their counts.
+- **Results that are reused, branched, and traced.** Each result is saved with the inputs and settings that produced it, so matching results are reused, a changed setting reruns only the stages after it, and a finished analysis serves as a reference for mapping new cells.
 
-Mount remote datasets, combine studies into **composite datasets**, and run pipelines with provenance stored alongside the results.
-
-[Documentation](https://docs.nygen.io/CyteArc/) · [Quick start](https://docs.nygen.io/CyteArc/quickstart) · [Methods and validation](https://docs.nygen.io/CyteArc/reference/methods)
+Start with the [quick start](https://docs.nygen.io/CyteArc/quickstart), browse the [documentation](https://docs.nygen.io/CyteArc/), or read the [methods and validation](https://docs.nygen.io/CyteArc/reference/methods).
 
 ## Capabilities
 
@@ -21,15 +21,15 @@ Mount remote datasets, combine studies into **composite datasets**, and run pipe
 | :-- | :-- |
 | **[Data access](https://docs.nygen.io/CyteArc/tutorials/remote-stores)** | Mount local or remote stores; combine cells across studies into composite datasets without copying their counts |
 | **[Cell calling and QC](https://docs.nygen.io/CyteArc/tutorials/quality-control)** | EmptyDrops cell calling, ambient RNA correction, doublet detection within samples, cell-cycle scoring, and HTO demultiplexing |
-| **[Cell populations](https://docs.nygen.io/CyteArc/tutorials/scrna-seq)** | RNA, ATAC, and protein pipelines; batch-aware feature selection, PCA/LSI, UMAP, densMAP, t-SNE, Leiden/Paris clustering, and marker tests |
+| **[Cell populations](https://docs.nygen.io/CyteArc/tutorials/scrna-seq)** | RNA, ATAC, and protein pipelines; batch-aware feature selection, PCA/LSI, UMAP, densMAP, LocalMAP, t-SNE, Leiden/Paris clustering, and marker tests |
 | **[Integration](https://docs.nygen.io/CyteArc/tutorials/multimodal-diagnostics)** | Harmony2 batch correction, WNN/SNN integration of modalities measured in the same cells, and integration diagnostics |
-| **[Reference mapping](https://docs.nygen.io/CyteArc/tutorials/mapping-and-label-transfer)** | Symphony-style mapping, label transfer, and diagnostics for projected cells |
-| **[Condition comparisons](https://docs.nygen.io/CyteArc/tutorials/condition-comparisons)** | Sample-level and paired comparisons across donors, with pseudobulk export for downstream differential expression |
-| **[Trajectories](https://docs.nygen.io/CyteArc/tutorials/lineage-dynamics)** | Population Balance Analysis pseudotime, fate probabilities, lineage-specific gene dynamics, and fate-weighted curves |
-| **[Lineage tracing and immune repertoires](https://docs.nygen.io/CyteArc/tutorials/lineage-tracing)** | Clones from lineage barcodes, lineage recorder alleles and phylogenies, and mitochondrial DNA variants; clonal expansion, diversity, fate coupling, and fate bias; TCR and BCR clonotypes, gene usage, and AIRR export |
+| **[Reference mapping](https://docs.nygen.io/CyteArc/tutorials/mapping-and-label-transfer)** | Symphony-style mapping onto a finished analysis, which becomes a reference without reading its counts; label transfer and diagnostics for projected cells |
+| **[Donor comparisons and pseudobulk](https://docs.nygen.io/CyteArc/tutorials/condition-comparisons)** | Sample-level and paired comparisons across donors, with pseudobulk export for downstream differential expression |
+| **[Trajectories and fate mapping](https://docs.nygen.io/CyteArc/tutorials/pseudotime)** | Population Balance Analysis pseudotime, fate probabilities directed by pseudotime or potency scores, lineage-specific gene dynamics, and fate-weighted curves |
+| **[Lineage tracing and immune repertoires](https://docs.nygen.io/CyteArc/tutorials/lineage-tracing)** | Clones from lineage barcodes, lineage recorder alleles and phylogenies, and mitochondrial or targeted DNA variants; clonal expansion, diversity, fate coupling, and fate bias; TCR and BCR clonotypes, gene usage, and AIRR export |
 | **[Gene activity and regulation](https://docs.nygen.io/CyteArc/tutorials/regulons)** | AUCell/WAGGR gene-set scores, SCENIC-style regulons, chromVAR motif activity, region-to-gene links, and gene programs |
 | **[CRISPR screens](https://docs.nygen.io/CyteArc/tutorials/crispr-screens)** | Guide calling, perturbation labels, target knockdown and E-distances, Mixscape's knocked-out cells and escapers, calibrated association tests at low and high MOI, and perturbation clusters |
-| **[Import and export](https://docs.nygen.io/CyteArc/tutorials/import-and-export)** | Cell Ranger, Matrix Market, AnnData, and Seurat import; export counts and selected analysis results to AnnData |
+| **[Import and export](https://docs.nygen.io/CyteArc/tutorials/import-and-export)** | Cell Ranger, Matrix Market, CSV, AnnData, Seurat, and Mission Bio Tapestri import, of counts or normalized values; export counts and selected analysis results to AnnData |
 
 ## Install
 
@@ -49,7 +49,7 @@ run = ds.pipeline.rna(label="rna")
 ds.plots.embedding(run=run, color_by="clusters")
 ```
 
-Pipelines cover QC through marker discovery, with over 100 stage settings across RNA, ATAC, protein, and multimodal workflows. See the [analysis pipeline API reference](https://docs.nygen.io/CyteArc/api/pipeline.html) for every stage and its settings.
+Recipes for RNA, ATAC, protein, multimodal, and CRISPR screen data cover quality control through marker discovery. See the [analysis pipeline API reference](https://docs.nygen.io/CyteArc/api/pipeline.html) for every stage and its settings.
 
 ## Mount a remote dataset
 
@@ -64,7 +64,7 @@ ds = cytearc.mount_datastore(
 run = ds.pipeline.rna(label="rna")
 ```
 
-Find datasets in the companion [CyteBase catalog](https://docs.nygen.io/CyteBase/). See [remote access](https://docs.nygen.io/CyteArc/tutorials/remote-stores) for connection options.
+Find datasets in the companion [CyteBase catalog](https://docs.nygen.io/CyteBase/), which publishes primary-count datasets from CZ CELLxGENE Discover as CyteArc stores. See [remote access](https://docs.nygen.io/CyteArc/tutorials/remote-stores) for connection options.
 
 ## Analyze several studies as one composite dataset
 
@@ -84,12 +84,14 @@ joint_run = joint.pipeline.rna(label="joint_rna")
 
 See the [joint-analysis tutorial](https://docs.nygen.io/CyteArc/tutorials/composite-datasets) for details.
 
-## Trace results and reuse work
+## Reuse, branch, and trace results
 
-CyteArc records pipeline provenance in the datastore, linking result artifacts to their exact inputs and parameters. You can trace results and check their status without rerunning the analysis or setting up a separate workflow system. Matching results are reused automatically.
+A rerun that changes one setting reuses every saved stage before it, and `ds.artifacts.lineage` traces any result back to the counts it came from, with no separate workflow system.
 
 ```python
-ds.artifacts.lineage(run["markers"])
+# Saved stages through UMAP are reused; only clustering and the stages that use it run again.
+run_r2 = ds.pipeline.rerun(run, label="rna_r2", leiden={"partitions": [2.0]})
+ds.artifacts.lineage(run_r2["markers"])
 ```
 
 See [provenance](https://docs.nygen.io/CyteArc/concepts/provenance) and [result reuse](https://docs.nygen.io/CyteArc/tutorials/reuse-and-tracing) for details.
