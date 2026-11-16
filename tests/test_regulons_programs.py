@@ -237,6 +237,77 @@ def test_regulon_specificity_rejects_invalid_inputs(values, labels, message):
         regulon_specificity(pd.DataFrame(values), labels)
 
 
+@pytest.mark.parametrize(
+    ("labels", "unlabeled"),
+    [
+        (["a", "a", "b", "b", None], 1),
+        (["a", "a", "b", "b", np.nan], 1),
+        # Two NaN objects that are not the same object, and a float array.
+        (["a", np.float32("nan"), "b", "b", float("nan")], 2),
+        (np.asarray([1.0, np.nan, 2.0, 2.0, np.nan]), 2),
+        (["a", "a", "b", "b", pd.NA], 1),
+        (pd.Series(["a", "a", "b", None, "b"], dtype="string"), 1),
+        (["a", "a", "b", "b", pd.NaT], 1),
+        (pd.Categorical(["a", "a", None, "b", "b"]), 1),
+        # Blank and whitespace text names no group, as a category or a value.
+        (pd.Categorical(["a", "a", "", "b", "b"]), 1),
+        (["a", "a", "b", "b", ""], 1),
+        (np.asarray(["a", "  ", "b", "\t", "b"]), 2),
+        ([None] * 5, 5),
+        ([np.nan] * 5, 5),
+        (pd.Categorical([None] * 5, categories=["a"]), 5),
+    ],
+)
+def test_regulon_specificity_refuses_cells_without_a_label(labels, unlabeled):
+    activity = pd.DataFrame(
+        {"X": [2.0, 2.0, 0.0, 0.0, 1.0], "Y": [0.0, 1.0, 3.0, 0.0, 1.0]}
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=f"labels holds no label for {unlabeled} of the 5 cells to score; "
+        "pass the activity and labels of the labeled cells",
+    ):
+        regulon_specificity(activity, labels)
+
+
+@pytest.mark.parametrize(
+    ("labels", "groups"),
+    [
+        (["a", "a", "b", "b"], ["a", "b"]),
+        (np.asarray(["b", "b", "a", "a"]), ["b", "a"]),
+        # Unused categories name no group, and the groups follow the cells.
+        (pd.Categorical(["a", "a", "b", "b"], categories=["b", "z", "a"]), ["a", "b"]),
+        # A Series aligns with the activity by position, not by its index.
+        (pd.Series(["a", "a", "b", "b"], index=[3, 2, 1, 0]), ["a", "b"]),
+        (pd.Series(["a", "a", "b", "b"], dtype="string"), ["a", "b"]),
+        # Labels that read as false, or spell a missing value, are labels.
+        ([0, 0, 1, 1], [0, 1]),
+        ([False, False, True, True], [False, True]),
+        (["nan", "nan", "None", "None"], ["nan", "None"]),
+        (np.asarray([0.0, 0.0, 1.5, 1.5]), [0.0, 1.5]),
+    ],
+)
+def test_regulon_specificity_scores_every_kind_of_label_alike(labels, groups):
+    activity = pd.DataFrame({"X": [2.0, 2.0, 0.0, 0.0], "Y": [1.0, 1.0, 1.0, 1.0]})
+
+    rss = regulon_specificity(activity, labels)
+
+    # The scores derived by hand in
+    # test_regulon_specificity_gives_the_scores_derived_by_hand: X is active
+    # only, and evenly, in the first two cells' group, and none of its
+    # activity is in the last two cells.
+    even = 1 - np.sqrt(0.75 * np.log(4 / 3))
+    assert rss.index.tolist() == groups and rss.index.name == "group"
+    assert rss.columns.tolist() == ["X", "Y"]
+    np.testing.assert_allclose(
+        rss.to_numpy(),
+        [[1.0, even], [1 - np.sqrt(np.log(2)), even]],
+        rtol=0,
+        atol=1e-15,
+    )
+
+
 def test_connection_specificity_and_modules():
     rng = np.random.default_rng(3)
     base = rng.normal(size=(300, 2))
@@ -358,8 +429,7 @@ def test_in_memory_specificity_reads_its_table_a_block_of_rows_at_a_time(
         use_python_kernels(monkeypatch, specificity)
     rng = np.random.default_rng(5)
     values = rng.integers(0, 9, size=(101, 5))
-    labels = np.asarray([None, "B", "C"] * 33 + ["B", "C"], dtype=object)
-    labels[50] = np.nan
+    labels = np.asarray(["A", "B", "C"] * 33 + ["B", "C"], dtype=object)
     # Blocks of three rows of five regulons, beside the default of one.
     monkeypatch.setattr(specificity, "_TABLE_BLOCK_BYTES", 8 * 5 * 3)
     reads: list[int] = []
@@ -376,11 +446,9 @@ def test_in_memory_specificity_reads_its_table_a_block_of_rows_at_a_time(
     csi = connection_specificity(activity)
 
     assert reads == [3] * 33 + [2]
-    # A label that matches no cell, as NaN does, scores NaN, and its cell
-    # counts in each regulon's total only, as pySCENIC's scores count it.
     expected = rss_by_definition(values, labels)
-    assert rss.index[1:3].tolist() == ["B", "C"] and rss.index[[0, 3]].isna().all()
-    assert np.isnan(rss.iloc[3]).all() and not np.isnan(rss.iloc[0]).any()
+    assert rss.index.tolist() == ["A", "B", "C"]
+    assert not rss.isna().any(axis=None)
     np.testing.assert_allclose(rss.to_numpy(), expected.to_numpy(), atol=1e-12)
     np.testing.assert_array_equal(csi.to_numpy(), csi_by_definition(values))
 
@@ -494,10 +562,15 @@ def test_specificity_scores_check_their_codes_and_blocks():
     from cytearc.regulons.specificity import specificity_scores
 
     values = np.ones((3, 2))
-    with pytest.raises(ValueError, match="codes must name groups from 0 to 1, or -1"):
+    with pytest.raises(ValueError, match="codes must name groups from 0 to 1"):
         specificity_scores(_passes(values, 2), np.asarray([0, 2, 1]), 2, 2)
-    with pytest.raises(ValueError, match="codes must name groups"):
-        specificity_scores(_passes(values, 2), np.asarray([0, -2, 1]), 2, 2)
+    with pytest.raises(ValueError, match="codes must name groups from 0 to 1"):
+        specificity_scores(_passes(values, 2), np.asarray([[0, 1, 1]]), 2, 2)
+    # Every cell is in a group: a negative code, as -1 once marked a cell in
+    # none, is refused before any block is read.
+    for code in (-1, -2):
+        with pytest.raises(ValueError, match="negative"):
+            specificity_scores(None, np.asarray([0, code, 1]), 2, 2)
     with pytest.raises(ValueError, match="must hold 3 columns"):
         specificity_scores(_passes(values, 2), np.asarray([0, 1, 1]), 2, 3)
     with pytest.raises(ValueError, match="activity holds 3 rows for 4 cells"):
