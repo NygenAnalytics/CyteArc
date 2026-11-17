@@ -20,18 +20,34 @@ from cytearc.readers._sparse import ROW_BYTES, SparseRowStore, encoded_entry_byt
 from cytearc.utils.memory_budget import MemoryBudgetError
 
 _BIG = 1 << 40
+# The operation that the stores of these tests name in their errors.
+_OPERATION = "sparse row conversion"
 
 
 def _whole_store(tmp_path, shape, dtype, **options) -> SparseRowStore:
     settings = {"bucket_rows": 7, "buffer_bytes": 4096, "bucket_bytes": _BIG}
     settings.update(options)
-    return SparseRowStore(shape, dtype, whole_rows=True, temp_dir=tmp_path, **settings)
+    return SparseRowStore(
+        shape,
+        dtype,
+        operation=_OPERATION,
+        whole_rows=True,
+        temp_dir=tmp_path,
+        **settings,
+    )
 
 
 def _loose_store(tmp_path, shape, dtype, **options) -> SparseRowStore:
     settings = {"bucket_rows": 7, "buffer_bytes": 4096, "bucket_bytes": _BIG}
     settings.update(options)
-    return SparseRowStore(shape, dtype, whole_rows=False, temp_dir=tmp_path, **settings)
+    return SparseRowStore(
+        shape,
+        dtype,
+        operation=_OPERATION,
+        whole_rows=False,
+        temp_dir=tmp_path,
+        **settings,
+    )
 
 
 def _random_rows(rng, n_rows, n_columns, dtype, density=0.3) -> csr_matrix:
@@ -138,6 +154,7 @@ def test_values_round_trip_bit_for_bit(tmp_path, values, whole_rows):
     store = SparseRowStore(
         matrix.shape,
         values.dtype,
+        operation=_OPERATION,
         bucket_rows=2,
         whole_rows=whole_rows,
         buffer_bytes=0,
@@ -303,6 +320,7 @@ def test_empty_axes_rows_and_buckets_round_trip(tmp_path, whole_rows, shape):
     store = SparseRowStore(
         shape,
         np.float32,
+        operation=_OPERATION,
         bucket_rows=2,
         whole_rows=whole_rows,
         buffer_bytes=0,
@@ -899,7 +917,7 @@ def test_a_bucket_limit_below_one_row_is_refused(tmp_path):
         )
         with pytest.raises(MemoryBudgetError) as widest:
             store.finalize()
-        assert widest.value.item == "one sparse row of the conversion"
+        assert widest.value.item == "one row of the sparse row conversion"
         assert widest.value.needed_bytes == limit
         assert widest.value.budget_bytes == limit - 1
     finally:
@@ -992,6 +1010,7 @@ def test_from_entries_refuses_chunks_of_the_wrong_shape_and_cleans_up(tmp_path):
             chunks,
             (2, 2),
             np.int64,
+            operation=_OPERATION,
             max_bytes=1 << 20,
             entry_bytes=100,
             entries=3,
@@ -1007,6 +1026,7 @@ def test_from_entries_sizes_buckets_from_the_entries_expected(tmp_path, entries)
         iter((matrix,)),
         matrix.shape,
         np.int64,
+        operation=_OPERATION,
         max_bytes=1 << 20,
         entry_bytes=100,
         entries=entries,

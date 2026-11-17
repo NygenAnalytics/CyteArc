@@ -21,8 +21,6 @@ from ..utils.count_values import (
     dense_row_nonzeros,
     merge_count_scans,
     scan_processes,
-    scan_window_bytes,
-    scan_window_values,
     value_windows,
 )
 from ..utils.arguments import integer_argument
@@ -58,11 +56,19 @@ from ._h5ad_inspect import H5adInspectResult, inspect_h5ad as inspect_h5ad
 from ._h5ad_values import (
     RowSpill,
     matrix_values,
-    row_spill_consumer,
     scan_file_window,
     scan_window,
 )
-from ._sparse import ROW_BYTES, SparseRowStore, encoded_entry_bytes
+from ._row_spill import (
+    RowSpillPlan,
+    checked_destinations,
+    dense_sample_rows,
+    dense_spill_estimate,
+    row_spill_plan,
+    sample_rows,
+    spill_rows,
+)
+from ._sparse import SparseRowStore, encoded_entry_bytes
 from ._text import (
     DuplicateCellIds,
     DuplicateFeatureIds,
@@ -88,20 +94,9 @@ _CSC_ENTRY_BYTES = 384
 # The most entries of one chunk of columns that the conversion reads. Each
 # chunk gives a row one piece, so larger chunks give fewer, longer pieces.
 _CSC_CHUNK_ENTRIES = 8 * 1024 * 1024
-# What appending a scan window's rows to the row spill of a shuffle holds for
-# each value of the window: the rows gathered by bucket, their values cast to
-# the source dtype, a dense window's sparse copy, and the row and bucket
-# numbers of each row, which a window holds no more of than values.
-_SPILL_BYTES_PER_VALUE = 96
-# The most rows that a spill writer keeps pending; more gives longer blocks.
-_SPILL_BUFFER_BYTES = 1 << 30
-# The least pending rows for which a shuffle's scan starts another process.
-_SPILL_PROCESS_BUFFER_BYTES = 64 << 20
-# Buckets of shuffled rows are sized to read in this much, or in a
-# thirty-second of the budget when that is less, and split beyond twice it.
-_SPILL_READ_BYTES = 256 << 20
-# The entries of the first rows whose encoding estimates the spill's disk use.
-_SPILL_SAMPLE_ENTRIES = 1 << 20
+# What the row bucket stores of the reader do, as their errors name it.
+_CSC_OPERATION = "CSC row conversion"
+_SHUFFLE_OPERATION = "shuffled H5AD import"
 
 
 def _texts(values: np.ndarray) -> list[str | None]:
@@ -133,81 +128,6 @@ class _H5adAssayFeatures:
     featureIndexes: np.ndarray
     featureIds: np.ndarray
     featureNames: np.ndarray
-
-
-@dataclass(frozen=True)
-class _RowSpillPlan:
-    """The row bucket store of a shuffle, and what its scan and writers hold.
-
-    The owner holds the store's row counts. Each scan window's writer holds
-    a count and mark for every row of the store, the destinations of its own
-    rows, the scan window and the rows it appends, and its pending rows,
-    which take what is left of the window's share, up to 1 GiB. ``entries``
-    and ``entryBytes``, the values the rows hold beside zeros and the bytes
-    each takes on disk, check the free disk before the spill: a sparse
-    matrix's values are counted, and a dense matrix's estimated from its
-    first rows.
-    """
-
-    destinations: np.ndarray
-    shape: tuple[int, int]
-    dtype: np.dtype[Any]
-    bucketRows: int
-    readBytes: int
-    entries: int | None
-    entryBytes: float | None
-    longest: int
-    maxBytes: int
-
-    @property
-    def ownerBytes(self) -> int:
-        return (self.shape[0] + 1) * ROW_BYTES
-
-    def _fixed_bytes(self, rows: int) -> int:
-        """Return what a writer of ``rows`` rows holds beside its scan and buffer."""
-        return SparseRowStore.writer_bytes(self.shape[0], self.bucketRows) + 8 * rows
-
-    def _window_values(self, share: int, rows: int) -> int:
-        available = share - self._fixed_bytes(rows)
-        per_value = scan_window_bytes(1) + _SPILL_BYTES_PER_VALUE
-        return max(
-            max(1, self.longest),
-            min(scan_window_values(self.longest), available // per_value),
-        )
-
-    def scan_bytes(self, share: int, start: int, stop: int) -> int:
-        """Return the scan's budget for the window ``[start, stop)`` within ``share``."""
-        return scan_window_bytes(self._window_values(share, stop - start))
-
-    def buffer_bytes(self, share: int, start: int, stop: int) -> int:
-        """Return the pending rows of the window ``[start, stop)``'s writer within ``share``."""
-        values = self._window_values(share, stop - start)
-        left = (
-            share
-            - self._fixed_bytes(stop - start)
-            - values * (scan_window_bytes(1) + _SPILL_BYTES_PER_VALUE)
-        )
-        return int(max(0, min(_SPILL_BUFFER_BYTES, left)))
-
-    def process_extra_bytes(self) -> int:
-        """Return what a scan process holds beside its scan when it may start."""
-        return (
-            self._fixed_bytes(self.shape[0])
-            + _SPILL_BYTES_PER_VALUE * scan_window_values(self.longest)
-            + _SPILL_PROCESS_BUFFER_BYTES
-        )
-
-    def least_bytes(self) -> int:
-        """Return the least budget that scans and spills the longest row in one process."""
-        return (
-            self.ownerBytes
-            + self._fixed_bytes(self.shape[0])
-            + max(1, self.longest) * (scan_window_bytes(1) + _SPILL_BYTES_PER_VALUE)
-        )
-
-    def bucket_bytes(self) -> int:
-        """Return the most that reading one bucket may hold: a quarter of the budget."""
-        return max(2 * self.readBytes, self.maxBytes // 4)
 
 
 class H5adReader:
@@ -1254,9 +1174,9 @@ class H5adReader:
             count = scan_processes(
                 values,
                 longest,
-                int(maxBytes) - (0 if spill is None else spill.ownerBytes),
+                int(maxBytes) - (0 if spill is None else spill[0].ownerBytes),
                 processes,
-                extraBytes=0 if spill is None else spill.process_extra_bytes(),
+                extraBytes=0 if spill is None else spill[0].process_extra_bytes(),
             )
         windows = [(0, n_vectors)]
         if count > 1 and pointers is not None:
@@ -1275,7 +1195,7 @@ class H5adReader:
         if spill is None:
             scan = self._scan_windows(windows, int(maxBytes), featureGroups)
         else:
-            scan = self._scan_and_spill(windows, spill, featureGroups)
+            scan = self._scan_and_spill(windows, *spill, featureGroups)
         if dense:
             assert scan.rowNonzeros is not None
             self._cumulativeRowNnz = cumulative_nnz(scan.rowNonzeros)
@@ -1301,32 +1221,33 @@ class H5adReader:
 
     def _row_spill_plan(
         self, destinationRows: np.ndarray, maxBytes: int
-    ) -> "_RowSpillPlan":
+    ) -> tuple[RowSpillPlan, float | None, int]:
         """Plan the row bucket store of a shuffle and check that ``maxBytes`` holds it.
+
+        Returns:
+            The plan; the bytes per entry that the file's first rows take as
+            the store encodes them, or None without rows; and the values that
+            the rows hold beside zeros, counted for a sparse matrix and
+            estimated from its first rows for a dense one, from which the
+            free disk is checked before the spill.
 
         Raises:
             ValueError: If ``destinationRows`` is not a permutation of the rows.
             MemoryBudgetError: If the budget cannot hold the store's row
                 counts and one window of the longest row.
         """
-        destinations = self._checked_destinations(destinationRows)
-        sample: csr_matrix | None = None
-        # The values the rows hold beside zeros, which the disk check takes.
-        expected: int | None
+        destinations = checked_destinations(destinationRows, self.nCells)
+        entry_bytes: float | None = None
         if self.matrixOrientation == "dense":
             entries = None
             longest = self.nFeatures
             # The first rows, of about a million values, estimate how many
             # values the rows hold beside zeros and what they take on disk.
-            rows = min(
-                self.nCells, max(1, _SPILL_SAMPLE_ENTRIES // max(1, self.nFeatures))
+            rows = dense_sample_rows(self.nCells, self.nFeatures)
+            expected, entry_bytes = dense_spill_estimate(
+                self._matrix_values(self.h5[self.matrixKey], slice(0, rows)),
+                self.nCells,
             )
-            expected = 0
-            if rows:
-                sample = csr_matrix(
-                    self._matrix_values(self.h5[self.matrixKey], slice(0, rows))
-                )
-                expected = -(-int(sample.nnz) * self.nCells // rows)
         else:
             pointers = self._csr_indptr()
             assert pointers is not None
@@ -1335,81 +1256,27 @@ class H5adReader:
             longest = int(np.diff(pointers).max(initial=0))
             # The first rows, of about a million entries, measure what the
             # spill takes on disk.
-            rows = max(
-                1,
-                int(
-                    np.searchsorted(
-                        pointers, pointers[0] + _SPILL_SAMPLE_ENTRIES, side="right"
-                    )
-                )
-                - 1,
-            )
-            rows = min(rows, self.nCells)
+            rows = sample_rows(pointers)
             if rows:
-                sample = next(self._file_csr_batches(pointers, rows, 0, rows))
-        itemsize = np.dtype(self.sourceMatrixDtype).itemsize
-        read_bytes = min(_SPILL_READ_BYTES, maxBytes // 32)
-        bucket_rows = SparseRowStore.whole_row_bucket_rows(
-            self.nCells,
-            entries if entries is not None else self.nCells * self.nFeatures,
-            read_bytes,
-            itemsize,
-        )
-        plan = _RowSpillPlan(
-            destinations=destinations,
-            shape=(self.nCells, self.nFeatures),
-            dtype=np.dtype(self.sourceMatrixDtype),
-            bucketRows=bucket_rows,
-            readBytes=read_bytes,
-            entries=expected,
-            entryBytes=None if sample is None else encoded_entry_bytes(sample),
+                entry_bytes = encoded_entry_bytes(
+                    next(self._file_csr_batches(pointers, rows, 0, rows))
+                )
+        plan = row_spill_plan(
+            destinations,
+            (self.nCells, self.nFeatures),
+            self.sourceMatrixDtype,
+            entries=entries,
             longest=longest,
             maxBytes=maxBytes,
         )
-        least = plan.least_bytes()
-        if maxBytes < least:
-            raise MemoryBudgetError(
-                "Shuffling cells exceeds the memory limit. Scanning the matrix "
-                "and sending its rows to their buckets needs at least "
-                f"{least} bytes.",
-                needed_bytes=least,
-                budget_bytes=maxBytes,
-                item="the row spill of a cell shuffle",
-            )
-        return plan
-
-    def _checked_destinations(self, destinationRows: np.ndarray) -> np.ndarray:
-        """Return the destination row of each row as int64, checked to be a permutation.
-
-        Raises:
-            ValueError: If the rows are not one integer for each row, or not
-                a permutation of the rows.
-        """
-        destinations = np.asarray(destinationRows)
-        if destinations.shape != (self.nCells,) or destinations.dtype.kind not in "iu":
-            raise ValueError(
-                f"destinationRows must hold one integer row for each of the "
-                f"{self.nCells} cells; found dtype {destinations.dtype} and "
-                f"shape {destinations.shape}"
-            )
-        destinations = destinations.astype(np.int64, copy=False)
-        if self.nCells and (
-            int(destinations.min()) < 0
-            or not np.array_equal(
-                np.bincount(destinations, minlength=self.nCells),
-                np.ones(self.nCells, dtype=np.int64),
-            )
-        ):
-            raise ValueError(
-                "destinationRows must be a permutation of the rows, each row "
-                "from 0 once"
-            )
-        return destinations
+        return plan, entry_bytes, expected
 
     def _scan_and_spill(
         self,
         windows: list[tuple[int, int]],
-        plan: "_RowSpillPlan",
+        plan: RowSpillPlan,
+        entry_bytes: float | None,
+        entries: int,
         featureGroups: np.ndarray | None,
     ) -> CountScan:
         """Scan the windows and spill their rows into a new row bucket store.
@@ -1418,22 +1285,33 @@ class H5adReader:
         """
         self._release_rows()
         self._indptrCache = None
-        store = SparseRowStore(
-            plan.shape,
-            plan.dtype,
-            bucket_rows=plan.bucketRows,
-            whole_rows=True,
-            buffer_bytes=0,
-            bucket_bytes=plan.bucket_bytes(),
-            split_bytes=2 * plan.readBytes,
-            entries=plan.entries,
-            entry_bytes=plan.entryBytes,
-            sum_duplicates=False,
-            temp_dir=self._tempDir,
-        )
-        try:
-            share = (plan.maxBytes - plan.ownerBytes) // len(windows)
-            if len(windows) > 1:
+        share = (plan.maxBytes - plan.ownerBytes) // len(windows)
+        if len(windows) == 1:
+            start, stop = windows[0]
+            store, scan = spill_rows(
+                plan,
+                lambda consumer: self._scan_values(
+                    start,
+                    stop,
+                    plan.scan_bytes(share, start, stop),
+                    featureGroups,
+                    consumer=consumer,
+                ),
+                operation=_SHUFFLE_OPERATION,
+                entry_bytes=entry_bytes,
+                entries=entries,
+                buffer_bytes=plan.buffer_bytes(share, start, stop),
+                dense=self.matrixOrientation == "dense",
+                temp_dir=self._tempDir,
+            )
+        else:
+            store = plan.new_store(
+                operation=_SHUFFLE_OPERATION,
+                entry_bytes=entry_bytes,
+                entries=entries,
+                temp_dir=self._tempDir,
+            )
+            try:
                 logger.debug(
                     f"Scanning H5AD values and spilling rows in {len(windows)} processes"
                 )
@@ -1457,30 +1335,10 @@ class H5adReader:
                         ],
                     )
                 )
-            else:
-                start, stop = windows[0]
-                writer = SparseRowStore.open(
-                    store.directory,
-                    part=1,
-                    buffer_bytes=plan.buffer_bytes(share, start, stop),
-                )
-                scan = self._scan_values(
-                    start,
-                    stop,
-                    plan.scan_bytes(share, start, stop),
-                    featureGroups,
-                    consumer=row_spill_consumer(
-                        writer,
-                        plan.destinations,
-                        dense=self.matrixOrientation == "dense",
-                    ),
-                )
-                writer.finish()
-                del writer
-            store.finalize()
-        except BaseException:
-            store.close()
-            raise
+                store.finalize()
+            except BaseException:
+                store.close()
+                raise
         self._convertedCsr = store
         self._shuffledRows = True
         return scan
@@ -1704,7 +1562,7 @@ class H5adReader:
         destinations = (
             None
             if destinationRows is None
-            else self._checked_destinations(destinationRows)
+            else checked_destinations(destinationRows, self.nCells)
         )
         if self._convertedCsr is not None:
             if destinations is None and not self._shuffledRows:
@@ -1766,6 +1624,9 @@ class H5adReader:
                 chunks(),
                 shape,
                 dtype,
+                operation=(
+                    _CSC_OPERATION if destinations is None else _SHUFFLE_OPERATION
+                ),
                 max_bytes=store_bytes,
                 entry_bytes=_CSC_ENTRY_BYTES,
                 entries=int(data_node.size),

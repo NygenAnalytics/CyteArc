@@ -659,6 +659,7 @@ class BaseMatrixSource(ABC):
                     ),
                     (self.n_cells, self.n_features),
                     self.dtype,
+                    operation="Seurat row conversion",
                     max_bytes=max_bytes,
                     entry_bytes=self._rowStoreEntryBytes,
                     entries=entries,

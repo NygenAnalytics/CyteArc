@@ -2885,10 +2885,12 @@ def test_source_preparation_names_the_budget_of_a_row_that_its_limit_refuses(
     # refuses a row; the refusal names the whole budget that passes it.
     budget = source().resident_bytes + 2000
     refused = refusal(budget)
-    assert refused.item == "one sparse row of the conversion"
+    assert refused.item == "one row of the Seurat row conversion"
     assert refused.budget_bytes == budget
     assert refused.needed_bytes > budget
-    assert str(refused).startswith("One sparse row exceeds the conversion memory")
+    assert str(refused).startswith(
+        "One row of the Seurat row conversion exceeds its memory"
+    )
     assert str(refused).endswith(f"It needs at least {refused.needed_bytes} bytes.")
     below = refusal(refused.needed_bytes - 1)
     assert (below.needed_bytes, below.item) == (refused.needed_bytes, refused.item)
@@ -3028,7 +3030,8 @@ def _feature_major_sources(tmp_path: Path, values: NDArray[Any]) -> dict[str, An
         (
             "sparse",
             5_000,
-            "One sparse row exceeds the conversion memory limit; maxBlockBytes={}",
+            "One row of the Seurat row conversion exceeds its memory limit; "
+            "maxBlockBytes={}",
         ),
     ],
 )

@@ -30,6 +30,7 @@ __all__ = [
     "CELL_ORDER_ATTR",
     "SOURCE_ROW",
     "SOURCE_ROW_ROLE",
+    "destination_rows",
     "recorded_shuffle_seed",
     "shuffle_seed_argument",
     "shuffled_order",
@@ -91,6 +92,26 @@ def shuffled_order(n_rows: int, seed: int) -> np.ndarray:
     )
     order: np.ndarray = np.argsort(hashes, kind="stable").astype(np.int64, copy=False)
     return order
+
+
+def destination_rows(order: np.ndarray) -> np.ndarray:
+    """Return the destination row of each source row, the inverse of ``order``.
+
+    Source row ``order[r]`` goes to row ``r``, so an import that reads its
+    rows in the file's order sends row ``s`` to ``destination_rows(order)[s]``.
+
+    Raises:
+        ValueError: If ``order`` is not a one-dimensional integer array.
+    """
+    rows = np.asarray(order)
+    if rows.ndim != 1 or rows.dtype.kind not in "iu":
+        raise ValueError(
+            f"A cell order is one integer row per cell; found dtype {rows.dtype} "
+            f"and shape {rows.shape}"
+        )
+    destinations = np.empty(rows.size, dtype=np.int64)
+    destinations[rows] = np.arange(rows.size, dtype=np.int64)
+    return destinations
 
 
 def write_shuffled_cell_order(

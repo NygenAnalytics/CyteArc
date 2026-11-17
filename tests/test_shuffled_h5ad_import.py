@@ -23,7 +23,7 @@ from loguru import logger
 from scipy.sparse import coo_matrix, csc_matrix, csr_matrix
 from zarr.storage import MemoryStore
 
-import cytearc.readers.h5ad as h5ad_reader
+import cytearc.readers._row_spill as row_spill
 import cytearc.writers.h5ad as h5ad_writer
 from cytearc.readers import H5adReader
 from cytearc.readers._sparse import SparseRowStore
@@ -576,7 +576,7 @@ def test_producer_processes_read_and_delete_their_buckets(
     bucket_starts: list[list[int]] = []
     directory: list[Path] = []
     # Buckets of about three rows, so producer windows split some of them.
-    monkeypatch.setattr(h5ad_reader, "_SPILL_READ_BYTES", 600)
+    monkeypatch.setattr(row_spill, "_SPILL_READ_BYTES", 600)
     monkeypatch.setattr(h5ad_writer, "_producer_messages", messages)
     monkeypatch.setattr(H5adReader, "_release_shuffled_rows", release)
     destination = str(tmp_path / "shuffled.zarr") if direct else MemoryStore()
@@ -622,7 +622,7 @@ def test_a_single_producer_deletes_every_bucket_as_it_reads(
 
     monkeypatch.setattr(SparseRowStore, "_delete", delete)
     # Buckets of about ten rows.
-    monkeypatch.setattr(h5ad_reader, "_SPILL_READ_BYTES", 5_000)
+    monkeypatch.setattr(row_spill, "_SPILL_READ_BYTES", 5_000)
     reader = _reader(source, temp_dir=str(tmp_path))
     try:
         writer = H5adToZarr(
