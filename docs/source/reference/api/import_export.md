@@ -248,6 +248,16 @@ Steps that need counts refuse a normalized assay with a `TypeError` that says wh
 
 Mount, repack, and subset stores carry the record. A merge or composite holds normalized values when any source does, keeps the import kind only when every source shares it, and keeps no cell total. Grouped and melded assays hold normalized values whatever their source. Matrix Market readers read whole numbers only: read a normalized Matrix Market file with `scipy.io.mmread` and write it with `SparseToZarr(values=...)`. Seurat imports read `counts` layers only. A store imported from normalized values by an earlier version of CyteArc holds no record and reads as counts; re-import it with `values=`.
 
+(shuffled_cells)=
+
+## Shuffled cells
+
+Files usually group their cells by sample, donor or plate, so a contiguous slice of a store imported in the file's order, such as one count shard of about 11,000 cells or a training mini-batch, holds the cells of few groups. `H5adToZarr(shuffle_cells=True)` writes the cells in a uniformly random order, so every contiguous slice of the store is a random sample of its cells. Every per-cell array follows the one order: `counts` and `countsT`, the cell IDs and names, the `obs` columns, assay membership, and imported embeddings and cluster labels. `shuffle_seed`, an integer from 0 to 2**64 - 1 and 0 by default, chooses the order, which one seed gives on every platform. The option is off by default in this release, and the other imports keep the file's order.
+
+Each cell keeps its row in the file, from 0, in the int64 cell column `sourceRow`, and the cell table records the seed in its `cellOrder` attribute, as [cell order](../developers/zarr-internals#cell-order) describes. `insert`, `update_key`, `reset_key` and `drop` refuse `sourceRow`, and a shuffled import skips a source `obs` column of that name with a warning. The import decides what the values are from the file's first 100 cells, shuffled or not, so the shuffle never changes that decision.
+
+The shuffle reads the file once. As the value scan reads each block of rows of a CSR or dense matrix, it sends the rows to their destination in temporary files in the reader's `temp_dir`, which hold counts in about one byte per stored value; a CSC matrix's conversion to rows, which writes such files anyway, places each value at its destination row instead. The counts write reads the rows back in destination order and deletes each file once read, so the temporary files never take disk beyond the final store of a local destination. The import refuses before it writes anything when the budget cannot hold the scan's share of the shuffle, and when the temporary disk lacks a quarter more than the rows are estimated to take.
+
 ## Writers
 
 Every writer owns the reserved metadata columns `ids`, `names` and `I` and the

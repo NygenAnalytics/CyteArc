@@ -878,3 +878,63 @@ def test_destination_rows_must_be_a_permutation(tmp_path) -> None:
         assert reader._convertedCsr is None
     finally:
         reader.close()
+
+
+@pytest.mark.parametrize("n_cells", [0, 1, 2])
+@pytest.mark.parametrize("encoding", ["csr", "csc", "dense"])
+def test_files_of_no_one_or_two_cells_shuffle(tmp_path, encoding, n_cells) -> None:
+    counts = np.arange(1, 3 * n_cells + 1, dtype=np.float32).reshape(n_cells, 3)
+    matrix = {"csr": csr_matrix, "csc": csc_matrix, "dense": np.asarray}[encoding]
+    source = tmp_path / "small.h5ad"
+    anndata.AnnData(
+        matrix(counts),
+        obs=pd.DataFrame(index=[f"c{row}" for row in range(n_cells)]),
+        var=pd.DataFrame(index=["a", "b", "c"]),
+    ).write_h5ad(source)
+    reader = H5adReader(str(source), temp_dir=str(tmp_path))
+    try:
+        H5adToZarr(
+            reader, str(tmp_path / "small.zarr"), nthreads=1, shuffle_cells=True
+        ).dump()
+    finally:
+        reader.close()
+    root = _open(tmp_path / "small.zarr")
+    order = shuffled_order(n_cells, 0)
+    np.testing.assert_array_equal(root["RNA/counts"][...], counts[order])
+    np.testing.assert_array_equal(root[f"cellData/{SOURCE_ROW}"][...], order)
+    assert not [path for path in tmp_path.iterdir() if path.name.startswith("cytearc-")]
+
+
+def test_a_csc_conversion_is_redone_in_the_order_that_an_import_needs(tmp_path) -> None:
+    source = tmp_path / "source.h5ad"
+    counts = _write_source(source, "csc")
+    reader = H5adReader(str(source), temp_dir=str(tmp_path))
+    try:
+        reader.materialize_csc(1 << 30)
+        plain = reader._convertedCsr
+        assert plain is not None
+        # A bad order is refused before the conversion in hand is given up.
+        with pytest.raises(ValueError, match="destinationRows must be a permutation"):
+            reader.materialize_csc(1 << 30, destinationRows=np.zeros(_N_CELLS, int))
+        with pytest.raises(ValueError, match="destinationRows must hold one integer"):
+            reader.materialize_csc(1 << 30, destinationRows=np.arange(3))
+        assert reader._convertedCsr is plain
+        # A shuffled import converts the columns again, to destination rows.
+        H5adToZarr(
+            reader, str(tmp_path / "shuffled.zarr"), nthreads=1, shuffle_cells=True
+        ).dump()
+        assert not plain.directory.exists()
+        assert reader._convertedCsr is None
+        # Once its counts are written, the reader converts in the file's order.
+        first = next(reader.consume_row_range(_N_CELLS, 0, _N_CELLS)).toarray()
+        np.testing.assert_array_equal(first, counts)
+        with pytest.raises(ValueError, match="consume row range is outside"):
+            reader._file_first_rows(_N_CELLS + 1)
+        with pytest.raises(ValueError, match="consume row range is outside"):
+            reader._file_first_rows(-1)
+    finally:
+        reader.close()
+    np.testing.assert_array_equal(
+        _open(tmp_path / "shuffled.zarr")["RNA/counts"][...],
+        counts[shuffled_order(_N_CELLS, 0)],
+    )

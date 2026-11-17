@@ -9,8 +9,8 @@ into one whose bits each depend on all of its bits. The row digests and the
 set hashes of clone calling mix with :func:`mix64`, and every counter-based
 generator keys its streams through it or :func:`mix64_array`: Leiden's, the
 Monte Carlo draws of cell calling, the rounding draws of ambient RNA removal,
-the shuffles of fate coupling's null and the random sets of the association
-tests.
+the shuffles of fate coupling's null, the random sets of the association
+tests and the cell order of imports that shuffle cells.
 """
 
 import hashlib

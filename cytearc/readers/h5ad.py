@@ -1283,22 +1283,7 @@ class H5adReader:
             MemoryBudgetError: If the budget cannot hold the store's row
                 counts and one window of the longest row.
         """
-        destinations = np.asarray(destinationRows)
-        if destinations.shape != (self.nCells,) or destinations.dtype.kind not in "iu":
-            raise ValueError(
-                f"destinationRows must hold one integer row for each of the "
-                f"{self.nCells} cells; found dtype {destinations.dtype} and "
-                f"shape {destinations.shape}"
-            )
-        destinations = destinations.astype(np.int64, copy=False)
-        if self.nCells and not np.array_equal(
-            np.bincount(destinations, minlength=self.nCells)
-            if int(destinations.min()) >= 0
-            else np.zeros(0),
-            np.ones(self.nCells, dtype=np.int64),
-        ):
-            raise ValueError("destinationRows must be a permutation of the rows")
-        node = self.h5[self.matrixKey]
+        destinations = self._checked_destinations(destinationRows)
         sample: csr_matrix | None = None
         if self.matrixOrientation == "dense":
             entries = None
@@ -1351,8 +1336,35 @@ class H5adReader:
                 budget_bytes=maxBytes,
                 item="the row spill of a cell shuffle",
             )
-        del node
         return plan
+
+    def _checked_destinations(self, destinationRows: np.ndarray) -> np.ndarray:
+        """Return the destination row of each row as int64, checked to be a permutation.
+
+        Raises:
+            ValueError: If the rows are not one integer for each row, or not
+                a permutation of the rows.
+        """
+        destinations = np.asarray(destinationRows)
+        if destinations.shape != (self.nCells,) or destinations.dtype.kind not in "iu":
+            raise ValueError(
+                f"destinationRows must hold one integer row for each of the "
+                f"{self.nCells} cells; found dtype {destinations.dtype} and "
+                f"shape {destinations.shape}"
+            )
+        destinations = destinations.astype(np.int64, copy=False)
+        if self.nCells and (
+            int(destinations.min()) < 0
+            or not np.array_equal(
+                np.bincount(destinations, minlength=self.nCells),
+                np.ones(self.nCells, dtype=np.int64),
+            )
+        ):
+            raise ValueError(
+                "destinationRows must be a permutation of the rows, each row "
+                "from 0 once"
+            )
+        return destinations
 
     def _scan_and_spill(
         self,
@@ -1649,23 +1661,15 @@ class H5adReader:
         """
         if self.matrixOrientation != "csc":
             return
+        destinations = (
+            None
+            if destinationRows is None
+            else self._checked_destinations(destinationRows)
+        )
         if self._convertedCsr is not None:
-            if destinationRows is None and not self._shuffledRows:
+            if destinations is None and not self._shuffledRows:
                 return
             self._release_rows()
-        destinations: np.ndarray | None = None
-        if destinationRows is not None:
-            destinations = np.asarray(destinationRows)
-            if (
-                destinations.shape != (self.nCells,)
-                or destinations.dtype.kind not in "iu"
-            ):
-                raise ValueError(
-                    f"destinationRows must hold one integer row for each of the "
-                    f"{self.nCells} cells; found dtype {destinations.dtype} and "
-                    f"shape {destinations.shape}"
-                )
-            destinations = destinations.astype(np.int64, copy=False)
         group = self.h5[self.matrixKey]
         data_node = group["data"]
         source = np.dtype(self.sourceMatrixDtype)
