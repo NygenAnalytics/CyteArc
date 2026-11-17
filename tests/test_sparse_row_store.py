@@ -1220,3 +1220,56 @@ def test_store_sizes_for_planners_count_rows_and_buckets():
     assert SparseRowStore.whole_row_bucket_rows(10, 100, 1_040, 4) == 2
     assert SparseRowStore.whole_row_bucket_rows(10, 100, 10, 4) == 1
     assert SparseRowStore.whole_row_bucket_rows(0, 0, 10, 4) == 1
+
+
+def test_the_operation_a_store_serves_names_its_errors_in_every_process(tmp_path):
+    store = SparseRowStore(
+        (4, 3),
+        np.float32,
+        operation="shuffled test import",
+        bucket_rows=2,
+        whole_rows=True,
+        buffer_bytes=0,
+        bucket_bytes=_BIG,
+        max_nnz=2,
+        temp_dir=tmp_path,
+    )
+    try:
+        assert store.operation == "shuffled test import"
+        # A writer opened by the store's directory names it too.
+        writer = SparseRowStore.open(store.directory, part=1)
+        assert writer.operation == "shuffled test import"
+        with pytest.raises(ValueError, match="^Shuffled test import exceeds maxNnz=2$"):
+            writer.append_rows([0], csr_matrix(np.ones((1, 3), np.float32)))
+    finally:
+        store.close()
+    with pytest.raises(MemoryBudgetError) as refused:
+        SparseRowStore(
+            (2, 2),
+            np.float32,
+            operation="shuffled test import",
+            bucket_rows=1,
+            whole_rows=True,
+            buffer_bytes=0,
+            bucket_bytes=10,
+            temp_dir=tmp_path,
+        )
+    assert str(refused.value).startswith("Shuffled test import exceeds the memory")
+    assert refused.value.item == "reading one entry of the shuffled test import"
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("operation", ["", "   ", None, 3])
+def test_a_store_without_an_operation_is_refused(tmp_path, operation):
+    with pytest.raises(ValueError, match="operation names what a sparse row store"):
+        SparseRowStore(
+            (2, 2),
+            np.float32,
+            operation=operation,
+            bucket_rows=1,
+            whole_rows=True,
+            buffer_bytes=0,
+            bucket_bytes=_BIG,
+            temp_dir=tmp_path,
+        )
+    assert list(tmp_path.iterdir()) == []

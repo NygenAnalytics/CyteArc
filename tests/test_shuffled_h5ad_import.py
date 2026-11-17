@@ -492,6 +492,33 @@ def _spy_on_scan_processes(monkeypatch) -> list[Any]:
     return seen
 
 
+def test_a_failed_scan_in_processes_leaves_no_rows_behind(
+    tmp_path, monkeypatch
+) -> None:
+    source = tmp_path / "source.h5ad"
+    _write_source(source, "csr")
+    monkeypatch.setattr(count_values, "_SCAN_PROCESS_VALUES", 0)
+    windows: list[Any] = []
+
+    def fail(self, scanned, maxBytes, featureGroups, **kwargs):
+        windows.append(scanned)
+        raise RuntimeError("a scan process failed")
+
+    monkeypatch.setattr(H5adReader, "_scan_in_processes", fail)
+    with pytest.raises(RuntimeError, match="a scan process failed"):
+        _import(
+            source,
+            tmp_path / "refused.zarr",
+            mem_budget="1G",
+            nthreads=3,
+            shuffle_cells=True,
+            reader_options={"temp_dir": str(tmp_path)},
+        )
+    assert len(windows[0]) == 3
+    assert not [path for path in tmp_path.iterdir() if path.name.startswith("cytearc-")]
+    assert not (tmp_path / "refused.zarr").exists()
+
+
 @pytest.mark.parametrize("encoding", ["csr", "dense"])
 def test_scan_processes_each_spill_their_own_rows(
     tmp_path, monkeypatch, encoding

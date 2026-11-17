@@ -75,7 +75,8 @@ class CrToZarr:
     Raises:
         FileExistsError: If ``zarr_loc`` is not empty, unless ``overwrite`` replaces it.
         TypeError: If ``shuffle_cells`` is not a boolean, or ``shuffle_seed``
-            is not an integer.
+            is not an integer, or ``shuffle_cells`` is True and the reader's
+            ``count_value_ranges`` takes no ``destinationRows``.
         ValueError: If ``shuffle_seed`` lies outside its range.
         OSError: If ``shuffle_cells`` is True and the temporary disk lacks
             room for the shuffled cells.
@@ -175,6 +176,7 @@ class CrToZarr:
         scan_options: dict[str, Any] = {}
         held = 0
         if self.shuffleCells:
+            _require_shuffled_scan(self.cr)
             self._cellOrder = shuffled_order(self.cr.nCells, self.shuffleSeed)
             scan_options["destinationRows"] = destination_rows(self._cellOrder)
             held = 2 * self._cellOrder.nbytes
@@ -636,6 +638,25 @@ class CrToZarr:
             if self.shuffleCells:
                 self.cr._release_shuffled_rows()
                 self._shuffledStore = None
+
+
+def _require_shuffled_scan(reader: CrReader) -> None:
+    """Refuse a reader whose value scan cannot send its cells to shuffled rows.
+
+    Raises:
+        TypeError: If the reader's ``count_value_ranges`` takes no
+            ``destinationRows``, as readers written before cells could be
+            shuffled do.
+    """
+    import inspect
+
+    parameters = inspect.signature(reader.count_value_ranges).parameters
+    if "destinationRows" not in parameters:
+        raise TypeError(
+            f"{type(reader).__name__}.count_value_ranges takes no destinationRows, "
+            "so its cells cannot be shuffled; pass shuffle_cells=False, or give "
+            "the reader the keyword-only destinationRows that CrReader describes"
+        )
 
 
 MtxToZarr = CrToZarr

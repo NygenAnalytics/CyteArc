@@ -14,6 +14,7 @@ import zarr
 from zarr.storage import MemoryStore
 
 from cytearc.storage.cell_order import (
+    destination_rows,
     CELL_ORDER_ATTR,
     SOURCE_ROW,
     SOURCE_ROW_ROLE,
@@ -118,6 +119,28 @@ def _cell_table(n_rows: int) -> zarr.Group:
     cells = root.create_group("cellData")
     cells.create_array("ids", data=np.array([f"c{row}" for row in range(n_rows)]))
     return cells
+
+
+@pytest.mark.parametrize("n_rows", [0, 1, 2, 997])
+def test_destination_rows_send_each_source_row_to_its_row_of_the_order(n_rows) -> None:
+    order = shuffled_order(n_rows, 3)
+    destinations = destination_rows(order)
+    assert destinations.dtype == np.int64
+    # Row r holds source row order[r], so source row s lands where order holds s.
+    for row, source in enumerate(order.tolist()):
+        assert destinations[source] == row
+    np.testing.assert_array_equal(destinations, np.argsort(order))
+    np.testing.assert_array_equal(
+        destination_rows(order.astype(np.uint32)), destinations
+    )
+
+
+@pytest.mark.parametrize(
+    "order", [np.zeros((2, 2), dtype=np.int64), np.array([0.0, 1.0]), [[0]]]
+)
+def test_destination_rows_refuse_what_is_not_one_integer_row_per_cell(order) -> None:
+    with pytest.raises(ValueError, match="one integer row per cell"):
+        destination_rows(order)
 
 
 def test_the_record_and_source_rows_round_trip() -> None:
