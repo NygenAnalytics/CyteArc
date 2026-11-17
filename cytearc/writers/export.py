@@ -499,6 +499,7 @@ def _reordered_blocks(
         return SparseRowStore(
             matrix.shape,
             matrix.dtype,
+            operation="export in source order",
             bucket_rows=bucket_rows,
             whole_rows=True,
             buffer_bytes=buffer_bytes,
