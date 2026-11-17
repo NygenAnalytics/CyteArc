@@ -398,8 +398,9 @@ class CSVtoZarr:
         }
         shuffled = self._shuffledStore
         if shuffled is not None:
-            # The rows' pass kept every cell column in the file's order.
-            parts = self._shuffledParts
+            # The rows' pass kept every cell column in the file's order, which
+            # this write takes over.
+            parts, self._shuffledParts = self._shuffledParts, {}
 
         def count_batches() -> Iterator[np.ndarray]:
             if shuffled is not None:
