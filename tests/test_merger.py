@@ -2956,6 +2956,7 @@ def test_dataset_merge_writes_cell_metadata_in_whole_chunk_bands(tmp_path, monke
         "names",
         "I",
         "RNA_I",
+        "sourceRow",
         "quality",
         "__cytearc_missing__quality",
     }
@@ -2968,6 +2969,11 @@ def test_dataset_merge_writes_cell_metadata_in_whole_chunk_bands(tmp_path, monke
     }
     assert _rows_by_id(root, "cellData/I") == dict.fromkeys(cells, True)
     assert _rows_by_id(root, "cellData/RNA_I") == dict.fromkeys(cells, True)
+    # Each cell's row in the concatenation of the sources, left then right.
+    assert _rows_by_id(root, "cellData/sourceRow") == {
+        cell: int(cell.split("__c")[1]) + (0 if cell.startswith("left") else 12)
+        for cell in cells
+    }
     assert _rows_by_id(root, "cellData/quality") == {
         cell: int(cell.split("__c")[1]) if cell.startswith("left") else 0
         for cell in cells

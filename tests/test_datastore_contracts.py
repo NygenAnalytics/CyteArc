@@ -180,8 +180,9 @@ _SIGNATURE_DIGESTS = {
     # normalize_scores; select_cells gained value. source_storage_options is
     # dict[str, Any] | None: a mount's source options, or a composite's by name.
     # run_pseudotime_aggregation takes n_neighbors: int = 11 in place of
-    # n_neighbours.
-    DataStore: "6f3e8e41ace18075174d2689254a511c61a11999501b2e89dbd397b930e9154c",
+    # n_neighbours. to_anndata gained the keyword-only cell_order: CellOrder =
+    # "source", "source" or "stored".
+    DataStore: "55b3b942e808ec14cadda31bb0327e297c5b5968e9143cff18b256eb253e897c",
     # artifacts.prune_incomplete(*, dry_run: bool = True) -> list[str] was added.
     ArtifactAccessor: "6d4befabbbc91b00684038f44e0b3063905c84437587be0994c26370efa2570c",
 }

@@ -944,6 +944,7 @@ class DataStoreMerge:
                 membership=self._sourceMembership,
                 block_rows=preferred_rows,
                 scan_rows=scan_rows,
+                n_cells=self._rowPlan.nCells,
                 # Columns derived from a source's assays are not merged. Its
                 # membership columns are merged only as membership, and those
                 # of the assays that the merge leaves out are left out too.

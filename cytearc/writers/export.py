@@ -13,6 +13,7 @@ form of the same plan, which ``DataStore.to_anndata`` returns.
 """
 
 import gzip
+import math
 import os
 import re
 import secrets
@@ -32,6 +33,7 @@ from scipy.sparse import csr_matrix, issparse, vstack
 
 from ..metadata.rows import apply_missing_mask, metadata_missing_mask
 from ..storage.categorical import CategoricalColumn
+from ..storage.cell_order import CellOrder, exported_cell_order
 from ..storage.refs import ArtifactRef
 from ..utils.compute import compute_with_progress
 from ..utils.logging import logger
@@ -331,6 +333,226 @@ def materialize_h5ad_matrix(
     if not blocks:
         return csr_matrix(matrix.shape, dtype=_stored_dtype(matrix))
     return cast(csr_matrix, vstack(blocks, format="csr"))
+
+
+# ---------------------------------------------------------------------------
+# Rows in another order
+
+# The read size for which a reorder sizes its buckets, or a thirty-second of
+# the budget when that is less; a bucket that takes more than twice it to read
+# is split.
+_REORDER_READ_BYTES = 256 << 20
+# The most that a reorder keeps pending before it writes blocks.
+_REORDER_BUFFER_BYTES = 256 << 20
+# Bytes that appending one value of a piece holds beside the pending rows:
+# the piece gathered by bucket and its values cast, each value and column
+# index of up to eight bytes.
+_REORDER_APPEND_BYTES_PER_VALUE = 32
+# Bytes that a reorder holds for each row while the rows stream in: the
+# order and the destination of each row.
+_REORDER_ROW_BYTES = 16
+
+
+def _reorder_read_bytes(max_bytes: int) -> int:
+    return max(1, min(_REORDER_READ_BYTES, int(max_bytes) // 32))
+
+
+def _reorder_fixed_bytes(shape: tuple[int, int], dtype: Any) -> int:
+    """Return what a reorder holds, beside its pending rows, while rows stream in.
+
+    The order and destination of each row, the bucket writer's count and
+    mark of each row and its numbers for each bucket, as many buckets as
+    rows of every value take, and the append of one conversion step.
+    """
+    from ..readers._sparse import SparseRowStore
+
+    n_rows, n_cols = (int(value) for value in shape)
+    itemsize = int(np.dtype(dtype).itemsize)
+    bucket_rows = SparseRowStore.whole_row_bucket_rows(
+        n_rows, n_rows * max(1, n_cols), _REORDER_READ_BYTES, itemsize
+    )
+    n_buckets = -(-n_rows // bucket_rows)
+    step_values = _csr_step_rows(n_cols) * max(1, n_cols)
+    return (
+        _REORDER_ROW_BYTES * n_rows
+        + SparseRowStore.writer_bytes(n_rows, bucket_rows)
+        + 8 * (n_buckets + 1)
+        + _REORDER_APPEND_BYTES_PER_VALUE * step_values
+    )
+
+
+def _reorder_buffer_bytes(fixed: int, max_bytes: int) -> int:
+    """Return the pending rows of a reorder: half of what the budget leaves, at most 256 MiB."""
+    return max(0, min(_REORDER_BUFFER_BYTES, (int(max_bytes) - fixed) // 2))
+
+
+def reorder_held_bytes(shape: tuple[int, int], dtype: Any, max_bytes: int) -> int:
+    """Return what reordering the rows of a matrix holds while its rows stream in.
+
+    A matrix that :func:`reordered_matrix` reorders streams its rows with
+    this many bytes held beside its blocks and their conversion: the order,
+    the bucket writer and the pending rows, which take half of what the
+    budget leaves, at most 256 MiB.
+    """
+    fixed = _reorder_fixed_bytes(shape, dtype)
+    return fixed + _reorder_buffer_bytes(
+        fixed + h5ad_conversion_bytes(dtype, shape[1], 1), max_bytes
+    )
+
+
+def _reordered_blocks(
+    matrix: H5adMatrix,
+    order: np.ndarray,
+    max_bytes: int,
+    temp_dir: str | os.PathLike[str] | None,
+    label: str,
+    entries: int | None,
+) -> Iterator[csr_matrix]:
+    """Yield the rows of ``matrix`` in ``order``, through a row bucket store on local disk.
+
+    The first piece that the stream yields measures what its entries take
+    on disk, and estimates the entries of every row unless ``entries``
+    gives them; these size the buckets and check the free disk. Each
+    bucket's files are deleted once its rows are yielded, and closing the
+    store removes the rest.
+    """
+    from ..readers._sparse import SparseRowStore, encoded_entry_bytes
+
+    n_rows, n_cols = matrix.shape
+    destinations = np.empty(n_rows, dtype=np.int64)
+    destinations[order] = np.arange(n_rows, dtype=np.int64)
+    fixed = _reorder_fixed_bytes(matrix.shape, matrix.dtype)
+    buffer_bytes = _reorder_buffer_bytes(
+        fixed + h5ad_conversion_bytes(matrix.dtype, n_cols, 1), max_bytes
+    )
+    read_bytes = _reorder_read_bytes(max_bytes)
+    store: SparseRowStore | None = None
+    bucket_rows = 1
+
+    def created(sample: csr_matrix) -> SparseRowStore:
+        nonlocal bucket_rows
+        expected = (
+            math.ceil(sample.nnz * n_rows / max(1, sample.shape[0]))
+            if entries is None
+            else int(entries)
+        )
+        bucket_rows = SparseRowStore.whole_row_bucket_rows(
+            n_rows, expected, read_bytes, matrix.dtype.itemsize
+        )
+        return SparseRowStore(
+            matrix.shape,
+            matrix.dtype,
+            bucket_rows=bucket_rows,
+            whole_rows=True,
+            buffer_bytes=buffer_bytes,
+            bucket_bytes=max(2 * read_bytes, int(max_bytes) // 4),
+            split_bytes=2 * read_bytes,
+            entries=expected,
+            entry_bytes=encoded_entry_bytes(sample) if sample.nnz else None,
+            sum_duplicates=False,
+            temp_dir=None if temp_dir is None else os.fspath(temp_dir),
+        )
+
+    try:
+        start = 0
+        stored = replace(matrix, export_dtype=None)
+        for piece in iter_h5ad_blocks(stored, label):
+            if store is None:
+                store = created(piece)
+            stop = start + piece.shape[0]
+            store.append_rows(destinations[start:stop], piece)
+            start = stop
+            del piece
+        del destinations
+        if store is None:
+            store = created(csr_matrix((0, n_cols), dtype=matrix.dtype))
+        store.finalize()
+        # Each batch is a bucket of rows, or the band of one that was split.
+        yield from store.iter_rows(0, n_rows, bucket_rows, read_ahead=True, delete=True)
+    finally:
+        if store is not None:
+            store.close()
+
+
+def reordered_matrix(
+    matrix: H5adMatrix,
+    order: np.ndarray,
+    *,
+    max_bytes: int,
+    temp_dir: str | os.PathLike[str] | None = None,
+    label: str = "The X matrix",
+    entries: int | None = None,
+) -> H5adMatrix:
+    """Return ``matrix`` with its rows written in ``order``, through temporary files on local disk.
+
+    ``matrix`` streams its rows in stored order, as a store reads them
+    fastest, holding :func:`reorder_held_bytes` beside its blocks; output row
+    ``d`` is the row that it streams at position ``order[d]``. Each row goes
+    to a bucket of output rows as it streams, and the buckets are read back
+    in output order. The temporary files take about what the rows take in
+    the export, in ``temp_dir``, the system's temporary directory when None,
+    and each bucket's files are deleted once its rows are written.
+    ``entries``, the nonzero values of the matrix when the caller has
+    counted them, sizes the buckets and checks the free disk exactly;
+    otherwise the first rows estimate them.
+
+    Raises:
+        ValueError: If ``order`` is not a permutation of the matrix's rows.
+        MemoryBudgetError: If ``max_bytes`` cannot hold the order and the
+            bucket writer beside the conversion of one row.
+    """
+    n_rows, n_cols = matrix.shape
+    positions = np.asarray(order)
+    if (
+        positions.shape != (n_rows,)
+        or (n_rows and positions.dtype.kind not in "iu")
+        or not np.array_equal(
+            np.bincount(positions.astype(np.int64), minlength=n_rows),
+            np.ones(n_rows, dtype=np.int64),
+        )
+    ):
+        raise ValueError(
+            f"{label}: a row order must be a permutation of its {n_rows} rows"
+        )
+    least = _reorder_fixed_bytes(matrix.shape, matrix.dtype) + h5ad_conversion_bytes(
+        matrix.dtype, n_cols, 1
+    )
+    if int(max_bytes) < least:
+        raise MemoryBudgetError(
+            f"Writing {label[0].lower()}{label[1:]} in source order exceeds the "
+            f"memory limit. Sending the rows of its {n_rows} cells to their "
+            f"buckets needs at least {least} bytes. Raise mem_budget, or export "
+            "with cell_order='stored'.",
+            needed_bytes=least,
+            budget_bytes=int(max_bytes),
+            item=f"the row order of {n_rows} cells",
+        )
+    return replace(
+        matrix,
+        blocks=partial(
+            _reordered_blocks,
+            matrix,
+            positions.astype(np.int64, copy=False),
+            int(max_bytes),
+            temp_dir,
+            label,
+            entries,
+        ),
+    )
+
+
+def in_memory_reordered_matrix(matrix: H5adMatrix, order: np.ndarray) -> H5adMatrix:
+    """Return ``matrix`` with its rows in ``order``, gathered once it is read whole.
+
+    For an export that holds the matrix in memory anyway, such as
+    ``DataStore.to_anndata``.
+    """
+
+    def blocks() -> Iterator[csr_matrix]:
+        rows = materialize_h5ad_matrix(replace(matrix, export_dtype=None))
+        yield cast(csr_matrix, rows[np.asarray(order, dtype=np.int64)])
+
+    return replace(matrix, blocks=blocks, reserve=None)
 
 
 _DIGIT_RUNS = re.compile(r"(\d+)")
@@ -1106,6 +1328,10 @@ _SCANPY_METRICS = {"l2": "euclidean", "cosine": "cosine"}
 # the directed and transposed CSR matrices, their product and fuzzy union,
 # and the distances.
 _GRAPH_EDGE_BYTES = 96
+# Bytes per stored edge that permuting a graph's cells adds: its
+# connectivities, of up to two entries per edge, gathered by rows and then by
+# columns while they are held.
+_GRAPH_PERMUTED_EDGE_BYTES = 64
 
 
 @dataclass(frozen=True, slots=True)
@@ -1199,16 +1425,30 @@ class _ArtifactRows:
             )
         return positions
 
-    def same_cells(self, label: str, ref: ArtifactRef, selection: ArtifactRef) -> None:
-        """Require that an artifact holds exactly the exported cells."""
+    def same_cells(
+        self, label: str, ref: ArtifactRef, selection: ArtifactRef
+    ) -> np.ndarray | None:
+        """Require that an artifact holds exactly the exported cells.
+
+        Returns the position of each exported cell among the artifact's
+        cells, or None when the export holds them in the artifact's order.
+        """
         rows = self.selection_rows(selection)
-        if not np.array_equal(rows, self._cellRows):
+        if rows.size != self._cellRows.size or not np.array_equal(
+            rows, np.sort(self._cellRows)
+        ):
             raise ValueError(
                 f"{label}: the {ref.kind} artifact covers {rows.size} cells, and a "
                 f"graph is exported only over exactly its cells; the export holds "
                 f"{self._cellRows.size} other or more cells. Export the cells of "
                 "its cell selection, with cell_selection=<that selection>"
             )
+        if np.array_equal(rows, self._cellRows):
+            return None
+        positions: np.ndarray = np.searchsorted(rows, self._cellRows).astype(
+            np.int64, copy=False
+        )
+        return positions
 
 
 def _lineage_selection(root: "zarr.Group", ref: ArtifactRef) -> ArtifactRef:
@@ -1346,14 +1586,21 @@ def _require_graph_memory(
     root: "zarr.Group",
     graph: ArtifactRef,
     max_bytes: int | None,
+    *,
+    permuted: bool = False,
 ) -> None:
-    """Refuse a graph whose export does not fit the memory budget."""
+    """Refuse a graph whose export does not fit the memory budget.
+
+    A graph whose cells the export writes in another order is permuted,
+    which holds a copy of its matrices.
+    """
     from ..storage.artifacts import artifact_group
     from ..storage.types import as_zarr_array
 
     edges = as_zarr_array(artifact_group(root, graph)["edges"], name="edges")
     n_edges = int(edges.shape[0])
-    required = n_edges * _GRAPH_EDGE_BYTES
+    per_edge = _GRAPH_EDGE_BYTES + (_GRAPH_PERMUTED_EDGE_BYTES if permuted else 0)
+    required = n_edges * per_edge
     if max_bytes is not None and required > max_bytes:
         raise MemoryBudgetError(
             f"Exporting the graph's {n_edges} edges needs about {required} bytes, "
@@ -1514,7 +1761,7 @@ def artifact_entries(
     array of the artifact. Each artifact must hold every exported cell.
 
     ``graph``, a ``connectivity_map`` or ``integrated_graph`` over exactly
-    the exported cells, becomes ``obsp["connectivities"]``, the fuzzy union
+    the exported cells, in any order, becomes ``obsp["connectivities"]``, the fuzzy union
     of its directed weights, and, for a connectivity map,
     ``obsp["distances"]``, its KNN distances, with ``uns["neighbors"]`` in
     Scanpy's layout, whose ``use_rep`` names the ``obsm`` entry, among
@@ -1606,9 +1853,9 @@ def artifact_entries(
     if graph is not None:
         from ..graph.feature_projection import graph_cell_selection
 
-        rows.same_cells("graph", graph, graph_cell_selection(root, graph))
-        _require_graph_memory(root, graph, max_bytes)
-        matrices = _LazyGraph(root, graph)
+        graph_order = rows.same_cells("graph", graph, graph_cell_selection(root, graph))
+        _require_graph_memory(root, graph, max_bytes, permuted=graph_order is not None)
+        matrices = _LazyGraph(root, graph, graph_order)
         obsp["connectivities"] = matrices.connectivities
         neighbors: dict[str, Any] = {"connectivities_key": "connectivities"}
         if graph.kind == "connectivity_map":
@@ -1682,15 +1929,35 @@ def _graph_coordinates(root: "zarr.Group", graph: ArtifactRef) -> ArtifactRef | 
 
 
 class _LazyGraph:
-    """Read a graph's matrices once, when the export first writes one."""
+    """Read a graph's matrices once, when the export first writes one.
 
-    def __init__(self, root: "zarr.Group", graph: ArtifactRef):
+    With ``positions``, exported cell ``i`` is the graph's cell
+    ``positions[i]``, and both axes of each matrix are permuted to match.
+    """
+
+    def __init__(
+        self,
+        root: "zarr.Group",
+        graph: ArtifactRef,
+        positions: np.ndarray | None = None,
+    ):
         self._args = (root, graph)
+        self._positions = positions
         self._matrices: tuple[csr_matrix, csr_matrix | None] | None = None
+
+    def _permuted(self, matrix: csr_matrix) -> csr_matrix:
+        positions = self._positions
+        assert positions is not None
+        return csr_matrix(matrix[positions][:, positions])
 
     def _read(self) -> tuple[csr_matrix, csr_matrix | None]:
         if self._matrices is None:
-            self._matrices = _graph_matrices(*self._args)
+            connectivities, distances = _graph_matrices(*self._args)
+            if self._positions is not None:
+                connectivities = self._permuted(connectivities)
+                if distances is not None:
+                    distances = self._permuted(distances)
+            self._matrices = (connectivities, distances)
         return self._matrices
 
     def connectivities(self) -> csr_matrix:
@@ -1736,7 +2003,8 @@ def with_artifacts(
 ) -> H5adExportPlan:
     """Return ``plan`` with the entries of :func:`artifact_entries` added.
 
-    ``cell_rows`` are the store rows of the plan's cells, in their order. A
+    ``cell_rows`` are the store rows of the plan's cells, in their order,
+    which may differ from store order, as in an export in source order. A
     name that the plan already exports raises ``ValueError``.
     """
     feature_ids = np.asarray(_read_column(plan.var_index, plan.x.shape[1])[0]).astype(
@@ -1840,10 +2108,13 @@ def _live_count_blocks(
     assay: Any,
     nthreads: int,
     rows: np.ndarray | None,
+    held_bytes: int = 0,
 ) -> Iterator[np.ndarray]:
     """Stream the raw counts of an assay's cells, every cell by default.
 
-    The writer's conversion of each block to CSR is charged as resident.
+    The writer's conversion of each block to CSR is charged as resident,
+    beside ``held_bytes``, what the export holds while the counts stream,
+    such as a reorder (:func:`reorder_held_bytes`).
     """
     counts = assay.rawData if rows is None else assay.rawData[rows, :]
     blocks: Iterator[np.ndarray] = counts._stream_blocks(
@@ -1851,7 +2122,8 @@ def _live_count_blocks(
         msg="Writing raw counts",
         prefetch=None,
         row_mask=None,
-        resident_bytes=h5ad_conversion_bytes(
+        resident_bytes=int(held_bytes)
+        + h5ad_conversion_bytes(
             counts.dtype, counts.shape[1], largest_block_rows(counts)
         ),
     )
@@ -1869,6 +2141,25 @@ def _live_count_nonzero(assay: Any, nthreads: int) -> int:
     )
 
 
+def exported_obs_columns(cells: Any) -> list[str]:
+    """Return the cell columns that an export writes to ``obs``.
+
+    Every public column but the IDs, which index ``obs``, and CyteArc's
+    ``sourceRow``: an export in source order writes the cells in that order,
+    and an import records its own.
+    """
+    from ..storage.cell_order import SOURCE_ROW, is_source_row_column
+
+    return [
+        column
+        for column in cells.columns
+        if column != "ids"
+        and not (
+            column == SOURCE_ROW and is_source_row_column(cells._get_array(column))
+        )
+    ]
+
+
 def live_h5ad_plan(
     assay: Any,
     embeddings_cols: list[str] | None = None,
@@ -1876,19 +2167,32 @@ def live_h5ad_plan(
     nthreads: int = 4,
     *,
     cell_rows: np.ndarray | None = None,
+    order: np.ndarray | None = None,
+    temp_dir: str | os.PathLike[str] | None = None,
 ) -> H5adExportPlan:
     """Plan the H5AD export of an assay with its live metadata.
 
-    Every cell is exported, or the cells at store rows ``cell_rows``. A
-    categorical column exports as its codes and categories, and a column
-    that holds a source categorical's ``levels`` as that categorical; either
-    takes the colors of its ``display``. Column names that AnnData reserves
-    or that the export already uses are renamed (:func:`unique_column_names`).
+    Every cell is exported, or the cells at store rows ``cell_rows``, in
+    store order, or with ``order``, as
+    :func:`~cytearc.storage.cell_order.exported_cell_order` gives it,
+    the cell at position ``order[i]`` of them as row ``i``: metadata and
+    embeddings are gathered in that order, and the counts, which stream in
+    store order, go through temporary files in ``temp_dir``
+    (:func:`reordered_matrix`). A categorical column exports as its codes
+    and categories, and a column that holds a source categorical's
+    ``levels`` as that categorical; either takes the colors of its
+    ``display``. Column names that AnnData reserves or that the export
+    already uses are renamed (:func:`unique_column_names`).
     """
     from ..metadata.membership import exported_membership
 
     membership, omitted = exported_membership(assay.cells, assay.name)
     cells, feats = assay.cells, assay.feats
+    exported_rows = cell_rows
+    if order is not None:
+        exported_rows = (
+            np.arange(int(cells.N), dtype=np.int64) if cell_rows is None else cell_rows
+        )[order]
     if embeddings_cols is None:
         embeddings_cols = ["UMAP", "tSNE"]
     embeddings = _embedding_groups(list(cells.columns), assay.name, embeddings_cols)
@@ -1902,7 +2206,7 @@ def live_h5ad_plan(
             raise ValueError(
                 f"Embedding columns of two prefixes both export as obsm[{name!r}]"
             )
-        obsm[name] = partial(_live_embedding, cells, columns, cell_rows)
+        obsm[name] = partial(_live_embedding, cells, columns, exported_rows)
 
     def planned(
         table: Any,
@@ -1921,8 +2225,8 @@ def live_h5ad_plan(
 
     obs_keys = [
         key
-        for key in cells.columns
-        if key != "ids" and key not in omitted and key not in embedding_columns
+        for key in exported_obs_columns(cells)
+        if key not in omitted and key not in embedding_columns
     ]
     var_keys = [key for key in feats.columns if key != "ids"]
     var_names = unique_column_names(
@@ -1931,24 +2235,38 @@ def live_h5ad_plan(
         table="var",
     )
     n_cells = int(cells.N) if cell_rows is None else int(np.asarray(cell_rows).size)
-    return H5adExportPlan(
-        x=H5adMatrix(
-            shape=(n_cells, int(feats.N)),
-            dtype=np.dtype(assay.rawData.dtype),
-            blocks=partial(_live_count_blocks, assay, nthreads, cell_rows),
-            # A preliminary pass counts the stored values to allocate.
-            reserve=(
-                None
-                if skip_recalc_nfeats or cell_rows is not None
-                else partial(_live_count_nonzero, assay, nthreads)
-            ),
+    shape = (n_cells, int(feats.N))
+    dtype = np.dtype(assay.rawData.dtype)
+    max_bytes = int(assay.resources.memoryBytes)
+    x = H5adMatrix(
+        shape=shape,
+        dtype=dtype,
+        blocks=partial(
+            _live_count_blocks,
+            assay,
+            nthreads,
+            cell_rows,
+            0 if order is None else reorder_held_bytes(shape, dtype, max_bytes),
         ),
-        obs_index=H5adColumn("_index", partial(_live_column, cells, "ids", cell_rows)),
+        # A preliminary pass counts the stored values to allocate.
+        reserve=(
+            None
+            if skip_recalc_nfeats or cell_rows is not None
+            else partial(_live_count_nonzero, assay, nthreads)
+        ),
+    )
+    if order is not None:
+        x = reordered_matrix(x, order, max_bytes=max_bytes, temp_dir=temp_dir)
+    return H5adExportPlan(
+        x=x,
+        obs_index=H5adColumn(
+            "_index", partial(_live_column, cells, "ids", exported_rows)
+        ),
         obs=planned(
             cells,
             obs_keys,
             unique_column_names("_index", obs_keys, table="obs"),
-            cell_rows,
+            exported_rows,
         ),
         var_index=H5adColumn("_index", partial(_live_column, feats, "ids", None)),
         var=planned(feats, var_keys, var_names, None),
@@ -1991,10 +2309,19 @@ def to_h5ad(
     obs: Mapping[str, H5adSource] | None = None,
     graph: ArtifactRef | None = None,
     dtype: Any | None = None,
+    cell_order: CellOrder = "source",
+    temp_dir: str | os.PathLike[str] | None = None,
 ) -> None:
     """Save an assay or a completed pipeline run as an H5AD file.
 
     The file is streamed block by block with h5py and needs no AnnData.
+    Cells are written in the order of the file that the store imported, by
+    default, as their ``sourceRow`` records it; a store that holds no
+    ``sourceRow`` is in that order already. Its counts are read in store
+    order and sent to their rows of the file through temporary files on
+    local disk, in ``temp_dir``, about the size of the counts in the file,
+    each deleted once its rows are written. ``cell_order="stored"`` writes
+    the cells in store order and needs no temporary files.
     Rows that a nullable metadata column's linked missing mask flags are
     written as missing values: NaN in a float64 column for numeric columns, a
     nullable boolean for boolean columns, and a missing category for other
@@ -2032,8 +2359,8 @@ def to_h5ad(
         matrix: ``"raw"`` counts, or ``"normed"`` values, which require
                 ``run``: the run's stored normalized values over its highly
                 variable features.
-        cell_selection: Cell-selection artifact whose cells are exported, in
-                        store order. None exports every cell of the assay.
+        cell_selection: Cell-selection artifact whose cells are exported.
+                        None exports every cell of the assay.
         obsm: Artifacts to export as ``obsm`` arrays, such as
               ``{"X_pca": pca, "X_umap": umap}``.
         obs: Cell-aligned artifacts to export as ``obs`` columns, such as
@@ -2045,6 +2372,10 @@ def to_h5ad(
                None keeps the stored dtype, except that ``uint8`` and
                ``uint16`` counts become ``float32``. A count that the dtype
                cannot hold raises ``OverflowError``.
+        cell_order: ``"source"`` writes the cells in the order of the
+                    imported file, ``"stored"`` in store order.
+        temp_dir: Directory of the temporary files of an export in source
+                  order. None uses the system's temporary directory.
 
     Returns:
         None
@@ -2053,12 +2384,19 @@ def to_h5ad(
     anything is written, so a misaligned artifact raises ``ValueError`` and
     leaves no file.
     """
+    from ..storage.cell_order import cell_order_argument
+
     skip_recalc_nfeats = bool_argument(skip_recalc_nfeats, "skip_recalc_nfeats")
     nthreads = integer_argument(nthreads, "nthreads", minimum=1)
     if matrix not in ("raw", "normed"):
         raise ValueError("matrix must be either 'raw' or 'normed'")
     if dtype is not None:
         export_count_dtype(None, dtype)
+    cell_order = cell_order_argument(cell_order)
+    if temp_dir is not None and not isinstance(temp_dir, str | os.PathLike):
+        raise TypeError(
+            f"temp_dir must be a path or None, not {type(temp_dir).__name__}"
+        )
     if run is None:
         if matrix != "raw":
             raise ValueError(
@@ -2070,22 +2408,26 @@ def to_h5ad(
             if cell_selection is None
             else cell_selection_rows(assay._artifact_root, cell_selection)
         )
+        exported = (
+            np.arange(int(assay.cells.N), dtype=np.int64)
+            if cell_rows is None
+            else cell_rows
+        )
+        order = exported_cell_order(assay.cells._group, exported, cell_order)
         plan = live_h5ad_plan(
             assay,
             embeddings_cols,
             skip_recalc_nfeats,
             nthreads,
             cell_rows=cell_rows,
+            order=order,
+            temp_dir=temp_dir,
         )
         if obsm is not None or obs is not None or graph is not None:
             plan = with_artifacts(
                 plan,
                 assay._artifact_root,
-                cell_rows=(
-                    np.arange(int(assay.cells.N), dtype=np.int64)
-                    if cell_rows is None
-                    else cell_rows
-                ),
+                cell_rows=exported if order is None else exported[order],
                 obsm=obsm,
                 obs=obs,
                 graph=graph,
@@ -2136,12 +2478,14 @@ def to_h5ad(
             "be provided"
         )
 
-    plan = run_plan(pipeline_run, matrix=matrix)
+    plan = run_plan(
+        pipeline_run, matrix=matrix, cell_order=cell_order, temp_dir=temp_dir
+    )
     if obsm is not None or obs is not None or graph is not None:
         plan = with_artifacts(
             plan,
             owner.zw,
-            cell_rows=np.flatnonzero(pipeline_run.cells.fetch_all("I")),
+            cell_rows=owner._run_export_rows(pipeline_run, cell_order),
             obsm=obsm,
             obs=obs,
             graph=graph,
@@ -2257,7 +2601,24 @@ def _assay_feature_type(assay: Any, default: str) -> str:
     return default
 
 
-def to_mtx(assay: Any, mtx_directory: str, compress: bool = False) -> None:
+def _csr_lines(piece: csr_matrix, start: int) -> bytes:
+    """Return Matrix Market lines of the entries of CSR rows that start at cell ``start``."""
+    rows = np.repeat(np.arange(piece.shape[0], dtype=np.int64), np.diff(piece.indptr))
+    return _matrix_market_lines(
+        np.asarray(piece.indices).astype(np.int64) + 1,
+        rows + start + 1,
+        np.asarray(piece.data),
+    )
+
+
+def to_mtx(
+    assay: Any,
+    mtx_directory: str,
+    compress: bool = False,
+    *,
+    cell_order: CellOrder = "source",
+    temp_dir: str | os.PathLike[str] | None = None,
+) -> None:
     """Save an assay as a Matrix Market directory.
 
     The features file holds a feature ID, name, and type column, as Cell
@@ -2270,22 +2631,44 @@ def to_mtx(assay: Any, mtx_directory: str, compress: bool = False) -> None:
     gene biotypes that CELLxGENE keeps in ``feature_type`` do not split the
     assay on import. Compressed files use gzip level 6.
 
+    Cells are written in the order of the file that the store imported, by
+    default, as their ``sourceRow`` records it; a store that holds no
+    ``sourceRow`` is in that order already. The entries are sorted by cell,
+    then feature. Counts are read in store order and sent to their cells'
+    rows through temporary files on local disk, in ``temp_dir``, each
+    deleted once its rows are written. ``cell_order="stored"`` writes the
+    cells in store order and needs no temporary files.
+
     Args:
         assay: CyteArc assay. For example: `ds.RNA`
         mtx_directory: Out directory where MTX file will be saved along with barcodes and features file
         compress: If True, then the files are compressed and saved with .gz extension, using Cell Ranger 3
                   names. (Default value: False).
+        cell_order: ``"source"`` writes the cells in the order of the
+                    imported file, ``"stored"`` in store order.
+        temp_dir: Directory of the temporary files of an export in source
+                  order. None uses the system's temporary directory.
 
     Returns:
         None
 
     Raises:
         UnmeasuredCellsError: If the assay did not measure a cell.
+        MemoryBudgetError: If an export in source order cannot hold the order
+            of the cells within the assay's memory budget.
+        OSError: If the temporary directory lacks the disk that the counts
+            take there.
     """
     compress = bool_argument(compress, "compress")
     from ..assay.classification import is_rna_assay_type
     from ..metadata.membership import require_measured_cells
+    from ..storage.cell_order import cell_order_argument
 
+    cell_order = cell_order_argument(cell_order)
+    if temp_dir is not None and not isinstance(temp_dir, str | os.PathLike):
+        raise TypeError(
+            f"temp_dir must be a path or None, not {type(temp_dir).__name__}"
+        )
     require_measured_cells(
         assay.cells,
         assay.name,
@@ -2293,9 +2676,10 @@ def to_mtx(assay: Any, mtx_directory: str, compress: bool = False) -> None:
         operation="to_mtx",
         remedy="export",
     )
-    if os.path.isdir(mtx_directory) is False:
-        os.mkdir(mtx_directory)
-
+    n_cells = int(assay.cells.N)
+    order = exported_cell_order(
+        assay.cells._group, np.arange(n_cells, dtype=np.int64), cell_order
+    )
     tot_counts = int(
         compute_with_progress(
             assay.rawData.count_nonzero(),
@@ -2303,6 +2687,31 @@ def to_mtx(assay: Any, mtx_directory: str, compress: bool = False) -> None:
             nthreads=assay.nthreads,
         )
     )
+    shape = (n_cells, int(assay.feats.N))
+    dtype = np.dtype(assay.rawData.dtype)
+    max_bytes = int(assay.resources.memoryBytes)
+    counts = H5adMatrix(
+        shape=shape,
+        dtype=dtype,
+        blocks=partial(
+            _live_count_blocks,
+            assay,
+            assay.nthreads,
+            None,
+            0 if order is None else reorder_held_bytes(shape, dtype, max_bytes),
+        ),
+    )
+    if order is not None:
+        counts = reordered_matrix(
+            counts,
+            order,
+            max_bytes=max_bytes,
+            temp_dir=temp_dir,
+            label="The counts",
+            entries=tot_counts,
+        )
+    if os.path.isdir(mtx_directory) is False:
+        os.mkdir(mtx_directory)
     if compress:
         barcodes_fn = "barcodes.tsv.gz"
         features_fn = "features.tsv.gz"
@@ -2311,9 +2720,7 @@ def to_mtx(assay: Any, mtx_directory: str, compress: bool = False) -> None:
         barcodes_fn = "barcodes.tsv"
         features_fn = "genes.tsv"
         matrix_path = os.path.join(mtx_directory, "matrix.mtx")
-    numeric_type = (
-        "integer" if np.issubdtype(assay.rawData.dtype, np.integer) else "real"
-    )
+    numeric_type = "integer" if np.issubdtype(dtype, np.integer) else "real"
     with (
         gzip.open(matrix_path, "wb", compresslevel=6)
         if compress
@@ -2325,21 +2732,13 @@ def to_mtx(assay: Any, mtx_directory: str, compress: bool = False) -> None:
             f"{assay.feats.N} {assay.cells.N} {tot_counts}\n".encode()
         )
         start = 0
-        for values in assay.rawData.stream_blocks(
-            nthreads=assay.nthreads,
-            msg="Writing Matrix Market counts",
-        ):
-            block = np.asarray(values)
-            rows, columns = np.nonzero(block)
-            handle.write(
-                _matrix_market_lines(
-                    columns.astype(np.int64) + 1,
-                    rows.astype(np.int64) + start + 1,
-                    block[rows, columns],
-                )
-            )
-            start += block.shape[0]
-    assay.cells.to_pandas_dataframe(["ids"]).to_csv(
+        for piece in iter_h5ad_blocks(counts, "The counts"):
+            handle.write(_csr_lines(piece, start))
+            start += piece.shape[0]
+    barcodes = assay.cells.to_pandas_dataframe(["ids"])
+    if order is not None:
+        barcodes = barcodes.iloc[order]
+    barcodes.to_csv(
         os.path.join(mtx_directory, barcodes_fn), sep="\t", header=False, index=False
     )
 

@@ -13,15 +13,17 @@ in its ``cellOrder`` attribute, ``{"shuffled": true, "seed": <seed>}``, which
 :func:`recorded_shuffle_seed` reads.
 
 A store imported in the file's order has neither the column nor the record,
-and its rows are already in that order.
+and its rows are already in that order. A merge writes ``sourceRow`` as each
+cell's row in the concatenation of its sources, and a subset copies it, so
+exports of either restore the order of the files they came from.
 """
 
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 import zarr
 
-from ..utils.arguments import integer_argument
+from ..utils.arguments import integer_argument, quoted_value
 from ..utils.digest import mix64_array
 from .arrays import MetadataBlock, create_streamed_metadata_column
 from .layout import column_chunk_rows
@@ -29,16 +31,29 @@ from .profiles import StorageProfile
 from .types import as_zarr_array
 
 __all__ = [
+    "CELL_ORDERS",
     "CELL_ORDER_ATTR",
     "SOURCE_ROW",
     "SOURCE_ROW_ROLE",
+    "CellOrder",
+    "cell_order_argument",
+    "copy_cell_order",
     "destination_rows",
+    "exported_cell_order",
+    "is_source_row_column",
     "recorded_shuffle_seed",
     "shuffle_seed_argument",
     "shuffled_order",
+    "source_order_positions",
+    "source_order_ranks",
     "source_order_rows",
     "write_shuffled_cell_order",
 ]
+
+type CellOrder = Literal["source", "stored"]
+"""The order in which an export writes cells: the imported file's, or the store's."""
+
+CELL_ORDERS: tuple[CellOrder, ...] = ("source", "stored")
 
 SOURCE_ROW = "sourceRow"
 """The cell column that holds each cell's row in the imported file."""
@@ -55,6 +70,27 @@ _GOLDEN = np.uint64(0x9E3779B97F4A7C15)
 # "CellOrdr" in ASCII, mixed into the seed, so the shuffle's stream differs from the other
 # counter-based streams that take the same seed.
 _SALT = np.uint64(0x43656C6C4F726472)
+
+
+def cell_order_argument(value: object) -> CellOrder:
+    """Return an export's ``cell_order``, ``"source"`` or ``"stored"``.
+
+    Raises:
+        TypeError: If ``value`` is not a string.
+        ValueError: If ``value`` is another string.
+    """
+    if not isinstance(value, str):
+        raise TypeError(
+            f"cell_order must be 'source' or 'stored', not {type(value).__name__}"
+        )
+    if value == "source":
+        return "source"
+    if value == "stored":
+        return "stored"
+    raise ValueError(
+        "cell_order must be 'source', the order of the imported file, or "
+        f"'stored', the order of the store, not {quoted_value(value)}"
+    )
 
 
 def shuffle_seed_argument(value: object) -> int:
@@ -189,6 +225,121 @@ def recorded_shuffle_seed(cells: zarr.Group) -> int | None:
     return seed
 
 
+def is_source_row_column(array: object) -> bool:
+    """Return whether a cell column is CyteArc's ``sourceRow``, which carries the ``source_row`` role.
+
+    A plain column of that name, such as one a store held before imports
+    could shuffle, is not.
+    """
+    return isinstance(array, zarr.Array) and array.attrs.get("role") == (
+        SOURCE_ROW_ROLE
+    )
+
+
+def _source_rows(cells: zarr.Group, rows: np.ndarray) -> np.ndarray | None:
+    """Return the ``sourceRow`` of store rows ``rows``, or None without the column.
+
+    Raises:
+        ValueError: If the column does not hold one int64 per row.
+    """
+    n_rows = int(as_zarr_array(cells["ids"], name="ids").shape[0])
+    column = cells.get(SOURCE_ROW)
+    if not is_source_row_column(column):
+        return None
+    assert isinstance(column, zarr.Array)
+    if column.dtype != np.int64 or column.shape != (n_rows,):
+        raise ValueError(
+            f"Cell column {SOURCE_ROW!r} must hold one int64 row of the imported "
+            f"file for each of the {n_rows} cells; found dtype {column.dtype} and "
+            f"shape {column.shape}"
+        )
+    if rows.size == n_rows:
+        # The rows of every cell, in store order.
+        return np.asarray(column[...])
+    return np.asarray(column.get_orthogonal_selection((rows,)))
+
+
+def source_order_ranks(source_rows: np.ndarray) -> np.ndarray:
+    """Return the rank of each cell in the order of its ``source_rows``, ties in their order.
+
+    The cells are given in store order, so ``ranks[i]`` is where the cell of
+    ``source_rows[i]`` lies in an export in source order.
+
+    Raises:
+        ValueError: If ``source_rows`` is not a one-dimensional integer array.
+    """
+    values = np.asarray(source_rows)
+    if values.ndim != 1 or (values.size and values.dtype.kind not in "iu"):
+        raise ValueError(
+            f"Source rows are one integer per cell; found dtype {values.dtype} and "
+            f"shape {values.shape}"
+        )
+    ranks = np.empty(values.size, dtype=np.int64)
+    ranks[np.argsort(values, kind="stable")] = np.arange(values.size, dtype=np.int64)
+    return ranks
+
+
+def source_order_positions(cells: zarr.Group, rows: np.ndarray) -> np.ndarray | None:
+    """Return the order in which an export in source order writes the cells at store rows ``rows``.
+
+    ``rows`` are in store order, and ``rows[positions]`` are the same rows
+    sorted by their ``sourceRow``, ties kept in store order. None means that
+    store order is already source order: the table has no ``sourceRow``
+    column that carries the ``source_row`` role, or the rows' source rows
+    never decrease.
+
+    Args:
+        cells: A store's cell table.
+        rows: Store rows, in increasing order.
+
+    Returns:
+        Positions in ``rows``, as int64, or None.
+
+    Raises:
+        ValueError: If ``rows`` are not increasing rows of the table, or the
+            ``sourceRow`` column does not hold one int64 per row.
+    """
+    n_rows = int(as_zarr_array(cells["ids"], name="ids").shape[0])
+    selected = np.asarray(rows)
+    if (
+        selected.ndim != 1
+        or (selected.size and selected.dtype.kind not in "iu")
+        or (selected.size and (int(selected[0]) < 0 or int(selected[-1]) >= n_rows))
+        or bool(np.any(np.diff(selected) <= 0))
+    ):
+        raise ValueError(
+            f"Exported rows are increasing integer rows of the {n_rows} cells; "
+            f"found dtype {selected.dtype} and shape {selected.shape}"
+        )
+    source = _source_rows(cells, selected.astype(np.int64, copy=False))
+    if source is None or bool(np.all(source[1:] >= source[:-1])):
+        return None
+    positions: np.ndarray = np.argsort(source, kind="stable").astype(
+        np.int64, copy=False
+    )
+    return positions
+
+
+def exported_cell_order(
+    cells: zarr.Group, rows: np.ndarray, cell_order: object
+) -> np.ndarray | None:
+    """Return the order in which an export writes the cells at store rows ``rows``.
+
+    With ``cell_order="source"``, the export writes the cells in the order
+    of the imported file, as :func:`source_order_positions` gives it; None
+    means that the export keeps store order, as it always does with
+    ``"stored"``.
+
+    Raises:
+        TypeError: If ``cell_order`` is not a string.
+        ValueError: If ``cell_order`` is neither ``"source"`` nor
+            ``"stored"``, or as :func:`source_order_positions` raises.
+    """
+    if cell_order_argument(cell_order) == "stored":
+        return None
+    return source_order_positions(cells, rows)
+
+
 def source_order_rows(cells: zarr.Group, selection: np.ndarray) -> np.ndarray:
     """Return the rows that ``selection`` selects, in the order of the imported file.
 
@@ -216,17 +367,20 @@ def source_order_rows(cells: zarr.Group, selection: np.ndarray) -> np.ndarray:
             f"dtype {mask.dtype} and shape {mask.shape}"
         )
     rows = np.flatnonzero(mask).astype(np.int64, copy=False)
-    column = cells.get(SOURCE_ROW)
-    if not isinstance(column, zarr.Array) or column.attrs.get("role") != (
-        SOURCE_ROW_ROLE
-    ):
-        return rows
-    if column.dtype != np.int64 or column.shape != (n_rows,):
-        raise ValueError(
-            f"Cell column {SOURCE_ROW!r} must hold one int64 row of the imported "
-            f"file for each of the {n_rows} cells; found dtype {column.dtype} and "
-            f"shape {column.shape}"
-        )
-    source = np.asarray(column.get_orthogonal_selection((rows,)))
-    ordered: np.ndarray = rows[np.argsort(source, kind="stable")]
-    return ordered
+    positions = source_order_positions(cells, rows)
+    return rows if positions is None else rows[positions]
+
+
+def copy_cell_order(source: zarr.Group, target: zarr.Group) -> None:
+    """Copy the ``cellOrder`` record of a cell table to a table of some of its rows.
+
+    A subset, repack or mount keeps the store's order of rows, so the rows
+    it copies stay in the random order that the record states. A table
+    without the record gives none.
+
+    Raises:
+        ValueError: If the source's record is malformed.
+    """
+    seed = recorded_shuffle_seed(source)
+    if seed is not None:
+        target.attrs[CELL_ORDER_ATTR] = {"shuffled": True, "seed": seed}

@@ -1,6 +1,6 @@
 import os
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -57,6 +57,7 @@ from ...storage.artifacts import (
     inspect_artifact,
     require_complete_artifact,
 )
+from ...storage.cell_order import CellOrder, cell_order_argument
 from ...storage.diagnostics import (
     DiagnosticRule,
     ExportSummary,
@@ -78,7 +79,11 @@ from .cell_barcodes import (
     unmatched_barcode_rules,
 )
 from .clone_artifacts import plan_clones, write_clones
-from .clone_steps import files_text, hold_ranked_clone_labels
+from .clone_steps import (
+    exported_cell_positions,
+    files_text,
+    hold_ranked_clone_labels,
+)
 from .record_tables import (
     record_arrays,
     record_chunk_lengths,
@@ -823,6 +828,7 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
         *,
         format: str = "treedata",
         unknown: str = "state",
+        cell_order: CellOrder = "source",
     ) -> ExportSummary:
         """Write saved recorder alleles as a character matrix for tree builders.
 
@@ -861,7 +867,10 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
         export reads back with its own token:
         :meth:`~cytearc.datastore.namespaces.ClonesAccessor.import_alleles`
         reads the store as ``format="treedata"`` and the CSV as
-        ``format="laml"``. Cell IDs are this store's.
+        ``format="laml"``. Cell IDs are this store's, and cells are written
+        in the order of the file that the store imported, as their
+        ``sourceRow`` records it, or in store order with
+        ``cell_order="stored"``.
 
         Args:
             alleles: A ``lineage_alleles`` artifact.
@@ -873,6 +882,7 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
                 its allele, such as an insertion outside PEtracer's lookup, a
                 state of its own after the marks; ``"missing"`` writes every
                 unknown mark as missing.
+            cell_order: ``"source"`` or ``"stored"``.
 
         Returns:
             The store or CSV written, its ``rows``, the cells written, and
@@ -882,7 +892,7 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
         Raises:
             TypeError: If an argument has the wrong type.
             ValueError: If ``alleles`` is not a ``lineage_alleles`` artifact,
-                ``format`` or ``unknown`` is unknown, no cell reads a
+                ``format``, ``unknown`` or ``cell_order`` is unknown, no cell reads a
                 character, two integrations give one character name, a
                 character's states pass the int32 range, or, for LAML, a cell
                 or character name holds a character that its files cannot
@@ -904,6 +914,7 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
                 f"unknown must be one of {', '.join(map(repr, UNKNOWN_POLICIES))}, "
                 f"not {quoted_value(unknown)}"
             )
+        cell_order_argument(cell_order)
         target = os.fspath(path)
         if format == "treedata" and os.path.lexists(target):
             raise FileExistsError(
@@ -953,10 +964,21 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
         cell_index = cell_selection_indices(
             self.zw, inspect_artifact(self.zw, alleles).input_ref("cell_selection")
         )
+        rows = cell_index[matrix.cells]
         cell_ids = np.asarray(
-            read_metadata_rows_chunkwise(self.cells, "ids", cell_index[matrix.cells]),
-            dtype=object,
+            read_metadata_rows_chunkwise(self.cells, "ids", rows), dtype=object
         )
+        order = exported_cell_positions(ledger, self.cells, rows, cell_order)
+        if order is not None:
+            # A gathered copy of the matrix's codes and of the IDs.
+            ledger.peak(
+                "the cells in the imported file's order",
+                matrix.codes.nbytes + cell_ids.nbytes,
+            )
+            matrix = replace(
+                matrix, cells=matrix.cells[order], codes=matrix.codes[order]
+            )
+            cell_ids = cell_ids[order]
         if format == "treedata":
             from ...writers.characters import write_treedata_characters
 

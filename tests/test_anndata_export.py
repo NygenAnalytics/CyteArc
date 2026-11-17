@@ -7,7 +7,9 @@ from types import SimpleNamespace
 import numpy as np
 import pandas as pd
 import pytest
+import zarr
 from scipy import sparse
+from zarr.storage import MemoryStore
 
 import cytearc
 import cytearc.assay.base as assay_base
@@ -158,6 +160,11 @@ def _fake_run_store(monkeypatch, cell_frame: pd.DataFrame):
         rawData=_RawMatrix([[1, 2], [3, 4], [5, 6]]),
     )
     store._get_assay = lambda name: assay
+    # The live cell table, without sourceRow, so the run exports in store
+    # order.
+    table = zarr.open_group(store=MemoryStore(), mode="w")
+    table.create_array("ids", data=np.asarray(["c0", "c1", "c2"]))
+    store.cells = SimpleNamespace(_group=table)
     monkeypatch.setattr(pipeline_run_module, "PipelineRun", FakePipelineRun)
     return store, FakePipelineRun(store)
 
@@ -614,7 +621,7 @@ def test_normed_run_export_rechecks_the_values_it_plans(
     run.run_id = "fake-run"
     # _run_normalized_values checks the artifact's selections, so only an
     # inconsistent result reaches the plan's own checks.
-    store._run_normalized_values = lambda _run: (
+    store._run_normalized_values = lambda _run, streamed: (
         H5adMatrix(
             shape=(rows, 1),
             dtype=np.dtype(np.float32),

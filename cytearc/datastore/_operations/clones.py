@@ -99,6 +99,7 @@ from ...storage.artifacts import (
     inspect_artifact,
     require_complete_artifact,
 )
+from ...storage.cell_order import CellOrder, cell_order_argument
 from ...storage.diagnostics import ExportSummary, export_summary, warn_diagnostics
 from ...storage.selections import validate_cell_selection
 from ...storage.types import as_zarr_array, read_array
@@ -137,6 +138,7 @@ from .clone_artifacts import (
 from .clone_steps import (
     CODES_WITHIN_TYPE,
     artifact_cell_ids,
+    exported_cell_positions,
     files_text,
     measured_within_types,
     plan_artifact_cells,
@@ -932,6 +934,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         path: str | os.PathLike[str],
         *,
         format: str = "cospar",
+        cell_order: CellOrder = "source",
     ) -> ExportSummary:
         """Write saved clones as a file that lineage tracing tools read.
 
@@ -944,12 +947,15 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         columns, replacing files of those names; ``import_clones`` reads the
         matrix with its lists as ``format="matrix"``. Cell IDs are this
         store's, and a path ending in ``.gz`` is gzip-compressed. Clone
-        probabilities are not written.
+        probabilities are not written. Cells are written in the order of the
+        file that the store imported, as their ``sourceRow`` records it, or
+        in store order with ``cell_order="stored"``.
 
         Args:
             clones: A clone artifact, such as ``clones`` or ``clonotypes``.
             path: The file to write.
             format: ``"cospar"`` or ``"matrix"``.
+            cell_order: ``"source"`` or ``"stored"``.
 
         Returns:
             The file written, its ``rows``, the cells written, and its
@@ -958,7 +964,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         Raises:
             TypeError: If an argument has the wrong type.
             ValueError: If ``clones`` is not a ``clones`` or ``clonotypes``
-                artifact, ``format`` is unknown, a ``"cospar"`` table would hold a
+                artifact, ``format`` or ``cell_order`` is unknown, a ``"cospar"`` table would hold a
                 clone label that reads as no clone, such as ``"NA"``, or a
                 ``"matrix"`` would list a label or cell ID that holds a line
                 break.
@@ -979,6 +985,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             raise ValueError(
                 f"format must be one of {', '.join(EXPORT_FORMATS)}, not {quoted_value(format)}"
             )
+        cell_order_argument(cell_order)
         group = self._clone_group(clones)
         n_cells = int(as_zarr_array(group["codes"], name="codes").shape[0])
         planned_cells = plan_artifact_cells(self.zw, clones)
@@ -1009,9 +1016,27 @@ class _CloneOperationsMixin(_CloneOperationsBase):
                     + " read as no clone in a clone table; export these clones "
                     "with format='matrix', whose clone list keeps them"
                 )
-        cell_ids = artifact_cell_ids(
-            ledger, self.zw, self.cells._get_array("ids"), planned_cells
+        cell_index = read_cell_selection(
+            ledger,
+            self.zw,
+            planned_cells,
+            item="the positions of the artifact's cells",
         )
+        cell_ids = read_text_rows(
+            ledger, self.cells._get_array("ids"), cell_index, item="the cells' IDs"
+        )
+        order = exported_cell_positions(ledger, self.cells, cell_index, cell_order)
+        ledger.release(cell_index.nbytes)
+        del cell_index
+        if order is not None:
+            # A gathered copy of the codes and IDs.
+            ledger.peak(
+                "the cells in the imported file's order",
+                codes.nbytes + cell_ids.nbytes,
+            )
+            codes, cell_ids = codes[order], cell_ids[order]
+            ledger.release(order.nbytes)
+            del order
         # Each cell's label and code as written, and its flag.
         ledger.peak(
             f"writing the clones of {n_cells} cells", _EXPORT_BYTES_PER_CELL * n_cells

@@ -19,6 +19,12 @@ from ..storage.arrays import (
     create_streamed_metadata_column,
 )
 from ..storage.budget import ResourceBudget
+from ..storage.cell_order import (
+    SOURCE_ROW,
+    SOURCE_ROW_ROLE,
+    is_source_row_column,
+    source_order_ranks,
+)
 from ..storage.copy import COLUMN_METADATA_ATTRIBUTES
 from ..storage.execution import admitted_worker_split
 from ..storage.identity import GENERATED_FEATURE_COLUMNS, clear_column
@@ -49,7 +55,12 @@ from .row_plan import (
 )
 
 
-_PROTECTED = frozenset({"ids", "I", "names"})
+_PROTECTED = frozenset({"ids", "I", "names", SOURCE_ROW})
+# Bytes per merged cell that writing the merged sourceRow holds: each cell's
+# row in its source and its merged row, which the write keeps, and, while a
+# source is read, its cells' rows as gathered and sorted and their source
+# rows and ranks.
+_SOURCE_ROW_BYTES = 40
 # Column attributes carried into merged metadata; a selection fingerprint
 # describes one source's features and never survives a merge.
 _MERGED_ATTRIBUTES = tuple(
@@ -522,8 +533,13 @@ def plan_cell_metadata(
     block_rows: int = 100_000,
     scan_rows: int | None = None,
     excluded_columns: list[frozenset[str]] | None = None,
+    n_cells: int | None = None,
 ) -> CellMetadataPlan:
-    """Resolve the destination cell-metadata schema without writing."""
+    """Resolve the destination cell-metadata schema without writing.
+
+    ``n_cells``, the cells that the merge takes from its sources, sizes what
+    writing ``sourceRow`` holds; None counts every cell of every source.
+    """
     block_rows = max(1, int(block_rows))
     scan_rows = block_rows if scan_rows is None else max(1, int(scan_rows))
     if source_column is not None and (
@@ -532,7 +548,8 @@ def plan_cell_metadata(
         or source_column in _PROTECTED
     ):
         raise ValueError(
-            "source_column must be a non-empty string that is not ids, I, or names"
+            "source_column must be a non-empty string that is not ids, I, names, "
+            f"or {SOURCE_ROW}"
         )
     if source_column is not None:
         validate_metadata_column_name(source_column)
@@ -592,8 +609,19 @@ def plan_cell_metadata(
             dropped_attributes[public] = dropped
         return kept
 
-    # Stable order: ids, names, I, source, membership, then remaining sorted.
-    ordered = ["ids", "names", "I"]
+    for name, table in zip(source_names, source_cell_tables, strict=True):
+        if SOURCE_ROW in table.columns and not is_source_row_column(
+            table._get_array(SOURCE_ROW)
+        ):
+            logger.warning(
+                f"Source {name!r} holds a cell column {SOURCE_ROW!r} that no "
+                "import wrote; the merged store's column holds each cell's row "
+                "in the concatenation of the sources instead"
+            )
+
+    # Stable order: ids, names, I, sourceRow, source, membership, then
+    # remaining sorted.
+    ordered = ["ids", "names", "I", SOURCE_ROW]
     if source_column is not None:
         ordered.append(source_column)
     ordered.extend(membership_columns)
@@ -661,6 +689,29 @@ def plan_cell_metadata(
                         else (table._get_array("I") for table in source_cell_tables)
                     ),
                     attributes=attributes_for(public),
+                )
+            )
+            continue
+        if public == SOURCE_ROW:
+            columns.append(
+                replace(
+                    _metadata_column_spec(
+                        public,
+                        np.dtype(np.int64),
+                        False,
+                        value_arrays=(
+                            table._get_array(SOURCE_ROW)
+                            for table in source_cell_tables
+                            if SOURCE_ROW in table.columns
+                        ),
+                        role=SOURCE_ROW_ROLE,
+                    ),
+                    sourceReadFixedBytes=_SOURCE_ROW_BYTES
+                    * (
+                        sum(int(table.N) for table in source_cell_tables)
+                        if n_cells is None
+                        else int(n_cells)
+                    ),
                 )
             )
             continue
@@ -1022,6 +1073,46 @@ def _iter_destination_chunk_segments(
             offset += width
 
 
+def merged_source_rows(
+    row_plan: RowPlan, source_cell_tables: list[Any]
+) -> list[tuple[np.ndarray, np.ndarray]]:
+    """Return each merged cell's ``sourceRow``: its row in the concatenation of its sources.
+
+    The sources are concatenated in the merge's order, each with the cells
+    that the merge takes from it in the order that an export of it writes
+    them: by the source's own ``sourceRow``, or in its store order when it
+    holds none. A merged cell's row is then its source's offset, the cells
+    taken from the sources before it, plus its rank in that order. An
+    export of the merged store in source order thus writes the cells as
+    exports of its sources, one after the other, would.
+
+    Returns:
+        For each source, its selected rows in increasing order and the
+        merged ``sourceRow`` of each.
+    """
+    lookups: list[tuple[np.ndarray, np.ndarray]] = []
+    offset = 0
+    for index, table in enumerate(source_cell_tables):
+        blocks = list(row_plan.permutationsRows[index].values())
+        selected = (
+            np.sort(np.concatenate(blocks)).astype(np.int64, copy=False)
+            if blocks
+            else np.zeros(0, dtype=np.int64)
+        )
+        del blocks
+        column = table._get_array(SOURCE_ROW) if SOURCE_ROW in table.columns else None
+        if is_source_row_column(column):
+            values = read_metadata_rows_chunkwise(table, SOURCE_ROW, selected)
+            ranks = source_order_ranks(values)
+            del values
+        else:
+            ranks = np.arange(selected.size, dtype=np.int64)
+        ranks += offset
+        lookups.append((selected, ranks))
+        offset += int(selected.size)
+    return lookups
+
+
 def _iter_column_blocks(
     spec: MetadataColumnSpec,
     row_plan: RowPlan,
@@ -1039,6 +1130,11 @@ def _iter_column_blocks(
     band_start = 0
     band_values: np.ndarray | None = None
     band_missing: np.ndarray | None = None
+    lookups = (
+        merged_source_rows(row_plan, source_cell_tables)
+        if spec.name == SOURCE_ROW
+        else None
+    )
     for segment in _iter_destination_chunk_segments(
         row_plan,
         segment_rows=segment_rows,
@@ -1070,6 +1166,9 @@ def _iter_column_blocks(
                     read_metadata_rows_chunkwise(table, "I", local_rows),
                     dtype=bool,
                 )
+        elif lookups is not None:
+            selected, merged = lookups[source_idx]
+            values = merged[np.searchsorted(selected, local_rows)]
         elif spec.name == source_column:
             values = np.full(n, name, dtype=spec.dtype)
         elif spec.role == ASSAY_MEMBERSHIP_ROLE:

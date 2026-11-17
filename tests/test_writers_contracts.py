@@ -81,8 +81,10 @@ _MODULE_FUNCTIONS = (
 )
 # to_h5ad takes the keyword-only matrix="raw" or "normed" beside run, and the
 # keyword-only cell_selection, obsm, obs, graph, and dtype, each None by default.
+# to_h5ad and to_mtx take the keyword-only cell_order: CellOrder = "source",
+# "source" or "stored", and temp_dir: str | os.PathLike[str] | None = None.
 _MODULE_SIGNATURE_DIGEST = (
-    "912f2d15dd1103f65f951e473a18e782f9b60c5fb563dddec4a13e3825d3bf0f"
+    "1f61708ccfff981d6e7d36c01c19005b07b24d5deebfc6173327c4fdb8c7e73d"
 )
 
 
