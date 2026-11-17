@@ -94,6 +94,14 @@ _UBIQUITY_NUMERATOR = 199
 _UBIQUITY_DENOMINATOR = 200
 
 
+def _line_search_converged(result: Any) -> bool:
+    """Whether L-BFGS-B converged, or its line search stopped once the gradient vanished."""
+    return bool(
+        result.success
+        or (result.status == 2 and np.max(np.abs(result.jac)) <= _STALLED_FIT_GRADIENT)
+    )
+
+
 def _fit_local_quantile(
     log_means: np.ndarray,
     log_variances: np.ndarray,
@@ -144,20 +152,23 @@ def _fit_local_quantile(
                 gradient[2] += 2 * penalty * coefficients[2]
             return float(value), gradient
 
+        options = {"ftol": 1e-15, "gtol": 1e-10, "maxiter": 300, "maxls": 50}
         result = minimize(
-            objective,
-            initial,
-            jac=True,
-            method="L-BFGS-B",
-            options={"ftol": 1e-15, "gtol": 1e-10, "maxiter": 300, "maxls": 50},
+            objective, initial, jac=True, method="L-BFGS-B", options=options
         )
         # The line search stops (status 2) when the fit already sits at the optimum
         # to machine precision, which depends on the scipy version and BLAS
-        # threading. Accept that stop only once the gradient has vanished.
-        stalled = (
-            result.status == 2 and np.max(np.abs(result.jac)) <= _STALLED_FIT_GRADIENT
-        )
-        if not (result.success or stalled) or not np.all(np.isfinite(result.x)):
+        # threading. A stop whose gradient has not quite vanished is confirmed by
+        # restarting from it, which converges at once when the stop is optimal.
+        if (
+            result.status == 2
+            and not _line_search_converged(result)
+            and np.all(np.isfinite(result.x))
+        ):
+            result = minimize(
+                objective, result.x, jac=True, method="L-BFGS-B", options=options
+            )
+        if not _line_search_converged(result) or not np.all(np.isfinite(result.x)):
             raise ValueError(f"Adaptive variance trend fit failed: {result.message}")
 
         # Continue linearly outside the interior support instead of extrapolating
