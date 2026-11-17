@@ -725,11 +725,14 @@ class _MappingOperationsMixin(_MappingOperationsBase):
         weighted: bool = True,
         fixed_weight: float = 0.1,
     ) -> Generator[tuple[Any, np.ndarray], None, None]:
-        """Yield reference-sized mapping scores for each requested query group.
+        """Return an iterator of reference-sized mapping scores, one per query group.
 
         ``target_groups`` names the group of each projected query cell, as a
         pandas Series indexed by cell ID; values of other cells are left out.
         Without it, every query cell forms one group.
+
+        The call checks its arguments, ``target_groups`` among them, before
+        it returns; the scores are computed as the groups are taken.
 
         Raises:
             TypeError: If ``target_groups`` is not a Series indexed by cell
@@ -744,13 +747,21 @@ class _MappingOperationsMixin(_MappingOperationsBase):
         loaded = self._mapping_load_result(
             result, reference=reference, load_arrays=False
         )
-        yield from self._mapping_scores(
+        groups, scale, weight = self._mapping_score_settings(
             loaded,
-            target_groups=target_groups,
+            self._aligned_target_groups(loaded, target_groups),
             log_transform=log_transform,
             multiplier=multiplier,
             weighted=weighted,
             fixed_weight=fixed_weight,
+        )
+        return self._mapping_scores(
+            loaded,
+            groups,
+            scale,
+            weight,
+            log_transform=log_transform,
+            weighted=weighted,
         )
 
     def _mapping_score_data(
@@ -784,14 +795,22 @@ class _MappingOperationsMixin(_MappingOperationsBase):
         loaded = self._mapping_load_result(
             result, reference=reference, load_arrays=False
         )
+        groups, scale, weight = self._mapping_score_settings(
+            loaded,
+            self._aligned_target_groups(loaded, target_groups),
+            log_transform=log_transform,
+            multiplier=multiplier,
+            weighted=weighted,
+            fixed_weight=fixed_weight,
+        )
         scores = list(
             self._mapping_scores(
                 loaded,
-                target_groups=target_groups,
+                groups,
+                scale,
+                weight,
                 log_transform=log_transform,
-                multiplier=multiplier,
                 weighted=weighted,
-                fixed_weight=fixed_weight,
                 one_pass=True,
             )
         )
@@ -836,50 +855,59 @@ class _MappingOperationsMixin(_MappingOperationsBase):
                 )
         return groups, scale, weight
 
+    def _aligned_target_groups(
+        self, loaded: MappingResult, target_groups: pd.Series | None
+    ) -> np.ndarray | None:
+        """Return the group of each projected query cell, from groups keyed by cell ID.
+
+        Values of other cells are left out.
+
+        Raises:
+            TypeError: If ``target_groups`` is not a Series indexed by cell ID.
+            ValueError: If it lacks a projected query cell or repeats an ID.
+        """
+        if target_groups is None:
+            return None
+        query_ids = self._cell_ids_at(
+            read_stored_selection_indices(
+                self.zw,
+                loaded.cell_selection,
+                kind="cell_selection",
+                scope="datastore",
+                assay=None,
+                table_path="cellData",
+            )
+        )
+        aligned: pd.Series = align_to_cell_ids(
+            target_groups,
+            query_ids,
+            name="target_groups",
+            cells=f"the {query_ids.size} projected query cells",
+            remedy=keyed_values_remedy(),
+            leave_out_others=True,
+        )
+        groups: np.ndarray = aligned.to_numpy()
+        return groups
+
     def _mapping_scores(
         self,
         loaded: MappingResult,
+        groups: np.ndarray,
+        scale: float,
+        weight: float,
         *,
-        target_groups: pd.Series | None,
         log_transform: bool,
-        multiplier: float,
         weighted: bool,
-        fixed_weight: float,
         one_pass: bool = False,
     ) -> Generator[tuple[Any, np.ndarray], None, None]:
         """Yield one reference-sized score row per query group.
 
-        Missing group values form one group. By default each group is scored in
-        its own pass over the projection, so one row is held at a time;
-        ``one_pass`` scores every group in a single pass instead.
+        ``groups``, ``scale`` and ``weight`` are what
+        :meth:`_mapping_score_settings` returns. Missing group values form one
+        group. By default each group is scored in its own pass over the
+        projection, so one row is held at a time; ``one_pass`` scores every
+        group in a single pass instead.
         """
-        if target_groups is not None:
-            query_ids = self._cell_ids_at(
-                read_stored_selection_indices(
-                    self.zw,
-                    loaded.cell_selection,
-                    kind="cell_selection",
-                    scope="datastore",
-                    assay=None,
-                    table_path="cellData",
-                )
-            )
-            target_groups = align_to_cell_ids(
-                target_groups,
-                query_ids,
-                name="target_groups",
-                cells=f"the {query_ids.size} projected query cells",
-                remedy=keyed_values_remedy(),
-                leave_out_others=True,
-            )
-        groups, scale, weight = self._mapping_score_settings(
-            loaded,
-            None if target_groups is None else target_groups.to_numpy(),
-            log_transform=log_transform,
-            multiplier=multiplier,
-            weighted=weighted,
-            fixed_weight=fixed_weight,
-        )
         codes, labels = pd.factorize(groups, use_na_sentinel=False)
         batches = (
             [np.arange(len(labels))]

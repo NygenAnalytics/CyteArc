@@ -444,41 +444,37 @@ def test_mapping_scores_exclude_uninformative_rows_and_preserve_groups(
     np.testing.assert_allclose(unweighted[0][1][:2], [0.1, 0.1])
     np.testing.assert_array_equal(unweighted[1][1], 0.0)
 
+    # Every refusal below comes from the call itself, before any group is
+    # taken from the iterator it returns.
     with pytest.raises(
         ValueError,
         match=r"its index must hold the ids of the 4 projected query cells, each "
         r"once; 3 such ids have no label",
     ):
-        list(
-            query.mapping.compute_scores(
-                result,
-                target_groups=_projected(query, np.array(["short"])),
-                reference=reference,
-            )
+        query.mapping.compute_scores(
+            result,
+            target_groups=_projected(query, np.array(["short"])),
+            reference=reference,
         )
     # Groups by position are refused before the projection is read.
     with pytest.raises(TypeError, match=r"^target_groups takes per-cell values only"):
-        list(
-            query.mapping.compute_scores(
-                result, target_groups=groups, reference=reference
-            )
+        query.mapping.compute_scores(result, target_groups=groups, reference=reference)
+    with pytest.raises(TypeError, match=r"^target_groups takes per-cell values only"):
+        query.mapping.compute_scores(
+            result, target_groups=pd.Series(groups), reference=reference
         )
     with pytest.raises(ValueError, match="fixed_weight must be finite and positive"):
-        list(
-            query.mapping.compute_scores(result, reference=reference, fixed_weight=0.0)
-        )
+        query.mapping.compute_scores(result, reference=reference, fixed_weight=0.0)
     with pytest.raises(TypeError, match="weighted must be a boolean"):
-        list(query.mapping.compute_scores(result, reference=reference, weighted=1))
+        query.mapping.compute_scores(result, reference=reference, weighted=1)
     with pytest.raises(TypeError, match="log_transform must be a boolean"):
-        list(query.mapping.compute_scores(result, reference=reference, log_transform=1))
+        query.mapping.compute_scores(result, reference=reference, log_transform=1)
     for multiplier in (-1.0, np.inf, True):
         with pytest.raises(
             ValueError, match="multiplier must be finite and non-negative"
         ):
-            list(
-                query.mapping.compute_scores(
-                    result, reference=reference, multiplier=multiplier
-                )
+            query.mapping.compute_scores(
+                result, reference=reference, multiplier=multiplier
             )
 
 
