@@ -122,7 +122,7 @@ they appear. `MtxReader` and `CrDirReader` stream a matrix sorted by cell, as Ce
 later write it, straight from the file, and sort a matrix sorted by feature into temporary rows
 on local disk when an import starts. Any other order, such as the descending features within each
 barcode that Cell Ranger 1 and 2 write, or shuffled entries, is read once more at construction to
-sort the entries of each kept cell into the same temporary rows. The totals, the filtering
+sort the entries of each kept cell into the same temporary rows. An import that [shuffles cells](#shuffled_cells) reads the kept cells once more in this order before it creates the store. The totals, the filtering
 cutoff, and the count dtype follow the summed counts, so every order imports the counts and
 identity of the same matrix in sorted order. `coordinateOrder` reports `cellMajor`,
 `featureMajor`, or `unordered`, and `temporaryDiskBytes` the size of the rows, a count and a
@@ -154,7 +154,7 @@ the store's default assay, which an active assay that is not imported, such as a
 assay without raw counts (`counts_layer_missing`), requires. `reduction_roles` sets whether a
 reduction imports as a UMAP or t-SNE embedding or as graph coordinates.
 
-Counts that a Seurat object stores out of cell order, such as a matrix compressed by feature, a transposed matrix or counts derived from fragments, are read once and converted to rows on local disk in the same compact buckets as a CSC H5AD matrix. `SeuratReader`'s `temp_dir` chooses their parent directory, and they are removed when the reader closes.
+Counts that a Seurat object stores out of cell order, such as a matrix compressed by feature, a transposed matrix or counts derived from fragments, are read once and converted to rows on local disk in the same compact buckets as a CSC H5AD matrix. `SeuratReader`'s `temp_dir` chooses their parent directory, and they are removed when the reader closes. `SeuratToZarr(shuffle_cells=True)` [shuffles the cells](#shuffled_cells), its per-cell arrays with them.
 See [Import a saved Seurat object](../tutorials/seurat-import) for a worked import and [CyteArc for Seurat users](../seurat) for
 workflow mapping.
 
@@ -252,11 +252,22 @@ Mount, repack, and subset stores carry the record. A merge or composite holds no
 
 ## Shuffled cells
 
-Files usually group their cells by sample, donor or plate, so a contiguous slice of a store imported in the file's order, such as one count shard of about 11,000 cells or a training mini-batch, holds the cells of few groups. `H5adToZarr(shuffle_cells=True)` writes the cells in a uniformly random order, so every contiguous slice of the store is a random sample of its cells. Every per-cell array follows the one order: `counts` and `countsT`, the cell IDs and names, the `obs` columns, assay membership, and imported embeddings and cluster labels. `shuffle_seed`, an integer from 0 to 2**64 - 1 and 0 by default, chooses the order, which one seed gives on every platform. The option is off by default in this release, and the other imports keep the file's order.
+Files usually group their cells by sample, donor or plate, so a contiguous slice of a store imported in the file's order, such as one count shard of about 11,000 cells or a training mini-batch, holds the cells of few groups. Every import writer takes `shuffle_cells=True` to write the cells in a uniformly random order instead, so that every contiguous slice of the store is a random sample of its cells: `H5adToZarr`, `CrToZarr` and `MtxToZarr` for 10x HDF5 and Matrix Market files, `TapestriToZarr`, `CSVtoZarr`, `SparseToZarr` and `SeuratToZarr`. Every per-cell array follows the one order: `counts` and `countsT`, the cell IDs and names, the cell metadata columns, assay membership, and imported embeddings, cluster labels, reductions and active identities. `shuffle_seed`, an integer from 0 to 2**64 - 1 and 0 by default, chooses the order, which one seed gives on every platform. The option is off by default in this release.
 
-Each cell keeps its row in the file, from 0, in the int64 cell column `sourceRow`, and the cell table records the seed in its `cellOrder` attribute, as [cell order](../developers/zarr-internals#cell-order) describes. `insert`, `update_key`, `reset_key` and `drop` refuse `sourceRow`, and a shuffled import skips a source `obs` column of that name with a warning. The import decides what the values are from the file's first 100 cells, shuffled or not, so the shuffle never changes that decision.
+Each cell keeps its row in the file, from 0, in the int64 cell column `sourceRow`, and the cell table records the seed in its `cellOrder` attribute, as [cell order](../developers/zarr-internals#cell-order) describes. A reader that keeps only some barcodes, such as `CrH5Reader(is_filtered=False)`, counts the rows of the cells it keeps, so `sourceRow` is each cell's row in an import of the same reader in the file's order. `insert`, `update_key`, `reset_key` and `drop` refuse `sourceRow`, and a shuffled import skips a source cell column of that name with a warning. The import decides what the values are from the file's first 100 cells, shuffled or not, so the shuffle never changes that decision.
 
-The shuffle reads the file once. As the value scan reads each block of rows of a CSR or dense matrix, it sends the rows to their destination in temporary files in the reader's `temp_dir`, which hold counts in about one byte per stored value; a CSC matrix's conversion to rows, which writes such files anyway, places each value at its destination row instead. The counts write reads the rows back in destination order and deletes each file once read, so the temporary files never take disk beyond the final store of a local destination. On a CELLxGENE sample of 10 million cells, 17 billion stored counts in a 40 GB gzip file, imported with 8 workers and a 24 GiB budget, the shuffle added 4% to the import's 24 minutes: the scan took 127 seconds longer and wrote 18.5 GB of temporary files, and the counts write took 72 seconds less. The shuffled store's `countsT` takes 4% more disk. The import refuses before it writes anything when the budget cannot hold the scan's share of the shuffle, or an embedding or a key's cluster labels, which it holds whole to write them in shuffled order, and when the temporary disk lacks a quarter more than the rows are estimated to take from the file's first million values.
+The shuffled rows wait in temporary files on local disk, in the reader's `temp_dir`, which hold counts in about one byte per stored value. The counts write reads them back in shuffled order and deletes each file once read, so the temporary files never take disk beyond the final store of a local destination. Each import sends its rows to the files where it already reads them:
+
+| Import | When the rows go to the temporary files |
+|---|---|
+| H5AD of CSR or dense values, 10x HDF5, Tapestri | As the value scan reads them, so the file is read once. |
+| H5AD of CSC values | As the conversion to rows, which writes such files anyway, places each value at its destination row. |
+| Matrix Market | In one more pass over the kept cells, before the store is created. Construction scanned the file before any import asked for a shuffle. |
+| CSV | In one more pass over the file before the store is created, which also keeps the cell columns in memory. |
+| Seurat | As the value scan of each assay reads them. Counts stored out of cell order pass through their own conversion first, so they take one more local pass. |
+| In-memory matrices | Never: each batch of `SparseToZarr` gathers its rows from the matrices. |
+
+On a CELLxGENE sample of 10 million cells, 17 billion stored counts in a 40 GB gzip H5AD file, imported with 8 workers and a 24 GiB budget, the shuffle added 4% to the import's 24 minutes: the scan took 127 seconds longer and wrote 18.5 GB of temporary files, and the counts write took 72 seconds less. 10X_BENCHMARK_SENTENCE The shuffled store's `countsT` takes 4% more disk. The import refuses before it writes anything when the budget cannot hold its share of the shuffle, and when the temporary disk lacks a quarter more than the rows are estimated to take.
 
 A reader holds the shuffled rows of one import at a time. Another import of the same reader releases them when it is created, and an import in the file's order also when it writes its counts, so that it always writes the file's rows. The shuffled import whose rows were released raises a `RuntimeError` when it writes its counts, instead of writing rows in another order; create a new `H5adToZarr` to import the file again. A shuffled import that is refused after it sent its rows to the temporary files removes them.
 

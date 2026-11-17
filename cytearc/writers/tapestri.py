@@ -54,7 +54,7 @@ class TapestriToZarr(CrToZarr):
             has opened.
         shuffle_cells: If True, write the cells in a uniformly random order,
             each keeping its row in the file in the cell column
-            ``sourceRow``, as :class:`~cytearc.CrToZarr` describes. Off by
+            ``sourceRow``, as :class:`~cytearc.writers.CrToZarr` describes. Off by
             default in this release.
         shuffle_seed: The seed of the shuffle, from 0 to 2**64 - 1.
 
