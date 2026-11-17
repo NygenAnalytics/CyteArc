@@ -96,10 +96,7 @@ initialization, and mapping accept as they accept a PCA. Coordinates computed af
 a store through {py:meth}`~cytearc.datastore.namespaces.ReductionAccessor.import_coordinates`
 ({doc}`graph_construction`).
 
-CSC input is converted to temporary row storage on local disk. Pass `temp_dir` to
-`H5adReader` or `H5adReader.from_inspect` to choose its parent directory; the default uses
-the system temporary directory, including `TMPDIR`. The temporary files are removed when the
-reader closes.
+A matrix stored by column (CSC) is converted to rows on local disk before its counts are written: one pass over the columns sends each value to a bucket of its cell's rows, compressed to about a byte per stored value for whole-number counts, and the write reads the rows back a bucket at a time. Before it writes, the conversion checks that the disk has room for the values uncompressed. Pass `temp_dir` to `H5adReader` or `H5adReader.from_inspect` to choose the parent directory; the default uses the system temporary directory, including `TMPDIR`. The temporary files are removed when the reader closes.
 
 ```{eval-rst}
 .. autofunction:: cytearc.inspect_h5ad
@@ -156,6 +153,8 @@ be decoded is otherwise left out with a `skipped_metadata_column` notice. `defau
 the store's default assay, which an active assay that is not imported, such as an `integrated`
 assay without raw counts (`counts_layer_missing`), requires. `reduction_roles` sets whether a
 reduction imports as a UMAP or t-SNE embedding or as graph coordinates.
+
+Counts that a Seurat object stores out of cell order, such as a matrix compressed by feature, a transposed matrix or counts derived from fragments, are read once and converted to rows on local disk in the same compact buckets as a CSC H5AD matrix. `SeuratReader`'s `temp_dir` chooses their parent directory, and they are removed when the reader closes.
 See [Import a saved Seurat object](../tutorials/seurat-import) for a worked import and [CyteArc for Seurat users](../seurat) for
 workflow mapping.
 
