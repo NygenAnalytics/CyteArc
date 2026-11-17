@@ -581,6 +581,7 @@ def reordered_matrix(
     if (
         positions.shape != (n_rows,)
         or (n_rows and positions.dtype.kind not in "iu")
+        or (n_rows and int(positions.min()) < 0)
         or not np.array_equal(
             np.bincount(positions.astype(np.int64), minlength=n_rows),
             np.ones(n_rows, dtype=np.int64),

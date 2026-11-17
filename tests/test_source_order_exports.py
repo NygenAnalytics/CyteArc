@@ -390,6 +390,21 @@ def test_reordered_rows_cross_many_buckets_and_are_deleted_as_read(
     assert list(tmp_path.iterdir()) == []
 
 
+def test_a_reorder_of_no_rows_writes_an_empty_matrix(tmp_path) -> None:
+    values = np.zeros((0, 4), dtype=np.int32)
+    exported = materialize_h5ad_matrix(
+        reordered_matrix(
+            _matrix(values),
+            np.zeros(0, dtype=np.int64),
+            max_bytes=1 << 20,
+            temp_dir=tmp_path,
+        )
+    )
+    assert exported.shape == (0, 4)
+    assert exported.dtype == np.int32
+    assert list(tmp_path.iterdir()) == []
+
+
 def test_reordered_rows_keep_the_export_dtype_cast(tmp_path) -> None:
     values = np.asarray([[1, 0], [0, 70_000], [3, 4]], dtype=np.uint32)
     order = np.asarray([2, 0, 1])
@@ -420,9 +435,10 @@ def test_reordered_rows_keep_the_export_dtype_cast(tmp_path) -> None:
         np.asarray([0, 1]),
         np.asarray([0, 1, 1]),
         np.asarray([0, 1, 3]),
+        np.asarray([-1, 0, 1]),
         np.asarray([0.0, 1.0, 2.0]),
     ],
-    ids=["short", "repeated", "beyond", "float"],
+    ids=["short", "repeated", "beyond", "negative", "float"],
 )
 def test_a_reorder_takes_only_a_permutation_of_the_rows(order) -> None:
     values = np.eye(3, dtype=np.float32)
