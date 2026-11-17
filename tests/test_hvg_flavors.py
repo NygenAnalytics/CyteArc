@@ -45,6 +45,7 @@ from cytearc.features.variability import (
     pearson_residuals,
     resolve_hvg_detection_bounds,
     select_highly_variable_features,
+    selected_detection_ratio,
     seurat_v3_clip_values,
     seurat_v3_expected_variance,
     seurat_v3_standardized_variance,
@@ -283,24 +284,31 @@ def test_pearson_residuals_match_a_hand_computed_example() -> None:
 # Detection bounds
 
 
+# min_cells is the cube root of the cells rounded up and at least 20, and a
+# selection too small for 20 takes 5% of its cells rounded up, at least 5:
+# 5% of 101 is 5.05, of 150 is 7.5 and of 381 is 19.05; 20**3 = 8,000;
+# 21**3 = 9,261 < 10,000 <= 22**3 = 10,648; 46**3 = 97,336 < 100,000 <=
+# 47**3 = 103,823; and 100**3 = 1,000,000 exactly.
 @pytest.mark.parametrize(
     ("n_selected", "min_cells", "limit"),
     [
-        (1, 1, 0),
-        (2, 1, 1),
-        (4, 1, 3),
-        (10, 2, 9),
-        (15, 3, 14),
-        (41, 3, 40),
-        (150, 3, 149),
-        (300, 3, 298),
-        (301, 4, 299),
-        (892, 9, 887),
-        (1000, 10, 995),
-        (1901, 20, 1891),
+        (1, 5, 0),
+        (2, 5, 1),
+        (4, 5, 3),
+        (10, 5, 9),
+        (41, 5, 40),
+        (100, 5, 99),
+        (101, 6, 100),
+        (150, 8, 149),
+        (380, 19, 378),
+        (381, 20, 379),
+        (1000, 20, 995),
         (3696, 20, 3677),
-        (4000, 20, 3980),
-        (100_000, 20, 99_500),
+        (8000, 20, 7960),
+        (8001, 21, 7960),
+        (10_000, 22, 9950),
+        (100_000, 47, 99_500),
+        (1_000_000, 100, 995_000),
     ],
 )
 def test_default_detection_bounds_scale_with_the_selection(
@@ -308,14 +316,49 @@ def test_default_detection_bounds_scale_with_the_selection(
 ) -> None:
     assert default_hvg_min_cells(n_selected) == min_cells
     assert default_hvg_ubiquity_limit(n_selected) == limit
-    # A selection of two or more cells keeps a band of detection counts.
-    assert n_selected < 2 or min_cells <= limit
+    # A selection of six or more cells keeps a band of detection counts.
+    assert n_selected < 6 or min_cells <= limit
     assert resolve_hvg_detection_bounds(
         None, None, n_selected=n_selected, keep_bounds=False
     ) == (min_cells, limit + 1)
     assert resolve_hvg_detection_bounds(
         None, None, n_selected=n_selected, keep_bounds=True
     ) == (min_cells, limit)
+
+
+def test_default_min_cells_is_the_exact_rounded_up_root_with_its_bounds() -> None:
+    sizes = np.r_[
+        np.arange(1, 10_000),
+        np.random.default_rng(3).integers(10_000, 10**12, 2_000),
+        [10**9, 10**12, 1000**3 - 1, 1000**3 + 1, 9999**3, 9999**3 + 1],
+    ]
+    previous = 0
+    for n in sorted(int(size) for size in sizes):
+        min_cells = default_hvg_min_cells(n)
+        if n <= 100:
+            assert min_cells == 5
+        elif n <= 380:
+            # The smallest whole number of cells that is at least 5% of them.
+            assert 20 * (min_cells - 1) < n <= 20 * min_cells
+        elif min_cells > 20:
+            # The smallest whole number whose cube reaches n, in integers.
+            assert min_cells**3 >= n > (min_cells - 1) ** 3
+        else:
+            assert min_cells == 20 and 20**3 >= n
+        assert min_cells >= previous
+        previous = min_cells
+
+
+def test_default_min_cells_takes_the_exact_root_past_float_precision() -> None:
+    # Past float precision a float cube root misses by more than 1: for
+    # (7 * 10**30) ** 3 it lands about 4e14 above the root, which correcting
+    # one step at a time would take about 4e14 steps to undo. The rounded-up
+    # root of a cube and of its neighbours is known without computing one.
+    for root in (2**18 + 1, 7 * 10**30, 10**100, 3**700):
+        cube = root**3
+        assert default_hvg_min_cells(cube - 1) == root
+        assert default_hvg_min_cells(cube) == root
+        assert default_hvg_min_cells(cube + 1) == root + 1
 
 
 def test_detection_bounds_of_other_flavors_and_explicit_values() -> None:
@@ -1180,7 +1223,8 @@ def test_default_cap_keeps_genes_of_homogeneous_selections(banded) -> None:
     ref = banded.features.hvgs(cells, top_n=5, show_plot=False)
 
     parameters = inspect_artifact(banded.zw, ref).parameters
-    assert (parameters["min_cells"], parameters["max_cells"]) == (3, 90)
+    # 5% of 90 cells is 4.5, so the default min_cells is its floor of 5.
+    assert (parameters["min_cells"], parameters["max_cells"]) == (5, 90)
     # Gene 7, detected in 88 of 90 cells, is among the most variable genes;
     # the earlier defaults excluded it.
     assert banded.artifacts.load(ref)["values"][:][7]
@@ -1203,14 +1247,15 @@ def test_small_selections_keep_a_band_of_detection_counts(datastore_ephemeral) -
     ref = store.features.hvgs(cells, top_n=1000, n_bins=20, show_plot=False)
 
     parameters = inspect_artifact(store.zw, ref).parameters
-    assert (parameters["min_cells"], parameters["max_cells"]) == (3, 41)
+    # 5% of 41 cells is 2.05, so the default min_cells is its floor of 5.
+    assert (parameters["min_cells"], parameters["max_cells"]) == (5, 41)
     counts = np.asarray(store.RNA.rawData[active[:41], :].compute())
     detected = (counts > 0).sum(axis=0)
     selected = np.asarray(store.artifacts.load(ref)["values"][:], dtype=bool)
     # The earlier bounds, 20 and 41 - 20, kept only genes detected in exactly
     # 20 of the 41 cells.
     assert selected.sum() == 1000
-    assert detected[selected].min() == 3
+    assert detected[selected].min() == 5
     assert detected[selected].max() <= 40
     assert np.unique(detected[selected]).size > 10
 
@@ -1706,12 +1751,25 @@ def test_a_selection_of_too_few_candidates_warns_when_computed_and_when_reused(
             "selectedFeatures",
             selected,
         )
+    # Every gene that could be selected is selected, so their medians agree.
     assert store.artifacts.inspect(computed).diagnostics == {
         "selectedFeatures": selected,
+        "selectedDetectionRatio": 1.0,
         "batches": None,
         "batchesBelowTopN": None,
         "batchBelowTopNExamples": [],
     }
+
+
+def _pooled_detection_ratio(store: DataStore, ref: Any) -> float:
+    """The selected genes' median detection over that of the genes within the bounds."""
+    group = store.artifacts.load(ref)
+    detected = np.asarray(group["detected"][:])
+    selected = np.asarray(group["values"][:], dtype=bool)
+    parameters = store.artifacts.inspect(ref).parameters
+    within = (detected > 0) & (detected >= parameters["min_cells"])
+    within &= detected < parameters["max_cells"]
+    return float(np.median(detected[selected]) / np.median(detected[within]))
 
 
 def test_a_batch_of_too_few_candidates_warns_when_computed_and_when_reused(
@@ -1738,6 +1796,9 @@ def test_a_batch_of_too_few_candidates_warns_when_computed_and_when_reused(
     assert [str(warning) for warning in second] == [expected]
     assert store.artifacts.inspect(computed).diagnostics == {
         "selectedFeatures": 10,
+        "selectedDetectionRatio": pytest.approx(
+            _pooled_detection_ratio(store, computed)
+        ),
         "batches": 2,
         "batchesBelowTopN": 1,
         "batchBelowTopNExamples": ["b (2)"],
@@ -1773,6 +1834,9 @@ def test_batches_that_together_hold_too_few_candidates_warn_of_both(
     assert [str(warning) for warning in second] == expected
     assert store.artifacts.inspect(computed).diagnostics == {
         "selectedFeatures": 27,
+        "selectedDetectionRatio": pytest.approx(
+            _pooled_detection_ratio(store, computed)
+        ),
         "batches": 2,
         "batchesBelowTopN": 2,
         "batchBelowTopNExamples": ["a (27)", "b (2)"],
@@ -1788,6 +1852,113 @@ def test_a_selection_of_enough_candidates_gives_no_warning(tmp_path) -> None:
             lambda: store.features.hvgs(cells, top_n=5, show_plot=False)
         )
         assert warnings_of_call == []
+
+
+def test_selected_detection_ratio_compares_medians_within_the_bounds() -> None:
+    detected = np.array([0, 1, 3, 4, 10, 20, 40, 80, 160, 200])
+    names = np.array([f"g{index}" for index in range(10)])
+    selected = np.zeros(10, dtype=bool)
+    selected[[0, 2, 3, 4]] = True  # g0 is undetected and does not count.
+
+    def ratio(**changes: Any) -> float | None:
+        arguments = {
+            "min_cells": 3,
+            "max_cells": 160,
+            "keep_bounds": False,
+            "blacklist": "",
+            **changes,
+        }
+        return selected_detection_ratio(selected, detected, names, **arguments)
+
+    # Selected medians 4 of (3, 4, 10); eligible 3 to 80, whose median is 15.
+    assert ratio() == pytest.approx(4 / 15)
+    # keep_bounds admits 160, which moves the eligible median to 20.
+    assert ratio(keep_bounds=True) == pytest.approx(4 / 20)
+    # The blacklist drops g5 (20 cells), which moves the eligible median to 10.
+    assert ratio(blacklist="^g5$") == pytest.approx(4 / 10)
+    assert ratio(min_cells=1000) is None
+    only_undetected = np.zeros(10, dtype=bool)
+    only_undetected[0] = True
+    assert (
+        selected_detection_ratio(
+            only_undetected,
+            detected,
+            names,
+            min_cells=0,
+            max_cells=np.inf,
+            keep_bounds=False,
+            blacklist="",
+        )
+        is None
+    )
+
+
+def test_selected_detection_ratio_flags_a_selection_of_rarely_detected_genes(
+    tmp_path,
+) -> None:
+    from cytearc import SparseToZarr
+
+    # 30 genes detected broadly; 40 genes detected only in the same 10 cells,
+    # as genes that a small share of the cells contributes; and 20 genes that
+    # split the cells into two types.
+    rng = np.random.default_rng(0)
+    counts = np.zeros((400, 90), dtype=np.int64)
+    counts[:, :30] = rng.poisson(2.0, size=(400, 30))
+    counts[:10, 30:70] = rng.poisson(5.0, size=(10, 40))
+    counts[:200, 70:] = rng.poisson(3.0, size=(200, 20))
+    counts[200:, 70:] = rng.poisson(1.0, size=(200, 20))
+    SparseToZarr(
+        counts,
+        str(tmp_path / "rare.zarr"),
+        [f"c{index}" for index in range(400)],
+        [f"g{index}" for index in range(90)],
+    ).dump()
+    store = DataStore(str(tmp_path / "rare.zarr"), min_features_per_cell=0)
+    cells = store.snapshot_cell_selection()
+
+    def ratio_and_genes(**options: Any) -> tuple[float, np.ndarray]:
+        ref = store.features.hvgs(cells, top_n=20, show_plot=False, **options)
+        selected = np.flatnonzero(store.artifacts.load(ref)["values"][:])
+        return store.artifacts.inspect(ref).diagnostics[
+            "selectedDetectionRatio"
+        ], selected
+
+    rare_ratio, unbounded = ratio_and_genes(min_cells=0)
+    floor_ratio, floored = ratio_and_genes(min_cells=30)
+    rare = set(range(30, 70))
+
+    # Without a detection floor the genes of the 10 cells fill most of the
+    # selection, so its median gene is detected in about 10 of 400 cells.
+    assert len(rare & set(unbounded)) > 10
+    assert rare_ratio < 0.1
+    # With the floor, none is eligible, and the selection's genes are detected
+    # about as widely as the median eligible gene.
+    assert not rare & set(floored)
+    assert floor_ratio > 0.9
+
+
+def test_a_selection_saved_with_earlier_diagnostics_is_computed_anew(
+    tmp_path,
+) -> None:
+    store = _store_of_batches(tmp_path / "hvg.zarr")
+    cells = store.snapshot_cell_selection()
+    saved = store.features.hvgs(cells, top_n=5, show_plot=False)
+    group = zarr.open_group(str(tmp_path / "hvg.zarr"))[artifact_path(saved)]
+    # As a selection saved before HVG selections recorded selectedDetectionRatio.
+    group.attrs["diagnostics"] = {
+        key: value
+        for key, value in group.attrs["diagnostics"].items()
+        if key != "selectedDetectionRatio"
+    }
+
+    recomputed = store.features.hvgs(cells, top_n=5, show_plot=False)
+
+    assert recomputed != saved
+    diagnostics = store.artifacts.inspect(recomputed).diagnostics
+    assert 0 < diagnostics["selectedDetectionRatio"]
+    np.testing.assert_array_equal(
+        store.artifacts.load(recomputed)["values"][:], group["values"][:]
+    )
 
 
 def test_a_selection_saved_without_diagnostics_is_computed_anew(tmp_path) -> None:

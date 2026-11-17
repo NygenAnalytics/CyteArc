@@ -284,6 +284,41 @@ def test_fit_lowess_adaptive_accepts_a_stopped_line_search_only_at_the_optimum(
             fit_lowess(means, variance, n_bins=200, lowess_frac=0.1)
 
 
+def test_fit_lowess_adaptive_confirms_a_stopped_line_search_by_restarting(
+    monkeypatch,
+):
+    # A random 100,000-cell sample of Tabula Sapiens stopped one window's line
+    # search at the optimum with a largest gradient entry of 1.7e-8, above the
+    # stalled bound, and HVG selection raised. Restarting from that point
+    # converges within the optimizer's tolerance (the trend moves by at most a
+    # few parts per billion), so the fit must match the uninterrupted one.
+    import scipy.optimize
+
+    means = np.exp(np.random.default_rng(17).normal(0, 2, 2_000))
+    variance = means**1.4 * np.exp(np.random.default_rng(5).normal(0, 0.3, 2_000))
+    expected = fit_lowess(means, variance, n_bins=200, lowess_frac=0.1)
+    minimize = scipy.optimize.minimize
+    calls = {"stopped": 0, "restarted": 0}
+
+    def stop_each_first_search(*args, **kwargs):
+        result = minimize(*args, **kwargs)
+        if calls["stopped"] == calls["restarted"]:
+            calls["stopped"] += 1
+            result.status = 2
+            result.success = False
+            result.message = "ABNORMAL: "
+            result.jac = np.full_like(result.jac, 1e-6)
+        else:
+            calls["restarted"] += 1
+        return result
+
+    monkeypatch.setattr(scipy.optimize, "minimize", stop_each_first_search)
+    fitted = fit_lowess(means, variance, n_bins=200, lowess_frac=0.1)
+
+    assert calls["stopped"] == calls["restarted"] > 0
+    np.testing.assert_allclose(fitted, expected, rtol=1e-6)
+
+
 def test_fit_lowess_fixed_fits_only_positive_finite_genes():
     # A zero variance became log(0) = -inf, was chosen as its bin minimum, and
     # turned every fixed-mode correction into NaN.

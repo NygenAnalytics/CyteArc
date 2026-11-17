@@ -2200,10 +2200,12 @@ class TestDataStore:
             artifact_values(artifact_group(datastore.zw, selection), "values").sum()
         )
         # Genes detected in more than 99.5% of the selected cells are excluded
-        # through an exclusive cutoff, and min_cells is 1% of the cells
-        # rounded up, from 3 to 20.
+        # through an exclusive cutoff. min_cells is the cube root of the cells
+        # rounded up and at least 20, which is 20 from 381 to 8,000 cells
+        # (20**3 = 8,000, and 5% of 381 cells rounds up to 20).
+        assert 381 <= n_selected <= 8000
         expected_max = n_selected * 199 // 200 + 1
-        expected_min = min(20, max(3, -(-n_selected // 100)))
+        expected_min = 20
         default_ref = datastore.features.hvgs(
             selection,
             show_plot=False,

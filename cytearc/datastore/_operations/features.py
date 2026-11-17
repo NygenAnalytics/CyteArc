@@ -19,6 +19,7 @@ from ...features.variability import (
     hvg_options,
     resolve_hvg_detection_bounds,
     select_batch_highly_variable_features,
+    selected_detection_ratio,
 )
 from ...assay.feature_summary import (
     ensure_feature_summary,
@@ -260,12 +261,15 @@ def _held_labels(
     return sorted(values.categories[named > 0].tolist())
 
 
-#: The diagnostics that an HVG selection saves: how many features it selected,
-#: and with a batch, how many batches it ranked and how many of them, with up
-#: to five examples, held fewer candidates than ``top_n``. A selection warns
-#: from them when it is computed and when it is reused.
+#: The diagnostics that an HVG selection saves: how many features it selected;
+#: the median detection of the selected features over that of the features it
+#: could select (see ``selected_detection_ratio``); and with a batch, how many
+#: batches it ranked and how many of them, with up to five examples, held
+#: fewer candidates than ``top_n``. A selection warns from them when it is
+#: computed and when it is reused.
 HVG_DIAGNOSTICS = (
     "selectedFeatures",
+    "selectedDetectionRatio",
     "batches",
     "batchesBelowTopN",
     "batchBelowTopNExamples",
@@ -284,12 +288,14 @@ def _hvg_diagnostics(
     selected: np.ndarray,
     *,
     top_n: int,
+    detection_ratio: float | None,
     batch_names: Sequence[str] | None = None,
     batch_candidates: np.ndarray | None = None,
 ) -> dict[str, Any]:
     """The diagnostics of an HVG selection, by batch when ``batch_names`` is given."""
     diagnostics: dict[str, Any] = {
         "selectedFeatures": int(np.count_nonzero(selected)),
+        "selectedDetectionRatio": detection_ratio,
         "batches": None,
         "batchesBelowTopN": None,
         "batchBelowTopNExamples": [],
@@ -849,6 +855,15 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
                 diagnostics=_hvg_diagnostics(
                     ranking.selected,
                     top_n=top_n,
+                    detection_ratio=selected_detection_ratio(
+                        ranking.selected,
+                        scores.detected,
+                        feature_names,
+                        min_cells=min_cells,
+                        max_cells=max_cells_int,
+                        keep_bounds=keep_bounds,
+                        blacklist=blacklist,
+                    ),
                     batch_names=None if batch is None else names,
                     batch_candidates=ranking.batch_candidates,
                 ),
@@ -946,7 +961,19 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
                     "corrected_variance": corrected_variance,
                 },
                 payload_names=("values", "corrected_variance"),
-                diagnostics=_hvg_diagnostics(values, top_n=parameters["top_n"]),
+                diagnostics=_hvg_diagnostics(
+                    values,
+                    top_n=parameters["top_n"],
+                    detection_ratio=selected_detection_ratio(
+                        values,
+                        summary["normed_n"],
+                        feature_names,
+                        min_cells=parameters["min_cells"],
+                        max_cells=parameters["max_cells"],
+                        keep_bounds=parameters["keep_bounds"],
+                        blacklist=parameters["blacklist"],
+                    ),
+                ),
             )
         _warn_hvg_selection(self.zw, planned.ref, parameters["top_n"])
         if show_plot:
@@ -1047,7 +1074,11 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
 
         The selection saves its diagnostics, which
         ``ds.artifacts.inspect(ref).diagnostics`` returns:
-        ``selectedFeatures``, the genes selected, and with ``batch``,
+        ``selectedFeatures``, the genes selected; ``selectedDetectionRatio``,
+        the median number of selected cells that detect a selected gene over
+        the same median for the genes it could select (detected, within the
+        detection bounds and outside the blacklist), or None when none is
+        detected; and with ``batch``,
         ``batches``, ``batchesBelowTopN``, the batches with fewer candidates
         than ``top_n``, and ``batchBelowTopNExamples``, up to five of them with
         their candidate counts. When fewer than ``top_n`` genes are selected,
@@ -1065,10 +1096,11 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
             cell_selection: The cells whose variability is scored.
             from_assay: The RNA assay; the default assay when None.
             min_cells: Keep genes detected in at least this many selected
-                cells. None uses the flavor's default: for cytearc, 1% of
-                the selected cells rounded up, at least 3 and at most 20, and
-                never more than a fifth of the cells; for the other flavors,
-                0.
+                cells. None uses the flavor's default: for cytearc, the cube
+                root of the number of selected cells rounded up and at least
+                20 (47 at 100,000 cells, 100 at 1,000,000), or for a
+                selection of fewer than 381 cells, 5% of them rounded up and
+                at least 5; for the other flavors, 0.
             top_n: The number of genes to select, and with ``batch`` the
                 number that each batch ranks as highly variable.
             min_var: cytearc only. The log2 of the smallest corrected

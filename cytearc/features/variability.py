@@ -43,8 +43,8 @@ __all__ = [
     "DEFAULT_PEARSON_THETA",
     "HVG_FLAVORS",
     "HVG_FLAVOR_OPTION_NAMES",
-    "HVG_MIN_CELLS_CAP",
     "HVG_MIN_CELLS_FLOOR",
+    "HVG_SMALL_SELECTION_MIN_CELLS",
     "HVG_OPTION_NAMES",
     "BatchRanking",
     "HvgFlavorOptions",
@@ -62,6 +62,7 @@ __all__ = [
     "resolve_hvg_detection_bounds",
     "select_batch_highly_variable_features",
     "select_highly_variable_features",
+    "selected_detection_ratio",
     "seurat_v3_clip_values",
     "seurat_v3_expected_variance",
     "seurat_v3_standardized_variance",
@@ -83,15 +84,25 @@ HVG_FLAVORS: tuple[str, ...] = ("cytearc", "seurat_v3", "pearson_residuals")
 # The span of the seurat_v3 trend and the overdispersion of Pearson residuals.
 DEFAULT_LOESS_SPAN = 0.3
 DEFAULT_PEARSON_THETA = 100.0
-# The default min_cells of the cytearc flavor is 1% of the selected cells,
-# at least HVG_MIN_CELLS_FLOOR and at most HVG_MIN_CELLS_CAP.
-HVG_MIN_CELLS_CAP = 20
-HVG_MIN_CELLS_FLOOR = 3
-_MIN_CELLS_DIVISOR = 100
+# The default min_cells of the cytearc flavor is the cube root of the number
+# of selected cells, rounded up, and at least HVG_MIN_CELLS_FLOOR. A selection
+# too small for that floor uses 5% of its cells, rounded up and at least
+# HVG_SMALL_SELECTION_MIN_CELLS.
+HVG_MIN_CELLS_FLOOR = 20
+HVG_SMALL_SELECTION_MIN_CELLS = 5
+_SMALL_SELECTION_DIVISOR = 20
 # The default max_cells of the cytearc flavor excludes features detected in
 # more than 99.5% of the selected cells, computed in integers as 199/200.
 _UBIQUITY_NUMERATOR = 199
 _UBIQUITY_DENOMINATOR = 200
+
+
+def _line_search_converged(result: Any) -> bool:
+    """Whether L-BFGS-B converged, or its line search stopped once the gradient vanished."""
+    return bool(
+        result.success
+        or (result.status == 2 and np.max(np.abs(result.jac)) <= _STALLED_FIT_GRADIENT)
+    )
 
 
 def _fit_local_quantile(
@@ -144,20 +155,23 @@ def _fit_local_quantile(
                 gradient[2] += 2 * penalty * coefficients[2]
             return float(value), gradient
 
+        options = {"ftol": 1e-15, "gtol": 1e-10, "maxiter": 300, "maxls": 50}
         result = minimize(
-            objective,
-            initial,
-            jac=True,
-            method="L-BFGS-B",
-            options={"ftol": 1e-15, "gtol": 1e-10, "maxiter": 300, "maxls": 50},
+            objective, initial, jac=True, method="L-BFGS-B", options=options
         )
         # The line search stops (status 2) when the fit already sits at the optimum
         # to machine precision, which depends on the scipy version and BLAS
-        # threading. Accept that stop only once the gradient has vanished.
-        stalled = (
-            result.status == 2 and np.max(np.abs(result.jac)) <= _STALLED_FIT_GRADIENT
-        )
-        if not (result.success or stalled) or not np.all(np.isfinite(result.x)):
+        # threading. A stop whose gradient has not quite vanished is confirmed by
+        # restarting from it, which converges at once when the stop is optimal.
+        if (
+            result.status == 2
+            and not _line_search_converged(result)
+            and np.all(np.isfinite(result.x))
+        ):
+            result = minimize(
+                objective, result.x, jac=True, method="L-BFGS-B", options=options
+            )
+        if not _line_search_converged(result) or not np.all(np.isfinite(result.x)):
             raise ValueError(f"Adaptive variance trend fit failed: {result.message}")
 
         # Continue linearly outside the interior support instead of extrapolating
@@ -947,17 +961,32 @@ def hvg_flavor_options(
 def default_hvg_min_cells(n_selected: int) -> int:
     """Return the default ``min_cells`` of the cytearc flavor for ``n_selected`` cells.
 
-    It is 1% of the selected cells rounded up, at least 3 and at most 20, so
-    selections of 2,000 cells or more keep the earlier fixed 20. It never
-    exceeds a fifth of the cells, at least 1, so a tiny selection keeps a
-    band of detection counts to choose from.
+    It is the cube root of ``n_selected`` rounded up, and at least 20: 20
+    from 381 to 8,000 cells, 22 at 10,000, 47 at 100,000 and 100 at
+    1,000,000. A smaller selection uses 5% of its cells rounded up, and at
+    least 5: 5 up to 100 cells, 8 at 150 and 15 at 300. No gene of a
+    selection under 5 cells reaches the default.
     """
-    scaled = -(-int(n_selected) // _MIN_CELLS_DIVISOR)
-    return min(
-        HVG_MIN_CELLS_CAP,
-        max(HVG_MIN_CELLS_FLOOR, scaled),
-        max(1, int(n_selected) // 5),
+    n_selected = int(n_selected)
+    small_selection = max(
+        HVG_SMALL_SELECTION_MIN_CELLS, -(-n_selected // _SMALL_SELECTION_DIVISOR)
     )
+    return min(max(HVG_MIN_CELLS_FLOOR, _ceil_cube_root(n_selected)), small_selection)
+
+
+def _ceil_cube_root(n: int) -> int:
+    """Return the smallest whole ``m``, at least 1, with ``m ** 3 >= n``, exactly.
+
+    Newton's method runs in integers, down from a power of two above the root,
+    because a float root misrounds exact cubes (``1_000_000 ** (1 / 3)`` is
+    just below 100) and, past float precision, misses by more than the root's
+    last digits.
+    """
+    n = max(n, 1)
+    root = 1 << -(-n.bit_length() // 3)
+    while (smaller := (2 * root + n // root**2) // 3) < root:
+        root = smaller
+    return root if root**3 == n else root + 1
 
 
 def default_hvg_ubiquity_limit(n_selected: int) -> int:
@@ -1047,6 +1076,40 @@ def hvg_candidates(
         keep_bounds=keep_bounds,
     )
     return candidates
+
+
+def selected_detection_ratio(
+    selected: np.ndarray,
+    detected: np.ndarray,
+    feature_names: np.ndarray,
+    *,
+    min_cells: int,
+    max_cells: int | float,
+    keep_bounds: bool,
+    blacklist: str,
+) -> float | None:
+    """Return the median detection of the selected features over the eligible ones'.
+
+    Detection is the number of selected cells that detect a feature. The
+    eligible features are detected in at least one cell, lie within the
+    detection bounds ``min_cells`` and ``max_cells`` (``max_cells`` itself
+    only with ``keep_bounds``), and match no ``blacklist`` pattern. The ratio
+    is about 1 when the selection draws on features across the eligible
+    range of detection, and well below 1 when it draws mostly on rarely
+    detected ones.
+
+    Returns:
+        The ratio, or None when no selected or no eligible feature is detected.
+    """
+    detected = np.asarray(detected, dtype=np.float64)
+    eligible = (detected > 0) & (detected >= min_cells)
+    eligible &= detected <= max_cells if keep_bounds else detected < max_cells
+    if blacklist:
+        eligible &= ~regex_match_mask(np.asarray(feature_names), blacklist)
+    chosen = np.asarray(selected, dtype=bool) & (detected > 0)
+    if not chosen.any() or not eligible.any():
+        return None
+    return float(np.median(detected[chosen]) / np.median(detected[eligible]))
 
 
 def _top_candidates(

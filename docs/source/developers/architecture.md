@@ -1256,9 +1256,13 @@ CyteArc validates persisted data and public arguments against the following cont
   and store `mean_nonzero`, `detected`, and with batches `batch_count` and `median_batch_rank`.
   `min_mean`, `max_mean`, `min_var`, and `max_var` filter candidates before `top_n`; before, a
   finite `min_var` ignored `top_n` and `max_var` applied after the cut. `min_cells` defaults to
-  None: 1% of the selected cells rounded up, from 3 to 20, and `max_cells` None excludes genes
-  detected in more than 99.5% of them, recorded as the resolved integers; before they were 20 and
-  `n_selected - 20`. The gene-family blacklist spares CCN1 to CCN6 (`^CCN[A-Z]`) and matches the
+  None: the cube root of the number of selected cells rounded up and at least 20, or for a
+  selection of fewer than 381 cells 5% of them rounded up and at least 5, and `max_cells` None
+  excludes genes detected in more than 99.5% of them, recorded as the resolved integers. Before,
+  the default `min_cells` was 1% of the selected cells from 3 to 20, and earlier still the bounds
+  were 20 and `n_selected - 20`. Defaults record their resolved values, so a default selection of
+  fewer than 1,901 or more than 8,000 cells records a new `min_cells` and is computed again, while
+  saved selections stay reusable for the `min_cells` they record. The gene-family blacklist spares CCN1 to CCN6 (`^CCN[A-Z]`) and matches the
   current histone symbols. `select_hvgs` revision 2 covers selections with a finite variance bound,
   with `min_cells` 20 (every selection with the earlier default bounds), or with the earlier default
   blacklist. `norm_pearson_residuals` is an RNA normalizer that takes only `renormalize_subset`.

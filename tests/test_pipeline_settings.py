@@ -446,10 +446,11 @@ def test_omitted_settings_use_the_stage_method_defaults(settings_store):
 
 # Pin CyteArc HVG parameter identities for max_cells=None (genes detected in
 # more than 99.5% of the selected cells excluded) and max_cells=np.inf (no
-# cutoff) on this fixture with top_n=50, the default min_cells (1% of the
-# selected cells, from 3 to 20), and the default blacklist of 1.3.0.
-_AUTO_DIGEST = "57929bd45c563d7206838229d44deae834440b1f9b89d5244817d735215d6014"
-_NO_CUTOFF_DIGEST = "efde872152049c8f582f39ad36802008276e91f0cf9a6489061be1cc13213133"
+# cutoff) on this fixture with top_n=50, the default min_cells (20 for its 892
+# selected cells, the cube root rounded up and at least 20), and the default
+# blacklist of 1.3.0.
+_AUTO_DIGEST = "9982d306b6840e62735ad2c37b4752d4cd8640f168c3df129ab264d8c50b0173"
+_NO_CUTOFF_DIGEST = "d7dea2b0b643ec5c92c8363ab5459a0d70cb9fc2571a2f049a68fd29eb456543"
 
 
 def _parameter_digest(store: DataStore, ref: ArtifactRef) -> str:
