@@ -826,9 +826,14 @@ def test_a_disk_that_fills_while_dense_rows_spill_is_refused(
     source = tmp_path / "source.h5ad"
     _write_source(source, "dense")
     real_usage = sparse.shutil.disk_usage
-    monkeypatch.setattr(
-        sparse.shutil, "disk_usage", lambda path: real_usage(path)._replace(free=10)
-    )
+    checks: list[int] = []
+
+    def disk_usage(path):
+        # The check before the spill finds room; the disk then fills.
+        checks.append(1)
+        return real_usage(path)._replace(free=1 << 40 if len(checks) == 1 else 10)
+
+    monkeypatch.setattr(sparse.shutil, "disk_usage", disk_usage)
     with pytest.raises(OSError, match="temporary bytes .* which has 10 free"):
         _import(
             source,
@@ -845,17 +850,18 @@ def test_embeddings_held_in_memory_are_checked_against_the_budget(tmp_path) -> N
     reader = _reader(source)
     try:
         writer = H5adToZarr(reader, MemoryStore(), nthreads=1, shuffle_cells=True)
-        # Twenty rows and a block of four, of 40 bytes each, beside the order.
-        needed = (20 + 4) * 40 + 20 * 8
+        # Twenty rows and a block of four, of 40 bytes each, beside the 300
+        # bytes the import holds throughout.
+        needed = (20 + 4) * 40 + 300
         for budget in (needed, needed - 1):
             writer.resources = ResourceBudget(budget, 1)
             if budget == needed:
-                writer._check_shuffled_rows_memory(40, 4, "rows")
+                writer._check_shuffled_rows_memory(40, 4, "rows", 300)
                 continue
             with pytest.raises(
                 MemoryBudgetError, match="Writing rows exceeds"
             ) as caught:
-                writer._check_shuffled_rows_memory(40, 4, "rows")
+                writer._check_shuffled_rows_memory(40, 4, "rows", 300)
             assert caught.value.needed_bytes == needed
             assert caught.value.item == "rows"
     finally:
@@ -938,3 +944,299 @@ def test_a_csc_conversion_is_redone_in_the_order_that_an_import_needs(tmp_path) 
         _open(tmp_path / "shuffled.zarr")["RNA/counts"][...],
         counts[shuffled_order(_N_CELLS, 0)],
     )
+
+
+def _temporary_folders(folder: Path) -> list[Path]:
+    return [path for path in folder.iterdir() if path.name.startswith("cytearc-")]
+
+
+@pytest.mark.parametrize("shuffled_first", [True, False])
+@pytest.mark.parametrize("encoding", ["csr", "csc", "dense"])
+def test_an_import_in_the_files_order_reads_the_file_whatever_another_import_left(
+    tmp_path, encoding, shuffled_first
+) -> None:
+    source = tmp_path / "source.h5ad"
+    counts = _write_source(source, encoding)
+    reader = H5adReader(str(source), temp_dir=str(tmp_path))
+    try:
+
+        def shuffled() -> H5adToZarr:
+            return H5adToZarr(reader, MemoryStore(), nthreads=1, shuffle_cells=True)
+
+        def plain() -> H5adToZarr:
+            return H5adToZarr(reader, str(tmp_path / "plain.zarr"), nthreads=1)
+
+        if shuffled_first:
+            shuffled_writer = shuffled()
+            plain_writer = plain()
+        else:
+            # Built before the shuffled import spills, dumped after it.
+            plain_writer = plain()
+            shuffled_writer = shuffled()
+        plain_writer.dump()
+        # The plain import released the shuffled rows, which the shuffled
+        # import cannot replace with the file's order.
+        with pytest.raises(RuntimeError, match="written once and released"):
+            shuffled_writer.dump()
+    finally:
+        reader.close()
+    root = _open(tmp_path / "plain.zarr")
+    np.testing.assert_array_equal(
+        root["cellData/ids"][...], [f"cell-{row}" for row in range(_N_CELLS)]
+    )
+    np.testing.assert_array_equal(root["RNA/counts"][...], counts)
+    np.testing.assert_array_equal(root["RNA/countsT"][...], counts.T)
+    assert SOURCE_ROW not in root["cellData"] or (
+        "role" not in root[f"cellData/{SOURCE_ROW}"].attrs
+    )
+    assert not _temporary_folders(tmp_path)
+
+
+def _write_fractional(path: Path, encoding: str, n_cells: int = 150) -> np.ndarray:
+    """Write values whose first 100 cells do not show what they are; column 0 is the row plus a half."""
+    values = np.zeros((n_cells, 5), dtype=np.float32)
+    values[:, 0] = np.arange(n_cells) + 0.5
+    values[::3, 2] = 2
+    matrix = {"csr": csr_matrix, "csc": csc_matrix, "dense": np.asarray}[encoding]
+    anndata.AnnData(
+        matrix(values),
+        obs=pd.DataFrame(index=[f"c{row}" for row in range(n_cells)]),
+        var=pd.DataFrame(index=[f"g{column}" for column in range(5)]),
+    ).write_h5ad(path)
+    return values
+
+
+@pytest.mark.parametrize("failure", ["values", "cell data"])
+@pytest.mark.parametrize("encoding", ["csr", "csc", "dense"])
+def test_a_shuffled_import_refused_after_its_spill_leaves_no_rows_for_a_retry(
+    tmp_path, monkeypatch, encoding, failure
+) -> None:
+    source = tmp_path / "source.h5ad"
+    values = _write_fractional(source, encoding)
+    options: dict[str, Any] = {}
+    if failure == "cell data":
+        # The refusal comes once the destination exists.
+        options["values"] = "normalized"
+
+        def refuse(self) -> None:
+            raise OSError("the destination refused a write")
+
+        monkeypatch.setattr(H5adToZarr, "_ini_cell_data", refuse)
+    reader = H5adReader(str(source), temp_dir=str(tmp_path))
+    try:
+        with pytest.raises(
+            ValueError if failure == "values" else OSError,
+            match="not whole numbers" if failure == "values" else "refused a write",
+        ):
+            H5adToZarr(
+                reader,
+                str(tmp_path / "refused.zarr"),
+                nthreads=1,
+                shuffle_cells=True,
+                **options,
+            )
+        assert reader._convertedCsr is None
+        assert not reader._shuffledRows
+        assert not _temporary_folders(tmp_path)
+        monkeypatch.undo()
+        H5adToZarr(
+            reader, str(tmp_path / "retry.zarr"), nthreads=1, values="normalized"
+        ).dump()
+    finally:
+        reader.close()
+    root = _open(tmp_path / "retry.zarr")
+    np.testing.assert_array_equal(
+        root["cellData/ids"][...], [f"c{row}" for row in range(values.shape[0])]
+    )
+    np.testing.assert_array_equal(root["RNA/counts"][...], values)
+
+
+@pytest.mark.parametrize("encoding", ["csr", "csc", "dense"])
+def test_interleaved_shuffled_imports_never_write_each_others_rows(
+    tmp_path, encoding
+) -> None:
+    source = tmp_path / "source.h5ad"
+    counts = _write_source(source, encoding)
+    reader = H5adReader(str(source), temp_dir=str(tmp_path))
+    try:
+        first = H5adToZarr(
+            reader, MemoryStore(), nthreads=1, shuffle_cells=True, shuffle_seed=0
+        )
+        second = H5adToZarr(
+            reader,
+            str(tmp_path / "second.zarr"),
+            nthreads=1,
+            shuffle_cells=True,
+            shuffle_seed=1,
+        )
+        # The second import's rows replaced the first's, in another order.
+        with pytest.raises(RuntimeError, match="another import of the reader replaced"):
+            first.dump()
+        second.dump()
+        with pytest.raises(RuntimeError, match="another import of the reader replaced"):
+            first.dump()
+    finally:
+        reader.close()
+    root = _open(tmp_path / "second.zarr")
+    order = shuffled_order(_N_CELLS, 1)
+    assert not np.array_equal(order, shuffled_order(_N_CELLS, 0))
+    np.testing.assert_array_equal(
+        root["cellData/ids"][...], [f"cell-{row}" for row in order]
+    )
+    np.testing.assert_array_equal(root["RNA/counts"][...], counts[order])
+    assert not _temporary_folders(tmp_path)
+
+
+def _id_bytes(ids: list[str]) -> int:
+    """Bytes of the reader's object array of IDs, which h5py reads as bytes objects.
+
+    CPython's bytes object takes 33 bytes and one per byte of its value, and
+    the array a reference of 8 bytes for each.
+    """
+    return sum(8 + 33 + len(value.encode()) for value in ids)
+
+
+@pytest.mark.parametrize("output", ["embedding", "cluster labels"])
+def test_per_cell_arrays_that_do_not_fit_are_refused_before_anything_is_written(
+    tmp_path, output
+) -> None:
+    n_cells = 600
+    ids = [f"c{row}" for row in range(n_cells)]
+    rng = np.random.default_rng(5)
+    counts = rng.poisson(1.0, (n_cells, 20)).astype(np.float32)
+    obs = pd.DataFrame(index=ids)
+    obsm = {}
+    options: dict[str, Any] = {}
+    if output == "embedding":
+        obsm["X_wide"] = rng.normal(size=(n_cells, 1000))
+        options["embedding_roles"] = {"X_wide": "coordinates"}
+        row_bytes = 1000 * 8
+        sized_bytes = row_bytes
+    else:
+        # Labels a thousand characters long, held as text 4 bytes a
+        # character with a missing mark, in blocks sized for 64 bytes a row.
+        obs["long"] = [("x" * 999) + str(row % 3) for row in range(n_cells)]
+        options["cluster_keys"] = ("long",)
+        row_bytes = 4 * 1000 + 1
+        sized_bytes = 64
+    source = tmp_path / "source.h5ad"
+    anndata.AnnData(
+        csr_matrix(counts),
+        obs=obs,
+        var=pd.DataFrame(index=[f"g{column}" for column in range(20)]),
+        obsm=obsm,
+    ).write_h5ad(source)
+    destination = tmp_path / "refused.zarr"
+    reader = H5adReader(str(source), temp_dir=str(tmp_path), **options)
+    try:
+        with pytest.raises(MemoryBudgetError) as caught:
+            H5adToZarr(
+                reader,
+                str(destination),
+                mem_budget="4M",
+                nthreads=1,
+                shuffle_cells=True,
+            )
+        assert reader._convertedCsr is None
+    finally:
+        reader.close()
+    assert not destination.exists()
+    assert not _temporary_folders(tmp_path)
+    budget = caught.value.budget_bytes
+    # The order of the cells and the reader's IDs are held throughout; a
+    # block takes the most rows that an eighth of the budget sizes it for.
+    block = min(n_cells, budget // (8 * sized_bytes))
+    needed = 8 * n_cells + _id_bytes(ids) + (n_cells + block) * row_bytes
+    assert caught.value.needed_bytes == needed
+    assert needed > budget
+    assert "in shuffled order" in caught.value.item
+
+
+def test_what_a_shuffled_import_holds_beside_a_gathered_array_is_charged(
+    tmp_path,
+) -> None:
+    source = tmp_path / "source.h5ad"
+    _write_source(source, "dense")
+    reader = _reader(source)
+    try:
+        writer = H5adToZarr(reader, MemoryStore(), nthreads=1, shuffle_cells=True)
+        resident = writer._shuffled_resident_bytes()
+    finally:
+        reader.close()
+    ids = [f"cell-{row}" for row in range(_N_CELLS)]
+    # The order, the reader's IDs, the declared RNA membership, one boolean
+    # a cell, and the dense matrix's count of values in each row.
+    assert resident == (8 * _N_CELLS + _id_bytes(ids) + _N_CELLS + 8 * (_N_CELLS + 1))
+
+
+def test_embeddings_gathered_in_another_order_than_the_ids_fail_their_check(
+    tmp_path,
+) -> None:
+    from cytearc.storage.errors import ArtifactResolutionError
+
+    source = tmp_path / "source.h5ad"
+    _write_source(source, "csr")
+    reader = _reader(source)
+    try:
+        writer = H5adToZarr(reader, MemoryStore(), nthreads=1, shuffle_cells=True)
+        # The rows of each embedding are gathered through another order than
+        # the store's IDs were written in.
+        writer._cellOrder = writer._cellOrder[::-1].copy()
+        with pytest.raises(
+            ArtifactResolutionError, match="cell IDs do not match the selected"
+        ):
+            writer.dump()
+    finally:
+        reader.close()
+
+
+def test_a_disk_without_room_for_dense_rows_is_refused_before_any_is_written(
+    tmp_path, monkeypatch
+) -> None:
+    import cytearc.readers._sparse as sparse
+
+    source = tmp_path / "source.h5ad"
+    _write_source(source, "dense")
+    actual: list[int] = []
+    appended: list[int] = []
+    original_finalize = SparseRowStore.finalize
+    original_append = SparseRowStore.append_rows
+
+    def finalize(self):
+        original_finalize(self)
+        actual.append(int(self._fileBytes.sum()))
+
+    def append_rows(self, rows, matrix):
+        appended.append(int(matrix.nnz))
+        return original_append(self, rows, matrix)
+
+    monkeypatch.setattr(SparseRowStore, "finalize", finalize)
+    monkeypatch.setattr(SparseRowStore, "append_rows", append_rows)
+    in_tmp = {"reader_options": {"temp_dir": str(tmp_path)}}
+    _import(source, MemoryStore(), shuffle_cells=True, **in_tmp)
+    (spilled,) = actual
+    real_usage = sparse.shutil.disk_usage
+
+    def usage(free: int):
+        def disk_usage(path):
+            return real_usage(path)._replace(free=free)
+
+        return disk_usage
+
+    appended.clear()
+    monkeypatch.setattr(sparse.shutil, "disk_usage", usage(0))
+    with pytest.raises(OSError, match=r"needs (\d+) temporary bytes") as caught:
+        _import(source, MemoryStore(), shuffle_cells=True, **in_tmp)
+    assert not appended
+    required = int(re.search(r"needs (\d+) temporary", str(caught.value)).group(1))
+    # Estimated from the first rows' values beside zeros and their encoding:
+    # it covers what the spill wrote, and stays well below every value of
+    # the matrix before compression.
+    assert spilled <= required < _N_CELLS * _N_FEATURES * (4 + 1)
+    monkeypatch.setattr(sparse.shutil, "disk_usage", usage(required - 1))
+    with pytest.raises(OSError, match=f"needs {required} temporary bytes"):
+        _import(source, MemoryStore(), shuffle_cells=True, **in_tmp)
+    assert not appended
+    monkeypatch.setattr(sparse.shutil, "disk_usage", usage(required))
+    _import(source, MemoryStore(), shuffle_cells=True, **in_tmp)
+    assert not _temporary_folders(tmp_path)

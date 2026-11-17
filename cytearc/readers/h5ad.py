@@ -1,3 +1,4 @@
+import sys
 from collections.abc import Generator, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -141,7 +142,11 @@ class _RowSpillPlan:
     The owner holds the store's row counts. Each scan window's writer holds
     a count and mark for every row of the store, the destinations of its own
     rows, the scan window and the rows it appends, and its pending rows,
-    which take what is left of the window's share, up to 1 GiB.
+    which take what is left of the window's share, up to 1 GiB. ``entries``
+    and ``entryBytes``, the values the rows hold beside zeros and the bytes
+    each takes on disk, check the free disk before the spill: a sparse
+    matrix's values are counted, and a dense matrix's estimated from its
+    first rows.
     """
 
     destinations: np.ndarray
@@ -763,6 +768,27 @@ class H5adReader:
         """
         return self._cell_identifiers()[1].copy()
 
+    def _cell_ids_at(self, rows: np.ndarray) -> np.ndarray:
+        """Return the cell IDs of file rows ``rows``, in that order, as the text an import stores."""
+        values = self._cell_identifiers()[1][rows]
+        return np.asarray(
+            [as_text(value) for value in values.astype(object)], dtype=str
+        )
+
+    def _cell_id_bytes(self) -> int:
+        """Return the bytes of the cell IDs that the reader holds once it read them.
+
+        It holds them as the file holds them and, when it renamed repeated
+        IDs, as they import.
+        """
+        source, resolved = self._cell_identifiers()
+        held = 0
+        for values in (source,) if resolved is source else (source, resolved):
+            held += int(values.nbytes)
+            if values.dtype.kind == "O":
+                held += sum(map(sys.getsizeof, values))
+        return held
+
     def _feature_identifiers(self) -> tuple[np.ndarray, np.ndarray]:
         """Return the feature IDs as the file holds them and as they import.
 
@@ -1285,13 +1311,27 @@ class H5adReader:
         """
         destinations = self._checked_destinations(destinationRows)
         sample: csr_matrix | None = None
+        # The values the rows hold beside zeros, which the disk check takes.
+        expected: int | None
         if self.matrixOrientation == "dense":
             entries = None
             longest = self.nFeatures
+            # The first rows, of about a million values, estimate how many
+            # values the rows hold beside zeros and what they take on disk.
+            rows = min(
+                self.nCells, max(1, _SPILL_SAMPLE_ENTRIES // max(1, self.nFeatures))
+            )
+            expected = 0
+            if rows:
+                sample = csr_matrix(
+                    self._matrix_values(self.h5[self.matrixKey], slice(0, rows))
+                )
+                expected = -(-int(sample.nnz) * self.nCells // rows)
         else:
             pointers = self._csr_indptr()
             assert pointers is not None
             entries = int(pointers[-1] - pointers[0])
+            expected = entries
             longest = int(np.diff(pointers).max(initial=0))
             # The first rows, of about a million entries, measure what the
             # spill takes on disk.
@@ -1321,7 +1361,7 @@ class H5adReader:
             dtype=np.dtype(self.sourceMatrixDtype),
             bucketRows=bucket_rows,
             readBytes=read_bytes,
-            entries=entries,
+            entries=expected,
             entryBytes=None if sample is None else encoded_entry_bytes(sample),
             longest=longest,
             maxBytes=maxBytes,
