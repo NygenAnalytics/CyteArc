@@ -1109,13 +1109,27 @@ def test_each_reader_reads_its_first_cells_from_the_file_once_shuffled(
     assert _no_temporary_files(tmp_path)
 
 
-def test_a_10x_reader_without_cells_reads_no_first_cells(tmp_path) -> None:
-    path = _write_10x(tmp_path / "matrix.h5", _counts())
-    reader = CrH5Reader(str(path), is_filtered=False, filtering_cutoff=10**9)
+def test_readers_without_cells_read_no_first_cells(tmp_path) -> None:
+    counts = _counts()
+    readers = [
+        CrH5Reader(
+            str(_write_10x(tmp_path / "matrix.h5", counts)),
+            is_filtered=False,
+            filtering_cutoff=10**9,
+        ),
+        MtxReader(
+            inspect_mtx(_write_mtx(tmp_path / "mtx", counts, "cellMajor"))[0],
+            is_filtered=False,
+            filtering_cutoff=10**9,
+        ),
+    ]
     try:
-        assert reader._file_first_rows(100, 0).shape == (0, _N_FEATURES)
+        for reader in readers:
+            assert reader.nCells == 0
+            assert reader._file_first_rows(100, 50).shape == (0, _N_FEATURES)
     finally:
-        reader.close()
+        for reader in readers:
+            reader.close()
 
 
 def test_a_csv_import_that_fails_after_its_spill_removes_the_rows(tmp_path) -> None:
