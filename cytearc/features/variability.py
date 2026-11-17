@@ -25,7 +25,6 @@ number of batches that rank them among their ``top_n`` and then by their
 median rank, the order of Seurat's ``SelectIntegrationFeatures``.
 """
 
-import math
 from typing import Any, Literal, NamedTuple, cast
 
 import numpy as np
@@ -976,17 +975,18 @@ def default_hvg_min_cells(n_selected: int) -> int:
 
 
 def _ceil_cube_root(n: int) -> int:
-    """Return the smallest whole ``m`` with ``m ** 3 >= n``, exactly.
+    """Return the smallest whole ``m``, at least 1, with ``m ** 3 >= n``, exactly.
 
-    The comparison runs in integers, because a float root misrounds exact
-    cubes: ``1_000_000 ** (1 / 3)`` is just below 100.
+    Newton's method runs in integers, down from a power of two above the root,
+    because a float root misrounds exact cubes (``1_000_000 ** (1 / 3)`` is
+    just below 100) and, past float precision, misses by more than the root's
+    last digits.
     """
-    root = max(1, round(math.cbrt(n)))
-    while root**3 < n:
-        root += 1
-    while root > 1 and (root - 1) ** 3 >= n:
-        root -= 1
-    return root
+    n = max(n, 1)
+    root = 1 << -(-n.bit_length() // 3)
+    while (smaller := (2 * root + n // root**2) // 3) < root:
+        root = smaller
+    return root if root**3 == n else root + 1
 
 
 def default_hvg_ubiquity_limit(n_selected: int) -> int:

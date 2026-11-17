@@ -349,6 +349,18 @@ def test_default_min_cells_is_the_exact_rounded_up_root_with_its_bounds() -> Non
         previous = min_cells
 
 
+def test_default_min_cells_takes_the_exact_root_past_float_precision() -> None:
+    # Past float precision a float cube root misses by more than 1: for
+    # (7 * 10**30) ** 3 it lands about 4e14 above the root, which correcting
+    # one step at a time would take about 4e14 steps to undo. The rounded-up
+    # root of a cube and of its neighbours is known without computing one.
+    for root in (2**18 + 1, 7 * 10**30, 10**100, 3**700):
+        cube = root**3
+        assert default_hvg_min_cells(cube - 1) == root
+        assert default_hvg_min_cells(cube) == root
+        assert default_hvg_min_cells(cube + 1) == root + 1
+
+
 def test_detection_bounds_of_other_flavors_and_explicit_values() -> None:
     for flavor in ("seurat_v3", "pearson_residuals"):
         assert resolve_hvg_detection_bounds(
