@@ -277,7 +277,11 @@ def test_to_anndata_exports_an_empty_feature_selection() -> None:
         name="RNA",
     )
     store._get_assay = Mock(return_value=assay)
+    # The cell table holds no sourceRow, so the export keeps store order.
+    table = zarr.open_group(store=MemoryStore(), mode="w")
+    table.create_array("ids", data=np.asarray(["c0", "c1"]))
     store.cells = SimpleNamespace(
+        _group=table,
         columns=["ids"],
         active_index=Mock(return_value=np.asarray([0, 1])),
         to_pandas_dataframe=Mock(return_value=pd.DataFrame({"ids": ["c0", "c1"]})),
