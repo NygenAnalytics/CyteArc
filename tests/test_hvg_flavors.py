@@ -283,24 +283,32 @@ def test_pearson_residuals_match_a_hand_computed_example() -> None:
 # Detection bounds
 
 
+# min_cells is the 2.5th root of the cells rounded up and at least 20, and a
+# selection too small for 20 takes 5% of its cells rounded up, at least 5:
+# 5% of 101 is 5.05, of 150 is 7.5 and of 381 is 19.05; 20**5 = 3,200,000
+# lies between 1,788**2 and 1,789**2; 26**5 < 3,696**2 <= 27**5;
+# 40**5 >= 10**8 > 39**5; 100**5 == 100,000**2 exactly; and
+# 251**5 < 10**12 <= 252**5.
 @pytest.mark.parametrize(
     ("n_selected", "min_cells", "limit"),
     [
-        (1, 1, 0),
-        (2, 1, 1),
-        (4, 1, 3),
-        (10, 2, 9),
-        (15, 3, 14),
-        (41, 3, 40),
-        (150, 3, 149),
-        (300, 3, 298),
-        (301, 4, 299),
-        (892, 9, 887),
-        (1000, 10, 995),
-        (1901, 20, 1891),
-        (3696, 20, 3677),
-        (4000, 20, 3980),
-        (100_000, 20, 99_500),
+        (1, 5, 0),
+        (2, 5, 1),
+        (4, 5, 3),
+        (10, 5, 9),
+        (41, 5, 40),
+        (100, 5, 99),
+        (101, 6, 100),
+        (150, 8, 149),
+        (380, 19, 378),
+        (381, 20, 379),
+        (1000, 20, 995),
+        (1788, 20, 1779),
+        (1789, 21, 1780),
+        (3696, 27, 3677),
+        (10_000, 40, 9950),
+        (100_000, 100, 99_500),
+        (1_000_000, 252, 995_000),
     ],
 )
 def test_default_detection_bounds_scale_with_the_selection(
@@ -308,14 +316,37 @@ def test_default_detection_bounds_scale_with_the_selection(
 ) -> None:
     assert default_hvg_min_cells(n_selected) == min_cells
     assert default_hvg_ubiquity_limit(n_selected) == limit
-    # A selection of two or more cells keeps a band of detection counts.
-    assert n_selected < 2 or min_cells <= limit
+    # A selection of six or more cells keeps a band of detection counts.
+    assert n_selected < 6 or min_cells <= limit
     assert resolve_hvg_detection_bounds(
         None, None, n_selected=n_selected, keep_bounds=False
     ) == (min_cells, limit + 1)
     assert resolve_hvg_detection_bounds(
         None, None, n_selected=n_selected, keep_bounds=True
     ) == (min_cells, limit)
+
+
+def test_default_min_cells_is_the_exact_rounded_up_root_with_its_bounds() -> None:
+    sizes = np.r_[
+        np.arange(1, 5_000),
+        np.random.default_rng(3).integers(5_000, 10**12, 2_000),
+        [10**10, 10**12, 32**5, 32**5 + 1, 1024**2, 1024**2 + 1],
+    ]
+    previous = 0
+    for n in sorted(int(size) for size in sizes):
+        min_cells = default_hvg_min_cells(n)
+        if n <= 100:
+            assert min_cells == 5
+        elif n <= 380:
+            # The smallest whole number of cells that is at least 5% of them.
+            assert 20 * (min_cells - 1) < n <= 20 * min_cells
+        elif min_cells > 20:
+            # The smallest whole number whose 2.5th power reaches n, in integers.
+            assert min_cells**5 >= n * n > (min_cells - 1) ** 5
+        else:
+            assert min_cells == 20 and 20**5 >= n * n
+        assert min_cells >= previous
+        previous = min_cells
 
 
 def test_detection_bounds_of_other_flavors_and_explicit_values() -> None:
@@ -1180,7 +1211,8 @@ def test_default_cap_keeps_genes_of_homogeneous_selections(banded) -> None:
     ref = banded.features.hvgs(cells, top_n=5, show_plot=False)
 
     parameters = inspect_artifact(banded.zw, ref).parameters
-    assert (parameters["min_cells"], parameters["max_cells"]) == (3, 90)
+    # 5% of 90 cells is 4.5, so the default min_cells is its floor of 5.
+    assert (parameters["min_cells"], parameters["max_cells"]) == (5, 90)
     # Gene 7, detected in 88 of 90 cells, is among the most variable genes;
     # the earlier defaults excluded it.
     assert banded.artifacts.load(ref)["values"][:][7]
@@ -1203,14 +1235,15 @@ def test_small_selections_keep_a_band_of_detection_counts(datastore_ephemeral) -
     ref = store.features.hvgs(cells, top_n=1000, n_bins=20, show_plot=False)
 
     parameters = inspect_artifact(store.zw, ref).parameters
-    assert (parameters["min_cells"], parameters["max_cells"]) == (3, 41)
+    # 5% of 41 cells is 2.05, so the default min_cells is its floor of 5.
+    assert (parameters["min_cells"], parameters["max_cells"]) == (5, 41)
     counts = np.asarray(store.RNA.rawData[active[:41], :].compute())
     detected = (counts > 0).sum(axis=0)
     selected = np.asarray(store.artifacts.load(ref)["values"][:], dtype=bool)
     # The earlier bounds, 20 and 41 - 20, kept only genes detected in exactly
     # 20 of the 41 cells.
     assert selected.sum() == 1000
-    assert detected[selected].min() == 3
+    assert detected[selected].min() == 5
     assert detected[selected].max() <= 40
     assert np.unique(detected[selected]).size > 10
 

@@ -25,6 +25,7 @@ number of batches that rank them among their ``top_n`` and then by their
 median rank, the order of Seurat's ``SelectIntegrationFeatures``.
 """
 
+import math
 from typing import Any, Literal, NamedTuple, cast
 
 import numpy as np
@@ -43,8 +44,8 @@ __all__ = [
     "DEFAULT_PEARSON_THETA",
     "HVG_FLAVORS",
     "HVG_FLAVOR_OPTION_NAMES",
-    "HVG_MIN_CELLS_CAP",
     "HVG_MIN_CELLS_FLOOR",
+    "HVG_SMALL_SELECTION_MIN_CELLS",
     "HVG_OPTION_NAMES",
     "BatchRanking",
     "HvgFlavorOptions",
@@ -83,11 +84,13 @@ HVG_FLAVORS: tuple[str, ...] = ("cytearc", "seurat_v3", "pearson_residuals")
 # The span of the seurat_v3 trend and the overdispersion of Pearson residuals.
 DEFAULT_LOESS_SPAN = 0.3
 DEFAULT_PEARSON_THETA = 100.0
-# The default min_cells of the cytearc flavor is 1% of the selected cells,
-# at least HVG_MIN_CELLS_FLOOR and at most HVG_MIN_CELLS_CAP.
-HVG_MIN_CELLS_CAP = 20
-HVG_MIN_CELLS_FLOOR = 3
-_MIN_CELLS_DIVISOR = 100
+# The default min_cells of the cytearc flavor is the 2.5th root of the number
+# of selected cells, rounded up, and at least HVG_MIN_CELLS_FLOOR. A selection
+# too small for that floor uses 5% of its cells, rounded up and at least
+# HVG_SMALL_SELECTION_MIN_CELLS.
+HVG_MIN_CELLS_FLOOR = 20
+HVG_SMALL_SELECTION_MIN_CELLS = 5
+_SMALL_SELECTION_DIVISOR = 20
 # The default max_cells of the cytearc flavor excludes features detected in
 # more than 99.5% of the selected cells, computed in integers as 199/200.
 _UBIQUITY_NUMERATOR = 199
@@ -958,17 +961,35 @@ def hvg_flavor_options(
 def default_hvg_min_cells(n_selected: int) -> int:
     """Return the default ``min_cells`` of the cytearc flavor for ``n_selected`` cells.
 
-    It is 1% of the selected cells rounded up, at least 3 and at most 20, so
-    selections of 2,000 cells or more keep the earlier fixed 20. It never
-    exceeds a fifth of the cells, at least 1, so a tiny selection keeps a
-    band of detection counts to choose from.
+    It is the 2.5th root of ``n_selected`` rounded up, and at least 20: 20
+    from 381 to 1,788 cells, 40 at 10,000, 100 at 100,000 and 252 at
+    1,000,000. A smaller selection uses 5% of its cells rounded up, and at
+    least 5: 5 up to 100 cells, 8 at 150 and 15 at 300. No gene of a
+    selection under 5 cells reaches the default.
     """
-    scaled = -(-int(n_selected) // _MIN_CELLS_DIVISOR)
-    return min(
-        HVG_MIN_CELLS_CAP,
-        max(HVG_MIN_CELLS_FLOOR, scaled),
-        max(1, int(n_selected) // 5),
+    n_selected = int(n_selected)
+    small_selection = max(
+        HVG_SMALL_SELECTION_MIN_CELLS, -(-n_selected // _SMALL_SELECTION_DIVISOR)
     )
+    return min(
+        max(HVG_MIN_CELLS_FLOOR, _ceil_root_two_and_a_half(n_selected)),
+        small_selection,
+    )
+
+
+def _ceil_root_two_and_a_half(n: int) -> int:
+    """Return the smallest whole ``m`` with ``m ** 2.5 >= n``, exactly.
+
+    The comparison runs in integers as ``m ** 5 >= n ** 2``, because a float
+    root misrounds exact powers: ``100_000 ** 0.4`` is just above 100.
+    """
+    target = n * n
+    root = max(1, round(math.pow(n, 0.4)))
+    while root**5 < target:
+        root += 1
+    while root > 1 and (root - 1) ** 5 >= target:
+        root -= 1
+    return root
 
 
 def default_hvg_ubiquity_limit(n_selected: int) -> int:

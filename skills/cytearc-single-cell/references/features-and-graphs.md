@@ -49,8 +49,10 @@ chain of artifacts, then branch or subcluster it safely. Docs: <https://docs.nyg
   The two count flavors ignore `normMethod` and have no detection bounds unless you pass them.
   `batch=` (a cell column or label artifact) scores every batch on its own and keeps the genes
   highly variable in the most batches, ties broken by median rank (Seurat's order).
-- Detection bounds of the cytearc flavor: `min_cells` defaults to 1% of the selected cells
-  (3 to 20) and `max_cells` excludes genes detected in more than 99.5% of them; artifacts record
+- Detection bounds of the cytearc flavor: `min_cells` defaults to the 2.5th root of the number of
+  selected cells, at least 20 (100 at 100,000 cells, 252 at 1M); a selection of fewer than 381
+  cells uses 5% of them, at least 5 (no gene passes in a selection of under 5 cells), and
+  `max_cells` excludes genes detected in more than 99.5% of them; artifacts record
   the resolved integers. `min_mean`/`max_mean` are log2 means over the cells where a gene is
   detected and `min_var`/`max_var` log2 corrected variances; all four filter before `top_n`.
 
@@ -291,7 +293,7 @@ minimum seed ARI was 0.78. The parent had no FOXP3 group.
 | --- | --- | --- |
 | `features.hvgs(top_n=)` / `hvg={"top_n": ...}` | `1000` | Weak or rare populations (raise); noisy programs dominate (lower). |
 | `features.hvgs(blacklist=)` | `DEFAULT_HVG_BLACKLIST` | A family dominates the HVGs or is the question; what to add: `gene-blacklists.md`. |
-| `features.hvgs(min_cells=, max_cells=)` | `None`, `None`: 1% of the selected cells (3 to 20) and detection in at most 99.5% of them; none for the count flavors | Outlier-driven genes (raise `min_cells`); `max_cells=np.inf` keeps ubiquitous genes. |
+| `features.hvgs(min_cells=, max_cells=)` | `None`, `None`: the 2.5th root of the selected cells (at least 20; 5% of a selection under 381 cells, at least 5) and detection in at most 99.5% of them; none for the count flavors | Outlier-driven genes (raise `min_cells`); `max_cells=np.inf` keeps ubiquitous genes. |
 | `features.hvgs(flavor=)` | `"cytearc"` | Parity with scanpy/Seurat (`"seurat_v3"`), or a residual workflow (`"pearson_residuals"`). |
 | `features.hvgs(batch=)` | `None` | Samples or donors drive the HVGs; pass the sample column. |
 | `reduction.pca(dims=)` / `pca={"dims": ...}` | `21` | After a variance and stability check; keep it below the HVG count. `0` in a recipe means no PCA (graph on normalized values; pass `doublets=False`; memory and time scale with the HVG count). |

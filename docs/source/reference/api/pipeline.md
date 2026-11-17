@@ -321,7 +321,7 @@ The other keywords configure the run itself:
 
 Settings are JSON values: numbers, strings, bools, None, lists, and mappings with string keys.
 Infinity and NaN are never settings. Some settings spell a derived default as `None`: `hvg`
-`min_cells`, 1% of the selected cells rounded up, from 3 to 20, for the default flavor; `hvg`
+`min_cells`, the 2.5th root of the number of selected cells rounded up and at least 20, or 5% of a smaller selection's cells and at least 5, for the default flavor; `hvg`
 `max_cells`, which for the default flavor excludes genes detected in more than 99.5% of the selected
 cells; `batch_size` of every stage that takes it; `cell_cycle` `ctrl_size` and `log_transform`;
 `paris` `min_cluster_size`; and `normalization` `log_transform` and `renormalize_subset`, whose
