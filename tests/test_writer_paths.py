@@ -822,6 +822,22 @@ def test_subset_rejects_invalid_cell_ids(cell_ids, error, message) -> None:
     assert _untouched(destination)
 
 
+def test_subset_rejects_cell_key_with_cell_ids() -> None:
+    # One selector would otherwise be ignored without a word.
+    dataset = _subset_source(MemoryStore())
+    destination = _sentinel_store()
+    with pytest.raises(ValueError, match="by cell_key or by cell_ids, not both"):
+        SubsetZarr(
+            destination,
+            assays=[dataset.RNA],
+            cell_key="I",
+            cell_ids=["c1"],
+            overwrite_existing_file=True,
+            nthreads=1,
+        )
+    assert _untouched(destination)
+
+
 @pytest.mark.parametrize(
     "cell_ids",
     [["c4", "c1", "c3"], np.array(["c3", "c4", "c1"]), pd.Index(["c1", "c3", "c4"])],

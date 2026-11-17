@@ -191,7 +191,7 @@ class SubsetZarr:
         in_workspace: Source workspace name (None for legacy layout).
         out_workspace: Target workspace name in the output Zarr file.
         cell_key: Name of a boolean column in cell metadata. The cells with value True are included in the
-                  subset. Only used when cell_ids is None. A column without True values writes a subset
+                  subset. Pass cell_key or cell_ids, not both. A column without True values writes a subset
                   without cells.
         cell_ids: IDs of the cells to include in the subset, such as values of
                   ``ds.cells.fetch_all("ids")``: at least one, each a cell of the store, given once.
@@ -386,6 +386,11 @@ class SubsetZarr:
         """Return the store rows of the subset's cells, in store order."""
         if cell_key is None and cell_ids is None:
             raise ValueError("Both `cell_key` and `cell_ids` parameters cannot be None")
+        if cell_key is not None and cell_ids is not None:
+            raise ValueError(
+                "SubsetZarr selects cells by cell_key or by cell_ids, not both; "
+                f"found cell_key={cell_key!r} and cell_ids. Pass one of them"
+            )
         if cell_ids is None:
             resolved: np.ndarray | None = None
             for assay in self.assays:

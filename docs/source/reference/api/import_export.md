@@ -442,7 +442,7 @@ The two feature selectors are mutually exclusive.
 `to_anndata` needs the optional `anndata` package and raises `ImportError` without it; install it
 with `pip install 'cytearc[extra]'`. `to_h5ad` writes with h5py, which CyteArc always installs, and
 needs no `anndata`, with or without a `run`.
-`SubsetZarr` selects cells of one `DataStore`, the cells of a boolean `cell_key` column or those that `cell_ids` names by ID, and keeps them in store order, whatever order the IDs come in. It retains every feature in each assay it writes.
+`SubsetZarr` selects cells of one `DataStore`, the cells of a boolean `cell_key` column or those that `cell_ids` names by ID (pass one of the two), and keeps them in store order, whatever order the IDs come in. It retains every feature in each assay it writes.
 It keeps the membership column `<assay>_I` of each assay it writes, for the selected cells, and
 does not copy the membership column of an assay that `assays=` leaves out
 ([Assay membership](../developers/zarr-internals#assay-membership)).
