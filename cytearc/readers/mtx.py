@@ -1944,6 +1944,10 @@ class MtxReader(CrReader):
             return
         yield from self._engine.consume(batch_size, lines_in_mem)
 
+    def _file_rows(self) -> np.ndarray:
+        """Return each kept cell's row in the file, its index in the cell sidecar."""
+        return np.asarray(self._engine.validCellIndexes).astype(np.int64, copy=False)
+
     def _file_first_rows(self, count: int, lines_in_mem: int) -> csr_matrix:
         """Return the first ``count`` kept cells in the order construction found."""
         batches = self._engine.consume(max(1, int(count)), lines_in_mem)

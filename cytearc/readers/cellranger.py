@@ -136,6 +136,16 @@ class CrReader(ABC):
                 permutation, or None to keep the cells in place.
         """
 
+    def _file_rows(self) -> np.ndarray:
+        """Return each selected cell's row in the file, from 0, as int64.
+
+        A reader that keeps every cell of the file returns 0 to ``nCells -
+        1``; one that keeps only some, such as :class:`CrH5Reader` with
+        ``is_filtered=False``, returns the rows of those it keeps, in order.
+        An import that shuffles cells stores them as ``sourceRow``.
+        """
+        return np.arange(self.nCells, dtype=np.int64)
+
     def _file_first_rows(self, count: int, lines_in_mem: int) -> csr_matrix:
         """Return the first ``count`` selected cells in the file's order.
 
@@ -691,6 +701,12 @@ class CrH5Reader(CrReader):
         if self._shuffledRows is not None:
             return self._consume_shuffled(batch_size)
         return self._consume_file(batch_size)
+
+    def _file_rows(self) -> np.ndarray:
+        """Return each selected barcode's row in the file, its index among the barcodes."""
+        valid_idx = self.validBarcodeIdx
+        assert valid_idx is not None
+        return np.asarray(valid_idx).astype(np.int64, copy=False)
 
     def _file_first_rows(self, count: int, lines_in_mem: int) -> csr_matrix:
         """Return the first ``count`` selected barcodes, read from the file."""

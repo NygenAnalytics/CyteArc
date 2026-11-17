@@ -41,6 +41,7 @@ from cytearc.storage.cell_order import (
     SOURCE_ROW_ROLE,
     recorded_shuffle_seed,
     shuffled_order,
+    source_order_rows,
 )
 from cytearc.utils.count_values import compressed_count_ranges
 from cytearc.utils.memory_budget import MemoryBudgetError
@@ -267,11 +268,13 @@ def _assert_shuffled_store(
     order: np.ndarray,
     seed: int,
     expected_counts: dict[str, np.ndarray],
+    file_rows: np.ndarray,
 ) -> None:
     """Check every per-cell array of the shuffled store against the plain store's rows.
 
     ``expected_counts`` holds each assay's counts in the source's order, read
-    from the source itself.
+    from the source itself, and ``file_rows`` the row in the file of each
+    cell that the import keeps.
     """
     n_cells = order.size
     assays = [name for name in plain.group_keys() if "counts" in plain[name]]
@@ -303,7 +306,8 @@ def _assert_shuffled_store(
         assert dict(shuffled[f"cellData/{name}"].attrs) == dict(
             plain[f"cellData/{name}"].attrs
         ), name
-    np.testing.assert_array_equal(shuffled_cells[SOURCE_ROW], order)
+    # Each cell's row in the file: with every row kept, the order itself.
+    np.testing.assert_array_equal(shuffled_cells[SOURCE_ROW], file_rows[order])
     assert shuffled_cells[SOURCE_ROW].dtype == np.int64
     assert dict(shuffled[f"cellData/{SOURCE_ROW}"].attrs) == {"role": SOURCE_ROW_ROLE}
     assert recorded_shuffle_seed(shuffled["cellData"]) == seed
@@ -393,12 +397,18 @@ def _source(
         return _cr_import(mtx_reader, lines_in_mem=50), {
             name: values[kept] for name, values in by_assay.items()
         }
-    if kind == "parse":
+    if kind.startswith("parse"):
+        cutoff = kind == "parse-cutoff"
         directory = _write_parse(tmp_path / "parse", counts[:, :9])
         return _cr_import(
-            lambda: MtxReader(inspect_mtx(directory)[0], temp_dir=scratch),
+            lambda: MtxReader(
+                inspect_mtx(directory)[0],
+                is_filtered=not cutoff,
+                filtering_cutoff=_CUTOFF,
+                temp_dir=scratch,
+            ),
             lines_in_mem=50,
-        ), {"RNA": counts[:, :9]}
+        ), {"RNA": counts[_source_rows(kind)][:, :9]}
     if kind == "tapestri":
         truth = tapestri_truth()
         path = write_tapestri(truth, tmp_path / "run.dna+protein.h5")
@@ -451,6 +461,20 @@ def _source(
     )
 
 
+def _source_rows(kind: str) -> np.ndarray:
+    """Return the row in the file of each cell that an import of ``kind`` keeps.
+
+    Readers that filter keep the cells whose counts total more than the
+    cutoff; the Parse matrix holds the first nine features only.
+    """
+    counts = _counts()
+    if kind == "tapestri":
+        return np.arange(len(tapestri_truth().row_ids))
+    if kind == "parse-cutoff":
+        return np.flatnonzero(counts[:, :9].sum(axis=1) > _CUTOFF)
+    return _kept(counts, cutoff=kind.endswith("cutoff"))
+
+
 _KINDS = [
     "10x-filtered",
     "10x-cutoff",
@@ -461,6 +485,7 @@ _KINDS = [
     "mtx-unordered-filtered",
     "mtx-unordered-cutoff",
     "parse",
+    "parse-cutoff",
     "tapestri",
     "csv",
     "sparse",
@@ -481,12 +506,14 @@ def test_every_per_cell_array_follows_the_shuffled_order(tmp_path, kind) -> None
     plain = _open(tmp_path / "plain.zarr")
     n_cells = int(plain["cellData/ids"].shape[0])
     order = shuffled_order(n_cells, 11)
+    file_rows = _source_rows(kind)
+    assert file_rows.size == n_cells
     _assert_shuffled_store(
-        plain, _open(tmp_path / "shuffled.zarr"), order, 11, expected
+        plain, _open(tmp_path / "shuffled.zarr"), order, 11, expected, file_rows
     )
     # A source cell column named sourceRow imports only in the file's order.
     skipped = "Skipped source cell metadata column 'sourceRow' because CyteArc stores"
-    if kind in ("parse", "csv"):
+    if kind in ("parse", "parse-cutoff", "csv"):
         assert "role" not in plain[f"cellData/{SOURCE_ROW}"].attrs
         assert any(message.startswith(skipped) for message in shuffled_warnings)
     assert not any(SOURCE_ROW in message for message in plain_warnings)
@@ -745,6 +772,7 @@ def test_cells_of_many_buckets_are_read_ahead_and_each_deleted_once_read(
         shuffled_order(_N_CELLS, 0),
         0,
         expected,
+        np.arange(_N_CELLS),
     )
     assert _no_temporary_files(tmp_path)
 
@@ -1212,3 +1240,67 @@ def test_a_10x_import_removes_its_shuffled_cells_before_counts_t(
         reader.close()
     # countsT reads counts; the shuffled cells and their files are gone.
     assert seen == [(None, True)]
+
+
+def _file_barcodes(tmp_path: Path, kind: str) -> np.ndarray:
+    """Read the barcodes of a source in the file's order, without CyteArc."""
+    if kind == "10x-cutoff":
+        with h5py.File(tmp_path / "matrix.h5", "r") as h5:
+            return np.array([value.decode() for value in h5["matrix/barcodes"][:]])
+    if kind == "parse-cutoff":
+        return pd.read_csv(tmp_path / "parse" / "cell_metadata.csv")[
+            "bc_wells"
+        ].to_numpy(dtype=str)
+    lines = (tmp_path / "mtx" / "barcodes.tsv").read_text().splitlines()
+    return np.array(lines)
+
+
+@pytest.mark.parametrize(
+    "kind",
+    ["10x-cutoff", "mtx-cellMajor-cutoff", "mtx-unordered-cutoff", "parse-cutoff"],
+)
+def test_a_reader_that_drops_cells_keeps_each_cells_row_in_the_file(
+    tmp_path, kind
+) -> None:
+    run, _expected = _source(tmp_path, kind)
+    run(tmp_path / "plain.zarr", {})
+    run(tmp_path / "shuffled.zarr", {"shuffle_cells": True, "shuffle_seed": 3})
+    barcodes = _file_barcodes(tmp_path, kind)
+    shuffled = _open(tmp_path / "shuffled.zarr")
+    rows = np.asarray(shuffled["cellData/sourceRow"][...])
+    ids = np.asarray(shuffled["cellData/ids"][...])
+    # Each cell is the barcode at its row of the file.
+    np.testing.assert_array_equal(barcodes[rows], ids)
+    # The rows of the dropped cells are missing, so the rows have gaps.
+    assert rows.dtype == np.int64
+    assert np.unique(rows).size == rows.size < barcodes.size
+    assert int(rows.max()) > rows.size - 1
+    # Sorting by sourceRow restores the order of an import in the file's order.
+    plain_ids = np.asarray(_open(tmp_path / "plain.zarr")["cellData/ids"][...])
+    restored = source_order_rows(shuffled["cellData"], np.ones(rows.size, dtype=bool))
+    np.testing.assert_array_equal(ids[restored], plain_ids)
+    np.testing.assert_array_equal(rows[restored], np.sort(rows))
+
+
+def test_a_reader_that_names_too_few_file_rows_is_refused_before_it_is_read(
+    tmp_path, monkeypatch
+) -> None:
+    reader = _10x_reader(tmp_path)
+    scans: list[Any] = []
+    monkeypatch.setattr(reader, "_file_rows", lambda: np.arange(3))
+    monkeypatch.setattr(
+        reader,
+        "count_value_ranges",
+        lambda *args, destinationRows=None: scans.append(1),
+    )
+    try:
+        with pytest.raises(
+            ValueError, match="one integer file row for each of the 157"
+        ):
+            CrToZarr(
+                reader, str(tmp_path / "refused.zarr"), nthreads=1, shuffle_cells=True
+            )
+    finally:
+        reader.close()
+    assert scans == []
+    assert not (tmp_path / "refused.zarr").exists()

@@ -59,12 +59,14 @@ class CrToZarr:
             so that any contiguous slice of the store, such as one shard or
             a training mini-batch, is a random sample of its cells. Every
             per-cell array follows the one order, and each cell keeps its
-            row among the imported cells, from 0, in the int64 cell column
-            ``sourceRow``. The reader sends each cell to temporary files on
-            local disk, in its ``temp_dir``, as it reads it: a 10x HDF5 or
-            Tapestri reader during its value scan, a Matrix Market reader as
-            it reads its cells for the counts write, before the store is
-            created. Off by default in this release.
+            row in the file, from 0, in the int64 cell column ``sourceRow``:
+            for a reader that drops barcodes, such as one with
+            ``is_filtered=False``, its barcode's index in the file. The
+            reader sends each cell to temporary files on local disk, in its
+            ``temp_dir``, as it reads it: a 10x HDF5 or Tapestri reader
+            during its value scan, a Matrix Market reader as it reads its
+            cells for the counts write, before the store is created. Off by
+            default in this release.
         shuffle_seed: The seed of the shuffle, from 0 to 2**64 - 1. One seed
             gives the same order on every platform.
 
@@ -230,10 +232,14 @@ class CrToZarr:
         if self._cellOrder is not None:
             from ..storage.cell_order import write_shuffled_cell_order
 
-            # Written before the keys are planned, so a source column of the
-            # same name is skipped.
+            # Each cell's row in the file, which a reader that drops cells
+            # keeps with gaps. Written before the keys are planned, so a
+            # source column of the same name is skipped.
             write_shuffled_cell_order(
-                cell_group, self._cellOrder, self.shuffleSeed, profile=self.profile
+                cell_group,
+                self.cr._file_rows()[self._cellOrder],
+                self.shuffleSeed,
+                profile=self.profile,
             )
         for assay_name in assay_names:
             create_zarr_count_assay(
@@ -650,12 +656,14 @@ class CrToZarr:
 
 
 def _require_shuffled_scan(reader: CrReader) -> None:
-    """Refuse a reader whose value scan cannot send its cells to shuffled rows.
+    """Refuse a reader that cannot shuffle its cells or name their rows in the file.
 
     Raises:
         TypeError: If the reader's ``count_value_ranges`` takes no
             ``destinationRows``, as readers written before cells could be
             shuffled do.
+        ValueError: If the reader's ``_file_rows`` does not give one row for
+            each selected cell.
     """
     import inspect
 
@@ -665,6 +673,13 @@ def _require_shuffled_scan(reader: CrReader) -> None:
             f"{type(reader).__name__}.count_value_ranges takes no destinationRows, "
             "so its cells cannot be shuffled; pass shuffle_cells=False, or give "
             "the reader the keyword-only destinationRows that CrReader describes"
+        )
+    rows = np.asarray(reader._file_rows())
+    if rows.shape != (reader.nCells,) or rows.dtype.kind not in "iu":
+        raise ValueError(
+            f"{type(reader).__name__}._file_rows gave dtype {rows.dtype} and shape "
+            f"{rows.shape}; it must give one integer file row for each of the "
+            f"{reader.nCells} selected cells"
         )
 
 

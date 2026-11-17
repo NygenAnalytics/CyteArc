@@ -1,12 +1,14 @@
 """Shuffle the cells of an import, and find the order of the imported file again.
 
 An import that shuffles cells writes row ``r`` of every per-cell array from
-row ``order[r]`` of the imported file, where :func:`shuffled_order` gives the
-permutation ``order``. Any contiguous slice of the store is then a uniformly
-random sample of its cells. Each cell keeps its row in the imported file, from
-0, in the int64 cell column ``sourceRow``, which carries the role attribute
-``source_row``; :func:`source_order_rows` sorts the rows of a selection by it,
-for exports that restore the file's order. The cell table records the shuffle
+cell ``order[r]`` of the cells it imports, where :func:`shuffled_order` gives
+the permutation ``order``. Any contiguous slice of the store is then a
+uniformly random sample of its cells. Each cell keeps its row in the imported
+file, from 0, in the int64 cell column ``sourceRow``, which carries the role
+attribute ``source_row``. A reader that keeps only some of the file's cells,
+such as one that filters barcodes, leaves gaps in those rows.
+:func:`source_order_rows` sorts the rows of a selection by them, for exports
+that restore the file's order. The cell table records the shuffle
 in its ``cellOrder`` attribute, ``{"shuffled": true, "seed": <seed>}``, which
 :func:`recorded_shuffle_seed` reads.
 
@@ -125,8 +127,11 @@ def write_shuffled_cell_order(
 
     Args:
         cells: The cell table of the new store.
-        order: The source row of each cell, as :func:`shuffled_order` returns it.
-        seed: The seed that gave ``order``.
+        order: Each cell's row in the imported file: the order that
+            :func:`shuffled_order` returns when the import keeps every row
+            of the file, or the file rows of the cells it keeps, taken in
+            that order, when it keeps only some.
+        seed: The seed that gave the order.
         profile: Zarr encoding profile of the import.
 
     Raises:
