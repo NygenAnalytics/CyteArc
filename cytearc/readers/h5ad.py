@@ -74,8 +74,9 @@ _SOURCE_INDEX = "source_index"
 # The bytes that the CSC row conversion holds for each entry of a chunk of
 # columns as it reads the chunk and sends its entries to their rows' buckets.
 _CSC_ENTRY_BYTES = 384
-# The most entries of one chunk of columns that the conversion reads.
-_CSC_CHUNK_ENTRIES = 1024 * 1024
+# The most entries of one chunk of columns that the conversion reads. Each
+# chunk gives a row one piece, so larger chunks give fewer, longer pieces.
+_CSC_CHUNK_ENTRIES = 8 * 1024 * 1024
 
 
 def _texts(values: np.ndarray) -> list[str | None]:

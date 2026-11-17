@@ -319,7 +319,8 @@ def _read_blocks(
             del starts, offsets
         else:
             indices = stored.astype(np.int64)
-        if indices.size and (int(indices.min()) < 0 or int(indices.max()) >= n_columns):
+        # Unsigned gaps within each piece add up to no negative index.
+        if indices.size and int(indices.max()) >= n_columns:
             raise RuntimeError(
                 f"{where} holds a column outside the matrix; the file is corrupted"
             )
