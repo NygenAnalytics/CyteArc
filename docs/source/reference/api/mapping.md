@@ -98,12 +98,7 @@ the transfer into the reference datastore.
 Vote metrics are NaN for uninformative cells. Projection-level diagnostics such as
 `featureCoverage` and `queryScaledDispersion` stay in `mapping.load_result(...).diagnostics`.
 
-`label_vote_shares(labels)` returns each cell's vote share for given labels, and
-`prediction_sets(calibration_nonconformity, alpha)` forms split-conformal prediction sets from the
-saved votes, calibrated with one minus those shares on held-out cells. Both need the per-neighbor
-vote matrices, which hold one column per saved neighbor, so `mapping.load_label_transfer` loads them only
-with `load_votes=True`. Each array that a load reads is checked against the digest recorded when the
-transfer was written.
+`label_vote_shares(labels)` returns each cell's vote share for given labels, a pandas Series indexed by cell ID, such as `pd.Series(values, index=transfer.cell_ids)`, where `cell_ids` holds the IDs of the transfer's cells in the order of its evidence. `prediction_sets(calibration_nonconformity, alpha)` forms split-conformal prediction sets from the saved votes, calibrated with one minus those shares on held-out cells. Both need the per-neighbor vote matrices, which hold one column per saved neighbor, so `mapping.load_label_transfer` loads them only with `load_votes=True`. Each array that a load reads is checked against the digest recorded when the transfer was written.
 
 ```{eval-rst}
 .. autoclass:: cytearc.MappingReference

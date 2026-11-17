@@ -268,7 +268,7 @@ def _derive_tabula_sample(source_paths: dict[str, Path], store: Path) -> None:
     cytearc.SubsetZarr(
         zarr_loc=str(store),
         assays=[source.RNA],
-        cell_idx=indices,
+        cell_ids=source.cells.fetch_all("ids")[indices],
         reset_cell_filter=False,
         mem_budget=TABULA_SAPIENS_MEMORY_BYTES,
         nthreads=ZARR_NTHREADS,
@@ -312,13 +312,20 @@ def _labeled_cluster_mask(values: Any) -> np.ndarray:
     return (labels != "") & (np.char.lower(labels) != "nan")
 
 
+def _by_cell_id(store: Any, values: Any) -> Any:
+    """Key values of every cell, in store order, by cell ID, as a cell table takes them."""
+    import pandas as pd
+
+    return pd.Series(values, index=store.cells.fetch_all("ids"))
+
+
 def _set_prepared_cell_selection(store: Any, values: Any) -> None:
     """Make one exact analysis selection the teaching store's literal ``I``."""
     selected = np.asarray(values, dtype=bool)
     if selected.shape != (store.cells.N,):
         raise ValueError("Prepared cell selection must align with the full cell axis")
     store.cells.reset_key("I")
-    store.cells.update_key(selected, "I")
+    store.cells.update_key(_by_cell_id(store, selected), "I")
 
 
 def _materialize_run_cell_columns(
@@ -338,7 +345,7 @@ def _materialize_run_cell_columns(
         fill_value = 0 if np.issubdtype(values.dtype, np.integer) else np.nan
         store.cells.insert(
             target,
-            values,
+            _by_cell_id(store, values),
             fill_value=fill_value,
             overwrite=True,
         )
@@ -380,7 +387,7 @@ def _derive_labeled_kang_store(
     cytearc.SubsetZarr(
         zarr_loc=str(store),
         assays=[source.RNA],
-        cell_idx=np.flatnonzero(keep),
+        cell_ids=source.cells.fetch_all("ids")[keep],
         reset_cell_filter=True,
         overwrite_existing_file=True,
         nthreads=ZARR_NTHREADS,
@@ -654,30 +661,30 @@ def _add_teaseq_annotations(store: Any, source: Path) -> None:
 
     store.cells.insert(
         "publication_barcode",
-        publication_barcodes.to_numpy(dtype=str),
+        _by_cell_id(store, publication_barcodes.to_numpy(dtype=str)),
         overwrite=True,
     )
     store.cells.insert(
         "tea_cell_type",
-        matched_text("seurat_pbmc_cell_type"),
+        _by_cell_id(store, matched_text("seurat_pbmc_cell_type")),
         overwrite=True,
     )
     store.cells.insert(
         "tea_cell_type_color",
-        matched_text("seurat_pbmc_type_color"),
+        _by_cell_id(store, matched_text("seurat_pbmc_type_color")),
         overwrite=True,
     )
     store.cells.insert(
         "tea_predicted_cell_type",
-        matched_text("predicted.celltype.l2"),
+        _by_cell_id(store, matched_text("predicted.celltype.l2")),
         overwrite=True,
     )
     store.cells.insert(
         "tea_prediction_score",
-        matched_float("predicted.celltype.l2.score"),
+        _by_cell_id(store, matched_float("predicted.celltype.l2.score")),
         overwrite=True,
     )
-    store.cells.update_key(publication_cells, "I")
+    store.cells.update_key(_by_cell_id(store, publication_cells), "I")
     active_cells = int(np.asarray(store.cells.fetch_all("I"), dtype=bool).sum())
     if active_cells != TEASEQ_MATCHED_PUBLICATION_CELLS:
         raise RuntimeError(

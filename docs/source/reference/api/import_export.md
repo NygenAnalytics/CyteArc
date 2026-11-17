@@ -291,7 +291,7 @@ imported assay, in an H5AD file without the declaration or from `CSVtoZarr`, `Cr
 `MtxToZarr`, is skipped with a warning, as `I` is. `SeuratToZarr` writes the membership itself
 and raises for a metadata column named for any imported assay. A column named for an assay that
 the import does not write, such as `ADT_I` in an RNA-only import, stays an ordinary column.
-`SparseToZarr` imports no cell metadata; add columns afterwards with `ds.cells.insert`.
+`SparseToZarr` imports no cell metadata; add columns afterwards with `ds.cells.insert`, as a pandas Series keyed by cell ID.
 
 Tables of several modalities held in memory, such as RNA, guide, hashtag and protein counts read from GEO, become one store through `SparseToZarr` without a file between them. Pass a mapping of assay names to matrices of the same cells, with `feature_ids` mapping each assay to its IDs, and `feature_names`, `assay_type` and `values` mapping the assays they apply to. Each assay resolves its own dtype, values decision and count layout, and a feature ID needs to be unique only within its assay, so a gene and an antibody may both be `CD86`. `assay_name` names the assay of a single matrix and is refused beside a mapping.
 
@@ -442,7 +442,7 @@ The two feature selectors are mutually exclusive.
 `to_anndata` needs the optional `anndata` package and raises `ImportError` without it; install it
 with `pip install 'cytearc[extra]'`. `to_h5ad` writes with h5py, which CyteArc always installs, and
 needs no `anndata`, with or without a `run`.
-`SubsetZarr` selects cells of one `DataStore` but retains every feature in each assay it writes.
+`SubsetZarr` selects cells of one `DataStore`, the cells of a boolean `cell_key` column or those that `cell_ids` names by ID, and keeps them in store order, whatever order the IDs come in. It retains every feature in each assay it writes.
 It keeps the membership column `<assay>_I` of each assay it writes, for the selected cells, and
 does not copy the membership column of an assay that `assays=` leaves out
 ([Assay membership](../developers/zarr-internals#assay-membership)).
