@@ -114,6 +114,15 @@ splt.highly_variable_features(
 (10x 5K PBMC docs dataset) The top HVGs were platelet (`PPBP`, `NRGN`), light-chain (`IGLC2`,
 `IGKC`) and `IGHM` genes, which the default blacklist keeps. What to exclude: `gene-blacklists.md`.
 
+`ds.artifacts.inspect(hvg).diagnostics["selectedDetectionRatio"]` is the median number of cells
+that detect a selected gene over the same median for every gene it could select. It reads 0.7 to
+3.1 on 10x 3' Tabula Sapiens samples of 10,000 to 1M cells and 1.0 to 1.9 on pancreas selections
+of 70 to 3,696 cells, at `top_n` 1,000 and 2,000. A ratio far below these means that the HVGs come
+mostly from rarely detected genes: all of Tabula Sapiens, whose cells mix 10x with 3.8% Smart-seq
+cells, reads 0.21 to 0.26, and 14% of its 2,000 HVGs get most of their detections from the
+Smart-seq cells. Check whether the cells mix technologies or batches, and compare with a
+selection made within one of them or with `batch=`, which ranks genes within each batch.
+
 ### Alternative feature sets and a custom blacklist
 
 `blacklist` is one regex, matched (`re.match`, ignoring case) against every feature name. It

@@ -45,6 +45,7 @@ from cytearc.features.variability import (
     pearson_residuals,
     resolve_hvg_detection_bounds,
     select_highly_variable_features,
+    selected_detection_ratio,
     seurat_v3_clip_values,
     seurat_v3_expected_variance,
     seurat_v3_standardized_variance,
@@ -1739,12 +1740,25 @@ def test_a_selection_of_too_few_candidates_warns_when_computed_and_when_reused(
             "selectedFeatures",
             selected,
         )
+    # Every gene that could be selected is selected, so their medians agree.
     assert store.artifacts.inspect(computed).diagnostics == {
         "selectedFeatures": selected,
+        "selectedDetectionRatio": 1.0,
         "batches": None,
         "batchesBelowTopN": None,
         "batchBelowTopNExamples": [],
     }
+
+
+def _pooled_detection_ratio(store: DataStore, ref: Any) -> float:
+    """The selected genes' median detection over that of the genes within the bounds."""
+    group = store.artifacts.load(ref)
+    detected = np.asarray(group["detected"][:])
+    selected = np.asarray(group["values"][:], dtype=bool)
+    parameters = store.artifacts.inspect(ref).parameters
+    within = (detected > 0) & (detected >= parameters["min_cells"])
+    within &= detected < parameters["max_cells"]
+    return float(np.median(detected[selected]) / np.median(detected[within]))
 
 
 def test_a_batch_of_too_few_candidates_warns_when_computed_and_when_reused(
@@ -1771,6 +1785,9 @@ def test_a_batch_of_too_few_candidates_warns_when_computed_and_when_reused(
     assert [str(warning) for warning in second] == [expected]
     assert store.artifacts.inspect(computed).diagnostics == {
         "selectedFeatures": 10,
+        "selectedDetectionRatio": pytest.approx(
+            _pooled_detection_ratio(store, computed)
+        ),
         "batches": 2,
         "batchesBelowTopN": 1,
         "batchBelowTopNExamples": ["b (2)"],
@@ -1806,6 +1823,9 @@ def test_batches_that_together_hold_too_few_candidates_warn_of_both(
     assert [str(warning) for warning in second] == expected
     assert store.artifacts.inspect(computed).diagnostics == {
         "selectedFeatures": 27,
+        "selectedDetectionRatio": pytest.approx(
+            _pooled_detection_ratio(store, computed)
+        ),
         "batches": 2,
         "batchesBelowTopN": 2,
         "batchBelowTopNExamples": ["a (27)", "b (2)"],
@@ -1821,6 +1841,113 @@ def test_a_selection_of_enough_candidates_gives_no_warning(tmp_path) -> None:
             lambda: store.features.hvgs(cells, top_n=5, show_plot=False)
         )
         assert warnings_of_call == []
+
+
+def test_selected_detection_ratio_compares_medians_within_the_bounds() -> None:
+    detected = np.array([0, 1, 3, 4, 10, 20, 40, 80, 160, 200])
+    names = np.array([f"g{index}" for index in range(10)])
+    selected = np.zeros(10, dtype=bool)
+    selected[[0, 2, 3, 4]] = True  # g0 is undetected and does not count.
+
+    def ratio(**changes: Any) -> float | None:
+        arguments = {
+            "min_cells": 3,
+            "max_cells": 160,
+            "keep_bounds": False,
+            "blacklist": "",
+            **changes,
+        }
+        return selected_detection_ratio(selected, detected, names, **arguments)
+
+    # Selected medians 4 of (3, 4, 10); eligible 3 to 80, whose median is 15.
+    assert ratio() == pytest.approx(4 / 15)
+    # keep_bounds admits 160, which moves the eligible median to 20.
+    assert ratio(keep_bounds=True) == pytest.approx(4 / 20)
+    # The blacklist drops g5 (20 cells), which moves the eligible median to 10.
+    assert ratio(blacklist="^g5$") == pytest.approx(4 / 10)
+    assert ratio(min_cells=1000) is None
+    only_undetected = np.zeros(10, dtype=bool)
+    only_undetected[0] = True
+    assert (
+        selected_detection_ratio(
+            only_undetected,
+            detected,
+            names,
+            min_cells=0,
+            max_cells=np.inf,
+            keep_bounds=False,
+            blacklist="",
+        )
+        is None
+    )
+
+
+def test_selected_detection_ratio_flags_a_selection_of_rarely_detected_genes(
+    tmp_path,
+) -> None:
+    from cytearc import SparseToZarr
+
+    # 30 genes detected broadly; 40 genes detected only in the same 10 cells,
+    # as genes that a small share of the cells contributes; and 20 genes that
+    # split the cells into two types.
+    rng = np.random.default_rng(0)
+    counts = np.zeros((400, 90), dtype=np.int64)
+    counts[:, :30] = rng.poisson(2.0, size=(400, 30))
+    counts[:10, 30:70] = rng.poisson(5.0, size=(10, 40))
+    counts[:200, 70:] = rng.poisson(3.0, size=(200, 20))
+    counts[200:, 70:] = rng.poisson(1.0, size=(200, 20))
+    SparseToZarr(
+        counts,
+        str(tmp_path / "rare.zarr"),
+        [f"c{index}" for index in range(400)],
+        [f"g{index}" for index in range(90)],
+    ).dump()
+    store = DataStore(str(tmp_path / "rare.zarr"), min_features_per_cell=0)
+    cells = store.snapshot_cell_selection()
+
+    def ratio_and_genes(**options: Any) -> tuple[float, np.ndarray]:
+        ref = store.features.hvgs(cells, top_n=20, show_plot=False, **options)
+        selected = np.flatnonzero(store.artifacts.load(ref)["values"][:])
+        return store.artifacts.inspect(ref).diagnostics[
+            "selectedDetectionRatio"
+        ], selected
+
+    rare_ratio, unbounded = ratio_and_genes(min_cells=0)
+    floor_ratio, floored = ratio_and_genes(min_cells=30)
+    rare = set(range(30, 70))
+
+    # Without a detection floor the genes of the 10 cells fill most of the
+    # selection, so its median gene is detected in about 10 of 400 cells.
+    assert len(rare & set(unbounded)) > 10
+    assert rare_ratio < 0.1
+    # With the floor, none is eligible, and the selection's genes are detected
+    # about as widely as the median eligible gene.
+    assert not rare & set(floored)
+    assert floor_ratio > 0.9
+
+
+def test_a_selection_saved_with_earlier_diagnostics_is_computed_anew(
+    tmp_path,
+) -> None:
+    store = _store_of_batches(tmp_path / "hvg.zarr")
+    cells = store.snapshot_cell_selection()
+    saved = store.features.hvgs(cells, top_n=5, show_plot=False)
+    group = zarr.open_group(str(tmp_path / "hvg.zarr"))[artifact_path(saved)]
+    # As a selection saved before HVG selections recorded selectedDetectionRatio.
+    group.attrs["diagnostics"] = {
+        key: value
+        for key, value in group.attrs["diagnostics"].items()
+        if key != "selectedDetectionRatio"
+    }
+
+    recomputed = store.features.hvgs(cells, top_n=5, show_plot=False)
+
+    assert recomputed != saved
+    diagnostics = store.artifacts.inspect(recomputed).diagnostics
+    assert 0 < diagnostics["selectedDetectionRatio"]
+    np.testing.assert_array_equal(
+        store.artifacts.load(recomputed)["values"][:], group["values"][:]
+    )
 
 
 def test_a_selection_saved_without_diagnostics_is_computed_anew(tmp_path) -> None:

@@ -63,6 +63,7 @@ __all__ = [
     "resolve_hvg_detection_bounds",
     "select_batch_highly_variable_features",
     "select_highly_variable_features",
+    "selected_detection_ratio",
     "seurat_v3_clip_values",
     "seurat_v3_expected_variance",
     "seurat_v3_standardized_variance",
@@ -1079,6 +1080,40 @@ def hvg_candidates(
         keep_bounds=keep_bounds,
     )
     return candidates
+
+
+def selected_detection_ratio(
+    selected: np.ndarray,
+    detected: np.ndarray,
+    feature_names: np.ndarray,
+    *,
+    min_cells: int,
+    max_cells: int | float,
+    keep_bounds: bool,
+    blacklist: str,
+) -> float | None:
+    """Return the median detection of the selected features over the eligible ones'.
+
+    Detection is the number of selected cells that detect a feature. The
+    eligible features are detected in at least one cell, lie within the
+    detection bounds ``min_cells`` and ``max_cells`` (``max_cells`` itself
+    only with ``keep_bounds``), and match no ``blacklist`` pattern. The ratio
+    is about 1 when the selection draws on features across the eligible
+    range of detection, and well below 1 when it draws mostly on rarely
+    detected ones.
+
+    Returns:
+        The ratio, or None when no selected or no eligible feature is detected.
+    """
+    detected = np.asarray(detected, dtype=np.float64)
+    eligible = (detected > 0) & (detected >= min_cells)
+    eligible &= detected <= max_cells if keep_bounds else detected < max_cells
+    if blacklist:
+        eligible &= ~regex_match_mask(np.asarray(feature_names), blacklist)
+    chosen = np.asarray(selected, dtype=bool) & (detected > 0)
+    if not chosen.any() or not eligible.any():
+        return None
+    return float(np.median(detected[chosen]) / np.median(detected[eligible]))
 
 
 def _top_candidates(
