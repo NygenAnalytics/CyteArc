@@ -98,6 +98,8 @@ Every writer follows reader then `*ToZarr(...).dump()`. Open each new store writ
 Write each import to a new or empty path: writers raise `FileExistsError` for a path that holds
 data. `overwrite=True` replaces only an earlier import that no `DataStore` has opened; after the
 first open the store is prepared and never replaced, so delete it yourself before you import again.
+
+Every writer writes the cells in a uniformly random order by default (`shuffle_cells=True`, `shuffle_seed=0`), so any contiguous block of rows is a random sample of the cells; row `r` of the store is not row `r` of the file. Each cell keeps its row in the file in the protected int64 column `sourceRow`, and exports write the cells back in the file's order. Key every per-cell value by cell ID, never by position. `shuffle_cells=False` keeps the file's order, which suits a large store read one sample at a time, since a sample's cells are otherwise spread over every chunk, and rebuilds the store that CyteArc 1.4.0 imported. The shuffle sends rows through temporary files in the reader's `temp_dir`, about 1.1 bytes per stored count, deleted as the counts are written.
 Writers also refuse, with `ValueError`, a path inside another store (`s.zarr/RNA`,
 `s.zarr/new.zarr`): put every store in its own directory outside other stores.
 

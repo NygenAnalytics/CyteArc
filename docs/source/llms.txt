@@ -76,6 +76,7 @@ CyteBase, the catalog of public datasets stored as cloud-hosted CyteArc DataStor
 - [Data model comparison](scanpy-and-seurat/): how objects, selections, and saved results differ between tools
 - [Cell and feature metadata](tutorials/data-organization/): cell and feature tables, saved run fields beside live columns, metadata selections, and the store layout
 - [Provenance](concepts/provenance/): artifacts, reuse, lineage, and limits
+- [Cell order](concepts/cell-order/): why imports shuffle cells, `sourceRow`, exports in the file's order, the costs, and how to keep the file's order
 - [Custom analyses](tutorials/custom-analyses/): per-cell statistics from a saved neighbor graph and streamed count blocks, custom cell selections, and export to AnnData or a new store
 
 ## Public datasets
