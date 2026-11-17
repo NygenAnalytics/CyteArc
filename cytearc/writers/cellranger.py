@@ -177,6 +177,11 @@ class CrToZarr:
         held = 0
         if self.shuffleCells:
             _require_shuffled_scan(self.cr)
+            # A Matrix Market reader reads its cells for the shuffle with the
+            # parse buffer that the import reserves.
+            configure_lines = getattr(self.cr, "_set_sparse_import_lines_in_mem", None)
+            if callable(configure_lines):
+                configure_lines(self.linesInMem)
             self._cellOrder = shuffled_order(self.cr.nCells, self.shuffleSeed)
             scan_options["destinationRows"] = destination_rows(self._cellOrder)
             held = 2 * self._cellOrder.nbytes

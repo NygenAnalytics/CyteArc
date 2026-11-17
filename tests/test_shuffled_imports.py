@@ -1142,3 +1142,35 @@ def test_a_csv_import_that_fails_after_its_spill_removes_the_rows(tmp_path) -> N
     writer.dump()
     with pytest.raises(RuntimeError, match="written once and removed"):
         writer.dump()
+
+
+def test_a_matrix_market_shuffle_parses_with_the_imports_parse_buffer(
+    tmp_path, monkeypatch
+) -> None:
+    import cytearc.readers.mtx as mtx
+
+    parses: list[int] = []
+    original = mtx._MtxEngine._raw_chunks
+
+    def raw_chunks(self, lines_in_mem):
+        parses.append(lines_in_mem)
+        yield from original(self, lines_in_mem)
+
+    monkeypatch.setattr(mtx._MtxEngine, "_raw_chunks", raw_chunks)
+    directory = _write_mtx(tmp_path / "mtx", _counts(), "cellMajor")
+    reader = MtxReader(inspect_mtx(directory)[0], temp_dir=str(tmp_path))
+    try:
+        # Construction scans with the reader's own buffer.
+        assert parses == [100_000]
+        parses.clear()
+        CrToZarr(
+            reader,
+            str(tmp_path / "store.zarr"),
+            nthreads=1,
+            lines_in_mem=50,
+            shuffle_cells=True,
+        ).dump()
+    finally:
+        reader.close()
+    # The shuffle's pass over the cells is the import's only parse.
+    assert parses == [50]
