@@ -52,6 +52,11 @@ class TapestriToZarr(CrToZarr):
             ``ADT``'s own type for the proteins.
         overwrite: If True, replace a CyteArc store that no ``DataStore``
             has opened.
+        shuffle_cells: If True, write the cells in a uniformly random order,
+            each keeping its row in the file in the cell column
+            ``sourceRow``, as :class:`~cytearc.CrToZarr` describes. Off by
+            default in this release.
+        shuffle_seed: The seed of the shuffle, from 0 to 2**64 - 1.
 
     Raises:
         TypeError: If ``reader`` is not a ``TapestriReader``.
@@ -85,6 +90,8 @@ class TapestriToZarr(CrToZarr):
         assay_types: dict[str, str] | None = None,
         *,
         overwrite: bool = False,
+        shuffle_cells: bool = False,
+        shuffle_seed: int = 0,
     ) -> None:
         overwrite = bool_argument(overwrite, "overwrite")
         if not isinstance(reader, TapestriReader):
@@ -107,6 +114,8 @@ class TapestriToZarr(CrToZarr):
             overwrite=overwrite,
             # Read counts are counts, whole or not, as before values= existed.
             values="counts",
+            shuffle_cells=shuffle_cells,
+            shuffle_seed=shuffle_seed,
         )
         root = (
             self.z

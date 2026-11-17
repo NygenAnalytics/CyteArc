@@ -55,6 +55,18 @@ class CrToZarr:
             reference's normalized values section describes. None decides
             from the values. Matrix Market readers
             read whole numbers only.
+        shuffle_cells: If True, write the cells in a uniformly random order,
+            so that any contiguous slice of the store, such as one shard or
+            a training mini-batch, is a random sample of its cells. Every
+            per-cell array follows the one order, and each cell keeps its
+            row among the imported cells, from 0, in the int64 cell column
+            ``sourceRow``. The reader sends each cell to temporary files on
+            local disk, in its ``temp_dir``, as it reads it: a 10x HDF5 or
+            Tapestri reader during its value scan, a Matrix Market reader in
+            one more pass over the cells before the store is created. Off by
+            default in this release.
+        shuffle_seed: The seed of the shuffle, from 0 to 2**64 - 1. One seed
+            gives the same order on every platform.
 
     Each assay stores its counts in the dtype that
     :func:`~cytearc.storage.count_dtype.count_storage_dtype` resolves from the
@@ -62,12 +74,19 @@ class CrToZarr:
 
     Raises:
         FileExistsError: If ``zarr_loc`` is not empty, unless ``overwrite`` replaces it.
+        TypeError: If ``shuffle_cells`` is not a boolean, or ``shuffle_seed``
+            is not an integer.
+        ValueError: If ``shuffle_seed`` lies outside its range.
+        OSError: If ``shuffle_cells`` is True and the temporary disk lacks
+            room for the shuffled cells.
 
     Attributes:
         cr: A CrReader object, containing the Cellranger data.
         z: The Zarr hierarchy (array or group).
         policy: The count-matrix layout that every imported assay was written
             with.
+        shuffleCells: Whether the import shuffles the cells.
+        shuffleSeed: The seed of the shuffle.
     """
 
     #: The tool whose files the writer reads, as its log names it.
@@ -89,8 +108,18 @@ class CrToZarr:
         *,
         overwrite: bool = False,
         values: ImportValues = None,
+        shuffle_cells: bool = False,
+        shuffle_seed: int = 0,
     ) -> None:
         overwrite = bool_argument(overwrite, "overwrite")
+        self.shuffleCells = bool_argument(shuffle_cells, "shuffle_cells")
+        from ..storage.cell_order import (
+            destination_rows,
+            shuffle_seed_argument,
+            shuffled_order,
+        )
+
+        self.shuffleSeed = shuffle_seed_argument(shuffle_seed)
         from ..utils.matrix_values import import_values_argument
 
         import_values_argument(values)
@@ -140,13 +169,28 @@ class CrToZarr:
         for code, spans in enumerate(ranges.values()):
             for start, end in spans:
                 groups[start:end] = code
+        # Row r of every per-cell array holds the reader's cell _cellOrder[r];
+        # the reader sends each cell to its destination as it reads it.
+        self._cellOrder: np.ndarray | None = None
+        scan_options: dict[str, Any] = {}
+        held = 0
+        if self.shuffleCells:
+            self._cellOrder = shuffled_order(self.cr.nCells, self.shuffleSeed)
+            scan_options["destinationRows"] = destination_rows(self._cellOrder)
+            held = 2 * self._cellOrder.nbytes
         value_ranges = dict(
             zip(
                 ranges,
-                self.cr.count_value_ranges(self.resources.memoryBytes, groups),
+                self.cr.count_value_ranges(
+                    self.resources.memoryBytes - held, groups, **scan_options
+                ),
                 strict=True,
             )
         )
+        del scan_options
+        # The rows that this import's counts write reads, which no other
+        # import of the same reader may replace.
+        self._shuffledStore = self.cr._shuffledRows if self.shuffleCells else None
         storage_dtypes = {
             name: count_storage_dtype(self.cr.matrix_dtype, value_range)
             for name, value_range in value_ranges.items()
@@ -165,13 +209,25 @@ class CrToZarr:
         self.z = create_destination(
             zarr_loc, overwrite=overwrite, storage_options=storage_options
         )
+        cell_names = np.array(self.cr.cell_names())
+        if self._cellOrder is not None:
+            cell_names = cell_names[self._cellOrder]
         cell_group = create_cell_data(
             root=self.z,
             workspace=self.workspace,
-            ids=np.array(self.cr.cell_names()),
-            names=np.array(self.cr.cell_names()),
+            ids=cell_names,
+            names=cell_names,
             profile=self.profile,
         )
+        del cell_names
+        if self._cellOrder is not None:
+            from ..storage.cell_order import write_shuffled_cell_order
+
+            # Written before the keys are planned, so a source column of the
+            # same name is skipped.
+            write_shuffled_cell_order(
+                cell_group, self._cellOrder, self.shuffleSeed, profile=self.profile
+            )
         for assay_name in assay_names:
             create_zarr_count_assay(
                 z=self.z,
@@ -190,13 +246,14 @@ class CrToZarr:
     def _first_cells(
         self, ranges: dict[str, tuple[tuple[int, int], ...]]
     ) -> dict[str, Any]:
-        """Return the values of each assay's first cells, which decide what they are."""
-        from scipy.sparse import csr_matrix
+        """Return the values of each assay's first cells, which decide what they are.
 
+        They are the reader's first cells, whether or not the import shuffles
+        them, so the shuffle never changes what the values are taken to be.
+        """
         from ..utils.matrix_values import DETECTION_CELLS
 
-        batch = next(iter(self.cr.consume(DETECTION_CELLS, self.linesInMem)), None)
-        cells = csr_matrix((0, self.cr.nFeatures)) if batch is None else batch.tocsr()
+        cells = self.cr._file_first_rows(DETECTION_CELLS, self.linesInMem)
         return {
             name: cells[:, np.concatenate([np.arange(a, b) for a, b in spans])]
             for name, spans in ranges.items()
@@ -221,10 +278,13 @@ class CrToZarr:
 
         reader_resident = getattr(self.cr, "_sparse_import_resident_bytes", None)
         resident = (
-            max(0, int(reader_resident())) if callable(reader_resident) else 0
-        ) + sum(
-            CountSummary.nbytes_for(self.cr.nCells, width)
-            for width in self._assay_widths().values()
+            (max(0, int(reader_resident())) if callable(reader_resident) else 0)
+            + sum(
+                CountSummary.nbytes_for(self.cr.nCells, width)
+                for width in self._assay_widths().values()
+            )
+            # A shuffled import holds the order of its cells.
+            + (0 if self._cellOrder is None else int(self._cellOrder.nbytes))
         )
         projection_value_bytes = int(
             max(
@@ -315,6 +375,8 @@ class CrToZarr:
                         f"Cell metadata column {name!r} has shape {values.shape}; "
                         f"expected ({self.cr.nCells},)"
                     )
+                if self._cellOrder is not None:
+                    values = values[self._cellOrder]
                 write_metadata_column(cell_group, key, values, profile=self.profile)
 
         feature_columns = getattr(self.cr, "get_feature_columns", None)
@@ -386,12 +448,18 @@ class CrToZarr:
     def dump(self, batch_size: int | None = None) -> None:
         """Writes the count values into the Zarr matrix.
 
+        A shuffled import reads its shuffled cells once, deleting them as
+        it goes, and removes them once the counts are written or the write
+        fails, so it writes its counts once.
+
         Args:
             batch_size: Number of source cells per batch, at most one
                         destination row band, which is the default.
 
         Raises:
             ValueError: If ``batch_size`` is not positive.
+            RuntimeError: If the shuffled cells of this import were already
+                written, or another import of the reader replaced them.
 
         Returns:
             None
@@ -411,6 +479,15 @@ class CrToZarr:
 
         if batch_size is not None and batch_size <= 0:
             raise ValueError("batch_size must be positive")
+        if self.shuffleCells and (
+            self._shuffledStore is None
+            or self.cr._shuffledRows is not self._shuffledStore
+        ):
+            raise RuntimeError(
+                "The shuffled cells of this import were written once and removed, "
+                f"or another import of the reader replaced them; create a new "
+                f"{type(self).__name__} to import the cells again"
+            )
         input_ranges = assay_feature_ranges(self.cr.assayFeats)
         stores = {
             assay: load_count_array(self.z, assay, self.workspace)
@@ -556,6 +633,9 @@ class CrToZarr:
         finally:
             if callable(release):
                 release()
+            if self.shuffleCells:
+                self.cr._release_shuffled_rows()
+                self._shuffledStore = None
 
 
 MtxToZarr = CrToZarr

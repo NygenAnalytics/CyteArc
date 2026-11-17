@@ -43,14 +43,15 @@ import hashlib
 import os
 import re
 import sys
-from collections.abc import Generator, Iterator, Sequence
+from collections.abc import Callable, Generator, Iterator, Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import h5py
 import numpy as np
 import pandas as pd
-from scipy.sparse import coo_matrix
+from scipy.sparse import coo_matrix, csr_matrix
 
 from ..utils.arrays import cumulative_nnz, max_window_nnz
 from ..utils.count_values import (
@@ -267,6 +268,8 @@ class TapestriReader(CrReader):
 
     Args:
         h5_fn: The Tapestri ``.h5`` file.
+        temp_dir: Parent directory of the temporary files of an import that
+            shuffles cells. None uses the system temporary directory.
 
     Attributes:
         samples: The samples of the file's cells, in order of first
@@ -284,8 +287,9 @@ class TapestriReader(CrReader):
             align with its assay.
     """
 
-    def __init__(self, h5_fn: str) -> None:
+    def __init__(self, h5_fn: str, *, temp_dir: str | Path | None = None) -> None:
         self.path = os.fspath(h5_fn)
+        self._tempDir = temp_dir
         # The cumulative nonzero reads of the cells, which plan an import's
         # batches.
         self._cumulativeRowNnz: np.ndarray | None = None
@@ -425,26 +429,54 @@ class TapestriReader(CrReader):
         )
 
     def count_value_ranges(
-        self, maxBytes: int, featureGroups: np.ndarray | None = None
+        self,
+        maxBytes: int,
+        featureGroups: np.ndarray | None = None,
+        *,
+        destinationRows: np.ndarray | None = None,
     ) -> list[CountValueRange]:
         """Return the range of the reads of each group of features.
 
         The scan also counts each cell's nonzero reads, which
-        :meth:`max_window_nnz` plans from.
+        :meth:`max_window_nnz` plans from. With ``destinationRows``, it also
+        sends each cell's nonzero reads to the cell's destination row as it
+        reads them, so an import that shuffles cells reads the file once.
 
         Raises:
-            MemoryError: If one cell's reads do not fit in ``maxBytes``.
-            ValueError: If a value is NaN or infinite.
+            MemoryError: If one cell's reads do not fit in ``maxBytes``, or
+                with ``destinationRows`` their spill does not.
+            OSError: If the temporary disk lacks room for the shuffled cells.
+            ValueError: If a value is NaN or infinite, or ``destinationRows``
+                is not a permutation of the cells.
         """
         row_nonzeros = np.empty(self.nCells, dtype=np.int64)
-        value_ranges = dense_count_ranges(
-            self._block,
-            self.nCells,
-            self.nFeatures,
-            maxBytes=maxBytes,
-            groups=featureGroups,
-            rowNonzeros=row_nonzeros,
-        )
+
+        def scan(
+            scan_bytes: int, consumer: Callable[[int, Any], None] | None
+        ) -> list[CountValueRange]:
+            return dense_count_ranges(
+                self._block,
+                self.nCells,
+                self.nFeatures,
+                maxBytes=scan_bytes,
+                groups=featureGroups,
+                rowNonzeros=row_nonzeros,
+                consumer=consumer,
+            )
+
+        if destinationRows is None:
+            value_ranges = scan(maxBytes, None)
+        else:
+            value_ranges = self._spill_rows(
+                destinationRows,
+                maxBytes,
+                scan,
+                entries=None,
+                longest=self.nFeatures,
+                entry_bytes=None,
+                operation="shuffled Tapestri import",
+                temp_dir=self._tempDir,
+            )
         self._cumulativeRowNnz = cumulative_nnz(row_nonzeros)
         return value_ranges
 
@@ -453,9 +485,13 @@ class TapestriReader(CrReader):
 
         :meth:`count_value_ranges` counts each cell's nonzero reads as it
         scans them; before it runs, the cells are read here to count them.
+        After an import's scan shuffled the cells, the windows are of
+        shuffled cells.
         """
         if window_rows <= 0:
             raise ValueError("window_rows must be positive")
+        if self._shuffledRows is not None:
+            return max_window_nnz(self._shuffledRows.indptr, window_rows)
         if self._cumulativeRowNnz is None:
             self._cumulativeRowNnz = cumulative_nnz(
                 dense_row_nonzeros(self._block, self.nCells, self.nFeatures)
@@ -467,10 +503,23 @@ class TapestriReader(CrReader):
     ) -> Generator[coo_matrix, None, None]:
         """Yield the reads of ``batch_size`` cells at a time, cells by features.
 
+        After an import's scan shuffled the cells, the chunks hold its
+        shuffled cells, once.
+
         Args:
             batch_size: Number of cells per chunk.
             lines_in_mem: Unused; kept for CrReader API compatibility.
         """
+        if self._shuffledRows is not None:
+            return self._consume_shuffled(batch_size)
+        return self._consume_file(batch_size)
+
+    def _file_first_rows(self, count: int, lines_in_mem: int) -> csr_matrix:
+        """Return the reads of the file's first ``count`` cells."""
+        return csr_matrix(self._block(0, min(int(count), self.nCells)))
+
+    def _consume_file(self, batch_size: int) -> Generator[coo_matrix, None, None]:
+        """Yield the reads of the cells in the file's order."""
         for start in range(0, self.nCells, batch_size):
             stop = min(self.nCells, start + batch_size)
             block = self._block(start, stop)
@@ -490,8 +539,11 @@ class TapestriReader(CrReader):
         dense copies; finds the nonzero entries' rows and columns, 16 bytes
         each, and takes their values; and builds the sparse batch, whose
         32-bit indices are copied from the 64-bit ones. Every value counts
-        the most of these at once: its dtype's bytes and 24.
+        the most of these at once: its dtype's bytes and 24. Shuffled cells
+        are read a bucket at a time with the next one loading ahead.
         """
+        if self._shuffledRows is not None:
+            return self._shuffled_staging_bytes(batch_size)
         rows = min(max(1, int(batch_size)), self.nCells)
         itemsize = self.matrix_dtype.itemsize
         return int(rows * self.nFeatures * (itemsize + 24))
@@ -499,8 +551,12 @@ class TapestriReader(CrReader):
     def _sparse_import_resident_bytes(self) -> int:
         """The cells' samples, barcodes and IDs, which the reader holds while
         it is open, and their cumulative nonzero reads, counted before they
-        are read so that an import can plan before it scans."""
-        return int(
+        are read so that an import can plan before it scans, and the row
+        pointers of an import's shuffled cells."""
+        shuffled = (
+            0 if self._shuffledRows is None else self._shuffledRows.resident_bytes
+        )
+        return shuffled + int(
             sum(
                 sum(map(sys.getsizeof, values.tolist())) + 8 * len(values)
                 for values in (
@@ -549,7 +605,8 @@ class TapestriReader(CrReader):
         yield from merged.items()
 
     def close(self) -> None:
-        """Close the file."""
+        """Close the file and remove any shuffled cells."""
+        self._release_shuffled_rows()
         self.h5obj.close()
 
 
