@@ -13,6 +13,7 @@ from collections.abc import Callable
 from typing import Any
 
 import numpy as np
+import pandas as pd
 import pytest
 
 from cytearc.graph.feature_projection import resolve_native_graph_inputs
@@ -47,6 +48,7 @@ from .test_trajectory_record_paths import (
     _trajectory_store,
     _y_graph,
 )
+from tests.storage_helpers import by_cell_id
 
 _SINKS = ["A", "B"]
 # The share of an edge's weight that a drop of a quarter of the score's range
@@ -70,7 +72,11 @@ def _direct(
     return scored.store.trajectory.fate(
         sink_labels=scored.labels,
         graph=scored.graph,
-        direction=direction,
+        direction=(
+            _keyed(scored, direction)
+            if isinstance(direction, np.ndarray)
+            else direction
+        ),
         sinks=sinks,
         **options,
     )
@@ -153,6 +159,25 @@ def _cell_artifact(
             group.create_array(mask_name, data=missing)
             group["values"].attrs["missing_mask"] = mask_name
     return planned.ref
+
+
+def test_a_score_keyed_by_cell_id_directs_the_walk_of_the_cells_of_its_ids() -> None:
+    scored, pseudotime = _y_with_island()
+    store = scored.store
+    ids = store.cells.fetch_all("ids")
+    values = pseudotime.values
+    in_order = _direct(scored, pd.Series(values, index=ids))
+    # Reversed, and beside a score of a cell outside the graph, which is left
+    # out, the score directs the same walk: the map records the aligned score.
+    assert _direct(scored, pd.Series(values[::-1], index=ids[::-1])) == in_order
+    assert (
+        _direct(scored, pd.Series([*values, 0.5], index=[*ids, "elsewhere"]))
+        == in_order
+    )
+    np.testing.assert_array_equal(
+        store.trajectory.load_fate(in_order).values,
+        store.trajectory.load_fate(_direct(scored, values)).values,
+    )
 
 
 def test_a_score_equal_to_the_pseudotime_directs_the_same_fate_map() -> None:
@@ -269,7 +294,7 @@ def test_a_score_biases_backward_edges_as_worked_by_hand(
         trajectory.store.trajectory.fate(
             sink_labels=labels,
             graph=trajectory.graph,
-            direction=np.array(score),
+            direction=by_cell_id(trajectory.store.cells, np.array(score)),
             sinks=_SINKS,
             solver_tol=1e-9,
         )
@@ -369,6 +394,11 @@ def _score(scored: _ScoredStore) -> np.ndarray:
     return scored.store.trajectory.load_pseudotime(scored.pseudotime).values
 
 
+def _keyed(scored: _ScoredStore, values: Any, **options: Any) -> pd.Series:
+    """Key scores of the graph's cells, in store order, by cell ID."""
+    return by_cell_id(scored.store.cells, values, **options)
+
+
 _ARGUMENT_REFUSALS: dict[
     str,
     tuple[Callable[[_ScoredStore], dict[str, Any]], type[Exception], str],
@@ -376,7 +406,7 @@ _ARGUMENT_REFUSALS: dict[
     "pseudotime-and-direction": (
         lambda scored: {
             "pseudotime": scored.pseudotime,
-            "direction": _score(scored),
+            "direction": _keyed(scored, _score(scored)),
             "graph": scored.graph,
         },
         ValueError,
@@ -393,48 +423,79 @@ _ARGUMENT_REFUSALS: dict[
         "graph applies only with direction",
     ),
     "direction-without-graph": (
-        lambda scored: {"direction": _score(scored)},
+        lambda scored: {"direction": _keyed(scored, _score(scored))},
         ValueError,
         "graph is required with direction",
     ),
     "graph-not-a-reference": (
-        lambda scored: {"direction": _score(scored), "graph": "graph"},
+        lambda scored: {"direction": _keyed(scored, _score(scored)), "graph": "graph"},
         TypeError,
         "graph must be an ArtifactRef",
     ),
     "graph-of-another-kind": (
-        lambda scored: {"direction": _score(scored), "graph": scored.labels},
+        lambda scored: {
+            "direction": _keyed(scored, _score(scored)),
+            "graph": scored.labels,
+        },
         ValueError,
         "graph must be a connectivity_map or integrated_graph artifact",
     ),
     "direction-list": (
         lambda scored: {"direction": _score(scored).tolist(), "graph": scored.graph},
         TypeError,
-        "direction must be an ArtifactRef or a NumPy array",
+        r"^trajectory\.fate\(direction=\) takes per-cell values only as a pandas "
+        r"Series keyed by cell ID, whose index holds the cell IDs; got values of "
+        r"type list, which would assign values to cells by position",
+    ),
+    "direction-array": (
+        lambda scored: {"direction": _score(scored), "graph": scored.graph},
+        TypeError,
+        r"got a NumPy array, which would assign values to cells by position\. Key "
+        r"them by the IDs of the cells they describe",
+    ),
+    "direction-by-position": (
+        lambda scored: {"direction": pd.Series(_score(scored)), "graph": scored.graph},
+        TypeError,
+        "got a pandas Series with a RangeIndex",
     ),
     "direction-labels": (
-        lambda scored: {"direction": scored.label_values, "graph": scored.graph},
+        lambda scored: {
+            "direction": _keyed(scored, scored.label_values),
+            "graph": scored.graph,
+        },
         TypeError,
         "Direction scores must be real numbers",
     ),
     "direction-booleans": (
-        lambda scored: {"direction": _score(scored) > 0.5, "graph": scored.graph},
+        lambda scored: {
+            "direction": _keyed(scored, _score(scored) > 0.5),
+            "graph": scored.graph,
+        },
         TypeError,
         "Direction scores must be real numbers",
     ),
     "direction-too-short": (
-        lambda scored: {"direction": _score(scored)[:-1], "graph": scored.graph},
+        lambda scored: {
+            "direction": _keyed(scored, _score(scored)[:-1], rows=np.arange(6)),
+            "graph": scored.graph,
+        },
         ValueError,
-        "one value per cell of the graph, 7 values",
+        "the ids of the 7 cells of the graph, each once; 1 such ids have no "
+        "label, such as 'c6'",
     ),
     "direction-without-a-finite-value": (
-        lambda scored: {"direction": np.full(7, np.nan), "graph": scored.graph},
+        lambda scored: {
+            "direction": _keyed(scored, np.full(7, np.nan)),
+            "graph": scored.graph,
+        },
         ValueError,
         "Direction scores hold no finite value",
     ),
     "direction-constant-where-mapped": (
         lambda scored: {
-            "direction": np.where(np.isnan(_score(scored)), np.nan, 2.0),
+            "direction": _keyed(
+                scored, np.where(np.isnan(_score(scored)), np.nan, 2.0)
+            ),
             "graph": scored.graph,
         },
         ValueError,
@@ -468,7 +529,7 @@ _ARGUMENT_REFUSALS: dict[
     ),
     "no-sink-labels": (
         lambda scored: {
-            "direction": _score(scored),
+            "direction": _keyed(scored, _score(scored)),
             "graph": scored.graph,
             "sink_labels": None,
         },
@@ -477,7 +538,7 @@ _ARGUMENT_REFUSALS: dict[
     ),
     "sink-labels-of-another-selection": (
         lambda scored: {
-            "direction": _score(scored),
+            "direction": _keyed(scored, _score(scored)),
             "graph": scored.graph,
             "sink_labels": _snapshot(
                 scored, scored.label_values, _other_selection(scored)
@@ -518,7 +579,7 @@ def test_fate_refuses_a_graph_whose_rows_do_not_match_its_cells() -> None:
             trajectory.store.trajectory.fate(
                 sink_labels=trajectory.labels(_Y_LABELS),
                 graph=trajectory.graph,
-                direction=np.arange(5.0),
+                direction=by_cell_id(trajectory.store.cells, np.arange(5.0)),
                 sinks=_SINKS,
             )
         assert trajectory.artifacts("fate_map") == []
@@ -739,7 +800,7 @@ def test_lineage_membership_of_a_map_directed_by_a_score_parts_lineages_on_it() 
     fate = store.trajectory.fate(
         sink_labels=branching.label_artifact(),
         graph=branching.graph,
-        direction=score,
+        direction=by_cell_id(store.cells, score),
         sinks=["a2", "b2"],
     )
     membership = store.trajectory.lineage_membership(

@@ -32,7 +32,11 @@ from cytearc.storage.errors import ArtifactResolutionError
 from cytearc.storage.selections import resolve_metadata_snapshot, snapshot_run_metadata
 from cytearc.trajectory.artifacts import load_cell_artifact_values
 from cytearc.utils.memory_budget import MemoryBudgetError
-from tests.storage_helpers import insert_nullable_cell_column, write_count_store
+from tests.storage_helpers import (
+    by_cell_id,
+    insert_nullable_cell_column,
+    write_count_store,
+)
 
 N_CELLS = 8
 # The cells of the artifacts' own selection, and a subset of them.
@@ -68,10 +72,10 @@ def store_template(tmp_path_factory) -> Path:
     write_count_store(str(path), {"RNA": counts}, "uint16")
     store = _open(path)
     rows = np.arange(N_CELLS)
-    store.cells.insert("selected", np.isin(rows, SELECTED))
-    store.cells.insert("subset", np.isin(rows, SUBSET))
-    store.cells.insert("outside", np.isin(rows, [1, 7]))
-    store.cells.insert("cluster", np.array(list("aabbccdd")))
+    store.cells.insert("selected", by_cell_id(store.cells, np.isin(rows, SELECTED)))
+    store.cells.insert("subset", by_cell_id(store.cells, np.isin(rows, SUBSET)))
+    store.cells.insert("outside", by_cell_id(store.cells, np.isin(rows, [1, 7])))
+    store.cells.insert("cluster", by_cell_id(store.cells, np.array(list("aabbccdd"))))
     return path
 
 
@@ -399,7 +403,7 @@ def large_store(tmp_path) -> DataStore:
     store = DataStore(
         str(path), default_assay="RNA", min_features_per_cell=-1, nthreads=1
     )
-    store.cells.insert("half", np.arange(n_cells) % 2 == 0)
+    store.cells.insert("half", by_cell_id(store.cells, np.arange(n_cells) % 2 == 0))
     return store
 
 
@@ -519,8 +523,10 @@ def _store_with_ids(path: Path, width: int, n_cells: int) -> DataStore:
     store = DataStore(
         str(path), default_assay="RNA", min_features_per_cell=-1, nthreads=1
     )
-    store.cells.insert("half", np.arange(n_cells) % 2 == 0)
-    store.cells.insert("depth", np.arange(n_cells, dtype=np.float64))
+    store.cells.insert("half", by_cell_id(store.cells, np.arange(n_cells) % 2 == 0))
+    store.cells.insert(
+        "depth", by_cell_id(store.cells, np.arange(n_cells, dtype=np.float64))
+    )
     return store
 
 
@@ -727,7 +733,9 @@ def test_a_cell_column_needs_a_cell_selection_of_this_store(store) -> None:
 def test_a_cell_column_beyond_the_memory_budget_is_refused_before_it_is_read(
     store, monkeypatch
 ) -> None:
-    store.cells.insert("depth", np.arange(N_CELLS, dtype=np.float64))
+    store.cells.insert(
+        "depth", by_cell_id(store.cells, np.arange(N_CELLS, dtype=np.float64))
+    )
     selected = store.snapshot_cell_selection("selected")
     reads: list[str] = []
 
@@ -1127,13 +1135,20 @@ def test_fate_bias_stores_the_declared_arrays(store) -> None:
     # the late cells 6 and 7, of fates x and y, are of clones a and b.
     rows = np.arange(N_CELLS)
     store.cells.insert(
-        "lineage", np.asarray(["a", "a", "b", "b", "c", "", "a", "b"], dtype=object)
+        "lineage",
+        by_cell_id(
+            store.cells,
+            np.asarray(["a", "a", "b", "b", "c", "", "a", "b"], dtype=object),
+        ),
     )
     store.cells.insert(
-        "outcome", np.asarray(["", "", "", "", "", "", "x", "y"], dtype=object)
+        "outcome",
+        by_cell_id(
+            store.cells, np.asarray(["", "", "", "", "", "", "x", "y"], dtype=object)
+        ),
     )
-    store.cells.insert("every", np.ones(N_CELLS, dtype=bool))
-    store.cells.insert("last_two", rows >= 6)
+    store.cells.insert("every", by_cell_id(store.cells, np.ones(N_CELLS, dtype=bool)))
+    store.cells.insert("last_two", by_cell_id(store.cells, rows >= 6))
     clones = store.clones.from_column(
         "lineage", cell_selection=store.snapshot_cell_selection("every")
     )

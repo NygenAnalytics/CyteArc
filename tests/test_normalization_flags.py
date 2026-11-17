@@ -32,7 +32,7 @@ from cytearc.features.markers.rank import _batch_stats
 from cytearc.features.scoring import binned_sampling
 from cytearc.plotting.heatmaps import _marker_log_transform, _prepare_marker_heatmap
 from cytearc.storage.artifacts import artifact_group
-from tests.storage_helpers import write_count_store
+from tests.storage_helpers import by_cell_id, write_count_store
 
 N_CELLS = 30
 SIZE_FACTOR = 1000.0
@@ -58,7 +58,7 @@ COUNTS = _counts()
 
 def test_atac_default_normalization_fits_only_active_cells(store):
     keep = np.arange(N_CELLS) % 3 != 0
-    store.cells.update_key(keep, "I")
+    store.cells.update_key(by_cell_id(store.cells, keep), "I")
     selected = COUNTS["ATAC"][keep].astype(np.float64)
     totals = selected.sum(axis=1)
     expected = selected / np.where(totals == 0, 1, totals)[:, None]
@@ -162,7 +162,7 @@ def _every_path(
     flags = {"log_transform": log_transform}
     regressor = np.linspace(0.0, 1.0, N_CELLS) + np.sin(np.arange(N_CELLS))
     cell_selection, features = _selections(store, "RNA", SUBSET)
-    store.cells.insert("flag_groups", GROUPS, overwrite=True)
+    store.cells.insert("flag_groups", by_cell_id(store.cells, GROUPS), overwrite=True)
     clusters = store.snapshot_cluster_labels(
         "flag_groups", cell_selection=cell_selection
     )
@@ -279,7 +279,7 @@ def test_normalizers_reject_flags_they_cannot_apply(
     cells = np.arange(N_CELLS)
     features = np.arange(assay.feats.N)
     cell_selection, feature_ref = _selections(store, assay_name, features[:3])
-    store.cells.insert("flag_groups", GROUPS, overwrite=True)
+    store.cells.insert("flag_groups", by_cell_id(store.cells, GROUPS), overwrite=True)
     clusters = store.snapshot_cluster_labels(
         "flag_groups", cell_selection=cell_selection
     )
@@ -390,7 +390,7 @@ def test_values_that_are_not_logarithms_are_logged_when_asked(
         _stored(store, stored), expected[:, :3].astype(np.float32)
     )
 
-    store.cells.insert("flag_groups", GROUPS, overwrite=True)
+    store.cells.insert("flag_groups", by_cell_id(store.cells, GROUPS), overwrite=True)
     clusters = store.snapshot_cluster_labels(
         "flag_groups", cell_selection=cell_selection
     )
@@ -448,7 +448,7 @@ def test_marker_heatmap_defaults_follow_the_normalizer(store, monkeypatch) -> No
 @pytest.mark.slow
 def test_saved_results_are_current_across_normalizers(store, monkeypatch) -> None:
     cell_selection, features = _selections(store, "RNA", SUBSET)
-    store.cells.insert("flag_groups", GROUPS, overwrite=True)
+    store.cells.insert("flag_groups", by_cell_id(store.cells, GROUPS), overwrite=True)
     clusters = store.snapshot_cluster_labels(
         "flag_groups", cell_selection=cell_selection
     )

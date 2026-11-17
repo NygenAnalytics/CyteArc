@@ -29,6 +29,7 @@ from cytearc.metadata.arguments import (
 )
 from cytearc.storage.artifacts import ArtifactRef, artifact_path, fingerprint_array
 from cytearc.writers import SparseToZarr
+from tests.storage_helpers import by_cell_id
 
 
 @pytest.fixture(scope="module")
@@ -104,7 +105,7 @@ def test_zero_weight_neighbors_support_membership_and_snn(zero_weight_graphs):
     np.testing.assert_array_equal(np.diff(truncated.indptr), 9)
     assert np.count_nonzero(truncated.data == 0) == 18
 
-    store.cells.insert("annotation", np.repeat("all", 18))
+    store.cells.insert("annotation", by_cell_id(store.cells, np.repeat("all", 18)))
     columns = set(store.cells.columns)
     clusters = store.clusters.leiden(graph)
     labels = store.artifacts.load(clusters)["values"][:]

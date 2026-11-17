@@ -50,6 +50,7 @@ from tests.variant_truth import (
     dropout_truth,
     write_call_tables,
 )
+from tests.storage_helpers import by_cell_id
 
 
 def _packed(calls: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -667,7 +668,7 @@ def _store_of_truth(folder: Path, calls: np.ndarray, donors: np.ndarray | None =
     ids = [f"cell{cell:05d}-1" for cell in range(len(calls))]
     store = write_cells_store(folder / "store.zarr", ids)
     if donors is not None:
-        store.cells.insert("donor", donors.astype(object))
+        store.cells.insert("donor", by_cell_id(store.cells, donors.astype(object)))
     paths = write_call_tables(calls, ids, folder / "got")
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", UserWarning)

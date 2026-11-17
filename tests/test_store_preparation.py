@@ -28,7 +28,7 @@ from cytearc.storage.preparation import (
     preparation_claim,
 )
 from cytearc.utils.logging import logger
-from tests.storage_helpers import write_count_store
+from tests.storage_helpers import by_cell_id, write_count_store
 
 # The cells hold 1, 2, 3, 4, and 5 features, and the sixth holds all 12.
 _FEATURES = np.array([1, 2, 3, 4, 5, 12])
@@ -80,7 +80,8 @@ def test_only_the_first_writable_open_filters_and_records_its_threshold(tmp_path
     assert [message for message in messages if "is not applied" in message] == [
         "min_features_per_cell=4 is not applied: only the first writable open of "
         "a store filters I, and it applied min_features_per_cell=2 to assay 'RNA'. "
-        "Filter cells explicitly with qc.filter or cells.update_key instead."
+        "Filter cells explicitly with qc.filter, or with cells.update_key and a "
+        "pandas Series of booleans keyed by cell ID, instead."
     ]
 
 
@@ -102,9 +103,8 @@ def test_the_first_open_applies_the_default_threshold_when_none_is_given(tmp_pat
 
 def test_a_store_without_active_cells_records_the_filter_without_changing_i(tmp_path):
     location = _fresh(tmp_path / "store.zarr")
-    _open(location, min_features_per_cell=-1).cells.update_key(
-        np.zeros(6, dtype=bool), key="I"
-    )
+    cells = _open(location, min_features_per_cell=-1).cells
+    cells.update_key(by_cell_id(cells, np.zeros(6, dtype=bool)), key="I")
     root = zarr.open_group(location, mode="r+")
     del root["cellData"].attrs[CELL_FILTER_ATTR]
 

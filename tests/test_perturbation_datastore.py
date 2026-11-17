@@ -24,6 +24,7 @@ from cytearc.utils.logging import collect_warnings, logger
 from cytearc.utils.memory_budget import MemoryBudgetError, MemoryLedger
 from tests.perturbation_helpers import record_cell_reads, write_screen
 from tests.storage_helpers import (
+    by_cell_id,
     copy_store,
     insert_nullable_cell_column,
     open_store,
@@ -88,7 +89,7 @@ def _store(path: Path, dtype: str = "uint16") -> DataStore:
 def _selection(store: DataStore):
     keep = np.ones(len(GUIDE_COUNTS), dtype=bool)
     keep[6] = False
-    store.cells.insert("screened", keep)
+    store.cells.insert("screened", by_cell_id(store.cells, keep))
     return store.snapshot_cell_selection("screened")
 
 
@@ -391,8 +392,8 @@ def test_an_import_reaches_the_cells_of_one_sample_of_a_merged_store(
         "ids", data=ids, overwrite=True
     )
     merged = open_store(store.zarr_loc)
-    merged.cells.insert("every", np.ones(8, dtype=bool))
-    merged.cells.insert("first", np.arange(8) < 4)
+    merged.cells.insert("every", by_cell_id(merged.cells, np.ones(8, dtype=bool)))
+    merged.cells.insert("first", by_cell_id(merged.cells, np.arange(8) < 4))
     every = merged.snapshot_cell_selection("every")
     first = merged.snapshot_cell_selection("first")
     path = _call_file(tmp_path)
@@ -480,7 +481,7 @@ def test_an_import_refuses_a_small_budget_before_it_writes(tmp_path) -> None:
     # not a chunk of 100,000 guide IDs, set the budget.
     rechunk_feature_tables(store_path)
     store = open_store(store_path)
-    store.cells.insert("every", np.ones(4_000, dtype=bool))
+    store.cells.insert("every", by_cell_id(store.cells, np.ones(4_000, dtype=bool)))
     every = store.snapshot_cell_selection("every")
 
     # The refusal comes before anything is written and names the step that it
@@ -600,7 +601,9 @@ def test_import_refuses_arguments_of_the_wrong_type(
 
 
 def test_import_refuses_an_empty_cell_selection(store, tmp_path) -> None:
-    store.cells.insert("nobody", np.zeros(len(GUIDE_COUNTS), dtype=bool))
+    store.cells.insert(
+        "nobody", by_cell_id(store.cells, np.zeros(len(GUIDE_COUNTS), dtype=bool))
+    )
     nobody = store.snapshot_cell_selection("nobody")
     saved = written(store)
     with pytest.raises(ValueError, match="selects no cell"):
@@ -690,7 +693,9 @@ def test_an_import_of_one_sample_reads_only_its_cell_ids(
 ) -> None:
     # A merged store imports each sample's call file for the cells of that
     # sample, here the first four.
-    store.cells.insert("sample", np.arange(len(GUIDE_COUNTS)) < 4)
+    store.cells.insert(
+        "sample", by_cell_id(store.cells, np.arange(len(GUIDE_COUNTS)) < 4)
+    )
     sample = store.snapshot_cell_selection("sample")
     reads = record_cell_reads(monkeypatch, store, {"ids"})
 

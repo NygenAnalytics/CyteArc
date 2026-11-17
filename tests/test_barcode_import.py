@@ -43,6 +43,7 @@ from tests.clone_truth import (
     write_trex_molecules,
 )
 from tests.storage_helpers import (
+    by_cell_id,
     copy_store,
     open_store,
     write_count_store,
@@ -685,7 +686,9 @@ def test_barcodes_counted_as_an_assays_features_are_pairs(tmp_path) -> None:
         cell_ids=TRUTH.cell_ids,
     )
     store = open_store(path)
-    store.cells.insert("every_cell", np.ones(N_CELLS, dtype=bool))
+    store.cells.insert(
+        "every_cell", by_cell_id(store.cells, np.ones(N_CELLS, dtype=bool))
+    )
     cells = store.snapshot_cell_selection("every_cell")
 
     ref = store.clones.import_barcodes(cell_selection=cells, from_assay="LINEAGE")
@@ -725,7 +728,9 @@ def test_an_assay_import_refuses_file_options(tmp_path) -> None:
         cell_ids=TRUTH.cell_ids,
     )
     store = open_store(path)
-    store.cells.insert("every_cell", np.ones(N_CELLS, dtype=bool))
+    store.cells.insert(
+        "every_cell", by_cell_id(store.cells, np.ones(N_CELLS, dtype=bool))
+    )
     cells = store.snapshot_cell_selection("every_cell")
     with pytest.raises(ValueError, match="not both"):
         store.clones.import_barcodes(path, cell_selection=cells, from_assay="RNA")
@@ -778,7 +783,9 @@ def test_import_is_reused_by_contents_and_warns_again(store, tmp_path) -> None:
 def test_a_subset_of_cells_holds_only_its_barcodes(shared, tmp_path) -> None:
     paths = _per_sample(write_trex_molecules, "molecules.txt")(tmp_path)
     samples = TRUTH.samples
-    shared.store.cells.insert("in_d4", samples == "d4", overwrite=True)
+    shared.store.cells.insert(
+        "in_d4", by_cell_id(shared.store.cells, samples == "d4"), overwrite=True
+    )
     cells = shared.store.snapshot_cell_selection("in_d4")
 
     with collect_warnings() as messages:
@@ -1021,8 +1028,12 @@ def test_import_refuses_an_empty_selection_and_assays_without_integer_counts(
         cell_ids=TRUTH.cell_ids,
     )
     store = open_store(path)
-    store.cells.insert("no_cell", np.zeros(N_CELLS, dtype=bool))
-    store.cells.insert("every_cell", np.ones(N_CELLS, dtype=bool))
+    store.cells.insert(
+        "no_cell", by_cell_id(store.cells, np.zeros(N_CELLS, dtype=bool))
+    )
+    store.cells.insert(
+        "every_cell", by_cell_id(store.cells, np.ones(N_CELLS, dtype=bool))
+    )
     none = store.snapshot_cell_selection("no_cell")
     cells = store.snapshot_cell_selection("every_cell")
     counts = write_bartab_counts(BARCODES, tmp_path / "counts.tsv", sample="d2")
@@ -1128,7 +1139,7 @@ def test_barcodes_of_an_assay_join_cells_across_its_blocks(
     )
     store = open_store(path)
     keep = np.arange(N_CELLS) % 3 != 0
-    store.cells.insert("kept", keep)
+    store.cells.insert("kept", by_cell_id(store.cells, keep))
     cells = store.snapshot_cell_selection("kept")
     stream = ChunkedArray._stream_blocks
 

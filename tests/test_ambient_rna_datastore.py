@@ -37,7 +37,7 @@ from cytearc.storage.artifacts import ArtifactRef, artifact_group, artifact_path
 from cytearc.storage.identity import read_dataset_fingerprint
 from cytearc.storage.schema import create_cell_data, derived_assay_transaction
 from cytearc.utils.logging import logger
-from tests.storage_helpers import write_count_store
+from tests.storage_helpers import by_cell_id, write_count_store
 from tests.test_reduction_graph_diagnostics import _warned
 
 N_GENES = 120
@@ -159,15 +159,23 @@ def template(tmp_path_factory) -> Path:
     ).dump()
     store = _open(path)
     rows = np.arange(store.cells.N)
-    store.cells.insert("is_cell", rows < N_CELLS)
-    store.cells.insert("is_empty", (rows >= N_CELLS) & (rows < N_CELLS + N_EMPTY))
+    store.cells.insert("is_cell", by_cell_id(store.cells, rows < N_CELLS))
+    store.cells.insert(
+        "is_empty",
+        by_cell_id(store.cells, (rows >= N_CELLS) & (rows < N_CELLS + N_EMPTY)),
+    )
     store.cells.insert(
         "cluster",
-        np.concatenate(
-            [CLUSTER_NAMES[droplets.labels], np.full(len(rows) - N_CELLS, "empty")]
+        by_cell_id(
+            store.cells,
+            np.concatenate(
+                [CLUSTER_NAMES[droplets.labels], np.full(len(rows) - N_CELLS, "empty")]
+            ),
         ),
     )
-    store.cells.insert("nothing", np.zeros(len(rows), dtype=bool))
+    store.cells.insert(
+        "nothing", by_cell_id(store.cells, np.zeros(len(rows), dtype=bool))
+    )
     # Each copy reuses these inputs instead of computing them again.
     _cells_and_clusters(store)
     store.qc.ambient_profile(total_counts=(2, 10))
@@ -825,7 +833,11 @@ def test_contamination_warns_about_an_estimate_of_zero_and_keeps_it(store):
     rare = NAMES.index("GENE5")
     without = droplets.cells[:, rare] == 0
     store.cells.insert(
-        "no_gene5", np.concatenate([without, np.zeros(store.cells.N - N_CELLS, bool)])
+        "no_gene5",
+        by_cell_id(
+            store.cells,
+            np.concatenate([without, np.zeros(store.cells.N - N_CELLS, bool)]),
+        ),
     )
     cells = store.snapshot_cell_selection("no_gene5")
     expected = float((droplets.cells[without].sum(axis=1) * soup[rare]).sum())
@@ -1346,7 +1358,9 @@ def test_correction_in_a_workspace_publishes_its_matrices(tmp_path):
         min_features_per_cell=-1,
         nthreads=1,
     )
-    store.cells.insert("is_cell", np.arange(store.cells.N) < N_CELLS)
+    store.cells.insert(
+        "is_cell", by_cell_id(store.cells, np.arange(store.cells.N) < N_CELLS)
+    )
     cells = store.snapshot_cell_selection("is_cell")
     profile = store.qc.ambient_profile(total_counts=(2, 10))
 

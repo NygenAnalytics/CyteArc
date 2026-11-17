@@ -33,7 +33,7 @@ from cytearc.neighbors.graph import (
 )
 from cytearc.storage.artifacts import ArtifactRef, artifact_group
 from cytearc.storage.budget import ResourceBudget
-from tests.storage_helpers import write_count_store
+from tests.storage_helpers import by_cell_id, write_count_store
 
 N_CELLS = 150
 K = 6
@@ -307,7 +307,7 @@ def test_consumers_admit_their_graph_memory_before_reading_it(
         (
             lambda: store.embeddings.tsne(
                 graph,
-                np.zeros((N_CELLS, 3)),
+                by_cell_id(store.cells, np.zeros((N_CELLS, 3))),
                 tsne_dims=3,
                 symmetric_graph=True,
                 graph_upper_only=True,
@@ -501,8 +501,8 @@ def test_embeddings_refuse_other_references_as_initialization(
         assert str(caught.value) == (
             "initialization must be an embedding_initialization ref, not a "
             "'reduction' ref; build one from the graph's coordinates with "
-            "embeddings.initialization(coordinates), or pass an array of initial "
-            "coordinates"
+            "embeddings.initialization(coordinates), or pass a DataFrame of "
+            "initial coordinates indexed by cell ID"
         )
     scoped = ArtifactRef(
         scope="datastore", kind="embedding_initialization", artifact_id="a" * 64

@@ -121,7 +121,7 @@ def test_metadata_method_ownership_and_signatures_remain_stable():
     methods = {name: getattr(metadata.MetaData, name) for name in _METHODS}
 
     assert signature_digest(methods) == (
-        "cc715f0b377ffc86eaaaf0a708a854ca20e7bab9020dbb31cf9b4092f3f2cbb4"
+        "0485f8a7c7ba4947b6507686f11e2c3ab306c76445b1d0987a4ccf90b780aa84"
     )
 
 

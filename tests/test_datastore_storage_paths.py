@@ -48,7 +48,7 @@ from cytearc.storage.stores import (
 )
 from cytearc.utils.logging import logger
 from cytearc.writers.counts_t import finalize_writer_counts_t
-from tests.storage_helpers import finalize_test_counts
+from tests.storage_helpers import by_cell_id, finalize_test_counts
 
 _COUNTS = np.random.default_rng(5).poisson(3.0, size=(16, 6)).astype(np.uint32)
 
@@ -580,7 +580,9 @@ def test_run_aware_export_requires_a_run_opened_from_this_datastore(
 
 def test_graph_consumers_reject_unusable_graph_references(tmp_path: Path) -> None:
     datastore = _open(_write_store(tmp_path / "data.zarr", {"RNA": _COUNTS}))
-    datastore.cells.insert("group", np.asarray(["a", "b"] * 8), overwrite=True)
+    datastore.cells.insert(
+        "group", by_cell_id(datastore.cells, np.asarray(["a", "b"] * 8)), overwrite=True
+    )
     labels = datastore.snapshot_cluster_labels(
         "group",
         cell_selection=datastore.snapshot_cell_selection(),
@@ -623,7 +625,9 @@ def test_membership_strength_rejects_hand_edited_graph_dimensions(
     message: str,
 ) -> None:
     datastore = _open(_write_store(tmp_path / "data.zarr", {"RNA": _COUNTS}))
-    datastore.cells.insert("group", np.asarray(["a", "b"] * 8), overwrite=True)
+    datastore.cells.insert(
+        "group", by_cell_id(datastore.cells, np.asarray(["a", "b"] * 8)), overwrite=True
+    )
     selection = datastore.snapshot_cell_selection()
     labels = datastore.snapshot_cluster_labels("group", cell_selection=selection)
     graph = _write_record(
@@ -712,12 +716,22 @@ def test_smart_label_needs_one_cell_selection_and_handles_no_cells(
     tmp_path: Path,
 ) -> None:
     datastore = _open(_write_store(tmp_path / "data.zarr", {"RNA": _COUNTS}))
-    datastore.cells.insert("group", np.asarray(["a", "b"] * 8), overwrite=True)
-    datastore.cells.insert("base", np.asarray(["x"] * 8 + ["y"] * 8), overwrite=True)
     datastore.cells.insert(
-        "first_half", np.asarray([True] * 8 + [False] * 8), overwrite=True
+        "group", by_cell_id(datastore.cells, np.asarray(["a", "b"] * 8)), overwrite=True
     )
-    datastore.cells.insert("nobody", np.zeros(16, dtype=bool), overwrite=True)
+    datastore.cells.insert(
+        "base",
+        by_cell_id(datastore.cells, np.asarray(["x"] * 8 + ["y"] * 8)),
+        overwrite=True,
+    )
+    datastore.cells.insert(
+        "first_half",
+        by_cell_id(datastore.cells, np.asarray([True] * 8 + [False] * 8)),
+        overwrite=True,
+    )
+    datastore.cells.insert(
+        "nobody", by_cell_id(datastore.cells, np.zeros(16, dtype=bool)), overwrite=True
+    )
 
     everyone = datastore.snapshot_cluster_labels(
         "group", cell_selection=datastore.snapshot_cell_selection()
@@ -954,7 +968,9 @@ def test_repr_lists_metadata_columns_in_rows_of_five(tmp_path: Path, n_extra) ->
     datastore = _open(_write_store(tmp_path / "s.zarr", {"RNA": np.eye(4) + 1}))
     columns = list(datastore.cells.columns)
     for index in range(10 - len(columns) % 5 + n_extra):
-        datastore.cells.insert(f"extra{index}", np.zeros(4), overwrite=True)
+        datastore.cells.insert(
+            f"extra{index}", by_cell_id(datastore.cells, np.zeros(4)), overwrite=True
+        )
     columns = list(datastore.cells.columns)
     text = repr(datastore)
     listing = text.split("Cell metadata:")[1].split("\n   RNA assay")[0]

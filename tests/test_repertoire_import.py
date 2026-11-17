@@ -33,7 +33,7 @@ from tests.clone_helpers import (
     write_truth_store,
 )
 from cytearc.utils.memory_budget import MemoryBudgetError
-from tests.storage_helpers import copy_store
+from tests.storage_helpers import by_cell_id, copy_store
 from tests.clone_truth import (
     N_OUTSIDE,
     RECEPTOR_SLOTS,
@@ -360,7 +360,7 @@ def test_a_cell_selection_limits_the_imported_cells(tmp_path) -> None:
     store = receptor_store(tmp_path)
     keep = np.zeros(N_CELLS, dtype=bool)
     keep[[0, 4]] = True
-    store.cells.insert("chosen", keep)
+    store.cells.insert("chosen", by_cell_id(store.cells, keep))
     ref = store.repertoire.import_receptors(
         [tcr_file(tmp_path), bcr_file(tmp_path)],
         cell_selection=store.snapshot_cell_selection("chosen"),
@@ -495,7 +495,7 @@ def test_a_file_without_contig_rows_leaves_every_cell_without_a_receptor(
 
 def test_import_refuses_an_empty_cell_selection(tmp_path) -> None:
     store = receptor_store(tmp_path)
-    store.cells.insert("nobody", np.zeros(N_CELLS, dtype=bool))
+    store.cells.insert("nobody", by_cell_id(store.cells, np.zeros(N_CELLS, dtype=bool)))
     with pytest.raises(ValueError, match="selects no cell"):
         store.repertoire.import_receptors(
             tcr_file(tmp_path), cell_selection=store.snapshot_cell_selection("nobody")

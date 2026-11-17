@@ -57,7 +57,11 @@ from cytearc.storage.operation_revisions import OPERATION_REVISIONS
 from cytearc.storage.schema import create_cell_data, create_zarr_count_assay
 from cytearc.utils.logging import logger
 from cytearc.writers.counts_t import finalize_writer_counts_t
-from tests.storage_helpers import finalize_test_counts, insert_nullable_cell_column
+from tests.storage_helpers import (
+    by_cell_id,
+    finalize_test_counts,
+    insert_nullable_cell_column,
+)
 
 _GOLDEN = Path(__file__).parent / "scanpy_hvg_1_12_4_golden.json"
 
@@ -718,7 +722,7 @@ def banded_template(tmp_path_factory) -> Path:
     store = DataStore(
         str(path), default_assay="RNA", min_features_per_cell=-1, nthreads=2
     )
-    store.cells.insert("batch", _BATCHES, overwrite=True)
+    store.cells.insert("batch", by_cell_id(store.cells, _BATCHES), overwrite=True)
     return path
 
 
@@ -1104,7 +1108,7 @@ def test_batches_need_labels_and_two_cells_each(banded) -> None:
 
     singles = _BATCHES.copy()
     singles[0] = "lone"
-    banded.cells.insert("singles", singles, overwrite=True)
+    banded.cells.insert("singles", by_cell_id(banded.cells, singles), overwrite=True)
     with pytest.raises(ValueError, match=r"these have fewer: 'lone' \(1\)"):
         banded.features.hvgs(
             cells, flavor="pearson_residuals", batch="singles", show_plot=False
@@ -1114,7 +1118,7 @@ def test_batches_need_labels_and_two_cells_each(banded) -> None:
 def test_count_flavors_need_two_selected_cells(banded) -> None:
     keep = np.zeros(_N_CELLS, dtype=bool)
     keep[5] = True
-    banded.cells.insert("one", keep, overwrite=True)
+    banded.cells.insert("one", by_cell_id(banded.cells, keep), overwrite=True)
     with pytest.raises(ValueError, match="needs at least two selected cells"):
         banded.features.hvgs(
             banded.snapshot_cell_selection("one"), flavor="seurat_v3", show_plot=False
@@ -1239,7 +1243,7 @@ def test_small_selections_keep_a_band_of_detection_counts(datastore_ephemeral) -
     active = np.flatnonzero(np.asarray(store.cells.fetch_all("I"), dtype=bool))
     keep = np.zeros(store.cells.N, dtype=bool)
     keep[active[:41]] = True
-    store.cells.insert("small", keep, overwrite=True)
+    store.cells.insert("small", by_cell_id(store.cells, keep), overwrite=True)
     cells = store.snapshot_cell_selection("small")
 
     # The detection bounds do not depend on the trend, so a coarse trend of
@@ -1500,7 +1504,9 @@ def golden_store(datastore_zarr_root, tmp_path_factory) -> DataStore:
     active = np.flatnonzero(np.asarray(store.cells.fetch_all("I"), dtype=bool))
     labels = np.full(store.cells.N, "none", dtype=object)
     labels[active] = np.where(np.arange(len(active)) < len(active) // 2, "a", "b")
-    store.cells.insert("golden_batch", labels.astype(str), overwrite=True)
+    store.cells.insert(
+        "golden_batch", by_cell_id(store.cells, labels.astype(str)), overwrite=True
+    )
     return store
 
 
@@ -1703,7 +1709,9 @@ def _store_of_batches(path: Path) -> DataStore:
         counts, str(path), [f"c{i}" for i in range(120)], [f"g{i}" for i in range(30)]
     ).dump()
     store = DataStore(str(path), min_features_per_cell=0)
-    store.cells.insert("batch", np.repeat(["a", "b"], 60).astype(object))
+    store.cells.insert(
+        "batch", by_cell_id(store.cells, np.repeat(["a", "b"], 60).astype(object))
+    )
     return store
 
 

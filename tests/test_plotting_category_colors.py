@@ -15,6 +15,7 @@ from seaborn.utils import desaturate
 import cytearc.plotting as splt
 from cytearc.plotting._style import resolve_category_scale
 from tests.test_plotting_foundation import _ArrayAssay, _imported_plot_store
+from tests.storage_helpers import by_cell_id
 
 CATEGORIES = (
     "Alpha",
@@ -358,7 +359,7 @@ def test_label_artifact_colors_range_over_all_labeled_cells(tmp_path):
         coordinates=np.column_stack((x, (x % 4) * 1.5)),
         clusters=labels,
     )
-    store.cells.insert("no_one", labels != 1)
+    store.cells.insert("no_one", by_cell_id(store.cells, labels != 1))
     layout = imported.embeddingArtifacts["X_umap"]
     clusters = imported.clusterArtifacts["clusters"]
     # Labels 1, 2 and 10 take the first three default colors.
@@ -965,22 +966,29 @@ def test_a_column_stored_as_ordered_keeps_its_order_in_plots(tmp_path):
     # A categorical column whose categories are ordered, one of them unused.
     store.cells.insert(
         "stage",
-        pd.Categorical(
-            stages, categories=["early", "mid", "late", "post"], ordered=True
+        by_cell_id(
+            store.cells,
+            pd.Categorical(
+                stages, categories=["early", "mid", "late", "post"], ordered=True
+            ),
         ),
     )
     # A column of labels that records an ordered source categorical, as a
     # Seurat import of an ordered factor writes it.
-    store.cells.insert("grade", stages)
+    store.cells.insert("grade", by_cell_id(store.cells, stages))
     store.zw["cellData"]["grade"].attrs.update(
         {"levels": ["early", "mid", "late"], "ordered": True}
     )
     # The same layouts, unordered, keep the natural order: "2" before "10".
     clusters = np.repeat(["10", "2", "1"], 4)
     store.cells.insert(
-        "cluster", pd.Categorical(clusters, categories=["10", "2", "1"], ordered=False)
+        "cluster",
+        by_cell_id(
+            store.cells,
+            pd.Categorical(clusters, categories=["10", "2", "1"], ordered=False),
+        ),
     )
-    store.cells.insert("unordered_grade", stages)
+    store.cells.insert("unordered_grade", by_cell_id(store.cells, stages))
     store.zw["cellData"]["unordered_grade"].attrs.update(
         {"levels": ["early", "mid", "late"], "ordered": False}
     )

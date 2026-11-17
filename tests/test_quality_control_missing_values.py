@@ -19,7 +19,7 @@ from cytearc.storage.artifacts import (
 )
 from cytearc.storage.selections import read_stored_selection_mask
 from tests.fixtures_datastore import build_neighborhood_graph
-from tests.storage_helpers import insert_nullable_cell_column
+from tests.storage_helpers import by_cell_id, insert_nullable_cell_column
 from tests.qc_helpers import (
     create_labeled_qc_store,
     open_qc_store,
@@ -375,7 +375,7 @@ def test_auto_filter_cells_rejects_masked_integer_sample_labels(small_store) -> 
     )
 
     labeled = active & ~missing
-    store.cells.insert("labeled_cells", labeled)
+    store.cells.insert("labeled_cells", by_cell_id(store.cells, labeled))
     ref = store.qc.auto_filter(
         attrs=["RNA_nCounts"],
         cell_selection=store.snapshot_cell_selection("labeled_cells"),
@@ -401,7 +401,9 @@ def test_merged_partial_integer_column_cannot_seed_a_fake_qc_sample(
 
     left = create_labeled_qc_store(tmp_path / "left")
     right = create_labeled_qc_store(tmp_path / "right")
-    left.cells.insert("donor", np.array([1, 1, 2, 2, 1, 2], dtype=np.int64))
+    left.cells.insert(
+        "donor", by_cell_id(left.cells, np.array([1, 1, 2, 2, 1, 2], dtype=np.int64))
+    )
     destination = str(tmp_path / "merged")
     DataStoreMerge([left, right], destination, ["left", "right"], nthreads=1).dump()
     merged = DataStore(destination, nthreads=1, min_features_per_cell=0)
@@ -455,7 +457,9 @@ def test_filter_cells_rejects_invalid_bounds_and_empty_results(small_store) -> N
         store.qc.filter(["absent"], [None], [None])
     with pytest.raises(ValueError, match="removed every selected cell"):
         store.qc.filter(["RNA_nCounts"], [float(counts.max())], [None])
-    store.cells.insert("no_cells", np.zeros(store.cells.N, dtype=bool))
+    store.cells.insert(
+        "no_cells", by_cell_id(store.cells, np.zeros(store.cells.N, dtype=bool))
+    )
     with pytest.raises(ValueError, match="contains no active cells"):
         store.qc.filter(
             ["RNA_nCounts"],
@@ -509,7 +513,7 @@ def test_zero_count_percentages_fail_with_actionable_error_in_both_paths() -> No
         assert isinstance(caught.value.__cause__, ValueError)
         assert "exclude zero-count cells" in str(caught.value.__cause__)
 
-    dataset.cells.insert("has_counts", counts > 0)
+    dataset.cells.insert("has_counts", by_cell_id(dataset.cells, counts > 0))
     ref = dataset.qc.auto_filter(
         attrs=["RNA_percentMito"],
         cell_selection=dataset.snapshot_cell_selection("has_counts"),
@@ -531,7 +535,7 @@ def test_typed_sample_labels_validate_without_per_cell_scan(
     store = small_store
     n = store.cells.N
     labels = np.array(["A"] * (n // 2) + ["B"] * (n - n // 2))
-    store.cells.insert("typed_sample", labels, overwrite=True)
+    store.cells.insert("typed_sample", by_cell_id(store.cells, labels), overwrite=True)
     active = np.asarray(store.cells.fetch_all("I"), dtype=bool)
     checked: list[object] = []
     label_kind = filtering._sample_label_kind

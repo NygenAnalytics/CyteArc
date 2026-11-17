@@ -10,7 +10,7 @@ import zarr
 import cytearc
 from cytearc import DataStore
 from cytearc.storage.types import read_fresh_group
-from tests.storage_helpers import write_count_store
+from tests.storage_helpers import by_cell_id, write_count_store
 
 _COUNTS = np.array(
     [[1, 0, 2, 0], [0, 3, 1, 0], [4, 0, 0, 1], [1, 1, 1, 1], [0, 2, 0, 3]],
@@ -35,7 +35,9 @@ def test_writable_operations_and_listings_ignore_consolidated_metadata(tmp_path)
     zarr.consolidate_metadata(str(path))
 
     ds = _open(path)
-    ds.cells.insert("early", np.array([True, True, False, True, False]))
+    ds.cells.insert(
+        "early", by_cell_id(ds.cells, np.array([True, True, False, True, False]))
+    )
     early = ds.snapshot_cell_selection("early")
     summary = ds.RNA.attrs.asdict()
     universe = ds.features.universe(from_assay="RNA")

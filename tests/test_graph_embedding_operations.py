@@ -4,6 +4,7 @@ import dataclasses
 import shutil
 
 import numpy as np
+import pandas as pd
 import pytest
 from scipy.sparse import coo_matrix
 
@@ -22,6 +23,7 @@ from cytearc.storage.artifacts import (
     provenance_hash,
 )
 from cytearc.storage.budget import ResourceBudget
+from tests.storage_helpers import by_cell_id, graph_rows
 
 
 def _identity(arguments: OperationArguments) -> str:
@@ -85,6 +87,11 @@ def _input(store: DataStore, ref: ArtifactRef, name: str) -> ArtifactRef:
     return ArtifactRef.from_dict(store.artifacts.inspect(ref).inputs[name])
 
 
+def _keyed(store: DataStore, graph: ArtifactRef, values: np.ndarray) -> pd.DataFrame:
+    """Key coordinates of the graph's cells, in store order, by cell ID."""
+    return by_cell_id(store.cells, values, rows=graph_rows(store, graph))
+
+
 def _graph(store: DataStore) -> ArtifactRef:
     graphs = store.artifacts.list(
         kind="connectivity_map",
@@ -128,12 +135,20 @@ def test_run_umap_copies_and_canonicalizes_numpy_initialization(store) -> None:
     initial = np.random.default_rng(3).normal(size=(n_cells, 2)).astype(np.float32)
     original = initial.copy()
 
-    ref = store.embeddings.umap(graph, initial, n_epochs=5)
+    ref = store.embeddings.umap(graph, _keyed(store, graph, initial), n_epochs=5)
 
     np.testing.assert_array_equal(initial, original)
     assert store.artifacts.inspect(ref).inputs["initialization"] == {
         "value_fingerprint": fingerprint_array(original)
     }
+    # Rows keyed by cell ID in reverse order, beside a row of a cell outside
+    # the graph, which is left out, are the same coordinates of the same cells.
+    keyed = _keyed(store, graph, initial)
+    extra = pd.DataFrame([[9.0, 9.0]], index=["elsewhere"], columns=keyed.columns)
+    assert (
+        store.embeddings.umap(graph, pd.concat([keyed.iloc[::-1], extra]), n_epochs=5)
+        == ref
+    )
     wide = np.zeros((n_cells, 4), dtype=np.float32)
     wide[:, ::2] = original
     variants = (
@@ -143,8 +158,13 @@ def test_run_umap_copies_and_canonicalizes_numpy_initialization(store) -> None:
     )
     for n_epochs, variant in enumerate(variants, start=6):
         unchanged = variant.copy()
-        assert store.embeddings.umap(graph, variant, n_epochs=5) == ref
-        fitted = store.embeddings.umap(graph, variant, n_epochs=n_epochs)
+        assert (
+            store.embeddings.umap(graph, _keyed(store, graph, variant), n_epochs=5)
+            == ref
+        )
+        fitted = store.embeddings.umap(
+            graph, _keyed(store, graph, variant), n_epochs=n_epochs
+        )
         np.testing.assert_array_equal(variant, unchanged)
         values = store.artifacts.load(fitted)["values"][:]
         assert values.shape == (n_cells, 2)
@@ -158,13 +178,26 @@ def test_run_umap_rejects_invalid_numpy_initialization(store) -> None:
     initial[0, 0] = np.nan
 
     with pytest.raises(ValueError, match="finite"):
-        store.embeddings.umap(graph, initial, n_epochs=5)
+        store.embeddings.umap(graph, _keyed(store, graph, initial), n_epochs=5)
+    # Coordinates by position are refused before the graph's cells are read.
+    with pytest.raises(TypeError, match=r"^initialization takes per-cell values only"):
+        store.embeddings.umap(graph, np.zeros((n_cells, 2)), n_epochs=5)
+    with pytest.raises(TypeError, match="got a pandas DataFrame with a RangeIndex"):
+        store.embeddings.umap(graph, pd.DataFrame(np.zeros((n_cells, 2))), n_epochs=5)
     with pytest.raises(ValueError, match="finite"):
-        store.embeddings.umap(graph, np.full((n_cells, 2), 1e300), n_epochs=5)
+        store.embeddings.umap(
+            graph, _keyed(store, graph, np.full((n_cells, 2), 1e300)), n_epochs=5
+        )
     with pytest.raises(TypeError, match="real numbers"):
-        store.embeddings.umap(graph, np.zeros((n_cells, 2), dtype=bool), n_epochs=5)
+        store.embeddings.umap(
+            graph,
+            _keyed(store, graph, np.zeros((n_cells, 2), dtype=bool)),
+            n_epochs=5,
+        )
     with pytest.raises(ValueError, match="invalid shape"):
-        store.embeddings.umap(graph, np.zeros((n_cells, 3)), n_epochs=5)
+        store.embeddings.umap(
+            graph, _keyed(store, graph, np.zeros((n_cells, 3))), n_epochs=5
+        )
 
 
 def test_run_tsne_rejects_invalid_numpy_initialization(store) -> None:
@@ -172,9 +205,13 @@ def test_run_tsne_rejects_invalid_numpy_initialization(store) -> None:
     n_cells = store.graph.load(graph).shape[0]
 
     with pytest.raises(ValueError, match="finite"):
-        store.embeddings.tsne(graph, np.full((n_cells, 2), np.nan))
+        store.embeddings.tsne(
+            graph, _keyed(store, graph, np.full((n_cells, 2), np.nan))
+        )
     with pytest.raises(TypeError, match="real numbers"):
-        store.embeddings.tsne(graph, np.zeros((n_cells, 2), dtype=bool))
+        store.embeddings.tsne(
+            graph, _keyed(store, graph, np.zeros((n_cells, 2), dtype=bool))
+        )
 
 
 def _fake_tsne_backend(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, object]]:

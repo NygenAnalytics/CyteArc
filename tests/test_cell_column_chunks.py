@@ -29,7 +29,7 @@ from cytearc.storage.layout import (
 )
 from cytearc.utils.memory_budget import MemoryLedger
 from tests import full_path
-from tests.storage_helpers import rechunk_column
+from tests.storage_helpers import by_cell_id, rechunk_column
 
 if TYPE_CHECKING:
     from cytearc.datastore.datastore import DataStore
@@ -323,8 +323,10 @@ def test_a_new_column_written_into_an_old_store_takes_the_new_chunks(
         str(old_store), default_assay="ATAC", min_features_per_cell=0, nthreads=1
     )
     labels = np.asarray([f"label{index % 7}" for index in range(store.cells.N)])
-    store.cells.insert("label", labels)
-    store.cells.insert("score", np.arange(store.cells.N, dtype=np.float64))
+    store.cells.insert("label", by_cell_id(store.cells, labels))
+    store.cells.insert(
+        "score", by_cell_id(store.cells, np.arange(store.cells.N, dtype=np.float64))
+    )
     regions = np.asarray([f"region{index % 5}" for index in range(_N_PEAKS)])
     store.ATAC.feats.insert("region", regions)
     store.ATAC.feats.insert("weight", np.arange(_N_PEAKS, dtype=np.float64))
@@ -373,7 +375,10 @@ def _sparse_store(path: Path, prefix: str) -> "DataStore":
         str(path), default_assay="RNA", min_features_per_cell=-1, nthreads=1
     )
     store.cells.insert(
-        "wide", np.asarray(["w" * _LABEL_WIDTH] + ["v"] * 47, dtype=object)
+        "wide",
+        by_cell_id(
+            store.cells, np.asarray(["w" * _LABEL_WIDTH] + ["v"] * 47, dtype=object)
+        ),
     )
     # A wide column in chunks of 100,000 rows would allocate a chunk of 40 GB
     # as it is written, so a narrow column first checks that feature columns
@@ -434,7 +439,10 @@ def test_store_imports_and_copies_chunk_cell_and_feature_columns_by_rows_and_byt
     assert features == _ruled(features, _N_FEATURES)
 
     SubsetZarr(
-        str(tmp_path / "subset.zarr"), [source.RNA], cell_idx=np.arange(45), nthreads=1
+        str(tmp_path / "subset.zarr"),
+        [source.RNA],
+        cell_ids=source.cells.fetch_all("ids")[:45],
+        nthreads=1,
     ).dump()
     subset = _cell_chunks(tmp_path / "subset.zarr")
     assert subset == {

@@ -130,7 +130,7 @@ def test_an_explicit_type_is_the_declared_type_of_the_whole_session(
         subset_path,
         assays=[first.RNA, hashtags],
         out_workspace=workspace,
-        cell_idx=np.arange(8),
+        cell_ids=first.cells.fetch_all("ids")[:8],
         nthreads=1,
     ).dump()
     assert _attribute_root(subset_path, workspace).attrs["assayTypes"] == {

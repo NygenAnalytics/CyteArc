@@ -30,6 +30,7 @@ from cytearc.storage.artifact_writer import artifact_transaction
 from cytearc.storage.artifacts import ArtifactRef
 from tests.clone_helpers import write_selection_embedding
 from tests.storage_helpers import (
+    by_cell_id,
     insert_nullable_cell_column,
     open_store,
     write_count_store,
@@ -323,10 +324,14 @@ def clustered(tmp_path_factory):
     path = tmp_path_factory.mktemp("cluster_connectivity") / "store.zarr"
     write_count_store(str(path), {"RNA": counts}, "uint16")
     store = open_store(path)
-    store.cells.insert("block", BLOCKS)
-    store.cells.insert("kept", ~LEFT_OUT)
-    store.cells.insert("half", np.arange(N_CELLS) < N_CELLS // 2)
-    store.cells.insert("every_cell", np.ones(N_CELLS, dtype=bool))
+    store.cells.insert("block", by_cell_id(store.cells, BLOCKS))
+    store.cells.insert("kept", by_cell_id(store.cells, ~LEFT_OUT))
+    store.cells.insert(
+        "half", by_cell_id(store.cells, np.arange(N_CELLS) < N_CELLS // 2)
+    )
+    store.cells.insert(
+        "every_cell", by_cell_id(store.cells, np.ones(N_CELLS, dtype=bool))
+    )
     # Cell 1, a kept cell, has no block label in this column.
     insert_nullable_cell_column(
         store, "block_with_gap", BLOCKS.astype(str), np.arange(N_CELLS) == 1

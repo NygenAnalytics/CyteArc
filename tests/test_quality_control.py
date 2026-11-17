@@ -32,6 +32,7 @@ from cytearc.storage.selections import (
     read_stored_selection_mask,
     resolve_generated_selection_artifact,
 )
+from tests.storage_helpers import by_cell_id
 
 
 def test_doublet_pair_counts_are_widened_without_overflow():
@@ -381,7 +382,7 @@ def test_select_cells_thresholds_artifact_values_without_live_metadata_writes(
     store = datastore_ephemeral
     store.cells.insert(
         "I",
-        np.ones(store.cells.N, dtype=bool),
+        by_cell_id(store.cells, np.ones(store.cells.N, dtype=bool)),
         overwrite=True,
         force=True,
     )
@@ -391,7 +392,9 @@ def test_select_cells_thresholds_artifact_values_without_live_metadata_writes(
 
     drifted = np.ones(store.cells.N, dtype=bool)
     drifted[::3] = False
-    store.cells.insert("I", drifted, overwrite=True, force=True)
+    store.cells.insert(
+        "I", by_cell_id(store.cells, drifted), overwrite=True, force=True
+    )
     metadata_before = _snapshot_store(str(Path(store.zarr_loc) / "cellData"))
 
     selected = store.select_cells(
@@ -425,7 +428,9 @@ def test_select_cells_thresholds_artifact_values_without_live_metadata_writes(
 def test_select_cells_composes_only_with_a_source_subset(datastore_ephemeral) -> None:
     store = datastore_ephemeral
     source_mask = np.arange(store.cells.N) % 2 == 0
-    store.cells.insert("I", source_mask, overwrite=True, force=True)
+    store.cells.insert(
+        "I", by_cell_id(store.cells, source_mask), overwrite=True, force=True
+    )
     source = store.snapshot_cell_selection()
     metric = _fixture_quality_metric(
         store,
@@ -434,14 +439,16 @@ def test_select_cells_composes_only_with_a_source_subset(datastore_ephemeral) ->
     )
 
     prior_mask = source_mask & (np.arange(store.cells.N) % 4 == 0)
-    store.cells.insert("I", prior_mask, overwrite=True, force=True)
+    store.cells.insert(
+        "I", by_cell_id(store.cells, prior_mask), overwrite=True, force=True
+    )
     prior = store.snapshot_cell_selection()
     selected = store.select_cells(metric, low=None, high=None, cell_selection=prior)
     np.testing.assert_array_equal(_selection_values(store, selected), prior_mask)
 
     store.cells.insert(
         "I",
-        np.ones(store.cells.N, dtype=bool),
+        by_cell_id(store.cells, np.ones(store.cells.N, dtype=bool)),
         overwrite=True,
         force=True,
     )
@@ -461,7 +468,7 @@ def test_select_cells_includes_categorical_artifact_values(
     store = datastore_ephemeral
     store.cells.insert(
         "I",
-        np.ones(store.cells.N, dtype=bool),
+        by_cell_id(store.cells, np.ones(store.cells.N, dtype=bool)),
         overwrite=True,
         force=True,
     )
@@ -501,7 +508,7 @@ def test_select_cells_reads_canonical_label_arrays_and_rejects_empty_results(
     store = datastore_ephemeral
     store.cells.insert(
         "I",
-        np.ones(store.cells.N, dtype=bool),
+        by_cell_id(store.cells, np.ones(store.cells.N, dtype=bool)),
         overwrite=True,
         force=True,
     )
@@ -546,7 +553,7 @@ def test_select_cells_rejects_lossy_categorical_include_values(
     store = datastore_ephemeral
     store.cells.insert(
         "I",
-        np.ones(store.cells.N, dtype=bool),
+        by_cell_id(store.cells, np.ones(store.cells.N, dtype=bool)),
         overwrite=True,
         force=True,
     )
@@ -849,7 +856,9 @@ def test_doublet_detection_rejects_symphony_connectivity_chain(
     reduction = resolve_native_graph_inputs(datastore.zw, native_graph).coordinates
     datastore.cells.insert(
         "doublet_batch",
-        np.where(np.arange(datastore.cells.N) % 2, "a", "b"),
+        by_cell_id(
+            datastore.cells, np.where(np.arange(datastore.cells.N) % 2, "a", "b")
+        ),
         overwrite=True,
     )
     correction = datastore.reduction.harmony(
@@ -902,7 +911,9 @@ def test_doublet_detection_needs_two_clusters_for_heterotypic_doublets(
     datastore = analyzed_datastore_ephemeral
     graph = _fixture_graph(datastore)
     datastore.cells.insert(
-        "one_cluster", np.full(datastore.cells.N, "all"), overwrite=True
+        "one_cluster",
+        by_cell_id(datastore.cells, np.full(datastore.cells.N, "all")),
+        overwrite=True,
     )
     clusters = datastore.snapshot_cluster_labels(
         "one_cluster", cell_selection=graph_cell_selection(datastore.zw, graph)

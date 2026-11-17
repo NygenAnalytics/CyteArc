@@ -946,7 +946,7 @@ _FOREIGN_REF = ArtifactRef(
             {"point_sizes": [1.0, 2.0]},
             ValueError,
             "Run embedding takes no point_sizes; pass layout=run[...] and "
-            "point_sizes in that layout's cell order",
+            "point_sizes as a pandas Series indexed by cell ID",
         ),
         (
             "embedding",

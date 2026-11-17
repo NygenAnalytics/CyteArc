@@ -68,6 +68,7 @@ from cytearc.trajectory.lineages import (
 )
 
 from .fixtures_lineages import LINEAGE_SINKS
+from tests.storage_helpers import by_cell_id
 
 _OPERATIONS = "cytearc.datastore._operations.trajectory"
 
@@ -194,7 +195,9 @@ def _without_input(datastore, ref: ArtifactRef, name: str) -> dict[str, Any]:
 
 
 def _subset_selection(datastore, name: str, keep: np.ndarray) -> ArtifactRef:
-    datastore.cells.insert(name, keep, key="I", overwrite=True)
+    datastore.cells.insert(
+        name, by_cell_id(datastore.cells, keep), key="I", overwrite=True
+    )
     return datastore.snapshot_cell_selection(name)
 
 

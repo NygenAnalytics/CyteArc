@@ -26,7 +26,12 @@ from tests.clone_helpers import (
     write_truth_store,
 )
 from tests.clone_truth import CLONE_SIZES, N_CELLS, clone_truth
-from tests.storage_helpers import copy_store, insert_nullable_cell_column, open_store
+from tests.storage_helpers import (
+    by_cell_id,
+    copy_store,
+    insert_nullable_cell_column,
+    open_store,
+)
 
 TRUTH = clone_truth()
 N_IN_CLONES = sum(CLONE_SIZES)
@@ -254,7 +259,7 @@ def test_expansion_crosses_columns_with_a_label_artifact(shared) -> None:
 def test_expansion_of_a_cell_selection_labels_its_cells(shared) -> None:
     store = shared.store
     d2 = TRUTH.samples == "d2"
-    store.cells.insert("is_d2", d2, overwrite=True)
+    store.cells.insert("is_d2", by_cell_id(store.cells, d2), overwrite=True)
     selection = store.snapshot_cell_selection("is_d2")
     ref = store.clones.expansion(shared.clones, cell_selection=selection)
     assert store.artifacts.inspect(ref).input_ref("cell_selection") == selection
@@ -279,7 +284,7 @@ def test_selected_cells_that_the_clones_do_not_hold_have_no_clone(
 ) -> None:
     store = shared.store
     d4 = TRUTH.samples == "d4"
-    store.cells.insert("is_d4", d4, overwrite=True)
+    store.cells.insert("is_d4", by_cell_id(store.cells, d4), overwrite=True)
     d4_clones = import_truth_clones(
         store, TRUTH, tmp_path, cell_selection=store.snapshot_cell_selection("is_d4")
     )
@@ -334,20 +339,28 @@ def test_expansion_is_reused_and_selected_like_labels(copied) -> None:
     # make the same groups, and the same labels again reuse it.
     by_sample = store.clones.expansion(clones, group_by="sample")
     renamed = np.where(TRUTH.samples == "d2", "x2", "x4").astype(object)
-    store.cells.insert("sample", renamed, overwrite=True)
+    store.cells.insert("sample", by_cell_id(store.cells, renamed), overwrite=True)
     assert store.clones.expansion(clones, group_by="sample") != by_sample
-    store.cells.insert("sample", TRUTH.samples.astype(object), overwrite=True)
+    store.cells.insert(
+        "sample", by_cell_id(store.cells, TRUTH.samples.astype(object)), overwrite=True
+    )
     assert store.clones.expansion(clones, group_by="sample") == by_sample
-    store.cells.insert("sample", TRUTH.samples[::-1].astype(object), overwrite=True)
+    store.cells.insert(
+        "sample",
+        by_cell_id(store.cells, TRUTH.samples[::-1].astype(object)),
+        overwrite=True,
+    )
     reversed_samples = store.clones.expansion(clones, group_by="sample")
     assert reversed_samples != by_sample
     # Renamed labels that keep every cell's group give another result too, and
     # the same labels again reuse it.
     renamed = np.where(TRUTH.samples[::-1] == "d2", "day2", "day4").astype(object)
-    store.cells.insert("sample", renamed, overwrite=True)
+    store.cells.insert("sample", by_cell_id(store.cells, renamed), overwrite=True)
     by_renamed = store.clones.expansion(clones, group_by="sample")
     assert by_renamed not in (by_sample, reversed_samples)
-    store.cells.insert("sample", renamed.copy(), overwrite=True)
+    store.cells.insert(
+        "sample", by_cell_id(store.cells, renamed.copy()), overwrite=True
+    )
     assert store.clones.expansion(clones, group_by="sample") == by_renamed
 
 
@@ -371,8 +384,12 @@ def test_cells_without_a_label_are_counted_in_no_group(copied) -> None:
 def test_expansion_refuses_groups_that_labels_with_commas_name_alike(copied) -> None:
     store = copied.store
     # "x, y" with "z" and "x" with "y, z" both read "x, y, z".
-    store.cells.insert("first", np.asarray(["x, y"] * 24 + ["x"] * 24))
-    store.cells.insert("second", np.asarray(["z"] * 24 + ["y, z"] * 24))
+    store.cells.insert(
+        "first", by_cell_id(store.cells, np.asarray(["x, y"] * 24 + ["x"] * 24))
+    )
+    store.cells.insert(
+        "second", by_cell_id(store.cells, np.asarray(["z"] * 24 + ["y, z"] * 24))
+    )
     with pytest.raises(ValueError, match="remove the commas"):
         store.clones.expansion(copied.clones, group_by=["first", "second"])
 
@@ -394,7 +411,9 @@ def test_group_columns_may_take_the_names_of_the_results_columns(copied) -> None
         "window",
         "group_clone_size",
     ):
-        store.cells.insert(name, TRUTH.samples.astype(object), overwrite=True)
+        store.cells.insert(
+            name, by_cell_id(store.cells, TRUTH.samples.astype(object)), overwrite=True
+        )
         loaded = store.clones.load_expansion(
             store.clones.expansion(copied.clones, group_by=name)
         )
@@ -489,7 +508,7 @@ def test_frequency_bounds_that_print_alike_get_names_of_their_own(shared) -> Non
 def test_the_group_keys_order_the_groups_naturally(copied) -> None:
     store = copied.store
     sites = np.where(TRUTH.samples == "d2", "s2", "s10").astype(object)
-    store.cells.insert("site", sites)
+    store.cells.insert("site", by_cell_id(store.cells, sites))
     loaded = store.clones.load_expansion(
         store.clones.expansion(copied.clones, group_by="site")
     )
@@ -566,7 +585,7 @@ def test_expansion_of_some_cells_measures_only_them(copied) -> None:
     store, clones = copied.store, copied.clones
     in_d2 = TRUTH.samples == "d2"
     n_d2 = int(in_d2.sum())
-    store.cells.insert("is_d2", in_d2, overwrite=True)
+    store.cells.insert("is_d2", by_cell_id(store.cells, in_d2), overwrite=True)
     d2 = store.snapshot_cell_selection("is_d2")
     saved = store.clones.expansion(clones, cell_selection=d2)
 
@@ -578,12 +597,14 @@ def test_expansion_refuses_cells_without_a_clone_and_a_group(copied) -> None:
     store = copied.store
     # Clones of no cell, a column without a label, and labels of the cells
     # without a clone.
-    store.cells.insert("no_clone", np.full(N_CELLS, "", dtype=object))
+    store.cells.insert(
+        "no_clone", by_cell_id(store.cells, np.full(N_CELLS, "", dtype=object))
+    )
     empty = store.clones.from_column("no_clone", cell_selection=copied.cells)
     insert_nullable_cell_column(
         store, "unlabeled", TRUTH.samples, np.ones(N_CELLS, dtype=bool)
     )
-    store.cells.insert("without_clone", TRUTH.clones < 0)
+    store.cells.insert("without_clone", by_cell_id(store.cells, TRUTH.clones < 0))
     others = store.snapshot_cluster_labels(
         "sample", cell_selection=store.snapshot_cell_selection("without_clone")
     )
@@ -612,7 +633,7 @@ def test_labels_that_a_source_keeps_apart_follow_the_measured_cells(shared) -> N
     cells, codes, kept = store._measured_clone_cells(labeled, None, ledger)
     assert cells == shared.cells and kept[0][1] is kinds
     d2 = TRUTH.samples == "d2"
-    store.cells.insert("is_d2", d2, overwrite=True)
+    store.cells.insert("is_d2", by_cell_id(store.cells, d2), overwrite=True)
     selection = store.snapshot_cell_selection("is_d2")
     cells, codes, kept = store._measured_clone_cells(labeled, selection, ledger)
     assert cells == selection
@@ -620,7 +641,7 @@ def test_labels_that_a_source_keeps_apart_follow_the_measured_cells(shared) -> N
     ((name, labels),) = kept
     assert name == "kind" and labels.tolist() == kinds[d2].tolist()
     # A measured cell that the clones do not hold has neither clone nor label.
-    store.cells.insert("is_d4", ~d2, overwrite=True)
+    store.cells.insert("is_d4", by_cell_id(store.cells, ~d2), overwrite=True)
     d4_clones = import_truth_clones(
         store,
         TRUTH,

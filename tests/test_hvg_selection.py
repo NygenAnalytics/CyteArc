@@ -12,6 +12,7 @@ from cytearc.features.variability import HVG_OPTION_NAMES, HvgOptions, hvg_optio
 from cytearc.storage.artifacts import ArtifactRef, artifact_path, inspect_artifact
 from cytearc.storage.errors import ArtifactResolutionError
 from cytearc.storage.selections import snapshot_run_metadata
+from tests.storage_helpers import by_cell_id
 
 
 @pytest.fixture(scope="module")
@@ -455,7 +456,7 @@ def test_select_hvgs_checks_counts_and_trend_options_before_writing(
     active = np.asarray(store.cells.fetch_all("I"), dtype=bool)
     subset = active.copy()
     subset[np.flatnonzero(active)[::2]] = False
-    store.cells.insert("hvg_subset", subset)
+    store.cells.insert("hvg_subset", by_cell_id(store.cells, subset))
     # New feature names and a selection without a feature summary, whose
     # snapshot and summary a late check would write.
     names = np.asarray([f"GENE_{index}" for index in range(store.RNA.feats.N)])

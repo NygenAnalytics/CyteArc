@@ -18,6 +18,7 @@ from tests.test_plotting_foundation import _ArrayAssay, _ArrayFeatures, _ArraySt
 from tests.test_plotting_modernization import _synthetic_plot_store
 from tests.test_plotting_perturbation import CLUSTERS, _clusters_record, _record_store
 from tests.test_plotting_raster import _GuardedMeta
+from tests.storage_helpers import by_cell_id
 
 embedding_module = import_module("cytearc.plotting.embedding")
 
@@ -49,8 +50,10 @@ def feature_plot_store(tmp_path_factory):
         "uint16",
     )
     store = DataStore(path, default_assay="RNA", min_features_per_cell=-1, nthreads=1)
-    store.cells.insert("group", np.repeat(["a", "b"], 12))
-    store.cells.insert("sample", np.tile(np.repeat(["s1", "s2"], 6), 2))
+    store.cells.insert("group", by_cell_id(store.cells, np.repeat(["a", "b"], 12)))
+    store.cells.insert(
+        "sample", by_cell_id(store.cells, np.tile(np.repeat(["s1", "s2"], 6), 2))
+    )
     return store
 
 
@@ -1012,6 +1015,7 @@ def test_mapping_confusion_rejects_text_only_label_matches():
     )
     transfer = SimpleNamespace(
         evidence=evidence,
+        cell_ids=np.asarray([f"q{row}" for row in range(len(evidence))]),
         threshold_fraction=0.5,
         max_distance=None,
     )
@@ -1022,7 +1026,7 @@ def test_mapping_confusion_rejects_text_only_label_matches():
         splt.mapping_confusion(
             store,
             SimpleNamespace(assay="RNA"),
-            known_labels=np.asarray(["1", "1", "2", "2"], dtype=object),
+            known_labels=pd.Series(["1", "1", "2", "2"], index=transfer.cell_ids),
             show=False,
         )
 
@@ -1037,6 +1041,7 @@ def test_mapping_confusion_rejects_an_abstention_label_that_names_a_class():
     )
     transfer = SimpleNamespace(
         evidence=evidence,
+        cell_ids=np.asarray([f"q{row}" for row in range(len(evidence))]),
         threshold_fraction=0.5,
         max_distance=None,
     )
@@ -1047,13 +1052,13 @@ def test_mapping_confusion_rejects_an_abstention_label_that_names_a_class():
         splt.mapping_confusion(
             store,
             SimpleNamespace(assay="RNA"),
-            known_labels=np.asarray(["Abstained", "T"], dtype=object),
+            known_labels=pd.Series(["Abstained", "T"], index=transfer.cell_ids),
             show=False,
         )
     plot = splt.mapping_confusion(
         store,
         SimpleNamespace(assay="RNA"),
-        known_labels=np.asarray(["Abstained", "T"], dtype=object),
+        known_labels=pd.Series(["Abstained", "T"], index=transfer.cell_ids),
         abstention_label="No label",
         show=False,
     )

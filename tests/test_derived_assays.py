@@ -17,7 +17,7 @@ from cytearc.assay.normalization import iter_feature_group_means
 from cytearc.datastore.datastore import DataStore
 from cytearc.metadata.membership import membership_attributes
 from cytearc.storage.count_matrix import CountMatrixPolicy
-from tests.storage_helpers import finalize_test_counts
+from tests.storage_helpers import by_cell_id, finalize_test_counts
 from cytearc.storage.schema import (
     PENDING_ASSAY_ATTR,
     create_cell_data,
@@ -354,7 +354,12 @@ def test_writers_refuse_a_source_with_a_pending_derived_assay(
     # column with the cell metadata as finished data.
     with pytest.raises(ValueError, match=message):
         if writer == "subset":
-            SubsetZarr(str(destination), [store.RNA], cell_idx=np.arange(4), nthreads=1)
+            SubsetZarr(
+                str(destination),
+                [store.RNA],
+                cell_ids=store.cells.fetch_all("ids")[:4],
+                nthreads=1,
+            )
         elif writer == "merge":
             DataStoreMerge(
                 [store, store], str(destination), ["first", "second"], nthreads=1
@@ -383,7 +388,9 @@ def test_an_interrupted_derived_assay_is_discarded_with_its_membership(tmp_path)
     np.testing.assert_array_equal(reopened.cells.fetch_all("MODULES_I"), _MEMBERS)
     # The pending assay owns the column, so it cannot be rewritten or dropped.
     with pytest.raises(ValueError, match="reserved for the membership of assay"):
-        reopened.cells.insert("MODULES_I", ~_MEMBERS, overwrite=True)
+        reopened.cells.insert(
+            "MODULES_I", by_cell_id(reopened.cells, ~_MEMBERS), overwrite=True
+        )
     with pytest.raises(ValueError, match="records which cells assay 'MODULES'"):
         reopened.cells.drop("MODULES_I")
 

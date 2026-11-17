@@ -29,7 +29,7 @@ from tests.clone_helpers import (
     write_cells_store,
     write_truth_store,
 )
-from tests.storage_helpers import copy_store, open_store
+from tests.storage_helpers import by_cell_id, copy_store, open_store
 from tests.clone_truth import (
     CLONE_SIZES,
     N_CELLS,
@@ -527,7 +527,9 @@ def test_repeated_rows_of_one_cell_and_clone_count_the_cell_once(
 
 
 def test_a_subset_of_cells_holds_only_its_clones(shared, tmp_path) -> None:
-    shared.store.cells.insert("day_two", TRUTH.samples == "d2", overwrite=True)
+    shared.store.cells.insert(
+        "day_two", by_cell_id(shared.store.cells, TRUTH.samples == "d2"), overwrite=True
+    )
     day_two = shared.store.snapshot_cell_selection("day_two")
     path = write_trex(TRUTH, tmp_path / "clones.txt")
 
@@ -705,7 +707,9 @@ def test_import_refuses_files_it_cannot_read(shared, tmp_path) -> None:
     with pytest.raises(TypeError, match="paths must be a path"):
         shared.store.clones.import_clones(3, cell_selection=cells)
     nobody = shared.store.cells.insert(
-        "nobody", np.zeros(N_CELLS, dtype=bool), overwrite=True
+        "nobody",
+        by_cell_id(shared.store.cells, np.zeros(N_CELLS, dtype=bool)),
+        overwrite=True,
     )
     assert nobody is None
     with pytest.raises(ValueError, match="selects no cell"):
@@ -927,7 +931,7 @@ def test_labels_that_a_clone_table_reads_as_no_clone_export_only_as_a_matrix(
         ],
         dtype=object,
     )
-    store.cells.insert("lineage", labels)
+    store.cells.insert("lineage", by_cell_id(store.cells, labels))
     ref = store.clones.from_column("lineage", cell_selection=cells)
 
     # A clone table would read these labels back as cells without a clone.
@@ -994,7 +998,7 @@ def test_clones_come_from_a_cell_metadata_column(store) -> None:
         TRUTH.clones >= 0, np.char.add("L", TRUTH.clones.astype(str)), ""
     ).astype(object)
     labels[np.flatnonzero(TRUTH.clones < 0)[:2]] = None
-    store.cells.insert("lineage", labels)
+    store.cells.insert("lineage", by_cell_id(store.cells, labels))
 
     ref = store.clones.from_column("lineage", cell_selection=cells)
 
@@ -1008,7 +1012,7 @@ def test_clones_come_from_a_cell_metadata_column(store) -> None:
     # Editing the column gives new clones.
     edited = labels.copy()
     edited[np.flatnonzero(TRUTH.clones == 0)[0]] = "L7"
-    store.cells.insert("lineage", edited, overwrite=True)
+    store.cells.insert("lineage", by_cell_id(store.cells, edited), overwrite=True)
     changed = store.clones.from_column("lineage", cell_selection=cells)
     assert changed != ref
     assert store.clones.load_clones(changed).clones["n_cells"].tolist()[0] == 8
@@ -1017,14 +1021,14 @@ def test_clones_come_from_a_cell_metadata_column(store) -> None:
 def test_numeric_label_columns_name_clones_by_whole_numbers(store) -> None:
     cells = every_cell(store)
     values = np.where(TRUTH.clones >= 0, TRUTH.clones + 10.0, np.nan)
-    store.cells.insert("lineage_number", values)
+    store.cells.insert("lineage_number", by_cell_id(store.cells, values))
 
     ref = store.clones.from_column("lineage_number", cell_selection=cells)
 
     assert store.clones.load_clones(ref).clones["clone"].tolist() == [
         str(clone + 10) for clone in range(len(CLONE_SIZES))
     ]
-    store.cells.insert("fraction", np.full(N_CELLS, 0.5))
+    store.cells.insert("fraction", by_cell_id(store.cells, np.full(N_CELLS, 0.5)))
     with pytest.raises(TypeError, match="text or whole numbers, not 0.5"):
         store.clones.from_column("fraction", cell_selection=cells)
     with pytest.raises(ValueError, match="'absent' is not a cell metadata column"):
@@ -1040,14 +1044,18 @@ def test_numeric_label_columns_name_clones_by_whole_numbers(store) -> None:
 
 
 def test_labels_of_a_column_larger_than_the_budget_are_refused(store) -> None:
-    store.cells.insert("lineage_text", TRUTH.clones.astype(str).astype(object))
+    store.cells.insert(
+        "lineage_text", by_cell_id(store.cells, TRUTH.clones.astype(str).astype(object))
+    )
     store.memoryBytes = 1_000
     with pytest.raises(MemoryError, match="memory budget of 1000 bytes"):
         store.clones.from_column("lineage_text", cell_selection=every_cell(store))
 
 
 def test_a_column_without_labels_saves_no_clone(store) -> None:
-    store.cells.insert("empty_lineage", np.full(N_CELLS, "", dtype=object))
+    store.cells.insert(
+        "empty_lineage", by_cell_id(store.cells, np.full(N_CELLS, "", dtype=object))
+    )
     ref = store.clones.from_column("empty_lineage", cell_selection=every_cell(store))
     loaded = store.clones.load_clones(ref)
     assert loaded.clones.empty
@@ -1069,7 +1077,7 @@ def _long_label_store(tmp_path: Path) -> SimpleNamespace:
     store = write_cells_store(tmp_path / "store.zarr", ids)
     labels = np.asarray([f"L{index}" for index in range(_N_LONG)], dtype=object)
     labels[-1] = "X" * 5_000
-    store.cells.insert("lineage", labels)
+    store.cells.insert("lineage", by_cell_id(store.cells, labels))
     table = tmp_path / "clones.csv"
     table.write_text(
         "Cell_ID,Clone_ID\n"

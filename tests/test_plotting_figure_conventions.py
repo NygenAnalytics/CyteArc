@@ -51,6 +51,7 @@ from tests.clone_helpers import (
 )
 from tests.clone_truth import N_CELLS, clone_truth, receptor_truth
 from tests.storage_helpers import (
+    by_cell_id,
     insert_nullable_cell_column,
     open_store,
     write_count_store,
@@ -265,14 +266,24 @@ def many(tmp_path_factory) -> SimpleNamespace:
     write_count_store(str(path), {"RNA": np.ones((N_MANY, 3), dtype=int)}, "uint16")
     store = open_store(path)
     store.cells.insert(
-        "clone", np.asarray([f"k{i // 2:03d}" for i in range(N_MANY)], dtype=object)
+        "clone",
+        by_cell_id(
+            store.cells,
+            np.asarray([f"k{i // 2:03d}" for i in range(N_MANY)], dtype=object),
+        ),
     )
     store.cells.insert(
-        "cell", np.asarray([f"cell{i:03d}" for i in range(N_MANY)], dtype=object)
+        "cell",
+        by_cell_id(
+            store.cells,
+            np.asarray([f"cell{i:03d}" for i in range(N_MANY)], dtype=object),
+        ),
     )
-    store.cells.insert("even", np.arange(N_MANY) % 2 == 0)
-    store.cells.insert("odd", np.arange(N_MANY) % 2 == 1)
-    store.cells.insert("every_cell", np.ones(N_MANY, dtype=bool))
+    store.cells.insert("even", by_cell_id(store.cells, np.arange(N_MANY) % 2 == 0))
+    store.cells.insert("odd", by_cell_id(store.cells, np.arange(N_MANY) % 2 == 1))
+    store.cells.insert(
+        "every_cell", by_cell_id(store.cells, np.ones(N_MANY, dtype=bool))
+    )
     clones = store.clones.from_column(
         "clone", cell_selection=store.snapshot_cell_selection("every_cell")
     )
@@ -346,11 +357,18 @@ def long_names(tmp_path_factory) -> SimpleNamespace:
     ids = [f"cell{i:03d}" for i in range(300)]
     store = write_cells_store(folder / "store.zarr", ids)
     store.cells.insert(
-        "cell_type", np.asarray(LONG_NAMES, dtype=object)[np.arange(300) % 5]
+        "cell_type",
+        by_cell_id(
+            store.cells, np.asarray(LONG_NAMES, dtype=object)[np.arange(300) % 5]
+        ),
     )
     clone_of = np.arange(300) // 3
     store.cells.insert(
-        "clone", np.asarray([f"k{clone:03d}" for clone in clone_of], dtype=object)
+        "clone",
+        by_cell_id(
+            store.cells,
+            np.asarray([f"k{clone:03d}" for clone in clone_of], dtype=object),
+        ),
     )
     cells = every_cell(store)
     contigs = write_clone_contigs(folder, "contigs.csv", ids, clone_of)
@@ -572,7 +590,11 @@ def test_label_artifacts_color_groups_over_all_their_labels(truth) -> None:
     labels = store.snapshot_cluster_labels(
         "cell_type", cell_selection=every_cell(store)
     )
-    store.cells.insert("not_monocyte", TRUTH.cell_types != "Monocyte", overwrite=True)
+    store.cells.insert(
+        "not_monocyte",
+        by_cell_id(store.cells, TRUTH.cell_types != "Monocyte"),
+        overwrite=True,
+    )
     every = store.plots.clone_abundance(clones, groups=labels, show=False)
     # Without the monocytes, the first label, the two other types keep the
     # second and third colors, which colors over the groups drawn would
@@ -1050,7 +1072,11 @@ def many_receptors(tmp_path_factory) -> SimpleNamespace:
         contigs, cell_selection=every_cell(store)
     )
     store.cells.insert(
-        "own", np.asarray([f"g{i:03d}" for i in range(N_GROUPS)], dtype=object)
+        "own",
+        by_cell_id(
+            store.cells,
+            np.asarray([f"g{i:03d}" for i in range(N_GROUPS)], dtype=object),
+        ),
     )
     return SimpleNamespace(store=store, receptors=receptors)
 
@@ -1110,7 +1136,9 @@ def test_repertoire_figures_with_nothing_to_draw_raise(repertoire) -> None:
         insert_nullable_cell_column(
             store, "unlabeled", TRUTH.samples, np.ones(N_CELLS, dtype=bool)
         )
-    store.cells.insert("nobody", np.zeros(N_CELLS, dtype=bool), overwrite=True)
+    store.cells.insert(
+        "nobody", by_cell_id(store.cells, np.zeros(N_CELLS, dtype=bool)), overwrite=True
+    )
     nobody = store.snapshot_cell_selection("nobody")
     plots = store.plots
     barcodes = store.clones.load_barcodes(repertoire.barcodes)
@@ -1353,7 +1381,11 @@ def test_bars_of_a_locus_take_the_locus_color(repertoire) -> None:
 
 def test_a_spectratype_of_some_cells_keeps_each_groups_color(repertoire) -> None:
     store, receptors = repertoire.store, repertoire.receptors
-    store.cells.insert("not_monocyte", TRUTH.cell_types != "Monocyte", overwrite=True)
+    store.cells.insert(
+        "not_monocyte",
+        by_cell_id(store.cells, TRUTH.cell_types != "Monocyte"),
+        overwrite=True,
+    )
     full = store.plots.spectratype(
         store.repertoire.spectratype(receptors, group_by="cell_type"), show=False
     )
@@ -1938,7 +1970,11 @@ def many_variant_groups(tmp_path_factory) -> SimpleNamespace:
     ids = [f"cell{i:03d}" for i in range(N_VARIANT_GROUPS)]
     store = write_cells_store(folder / "store.zarr", ids)
     store.cells.insert(
-        "own", np.asarray([f"g{i:03d}" for i in range(N_VARIANT_GROUPS)], dtype=object)
+        "own",
+        by_cell_id(
+            store.cells,
+            np.asarray([f"g{i:03d}" for i in range(N_VARIANT_GROUPS)], dtype=object),
+        ),
     )
     umis = np.random.default_rng(11).integers(0, 4, size=(N_VARIANT_GROUPS, 3, 2))
     counts = store.variants.import_counts(
@@ -2003,9 +2039,12 @@ def test_depth_legends_of_many_groups_fit_beside_their_panel(
     if column not in store.cells.columns:
         store.cells.insert(
             column,
-            np.asarray(
-                [f"g{cell % n_groups:03d}" for cell in range(N_VARIANT_GROUPS)],
-                dtype=object,
+            by_cell_id(
+                store.cells,
+                np.asarray(
+                    [f"g{cell % n_groups:03d}" for cell in range(N_VARIANT_GROUPS)],
+                    dtype=object,
+                ),
             ),
         )
     result = store.plots.variant_depth(
@@ -2054,7 +2093,11 @@ def test_variant_figures_with_nothing_to_draw_raise(variants, tmp_path) -> None:
         insert_nullable_cell_column(
             store, "unlabeled", TRUTH.samples, np.ones(N_CELLS, dtype=bool)
         )
-    store.cells.insert("only_first_cell", np.arange(N_CELLS) == 0, overwrite=True)
+    store.cells.insert(
+        "only_first_cell",
+        by_cell_id(store.cells, np.arange(N_CELLS) == 0),
+        overwrite=True,
+    )
     nobody = tmp_path / "nobody.tsv"
     nobody.write_text("BC\twtUMIs\tmutUMIs\nnobody\t1\t0\n")
     with warnings.catch_warnings():

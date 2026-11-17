@@ -1244,7 +1244,7 @@ def test_subset_preserves_gene_activity_alias(tmp_path):
     SubsetZarr(
         out,
         [store.GeneActivity],
-        cell_idx=np.array([0, 2]),
+        cell_ids=store.cells.fetch_all("ids")[[0, 2]],
         overwrite_existing_file=True,
     ).dump()
     subset_root = zarr.open_group(out, mode="r")

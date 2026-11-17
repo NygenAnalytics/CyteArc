@@ -1321,7 +1321,7 @@ def test_subset_and_repack_keep_the_source_dtype(tmp_path, dtype):
     SubsetZarr(
         str(tmp_path / "subset.zarr"),
         assays=[store.RNA],
-        cell_idx=np.arange(_VALUES.shape[0]),
+        cell_ids=store.cells.fetch_all("ids"),
         nthreads=1,
     ).dump()
     repack_store(str(source), str(tmp_path / "repacked.zarr"), data_only=True)
@@ -1364,7 +1364,7 @@ def _rebuild(writer: str, directory: Path, source: Path, **options: Any) -> zarr
         SubsetZarr(
             destination,
             assays=[store.RNA],
-            cell_idx=np.arange(store.cells.N),
+            cell_ids=store.cells.fetch_all("ids"),
             nthreads=1,
             **options,
         ).dump()

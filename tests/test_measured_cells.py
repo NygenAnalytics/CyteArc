@@ -48,7 +48,7 @@ from cytearc.metadata.selection import CellField, FeatureRef, NormalizationSpec
 from cytearc.storage.artifacts import ArtifactRef, fingerprint_array, list_artifacts
 from cytearc.writers._store import write_membership_column
 from tests.fixtures_datastore import build_neighborhood_graph
-from tests.storage_helpers import write_count_store
+from tests.storage_helpers import by_cell_id, write_count_store
 from tests.test_hto import planted_hto_counts
 from tests.test_mapping_reference import mapping_counts
 
@@ -165,12 +165,19 @@ def measured(tmp_path_factory) -> _MeasuredStore:
     membership = np.asarray(store.cells.fetch_all("RNA_I"), dtype=bool)
     assert int(membership.sum()) == _N_FULL
     store.cells.insert(
-        "program", np.array([f"p{index % 4}" for index in range(_N_CELLS)])
+        "program",
+        by_cell_id(
+            store.cells, np.array([f"p{index % 4}" for index in range(_N_CELLS)])
+        ),
     )
-    store.cells.insert("adt_cells", ~membership)
+    store.cells.insert("adt_cells", by_cell_id(store.cells, ~membership))
     # A live layout: x is the cell's row.
-    store.cells.insert("xy1", np.arange(_N_CELLS, dtype=np.float64))
-    store.cells.insert("xy2", (np.arange(_N_CELLS) % 7).astype(np.float64))
+    store.cells.insert(
+        "xy1", by_cell_id(store.cells, np.arange(_N_CELLS, dtype=np.float64))
+    )
+    store.cells.insert(
+        "xy2", by_cell_id(store.cells, (np.arange(_N_CELLS) % 7).astype(np.float64))
+    )
 
     refs: dict[str, ArtifactRef] = {"all": store.snapshot_cell_selection("I")}
     for assay in _PARTIAL:
@@ -368,8 +375,8 @@ _GRAPH = "Build the graph over a selection of measured cells"
 _CELL_KEY = (
     "Pass as cell_key a boolean cell column that is True only for the cells of "
     "'I' that it measured, such as 'RNA_measured' after "
-    "`ds.cells.insert('RNA_measured', ds.cells.fetch_all('I') & "
-    "ds.cells.fetch_all('RNA_I'))`."
+    "`ds.cells.insert('RNA_measured', pandas.Series(ds.cells.fetch_all('I') & "
+    "ds.cells.fetch_all('RNA_I'), index=ds.cells.fetch_all('ids')))`."
 )
 
 
@@ -379,8 +386,9 @@ def _cells_remedy(assay: str) -> str:
         f"Pass as cells the selection from `select_measured_cells('{assay}', "
         "cell_selection=...)`, or a boolean cell column that is True only for the "
         f"cells of 'I' that it measured, such as '{assay}_measured' after "
-        f"`ds.cells.insert('{assay}_measured', ds.cells.fetch_all('I') & "
-        f"ds.cells.fetch_all('{assay}_I'))`."
+        f"`ds.cells.insert('{assay}_measured', pandas.Series("
+        f"ds.cells.fetch_all('I') & ds.cells.fetch_all('{assay}_I'), "
+        "index=ds.cells.fetch_all('ids')))`."
     )
 
 
@@ -797,9 +805,10 @@ def test_fully_measured_stores_keep_their_identities(tmp_path) -> None:
 def test_the_pipeline_runs_over_the_cells_that_its_remedy_names(measured) -> None:
     store = measured.open()
     # The column that the remedy writes holds the cells of I that RNA measured.
-    store.cells.insert(
-        "RNA_measured", store.cells.fetch_all("I") & store.cells.fetch_all("RNA_I")
-    )
+    # Run the insert that the remedy names, as a user would copy it.
+    remedy = _CELL_KEY.rsplit("`", 2)[1]
+    assert remedy.startswith("ds.cells.insert('RNA_measured', pandas.Series(")
+    eval(remedy, {"ds": store, "pandas": pd})
     run = store.pipeline.rna(label="measured", cells="RNA_measured", **_PIPELINE)
 
     assert run.status == "completed"
@@ -1095,14 +1104,27 @@ def _merge_partial_rna(base: Path) -> Path:
     DataStoreMerge(sources, str(path), ["full", "adt"], nthreads=1).dump()
     store = _open(path)
     n_cells = store.cells.N
-    store.cells.insert("grp", np.where(np.arange(n_cells) % 2 == 0, "g0", "g1"))
-    ids = np.asarray(store.cells.fetch_all("ids")).astype(str)
-    store.cells.insert("source", np.array([value.split("__")[0] for value in ids]))
     store.cells.insert(
-        "adt_only", ~np.asarray(store.cells.fetch_all("RNA_I"), dtype=bool)
+        "grp",
+        by_cell_id(store.cells, np.where(np.arange(n_cells) % 2 == 0, "g0", "g1")),
     )
-    store.cells.insert("xy1", np.arange(n_cells, dtype=np.float64))
-    store.cells.insert("xy2", (np.arange(n_cells) % 7).astype(np.float64))
+    ids = np.asarray(store.cells.fetch_all("ids")).astype(str)
+    store.cells.insert(
+        "source",
+        by_cell_id(store.cells, np.array([value.split("__")[0] for value in ids])),
+    )
+    store.cells.insert(
+        "adt_only",
+        by_cell_id(
+            store.cells, ~np.asarray(store.cells.fetch_all("RNA_I"), dtype=bool)
+        ),
+    )
+    store.cells.insert(
+        "xy1", by_cell_id(store.cells, np.arange(n_cells, dtype=np.float64))
+    )
+    store.cells.insert(
+        "xy2", by_cell_id(store.cells, (np.arange(n_cells) % 7).astype(np.float64))
+    )
     return path
 
 
@@ -1317,7 +1339,9 @@ def test_plots_record_the_cells_that_an_assay_did_not_measure(partial_rna) -> No
     # Unmeasured cells without a group join no summary, so none is recorded.
     store.cells.insert(
         "rna_grp",
-        np.where(np.arange(_N_RNA) % 2 == 0, "g0", "g1"),
+        by_cell_id(
+            store.cells, np.where(np.arange(_N_RNA) % 2 == 0, "g0", "g1"), key="RNA_I"
+        ),
         key="RNA_I",
         overwrite=True,
     )
@@ -1406,7 +1430,7 @@ def test_quality_control_refuses_metrics_of_unmeasured_cells(tmp_path) -> None:
     assert store.artifacts.load(store.qc.filter(["ADT_nCounts"], [0], [None]))[
         "values"
     ][:].all()
-    store.cells.insert("RNA_score", np.ones(store.cells.N))
+    store.cells.insert("RNA_score", by_cell_id(store.cells, np.ones(store.cells.N)))
     assert store.artifacts.load(store.qc.filter(["RNA_score"], [0], [None]))["values"][
         :
     ].all()

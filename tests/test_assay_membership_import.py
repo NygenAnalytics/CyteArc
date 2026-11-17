@@ -440,7 +440,10 @@ def _subset_membership(
 
     _sources, merged = partial
     SubsetZarr(
-        store, [merged.RNA, merged.ADT], cell_idx=np.arange(5), nthreads=1
+        store,
+        [merged.RNA, merged.ADT],
+        cell_ids=merged.cells.fetch_all("ids")[:5],
+        nthreads=1,
     ).dump()
     return "RNA"
 

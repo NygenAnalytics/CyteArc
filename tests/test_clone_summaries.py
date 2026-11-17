@@ -67,7 +67,7 @@ from tests.clone_truth import (
     without_single_cell_clones,
     write_newick,
 )
-from tests.storage_helpers import insert_nullable_cell_column
+from tests.storage_helpers import by_cell_id, insert_nullable_cell_column
 from tests.variant_truth import (
     clone_variant_truth,
     genotype_clone_truth,
@@ -268,8 +268,8 @@ def test_every_source_says_how_it_labels_the_truths_clones() -> None:
 def source(request, tmp_path_factory) -> SimpleNamespace:
     folder = tmp_path_factory.mktemp(request.param.replace(" ", "_"))
     store = write_truth_store(folder / "store.zarr", TRUTH)
-    store.cells.insert("is_d2", TRUTH.samples == "d2")
-    store.cells.insert("is_d4", TRUTH.samples == "d4")
+    store.cells.insert("is_d2", by_cell_id(store.cells, TRUTH.samples == "d2"))
+    store.cells.insert("is_d4", by_cell_id(store.cells, TRUTH.samples == "d4"))
     insert_nullable_cell_column(
         store, "unlabeled", TRUTH.samples, np.ones(N_CELLS, dtype=bool)
     )
@@ -885,7 +885,9 @@ def test_summaries_grouped_by_a_column_named_like_their_own_columns(source) -> N
         # The samples under the summaries' own column name measure what the
         # samples do, and the joins give each row its sample, and the labels
         # that the clones keep apart.
-        store.cells.insert(name, TRUTH.samples.astype(object), overwrite=True)
+        store.cells.insert(
+            name, by_cell_id(store.cells, TRUTH.samples.astype(object)), overwrite=True
+        )
         for found, expected in zip(
             _summaries(store, source.clones, group_by=name), neutral, strict=True
         ):
@@ -917,7 +919,11 @@ def test_summaries_grouped_by_a_column_named_like_their_own_columns(source) -> N
         assert joined[grouped].tolist() == TRUTH.samples[grouped].tolist()
         assert joined[~grouped].isna().all()
         # The fates under the name measure what the cell types do.
-        store.cells.insert(name, TRUTH.cell_types.astype(object), overwrite=True)
+        store.cells.insert(
+            name,
+            by_cell_id(store.cells, TRUTH.cell_types.astype(object)),
+            overwrite=True,
+        )
         bias = _fate_bias(store, source.clones, group_by=name)
         _assert_same_tables(bias, neutral_bias)
         assert bias.group_keys.columns.tolist() == [name, *source.kept_apart]
@@ -933,7 +939,9 @@ def test_fates_named_like_the_tables_columns_keep_their_shares(source, name) -> 
     # The monocytes' fate takes a name of the tables' own columns, which the
     # tables hold as a value; every share stays that of the cell types.
     renamed = np.where(TRUTH.cell_types == "Monocyte", name, TRUTH.cell_types)
-    store.cells.insert("named_fate", renamed.astype(object), overwrite=True)
+    store.cells.insert(
+        "named_fate", by_cell_id(store.cells, renamed.astype(object)), overwrite=True
+    )
     bias = _fate_bias(store, source.clones, group_by="named_fate")
     names = {
         fate: fate.replace("Monocyte", name, 1) if fate.startswith("Monocyte") else fate

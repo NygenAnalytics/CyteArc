@@ -32,6 +32,7 @@ from cytearc.writers import (
 )
 from tests.test_seurat_reader import _Wire, _legacy_assay
 from tests.test_writers import _write_h5ad
+from tests.storage_helpers import by_cell_id
 
 _CELLS = ["c1", "c2", "c3"]
 
@@ -747,7 +748,7 @@ def test_subset_refuses_its_source_even_when_it_is_not_prepared(tmp_path) -> Non
             SubsetZarr(
                 destination,
                 assays=[dataset.RNA],
-                cell_idx=np.array([0]),
+                cell_ids=["c1"],
                 overwrite_existing_file=True,
                 nthreads=1,
             )
@@ -761,7 +762,7 @@ def test_subset_refuses_a_destination_that_overlaps_its_source(tmp_path) -> None
         SubsetZarr(
             f"{on_disk}/nested.zarr",
             assays=[dataset.RNA],
-            cell_idx=np.array([0]),
+            cell_ids=["c1"],
             nthreads=1,
         )
 
@@ -771,7 +772,7 @@ def test_subset_refuses_a_destination_that_overlaps_its_source(tmp_path) -> None
         SubsetZarr(
             in_memory,
             assays=[dataset.RNA],
-            cell_idx=np.array([0]),
+            cell_ids=["c1"],
             overwrite_existing_file=True,
             nthreads=1,
         )
@@ -781,7 +782,7 @@ def test_subset_refuses_a_destination_that_overlaps_its_source(tmp_path) -> None
         SubsetZarr(
             MemoryStore(in_memory._store_dict),
             assays=[dataset.RNA],
-            cell_idx=np.array([0]),
+            cell_ids=["c1"],
             overwrite_existing_file=True,
             nthreads=1,
         )
@@ -789,38 +790,75 @@ def test_subset_refuses_a_destination_that_overlaps_its_source(tmp_path) -> None
 
 
 @pytest.mark.parametrize(
-    ("cell_idx", "message"),
+    ("cell_ids", "error", "message"),
     [
-        # A repeated index would write a store whose cell IDs repeat.
-        (np.array([1, 1]), "cannot contain duplicate indices"),
-        # An empty index used to fail inside Python's max(), and an empty
-        # list was reported as an array of the wrong dtype.
-        (np.array([], dtype=np.int64), "cannot be empty"),
-        ([], "cannot be empty"),
-        # A negative index wrapped around, so -4 repeated the first cell.
-        (np.array([0, -4]), "cannot contain negative indices"),
+        # A repeated cell would write a store whose cell IDs repeat.
+        (["c2", "c3", "c2"], ValueError, "cell_ids repeats 1 cell IDs, such as 'c2'"),
+        (np.array([], dtype=str), ValueError, "cell_ids is empty"),
+        ([], ValueError, "cell_ids is empty"),
+        (
+            ["c1", "c9", "c8"],
+            ValueError,
+            "2 of the 3 values of cell_ids are not cell IDs of the store, such as 'c9'",
+        ),
+        # Row positions, which the replaced cell_idx took, are not cell IDs.
+        (np.array([0, 2]), ValueError, "such as 0; pass IDs such as those of"),
+        ("c1", TypeError, "one-dimensional sequence of cell IDs"),
+        ([["c1"], ["c2"]], TypeError, r"of shape \(2, 1\)"),
     ],
-    ids=["repeated", "empty", "empty-list", "negative"],
+    ids=["repeated", "empty", "empty-list", "unknown", "positions", "text", "2d"],
 )
-def test_subset_rejects_invalid_cell_indices(cell_idx, message) -> None:
+def test_subset_rejects_invalid_cell_ids(cell_ids, error, message) -> None:
     dataset = _subset_source(MemoryStore())
     destination = _sentinel_store()
-    with pytest.raises(ValueError, match=message):
+    with pytest.raises(error, match=message):
         SubsetZarr(
             destination,
             assays=[dataset.RNA],
-            cell_idx=cell_idx,
+            cell_ids=cell_ids,
             overwrite_existing_file=True,
             nthreads=1,
         )
     assert _untouched(destination)
 
 
+@pytest.mark.parametrize(
+    "cell_ids",
+    [["c4", "c1", "c3"], np.array(["c3", "c4", "c1"]), pd.Index(["c1", "c3", "c4"])],
+    ids=["reversed-list", "shuffled-array", "sorted-index"],
+)
+def test_subset_by_cell_ids_keeps_store_order(cell_ids) -> None:
+    dataset = _subset_source(MemoryStore())
+    destination = MemoryStore()
+
+    SubsetZarr(destination, assays=[dataset.RNA], cell_ids=cell_ids, nthreads=1).dump()
+
+    root = zarr.open_group(store=destination, mode="r")
+    # Whatever order the IDs come in, the subset holds rows 0, 2 and 3.
+    np.testing.assert_array_equal(root["cellData/ids"][:], ["c1", "c3", "c4"])
+    np.testing.assert_array_equal(root["RNA/counts"][:], _SUBSET_COUNTS[[0, 2, 3]])
+    np.testing.assert_array_equal(root["RNA/countsT"][:], _SUBSET_COUNTS[[0, 2, 3]].T)
+
+
+def test_subset_cell_ids_refuse_ids_that_the_store_repeats() -> None:
+    dataset = _subset_source(MemoryStore())
+    ids = dataset.cells.locations["primary"]["ids"]
+    ids[:] = np.array(["c1", "c2", "c1", "c4"])
+    destination = _sentinel_store()
+
+    with pytest.raises(ValueError, match="holds cell ID 'c1' in more than one row"):
+        SubsetZarr(destination, assays=[dataset.RNA], cell_ids=["c1"], nthreads=1)
+    assert _untouched(destination)
+    # IDs that the store holds once still select their cells.
+    writer = SubsetZarr(MemoryStore(), assays=[dataset.RNA], cell_ids=["c4", "c2"])
+    np.testing.assert_array_equal(writer.cellIdx, [1, 3])
+
+
 def test_subset_by_a_cell_key_without_selected_cells_writes_no_cells() -> None:
     # A key is data, not an index argument: one that selects no cells writes
     # a store without cells, as an import of a source without cells does.
     dataset = _subset_source(MemoryStore())
-    dataset.cells.insert("none", np.zeros(4, dtype=bool))
+    dataset.cells.insert("none", by_cell_id(dataset.cells, np.zeros(4, dtype=bool)))
     destination = MemoryStore()
     SubsetZarr(destination, assays=[dataset.RNA], cell_key="none", nthreads=1).dump()
 
@@ -845,12 +883,14 @@ def test_subset_by_a_cell_key_without_selected_cells_writes_no_cells() -> None:
 )
 def test_subset_keeps_the_source_cell_filter_unless_reset(reset, expected) -> None:
     dataset = _subset_source(MemoryStore())
-    dataset.cells.update_key(np.array([True, False, True, False]), key="I")
+    dataset.cells.update_key(
+        by_cell_id(dataset.cells, np.array([True, False, True, False])), key="I"
+    )
     destination = MemoryStore()
     SubsetZarr(
         destination,
         assays=[dataset.RNA],
-        cell_idx=np.array([0, 1, 2]),
+        cell_ids=["c1", "c2", "c3"],
         reset_cell_filter=reset,
         nthreads=1,
     ).dump()

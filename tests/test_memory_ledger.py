@@ -35,6 +35,7 @@ from cytearc.utils.memory_budget import (
 from tests.memory_helpers import (
     named_budget,
 )
+from tests.storage_helpers import by_cell_id
 
 
 # The ledger
@@ -528,10 +529,15 @@ def labeled_store(tmp_path_factory):
     n_cells = 50_000
     write_count_store(str(path), {"RNA": np.ones((n_cells, 1), dtype=int)}, "uint16")
     store = open_store(path)
-    store.cells.insert("every_cell", np.ones(n_cells, dtype=bool))
-    store.cells.insert("half", np.arange(n_cells) % 2 == 0)
     store.cells.insert(
-        "cluster", np.asarray([f"cluster_{i % 30:03d}" for i in range(n_cells)])
+        "every_cell", by_cell_id(store.cells, np.ones(n_cells, dtype=bool))
+    )
+    store.cells.insert("half", by_cell_id(store.cells, np.arange(n_cells) % 2 == 0))
+    store.cells.insert(
+        "cluster",
+        by_cell_id(
+            store.cells, np.asarray([f"cluster_{i % 30:03d}" for i in range(n_cells)])
+        ),
     )
     every = store.snapshot_cell_selection("every_cell")
     return store, store.snapshot_cluster_labels("cluster", cell_selection=every)
@@ -563,11 +569,18 @@ def sparse_labels(tmp_path_factory):
     n_cells = 500_000
     write_count_store(str(path), {"RNA": np.ones((n_cells, 1), dtype=int)}, "uint16")
     store = open_store(path)
-    store.cells.insert("every_cell", np.ones(n_cells, dtype=bool))
-    store.cells.insert("first", np.arange(n_cells) < 100)
-    store.cells.insert("first_thousand", np.arange(n_cells) < 1_000)
     store.cells.insert(
-        "cluster", np.asarray([f"cluster_{i % 30:03d}" for i in range(n_cells)])
+        "every_cell", by_cell_id(store.cells, np.ones(n_cells, dtype=bool))
+    )
+    store.cells.insert("first", by_cell_id(store.cells, np.arange(n_cells) < 100))
+    store.cells.insert(
+        "first_thousand", by_cell_id(store.cells, np.arange(n_cells) < 1_000)
+    )
+    store.cells.insert(
+        "cluster",
+        by_cell_id(
+            store.cells, np.asarray([f"cluster_{i % 30:03d}" for i in range(n_cells)])
+        ),
     )
     first = store.snapshot_cell_selection("first")
     labels = {

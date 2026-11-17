@@ -25,7 +25,7 @@ from tests.clone_helpers import (
 )
 from tests.clone_truth import N_CELLS, clone_truth, number_label
 from cytearc.utils.memory_budget import MemoryBudgetError
-from tests.storage_helpers import copy_store, insert_nullable_cell_column
+from tests.storage_helpers import by_cell_id, copy_store, insert_nullable_cell_column
 
 TRUTH = clone_truth()
 SAMPLES = ("d2", "d4")
@@ -43,8 +43,11 @@ def template(tmp_path_factory) -> SimpleNamespace:
     folder = tmp_path_factory.mktemp("clone_overlap")
     store = write_truth_store(folder / "store.zarr", TRUTH)
     clones = import_truth_clones(store, TRUTH, folder)
-    store.cells.insert("is_d2", TRUTH.samples == "d2")
-    store.cells.insert("cell", np.asarray([f"c{at:02d}" for at in range(N_CELLS)]))
+    store.cells.insert("is_d2", by_cell_id(store.cells, TRUTH.samples == "d2"))
+    store.cells.insert(
+        "cell",
+        by_cell_id(store.cells, np.asarray([f"c{at:02d}" for at in range(N_CELLS)])),
+    )
     return SimpleNamespace(path=folder / "store.zarr", clones=clones)
 
 
@@ -191,8 +194,12 @@ def test_overlap_and_track_refuse_other_artifacts(shared) -> None:
 def test_groups_whose_labels_join_to_one_name_are_refused(copied) -> None:
     store, clones = copied.store, copied.clones
     # ("a, b", "c") and ("a", "b, c") would both be named "a, b, c".
-    store.cells.insert("first", np.asarray(["a, b", "a"] * (N_CELLS // 2)))
-    store.cells.insert("second", np.asarray(["c", "b, c"] * (N_CELLS // 2)))
+    store.cells.insert(
+        "first", by_cell_id(store.cells, np.asarray(["a, b", "a"] * (N_CELLS // 2)))
+    )
+    store.cells.insert(
+        "second", by_cell_id(store.cells, np.asarray(["c", "b, c"] * (N_CELLS // 2)))
+    )
     with pytest.raises(ValueError, match="are both named 'a, b, c"):
         store.clones.overlap(clones, group_by=["first", "second"])
     with pytest.raises(ValueError, match="are both named 'a, b, c"):
@@ -207,7 +214,11 @@ def test_group_columns_may_take_the_names_of_the_results_columns(copied) -> None
     # and compare and follow what the samples do; their labels stay in the
     # keys.
     for column in ("group", "n_cells", "n_clones", "fraction", "clone", "shared"):
-        store.cells.insert(column, TRUTH.samples.astype(object), overwrite=True)
+        store.cells.insert(
+            column,
+            by_cell_id(store.cells, TRUTH.samples.astype(object)),
+            overwrite=True,
+        )
         found = store.clones.overlap(clones, group_by=column)
         pd.testing.assert_frame_equal(found.group_sizes, overlap.group_sizes)
         pd.testing.assert_frame_equal(found.pairs, overlap.pairs)
@@ -367,7 +378,7 @@ def test_track_takes_labels_as_an_array(shared) -> None:
 
 def _own_labels(store):
     """A label artifact of a label of its own for each of the 32 cells with a clone."""
-    store.cells.insert("has_clone", TRUTH.clones >= 0)
+    store.cells.insert("has_clone", by_cell_id(store.cells, TRUTH.clones >= 0))
     own = store.snapshot_cluster_labels(
         "cell", cell_selection=store.snapshot_cell_selection("has_clone")
     )
@@ -484,7 +495,10 @@ def test_track_follows_clones_through_the_groups_of_their_labels(kept_apart) -> 
         ["8", "d2, B", 0]
     ]
     # Without a group of its lineage, a clone has no group to follow.
-    store.cells.insert("is_a_in_d2", (TRUTH.samples == "d2") & (LINEAGES == "A"))
+    store.cells.insert(
+        "is_a_in_d2",
+        by_cell_id(store.cells, (TRUTH.samples == "d2") & (LINEAGES == "A")),
+    )
     lineage_a = store.snapshot_cell_selection("is_a_in_d2")
     none = store.clones.track(
         clones, group_by="sample", labels=["8"], cell_selection=lineage_a
@@ -528,7 +542,7 @@ def test_overlap_needs_two_groups_of_one_lineage(kept_apart) -> None:
     chosen = ((TRUTH.samples == "d2") & (LINEAGES == "A")) | (
         (TRUTH.samples == "d4") & (LINEAGES == "B")
     )
-    store.cells.insert("one_lineage_each", chosen)
+    store.cells.insert("one_lineage_each", by_cell_id(store.cells, chosen))
     selection = store.snapshot_cell_selection("one_lineage_each")
     with pytest.raises(
         ValueError, match=r"No two groups share their labels in \['lineage'\]"

@@ -277,8 +277,11 @@ def test_exports_reject_misaligned_and_malformed_artifacts(analysis, tmp_path):
     n_subset = int(np.count_nonzero(store.artifacts.load(subset)["values"][:]))
     assert 0 < n_subset < _N_CELLS
     part = store.snapshot_cluster_labels(leiden, cell_selection=subset)
+    # Rows of cells outside the subset are left out.
     partial = store.reduction.import_coordinates(
-        np.ones((n_subset, 2)), cell_selection=subset, name="partial"
+        pd.DataFrame(np.ones((_N_CELLS, 2)), index=store.cells.fetch_all("ids")),
+        cell_selection=subset,
+        name="partial",
     )
     with pytest.raises(
         ValueError,
@@ -389,17 +392,23 @@ def test_imported_coordinates_feed_graph_construction(analysis) -> None:
         )
         == ref
     )
-    # The same values in store order reuse the artifact.
+    # The same values keyed by the store's cell IDs reuse the artifact.
+    ids = store.cells.fetch_all("ids")
     assert (
         store.reduction.import_coordinates(
-            latent, cell_selection=cells, name="X_scVI", source=source
+            pd.DataFrame(latent, index=ids),
+            cell_selection=cells,
+            name="X_scVI",
+            source=source,
         )
         == ref
     )
     # Integer coordinates are stored as float64; another source is another
     # artifact.
     whole = store.reduction.import_coordinates(
-        np.arange(_N_CELLS * 2).reshape(_N_CELLS, 2), cell_selection=cells, name="X"
+        pd.DataFrame(np.arange(_N_CELLS * 2).reshape(_N_CELLS, 2), index=ids),
+        cell_selection=cells,
+        name="X",
     )
     assert store.artifacts.load(whole)["data"].dtype == np.float64
     assert "source" not in store.artifacts.inspect(whole).parameters
@@ -418,22 +427,59 @@ def test_import_coordinates_rejects_misaligned_values(analysis, tmp_path) -> Non
     store = analysis["store"]
     cells = analysis["cells"]
     ids = store.cells.fetch_all("ids")
-    values = np.ones((_N_CELLS, 2))
+    values = pd.DataFrame(np.ones((_N_CELLS, 2)), index=ids)
+    positional = (
+        r"reduction\.import_coordinates takes per-cell values only as a pandas "
+        r"DataFrame keyed by cell ID, whose index holds the cell IDs; got {}, which "
+        r"would assign values to cells by position\. Key them by the IDs of the "
+        r"cells they describe, such as pandas\.DataFrame\(values, "
+        r"index=adata\.obs_names\)"
+    )
     cases = [
-        (values[:-1], ValueError, "have 47 rows; the cell selection holds 48 cells"),
-        (np.ones(_N_CELLS), ValueError, "must be two-dimensional; found 1"),
-        (np.ones((_N_CELLS, 0)), ValueError, "need at least one dimension"),
-        (np.full((_N_CELLS, 2), np.nan), ValueError, "only finite values"),
-        (np.full((_N_CELLS, 2), "a"), TypeError, "uses unsupported dtype"),
+        (values.to_numpy(), TypeError, positional.format("a NumPy array")),
+        (np.ones(_N_CELLS), TypeError, positional.format("a NumPy array")),
+        (
+            values.to_numpy().tolist(),
+            TypeError,
+            positional.format("values of type list"),
+        ),
+        (
+            values.reset_index(drop=True),
+            TypeError,
+            positional.format("a pandas DataFrame with a RangeIndex"),
+        ),
+        # Row positions are not cell IDs.
+        (
+            values.set_axis(np.arange(_N_CELLS)),
+            ValueError,
+            "takes the values of a pandas DataFrame by ID: its index must hold the "
+            "ids of the 48 selected cells, each once; 48 such ids have no label, "
+            "such as 'cell0'",
+        ),
+        (
+            pd.DataFrame(np.ones((_N_CELLS, 0)), index=ids),
+            ValueError,
+            "need at least one dimension",
+        ),
+        (
+            pd.DataFrame(np.full((_N_CELLS, 2), np.nan), index=ids),
+            ValueError,
+            "only finite values",
+        ),
+        (
+            pd.DataFrame(np.full((_N_CELLS, 2), "a"), index=ids),
+            TypeError,
+            "uses unsupported dtype",
+        ),
         (
             pd.DataFrame(values[1:], index=ids[1:]),
             ValueError,
-            "have no row for 1 of the 48 selected cells, such as 'cell0'",
+            "1 such ids have no label, such as 'cell0'",
         ),
         (
             pd.DataFrame(np.ones((2, 2)), index=["cell0", "cell0"]),
             ValueError,
-            "repeat cell IDs, such as 'cell0'",
+            "the index repeats a label",
         ),
     ]
     for coordinates, error, message in cases:
@@ -580,7 +626,9 @@ def test_pca_entries_follow_the_coordinates_that_hold_them(analysis) -> None:
     cells = analysis["cells"]
     coordinates = np.arange(_N_CELLS * 2, dtype=np.float32).reshape(_N_CELLS, 2)
     plain = store.reduction.import_coordinates(
-        coordinates, cell_selection=cells, name="plain"
+        pd.DataFrame(coordinates, index=store.cells.fetch_all("ids")),
+        cell_selection=cells,
+        name="plain",
     )
     # Imported coordinates with loadings over two genes and a deviation per
     # dimension, as a Seurat import stores them.

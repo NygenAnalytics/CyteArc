@@ -31,7 +31,7 @@ from cytearc.utils.logging import logger
 from cytearc.writers import SubsetZarr, create_zarr_count_assay
 from cytearc.writers._store import write_membership_column
 from cytearc.writers.counts_t import finalize_writer_counts_t
-from tests.storage_helpers import finalize_test_counts
+from tests.storage_helpers import by_cell_id, finalize_test_counts
 
 _NAMES = ["left", "right"]
 _COUNTS = np.random.default_rng(7).poisson(2.0, size=(6, 3)).astype(np.uint16)
@@ -413,9 +413,9 @@ def test_cell_tables_reserve_the_membership_column_of_each_assay(
     before = cells.fetch_all(column)
     restriction = np.zeros(cells.N, dtype=bool)
     for write in (
-        lambda: cells.insert(column, ~before),
-        lambda: cells.insert(column, ~before, overwrite=True),
-        lambda: cells.update_key(restriction, column),
+        lambda: cells.insert(column, by_cell_id(cells, ~before)),
+        lambda: cells.insert(column, by_cell_id(cells, ~before), overwrite=True),
+        lambda: cells.update_key(by_cell_id(cells, restriction), column),
         lambda: cells.reset_key(column),
     ):
         with pytest.raises(ValueError, match=_RESERVED.format(assay=assay)):
@@ -428,8 +428,10 @@ def test_cell_tables_reserve_the_membership_column_of_each_assay(
     if workspace is None:
         # RNA measured every cell; its absent membership column is reserved too.
         for write in (
-            lambda: cells.insert("RNA_I", np.ones(cells.N, dtype=bool)),
-            lambda: cells.update_key(restriction, "RNA_I"),
+            lambda: cells.insert(
+                "RNA_I", by_cell_id(cells, np.ones(cells.N, dtype=bool))
+            ),
+            lambda: cells.update_key(by_cell_id(cells, restriction), "RNA_I"),
             lambda: cells.reset_key("RNA_I"),
         ):
             with pytest.raises(ValueError, match=_RESERVED.format(assay="RNA")):
@@ -443,18 +445,20 @@ def test_cell_tables_reserve_the_membership_column_of_each_assay(
         cells.drop("RNA_I")
         assert "RNA_I" not in cells.columns
     # A name that is not the membership column of an assay stays ordinary.
-    cells.insert("ATAC_I", ~before)
+    cells.insert("ATAC_I", by_cell_id(cells, ~before))
     cells.drop("ATAC_I")
 
 
 def test_subsets_keep_only_the_membership_of_their_assays(tmp_path):
     store = _open(_partial_adt_source(MemoryStore()))
-    rows = np.asarray([4, 0, 1])
+    # The IDs come in another order; subsets keep the cells in store order.
+    ids = store.cells.fetch_all("ids")[[4, 0, 1]]
+    rows = np.asarray([0, 1, 4])
 
     only_rna = str(tmp_path / "rna.zarr")
-    SubsetZarr(only_rna, [store.RNA], cell_idx=rows, nthreads=1).dump()
+    SubsetZarr(only_rna, [store.RNA], cell_ids=ids, nthreads=1).dump()
     both = str(tmp_path / "both.zarr")
-    SubsetZarr(both, [store.RNA, store.ADT], cell_idx=rows, nthreads=1).dump()
+    SubsetZarr(both, [store.RNA, store.ADT], cell_ids=ids, nthreads=1).dump()
 
     # A subset without ADT holds no ADT membership.
     assert "ADT_I" not in zarr.open_group(only_rna, mode="r")["cellData"]
@@ -467,7 +471,7 @@ def test_subsets_keep_only_the_membership_of_their_assays(tmp_path):
     del store.zw.attrs["assayTypes"]
     untyped = DataStore(store.zw.store, zarr_mode="r", default_assay="RNA")
     rna_only = str(tmp_path / "untyped.zarr")
-    SubsetZarr(rna_only, [untyped.RNA], cell_idx=rows, nthreads=1).dump()
+    SubsetZarr(rna_only, [untyped.RNA], cell_ids=ids, nthreads=1).dump()
     cells = zarr.open_group(rna_only, mode="r")["cellData"]
     assert [name for name in cells.array_keys() if name.startswith("ADT_")] == []
 

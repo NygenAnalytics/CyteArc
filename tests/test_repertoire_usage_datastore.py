@@ -41,6 +41,7 @@ from tests.memory_helpers import (
     named_budget,
 )
 from tests.clone_truth import clone_truth, receptor_truth
+from tests.storage_helpers import by_cell_id
 
 pytestmark = pytest.mark.usefixtures("figures_closed")
 
@@ -59,7 +60,7 @@ def clonal_template(tmp_path_factory) -> Path:
     receptors = store.repertoire.import_receptors(
         path, cell_selection=store.snapshot_cell_selection()
     )
-    store.cells.insert("sample", SAMPLES)
+    store.cells.insert("sample", by_cell_id(store.cells, SAMPLES))
     store.repertoire.clonotypes(receptors)
     return folder / "store.zarr"
 
@@ -213,7 +214,7 @@ def test_spectratype_counts_junction_lengths(tmp_path) -> None:
 def test_tables_follow_the_natural_order_of_the_groups(tmp_path) -> None:
     store, receptors, clonotypes = _sources(tmp_path)
     # "g10" sorts before "g2" as text, but after it as a label.
-    store.cells.insert("batch", np.asarray(["g10", "g2"] * 4))
+    store.cells.insert("batch", by_cell_id(store.cells, np.asarray(["g10", "g2"] * 4)))
     spectratype = store.repertoire.spectratype(receptors, group_by="batch")
     assert spectratype.group_keys.index.tolist() == ["g2", "g10"]
     lengths = spectratype.table.join(spectratype.group_keys, on="group")
@@ -524,7 +525,7 @@ def test_a_clonotypes_source_counts_only_cells_with_a_clonotype(tmp_path) -> Non
 
 def test_cells_outside_a_selection_or_without_a_label_are_left_out(tmp_path) -> None:
     store, receptors, clonotypes = _sources(tmp_path)
-    store.cells.insert("first_four", np.arange(8) < 4)
+    store.cells.insert("first_four", by_cell_id(store.cells, np.arange(8) < 4))
     first = store.snapshot_cell_selection("first_four")
     usage = store.repertoire.gene_usage(clonotypes, cell_selection=first)
     # cell0 to cell3: TRAV1 twice and TRAV2 once, TRBV1 four times.
@@ -567,7 +568,7 @@ def test_cells_outside_a_selection_or_without_a_label_are_left_out(tmp_path) -> 
 
 def test_groups_of_two_columns_follow_the_natural_order_of_each(tmp_path) -> None:
     store, receptors, _clonotypes = _sources(tmp_path)
-    store.cells.insert("batch", np.asarray(["b10", "b2"] * 4))
+    store.cells.insert("batch", by_cell_id(store.cells, np.asarray(["b10", "b2"] * 4)))
     usage = store.repertoire.gene_usage(receptors, group_by=["batch", "sample"])
     table = usage.table
     assert table.columns[:3].tolist() == ["group", "locus", "v_call"]
@@ -596,7 +597,7 @@ def test_group_columns_may_take_the_names_of_the_results_columns(tmp_path) -> No
     # Columns named like the results' own columns hold the samples' labels
     # and count what the samples do; their labels stay in the keys.
     for column in ("group", "locus", "v_call", "length", "n_cells", "fraction"):
-        store.cells.insert(column, SAMPLES, overwrite=True)
+        store.cells.insert(column, by_cell_id(store.cells, SAMPLES), overwrite=True)
         for measure, expected in zip(measures, neutral, strict=True):
             found = measure(receptors, group_by=column)
             pd.testing.assert_frame_equal(found.table, expected.table)
@@ -717,7 +718,7 @@ def test_figures_with_nothing_to_draw_are_refused(tmp_path) -> None:
         store.plots.gene_usage(
             store.repertoire.gene_usage(receptors, genes="d_call"), show=False
         )
-    store.cells.insert("nobody", np.zeros(8, dtype=bool))
+    store.cells.insert("nobody", by_cell_id(store.cells, np.zeros(8, dtype=bool)))
     nobody = store.snapshot_cell_selection("nobody")
     for plot, genes in (
         (store.plots.gene_usage, "v_call"),
@@ -872,7 +873,9 @@ def test_the_lengths_legend_names_at_most_80_groups(tmp_path) -> None:
     receptors = store.repertoire.import_receptors(
         contigs, cell_selection=every_cell(store)
     )
-    store.cells.insert("own", np.asarray([f"g{i:03d}" for i in range(100)]))
+    store.cells.insert(
+        "own", by_cell_id(store.cells, np.asarray([f"g{i:03d}" for i in range(100)]))
+    )
     result = store.plots.spectratype(
         store.repertoire.spectratype(receptors, group_by="own"), show=False
     )
@@ -962,7 +965,10 @@ def test_two_slots_of_one_arm_count_a_cell_once_per_value(tmp_path) -> None:
 def test_grouped_gene_usage_names_the_group_of_a_locus_held_by_one(tmp_path) -> None:
     store, receptors, _clonotypes = _sources(tmp_path)
     # The B cells, cell5 and cell6, are all of group b, and the T cells of t.
-    store.cells.insert("kind", np.asarray(["t"] * 5 + ["b", "b", "t"], dtype=object))
+    store.cells.insert(
+        "kind",
+        by_cell_id(store.cells, np.asarray(["t"] * 5 + ["b", "b", "t"], dtype=object)),
+    )
     result = store.plots.gene_usage(
         store.repertoire.gene_usage(receptors, group_by="kind"), show=False
     )
@@ -1091,7 +1097,7 @@ def test_junctions_that_span_stored_chunks_are_measured_whole(
     # In the order of their text, CAŚSF and Cé lie between the junctions of
     # cell1 and cell2, so leaving them out leaves a chunk that no junction
     # measured touches.
-    store.cells.insert("ends", np.isin(np.arange(8), [1, 2]))
+    store.cells.insert("ends", by_cell_id(store.cells, np.isin(np.arange(8), [1, 2])))
     ends = store.repertoire.spectratype(
         receptors, cell_selection=store.snapshot_cell_selection("ends")
     ).table

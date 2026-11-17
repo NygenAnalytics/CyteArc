@@ -15,7 +15,7 @@ import pandas as pd
 import pytest
 
 from tests.clone_helpers import assert_joined, every_cell, write_truth_store
-from tests.storage_helpers import copy_store
+from tests.storage_helpers import by_cell_id, copy_store
 from tests.clone_truth import (
     CHAIN_TAPES,
     DARLIN_ARRAYS,
@@ -161,7 +161,9 @@ def test_petracer_long_tables_recover_the_truth(store, truth, recorders, tmp_pat
     # With one sample's cells selected, the other's are cells of the store
     # outside the selection, which give no warning of their own.
     store.cells.insert(
-        "petracer_first_sample", truth.samples == SAMPLES[0], overwrite=True
+        "petracer_first_sample",
+        by_cell_id(store.cells, truth.samples == SAMPLES[0]),
+        overwrite=True,
     )
     with pytest.warns(UserWarning, match="1 of 49 barcodes of the allele files"):
         first = store.clones.import_alleles(
@@ -569,7 +571,9 @@ def test_import_arguments_are_checked(store, tmp_path, truth, recorders):
     with pytest.raises(TypeError, match="integrations must be an integration's name"):
         store.clones.import_alleles(path, cell_selection=cells, integrations=5)
     store.cells.insert(
-        "no_cell", np.zeros(len(truth.cell_ids), dtype=bool), overwrite=True
+        "no_cell",
+        by_cell_id(store.cells, np.zeros(len(truth.cell_ids), dtype=bool)),
+        overwrite=True,
     )
     with pytest.raises(ValueError, match="cell_selection selects no cell"):
         store.clones.import_alleles(

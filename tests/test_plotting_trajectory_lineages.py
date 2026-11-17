@@ -38,6 +38,7 @@ from cytearc.storage.artifacts import artifact_group
 from cytearc.trajectory.curves import smooth_against_progress
 from cytearc.utils.memory_budget import MemoryBudgetError
 from tests.clone_helpers import write_selection_embedding
+from tests.storage_helpers import by_cell_id
 
 # Lineages are drawn under the string form of their sink labels.
 LINEAGES = ("2", "3", "4")
@@ -165,7 +166,7 @@ def other_selections(datastore, layout, loaded_tree, tmp_path_factory):
     flags = np.zeros(store.cells.N, dtype=bool)
     flags[layout.cell_indices[1:]] = True
     flags[outside[0]] = True
-    store.cells.insert("swapped_trajectory_cells", flags)
+    store.cells.insert("swapped_trajectory_cells", by_cell_id(store.cells, flags))
     swapped = store.snapshot_cell_selection("swapped_trajectory_cells")
     return SimpleNamespace(
         store=store,
@@ -560,7 +561,7 @@ def test_layout_for_returns_the_coordinates_of_the_trajectory_cells(
     # A trajectory of some of the layout's cells, every third, takes their rows.
     flags = np.zeros(store.cells.N, dtype=bool)
     flags[layout.cell_indices[::3]] = True
-    store.cells.insert("every_third_trajectory_cell", flags)
+    store.cells.insert("every_third_trajectory_cell", by_cell_id(store.cells, flags))
     some = store.snapshot_cell_selection("every_third_trajectory_cell")
     of_some, of_some_indices = lineage_plots._layout_for(store, layout.ref, some)
     np.testing.assert_array_equal(of_some, layout.coordinates[::3])

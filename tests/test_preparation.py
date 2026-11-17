@@ -191,8 +191,10 @@ def test_subset_maps_missing_flags_and_recomputes_statistics(
 ):
     source = _labeled_copy(labeled_template, tmp_path / "source.zarr")
     target = tmp_path / "subset.zarr"
-    rows = np.array([5, 1, 3])
-    writer = SubsetZarr(str(target), [source.RNA], cell_idx=rows, nthreads=1)
+    # The IDs come in another order; the subset keeps the cells in store order.
+    ids = source.cells.fetch_all("ids")
+    rows = np.array([1, 3, 5])
+    writer = SubsetZarr(str(target), [source.RNA], cell_ids=ids[[5, 1, 3]], nthreads=1)
     writer.dump()
     copied = DataStore(
         str(target), default_assay="RNA", min_features_per_cell=0, nthreads=1
@@ -200,7 +202,7 @@ def test_subset_maps_missing_flags_and_recomputes_statistics(
     np.testing.assert_array_equal(copied.RNA.rawData.compute(), QC_VALUES[rows])
     np.testing.assert_array_equal(
         read_metadata_missing_rows(copied.cells, "label", np.arange(3)),
-        [False, True, False],
+        [True, False, False],
     )
     np.testing.assert_array_equal(
         copied.RNA.feats.fetch_all("nCells"), (QC_VALUES[rows] > 0).sum(axis=0)

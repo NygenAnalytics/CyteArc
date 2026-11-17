@@ -16,7 +16,7 @@ import cytearc.plotting as splt
 from cytearc.plotting import NamedCellArtifact
 from cytearc.plotting._titles import artifact_title, artifact_titles, kind_title
 from tests.clone_helpers import write_selection_embedding
-from tests.storage_helpers import open_store, write_count_store
+from tests.storage_helpers import by_cell_id, open_store, write_count_store
 
 LEIDEN = "Leiden, resolution 1.0"
 
@@ -32,12 +32,21 @@ def titled(tmp_path_factory) -> SimpleNamespace:
         rates[block, 4 * block : 4 * block + 4] = 3.0
     write_count_store(str(path), {"RNA": rng.poisson(rates[blocks])}, "uint16")
     store = open_store(path)
-    store.cells.insert("cell_type", np.repeat(["A", "B", "C"], 20).astype(object))
-    store.cells.insert("donor", np.asarray(["d1", "d2", "d3"] * 20, dtype=object))
     store.cells.insert(
-        "lineage", np.asarray([f"l{i % 7}" for i in range(60)], dtype=object)
+        "cell_type",
+        by_cell_id(store.cells, np.repeat(["A", "B", "C"], 20).astype(object)),
     )
-    store.cells.insert("every_cell", np.ones(60, dtype=bool))
+    store.cells.insert(
+        "donor",
+        by_cell_id(store.cells, np.asarray(["d1", "d2", "d3"] * 20, dtype=object)),
+    )
+    store.cells.insert(
+        "lineage",
+        by_cell_id(
+            store.cells, np.asarray([f"l{i % 7}" for i in range(60)], dtype=object)
+        ),
+    )
+    store.cells.insert("every_cell", by_cell_id(store.cells, np.ones(60, dtype=bool)))
     cells = store.snapshot_cell_selection("every_cell")
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")

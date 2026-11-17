@@ -49,6 +49,7 @@ from tests.barcode_join_helpers import (
     write_variant_file,
 )
 from tests.memory_helpers import climb_refusals
+from tests.storage_helpers import by_cell_id
 
 _REFERENCE = Path(__file__).parent / "guide_calls_import_reference.json"
 # Attributes that differ between two writes of one artifact.
@@ -670,7 +671,9 @@ def test_guide_calls_find_cells_outside_the_selection_through_the_options(
     store, _ = joined
     # QC kept two of the first sample's cells, so s1__TTTA-1 is a cell of
     # the store outside the selection.
-    store.cells.insert("kept", np.asarray([True, True, False, False, False]))
+    store.cells.insert(
+        "kept", by_cell_id(store.cells, np.asarray([True, True, False, False, False]))
+    )
     path = write_guide_call_file(
         tmp_path / "calls.csv",
         ["a:AAAC:1", "b:TTTA:1", "c:TTTA:2", "AAAC", "d:GGGG:1"],
@@ -713,8 +716,10 @@ def test_guide_calls_refuse_cells_that_the_suffix_cannot_reach(tmp_path) -> None
         cell_ids=ids,
     )
     store = open_store(tmp_path / "store.zarr")
-    store.cells.insert("every", np.ones(3, dtype=bool))
-    store.cells.insert("first", np.asarray([True, True, False]))
+    store.cells.insert("every", by_cell_id(store.cells, np.ones(3, dtype=bool)))
+    store.cells.insert(
+        "first", by_cell_id(store.cells, np.asarray([True, True, False]))
+    )
     every = store.snapshot_cell_selection("every")
     first = store.snapshot_cell_selection("first")
     path = write_guide_call_file(tmp_path / "calls.csv", ["AAAC", "CCCG"])
@@ -768,7 +773,7 @@ def test_guide_calls_with_every_option_refuse_a_small_budget_before_writing(
         cell_ids=ids,
     )
     store = open_store(path)
-    store.cells.insert("kept", np.arange(n_cells) < 2_700)
+    store.cells.insert("kept", by_cell_id(store.cells, np.arange(n_cells) < 2_700))
     kept = store.snapshot_cell_selection("kept")
     named = barcodes[:2_400] + barcodes[2_700:3_300]
     calls = write_guide_call_file(
@@ -833,7 +838,9 @@ def wide_template(tmp_path_factory) -> Path:
         cell_ids=[f"s1__{index:016d}-1" for index in range(_WIDE_CELLS)],
     )
     store = open_store(path)
-    store.cells.insert("kept", np.arange(_WIDE_CELLS) < _WIDE_SELECTED)
+    store.cells.insert(
+        "kept", by_cell_id(store.cells, np.arange(_WIDE_CELLS) < _WIDE_SELECTED)
+    )
     return path
 
 

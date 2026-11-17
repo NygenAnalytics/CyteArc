@@ -22,6 +22,7 @@ from cytearc.trajectory.pseudotime import (
 )
 from cytearc.trajectory.parameters import AGGREGATION_ANN_DEFAULTS
 from cytearc.trajectory.results import PseudotimeMarkerResult
+from tests.storage_helpers import by_cell_id, graph_rows
 
 
 def _metadata_values(table):
@@ -156,13 +157,21 @@ def test_raw_source_sink_scoring_round_trips_and_validates_snapshot(
     with pytest.raises(TypeError, match="min_max_norm_ptime"):
         datastore.trajectory.pseudotime(
             connectivity_graph,
-            ss_vec=source_sink,
+            ss_vec=by_cell_id(
+                datastore.cells,
+                source_sink,
+                rows=graph_rows(datastore, connectivity_graph),
+            ),
             min_max_norm_ptime=1,
         )
 
     ref = datastore.trajectory.pseudotime(
         connectivity_graph,
-        ss_vec=source_sink,
+        ss_vec=by_cell_id(
+            datastore.cells,
+            source_sink,
+            rows=graph_rows(datastore, connectivity_graph),
+        ),
     )
     result = datastore.trajectory.load_pseudotime(ref)
     assert result.graph == connectivity_graph
@@ -240,7 +249,11 @@ def test_raw_source_sink_scoring_owns_the_vector_before_validation_and_snapshot(
     )
     ref = datastore.trajectory.pseudotime(
         connectivity_graph,
-        ss_vec=source_sink,
+        ss_vec=by_cell_id(
+            datastore.cells,
+            source_sink,
+            rows=graph_rows(datastore, connectivity_graph),
+        ),
         invalidate_cache=True,
     )
     result = datastore.trajectory.load_pseudotime(ref)
@@ -935,7 +948,11 @@ def test_raw_source_sink_scoring_refuses_read_only_store_before_snapshot(
     with pytest.raises(PermissionError, match="zarr_mode='r\\+'"):
         read_only.trajectory.pseudotime(
             connectivity_graph,
-            ss_vec=source_sink,
+            ss_vec=by_cell_id(
+                read_only.cells,
+                source_sink,
+                rows=graph_rows(read_only, connectivity_graph),
+            ),
         )
     assert (
         datastore.artifacts.list(kind="metadata_snapshot", scope="datastore")
@@ -1510,7 +1527,9 @@ def test_aggregation_and_marker_search_complete_within_a_small_budget(tmp_path):
     )
     source_sink = np.zeros(n_cells)
     source_sink[[0, -1]] = [-1.0, 1.0]
-    pseudotime = datastore.trajectory.pseudotime(graph, ss_vec=source_sink)
+    pseudotime = datastore.trajectory.pseudotime(
+        graph, ss_vec=by_cell_id(datastore.cells, source_sink)
+    )
     # Every cell is scored, so both analyses read the counts of all 4000 cells.
     assert datastore.trajectory.load_pseudotime(pseudotime).valid.all()
 
@@ -2175,7 +2194,7 @@ def test_the_sources_policy_scores_the_component_that_holds_the_sources():
     # A custom vector's sources are its negative values.
     from_vector = store.trajectory.pseudotime(
         trajectory.graph,
-        ss_vec=np.concatenate((np.zeros(8), _Y_SOURCE_SINK)),
+        ss_vec=by_cell_id(store.cells, np.concatenate((np.zeros(8), _Y_SOURCE_SINK))),
         component_policy="sources",
     )
     np.testing.assert_array_equal(
@@ -2334,7 +2353,9 @@ def test_the_untruncated_potential_orders_a_path_from_source_to_sink():
     trajectory = _trajectory_store(adjacency)
     store = trajectory.store
     values = store.trajectory.load_pseudotime(
-        store.trajectory.pseudotime(trajectory.graph, ss_vec=source_sink)
+        store.trajectory.pseudotime(
+            trajectory.graph, ss_vec=by_cell_id(store.cells, source_sink)
+        )
     ).values
     assert (values[0], values[-1]) == (0.0, 1.0)
     assert np.all(np.diff(values) > 0)
@@ -2741,7 +2762,9 @@ def test_the_truncated_method_reproduces_the_earlier_potential_bit_for_bit():
     source_sink = _first_to_last_source_sink(120)
 
     ref = store.trajectory.pseudotime(
-        trajectory.graph, ss_vec=source_sink, method="truncated"
+        trajectory.graph,
+        ss_vec=by_cell_id(store.cells, source_sink),
+        method="truncated",
     )
 
     # Releases before 1.4.0 scored every pseudotime so: the 30 smallest
@@ -2776,7 +2799,9 @@ def test_saved_default_pseudotimes_are_computed_again_and_truncated_ones_reused(
     # A release before 1.4.0 saved the truncated potential by default, with no
     # method and no revision in its record.
     earlier = store.trajectory.pseudotime(
-        trajectory.graph, ss_vec=source_sink, method="truncated"
+        trajectory.graph,
+        ss_vec=by_cell_id(store.cells, source_sink),
+        method="truncated",
     )
     group = artifact_group(store.zw, earlier)
     provenance = dict(group.attrs["provenance"])
@@ -2786,9 +2811,13 @@ def test_saved_default_pseudotimes_are_computed_again_and_truncated_ones_reused(
     assert "revision" not in provenance
     group.attrs["provenance"] = provenance
 
-    default = store.trajectory.pseudotime(trajectory.graph, ss_vec=source_sink)
+    default = store.trajectory.pseudotime(
+        trajectory.graph, ss_vec=by_cell_id(store.cells, source_sink)
+    )
     truncated = store.trajectory.pseudotime(
-        trajectory.graph, ss_vec=source_sink, method="truncated"
+        trajectory.graph,
+        ss_vec=by_cell_id(store.cells, source_sink),
+        method="truncated",
     )
 
     (revision,) = OPERATION_REVISIONS["run_pseudotime_scoring"]
@@ -2809,13 +2838,20 @@ def test_saved_default_pseudotimes_are_computed_again_and_truncated_ones_reused(
         store.trajectory.load_pseudotime(truncated).values,
     )
     again = store.trajectory.pseudotime(
-        trajectory.graph, ss_vec=source_sink, method="truncated"
+        trajectory.graph,
+        ss_vec=by_cell_id(store.cells, source_sink),
+        method="truncated",
     )
     assert again == truncated
     kept = store.artifacts.inspect(truncated)
     assert (kept.revision, kept.current_revision, kept.is_current) == (1, 1, True)
     assert kept.superseded_by == ()
-    assert store.trajectory.pseudotime(trajectory.graph, ss_vec=source_sink) == default
+    assert (
+        store.trajectory.pseudotime(
+            trajectory.graph, ss_vec=by_cell_id(store.cells, source_sink)
+        )
+        == default
+    )
 
 
 @pytest.mark.parametrize(

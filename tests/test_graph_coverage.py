@@ -32,6 +32,7 @@ from cytearc.storage.selections import (
     resolve_stored_selection_artifact,
 )
 from tests.qc_helpers import create_labeled_qc_store
+from tests.storage_helpers import by_cell_id
 
 
 class _MemoryGraphStore(GraphDataStore):
@@ -873,6 +874,7 @@ def test_run_tsne_orchestration_and_error_paths(
     monkeypatch.setattr(sgtsne_module, "require_sgtsnepi", backend)
     metadata_before = _metadata_snapshot(store.cells)
 
+    keyed = by_cell_id(store.cells, initial)
     tsne_ref = store.embeddings.tsne(
         graph_ref,
         initialization_ref,
@@ -918,18 +920,22 @@ def test_run_tsne_orchestration_and_error_paths(
     with pytest.raises(ValueError, match="invalid shape"):
         store.embeddings.tsne(
             graph_ref,
-            np.zeros((2, 2)),
+            by_cell_id(store.cells, np.zeros((3, 3))),
             tsne_dims=2,
         )
 
     # Backend failures propagate unchanged instead of becoming RuntimeError.
     runner.side_effect = RuntimeError("sgtsnepi failed")
     with pytest.raises(RuntimeError, match="^sgtsnepi failed$"):
-        store.embeddings.tsne(graph_ref, initial, invalidate_cache=True)
-    with pytest.raises(TypeError, match="initialization must be an ArtifactRef"):
+        store.embeddings.tsne(graph_ref, keyed, invalidate_cache=True)
+    with pytest.raises(
+        TypeError,
+        match=r"^initialization takes per-cell values only as a pandas DataFrame "
+        r"keyed by cell ID, whose index holds the cell IDs; got values of type list",
+    ):
         store.embeddings.tsne(graph_ref, initial.tolist())  # type: ignore[arg-type]
     with pytest.raises(TypeError, match="graph must be an ArtifactRef"):
-        store.embeddings.tsne("graph", initial)  # type: ignore[arg-type]
+        store.embeddings.tsne("graph", keyed)  # type: ignore[arg-type]
 
     runner_calls = runner.call_count
     graph_loads = load_graph.call_count
@@ -953,7 +959,7 @@ def test_run_tsne_orchestration_and_error_paths(
     assert get_initial.call_count == initial_loads
     # A new embedding names the tsne extra before reading the graph.
     with pytest.raises(ImportError, match=r"cytearc\[tsne\]"):
-        store.embeddings.tsne(graph_ref, initial, invalidate_cache=True)
+        store.embeddings.tsne(graph_ref, keyed, invalidate_cache=True)
     assert load_graph.call_count == graph_loads
     assert runner.call_count == runner_calls
 
@@ -961,7 +967,7 @@ def test_run_tsne_orchestration_and_error_paths(
     runner.side_effect = None
     runner.return_value = embedding[:1]
     with pytest.raises(ValueError, match="returned an embedding with shape"):
-        store.embeddings.tsne(graph_ref, initial, invalidate_cache=True)
+        store.embeddings.tsne(graph_ref, keyed, invalidate_cache=True)
     _assert_metadata_unchanged(store.cells, metadata_before)
 
 

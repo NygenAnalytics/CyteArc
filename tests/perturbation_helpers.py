@@ -7,13 +7,14 @@ from types import ModuleType, SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
+import pandas as pd
 import pytest
 import statsmodels.api as sm
 from scipy import optimize, special, stats
 
 from cytearc import DiagnosticWarning
 from cytearc.utils.logging import collect_warnings
-from tests.storage_helpers import open_store, write_count_store
+from tests.storage_helpers import by_cell_id, open_store, write_count_store
 
 if TYPE_CHECKING:
     from cytearc.datastore.datastore import DataStore
@@ -45,7 +46,7 @@ def write_screen(
     if target_ids is not None:
         features.insert("target_gene_id", np.asarray(target_ids, dtype=object))
     for name, values in (cell_columns or {}).items():
-        store.cells.insert(name, values)
+        store.cells.insert(name, by_cell_id(store.cells, values))
     return store
 
 
@@ -272,7 +273,9 @@ def memory_screen(path: Path) -> SimpleNamespace:
     )
     labels = fixed_labels(store, ["NT"])
     coordinates = store.reduction.import_coordinates(
-        rng.normal(size=(n_cells, 20)),
+        pd.DataFrame(
+            rng.normal(size=(n_cells, 20)), index=store.cells.fetch_all("ids")
+        ),
         cell_selection=store.select_measured_cells("RNA"),
         name="X",
     )

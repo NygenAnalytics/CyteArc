@@ -11,6 +11,7 @@ from cytearc.graph.feature_projection import resolve_native_graph_inputs
 from cytearc.plotting._data import _validated_embedding_selection
 from cytearc.storage.artifacts import ArtifactRef
 from cytearc.storage.budget import ResourceBudget
+from tests.storage_helpers import by_cell_id, graph_rows
 
 pytestmark = pytest.mark.slow
 
@@ -144,8 +145,13 @@ def test_localmap_takes_an_array_initialization_without_changing_it(
     start = np.random.default_rng(0).normal(size=(n_cells, 2))
     copy = start.copy()
 
-    first = store.embeddings.localmap(graph, start, iterations=SHORT)
-    second = store.embeddings.localmap(graph, start * 2.0, iterations=SHORT)
+    rows = graph_rows(store, graph)
+    first = store.embeddings.localmap(
+        graph, by_cell_id(store.cells, start, rows=rows), iterations=SHORT
+    )
+    second = store.embeddings.localmap(
+        graph, by_cell_id(store.cells, start * 2.0, rows=rows), iterations=SHORT
+    )
 
     np.testing.assert_array_equal(start, copy)
     # Scaling an initialization changes its identity but not its layout.
@@ -165,7 +171,11 @@ def test_localmap_draws_mid_near_pairs_by_cosine_on_a_cosine_graph(
     n_cells = store.graph.load(cosine_graph).shape[0]
     start = np.random.default_rng(1).normal(size=(n_cells, 2))
 
-    ref = store.embeddings.localmap(cosine_graph, start, iterations=SHORT)
+    ref = store.embeddings.localmap(
+        cosine_graph,
+        by_cell_id(store.cells, start, rows=graph_rows(store, cosine_graph)),
+        iterations=SHORT,
+    )
 
     expected = _expected_layout(store, cosine_graph, start, cosine=True)
     np.testing.assert_array_equal(_values(store, ref), expected)

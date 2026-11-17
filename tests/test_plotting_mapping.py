@@ -35,6 +35,7 @@ from cytearc.storage.selections import (
     read_stored_selection_indices,
     resolve_generated_selection_artifact,
 )
+from tests.storage_helpers import by_cell_id
 
 # Mapping store builders, kept local so this module does not depend on another
 # test module's private helpers.
@@ -84,7 +85,7 @@ def _write_projection(
     else:
         cell_mask = np.zeros(query.cells.N, dtype=bool)
         cell_mask[:n_cells] = True
-        query.cells.insert(cell_key, cell_mask, overwrite=True)
+        query.cells.insert(cell_key, by_cell_id(query.cells, cell_mask), overwrite=True)
     cell_selection = resolve_generated_selection_artifact(
         query.zw,
         scope="datastore",
@@ -183,7 +184,9 @@ def _write_reference_column(reference, name: str, values: np.ndarray) -> None:
     else:
         full[:] = 0
     full[indices] = compact
-    reference.datastore.cells.insert(name, full, overwrite=True)
+    reference.datastore.cells.insert(
+        name, by_cell_id(reference.datastore.cells, full), overwrite=True
+    )
 
 
 def _write_reference_layout(
@@ -245,17 +248,17 @@ def plotting_mapping_context(analyzed_datastore_zarr_root, tmp_path_factory):
 
     query.cells.insert(
         "mapping_layout1",
-        np.full(query.cells.N, -1000.0),
+        by_cell_id(query.cells, np.full(query.cells.N, -1000.0)),
         overwrite=True,
     )
     query.cells.insert(
         "mapping_layout2",
-        np.full(query.cells.N, 1000.0),
+        by_cell_id(query.cells, np.full(query.cells.N, 1000.0)),
         overwrite=True,
     )
     query.cells.insert(
         "mapping_label",
-        np.full(query.cells.N, "query_only", dtype=object),
+        by_cell_id(query.cells, np.full(query.cells.N, "query_only", dtype=object)),
         overwrite=True,
     )
     indices = np.asarray(
@@ -296,6 +299,8 @@ def plotting_mapping_context(analyzed_datastore_zarr_root, tmp_path_factory):
         reference=reference,
         reference_labels="mapping_label",
     )
+    # The IDs of the projected query cells, which key per-cell plot inputs.
+    query_ids = query.mapping.load_label_transfer(transfer).cell_ids
     return {
         "reference": reference,
         "reference_layout": reference_layout,
@@ -304,8 +309,11 @@ def plotting_mapping_context(analyzed_datastore_zarr_root, tmp_path_factory):
         "query": query,
         "result": result,
         "transfer": transfer,
-        "query_groups": np.asarray(["q1", "q1", "q2", "q2", "q1", "q2"]),
-        "known_labels": np.asarray(["A", "A", "B", "B", "A", "B"]),
+        "query_ids": query_ids,
+        "query_groups": pd.Series(
+            ["q1", "q1", "q2", "q2", "q1", "q2"], index=query_ids
+        ),
+        "known_labels": pd.Series(["A", "A", "B", "B", "A", "B"], index=query_ids),
     }
 
 
@@ -341,6 +349,17 @@ def _score_matrix(table: pd.DataFrame) -> pd.DataFrame:
     return table.pivot(index="referenceIndex", columns="group", values="score")
 
 
+def _query_ids(n_cells: int) -> np.ndarray:
+    """IDs of the query cells of a controlled store, in the order of its evidence."""
+    return np.asarray([f"q{row}" for row in range(n_cells)])
+
+
+def _keyed_query(values) -> pd.Series:
+    """Key values of a controlled store's query cells by cell ID."""
+    values = np.asarray(values, dtype=object)
+    return pd.Series(values, index=_query_ids(len(values)))
+
+
 def _controlled_mapping_store(
     *,
     evidence: pd.DataFrame | None = None,
@@ -368,6 +387,7 @@ def _controlled_mapping_store(
         methods["mapping"] = SimpleNamespace(
             load_label_transfer=lambda *_args, **_kwargs: SimpleNamespace(
                 evidence=evidence.copy(),
+                cell_ids=_query_ids(len(evidence)),
                 threshold_fraction=threshold_fraction,
                 max_distance=max_distance,
             )
@@ -458,6 +478,35 @@ def test_mapping_plot_families_use_query_result_and_reference_semantics(
         chosen_threshold=0.75,
         show=False,
     )
+    # Labels and groups keyed by cell ID in reverse order are those of the same
+    # cells, so the plots read the same tables.
+    reversed_confusion = splt.mapping_confusion(
+        query, transfer, known_labels=known_labels.iloc[::-1], show=False
+    )
+    reversed_evidence = splt.mapping_evidence(
+        query,
+        transfer,
+        target_groups=query_groups.iloc[::-1],
+        metrics=("voteFraction", "topTwoMargin"),
+        show=False,
+    )
+    reversed_score = splt.mapping_score(
+        query,
+        result,
+        reference=reference,
+        target_groups=query_groups.iloc[::-1],
+        layout=context["layout_ref"],
+        show=False,
+    )
+    for plot, other in (
+        (confusion, reversed_confusion),
+        (evidence, reversed_evidence),
+        (score, reversed_score),
+    ):
+        assert plot.tables.keys() == other.tables.keys()
+        for name, table in plot.tables.items():
+            pd.testing.assert_frame_equal(table, other.tables[name])
+        other.close()
 
     assert set(score.axes) == {"q1", "q2"}
     n_reference = reference.selected_cell_count
@@ -524,8 +573,9 @@ def test_mapping_plot_families_use_query_result_and_reference_semantics(
     for plot in (evidence, confusion, calibration):
         assert plot.provenance.extras["label_transfer"] == transfer.to_dict()
     assert evidence.provenance.extras["threshold_fraction"] == 0.5
-    # Only the score plots read the reference; transfer plots read saved results.
-    assert binding_checks == 3
+    # Only the four score plots, one with groups in reverse order, read the
+    # reference; transfer plots read saved results.
+    assert binding_checks == 4
 
     for plot in (
         score,
@@ -605,7 +655,7 @@ def test_mapping_evidence_box_kind_draws_one_box_per_query_group():
     plot = plotting_mapping.mapping_evidence(
         _controlled_mapping_store(evidence=evidence),
         _TRANSFER_REF,
-        target_groups=["q1", "q1", "q1", "q2", "q2", "q2"],
+        target_groups=_keyed_query(["q1", "q1", "q1", "q2", "q2", "q2"]),
         metrics=("voteFraction",),
         kind="box",
         categorical_scale=scale,
@@ -681,7 +731,9 @@ def test_mapping_calibration_allows_genuine_zero_accuracy(
     plot = splt.mapping_calibration(
         context["query"],
         context["transfer"],
-        known_labels=np.asarray(["B", "B", "A", "A", "B", "A"]),
+        known_labels=pd.Series(
+            ["B", "B", "A", "A", "B", "A"], index=context["query_ids"]
+        ),
         n_thresholds=3,
         show=False,
     )
@@ -724,7 +776,9 @@ def test_mapping_calibration_rejects_pairwise_label_type_mismatch(
         splt.mapping_calibration(
             context["query"],
             transfer,
-            known_labels=np.asarray(["1", "1", "2", "2", "1", "2"]),
+            known_labels=pd.Series(
+                ["1", "1", "2", "2", "1", "2"], index=context["query_ids"]
+            ),
             n_thresholds=3,
             show=False,
         )
@@ -872,7 +926,7 @@ def test_mapping_calibration_respects_direction_and_draws_uncertainty():
     higher = plotting_mapping.mapping_calibration(
         store,
         _TRANSFER_REF,
-        known_labels=known,
+        known_labels=_keyed_query(known),
         metric="voteFraction",
         direction="auto",
         thresholds=[0.0, 0.5, 0.8],
@@ -882,7 +936,7 @@ def test_mapping_calibration_respects_direction_and_draws_uncertainty():
     lower = plotting_mapping.mapping_calibration(
         store,
         _TRANSFER_REF,
-        known_labels=known,
+        known_labels=_keyed_query(known),
         metric="meanNeighborDistance",
         direction="auto",
         thresholds=[0.2, 0.5, 1.0],
@@ -891,7 +945,7 @@ def test_mapping_calibration_respects_direction_and_draws_uncertainty():
     explicit = plotting_mapping.mapping_calibration(
         store,
         _TRANSFER_REF,
-        known_labels=known,
+        known_labels=_keyed_query(known),
         metric="customConfidence",
         direction="higher",
         thresholds=[0.0, 0.5],
@@ -995,7 +1049,7 @@ def test_mapping_calibration_rejects_malformed_threshold_controls(
         plotting_mapping.mapping_calibration(
             store,
             _TRANSFER_REF,
-            known_labels=np.asarray(["A", "B"]),
+            known_labels=_keyed_query(np.asarray(["A", "B"])),
             show=False,
             **kwargs,
         )
@@ -1014,7 +1068,7 @@ def test_mapping_calibration_rejects_nonfinite_or_unretained_evidence():
         plotting_mapping.mapping_calibration(
             store,
             _TRANSFER_REF,
-            known_labels=np.asarray(["A", "B"]),
+            known_labels=_keyed_query(np.asarray(["A", "B"])),
             show=False,
         )
 
@@ -1024,14 +1078,14 @@ def test_mapping_calibration_rejects_nonfinite_or_unretained_evidence():
         plotting_mapping.mapping_calibration(
             store,
             _TRANSFER_REF,
-            known_labels=np.asarray([None, None], dtype=object),
+            known_labels=_keyed_query(np.asarray([None, None], dtype=object)),
             show=False,
         )
     with pytest.raises(ValueError, match="No threshold retained"):
         plotting_mapping.mapping_calibration(
             store,
             _TRANSFER_REF,
-            known_labels=np.asarray(["A", "B"]),
+            known_labels=_keyed_query(np.asarray(["A", "B"])),
             thresholds=[2.0],
             show=False,
         )
@@ -1051,12 +1105,12 @@ def test_mapping_calibration_marks_the_transfer_threshold_without_extra_rows():
     store = _controlled_mapping_store(evidence=evidence, threshold_fraction=0.5)
 
     default = plotting_mapping.mapping_calibration(
-        store, _TRANSFER_REF, known_labels=known, show=False
+        store, _TRANSFER_REF, known_labels=_keyed_query(known), show=False
     )
     explicit = plotting_mapping.mapping_calibration(
         store,
         _TRANSFER_REF,
-        known_labels=known,
+        known_labels=_keyed_query(known),
         thresholds=[0.6, 0.8],
         show=False,
     )
@@ -1064,7 +1118,7 @@ def test_mapping_calibration_marks_the_transfer_threshold_without_extra_rows():
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         silent = plotting_mapping.mapping_calibration(
-            unreachable, _TRANSFER_REF, known_labels=known, show=False
+            unreachable, _TRANSFER_REF, known_labels=_keyed_query(known), show=False
         )
 
     assert 0.5 in default.tables["calibration"]["threshold"].tolist()
@@ -1107,7 +1161,7 @@ def test_mapping_calibration_keeps_the_transfers_other_rules():
         plot = plotting_mapping.mapping_calibration(
             store,
             _TRANSFER_REF,
-            known_labels=known,
+            known_labels=_keyed_query(known),
             metric=metric,
             direction="higher" if metric != "nearestDistance" else "lower",
             thresholds=[0.0] if metric != "nearestDistance" else [10.0],
@@ -1126,7 +1180,7 @@ def test_mapping_calibration_keeps_the_transfers_other_rules():
     marked = plotting_mapping.mapping_calibration(
         store,
         _TRANSFER_REF,
-        known_labels=known,
+        known_labels=_keyed_query(known),
         metric="nearestDistance",
         show=False,
     )
@@ -1203,10 +1257,14 @@ def test_mapping_calibration_counts_cells_without_evidence_in_coverage():
     known = np.full(len(evidence), "A", dtype=object)
 
     calibration = plotting_mapping.mapping_calibration(
-        store, _TRANSFER_REF, known_labels=known, show=False
+        store, _TRANSFER_REF, known_labels=_keyed_query(known), show=False
     )
     confusion = plotting_mapping.mapping_confusion(
-        store, _TRANSFER_REF, known_labels=known, normalize="all", show=False
+        store,
+        _TRANSFER_REF,
+        known_labels=_keyed_query(known),
+        normalize="all",
+        show=False,
     )
 
     # The nine cells without evidence have known labels, so they stay in the
@@ -1239,7 +1297,7 @@ def test_label_transfer_plots_require_a_transfer_loader_and_label():
             plotting_mapping.mapping_confusion(
                 store,
                 _TRANSFER_REF,
-                known_labels=np.asarray(["A"]),
+                known_labels=_keyed_query(np.asarray(["A"])),
                 abstention_label=label,
                 show=False,
             )
@@ -1351,7 +1409,7 @@ def test_mapping_score_embedding_without_weighted_cells_colors_nothing():
         store,
         _RESULT_REF,
         reference=object(),
-        target_groups=["q1", "q2"],
+        target_groups=_keyed_query(["q1", "q2"]),
         layout=ArtifactRef(
             scope="assay", assay="RNA", kind="embedding", artifact_id="c" * 64
         ),
@@ -1410,11 +1468,15 @@ def test_mapping_plots_reject_empty_and_misaligned_data():
         }
     )
     evidence_store = _controlled_mapping_store(evidence=evidence)
-    with pytest.raises(ValueError, match="one value per mapped cell"):
+    with pytest.raises(
+        ValueError,
+        match=r"the ids of the 2 cells of the label transfer, each once; 1 such ids "
+        r"have no label, such as 'q1'",
+    ):
         plotting_mapping.mapping_evidence(
             evidence_store,
             _TRANSFER_REF,
-            target_groups=["only-one"],
+            target_groups=_keyed_query(["only-one"]),
             metrics=("voteFraction",),
             show=False,
         )
@@ -1422,7 +1484,7 @@ def test_mapping_plots_reject_empty_and_misaligned_data():
         plotting_mapping.mapping_evidence(
             evidence_store,
             _TRANSFER_REF,
-            target_groups=["first", None],
+            target_groups=_keyed_query(["first", None]),
             metrics=("voteFraction",),
             show=False,
         )
@@ -1489,7 +1551,7 @@ def test_mapping_categorical_legends_serialize_and_owned_figures_close(
     evidence_plot = plotting_mapping.mapping_evidence(
         store,
         _TRANSFER_REF,
-        target_groups=["beta", "alpha", "beta"],
+        target_groups=_keyed_query(["beta", "alpha", "beta"]),
         metrics=("voteFraction",),
         categorical_scale=scale,
         bins=3,
@@ -1592,7 +1654,7 @@ def test_mapping_confusion_normalizes_counts(normalize, expected):
     plot = plotting_mapping.mapping_confusion(
         _confusion_store(),
         _TRANSFER_REF,
-        known_labels=np.asarray(["A", "A", "A", "A", "B", "B"]),
+        known_labels=_keyed_query(np.asarray(["A", "A", "A", "A", "B", "B"])),
         normalize=normalize,
         show=False,
     )
@@ -1617,8 +1679,14 @@ def test_mapping_confusion_normalizes_counts(normalize, expected):
             "normalize must be 'none', 'true', 'predicted', or 'all'",
         ),
         (
-            {"known_labels": np.asarray(["A", "B"])},
-            "known_labels must have one value per mapped cell",
+            {"known_labels": _keyed_query(["A", "B"])},
+            "plots.mapping_confusion(known_labels=) takes the values of a pandas "
+            "Series by ID: its index must hold the ids of the 6 cells of the label "
+            "transfer, each once; 4 such ids have no label, such as 'q2'. Key them "
+            "by the IDs of the cells they describe, such as pandas.Series(values, "
+            "index=adata.obs_names), or pandas.Series(values, "
+            'index=ds.cells.fetch_all("ids")) for values of every cell in store '
+            "order; values of other cells are left out.",
         ),
         ({"known_order": ["A"]}, "known_order is missing observed labels"),
         (
@@ -1628,7 +1696,10 @@ def test_mapping_confusion_normalizes_counts(normalize, expected):
     ],
 )
 def test_mapping_confusion_rejects_inconsistent_labels_and_orders(kwargs, message):
-    options = {"known_labels": np.asarray(["A", "A", "B", "A", "B", "B"]), **kwargs}
+    options = {
+        "known_labels": _keyed_query(["A", "A", "B", "A", "B", "B"]),
+        **kwargs,
+    }
 
     with pytest.raises(ValueError) as raised:
         plotting_mapping.mapping_confusion(
@@ -1645,16 +1716,28 @@ def test_mapping_calibration_rejects_unknown_metrics_and_misaligned_labels():
         plotting_mapping.mapping_calibration(
             store,
             _TRANSFER_REF,
-            known_labels=np.asarray(["A"] * 6),
+            known_labels=_keyed_query(np.asarray(["A"] * 6)),
             metric="margin",
             direction="higher",
             show=False,
         )
     with pytest.raises(ValueError) as raised:
         plotting_mapping.mapping_calibration(
-            store, _TRANSFER_REF, known_labels=np.asarray(["A"]), show=False
+            store,
+            _TRANSFER_REF,
+            known_labels=_keyed_query(np.asarray(["A"])),
+            show=False,
         )
-    assert raised.value.args == ("known_labels must have one value per mapped cell",)
+    assert raised.value.args[0].startswith(
+        "plots.mapping_calibration(known_labels=) takes the values of a pandas "
+        "Series by ID: its index must hold the ids of the 6 cells of the label "
+        "transfer, each once; 5 such ids have no label, such as 'q1'."
+    )
+    # Labels by position are refused, whatever their length.
+    with pytest.raises(TypeError, match="got a NumPy array"):
+        plotting_mapping.mapping_calibration(
+            store, _TRANSFER_REF, known_labels=np.asarray(["A"] * 6), show=False
+        )
 
 
 def test_mapping_plots_show_owned_results_by_default(monkeypatch):
@@ -1675,12 +1758,63 @@ def test_mapping_plots_show_owned_results_by_default(monkeypatch):
         plotting_mapping.mapping_evidence(
             store, _TRANSFER_REF, metrics=("voteFraction",)
         ),
-        plotting_mapping.mapping_confusion(store, _TRANSFER_REF, known_labels=known),
+        plotting_mapping.mapping_confusion(
+            store, _TRANSFER_REF, known_labels=_keyed_query(known)
+        ),
         plotting_mapping.mapping_calibration(
-            store, _TRANSFER_REF, known_labels=known, n_thresholds=3
+            store, _TRANSFER_REF, known_labels=_keyed_query(known), n_thresholds=3
         ),
     ]
 
     assert shown == plots
     for plot in plots:
         plot.close()
+
+
+@pytest.mark.parametrize(
+    ("plot", "options", "name"),
+    [
+        (
+            "mapping_score",
+            {
+                "result": _TRANSFER_REF,
+                "reference": None,
+                "kind": "histogram",
+                "target_groups": ["a"] * 2,
+            },
+            "plots.mapping_score(target_groups=)",
+        ),
+        (
+            "mapping_evidence",
+            {"transfer": _TRANSFER_REF, "target_groups": np.asarray(["a", "b"])},
+            "plots.mapping_evidence(target_groups=)",
+        ),
+        (
+            "mapping_confusion",
+            {"transfer": _TRANSFER_REF, "known_labels": pd.Series(["A", "B"])},
+            "plots.mapping_confusion(known_labels=)",
+        ),
+        (
+            "mapping_calibration",
+            {"transfer": _TRANSFER_REF, "known_labels": ["A", "B"]},
+            "plots.mapping_calibration(known_labels=)",
+        ),
+    ],
+    ids=["score", "evidence", "confusion", "calibration"],
+)
+def test_mapping_plots_refuse_per_cell_values_by_position(plot, options, name):
+    evidence = pd.DataFrame(
+        {"label": ["A", "B"], "candidateLabel": ["A", "B"], "voteFraction": [0.8, 0.6]}
+    )
+    store = _controlled_mapping_store(
+        evidence=evidence, score_rows=[("all", np.asarray([0.1, 0.4]))]
+    )
+
+    with pytest.raises(TypeError) as raised:
+        getattr(plotting_mapping, plot)(store, show=False, **options)
+
+    message = str(raised.value)
+    assert message.startswith(
+        f"{name} takes per-cell values only as a pandas Series keyed by cell ID"
+    )
+    assert "which would assign values to cells by position" in message

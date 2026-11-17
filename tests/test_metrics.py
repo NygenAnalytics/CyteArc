@@ -23,6 +23,7 @@ from cytearc.metrics.lisi import _effective_perplexity, _neighbor_probabilities
 from cytearc.metadata.artifacts import plan_cell_data_artifact, write_cell_data_artifact
 from cytearc.storage.artifacts import ArtifactRef, ArtifactScope
 from cytearc.storage.selections import resolve_stored_selection_artifact
+from tests.storage_helpers import by_cell_id
 
 
 def _graph_neighbors(datastore, graph: ArtifactRef) -> ArtifactRef:
@@ -1065,13 +1066,13 @@ def test_datastore_scib_metrics(datastore, connectivity_graph):
     annotations = np.arange(datastore.cells.N) % 3
     datastore.cells.insert(
         column_name="metric_annotations",
-        values=annotations,
+        values=by_cell_id(datastore.cells, annotations),
         overwrite=True,
     )
     batches = np.arange(datastore.cells.N) % 2
     datastore.cells.insert(
         column_name="metric_batches",
-        values=batches,
+        values=by_cell_id(datastore.cells, batches),
         overwrite=True,
     )
     ilisi = datastore.integration.compute_ilisi("metric_batches", neighbors)
@@ -1117,7 +1118,7 @@ def test_datastore_metrics_reject_missing_metadata_labels(
     column = "masked_metric_labels"
     datastore.cells.insert(
         column_name=column,
-        values=np.zeros(datastore.cells.N, dtype=np.int8),
+        values=by_cell_id(datastore.cells, np.zeros(datastore.cells.N, dtype=np.int8)),
         overwrite=True,
     )
     cell_data = datastore.zw["cellData"]
@@ -1145,7 +1146,9 @@ def test_datastore_metrics_reject_blank_labels_and_name_missing_columns(
     neighbors = _graph_neighbors(datastore, connectivity_graph)
     column = "blank_metric_labels"
     labels = np.resize(np.asarray(["", "a", "b"], dtype=object), datastore.cells.N)
-    datastore.cells.insert(column_name=column, values=labels, overwrite=True)
+    datastore.cells.insert(
+        column_name=column, values=by_cell_id(datastore.cells, labels), overwrite=True
+    )
     try:
         with pytest.raises(ValueError, match="contains missing values"):
             datastore.integration.compute_ilisi(column, neighbors)
@@ -1174,7 +1177,7 @@ def test_datastore_metrics_reject_malformed_metadata_missing_masks(
     column = f"malformed_metric_mask_{mask_case}"
     datastore.cells.insert(
         column_name=column,
-        values=np.zeros(datastore.cells.N, dtype=np.int8),
+        values=by_cell_id(datastore.cells, np.zeros(datastore.cells.N, dtype=np.int8)),
         overwrite=True,
     )
     cell_data = datastore.zw["cellData"]
@@ -1388,8 +1391,8 @@ def metric_store_template(tmp_path_factory):
     pca = store.reduction.pca(normalized, dims=3)
     neighbors = store.graph.neighbors(store.graph.ann_index(pca), k=5)
     graph = store.graph.connectivity(neighbors)
-    store.cells.insert("batch", np.arange(40) % 2)
-    store.cells.insert("first_half", np.arange(40) < 20)
+    store.cells.insert("batch", by_cell_id(store.cells, np.arange(40) % 2))
+    store.cells.insert("first_half", by_cell_id(store.cells, np.arange(40) < 20))
     groups = np.repeat([0, 1], 20)
     refs = {
         "cells": cells,

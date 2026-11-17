@@ -67,6 +67,7 @@ from .test_trajectory_record_paths import (
     _rewrite_record,
     _write_graph_payload,
 )
+from tests.storage_helpers import by_cell_id
 
 _SOURCES = ["t1"]
 
@@ -1213,7 +1214,7 @@ def _two_components(
     fate = branching.store.trajectory.fate(
         sink_labels=branching.label_artifact(),
         graph=branching.graph,
-        direction=score,
+        direction=by_cell_id(branching.store.cells, score),
         sinks=sinks,
     )
     return replace(branching, fate=fate), fate, later
@@ -1391,7 +1392,7 @@ def test_a_sink_that_the_curves_leave_out_stays_out_of_the_trunk() -> None:
     fate = store.trajectory.fate(
         sink_labels=branching.label_artifact(),
         graph=branching.graph,
-        direction=branching.points[:, 0],
+        direction=by_cell_id(store.cells, branching.points[:, 0]),
         sinks=["a2", "b2", "d2"],
     )
     curves = store.trajectory.curves(fate, lineages=["a2", "b2"], n_points=40, df=6.0)
@@ -1977,7 +1978,7 @@ def test_every_pancreas_lineage_shares_the_progenitor_trunk(
     source_sink[types == "Ductal"] = -1 / (types == "Ductal").sum()
     source_sink[np.isin(types, fates)] = 1 / np.isin(types, fates).sum()
     pseudotime_ref = ds.trajectory.pseudotime(
-        run["connectivity_map"], ss_vec=source_sink
+        run["connectivity_map"], ss_vec=by_cell_id(ds.cells, source_sink)
     )
     pseudotime = ds.trajectory.load_pseudotime(pseudotime_ref)
     labels = ds.snapshot_cluster_labels(

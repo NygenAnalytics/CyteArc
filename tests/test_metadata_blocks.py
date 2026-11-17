@@ -18,6 +18,7 @@ from cytearc.metadata.queries import (
 from cytearc.metadata.rows import metadata_column_fingerprint
 from cytearc.storage.artifacts import ArtifactRef, artifact_group
 from cytearc.utils.logging import logger
+from tests.storage_helpers import by_cell_id
 
 _PSEUDO_REP_WARNING = (
     "compare.compute_bulk with pseudo_reps > 1 randomly splits cells within each "
@@ -83,7 +84,7 @@ def test_iter_row_blocks_respects_subset_cell_key(datastore):
     cells = datastore.cells
     keep = np.zeros(cells.N, dtype=bool)
     keep[::3] = True
-    cells.insert("block_subset", keep, overwrite=True)
+    cells.insert("block_subset", by_cell_id(cells, keep), overwrite=True)
     expected = cells.active_index("block_subset")
     got = np.concatenate(
         [
@@ -111,7 +112,7 @@ def test_make_bulk_respects_explicit_subset_selection(leiden_clustering, datasto
     drop = np.zeros(ds.cells.N, dtype=bool)
     drop[active_idx[::2]] = True
     subset = active & ~drop
-    ds.cells.insert("bulk_subset", subset, overwrite=True)
+    ds.cells.insert("bulk_subset", by_cell_id(ds.cells, subset), overwrite=True)
     subset_selection = ds.snapshot_cell_selection("bulk_subset")
 
     full = ds.compare.compute_bulk(

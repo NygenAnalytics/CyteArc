@@ -18,7 +18,11 @@ from cytearc.datastore._operations.presentation import _PresentationOperationsMi
 from cytearc.datastore.pipeline_run import PipelineRun
 from cytearc.storage.pipeline_runs import PipelineOutputRecord
 from tests import full_path
-from tests.storage_helpers import insert_nullable_cell_column, write_count_store
+from tests.storage_helpers import (
+    by_cell_id,
+    insert_nullable_cell_column,
+    write_count_store,
+)
 from tests.test_writers import _TOY_RNA_COUNTS
 
 
@@ -196,7 +200,7 @@ def test_to_anndata_materializes_frozen_pipeline_run_views(monkeypatch) -> None:
 def test_to_anndata_exports_empty_normed_cell_selection(export_store) -> None:
     export_store.cells.insert(
         "empty_export",
-        np.zeros(export_store.cells.N, dtype=bool),
+        by_cell_id(export_store.cells, np.zeros(export_store.cells.N, dtype=bool)),
         overwrite=True,
     )
 
@@ -213,7 +217,7 @@ def test_to_anndata_exports_empty_normed_cell_selection(export_store) -> None:
 def test_to_anndata_exports_empty_raw_cell_selection(export_store) -> None:
     export_store.cells.insert(
         "empty_export",
-        np.zeros(export_store.cells.N, dtype=bool),
+        by_cell_id(export_store.cells, np.zeros(export_store.cells.N, dtype=bool)),
         overwrite=True,
     )
     n_features = export_store.RNA.feats.N
@@ -279,7 +283,11 @@ def test_raw_feature_subset_matches_full_raw_columns(shared_export_store) -> Non
 
 def test_to_anndata_exports_normed_csr_with_ordered_feature_indexes(export_store):
     feature_indexes = np.array([3, 0])
-    export_store.cells.insert("picked", np.array([True, False, True]), overwrite=True)
+    export_store.cells.insert(
+        "picked",
+        by_cell_id(export_store.cells, np.array([True, False, True])),
+        overwrite=True,
+    )
 
     adata = export_store.to_anndata(
         from_assay="RNA",
@@ -667,9 +675,13 @@ def exported_run(tmp_path_factory) -> tuple[DataStore, PipelineRun]:
     datastore = DataStore(
         location, default_assay="RNA", min_features_per_cell=1, nthreads=1
     )
-    datastore.cells.insert("keep", _EXPORTED_RUN_CELLS, overwrite=True)
+    datastore.cells.insert(
+        "keep", by_cell_id(datastore.cells, _EXPORTED_RUN_CELLS), overwrite=True
+    )
     for name, values in _SNAPSHOT_COLUMNS.items():
-        datastore.cells.insert(name, values, overwrite=True)
+        datastore.cells.insert(
+            name, by_cell_id(datastore.cells, values), overwrite=True
+        )
     for name, values in _MASKED_COLUMNS.items():
         insert_nullable_cell_column(datastore, name, values, _MISSING)
     # Text missing in every cell, which AnnData cannot write as text.
@@ -1028,7 +1040,11 @@ def test_normed_run_export_requires_the_runs_own_normalized_values(
             cytearc.to_h5ad(datastore.RNA, str(path), run=swapped, matrix="normed")
         assert not path.exists()
     # As many cells as the run but other ones: only the selection check sees it.
-    datastore.cells.insert("shifted", np.roll(_EXPORTED_RUN_CELLS, 1), overwrite=True)
+    datastore.cells.insert(
+        "shifted",
+        by_cell_id(datastore.cells, np.roll(_EXPORTED_RUN_CELLS, 1)),
+        overwrite=True,
+    )
     try:
         same_size = datastore.features.normalize(
             datastore.snapshot_cell_selection("shifted"),

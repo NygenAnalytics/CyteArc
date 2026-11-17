@@ -21,7 +21,7 @@ from cytearc import DataStore
 from cytearc.storage.artifacts import ArtifactRef, artifact_group
 from cytearc.storage.errors import ArtifactResolutionError
 from cytearc.storage.finite_values import NonFiniteArtifactError
-from tests.storage_helpers import write_count_store
+from tests.storage_helpers import by_cell_id, write_count_store
 
 N_CELLS = 40
 SUBSET = np.arange(12)
@@ -57,7 +57,9 @@ def poisoned_by_cell(assay: Any, counts: Any) -> Any:
 def _write_template(zarr_loc: Path) -> dict[str, ArtifactRef]:
     write_count_store(str(zarr_loc), _counts(), "uint16")
     store = _open(zarr_loc)
-    store.cells.insert("batch", np.where(np.arange(N_CELLS) % 2, "a", "b"))
+    store.cells.insert(
+        "batch", by_cell_id(store.cells, np.where(np.arange(N_CELLS) % 2, "a", "b"))
+    )
     cells = store.snapshot_cell_selection()
     features = store.features.snapshot(from_assay="RNA", feature_indexes=SUBSET)
     adt = store.features.normalize(cells, store.features.universe(from_assay="ADT"))

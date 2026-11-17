@@ -16,6 +16,7 @@ import cytearc
 from cytearc.metadata.selection import CellField
 from cytearc.utils.warnings import warn
 from tests.qc_helpers import fresh_qc_store, open_qc_store
+from tests.storage_helpers import by_cell_id
 
 _THIS_FILE = Path(__file__).resolve()
 _CELL_LEVEL = "Cell-level statistical testing treats each cell"
@@ -60,9 +61,12 @@ def test_statistical_warnings_name_the_callers_line_through_a_datastore() -> Non
     store = open_qc_store(fresh_qc_store()[0], min_features_per_cell=-1)
     cells = np.arange(store.cells.N)
     store.cells.insert(
-        "warning_group", np.array([f"g{index % 3}" for index in cells], dtype=object)
+        "warning_group",
+        by_cell_id(
+            store.cells, np.array([f"g{index % 3}" for index in cells], dtype=object)
+        ),
     )
-    store.cells.insert("warning_keep", cells % 3 != 2)
+    store.cells.insert("warning_keep", by_cell_id(store.cells, cells % 3 != 2))
     selection = store.snapshot_cell_selection("I")
     with warnings.catch_warnings(record=True) as through_store:
         warnings.simplefilter("always")

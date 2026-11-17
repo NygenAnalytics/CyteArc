@@ -25,7 +25,7 @@ from cytearc.storage.stores import (
     zarr_root_path,
 )
 from tests.fixtures_datastore import build_neighborhood_graph
-from tests.storage_helpers import serve_uris, stored_bytes
+from tests.storage_helpers import by_cell_id, serve_uris, stored_bytes
 from cytearc.storage.schema import create_cell_data
 from cytearc.writers import create_zarr_count_assay
 
@@ -634,10 +634,14 @@ def test_mounted_store_writes_only_to_target(default_sources, tmp_path):
         default_assay="RNA",
         min_features_per_cell=1,
     )
-    ds.cells.insert("mounted_flag", np.ones(ds.cells.N, dtype=bool), overwrite=True)
+    ds.cells.insert(
+        "mounted_flag",
+        by_cell_id(ds.cells, np.ones(ds.cells.N, dtype=bool)),
+        overwrite=True,
+    )
     mask = np.zeros(ds.cells.N, dtype=bool)
     mask[:3] = True
-    ds.cells.update_key(mask, key="I")
+    ds.cells.update_key(by_cell_id(ds.cells, mask), key="I")
 
     assert _snapshot_store_files(source) == source_before
     assert "mounted_flag" in zarr.open_group(target, mode="r")["cellData"]
@@ -794,7 +798,7 @@ def test_mounted_store_computes_markers_without_writing_source(tmp_path):
     )
     ds.cells.insert(
         "marker_groups",
-        np.array(["a", "a", "b", "b"]),
+        by_cell_id(ds.cells, np.array(["a", "a", "b", "b"])),
         overwrite=True,
     )
 

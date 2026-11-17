@@ -26,7 +26,7 @@ from cytearc.datastore.pipeline_accessor import (
     StageDescription,
 )
 from tests.perturbation_helpers import write_screen
-from tests.storage_helpers import open_store, write_count_store
+from tests.storage_helpers import by_cell_id, open_store, write_count_store
 
 RECIPES = ("rna", "atac", "adt", "multimodal", "perturbation")
 # The keywords of the recipes' methods that are not stages.
@@ -485,8 +485,10 @@ def test_the_rna_defaults_that_the_call_decides_follow_their_rules(tmp_path: Pat
         "uint16",
     )
     store = open_store(tmp_path / "rna.zarr")
-    store.cells.insert("batch", np.where(np.arange(40) % 2 == 0, "a", "b"))
-    store.cells.insert("chosen", np.arange(40) < 30)
+    store.cells.insert(
+        "batch", by_cell_id(store.cells, np.where(np.arange(40) % 2 == 0, "a", "b"))
+    )
+    store.cells.insert("chosen", by_cell_id(store.cells, np.arange(40) < 30))
     described = PipelineAccessor.describe("rna")
     graph = {**_QUICK_RNA, "leiden": True, "doublets": True}
 

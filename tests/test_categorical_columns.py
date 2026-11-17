@@ -43,7 +43,7 @@ from cytearc.storage.identity import replace_metadata_column
 from cytearc.storage.metadata_keys import metadata_column_keys
 from cytearc.storage.selections import snapshot_run_metadata
 from cytearc.utils.memory_budget import MemoryBudgetError, MemoryLedger
-from tests.storage_helpers import open_store, write_count_store
+from tests.storage_helpers import by_cell_id, open_store, write_count_store
 
 # Labels with a missing row, text beyond ASCII, slashes and underscores, and
 # numbers written as text, whose natural order puts "2" before "10".
@@ -665,15 +665,22 @@ def stores(tmp_path_factory) -> dict[str, object]:
         write_count_store(str(path), {"RNA": counts}, "uint16")
         store = open_store(path)
         if layout == "text":
-            store.cells.insert("cell_type", np.array(LABELS, dtype=object))
-            store.cells.insert("sample", np.array(samples, dtype=object))
+            store.cells.insert(
+                "cell_type", by_cell_id(store.cells, np.array(LABELS, dtype=object))
+            )
+            store.cells.insert(
+                "sample", by_cell_id(store.cells, np.array(samples, dtype=object))
+            )
         else:
             store.cells.insert(
-                "cell_type", pd.Categorical(LABELS, categories=CATEGORIES)
+                "cell_type",
+                by_cell_id(store.cells, pd.Categorical(LABELS, categories=CATEGORIES)),
             )
-            store.cells.insert("sample", pd.Categorical(samples))
+            store.cells.insert(
+                "sample", by_cell_id(store.cells, pd.Categorical(samples))
+            )
             assert isinstance(store.cells._get_array("cell_type"), CategoricalColumn)
-        store.cells.insert("labeled", ~np.array(MISSING))
+        store.cells.insert("labeled", by_cell_id(store.cells, ~np.array(MISSING)))
         opened[layout] = store
     return opened
 
@@ -1338,7 +1345,10 @@ def test_subset_repack_and_mount_keep_the_categorical_layout(
     location = source.zarr_loc
     rows = np.array([0, 2, 5, 9, 11])
     SubsetZarr(
-        str(tmp_path / "subset.zarr"), [source.RNA], cell_idx=rows, nthreads=1
+        str(tmp_path / "subset.zarr"),
+        [source.RNA],
+        cell_ids=source.cells.fetch_all("ids")[rows],
+        nthreads=1,
     ).dump()
     repack_store(str(location), str(tmp_path / "repacked.zarr"))
     mount_datastore(

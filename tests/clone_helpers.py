@@ -32,7 +32,7 @@ from tests.clone_truth import (
     write_pycashier,
     write_trex_molecules,
 )
-from tests.storage_helpers import open_store, write_count_store
+from tests.storage_helpers import by_cell_id, open_store, write_count_store
 
 if TYPE_CHECKING:
     from cytearc.datastore.datastore import DataStore
@@ -80,10 +80,14 @@ def write_truth_store(path: Path, truth: CloneTruth) -> "DataStore":
     counts = np.random.default_rng(5).poisson(3.0, size=(n_cells, 6)) + 1
     write_count_store(str(path), {"RNA": counts}, "uint16", cell_ids=truth.cell_ids)
     store = open_store(path)
-    store.cells.insert("sample", truth.samples.astype(object))
-    store.cells.insert("time_point", truth.time_points)
-    store.cells.insert("cell_type", truth.cell_types.astype(object))
-    store.cells.insert("every_cell", np.ones(n_cells, dtype=bool))
+    store.cells.insert("sample", by_cell_id(store.cells, truth.samples.astype(object)))
+    store.cells.insert("time_point", by_cell_id(store.cells, truth.time_points))
+    store.cells.insert(
+        "cell_type", by_cell_id(store.cells, truth.cell_types.astype(object))
+    )
+    store.cells.insert(
+        "every_cell", by_cell_id(store.cells, np.ones(n_cells, dtype=bool))
+    )
     return store
 
 
@@ -95,7 +99,9 @@ def write_cells_store(path: Path, cell_ids: Sequence[str]) -> "DataStore":
     counts = np.ones((len(cell_ids), 3), dtype=np.uint16)
     write_count_store(str(path), {"RNA": counts}, "uint16", cell_ids=list(cell_ids))
     store = open_store(path)
-    store.cells.insert("every_cell", np.ones(len(cell_ids), dtype=bool))
+    store.cells.insert(
+        "every_cell", by_cell_id(store.cells, np.ones(len(cell_ids), dtype=bool))
+    )
     return store
 
 
@@ -200,8 +206,16 @@ def clone_figure_calls(
     pairs of groups by cell type; fate bias follows the clones of d2's cells
     to the cell types of d4's. Each summary is computed once, here.
     """
-    store.cells.insert("is_d2", store.cells.fetch_all("sample") == "d2", overwrite=True)
-    store.cells.insert("is_d4", store.cells.fetch_all("sample") == "d4", overwrite=True)
+    store.cells.insert(
+        "is_d2",
+        by_cell_id(store.cells, store.cells.fetch_all("sample") == "d2"),
+        overwrite=True,
+    )
+    store.cells.insert(
+        "is_d4",
+        by_cell_id(store.cells, store.cells.fetch_all("sample") == "d4"),
+        overwrite=True,
+    )
     plots = store.plots
     expansion = store.clones.expansion(clones, group_by="sample")
     rarefaction = store.clones.rarefaction(clones, group_by="sample")

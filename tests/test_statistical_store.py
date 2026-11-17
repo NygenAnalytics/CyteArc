@@ -17,7 +17,7 @@ from cytearc.datastore._operations.statistical_store import _STATISTICAL_SLOT_AT
 from cytearc.datastore.datastore import DataStore
 from cytearc.metadata.selection import CellField
 from cytearc.storage.artifacts import artifact_path
-from tests.storage_helpers import write_count_store
+from tests.storage_helpers import by_cell_id, write_count_store
 
 _N_CELLS = 24
 
@@ -31,13 +31,21 @@ def store(tmp_path_factory: pytest.TempPathFactory) -> DataStore:
         zarr_loc, default_assay="RNA", min_features_per_cell=0, nthreads=1
     )
     cells = np.arange(_N_CELLS)
-    store.cells.insert("everyone", np.ones(_N_CELLS, dtype=bool), overwrite=True)
     store.cells.insert(
-        "grp", np.where(cells % 2 == 0, "a", "b").astype(object), overwrite=True
+        "everyone",
+        by_cell_id(store.cells, np.ones(_N_CELLS, dtype=bool)),
+        overwrite=True,
+    )
+    store.cells.insert(
+        "grp",
+        by_cell_id(store.cells, np.where(cells % 2 == 0, "a", "b").astype(object)),
+        overwrite=True,
     )
     store.cells.insert(
         "sample",
-        np.array([f"s{cell % 6}" for cell in cells], dtype=object),
+        by_cell_id(
+            store.cells, np.array([f"s{cell % 6}" for cell in cells], dtype=object)
+        ),
         overwrite=True,
     )
     return store
@@ -66,7 +74,9 @@ def test_editing_an_attribute_the_request_determines_stops_reuse(
 ) -> None:
     key = f"value_{attribute}"
     store.cells.insert(
-        key, np.random.default_rng(len(key)).normal(size=_N_CELLS), overwrite=True
+        key,
+        by_cell_id(store.cells, np.random.default_rng(len(key)).normal(size=_N_CELLS)),
+        overwrite=True,
     )
     first = _run(store, key)
     assert _run(store, key).artifact == first.artifact
@@ -84,7 +94,7 @@ def test_the_reader_requires_exactly_the_attributes_the_writer_records(
 ) -> None:
     store.cells.insert(
         "value_recorded",
-        np.random.default_rng(3).normal(size=_N_CELLS),
+        by_cell_id(store.cells, np.random.default_rng(3).normal(size=_N_CELLS)),
         overwrite=True,
     )
     result = _run(store, "value_recorded")

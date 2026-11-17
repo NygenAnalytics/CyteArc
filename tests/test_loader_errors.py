@@ -18,7 +18,7 @@ import pytest
 
 from cytearc.storage.artifacts import artifact_path
 from cytearc.storage.refs import ArtifactRef
-from tests.storage_helpers import open_store, write_count_store
+from tests.storage_helpers import by_cell_id, open_store, write_count_store
 
 # Each loader: its namespace and method, the kind it reads, and its scope.
 LOADERS = [
@@ -68,7 +68,7 @@ def loader_store(tmp_path_factory):
         str(path), {"RNA": np.arange(24, dtype=np.uint16).reshape(6, 4)}, "uint16"
     )
     store = open_store(path)
-    store.cells.insert("every", np.ones(6, dtype=bool))
+    store.cells.insert("every", by_cell_id(store.cells, np.ones(6, dtype=bool)))
     return store, store.snapshot_cell_selection("every")
 
 

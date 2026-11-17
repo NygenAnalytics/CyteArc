@@ -16,7 +16,7 @@ from matplotlib.colors import to_rgba
 
 import cytearc.plotting as splt
 from cytearc import DataStore
-from tests.storage_helpers import write_count_store
+from tests.storage_helpers import by_cell_id, write_count_store
 
 pytestmark = pytest.mark.slow
 
@@ -38,8 +38,8 @@ def plotted_run(tmp_path_factory) -> SimpleNamespace:
     store = DataStore(location, default_assay="RNA", min_features_per_cell=-1)
     donor = np.where(np.arange(len(types)) % 2, "d1", "d2").astype(object)
     keep = np.arange(len(types)) % 3 != 0
-    store.cells.insert("donor", donor)
-    store.cells.insert("keep", keep)
+    store.cells.insert("donor", by_cell_id(store.cells, donor))
+    store.cells.insert("keep", by_cell_id(store.cells, keep))
     run = store.pipeline.rna(
         label="plots",
         filtering=False,

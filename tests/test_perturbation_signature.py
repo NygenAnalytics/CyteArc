@@ -34,7 +34,7 @@ from tests.perturbation_helpers import (
     use_python_kernels,
     write_screen,
 )
-from tests.storage_helpers import copy_store, open_store, written
+from tests.storage_helpers import by_cell_id, copy_store, open_store, written
 
 N_CELLS = 48
 # Guide 0 targets GENE_A, guide 1 GENE_B, and guide 2 is non-targeting.
@@ -59,9 +59,10 @@ CONTROLS = np.flatnonzero(CARRIED == 2)
 def _coordinates(store: DataStore, cells=None):
     """Import COORDINATES for ``cells``, every cell by default."""
     cells = cells or store.select_measured_cells("RNA")
-    selected = np.asarray(store.artifacts.load(cells)["values"][:], dtype=bool)
+    # Rows of cells outside the selection are left out.
+    coordinates = pd.DataFrame(COORDINATES, index=store.cells.fetch_all("ids"))
     return store.reduction.import_coordinates(
-        COORDINATES[selected], cell_selection=cells, name="X_test"
+        coordinates, cell_selection=cells, name="X_test"
     )
 
 
@@ -376,7 +377,7 @@ def test_a_short_sample_refusal_gives_each_sample_its_own_count(
     lanes[CONTROLS[:11]] = "A"
     lanes[CONTROLS[11:]] = "B"
     lanes[CARRIED != 2] = np.where(np.arange(N_CELLS)[CARRIED != 2] % 2, "A", "B")
-    store.cells.insert("lane", lanes)
+    store.cells.insert("lane", by_cell_id(store.cells, lanes))
 
     with pytest.raises(
         ValueError,

@@ -29,7 +29,11 @@ from cytearc.storage.artifacts import ArtifactRef, artifact_group
 from cytearc.storage.budget import ResourceBudget
 from cytearc.storage.selections import read_stored_selection_mask
 from cytearc.utils.logging import logger
-from tests.storage_helpers import insert_nullable_cell_column, write_count_store
+from tests.storage_helpers import (
+    by_cell_id,
+    insert_nullable_cell_column,
+    write_count_store,
+)
 from tests.test_reduction_graph_diagnostics import _warned
 
 _INDEX = doublets.DoubletIndexSettings(
@@ -510,8 +514,8 @@ def _build_synthetic(
     store = DataStore(
         str(path), default_assay="RNA", min_features_per_cell=0, nthreads=2
     )
-    store.cells.insert("sample", samples)
-    store.cells.insert("cell_type", types.astype(str))
+    store.cells.insert("sample", by_cell_id(store.cells, samples))
+    store.cells.insert("cell_type", by_cell_id(store.cells, types.astype(str)))
     cells = store.snapshot_cell_selection("I")
     normalized = store.features.normalize(cells, store.features.universe())
     pca = store.reduction.pca(normalized, dims=10, local_cache=False)
@@ -957,7 +961,7 @@ def test_doublet_samples_need_labels_two_cells_and_pair_one_cluster_freely(
 
     lonely = samples.copy()
     lonely[0] = "C"
-    store.cells.insert("lonely_sample", lonely)
+    store.cells.insert("lonely_sample", by_cell_id(store.cells, lonely))
     with pytest.raises(
         ValueError, match=r"sample \(lonely_sample='C'\) has one selected cell"
     ):
@@ -966,7 +970,7 @@ def test_doublet_samples_need_labels_two_cells_and_pair_one_cluster_freely(
 
     # Sample A is one cluster: its doublets pair any two of its cells.
     one_type = np.where(samples == "A", "a", two_captures.types.astype(str))
-    store.cells.insert("one_type_in_a", one_type)
+    store.cells.insert("one_type_in_a", by_cell_id(store.cells, one_type))
     clusters = store.snapshot_cluster_labels(
         "one_type_in_a", cell_selection=store.snapshot_cell_selection("I")
     )
@@ -1163,7 +1167,7 @@ _ONE_CLUSTER = "In 1 sample every cell has the same cluster label"
 def _one_cluster_in_a(opened: SimpleNamespace, synthetic: _SyntheticDoublets) -> Any:
     """Return cluster labels that give every cell of sample A one label, and B its types."""
     labels = np.where(synthetic.samples == "A", "a", synthetic.types.astype(str))
-    opened.store.cells.insert("one_type_in_a", labels)
+    opened.store.cells.insert("one_type_in_a", by_cell_id(opened.store.cells, labels))
     return opened.store.snapshot_cluster_labels(
         "one_type_in_a", cell_selection=opened.store.snapshot_cell_selection("I")
     )
@@ -1210,7 +1214,9 @@ def test_a_sample_of_one_cluster_warns_when_computed_and_when_reused(
 
     # Each sample of one label of its own: two clusters in all, one in each.
     opened.store.cells.insert(
-        "one_type_each", np.where(samples == "A", "a", "b"), overwrite=True
+        "one_type_each",
+        by_cell_id(opened.store.cells, np.where(samples == "A", "a", "b")),
+        overwrite=True,
     )
     each = opened.store.snapshot_cluster_labels(
         "one_type_each", cell_selection=opened.store.snapshot_cell_selection("I")

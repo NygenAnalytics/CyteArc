@@ -21,7 +21,7 @@ from tests.clone_helpers import (
 )
 from tests.clone_truth import CLONE_SIZES, N_CELLS, clone_truth
 from cytearc.utils.memory_budget import MemoryBudgetError
-from tests.storage_helpers import copy_store, insert_nullable_cell_column
+from tests.storage_helpers import by_cell_id, copy_store, insert_nullable_cell_column
 
 TRUTH = clone_truth()
 ALL = dv.CloneSizes.from_sizes(CLONE_SIZES)
@@ -43,7 +43,7 @@ def template(tmp_path_factory) -> SimpleNamespace:
     folder = tmp_path_factory.mktemp("clone_diversity")
     store = write_truth_store(folder / "store.zarr", TRUTH)
     clones = import_truth_clones(store, TRUTH, folder)
-    store.cells.insert("is_d2", TRUTH.samples == "d2")
+    store.cells.insert("is_d2", by_cell_id(store.cells, TRUTH.samples == "d2"))
     return SimpleNamespace(path=folder / "store.zarr", clones=clones)
 
 
@@ -157,7 +157,9 @@ def test_group_columns_may_take_the_names_of_the_results_columns(copied) -> None
     # Columns named like the results' own columns hold the samples' labels and
     # measure what the samples do; their labels stay in the keys.
     for name in ("group", "coverage", "n_clones", "shannon", "order", "diversity"):
-        store.cells.insert(name, TRUTH.samples.astype(object), overwrite=True)
+        store.cells.insert(
+            name, by_cell_id(store.cells, TRUTH.samples.astype(object)), overwrite=True
+        )
         found = store.clones.diversity(clones, group_by=name)
         pd.testing.assert_frame_equal(found.indices, neutral.indices)
         pd.testing.assert_frame_equal(found.hill, neutral.hill)
@@ -263,8 +265,11 @@ def test_a_label_of_its_own_for_each_cell_makes_groups_of_one_cell(copied) -> No
     # A label of its own for each of the 32 cells with a clone makes 32
     # groups.
     has = TRUTH.clones >= 0
-    store.cells.insert("own", np.asarray([f"c{i:02d}" for i in range(N_CELLS)]))
-    store.cells.insert("has_clone", has)
+    store.cells.insert(
+        "own",
+        by_cell_id(store.cells, np.asarray([f"c{i:02d}" for i in range(N_CELLS)])),
+    )
+    store.cells.insert("has_clone", by_cell_id(store.cells, has))
     own = store.snapshot_cluster_labels(
         "own", cell_selection=store.snapshot_cell_selection("has_clone")
     )

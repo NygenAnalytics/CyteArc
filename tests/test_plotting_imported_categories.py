@@ -15,6 +15,7 @@ from matplotlib.colors import to_hex
 
 import cytearc
 import cytearc.plotting as splt
+from tests.storage_helpers import by_cell_id
 
 anndata = pytest.importorskip("anndata")
 
@@ -75,15 +76,23 @@ def imported(tmp_path_factory) -> SimpleNamespace:
     )
     store.cells.insert(
         "stage",
-        pd.Categorical(
-            np.array(["late", "early", "mid"])[blocks],
-            categories=["early", "mid", "late", "unused"],
-            ordered=True,
+        by_cell_id(
+            store.cells,
+            pd.Categorical(
+                np.array(["late", "early", "mid"])[blocks],
+                categories=["early", "mid", "late", "unused"],
+                ordered=True,
+            ),
         ),
     )
     store.cells.insert(
         "cluster_codes",
-        pd.Categorical(np.array(["10", "2", "1"])[blocks], categories=["10", "2", "1"]),
+        by_cell_id(
+            store.cells,
+            pd.Categorical(
+                np.array(["10", "2", "1"])[blocks], categories=["10", "2", "1"]
+            ),
+        ),
     )
     return SimpleNamespace(
         store=store,

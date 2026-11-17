@@ -39,6 +39,7 @@ from tests.clone_helpers import (
 from cytearc.utils.memory_budget import MemoryLedger
 from tests.memory_helpers import climb_refusals, named_budget
 from tests.perturbation_helpers import use_python_kernels
+from tests.storage_helpers import by_cell_id
 
 # Contig IDs repeat across the three files: X takes _3 and then _4, since the
 # TCR file names a contig X_2, and Z takes _3, or _2 when only chains are
@@ -1825,7 +1826,11 @@ def test_clonotypes_replace_an_imported_clone_id(tmp_path) -> None:
 def test_a_selection_of_some_cells_exports_their_ids(tmp_path) -> None:
     store = receptor_store(tmp_path)
     store.cells.insert(
-        "chosen", np.asarray([False, False, True, False, True, True, False, True])
+        "chosen",
+        by_cell_id(
+            store.cells,
+            np.asarray([False, False, True, False, True, True, False, True]),
+        ),
     )
     rows = [
         f"cell{k},true,cell{k}_contig_1,true,500,TRB,TRBV{k},,TRBJ1,TRBC1,true,true,"

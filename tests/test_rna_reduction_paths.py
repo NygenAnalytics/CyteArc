@@ -27,7 +27,7 @@ from cytearc.trajectory import (
     truncated_pba_potential,
     validate_source_sink_vector,
 )
-from tests.storage_helpers import write_count_store
+from tests.storage_helpers import by_cell_id, write_count_store
 
 N_CELLS = 24
 N_GENES = 12
@@ -59,11 +59,19 @@ def _open(zarr_loc: str, **options: Any) -> DataStore:
 @pytest.fixture(scope="module")
 def store(tmp_path_factory) -> DataStore:
     store = _open(_write(tmp_path_factory.mktemp("rna_paths"), _counts()))
-    store.cells.insert("everyone", np.ones(N_CELLS, dtype=bool), overwrite=True)
-    store.cells.insert("nobody", np.zeros(N_CELLS, dtype=bool), overwrite=True)
+    store.cells.insert(
+        "everyone",
+        by_cell_id(store.cells, np.ones(N_CELLS, dtype=bool)),
+        overwrite=True,
+    )
+    store.cells.insert(
+        "nobody", by_cell_id(store.cells, np.zeros(N_CELLS, dtype=bool)), overwrite=True
+    )
     without_counts = np.zeros(N_CELLS, dtype=bool)
     without_counts[:4] = True
-    store.cells.insert("without_counts", without_counts, overwrite=True)
+    store.cells.insert(
+        "without_counts", by_cell_id(store.cells, without_counts), overwrite=True
+    )
     return store
 
 

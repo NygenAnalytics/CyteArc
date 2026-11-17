@@ -16,6 +16,7 @@ from cytearc.features.genomic.melding import create_counts_mat
 from cytearc.storage.budget import ResourceBudget
 from cytearc.utils.arrays import sparse_matrix_bytes
 from cytearc.writers import SparseToZarr, create_zarr_dataset
+from tests.storage_helpers import by_cell_id
 
 
 def _features_bed(rows):
@@ -576,7 +577,7 @@ def test_add_melded_assay_uses_cell_key_for_idf_and_keeps_all_rows(tmp_path):
         nthreads=1,
     )
     train_mask = np.array([False, True, True])
-    store.cells.insert("train", train_mask, overwrite=True)
+    store.cells.insert("train", by_cell_id(store.cells, train_mask), overwrite=True)
     feature_bed = _features_bed(
         [
             ("chr1", 120, 300, "gene_a", "GENE_A", "+"),
