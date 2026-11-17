@@ -85,7 +85,7 @@ HVG_FLAVORS: tuple[str, ...] = ("cytearc", "seurat_v3", "pearson_residuals")
 # The span of the seurat_v3 trend and the overdispersion of Pearson residuals.
 DEFAULT_LOESS_SPAN = 0.3
 DEFAULT_PEARSON_THETA = 100.0
-# The default min_cells of the cytearc flavor is the 2.5th root of the number
+# The default min_cells of the cytearc flavor is the cube root of the number
 # of selected cells, rounded up, and at least HVG_MIN_CELLS_FLOOR. A selection
 # too small for that floor uses 5% of its cells, rounded up and at least
 # HVG_SMALL_SELECTION_MIN_CELLS.
@@ -962,8 +962,8 @@ def hvg_flavor_options(
 def default_hvg_min_cells(n_selected: int) -> int:
     """Return the default ``min_cells`` of the cytearc flavor for ``n_selected`` cells.
 
-    It is the 2.5th root of ``n_selected`` rounded up, and at least 20: 20
-    from 381 to 1,788 cells, 40 at 10,000, 100 at 100,000 and 252 at
+    It is the cube root of ``n_selected`` rounded up, and at least 20: 20
+    from 381 to 8,000 cells, 22 at 10,000, 47 at 100,000 and 100 at
     1,000,000. A smaller selection uses 5% of its cells rounded up, and at
     least 5: 5 up to 100 cells, 8 at 150 and 15 at 300. No gene of a
     selection under 5 cells reaches the default.
@@ -972,23 +972,19 @@ def default_hvg_min_cells(n_selected: int) -> int:
     small_selection = max(
         HVG_SMALL_SELECTION_MIN_CELLS, -(-n_selected // _SMALL_SELECTION_DIVISOR)
     )
-    return min(
-        max(HVG_MIN_CELLS_FLOOR, _ceil_root_two_and_a_half(n_selected)),
-        small_selection,
-    )
+    return min(max(HVG_MIN_CELLS_FLOOR, _ceil_cube_root(n_selected)), small_selection)
 
 
-def _ceil_root_two_and_a_half(n: int) -> int:
-    """Return the smallest whole ``m`` with ``m ** 2.5 >= n``, exactly.
+def _ceil_cube_root(n: int) -> int:
+    """Return the smallest whole ``m`` with ``m ** 3 >= n``, exactly.
 
-    The comparison runs in integers as ``m ** 5 >= n ** 2``, because a float
-    root misrounds exact powers: ``100_000 ** 0.4`` is just above 100.
+    The comparison runs in integers, because a float root misrounds exact
+    cubes: ``1_000_000 ** (1 / 3)`` is just below 100.
     """
-    target = n * n
-    root = max(1, round(math.pow(n, 0.4)))
-    while root**5 < target:
+    root = max(1, round(math.cbrt(n)))
+    while root**3 < n:
         root += 1
-    while root > 1 and (root - 1) ** 5 >= target:
+    while root > 1 and (root - 1) ** 3 >= n:
         root -= 1
     return root
 

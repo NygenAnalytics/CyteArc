@@ -1096,9 +1096,9 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
             cell_selection: The cells whose variability is scored.
             from_assay: The RNA assay; the default assay when None.
             min_cells: Keep genes detected in at least this many selected
-                cells. None uses the flavor's default: for cytearc, the 2.5th
+                cells. None uses the flavor's default: for cytearc, the cube
                 root of the number of selected cells rounded up and at least
-                20 (100 at 100,000 cells, 252 at 1,000,000), or for a
+                20 (47 at 100,000 cells, 100 at 1,000,000), or for a
                 selection of fewer than 381 cells, 5% of them rounded up and
                 at least 5; for the other flavors, 0.
             top_n: The number of genes to select, and with ``batch`` the

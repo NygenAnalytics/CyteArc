@@ -284,12 +284,11 @@ def test_pearson_residuals_match_a_hand_computed_example() -> None:
 # Detection bounds
 
 
-# min_cells is the 2.5th root of the cells rounded up and at least 20, and a
+# min_cells is the cube root of the cells rounded up and at least 20, and a
 # selection too small for 20 takes 5% of its cells rounded up, at least 5:
-# 5% of 101 is 5.05, of 150 is 7.5 and of 381 is 19.05; 20**5 = 3,200,000
-# lies between 1,788**2 and 1,789**2; 26**5 < 3,696**2 <= 27**5;
-# 40**5 >= 10**8 > 39**5; 100**5 == 100,000**2 exactly; and
-# 251**5 < 10**12 <= 252**5.
+# 5% of 101 is 5.05, of 150 is 7.5 and of 381 is 19.05; 20**3 = 8,000;
+# 21**3 = 9,261 < 10,000 <= 22**3 = 10,648; 46**3 = 97,336 < 100,000 <=
+# 47**3 = 103,823; and 100**3 = 1,000,000 exactly.
 @pytest.mark.parametrize(
     ("n_selected", "min_cells", "limit"),
     [
@@ -304,12 +303,12 @@ def test_pearson_residuals_match_a_hand_computed_example() -> None:
         (380, 19, 378),
         (381, 20, 379),
         (1000, 20, 995),
-        (1788, 20, 1779),
-        (1789, 21, 1780),
-        (3696, 27, 3677),
-        (10_000, 40, 9950),
-        (100_000, 100, 99_500),
-        (1_000_000, 252, 995_000),
+        (3696, 20, 3677),
+        (8000, 20, 7960),
+        (8001, 21, 7960),
+        (10_000, 22, 9950),
+        (100_000, 47, 99_500),
+        (1_000_000, 100, 995_000),
     ],
 )
 def test_default_detection_bounds_scale_with_the_selection(
@@ -329,9 +328,9 @@ def test_default_detection_bounds_scale_with_the_selection(
 
 def test_default_min_cells_is_the_exact_rounded_up_root_with_its_bounds() -> None:
     sizes = np.r_[
-        np.arange(1, 5_000),
-        np.random.default_rng(3).integers(5_000, 10**12, 2_000),
-        [10**10, 10**12, 32**5, 32**5 + 1, 1024**2, 1024**2 + 1],
+        np.arange(1, 10_000),
+        np.random.default_rng(3).integers(10_000, 10**12, 2_000),
+        [10**9, 10**12, 1000**3 - 1, 1000**3 + 1, 9999**3, 9999**3 + 1],
     ]
     previous = 0
     for n in sorted(int(size) for size in sizes):
@@ -342,10 +341,10 @@ def test_default_min_cells_is_the_exact_rounded_up_root_with_its_bounds() -> Non
             # The smallest whole number of cells that is at least 5% of them.
             assert 20 * (min_cells - 1) < n <= 20 * min_cells
         elif min_cells > 20:
-            # The smallest whole number whose 2.5th power reaches n, in integers.
-            assert min_cells**5 >= n * n > (min_cells - 1) ** 5
+            # The smallest whole number whose cube reaches n, in integers.
+            assert min_cells**3 >= n > (min_cells - 1) ** 3
         else:
-            assert min_cells == 20 and 20**5 >= n * n
+            assert min_cells == 20 and 20**3 >= n
         assert min_cells >= previous
         previous = min_cells
 

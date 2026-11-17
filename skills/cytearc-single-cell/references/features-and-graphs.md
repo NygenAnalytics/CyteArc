@@ -49,8 +49,8 @@ chain of artifacts, then branch or subcluster it safely. Docs: <https://docs.nyg
   The two count flavors ignore `normMethod` and have no detection bounds unless you pass them.
   `batch=` (a cell column or label artifact) scores every batch on its own and keeps the genes
   highly variable in the most batches, ties broken by median rank (Seurat's order).
-- Detection bounds of the cytearc flavor: `min_cells` defaults to the 2.5th root of the number of
-  selected cells, at least 20 (100 at 100,000 cells, 252 at 1M); a selection of fewer than 381
+- Detection bounds of the cytearc flavor: `min_cells` defaults to the cube root of the number of
+  selected cells, at least 20 (47 at 100,000 cells, 100 at 1M); a selection of fewer than 381
   cells uses 5% of them, at least 5 (no gene passes in a selection of under 5 cells), and
   `max_cells` excludes genes detected in more than 99.5% of them; artifacts record
   the resolved integers. `min_mean`/`max_mean` are log2 means over the cells where a gene is
@@ -115,11 +115,11 @@ splt.highly_variable_features(
 `IGKC`) and `IGHM` genes, which the default blacklist keeps. What to exclude: `gene-blacklists.md`.
 
 `ds.artifacts.inspect(hvg).diagnostics["selectedDetectionRatio"]` is the median number of cells
-that detect a selected gene over the same median for every gene it could select. It reads 0.7 to
-3.1 on 10x 3' Tabula Sapiens samples of 10,000 to 1M cells and 1.0 to 1.9 on pancreas selections
+that detect a selected gene over the same median for every gene it could select. It reads 0.96 to
+4.3 on 10x 3' Tabula Sapiens samples of 10,000 to 1M cells and 1.0 to 1.9 on pancreas selections
 of 70 to 3,696 cells, at `top_n` 1,000 and 2,000. A ratio far below these means that the HVGs come
 mostly from rarely detected genes: all of Tabula Sapiens, whose cells mix 10x with 3.8% Smart-seq
-cells, reads 0.21 to 0.26, and 14% of its 2,000 HVGs get most of their detections from the
+cells, reads 0.20 to 0.21, and 24% of its 2,000 HVGs get most of their detections from the
 Smart-seq cells. Check whether the cells mix technologies or batches, and compare with a
 selection made within one of them or with `batch=`, which ranks genes within each batch.
 
@@ -302,7 +302,7 @@ minimum seed ARI was 0.78. The parent had no FOXP3 group.
 | --- | --- | --- |
 | `features.hvgs(top_n=)` / `hvg={"top_n": ...}` | `1000` | Weak or rare populations (raise); noisy programs dominate (lower). |
 | `features.hvgs(blacklist=)` | `DEFAULT_HVG_BLACKLIST` | A family dominates the HVGs or is the question; what to add: `gene-blacklists.md`. |
-| `features.hvgs(min_cells=, max_cells=)` | `None`, `None`: the 2.5th root of the selected cells (at least 20; 5% of a selection under 381 cells, at least 5) and detection in at most 99.5% of them; none for the count flavors | Outlier-driven genes (raise `min_cells`); `max_cells=np.inf` keeps ubiquitous genes. |
+| `features.hvgs(min_cells=, max_cells=)` | `None`, `None`: the cube root of the selected cells (at least 20; 5% of a selection under 381 cells, at least 5) and detection in at most 99.5% of them; none for the count flavors | Outlier-driven genes (raise `min_cells`); `max_cells=np.inf` keeps ubiquitous genes. |
 | `features.hvgs(flavor=)` | `"cytearc"` | Parity with scanpy/Seurat (`"seurat_v3"`), or a residual workflow (`"pearson_residuals"`). |
 | `features.hvgs(batch=)` | `None` | Samples or donors drive the HVGs; pass the sample column. |
 | `reduction.pca(dims=)` / `pca={"dims": ...}` | `21` | After a variance and stability check; keep it below the HVG count. `0` in a recipe means no PCA (graph on normalized values; pass `doublets=False`; memory and time scale with the HVG count). |
