@@ -60,10 +60,11 @@ class CSVtoZarr:
             counts, the cell IDs and the ``cell_data_cols`` columns follow
             the one order, and each cell keeps its row in the file, from 0,
             in the int64 cell column ``sourceRow``. Before the store is
-            created, the writer reads the file once more, sending each row
-            to temporary files on local disk, in ``temp_dir`` of the reader,
-            and keeping the cell columns in memory. Off by default in this
-            release.
+            created, the writer reads the file's rows, as its counts write
+            would, sending each to temporary files on local disk, in
+            ``temp_dir`` of the reader, and keeping the cell columns in
+            memory; the counts write then reads the rows from those files.
+            Off by default in this release.
         shuffle_seed: The seed of the shuffle, from 0 to 2**64 - 1. One seed
             gives the same order on every platform.
 
@@ -151,9 +152,9 @@ class CSVtoZarr:
             {self.assayName: storage_dtype},
         )[self.assayName]
         # Row r of every per-cell array holds the file's row _cellOrder[r].
-        # A shuffled import reads the file once more here, sending each row
-        # to its destination and keeping the cell columns, so that the
-        # counts write reads the rows in that order.
+        # A shuffled import reads the file's rows here, as its counts write
+        # would, sending each to its destination and keeping the cell
+        # columns, so that the counts write reads the rows in that order.
         self._cellOrder: np.ndarray | None = None
         self._shuffledStore: "SparseRowStore | None" = None
         self._shuffledParts: dict[int, list[tuple[np.ndarray, np.ndarray]]] = {}

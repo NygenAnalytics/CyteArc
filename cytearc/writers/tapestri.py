@@ -94,6 +94,7 @@ class TapestriToZarr(CrToZarr):
         shuffle_seed: int = 0,
     ) -> None:
         overwrite = bool_argument(overwrite, "overwrite")
+        shuffle_cells = bool_argument(shuffle_cells, "shuffle_cells")
         if not isinstance(reader, TapestriReader):
             raise TypeError(
                 f"reader must be a TapestriReader, not {type(reader).__name__}"

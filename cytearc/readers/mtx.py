@@ -1680,10 +1680,11 @@ class MtxReader(CrReader):
     of an unordered or feature-major matrix from these rows; a feature-major
     matrix is sorted into them when an import starts. ``temporaryDiskBytes``
     reports the size of the rows, which the end of an import and ``close``
-    remove. An import that shuffles cells reads the kept cells once more in
-    this order, as construction found them, and sends each to its
-    destination row in temporary files in ``temp_dir``; it then reads them
-    back in shuffled order.
+    remove. An import that shuffles cells reads the kept cells in this
+    order before it creates its store, as its counts write would, and sends
+    each to its destination row in temporary files in ``temp_dir``; the
+    counts write then reads them back in shuffled order instead of the
+    file.
 
     Args:
         matrix_path: A candidate returned by :func:`~cytearc.inspect_mtx`, or
@@ -1823,10 +1824,10 @@ class MtxReader(CrReader):
         need one more read of the file to find the largest counts of the kept
         cells.
 
-        With ``destinationRows``, the kept cells are read once more, in the
-        order that :meth:`consume` would yield them, and each is sent to its
+        With ``destinationRows``, the kept cells are read here, in the order
+        that :meth:`consume` would yield them, and each is sent to its
         destination row in temporary files; ``consume`` then yields them
-        once in destination order. The pass holds what one batch of about a
+        once in destination order, from those files. The pass holds what one batch of about a
         million counts holds as it is read and sent, within ``maxBytes``.
 
         Raises:

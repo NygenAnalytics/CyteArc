@@ -1174,3 +1174,27 @@ def test_a_matrix_market_shuffle_parses_with_the_imports_parse_buffer(
         reader.close()
     # The shuffle's pass over the cells is the import's only parse.
     assert parses == [50]
+
+
+def test_a_10x_import_removes_its_shuffled_cells_before_counts_t(
+    tmp_path, monkeypatch
+) -> None:
+    import cytearc.writers.counts_t as counts_t
+
+    reader = _10x_reader(tmp_path)
+    seen: list[tuple[Any, bool]] = []
+    original = counts_t.finalize_writer_counts_t_many
+
+    def finalize(*args, **kwargs):
+        seen.append((reader._shuffledRows, _no_temporary_files(tmp_path)))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(counts_t, "finalize_writer_counts_t_many", finalize)
+    try:
+        CrToZarr(
+            reader, str(tmp_path / "store.zarr"), nthreads=1, shuffle_cells=True
+        ).dump()
+    finally:
+        reader.close()
+    # countsT reads counts; the shuffled cells and their files are gone.
+    assert seen == [(None, True)]

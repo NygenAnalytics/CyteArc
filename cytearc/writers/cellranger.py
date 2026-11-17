@@ -62,9 +62,9 @@ class CrToZarr:
             row among the imported cells, from 0, in the int64 cell column
             ``sourceRow``. The reader sends each cell to temporary files on
             local disk, in its ``temp_dir``, as it reads it: a 10x HDF5 or
-            Tapestri reader during its value scan, a Matrix Market reader in
-            one more pass over the cells before the store is created. Off by
-            default in this release.
+            Tapestri reader during its value scan, a Matrix Market reader as
+            it reads its cells for the counts write, before the store is
+            created. Off by default in this release.
         shuffle_seed: The seed of the shuffle, from 0 to 2**64 - 1. One seed
             gives the same order on every platform.
 
@@ -626,6 +626,10 @@ class CrToZarr:
             )
             for assay, summary in summaries.items():
                 finalize_counts(stores[assay], summary=summary)
+            if self.shuffleCells:
+                # The shuffled cells were read once; countsT reads counts.
+                self.cr._release_shuffled_rows()
+                self._shuffledStore = None
             from .counts_t import finalize_writer_counts_t_many
 
             finalize_writer_counts_t_many(
