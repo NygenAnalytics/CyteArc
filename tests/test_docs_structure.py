@@ -241,6 +241,7 @@ def test_navigation_prioritizes_remote_workflows_and_preserves_tutorials() -> No
             "scanpy_and_seurat.md",
             "tutorials/data_organization.ipynb",
             "concepts/provenance.md",
+            "concepts/cell_order.md",
             "tutorials/custom_analyses.ipynb",
         ],
         "Public datasets": ["tutorials/cytebase_datasets.md"],

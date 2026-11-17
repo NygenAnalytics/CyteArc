@@ -273,7 +273,9 @@ def _write_source(path: Path) -> None:
 def _import(source: Path, destination: Path, **options: Any) -> None:
     reader = H5adReader(str(source))
     try:
-        H5adToZarr(reader, str(destination), nthreads=1, **options).dump()
+        H5adToZarr(
+            reader, str(destination), nthreads=1, **options, shuffle_cells=False
+        ).dump()
     finally:
         reader.close()
 

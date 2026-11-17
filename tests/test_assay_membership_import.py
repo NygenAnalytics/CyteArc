@@ -225,6 +225,7 @@ def test_a_declaration_restores_only_the_assays_it_names(tmp_path) -> None:
                     str(tmp_path / f"{assay.lower()}.zarr"),
                     assay_name=assay,
                     nthreads=1,
+                    shuffle_cells=False,
                 ).dump()
         finally:
             reader.close()
@@ -310,7 +311,9 @@ def test_csv_and_cell_ranger_imports_reserve_membership_names(tmp_path) -> None:
     )
     store = MemoryStore()
     with _captured_warnings() as messages:
-        CSVtoZarr(reader, store, assay_name="RNA", nthreads=1).dump()
+        CSVtoZarr(
+            reader, store, assay_name="RNA", nthreads=1, shuffle_cells=False
+        ).dump()
     columns = zarr.open_group(store=store, mode="r")["cellData"]
     assert "RNA_I" not in columns
     assert any(
@@ -335,6 +338,7 @@ def test_csv_and_cell_ranger_imports_reserve_membership_names(tmp_path) -> None:
             ),
             zarr_loc=cell_ranger,
             nthreads=1,
+            shuffle_cells=False,
         ).dump()
     columns = zarr.open_group(store=cell_ranger, mode="r")["cellData"]
     assert "ADT_I" not in columns

@@ -56,6 +56,7 @@ def _write_counts(
         assay_name=assay,
         nthreads=1,
         policy=_SMALL_SHARDS,
+        shuffle_cells=False,
     ).dump(batch_size=10)
 
 
@@ -1086,6 +1087,7 @@ def test_add_grouped_assay_fits_the_count_layout_to_the_budget(tmp_path):
         feature_ids=[f"g{i}" for i in range(200)],
         nthreads=1,
         policy=CountMatrixPolicy(unitBytes=100_000, chunkBytes=20_000),
+        shuffle_cells=False,
     ).dump()
     # The 3.2 MB of group means fit one default band, but the write of that
     # band does not fit this budget.

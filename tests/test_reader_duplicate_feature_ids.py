@@ -173,7 +173,14 @@ def test_matrix_market_readers_rename_repeated_feature_ids_on_request(
         assert reader.feature_ids() == _RENAMED
         assert reader.feature_ids("RNA") == _RENAMED
         assert reader.feature_names() == _NAMES
-        MtxToZarr(reader, store, mem_budget="64M", nthreads=1, policy=_POLICY).dump()
+        MtxToZarr(
+            reader,
+            store,
+            mem_budget="64M",
+            nthreads=1,
+            policy=_POLICY,
+            shuffle_cells=False,
+        ).dump()
     finally:
         reader.close()
     assert [message.strip() for message in messages if "renamed" in message] == [
@@ -298,7 +305,14 @@ def test_cellranger_h5_reader_renames_repeated_feature_ids_on_request(
         assert reader.feature_ids() == _RENAMED
         assert reader.feature_ids("RNA") == _RENAMED
         assert reader.feature_names() == _NAMES
-        CrToZarr(reader, store, mem_budget="64M", nthreads=1, policy=_POLICY).dump()
+        CrToZarr(
+            reader,
+            store,
+            mem_budget="64M",
+            nthreads=1,
+            policy=_POLICY,
+            shuffle_cells=False,
+        ).dump()
     finally:
         reader.close()
     assert sum("Cell Ranger feature IDs repeat 1 values" in m for m in messages) == 1
@@ -393,7 +407,9 @@ def test_h5ad_reader_renames_repeated_feature_ids_on_request(
             # Without a name column the names are the IDs as the file holds
             # them.
             assert _texts(reader.feat_names()) == (_NAMES if with_names else _IDS)
-            H5adToZarr(reader, store, nthreads=1, policy=_POLICY).dump()
+            H5adToZarr(
+                reader, store, nthreads=1, policy=_POLICY, shuffle_cells=False
+            ).dump()
         finally:
             reader.close()
     # The IDs are resolved once, however often the import reads them.

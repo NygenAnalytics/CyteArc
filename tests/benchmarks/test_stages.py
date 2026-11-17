@@ -340,8 +340,10 @@ def test_stage_create_count_store(bench, tmp_path) -> None:
         import zarr
 
         counts, _labels = inputs.labeled_counts(n_cells)
-        stored = zarr.open_group(str(target), mode="r")["RNA/counts"]
-        np.testing.assert_array_equal(stored[:], counts)
+        root = zarr.open_group(str(target), mode="r")
+        # The import shuffles the cells; row r holds the file's row sourceRow[r].
+        source_rows = root["cellData/sourceRow"][:]
+        np.testing.assert_array_equal(root["RNA/counts"][:], counts[source_rows])
 
     bench("stage.create_count_store", make, STAGES, check=check, fresh=True)
 

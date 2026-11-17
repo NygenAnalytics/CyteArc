@@ -54,17 +54,17 @@ class CSVtoZarr:
             ``"log_normalized"`` or ``"log2_normalized"``, as the import
             reference's normalized values section describes. None decides
             from the values.
-        shuffle_cells: If True, write the cells in a uniformly random order,
-            so that any contiguous slice of the store, such as one shard or
-            a training mini-batch, is a random sample of its cells. The
-            counts, the cell IDs and the ``cell_data_cols`` columns follow
-            the one order, and each cell keeps its row in the file, from 0,
-            in the int64 cell column ``sourceRow``. Before the store is
-            created, the writer reads the file's rows, as its counts write
-            would, sending each to temporary files on local disk, in
-            ``temp_dir`` of the reader, and keeping the cell columns in
-            memory; the counts write then reads the rows from those files.
-            Off by default in this release.
+        shuffle_cells: If True, the default, write the cells in a uniformly
+            random order, so that any contiguous slice of the store, such as
+            one shard or a training mini-batch, is a random sample of its
+            cells. The counts, the cell IDs and the ``cell_data_cols``
+            columns follow the one order, and each cell keeps its row in the
+            file, from 0, in the int64 cell column ``sourceRow``. Before the
+            store is created, the writer reads the file's rows, as its
+            counts write would, sending each to temporary files on local
+            disk, in ``temp_dir`` of the reader, and keeping the cell
+            columns in memory; the counts write then reads the rows from
+            those files. False writes the cells in the file's order.
         shuffle_seed: The seed of the shuffle, from 0 to 2**64 - 1. One seed
             gives the same order on every platform.
 
@@ -107,7 +107,7 @@ class CSVtoZarr:
         *,
         overwrite: bool = False,
         values: ImportValues = None,
-        shuffle_cells: bool = False,
+        shuffle_cells: bool = True,
         shuffle_seed: int = 0,
     ) -> None:
         overwrite = bool_argument(overwrite, "overwrite")

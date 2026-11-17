@@ -183,7 +183,7 @@ def wide_counts(tmp_path_factory) -> tuple[Path, np.ndarray]:
 def _build(path: Path, destination: Path, **options) -> zarr.Group:
     reader = H5adReader(str(path), feature_name_key="feature_name")
     try:
-        H5adToZarr(reader, str(destination), **options).dump()
+        H5adToZarr(reader, str(destination), **options, shuffle_cells=False).dump()
     finally:
         reader.close()
     return zarr.open_group(str(destination), mode="r")
@@ -400,6 +400,7 @@ def _sparse_import(matrix: csr_matrix, budget: int) -> zarr.Group:
         feature_ids=[f"g{j}" for j in range(matrix.shape[1])],
         mem_budget=budget,
         nthreads=1,
+        shuffle_cells=False,
     ).dump()
     return zarr.open_group(store=store, mode="r")
 
@@ -612,6 +613,7 @@ def imports(wide_counts, tmp_path_factory) -> dict[str, _Import]:
                         mem_budget=budget,
                         nthreads=1,
                         policy=policy,
+                        shuffle_cells=False,
                     ),
                     dump,
                 )
@@ -629,6 +631,7 @@ def imports(wide_counts, tmp_path_factory) -> dict[str, _Import]:
             mem_budget=budget,
             nthreads=1,
             policy=policy,
+            shuffle_cells=False,
         )
         return _writing(writer, dump)
 
@@ -642,6 +645,7 @@ def imports(wide_counts, tmp_path_factory) -> dict[str, _Import]:
             mem_budget=budget,
             nthreads=1,
             policy=policy,
+            shuffle_cells=False,
         )
         return _writing(writer, dump)
 
@@ -656,6 +660,7 @@ def imports(wide_counts, tmp_path_factory) -> dict[str, _Import]:
                         mem_budget=budget,
                         nthreads=1,
                         policy=policy,
+                        shuffle_cells=False,
                     ),
                     dump,
                 )
@@ -667,7 +672,12 @@ def imports(wide_counts, tmp_path_factory) -> dict[str, _Import]:
     def seurat_build(destination: str, policy: Any, budget: int, dump: bool) -> Any:
         with SeuratReader(str(seurat), assays=["RNA"], reductions=[]) as reader:
             writer = SeuratToZarr(
-                reader, destination, mem_budget=budget, nthreads=1, policy=policy
+                reader,
+                destination,
+                mem_budget=budget,
+                nthreads=1,
+                policy=policy,
+                shuffle_cells=False,
             )
             return _writing(writer, dump)
 
@@ -787,9 +797,9 @@ def test_policy_fit_fits_each_assay_of_a_sparse_import_on_its_own(wide_counts):
         "nthreads": 1,
     }
     with pytest.raises(CountLayoutMemoryError) as refused:
-        SparseToZarr(matrices, MemoryStore(), **options)
+        SparseToZarr(matrices, MemoryStore(), **options, shuffle_cells=False)
     store = MemoryStore()
-    writer = SparseToZarr(matrices, store, policy="fit", **options)
+    writer = SparseToZarr(matrices, store, policy="fit", **options, shuffle_cells=False)
 
     # Only the wide assay needs smaller shards than the default.
     assert writer.policy == {

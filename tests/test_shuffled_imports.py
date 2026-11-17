@@ -497,7 +497,7 @@ _KINDS = [
 def test_every_per_cell_array_follows_the_shuffled_order(tmp_path, kind) -> None:
     run, expected = _source(tmp_path, kind)
     with _warnings() as plain_warnings:
-        run(tmp_path / "plain.zarr", {})
+        run(tmp_path / "plain.zarr", {"shuffle_cells": False})
     with _warnings() as shuffled_warnings:
         writer = run(
             tmp_path / "shuffled.zarr", {"shuffle_cells": True, "shuffle_seed": 11}
@@ -537,15 +537,30 @@ def test_one_seed_gives_the_same_store_and_another_seed_another_order(
 
 
 @pytest.mark.parametrize("kind", _KINDS)
-def test_an_import_without_the_shuffle_writes_no_cell_order(tmp_path, kind) -> None:
+def test_an_import_shuffles_with_seed_0_unless_told_not_to(tmp_path, kind) -> None:
     run, _expected = _source(tmp_path, kind)
     writer = run(tmp_path / "default.zarr", {})
-    assert writer.shuffleCells is False
-    run(tmp_path / "explicit.zarr", {"shuffle_cells": False, "shuffle_seed": 9})
+    assert writer.shuffleCells is True and writer.shuffleSeed == 0
+    run(tmp_path / "seed0.zarr", {"shuffle_cells": True, "shuffle_seed": 0})
     default = _store_files(tmp_path / "default.zarr")
-    # The seed changes nothing without the shuffle.
-    assert default == _store_files(tmp_path / "explicit.zarr")
+    assert default == _store_files(tmp_path / "seed0.zarr")
     cells = _open(tmp_path / "default.zarr")["cellData"]
+    assert recorded_shuffle_seed(cells) == 0
+    assert cells[SOURCE_ROW].attrs["role"] == SOURCE_ROW_ROLE
+    # Each cell's row in the file, in the order that seed 0 gives.
+    np.testing.assert_array_equal(
+        cells[SOURCE_ROW][...],
+        _source_rows(kind)[shuffled_order(cells["ids"].shape[0], 0)],
+    )
+
+    # shuffle_cells=False writes the file's order, whatever the seed.
+    plain = run(tmp_path / "plain.zarr", {"shuffle_cells": False})
+    assert plain.shuffleCells is False
+    run(tmp_path / "explicit.zarr", {"shuffle_cells": False, "shuffle_seed": 9})
+    plain_files = _store_files(tmp_path / "plain.zarr")
+    assert plain_files == _store_files(tmp_path / "explicit.zarr")
+    assert plain_files != default
+    cells = _open(tmp_path / "plain.zarr")["cellData"]
     assert "cellOrder" not in cells.attrs
     if SOURCE_ROW in cells:
         assert "role" not in cells[SOURCE_ROW].attrs
@@ -686,7 +701,9 @@ def test_counts_are_written_once_from_the_cells_of_their_own_import(tmp_path) ->
         with pytest.raises(RuntimeError, match="written once and removed"):
             second.dump()
         # Without the shuffle, the reader reads the file again.
-        CrToZarr(reader, str(tmp_path / "plain.zarr"), nthreads=1).dump()
+        CrToZarr(
+            reader, str(tmp_path / "plain.zarr"), nthreads=1, shuffle_cells=False
+        ).dump()
     finally:
         reader.close()
     order = shuffled_order(_N_CELLS, 1)
@@ -712,7 +729,9 @@ def test_a_matrix_market_reader_imports_shuffled_and_plain_from_one_archive(
     try:
         for name, seed in (("first", 2), ("plain", None), ("second", 3)):
             options = (
-                {} if seed is None else {"shuffle_cells": True, "shuffle_seed": seed}
+                {"shuffle_cells": False}
+                if seed is None
+                else {"shuffle_cells": True, "shuffle_seed": seed}
             )
             CrToZarr(
                 reader, str(tmp_path / f"{name}.zarr"), nthreads=1, **options
@@ -754,7 +773,7 @@ def test_cells_of_many_buckets_are_read_ahead_and_each_deleted_once_read(
     monkeypatch.setattr(SparseRowStore, "_delete", delete)
     monkeypatch.setattr(SparseRowStore, "_load_bucket", load)
     run, expected = _source(tmp_path, kind)
-    run(tmp_path / "plain.zarr", {})
+    run(tmp_path / "plain.zarr", {"shuffle_cells": False})
     run(tmp_path / "shuffled.zarr", {"shuffle_cells": True})
     # Every bucket was read once and deleted once read, in order.
     assert len(deleted) > 5
@@ -1076,11 +1095,19 @@ def test_a_reader_whose_scan_cannot_shuffle_is_refused_and_still_imports_in_orde
     with pytest.raises(TypeError, match="takes no destinationRows"):
         CrToZarr(reader, str(tmp_path / "refused.zarr"), nthreads=1, shuffle_cells=True)
     assert not (tmp_path / "refused.zarr").exists()
+    # A default import shuffles too, and the refusal names the way out.
+    with pytest.raises(TypeError, match="pass shuffle_cells=False"):
+        CrToZarr(reader, str(tmp_path / "default.zarr"), nthreads=1)
+    assert not (tmp_path / "default.zarr").exists()
     # Its first cells, which decide what the values are, come from consume.
     first = reader._file_first_rows(100, 1)
     np.testing.assert_array_equal(first.toarray(), values[:100])
     CrToZarr(
-        reader, str(tmp_path / "plain.zarr"), nthreads=1, values="normalized"
+        reader,
+        str(tmp_path / "plain.zarr"),
+        nthreads=1,
+        values="normalized",
+        shuffle_cells=False,
     ).dump()
     np.testing.assert_allclose(
         _open(tmp_path / "plain.zarr")["RNA/counts"][...], values, rtol=1e-6
@@ -1263,7 +1290,7 @@ def test_a_reader_that_drops_cells_keeps_each_cells_row_in_the_file(
     tmp_path, kind
 ) -> None:
     run, _expected = _source(tmp_path, kind)
-    run(tmp_path / "plain.zarr", {})
+    run(tmp_path / "plain.zarr", {"shuffle_cells": False})
     run(tmp_path / "shuffled.zarr", {"shuffle_cells": True, "shuffle_seed": 3})
     barcodes = _file_barcodes(tmp_path, kind)
     shuffled = _open(tmp_path / "shuffled.zarr")

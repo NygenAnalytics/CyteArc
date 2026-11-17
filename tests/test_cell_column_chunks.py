@@ -370,6 +370,7 @@ def _sparse_store(path: Path, prefix: str) -> "DataStore":
         [f"f{index}" for index in range(_N_FEATURES)],
         assay_name="RNA",
         nthreads=1,
+        shuffle_cells=False,
     ).dump()
     store = DataStore(
         str(path), default_assay="RNA", min_features_per_cell=-1, nthreads=1
@@ -521,7 +522,9 @@ def test_an_h5ad_import_chunks_its_cell_and_feature_columns_by_rows_and_bytes(
     ).write_h5ad(tmp_path / "narrow.h5ad")
     narrow = H5adReader(str(tmp_path / "narrow.h5ad"))
     try:
-        H5adToZarr(narrow, str(tmp_path / "narrow.zarr"), nthreads=1).dump()
+        H5adToZarr(
+            narrow, str(tmp_path / "narrow.zarr"), nthreads=1, shuffle_cells=False
+        ).dump()
     finally:
         narrow.close()
     assert _feature_chunks(tmp_path / "narrow.zarr")["narrow"] == (n_features,)
@@ -550,7 +553,9 @@ def test_an_h5ad_import_chunks_its_cell_and_feature_columns_by_rows_and_bytes(
     adata.write_h5ad(tmp_path / "cells.h5ad")
     reader = H5adReader(str(tmp_path / "cells.h5ad"))
     try:
-        H5adToZarr(reader, str(tmp_path / "imported.zarr"), nthreads=1).dump()
+        H5adToZarr(
+            reader, str(tmp_path / "imported.zarr"), nthreads=1, shuffle_cells=False
+        ).dump()
     finally:
         reader.close()
     assert _cell_chunks(tmp_path / "imported.zarr") == {
@@ -580,7 +585,9 @@ def _seurat_import(path: Path) -> None:
         Path(full_path("seurat_assay5_synthetic.rds")), reductions=[]
     ) as reader:
         assert len(reader.cellIds) == 300
-        SeuratToZarr(reader, str(path), mem_budget="1G", nthreads=1).dump()
+        SeuratToZarr(
+            reader, str(path), mem_budget="1G", nthreads=1, shuffle_cells=False
+        ).dump()
 
 
 def test_a_seurat_import_chunks_its_cell_and_feature_columns_by_rows(
@@ -626,7 +633,13 @@ def test_csv_and_cell_ranger_imports_chunk_their_cell_and_feature_columns_by_row
     path = tmp_path / "counts.csv"
     path.write_text("cell,batch,g0,g1\nc0,a,1,0\nc1,b,0,2\nc2,a,3,1\n")
     reader = CSVReader(str(path), id_column=0, cell_data_cols=["batch"], batch_size=2)
-    CSVtoZarr(reader, str(tmp_path / "csv.zarr"), assay_name="RNA", nthreads=1).dump()
+    CSVtoZarr(
+        reader,
+        str(tmp_path / "csv.zarr"),
+        assay_name="RNA",
+        nthreads=1,
+        shuffle_cells=False,
+    ).dump()
     assert _cell_chunks(tmp_path / "csv.zarr") == dict.fromkeys(
         ("I", "batch", "ids", "names"), (3,)
     )
@@ -643,7 +656,9 @@ def test_csv_and_cell_ranger_imports_chunk_their_cell_and_feature_columns_by_row
     file = write_tapestri(truth, tmp_path / "run.dna+protein.h5")
     reader = TapestriReader(str(file))
     try:
-        TapestriToZarr(reader, str(tmp_path / "tapestri.zarr"), nthreads=1).dump()
+        TapestriToZarr(
+            reader, str(tmp_path / "tapestri.zarr"), nthreads=1, shuffle_cells=False
+        ).dump()
     finally:
         reader.close()
     tapestri = _cell_chunks(tmp_path / "tapestri.zarr")

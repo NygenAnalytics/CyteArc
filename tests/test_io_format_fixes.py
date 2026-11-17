@@ -78,7 +78,9 @@ def test_matrix_market_counts_keep_their_text_and_feature_types(tmp_path, compre
         f"ADT{index}\tADT{index}\tADT" for index in range(3)
     ]
     reimported = tmp_path / f"reimported_{compress}.zarr"
-    CrToZarr(CrDirReader(str(directory)), str(reimported), nthreads=1).dump()
+    CrToZarr(
+        CrDirReader(str(directory)), str(reimported), nthreads=1, shuffle_cells=False
+    ).dump()
     reopened = cytearc.DataStore(str(reimported), min_features_per_cell=0, nthreads=1)
     assert reopened.assay_names == ["ADT"]
     assert reopened.ADT.assayType == "ADT"
@@ -164,7 +166,7 @@ def test_csv_cell_ids_stay_text(tmp_path) -> None:
     assert converters == {2: int}
     assert reader.pandas_kwargs["converters"] == {2: int, 0: str}
     store = MemoryStore()
-    CSVtoZarr(reader, store, assay_name="RNA", nthreads=1).dump()
+    CSVtoZarr(reader, store, assay_name="RNA", nthreads=1, shuffle_cells=False).dump()
     assert zarr.open_group(store, mode="r")["cellData/ids"][:].tolist() == [
         "001",
         "002",
@@ -210,6 +212,7 @@ def test_sparse_writer_converts_every_input_to_csr(matrix) -> None:
         cell_ids=[b"c0", "c1", "c2", "c3"],
         feature_ids=["g0", "g1", "g2"],
         nthreads=1,
+        shuffle_cells=False,
     ).dump()
 
     np.testing.assert_array_equal(

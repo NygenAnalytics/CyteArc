@@ -77,7 +77,11 @@ def _import(h5ad: Path, location: str | Store, *, workspace: str | None = None):
     )
     try:
         return H5adToZarr(
-            reader, zarr_loc=location, assay_name="RNA", workspace=workspace
+            reader,
+            zarr_loc=location,
+            assay_name="RNA",
+            workspace=workspace,
+            shuffle_cells=False,
         ).dump()
     finally:
         reader.h5.close()

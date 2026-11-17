@@ -152,6 +152,7 @@ def _panel_query(
             *(f"panel-only-{index}" for index in range(5)),
         ],
         nthreads=1,
+        shuffle_cells=False,
     ).dump()
     query = DataStore(
         str(path),
@@ -711,6 +712,7 @@ def subset_fitted_pca(tmp_path_factory) -> tuple[Path, ArtifactRef]:
         cell_ids=[f"c{i}" for i in range(len(counts))],
         feature_ids=[f"g{i}" for i in range(counts.shape[1])],
         nthreads=1,
+        shuffle_cells=False,
     ).dump()
     datastore = DataStore(
         str(path), default_assay="RNA", min_features_per_cell=0, nthreads=1

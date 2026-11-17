@@ -34,7 +34,9 @@ def _write_store(file: Path, store: Path, **options):
 
     reader = TapestriReader(str(file))
     try:
-        TapestriToZarr(reader, str(store), nthreads=1, **options).dump()
+        TapestriToZarr(
+            reader, str(store), nthreads=1, **options, shuffle_cells=False
+        ).dump()
     finally:
         reader.close()
 

@@ -703,7 +703,9 @@ def _import(path: Path, **options: object) -> zarr.Array:
     reader = H5adReader(str(path), feature_name_key="feature_name")
     store = MemoryStore()
     try:
-        H5adToZarr(reader, zarr_loc=store, nthreads=1, **options).dump()
+        H5adToZarr(
+            reader, zarr_loc=store, nthreads=1, **options, shuffle_cells=False
+        ).dump()
     finally:
         reader.close()
     return zarr.open_group(store=store, mode="r")["RNA/counts"]
@@ -825,7 +827,9 @@ def test_h5ad_non_finite_counts_fail_before_the_destination_exists(
     reader = H5adReader(str(path), feature_name_key="feature_name")
     try:
         with pytest.raises(ValueError, match="finite values"):
-            H5adToZarr(reader, zarr_loc=str(destination), nthreads=1)
+            H5adToZarr(
+                reader, zarr_loc=str(destination), nthreads=1, shuffle_cells=False
+            )
     finally:
         reader.close()
     assert not destination.exists()

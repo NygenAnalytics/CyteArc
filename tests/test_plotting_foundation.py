@@ -155,6 +155,7 @@ def _imported_plot_store(
             reader,
             zarr_loc=str(Path(directory) / "plot_inputs.zarr"),
             nthreads=1,
+            shuffle_cells=False,
         ).dump()
     finally:
         reader.h5.close()

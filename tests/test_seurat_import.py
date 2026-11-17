@@ -202,6 +202,7 @@ def _new_writer(
         nthreads=1,
         policy=CountMatrixPolicy(unitBytes=4096, chunkBytes=1024),
         overwrite=overwrite,
+        shuffle_cells=False,
     )
 
 
@@ -229,6 +230,7 @@ def test_import_materializes_metadata_counts_membership_and_pca(
             mem_budget="64M",
             nthreads=1,
             policy=CountMatrixPolicy(unitBytes=4096, chunkBytes=1024),
+            shuffle_cells=False,
         ).dump(batch_size=1)
 
     root = zarr.open_group(store=destination, mode="r")
@@ -335,6 +337,7 @@ def test_assay5_subclass_preserves_partial_cell_membership(
             mem_budget="64M",
             nthreads=1,
             policy=CountMatrixPolicy(unitBytes=4096, chunkBytes=1024),
+            shuffle_cells=False,
         ).dump(batch_size=1)
 
     root = zarr.open_group(store=destination, mode="r")
@@ -354,6 +357,7 @@ def test_imported_store_is_readable_by_datastore(tmp_path: Path) -> None:
             mem_budget="64M",
             nthreads=1,
             policy=CountMatrixPolicy(unitBytes=4096, chunkBytes=1024),
+            shuffle_cells=False,
         ).dump(batch_size=2)
 
     store = DataStore(
@@ -394,6 +398,7 @@ def test_chromatin_assay_streams_counts_and_round_trips_to_zarr(
             mem_budget="64M",
             nthreads=1,
             policy=CountMatrixPolicy(unitBytes=4096, chunkBytes=1024),
+            shuffle_cells=False,
         ).dump(batch_size=1)
 
     root = zarr.open_group(store=destination, mode="r")
@@ -531,6 +536,7 @@ def test_matrix_metadata_and_reduction_reads_stay_bounded(
             mem_budget="64M",
             nthreads=1,
             policy=CountMatrixPolicy(unitBytes=4096, chunkBytes=1024),
+            shuffle_cells=False,
         )
         matrix_reads: dict[str, list[tuple[int, int]]] = {}
         for assay_name in reader.assayNames:
@@ -926,6 +932,7 @@ def test_fragment_preparation_obeys_import_budget(tmp_path: Path, mem_budget: st
                 mem_budget=mem_budget,
                 nthreads=1,
                 policy=CountMatrixPolicy(unitBytes=4096, chunkBytes=1024),
+                shuffle_cells=False,
             )
 
         if mem_budget == "1K":
@@ -1141,9 +1148,9 @@ def test_duplicate_coordinates_import_their_sum_from_every_layout(
     source = _write_duplicate_seed_fixture(tmp_path, container, layout)
     destination = MemoryStore()
     with SeuratReader(source, reductions=[], temp_dir=tmp_path) as reader:
-        SeuratToZarr(reader, destination, mem_budget="64M", nthreads=1).dump(
-            batch_size=1
-        )
+        SeuratToZarr(
+            reader, destination, mem_budget="64M", nthreads=1, shuffle_cells=False
+        ).dump(batch_size=1)
     counts = zarr.open_group(store=destination, mode="r")["RNA/counts"]
     # The sum is neither wrapped to 44 in uint8 nor refused.
     assert counts.dtype == np.uint16
@@ -1228,7 +1235,13 @@ def test_counts_that_cannot_be_read_one_cell_at_a_time_fail_at_construction(
     destination = tmp_path / "skewed.zarr"
     with SeuratReader(source, reductions=[]) as reader:
         with pytest.raises(MemoryError, match="cannot be read one cell at a time"):
-            SeuratToZarr(reader, str(destination), mem_budget=100_000, nthreads=1)
+            SeuratToZarr(
+                reader,
+                str(destination),
+                mem_budget=100_000,
+                nthreads=1,
+                shuffle_cells=False,
+            )
     assert not destination.exists()
 
 

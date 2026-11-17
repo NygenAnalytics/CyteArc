@@ -454,7 +454,9 @@ def _assert_shuffled_import(
 def test_every_per_cell_array_follows_the_shuffled_order(tmp_path, sparse) -> None:
     source = _write_object(tmp_path / "object.rds", sparse=sparse)
     with _warnings() as plain_warnings:
-        plain_result, _ = _import(source, tmp_path / "plain.zarr", batch_size=7)
+        plain_result, _ = _import(
+            source, tmp_path / "plain.zarr", batch_size=7, shuffle_cells=False
+        )
     with _warnings() as shuffled_warnings:
         shuffled_result, writer = _import(
             source,
@@ -493,7 +495,7 @@ def test_cells_of_many_buckets_are_read_in_batches_and_deleted(
     tmp_path, monkeypatch
 ) -> None:
     source = _write_object(tmp_path / "object.rds")
-    plain_result, _ = _import(source, tmp_path / "plain.zarr")
+    plain_result, _ = _import(source, tmp_path / "plain.zarr", shuffle_cells=False)
     # Buckets of a few cells each, read in batches that cross them.
     monkeypatch.setattr(row_spill, "_SPILL_READ_BYTES", 600)
     stores: list[SparseRowStore] = []
@@ -537,7 +539,7 @@ def test_cells_of_many_buckets_are_read_in_batches_and_deleted(
 def test_cells_counted_from_fragments_shuffle(tmp_path) -> None:
     # Fragment counts reach the import through a row store of their own.
     source = _write_fragment_matrix_fixture(tmp_path / "fragments.rds")
-    plain_result, _ = _import(source, tmp_path / "plain.zarr")
+    plain_result, _ = _import(source, tmp_path / "plain.zarr", shuffle_cells=False)
     seed = next(
         seed
         for seed in range(100)
@@ -608,30 +610,44 @@ def test_one_seed_gives_the_same_store_and_another_seed_another_order(tmp_path) 
     )
 
 
-def test_an_import_without_the_shuffle_writes_no_cell_order(tmp_path) -> None:
+def test_an_import_shuffles_with_seed_0_unless_told_not_to(tmp_path) -> None:
     source = _write_object(tmp_path / "object.rds")
-    results = []
-    for name in ("default", "explicit"):
-        options = (
-            {} if name == "default" else {"shuffle_cells": False, "shuffle_seed": 9}
+    results = {}
+    for name, options in (
+        ("default", {}),
+        ("seed0", {"shuffle_cells": True, "shuffle_seed": 0}),
+        ("plain", {"shuffle_cells": False}),
+        ("explicit", {"shuffle_cells": False, "shuffle_seed": 9}),
+    ):
+        results[name], writer = _import(
+            source, tmp_path / f"{name}.zarr", temp_dir=tmp_path, **options
         )
-        result, writer = _import(source, tmp_path / f"{name}.zarr", **options)
-        assert writer.shuffleCells is False
-        results.append(result)
-    default = _store_files(tmp_path / "default.zarr", [results[0]])
-    # The seed changes nothing without the shuffle.
-    assert default == _store_files(tmp_path / "explicit.zarr", [results[1]])
+        assert writer.shuffleCells is (name in ("default", "seed0"))
+    stores = {
+        name: _store_files(tmp_path / f"{name}.zarr", [result])
+        for name, result in results.items()
+    }
+    # The default is the shuffle with seed 0, and the object's column named
+    # sourceRow gives way to each cell's position among the object's cells.
+    assert stores["default"] == stores["seed0"]
     cells = _open(tmp_path / "default.zarr")["cellData"]
+    assert recorded_shuffle_seed(cells) == 0
+    assert cells[SOURCE_ROW].attrs["role"] == SOURCE_ROW_ROLE
+    np.testing.assert_array_equal(cells[SOURCE_ROW][...], shuffled_order(_N_CELLS, 0))
+    # shuffle_cells=False writes the object's order, whatever the seed.
+    assert stores["plain"] == stores["explicit"] != stores["default"]
+    cells = _open(tmp_path / "plain.zarr")["cellData"]
     assert "cellOrder" not in cells.attrs
     # The source's own column of that name is imported as any other.
     assert "role" not in cells[SOURCE_ROW].attrs
     np.testing.assert_array_equal(cells[SOURCE_ROW][...], np.arange(_N_CELLS)[::-1])
+    assert not list(tmp_path.glob("cytearc-sparse-*"))
 
 
 @pytest.mark.parametrize("n_cells", [0, 1, 2])
 def test_objects_of_no_one_or_two_cells_shuffle(tmp_path, n_cells) -> None:
     source = _write_object(tmp_path / "object.rds", n_cells=n_cells)
-    plain_result, _ = _import(source, tmp_path / "plain.zarr")
+    plain_result, _ = _import(source, tmp_path / "plain.zarr", shuffle_cells=False)
     shuffled_result, _ = _import(
         source,
         tmp_path / "shuffled.zarr",
@@ -1058,7 +1074,9 @@ def test_repeated_coordinates_sum_as_the_objects_order_sums_them(
 
     monkeypatch.setattr(CompressedMatrixSource, "read_cells", read_cells)
     source = _write_object(tmp_path / "object.rds")
-    plain_result, _ = _import(source, tmp_path / "plain.zarr", batch_size=7)
+    plain_result, _ = _import(
+        source, tmp_path / "plain.zarr", batch_size=7, shuffle_cells=False
+    )
     shuffled_result, _ = _import(
         source,
         tmp_path / "shuffled.zarr",

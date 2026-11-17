@@ -87,7 +87,9 @@ def _import_h5ad(tmp_path: Path) -> _Imported:
     store = MemoryStore()
     reader = H5adReader(str(source), feature_name_key="feature_name")
     try:
-        H5adToZarr(reader, zarr_loc=store, mem_budget="64M", nthreads=1).dump()
+        H5adToZarr(
+            reader, zarr_loc=store, mem_budget="64M", nthreads=1, shuffle_cells=False
+        ).dump()
     finally:
         reader.close()
     return _Imported(
@@ -116,7 +118,9 @@ def _import_csv(tmp_path: Path) -> _Imported:
     )
     reader = CSVReader(str(path), cell_data_cols=["a/b", "a_b", "c\\d"], batch_size=2)
     store = MemoryStore()
-    CSVtoZarr(reader, zarr_loc=store, assay_name="RNA", nthreads=1).dump()
+    CSVtoZarr(
+        reader, zarr_loc=store, assay_name="RNA", nthreads=1, shuffle_cells=False
+    ).dump()
     return _Imported(
         store=store,
         cells={"a_b": [10, 20, 30], "a_b_2": ["x", "y", "z"], "c_d": [1.5, 2.5, 3.5]},
@@ -143,7 +147,9 @@ def _import_mtx(tmp_path: Path) -> _Imported:
     reader = MtxReader(inspect_mtx(tmp_path)[0])
     store = MemoryStore()
     try:
-        MtxToZarr(reader, store, mem_budget="64M", lines_in_mem=2).dump()
+        MtxToZarr(
+            reader, store, mem_budget="64M", lines_in_mem=2, shuffle_cells=False
+        ).dump()
     finally:
         reader.close()
     return _Imported(
@@ -238,7 +244,13 @@ def test_anndata_written_separator_columns_round_trip(
         store = MemoryStore()
         reader = H5adReader(str(path))
         try:
-            H5adToZarr(reader, zarr_loc=store, mem_budget="64M", nthreads=1).dump()
+            H5adToZarr(
+                reader,
+                zarr_loc=store,
+                mem_budget="64M",
+                nthreads=1,
+                shuffle_cells=False,
+            ).dump()
         finally:
             reader.close()
         return _Imported(
@@ -261,7 +273,13 @@ def test_h5ad_without_column_order_skips_nested_columns(tmp_path: Path) -> None:
     def dump() -> None:
         reader = H5adReader(str(source), feature_name_key="feature_name")
         try:
-            H5adToZarr(reader, zarr_loc=store, mem_budget="64M", nthreads=1).dump()
+            H5adToZarr(
+                reader,
+                zarr_loc=store,
+                mem_budget="64M",
+                nthreads=1,
+                shuffle_cells=False,
+            ).dump()
         finally:
             reader.close()
 

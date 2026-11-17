@@ -340,6 +340,7 @@ def test_a_categorical_import_of_an_export_keeps_codes_labels_and_fingerprints(
             str(tmp_path / "imported.zarr"),
             nthreads=1,
             categorical_columns=True,
+            shuffle_cells=False,
         ).dump()
     finally:
         reader.close()

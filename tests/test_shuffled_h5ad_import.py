@@ -285,7 +285,9 @@ def test_every_per_cell_array_follows_the_shuffled_order(
     counts = _write_source(source, encoding)
     options = {"assay_split_key": "feature_types"} if split else {}
     with _warnings() as plain_warnings:
-        plain_result, _ = _import(source, tmp_path / "plain.zarr", **options)
+        plain_result, _ = _import(
+            source, tmp_path / "plain.zarr", shuffle_cells=False, **options
+        )
     with _warnings() as shuffled_warnings:
         shuffled_result, writer = _import(
             source,
@@ -320,7 +322,11 @@ def test_categorical_columns_and_renamed_duplicate_ids_follow_the_order(
     counts = _write_source(source, "csr", duplicates=True)
     renamed = {"reader_options": {"duplicate_cell_ids": "make_unique"}}
     plain_result, _ = _import(
-        source, tmp_path / "plain.zarr", categorical_columns=True, **renamed
+        source,
+        tmp_path / "plain.zarr",
+        categorical_columns=True,
+        shuffle_cells=False,
+        **renamed,
     )
     shuffled_result, _ = _import(
         source,
@@ -458,21 +464,34 @@ def test_one_seed_gives_the_same_store_and_another_seed_another_order(tmp_path) 
     assert other["cellData/sourceRow/c/0"] != first["cellData/sourceRow/c/0"]
 
 
-def test_an_import_without_the_shuffle_writes_no_cell_order(tmp_path) -> None:
+def test_an_import_shuffles_with_seed_0_unless_told_not_to(tmp_path) -> None:
     source = tmp_path / "source.h5ad"
     _write_source(source, "csr")
-    results = []
-    for name in ("default", "explicit"):
-        options = (
-            {} if name == "default" else {"shuffle_cells": False, "shuffle_seed": 9}
-        )
-        result, writer = _import(source, tmp_path / f"{name}.zarr", **options)
-        assert writer.shuffleCells is False
-        results.append(result)
-    default = _store_files(tmp_path / "default.zarr", [results[0]])
-    # The seed changes nothing without the shuffle.
-    assert default == _store_files(tmp_path / "explicit.zarr", [results[1]])
+    results = {}
+    for name, options in (
+        ("default", {}),
+        ("seed0", {"shuffle_cells": True, "shuffle_seed": 0}),
+        ("plain", {"shuffle_cells": False}),
+        ("explicit", {"shuffle_cells": False, "shuffle_seed": 9}),
+    ):
+        results[name], writer = _import(source, tmp_path / f"{name}.zarr", **options)
+        assert writer.shuffleCells is (name in ("default", "seed0"))
+        assert writer.shuffleSeed == options.get("shuffle_seed", 0)
+    stores = {
+        name: _store_files(tmp_path / f"{name}.zarr", [result])
+        for name, result in results.items()
+    }
+    # The default is the shuffle with seed 0, and its source column named
+    # sourceRow gives way to the cells' rows in the file.
+    assert stores["default"] == stores["seed0"]
     cells = _open(tmp_path / "default.zarr")["cellData"]
+    assert recorded_shuffle_seed(cells) == 0
+    assert cells[SOURCE_ROW].attrs["role"] == SOURCE_ROW_ROLE
+    np.testing.assert_array_equal(cells[SOURCE_ROW][...], shuffled_order(_N_CELLS, 0))
+    # shuffle_cells=False writes the file's order, whatever the seed, and
+    # keeps the source column.
+    assert stores["plain"] == stores["explicit"] != stores["default"]
+    cells = _open(tmp_path / "plain.zarr")["cellData"]
     assert "cellOrder" not in cells.attrs
     assert "role" not in cells[SOURCE_ROW].attrs
     np.testing.assert_array_equal(cells[SOURCE_ROW][...], np.arange(_N_CELLS)[::-1])
@@ -525,7 +544,7 @@ def test_scan_processes_each_spill_their_own_rows(
 ) -> None:
     source = tmp_path / "source.h5ad"
     counts = _write_source(source, encoding)
-    plain_result, _ = _import(source, tmp_path / "plain.zarr")
+    plain_result, _ = _import(source, tmp_path / "plain.zarr", shuffle_cells=False)
     seen = _spy_on_scan_processes(monkeypatch)
     # Each scan process needs room for a window and a buffer of pending rows.
     shuffled_result, _ = _import(

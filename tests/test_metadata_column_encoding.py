@@ -444,7 +444,9 @@ def test_an_h5ad_import_converts_each_category_once(
     calls = _text_value_calls(monkeypatch)
     reader = H5adReader(str(path))
     try:
-        H5adToZarr(reader, str(tmp_path / "cells.zarr"), nthreads=1)
+        H5adToZarr(
+            reader, str(tmp_path / "cells.zarr"), nthreads=1, shuffle_cells=False
+        )
     finally:
         reader.close()
 
@@ -611,6 +613,7 @@ def test_an_h5ad_import_stores_the_columns_of_the_per_value_conversion(
             str(tmp_path / "store.zarr"),
             nthreads=1,
             assay_split_key="feature_types",
+            shuffle_cells=False,
         ).dump()
         root = zarr.open_group(str(tmp_path / "store.zarr"), mode="r")
         cells = root["cellData"]
@@ -680,6 +683,7 @@ def test_csv_10x_matrix_market_and_sparse_imports_store_their_columns_as_before(
         str(tmp_path / "csv.zarr"),
         assay_name="RNA",
         nthreads=1,
+        shuffle_cells=False,
     ).dump()
     root = zarr.open_group(str(tmp_path / "csv.zarr"), mode="r")
     # The CSV writer passes blank text cells as missing rows of fixed-width text.
@@ -762,6 +766,7 @@ def test_csv_10x_matrix_market_and_sparse_imports_store_their_columns_as_before(
         feature_ids=["g1", "g2"],
         feature_names=np.array(["Gène", "中"], dtype=object),
         nthreads=1,
+        shuffle_cells=False,
     ).dump()
     root = zarr.open_group(store=store, mode="r")
     assert root["cellData/ids"][:].tolist() == ["c-é", "c-2", "c-3"]

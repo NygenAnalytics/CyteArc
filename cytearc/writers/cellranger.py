@@ -55,21 +55,21 @@ class CrToZarr:
             reference's normalized values section describes. None decides
             from the values. Matrix Market readers
             read whole numbers only.
-        shuffle_cells: If True, write the cells in a uniformly random order,
-            so that any contiguous slice of the store, such as one shard or
-            a training mini-batch, is a random sample of its cells. Every
-            per-cell array follows the one order, and each cell keeps its
-            row in the file, from 0, in the int64 cell column ``sourceRow``:
-            for a reader that drops barcodes, such as one with
-            ``is_filtered=False``, its barcode's index in the file. The
+        shuffle_cells: If True, the default, write the cells in a uniformly
+            random order, so that any contiguous slice of the store, such as
+            one shard or a training mini-batch, is a random sample of its
+            cells. Every per-cell array follows the one order, and each cell
+            keeps its row in the file, from 0, in the int64 cell column
+            ``sourceRow``: for a reader that drops barcodes, such as one
+            with ``is_filtered=False``, its barcode's index in the file. The
             reader sends each cell to temporary files on local disk, in its
             ``temp_dir``, as it reads it: a 10x HDF5 or Tapestri reader
             during its value scan, a Matrix Market reader as it reads its
             cells for the counts write, before the store is created. A
             reader holds the shuffled cells of one import at a time, and an
             import in the reader's order of a reader that another import
-            shuffled reads the reader's order. Off by default in this
-            release.
+            shuffled reads the reader's order. False writes the cells in the
+            file's order.
         shuffle_seed: The seed of the shuffle, from 0 to 2**64 - 1. One seed
             gives the same order on every platform.
 
@@ -114,7 +114,7 @@ class CrToZarr:
         *,
         overwrite: bool = False,
         values: ImportValues = None,
-        shuffle_cells: bool = False,
+        shuffle_cells: bool = True,
         shuffle_seed: int = 0,
     ) -> None:
         overwrite = bool_argument(overwrite, "overwrite")

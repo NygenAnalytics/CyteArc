@@ -260,18 +260,19 @@ class SeuratToZarr:
             ``"log_normalized"`` or ``"log2_normalized"``, as the import
             reference's normalized values section describes. None decides
             from the values.
-        shuffle_cells: If True, write the cells in a uniformly random order,
-            so that any contiguous slice of the store, such as one shard or
-            a training mini-batch, is a random sample of its cells. Every
-            per-cell array follows the one order: counts, cell IDs and
-            names, cell metadata, assay membership, the active identity and
-            reductions; each cell keeps its position among the object's
-            cells, from 0, in the int64 cell column ``sourceRow``. The value
-            scan sends each cell's counts to temporary files on local disk,
-            in ``temp_dir`` of the reader, as it reads them. The import holds
-            every per-cell array other than counts whole while it writes it,
-            and refuses before the destination exists if one does not fit
-            in ``mem_budget``. Off by default in this release.
+        shuffle_cells: If True, the default, write the cells in a uniformly
+            random order, so that any contiguous slice of the store, such as
+            one shard or a training mini-batch, is a random sample of its
+            cells. Every per-cell array follows the one order: counts, cell
+            IDs and names, cell metadata, assay membership, the active
+            identity and reductions; each cell keeps its position among the
+            object's cells, from 0, in the int64 cell column ``sourceRow``.
+            The value scan sends each cell's counts to temporary files on
+            local disk, in ``temp_dir`` of the reader, as it reads them. The
+            import holds every per-cell array other than counts whole while
+            it writes it, and refuses before the destination exists if one
+            does not fit in ``mem_budget``. False writes the cells in the
+            object's order.
         shuffle_seed: The seed of the shuffle, from 0 to 2**64 - 1. One seed
             gives the same order on every platform.
 
@@ -335,7 +336,7 @@ class SeuratToZarr:
         overwrite: bool = False,
         default_assay: str | None = None,
         values: ImportValues = None,
-        shuffle_cells: bool = False,
+        shuffle_cells: bool = True,
         shuffle_seed: int = 0,
     ) -> None:
         overwrite = bool_argument(overwrite, "overwrite")

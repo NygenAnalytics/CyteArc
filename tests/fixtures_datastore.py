@@ -157,7 +157,8 @@ def toy_crdir_writer(toy_crdir_reader, tmp_path_factory):
     from cytearc.writers import CrToZarr
 
     out_fn = tmp_path_factory.mktemp("toy_crdir") / "toy_crdir.zarr"
-    writer = CrToZarr(toy_crdir_reader, str(out_fn))
+    # Tests pin the toy store's values in the order of the toy files' cells.
+    writer = CrToZarr(toy_crdir_reader, str(out_fn), shuffle_cells=False)
     writer.dump()
     yield str(out_fn)
 

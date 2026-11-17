@@ -28,6 +28,7 @@ def _build_store(store_path, counts):
         feature_ids=[f"peak_{i}" for i in range(counts.shape[1])],
         assay_name="ATAC",
         nthreads=1,
+        shuffle_cells=False,
     )
     writer.dump(batch_size=2)
     return DataStore(

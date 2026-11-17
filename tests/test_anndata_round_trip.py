@@ -50,7 +50,11 @@ def _import_store(directory: Path) -> tuple[cytearc.DataStore, object]:
     )
     try:
         result = H5adToZarr(
-            reader, str(directory / "store.zarr"), nthreads=1, analysis_assay="RNA"
+            reader,
+            str(directory / "store.zarr"),
+            nthreads=1,
+            analysis_assay="RNA",
+            shuffle_cells=False,
         ).dump()
     finally:
         reader.close()

@@ -1706,7 +1706,11 @@ def _store_of_batches(path: Path) -> DataStore:
     counts[:60] = rng.poisson(rng.gamma(2.0, 2.0, 30), size=(60, 30))
     counts[60:, :5] = rng.poisson(rng.gamma(2.0, 2.0, 5), size=(60, 5))
     SparseToZarr(
-        counts, str(path), [f"c{i}" for i in range(120)], [f"g{i}" for i in range(30)]
+        counts,
+        str(path),
+        [f"c{i}" for i in range(120)],
+        [f"g{i}" for i in range(30)],
+        shuffle_cells=False,
     ).dump()
     store = DataStore(str(path), min_features_per_cell=0)
     store.cells.insert(
