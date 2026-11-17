@@ -17,9 +17,9 @@ Several processes may write one store. The owner creates the directory and
 writes part 0; each other writer opens the directory with
 :meth:`SparseRowStore.open` and its own part number and calls
 :meth:`~SparseRowStore.finish`. The owner then calls
-:meth:`~SparseRowStore.finalize`, which also splits every bucket that one read
-could not hold, and any process may open the finalized store by its path to
-read it.
+:meth:`~SparseRowStore.finalize`, which also splits every bucket that would take
+more than the split size to read, and any process may open the finalized store
+by its path to read it.
 
 On disk, every bucket is a directory holding one file per writer. A file is a
 sequence of blocks, each a header and four Blosc payloads (zstd level 1 with
@@ -440,7 +440,10 @@ class SparseRowStore:
             it: pending pieces and the encoding of one block. Every writer,
             and :meth:`finalize`, holds up to this much.
         bucket_bytes: The most that reading one bucket holds; :meth:`finalize`
-            splits a bucket whose rows need more.
+            refuses a row that needs more.
+        split_bytes: The read size above which :meth:`finalize` splits a
+            bucket into bands of rows, each read within it unless one row
+            needs more; ``bucket_bytes`` by default, and at most that.
         entries: The entries expected, from which the free disk the spill may
             need is checked before anything is written, or None.
         source_dtype: The dtype in which values arrive and in which a row's
@@ -469,6 +472,7 @@ class SparseRowStore:
         whole_rows: bool,
         buffer_bytes: int,
         bucket_bytes: int,
+        split_bytes: int | None = None,
         entries: int | None = None,
         source_dtype: Any | None = None,
         sum_duplicates: bool = True,
@@ -489,6 +493,12 @@ class SparseRowStore:
         ):
             if int(value) < 0:
                 raise ValueError(f"{name} must not be negative, not {value}")
+        split = int(bucket_bytes if split_bytes is None else split_bytes)
+        if not 0 <= split <= int(bucket_bytes):
+            raise ValueError(
+                f"split_bytes must lie between 0 and bucket_bytes={bucket_bytes}, "
+                f"not {split_bytes}"
+            )
         self._configure(
             {
                 "format": _FORMAT,
@@ -502,6 +512,7 @@ class SparseRowStore:
                 "wholeRows": bool(whole_rows),
                 "sumDuplicates": bool(sum_duplicates),
                 "bucketBytes": int(bucket_bytes),
+                "splitBytes": split,
                 "maxNnz": int(max_nnz),
             }
         )
@@ -544,6 +555,7 @@ class SparseRowStore:
         self._wholeRows = bool(settings["wholeRows"])
         self._sumDuplicates = bool(settings["sumDuplicates"])
         self._bucketLimit = int(settings["bucketBytes"])
+        self._splitLimit = int(settings["splitBytes"])
         self._maxNnz = int(settings["maxNnz"])
         self._nnzError = ValueError
         self._directory = None
@@ -818,7 +830,7 @@ class SparseRowStore:
         del self._buckets, self._rowEntries, self._rowPieces
 
     def finalize(self) -> None:
-        """Join every writer's part, split buckets that one read cannot hold, and plan reads.
+        """Join every writer's part, split buckets beyond the split size, and plan reads.
 
         Raises:
             RuntimeError: If a writer's part was opened and never finished.
@@ -909,7 +921,7 @@ class SparseRowStore:
         return min(int(self._bucketPieces[bucket]), entries)
 
     def _bands(self, bucket: int) -> list[int]:
-        """Return the first rows of bands of a bucket that one read each holds."""
+        """Return the first rows of bands of a bucket, each read within the split size."""
         first, last = (int(row) for row in self.bucket_starts[bucket : bucket + 2])
         pieces = int(self._bucketPieces[bucket])
         bands = []
@@ -924,7 +936,7 @@ class SparseRowStore:
                 )
                 if (
                     self._bucket_cost(entries, band_pieces, middle - start)
-                    <= self._bucketLimit
+                    <= self._splitLimit
                 ):
                     stop, low = middle, middle + 1
                 else:
@@ -934,7 +946,7 @@ class SparseRowStore:
         return bands
 
     def _split_buckets(self) -> None:
-        """Rewrite every bucket that one read cannot hold as bands that it can.
+        """Rewrite every bucket that needs more than the split size to read in bands.
 
         A bucket's blocks are read in the order they were written and their
         pieces sent to the band of their row, so each band keeps the order
@@ -951,7 +963,7 @@ class SparseRowStore:
                 self._bucket_cost(
                     entries, self._bucket_pieces(bucket, entries), last - first
                 )
-                <= self._bucketLimit
+                <= self._splitLimit
             ):
                 starts.append(first)
                 file_bytes.append(self._fileBytes[:, bucket])
@@ -980,7 +992,9 @@ class SparseRowStore:
                     )
                 del block
             writer.write_all()
-            shutil.rmtree(self._folder(first))
+            # A bucket that no writer gave an entry has no folder.
+            if self._folder(first).exists():
+                shutil.rmtree(self._folder(first))
             for index, band_first in enumerate(bands.tolist()):
                 folder = staging / f"rows-{band_first:012d}"
                 if folder.exists():
@@ -1421,9 +1435,13 @@ class SparseRowStore:
 
         ``max_bytes`` holds :data:`ROW_BYTES` for each row; half of the rest
         holds one chunk of up to :meth:`chunk_entries` entries of
-        ``entry_bytes`` each and the write buffers, and the other half one
-        read. Buckets are sized from ``entries``, the entries expected, which
-        also check the free disk; None sizes them for dense rows.
+        ``entry_bytes`` each and the write buffers, and the other half reads
+        the widest row. Buckets are sized to read in a thirty-second of
+        ``max_bytes``, at most 128 MiB, and split beyond twice that, except a
+        bucket of one wider row, so that a reader holds little beside the
+        writes that it feeds. They are sized from ``entries``, the entries
+        expected, which also check the free disk; None sizes them for dense
+        rows.
 
         Raises:
             MemoryBudgetError: If ``max_bytes`` holds less than the row bytes
@@ -1454,7 +1472,13 @@ class SparseRowStore:
         per_entry = _bucket_bytes(2, 2, 0, itemsize, sum_duplicates) - _bucket_bytes(
             1, 1, 0, itemsize, sum_duplicates
         )
-        target = max(1, min(half, _BUCKET_TARGET_BYTES) // per_entry)
+        # Reads hold one bucket beside the writes they feed, so buckets are
+        # sized to read in a thirty-second of the budget and split beyond
+        # twice that, when rows arrive unevenly; only a row that half of the
+        # budget cannot hold is refused.
+        target_bytes = min(_BUCKET_TARGET_BYTES, int(max_bytes) // 32)
+        split = min(half, 2 * target_bytes)
+        target = max(1, target_bytes // per_entry)
         if entries is None:
             bucket_rows = max(
                 -(-n_rows // _MAX_UNKNOWN_BUCKETS), target // max(1, n_columns)
@@ -1468,6 +1492,7 @@ class SparseRowStore:
             whole_rows=False,
             buffer_bytes=min(half, 4 * _PENDING_LIMIT_BYTES),
             bucket_bytes=half,
+            split_bytes=split,
             entries=entries,
             source_dtype=source,
             sum_duplicates=sum_duplicates,

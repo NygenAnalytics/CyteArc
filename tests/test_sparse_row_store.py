@@ -1098,3 +1098,62 @@ def test_closing_batches_early_stops_the_read_ahead(tmp_path):
         _assert_same_rows(store.read(6, 12), matrix[6:12])
     finally:
         store.close()
+
+
+def test_buckets_split_to_the_split_size_and_one_wider_row_reads_alone(tmp_path):
+    shape = (12, 40)
+    # Row 5 holds 30 entries; every other row holds 2.
+    rows = np.r_[np.repeat(np.arange(12), 2), np.full(28, 5)]
+    columns = np.r_[np.tile([0, 1], 12), np.arange(2, 30)]
+    values = np.arange(1, rows.size + 1, dtype=np.int64)
+    split = _sparse._bucket_bytes(8, 8, 4, 8, True)
+    limit = _sparse._bucket_bytes(30, 30, 1, 8, True)
+    with pytest.raises(ValueError, match="split_bytes must lie between 0 and"):
+        _loose_store(
+            tmp_path, shape, np.int64, bucket_bytes=limit, split_bytes=limit + 1
+        )
+    store = _loose_store(
+        tmp_path,
+        shape,
+        np.int64,
+        bucket_rows=12,
+        bucket_bytes=limit,
+        split_bytes=split,
+        buffer_bytes=1 << 16,
+    )
+    try:
+        store.append_entries(rows, columns, values)
+        store.finalize()
+        # Bands of four rows of two entries each, and row 5 alone.
+        starts = store.bucket_starts.tolist()
+        assert [5, 6] == [start for start in starts if start in (5, 6)]
+        assert max(np.diff(starts)) <= 4
+        expected = np.zeros(shape, dtype=np.int64)
+        expected[rows, columns] = values
+        np.testing.assert_array_equal(store.read(0, 12).toarray(), expected)
+        # The widest read is row 5's band: one piece of 30 entries.
+        assert store.read_bytes() - store.bucket_starts.nbytes == (
+            _sparse._bucket_bytes(30, 1, 1, 8, True)
+        )
+    finally:
+        store.close()
+
+
+def test_an_empty_bucket_beyond_the_split_size_splits_without_files(tmp_path):
+    store = _loose_store(
+        tmp_path,
+        (8, 3),
+        np.float32,
+        bucket_rows=4,
+        split_bytes=_sparse._bucket_bytes(0, 0, 2, 4, True),
+    )
+    try:
+        store.append_entries([6], [1], [2.0])
+        store.finalize()
+        # Rows 0 to 3 had no entry and no folder, and split all the same.
+        assert store.bucket_starts.tolist() == [0, 2, 4, 6, 7, 8]
+        expected = np.zeros((8, 3), dtype=np.float32)
+        expected[6, 1] = 2.0
+        np.testing.assert_array_equal(store.read(0, 8).toarray(), expected)
+    finally:
+        store.close()
