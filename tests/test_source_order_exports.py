@@ -1335,3 +1335,93 @@ def test_a_store_whose_source_rows_have_gaps_exports_and_merges_by_their_sort(
     np.testing.assert_array_equal(
         np.sort(merged.cells.fetch_all(SOURCE_ROW)), np.arange(kept.size + _N_CELLS)
     )
+
+
+# ---------------------------------------------------------------------------
+# Round trips through other shuffled imports
+
+
+def _cr_store(make_reader: Any, destination: Path, **options: Any) -> DataStore:
+    from cytearc.writers import CrToZarr
+
+    reader = make_reader()
+    try:
+        CrToZarr(
+            reader, str(destination), mem_budget="256M", nthreads=1, **options
+        ).dump()
+    finally:
+        reader.close()
+    return _open(destination, default_assay="RNA")
+
+
+def test_a_shuffled_matrix_market_import_exports_its_file(imported, tmp_path) -> None:
+    from cytearc.readers import MtxReader, inspect_mtx
+
+    # The file: the counts in the file's order, as to_mtx writes them.
+    source = tmp_path / "source"
+    to_mtx(_open(imported.plain).RNA, str(source))
+
+    def reader() -> MtxReader:
+        return MtxReader(inspect_mtx(str(source))[0], temp_dir=str(tmp_path))
+
+    shuffled = _cr_store(reader, tmp_path / "shuffled.zarr", shuffle_cells=True)
+    plain = _cr_store(reader, tmp_path / "plain.zarr")
+    rows = _file_rows(shuffled.cells.fetch_all("ids"))
+    assert rows.tolist() != sorted(rows.tolist())
+    np.testing.assert_array_equal(shuffled.cells.fetch_all(SOURCE_ROW), rows)
+
+    # Matrix Market gives back the file byte for byte.
+    to_mtx(shuffled.RNA, str(tmp_path / "exported"))
+    assert _mtx_files(tmp_path / "exported") == _mtx_files(source)
+    # H5AD holds what the export of an import in the file's order holds.
+    to_h5ad(shuffled.RNA, str(tmp_path / "shuffled.h5ad"))
+    to_h5ad(plain.RNA, str(tmp_path / "plain.h5ad"))
+    assert _h5_tree(tmp_path / "shuffled.h5ad") == _h5_tree(tmp_path / "plain.h5ad")
+    exported = anndata.read_h5ad(tmp_path / "shuffled.h5ad")
+    assert exported.obs_names.tolist() == [f"cell-{row}" for row in range(_N_CELLS)]
+    np.testing.assert_array_equal(exported.X.toarray(), _COUNTS)
+
+
+def test_a_filtered_10x_import_exports_its_kept_cells_in_the_files_order(
+    tmp_path,
+) -> None:
+    from cytearc.readers import CrH5Reader
+    from tests.test_shuffled_imports import _CUTOFF, _counts, _kept, _write_10x
+
+    counts = _counts()
+    path = _write_10x(tmp_path / "matrix.h5", counts)
+    kept = _kept(counts, cutoff=True)
+    genes = np.arange(9)
+
+    def reader() -> CrH5Reader:
+        return CrH5Reader(
+            str(path),
+            is_filtered=False,
+            filtering_cutoff=_CUTOFF,
+            temp_dir=str(tmp_path),
+        )
+
+    shuffled = _cr_store(reader, tmp_path / "shuffled.zarr", shuffle_cells=True)
+    plain = _cr_store(reader, tmp_path / "plain.zarr")
+    source_rows = shuffled.cells.fetch_all(SOURCE_ROW)
+    # The reader dropped cells, so the file rows that sourceRow holds have
+    # gaps straight from the import.
+    assert kept.size < counts.shape[0]
+    np.testing.assert_array_equal(np.sort(source_rows), kept)
+    barcodes = [f"BC-{row}" for row in kept]
+
+    to_h5ad(shuffled.RNA, str(tmp_path / "shuffled.h5ad"))
+    exported = anndata.read_h5ad(tmp_path / "shuffled.h5ad")
+    assert exported.obs_names.tolist() == barcodes
+    np.testing.assert_array_equal(exported.X.toarray(), counts[kept][:, genes])
+    to_h5ad(plain.RNA, str(tmp_path / "plain.h5ad"))
+    assert _h5_tree(tmp_path / "shuffled.h5ad") == _h5_tree(tmp_path / "plain.h5ad")
+
+    to_mtx(shuffled.ADT, str(tmp_path / "shuffled_mtx"))
+    to_mtx(plain.ADT, str(tmp_path / "plain_mtx"))
+    assert _mtx_files(tmp_path / "shuffled_mtx") == _mtx_files(tmp_path / "plain_mtx")
+    assert (tmp_path / "shuffled_mtx" / "barcodes.tsv").read_text().split() == barcodes
+    np.testing.assert_array_equal(
+        np.asarray(mmread(tmp_path / "shuffled_mtx" / "matrix.mtx").todense()).T,
+        counts[kept][:, 9:],
+    )

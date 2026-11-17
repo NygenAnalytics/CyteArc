@@ -15,8 +15,8 @@ in its ``cellOrder`` attribute, ``{"shuffled": true, "seed": <seed>}``, which
 A store imported in the file's order has neither the column nor the record,
 and its rows are already in that order. A merge writes ``sourceRow`` as each
 cell's row in the concatenation of its sources, and a subset copies it, so
-exports of either restore the order of the files they came from. The values
-may have gaps, as a subset leaves them, so they are only sorted and ranked,
+exports of either restore the order of the files they came from. Since such
+readers and subsets leave gaps in the values, they are only sorted and ranked,
 never taken as positions.
 """
 

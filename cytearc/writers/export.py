@@ -33,7 +33,7 @@ from scipy.sparse import csr_matrix, issparse, vstack
 
 from ..metadata.rows import apply_missing_mask, metadata_missing_mask
 from ..storage.categorical import CategoricalColumn
-from ..storage.cell_order import CellOrder, exported_cell_order
+from ..storage.cell_order import CellOrder, destination_rows, exported_cell_order
 from ..storage.refs import ArtifactRef
 from ..utils.compute import compute_with_progress
 from ..utils.logging import logger
@@ -477,8 +477,7 @@ def _reordered_blocks(
     from ..readers._sparse import SparseRowStore, encoded_entry_bytes
 
     n_rows, n_cols = matrix.shape
-    destinations = np.empty(n_rows, dtype=np.int64)
-    destinations[order] = np.arange(n_rows, dtype=np.int64)
+    destinations = destination_rows(order)
     _held, batch_entries, buffer_bytes = _reorder_shares(
         matrix.shape, matrix.dtype, max_bytes
     )
