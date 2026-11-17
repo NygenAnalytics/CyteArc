@@ -90,18 +90,22 @@ _PUBLIC_CLASS_METHODS = {
     ),
 }
 _PUBLIC_CLASS_SIGNATURE_DIGESTS = {
-    CrReader: "0237d8e7c63b64fb6526f3536d5f65c1d704fe56675bf38b41644be419a5607f",
-    CrH5Reader: "435e2965b15010e0d1a41a36dae1c492d24eac90386e3e1f58ea8b705570db7d",
+    # count_value_ranges of CrReader, CrH5Reader, MtxReader and TapestriReader
+    # gained the keyword-only destinationRows, which shuffles an import's
+    # cells; CrH5Reader, CSVReader and TapestriReader gained the keyword-only
+    # temp_dir of a shuffle's temporary files.
+    CrReader: "490b8f92b9b7eef78c2320a859b68af836ccf481405f268e2120a75d66cd94ea",
+    CrH5Reader: "897cc0aeefed5ddce798406ad3d7fccae8fef092268571cdf591e5db24301fac",
     CrDirReader: "47ae6207108e6433f78e3214a0b38c11cadf5cf2d6a79eb218949d6137311bef",
     # H5adReader gained the keyword-only duplicate_cell_ids="error", and its
     # embedding roles gained "coordinates". count_value_ranges gained the
     # keyword-only processes: int = 1, and destinationRows, which shuffles an
     # import's rows as the scan reads them.
     H5adReader: "e102f293423f2519e0c40caa7b8de1819fd31362edc83c8e536396c865ee3b04",
-    CSVReader: "8aa6c17c876afb62765584fc7ff64d2838c66ef53095da10d7198ca60ab83851",
-    MtxReader: "b0ce7fc6984e0b49abd3e1e3d65ae97194af7b7de083b1d0ea0496735a8c5dd0",
+    CSVReader: "3cf26dad8010b631f6f362b7d5f7d29fd929d1b80e3746340f130391edc4a1ac",
+    MtxReader: "0168bb32978709dd2129be912890b3a47186f577efe4ffef43be887cb9bfa69d",
     SeuratReader: "68678f67361080e8121eaae116ace832c1e0defc73ca36e3e3aa02d4d96718e6",
-    TapestriReader: "d23c113f0da998082610e4ca3f976752be27765824e55bf3473ae90bf90610be",
+    TapestriReader: "6170085dd0ecb148f9eb92ee50604c170d68653a71d21b63b12ccc2b868de132",
 }
 _MODULE_SIGNATURE_DIGEST = (
     "21c4a2974e1193da7ebe9be85417b73e2525e875e885c75367a61bf484d4c171"

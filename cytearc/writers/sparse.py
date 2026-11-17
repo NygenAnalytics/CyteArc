@@ -17,6 +17,7 @@ from ..storage.profiles import (
 from ..storage.sharding import accumulate_sparse_to_shards
 from ..utils.arrays import (
     csr_to_coo,
+    cumulative_nnz,
     has_duplicates,
     max_window_nnz,
     sparse_matrix_bytes,
@@ -204,6 +205,16 @@ class SparseToZarr:
             ``"log_normalized"`` or ``"log2_normalized"``, as the import
             reference's normalized values section describes, or a mapping of
             assays to these. None decides from the values.
+        shuffle_cells: If True, write the cells in a uniformly random order,
+            so that any contiguous slice of the store, such as one shard or
+            a training mini-batch, is a random sample of its cells. Every
+            assay's counts and the cell IDs follow the one order, and each
+            cell keeps its row in the matrices, from 0, in the int64 cell
+            column ``sourceRow``. The matrices are in memory, so each batch
+            gathers its rows from them; nothing is written to temporary
+            files. Off by default in this release.
+        shuffle_seed: The seed of the shuffle, from 0 to 2**64 - 1. One seed
+            gives the same order on every platform.
 
     Each assay's counts are stored in the dtype that
     :func:`~cytearc.storage.count_dtype.count_storage_dtype` resolves from the
@@ -217,7 +228,9 @@ class SparseToZarr:
             is not two-dimensional, if a count is NaN or infinite, or if a
             per-assay argument names an assay that the matrices do not.
         TypeError: If per-assay arguments are mappings beside a single matrix,
-            or ``feature_ids`` is not a mapping beside a mapping of matrices.
+            or ``feature_ids`` is not a mapping beside a mapping of matrices,
+            ``shuffle_cells`` is not a boolean, or ``shuffle_seed`` is not an
+            integer.
         FileExistsError: If ``zarr_loc`` is not empty and may not be replaced.
 
     Attributes:
@@ -230,6 +243,8 @@ class SparseToZarr:
             decided before the store was created.
         policy: The count-matrix layout that the assay was written with, or
             a mapping of assay names to it.
+        shuffleCells: Whether the import shuffles the cells.
+        shuffleSeed: The seed of the shuffle.
     """
 
     def __init__(
@@ -251,8 +266,14 @@ class SparseToZarr:
         *,
         overwrite: bool = False,
         values: ImportValues = None,
+        shuffle_cells: bool = False,
+        shuffle_seed: int = 0,
     ) -> None:
         overwrite = bool_argument(overwrite, "overwrite")
+        self.shuffleCells = bool_argument(shuffle_cells, "shuffle_cells")
+        from ..storage.cell_order import shuffle_seed_argument, shuffled_order
+
+        self.shuffleSeed = shuffle_seed_argument(shuffle_seed)
         from ..utils.matrix_values import import_values_argument
 
         import_values_argument(values)
@@ -312,8 +333,16 @@ class SparseToZarr:
                 assay.feature_ids,
                 "Feature IDs" if single else f"Feature IDs of assay {assay.name!r}",
             )
-        # The scans read windows beside the matrices, which stay held.
+        # Row r of every per-cell array holds the matrices' row _cellOrder[r];
+        # each batch of the counts write gathers its rows from them.
+        self._cellOrder: np.ndarray | None = (
+            shuffled_order(self.nCells, self.shuffleSeed) if self.shuffleCells else None
+        )
+        # The scans read windows beside the matrices, which stay held, as
+        # does a shuffled import's order of the cells.
         held = sum(sparse_matrix_bytes(assay.matrix) for assay in assays)
+        if self._cellOrder is not None:
+            held += int(self._cellOrder.nbytes)
         self._heldMatrixBytes = held
         if held >= self.resources.memoryBytes:
             what = "The sparse matrix holds" if single else "The sparse matrices hold"
@@ -371,13 +400,20 @@ class SparseToZarr:
         self.z = create_destination(
             zarr_loc, overwrite=overwrite, storage_options=storage_options
         )
-        _ = create_cell_data(
+        stored_ids = cell_ids if self._cellOrder is None else cell_ids[self._cellOrder]
+        cell_group = create_cell_data(
             root=self.z,
             workspace=self.workspace,
-            ids=cell_ids,
-            names=cell_ids,
+            ids=stored_ids,
+            names=stored_ids,
             profile=self.profile,
         )
+        if self._cellOrder is not None:
+            from ..storage.cell_order import write_shuffled_cell_order
+
+            write_shuffled_cell_order(
+                cell_group, self._cellOrder, self.shuffleSeed, profile=self.profile
+            )
         for assay in assays:
             create_zarr_count_assay(
                 z=self.z,
@@ -400,13 +436,17 @@ class SparseToZarr:
         The third value says whether every row of the matrix holds its
         indices sorted without repeats, so that the write marks its batches
         canonical and sorts and sums none. Every matrix stays held while
-        each assay is written. The layout fit and the write plan the same
-        import from these.
+        each assay is written. A shuffled import plans its windows from the
+        rows' sizes in shuffled order, which it holds beside the order. The
+        layout fit and the write plan the same import from these.
         """
         indptr = np.asarray(assay.matrix.indptr)
         resident = self._heldMatrixBytes + CountSummary.nbytes_for(
             self.nCells, assay.matrix.shape[1]
         )
+        if self._cellOrder is not None:
+            indptr = cumulative_nnz(np.diff(indptr)[self._cellOrder])
+            resident += int(indptr.nbytes)
         return (
             resident,
             lambda rows: max_window_nnz(indptr, rows),
@@ -494,9 +534,14 @@ class SparseToZarr:
         )
         kind = self._assayValues[assay.name].kind
 
+        order = self._cellOrder
+
         def row_batches() -> Iterator[coo_matrix]:
             for start in range(0, self.nCells, resolved_batch_rows):
-                batch = csr_to_coo(assay.matrix[start : start + resolved_batch_rows])
+                rows = slice(start, start + resolved_batch_rows)
+                batch = csr_to_coo(
+                    assay.matrix[rows] if order is None else assay.matrix[order[rows]]
+                )
                 yield linear_coo(batch, kind, store.dtype, assay=assay.name)
 
         accumulate_sparse_to_shards(

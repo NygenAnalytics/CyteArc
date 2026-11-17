@@ -1,5 +1,5 @@
-from collections.abc import Iterator
-from typing import Any, Literal
+from collections.abc import Callable, Iterator
+from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
 import pandas as pd
@@ -18,6 +18,9 @@ from ..storage.sharding import write_dense_from_row_batches
 from ..utils.logging import logger
 from ..utils.arguments import bool_argument
 from ..utils.matrix_values import ImportValues
+
+if TYPE_CHECKING:
+    from ..readers._sparse import SparseRowStore
 
 
 class CSVtoZarr:
@@ -51,6 +54,18 @@ class CSVtoZarr:
             ``"log_normalized"`` or ``"log2_normalized"``, as the import
             reference's normalized values section describes. None decides
             from the values.
+        shuffle_cells: If True, write the cells in a uniformly random order,
+            so that any contiguous slice of the store, such as one shard or
+            a training mini-batch, is a random sample of its cells. The
+            counts, the cell IDs and the ``cell_data_cols`` columns follow
+            the one order, and each cell keeps its row in the file, from 0,
+            in the int64 cell column ``sourceRow``. Before the store is
+            created, the writer reads the file once more, sending each row
+            to temporary files on local disk, in ``temp_dir`` of the reader,
+            and keeping the cell columns in memory. Off by default in this
+            release.
+        shuffle_seed: The seed of the shuffle, from 0 to 2**64 - 1. One seed
+            gives the same order on every platform.
 
     The counts are stored in the dtype that
     :func:`~cytearc.storage.count_dtype.count_storage_dtype` resolves from the
@@ -59,11 +74,20 @@ class CSVtoZarr:
 
     Raises:
         FileExistsError: If ``zarr_loc`` is not empty and may not be replaced.
+        TypeError: If ``shuffle_cells`` is not a boolean, or ``shuffle_seed``
+            is not an integer.
+        ValueError: If ``shuffle_seed`` lies outside its range, or a shuffled
+            import finds that the file no longer holds the rows that the
+            reader counted.
+        OSError: If ``shuffle_cells`` is True and the temporary disk lacks
+            room for the shuffled rows.
 
     Attributes:
         csvr: A CSVReader object
         z: The Zarr hierarchy (array or group).
         policy: The count-matrix layout that the assay was written with.
+        shuffleCells: Whether the import shuffles the cells.
+        shuffleSeed: The seed of the shuffle.
     """
 
     def __init__(
@@ -82,8 +106,14 @@ class CSVtoZarr:
         *,
         overwrite: bool = False,
         values: ImportValues = None,
+        shuffle_cells: bool = False,
+        shuffle_seed: int = 0,
     ) -> None:
         overwrite = bool_argument(overwrite, "overwrite")
+        self.shuffleCells = bool_argument(shuffle_cells, "shuffle_cells")
+        from ..storage.cell_order import shuffle_seed_argument, shuffled_order
+
+        self.shuffleSeed = shuffle_seed_argument(shuffle_seed)
         from ..utils.matrix_values import import_values_argument
 
         import_values_argument(values)
@@ -120,19 +150,44 @@ class CSVtoZarr:
             {self.assayName: assay_type},
             {self.assayName: storage_dtype},
         )[self.assayName]
-        # A layout that does not fit fails here, before the destination exists.
-        self.policy = self._fit_count_layout(storage_dtype, layout_request)
-        # The destination must be empty, or with overwrite an unprepared store.
-        self.z = create_destination(
-            zarr_loc, overwrite=overwrite, storage_options=storage_options
-        )
-        _ = create_cell_data(
+        # Row r of every per-cell array holds the file's row _cellOrder[r].
+        # A shuffled import reads the file once more here, sending each row
+        # to its destination and keeping the cell columns, so that the
+        # counts write reads the rows in that order.
+        self._cellOrder: np.ndarray | None = None
+        self._shuffledStore: "SparseRowStore | None" = None
+        self._shuffledParts: dict[int, list[tuple[np.ndarray, np.ndarray]]] = {}
+        if self.shuffleCells:
+            self._cellOrder = shuffled_order(self.csvr.nCells, self.shuffleSeed)
+            self._spill_rows()
+            cell_ids = cell_ids[self._cellOrder]
+        try:
+            # A layout that does not fit fails here, before the destination
+            # exists.
+            self.policy = self._fit_count_layout(storage_dtype, layout_request)
+            # The destination must be empty, or with overwrite an unprepared
+            # store.
+            self.z = create_destination(
+                zarr_loc, overwrite=overwrite, storage_options=storage_options
+            )
+        except BaseException:
+            self._release_shuffled_rows()
+            raise
+        cell_group = create_cell_data(
             root=self.z,
             workspace=workspace,
             ids=cell_ids,
             names=cell_ids,
             profile=self.profile,
         )
+        if self._cellOrder is not None:
+            from ..storage.cell_order import write_shuffled_cell_order
+
+            # Written before the keys of the cell columns are planned, so a
+            # source column of the same name is skipped.
+            write_shuffled_cell_order(
+                cell_group, self._cellOrder, self.shuffleSeed, profile=self.profile
+            )
         create_zarr_count_assay(
             z=self.z,
             assay_name=self.assayName,
@@ -164,19 +219,102 @@ class CSVtoZarr:
         cells = np.vstack(blocks) if blocks else np.zeros((0, self.csvr.nFeatures))
         return {self.assayName: csr_matrix(cells[:DETECTION_CELLS])}
 
+    def _chunk_rows(self) -> int:
+        """Return the rows of one reader chunk, which is also a batch of shuffled rows."""
+        return min(int(self.csvr.pandas_kwargs["chunksize"]), self.csvr.nCells)
+
     def _count_import_requirements(self) -> tuple[int, int]:
         """Return the resident and source batch bytes of the counts write.
 
         A batch is one reader chunk of every count column, held with its
-        DataFrame. The layout fit and the write plan the same import from
-        these.
+        DataFrame. A batch of shuffled rows is as wide, read as sparse rows
+        from a bucket with the next one loading ahead, beside the order of
+        the cells and the rows' pointers. The layout fit and the write plan
+        the same import from these.
         """
         from ..storage.identity import CountSummary
 
-        rows = min(int(self.csvr.pandas_kwargs["chunksize"]), self.csvr.nCells)
-        batch_bytes = rows * self.csvr.nFeatures * self.csvr.countDtype.itemsize
+        rows = self._chunk_rows()
+        itemsize = self.csvr.countDtype.itemsize
+        batch_bytes = rows * self.csvr.nFeatures * itemsize
         resident = CountSummary.nbytes_for(self.csvr.nCells, self.csvr.nFeatures)
-        return resident, 2 * batch_bytes
+        store = self._shuffledStore
+        if self._cellOrder is None or store is None:
+            return resident, 2 * batch_bytes
+        sparse_batch = rows * self.csvr.nFeatures * (itemsize + 8) + (rows + 1) * 8
+        return (
+            resident + int(self._cellOrder.nbytes) + store.resident_bytes,
+            2 * batch_bytes + sparse_batch + store.read_bytes(read_ahead=True),
+        )
+
+    def _spill_rows(self) -> None:
+        """Read the file once, sending each row to its destination and keeping the cell columns.
+
+        The pass holds the order and its inverse, one reader chunk twice as
+        the counts write does, and what sending the chunk's rows to their
+        buckets holds, beside up to 1 GiB of rows waiting for their files.
+
+        Raises:
+            MemoryBudgetError: If the budget cannot hold one chunk and its spill.
+            ValueError: If the file no longer holds the rows that the reader
+                counted.
+            OSError: If the temporary disk lacks room for the rows.
+        """
+        from ..readers._row_spill import row_spill_plan, spill_rows
+        from ..storage.cell_order import destination_rows
+
+        assert self._cellOrder is not None
+        n_cells, n_features = self.csvr.nCells, self.csvr.nFeatures
+        destinations = destination_rows(self._cellOrder)
+        available = int(self.resources.memoryBytes) - 2 * int(destinations.nbytes)
+        chunk_values = self._chunk_rows() * n_features
+        chunk_bytes = 2 * chunk_values * self.csvr.countDtype.itemsize
+        plan = row_spill_plan(
+            destinations,
+            (n_cells, n_features),
+            self.csvr.countDtype,
+            entries=None,
+            longest=n_features,
+            maxBytes=available,
+            least=lambda plan: plan.batch_bytes(chunk_values) + chunk_bytes,
+        )
+        parts: dict[int, list[tuple[np.ndarray, np.ndarray]]] = {
+            position: [] for _name, (position, _dtype) in self._cellDataColumns
+        }
+
+        def fill(consumer: Callable[[int, Any], None]) -> None:
+            start = 0
+            for counts, cell_values in self.csvr.consume():
+                if start + counts.shape[0] > n_cells:
+                    raise ValueError(_changed_rows_message(n_cells))
+                if cell_values is not None:
+                    for _name, (position, dtype) in self._cellDataColumns:
+                        parts[position].append(
+                            _metadata_part(cell_values[:, position], dtype)
+                        )
+                consumer(start, counts)
+                start += int(counts.shape[0])
+            if start != n_cells:
+                raise ValueError(_changed_rows_message(n_cells))
+
+        self._shuffledStore, _ = spill_rows(
+            plan,
+            fill,
+            operation="shuffled CSV import",
+            entry_bytes=None,
+            buffer_bytes=plan.batch_buffer_bytes(
+                available - plan.ownerBytes - chunk_bytes, chunk_values
+            ),
+            dense=True,
+            temp_dir=self.csvr.tempDir,
+        )
+        self._shuffledParts = parts
+
+    def _release_shuffled_rows(self) -> None:
+        """Remove the shuffled rows, once written or given up."""
+        if self._shuffledStore is not None:
+            self._shuffledStore.close()
+        self._shuffledStore = None
 
     def _fit_count_layout(
         self, storage_dtype: Any, requested: CountMatrixPolicy | None
@@ -203,11 +341,17 @@ class CSVtoZarr:
     def dump(self) -> None:
         """Writes the count values into the Zarr matrix.
 
+        A shuffled import reads its shuffled rows once, deleting them as it
+        goes, and removes them once the counts are written or the write
+        fails, so it writes its counts once.
+
         Raises:
             OverflowError: If a count no longer fits the stored dtype because
                 the file changed after the reader's pass.
             ValueError: If the file no longer holds the rows that the
                 reader's pass counted.
+            RuntimeError: If the shuffled rows of this import were already
+                written.
 
         Returns:
             None
@@ -219,6 +363,11 @@ class CSVtoZarr:
         from ..utils.matrix_values import linear_values
         from ._store import keyed_metadata_columns, write_metadata_column
 
+        if self.shuffleCells and self._shuffledStore is None:
+            raise RuntimeError(
+                "The shuffled rows of this import were written once and removed; "
+                "create a new CSVtoZarr to import the file again"
+            )
         store = load_count_array(self.z, self.assayName, self.workspace)
         summary = CountSummary(store)
         resident, producer_reserve = self._count_import_requirements()
@@ -247,8 +396,27 @@ class CSVtoZarr:
         parts: dict[int, list[tuple[np.ndarray, np.ndarray]]] = {
             position: [] for _name, (position, _dtype) in metadata
         }
+        shuffled = self._shuffledStore
+        if shuffled is not None:
+            # The rows' pass kept every cell column in the file's order.
+            parts = self._shuffledParts
 
         def count_batches() -> Iterator[np.ndarray]:
+            if shuffled is not None:
+                for batch in shuffled.iter_rows(
+                    0,
+                    self.csvr.nCells,
+                    max(1, self._chunk_rows()),
+                    read_ahead=True,
+                    delete=True,
+                ):
+                    yield linear_values(
+                        batch.toarray(),
+                        self.values.kind,
+                        store.dtype,
+                        assay=self.assayName,
+                    )
+                return
             for counts, cell_values in self.csvr.consume():
                 if cell_values is not None:
                     for _name, (position, dtype) in metadata:
@@ -261,19 +429,25 @@ class CSVtoZarr:
                     counts, self.values.kind, store.dtype, assay=self.assayName
                 )
 
-        write_dense_from_row_batches(
-            store,
-            count_batches(),
-            msg="Writing CSV counts",
-            resources=self.resources,
-            io=self.io,
-            producerReserveBytes=producer_reserve,
-            residentBytes=resident,
-            countSummary=summary,
-        )
+        try:
+            write_dense_from_row_batches(
+                store,
+                count_batches(),
+                msg="Writing CSV counts",
+                resources=self.resources,
+                io=self.io,
+                producerReserveBytes=producer_reserve,
+                residentBytes=resident,
+                countSummary=summary,
+            )
+        finally:
+            self._release_shuffled_rows()
         for name, (position, _dtype) in metadata:
             values = np.concatenate([values for values, _missing in parts[position]])
             missing = np.concatenate([missing for _values, missing in parts[position]])
+            if self._cellOrder is not None:
+                values = values[self._cellOrder]
+                missing = missing[self._cellOrder]
             write_metadata_column(
                 cell_data_grp, name, values, missing, profile=self.profile
             )
@@ -293,6 +467,13 @@ class CSVtoZarr:
             profile=self.profile,
             io=self.io,
         )
+
+
+def _changed_rows_message(n_cells: int) -> str:
+    return (
+        f"The CSV file no longer holds the {n_cells} rows that the reader "
+        "counted; the file changed after the reader read it"
+    )
 
 
 def _cell_data_columns(
