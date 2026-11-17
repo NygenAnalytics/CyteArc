@@ -1274,8 +1274,8 @@ class H5adReader:
         """Bound what a producer holds beside one batch.
 
         It holds the batch's sparse row pointers, and the rows of converted
-        CSC columns are read a bucket at a time, which the producer holds as
-        it reads.
+        CSC columns are read a bucket at a time with the next bucket loading
+        ahead, which the producer holds as it reads.
         """
         rows = min(max(1, int(batch_size)), self.nCells)
         if rows == 0 or self.matrixOrientation == "dense":
@@ -1283,7 +1283,7 @@ class H5adReader:
         reading = 0
         if self._convertedCsr is not None:
             itemsize = np.asarray(self._convertedCsr.indptr).dtype.itemsize
-            reading = self._convertedCsr.read_bytes()
+            reading = self._convertedCsr.read_bytes(read_ahead=True)
         else:
             itemsize = self.h5[self.matrixKey]["indptr"].dtype.itemsize
         normalized_itemsize = np.dtype(np.int32).itemsize
@@ -1425,7 +1425,10 @@ class H5adReader:
         if self._convertedCsr is None:
             self.materialize_csc()
         assert self._convertedCsr is not None
-        for batch in self._convertedCsr.iter_rows(start, stop, batch_size):
+        # The next bucket of rows decodes while this one's batches are written.
+        for batch in self._convertedCsr.iter_rows(
+            start, stop, batch_size, read_ahead=True
+        ):
             yield csr_to_coo(batch)
 
     def consume_row_range(

@@ -63,8 +63,10 @@ _GAPS = 0x10
 _CANONICAL = 0x01
 _MAGIC = b"CRB1"
 # Magic, flags, the row, length, index and value codes, the piece and entry
-# counts, the four payload sizes and the CRC-32 of the payloads.
+# counts, the four payload sizes and the CRC-32 of the header before it and of
+# the payloads.
 _HEADER = struct.Struct("<4sBBBBB3xQQQQQQI")
+_CHECKSUM = struct.Struct("<I")
 _FORMAT = 1
 
 #: Bytes per destination row that a store holds: the entries appended to each
@@ -76,7 +78,7 @@ _BLOCK_BYTES = 4 * 1024 * 1024
 # The read size for which from_entries sizes its buckets.
 _BUCKET_TARGET_BYTES = 128 * 1024 * 1024
 # The most bytes that from_entries keeps pending before it writes blocks.
-_PENDING_LIMIT_BYTES = 1024 * 1024 * 1024
+_PENDING_LIMIT_BYTES = 256 * 1024 * 1024
 # The most buckets that from_entries makes when it cannot estimate the entries.
 _MAX_UNKNOWN_BUCKETS = 4096
 
@@ -189,9 +191,6 @@ def _encode_block(
         _encode_payload(stored_indices.astype(_UNSIGNED[column_code], copy=False)),
         _encode_payload(stored_values),
     )
-    checksum = 0
-    for payload in payloads:
-        checksum = zlib.crc32(payload, checksum)
     header = _HEADER.pack(
         _MAGIC,
         flags,
@@ -202,9 +201,20 @@ def _encode_block(
         int(rows.size),
         int(indices.size),
         *(len(payload) for payload in payloads),
-        checksum,
+        0,
+    )[: -_CHECKSUM.size]
+    return (
+        header + _CHECKSUM.pack(_checksum(header, payloads)) + b"".join(payloads),
+        bool(flags & _CANONICAL),
     )
-    return header + b"".join(payloads), bool(flags & _CANONICAL)
+
+
+def _checksum(header: bytes, payloads: Iterable[bytes]) -> int:
+    """Return the CRC-32 of a block's header, without its checksum, and payloads."""
+    checksum = zlib.crc32(header)
+    for payload in payloads:
+        checksum = zlib.crc32(payload, checksum)
+    return checksum
 
 
 @dataclass(frozen=True, slots=True)
@@ -236,13 +246,14 @@ def _decode_payload(
 def _read_blocks(
     stream: BinaryIO,
     *,
+    size: int,
     path: Path,
     source_dtype: np.dtype[Any],
     n_columns: int,
     bucket_rows: int,
 ) -> Iterator[_Block]:
     """Yield the blocks of one bucket file in turn, checking every size and checksum."""
-    number = 0
+    number = position = 0
     while header := stream.read(_HEADER.size):
         where = f"Block {number} of {path}"
         if len(header) < _HEADER.size:
@@ -261,18 +272,20 @@ def _read_blocks(
         ) = _HEADER.unpack(header)
         if magic != _MAGIC:
             raise RuntimeError(f"{where} does not start a block; the file is corrupted")
+        position += _HEADER.size
+        if sum(sizes) > size - position:
+            raise RuntimeError(
+                f"{where} is truncated: its payloads take {sum(sizes)} bytes and "
+                f"{size - position} remain"
+            )
+        payloads = [stream.read(length) for length in sizes]
+        position += sum(sizes)
+        if _checksum(header[: -_CHECKSUM.size], payloads) != checksum:
+            raise RuntimeError(f"{where} fails its checksum; the file is corrupted")
         if max(row_code, length_code, index_code & ~_GAPS) >= len(_UNSIGNED) or (
             value_code >= len(_UNSIGNED) and value_code != _SOURCE_VALUES
         ):
             raise RuntimeError(f"{where} names an unknown dtype; the file is corrupted")
-        payloads = [stream.read(size) for size in sizes]
-        if sum(len(payload) for payload in payloads) != sum(sizes):
-            raise RuntimeError(f"{where} is truncated: its payloads are incomplete")
-        checksum_found = 0
-        for payload in payloads:
-            checksum_found = zlib.crc32(payload, checksum_found)
-        if checksum_found != checksum:
-            raise RuntimeError(f"{where} fails its checksum; the file is corrupted")
         rows = _decode_payload(payloads[0], _UNSIGNED[row_code], n_pieces, where)
         lengths = _decode_payload(
             payloads[1], _UNSIGNED[length_code], n_pieces, where
@@ -622,6 +635,11 @@ class SparseRowStore:
                 f"{int(indices.min())} to {int(indices.max())}"
             )
 
+    def _column_indices(self, indices: np.ndarray) -> np.ndarray:
+        """Return column indices as int32 while pending, when the columns allow."""
+        dtype = np.int32 if self.shape[1] <= np.iinfo(np.int32).max else np.int64
+        return np.asarray(indices).astype(dtype, copy=False)
+
     def _check_rows(self, rows: Any) -> np.ndarray:
         given = np.asarray(rows)
         if given.ndim != 1 or (given.size and given.dtype.kind not in "iu"):
@@ -669,6 +687,8 @@ class SparseRowStore:
                 "arrive once each"
             )
         del ordered, repeated, earlier
+        if rows.size == 0:
+            return
         self._check_columns(matrix.indices)
         lengths = np.diff(matrix.indptr).astype(np.int64)
         self._count_entries(int(lengths.sum()))
@@ -676,13 +696,13 @@ class SparseRowStore:
         self._rowEntries[rows] += lengths
         buckets = rows // self._bucketRows
         order = np.argsort(buckets, kind="stable")
-        gathered = matrix[order] if order.size else matrix
+        gathered = matrix[order]
         self._add_pieces(
             buckets[order],
             rows[order],
             lengths[order],
             np.asarray(gathered.indptr, dtype=np.int64),
-            np.asarray(gathered.indices),
+            self._column_indices(gathered.indices),
             checked_sparse_cast(np.asarray(gathered.data), self._sourceDtype),
         )
 
@@ -725,7 +745,7 @@ class SparseRowStore:
             piece_rows,
             lengths,
             pointers,
-            columns[order],
+            self._column_indices(columns[order]),
             checked_sparse_cast(values[order], self._sourceDtype),
         )
 
@@ -745,8 +765,6 @@ class SparseRowStore:
             np.concatenate((cuts, [buckets.size])).tolist(),
             strict=True,
         ):
-            if first == last:
-                continue
             bucket = int(buckets[first])
             left, right = int(pointers[first]), int(pointers[last])
             self._buckets.add(
@@ -1105,6 +1123,7 @@ class SparseRowStore:
                     )
                 yield from _read_blocks(
                     stream,
+                    size=size,
                     path=path,
                     source_dtype=self._sourceDtype,
                     n_columns=self.shape[1],
@@ -1464,8 +1483,7 @@ class SparseRowStore:
             try:
                 store.finalize()
             except MemoryBudgetError as error:
-                if error.item != "one sparse row of the conversion":
-                    raise
+                # Finalizing refuses only a row that one read cannot hold.
                 needed = fixed + 2 * error.needed_bytes
                 raise MemoryBudgetError(
                     "One sparse row exceeds the conversion memory limit. It needs "

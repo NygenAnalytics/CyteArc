@@ -708,9 +708,10 @@ def _bucket_file(store: SparseRowStore, first_row: int = 0) -> Path:
         (lambda data: b"", "holds 0 bytes where .* were written"),
         (lambda data: b"XXXX" + data[4:], "does not start a block"),
         (lambda data: data[:-1] + bytes([data[-1] ^ 0xFF]), "fails its checksum"),
-        (lambda data: data[:8] + bytes([0xEE]) + data[9:], "unknown dtype"),
+        # The checksum covers the header too.
+        (lambda data: data[:8] + bytes([0xEE]) + data[9:], "fails its checksum"),
     ],
-    ids=["truncated", "emptied", "magic", "payload", "code"],
+    ids=["truncated", "emptied", "magic", "payload", "header"],
 )
 def test_damaged_files_are_refused(tmp_path, damage, message):
     store, _ = _finalized_rows(tmp_path)
@@ -723,23 +724,69 @@ def test_damaged_files_are_refused(tmp_path, damage, message):
         store.close()
 
 
-def test_a_file_of_the_right_size_with_short_blocks_is_refused(tmp_path):
+def _sign(block: bytes) -> bytes:
+    """Return a block whose checksum matches its header and payloads again."""
+    size = _sparse._HEADER.size - _sparse._CHECKSUM.size
+    payloads = [block[_sparse._HEADER.size :]]
+    checksum = _sparse._checksum(block[:size], payloads)
+    return block[:size] + _sparse._CHECKSUM.pack(checksum) + payloads[0]
+
+
+def _replace_header(block: bytes, **fields: int) -> bytes:
+    names = (
+        "magic flags row length index value pieces entries "
+        "rowBytes lengthBytes indexBytes valueBytes checksum"
+    ).split()
+    values = dict(zip(names, _sparse._HEADER.unpack_from(block), strict=True))
+    values.update(fields)
+    header = _sparse._HEADER.pack(*(values[name] for name in names))
+    return _sign(header + block[_sparse._HEADER.size :])
+
+
+def test_files_whose_size_matches_but_whose_blocks_end_early_are_refused(tmp_path):
     store, _ = _finalized_rows(tmp_path)
     try:
         path = _bucket_file(store)
         data = path.read_bytes()
-        header = _sparse._HEADER
-        fields = list(header.unpack_from(data))
+
+        def write(changed: bytes) -> None:
+            path.write_bytes(changed)
+            store._fileBytes[store._fileBytes[:, 0] > 0, 0] = len(changed)
+            store._cache = None
+
         # A header that claims more payload than the file holds.
+        fields = list(_sparse._HEADER.unpack_from(data))
         fields[-2] += 50
-        path.write_bytes(header.pack(*fields) + data[header.size :])
-        with pytest.raises(RuntimeError, match="payloads are incomplete|checksum"):
+        write(_sparse._HEADER.pack(*fields) + data[_sparse._HEADER.size :])
+        with pytest.raises(RuntimeError, match="payloads take .* bytes and .* remain"):
             store.read(0, 1)
-        # A header cut short at the end of the file.
-        path.write_bytes(data[:-10] + data[:10])
-        with pytest.raises(
-            RuntimeError, match="header is incomplete|checksum|truncated"
-        ):
+        # A second block cut off inside its header.
+        write(data + data[:10])
+        with pytest.raises(RuntimeError, match="Block 1 .* header is incomplete"):
+            store.read(0, 1)
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize(
+    ("fields", "message"),
+    [
+        ({"value": 0xEE}, "names an unknown dtype"),
+        ({"row": 7}, "names an unknown dtype"),
+        ({"pieces": 99}, "decodes to .* values where its header records 99"),
+        ({"entries": 1}, "decodes to .* values where its header records 1"),
+    ],
+)
+def test_signed_blocks_that_contradict_their_header_are_refused(
+    tmp_path, fields, message
+):
+    store, _ = _finalized_rows(tmp_path)
+    try:
+        path = _bucket_file(store)
+        data = path.read_bytes()
+        changed = _replace_header(data, **fields)
+        path.write_bytes(changed)
+        with pytest.raises(RuntimeError, match=message):
             store.read(0, 1)
     finally:
         store.close()
@@ -803,6 +850,15 @@ def test_blocks_that_disagree_with_the_written_rows_are_refused(tmp_path):
             store.read(0, 1)
         write([7], [1], [0], np.ones(1, np.float32))
         with pytest.raises(RuntimeError, match="holds a row outside its bucket"):
+            store.read(0, 1)
+        # One piece of one entry that holds two.
+        write([0], [1], [0, 0], np.ones(2, np.float32))
+        with pytest.raises(
+            RuntimeError, match="holds pieces of 1 entries where its header records 2"
+        ):
+            store.read(0, 1)
+        write([0], [1], [9], np.ones(1, np.float32))
+        with pytest.raises(RuntimeError, match="holds a column outside the matrix"):
             store.read(0, 1)
     finally:
         store.close()
@@ -878,6 +934,8 @@ def test_closing_the_owner_removes_the_directory_and_a_reader_keeps_it(tmp_path)
     store, matrix = _finalized_rows(tmp_path)
     reader = SparseRowStore.open(store.directory)
     _assert_same_rows(reader.read(0, 30), matrix)
+    # Both keep the int64 pointers of 30 rows.
+    assert store.resident_bytes == reader.resident_bytes == 31 * 8
     reader.close()
     assert store.directory.exists()
     store.close()
@@ -995,8 +1053,48 @@ def test_rewriting_a_split_bucket_keeps_the_order_of_duplicates(tmp_path):
 
 def test_stable_order_matches_numpy_for_every_key_width():
     rng = np.random.default_rng(0)
-    for top in (2**8, 2**16, 2**20, 2**32 + 5):
+    edges = np.array([0, 2**16 - 1, 2**16, 2**32 - 1, 2**32, 2**40 - 1])
+    for top in (2**8, 2**16, 2**20, 2**40):
         keys = rng.integers(0, top, 5000)
+        # Keys at the edges of each 16-bit digit, each twice.
+        present = edges[edges < top]
+        keys[: 2 * present.size] = np.repeat(present, 2)
         np.testing.assert_array_equal(
             _sparse._stable_order(keys), np.argsort(keys, kind="stable")
         )
+
+
+def test_empty_appends_change_nothing(tmp_path):
+    whole = _whole_store(tmp_path, (2, 3), np.float32)
+    loose = _loose_store(tmp_path, (2, 3), np.float32)
+    try:
+        whole.append_rows(
+            np.zeros(0, dtype=np.int64), csr_matrix((0, 3), dtype=np.float32)
+        )
+        loose.append_entries([], [], [])
+        whole.append_rows([1, 0], csr_matrix(np.eye(2, 3, dtype=np.float32)))
+        loose.finalize()
+        whole.finalize()
+        np.testing.assert_array_equal(whole.read(0, 2).toarray(), np.eye(2, 3)[::-1])
+        assert loose.read(0, 2).nnz == 0
+        assert not list(loose.directory.glob("rows-*"))
+    finally:
+        whole.close()
+        loose.close()
+
+
+def test_closing_batches_early_stops_the_read_ahead(tmp_path):
+    import threading
+
+    store, matrix = _finalized_rows(tmp_path)
+    try:
+        threads = threading.active_count()
+        batches = store.iter_rows(0, 30, 6, read_ahead=True)
+        _assert_same_rows(next(batches), matrix[:6])
+        assert threading.active_count() == threads + 1
+        batches.close()
+        assert threading.active_count() == threads
+        # Bucket 1, read ahead and dropped, reads again.
+        _assert_same_rows(store.read(6, 12), matrix[6:12])
+    finally:
+        store.close()
