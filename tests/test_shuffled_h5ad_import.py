@@ -85,6 +85,8 @@ def _obs(n_cells: int, *, duplicates: bool = False) -> pd.DataFrame:
         ordered=True,
     )
     stage[[1 % n_cells, 8 % n_cells]] = np.nan
+    clusters = pd.Categorical(rng.choice(["a", "b", "c"], n_cells))
+    clusters[[2 % n_cells, 60 % n_cells]] = np.nan
     nullable = pd.array(rng.integers(0, 9, n_cells), dtype="Int64")
     nullable[[0, 4 % n_cells]] = pd.NA
     return pd.DataFrame(
@@ -95,7 +97,7 @@ def _obs(n_cells: int, *, duplicates: bool = False) -> pd.DataFrame:
             "label": [f"L{value}" for value in rng.integers(0, 50, n_cells)],
             "stage": stage,
             "nullable": nullable,
-            "clusters": pd.Categorical(rng.choice(["a", "b", "c"], n_cells)),
+            "clusters": clusters,
             "RNA_I": rng.random(n_cells) < 0.9,
             # A source column that a shuffled import's own column displaces.
             SOURCE_ROW: np.arange(n_cells)[::-1].copy(),
@@ -310,6 +312,7 @@ def test_every_per_cell_array_follows_the_shuffled_order(
     assert not [path for path in tmp_path.iterdir() if path.name.startswith("cytearc-")]
 
 
+@pytest.mark.filterwarnings("ignore:Observation names are not unique")
 def test_categorical_columns_and_renamed_duplicate_ids_follow_the_order(
     tmp_path,
 ) -> None:
