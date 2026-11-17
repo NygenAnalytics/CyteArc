@@ -18,6 +18,11 @@ from ...storage.artifacts import (
 )
 from ...storage.types import as_zarr_array
 from ...assay import RNAassay
+from ...metadata.alignment import (
+    align_to_cell_ids,
+    keyed_values_remedy,
+    require_keyed,
+)
 from ...mapping.artifact import (
     _load_reference_neighbor_query,
     _reference_available_k,
@@ -117,6 +122,12 @@ def _same_physical_store(query: Any, reference: MappingReference) -> bool:
         for first in _store_locations(query)
         for second in _store_locations(reference_datastore)
     )
+
+
+def _require_keyed_groups(target_groups: Any) -> None:
+    """Refuse query groups that would land on cells by position."""
+    if target_groups is not None:
+        require_keyed(target_groups, name="target_groups", remedy=keyed_values_remedy())
 
 
 def _query_batch_fingerprint(query_batches: pd.DataFrame) -> str:
@@ -279,10 +290,20 @@ class _MappingOperationsMixin(_MappingOperationsBase):
         query-batch statistics, and ``queryScaledDispersion``. A read-only
         query store returns a saved projection of the same request.
 
+        ``query_batches``, for a Symphony reference only, holds the technical
+        batch of each selected query cell, one column per batch variable, as
+        a pandas DataFrame indexed by cell ID; rows of other cells are left
+        out.
+
         Raises:
             UnmeasuredCellsError: If the query assay did not measure a selected cell.
+            TypeError: If ``query_batches`` is not a DataFrame indexed by cell
+                ID, such as one with a ``RangeIndex``, whose rows would land
+                on cells by position.
             ValueError: If ``feature_key`` is ``"names"`` and reference
-                features share a name, before anything is written.
+                features share a name, before anything is written, or
+                ``query_batches`` lacks a selected query cell or repeats a
+                cell ID.
             PermissionError: If the projection or its overlap selection must be
                 written and the query store is not opened with
                 ``zarr_mode='r+'``, before any query cell is projected.
@@ -312,8 +333,13 @@ class _MappingOperationsMixin(_MappingOperationsBase):
             raise TypeError("feature_key must be a string")
         if feature_key not in {"ids", "names"}:
             raise ValueError("feature_key must be 'ids' or 'names'")
-        if query_batches is not None and not isinstance(query_batches, pd.DataFrame):
-            raise TypeError("query_batches must be a pandas DataFrame or None")
+        if query_batches is not None:
+            require_keyed(
+                query_batches,
+                name="mapping.run(query_batches=)",
+                remedy=keyed_values_remedy("DataFrame"),
+                frame=True,
+            )
         if _same_physical_store(self, reference):
             raise ValueError(
                 "Query and reference cannot use the same physical Zarr store. "
@@ -373,7 +399,16 @@ class _MappingOperationsMixin(_MappingOperationsBase):
                 n_batches = 1
                 query_batch_fingerprint = NO_QUERY_BATCH_FINGERPRINT
             else:
-                query_batches = query_batches.copy(deep=True)
+                query_ids = self._cell_ids_at(query_cell_indices)
+                query_batches = align_to_cell_ids(
+                    query_batches,
+                    query_ids,
+                    name="mapping.run(query_batches=)",
+                    cells=f"the {query_ids.size} selected query cells",
+                    remedy=keyed_values_remedy("DataFrame"),
+                    frame=True,
+                    leave_out_others=True,
+                ).copy(deep=True)
                 batch_codes, batch_design = self._query_batch_design(
                     query_batches,
                     n_cells,
@@ -682,7 +717,7 @@ class _MappingOperationsMixin(_MappingOperationsBase):
     def _mapping_compute_scores(
         self,
         result: ArtifactRef,
-        target_groups: np.ndarray | None = None,
+        target_groups: pd.Series | None = None,
         *,
         reference: MappingReference,
         log_transform: bool = True,
@@ -690,7 +725,20 @@ class _MappingOperationsMixin(_MappingOperationsBase):
         weighted: bool = True,
         fixed_weight: float = 0.1,
     ) -> Generator[tuple[Any, np.ndarray], None, None]:
-        """Yield reference-sized mapping scores for each requested query group."""
+        """Yield reference-sized mapping scores for each requested query group.
+
+        ``target_groups`` names the group of each projected query cell, as a
+        pandas Series indexed by cell ID; values of other cells are left out.
+        Without it, every query cell forms one group.
+
+        Raises:
+            TypeError: If ``target_groups`` is not a Series indexed by cell
+                ID, such as an array, whose values would land on cells by
+                position.
+            ValueError: If ``target_groups`` lacks a projected query cell or
+                repeats a cell ID.
+        """
+        _require_keyed_groups(target_groups)
         log_transform = bool_argument(log_transform, "log_transform")
         weighted = bool_argument(weighted, "weighted")
         loaded = self._mapping_load_result(
@@ -710,7 +758,7 @@ class _MappingOperationsMixin(_MappingOperationsBase):
         result: ArtifactRef,
         *,
         reference: MappingReference,
-        target_groups: np.ndarray | None = None,
+        target_groups: pd.Series | None = None,
         layout: ArtifactRef | None = None,
         reference_labels: str | ArtifactRef | None = None,
         log_transform: bool = True,
@@ -727,7 +775,10 @@ class _MappingOperationsMixin(_MappingOperationsBase):
 
         Reference classes come from ``reference_labels``, a reference column or
         label artifact; a reference cell without a usable label has class None.
+        ``target_groups`` is keyed by cell ID, as :meth:`_mapping_compute_scores`
+        takes it.
         """
+        _require_keyed_groups(target_groups)
         if reference_labels is not None:
             reference_labels = validate_reference_label_source(reference_labels)
         loaded = self._mapping_load_result(
@@ -789,7 +840,7 @@ class _MappingOperationsMixin(_MappingOperationsBase):
         self,
         loaded: MappingResult,
         *,
-        target_groups: np.ndarray | None,
+        target_groups: pd.Series | None,
         log_transform: bool,
         multiplier: float,
         weighted: bool,
@@ -802,9 +853,28 @@ class _MappingOperationsMixin(_MappingOperationsBase):
         its own pass over the projection, so one row is held at a time;
         ``one_pass`` scores every group in a single pass instead.
         """
+        if target_groups is not None:
+            query_ids = self._cell_ids_at(
+                read_stored_selection_indices(
+                    self.zw,
+                    loaded.cell_selection,
+                    kind="cell_selection",
+                    scope="datastore",
+                    assay=None,
+                    table_path="cellData",
+                )
+            )
+            target_groups = align_to_cell_ids(
+                target_groups,
+                query_ids,
+                name="target_groups",
+                cells=f"the {query_ids.size} projected query cells",
+                remedy=keyed_values_remedy(),
+                leave_out_others=True,
+            )
         groups, scale, weight = self._mapping_score_settings(
             loaded,
-            target_groups,
+            None if target_groups is None else target_groups.to_numpy(),
             log_transform=log_transform,
             multiplier=multiplier,
             weighted=weighted,

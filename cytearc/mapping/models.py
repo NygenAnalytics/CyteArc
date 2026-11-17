@@ -1,10 +1,10 @@
-from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pandas as pd
 
+from ..metadata.alignment import align_to_cell_ids, keyed_values_remedy
 from ..storage.refs import ArtifactRef, ExternalArtifactRef
 from ..utils.arrays import read_only_copy
 from .confidence import _conformal_membership, _validated_conformal_calibration
@@ -220,7 +220,9 @@ class LabelTransferResult:
     """One loaded label transfer: transferred query labels and their evidence.
 
     ``evidence`` has one row per projected query cell, in the order of
-    ``cell_selection``; ``cell_idx`` gives the matching query cell rows.
+    ``cell_selection``; ``cell_idx`` gives the matching query cell rows and
+    ``cell_ids`` their cell IDs, which key the per-cell values that
+    :meth:`label_vote_shares` and the mapping plots take.
     ``label`` is the transferred label and is missing where the cell
     abstained. ``abstentionReason`` says why a cell abstained:
     ``uninformative_cell`` (no counts in any measured reference feature),
@@ -249,6 +251,7 @@ class LabelTransferResult:
     reference_label_source: "str | ExternalArtifactRef"
     cell_selection: ArtifactRef
     cell_idx: np.ndarray = field(repr=False, compare=False)
+    cell_ids: np.ndarray = field(repr=False, compare=False)
     threshold_fraction: float
     max_distance: float | None
     categories: np.ndarray = field(repr=False, compare=False)
@@ -259,11 +262,13 @@ class LabelTransferResult:
     )
 
     def __post_init__(self) -> None:
-        for name in ("cell_idx", "categories"):
+        for name in ("cell_idx", "cell_ids", "categories"):
             object.__setattr__(self, name, _frozen_array(getattr(self, name)))
         n_cells = len(self.evidence)
         if self.cell_idx.shape != (n_cells,):
             raise ValueError("cell_idx must have one row per projected query cell")
+        if self.cell_ids.shape != (n_cells,):
+            raise ValueError("cell_ids must have one ID per projected query cell")
         if (self.vote_class_codes is None) != (self.vote_class_fractions is None):
             raise ValueError("Vote class codes and fractions are loaded together")
         if self.vote_class_codes is None or self.vote_class_fractions is None:
@@ -297,18 +302,45 @@ class LabelTransferResult:
         """Number of projected query cells."""
         return len(self.evidence)
 
-    def label_vote_shares(self, labels: Sequence[Any] | np.ndarray) -> np.ndarray:
+    def _keyed_values(self, values: Any, *, name: str) -> pd.Series:
+        """Return per-cell values keyed by cell ID in the order of these cells.
+
+        ``values`` is a pandas Series indexed by cell ID; values of other
+        cells are left out. ``name`` names the call and parameter in messages.
+
+        Raises:
+            TypeError: If ``values`` is not a Series indexed by cell ID.
+            ValueError: If it lacks a cell of the transfer or repeats an ID.
+        """
+        aligned: pd.Series = align_to_cell_ids(
+            values,
+            self.cell_ids,
+            name=name,
+            cells=f"the {self.n_cells} cells of the label transfer",
+            remedy=keyed_values_remedy(),
+            leave_out_others=True,
+        )
+        return aligned
+
+    def label_vote_shares(self, labels: pd.Series) -> np.ndarray:
         """Return each cell's share of neighbor vote weight for a given label.
 
-        ``labels`` holds one label per projected query cell, such as the known
-        labels of held-out calibration cells. A label that is not a reference
-        class has a share of zero. Missing labels and uninformative cells give
-        NaN. One minus these shares is the nonconformity that
+        ``labels`` holds the label of each projected query cell, such as the
+        known labels of held-out calibration cells, as a pandas Series indexed
+        by cell ID; labels of other cells are left out. A label that is not a
+        reference class has a share of zero. Missing labels and uninformative
+        cells give NaN. One minus these shares is the nonconformity that
         :meth:`prediction_sets` calibrates with.
+
+        Raises:
+            TypeError: If ``labels`` is not a Series indexed by cell ID, such
+                as an array, whose labels would land on cells by position.
+            ValueError: If ``labels`` lacks a cell of the transfer or repeats
+                a cell ID.
         """
-        values = np.asarray(labels, dtype=object)
-        if values.shape != (self.n_cells,):
-            raise ValueError("labels must have one value per projected query cell")
+        values = self._keyed_values(labels, name="label_vote_shares(labels=)").to_numpy(
+            dtype=object
+        )
         categories = self.categories.tolist()
         missing = np.asarray(pd.isna(values), dtype=bool)
         codes = np.asarray(

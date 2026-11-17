@@ -925,7 +925,7 @@ class BaseDataStore:
             raise KeyError(
                 f"cellData not found in zarr file at {self.zw.store_path}"
             ) from e
-        return MetaData(cell_data)
+        return MetaData(cell_data, cell_table=True)
 
     @property
     def assay_names(self) -> list[str]:
@@ -1424,8 +1424,9 @@ class BaseDataStore:
                     f"min_features_per_cell={min_features} is not applied: only "
                     "the first writable open of a store filters I, and it applied "
                     f"min_features_per_cell={recorded[1]} to assay {recorded[0]!r}. "
-                    "Filter cells explicitly with qc.filter or cells.update_key "
-                    "instead."
+                    "Filter cells explicitly with qc.filter, or with "
+                    "cells.update_key and a pandas Series of booleans keyed by "
+                    "cell ID, instead."
                 )
             return
         from_assay = self._defaultAssay
@@ -1448,7 +1449,7 @@ class BaseDataStore:
             )
         elif n_removed:
             # Write only when filtering changes the active cells.
-            self.cells.update_key(~removed, key="I")
+            self.cells._update_key_in_store_order(~removed, key="I")
         cells.attrs[CELL_FILTER_ATTR] = {"assay": from_assay, "threshold": threshold}
 
     def get_cell_vals(

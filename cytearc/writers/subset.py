@@ -1,7 +1,9 @@
 from dataclasses import replace
+from collections.abc import Sequence
 from typing import Any
 
 import numpy as np
+import pandas as pd
 import zarr
 
 from ..storage.types import as_zarr_array, as_zarr_group
@@ -38,7 +40,6 @@ from ..storage.sharding import (
 )
 from ..storage.stores import load_zarr
 from ..storage.virtual_arrays import read_selection
-from ..utils.arrays import has_duplicates
 from ..utils.logging import logger
 from ..utils.arguments import bool_argument
 
@@ -190,10 +191,11 @@ class SubsetZarr:
         in_workspace: Source workspace name (None for legacy layout).
         out_workspace: Target workspace name in the output Zarr file.
         cell_key: Name of a boolean column in cell metadata. The cells with value True are included in the
-                  subset. Only used when cell_idx is None. A column without True values writes a subset
+                  subset. Only used when cell_ids is None. A column without True values writes a subset
                   without cells.
-        cell_idx: Explicit indices of cells to include in the subset: at least one, each a distinct
-                  non-negative integer smaller than the number of cells.
+        cell_ids: IDs of the cells to include in the subset, such as values of
+                  ``ds.cells.fetch_all("ids")``: at least one, each a cell of the store, given once.
+                  The subset keeps the cells in store order, whatever order the IDs come in.
         reset_cell_filter: If True, then the cell filtering information is removed, i.e. even the filtered out cells
                            are set as True as in the 'I' column. To keep the filtering information set the value for
                            this parameter to False. (Default value: True)
@@ -228,7 +230,7 @@ class SubsetZarr:
         in_workspace: str | None = None,
         out_workspace: str | None = None,
         cell_key: str | None = None,
-        cell_idx: np.ndarray | None = None,
+        cell_ids: Sequence[str] | np.ndarray | None = None,
         reset_cell_filter: bool = True,
         overwrite_existing_file: bool = False,
         storage_options: dict[str, Any] | None = None,
@@ -262,7 +264,7 @@ class SubsetZarr:
             ),
             operation="subset",
         )
-        self.cellIdx = self._check_idx(cell_key, cell_idx)
+        self.cellIdx = self._selected_rows(cell_key, cell_ids)
         assay_resources = [
             assay.resources for assay in assays if hasattr(assay, "resources")
         ]
@@ -378,12 +380,13 @@ class SubsetZarr:
             raise ValueError("ERROR: Provided assays must not repeat an assay.")
         return assays
 
-    def _check_idx(
-        self, cell_key: str | None, cell_idx: np.ndarray | None
+    def _selected_rows(
+        self, cell_key: str | None, cell_ids: Sequence[str] | np.ndarray | None
     ) -> np.ndarray:
-        if cell_key is None and cell_idx is None:
-            raise ValueError("Both `cell_key` and `cell_idx` parameters cannot be None")
-        if cell_idx is None:
+        """Return the store rows of the subset's cells, in store order."""
+        if cell_key is None and cell_ids is None:
+            raise ValueError("Both `cell_key` and `cell_ids` parameters cannot be None")
+        if cell_ids is None:
             resolved: np.ndarray | None = None
             for assay in self.assays:
                 try:
@@ -405,26 +408,53 @@ class SubsetZarr:
                     )
             # _check_assays admits at least one assay.
             assert resolved is not None
-            cell_idx = np.where(resolved)[0]
-        else:
-            cell_idx = np.array(cell_idx)
-            if cell_idx.size == 0:
-                raise ValueError("ERROR: `cell_idx` cannot be empty.")
-            if np.issubdtype(cell_idx.dtype, np.integer) is False:
-                raise ValueError(
-                    f"ERROR: `cell_idx` must be of integer type. Provided array has a dtype: {cell_idx.dtype}"
-                )
-            # A negative index would wrap around to a cell counted from the end.
-            if np.any(cell_idx < 0):
-                raise ValueError("ERROR: `cell_idx` cannot contain negative indices.")
-            if max(cell_idx) >= self.assays[0].cells.N:
-                raise ValueError(
-                    f"ERROR: `cell_idx` max value is larger than the number of cells in the data."  # noqa: F541
-                )
-            # A repeated cell would repeat its ID in the subset.
-            if has_duplicates(cell_idx):
-                raise ValueError("ERROR: `cell_idx` cannot contain duplicate indices.")
-        return cell_idx
+            return np.flatnonzero(resolved)
+        return self._rows_of_ids(cell_ids)
+
+    def _rows_of_ids(self, cell_ids: Sequence[str] | np.ndarray) -> np.ndarray:
+        """Return the store rows of ``cell_ids``, in store order.
+
+        Raises:
+            TypeError: If ``cell_ids`` is one string, or not a one-dimensional
+                sequence.
+            ValueError: If it is empty, repeats an ID, or holds a value that is
+                not a cell ID of the store, or the store holds a requested ID
+                in more than one row.
+        """
+        if isinstance(cell_ids, str | bytes) or np.ndim(cell_ids) != 1:
+            raise TypeError(
+                "cell_ids takes a one-dimensional sequence of cell IDs, such as a "
+                f"list; found {type(cell_ids).__name__} of shape "
+                f"{np.shape(cell_ids)}"
+            )
+        requested = pd.Index(np.asarray(cell_ids, dtype=object))
+        if requested.empty:
+            raise ValueError("cell_ids is empty; pass the IDs of at least one cell")
+        if requested.has_duplicates:
+            repeated = requested[requested.duplicated()].unique()
+            raise ValueError(
+                f"cell_ids repeats {len(repeated)} cell IDs, such as "
+                f"{repeated[0]!r}; pass each cell once"
+            )
+        ids = pd.Index(np.asarray(self.assays[0].cells.fetch_all("ids"), dtype=object))
+        known = requested.isin(ids)
+        if not known.all():
+            unknown = requested[~known]
+            raise ValueError(
+                f"{len(unknown)} of the {len(requested)} values of cell_ids are "
+                f"not cell IDs of the store, such as {unknown[0]!r}; pass IDs "
+                'such as those of ds.cells.fetch_all("ids"), not row positions'
+            )
+        selected = ids.isin(requested)
+        if np.count_nonzero(selected) != len(requested):
+            stored = ids[selected]
+            repeated = stored[stored.duplicated()].unique()
+            raise ValueError(
+                f"The store holds cell ID {repeated[0]!r} in more than one row, "
+                "so cell_ids cannot tell those cells apart; select the cells "
+                "with cell_key instead"
+            )
+        return np.flatnonzero(selected)
 
     def _prep_cell_data(self) -> None:
         if self.outWorkspace is None:

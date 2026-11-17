@@ -164,7 +164,9 @@ class _ReadOnlySummaryStore:
         self.resources = resolve_budget()
         self.storageProfile = resolve_storage_profile(zarr_path)
         self._root = load_zarr(zarr_path, mode="r", storage_options=storage_options)
-        self.cells = MetaData(as_zarr_group(self.zw["cellData"], name="cellData"))
+        self.cells = MetaData(
+            as_zarr_group(self.zw["cellData"], name="cellData"), cell_table=True
+        )
         names = self.assay_names
         if not names:
             raise ValueError(f"No assays found in Zarr store at {zarr_path}")

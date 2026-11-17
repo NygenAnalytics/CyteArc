@@ -17,6 +17,7 @@ import numpy as np
 import pandas as pd
 import zarr
 
+from ..metadata.rows import read_array_rows_chunkwise
 from ..metadata.selection import (
     CELL_VALUE_NAMES,
     resolve_cell_aligned_artifact,
@@ -970,6 +971,11 @@ def _load_label_transfer(
         table_path="cellData",
     ).astype(np.int64, copy=False)
     cell_idx.setflags(write=False)
+    # The cells' IDs key per-cell values that callers give for these cells.
+    cell_ids = read_array_rows_chunkwise(
+        as_zarr_array(root["cellData/ids"], name="cellData/ids"), cell_idx
+    )
+    cell_ids.setflags(write=False)
 
     # Read each needed array once and check it against its recorded digest.
     # The arrays are frozen in place, so the result keeps them without copies.
@@ -1039,6 +1045,7 @@ def _load_label_transfer(
         reference_label_source=source,
         cell_selection=cell_selection,
         cell_idx=cell_idx,
+        cell_ids=cell_ids,
         threshold_fraction=threshold_fraction,
         max_distance=max_distance,
         categories=categories,

@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 import numpy as np
+import pandas as pd
 
 from ..clones.diversity import ClonalDiversity, Rarefaction
 from ..clones.fate import CloneCoupling
@@ -385,7 +386,7 @@ class DataStorePlotAccessor:
         from_assay: str | None = None,
         normalization: "NormalizationSpec | None" = None,
         point_size: float | None = None,
-        point_sizes: "np.ndarray | Sequence[float] | None" = None,
+        point_sizes: "pd.Series | None" = None,
         point_size_range: tuple[float, float] = (1.0, 28.0),
         point_edgecolor: str | None = None,
         point_edgewidth: float | None = None,
@@ -430,7 +431,7 @@ class DataStorePlotAccessor:
             if point_sizes is not None:
                 raise ValueError(
                     "Run embedding takes no point_sizes; pass layout=run[...] "
-                    "and point_sizes in that layout's cell order"
+                    "and point_sizes as a pandas Series indexed by cell ID"
                 )
             frozen = _FrozenRunPlotStore(self._store, assay=run.assay, cells=run.cells)
             _check_run_embedding_colors(run, frozen, color_by, normalization)
@@ -509,7 +510,7 @@ class DataStorePlotAccessor:
         result: ArtifactRef,
         *,
         reference: MappingReference,
-        target_groups: Sequence[Any] | np.ndarray | None = None,
+        target_groups: "pd.Series | None" = None,
         layout: ArtifactRef | None = None,
         kind: Literal["embedding", "histogram", "box"] = "embedding",
         reference_labels: str | ArtifactRef | None = None,
@@ -535,7 +536,7 @@ class DataStorePlotAccessor:
         self,
         transfer: ArtifactRef,
         *,
-        target_groups: Sequence[Any] | np.ndarray | None = None,
+        target_groups: "pd.Series | None" = None,
         metrics: Sequence[str] = (
             "voteFraction",
             "topTwoMargin",
@@ -558,7 +559,7 @@ class DataStorePlotAccessor:
         self,
         transfer: ArtifactRef,
         *,
-        known_labels: Sequence[Any] | np.ndarray,
+        known_labels: "pd.Series",
         normalize: Literal["none", "true", "predicted", "all"] = "true",
         known_order: Sequence[Any] | None = None,
         predicted_order: Sequence[Any] | None = None,
@@ -577,7 +578,7 @@ class DataStorePlotAccessor:
         self,
         transfer: ArtifactRef,
         *,
-        known_labels: Sequence[Any] | np.ndarray,
+        known_labels: "pd.Series",
         metric: str = "voteFraction",
         direction: Literal["auto", "higher", "lower"] = "auto",
         thresholds: Sequence[float] | np.ndarray | None = None,

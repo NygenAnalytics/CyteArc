@@ -257,6 +257,14 @@ def count_unmeasured_cells_with_counts(table: Any, assay: str, column: str) -> i
     return count
 
 
+def _measured_insert(name: str, key: str, column: str) -> str:
+    """Return the insert of a column of the cells of ``key`` that ``column`` measured."""
+    return (
+        f"`ds.cells.insert({name!r}, pandas.Series(ds.cells.fetch_all({key!r}) & "
+        f"ds.cells.fetch_all({column!r}), index=ds.cells.fetch_all('ids')))`"
+    )
+
+
 def _measured_cells_remedy(
     remedy: MeasuredCellsRemedy | None,
     assay: str,
@@ -286,8 +294,7 @@ def _measured_cells_remedy(
         return (
             "Pass as cell_key a boolean cell column that is True only for the "
             f"cells of {key!r} that it measured, such as {name!r} after "
-            f"`ds.cells.insert({name!r}, ds.cells.fetch_all({key!r}) & "
-            f"ds.cells.fetch_all({column!r}))`."
+            f"{_measured_insert(name, key, column)}."
         )
     if remedy == "cells":
         if cell_key is None:
@@ -302,8 +309,7 @@ def _measured_cells_remedy(
             f"Pass as cells the selection from `{measured}`, or a boolean cell "
             f"column that is True only for the cells of {cell_key!r} that it "
             f"measured, such as {f'{assay}_measured'!r} after "
-            f"`ds.cells.insert({f'{assay}_measured'!r}, "
-            f"ds.cells.fetch_all({cell_key!r}) & ds.cells.fetch_all({column!r}))`."
+            f"{_measured_insert(f'{assay}_measured', cell_key, column)}."
         )
     if remedy == "export":
         return (

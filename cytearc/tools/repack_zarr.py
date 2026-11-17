@@ -554,7 +554,7 @@ def repack_store(
                     z=dst,
                     workspace=workspace,
                     name=name,
-                    cell_data=MetaData(cells),
+                    cell_data=MetaData(cells, cell_table=True),
                     nthreads=resources.workers,
                     resources=resources,
                     assay_type=type_name,

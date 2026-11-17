@@ -25,6 +25,7 @@ from ..storage.metadata_keys import (
     validate_metadata_column_name,
 )
 from ..utils.logging import logger
+from .alignment import align_to_cell_ids, require_keyed
 from .encoding import (
     categorical_codes,
     checked_fill_value,
@@ -49,6 +50,16 @@ from ..utils.arrays import sort_categories
 
 _RESERVED_COLUMNS = ("I", "ids", "names")
 _RESERVED_COLUMN_SET = frozenset(_RESERVED_COLUMNS)
+
+
+def _keyed_by_cell_id_remedy(key: str) -> str:
+    """Return how to key values computed in store order by cell ID."""
+    return (
+        'Pass pandas.Series(values, index=ds.cells.fetch_all("ids")) for values '
+        "of every cell in store order, or pandas.Series(values, "
+        f'index=ds.cells.fetch("ids", key="{key}")) for values of the cells '
+        f"that {key!r} selects."
+    )
 
 
 class CaseInsensitiveIndex:
@@ -76,12 +87,25 @@ class MetaData:
     """Metadata table for cells and features backed by one Zarr group.
 
     Changes made through this class are synchronized with the backing store.
+
+    Args:
+        zgrp: Zarr group of the table.
+        cell_table: Whether the table is a store's cell table. Its
+            :meth:`insert` and :meth:`update_key` take per-cell values only
+            as a pandas Series keyed by cell ID, because a store's cells need
+            not be in the order of values computed elsewhere.
     """
 
-    def __init__(self, zgrp: zarr.Group):
+    def __init__(self, zgrp: zarr.Group, *, cell_table: bool = False):
+        self._cell_table = bool_argument(cell_table, "cell_table")
         self.locations: dict[str, zarr.Group] = {"primary": zgrp}
         self.N = self._get_size(zgrp)
         self.index = np.arange(self.N)
+
+    @property
+    def cell_table(self) -> bool:
+        """Whether the table is a store's cell table, which takes values keyed by cell ID."""
+        return self._cell_table
 
     @property
     def _group(self) -> zarr.Group:
@@ -529,7 +553,6 @@ class MetaData:
             ValueError: If the values cover neither every row nor the rows
                 that ``key`` selects, or the fill does not fit their dtype.
         """
-        values = self._label_aligned(values, key, name=name)
         supplied, supplied_missing = nullable_values(values, name=name)
         n_values = supplied.shape[0]
         if n_values == self.N:
@@ -553,55 +576,56 @@ class MetaData:
         missing[selected] = supplied_missing
         return expanded, missing
 
-    def _label_aligned(self, values: Any, key: str, *, name: str) -> Any:
+    def _label_aligned(self, values: Any, key: str, *, name: str, call: str) -> Any:
         """Return ``values`` in row order, aligning a labeled Series to row ids.
 
         A pandas Series whose index is not a ``RangeIndex`` is matched by label
         to the ``ids`` of every row when it holds a value for every row, and
-        otherwise to the ids of the rows that ``key`` selects. It is returned
-        reordered to those rows with a ``RangeIndex``. Arrays, lists, and a
-        Series with a ``RangeIndex`` are returned unchanged, so their values
-        are assigned by position.
+        otherwise to the ids of the rows that ``key`` selects, by
+        :func:`~cytearc.metadata.alignment.align_to_cell_ids`. It is returned
+        reordered to those rows with a ``RangeIndex``. On a feature table,
+        arrays, lists, and a Series with a ``RangeIndex`` are returned
+        unchanged, so their values are assigned by position; the cell table
+        refuses them. ``call`` names the public method, such as ``insert``,
+        in the messages of the cell table.
 
         Raises:
+            TypeError: If the cell table gets values that are not a Series, or
+                a Series with a ``RangeIndex``.
             ValueError: If the labels are not exactly those ids, each once.
         """
-        if not isinstance(values, pd.Series) or isinstance(values.index, pd.RangeIndex):
+        positional = not isinstance(values, pd.Series) or isinstance(
+            values.index, pd.RangeIndex
+        )
+        if positional and not self._cell_table:
             return values
-        labels = values.index
+        if self._cell_table:
+            require_keyed(
+                values,
+                name=f"cells.{call}({name!r})",
+                remedy=_keyed_by_cell_id_remedy(key),
+            )
         ids = np.asarray(self.fetch_all("ids"))
-        rows = f"the {self.N} rows"
-        if len(labels) != self.N:
+        unit = "cells" if self._cell_table else "rows"
+        rows = f"the {self.N} {unit}"
+        if len(values) != self.N:
             selected = np.asarray(self._bool_array(key)[:], dtype=bool)
             ids = ids[selected]
-            rows = f"the {len(ids)} rows that {key!r} selects"
-        target = pd.Index(ids)
-        positions = (
-            labels.get_indexer(target)
-            if labels.is_unique and target.is_unique
-            else np.empty(0, dtype=np.int64)
-        )
-        if len(positions) == len(labels) == len(target) and (positions >= 0).all():
-            return values.iloc[positions].reset_index(drop=True)
-        if not target.is_unique:
-            problem = "the ids of those rows repeat a value"
-        elif not labels.is_unique:
-            problem = "the index repeats a label"
-        else:
-            known = set(target)
-            extra = [label for label in labels if label not in known]
-            given = set(labels)
-            absent = [row_id for row_id in target if row_id not in given]
-            problem = (
-                f"{len(extra)} labels are not such ids"
-                + (f", such as {extra[0]!r}" if extra else "")
-                + f", and {len(absent)} such ids have no label"
-                + (f", such as {absent[0]!r}" if absent else "")
+            rows = f"the {len(ids)} {unit} that {key!r} selects"
+        if self._cell_table:
+            return align_to_cell_ids(
+                values,
+                ids,
+                name=f"cells.{call}({name!r})",
+                cells=rows,
+                remedy=_keyed_by_cell_id_remedy(key),
             )
-        raise ValueError(
-            f"Column {name!r} takes the values of a pandas Series by its index "
-            f"labels, which must be the ids of {rows}, each once; {problem}. "
-            "Pass values.to_numpy() to assign the values by position instead."
+        return align_to_cell_ids(
+            values,
+            ids,
+            name=f"Column {name!r}",
+            cells=rows,
+            remedy="Pass values.to_numpy() to assign the values by position instead.",
         )
 
     def get_index_by(
@@ -669,10 +693,19 @@ class MetaData:
         """Insert a column into the table.
 
         ``values`` hold a value for every row, or for the rows that ``key``
-        selects. Arrays, lists, and a pandas Series with a ``RangeIndex`` are
-        assigned by position. A Series with any other index is assigned by
-        label: its labels must be exactly the ``ids`` of those rows, in any
-        order, and each value goes to the row with its label.
+        selects. A pandas Series whose index is not a ``RangeIndex`` is
+        assigned by label: its labels must be exactly the ``ids`` of those
+        rows, in any order, and each value goes to the row with its label.
+
+        The cell table takes per-cell values only as such a Series, keyed by
+        cell ID, because a store's cells need not be in the order of values
+        computed elsewhere, such as an AnnData's ``obs``. It refuses arrays,
+        lists, tuples, a bare ``pd.Categorical`` or other pandas array, and
+        a Series with a ``RangeIndex``, which would land on cells by
+        position. Key values computed in store order with
+        ``pd.Series(values, index=ds.cells.fetch_all("ids"))``. A feature
+        table, whose order does not change, also assigns arrays, lists, and
+        a Series with a ``RangeIndex`` by position.
 
         Pandas categorical values, a ``pd.Categorical`` or a Series of
         categorical dtype, are stored as a categorical column: each row's
@@ -685,6 +718,8 @@ class MetaData:
         :meth:`fetch_categorical` returns its codes and categories.
 
         Raises:
+            TypeError: If the cell table gets values that are not a Series,
+                or a Series with a ``RangeIndex``.
             ValueError: If ``column_name`` is protected, already exists
                 without ``overwrite``, or contains ``/`` or ``\\``, which
                 Zarr reads as path separators, if a Series is labeled by
@@ -694,6 +729,48 @@ class MetaData:
         """
         overwrite = bool_argument(overwrite, "overwrite")
         force = bool_argument(force, "force")
+        self._check_insert(column_name, overwrite=overwrite, force=force)
+        if isinstance(values, list):
+            logger.debug(
+                "'values' parameter is of `list` type and not `np.ndarray` as "
+                "expected. The correct dtype may not be assigned to the column"
+            )
+        aligned = self._label_aligned(values, key, name=column_name, call="insert")
+        self._write_rows(column_name, aligned, fill_value, key)
+
+    def _insert_in_store_order(
+        self, column_name: str, values: np.ndarray, *, overwrite: bool = False
+    ) -> None:
+        """Insert one value per row, in store order, into any table.
+
+        For CyteArc's own callers that compute values over the rows of the
+        store, such as the quality metrics that preparing an assay writes.
+        The column is checked and written as :meth:`insert` writes it, without
+        the cell table's requirement of values keyed by cell ID.
+
+        Raises:
+            ValueError: If ``values`` do not hold one value per row, or
+                :meth:`insert` would refuse the column.
+        """
+        self._check_insert(column_name, overwrite=overwrite, force=False)
+        self._check_store_order(values, column_name)
+        self._write_rows(column_name, values, None, "I")
+
+    def _check_store_order(self, values: np.ndarray, name: str) -> None:
+        """Refuse values of a private store-order write that miss a row."""
+        if np.shape(values) != (self.N,):
+            raise ValueError(
+                f"Column {name!r} needs one value per row in store order, "
+                f"{self.N} values; found values of shape {np.shape(values)}"
+            )
+
+    def _check_insert(self, column_name: str, *, overwrite: bool, force: bool) -> None:
+        """Refuse an insert into ``column_name`` before any value is read.
+
+        Raises:
+            ValueError: If the name is invalid, protected, or already taken
+                without ``overwrite``.
+        """
         validate_metadata_column_name(column_name)
         if column_name in ["I", "ids"] and force is False:
             raise ValueError(
@@ -705,17 +782,15 @@ class MetaData:
                 f"ERROR: {column_name} already exists. Please set `overwrite` to "
                 "True to overwrite."
             )
-        if isinstance(values, list):
-            logger.debug(
-                "'values' parameter is of `list` type and not `np.ndarray` as "
-                "expected. The correct dtype may not be assigned to the column"
-            )
+
+    def _write_rows(
+        self, column_name: str, values: Any, fill_value: Any, key: str
+    ) -> None:
+        """Write values in row order, for every row or the rows that ``key`` selects."""
         # Categorical values keep their layout, except in the reserved
         # columns, which store their labels.
         if column_name not in _RESERVED_COLUMN_SET and is_categorical(values):
-            codes, categories, ordered = categorical_codes(
-                self._label_aligned(values, key, name=column_name), name=column_name
-            )
+            codes, categories, ordered = categorical_codes(values, name=column_name)
             self._save_categorical(
                 column_name,
                 self._codes_for_rows(
@@ -736,15 +811,47 @@ class MetaData:
             )
         self._save(column_name, expanded, missing)
 
-    def update_key(self, values: np.ndarray, key: str) -> None:
+    def update_key(
+        self,
+        values: np.ndarray | list | pd.Series | pd.api.extensions.ExtensionArray,
+        key: str,
+    ) -> None:
         """Restrict a boolean metadata key using the supplied values.
 
         Values are matched to rows as :meth:`insert` matches them, so a pandas
-        Series labeled by ``ids`` is aligned to its rows by label.
+        Series labeled by ``ids`` is aligned to its rows by label, and the
+        cell table takes only such a Series, keyed by cell ID.
+
+        Raises:
+            TypeError: If the values are not booleans, or the cell table gets
+                values that are not a Series, or a Series with a ``RangeIndex``.
+            ValueError: If ``key`` is protected, or a Series is labeled by
+                anything other than the ids of every row or of the rows that
+                ``key`` selects.
         """
         validate_metadata_column_name(key)
         self._protect(key)
-        values = self._label_aligned(values, key, name=key)
+        self._restrict_key(
+            self._label_aligned(values, key, name=key, call="update_key"), key
+        )
+
+    def _update_key_in_store_order(self, values: np.ndarray, key: str) -> None:
+        """Restrict ``key`` by one boolean per row, in store order, on any table.
+
+        For CyteArc's own callers that compute values over the rows of the
+        store, such as the cell filter of a store's first writable open.
+
+        Raises:
+            ValueError: If ``values`` do not hold one value per row, or
+                ``key`` is protected.
+        """
+        validate_metadata_column_name(key)
+        self._protect(key)
+        self._check_store_order(values, key)
+        self._restrict_key(values, key)
+
+    def _restrict_key(self, values: Any, key: str) -> None:
+        """Keep the rows of ``key`` whose value, in row order, is True."""
         supplied, missing = nullable_values(values, name=key)
         if supplied.dtype.kind != "b":
             raise TypeError(
