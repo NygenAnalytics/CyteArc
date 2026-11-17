@@ -22,6 +22,7 @@ from .categorical import (
     linked_categories,
     stored_categories,
 )
+from .cell_order import SOURCE_ROW, SOURCE_ROW_ROLE
 from .geometry import array_geometry
 from .layout import column_chunk_rows
 from .metadata_keys import (
@@ -520,6 +521,8 @@ def protect_metadata_column(
         assay = as_zarr_group(root[path.rsplit("/", 1)[0]], name="assay")
         protected = assay.attrs.get("prepared") is True
     elif _is_cell_table(group):
+        if column == SOURCE_ROW:
+            _protect_source_row(removing)
         root = _stored_root(group)
         parent_path = path.rpartition("/")[0]
         parent = (
@@ -559,6 +562,28 @@ def _stored_root(group: zarr.Group) -> zarr.Group:
         zarr_format=group.metadata.zarr_format,
         use_consolidated=False,
     )
+
+
+def _protect_source_row(removing: zarr.Array | None) -> None:
+    """Refuse a change to the cell column ``sourceRow``.
+
+    Every cell table reserves the name. A plain column of that name, which a
+    store may hold from before imports shuffled cells, may still be dropped.
+    """
+    if removing is None:
+        raise ValueError(
+            f"Cell column {SOURCE_ROW!r} is reserved for each cell's row in the "
+            "imported file, which an import writes when it shuffles cells and "
+            "exports sort by to restore the file's order. It cannot be "
+            "inserted, overwritten, restricted, or reset. Store other values "
+            "under another name."
+        )
+    if removing.attrs.get("role") == SOURCE_ROW_ROLE:
+        raise ValueError(
+            f"Cell column {SOURCE_ROW!r} holds each cell's row in the imported "
+            "file and cannot be dropped: exports sort by it to restore the "
+            "file's order of the shuffled cells."
+        )
 
 
 def _protect_membership_column(

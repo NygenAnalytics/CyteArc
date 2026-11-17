@@ -3603,6 +3603,7 @@ def test_h5ad_process_windows_run_in_the_parent_process(tmp_path) -> None:
             connection = _Pipe() if connection is None else connection
             _read_h5ad_process_window(
                 reader._clone_kwargs() if kwargs is None else kwargs,
+                None,
                 2,
                 0,
                 values.shape[0],
@@ -3621,6 +3622,7 @@ def test_h5ad_process_windows_run_in_the_parent_process(tmp_path) -> None:
             connection = _Pipe() if connection is None else connection
             _write_h5ad_process_window(
                 reader._clone_kwargs() if kwargs is None else kwargs,
+                None,
                 2,
                 0,
                 values.shape[0],

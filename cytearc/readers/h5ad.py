@@ -5,10 +5,11 @@ from typing import Any, Literal
 
 import h5py
 import numpy as np
-from scipy.sparse import coo_matrix, csr_matrix
+from scipy.sparse import coo_matrix, csr_matrix, vstack
 
 from ..utils.arrays import (
     assay_feature_ranges,
+    canonicalize_sparse,
     csr_to_coo,
     cumulative_nnz,
     max_window_nnz,
@@ -19,10 +20,13 @@ from ..utils.count_values import (
     dense_row_nonzeros,
     merge_count_scans,
     scan_processes,
+    scan_window_bytes,
+    scan_window_values,
     value_windows,
 )
 from ..utils.arguments import integer_argument
 from ..utils.logging import logger
+from ..utils.matrix_values import DETECTION_CELLS
 from ..utils.memory_budget import MemoryBudgetError, refusal_words
 from ..utils.progress import iter_progress
 from ._assay_names import auto_name_feat_table, make_feat_table_from_types
@@ -50,8 +54,14 @@ from ._h5ad_columns import (
     table_members,
 )
 from ._h5ad_inspect import H5adInspectResult, inspect_h5ad as inspect_h5ad
-from ._h5ad_values import matrix_values, scan_file_window, scan_window
-from ._sparse import SparseRowStore
+from ._h5ad_values import (
+    RowSpill,
+    matrix_values,
+    row_spill_consumer,
+    scan_file_window,
+    scan_window,
+)
+from ._sparse import ROW_BYTES, SparseRowStore, encoded_entry_bytes
 from ._text import (
     DuplicateCellIds,
     DuplicateFeatureIds,
@@ -77,6 +87,20 @@ _CSC_ENTRY_BYTES = 384
 # The most entries of one chunk of columns that the conversion reads. Each
 # chunk gives a row one piece, so larger chunks give fewer, longer pieces.
 _CSC_CHUNK_ENTRIES = 8 * 1024 * 1024
+# What appending a scan window's rows to the row spill of a shuffle holds for
+# each value of the window: the rows gathered by bucket, their values cast to
+# the source dtype, a dense window's sparse copy, and the row and bucket
+# numbers of each row, which a window holds no more of than values.
+_SPILL_BYTES_PER_VALUE = 96
+# The most rows that a spill writer keeps pending; more gives longer blocks.
+_SPILL_BUFFER_BYTES = 1 << 30
+# The least pending rows for which a shuffle's scan starts another process.
+_SPILL_PROCESS_BUFFER_BYTES = 64 << 20
+# Buckets of shuffled rows are sized to read in this much, or in a
+# thirty-second of the budget when that is less, and split beyond twice it.
+_SPILL_READ_BYTES = 256 << 20
+# The entries of the first rows whose encoding estimates the spill's disk use.
+_SPILL_SAMPLE_ENTRIES = 1 << 20
 
 
 def _texts(values: np.ndarray) -> list[str | None]:
@@ -108,6 +132,77 @@ class _H5adAssayFeatures:
     featureIndexes: np.ndarray
     featureIds: np.ndarray
     featureNames: np.ndarray
+
+
+@dataclass(frozen=True)
+class _RowSpillPlan:
+    """The row bucket store of a shuffle, and what its scan and writers hold.
+
+    The owner holds the store's row counts. Each scan window's writer holds
+    a count and mark for every row of the store, the destinations of its own
+    rows, the scan window and the rows it appends, and its pending rows,
+    which take what is left of the window's share, up to 1 GiB.
+    """
+
+    destinations: np.ndarray
+    shape: tuple[int, int]
+    dtype: np.dtype[Any]
+    bucketRows: int
+    readBytes: int
+    entries: int | None
+    entryBytes: float | None
+    longest: int
+    maxBytes: int
+
+    @property
+    def ownerBytes(self) -> int:
+        return (self.shape[0] + 1) * ROW_BYTES
+
+    def _fixed_bytes(self, rows: int) -> int:
+        """Return what a writer of ``rows`` rows holds beside its scan and buffer."""
+        return SparseRowStore.writer_bytes(self.shape[0], self.bucketRows) + 8 * rows
+
+    def _window_values(self, share: int, rows: int) -> int:
+        available = share - self._fixed_bytes(rows)
+        per_value = scan_window_bytes(1) + _SPILL_BYTES_PER_VALUE
+        return max(
+            max(1, self.longest),
+            min(scan_window_values(self.longest), available // per_value),
+        )
+
+    def scan_bytes(self, share: int, start: int, stop: int) -> int:
+        """Return the scan's budget for the window ``[start, stop)`` within ``share``."""
+        return scan_window_bytes(self._window_values(share, stop - start))
+
+    def buffer_bytes(self, share: int, start: int, stop: int) -> int:
+        """Return the pending rows of the window ``[start, stop)``'s writer within ``share``."""
+        values = self._window_values(share, stop - start)
+        left = (
+            share
+            - self._fixed_bytes(stop - start)
+            - values * (scan_window_bytes(1) + _SPILL_BYTES_PER_VALUE)
+        )
+        return int(max(0, min(_SPILL_BUFFER_BYTES, left)))
+
+    def process_extra_bytes(self) -> int:
+        """Return what a scan process holds beside its scan when it may start."""
+        return (
+            self._fixed_bytes(self.shape[0])
+            + _SPILL_BYTES_PER_VALUE * scan_window_values(self.longest)
+            + _SPILL_PROCESS_BUFFER_BYTES
+        )
+
+    def least_bytes(self) -> int:
+        """Return the least budget that scans and spills the longest row in one process."""
+        return (
+            self.ownerBytes
+            + self._fixed_bytes(self.shape[0])
+            + max(1, self.longest) * (scan_window_bytes(1) + _SPILL_BYTES_PER_VALUE)
+        )
+
+    def bucket_bytes(self) -> int:
+        """Return the most that reading one bucket may hold: a quarter of the budget."""
+        return max(2 * self.readBytes, self.maxBytes // 4)
 
 
 class H5adReader:
@@ -224,7 +319,16 @@ class H5adReader:
                     column_order(self.h5[group])
             self.matrixOrientation = self._validate_sparse_matrix()
             self.sourceMatrixDtype: Any = self._get_matrix_dtype()
+            # The rows that consume yields from local disk: a CSC matrix's
+            # converted rows, or an import's shuffled rows.
             self._convertedCsr: SparseRowStore | None = None
+            # Whether the rows on local disk are in an import's shuffled
+            # order, which its counts write reads once, deleting them as it
+            # goes, and releases once written.
+            self._shuffledRows = False
+            # The file's first rows, which decide what the values are, kept
+            # by a shuffled conversion of CSC columns.
+            self._sourceFirstRows: csr_matrix | None = None
             self._indptrCache: np.ndarray | None = None
             # The cumulative nonzero values of a dense matrix's rows, which
             # plan its sparse batches as CSR row pointers do.
@@ -283,12 +387,38 @@ class H5adReader:
 
     def close(self) -> None:
         self.h5.close()
-        if self._convertedCsr is not None:
-            self._convertedCsr.close()
-        self._convertedCsr = None
+        self._release_rows()
         self._indptrCache = None
         self._cumulativeRowNnz = None
         self._canonicalRows = None
+
+    def _release_rows(self) -> None:
+        """Close the rows on local disk, removing them if this reader made them."""
+        if self._convertedCsr is not None:
+            self._convertedCsr.close()
+        self._convertedCsr = None
+        self._shuffledRows = False
+        self._sourceFirstRows = None
+
+    def _release_shuffled_rows(self) -> None:
+        """Release an import's shuffled rows once its counts are written.
+
+        Closing the store removes the buckets that no producer deleted, and
+        ``consume`` then yields the rows in the file's order again.
+        """
+        if self._shuffledRows:
+            self._release_rows()
+
+    def _open_shuffled_rows(self, directory: str) -> None:
+        """Yield the shuffled rows of an import from its finalized store in ``directory``.
+
+        A producer process of the counts write opens the store that the
+        import's parent process made; reads delete each bucket once read,
+        and closing the reader leaves the rest to the parent.
+        """
+        self._release_rows()
+        self._convertedCsr = SparseRowStore.open(directory)
+        self._shuffledRows = True
 
     @classmethod
     def from_inspect(
@@ -1023,6 +1153,7 @@ class H5adReader:
         featureGroups: np.ndarray | None = None,
         *,
         processes: int = 1,
+        destinationRows: np.ndarray | None = None,
     ) -> list[CountValueRange]:
         """Return the range of the canonical values of each group of features.
 
@@ -1044,6 +1175,14 @@ class H5adReader:
         counts. The ranges and records are the same for any number of
         processes.
 
+        With ``destinationRows``, the scan of a dense or CSR matrix also
+        sends each row it reads to its destination row in a row bucket store
+        on local disk, from which ``consume`` then yields rows in destination
+        order, so an import that shuffles cells reads the file once. Each
+        scan process writes its own part of the store, and ``maxBytes`` also
+        holds the parts' pending rows and the store's row counts. A CSC
+        matrix's rows take their destination in :meth:`materialize_csc`.
+
         Args:
             maxBytes: Memory available to the scan.
             featureGroups: Group, numbered from zero, of each feature, such as
@@ -1051,18 +1190,27 @@ class H5adReader:
                 group.
             processes: Most processes that scan at once. 1 scans in this
                 process.
+            destinationRows: The destination row of each row of the matrix,
+                a permutation, or None to keep the rows in place.
 
         Raises:
             MemoryError: If one compressed vector or dense row does not fit in
-                ``maxBytes``.
-            ValueError: If the matrix holds NaN or an infinite value, or
-                ``processes`` is below 1.
+                ``maxBytes``, or with ``destinationRows`` its spill does not.
+            OSError: If the temporary disk lacks room for the spill.
+            ValueError: If the matrix holds NaN or an infinite value,
+                ``processes`` is below 1, or ``destinationRows`` is not a
+                permutation of the rows.
             TypeError: If ``processes`` is not an integer.
         """
         processes = integer_argument(processes, "processes", minimum=1)
         node = self.h5[self.matrixKey]
         dense = self.matrixOrientation == "dense"
         n_vectors = int(node.shape[0] if dense else int(node["indptr"].shape[0]) - 1)
+        spill = None
+        if destinationRows is not None and self.matrixOrientation != "csc":
+            # Plans read the file's rows, never earlier shuffled ones.
+            self._release_rows()
+            spill = self._row_spill_plan(destinationRows, int(maxBytes))
         count = 1
         pointers: np.ndarray | None = None
         if processes > 1:
@@ -1077,7 +1225,13 @@ class H5adReader:
                 assert pointers is not None
                 values = int(pointers[-1] - pointers[0])
                 longest = int(np.diff(pointers).max(initial=0))
-            count = scan_processes(values, longest, maxBytes, processes)
+            count = scan_processes(
+                values,
+                longest,
+                int(maxBytes) - (0 if spill is None else spill.ownerBytes),
+                processes,
+                extraBytes=0 if spill is None else spill.process_extra_bytes(),
+            )
         windows = [(0, n_vectors)]
         if count > 1 and pointers is not None:
             windows = value_windows(pointers, count)
@@ -1092,15 +1246,10 @@ class H5adReader:
                 (int(bounds[first]), int(bounds[last]))
                 for first, last in value_windows(bounds, count)
             ]
-        if len(windows) > 1:
-            logger.debug(f"Scanning H5AD values in {len(windows)} processes")
-            scan = merge_count_scans(
-                self._scan_in_processes(
-                    windows, int(maxBytes) // len(windows), featureGroups
-                )
-            )
+        if spill is None:
+            scan = self._scan_windows(windows, int(maxBytes), featureGroups)
         else:
-            scan = self._scan_values(0, n_vectors, maxBytes, featureGroups)
+            scan = self._scan_and_spill(windows, spill, featureGroups)
         if dense:
             assert scan.rowNonzeros is not None
             self._cumulativeRowNnz = cumulative_nnz(scan.rowNonzeros)
@@ -1108,12 +1257,189 @@ class H5adReader:
             self._canonicalRows = scan.canonical
         return scan.valueRanges
 
+    def _scan_windows(
+        self,
+        windows: list[tuple[int, int]],
+        maxBytes: int,
+        featureGroups: np.ndarray | None,
+    ) -> CountScan:
+        """Scan the windows, in processes of their own when there are several."""
+        if len(windows) > 1:
+            logger.debug(f"Scanning H5AD values in {len(windows)} processes")
+            return merge_count_scans(
+                self._scan_in_processes(
+                    windows, maxBytes // len(windows), featureGroups
+                )
+            )
+        return self._scan_values(*windows[0], maxBytes, featureGroups)
+
+    def _row_spill_plan(
+        self, destinationRows: np.ndarray, maxBytes: int
+    ) -> "_RowSpillPlan":
+        """Plan the row bucket store of a shuffle and check that ``maxBytes`` holds it.
+
+        Raises:
+            ValueError: If ``destinationRows`` is not a permutation of the rows.
+            MemoryBudgetError: If the budget cannot hold the store's row
+                counts and one window of the longest row.
+        """
+        destinations = np.asarray(destinationRows)
+        if destinations.shape != (self.nCells,) or destinations.dtype.kind not in "iu":
+            raise ValueError(
+                f"destinationRows must hold one integer row for each of the "
+                f"{self.nCells} cells; found dtype {destinations.dtype} and "
+                f"shape {destinations.shape}"
+            )
+        destinations = destinations.astype(np.int64, copy=False)
+        if self.nCells and not np.array_equal(
+            np.bincount(destinations, minlength=self.nCells)
+            if int(destinations.min()) >= 0
+            else np.zeros(0),
+            np.ones(self.nCells, dtype=np.int64),
+        ):
+            raise ValueError("destinationRows must be a permutation of the rows")
+        node = self.h5[self.matrixKey]
+        sample: csr_matrix | None = None
+        if self.matrixOrientation == "dense":
+            entries = None
+            longest = self.nFeatures
+        else:
+            pointers = self._csr_indptr()
+            assert pointers is not None
+            entries = int(pointers[-1] - pointers[0])
+            longest = int(np.diff(pointers).max(initial=0))
+            # The first rows, of about a million entries, measure what the
+            # spill takes on disk.
+            rows = max(
+                1,
+                int(
+                    np.searchsorted(
+                        pointers, pointers[0] + _SPILL_SAMPLE_ENTRIES, side="right"
+                    )
+                )
+                - 1,
+            )
+            rows = min(rows, self.nCells)
+            if rows:
+                sample = next(self._file_csr_batches(pointers, rows, 0, rows))
+        itemsize = np.dtype(self.sourceMatrixDtype).itemsize
+        read_bytes = min(_SPILL_READ_BYTES, maxBytes // 32)
+        bucket_rows = SparseRowStore.whole_row_bucket_rows(
+            self.nCells,
+            entries if entries is not None else self.nCells * self.nFeatures,
+            read_bytes,
+            itemsize,
+        )
+        plan = _RowSpillPlan(
+            destinations=destinations,
+            shape=(self.nCells, self.nFeatures),
+            dtype=np.dtype(self.sourceMatrixDtype),
+            bucketRows=bucket_rows,
+            readBytes=read_bytes,
+            entries=entries,
+            entryBytes=None if sample is None else encoded_entry_bytes(sample),
+            longest=longest,
+            maxBytes=maxBytes,
+        )
+        least = plan.least_bytes()
+        if maxBytes < least:
+            raise MemoryBudgetError(
+                "Shuffling cells exceeds the memory limit. Scanning the matrix "
+                "and sending its rows to their buckets needs at least "
+                f"{least} bytes.",
+                needed_bytes=least,
+                budget_bytes=maxBytes,
+                item="the row spill of a cell shuffle",
+            )
+        del node
+        return plan
+
+    def _scan_and_spill(
+        self,
+        windows: list[tuple[int, int]],
+        plan: "_RowSpillPlan",
+        featureGroups: np.ndarray | None,
+    ) -> CountScan:
+        """Scan the windows and spill their rows into a new row bucket store.
+
+        The store, finalized, then holds the rows that ``consume`` yields.
+        """
+        self._release_rows()
+        self._indptrCache = None
+        store = SparseRowStore(
+            plan.shape,
+            plan.dtype,
+            bucket_rows=plan.bucketRows,
+            whole_rows=True,
+            buffer_bytes=0,
+            bucket_bytes=plan.bucket_bytes(),
+            split_bytes=2 * plan.readBytes,
+            entries=plan.entries,
+            entry_bytes=plan.entryBytes,
+            sum_duplicates=False,
+            temp_dir=self._tempDir,
+        )
+        try:
+            share = (plan.maxBytes - plan.ownerBytes) // len(windows)
+            if len(windows) > 1:
+                logger.debug(
+                    f"Scanning H5AD values and spilling rows in {len(windows)} processes"
+                )
+                scan = merge_count_scans(
+                    self._scan_in_processes(
+                        windows,
+                        0,
+                        featureGroups,
+                        spills=[
+                            RowSpill(
+                                str(store.directory),
+                                part,
+                                plan.buffer_bytes(share, start, stop),
+                                plan.destinations[start:stop],
+                            )
+                            for part, (start, stop) in enumerate(windows, start=1)
+                        ],
+                        scanBytes=[
+                            plan.scan_bytes(share, start, stop)
+                            for start, stop in windows
+                        ],
+                    )
+                )
+            else:
+                start, stop = windows[0]
+                writer = SparseRowStore.open(
+                    store.directory,
+                    part=1,
+                    buffer_bytes=plan.buffer_bytes(share, start, stop),
+                )
+                scan = self._scan_values(
+                    start,
+                    stop,
+                    plan.scan_bytes(share, start, stop),
+                    featureGroups,
+                    consumer=row_spill_consumer(
+                        writer,
+                        plan.destinations,
+                        dense=self.matrixOrientation == "dense",
+                    ),
+                )
+                writer.finish()
+                del writer
+            store.finalize()
+        except BaseException:
+            store.close()
+            raise
+        self._convertedCsr = store
+        self._shuffledRows = True
+        return scan
+
     def _scan_values(
         self,
         start: int,
         stop: int,
         maxBytes: int,
         featureGroups: np.ndarray | None,
+        consumer: Any | None = None,
     ) -> CountScan:
         """Scan the values of compressed vectors ``[start, stop)`` in this process."""
         return scan_window(
@@ -1125,6 +1451,7 @@ class H5adReader:
             stop,
             maxBytes,
             featureGroups,
+            consumer,
         )
 
     def _scan_in_processes(
@@ -1132,11 +1459,16 @@ class H5adReader:
         windows: list[tuple[int, int]],
         maxBytes: int,
         featureGroups: np.ndarray | None,
+        *,
+        spills: list[RowSpill] | None = None,
+        scanBytes: list[int] | None = None,
     ) -> list[CountScan]:
         """Scan each window in a new process of its own, with ``maxBytes`` each.
 
-        A window's error, such as a NaN or a vector that does not fit, is
-        raised here as the scan in this process raises it.
+        With ``spills``, each window's process also sends the rows it reads
+        to its part of a row bucket store, and scans within its entry of
+        ``scanBytes``. A window's error, such as a NaN or a vector that does
+        not fit, is raised here as the scan in this process raises it.
         """
         from concurrent.futures import ProcessPoolExecutor
         from multiprocessing import get_context
@@ -1156,10 +1488,11 @@ class H5adReader:
                     self.nFeatures if self.matrixOrientation == "csr" else self.nCells,
                     start,
                     stop,
-                    maxBytes,
+                    maxBytes if scanBytes is None else scanBytes[index],
                     featureGroups,
+                    None if spills is None else spills[index],
                 )
-                for start, stop in windows
+                for index, (start, stop) in enumerate(windows)
             ]
             return [future.result() for future in futures]
 
@@ -1255,15 +1588,16 @@ class H5adReader:
     def max_batch_nnz(self, batch_size: int) -> int:
         """Return the most nonzero values of any ``batch_size`` consecutive rows.
 
-        CSR row pointers and converted CSC rows give the count without
-        reading values. A dense matrix plans from the nonzero values of each
+        CSR row pointers, converted CSC rows and shuffled rows give the count
+        without reading values, the latter two in the order that ``consume``
+        yields the rows. A dense matrix plans from the nonzero values of each
         row, which its value scan counts, or which are counted here before
         the scan. CSC columns not yet converted bound a window by its rows
         times the features.
         """
         if batch_size <= 0:
             raise ValueError("batch_size must be positive")
-        if self.matrixOrientation == "dense":
+        if self.matrixOrientation == "dense" and self._convertedCsr is None:
             return max_window_nnz(self._dense_cumulative_nnz(), batch_size)
         batch_rows = min(batch_size, self.nCells)
         indptr = self._csr_indptr()
@@ -1274,12 +1608,14 @@ class H5adReader:
     def producer_batch_staging_bytes(self, batch_size: int) -> int:
         """Bound what a producer holds beside one batch.
 
-        It holds the batch's sparse row pointers, and the rows of converted
-        CSC columns are read a bucket at a time with the next bucket loading
-        ahead, which the producer holds as it reads.
+        It holds the batch's sparse row pointers, and converted CSC rows and
+        shuffled rows are read a bucket at a time with the next bucket
+        loading ahead, which the producer holds as it reads.
         """
         rows = min(max(1, int(batch_size)), self.nCells)
-        if rows == 0 or self.matrixOrientation == "dense":
+        if rows == 0 or (
+            self.matrixOrientation == "dense" and self._convertedCsr is None
+        ):
             return 0
         reading = 0
         if self._convertedCsr is not None:
@@ -1290,7 +1626,12 @@ class H5adReader:
         normalized_itemsize = np.dtype(np.int32).itemsize
         return int((rows + 1) * (2 * itemsize + normalized_itemsize) + reading)
 
-    def materialize_csc(self, maxBytes: int = 64 * 1024 * 1024) -> None:
+    def materialize_csc(
+        self,
+        maxBytes: int = 64 * 1024 * 1024,
+        *,
+        destinationRows: np.ndarray | None = None,
+    ) -> None:
         """Convert CSC into temporary row storage in bounded blocks.
 
         One pass over the columns sends each entry to the bucket of its row
@@ -1299,9 +1640,32 @@ class H5adReader:
         values keep ``sourceMatrixDtype``; integers are held in the 64-bit
         integer dtype in which their duplicates are summed, so a sum past the
         range of a narrow source dtype is kept, as a CSR import keeps it.
+
+        With ``destinationRows``, the destination row of each row of the
+        matrix, a permutation, each entry goes to its row's destination, so
+        ``consume`` yields the rows of an import that shuffles cells in
+        their shuffled order at no extra cost. The conversion then also keeps
+        the file's first rows, which decide what the values are.
         """
-        if self.matrixOrientation != "csc" or self._convertedCsr is not None:
+        if self.matrixOrientation != "csc":
             return
+        if self._convertedCsr is not None:
+            if destinationRows is None and not self._shuffledRows:
+                return
+            self._release_rows()
+        destinations: np.ndarray | None = None
+        if destinationRows is not None:
+            destinations = np.asarray(destinationRows)
+            if (
+                destinations.shape != (self.nCells,)
+                or destinations.dtype.kind not in "iu"
+            ):
+                raise ValueError(
+                    f"destinationRows must hold one integer row for each of the "
+                    f"{self.nCells} cells; found dtype {destinations.dtype} and "
+                    f"shape {destinations.shape}"
+                )
+            destinations = destinations.astype(np.int64, copy=False)
         group = self.h5[self.matrixKey]
         data_node = group["data"]
         source = np.dtype(self.sourceMatrixDtype)
@@ -1332,6 +1696,9 @@ class H5adReader:
             _CSC_CHUNK_ENTRIES,
             SparseRowStore.chunk_entries(store_bytes, self.nCells, _CSC_ENTRY_BYTES),
         )
+        # The entries of the file's first rows, in the order they are read.
+        first_rows = min(DETECTION_CELLS, self.nCells)
+        kept: list[tuple[np.ndarray, np.ndarray, np.ndarray]] = []
 
         def chunks() -> Iterator[coo_matrix]:
             for start in range(0, int(data_node.size), chunk_nnz):
@@ -1342,13 +1709,13 @@ class H5adReader:
                     )
                     - 1
                 )
-                yield coo_matrix(
-                    (
-                        self._matrix_values(data_node, slice(start, stop)),
-                        (np.asarray(group["indices"][start:stop]), columns),
-                    ),
-                    shape=shape,
-                )
+                rows = np.asarray(group["indices"][start:stop])
+                values = self._matrix_values(data_node, slice(start, stop))
+                if destinations is not None:
+                    first = rows < first_rows
+                    kept.append((rows[first], columns[first], values[first]))
+                    rows = destinations[rows]
+                yield coo_matrix((values, (rows, columns)), shape=shape)
 
         try:
             self._convertedCsr = SparseRowStore.from_entries(
@@ -1371,6 +1738,26 @@ class H5adReader:
                 budget_bytes=int(maxBytes),
                 item=error.item,
             ) from error
+        if destinations is not None:
+            self._shuffledRows = True
+            # Summed as the store sums each row's entries, in the order read.
+            first = coo_matrix(
+                (
+                    np.concatenate([values for _rows, _columns, values in kept])
+                    if kept
+                    else np.zeros(0, dtype=source),
+                    (
+                        np.concatenate([rows for rows, _columns, _values in kept])
+                        if kept
+                        else np.zeros(0, dtype=np.int64),
+                        np.concatenate([columns for _rows, columns, _values in kept])
+                        if kept
+                        else np.zeros(0, dtype=np.int64),
+                    ),
+                ),
+                shape=(first_rows, self.nFeatures),
+            )
+            self._sourceFirstRows = csr_matrix(canonicalize_sparse(first, dtype))
         logger.debug("Prepared H5AD row storage for the CSC conversion")
 
     def consume_group(
@@ -1391,22 +1778,37 @@ class H5adReader:
             yield from self._consume_converted_csr(batch_size, start, stop)
             return
 
+        source_indptr = self._csr_indptr()
+        assert source_indptr is not None
+        for batch in self._file_csr_batches(source_indptr, batch_size, start, stop):
+            yield csr_to_coo(batch)
+
+    def _file_csr_batches(
+        self,
+        pointers: np.ndarray,
+        batch_size: int,
+        start: int,
+        stop: int,
+    ) -> Iterator[csr_matrix]:
+        """Yield the file's CSR rows ``[start, stop)`` in batches of ``batch_size``.
+
+        ``pointers`` are the file's row pointers from row 0 to at least row
+        ``stop``.
+        """
         grp = self.h5[self.matrixKey]
         # HDF5 caches decompressed chunks per open dataset. Reopening the
         # datasets for every batch would decompress a chunk again for each
         # batch that reads part of it.
         data = grp["data"]
         indices = grp["indices"]
-        source_indptr = self._csr_indptr()
-        assert source_indptr is not None
         for offset in range(start, stop, batch_size):
             end = min(offset + batch_size, stop)
-            indptr = source_indptr[offset : end + 1]
+            indptr = pointers[offset : end + 1]
             data_start = int(indptr[0])
             data_end = int(indptr[-1])
             local_indptr = indptr - data_start
             n_rows = end - offset
-            batch = csr_matrix(
+            yield csr_matrix(
                 (
                     self._matrix_values(data, slice(data_start, data_end)),
                     np.asarray(indices[data_start:data_end]),
@@ -1414,7 +1816,6 @@ class H5adReader:
                 ),
                 shape=(n_rows, self.nFeatures),
             )
-            yield csr_to_coo(batch)
 
     def _consume_converted_csr(
         self,
@@ -1422,13 +1823,17 @@ class H5adReader:
         start: int,
         stop: int,
     ) -> Generator[coo_matrix, None, None]:
-        """Yield row batches from the temporary CSC conversion."""
+        """Yield row batches from the temporary CSC conversion or shuffled rows.
+
+        Shuffled rows are read once: each bucket that lies wholly inside the
+        rows is deleted once its batches are taken.
+        """
         if self._convertedCsr is None:
             self.materialize_csc()
         assert self._convertedCsr is not None
         # The next bucket of rows decodes while this one's batches are written.
         for batch in self._convertedCsr.iter_rows(
-            start, stop, batch_size, read_ahead=True
+            start, stop, batch_size, read_ahead=True, delete=self._shuffledRows
         ):
             yield csr_to_coo(batch)
 
@@ -1438,12 +1843,43 @@ class H5adReader:
         row_start: int,
         row_end: int,
     ) -> Generator[coo_matrix, None, None]:
-        """Yield source batches covering ``[row_start, row_end)``."""
+        """Yield source batches covering ``[row_start, row_end)``.
+
+        After an import's scan shuffled the rows, the batches hold its
+        shuffled rows, as sparse rows also for a dense matrix.
+        """
         # The constructor rejects a matrix slot that is neither a dataset nor
         # a group.
-        if self.groupCodes[self.matrixKey] == 1:
+        if self.groupCodes[self.matrixKey] == 1 and self._convertedCsr is None:
             return self.consume_dataset(batch_size, row_start, row_end)
         return self.consume_group(batch_size, row_start, row_end)
+
+    def _file_first_rows(self, count: int) -> coo_matrix:
+        """Return the file's first ``count`` rows, which decide what the values are.
+
+        They are the rows that ``consume`` yields first unless an import
+        shuffled them: then they are read from the file, or for a CSC
+        matrix kept by its shuffled conversion.
+
+        Raises:
+            ValueError: If ``count`` is negative or past the matrix.
+        """
+        if not 0 <= count <= self.nCells:
+            raise ValueError("consume row range is outside the matrix")
+        blocks: list[coo_matrix]
+        if not self._shuffledRows or count == 0:
+            blocks = list(self.consume_row_range(max(1, count), 0, count))
+        elif self._sourceFirstRows is not None:
+            blocks = [csr_to_coo(self._sourceFirstRows[:count])]
+        elif self.matrixOrientation == "dense":
+            blocks = list(self.consume_dataset(count, 0, count))
+        else:
+            pointers = np.asarray(self.h5[self.matrixKey]["indptr"][: count + 1])
+            blocks = [
+                csr_to_coo(batch)
+                for batch in self._file_csr_batches(pointers, count, 0, count)
+            ]
+        return (vstack(blocks) if blocks else coo_matrix((0, 0))).tocoo()
 
     def consume(self, batch_size: int) -> Generator[coo_matrix, None, None]:
         """Returns a generator that yield chunks of data."""

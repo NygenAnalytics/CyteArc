@@ -279,11 +279,18 @@ def _run_worker(
     reader_kwargs: dict[str, Any],
     connection: Any,
     work: Any,
+    shuffled_rows: str | None = None,
 ) -> None:
-    """Run one H5AD worker body and report failures over its pipe."""
+    """Run one H5AD worker body and report failures over its pipe.
+
+    With ``shuffled_rows``, the directory of an import's shuffled rows, the
+    reader yields those rows.
+    """
     reader: H5adReader | None = None
     try:
         reader = H5adReader(**reader_kwargs)
+        if shuffled_rows is not None:
+            reader._open_shuffled_rows(shuffled_rows)
         work(reader)
     except BaseException as exc:
         try:
@@ -378,6 +385,7 @@ def _stop_workers(
 
 def _read_h5ad_process_window(
     reader_kwargs: dict[str, Any],
+    shuffled_rows: str | None,
     batch_size: int,
     row_start: int,
     row_end: int,
@@ -424,11 +432,12 @@ def _read_h5ad_process_window(
                 return
         connection.send(("done", None))
 
-    _run_worker(reader_kwargs, connection, work)
+    _run_worker(reader_kwargs, connection, work, shuffled_rows)
 
 
 def _write_h5ad_process_window(
     reader_kwargs: dict[str, Any],
+    shuffled_rows: str | None,
     batch_size: int,
     row_start: int,
     row_end: int,
@@ -521,7 +530,7 @@ def _write_h5ad_process_window(
             windows = {name: summary.window() for name, summary in summaries.items()}
             connection.send(("done", (reports, windows)))
 
-    _run_worker(reader_kwargs, connection, work)
+    _run_worker(reader_kwargs, connection, work, shuffled_rows)
 
 
 def _read_dense_h5ad_process_window(
@@ -778,6 +787,16 @@ class H5adToZarr:
             Every read returns the same labels either way. Off by default
             in this release, because releases before categorical columns
             cannot read such a store.
+        shuffle_cells: If True, write the cells in a uniformly random order,
+            so that any contiguous slice of the store, such as one shard or
+            a training mini-batch, is a random sample of its cells. Every
+            per-cell array follows the one order, and each cell keeps its
+            row in the file, from 0, in the int64 cell column ``sourceRow``.
+            The shuffle reads the file once, sending each row to temporary
+            files on local disk, in ``temp_dir`` of the reader, as the value
+            scan reads it. Off by default in this release.
+        shuffle_seed: The seed of the shuffle, from 0 to 2**64 - 1. One seed
+            gives the same order on every platform.
 
     Each assay stores its counts in the dtype that
     :func:`~cytearc.storage.count_dtype.count_storage_dtype` resolves from the
@@ -786,7 +805,11 @@ class H5adToZarr:
 
     Raises:
         FileExistsError: If ``zarr_loc`` is not empty and may not be replaced.
-        TypeError: If ``categorical_columns`` is not a boolean.
+        TypeError: If ``categorical_columns`` or ``shuffle_cells`` is not a
+            boolean, or ``shuffle_seed`` is not an integer.
+        ValueError: If ``shuffle_seed`` lies outside its range.
+        OSError: If ``shuffle_cells`` is True and the temporary disk lacks
+            room for the shuffled rows.
 
     Attributes:
         h5ad: A h5ad object (h5 file with added AnnData structure).
@@ -795,6 +818,8 @@ class H5adToZarr:
         storageDtypes: Count storage dtype of each imported assay.
         policy: The count-matrix layout that every imported assay was written
             with.
+        shuffleCells: Whether the import shuffles the cells.
+        shuffleSeed: The seed of the shuffle.
     """
 
     def __init__(
@@ -817,11 +842,17 @@ class H5adToZarr:
         overwrite: bool = False,
         values: ImportValues = None,
         categorical_columns: bool = False,
+        shuffle_cells: bool = False,
+        shuffle_seed: int = 0,
     ) -> None:
         overwrite = bool_argument(overwrite, "overwrite")
         self._categoricalColumns = bool_argument(
             categorical_columns, "categorical_columns"
         )
+        self.shuffleCells = bool_argument(shuffle_cells, "shuffle_cells")
+        from ..storage.cell_order import shuffle_seed_argument, shuffled_order
+
+        self.shuffleSeed = shuffle_seed_argument(shuffle_seed)
         from ..utils.matrix_values import import_values_argument
 
         import_values_argument(values)
@@ -910,13 +941,25 @@ class H5adToZarr:
             if self.assayFeatures is None
             else self._assay_feature_projection(self.assayFeatures)
         )
+        # Row r of every per-cell array holds the file's row _cellOrder[r];
+        # the scan or the CSC conversion sends each row to its destination.
+        self._cellOrder: np.ndarray | None = None
+        destinations: np.ndarray | None = None
+        if self.shuffleCells:
+            self._cellOrder = shuffled_order(self.h5ad.nCells, self.shuffleSeed)
+            destinations = np.empty_like(self._cellOrder)
+            destinations[self._cellOrder] = np.arange(
+                self._cellOrder.size, dtype=np.int64
+            )
+        held = 0 if destinations is None else 2 * destinations.nbytes
         value_ranges = dict(
             zip(
                 self.assayNames,
                 self.h5ad.count_value_ranges(
-                    self.resources.memoryBytes,
+                    self.resources.memoryBytes - held,
                     None if self._projection is None else self._projection[0],
                     processes=self._value_scan_processes(),
+                    destinationRows=destinations,
                 ),
                 strict=True,
             )
@@ -926,7 +969,13 @@ class H5adToZarr:
             for name, value_range in value_ranges.items()
         }
         logger.debug(f"Resolved H5AD count storage dtypes={self.storageDtypes}")
-        self.h5ad.materialize_csc(self.resources.memoryBytes)
+        self.h5ad.materialize_csc(
+            self.resources.memoryBytes - held, destinationRows=destinations
+        )
+        del destinations
+        # The rows that this import's counts write reads, which no other
+        # import of the same reader may replace.
+        self._shuffledStore = self.h5ad._convertedCsr if self.shuffleCells else None
         try:
             self.values = resolve_import_values(
                 values,
@@ -999,14 +1048,17 @@ class H5adToZarr:
         ]
 
     def _first_cells(self) -> dict[str, Any]:
-        """Return the values of each assay's first cells, which decide what they are."""
-        from scipy.sparse import csr_matrix, vstack
+        """Return the values of each assay's first cells, which decide what they are.
+
+        They are the file's first cells, whether or not the import shuffles
+        them, so the shuffle never changes what the values are taken to be.
+        """
+        from scipy.sparse import csr_matrix
 
         from ..utils.matrix_values import DETECTION_CELLS
 
         rows = min(DETECTION_CELLS, self.h5ad.nCells)
-        blocks = list(self.h5ad.consume_row_range(max(1, rows), 0, rows))
-        cells = vstack(blocks).tocoo() if blocks else coo_matrix((0, 0))
+        cells = self.h5ad._file_first_rows(rows)
         if self._projection is None:
             return {self.assayNames[0]: csr_matrix(cells)}
         codes, columns = self._projection
@@ -1053,10 +1105,14 @@ class H5adToZarr:
             assay_membership_column,
             metadata_column_keys,
         )
+        from ..storage.cell_order import write_shuffled_cell_order
         from ..storage.schema import create_cell_data
         from ._store import keyed_metadata_columns, write_membership_column
 
+        order = self._cellOrder
         ids = self.h5ad.cell_ids()
+        if order is not None:
+            ids = ids[order]
         g = create_cell_data(
             root=self.z,
             workspace=self.workspace,
@@ -1064,6 +1120,11 @@ class H5adToZarr:
             names=ids,
             profile=self.profile,
         )
+        del ids
+        if order is not None:
+            # Written before the keys are planned, so a source column of the
+            # same name is skipped.
+            write_shuffled_cell_order(g, order, self.shuffleSeed, profile=self.profile)
         # The membership column name of every imported assay is reserved. A
         # declared membership is restored below; any other column of that
         # name is skipped with a warning.
@@ -1089,7 +1150,7 @@ class H5adToZarr:
             missing = _write_column(
                 g,
                 key,
-                column,
+                _column_rows(column, order),
                 profile=self.profile,
                 categorical=self._categoricalColumns,
                 ordered=categories is not None and categories.ordered,
@@ -1104,7 +1165,12 @@ class H5adToZarr:
                     display=True,
                 )
         for assay, members in self._membership.items():
-            write_membership_column(g, assay, members, profile=self.profile)
+            write_membership_column(
+                g,
+                assay,
+                members if order is None else members[order],
+                profile=self.profile,
+            )
 
     @staticmethod
     def _keep_categories(
@@ -1250,6 +1316,43 @@ class H5adToZarr:
             memory_bytes=int(self.resources.memoryBytes),
         )
 
+    def _check_shuffled_rows_memory(
+        self, row_bytes: int, block_rows: int, item: str
+    ) -> None:
+        """Check that the budget holds a per-cell array of ``row_bytes`` per cell in memory.
+
+        A shuffled import holds the file's rows of an embedding or of
+        cluster labels, with one gathered block of them, to write them in
+        shuffled order.
+
+        Raises:
+            MemoryBudgetError: If they do not fit in the import's budget.
+        """
+        assert self._cellOrder is not None
+        n_cells = int(self._cellOrder.size)
+        needed = (n_cells + min(int(block_rows), n_cells)) * int(row_bytes) + int(
+            self._cellOrder.nbytes
+        )
+        budget = int(self.resources.memoryBytes)
+        if needed > budget:
+            raise MemoryBudgetError(
+                f"Writing {item} exceeds the memory limit. A shuffled import "
+                "holds the file's rows to write them in shuffled order, which "
+                f"needs {needed} bytes.",
+                needed_bytes=needed,
+                budget_bytes=budget,
+                item=item,
+            )
+
+    def _shuffled_blocks(
+        self, arrays: tuple[np.ndarray, ...], block_rows: int
+    ) -> Iterator[tuple[np.ndarray, ...]]:
+        """Yield blocks of per-cell arrays, held in the file's order, in shuffled order."""
+        assert self._cellOrder is not None
+        for start in range(0, int(self._cellOrder.size), int(block_rows)):
+            rows = self._cellOrder[start : start + int(block_rows)]
+            yield tuple(array[rows] for array in arrays)
+
     def _write_cell_selection(self) -> ArtifactRef:
         from ._store import resolve_import_cell_selection
 
@@ -1273,7 +1376,11 @@ class H5adToZarr:
         from ._store import fingerprint_row_blocks, floating_payload_dtype
 
         artifacts: dict[str, ArtifactRef] = {}
-        cell_ids = _H5adCellIdSource(self.h5ad)
+        cell_ids: Sequence[str | bytes] | np.ndarray = (
+            _H5adCellIdSource(self.h5ad)
+            if self._cellOrder is None
+            else self.h5ad.cell_ids()[self._cellOrder]
+        )
         for key, role in self.h5ad.embeddingRoles.items():
             source = self.h5ad._obsm_array(key)
             source_shape = (int(source.shape[0]), int(source.shape[1]))
@@ -1282,23 +1389,44 @@ class H5adToZarr:
                 requested_rows,
                 row_bytes=int(source.shape[1]) * int(dtype.itemsize),
             )
+            blocks: Callable[[], Iterator[np.ndarray]]
+            if self._cellOrder is None:
+
+                def blocks(
+                    source_key: str = key,
+                    rows: int = block_rows,
+                    resolved_dtype: np.dtype[Any] = dtype,
+                ) -> Iterator[np.ndarray]:
+                    return self.h5ad._iter_obsm_blocks(
+                        source_key,
+                        rows,
+                        resolved_dtype,
+                    )
+
+            else:
+                self._check_shuffled_rows_memory(
+                    source_shape[1] * dtype.itemsize,
+                    block_rows,
+                    f"the rows of embedding {key!r} in shuffled order",
+                )
+                values = np.empty(source_shape, dtype=dtype)
+                first = 0
+                for block in self.h5ad._iter_obsm_blocks(key, block_rows, dtype):
+                    values[first : first + block.shape[0]] = block
+                    first += int(block.shape[0])
+
+                def blocks(
+                    held: np.ndarray = values, rows: int = block_rows
+                ) -> Iterator[np.ndarray]:
+                    for (block,) in self._shuffled_blocks((held,), rows):
+                        yield block
+
             fingerprint = fingerprint_row_blocks(
-                self.h5ad._iter_obsm_blocks(key, block_rows, dtype),
+                blocks(),
                 source_shape,
                 dtype,
                 label=f"Embedding key {key!r}",
             )
-
-            def blocks(
-                source_key: str = key,
-                rows: int = block_rows,
-                resolved_dtype: np.dtype[Any] = dtype,
-            ) -> Iterator[np.ndarray]:
-                return self.h5ad._iter_obsm_blocks(
-                    source_key,
-                    rows,
-                    resolved_dtype,
-                )
 
             if role == "coordinates":
                 # Graph coordinates, such as a scVI latent space, which graph
@@ -1474,20 +1602,46 @@ class H5adToZarr:
                 continue
             with artifact_transaction(self.root, planned) as group:
 
-                def blocks() -> Iterator[MetadataBlock]:
+                def source_blocks(
+                    source_key: str = key, resolved_dtype: np.dtype[Any] = dtype
+                ) -> Iterator[tuple[int, np.ndarray, np.ndarray]]:
                     for start in range(0, self.h5ad.nCells, block_rows):
                         stop = min(start + block_rows, self.h5ad.nCells)
                         values, missing = self._cluster_block(
-                            key,
+                            source_key,
                             start,
                             stop,
-                            dtype,
+                            resolved_dtype,
                         )
+                        yield start, values, missing
+
+                def blocks() -> Iterator[MetadataBlock]:
+                    if self._cellOrder is None:
+                        for start, values, missing in source_blocks():
+                            yield MetadataBlock(
+                                start,
+                                values,
+                                missing if has_missing else None,
+                            )
+                        return
+                    self._check_shuffled_rows_memory(
+                        dtype.itemsize + 1,
+                        block_rows,
+                        f"the cluster labels of {key!r} in shuffled order",
+                    )
+                    held_values = np.empty(self.h5ad.nCells, dtype=dtype)
+                    held_missing = np.empty(self.h5ad.nCells, dtype=bool)
+                    for start, values, missing in source_blocks():
+                        held_values[start : start + values.shape[0]] = values
+                        held_missing[start : start + values.shape[0]] = missing
+                    start = 0
+                    for values, missing in self._shuffled_blocks(
+                        (held_values, held_missing), block_rows
+                    ):
                         yield MetadataBlock(
-                            start,
-                            values,
-                            missing if has_missing else None,
+                            start, values, missing if has_missing else None
                         )
+                        start += int(values.shape[0])
 
                 values = create_streamed_metadata_column(
                     group,
@@ -1531,7 +1685,8 @@ class H5adToZarr:
         """Return the bytes that the counts write holds from start to end.
 
         They are the reader's row counts or converted rows, the count
-        summaries of every cell, and the features of each assay.
+        summaries of every cell, the features of each assay, and a shuffled
+        import's order of the cells.
         """
         from ..storage.identity import CountSummary
 
@@ -1549,6 +1704,8 @@ class H5adToZarr:
             )
         if self._projection is not None:
             resident += sum(array.nbytes for array in self._projection)
+        if self._cellOrder is not None:
+            resident += int(self._cellOrder.nbytes)
         return resident
 
     def _count_import_requirements(
@@ -1657,7 +1814,8 @@ class H5adToZarr:
         """Return the ``requested`` count layout if its writes fit the budget.
 
         None fits the default layout to the budget. A dense matrix is admitted as its write runs, through dense row bands
-        of every assay, and a sparse one through the sparse band writer.
+        of every assay, and a sparse one, or a dense one whose rows a shuffle
+        holds as sparse rows, through the sparse band writer.
         """
         from ..storage.sharding import (
             dense_counts_admission,
@@ -1666,7 +1824,7 @@ class H5adToZarr:
         )
         from .counts_t import counts_t_assays
 
-        if self.h5ad.matrixOrientation == "dense":
+        if self._dense_counts():
             admit_counts = dense_counts_admission(
                 self._count_resident_bytes(),
                 lambda band_rows: self._dense_producer_bytes(
@@ -1701,13 +1859,45 @@ class H5adToZarr:
             requested=requested,
         )
 
+    def _dense_counts(self) -> bool:
+        """Return whether the counts write copies dense rows into dense bands.
+
+        A shuffled import's dense rows are held as sparse rows, which the
+        sparse band writer writes.
+        """
+        return self.h5ad.matrixOrientation == "dense" and not self.shuffleCells
+
+    def _shuffled_rows_directory(self) -> str | None:
+        """Return the directory of the shuffled rows that producer processes open."""
+        if self._shuffledStore is None:
+            return None
+        return str(self._shuffledStore.directory)
+
     def _write_counts(self, batch_size: int | None = None) -> None:
-        """Write and finalize cell-major ``counts`` (profiling stage split helper)."""
+        """Write and finalize cell-major ``counts`` (profiling stage split helper).
+
+        A shuffled import reads its shuffled rows once, deleting them as it
+        goes, and releases them once the counts are written or the write
+        fails, so it writes its counts once.
+
+        Raises:
+            RuntimeError: If the shuffled rows of this import were already
+                written, or another import of the reader replaced them.
+        """
         from ..storage.identity import CountSummary, finalize_counts
         from ..storage.schema import load_count_array
 
         if batch_size is not None and batch_size <= 0:
             raise ValueError("batch_size must be positive")
+        if self.shuffleCells and (
+            self._shuffledStore is None
+            or self.h5ad._convertedCsr is not self._shuffledStore
+        ):
+            raise RuntimeError(
+                "The shuffled rows of this import were written once and released, "
+                "or another import of the reader replaced them; create a new "
+                "H5adToZarr to import the file again"
+            )
 
         destinations = {
             assay_name: load_count_array(self.z, assay_name, self.workspace)
@@ -1721,10 +1911,15 @@ class H5adToZarr:
             f"Writing counts with up to {self.resources.workers} row-band writer(s)"
         )
         started = time.perf_counter()
-        if self.h5ad.matrixOrientation == "dense":
-            self._write_dense_counts(batch_size, destinations, summaries)
-        else:
-            self._write_sparse_counts(batch_size, destinations, summaries)
+        try:
+            if self._dense_counts():
+                self._write_dense_counts(batch_size, destinations, summaries)
+            else:
+                self._write_sparse_counts(batch_size, destinations, summaries)
+        finally:
+            if self.shuffleCells:
+                self.h5ad._release_shuffled_rows()
+                self._shuffledStore = None
         counts_seconds = time.perf_counter() - started
         # counts is the durable physical orientation for H5AD imports. Public
         # dump() always finalizes paired RNA countsT after this step.
@@ -2164,6 +2359,7 @@ class H5adToZarr:
                 windows,
                 lambda row_start, row_end: (
                     self.h5ad._clone_kwargs(),
+                    self._shuffled_rows_directory(),
                     batch_size,
                     row_start,
                     row_end,
@@ -2231,6 +2427,7 @@ class H5adToZarr:
                 windows,
                 lambda row_start, row_end: (
                     self.h5ad._clone_kwargs(),
+                    self._shuffled_rows_directory(),
                     batch_size,
                     row_start,
                     row_end,

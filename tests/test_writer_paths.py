@@ -196,6 +196,7 @@ def test_h5ad_producer_sends_no_band_after_the_parent_stops(
         def produce(connection: _Connection, stop: threading.Event) -> None:
             h5ad_writer._read_h5ad_process_window(
                 reader._clone_kwargs(),
+                None,
                 4,
                 0,
                 8,
