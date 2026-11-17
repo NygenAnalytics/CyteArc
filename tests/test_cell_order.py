@@ -1,0 +1,256 @@
+"""The cell order of shuffled imports: the permutation, its record, and sourceRow.
+
+The permutation is checked against a SplitMix64 written here in Python
+integers, independently of NumPy, and against an order frozen for seed 0, so
+a change of algorithm fails a test.
+"""
+
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import pytest
+import zarr
+from zarr.storage import MemoryStore
+
+from cytearc.storage.cell_order import (
+    CELL_ORDER_ATTR,
+    SOURCE_ROW,
+    SOURCE_ROW_ROLE,
+    recorded_shuffle_seed,
+    shuffle_seed_argument,
+    shuffled_order,
+    source_order_rows,
+    write_shuffled_cell_order,
+)
+from tests.storage_helpers import by_cell_id, open_store
+
+_MASK = (1 << 64) - 1
+
+
+def _mix(value: int) -> int:
+    """SplitMix64's finalizer in Python integers."""
+    value = ((value ^ (value >> 30)) * 0xBF58476D1CE4E5B9) & _MASK
+    value = ((value ^ (value >> 27)) * 0x94D049BB133111EB) & _MASK
+    return value ^ (value >> 31)
+
+
+def _reference_order(n_rows: int, seed: int) -> list[int]:
+    """Rank the rows by their keyed hashes, ties by index, without NumPy."""
+    key = _mix(seed ^ int.from_bytes(b"CellOrdr", "big"))
+    hashes = [
+        _mix(key ^ _mix((row + 0x9E3779B97F4A7C15) & _MASK)) for row in range(n_rows)
+    ]
+    return sorted(range(n_rows), key=lambda row: (hashes[row], row))
+
+
+def test_the_order_of_seed_zero_is_frozen() -> None:
+    assert shuffled_order(10, 0).tolist() == [6, 8, 0, 5, 2, 4, 7, 9, 3, 1]
+    assert shuffled_order(10, 1).tolist() == [1, 8, 0, 7, 6, 3, 2, 4, 9, 5]
+
+
+@pytest.mark.parametrize(
+    ("n_rows", "seed"), [(0, 0), (1, 0), (2, 5), (997, 3), (1000, 2**64 - 1)]
+)
+def test_the_order_is_a_permutation_equal_to_the_reference(n_rows, seed) -> None:
+    order = shuffled_order(n_rows, seed)
+    assert order.dtype == np.int64
+    assert order.shape == (n_rows,)
+    np.testing.assert_array_equal(np.sort(order), np.arange(n_rows))
+    assert order.tolist() == _reference_order(n_rows, seed)
+
+
+def test_a_large_order_is_a_permutation_unlike_its_neighbours() -> None:
+    order = shuffled_order(200_003, 0)
+    np.testing.assert_array_equal(np.sort(order), np.arange(200_003))
+    np.testing.assert_array_equal(order, shuffled_order(200_003, 0))
+    # A shift or rotation of the rows would keep most rows beside the row
+    # that followed them in the file.
+    assert np.count_nonzero(np.diff(order) == 1) < 20
+    assert abs(np.corrcoef(order, np.arange(order.size))[0, 1]) < 0.01
+
+
+def test_seeds_give_different_orders() -> None:
+    orders = [
+        shuffled_order(1000, seed).tolist() for seed in (0, 1, 2, 2**32, 2**64 - 1)
+    ]
+    assert len({tuple(order) for order in orders}) == len(orders)
+    # The same seed as a NumPy integer gives the same order.
+    assert shuffled_order(1000, np.uint64(2**64 - 1)).tolist() == orders[-1]
+
+
+def test_each_row_is_equally_likely_at_each_destination() -> None:
+    # Over 4,000 seeds, row 0 of eight rows lands at each destination about
+    # 500 times; a standard deviation is about 21.
+    destinations = np.array(
+        [int(np.flatnonzero(shuffled_order(8, seed) == 0)[0]) for seed in range(4000)]
+    )
+    counts = np.bincount(destinations, minlength=8)
+    assert counts.min() > 400 and counts.max() < 600
+
+
+@pytest.mark.parametrize(
+    ("seed", "error", "message"),
+    [
+        (True, TypeError, "shuffle_seed must be an integer"),
+        (1.0, TypeError, "shuffle_seed must be an integer"),
+        ("1", TypeError, "shuffle_seed must be an integer"),
+        (-1, ValueError, "shuffle_seed must be at least 0"),
+        (2**64, ValueError, r"shuffle_seed must be at most 18446744073709551615"),
+    ],
+)
+def test_a_bad_seed_is_refused(seed, error, message) -> None:
+    with pytest.raises(error, match=message):
+        shuffle_seed_argument(seed)
+    with pytest.raises(error, match=message):
+        shuffled_order(3, seed)
+
+
+def test_a_bad_row_count_is_refused() -> None:
+    with pytest.raises(ValueError, match="n_rows must be at least 0"):
+        shuffled_order(-1, 0)
+    with pytest.raises(TypeError, match="n_rows must be an integer"):
+        shuffled_order(True, 0)
+
+
+def _cell_table(n_rows: int) -> zarr.Group:
+    root = zarr.open_group(store=MemoryStore(), mode="w")
+    cells = root.create_group("cellData")
+    cells.create_array("ids", data=np.array([f"c{row}" for row in range(n_rows)]))
+    return cells
+
+
+def test_the_record_and_source_rows_round_trip() -> None:
+    cells = _cell_table(5)
+    assert recorded_shuffle_seed(cells) is None
+    write_shuffled_cell_order(
+        cells, np.array([3, 0, 4, 1, 2], dtype=np.int32), 2**64 - 1
+    )
+    assert recorded_shuffle_seed(cells) == 2**64 - 1
+    assert dict(cells.attrs) == {CELL_ORDER_ATTR: {"shuffled": True, "seed": 2**64 - 1}}
+    column = cells[SOURCE_ROW]
+    assert column.dtype == np.int64
+    assert dict(column.attrs) == {"role": SOURCE_ROW_ROLE}
+    np.testing.assert_array_equal(column[:], [3, 0, 4, 1, 2])
+    with pytest.raises(ValueError, match="one integer row per cell"):
+        write_shuffled_cell_order(cells, np.zeros(5, dtype=float), 0)
+    with pytest.raises(ValueError, match="one integer row per cell"):
+        write_shuffled_cell_order(cells, np.zeros((5, 1), dtype=int), 0)
+
+
+@pytest.mark.parametrize(
+    "record",
+    [
+        "shuffled",
+        {"shuffled": True},
+        {"shuffled": False, "seed": 0},
+        {"shuffled": True, "seed": True},
+        {"shuffled": True, "seed": -1},
+        {"shuffled": True, "seed": 2**64},
+        {"shuffled": True, "seed": 1.0},
+        {"shuffled": True, "seed": 0, "extra": 1},
+    ],
+)
+def test_a_malformed_record_is_refused(record) -> None:
+    cells = _cell_table(2)
+    cells.attrs[CELL_ORDER_ATTR] = record
+    with pytest.raises(ValueError, match="cellOrder attribute is malformed"):
+        recorded_shuffle_seed(cells)
+
+
+def test_source_order_rows_sort_the_selected_rows_by_their_source_rows() -> None:
+    cells = _cell_table(6)
+    selection = np.array([True, False, True, True, True, True])
+    # Without the column the rows keep their store order.
+    np.testing.assert_array_equal(source_order_rows(cells, selection), [0, 2, 3, 4, 5])
+    write_shuffled_cell_order(cells, np.array([5, 2, 0, 4, 1, 3]), 0)
+    rows = source_order_rows(cells, selection)
+    assert rows.dtype == np.int64
+    # Selected source rows 5, 0, 4, 1, 3 sorted: 0, 1, 3, 4, 5.
+    np.testing.assert_array_equal(rows, [2, 4, 5, 3, 0])
+    np.testing.assert_array_equal(
+        source_order_rows(cells, np.zeros(6, dtype=bool)), np.zeros(0)
+    )
+
+
+def test_source_order_rows_keep_ties_and_ignore_a_plain_column() -> None:
+    cells = _cell_table(4)
+    # A merge of two shuffled stores could hold equal source rows.
+    cells.create_array(SOURCE_ROW, data=np.array([1, 0, 1, 0], dtype=np.int64))
+    # Without the role, the column is a user's, and rows keep store order.
+    np.testing.assert_array_equal(
+        source_order_rows(cells, np.ones(4, bool)), [0, 1, 2, 3]
+    )
+    cells[SOURCE_ROW].attrs["role"] = SOURCE_ROW_ROLE
+    np.testing.assert_array_equal(
+        source_order_rows(cells, np.ones(4, bool)), [1, 3, 0, 2]
+    )
+
+
+def test_source_order_rows_refuse_a_bad_selection_or_column() -> None:
+    cells = _cell_table(3)
+    for selection in (np.ones(2, bool), np.ones(3, int), np.ones((3, 1), bool)):
+        with pytest.raises(ValueError, match="one boolean per cell, 3 of them"):
+            source_order_rows(cells, selection)
+    column = cells.create_array(SOURCE_ROW, data=np.array([2.0, 0.0, 1.0]))
+    column.attrs["role"] = SOURCE_ROW_ROLE
+    with pytest.raises(ValueError, match="must hold one int64 row of the imported"):
+        source_order_rows(cells, np.ones(3, dtype=bool))
+
+
+def _shuffled_store(tmp_path: Path):
+    """Import a small shuffled H5AD file and open it."""
+    import anndata
+    from scipy.sparse import csr_matrix
+
+    from cytearc.readers import H5adReader
+    from cytearc.writers import H5adToZarr
+
+    counts = np.random.default_rng(0).poisson(1.0, (6, 4)).astype(np.float32)
+    counts[:, 0] += 1
+    source = tmp_path / "cells.h5ad"
+    anndata.AnnData(
+        csr_matrix(counts),
+        obs=pd.DataFrame({"flag": [True] * 6}, index=[f"c{row}" for row in range(6)]),
+        var=pd.DataFrame(index=[f"g{column}" for column in range(4)]),
+    ).write_h5ad(source)
+    reader = H5adReader(str(source))
+    try:
+        H5adToZarr(
+            reader, str(tmp_path / "cells.zarr"), nthreads=1, shuffle_cells=True
+        ).dump()
+    finally:
+        reader.close()
+    return open_store(tmp_path / "cells.zarr")
+
+
+def test_source_row_cannot_be_inserted_restricted_reset_or_dropped(tmp_path) -> None:
+    store = _shuffled_store(tmp_path)
+    cells = store.cells
+    before = cells.fetch_all(SOURCE_ROW)
+    np.testing.assert_array_equal(np.sort(before), np.arange(6))
+    reserved = "Cell column 'sourceRow' is reserved for each cell's row"
+    with pytest.raises(ValueError, match=reserved):
+        cells.insert(SOURCE_ROW, by_cell_id(cells, np.arange(6)), overwrite=True)
+    with pytest.raises(ValueError, match=reserved):
+        cells.update_key(by_cell_id(cells, np.ones(6, dtype=bool)), SOURCE_ROW)
+    with pytest.raises(ValueError, match=reserved):
+        cells.reset_key(SOURCE_ROW)
+    with pytest.raises(ValueError, match="cannot be dropped: exports sort by it"):
+        cells.drop(SOURCE_ROW)
+    np.testing.assert_array_equal(cells.fetch_all(SOURCE_ROW), before)
+    # Other columns still change.
+    cells.drop("flag")
+    assert "flag" not in cells.columns
+
+
+def test_a_plain_source_row_column_may_be_dropped_but_not_written(tmp_path) -> None:
+    store = _shuffled_store(tmp_path)
+    group = zarr.open_group(str(tmp_path / "cells.zarr"), mode="r+")["cellData"]
+    # A store written before imports shuffled could hold a user's column.
+    group[SOURCE_ROW].attrs.put({})
+    store = open_store(tmp_path / "cells.zarr")
+    store.cells.drop(SOURCE_ROW)
+    assert SOURCE_ROW not in store.cells.columns
+    with pytest.raises(ValueError, match="is reserved for each cell's row"):
+        store.cells.insert(SOURCE_ROW, by_cell_id(store.cells, np.arange(6)))
