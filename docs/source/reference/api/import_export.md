@@ -256,13 +256,13 @@ Files usually group their cells by sample, donor or plate, so a contiguous slice
 
 Each cell keeps its row in the file, from 0, in the int64 cell column `sourceRow`, and the cell table records the seed in its `cellOrder` attribute, as [cell order](../developers/zarr-internals#cell-order) describes. A reader that keeps only some barcodes, such as `CrH5Reader(is_filtered=False)`, counts the rows of the cells it keeps, so `sourceRow` is each cell's row in an import of the same reader in the file's order. `insert`, `update_key`, `reset_key` and `drop` refuse `sourceRow`, and a shuffled import skips a source cell column of that name with a warning. The import decides what the values are from the file's first 100 cells, shuffled or not, so the shuffle never changes that decision.
 
-The shuffled rows wait in temporary files on local disk, in the reader's `temp_dir`, which hold counts in about one byte per stored value. The counts write reads them back in shuffled order and deletes each file once read, so the temporary files never take disk beyond the final store of a local destination. Each import sends its rows to the files where it already reads them:
+The shuffled rows wait in temporary files on local disk, in the reader's `temp_dir`, which hold counts in about one byte per stored value. The counts write reads them back in shuffled order and deletes each file once read, so the temporary files never take disk beyond the final store of a local destination. Each import sends its rows to the files at one of these points:
 
 | Import | When the rows go to the temporary files |
 |---|---|
 | H5AD of CSR or dense values, 10x HDF5, Tapestri | As the value scan reads them, so the file is read once. |
 | H5AD of CSC values | As the conversion to rows, which writes such files anyway, places each value at its destination row. |
-| Matrix Market | In one more pass over the kept cells, before the store is created. Construction scanned the file before any import asked for a shuffle. |
+| Matrix Market | In one more pass over the kept cells, before the store is created. Construction scanned the file before any import asked for a shuffle. A matrix sorted by feature, or unordered, keeps its sorted rows on local disk beside them until the pass ends. |
 | CSV | In one more pass over the file before the store is created, which also keeps the cell columns in memory. |
 | Seurat | As the value scan of each assay reads them. Counts stored out of cell order pass through their own conversion first, so they take one more local pass. |
 | In-memory matrices | Never: each batch of `SparseToZarr` gathers its rows from the matrices. |
