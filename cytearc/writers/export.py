@@ -344,10 +344,15 @@ def materialize_h5ad_matrix(
 _REORDER_READ_BYTES = 256 << 20
 # The most that a reorder keeps pending before it writes blocks.
 _REORDER_BUFFER_BYTES = 256 << 20
-# Bytes that appending one value of a piece holds beside the pending rows:
-# the piece gathered by bucket and its values cast, each value and column
-# index of up to eight bytes.
-_REORDER_APPEND_BYTES_PER_VALUE = 32
+# The most entries that a reorder gathers from converted pieces before it
+# appends them to their buckets: a few large appends cost less per row than
+# many small ones.
+_REORDER_BATCH_ENTRIES = 1 << 21
+# Bytes per value of the rows that a reorder appends: those it gathers while
+# the batch before them is appended beside them, that batch joined, and the
+# batch gathered by bucket with its values cast, each value and column index
+# of up to eight bytes.
+_REORDER_BATCH_BYTES_PER_VALUE = 64
 # Bytes that a reorder holds for each row while the rows stream in: the
 # order and the destination of each row.
 _REORDER_ROW_BYTES = 16
@@ -358,11 +363,12 @@ def _reorder_read_bytes(max_bytes: int) -> int:
 
 
 def _reorder_fixed_bytes(shape: tuple[int, int], dtype: Any) -> int:
-    """Return what a reorder holds, beside its pending rows, while rows stream in.
+    """Return what a reorder holds, beside its pending rows and batches, while rows stream in.
 
     The order and destination of each row, the bucket writer's count and
     mark of each row and its numbers for each bucket, as many buckets as
-    rows of every value take, and the append of one conversion step.
+    rows of every value take, and the rows of one conversion step gathered
+    and appended.
     """
     from ..readers._sparse import SparseRowStore
 
@@ -377,7 +383,7 @@ def _reorder_fixed_bytes(shape: tuple[int, int], dtype: Any) -> int:
         _REORDER_ROW_BYTES * n_rows
         + SparseRowStore.writer_bytes(n_rows, bucket_rows)
         + 8 * (n_buckets + 1)
-        + _REORDER_APPEND_BYTES_PER_VALUE * step_values
+        + _REORDER_BATCH_BYTES_PER_VALUE * step_values
     )
 
 
@@ -407,9 +413,30 @@ def _reorder_least_bytes(shape: tuple[int, int], dtype: Any) -> int:
     return max(spill, read)
 
 
-def _reorder_buffer_bytes(fixed: int, max_bytes: int) -> int:
-    """Return the pending rows of a reorder: half of what the budget leaves, at most 256 MiB."""
-    return max(0, min(_REORDER_BUFFER_BYTES, (int(max_bytes) - fixed) // 2))
+def _reorder_shares(
+    shape: tuple[int, int], dtype: Any, max_bytes: int
+) -> tuple[int, int, int]:
+    """Return what a reorder holds while rows stream in, the entries of its batches, and its pending rows.
+
+    Batches take up to half of what the budget leaves beside the least that
+    a reorder needs, at most 2,097,152 entries beyond one conversion step,
+    and the pending rows half of what is then left, at most 256 MiB. The
+    rest is the stream's.
+    """
+    n_rows, n_cols = (int(value) for value in shape)
+    fixed = _reorder_fixed_bytes(shape, dtype)
+    spare = int(max_bytes) - fixed - h5ad_conversion_bytes(dtype, n_cols, 1)
+    batch = max(
+        0,
+        min(
+            _REORDER_BATCH_ENTRIES,
+            n_rows * n_cols,
+            spare // (2 * _REORDER_BATCH_BYTES_PER_VALUE),
+        ),
+    )
+    spare -= _REORDER_BATCH_BYTES_PER_VALUE * batch
+    buffer = max(0, min(_REORDER_BUFFER_BYTES, spare // 2))
+    return fixed + _REORDER_BATCH_BYTES_PER_VALUE * batch + buffer, batch, buffer
 
 
 def reorder_held_bytes(shape: tuple[int, int], dtype: Any, max_bytes: int) -> int:
@@ -417,13 +444,18 @@ def reorder_held_bytes(shape: tuple[int, int], dtype: Any, max_bytes: int) -> in
 
     A matrix that :func:`reordered_matrix` reorders streams its rows with
     this many bytes held beside its blocks and their conversion: the order,
-    the bucket writer and the pending rows, which take half of what the
-    budget leaves, at most 256 MiB.
+    the bucket writer, the rows gathered into batches and appended, and the
+    pending rows. The batches and the pending rows grow with the budget.
     """
-    fixed = _reorder_fixed_bytes(shape, dtype)
-    return fixed + _reorder_buffer_bytes(
-        fixed + h5ad_conversion_bytes(dtype, shape[1], 1), max_bytes
-    )
+    return _reorder_shares(shape, dtype, max_bytes)[0]
+
+
+def _append_batch(
+    store: Any, destinations: np.ndarray, pieces: list[csr_matrix]
+) -> None:
+    """Append converted pieces of consecutive rows to their buckets, as one batch."""
+    joined = pieces[0] if len(pieces) == 1 else vstack(pieces, format="csr")
+    store.append_rows(destinations, joined)
 
 
 def _reordered_blocks(
@@ -447,9 +479,8 @@ def _reordered_blocks(
     n_rows, n_cols = matrix.shape
     destinations = np.empty(n_rows, dtype=np.int64)
     destinations[order] = np.arange(n_rows, dtype=np.int64)
-    fixed = _reorder_fixed_bytes(matrix.shape, matrix.dtype)
-    buffer_bytes = _reorder_buffer_bytes(
-        fixed + h5ad_conversion_bytes(matrix.dtype, n_cols, 1), max_bytes
+    _held, batch_entries, buffer_bytes = _reorder_shares(
+        matrix.shape, matrix.dtype, max_bytes
     )
     read_bytes = _reorder_read_bytes(max_bytes)
     store: SparseRowStore | None = None
@@ -480,16 +511,33 @@ def _reordered_blocks(
         )
 
     try:
-        start = 0
-        stored = replace(matrix, export_dtype=None)
-        for piece in iter_h5ad_blocks(stored, label):
-            if store is None:
-                store = created(piece)
-            stop = start + piece.shape[0]
-            store.append_rows(destinations[start:stop], piece)
-            start = stop
-            del piece
-        del destinations
+        # One batch is appended on a thread while the stream reads and
+        # converts the rows of the next.
+        with ThreadPoolExecutor(1, thread_name_prefix="cytearc-reorder") as appender:
+            appending: Future[None] | None = None
+            pieces: list[csr_matrix] = []
+            first = start = gathered = 0
+            stored = replace(matrix, export_dtype=None)
+            for piece in iter_h5ad_blocks(stored, label):
+                if store is None:
+                    store = created(piece)
+                pieces.append(piece)
+                start += piece.shape[0]
+                gathered += piece.nnz
+                del piece
+                if gathered >= batch_entries:
+                    if appending is not None:
+                        appending.result()
+                    appending = appender.submit(
+                        _append_batch, store, destinations[first:start], pieces
+                    )
+                    pieces, first, gathered = [], start, 0
+            if appending is not None:
+                appending.result()
+            if pieces:
+                assert store is not None
+                _append_batch(store, destinations[first:start], pieces)
+            del pieces, destinations
         if store is None:
             store = created(csr_matrix((0, n_cols), dtype=matrix.dtype))
         store.finalize()
