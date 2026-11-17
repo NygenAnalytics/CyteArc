@@ -372,13 +372,39 @@ def _reorder_fixed_bytes(shape: tuple[int, int], dtype: Any) -> int:
         n_rows, n_rows * max(1, n_cols), _REORDER_READ_BYTES, itemsize
     )
     n_buckets = -(-n_rows // bucket_rows)
-    step_values = _csr_step_rows(n_cols) * max(1, n_cols)
+    step_values = min(_csr_step_rows(n_cols), max(1, n_rows)) * max(1, n_cols)
     return (
         _REORDER_ROW_BYTES * n_rows
         + SparseRowStore.writer_bytes(n_rows, bucket_rows)
         + 8 * (n_buckets + 1)
         + _REORDER_APPEND_BYTES_PER_VALUE * step_values
     )
+
+
+def _reorder_bucket_bytes(n_rows: int, max_bytes: int) -> int:
+    """Return the most that reading one bucket back may hold: a third of what the row pointers leave.
+
+    The rest holds the bucket loading ahead and the rows that the export
+    writes.
+    """
+    return max(0, int(max_bytes) - 8 * (int(n_rows) + 1)) // 3
+
+
+def _reorder_least_bytes(shape: tuple[int, int], dtype: Any) -> int:
+    """Return the least budget that reorders rows of ``shape``.
+
+    Sending the rows to their buckets holds :func:`_reorder_fixed_bytes`
+    and the conversion of one row; reading them back holds the row pointers
+    and, in a third of the rest, a row of every column.
+    """
+    from ..readers._sparse import SparseRowStore
+
+    n_rows, n_cols = (int(value) for value in shape)
+    spill = _reorder_fixed_bytes(shape, dtype) + h5ad_conversion_bytes(dtype, n_cols, 1)
+    read = 8 * (n_rows + 1) + 3 * SparseRowStore.whole_row_read_bytes(
+        n_cols, int(np.dtype(dtype).itemsize)
+    )
+    return max(spill, read)
 
 
 def _reorder_buffer_bytes(fixed: int, max_bytes: int) -> int:
@@ -445,7 +471,7 @@ def _reordered_blocks(
             bucket_rows=bucket_rows,
             whole_rows=True,
             buffer_bytes=buffer_bytes,
-            bucket_bytes=max(2 * read_bytes, int(max_bytes) // 4),
+            bucket_bytes=max(2 * read_bytes, _reorder_bucket_bytes(n_rows, max_bytes)),
             split_bytes=2 * read_bytes,
             entries=expected,
             entry_bytes=encoded_entry_bytes(sample) if sample.nnz else None,
@@ -467,7 +493,7 @@ def _reordered_blocks(
         if store is None:
             store = created(csr_matrix((0, n_cols), dtype=matrix.dtype))
         store.finalize()
-        # Each batch is a bucket of rows, or the band of one that was split.
+        # Batches are as many rows as a bucket holds.
         yield from store.iter_rows(0, n_rows, bucket_rows, read_ahead=True, delete=True)
     finally:
         if store is not None:
@@ -499,7 +525,8 @@ def reordered_matrix(
     Raises:
         ValueError: If ``order`` is not a permutation of the matrix's rows.
         MemoryBudgetError: If ``max_bytes`` cannot hold the order and the
-            bucket writer beside the conversion of one row.
+            bucket writer beside the conversion of one row, or the row
+            pointers and the read of a row of every column.
     """
     n_rows, n_cols = matrix.shape
     positions = np.asarray(order)
@@ -514,15 +541,13 @@ def reordered_matrix(
         raise ValueError(
             f"{label}: a row order must be a permutation of its {n_rows} rows"
         )
-    least = _reorder_fixed_bytes(matrix.shape, matrix.dtype) + h5ad_conversion_bytes(
-        matrix.dtype, n_cols, 1
-    )
+    least = _reorder_least_bytes(matrix.shape, matrix.dtype)
     if int(max_bytes) < least:
         raise MemoryBudgetError(
             f"Writing {label[0].lower()}{label[1:]} in source order exceeds the "
             f"memory limit. Sending the rows of its {n_rows} cells to their "
-            f"buckets needs at least {least} bytes. Raise mem_budget, or export "
-            "with cell_order='stored'.",
+            f"buckets and reading them back needs at least {least} bytes. Raise "
+            "mem_budget, or export with cell_order='stored'.",
             needed_bytes=least,
             budget_bytes=int(max_bytes),
             item=f"the row order of {n_rows} cells",

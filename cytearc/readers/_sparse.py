@@ -1479,6 +1479,16 @@ class SparseRowStore:
         return int(n_rows) * _WRITER_ROW_BYTES + (n_buckets + 1) * _WRITER_BUCKET_BYTES
 
     @staticmethod
+    def whole_row_read_bytes(entries: int, itemsize: int) -> int:
+        """Return what reading one whole row of ``entries`` entries holds, its duplicates not summed.
+
+        Values take ``itemsize`` bytes, the wider of the source and read
+        dtypes. A store refuses, when it is finalized, a row that needs
+        more than its ``bucket_bytes``.
+        """
+        return _bucket_bytes(int(entries), 1, 1, int(itemsize), False)
+
+    @staticmethod
     def whole_row_bucket_rows(
         n_rows: int, entries: int, read_bytes: int, itemsize: int
     ) -> int:
