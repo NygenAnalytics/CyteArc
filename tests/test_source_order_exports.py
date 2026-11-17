@@ -1277,3 +1277,61 @@ def test_character_matrices_export_in_the_files_order(clone_store, tmp_path) -> 
     with pytest.raises(TypeError, match="cell_order must be 'source' or 'stored'"):
         store.clones.export_characters(alleles, tmp_path / "x.zarr", cell_order=1)
     assert not (tmp_path / "x.zarr").exists()
+
+
+def test_a_store_whose_source_rows_have_gaps_exports_and_merges_by_their_sort(
+    imported, tmp_path
+) -> None:
+    """Source rows with gaps, as a subset or an import that drops cells leaves them, order by their sort."""
+    shuffled = _open(imported.shuffled)
+    ids = shuffled.cells.fetch_all("ids")
+    keep = (_ORDER % 3 != 0) & (_ORDER < 150)
+    SubsetZarr(
+        str(tmp_path / "gaps.zarr"), [shuffled.RNA], cell_ids=ids[keep], nthreads=1
+    ).dump()
+    gaps = _open(tmp_path / "gaps.zarr")
+    source_rows = gaps.cells.fetch_all(SOURCE_ROW)
+    kept = np.sort(_ORDER[keep])
+    # The values skip every third row and the last rows of the file.
+    np.testing.assert_array_equal(np.sort(source_rows), kept)
+    assert kept[-1] > kept.size and kept[0] == 1
+
+    # Every export writes the kept cells in the file's order.
+    to_h5ad(gaps.RNA, str(tmp_path / "gaps.h5ad"))
+    exported = anndata.read_h5ad(tmp_path / "gaps.h5ad")
+    assert _file_rows(exported.obs_names).tolist() == kept.tolist()
+    np.testing.assert_array_equal(exported.X.toarray(), _COUNTS[kept])
+    to_mtx(gaps.RNA, str(tmp_path / "gaps_mtx"))
+    np.testing.assert_array_equal(
+        np.asarray(mmread(tmp_path / "gaps_mtx" / "matrix.mtx").todense()).T,
+        _COUNTS[kept],
+    )
+    assert (
+        _file_rows(
+            (tmp_path / "gaps_mtx" / "barcodes.tsv").read_text().split()
+        ).tolist()
+        == kept.tolist()
+    )
+    in_memory = gaps.to_anndata(cell_key="keep")
+    expected = kept[_obs()["keep"].to_numpy()[kept]]
+    assert _file_rows(in_memory.obs_names).tolist() == expected.tolist()
+
+    # A merge ranks the kept cells by their sort: its rows have no gaps.
+    DataStoreMerge(
+        [gaps, _open(imported.plain)],
+        str(tmp_path / "merged.zarr"),
+        ["a", "b"],
+        nthreads=1,
+    ).dump()
+    merged = _open(tmp_path / "merged.zarr")
+    merged_ids = merged.cells.fetch_all("ids").astype(str)
+    rows = _file_rows(merged_ids)
+    expected_rows = np.where(
+        np.char.startswith(merged_ids, "a__"),
+        np.searchsorted(kept, rows),
+        kept.size + rows,
+    )
+    np.testing.assert_array_equal(merged.cells.fetch_all(SOURCE_ROW), expected_rows)
+    np.testing.assert_array_equal(
+        np.sort(merged.cells.fetch_all(SOURCE_ROW)), np.arange(kept.size + _N_CELLS)
+    )
