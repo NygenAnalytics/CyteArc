@@ -1,9 +1,9 @@
 """The normalizer of a recipe run, which the run records and applies to every stage.
 
-A module fixture commits, in one session, an RNA run of Pearson residuals, an
-ADT run of its cells, a WNN run of the two with markers, and an RNA run of a
-custom normalizer with an ADT run of its cells, on a private copy of the PBMC
-store. Another DataStore of the same store stands in for a new session, whose
+A module fixture commits, in one session, an RNA run of Pearson residuals,
+another whose PCA scales them, an ADT run of the first one's cells, a WNN run
+of the two with markers, and an RNA run of a custom normalizer with an ADT run
+of its cells, on a private copy of the PBMC store. Another DataStore of the same store stands in for a new session, whose
 RNA assay normalizes by library size, as every new session's does. Tests that
 write copy the store first.
 """
@@ -36,6 +36,7 @@ from cytearc.assay import (
 )
 from cytearc.datastore._pipeline.normalizers import (
     BUILTIN_NORMALIZERS,
+    add_applied_feat_scaling,
     normalizer_setting,
 )
 from cytearc.datastore.pipeline_accessor import PipelineEvent
@@ -137,11 +138,20 @@ def _method(store: DataStore, ref: Any) -> dict[str, Any]:
     return store.artifacts.inspect(ref).parameters["normalization_method"]
 
 
-def _record_as_1_4(location: Path, run_id: str) -> None:
-    """Rewrite a run record as CyteArc 1.4.0 recorded it, without the normalizer."""
+def _record_as_1_4(
+    location: Path, run_id: str, *, default_scaling: bool = False
+) -> None:
+    """Rewrite a run record as CyteArc 1.4.0 recorded it, without the normalizer.
+
+    With ``default_scaling``, the run's PCA scaled its features, which 1.4.0
+    did for a call that set no ``feat_scaling``, so the record leaves it out.
+    """
     group = zarr.open_group(str(location), mode="r+")[pipeline_run_path(run_id)]
     attrs = dict(group.attrs)
-    del attrs["config"]["stages"]["normalization"]["method"]
+    stages = attrs["config"]["stages"]
+    del stages["normalization"]["method"]
+    if default_scaling:
+        assert stages["pca"].pop("feat_scaling") is True
     attrs["cytearcVersion"] = "1.4.0"
     group.attrs.put(attrs)
 
@@ -154,6 +164,9 @@ def saved(datastore_zarr_root: str, tmp_path_factory) -> SimpleNamespace:
     first = _open(location)
     first.RNA.normMethod = norm_pearson_residuals
     residuals = first.pipeline.rna(label="residuals", **SETTINGS)
+    scaled = first.pipeline.rna(
+        label="scaled", **{**SETTINGS, "pca": {"dims": 5, "feat_scaling": True}}
+    )
     adt = first.pipeline.adt(label="adt", cells=residuals, **ADT_SETTINGS)
     wnn = first.pipeline.multimodal([residuals, adt], label="wnn", umap=False)
     first.RNA.normMethod = _log_library_size
@@ -162,6 +175,7 @@ def saved(datastore_zarr_root: str, tmp_path_factory) -> SimpleNamespace:
     return SimpleNamespace(
         location=location,
         residuals=residuals,
+        scaled=scaled,
         adt=adt,
         wnn=wnn,
         custom=custom,
@@ -206,7 +220,7 @@ def test_a_rerun_in_a_new_session_normalizes_as_the_run_did(
     assert second.RNA.normMethod is norm_lib_size
 
 
-@pytest.mark.parametrize("label", ["residuals", "adt", "wnn"])
+@pytest.mark.parametrize("label", ["residuals", "scaled", "adt", "wnn"])
 def test_a_plan_in_a_new_session_reuses_every_stage_of_the_run(saved, label) -> None:
     run = getattr(saved, label)
 
@@ -305,11 +319,13 @@ def test_pearson_residuals_reach_pca_unscaled_unless_the_call_scales_them(
     )
     # The run records the settings that the call gave.
     assert plan.config["stages"]["pca"] == {"dims": 5}
-    # A value that the call gives wins: scaled residuals are another PCA.
-    assert scaled.computed[0] == "pca"
-    assert (scaled["pca"].reason, scaled["pca"].changed_parameters) == (
-        "changed",
-        ("enabled",),
+    # A value that the call gives wins: scaled residuals are another PCA, the
+    # one of the committed run that scaled them.
+    assert scaled.computed == ()
+    assert scaled["pca"].outputs == (("pca", saved.scaled["pca"]),)
+    assert saved.scaled["pca"] != saved.residuals["pca"]
+    assert (
+        store.artifacts.inspect(saved.scaled["pca"]).parameters["feat_scaling"] is True
     )
 
 
@@ -521,6 +537,96 @@ def test_a_run_recorded_before_the_method_reruns_with_its_saved_normalizer(
     assert _computed(fine) == LEIDEN_STAGES
     assert fine["normalized"] == earlier["normalized"]
     assert store.RNA.normMethod is norm_lib_size
+
+
+def test_a_scaled_run_recorded_before_the_method_reruns_with_its_scaling(
+    saved, tmp_path
+) -> None:
+    location = _copy(saved.location, tmp_path)
+    _record_as_1_4(location, saved.scaled.run_id, default_scaling=True)
+    store = _open(location)
+    earlier = store.pipeline.open(label="scaled")
+
+    settings = earlier.settings()
+    plan = store.pipeline.plan(earlier)
+    fine = store.pipeline.rerun(earlier, label="fine", leiden={"partitions": [2.0]})
+
+    # The record holds what a 1.4.0 call gave, and the settings the scaling
+    # that its PCA applied, where a run of residuals now defaults to none.
+    assert earlier.report()["run"]["config"]["stages"]["pca"] == {"dims": 5}
+    assert settings["normalization"] == {"method": "pearson_residuals"}
+    assert settings["pca"] == {"dims": 5, "feat_scaling": True}
+    assert settings == saved.scaled.settings()
+    assert plan.computed == ()
+    assert [(stage.stage, stage.outputs) for stage in plan.stages] == [
+        (stage.stage, stage.outputs)
+        for stage in read_only_plan(saved.location, saved.scaled).stages
+    ]
+    assert _computed(fine) == LEIDEN_STAGES
+    assert fine["pca"] == earlier["pca"]
+    assert store.artifacts.inspect(fine["pca"]).parameters["feat_scaling"] is True
+    # A value that the rerun gives wins, and takes the unscaled residuals.
+    unscaled = store.pipeline.plan(earlier, pca={"feat_scaling": False})
+    assert unscaled.config["stages"]["pca"] == {"dims": 5, "feat_scaling": False}
+    assert unscaled["pca"].outputs == (("pca", saved.residuals["pca"]),)
+
+
+def test_a_scaled_run_recorded_before_the_method_reruns_without_pca(
+    saved, tmp_path
+) -> None:
+    location = _copy(saved.location, tmp_path)
+    _record_as_1_4(location, saved.scaled.run_id, default_scaling=True)
+    store = _open(location)
+    earlier = store.pipeline.open(label="scaled")
+
+    flat = store.pipeline.rerun(earlier, label="flat", pca={"dims": 0})
+
+    # The scaling holds only while a PCA runs, so dims=0 leaves it out.
+    assert flat.settings()["pca"] == {"dims": 0}
+    assert "pca" not in flat
+    assert flat["normalized"] == earlier["normalized"]
+    assert _computed(flat) == {"ann_index", "neighbors", "connectivity", *LEIDEN_STAGES}
+
+
+@pytest.mark.parametrize(
+    ("method", "pca", "expected"),
+    [
+        ("pearson_residuals", {"dims": 5}, {"dims": 5, "feat_scaling": True}),
+        (_identity(_log_library_size), {"dims": 5}, {"dims": 5, "feat_scaling": True}),
+        ("lib_size", {"dims": 5}, {"dims": 5}),
+        ("clr", {"dims": 5}, {"dims": 5}),
+        ("pearson_residuals", {"dims": 0}, {"dims": 0}),
+        (
+            "pearson_residuals",
+            {"dims": 5, "feat_scaling": False},
+            {"dims": 5, "feat_scaling": False},
+        ),
+        ("pearson_residuals", {"dims": True}, {"dims": True}),
+        ("pearson_residuals", None, None),
+    ],
+    ids=[
+        "residuals",
+        "custom",
+        "lib-size",
+        "clr",
+        "no-pca",
+        "given",
+        "bool-dims",
+        "default-pca",
+    ],
+)
+def test_the_scaling_of_an_earlier_run_goes_where_its_default_changed(
+    method, pca, expected
+) -> None:
+    settings: dict[str, Any] = {"pca": pca}
+
+    add_applied_feat_scaling(settings, method)
+
+    assert settings == {"pca": expected}
+    # Settings without PCA, as an ATAC run's, stay as they are.
+    without_pca: dict[str, Any] = {"lsi": {"dims": 5}}
+    add_applied_feat_scaling(without_pca, method)
+    assert without_pca == {"lsi": {"dims": 5}}
 
 
 def test_a_custom_run_recorded_before_the_method_reruns_only_with_its_normalizer(
@@ -819,6 +925,8 @@ def test_a_perturbation_run_normalizes_with_the_method_it_names(tmp_path) -> Non
     assert written(store) != before
     assert run.settings()["normalization"] == {"method": "pearson_residuals"}
     assert _method(store, run["normalized"]) == PEARSON
-    # The PCA of residuals scales no feature by default.
+    # The PCA of residuals scales no feature by default, and the run, which
+    # records its method, records only the PCA settings that the call gave.
     assert store.artifacts.inspect(run["pca"]).parameters["feat_scaling"] is False
+    assert run.settings()["pca"] == {"dims": 3}
     assert store.RNA.normMethod is norm_lib_size

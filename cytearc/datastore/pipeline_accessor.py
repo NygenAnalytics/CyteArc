@@ -25,7 +25,7 @@ from ._pipeline.events import (
     pipeline_listener as pipeline_listener,
 )
 from ._pipeline.executor import RecipePlan, execute_recipe
-from ._pipeline.normalizers import recorded_normalizer
+from ._pipeline.normalizers import add_applied_feat_scaling, recorded_normalizer
 from ._pipeline.planning import (
     PipelinePlan as PipelinePlan,
     PipelineStageEstimate as PipelineStageEstimate,
@@ -94,11 +94,30 @@ def recipe_keywords(recipe: str) -> frozenset[str]:
     return frozenset(parameters) - frozenset(_UNRECORDED_KEYWORDS)
 
 
-def recorded_settings(store: Any, record: PipelineRunRecord) -> dict[str, Any]:
-    """Return the keywords of the recipe call that ``record`` records.
+def recorded_settings(
+    store: Any,
+    record: PipelineRunRecord,
+    overrides: Mapping[str, object] | None = None,
+) -> dict[str, Any]:
+    """Return the keywords of the recipe call that ``record`` records, with ``overrides``.
 
-    ``PipelineRun.settings`` documents them. The settings are copies, so
-    changing them leaves the record as it is.
+    ``PipelineRun.settings`` documents the settings, and
+    ``PipelineAccessor.rerun`` the overrides: a mapping changes a stage's
+    settings key by key, and any other value replaces the run's. The
+    settings are copies, so changing them leaves the record as it is.
+
+    A run recorded before the ``normalization`` ``method``, as by 1.4.0,
+    applied the normalizer that its saved normalized values record, and its
+    PCA scaled its features unless the call set ``feat_scaling``. Its
+    settings take both, the scaling where the normalizer's default changed
+    since, once the overrides are in, so that a call that turns PCA off
+    with ``dims=0`` leaves the scaling out.
+
+    Raises:
+        ValueError: If the run's recipe is not one of this release's, the
+            run records a keyword that the recipe no longer takes, or its
+            saved normalized values do not record its normalizer.
+        TypeError: If an override is not a keyword of the run's recipe.
     """
     translate = _RECORDED_CALLS.get(record.recipe)
     if translate is None:
@@ -113,13 +132,6 @@ def recorded_settings(store: Any, record: PipelineRunRecord) -> dict[str, Any]:
             f"which is not one of {sorted(_RECORDED_CALLS)!r}{saved_by}"
         )
     settings = translate(store, record.assay, copy.deepcopy(record.config))
-    # A run recorded before its normalization stage recorded the normalizer,
-    # as by 1.4.0, applied the one that its saved normalized values record.
-    normalization = settings.get("normalization")
-    if isinstance(normalization, dict) and "method" not in normalization:
-        method = recorded_normalizer(store, record)
-        if method is not None:
-            normalization["method"] = method
     # A keyword that the recipe gained after the run started is not recorded,
     # and the recipe gives it its default; a keyword that the recipe lost has
     # no default to stand in for the run's setting.
@@ -131,6 +143,28 @@ def recorded_settings(store: Any, record: PipelineRunRecord) -> dict[str, Any]:
             f"release's {record.recipe} recipe does not take; "
             "report()['run']['config'] holds the settings that it recorded"
         )
+    # A run recorded before its normalization stage recorded the normalizer,
+    # as by 1.4.0, applied the one that its saved normalized values record.
+    normalization = settings.get("normalization")
+    method = None
+    if isinstance(normalization, dict) and "method" not in normalization:
+        method = recorded_normalizer(store, record)
+        if method is not None:
+            normalization["method"] = method
+    if overrides:
+        unknown = sorted(set(overrides) - recipe_keywords(record.recipe) - {"label"})
+        if unknown:
+            raise TypeError(
+                f"A run of the {record.recipe} recipe takes the keywords of "
+                f"pipeline.{record.recipe}, which do not include {unknown!r}"
+            )
+        for name, value in overrides.items():
+            recorded = settings.get(name)
+            if isinstance(recorded, dict) and isinstance(value, Mapping):
+                value = {**recorded, **value}
+            settings[name] = value
+    if method is not None:
+        add_applied_feat_scaling(settings, method)
     return settings
 
 
@@ -982,19 +1016,7 @@ class PipelineAccessor:
                 f"run must be a pipeline run of this datastore; run {run.run_id} "
                 "is not recorded in it"
             ) from error
-        keywords = recorded_settings(self._store, record)
-        unknown = sorted(set(overrides) - recipe_keywords(record.recipe) - {"label"})
-        if unknown:
-            raise TypeError(
-                f"A run of the {record.recipe} recipe takes the keywords of "
-                f"pipeline.{record.recipe}, which do not include {unknown!r}"
-            )
-        for name, value in overrides.items():
-            recorded = keywords.get(name)
-            if isinstance(recorded, dict) and isinstance(value, Mapping):
-                value = {**recorded, **value}
-            keywords[name] = value
-        return record.recipe, keywords
+        return record.recipe, recorded_settings(self._store, record, overrides)
 
     @validation_scoped
     def rerun(

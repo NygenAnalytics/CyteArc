@@ -246,6 +246,29 @@ def feat_scaling_default(normalizer: NormMethod) -> bool:
     return not isinstance(normalizer, PearsonResidualNormalizer)
 
 
+def add_applied_feat_scaling(settings: dict[str, Any], method: MethodSetting) -> None:
+    """Give the settings of a run recorded before the method the PCA scaling it applied.
+
+    Before the ``normalization`` ``method`` existed, a PCA scaled its
+    features unless the call set ``feat_scaling``, and the run recorded only
+    what the call gave. A run of Pearson residuals now defaults to no
+    scaling, and so may a custom normalizer, whose recorded identity does
+    not say whether it is a ``PearsonResidualNormalizer``. The ``pca``
+    settings of such a run that set no ``feat_scaling`` therefore get True,
+    as the run applied it, while they run a PCA, with ``dims`` above 0. A
+    run of another built-in normalizer, whose default is still True, keeps
+    its settings.
+    """
+    pca = settings.get("pca")
+    if not isinstance(pca, dict) or "feat_scaling" in pca:
+        return
+    if isinstance(method, str) and feat_scaling_default(BUILTIN_NORMALIZERS[method]):
+        return
+    dims = pca.get("dims")
+    if isinstance(dims, int) and not isinstance(dims, bool) and dims > 0:
+        pca["feat_scaling"] = True
+
+
 @contextmanager
 def applied_normalizers(
     store: Any, normalizers: Mapping[str, NormMethod]

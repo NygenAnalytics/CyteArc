@@ -1255,8 +1255,10 @@ class PipelineRun(Mapping[str, ArtifactRef | tuple[ArtifactRef, ...]]):
         started is left out, so the recipe gives it its default, as a call
         that omits it would, except the ``normalization`` ``method``: a run
         recorded before it, as by CyteArc 1.4.0, returns the normalizer that
-        its saved normalized values record. Passing the keywords to the
-        recipe, as ``getattr(ds.pipeline, run.recipe)(**run.settings())``,
+        its saved normalized values record and, for Pearson residuals or a
+        custom normalizer, the PCA ``feat_scaling`` of True that it applied
+        when its call set none. Passing the keywords to the recipe, as
+        ``getattr(ds.pipeline, run.recipe)(**run.settings())``,
         analyzes the run's cells again and reuses the run's artifacts while
         the store's cell columns and the release's defaults are unchanged;
         :meth:`~cytearc.datastore.pipeline_accessor.PipelineAccessor.rerun`
