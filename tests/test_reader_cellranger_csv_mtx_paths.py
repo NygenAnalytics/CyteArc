@@ -10,11 +10,13 @@ from types import SimpleNamespace
 
 import h5py
 import numpy as np
+import pandas as pd
 import pytest
 import zarr
 from scipy.sparse import coo_matrix, csr_matrix
 from zarr.storage import MemoryStore
 
+from cytearc import DataStore
 from cytearc.readers import (
     CSVReader,
     CrDirReader,
@@ -562,6 +564,173 @@ def test_csv_reader_rejects_settings_that_its_field_check_cannot_follow(
     # split rows as the setting does.
     with pytest.raises(ValueError, match=message):
         CSVReader(str(path), **options)  # type: ignore[arg-type]
+
+
+_TWO_ROW_CSV = "a,b\n1,2\n3,4\n"
+_GENERATED_CELL_IDS = ["cell_0", "cell_1"]
+
+
+@pytest.mark.parametrize(
+    ("text", "options", "features", "cells"),
+    [
+        pytest.param(_TWO_ROW_CSV, {}, ["a", "b"], _GENERATED_CELL_IDS, id="header"),
+        pytest.param(
+            "cell,10,20\n001,1,2\n002,3,4\n",
+            {"id_column": 0},
+            ["10", "20"],
+            ["001", "002"],
+            id="header-of-numbers-and-id-column",
+        ),
+        pytest.param(
+            "cell,g,g,\nc1,1,2,3\nc2,3,4,5\n",
+            {"id_column": 0},
+            ["g", "g.1", "Unnamed: 3"],
+            ["c1", "c2"],
+            id="header-repeated-and-blank",
+        ),
+        pytest.param(
+            "cell,géne,基因\ncafé,1,2\n中文,3,4\n",
+            {"id_column": 0},
+            ["géne", "基因"],
+            ["café", "中文"],
+            id="non-ascii",
+        ),
+        pytest.param(
+            "cell,a,b\nc1,1,2\nc2,3,4\n",
+            {"id_column": 0, "pandas_kwargs": {"names": ["cell", 10, 20]}},
+            ["10", "20"],
+            ["c1", "c2"],
+            id="names-integers-and-id-column",
+        ),
+        pytest.param(
+            _TWO_ROW_CSV,
+            {"pandas_kwargs": {"names": np.array([2**63 - 1, -5])}},
+            ["9223372036854775807", "-5"],
+            _GENERATED_CELL_IDS,
+            id="names-numpy-integers",
+        ),
+        pytest.param(
+            "a,b,c\n1,2,3\n4,5,6\n",
+            {"pandas_kwargs": {"names": [1.5, 2.0, 1e16]}},
+            ["1.5", "2.0", "1e+16"],
+            _GENERATED_CELL_IDS,
+            id="names-floats",
+        ),
+        pytest.param(
+            _TWO_ROW_CSV,
+            {"pandas_kwargs": {"names": np.array([1.5, 2.1], dtype=np.float32)}},
+            ["1.5", "2.1"],
+            _GENERATED_CELL_IDS,
+            id="names-float32",
+        ),
+        pytest.param(
+            "cell,a,b\nc1,1,2\nc2,3,4\n",
+            {"id_column": 0, "pandas_kwargs": {"names": ["cell", "g1", 20]}},
+            ["g1", "20"],
+            ["c1", "c2"],
+            id="names-text-and-number",
+        ),
+        pytest.param(
+            _TWO_ROW_CSV,
+            {"pandas_kwargs": {"names": [b"x", "é".encode()]}},
+            ["x", "é"],
+            _GENERATED_CELL_IDS,
+            id="names-utf8-bytes",
+        ),
+        # pandas reads a missing name as NaN, which the store held as "nan".
+        pytest.param(
+            _TWO_ROW_CSV,
+            {"pandas_kwargs": {"names": [None, "y"]}},
+            ["nan", "y"],
+            _GENERATED_CELL_IDS,
+            id="names-missing",
+        ),
+        # The skipped column is named as pandas holds it, the number 20.
+        pytest.param(
+            "cell,a,b,c\nc1,1,2,3\nc2,4,5,6\n",
+            {
+                "id_column": 0,
+                "pandas_kwargs": {"names": ["cell", 10, 20, 30]},
+                "skip_cols": [20],
+            },
+            ["10", "30"],
+            ["c1", "c2"],
+            id="names-integers-and-a-skipped-column",
+        ),
+    ],
+)
+def test_csv_reader_ids_are_the_text_that_an_import_stores(
+    tmp_path: Path,
+    text: str,
+    options: dict[str, object],
+    features: list[str],
+    cells: list[str],
+) -> None:
+    path = tmp_path / "counts.csv"
+    path.write_text(text, encoding="utf-8")
+    reader = CSVReader(str(path), batch_size=1, **options)  # type: ignore[arg-type]
+    read = {"RNA/featureData": reader.feature_ids(), "cellData": reader.cell_ids()}
+
+    store = MemoryStore()
+    CSVtoZarr(
+        reader, store, assay_name="RNA", nthreads=1, policy=_POLICY, shuffle_cells=False
+    ).dump()
+
+    root = zarr.open_group(store=store, mode="r")
+    for table, expected in (("RNA/featureData", features), ("cellData", cells)):
+        # The reader used to give the names in pandas_kwargs as pandas holds
+        # them, such as 10 or b"x", where the store holds "10" or "x".
+        assert read[table].dtype.kind == "U", table
+        assert read[table].tolist() == expected, table
+        # The import stores what it stored before: the text of each name, as
+        # wide as the widest.
+        width = max(len(value) for value in expected)
+        for column in ("ids", "names"):
+            stored = root[f"{table}/{column}"]
+            assert stored.dtype == np.dtype(f"U{width}"), (table, column)
+            assert stored[:].tolist() == expected, (table, column)
+
+
+def test_values_keyed_by_the_csv_reader_ids_insert_into_the_store(
+    tmp_path: Path,
+) -> None:
+    # Features named by numbers in pandas_kwargs came back as those numbers,
+    # 10, 20 and 30, where the store holds "10", "20" and "30", so values
+    # keyed by the reader's feature IDs were refused.
+    path = tmp_path / "counts.csv"
+    path.write_text(
+        "cell,a,b,c\n001,1,0,2\n002,0,3,0\n003,4,5,6\n004,7,0,8\n005,9,1,0\n"
+    )
+    reader = CSVReader(
+        str(path),
+        id_column=0,
+        batch_size=2,
+        pandas_kwargs={"names": ["cell", 10, 20, 30]},
+    )
+    feature_ids = reader.feature_ids()
+    cell_ids = reader.cell_ids()
+    store = MemoryStore()
+    # The import shuffles the cells, as every import does by default.
+    CSVtoZarr(reader, store, assay_name="RNA", nthreads=1, policy=_POLICY).dump()
+    ds = DataStore(store, min_features_per_cell=0, nthreads=1)
+    rows = ds.cells.fetch_all("sourceRow")
+    assert not np.array_equal(rows, np.arange(5))
+
+    # The values are keyed in another order than the features'.
+    ds.RNA.feats.insert(
+        "weight", pd.Series([2.5, 0.5, 1.5], index=feature_ids[[2, 0, 1]])
+    )
+    ds.cells.insert("score", pd.Series(np.arange(5.0), index=cell_ids))
+
+    assert feature_ids.tolist() == ["10", "20", "30"]
+    assert cell_ids.tolist() == ["001", "002", "003", "004", "005"]
+    np.testing.assert_array_equal(ds.RNA.feats.fetch_all("weight"), [0.5, 1.5, 2.5])
+    # Each cell gets the value of its row in the file, wherever it is stored.
+    np.testing.assert_array_equal(ds.cells.fetch_all("score"), rows.astype(float))
+    # Matching stays exact: the numbers that pandas holds name no feature.
+    with pytest.raises(ValueError, match="3 labels are not such ids"):
+        ds.RNA.feats.insert("raw", pd.Series([0.5, 1.5, 2.5], index=[10, 20, 30]))
+    assert "raw" not in ds.RNA.feats.columns
 
 
 def test_matrix_names_without_the_matrix_suffix_use_plain_sidecars(

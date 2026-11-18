@@ -16,7 +16,7 @@ from ..utils.files import (
     is_tar,
 )
 from ..utils.progress import iter_progress
-from ._text import require_unique_identifiers
+from ._text import as_text, require_unique_identifiers
 from ..utils.arguments import bool_argument
 
 # read_csv settings that, besides the separator and ``quoting``, decide how
@@ -379,6 +379,11 @@ class CSVReader:
         if feature_ids is not None and keep_cols is not None:
             feature_ids = feature_ids[keep_cols]
             n_features = len(keep_cols)
+        if feature_ids is not None:
+            # names in pandas_kwargs can be numbers, such as 10, and an import
+            # stores each name as its text, "10". The skipped columns were
+            # matched by the names as pandas holds them.
+            feature_ids = np.asarray([as_text(name) for name in feature_ids], dtype=str)
         return (
             n_cells,
             n_features,
@@ -392,14 +397,32 @@ class CSVReader:
         )
 
     def cell_ids(self) -> np.ndarray:
-        """Returns a list of cell IDs."""
+        """Return the cell IDs in the file's order, as the text that an import stores.
+
+        The IDs are a NumPy array of ``str``: the values of the ID column, or
+        ``cell_0``, ``cell_1``, and so on without ``id_column``. Per-cell
+        values keyed by these IDs, such as
+        ``pd.Series(values, index=reader.cell_ids())`` for values in the
+        file's order, match the imported store's cells in ``ds.cells.insert``.
+        """
         if self.cellIds is None:
             return np.array([f"cell_{x}" for x in range(self.nCells)])
         else:
             return self.cellIds
 
     def feature_ids(self) -> np.ndarray:
-        """Returns a list of feature IDs."""
+        """Return the feature IDs in the file's column order, as the text that an import stores.
+
+        The IDs are a NumPy array of ``str``: the names of the count columns,
+        which the header gives or ``names`` in ``pandas_kwargs`` replaces, or
+        ``feature_0``, ``feature_1``, and so on with ``has_header=False``. A
+        name that is not text, such as the number ``10`` in ``names``,
+        becomes its ``str`` text, ``"10"``, and a byte string is decoded as
+        UTF-8. Values keyed by these IDs, such as
+        ``pd.Series(values, index=reader.feature_ids())``, match the imported
+        assay's features in ``feats.insert``, for example
+        ``ds.RNA.feats.insert``.
+        """
         if self.featureIds is None:
             return np.array([f"feature_{x}" for x in range(self.nFeatures)])
         else:
