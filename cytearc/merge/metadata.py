@@ -6,6 +6,7 @@ from typing import Any, NoReturn
 import numpy as np
 import zarr
 
+from ..metadata.artifacts import distinct_level_positions
 from ..metadata.rows import (
     array_row_selection_parts,
     iter_metadata_column_blocks,
@@ -487,6 +488,20 @@ def _metadata_column_spec(
     )
 
 
+def _source_attribute(attrs: Mapping[str, Any], key: str) -> Any:
+    """Return a source column's attribute as a merge compares and keeps it.
+
+    Imports of CyteArc 1.3.0 and 1.4.0 store levels that read alike for
+    categories that read alike once stored. A merge takes such levels as the
+    first of them (:func:`~cytearc.metadata.artifacts.distinct_level_positions`),
+    so their import of a file agrees with an import by this release.
+    """
+    value = attrs[key]
+    if key != "levels" or not isinstance(value, list | tuple):
+        return value
+    return [value[position] for position in distinct_level_positions(value)]
+
+
 def _reconciled_cell_attributes(
     arrays: Iterable[Any],
 ) -> tuple[dict[str, Any], list[str]]:
@@ -502,7 +517,7 @@ def _reconciled_cell_attributes(
         attrs = getattr(array, "attrs", {})
         for key in _CELL_ATTRIBUTES:
             if key in attrs:
-                found.setdefault(key, []).append(attrs[key])
+                found.setdefault(key, []).append(_source_attribute(attrs, key))
     ordered = any(value is True for value in found.get("ordered", ()))
     kept: dict[str, Any] = {}
     dropped: list[str] = []
@@ -843,7 +858,7 @@ def _merged_column_attributes(arrays: Iterable[Any], name: str) -> dict[str, Any
         for key in _MERGED_ATTRIBUTES:
             if key not in attrs:
                 continue
-            value = attrs[key]
+            value = _source_attribute(attrs, key)
             if key in attributes and attributes[key] != value:
                 raise _SourceConflict(
                     f"Conflicting metadata for column {name!r}: {key}"

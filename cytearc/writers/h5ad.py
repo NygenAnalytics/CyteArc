@@ -83,19 +83,25 @@ def _categorical_attributes(
     ``levels`` holds every category in its source order, unused ones
     included, ``ordered`` whether they are ordered, and for cell columns
     ``display`` the categorical display contract that plots honor, with the
-    source colors when the file holds them. A categorical whose categories
-    the column cannot hold, or that has more than 10,000 categories, gets no
-    attributes.
+    source colors when the file holds them. Categories that read alike once
+    stored, such as repeated text or ``-0.0`` beside ``0.0``, name one label,
+    whose level keeps the place and the color of the first of them. A
+    categorical whose categories the column cannot hold, or that has more
+    than 10,000 categories, gets no attributes.
     """
+    from ..metadata.artifacts import distinct_level_positions, levels_display
+
     if len(categories.values) > _MAX_STORED_CATEGORIES:
         return {}
     levels = _stored_levels(dtype, categories.values)
     if levels is None:
         return {}
+    positions = distinct_level_positions(levels)
+    levels = [levels[position] for position in positions]
+    if colors is not None:
+        colors = tuple(colors[position] for position in positions)
     attributes: dict[str, Any] = {"levels": levels, "ordered": categories.ordered}
     if display:
-        from ..metadata.artifacts import levels_display
-
         contract = levels_display(levels, colors, has_missing)
         if contract is not None:
             attributes["display"] = contract

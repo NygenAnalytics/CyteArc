@@ -1,7 +1,7 @@
 import colorsys
 import math
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -571,6 +571,20 @@ def artifact_values(
     return values if value_index is None else values[:, value_index]
 
 
+def distinct_level_positions(levels: Sequence[Any]) -> list[int]:
+    """Return the position of each level that no earlier level reads alike.
+
+    Levels read alike when they compare equal, as pandas categories, display
+    values and mapping keys compare them: the same text, or equal numbers,
+    such as ``-0.0`` and ``0.0``. Such levels name one label, which keeps the
+    place of the first of them.
+    """
+    first: dict[Any, int] = {}
+    for position, level in enumerate(levels):
+        first.setdefault(level, position)
+    return list(first.values())
+
+
 @dataclass(frozen=True, slots=True)
 class RecordedCategories:
     """The categories that a stored array of labels records in its attributes.
@@ -580,8 +594,8 @@ class RecordedCategories:
     reads.
 
     Attributes:
-        levels: Every category in its source order, unused ones included, or
-            None when the array records none.
+        levels: Every category in its source order, unused ones included,
+            each named once, or None when the array records none.
         ordered: Whether the levels are ordered.
         display: The validated display contract, or None.
     """
@@ -599,6 +613,11 @@ class RecordedCategories:
 def recorded_categories(attributes: Mapping[str, Any]) -> RecordedCategories:
     """Read the ``levels``, ``ordered``, and ``display`` attributes of a stored array.
 
+    Imports of CyteArc 1.3.0 and 1.4.0 store one level for each category of
+    the source, so categories that read alike once stored, such as repeated
+    text, store levels that read alike. Such levels are read as the first of
+    them (:func:`distinct_level_positions`).
+
     Raises:
         TypeError: If ``levels`` is not a list or ``display`` not a mapping.
         ValueError: If ``display`` is not a valid display contract.
@@ -611,8 +630,12 @@ def recorded_categories(attributes: Mapping[str, Any]) -> RecordedCategories:
     display = attributes.get("display")
     if display is not None and not isinstance(display, Mapping):
         raise TypeError("Existing display metadata must be a mapping")
+    if levels is not None:
+        levels = tuple(
+            levels[position] for position in distinct_level_positions(levels)
+        )
     return RecordedCategories(
-        levels=None if levels is None else tuple(levels),
+        levels=levels,
         ordered=attributes.get("ordered") is True,
         display=None if display is None else validate_display_metadata(display),
     )
