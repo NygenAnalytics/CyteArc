@@ -103,6 +103,15 @@ def _texts(values: np.ndarray) -> list[str | None]:
     return [None if value is None else as_text(value) for value in values]
 
 
+def _stored_texts(values: np.ndarray) -> np.ndarray:
+    """Return IDs or names as the text that an import stores.
+
+    Byte strings are decoded as UTF-8, and other values, such as integers,
+    become their ``str`` text.
+    """
+    return np.asarray([as_text(value) for value in values.astype(object)], dtype=str)
+
+
 def _is_missing_name(value: Any) -> bool:
     if value is None:
         return True
@@ -150,7 +159,7 @@ class H5adReader:
                                and across assays, by appending ``-1``, ``-2``, and so on (skipping
                                names that are already IDs), as AnnData's ``var_names_make_unique``
                                does, and logs a warning. Feature names are never changed: without a
-                               feature name column they are the IDs as the file holds them.
+                               feature name column they are the IDs before any rename.
         duplicate_cell_ids: ``"error"`` rejects repeated cell IDs. ``"make_unique"`` renames each
                             later occurrence of a repeated cell ID as ``duplicate_feature_ids``
                             renames feature IDs, as AnnData's ``obs_names_make_unique`` does,
@@ -165,8 +174,7 @@ class H5adReader:
     Categorical columns keep their category order, unused categories, and
     ``ordered`` flag, which ``H5adToZarr`` stores with the column; ``obs``
     categories also keep the colors that ``uns["<column>_colors"]`` holds.
-    A missing or blank feature name takes the feature's ID as the file holds
-    it.
+    A missing or blank feature name takes the feature's ID before any rename.
 
     Attributes:
         h5: A File object from the h5py package.
@@ -218,8 +226,8 @@ class H5adReader:
         self._tempDir = temp_dir
         self.duplicateFeatureIds = duplicate_feature_ids_option(duplicate_feature_ids)
         self.duplicateCellIds = duplicate_cell_ids_option(duplicate_cell_ids)
-        # The feature and cell IDs as the file holds them and as an import
-        # stores them, read on first use.
+        # The feature and cell IDs as the file holds them and with any
+        # repeated ID renamed, read on first use.
         self._featureIdentifiers: tuple[np.ndarray, np.ndarray] | None = None
         self._cellIdentifiers: tuple[np.ndarray, np.ndarray] | None = None
         self._featureNames: np.ndarray | None = None
@@ -667,7 +675,7 @@ class H5adReader:
         return values
 
     def _cell_identifiers(self) -> tuple[np.ndarray, np.ndarray]:
-        """Return the cell IDs as the file holds them and as they import.
+        """Return the cell IDs as the file holds them and with any repeated ID renamed.
 
         They differ only when ``duplicate_cell_ids="make_unique"`` renamed
         repeated IDs, which happens once, on first use.
@@ -681,25 +689,28 @@ class H5adReader:
         return self._cellIdentifiers
 
     def cell_ids(self) -> np.ndarray:
-        """Returns a list of cell IDs.
+        """Return the cell IDs in the file's order, as the text that an import stores.
+
+        The IDs are a NumPy array of ``str``, whatever the file holds: byte
+        strings are decoded as UTF-8, and numbers become text, so ``101``
+        becomes ``"101"``. Per-cell values keyed by these IDs, such as
+        ``pd.Series(values, index=reader.cell_ids())`` for values in the
+        file's order, match the imported store's cells in ``ds.cells.insert``.
 
         Repeated IDs raise ValueError, or are renamed with
         ``duplicate_cell_ids="make_unique"``.
         """
-        return self._cell_identifiers()[1].copy()
+        return _stored_texts(self._cell_identifiers()[1])
 
     def _cell_ids_at(self, rows: np.ndarray) -> np.ndarray:
         """Return the cell IDs of file rows ``rows``, in that order, as the text an import stores."""
-        values = self._cell_identifiers()[1][rows]
-        return np.asarray(
-            [as_text(value) for value in values.astype(object)], dtype=str
-        )
+        return _stored_texts(self._cell_identifiers()[1][rows])
 
     def _cell_id_bytes(self) -> int:
         """Return the bytes of the cell IDs that the reader holds once it read them.
 
         It holds them as the file holds them and, when it renamed repeated
-        IDs, as they import.
+        IDs, with those IDs renamed.
         """
         source, resolved = self._cell_identifiers()
         held = 0
@@ -710,7 +721,7 @@ class H5adReader:
         return held
 
     def _feature_identifiers(self) -> tuple[np.ndarray, np.ndarray]:
-        """Return the feature IDs as the file holds them and as they import.
+        """Return the feature IDs as the file holds them and with any repeated ID renamed.
 
         They differ only when ``duplicate_feature_ids="make_unique"`` renamed
         repeated IDs, which happens once, on first use.
@@ -726,23 +737,27 @@ class H5adReader:
         return self._featureIdentifiers
 
     def feat_ids(self) -> np.ndarray:
-        """Returns a list of feature IDs.
+        """Return the feature IDs in the file's order, as the text that an import stores.
+
+        The IDs are a NumPy array of ``str``, converted as :meth:`cell_ids`
+        converts cell IDs.
 
         Repeated IDs raise ValueError, or are renamed with
         ``duplicate_feature_ids="make_unique"``.
         """
-        return self._feature_identifiers()[1].copy()
+        return _stored_texts(self._feature_identifiers()[1])
 
     def feat_names(self) -> np.ndarray:
-        """Returns a list of feature names.
+        """Return the feature names in the file's order, as the text that an import stores.
 
-        Without the feature name key, the names are the feature IDs as the
-        file holds them, before any repeated ID is renamed. A missing or
-        blank name, such as a missing category, takes the ID of its feature
-        as the file holds it.
+        The names are a NumPy array of ``str``, converted as :meth:`cell_ids`
+        converts cell IDs. Without the feature name key, the names are the
+        feature IDs before any repeated ID is renamed. A missing or blank
+        name, such as a missing category, takes the ID of its feature before
+        any rename.
         """
         if self._featureNames is None:
-            self._featureNames = self._read_feature_names()
+            self._featureNames = _stored_texts(self._read_feature_names())
         return self._featureNames.copy()
 
     def _read_feature_names(self) -> np.ndarray:
@@ -936,9 +951,7 @@ class H5adReader:
             values, _ = self._read_column(
                 self.cellAttrsKey, self.cellIdsKey, start, stop
             )
-        return np.asarray(
-            [as_text(value) for value in values.astype(object)], dtype=str
-        )
+        return _stored_texts(values)
 
     def _obsm_array(self, key: str) -> h5py.Dataset:
         # The constructor validated each embedding key as a dense array.

@@ -85,7 +85,7 @@ def test_inspect_h5ad_sees_id_columns_that_hdf5_nests(tmp_path):
     assert inspection.cellIdsKey == "cell/id"
     reader = H5adReader.from_inspect(inspection)
     try:
-        assert reader.cell_ids().tolist() == [name.encode() for name in CELL_IDS]
+        assert reader.cell_ids().tolist() == list(CELL_IDS)
     finally:
         reader.close()
 
