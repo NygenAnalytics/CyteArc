@@ -1,10 +1,12 @@
 from collections.abc import Callable, Mapping, Sequence
 from contextvars import Context, copy_context
 from dataclasses import dataclass, field, replace
+from types import MappingProxyType
 from typing import Any
 
 import numpy as np
 
+from ...assay import NormMethod
 from ...storage.artifacts import ArtifactRef
 from ...storage.pipeline_runs import (
     PipelineFieldDescriptor,
@@ -33,6 +35,7 @@ from ..pipeline_run import (
 )
 from .events import PipelineCallback, PipelineEventEmitter, run_callbacks
 from .ledger import RunLedger, StageSummarizer, end_pipeline_run, interruption_record
+from .normalizers import applied_normalizers
 
 # A stage output names one artifact, or a tuple of artifacts in a fixed order,
 # such as the Leiden candidates ordered by resolution.
@@ -112,6 +115,8 @@ class RecipePlan:
         fields: Builds the frozen field descriptors once the stages are done.
         summarize: Computes a completed stage's diagnostics, or None.
         start: Builds the shared state before the first stage.
+        normalizers: The normalizer that the run applies to each assay, by
+            name, as the assay's ``normMethod`` while the stages run.
     """
 
     recipe: str
@@ -123,6 +128,7 @@ class RecipePlan:
     fields: Callable[[RunState], tuple[PipelineFieldDescriptor, ...]]
     start: Callable[[Any], RunState]
     summarize: StageSummarizer | None = None
+    normalizers: Mapping[str, NormMethod] = MappingProxyType({})
 
     @property
     def stage_order(self) -> tuple[str, ...]:
@@ -141,7 +147,9 @@ def execute_recipe(
     The run installs cooperative signal handling on the main thread and
     listens to ``cancel``. A cancellation stops the run at its next safe
     checkpoint and raises ``PipelineCancelled``; a signal is handled as
-    before and propagated once durable state is written.
+    before and propagated once durable state is written. Each assay
+    normalizes with the plan's normalizer while the stages run, and with the
+    session's again once the run ends, however it ends.
     """
     callbacks = run_callbacks(callback)
     # Callbacks run in the caller's context, outside the run's shutdown and
@@ -162,15 +170,16 @@ def execute_recipe(
             cancellation_scope(cancel, token),
         ):
             try:
-                result = _execute(
-                    store,
-                    plan,
-                    callbacks,
-                    context=context,
-                    signal_guard_available=guard.available,
-                    signal_guard_unavailable_reason=guard.unavailable_reason,
-                    active=active,
-                )
+                with applied_normalizers(store, plan.normalizers):
+                    result = _execute(
+                        store,
+                        plan,
+                        callbacks,
+                        context=context,
+                        signal_guard_available=guard.available,
+                        signal_guard_unavailable_reason=guard.unavailable_reason,
+                        active=active,
+                    )
             except BaseException as error:
                 if active:
                     started_run, events, _ledger = active[0]

@@ -14,6 +14,7 @@ import numpy as np
 import pytest
 
 from cytearc import DataStore
+from cytearc.assay import norm_lib_size, norm_pearson_residuals
 from cytearc.datastore import namespaces
 from cytearc.datastore._pipeline import description
 from cytearc.datastore._pipeline.filtering import FILTERING_SETTINGS
@@ -101,6 +102,7 @@ _RNA_COLUMNS = (
 )
 _WITHOUT_TOTALS = ", without <assay>_nCounts for an assay of normalized values"
 _MANUAL_BOUNDS = "required with method 'manual', one bound for each column of attrs"
+_FEATURE_SCALING = "False when the run normalizes with Pearson residuals, else True"
 _ALL = "*"
 # The settings whose type, default or rule the recipe sets itself, by
 # recipe ("*" for every recipe with the stage), stage keyword and setting:
@@ -167,6 +169,19 @@ _OWN: dict[tuple[str, str, str], tuple[str | None, str | None, Any, str | None]]
         "the smaller of 10000 and one fewer than the assay's peaks",
     ),
     (_ALL, "panel", "exclude"): (None, "str | None", DEFAULT_PANEL_EXCLUDE, None),
+    (_ALL, "normalization", "method"): (
+        None,
+        "str | collections.abc.Mapping[str, str] | None",
+        None,
+        "the assay's normMethod",
+    ),
+    ("rna", "pca", "feat_scaling"): ("reduction.pca", "bool", None, _FEATURE_SCALING),
+    ("perturbation", "pca", "feat_scaling"): (
+        "reduction.pca",
+        "bool",
+        None,
+        _FEATURE_SCALING,
+    ),
     ("adt", "pca", "dims"): (
         "reduction.pca",
         "int",
@@ -514,6 +529,35 @@ def test_the_rna_defaults_that_the_call_decides_follow_their_rules(tmp_path: Pat
     # preparation wrote, and keeps a given selection's cells as they are.
     assert alone["stages"]["filtering"]["attrs"] == ["RNA_nCounts", "RNA_nFeatures"]
     assert chosen["stages"]["filtering"] == {"enabled": False}
+
+
+@pytest.mark.parametrize(
+    ("normalizer", "method", "scaled"),
+    [
+        (norm_lib_size, "lib_size", True),
+        (norm_pearson_residuals, "pearson_residuals", False),
+    ],
+    ids=["lib-size", "pearson"],
+)
+def test_the_rna_normalizer_and_its_pca_scaling_follow_their_described_rules(
+    tmp_path: Path, normalizer: Any, method: str, scaled: bool
+):
+    rng = np.random.default_rng(5)
+    write_count_store(
+        str(tmp_path / "rna.zarr"), {"RNA": rng.poisson(1.0, size=(40, 60))}, "uint16"
+    )
+    store = open_store(tmp_path / "rna.zarr")
+    store.RNA.normMethod = normalizer
+    described = PipelineAccessor.describe("rna")
+
+    run = store.pipeline.rna(filtering=False, **_QUICK_RNA)
+
+    # The method defaults to the assay's normMethod, which the run records by
+    # name, and the PCA scales its features unless the values are residuals.
+    assert described["normalization"]["method"].rule == "the assay's normMethod"
+    assert described["pca"]["feat_scaling"].rule == _FEATURE_SCALING
+    assert run.settings()["normalization"] == {"method": method}
+    assert store.artifacts.inspect(run["pca"]).parameters["feat_scaling"] is scaled
 
 
 @pytest.mark.parametrize(

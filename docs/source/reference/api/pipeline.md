@@ -99,11 +99,7 @@ atac.features.fetch("prevalent_peaks")
 
 The `atac` recipe runs `input_snapshot`, `filtering`, `prevalent_peaks`, `normalization`, `lsi`, `harmony`, `ann_index`, `neighbors`, `connectivity`, `embedding_initialization`, `umap`, `localmap`, `leiden`, `paris`, `cluster_selection`, `membership_strength`, `tsne`, and `markers`.
 
-By default it filters cells on `<assay>_nCounts` and `<assay>_nFeatures` with MAD bounds, keeps the
-10,000 most prevalent peaks (`features.prevalent_peaks` `top_n`), normalizes them with the assay's
-normalizer, TF-IDF for an ATAC assay, and reduces them to 11 LSI dimensions without the first
-component (`reduction.lsi` `dims` and `skip_first`). It then builds, embeds, and clusters a graph
-and ranks markers as the RNA recipe does. With Harmony, the run corrects its LSI coordinates.
+By default it filters cells on `<assay>_nCounts` and `<assay>_nFeatures` with MAD bounds, keeps the 10,000 most prevalent peaks (`features.prevalent_peaks` `top_n`), normalizes them with the assay's normalizer, TF-IDF for an ATAC assay ([Normalization method](#normalization-method)), and reduces them to 11 LSI dimensions without the first component (`reduction.lsi` `dims` and `skip_first`). It then builds, embeds, and clusters a graph and ranks markers as the RNA recipe does. With Harmony, the run corrects its LSI coordinates.
 
 `prevalent_peaks` `top_n` defaults to 10,000 or one fewer than the assay's number of peaks,
 whichever is smaller, and a given `top_n` must be below the assay's number of peaks; the run records
@@ -122,16 +118,7 @@ adt.features.fetch("panel")
 
 The `adt` recipe runs `input_snapshot`, `filtering`, `panel`, `normalization`, `pca`, `harmony`, `ann_index`, `neighbors`, `connectivity`, `embedding_initialization`, `umap`, `localmap`, `leiden`, `paris`, `cluster_selection`, `membership_strength`, `tsne`, and `markers`.
 
-The assay must be of type `ADT`; an `HTO` assay is read by the RNA recipe's `hashing` stage
-instead. The panel leaves out the antibodies whose names match
-`cytearc.datastore.pipeline_accessor.DEFAULT_PANEL_EXCLUDE`, the regular expression
-`(?i)isotype|control|ctrl`, so isotype controls stay out of the reduction. `panel={"exclude": ...}`
-sets another pattern, and `panel={"exclude": None}` keeps every antibody. The panel must keep at
-least two antibodies, and the run records the excluded names. The antibodies are normalized with
-the assay's normalizer, CLR for an ADT assay, and PCA keeps one dimension fewer than the panel
-holds, at most 21, unless `pca` sets `dims`, which must be at least 1 and below the panel's number
-of antibodies. The recipe filters cells only when `filtering` asks for it, because an ADT run
-usually takes the QC-passing cells of an RNA run.
+The assay must be of type `ADT`; an `HTO` assay is read by the RNA recipe's `hashing` stage instead. The panel leaves out the antibodies whose names match `cytearc.datastore.pipeline_accessor.DEFAULT_PANEL_EXCLUDE`, the regular expression `(?i)isotype|control|ctrl`, so isotype controls stay out of the reduction. `panel={"exclude": ...}` sets another pattern, and `panel={"exclude": None}` keeps every antibody. The panel must keep at least two antibodies, and the run records the excluded names. The antibodies are normalized with the assay's normalizer, CLR for an ADT assay ([Normalization method](#normalization-method)), and PCA keeps one dimension fewer than the panel holds, at most 21, unless `pca` sets `dims`, which must be at least 1 and below the panel's number of antibodies. The recipe filters cells only when `filtering` asks for it, because an ADT run usually takes the QC-passing cells of an RNA run.
 
 ### Multimodal
 
@@ -145,12 +132,7 @@ ds.markers.load(marker=wnn["markers_ADT"], group_id=1)
 
 The `multimodal` recipe runs `input_snapshot`, `integration`, `embedding_initialization`, `umap`, `leiden`, `paris`, `cluster_selection`, which is always skipped, `membership_strength`, `tsne`, and `markers`.
 
-It integrates the runs' graphs with weighted nearest neighbors (`method="wnn"`, the default), which
-weighs each run's neighbors, or with shared nearest neighbors (`method="snn"`), which shares each
-run's connectivity-map edges ({doc}`integration`). It then embeds and clusters the integrated graph
-and ranks each run's assay's features for the joint clusters as one `markers_<assay>` output per
-run. `integration` takes the keywords of `integration.modalities`: `chunk_size` and, for WNN only,
-`l2_normalize`.
+It integrates the runs' graphs with weighted nearest neighbors (`method="wnn"`, the default), which weighs each run's neighbors, or with shared nearest neighbors (`method="snn"`), which shares each run's connectivity-map edges ({doc}`integration`). It then embeds and clusters the integrated graph and ranks each run's assay's features for the joint clusters as one `markers_<assay>` output per run, with the normalizer that the run recorded ([Normalization method](#normalization-method)). `integration` takes the keywords of `integration.modalities`: `chunk_size` and, for WNN only, `l2_normalize`.
 
 `runs` is a sequence of two or more completed runs of different assays that analyze the same
 cells: their `analysis_cell_selection` outputs must be the same ref, which a run gets by taking an
@@ -250,7 +232,7 @@ Each stage keyword configures one stage:
 - `labels`, the settings of a `perturbation` run's labels, is a required mapping that names `controls`.
 - `signature` and `profiles` configure the stages that a `perturbation` run's `mixscape` and `clusters` run: None, the default, or a mapping of settings, which raises `ValueError` while its stage is off. A bool raises `TypeError`.
 
-A setting means exactly what the same keyword means on the stage's method, and an omitted setting takes that method's default, with three exceptions that fit the recipe to its data: an `adt` run's `pca` `dims` defaults to one fewer than the panel's antibodies, at most 21 ([ADT](#adt)); an `atac` run's `prevalent_peaks` `top_n` to 10,000 or one fewer than the assay's peaks ([ATAC](#atac)); and with Harmony, an `rna` run's `doublets` `sample_column` to the Harmony batch columns ([Doublets and Harmony](#doublets-and-harmony)). The pipeline supplies the artifacts that each stage consumes, so a mapping holds settings only. A few keys configure the recipe instead: Leiden `partitions` and `selected`, Harmony `batch_columns`, cell-calling `sample_column`, hashing `assay`, panel `exclude`, guide-calling `path`, `barcode_prefix`, `barcode_suffix` and `barcode_pattern`, which import Cell Ranger's calls in place of calling guides, and profiles `cells`, which chooses the cells that the profiles average ([Perturbation](#perturbation)). An unknown key raises `ValueError` that lists the allowed keys, such as `Unknown pca settings ['dim']; allowed: ['batch_size', 'dims', 'feat_scaling']`. `ds.pipeline.describe(recipe)` gives every stage's settings with these defaults and rules in code ([Describe a recipe](#describe-a-recipe)).
+A setting means exactly what the same keyword means on the stage's method, and an omitted setting takes that method's default, with four exceptions that fit the recipe to its data: an `adt` run's `pca` `dims` defaults to one fewer than the panel's antibodies, at most 21 ([ADT](#adt)); an `atac` run's `prevalent_peaks` `top_n` to 10,000 or one fewer than the assay's peaks ([ATAC](#atac)); an `rna` or `perturbation` run's `pca` `feat_scaling` to False when the run normalizes with Pearson residuals, and to True otherwise ([Normalization method](#normalization-method)); and with Harmony, an `rna` run's `doublets` `sample_column` to the Harmony batch columns ([Doublets and Harmony](#doublets-and-harmony)). The pipeline supplies the artifacts that each stage consumes, so a mapping holds settings only. A few keys configure the recipe instead: Leiden `partitions` and `selected`, Harmony `batch_columns`, cell-calling `sample_column`, hashing `assay`, panel `exclude`, normalization `method`, which names the run's normalizer ([Normalization method](#normalization-method)), guide-calling `path`, `barcode_prefix`, `barcode_suffix` and `barcode_pattern`, which import Cell Ranger's calls in place of calling guides, and profiles `cells`, which chooses the cells that the profiles average ([Perturbation](#perturbation)). An unknown key raises `ValueError` that lists the allowed keys, such as `Unknown pca settings ['dim']; allowed: ['batch_size', 'dims', 'feat_scaling']`. `ds.pipeline.describe(recipe)` gives every stage's settings with these defaults and rules in code ([Describe a recipe](#describe-a-recipe)).
 
 ```python
 run = ds.pipeline.rna(
@@ -276,7 +258,7 @@ run = ds.pipeline.rna(
 | `hvg` | `rna`, `perturbation` | {py:meth}`~cytearc.datastore.namespaces.FeaturesAccessor.hvgs` | `top_n`, `flavor`, `batch` (a cell metadata column), `min_cells`, `max_cells`, `min_mean`, `max_mean`, `min_var`, `max_var` (the last four are log2 values), `n_bins`, `lowess_frac`, `blacklist`, `keep_bounds`, `bin_strategy`, `span`, `theta`, `clip` |
 | `prevalent_peaks` | `atac` | {py:meth}`~cytearc.datastore.namespaces.FeaturesAccessor.prevalent_peaks` | `top_n` |
 | `panel` | `adt` | the antibody panel | `exclude`, a regular expression or None |
-| `normalization` | `rna`, `atac`, `adt`, `perturbation` | {py:meth}`~cytearc.datastore.namespaces.FeaturesAccessor.normalize` | `log_transform`, `renormalize_subset` |
+| `normalization` | `rna`, `atac`, `adt`, `perturbation` | {py:meth}`~cytearc.datastore.namespaces.FeaturesAccessor.normalize` | `method`, the run's normalizer ([Normalization method](#normalization-method)); `log_transform`, `renormalize_subset` |
 | `pca` | `rna`, `adt`, `perturbation` | {py:meth}`~cytearc.datastore.namespaces.ReductionAccessor.pca` | `dims`, `feat_scaling`, `batch_size` |
 | `lsi` | `atac` | {py:meth}`~cytearc.datastore.namespaces.ReductionAccessor.lsi` | `dims`, `skip_first`, `rand_state`, `solver`, `n_iter`, `n_oversamples`, `batch_size` |
 | `harmony` | `rna`, `atac`, `adt`, `perturbation` | {py:meth}`~cytearc.datastore.namespaces.ReductionAccessor.harmony` | `batch_columns` (required), `harmony_params` (the keyword options of {py:func}`~cytearc.embeddings.fit_harmony`), `batch_size` |
@@ -319,14 +301,33 @@ The other keywords configure the run itself:
 - `cancel`: a {py:class}`~cytearc.CancellationToken` that stops the run
   ([Cancellation](#cancellation)).
 
-Settings are JSON values: numbers, strings, bools, None, lists, and mappings with string keys.
-Infinity and NaN are never settings. Some settings spell a derived default as `None`: `hvg`
-`min_cells`, the cube root of the number of selected cells rounded up and at least 20, or 5% of a smaller selection's cells and at least 5, for the default flavor; `hvg`
-`max_cells`, which for the default flavor excludes genes detected in more than 99.5% of the selected
-cells; `batch_size` of every stage that takes it; `cell_cycle` `ctrl_size` and `log_transform`;
-`paris` `min_cluster_size`; and `normalization` `log_transform` and `renormalize_subset`, whose
-defaults follow the assay's normalizer ({doc}`assays`). The run records the settings it was given
-under `config["stages"]`, and each artifact records the values its method resolved.
+Settings are JSON values: numbers, strings, bools, None, lists, and mappings with string keys. Infinity and NaN are never settings. Some settings spell a derived default as `None`: `hvg` `min_cells`, the cube root of the number of selected cells rounded up and at least 20, or 5% of a smaller selection's cells and at least 5, for the default flavor; `hvg` `max_cells`, which for the default flavor excludes genes detected in more than 99.5% of the selected cells; `batch_size` of every stage that takes it; `cell_cycle` `ctrl_size` and `log_transform`; `paris` `min_cluster_size`; `normalization` `method`, the assay's `normMethod`; and `normalization` `log_transform` and `renormalize_subset`, whose defaults follow the run's normalizer ({doc}`assays`). The run records the settings it was given under `config["stages"]`, with the normalization `method` it resolved, and each artifact records the values its method resolved.
+
+### Normalization method
+
+Every stage of a run that reads normalized values, such as gene selection, normalization, cell cycle scores and markers, applies one normalizer: the one that the `normalization` `method` names, or the assay's `normMethod` when the call names none. The run records the normalizer, so `run.settings()`, `ds.pipeline.rerun` and `ds.pipeline.plan(run)` normalize as the run did in any session, including a new session whose RNA assay normalizes by library size. `method` names a built-in normalizer by its function's name without `norm_`, and `norm_dummy` as `"passthrough"`:
+
+| `method` | Normalizer | Assays |
+| --- | --- | --- |
+| `"lib_size"` | `cytearc.assay.norm_lib_size`, the RNA default | RNA |
+| `"lib_size_log"` | `cytearc.assay.norm_lib_size_log` | RNA |
+| `"pearson_residuals"` | `cytearc.assay.norm_pearson_residuals` | RNA |
+| `"clr"` | `cytearc.assay.norm_clr`, the ADT default | every assay |
+| `"tf_idf"` | `cytearc.assay.norm_tf_idf`, the ATAC default | ATAC |
+| `"passthrough"` | `cytearc.assay.norm_dummy`, which passes the stored values through | every assay |
+
+```python
+run = ds.pipeline.rna(
+    label="residuals", normalization={"method": "pearson_residuals"}, doublets=False
+)
+run.settings()["normalization"]  # {'method': 'pearson_residuals'}
+```
+
+The run makes its normalizer the assay's `normMethod` while its stages run, and so does a plan of the call, since the identities of the stages' artifacts depend on it; the session's `normMethod` comes back however the run ends, completed, failed, or cancelled. A call without `method` records the assay's `normMethod` by its name. A name that is not in the table, or a normalizer that the assay's class cannot apply, such as `"lib_size"` for an ATAC assay, raises `ValueError` before anything is written.
+
+A custom normalizer, and a `PearsonResidualNormalizer` with options other than the defaults, has no name: a run applies it as the assay's `normMethod` and records the identity that provenance records for it ({doc}`assays`), such as `{"identity": "cytearc.assay.pearson_residuals:theta=50.0:clip=sqrt-n"}`, which `run.settings()` returns as its `method`. A rerun or a plan of such a run raises `ValueError` before it computes anything unless the assay's `normMethod` has that identity, and the message names it. `normalization={"method": None}` reruns with the assay's `normMethod` instead.
+
+Pearson residuals are already standardized, so the PCA of a run of residuals scales no feature: `pca` `feat_scaling` defaults to False for such a run, as `reduction.pca(residuals, feat_scaling=False)` does, and to True for every other normalizer, and a value that the call gives wins. The run's cell cycle scores average residuals and its markers rank them. Doublet scoring normalizes its simulated doublets by library size, so a run of residuals passes `doublets=False`. A `multimodal` run ranks each assay's markers with the normalizer that the run of that assay recorded.
 
 ### Validation before a run starts
 
@@ -337,8 +338,9 @@ A recipe checks its call against the store before it creates a run record, and a
   `membership_strength requires at least one Leiden candidate`;
 - `pca={'dims': 0} builds the graph on normalized values, which Harmony cannot correct; ...` and
   `pca={'dims': 0} builds the graph on normalized values, but doublet scoring needs a PCA graph; ...`;
-- `Assay 'RNA' normalizes with ..., but doublet scoring normalizes its simulated doublets by library size and needs norm_lib_size; ...` (`rna` with doublet scoring on, when the assay's `normMethod` is not `cytearc.assay.norm_lib_size`, such as `norm_pearson_residuals`): pass `doublets=False`, or set the `normMethod` back to `norm_lib_size`;
-- `pca={'feat_scaling': False} fits PCA without feature scaling, but doublet scoring projects its simulated doublets onto the PCA through a mapping reference, which needs feature scaling; ...` (`rna` with doublet scoring on): pass `doublets=False`, or omit `feat_scaling`, which defaults to True;
+- `The run normalizes assay 'RNA' with ..., but doublet scoring normalizes its simulated doublets by library size and needs lib_size; ...` (`rna` with doublet scoring on, when the run normalizes with another normalizer, such as `"pearson_residuals"`): pass `normalization={"method": "lib_size"}` or `doublets=False`;
+- `pca={'feat_scaling': False} fits PCA without feature scaling, but doublet scoring projects its simulated doublets onto the PCA through a mapping reference, which needs feature scaling; ...` (`rna` with doublet scoring on): pass `doublets=False`, or omit `feat_scaling`, which defaults to True for library-size values;
+- `normalization['method'] must be one of [...], or the identity of a custom normalizer that a run recorded; ...`, `Assay 'ATAC' opens as ATACassay, but lib_size needs an RNAassay; ...`, and `normalization['method'] is the custom normalizer ..., which a run applies only as the assay's normMethod, ...` ([Normalization method](#normalization-method));
 - `PCA settings need dims above 0; dims=0 skips PCA`, for other `pca` settings beside `dims=0`;
 - `leiden selected must be one of the partitions`;
 - `snapshot_columns collide with reserved run fields: [...]`;
@@ -448,7 +450,7 @@ fine = ds.pipeline.rerun(base, label="fine", leiden={"partitions": [2.0]})
 
 A mapping changes a stage's settings key by key: `leiden={"partitions": [2.0]}` keeps the run's other Leiden settings, among them its `selected` resolution, which must be one of the new partitions or None. A mapping inside a stage's settings, such as Harmony's `harmony_params`, is replaced whole. `False` turns an optional stage off, `True` runs it with its defaults, None takes the keyword's default, and every other value replaces the run's. A rerun with new `cells` therefore keeps the run's filtering, and `filtering=None` filters the new cells as a call that omits `filtering` would. Stages whose settings and inputs are unchanged reuse the run's artifacts, and the new run takes its own `label`.
 
-The settings are those that the call gave, with the defaults that the recipe fits to its data resolved, such as an `atac` run's `prevalent_peaks` `top_n`: a rerun that changes the cells or the panel keeps them, and the recipe refuses a value that no longer fits. A `cells` column is passed by its name, so a rerun reads the column as it is now, and settings that the run did not set take this release's defaults ([Runs saved by other releases](#runs-saved-by-other-releases)). A run records its settings when it starts, so a failed or interrupted run reruns too, with the setting that failed changed. A run recorded before its recipe gained a keyword or a stage setting, such as an `rna` run recorded before `localmap`, reruns with that setting's default, which matches what the earlier release did, so the plan reuses the run's stages and a call can turn the new stage on. `run.settings()` raises `ValueError` for a run whose recipe this release lacks, such as one that `pipeline.run()` saved, and for a run that records a keyword its recipe no longer takes.
+The settings are those that the call gave, with the defaults that the recipe fits to its data resolved, such as an `atac` run's `prevalent_peaks` `top_n`: a rerun that changes the cells or the panel keeps them, and the recipe refuses a value that no longer fits. They hold the run's normalizer as its `normalization` `method`, so a rerun normalizes as the run did whatever the session's `normMethod` is, and refuses a custom normalizer that the assay's `normMethod` is not ([Normalization method](#normalization-method)). A `cells` column is passed by its name, so a rerun reads the column as it is now, and settings that the run did not set take this release's defaults ([Runs saved by other releases](#runs-saved-by-other-releases)). A run records its settings when it starts, so a failed or interrupted run reruns too, with the setting that failed changed. A run recorded before its recipe gained a keyword or a stage setting, such as an `rna` run recorded before `localmap`, reruns with that setting's default, which matches what the earlier release did, so the plan reuses the run's stages and a call can turn the new stage on; a run recorded before the normalization `method` reruns with the normalizer that its normalized values record ([Runs saved by other releases](#runs-saved-by-other-releases)). `run.settings()` raises `ValueError` for a run whose recipe this release lacks, such as one that `pipeline.run()` saved, and for a run that records a keyword its recipe no longer takes.
 
 ## Describe a recipe
 
@@ -853,16 +855,7 @@ table for the run's clusters.
 
 ### Run configuration
 
-`run.report()["run"]["config"]` records how the run was called. For `rna`, `atac`, and `adt`, it
-holds `cells` (`{"column": ...}`, `{"selection": ref}`, or `{"run": {"runId", "label"}, "selection":
-ref}`), `snapshotColumns`, `species`, `doubletSampleColumns` (`rna` only), `stages`, and
-`shutdown`, the signal protection of the run. `stages` maps each stage keyword to the settings
-that the call gave it, `False` for an optional stage that the call turned off, and a bool for
-`membership_strength` and `markers`. The recipe resolves a few of them: `pca` records its `dims`,
-`prevalent_peaks` its `top_n`, `leiden` its `partitions` and `selected` resolution, `panel` its
-`exclude` pattern and the `excluded` names, `hashing` its `assay`, and `filtering` the filter's
-parameters. A multimodal run records `method`, `sources` (each run's `runId`, `label`, `recipe`,
-and `assay`), `cells` (`{"selection": ref}`), `snapshotColumns`, `stages`, and `shutdown`.
+`run.report()["run"]["config"]` records how the run was called. For `rna`, `atac`, and `adt`, it holds `cells` (`{"column": ...}`, `{"selection": ref}`, or `{"run": {"runId", "label"}, "selection": ref}`), `snapshotColumns`, `species`, `doubletSampleColumns` (`rna` only), `stages`, and `shutdown`, the signal protection of the run. `stages` maps each stage keyword to the settings that the call gave it, `False` for an optional stage that the call turned off, and a bool for `membership_strength` and `markers`. The recipe resolves a few of them: `normalization` records its `method`, `pca` its `dims`, `prevalent_peaks` its `top_n`, `leiden` its `partitions` and `selected` resolution, `panel` its `exclude` pattern and the `excluded` names, `hashing` its `assay`, and `filtering` the filter's parameters. A multimodal run records `method`, `sources` (each run's `runId`, `label`, `recipe`, and `assay`), `cells` (`{"selection": ref}`), `snapshotColumns`, `stages`, and `shutdown`.
 
 A `perturbation` run records `cells`, `snapshotColumns`, `guideAssay`, the guide assay, `profileLabels`, the output whose cells the profiles average (`"mixscape"` for knocked-out cells, the default in a run with Mixscape, `"perturbation_labels"` for every labeled cell, and None without clusters), `stages`, and `shutdown`. Its `stages` record `False` for `signature` without Mixscape and for `profiles` without clusters, and a `guide_calling` `path` as the text of the path.
 
@@ -942,6 +935,8 @@ stored igraph partitions, and the stages that use them, such as cluster selectio
 and marker search, compute new results too. The earlier partitions are not superseded or marked
 `stale`: set `leiden={"backend": "igraph"}` to reuse them, which needs no igraph installation while
 the store holds them.
+
+Runs saved by releases before the normalization `method`, such as every run of 1.4.0, do not record their normalizer, and their recipes applied the assay's `normMethod` of the session that ran them. `run.settings()` of such a run gives it the `method` of the normalizer that its saved normalized values record in their provenance: a built-in normalizer's name, or a custom normalizer's identity, which a rerun and a plan then need as the assay's `normMethod` ([Normalization method](#normalization-method)). A rerun or a plan of the run in any session therefore normalizes as the run did. A run that saved no normalized values, such as one interrupted before its normalization stage, gets no `method`, so a rerun takes the assay's `normMethod`; `run.settings()` raises `ValueError` for a run whose saved normalized values are missing or record no normalizer. The `pca` `feat_scaling` default of a run of Pearson residuals changed from True to False, so a rerun of an earlier run of residuals that did not set `feat_scaling` computes its PCA again without feature scaling, and the stages after it; pass `pca={"feat_scaling": True}` to reuse the earlier PCA.
 
 A run whose records a newer CyteArc saved with fields this release does not know fails closed:
 opening it by run ID, or reading its stage records with `report()`, raises a `ValueError` that

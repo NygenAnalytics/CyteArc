@@ -194,6 +194,7 @@ def _filter_columns(modality: str, suffixes: tuple[str, ...]) -> _Declared:
 
 
 _MANUAL_BOUNDS = "required with method 'manual', one bound for each column of attrs"
+_FEATURE_SCALING = "False when the run normalizes with Pearson residuals, else True"
 # The settings whose type, default or rule is the recipe's own, by recipe,
 # stage keyword and setting; "*" declares a setting for every recipe.
 _DECLARED: Mapping[tuple[str, ...], _Declared] = MappingProxyType(
@@ -225,6 +226,13 @@ _DECLARED: Mapping[tuple[str, ...], _Declared] = MappingProxyType(
         ("*", "panel", "exclude"): _Declared(
             "str | None", adt.DEFAULT_PANEL_EXCLUDE, recipe_key=True
         ),
+        ("*", "normalization", "method"): _Declared(
+            "str | collections.abc.Mapping[str, str] | None",
+            rule="the assay's normMethod",
+            recipe_key=True,
+        ),
+        ("rna", "pca", "feat_scaling"): _Declared(rule=_FEATURE_SCALING),
+        ("perturbation", "pca", "feat_scaling"): _Declared(rule=_FEATURE_SCALING),
         ("adt", "pca", "dims"): _Declared(
             rule=(
                 f"the smaller of {PCA_DIMS_DEFAULT} and one fewer than the panel's "

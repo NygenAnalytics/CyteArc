@@ -113,6 +113,8 @@ Every normalized path of the assay applies the residuals while it is the `normMe
 marker search and scores, which then rank or average residuals; set the library-size normalizer
 back, `ds.RNA.normMethod = cytearc.assay.norm_lib_size`, for those steps.
 
+A pipeline recipe takes the residuals as `normalization={"method": "pearson_residuals"}`, which the run records and applies to each of its stages whatever the session's `normMethod`, and its PCA scales no feature unless the call sets `feat_scaling` ([Normalization method](pipeline.html#normalization-method)).
+
 RNA library-size normalization divides each cell by its total, the `<assay>_nCounts` value or, with
 `renormalize_subset=True`, its sum over the selected features, and a cell whose total is zero
 normalizes to zeros. `cytearc.assay.normalization.library_size_divisors` holds this rule for every

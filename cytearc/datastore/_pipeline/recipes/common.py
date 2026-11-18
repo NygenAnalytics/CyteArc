@@ -6,6 +6,7 @@ from typing import Any
 
 import numpy as np
 
+from ....assay import NormMethod
 from ....metadata.membership import require_measured_cells
 from ....metadata.selection import valid_category_mask
 from ....storage.artifacts import ArtifactRef
@@ -20,6 +21,7 @@ from ..filtering import (
     resolve_filtering,
     snapshot_column_values,
 )
+from ..normalizers import MethodSetting, feat_scaling_default, resolve_normalizer
 from ..settings import (
     HVG_TOP_N_DEFAULT,
     LOCALMAP_DIMS_DEFAULT,
@@ -197,6 +199,44 @@ def resolve_hvg(store: Any, hvg: object) -> dict[str, Any]:
     return settings
 
 
+@dataclass(frozen=True, slots=True)
+class NormalizationSettings:
+    """The settings of a run's normalization stage, and the normalizer it applies.
+
+    Attributes:
+        method: The normalizer's recorded method: a built-in's name, or the
+            identity of a custom normalizer.
+        normalizer: The normalizer that every stage of the run applies.
+        flags: The settings that the stage passes to ``features.normalize``.
+    """
+
+    method: MethodSetting
+    normalizer: NormMethod
+    flags: dict[str, Any]
+
+    def to_config(self) -> dict[str, Any]:
+        return {"method": self.method, **self.flags}
+
+
+def resolve_normalization(
+    store: Any, assay: str, normalization: object
+) -> NormalizationSettings:
+    """Return the settings of the normalization stage of a run of ``assay``.
+
+    Without ``method``, the run normalizes with the assay's ``normMethod``
+    and records it by name.
+
+    Raises:
+        TypeError: If a setting has the wrong type.
+        ValueError: If ``method`` names no normalizer, a normalizer of another
+            assay class, or a custom normalizer that is not the assay's
+            ``normMethod``.
+    """
+    _enabled, settings = stage_settings("normalization", normalization, optional=False)
+    normalizer, method = resolve_normalizer(store, assay, settings.pop("method", None))
+    return NormalizationSettings(method=method, normalizer=normalizer, flags=settings)
+
+
 def check_pca_features(
     dims: int, hvg: Mapping[str, Any], assay: str, n_features: int
 ) -> None:
@@ -353,17 +393,18 @@ class RNAHeadSettings:
     """
 
     hvg: dict[str, Any]
-    normalization: dict[str, Any]
+    normalization: NormalizationSettings
     pca_dims: int
     pca: dict[str, Any]
+    feat_scaling: bool
     harmony_columns: tuple[str, ...]
     harmony: dict[str, Any]
 
     def stages(self) -> tuple[PlannedStage, ...]:
         return (
             hvg_stage(self.hvg),
-            normalization_stage("highly_variable_features", self.normalization),
-            pca_stage(self.pca_dims, self.pca),
+            normalization_stage("highly_variable_features", self.normalization.flags),
+            pca_stage(self.pca_dims, {**self.pca, "feat_scaling": self.feat_scaling}),
             harmony_stage(self.harmony_columns, self.harmony),
         )
 
@@ -389,7 +430,7 @@ class RNAHeadSettings:
     def to_config(self) -> dict[str, Any]:
         return {
             "hvg": self.hvg,
-            "normalization": self.normalization,
+            "normalization": self.normalization.to_config(),
             "pca": {"dims": self.pca_dims, **self.pca},
             "harmony": harmony_config(self.harmony_columns, self.harmony),
         }
@@ -410,7 +451,9 @@ def resolve_rna_head(
     ``assay`` is the RNA assay that the stages read. ``min_dims`` is the
     fewest PCA dimensions: the RNA recipe takes 0, which builds its graph on
     the normalized values, and the perturbation recipe 1, since its
-    E-distances and signatures read the PCA.
+    E-distances and signatures read the PCA. PCA scales its features unless
+    the run normalizes with Pearson residuals, which are already
+    standardized, or ``pca`` sets ``feat_scaling``.
 
     Raises:
         TypeError: If a setting has the wrong type.
@@ -418,13 +461,12 @@ def resolve_rna_head(
             column.
         ValueError: If PCA has fewer than ``min_dims`` dimensions, settings
             besides ``dims=0``, or at least as many dimensions as the highly
-            variable genes or the assay's features, or another setting is out
-            of range.
+            variable genes or the assay's features, the normalization method
+            names no normalizer of the assay, or another setting is out of
+            range.
     """
     hvg_settings = resolve_hvg(store, hvg)
-    _norm_enabled, normalization_settings = stage_settings(
-        "normalization", normalization, optional=False
-    )
+    normalization_settings = resolve_normalization(store, assay, normalization)
     _pca_enabled, pca_settings = stage_settings("pca", pca, optional=False)
     dims = integer_argument(
         pca_settings.pop("dims", PCA_DIMS_DEFAULT), "pca dims", minimum=min_dims
@@ -438,6 +480,9 @@ def resolve_rna_head(
         normalization=normalization_settings,
         pca_dims=dims,
         pca=pca_settings,
+        feat_scaling=pca_settings.get(
+            "feat_scaling", feat_scaling_default(normalization_settings.normalizer)
+        ),
         harmony_columns=harmony_columns,
         harmony=harmony_settings,
     )

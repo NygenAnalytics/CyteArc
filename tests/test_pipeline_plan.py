@@ -549,10 +549,9 @@ def test_a_run_and_its_plan_refuse_doublets_without_library_size_before_writing(
     location = tmp_path / "data.zarr"
     datastore.RNA.normMethod = norm_pearson_residuals
     message = (
-        "Assay 'RNA' normalizes with PearsonResidualNormalizer, but doublet "
+        "The run normalizes assay 'RNA' with pearson_residuals, but doublet "
         "scoring normalizes its simulated doublets by library size and needs "
-        "norm_lib_size; pass doublets=False or set the assay's normMethod to "
-        "cytearc.assay.norm_lib_size"
+        "lib_size; pass normalization={'method': 'lib_size'} or doublets=False"
     )
     before = _digest(location)
 
@@ -577,6 +576,13 @@ def test_a_run_and_its_plan_refuse_doublets_without_library_size_before_writing(
     assert hvg.changed_parameters == ("normalization_method",)
     assert plan["normalization"].upstream == ("highly_variable_features",)
     assert plan["doublets"].status == "skipped"
+    # The remedy that the message names plans the committed run, every stage
+    # reused, and leaves the session's normalizer as it was.
+    named = datastore.pipeline.plan(
+        "rna", **SETTINGS, normalization={"method": "lib_size"}
+    )
+    assert named.computed == ()
+    assert datastore.RNA.normMethod is norm_pearson_residuals
     # With the library-size default back, the same call runs and reuses the
     # committed doublet scores.
     datastore.RNA.normMethod = norm_lib_size

@@ -112,7 +112,8 @@ def test_settings_are_the_keywords_that_the_run_was_called_with(completed) -> No
         "filtering": {"method": "mad", "attrs": QC_COLUMNS},
         "cell_cycle": False,
         "hvg": {"top_n": 200},
-        "normalization": {},
+        # The call named no normalizer, so the run records the assay's.
+        "normalization": {"method": "lib_size"},
         "pca": {"dims": 5},
         "harmony": False,
         "ann_index": {},

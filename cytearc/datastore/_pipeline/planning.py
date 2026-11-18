@@ -26,6 +26,7 @@ from ...storage.pipeline_runs import (
 )
 from ...utils.logging import logger
 from .executor import COORDINATES, FEATURE_NAMES, PlannedStage, RecipePlan, RunState
+from .normalizers import applied_normalizers
 
 type StagePlanStatus = Literal["reused", "computed", "skipped"]
 type StagePlanReason = Literal[
@@ -374,10 +375,33 @@ def plan_recipe(store: Any, plan: RecipePlan) -> PipelinePlan:
     The label is checked as a run checks it before it writes. Each stage then
     runs in an artifact forecast until it would compute an artifact; a stage
     that reads a value that an earlier computed stage would produce is not
-    run and waits on that stage.
+    run and waits on that stage. The stages normalize with the plan's
+    normalizers, as the run's would, since the identities of their artifacts
+    depend on them.
     """
     if plan.label is not None:
         ensure_pipeline_label_claimable(store.zw, plan.label)
+    with applied_normalizers(store, plan.normalizers):
+        planned = _plan_stages(store, plan)
+    estimates = _estimates(
+        store, plan, {stage.stage for stage in planned if stage.status == "computed"}
+    )
+    return PipelinePlan(
+        recipe=plan.recipe,
+        assay=plan.assay,
+        label=plan.label,
+        config=dict(plan.config),
+        stages=tuple(
+            replace(stage, estimate=estimates[stage.stage])
+            if stage.stage in estimates
+            else stage
+            for stage in planned
+        ),
+    )
+
+
+def _plan_stages(store: Any, plan: RecipePlan) -> list[PipelineStagePlan]:
+    """Plan each stage of ``plan`` in run order, as :func:`plan_recipe` describes."""
     state = plan.start(store)
     order = {stage.name: ordinal for ordinal, stage in enumerate(plan.stages)}
     # Each value that a stage of this plan would compute, by the stages it
@@ -454,18 +478,4 @@ def plan_recipe(store: Any, plan: RecipePlan) -> PipelinePlan:
                 ),
             )
         )
-    estimates = _estimates(
-        store, plan, {stage.stage for stage in planned if stage.status == "computed"}
-    )
-    return PipelinePlan(
-        recipe=plan.recipe,
-        assay=plan.assay,
-        label=plan.label,
-        config=dict(plan.config),
-        stages=tuple(
-            replace(stage, estimate=estimates[stage.stage])
-            if stage.stage in estimates
-            else stage
-            for stage in planned
-        ),
-    )
+    return planned

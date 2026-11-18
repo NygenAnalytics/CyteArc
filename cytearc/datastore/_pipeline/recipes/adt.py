@@ -44,6 +44,7 @@ from .common import (
     resolve_graph,
     resolve_harmony,
     resolve_label,
+    resolve_normalization,
     resolve_run_filtering,
     resolve_snapshot_columns,
     run_reserved_fields,
@@ -148,9 +149,7 @@ def resolve_adt(
     membership_strength = bool_argument(membership_strength, "membership_strength")
     markers = bool_argument(markers, "markers")
     pattern, panel_config, panel_size = _resolve_panel(store, assay_name, panel)
-    _norm, normalization_settings = stage_settings(
-        "normalization", normalization, optional=False
-    )
+    normalization_settings = resolve_normalization(store, assay_name, normalization)
     _pca, pca_settings = stage_settings("pca", pca, optional=False)
     # A panel holds few antibodies, so PCA keeps one dimension fewer than the
     # panel unless the call sets dims.
@@ -222,7 +221,7 @@ def resolve_adt(
         ),
         filtering_stage(filtering_config, source),
         _panel_stage(assay_name, pattern),
-        normalization_stage("panel", normalization_settings),
+        normalization_stage("panel", normalization_settings.flags),
         pca_stage(pca_dims, pca_settings),
         harmony_stage(harmony_columns, harmony_settings),
         *graph_stages(
@@ -241,7 +240,7 @@ def resolve_adt(
         "stages": {
             "filtering": filtering_config,
             "panel": panel_config,
-            "normalization": normalization_settings,
+            "normalization": normalization_settings.to_config(),
             "pca": {"dims": pca_dims, **pca_settings},
             "harmony": harmony_config(harmony_columns, harmony_settings),
             **graph.to_config(),
@@ -278,6 +277,7 @@ def resolve_adt(
         fields=fields,
         start=lambda store: RunState(store=store, assay=store._get_assay(assay_name)),
         summarize=lambda stage, outputs: summarize_stage(store, stage, outputs),
+        normalizers={assay_name: normalization_settings.normalizer},
     )
 
 

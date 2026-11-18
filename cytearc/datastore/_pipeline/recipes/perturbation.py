@@ -945,6 +945,7 @@ def resolve_perturbation(
         fields=fields,
         start=lambda store: RunState(store=store, assay=store._get_assay(assay_name)),
         summarize=lambda stage, outputs: summarize_stage(store, stage, outputs),
+        normalizers={assay_name: head.normalization.normalizer},
     )
 
 

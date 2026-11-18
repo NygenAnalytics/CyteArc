@@ -6,7 +6,7 @@ from typing import Any
 import numpy as np
 
 from ....quality_control.hto import checked_hashtag_mapping, checked_hashtags
-from ....assay import ADTassay, RNAassay, norm_lib_size
+from ....assay import ADTassay, NormMethod, RNAassay, norm_lib_size
 from ....metadata.rows import apply_missing_mask
 from ....storage.artifacts import ArtifactRef, artifact_group, inspect_artifact
 from ....storage.selections import (
@@ -18,6 +18,7 @@ from ..cluster_selection import cluster_label_values
 from ..executor import FEATURE_NAMES, PlannedStage, RecipePlan, RunState
 from ..fields import cell_fields, feature_fields
 from ..filtering import default_filter_columns, hashtag_labels, snapshot_column_values
+from ..normalizers import normalizer_label
 from ..settings import (
     leiden_config,
     resolve_leiden,
@@ -296,23 +297,20 @@ def _resolve_doublet_samples(
     return (column,)
 
 
-def _check_doublet_normalization(store: Any, assay: str) -> None:
-    """Refuse doublet scoring of an assay that does not normalize by library size.
+def _check_doublet_normalization(assay: str, normalizer: NormMethod) -> None:
+    """Refuse doublet scoring of a run that does not normalize by library size.
 
     Doublet scoring normalizes the counts of each simulated doublet by library
-    size and projects them onto the PCA of the graph's cells, so those cells
-    must be library-size normalized too. The normalization stage applies the
-    assay's ``normMethod`` when it runs, so the check reads the same value.
+    size and projects them onto the PCA of the graph's cells, so the run must
+    normalize those cells by library size too.
     """
-    method = store._get_assay(assay).normMethod
-    if method is norm_lib_size:
+    if normalizer is norm_lib_size:
         return
-    name = getattr(method, "__name__", type(method).__name__)
     raise ValueError(
-        f"Assay {assay!r} normalizes with {name}, but doublet scoring "
-        "normalizes its simulated doublets by library size and needs "
-        "norm_lib_size; pass doublets=False or set the assay's normMethod to "
-        "cytearc.assay.norm_lib_size"
+        f"The run normalizes assay {assay!r} with {normalizer_label(normalizer)}, "
+        "but doublet scoring normalizes its simulated doublets by library size "
+        "and needs lib_size; pass normalization={'method': 'lib_size'} or "
+        "doublets=False"
     )
 
 
@@ -501,17 +499,18 @@ def resolve_rna(
             "scoring needs a PCA graph; pass doublets=False or set pca dims "
             "above 0"
         )
+    if doublets_enabled:
+        _check_doublet_normalization(assay_name, head.normalization.normalizer)
     # Doublet scoring projects its simulated doublets through a mapping
-    # reference of the graph, which reads the PCA's feature scaling.
-    if doublets_enabled and head.pca.get("feat_scaling", True) is False:
+    # reference of the graph, which reads the PCA's feature scaling. A run of
+    # library-size values scales its features unless the call turns it off.
+    if doublets_enabled and head.feat_scaling is False:
         raise ValueError(
             "pca={'feat_scaling': False} fits PCA without feature scaling, but "
             "doublet scoring projects its simulated doublets onto the PCA "
             "through a mapping reference, which needs feature scaling; pass "
             "doublets=False or omit feat_scaling"
         )
-    if doublets_enabled:
-        _check_doublet_normalization(store, assay_name)
     snapshots = resolve_snapshot_columns(
         store,
         snapshot_columns,
@@ -692,6 +691,7 @@ def resolve_rna(
         fields=fields,
         start=lambda store: RunState(store=store, assay=store._get_assay(assay_name)),
         summarize=lambda stage, outputs: summarize_stage(store, stage, outputs),
+        normalizers={assay_name: head.normalization.normalizer},
     )
 
 

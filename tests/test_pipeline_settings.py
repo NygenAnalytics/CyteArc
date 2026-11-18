@@ -32,7 +32,7 @@ from cytearc.datastore.namespaces import (
 )
 from cytearc.datastore.pipeline_accessor import PipelineAccessor
 from cytearc.features.gene_reference import species_registry
-from cytearc.storage.artifacts import ArtifactRef, provenance_hash
+from cytearc.storage.artifacts import ArtifactRef, callable_identity, provenance_hash
 from cytearc.storage.feature_selection import read_feature_selection_indices
 from cytearc.utils.logging import logger
 
@@ -174,13 +174,15 @@ def adt_store(datastore_zarr_root: str, tmp_path_factory) -> DataStore:
 # Settings that configure the recipe, not the stage's method: the Leiden
 # candidates, the HTO assay that hashing reads, the capture column whose
 # captures cell calling calls apart, the antibodies the panel leaves out, the
-# Cell Ranger call file that guide calling imports in place of calling, and
-# the cells that the profiles average, which choose their labels.
+# normalizer that every stage applies, the Cell Ranger call file that guide
+# calling imports in place of calling, and the cells that the profiles
+# average, which choose their labels.
 _RECIPE_SETTINGS: dict[str, frozenset[str]] = {
     "leiden": frozenset({"partitions", "selected"}),
     "hashing": frozenset({"assay"}),
     "cell_calling": frozenset({"sample_column"}),
     "panel": frozenset({"exclude"}),
+    "normalization": frozenset({"method"}),
     "guide_calling": frozenset(
         {"path", "barcode_prefix", "barcode_suffix", "barcode_pattern"}
     ),
@@ -324,7 +326,8 @@ def test_a_default_call_records_each_stage_at_its_method_defaults(readonly_store
         },
         "cell_cycle": {},
         "hvg": {},
-        "normalization": {},
+        # The run records the assay's normalizer, which the call did not name.
+        "normalization": {"method": "lib_size"},
         "pca": {"dims": _keywords(ReductionAccessor.pca)["dims"]},
         "harmony": False,
         "ann_index": {},
@@ -364,7 +367,7 @@ def test_stage_settings_are_forwarded_and_recorded(settings_store):
         "filtering": {"enabled": False},
         "cell_cycle": False,
         "hvg": {"top_n": 50, "lowess_frac": 0.2},
-        "normalization": {},
+        "normalization": {"method": "lib_size"},
         "pca": {"dims": 3, "feat_scaling": False},
         "harmony": False,
         "ann_index": {},
@@ -1152,27 +1155,39 @@ def _pass_counts_through(_assay: Any, counts: Any) -> Any:
     return counts
 
 
+# A custom normalizer is named by the identity that provenance records for it:
+# its module, its name and the digest of its code.
+_CUSTOM_LABEL = (
+    "the custom normalizer {'module': 'tests.test_pipeline_settings', "
+    "'qualname': '_pass_counts_through', 'code': "
+    f"{callable_identity(_pass_counts_through)['code']!r}}}"
+)
+
+
 @pytest.mark.parametrize(
     ("normalizer", "name"),
     [
-        (norm_pearson_residuals, "PearsonResidualNormalizer"),
-        (PearsonResidualNormalizer(theta=10.0, clip=5.0), "PearsonResidualNormalizer"),
-        (norm_lib_size_log, "norm_lib_size_log"),
-        (norm_dummy, "norm_dummy"),
-        (_pass_counts_through, "_pass_counts_through"),
+        (norm_pearson_residuals, "pearson_residuals"),
+        (
+            PearsonResidualNormalizer(theta=10.0, clip=5.0),
+            "the custom normalizer "
+            "{'identity': 'cytearc.assay.pearson_residuals:theta=10.0:clip=5.0'}",
+        ),
+        (norm_lib_size_log, "lib_size_log"),
+        (norm_dummy, "passthrough"),
+        (_pass_counts_through, _CUSTOM_LABEL),
     ],
     ids=["pearson", "pearson-options", "lib-size-log", "dummy", "custom"],
 )
-def test_recipe_refuses_doublets_unless_the_assay_normalizes_by_library_size(
+def test_recipe_refuses_doublets_unless_the_run_normalizes_by_library_size(
     readonly_store, monkeypatch, normalizer, name
 ):
     store = readonly_store
     monkeypatch.setattr(store.RNA, "normMethod", normalizer)
     message = (
-        f"Assay 'RNA' normalizes with {name}, but doublet scoring normalizes "
-        "its simulated doublets by library size and needs norm_lib_size; pass "
-        "doublets=False or set the assay's normMethod to "
-        "cytearc.assay.norm_lib_size"
+        f"The run normalizes assay 'RNA' with {name}, but doublet scoring "
+        "normalizes its simulated doublets by library size and needs lib_size; "
+        "pass normalization={'method': 'lib_size'} or doublets=False"
     )
 
     # Doublet scoring is on by default, and a mapping of settings turns it on.
@@ -1184,17 +1199,25 @@ def test_recipe_refuses_doublets_unless_the_assay_normalizes_by_library_size(
     plan = _resolve(store, doublets=False)
     assert plan.config["stages"]["doublets"] is False
     assert {stage.name: stage.action for stage in plan.stages}["doublets"] is None
+    # The remedy that the message names schedules doublet scoring, whatever
+    # the assay's normMethod.
+    plan = _resolve(store, normalization={"method": "lib_size"})
+    assert plan.config["stages"]["doublets"] == {}
+    assert plan.normalizers == {"RNA": norm_lib_size}
 
 
 def test_recipe_reads_the_normalizer_the_run_will_use(readonly_store, monkeypatch):
     store = readonly_store
     monkeypatch.setattr(store.RNA, "normMethod", norm_pearson_residuals)
-    with pytest.raises(ValueError, match="normalizes with PearsonResidualNormalizer"):
+    with pytest.raises(ValueError, match="with pearson_residuals, but doublet"):
         _resolve(store)
-
-    # The normalization stage applies the live normMethod, so setting the
-    # library-size normalizer back lets the same call schedule doublet scoring.
+    # A run that names the residuals is refused alike in a session of the
+    # library-size default.
     store.RNA.normMethod = norm_lib_size
+    with pytest.raises(ValueError, match="with pearson_residuals, but doublet"):
+        _resolve(store, normalization={"method": "pearson_residuals"})
+
+    # Without a method, the run takes the assay's normMethod.
     plan = _resolve(store)
 
     assert plan.config["stages"]["doublets"] == {}
