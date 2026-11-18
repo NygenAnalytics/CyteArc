@@ -421,6 +421,33 @@ def test_exports_write_one_category_per_label(
     )
 
 
+def test_an_export_imports_as_categorical_columns_of_the_same_labels(
+    imports, tmp_path: Path
+) -> None:
+    store = imports["categorical"]["store"]
+    cytearc.to_h5ad(store.RNA, str(tmp_path / "export.h5ad"))
+    reader = H5adReader(str(tmp_path / "export.h5ad"))
+    with _warnings() as messages:
+        try:
+            H5adToZarr(
+                reader, str(tmp_path / "again.zarr"), nthreads=1, shuffle_cells=False
+            ).dump()
+        finally:
+            reader.close()
+
+    # The file names each label once, so a default import stores each column
+    # as a categorical column of the levels, quietly, reading the same labels.
+    again = open_store(tmp_path / "again.zarr")
+    for name, spec in _ALIKE.items():
+        assert not [message for message in messages if repr(name) in message], name
+        column = again.cells._get_array(name)
+        assert isinstance(column, CategoricalColumn), name
+        assert column.categories.tolist() == spec["levels"], name
+        assert column.codes[:].tolist() == spec["level_codes"], name
+        labels = again.cells.fetch_all(name).tolist()
+        assert labels == store.cells.fetch_all(name).tolist(), name
+
+
 def test_cluster_labels_export_one_category_per_label(imports) -> None:
     imported = imports["categorical"]
     exported = imported["store"].to_anndata(
