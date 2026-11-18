@@ -2,6 +2,7 @@ import csv
 import gzip
 import hashlib
 import io
+import shutil
 import weakref
 import warnings
 import zlib
@@ -10,16 +11,20 @@ import numpy as np
 import pandas as pd
 import pytest
 import zarr
+from scipy.sparse import csr_matrix
 
 import cytearc.datastore._operations.record_tables as record_tables
 import cytearc.datastore._operations.repertoire as repertoire_operations
 import cytearc.writers.airr as airr_writer
+import cytearc.writers.export as export_writer
+from cytearc.readers._sparse import SparseRowStore
 from cytearc import DiagnosticWarning
 from cytearc.metadata.records import EncodedText, encode_text
 from cytearc.storage.artifacts import artifact_group, inspect_artifact
+from cytearc.storage.cell_order import shuffled_order, write_shuffled_cell_order
 from cytearc.storage.refs import ArtifactRef
 from cytearc.utils.logging import collect_warnings
-from cytearc.writers import write_airr_rearrangements
+from cytearc.writers import SparseToZarr, to_h5ad, write_airr_rearrangements
 from cytearc.writers.airr import (
     AIRR_REQUIRED_FIELDS,
     AirrRearrangementWriter,
@@ -30,6 +35,7 @@ from tests.clone_helpers import (
     BCR_ROWS,
     CELLRANGER_HEADER,
     CLONAL_ROWS,
+    N_RECEPTOR_CELLS,
     TCR_ROWS,
     clonal_receptors,
     receptor_store,
@@ -39,7 +45,7 @@ from tests.clone_helpers import (
 from cytearc.utils.memory_budget import MemoryLedger
 from tests.memory_helpers import climb_refusals, named_budget
 from tests.perturbation_helpers import use_python_kernels
-from tests.storage_helpers import by_cell_id
+from tests.storage_helpers import by_cell_id, open_store
 
 # Contig IDs repeat across the three files: X takes _3 and then _4, since the
 # TCR file names a contig X_2, and Z takes _3, or _2 when only chains are
@@ -179,15 +185,18 @@ DISCOURAGED = (
 )
 
 
+def _edge_files(folder):
+    return [
+        write_lines(folder, "tcr.csv", CELLRANGER_HEADER, EDGE_TCR),
+        write_lines(folder, "bcr.csv", CELLRANGER_HEADER, EDGE_BCR),
+        write_lines(folder, "airr.tsv", EDGE_AIRR_HEADER, EDGE_AIRR),
+    ]
+
+
 def _edge_receptors(tmp_path):
     store = receptor_store(tmp_path)
-    files = [
-        write_lines(tmp_path, "tcr.csv", CELLRANGER_HEADER, EDGE_TCR),
-        write_lines(tmp_path, "bcr.csv", CELLRANGER_HEADER, EDGE_BCR),
-        write_lines(tmp_path, "airr.tsv", EDGE_AIRR_HEADER, EDGE_AIRR),
-    ]
     receptors = store.repertoire.import_receptors(
-        files, cell_selection=store.snapshot_cell_selection()
+        _edge_files(tmp_path), cell_selection=store.snapshot_cell_selection()
     )
     return store, receptors
 
@@ -1160,11 +1169,27 @@ def test_receptors_without_contigs_export_their_header(tmp_path) -> None:
 
 def test_the_cells_ids_are_packed_for_the_export(tmp_path) -> None:
     store, receptors = _edge_receptors(tmp_path)
-    packed, longest = store._export_cell_ids(
-        MemoryLedger(10**9, "Reading"), receptors, 8, 1
+    packed, longest, order = store._export_cell_ids(
+        MemoryLedger(10**9, "Reading"), receptors, 8, 1, "source"
     )
     assert bytes(packed.data) == b"".join(f"cell{k}".encode() for k in range(8))
     assert packed.offsets.tolist() == list(range(0, 45, 5)) and longest == 5
+    # A store without source rows is in its file's order already.
+    assert order is None
+    # Rows that claim the file rows of a shuffle are written by those rows,
+    # or in store order.
+    claimed = _claimed(tmp_path / "store.zarr")
+    for cell_order, expected in (("source", _SOURCE_CELLS), ("stored", None)):
+        ledger = MemoryLedger(10**9, "Reading")
+        packed, _, order = claimed._export_cell_ids(ledger, receptors, 8, 1, cell_order)
+        assert bytes(packed.data) == b"".join(f"cell{k}".encode() for k in range(8))
+        if expected is None:
+            assert order is None
+        else:
+            assert order.tolist() == expected
+            # The order stays held beside the packed IDs, the offsets of
+            # nine and 40 bytes of text.
+            assert ledger.held_bytes == 8 * 8 + 8 * 9 + 40
 
 
 def test_packing_text_counts_each_slice_and_their_join() -> None:
@@ -1990,3 +2015,541 @@ def test_exports_write_the_same_bytes_and_summarize_them(tmp_path) -> None:
         "leadingQuoteFields": "",
         "discouragedFields": "",
     }
+
+
+# ---------------------------------------------------------------------------
+# Cell order
+
+# A shuffle of the eight cells with seed 0 puts file row _SHUFFLED[r] in store
+# row r, so the file's order lists store rows _SOURCE_CELLS.
+_SHUFFLED = shuffled_order(N_RECEPTOR_CELLS, 0)
+_SOURCE_CELLS = [1, 7, 3, 6, 4, 2, 0, 5]
+# The IDs that the edge receptors' export writes when store rows cell0 to
+# cell7 claim those file rows. Cell6's X now comes first, before cell0's X and
+# X, which take _3, since cell0's X_2 holds that name, and _4; cell3's Z comes
+# before cell2's, which takes Z_3, since cell4 holds Z_2. Cell4's Z_2 is no
+# chain, so without it cell2's Z takes Z_2.
+_SOURCE_IDS = {
+    False: ["Y", "Z", "X", "Z_2", "Z_3", "X_3", "X_4", "X_2"],
+    True: ["Y", "Z", "X", "Z_2", "X_3", "X_4", "X_2"],
+}
+# The IDs that an export in store order writes for the stores that shuffled
+# imports of seeds 0 and 1 wrote, whose store rows hold cell6, cell0, cell5,
+# cell2, cell4, cell7, cell3 and cell1, and cell1, cell0, cell7, cell6, cell3,
+# cell2, cell4 and cell5.
+_STORED_IDS = {
+    0: ["X", "X_3", "X_4", "X_2", "cell5_contig_1", "cell5_contig_2", "Z", "Z_2"]
+    + ["Z_3", "Y"],
+    1: ["Y", "X", "X_3", "X_2", "X_4", "Z", "Z_3", "Z_2", "cell5_contig_1"]
+    + ["cell5_contig_2"],
+}
+
+
+def _shuffled_edge_receptors(folder, seed=0):
+    """The edge receptors of a store that a shuffled import of cells cell0 to cell7 wrote."""
+    counts = np.random.default_rng(5).poisson(2.0, size=(N_RECEPTOR_CELLS, 6)) + 1
+    SparseToZarr(
+        csr_matrix(counts.astype(np.float32)),
+        str(folder / "store.zarr"),
+        cell_ids=[f"cell{k}" for k in range(N_RECEPTOR_CELLS)],
+        feature_ids=[f"RNA{k}" for k in range(6)],
+        shuffle_seed=seed,
+        nthreads=1,
+    ).dump()
+    store = open_store(folder / "store.zarr")
+    receptors = store.repertoire.import_receptors(
+        _edge_files(folder), cell_selection=store.snapshot_cell_selection()
+    )
+    return store, receptors
+
+
+def _claimed(path):
+    """Reopen a store whose rows, cell0 to cell7 in order, now claim the file rows of a shuffle with seed 0."""
+    cells = zarr.open_group(str(path), mode="r+")["cellData"]
+    write_shuffled_cell_order(cells, _SHUFFLED, 0)
+    return open_store(path)
+
+
+def _cell_runs(table: pd.DataFrame) -> list[str]:
+    """The cells of a table of contigs in the order of their runs of rows."""
+    cells = table["cell_id"]
+    return cells[cells != cells.shift()].tolist()
+
+
+@pytest.mark.parametrize("seed", [0, 1])
+def test_a_shuffled_import_exports_its_contigs_in_the_files_order(
+    tmp_path, seed
+) -> None:
+    store, receptors = _shuffled_edge_receptors(tmp_path, seed)
+    ids = np.asarray(store.cells.fetch_all("ids")).astype(str)
+    assert ids.tolist() == [f"cell{k}" for k in shuffled_order(N_RECEPTOR_CELLS, seed)]
+    clonotypes = store.repertoire.clonotypes(receptors)
+    labels = store.repertoire.load_clonotypes(clonotypes).cells["clonotype"]
+    # The file lists cell0 to cell7, so the export of every shuffle writes
+    # the bytes that the export of the store in the file's order writes.
+    cases = [
+        ("edge.tsv", receptors, {"fields": EDGE_FIELDS}, EXPECTED_EDGE),
+        (
+            "chains.tsv.gz",
+            receptors,
+            {"fields": EDGE_FIELDS, "chains_only": True},
+            EXPECTED_EDGE_CHAINS,
+        ),
+        (
+            "clonotypes.tsv",
+            clonotypes,
+            {"fields": ["v_call"]},
+            EXPECTED_EDGE_CLONOTYPES.format(**labels.dropna().to_dict()),
+        ),
+        ("all.tsv.gz", receptors, {}, EXPECTED_EDGE_ALL),
+    ]
+    for name, source, options, expected in cases:
+        store.repertoire.export_airr(source, tmp_path / name, **options)
+        assert _text(tmp_path / name) == expected, name
+    # In store order the cells follow the store's rows, and the repeated IDs
+    # take their suffixes in that order.
+    store.repertoire.export_airr(
+        receptors, tmp_path / "stored.tsv", fields=EDGE_FIELDS, cell_order="stored"
+    )
+    stored = _read(tmp_path / "stored.tsv")
+    assert _cell_runs(stored) == [cell for cell in ids if cell != "cell7"]
+    assert stored["sequence_id"].tolist() == _STORED_IDS[seed]
+
+
+def test_stored_order_writes_the_bytes_that_the_export_wrote_before(tmp_path) -> None:
+    # Store rows that claim the file rows of a shuffle are written, in store
+    # order, as the export wrote them before it read source rows: the bytes
+    # that _EXPORT_DIGESTS pins. In the file's order the cells move.
+    (tmp_path / "clonal").mkdir()
+    _, receptors = clonal_receptors(tmp_path / "clonal")
+    store = _claimed(tmp_path / "clonal" / "store.zarr")
+    clonotypes = store.repertoire.clonotypes(receptors)
+    (tmp_path / "edge").mkdir()
+    _, edge = _edge_receptors(tmp_path / "edge")
+    edge_store = _claimed(tmp_path / "edge" / "store.zarr")
+    cases = {
+        "receptors.tsv": (store, receptors, {}),
+        "receptors.tsv.gz": (store, receptors, {}),
+        "fields.tsv": (store, receptors, {"fields": ["v_call", "junction_aa"]}),
+        "clonotypes.tsv": (store, clonotypes, {}),
+        "edge.tsv": (edge_store, edge, {}),
+        "edge_chains.tsv": (edge_store, edge, {"chains_only": True}),
+    }
+    for name, (owner, source, options) in cases.items():
+        stored, moved = tmp_path / name, tmp_path / f"source_{name}"
+        owner.repertoire.export_airr(source, stored, cell_order="stored", **options)
+        assert (
+            hashlib.sha256(stored.read_bytes()).hexdigest() == (_EXPORT_DIGESTS[name])
+        ), name
+        owner.repertoire.export_airr(source, moved, **options)
+        assert moved.read_bytes() != stored.read_bytes(), name
+
+
+@pytest.mark.parametrize("chains_only", [False, True])
+def test_cells_follow_their_source_rows_and_keep_their_contigs(
+    tmp_path, chains_only
+) -> None:
+    _, receptors = _edge_receptors(tmp_path)
+    store = _claimed(tmp_path / "store.zarr")
+    options = {"fields": EDGE_FIELDS, "chains_only": chains_only}
+    store.repertoire.export_airr(receptors, tmp_path / "source.tsv", **options)
+    store.repertoire.export_airr(
+        receptors, tmp_path / "stored.tsv", cell_order="stored", **options
+    )
+    source, stored = _read(tmp_path / "source.tsv"), _read(tmp_path / "stored.tsv")
+    # The cells with contigs, by the file row that each claims; cell7, whose
+    # file row is second, has no contig, and with chains only neither has
+    # cell4, whose one contig is no chain.
+    written = set(stored["cell_id"])
+    expected = [f"cell{k}" for k in _SOURCE_CELLS if f"cell{k}" in written]
+    assert _cell_runs(source) == expected
+    assert _cell_runs(stored) == sorted(written)
+    # Each cell's contigs keep their stored order and values; only the
+    # suffixes of IDs that repeat across cells follow the file's rows.
+    for cell in expected:
+        pd.testing.assert_frame_equal(
+            source[source["cell_id"] == cell]
+            .drop(columns="sequence_id")
+            .reset_index(drop=True),
+            stored[stored["cell_id"] == cell]
+            .drop(columns="sequence_id")
+            .reset_index(drop=True),
+        )
+    assert source["sequence_id"].tolist() == [
+        *_SOURCE_IDS[chains_only],
+        "cell5_contig_1",
+        "cell5_contig_2",
+    ]
+    # Both files name the same contigs, only in another order of the cells.
+    assert sorted(source["sequence_id"]) == sorted(stored["sequence_id"])
+
+
+@pytest.mark.parametrize("chains_only", [False, True])
+def test_both_orders_write_the_same_rows(tmp_path, chains_only) -> None:
+    # The clonal contigs' IDs are unique, so each row is the same in both.
+    _, receptors = clonal_receptors(tmp_path)
+    store = _claimed(tmp_path / "store.zarr")
+    clonotypes = store.repertoire.clonotypes(receptors)
+    for source in (receptors, clonotypes):
+        files = {}
+        for cell_order in ("source", "stored"):
+            path = tmp_path / f"{cell_order}.tsv"
+            written = store.repertoire.export_airr(
+                source, path, chains_only=chains_only, cell_order=cell_order
+            )
+            files[cell_order] = path.read_text().splitlines()
+            assert written.rows == len(files[cell_order]) - 1
+        assert files["source"][0] == files["stored"][0]
+        assert sorted(files["source"][1:]) == sorted(files["stored"][1:])
+        assert files["source"][1:] != files["stored"][1:]
+
+
+def test_a_selection_of_some_cells_exports_them_by_their_source_rows(tmp_path) -> None:
+    receptor_store(tmp_path)
+    store = _claimed(tmp_path / "store.zarr")
+    # Cells 1, 2, 4, 5 and 7 are selected, and cell1 has no contig; cell0's
+    # contig names a cell outside the selection.
+    store.cells.insert(
+        "chosen",
+        by_cell_id(
+            store.cells,
+            np.asarray([False, True, True, False, True, True, False, True]),
+        ),
+    )
+    rows = [
+        f"cell{k},true,cell{k}_contig_{j},true,500,TRB,TRBV{k},,TRBJ1,TRBC1,true,"
+        f"true,CASS{k},TGTGCCAGCAGC,100,5,ct{k},ct{k}_{j}"
+        for k in (0, 2, 4, 5, 7)
+        for j in (1, 2)
+    ]
+    receptors = store.repertoire.import_receptors(
+        write_lines(tmp_path, "some.csv", CELLRANGER_HEADER, rows),
+        cell_selection=store.snapshot_cell_selection("chosen"),
+    )
+    assert store.repertoire.export_airr(receptors, tmp_path / "some.tsv").rows == 8
+    written = _read(tmp_path / "some.tsv")
+    # Cells 7, 4, 2 and 5 claim file rows 1, 4, 5 and 7.
+    assert written["cell_id"].tolist() == [
+        cell for k in (7, 4, 2, 5) for cell in (f"cell{k}", f"cell{k}")
+    ]
+    assert written["sequence_id"].tolist() == [
+        f"cell{k}_contig_{j}" for k in (7, 4, 2, 5) for j in (1, 2)
+    ]
+
+
+@pytest.mark.parametrize(
+    ("block_bytes", "chunk_bytes"), [(None, None), (1, None), (None, 16), (1, 16)]
+)
+def test_rows_reach_the_files_order_across_blocks_chunks_and_buckets(
+    tmp_path, monkeypatch, block_bytes, chunk_bytes
+) -> None:
+    if chunk_bytes is not None:
+        # Cell positions stored four to a chunk and offsets two, so the blocks
+        # read their windows across stored chunks.
+        monkeypatch.setattr(record_tables, "_RECORD_CHUNK_BYTES", chunk_bytes)
+    store, receptors = _shuffled_edge_receptors(tmp_path)
+    if block_bytes is not None:
+        # One contig per block, so cell0's three contigs take three blocks,
+        # and buckets that read in the least that one row holds, so the rows
+        # of a cell fall in several buckets.
+        monkeypatch.setattr(repertoire_operations, "_EXPORT_BLOCK_BYTES", block_bytes)
+    finalize = SparseRowStore.finalize
+    buckets = []
+
+    def recorded(store):
+        finalize(store)
+        buckets.append(store.bucket_starts.size - 1)
+
+    monkeypatch.setattr(SparseRowStore, "finalize", recorded)
+    for options, expected in (
+        ({"fields": EDGE_FIELDS}, EXPECTED_EDGE),
+        ({"fields": EDGE_FIELDS, "chains_only": True}, EXPECTED_EDGE_CHAINS),
+    ):
+        store.repertoire.export_airr(receptors, tmp_path / "x.tsv", **options)
+        assert _text(tmp_path / "x.tsv") == expected
+    assert len(buckets) == 2
+    assert (min(buckets) > 1) == (block_bytes is not None)
+
+
+@pytest.mark.parametrize(
+    ("chains_only", "expected"),
+    [(False, [3, 5, 9, 6, 4, 0, 1, 2, 7, 8]), (True, [3, 5, 8, 4, 0, 1, 2, 6, 7])],
+)
+def test_the_files_rows_follow_each_cell_in_the_order_of_the_cells(
+    tmp_path, chains_only, expected
+) -> None:
+    # The edge contigs of cell0 are rows 0 to 2, of cell1 to cell4 rows 3 to
+    # 6, of cell5 rows 7 and 8, and of cell6 row 9; cell7 has none. Of the
+    # chains, cell4's contig is not one, so cell5's are rows 6 and 7.
+    store, receptors = _edge_receptors(tmp_path)
+    contigs = repertoire_operations._ExportContigs(
+        artifact_group(store.zw, receptors),
+        ("sequence_id",),
+        chains_only=chains_only,
+        ledger=MemoryLedger(10**9, "Ordering"),
+    )
+    rows = contigs.file_order(np.asarray(_SOURCE_CELLS))
+    assert rows.dtype == np.int64 and rows.tolist() == expected
+    # The contigs' cells and flags were let go; the rows stay held.
+    assert contigs.ledger.held_bytes == 8 * len(expected)
+
+
+@pytest.mark.parametrize("source", ["receptors", "clonotypes"])
+def test_an_export_in_the_files_order_refuses_before_it_writes(
+    tmp_path, monkeypatch, source
+) -> None:
+    store, receptors = _shuffled_edge_receptors(tmp_path)
+    clonotypes = store.repertoire.clonotypes(receptors)
+    ref = clonotypes if source == "clonotypes" else receptors
+    # A megabyte for each row that the reorder sends to its bucket, so that
+    # sending the rows needs more than any other step.
+    monkeypatch.setattr(export_writer, "_TEXT_ROW_SEND_BYTES", 2**20)
+    path = tmp_path / "climbed.tsv"
+    budget = store.memoryBytes
+
+    def run(limit):
+        # Every refusal came before the file was opened.
+        assert not path.exists()
+        store.memoryBytes = limit
+        try:
+            store.repertoire.export_airr(ref, path, fields=EDGE_FIELDS)
+        finally:
+            store.memoryBytes = budget
+        return _read(path)
+
+    refusals, written = climb_refusals(run)
+    # The last refusal is the reorder's, which names store order as the way
+    # around it, and the budget that it names writes the file.
+    assert refusals[-1].item == (
+        "sending the contigs to their places in the imported file's order"
+    )
+    assert str(refusals[-1]).endswith(", or export with cell_order='stored'.")
+    store.repertoire.export_airr(ref, tmp_path / "whole.tsv", fields=EDGE_FIELDS)
+    pd.testing.assert_frame_equal(written, _read(tmp_path / "whole.tsv"))
+    assert _cell_runs(written) == [f"cell{k}" for k in range(7)]
+
+
+def _store_folders(folder) -> list[str]:
+    """The folders of the row bucket stores under ``folder``."""
+    return sorted(path.name for path in folder.iterdir())
+
+
+def test_temporary_files_take_temp_dir_and_go_as_they_are_read(
+    tmp_path, monkeypatch
+) -> None:
+    store, receptors = _shuffled_edge_receptors(tmp_path)
+    temporary = tmp_path / "temporary"
+    temporary.mkdir()
+    # Blocks of one contig, and buckets of one row, so the rows are read back
+    # from ten buckets.
+    monkeypatch.setattr(repertoire_operations, "_EXPORT_BLOCK_BYTES", 1)
+    write = AirrRearrangementWriter.write_rendered
+    held = []
+
+    def recorded(writer, rendered, n_rows):
+        # The buckets left in the store's folder as each batch is written.
+        (folder,) = temporary.iterdir()
+        held.append(len(list(folder.glob("rows-*[0-9]"))))
+        return write(writer, rendered, n_rows)
+
+    monkeypatch.setattr(AirrRearrangementWriter, "write_rendered", recorded)
+    store.repertoire.export_airr(
+        receptors, tmp_path / "x.tsv", fields=EDGE_FIELDS, temp_dir=temporary
+    )
+    assert _text(tmp_path / "x.tsv") == EXPECTED_EDGE
+    # Each bucket's files go once its rows are taken, and the store's folder
+    # goes with the export.
+    assert held == sorted(held, reverse=True) and held[0] > held[-1]
+    assert _store_folders(temporary) == []
+    # In store order, the export writes no temporary files.
+    monkeypatch.setattr(AirrRearrangementWriter, "write_rendered", write)
+    monkeypatch.setattr(
+        SparseRowStore,
+        "__init__",
+        lambda *args, **kwargs: pytest.fail("store order needs no temporary files"),
+    )
+    store.repertoire.export_airr(
+        receptors, tmp_path / "y.tsv", cell_order="stored", temp_dir=temporary
+    )
+
+
+@pytest.mark.parametrize("failing", ["render", "write_rendered"])
+def test_temporary_files_go_when_the_export_fails(
+    tmp_path, monkeypatch, failing
+) -> None:
+    store, receptors = _shuffled_edge_receptors(tmp_path)
+    temporary = tmp_path / "temporary"
+    temporary.mkdir()
+    # One contig per block and per bucket, so the export fails while it
+    # sends its rows, or while it writes them back.
+    monkeypatch.setattr(repertoire_operations, "_EXPORT_BLOCK_BYTES", 1)
+    original = getattr(AirrRearrangementWriter, failing)
+    folders = []
+
+    def fails(writer, *args):
+        folders.append(len(_store_folders(temporary)))
+        if len(folders) == 2:
+            raise OSError("The disk failed")
+        return original(writer, *args)
+
+    monkeypatch.setattr(AirrRearrangementWriter, failing, fails)
+    with pytest.raises(OSError, match="The disk failed"):
+        store.repertoire.export_airr(receptors, tmp_path / "x.tsv", temp_dir=temporary)
+    # The store's folder was made at the first rendered block and held the
+    # rows when the export failed, and it is gone.
+    assert folders == ([0, 1] if failing == "render" else [1, 1])
+    assert _store_folders(temporary) == []
+
+
+def test_a_full_disk_is_refused_before_a_row_is_sent(tmp_path, monkeypatch) -> None:
+    store, receptors = _shuffled_edge_receptors(tmp_path)
+    temporary = tmp_path / "temporary"
+    temporary.mkdir()
+    usage = shutil.disk_usage(temporary)
+    monkeypatch.setattr(
+        "cytearc.readers._sparse.shutil.disk_usage",
+        lambda path: usage._replace(free=10),
+    )
+    path = tmp_path / "x.tsv"
+    with pytest.raises(OSError, match="AIRR export in source order needs") as refused:
+        store.repertoire.export_airr(receptors, path, temp_dir=temporary)
+    assert "pass temp_dir on a disk with more free space" in str(refused.value)
+    # The file holds the header alone, and the temporary files are gone.
+    assert _text(path).count("\n") == 1
+    assert _store_folders(temporary) == []
+
+
+@pytest.mark.parametrize("chains_only", [False, True])
+def test_the_order_of_the_files_rows_is_charged_before_it_is_built(
+    tmp_path, chains_only
+) -> None:
+    store, receptors = _edge_receptors(tmp_path)
+
+    class Recording(MemoryLedger):
+        """A ledger without a budget that notes each charge."""
+
+        def __init__(self) -> None:
+            super().__init__(None, "Ordering")
+            self.charges: list[tuple[str, str, int]] = []
+
+        def hold(self, item, nbytes, *, remedy=None):
+            self.charges.append(("hold", item, int(nbytes)))
+            return super().hold(item, nbytes, remedy=remedy)
+
+        def peak(self, item, nbytes, *, remedy=None):
+            self.charges.append(("peak", item, int(nbytes)))
+            super().peak(item, nbytes, remedy=remedy)
+
+    ledger = Recording()
+    contigs = repertoire_operations._ExportContigs(
+        artifact_group(store.zw, receptors),
+        ("sequence_id",),
+        chains_only=chains_only,
+        ledger=ledger,
+    )
+    rows = contigs.file_order(np.asarray(_SOURCE_CELLS))
+    n_rows = len(rows)
+    held = [(kind, item) for kind, item, _ in ledger.charges if kind == "hold"]
+    # The contigs' cells are held as read, and with chains only their flags
+    # and then the chains' cells; the rows are charged before they are sorted
+    # and held once sorted.
+    assert held == [
+        ("hold", "each contig's cell"),
+        *(
+            [
+                ("hold", "the contigs that count as chains"),
+                ("hold", "the cells of the chains"),
+            ]
+            if chains_only
+            else []
+        ),
+        ("hold", "the rows of the file in the imported file's order"),
+    ]
+    sorting = [
+        nbytes
+        for kind, item, nbytes in ledger.charges
+        if kind == "peak"
+        and item == "the rows of the file in the imported file's order"
+    ]
+    assert ledger.charges[-1] == (
+        "hold",
+        "the rows of the file in the imported file's order",
+        8 * n_rows,
+    )
+    # The sort holds each row's rank and its place, at least 16 bytes a row,
+    # and each cell's rank.
+    assert len(sorting) == 1 and sorting[0] >= 16 * n_rows + 8 * N_RECEPTOR_CELLS
+    # Only the rows stay held.
+    assert ledger.held_bytes == 8 * n_rows
+
+
+def test_rendered_blocks_write_the_rows_that_write_writes_in_any_order(
+    tmp_path,
+) -> None:
+    table = pd.DataFrame(
+        {
+            "sequence_id": ["a", "b", "c"],
+            "cell_id": ["c1", "c2", "c3"],
+            "v_call": ["IGHV1#x", "IGHV2", '"IGHV3'],
+            "umi_count": pd.array([3, None, 5], dtype="Int64"),
+        }
+    )
+    columns = ["cell_id", "v_call", "umi_count"]
+    blocks = [table.iloc[:2], table.iloc[2:]]
+    with AirrRearrangementWriter(tmp_path / "written.tsv", columns) as writer:
+        for block in blocks:
+            writer.write(block)
+    with AirrRearrangementWriter(tmp_path / "moved.tsv", columns) as moved:
+        rendered = [moved.render(block) for block in blocks]
+        # Rendering counts the blocks' values but writes no row.
+        assert moved.n_rows == 0
+        for values, offsets in reversed(rendered):
+            assert moved.write_rendered(values, offsets.size - 1) == offsets.size - 1
+    lines = _text(tmp_path / "written.tsv").splitlines()
+    assert _text(tmp_path / "moved.tsv").splitlines() == [
+        lines[0],
+        lines[3],
+        lines[1],
+        lines[2],
+    ]
+    assert moved.n_rows == 3 and moved.diagnostics == writer.diagnostics
+    # Each row's offsets bound it with its newline.
+    values, offsets = rendered[0]
+    assert [bytes(values[offsets[i] : offsets[i + 1]]) for i in range(2)] == [
+        f"{line}\n".encode() for line in lines[1:3]
+    ]
+    for closed in (
+        lambda: moved.render(blocks[0]),
+        lambda: moved.write_rendered(values, 2),
+    ):
+        with pytest.raises(ValueError, match="The writer is closed"):
+            closed()
+
+
+def test_cell_order_is_checked_as_the_other_exports_check_it(tmp_path) -> None:
+    store, receptors = _shuffled_edge_receptors(tmp_path)
+    clonotypes = store.repertoire.clonotypes(receptors)
+    path, table = tmp_path / "x.tsv", tmp_path / "x.csv"
+    for value, error in (
+        ("file", ValueError),
+        ("Source", ValueError),
+        (1, TypeError),
+        (None, TypeError),
+    ):
+        with pytest.raises(error) as airr:
+            store.repertoire.export_airr(receptors, path, cell_order=value)
+        with pytest.raises(error) as clones:
+            store.clones.export_clones(clonotypes, table, cell_order=value)
+        assert str(airr.value) == str(clones.value)
+        assert str(airr.value).startswith("cell_order must be 'source'")
+    # The directory of the temporary files is checked as to_h5ad checks it.
+    with pytest.raises(TypeError) as airr:
+        store.repertoire.export_airr(receptors, path, temp_dir=5)
+    with pytest.raises(TypeError) as h5ad:
+        to_h5ad(store.RNA, str(tmp_path / "x.h5ad"), temp_dir=5)
+    assert (
+        str(airr.value)
+        == str(h5ad.value)
+        == ("temp_dir must be a path or None, not int")
+    )
+    assert not path.exists() and not table.exists()

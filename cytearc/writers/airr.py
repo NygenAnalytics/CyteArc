@@ -690,7 +690,10 @@ class AirrRearrangementWriter:
     The schema requires unique ``sequence_id`` values, and the writer writes
     each block as given, so a caller whose contigs' IDs may repeat gives the
     later ones suffixes first, as :func:`suffix_repeated_ids` chooses them.
-    Close the writer, or use it as a context manager::
+    ``write`` renders a block and writes its rows; :meth:`render` renders a
+    block without writing it and :meth:`write_rendered` writes rows that it
+    rendered, so a caller can write the rows of several blocks in another
+    order. Close the writer, or use it as a context manager::
 
         with AirrRearrangementWriter("contigs.tsv.gz", ["cell_id"]) as writer:
             for block in blocks:
@@ -807,6 +810,28 @@ class AirrRearrangementWriter:
                 logical, or a value holds a tab, a newline or a carriage
                 return; the block is then not written.
         """
+        rendered, offsets = self.render(block)
+        return self.write_rendered(rendered, offsets.size - 1)
+
+    def render(
+        self, block: pd.DataFrame | Mapping[str, Any]
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Render a block of contigs as rows of the file, without writing them.
+
+        The block's values that :attr:`diagnostics` counts are counted as
+        :meth:`write` counts them, and its rows once :meth:`write_rendered`
+        writes them.
+
+        Args:
+            block: One row per contig, its columns AIRR field names.
+
+        Returns:
+            The rows' bytes, each row ending with a newline, and the offset of
+            each row in them, the last their end.
+
+        Raises:
+            ValueError: As :meth:`write` raises it.
+        """
         if self._handle is None:
             raise ValueError("The writer is closed")
         if isinstance(block, pd.DataFrame):
@@ -854,14 +879,30 @@ class AirrRearrangementWriter:
                     "the block",
                 )
             )
-        for start in range(0, len(rendered), _WRITE_BYTES):
-            self._handle.write(rendered[start : start + _WRITE_BYTES])
-        self._n_rows += n_rows
         for name, (_, _, discouraged, leading) in zip(self.columns, marks, strict=True):
             if discouraged:
                 self._discouraged[name] = self._discouraged.get(name, 0) + discouraged
             if leading:
                 self._leading_quotes[name] = self._leading_quotes.get(name, 0) + leading
+        # No value holds a newline, so each row ends at its newline.
+        offsets = np.zeros(n_rows + 1, dtype=np.int64)
+        offsets[1:] = np.flatnonzero(rendered == _NEWLINE) + 1
+        return rendered, offsets
+
+    def write_rendered(self, rendered: np.ndarray, n_rows: int) -> int:
+        """Write ``n_rows`` rows that :meth:`render` rendered, their bytes ``rendered``.
+
+        Returns:
+            The number of rows written.
+
+        Raises:
+            ValueError: If the writer is closed.
+        """
+        if self._handle is None:
+            raise ValueError("The writer is closed")
+        for start in range(0, len(rendered), _WRITE_BYTES):
+            self._handle.write(rendered[start : start + _WRITE_BYTES])
+        self._n_rows += n_rows
         return n_rows
 
     def close(self) -> None:

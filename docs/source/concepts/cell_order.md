@@ -22,7 +22,7 @@ Merges and composites order their cells otherwise, in blocks that each hold the 
 
 Each cell keeps its row in the imported file, counted from 0, in the int64 cell column `sourceRow`, and the cell table records the seed in its `cellOrder` attribute. A reader that drops cells, such as `CrH5Reader(is_filtered=False)`, keeps the row in the file of each cell it keeps, so the column has gaps where the dropped cells were. `insert`, `update_key`, `reset_key` and `drop` refuse `sourceRow`.
 
-Exports write the cells back in the file's order. `to_h5ad`, `to_mtx`, `DataStore.to_anndata` and the clone exports sort the exported cells by `sourceRow`, so an import followed by an export gives back the file's cells in the file's order, and `cell_order="stored"` keeps the store's order instead. Subsets, repacks and mounts keep each cell's `sourceRow`, and a merge gives each cell its row in the concatenation of its sources, so their exports follow the files too. The [import and export reference](/api/import_export.html#cell-order-in-exports) describes each export's order.
+Exports write the cells back in the file's order. `to_h5ad`, `to_mtx`, `DataStore.to_anndata`, the clone exports and the AIRR export sort the exported cells by `sourceRow`, so an import followed by an export gives back the file's cells in the file's order, and `cell_order="stored"` keeps the store's order instead. Subsets, repacks and mounts keep each cell's `sourceRow`, and a merge gives each cell its row in the concatenation of its sources, so their exports follow the files too. The [import and export reference](/api/import_export.html#cell-order-in-exports) describes each export's order.
 
 ## What the shuffle costs
 

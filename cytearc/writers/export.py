@@ -21,7 +21,14 @@ import stat
 import unicodedata
 import zlib
 from collections import defaultdict, deque
-from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from collections.abc import (
+    Callable,
+    Generator,
+    Iterable,
+    Iterator,
+    Mapping,
+    Sequence,
+)
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
@@ -627,6 +634,199 @@ def in_memory_reordered_matrix(matrix: H5adMatrix, order: np.ndarray) -> H5adMat
         yield cast(csr_matrix, rows[np.asarray(order, dtype=np.int64)])
 
     return replace(matrix, blocks=blocks, reserve=None)
+
+
+# Bytes that a reorder of text rows holds for each row of a block that it
+# sends to its bucket, beside the row's bytes as rendered, gathered by bucket
+# and cut into its bucket's piece: its place and bucket, its order by bucket,
+# and its offsets and length.
+_TEXT_ROW_SEND_BYTES = 48
+# The rows of the first block that measure how the rows encode on disk, about
+# this many bytes of them.
+_TEXT_SAMPLE_BYTES = 1 << 20
+
+
+@dataclass(frozen=True, slots=True)
+class TextReorder:
+    """How a reorder of text rows through temporary files sizes its buckets, and what it holds.
+
+    Attributes:
+        widest_row: The most bytes that one row holds.
+        read_bytes: The read size for which the buckets are sized.
+        bucket_bytes: The most that reading one bucket back holds; a bucket
+            that would take more is split into bands.
+        buffer_bytes: The most that rows waiting for their buckets take.
+        held_bytes: The most that the reorder holds beside the blocks of rows
+            that it is sent and the batches that it yields.
+    """
+
+    widest_row: int
+    read_bytes: int
+    bucket_bytes: int
+    buffer_bytes: int
+    held_bytes: int
+
+
+def plan_text_reorder(
+    n_rows: int, widest_row: int, block_rows: int, block_bytes: int, max_bytes: int
+) -> TextReorder:
+    """Size a reorder of ``n_rows`` text rows that holds a few blocks of them, at most ``max_bytes`` where it can.
+
+    The rows arrive in blocks of at most ``block_rows`` rows and about
+    ``block_bytes``. Buckets are sized to read in about a block, at least
+    what reading one row of ``widest_row`` bytes holds, and split beyond
+    twice that, and the rows waiting for their buckets take at most a block,
+    or half of what ``max_bytes`` leaves. While rows stream in, the reorder
+    holds the bucket writer, for as many buckets as rows of ``widest_row``
+    bytes take, the block that a thread sends to its buckets while the next
+    one arrives, as rendered, gathered by bucket and cut into its buckets'
+    pieces, and the waiting rows. While rows are read back, it holds their
+    pointers and the buckets' first rows, a bucket as it loads, the next
+    one, which loads ahead, and a batch joined from two. When ``max_bytes``
+    cannot hold the buckets, smaller ones are tried; any ``max_bytes`` from
+    what the plan of the smallest buckets holds gives a plan within it.
+    Below that, a plan that does not fit holds more than ``max_bytes``, so a
+    caller that charges it refuses, and a plan within the bytes that it
+    holds fits.
+    """
+    from ..readers._sparse import SparseRowStore
+
+    n_rows = int(n_rows)
+    widest_row = max(1, int(widest_row))
+    # A block holds no more rows than the reorder.
+    block_rows = max(1, min(int(block_rows), n_rows))
+    least_read = SparseRowStore.ragged_row_read_bytes(widest_row)
+    # A bucket's first row and the pointers of every row, the most buckets
+    # being one for each row.
+    pointers = 16 * (n_rows + 1)
+
+    def held(read: int) -> tuple[int, int]:
+        """What the reorder holds while rows stream in, without the waiting rows, and while they are read back."""
+        bucket_rows = SparseRowStore.ragged_bucket_rows(n_rows, widest_row, read)
+        streaming = SparseRowStore.writer_bytes(n_rows, bucket_rows) + block_rows * (
+            3 * widest_row + _TEXT_ROW_SEND_BYTES
+        )
+        return streaming, pointers + 3 * 2 * read
+
+    read = max(least_read, int(block_bytes))
+    streaming, reading = held(read)
+    if reading > max_bytes:
+        read = max(least_read, (int(max_bytes) - pointers) // 6)
+        streaming, reading = held(read)
+    buffer = max(0, min(int(block_bytes), (int(max_bytes) - streaming) // 2))
+    return TextReorder(
+        widest_row=widest_row,
+        read_bytes=read,
+        bucket_bytes=2 * read,
+        buffer_bytes=buffer,
+        held_bytes=max(streaming + buffer, reading),
+    )
+
+
+def reordered_text_rows(
+    rows: Iterable[tuple[np.ndarray, np.ndarray]],
+    destinations: np.ndarray,
+    plan: TextReorder,
+    *,
+    operation: str,
+    temp_dir: str | os.PathLike[str] | None = None,
+) -> Generator[tuple[np.ndarray, np.ndarray]]:
+    """Yield the rows of a text file in another order, through temporary files on local disk.
+
+    ``rows`` gives blocks of consecutive rows, each the rows' bytes and the
+    offset of each row in them, the last their end; row ``i`` goes to place
+    ``destinations[i]``. Each row goes to the bucket of its place as it
+    arrives, in a :class:`~cytearc.readers._sparse.SparseRowStore` of ragged
+    rows in ``temp_dir``, the system's temporary directory when None, sized
+    as ``plan`` gives it, and the buckets are read back in order, a bucket's
+    rows at a time, each bucket's files deleted once its rows are yielded.
+    A thread sends each block to its buckets while the next block arrives,
+    and the next bucket loads while the rows of one are yielded.
+    The first block's rows estimate what every row takes, which sizes the
+    buckets, and the free disk is checked against a quarter more than the
+    rows are estimated to take there, as their first megabyte encodes.
+    Closing the generator, or an error, removes the temporary files.
+    ``operation`` names the reorder in its errors, such as ``"AIRR export in
+    source order"``.
+
+    Raises:
+        ValueError: If the blocks hold more or fewer rows than
+            ``destinations`` holds, a place repeats, or a row holds more
+            bytes than ``plan.widest_row``.
+        OSError: If the temporary directory lacks the disk that the rows take
+            there.
+    """
+    from ..readers._sparse import SparseRowStore, encoded_ragged_bytes
+
+    n_rows = int(np.asarray(destinations).size)
+    store: SparseRowStore | None = None
+    bucket_rows = 1
+
+    def created(values: np.ndarray, offsets: np.ndarray) -> SparseRowStore:
+        nonlocal bucket_rows
+        n_sample = max(1, int(np.searchsorted(offsets, _TEXT_SAMPLE_BYTES)))
+        sample = min(n_sample, offsets.size - 1)
+        mean = int(offsets[-1]) / max(1, offsets.size - 1)
+        bucket_rows = SparseRowStore.ragged_bucket_rows(n_rows, mean, plan.read_bytes)
+        return SparseRowStore(
+            (n_rows, plan.widest_row),
+            np.uint8,
+            operation=operation,
+            bucket_rows=bucket_rows,
+            whole_rows=True,
+            ragged=True,
+            buffer_bytes=plan.buffer_bytes,
+            bucket_bytes=plan.bucket_bytes,
+            entries=math.ceil(mean * n_rows),
+            entry_bytes=(
+                encoded_ragged_bytes(
+                    values[: int(offsets[sample])], offsets[: sample + 1]
+                )
+                if sample
+                else None
+            ),
+            temp_dir=None if temp_dir is None else os.fspath(temp_dir),
+        )
+
+    try:
+        sent = 0
+        # One block is sent to its buckets on a thread while the next one
+        # arrives.
+        with ThreadPoolExecutor(1, thread_name_prefix="cytearc-reorder") as sender:
+            sending: Future[None] | None = None
+            for values, offsets in rows:
+                if store is None:
+                    store = created(values, offsets)
+                count = int(offsets.size) - 1
+                if sent + count > n_rows:
+                    raise ValueError(
+                        f"{operation} has places for {n_rows} rows and was sent more"
+                    )
+                if sending is not None:
+                    sending.result()
+                sending = sender.submit(
+                    store.append_ragged_rows,
+                    destinations[sent : sent + count],
+                    values,
+                    offsets,
+                )
+                sent += count
+                del values, offsets
+            if sending is not None:
+                sending.result()
+        if sent != n_rows:
+            raise ValueError(
+                f"{operation} has places for {n_rows} rows and was sent {sent}"
+            )
+        if store is None:
+            store = created(np.zeros(0, dtype=np.uint8), np.zeros(1, dtype=np.int64))
+        store.finalize()
+        yield from store.iter_ragged_rows(
+            0, n_rows, bucket_rows, read_ahead=True, delete=True
+        )
+    finally:
+        if store is not None:
+            store.close()
 
 
 _DIGIT_RUNS = re.compile(r"(\d+)")
