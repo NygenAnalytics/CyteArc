@@ -4,6 +4,7 @@ from typing import Any
 import h5py
 import numpy as np
 
+from ..utils.arguments import quoted_value
 from ._text import as_text
 
 # AnnData writes a dataframe column as a group when it needs more than one
@@ -33,6 +34,45 @@ def is_nullable(node: Any) -> bool:
 def is_column(node: Any) -> bool:
     """Return whether a dataframe child holds values that can be decoded."""
     return isinstance(node, h5py.Dataset) or is_categorical(node) or is_nullable(node)
+
+
+def column_place(path: str, table: str, key: str, *, index: bool) -> str:
+    """Name a column of an H5AD table as refusals name it.
+
+    For example ``the obs index '_index' of 'pbmc.h5ad'``.
+    """
+    kind = "index" if index else "column"
+    return f"the {table} {kind} {key!r} of {quoted_value(path)}"
+
+
+def utf8_refusal(value: bytes, row: int, expectation: str, place: str) -> ValueError:
+    """Return the refusal of bytes in a column that are not UTF-8 text.
+
+    Args:
+        value: The bytes.
+        row: Their row, counting from 0, which the refusal counts from 1.
+        expectation: What the column must hold, which the refusal starts
+            with, such as ``"H5AD cell IDs must be UTF-8 text"``.
+        place: Where the column is, as :func:`column_place` names it.
+    """
+    return ValueError(
+        f"{expectation}; row {row + 1} of {place} holds {quoted_value(bytes(value))}"
+    )
+
+
+def check_utf8(values: np.ndarray, expectation: str, place: str) -> None:
+    """Refuse a column that holds bytes that are not UTF-8 text.
+
+    Raises:
+        ValueError: If a value is such bytes, as :func:`utf8_refusal`
+            refuses the first.
+    """
+    for row, value in enumerate(values.tolist()):
+        if isinstance(value, bytes):
+            try:
+                value.decode("utf-8")
+            except UnicodeDecodeError:
+                raise utf8_refusal(value, row, expectation, place) from None
 
 
 @dataclass(frozen=True, slots=True)

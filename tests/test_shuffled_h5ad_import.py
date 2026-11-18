@@ -778,13 +778,23 @@ def test_a_budget_without_room_for_the_spill_is_refused_with_the_bytes_it_needs(
     _write_source(source, "csr")
     nonzeros = np.count_nonzero(_counts(), axis=1)
     rows, longest = _N_CELLS, int(nonzeros.max())
-    # The order and its inverse are held beside the scan.
-    held = 2 * 8 * rows
-    budget = 8_000
+    # The reader keeps the cell IDs, the feature IDs, and the feature IDs
+    # again as the names, which the reader finds no column of; the order and
+    # its inverse are held beside the scan too.
+    features = [f"feature-{f}" for f in range(_N_FEATURES)]
+    held = (
+        _id_bytes([f"cell-{row}" for row in range(rows)])
+        + _id_bytes(features)
+        + _text_bytes(features)
+        + 2 * 8 * rows
+    )
+    # What the scan may hold beside them.
+    share = 5_488
+    budget = held + share
     # Buckets read in a thirty-second of what the scan may hold, at 44 bytes
     # for each float32 entry read and 80 for each row.
     row_bytes = nonzeros.mean() * 44 + 80
-    buckets = -(-rows // max(1, int(((budget - held) // 32) // row_bytes)))
+    buckets = -(-rows // max(1, int((share // 32) // row_bytes)))
     # Row counts of the store; the writer's counts and marks, a few numbers
     # per bucket, and the destinations of its rows; a scan window of the
     # longest row and what appending it holds.
@@ -801,10 +811,16 @@ def test_a_budget_without_room_for_the_spill_is_refused_with_the_bytes_it_needs(
                 nthreads=1,
                 shuffle_cells=True,
             )
-        assert caught.value.needed_bytes == least
-        assert caught.value.budget_bytes == budget - held
+        # The refusal states what the import needs in all, as a budget that
+        # lets it pass the spill.
+        assert caught.value.needed_bytes == held + least
+        assert caught.value.budget_bytes == budget
         assert caught.value.item == "the row spill of a cell shuffle"
         assert str(caught.value).startswith("Shuffling cells exceeds the memory limit")
+        assert str(caught.value).endswith(
+            f"The import also holds the {held} bytes of its IDs, names and cell "
+            f"order, so it needs at least {held + least} bytes."
+        )
         assert reader._convertedCsr is None
         # With that much, the spill fits; a later step of so small a budget
         # refuses for itself.
@@ -812,7 +828,7 @@ def test_a_budget_without_room_for_the_spill_is_refused_with_the_bytes_it_needs(
             H5adToZarr(
                 reader,
                 str(tmp_path / "admitted.zarr"),
-                mem_budget=least + held,
+                mem_budget=held + least,
                 nthreads=1,
                 shuffle_cells=True,
             )
@@ -1148,6 +1164,11 @@ def _id_bytes(ids: list[str]) -> int:
     return sum(8 + 33 + len(value.encode()) for value in ids)
 
 
+def _text_bytes(names: list[str]) -> int:
+    """Bytes of the reader's NumPy array of feature names, 4 a character of the longest."""
+    return len(names) * 4 * max(len(name) for name in names)
+
+
 @pytest.mark.parametrize("output", ["embedding", "cluster labels"])
 def test_per_cell_arrays_that_do_not_fit_are_refused_before_anything_is_written(
     tmp_path, output
@@ -1195,10 +1216,19 @@ def test_per_cell_arrays_that_do_not_fit_are_refused_before_anything_is_written(
     assert not destination.exists()
     assert not _temporary_folders(tmp_path)
     budget = caught.value.budget_bytes
-    # The order of the cells and the reader's IDs are held throughout; a
-    # block takes the most rows that an eighth of the budget sizes it for.
+    # The order of the cells and the IDs and names that the reader keeps are
+    # held throughout: the cell IDs, the feature IDs, and the feature IDs
+    # again as the names, which the reader finds no column of. A block takes
+    # the most rows that an eighth of the budget sizes it for.
+    features = [f"g{column}" for column in range(20)]
     block = min(n_cells, budget // (8 * sized_bytes))
-    needed = 8 * n_cells + _id_bytes(ids) + (n_cells + block) * row_bytes
+    needed = (
+        8 * n_cells
+        + _id_bytes(ids)
+        + _id_bytes(features)
+        + _text_bytes(features)
+        + (n_cells + block) * row_bytes
+    )
     assert caught.value.needed_bytes == needed
     assert needed > budget
     assert "in shuffled order" in caught.value.item
@@ -1216,9 +1246,47 @@ def test_what_a_shuffled_import_holds_beside_a_gathered_array_is_charged(
     finally:
         reader.close()
     ids = [f"cell-{row}" for row in range(_N_CELLS)]
-    # The order, the reader's IDs, the declared RNA membership, one boolean
-    # a cell, and the dense matrix's count of values in each row.
-    assert resident == (8 * _N_CELLS + _id_bytes(ids) + _N_CELLS + 8 * (_N_CELLS + 1))
+    features = [f"feature-{f}" for f in range(_N_FEATURES)]
+    names = [f"gene-{f}" for f in range(_N_FEATURES)]
+    # The order, the IDs and names that the reader keeps, the declared RNA
+    # membership, one boolean a cell, and the dense matrix's count of values
+    # in each row.
+    assert resident == (
+        8 * _N_CELLS
+        + _id_bytes(ids)
+        + _id_bytes(features)
+        + _text_bytes(names)
+        + _N_CELLS
+        + 8 * (_N_CELLS + 1)
+    )
+
+
+@pytest.mark.parametrize("shuffle_cells", [False, True], ids=["file", "shuffled"])
+def test_an_import_reads_each_id_and_name_column_once(
+    tmp_path, monkeypatch, shuffle_cells
+) -> None:
+    source = tmp_path / "source.h5ad"
+    _write_source(source, "csr")
+    whole_reads: list[tuple[str, str]] = []
+    original = H5adReader._read_column
+
+    def spy(self, group, key, start=0, stop=None):
+        if start == 0 and stop is None:
+            whole_reads.append((group, key))
+        return original(self, group, key, start, stop)
+
+    monkeypatch.setattr(H5adReader, "_read_column", spy)
+    # A split reads the feature IDs and names, and a shuffled import of
+    # embeddings the cell IDs, before the import checks them all.
+    _import(
+        source,
+        tmp_path / "store.zarr",
+        shuffle_cells=shuffle_cells,
+        assay_split_key="feature_types",
+    )
+
+    for column in [("obs", "_index"), ("var", "_index"), ("var", "feature_name")]:
+        assert whole_reads.count(column) == 1, column
 
 
 def test_embeddings_gathered_in_another_order_than_the_ids_fail_their_check(

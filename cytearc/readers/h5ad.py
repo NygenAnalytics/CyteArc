@@ -1,3 +1,4 @@
+import math
 import sys
 from collections.abc import Generator, Iterator, Mapping, Sequence
 from dataclasses import dataclass
@@ -35,10 +36,12 @@ from ._h5ad_columns import (
     H5adCategories,
     TableColumn,
     category_colors,
+    check_utf8,
     column_categories,
     column_encoding,
     column_length,
     column_order,
+    column_place,
     decoded_column,
     index_key,
     is_column,
@@ -51,6 +54,7 @@ from ._h5ad_columns import (
     table_column_dtype,
     table_column_names,
     table_members,
+    utf8_refusal,
 )
 from ._h5ad_inspect import H5adInspectResult, inspect_h5ad as inspect_h5ad
 from ._h5ad_values import (
@@ -118,6 +122,73 @@ def _is_missing_name(value: Any) -> bool:
     if isinstance(value, float | np.floating):
         return not bool(np.isfinite(value))
     return not as_text(value).strip()
+
+
+# What refusals call the IDs and names that an import stores.
+_CELL_IDS = "H5AD cell IDs"
+_FEATURE_IDS = "H5AD feature IDs"
+_FEATURE_NAMES = "H5AD feature names"
+# The most rows that a refusal names.
+_NAMED_ROWS = 5
+
+
+def _named_rows(rows: list[int]) -> str:
+    """Name rows as refusals name them, counting from 1: the first few and how many more."""
+    shown = [str(row + 1) for row in rows[:_NAMED_ROWS]]
+    more = len(rows) - len(shown)
+    if more:
+        return f"rows {', '.join(shown)} and {more:,} more"
+    if len(shown) == 1:
+        return f"row {shown[0]}"
+    return f"rows {', '.join(shown[:-1])} and {shown[-1]}"
+
+
+def _check_identifiers(values: np.ndarray, label: str, place: str) -> None:
+    """Refuse IDs that an import cannot store.
+
+    Args:
+        values: The IDs as the file holds them.
+        label: What the IDs are, such as ``"H5AD cell IDs"``.
+        place: Where they are, as :func:`column_place` names it.
+
+    Raises:
+        ValueError: If an ID is bytes that are not UTF-8 text, naming the
+            first row that holds them, or if IDs are missing, as None or as
+            NaN in a column of numbers, or blank, naming their rows.
+    """
+    # One pass, decoding inline: a call per ID would take several times as long.
+    missing: list[int] = []
+    for row, value in enumerate(values.tolist()):
+        if isinstance(value, bytes):
+            try:
+                value = value.decode("utf-8")
+            except UnicodeDecodeError:
+                raise utf8_refusal(
+                    value, row, f"{label} must be UTF-8 text", place
+                ) from None
+        elif value is None or (
+            isinstance(value, float | np.floating) and math.isnan(value)
+        ):
+            missing.append(row)
+            continue
+        # The text that an import stores: the decoded bytes, or the str of
+        # another value, such as a number.
+        if not str(value).strip():
+            missing.append(row)
+    if missing:
+        state = "is" if len(missing) == 1 else "are"
+        raise ValueError(
+            f"{label} must contain non-empty values; {_named_rows(missing)} of "
+            f"{place} {state} missing or blank"
+        )
+
+
+def _array_bytes(values: np.ndarray) -> int:
+    """Return the bytes of an array, with those of the objects an object array holds."""
+    held = int(values.nbytes)
+    if values.dtype.kind == "O":
+        held += sum(map(sys.getsizeof, values))
+    return held
 
 
 def _matrix_group_contents(group: h5py.Group) -> str:
@@ -662,9 +733,24 @@ class H5adReader:
             f"Aborting because unexpected H5ad format."
         )
 
-    def _identifiers(self, group: str, key: str, generated: str) -> np.ndarray:
+    def _column_place(self, group: str, key: str) -> str:
+        """Name a column of a table of the file as refusals name it."""
+        return column_place(
+            str(self.h5adFn), group, key, index=key == self._index_member(group)
+        )
+
+    def _identifiers(
+        self, group: str, key: str, generated: str, label: str
+    ) -> np.ndarray:
+        """Return a table's IDs as the file holds them, or IDs that the reader generates.
+
+        Raises:
+            ValueError: If the file holds IDs that an import cannot store:
+                bytes that are not UTF-8 text, or missing or blank IDs.
+        """
         if self._check_exists(group, key):
             values = present_column(*self._read_column(group, key)).astype(object)
+            _check_identifiers(values, label, self._column_place(group, key))
         else:
             n_rows = self.nCells if group == self.cellAttrsKey else self.nFeatures
             logger.warning(
@@ -681,10 +767,10 @@ class H5adReader:
         repeated IDs, which happens once, on first use.
         """
         if self._cellIdentifiers is None:
-            source = self._identifiers(self.cellAttrsKey, self.cellIdsKey, "cell")
-            resolved = unique_cell_identifiers(
-                source, "H5AD cell IDs", self.duplicateCellIds
+            source = self._identifiers(
+                self.cellAttrsKey, self.cellIdsKey, "cell", _CELL_IDS
             )
+            resolved = unique_cell_identifiers(source, _CELL_IDS, self.duplicateCellIds)
             self._cellIdentifiers = (source, resolved)
         return self._cellIdentifiers
 
@@ -698,7 +784,10 @@ class H5adReader:
         file's order, match the imported store's cells in ``ds.cells.insert``.
 
         Repeated IDs raise ValueError, or are renamed with
-        ``duplicate_cell_ids="make_unique"``.
+        ``duplicate_cell_ids="make_unique"``. IDs that an import cannot
+        store raise ValueError that names the file, the table, the column
+        and the rows: missing IDs, such as NaN in an index of numbers, blank
+        IDs, and bytes that are not UTF-8 text.
         """
         return _stored_texts(self._cell_identifiers()[1])
 
@@ -706,19 +795,34 @@ class H5adReader:
         """Return the cell IDs of file rows ``rows``, in that order, as the text an import stores."""
         return _stored_texts(self._cell_identifiers()[1][rows])
 
-    def _cell_id_bytes(self) -> int:
-        """Return the bytes of the cell IDs that the reader holds once it read them.
+    def _check_ids_and_names(self) -> None:
+        """Read the cell IDs, feature IDs and feature names that an import stores.
 
-        It holds them as the file holds them and, when it renamed repeated
-        IDs, with those IDs renamed.
+        The reader keeps them, so an import that calls this before it reads
+        the matrix reads them once, and refuses IDs and names that it cannot
+        store before it writes anything.
+
+        Raises:
+            ValueError: If the reader refuses an ID or a name, as
+                :meth:`cell_ids`, :meth:`feat_ids` and :meth:`feat_names`
+                refuse them.
         """
-        source, resolved = self._cell_identifiers()
+        self._cell_identifiers()
+        self._feature_identifiers()
+        self._feature_names()
+
+    def _id_bytes(self) -> int:
+        """Return the bytes of the IDs and names that the reader keeps once it read them.
+
+        It keeps the cell and feature IDs as the file holds them and, when
+        it renamed repeated IDs, with those IDs renamed, and the feature
+        names as the text that an import stores.
+        """
         held = 0
-        for values in (source,) if resolved is source else (source, resolved):
-            held += int(values.nbytes)
-            if values.dtype.kind == "O":
-                held += sum(map(sys.getsizeof, values))
-        return held
+        for source, resolved in (self._cell_identifiers(), self._feature_identifiers()):
+            for values in (source,) if resolved is source else (source, resolved):
+                held += _array_bytes(values)
+        return held + _array_bytes(self._feature_names())
 
     def _feature_identifiers(self) -> tuple[np.ndarray, np.ndarray]:
         """Return the feature IDs as the file holds them and with any repeated ID renamed.
@@ -727,10 +831,12 @@ class H5adReader:
         repeated IDs, which happens once, on first use.
         """
         if self._featureIdentifiers is None:
-            source = self._identifiers(self.featureAttrsKey, self.featIdsKey, "feature")
+            source = self._identifiers(
+                self.featureAttrsKey, self.featIdsKey, "feature", _FEATURE_IDS
+            )
             resolved = unique_feature_identifiers(
                 source,
-                "H5AD feature IDs",
+                _FEATURE_IDS,
                 self.duplicateFeatureIds,
             )
             self._featureIdentifiers = (source, resolved)
@@ -743,7 +849,8 @@ class H5adReader:
         converts cell IDs.
 
         Repeated IDs raise ValueError, or are renamed with
-        ``duplicate_feature_ids="make_unique"``.
+        ``duplicate_feature_ids="make_unique"``. IDs that an import cannot
+        store raise ValueError, as :meth:`cell_ids` describes.
         """
         return _stored_texts(self._feature_identifiers()[1])
 
@@ -754,11 +861,16 @@ class H5adReader:
         converts cell IDs. Without the feature name key, the names are the
         feature IDs before any repeated ID is renamed. A missing or blank
         name, such as a missing category, takes the ID of its feature before
-        any rename.
+        any rename. Bytes that are not UTF-8 text raise ValueError that names
+        the file, the table, the column and the row.
         """
+        return self._feature_names().copy()
+
+    def _feature_names(self) -> np.ndarray:
+        """Return the feature names that the reader keeps, read on first use."""
         if self._featureNames is None:
             self._featureNames = _stored_texts(self._read_feature_names())
-        return self._featureNames.copy()
+        return self._featureNames
 
     def _read_feature_names(self) -> np.ndarray:
         if not self._check_exists(self.featureAttrsKey, self.featNamesKey):
@@ -770,6 +882,11 @@ class H5adReader:
         names = present_column(
             *self._read_column(self.featureAttrsKey, self.featNamesKey)
         ).astype(object)
+        check_utf8(
+            names,
+            f"{_FEATURE_NAMES} must be UTF-8 text",
+            self._column_place(self.featureAttrsKey, self.featNamesKey),
+        )
         missing = np.asarray([_is_missing_name(name) for name in names], dtype=bool)
         if missing.any():
             names[missing] = self._feature_identifiers()[0][missing]
@@ -939,8 +1056,8 @@ class H5adReader:
     def _cell_ids_block(self, start: int, stop: int) -> np.ndarray:
         """Return cell IDs ``[start, stop)`` as the text an import stores.
 
-        An import validates every ID with :meth:`cell_ids` before it reads
-        blocks.
+        An import checks every ID with :meth:`_check_ids_and_names` before
+        it reads blocks.
         """
         if not self._check_exists(self.cellAttrsKey, self.cellIdsKey):
             return np.asarray([f"cell_{index}" for index in range(start, stop)])

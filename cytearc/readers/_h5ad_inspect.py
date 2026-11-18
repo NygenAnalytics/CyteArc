@@ -13,7 +13,9 @@ from ._assay_names import (
 )
 from ._h5ad_columns import (
     SPARSE_KEYS,
+    check_utf8,
     column_length,
+    column_place,
     index_key as _index_key,
     is_column,
     present_column,
@@ -52,6 +54,8 @@ _CELL_ID_KEYS = (
     "barcodes",
 )
 _LEGACY_CATEGORY_GROUPS = ("__categories", "categories")
+# How inspection's refusal of text that is not UTF-8 starts.
+_TABLE_TEXT = "H5AD tables must hold UTF-8 text"
 _NON_MATRIX_PREFIXES = (
     "obs/",
     "var/",
@@ -317,6 +321,12 @@ def _read_column(
     node: h5py.Group | h5py.Dataset,
     key: str,
 ) -> np.ndarray | None:
+    """Return a column of a table, or None when it cannot be read.
+
+    Raises:
+        ValueError: If the column holds bytes that are not UTF-8 text, which
+            an import refuses in every column, as IDs, names or metadata.
+    """
     if isinstance(node, h5py.Dataset):
         if node.dtype.names is None or key not in node.dtype.names:
             return None
@@ -328,7 +338,16 @@ def _read_column(
         )
     except (TypeError, ValueError):
         return None
-    return present_column(values, missing)
+    values = present_column(values, missing)
+    if values.dtype.kind in "OS":
+        place = column_place(
+            node.file.filename,
+            node.name.strip("/"),
+            key,
+            index=key == _table_index(node, table_column_names(node)),
+        )
+        check_utf8(values, _TABLE_TEXT, place)
+    return values
 
 
 def _matching_key(names: list[str], preferences: tuple[str, ...]) -> str | None:
@@ -643,6 +662,12 @@ def inspect_h5ad(
     Returns:
         Keys, shape, and column names needed to configure
         :class:`~cytearc.readers.H5adReader`.
+
+    Raises:
+        ValueError: If no matrix matches the ``obs`` and ``var`` tables,
+            ``matrix_key`` names no matrix, or a column that inspection reads
+            to find the IDs and names holds bytes that are not UTF-8 text,
+            which an import refuses.
     """
     with h5py.File(h5ad_fn, mode="r") as h5:
         candidates = _matrix_candidates(h5)

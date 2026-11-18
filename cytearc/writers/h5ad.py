@@ -992,6 +992,10 @@ class H5adToZarr:
         check_destination(
             zarr_loc, overwrite=overwrite, storage_options=storage_options
         )
+        # IDs and names that the import refuses fail here, before the passes
+        # over the source and before anything is written. The reader keeps
+        # them for the import.
+        self.h5ad._check_ids_and_names()
         self._sourceDigest = (
             bytes.fromhex(file_sha256(self.h5ad.h5adFn)) if has_analysis else None
         )
@@ -1017,31 +1021,38 @@ class H5adToZarr:
             # Another import of the reader may hold its shuffled rows, which
             # this import, in the file's order, never reads.
             self.h5ad._release_shuffled_rows()
-        held = 0 if destinations is None else 2 * destinations.nbytes
+        # The reader keeps the IDs and names, and a shuffle holds the order
+        # and its inverse, beside the scan and the CSC conversion.
+        held = self.h5ad._id_bytes() + (
+            0 if destinations is None else 2 * destinations.nbytes
+        )
         # The rows on local disk before the scan; rows there after a failure
         # are this import's, which no later import of the reader may read.
         rows_before = self.h5ad._convertedCsr
         try:
-            value_ranges = dict(
-                zip(
-                    self.assayNames,
-                    self.h5ad.count_value_ranges(
-                        self.resources.memoryBytes - held,
-                        None if self._projection is None else self._projection[0],
-                        processes=self._value_scan_processes(),
-                        destinationRows=destinations,
-                    ),
-                    strict=True,
+            try:
+                value_ranges = dict(
+                    zip(
+                        self.assayNames,
+                        self.h5ad.count_value_ranges(
+                            self.resources.memoryBytes - held,
+                            None if self._projection is None else self._projection[0],
+                            processes=self._value_scan_processes(),
+                            destinationRows=destinations,
+                        ),
+                        strict=True,
+                    )
                 )
-            )
-            self.storageDtypes = {
-                name: count_storage_dtype(self.h5ad.sourceMatrixDtype, value_range)
-                for name, value_range in value_ranges.items()
-            }
-            logger.debug(f"Resolved H5AD count storage dtypes={self.storageDtypes}")
-            self.h5ad.materialize_csc(
-                self.resources.memoryBytes - held, destinationRows=destinations
-            )
+                self.storageDtypes = {
+                    name: count_storage_dtype(self.h5ad.sourceMatrixDtype, value_range)
+                    for name, value_range in value_ranges.items()
+                }
+                logger.debug(f"Resolved H5AD count storage dtypes={self.storageDtypes}")
+                self.h5ad.materialize_csc(
+                    self.resources.memoryBytes - held, destinationRows=destinations
+                )
+            except MemoryBudgetError as error:
+                raise self._refusal_beside_held(error, held) from error
             del destinations
             # The rows that this import's counts write reads, which no other
             # import of the same reader may replace.
@@ -1118,6 +1129,27 @@ class H5adToZarr:
             ):
                 self.h5ad._release_shuffled_rows()
             raise
+
+    def _refusal_beside_held(
+        self, error: MemoryBudgetError, held: int
+    ) -> MemoryBudgetError:
+        """Restate a refusal of the scan or the CSC conversion in the import's budget.
+
+        Both run within what the budget leaves beside the ``held`` bytes of
+        the IDs and names that the reader keeps and of a shuffle's order, so
+        the import needs those bytes beside what they refused for.
+        """
+        held_items = (
+            "IDs, names and cell order" if self.shuffleCells else "IDs and names"
+        )
+        needed = int(held) + error.needed_bytes
+        return MemoryBudgetError(
+            f"{error} The import also holds the {int(held)} bytes of its "
+            f"{held_items}, so it needs at least {needed} bytes.",
+            needed_bytes=needed,
+            budget_bytes=int(self.resources.memoryBytes),
+            item=error.item,
+        )
 
     def _other_count_matrices(self) -> list[str]:
         """Return the file's other matrices whose sampled values are counts."""
@@ -1440,12 +1472,12 @@ class H5adToZarr:
     def _shuffled_resident_bytes(self) -> int:
         """Return what a shuffled import holds while it writes an embedding or cluster labels.
 
-        It holds the order of the cells, the reader's cell IDs, each
-        declared assay membership, a dense matrix's count of the values in
-        each row, and the features of each assay of a split.
+        It holds the order of the cells, the IDs and names that the reader
+        keeps, each declared assay membership, a dense matrix's count of the
+        values in each row, and the features of each assay of a split.
         """
         assert self._cellOrder is not None
-        resident = int(self._cellOrder.nbytes) + self.h5ad._cell_id_bytes()
+        resident = int(self._cellOrder.nbytes) + self.h5ad._id_bytes()
         resident += sum(int(values.nbytes) for values in self._membership.values())
         if self.h5ad.matrixOrientation == "dense":
             resident += 8 * (self.h5ad.nCells + 1)
@@ -1481,8 +1513,8 @@ class H5adToZarr:
             raise MemoryBudgetError(
                 f"Writing {item} exceeds the memory limit. A shuffled import "
                 "holds the file's rows to write them in shuffled order, beside "
-                f"the {int(resident)} bytes of its cell order, cell IDs and "
-                f"other per-cell arrays, which needs {needed} bytes; raise "
+                f"the {int(resident)} bytes of its cell order, IDs, names and "
+                f"other arrays, which needs {needed} bytes; raise "
                 "mem_budget or import with shuffle_cells=False.",
                 needed_bytes=needed,
                 budget_bytes=budget,
