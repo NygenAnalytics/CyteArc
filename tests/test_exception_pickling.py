@@ -23,6 +23,7 @@ from cytearc.clones.recorders import RefusedTokens
 from cytearc.datasets import _StoreAppeared
 from cytearc.datastore.pipeline_run import PipelineCancelled, PipelineExecutionError
 from cytearc.merge.metadata import _SourceConflict
+from cytearc.metadata.encoding import UnstorableCategoriesError
 from cytearc.metadata.membership import UnmeasuredCellsError
 from cytearc.readers._rds._types import (
     RdsClosedError,
@@ -92,6 +93,9 @@ SAMPLES: dict[type[BaseException], Callable[[], BaseException]] = {
         context={"kind": "cell_selection"},
     ),
     NonFiniteArtifactError: lambda: NonFiniteArtifactError("run_pca", "data", 7),
+    UnstorableCategoriesError: lambda: UnstorableCategoriesError(
+        "Column 'tissue' has NaN among its categories"
+    ),
     PseudotimeConvergenceError: lambda: PseudotimeConvergenceError(
         method="untruncated",
         n_cells=595475,
