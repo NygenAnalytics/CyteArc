@@ -109,30 +109,45 @@ def test_h5ad_reader_rejects_a_matrix_that_disagrees_with_its_tables(
         H5adReader(str(path))
 
 
-def test_h5ad_import_matches_numeric_cell_ids_to_embedding_rows(tmp_path) -> None:
+@pytest.mark.parametrize("shuffle", [False, True])
+def test_h5ad_import_matches_numeric_cell_ids_to_embedding_rows(
+    tmp_path, shuffle
+) -> None:
     from cytearc import DataStore
     from cytearc.writers import H5adToZarr
 
     path = _write_h5ad(tmp_path / "numeric_ids.h5ad")
     umap = np.arange(8, dtype=np.float32).reshape(4, 2)
+    latent = np.arange(12, dtype=np.float32).reshape(4, 3) / 4
     with h5py.File(path, "a") as h5:
         h5["obs"].create_dataset("cell_number", data=np.arange(100, 104))
         h5.create_group("obsm").create_dataset("X_umap", data=umap)
+        h5["obsm"].create_dataset("X_pca", data=latent)
     reader = H5adReader(
-        str(path), cell_ids_key="cell_number", embedding_roles={"X_umap": "umap"}
+        str(path),
+        cell_ids_key="cell_number",
+        embedding_roles={"X_umap": "umap", "X_pca": "coordinates"},
     )
     try:
-        # The embedding's cell IDs used to be the source integers, which the
-        # import could not match to the text IDs that cellData stores.
-        result = H5adToZarr(reader, str(tmp_path / "ids.zarr"), nthreads=1).dump()
+        # The embeddings' cell IDs used to be the source integers, which the
+        # import could not match to the text IDs that cellData stores, in the
+        # file's order and, until they were read as text, in shuffled order.
+        result = H5adToZarr(
+            reader, str(tmp_path / "ids.zarr"), nthreads=1, shuffle_cells=shuffle
+        ).dump()
     finally:
         reader.close()
     store = DataStore(str(tmp_path / "ids.zarr"))
+    # Row r of the store holds the file's row rows[r].
+    rows = store.cells.fetch_all("sourceRow") if shuffle else np.arange(4)
+    assert shuffle != np.array_equal(rows, np.arange(4))
     np.testing.assert_array_equal(
-        store.cells.fetch_all("ids"), ["100", "101", "102", "103"]
+        store.cells.fetch_all("ids"), np.array(["100", "101", "102", "103"])[rows]
     )
     embedding = store.artifacts.load(result.embeddingArtifacts["X_umap"])
-    np.testing.assert_allclose(embedding["values"][:], umap)
+    np.testing.assert_allclose(embedding["values"][:], umap[rows])
+    coordinates = store.artifacts.load(result.embeddingArtifacts["X_pca"])
+    np.testing.assert_allclose(coordinates["data"][:], latent[rows])
 
 
 def test_h5ad_import_without_tables_generates_ids_for_embeddings(tmp_path) -> None:
@@ -147,7 +162,9 @@ def test_h5ad_import_without_tables_generates_ids_for_embeddings(tmp_path) -> No
         h5.create_group("obsm").create_dataset("X_umap", data=umap)
     reader = H5adReader(str(path), embedding_roles={"X_umap": "umap"})
     try:
-        result = H5adToZarr(reader, str(tmp_path / "bare.zarr"), nthreads=1).dump()
+        result = H5adToZarr(
+            reader, str(tmp_path / "bare.zarr"), nthreads=1, shuffle_cells=False
+        ).dump()
     finally:
         reader.close()
     store = DataStore(str(tmp_path / "bare.zarr"))
@@ -528,11 +545,20 @@ def test_h5ad_import_reads_big_endian_counts_natively(
         # The fractional values are counts too, so they are declared so.
         if stored_dtype is None:
             with pytest.raises(ValueError, match="negative values"):
-                H5adToZarr(reader, str(tmp_path / "counts.zarr"), values="counts")
+                H5adToZarr(
+                    reader,
+                    str(tmp_path / "counts.zarr"),
+                    values="counts",
+                    shuffle_cells=False,
+                )
             assert not (tmp_path / "counts.zarr").exists()
             return
         H5adToZarr(
-            reader, str(tmp_path / "counts.zarr"), nthreads=1, values="counts"
+            reader,
+            str(tmp_path / "counts.zarr"),
+            nthreads=1,
+            values="counts",
+            shuffle_cells=False,
         ).dump()
     finally:
         reader.close()

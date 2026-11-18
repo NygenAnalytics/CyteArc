@@ -157,7 +157,9 @@ def test_crreader_subclass_imports_with_the_base_planning_defaults() -> None:
     assert list(reader.assayFeats.columns) == ["RNA"]
 
     store = MemoryStore()
-    CrToZarr(reader, store, mem_budget="64M", nthreads=1, policy=_POLICY).dump()
+    CrToZarr(
+        reader, store, mem_budget="64M", nthreads=1, policy=_POLICY, shuffle_cells=False
+    ).dump()
 
     counts = zarr.open_group(store=store, mode="r")["RNA/counts"]
     assert counts.dtype == np.uint8
@@ -425,7 +427,13 @@ def test_csv_fraction_in_an_early_chunk_keeps_float_storage(tmp_path: Path) -> N
     store = MemoryStore()
     # The fraction is a count here, so it is declared so.
     CSVtoZarr(
-        reader, store, assay_name="RNA", nthreads=1, policy=_POLICY, values="counts"
+        reader,
+        store,
+        assay_name="RNA",
+        nthreads=1,
+        policy=_POLICY,
+        values="counts",
+        shuffle_cells=False,
     ).dump()
 
     counts = zarr.open_group(store=store, mode="r")["RNA/counts"]
@@ -791,7 +799,14 @@ def test_feature_major_import_without_free_temporary_disk_fails_and_cleans_up(
     reader = MtxReader(inspect_mtx(tmp_path)[0], temp_dir=str(tmp_path))
     store = MemoryStore()
     try:
-        writer = MtxToZarr(reader, store, mem_budget="64M", nthreads=1, policy=_POLICY)
+        writer = MtxToZarr(
+            reader,
+            store,
+            mem_budget="64M",
+            nthreads=1,
+            policy=_POLICY,
+            shuffle_cells=False,
+        )
         monkeypatch.setattr(shutil, "disk_usage", lambda _path: SimpleNamespace(free=0))
         with pytest.raises(OSError, match="temporary bytes, but 0 bytes are free"):
             writer.dump()
@@ -892,10 +907,20 @@ def test_unordered_matrix_without_free_temporary_disk_fails_and_cleans_up(
     stores = [MemoryStore(), MemoryStore()]
     try:
         MtxToZarr(
-            reader, stores[0], mem_budget="64M", nthreads=1, policy=_POLICY
+            reader,
+            stores[0],
+            mem_budget="64M",
+            nthreads=1,
+            policy=_POLICY,
+            shuffle_cells=False,
         ).dump()
         writer = MtxToZarr(
-            reader, stores[1], mem_budget="64M", nthreads=1, policy=_POLICY
+            reader,
+            stores[1],
+            mem_budget="64M",
+            nthreads=1,
+            policy=_POLICY,
+            shuffle_cells=False,
         )
         # The second import sorts the rows again and fails for want of disk.
         monkeypatch.setattr(shutil, "disk_usage", lambda _path: SimpleNamespace(free=0))

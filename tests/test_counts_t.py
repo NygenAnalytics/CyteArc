@@ -1232,6 +1232,7 @@ def test_subset_preserves_gene_activity_alias(tmp_path):
         cell_ids=["c0", "c1", "c2"],
         feature_ids=["f0", "f1"],
         assay_name="GeneActivity",
+        shuffle_cells=False,
     ).dump()
     root = zarr.open_group(src, mode="r+")
     root.attrs["assayTypes"] = {"GeneActivity": "GeneActivity"}

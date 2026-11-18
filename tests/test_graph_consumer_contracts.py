@@ -48,6 +48,7 @@ def zero_weight_template(tmp_path_factory):
         cell_ids=cell_ids,
         feature_ids=[f"gene_{i}" for i in range(6)],
         nthreads=1,
+        shuffle_cells=False,
     ).dump()
     shutil.copytree(path / "RNA", path / "ADT")
     store = DataStore(

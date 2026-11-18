@@ -69,6 +69,7 @@ def _write_store(location: str) -> None:
         feature_ids=["g0", "g1", "g2"],
         assay_name="RNA",
         nthreads=1,
+        shuffle_cells=False,
     ).dump(batch_size=4)
 
 

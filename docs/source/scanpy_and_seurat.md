@@ -17,6 +17,7 @@ Compare how CyteArc keeps counts and results with how Scanpy and Seurat keep the
 | An `AnnData` or `SeuratObject` in memory holds counts, metadata and results | A `DataStore` opens a Zarr store of counts, metadata and results on local disk or in object storage, and reads the counts in blocks of bounded size instead of loading them whole |
 | A step changes the object in the current session | A step saves its result in the store as an immutable {term}`artifact`, which later sessions can inspect or reuse |
 | Filtering subsets the object or creates a view | Filtering returns a cell selection, an artifact that marks the kept cells; no cell is deleted |
+| Cells stay in the order of the file or object they came from, and per-cell values often attach by position | An import writes the cells in a random order and keeps each cell's row in the file in `sourceRow`; per-cell values attach by cell ID, and exports write the file's order ([cell order](concepts/cell_order.md)) |
 | Graphs and embeddings fill named slots, such as `obsp` and `obsm`, or `graphs` and `reductions` | Each graph and embedding is an artifact, and the step that writes it returns an {term}`ArtifactRef` that the next step takes as its input |
 | One object holds one current set of results | Each {term}`PipelineRun` keeps its own results, and a new run leaves earlier runs unchanged |
 

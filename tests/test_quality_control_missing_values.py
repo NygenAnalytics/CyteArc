@@ -114,6 +114,7 @@ def import_nullable_cluster_h5ad(
             reader,
             zarr_loc=str(directory / "nullable_clusters.zarr"),
             nthreads=1,
+            shuffle_cells=False,
         ).dump()
     finally:
         reader.h5.close()

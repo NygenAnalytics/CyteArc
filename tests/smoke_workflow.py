@@ -68,11 +68,20 @@ def _coordinates(run: Any, prefix: str) -> np.ndarray:
     return values
 
 
-def _check_run_export(path: Path, run: Any, matrix: str, counts: np.dtype) -> None:
-    """Read a run's H5AD export back with h5py, which needs no AnnData."""
+def _check_run_export(
+    path: Path, run: Any, matrix: str, counts: np.dtype, source_cells: list[str]
+) -> None:
+    """Read a run's H5AD export back with h5py, which needs no AnnData.
+
+    The import shuffled the cells, and the export writes them back in the
+    order of ``source_cells``, the matrix that the store imported.
+    """
     import h5py
 
-    cells = np.asarray(run.cells.fetch("ids")).astype(str)
+    position = {cell: index for index, cell in enumerate(source_cells)}
+    cells = np.asarray(
+        sorted(np.asarray(run.cells.fetch("ids")).astype(str), key=position.__getitem__)
+    )
     universe = np.asarray(run.features.fetch("ids")).astype(str)
     hvg = np.asarray(run.features.fetch("highly_variable_features"), dtype=bool)
     features = universe if matrix == "raw" else universe[hvg]
@@ -151,7 +160,7 @@ def run_workflow(directory: Path, *, expect_tsne: bool) -> str:
     for matrix in ("raw", "normed"):
         exported = directory / f"smoke_{matrix}.h5ad"
         to_h5ad(store.RNA, str(exported), run=run, matrix=matrix)
-        _check_run_export(exported, run, matrix, store.RNA.rawData.dtype)
+        _check_run_export(exported, run, matrix, store.RNA.rawData.dtype, cells)
     return (
         f"Workflow smoke passed: {len(umap)} cells, {len(clusters)} Leiden "
         f"clusters, {outcome}, raw and normalized H5AD exports"

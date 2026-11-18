@@ -122,6 +122,8 @@ project:
       title: Cell and feature metadata
     - file: concepts/provenance.md
       title: Provenance
+    - file: concepts/cell_order.md
+      title: Cell order
     - file: tutorials/custom_analyses.ipynb
       title: Custom analyses
   - title: Public datasets

@@ -82,7 +82,9 @@ def imported_store(
     store = directory / "cells.zarr"
     reader = H5adReader(str(h5ad_path), cluster_keys=("leiden", "leiden_float"))
     try:
-        result = H5adToZarr(reader, zarr_loc=str(store), nthreads=1).dump()
+        result = H5adToZarr(
+            reader, zarr_loc=str(store), nthreads=1, shuffle_cells=False
+        ).dump()
     finally:
         reader.h5.close()
     # One writable open prepares the store for read-only and mounted opens.

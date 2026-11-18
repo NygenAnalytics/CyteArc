@@ -56,6 +56,7 @@ def _import(path: str, destination: Path, **reader_kwargs):
             analysis_assay=(
                 "RNA" if reader.embeddingRoles or reader.clusterKeys else None
             ),
+            shuffle_cells=False,
         ).dump()
     finally:
         reader.close()

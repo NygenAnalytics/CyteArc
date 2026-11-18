@@ -58,16 +58,16 @@ _PUBLIC_CLASS_METHODS = {
     TapestriToZarr: ("__init__",),
 }
 # Every importer takes the keyword ``overwrite``.
-# Every import writer gained the keyword-only shuffle_cells=False and
-# shuffle_seed=0.
+# Every import writer takes the keyword-only shuffle_cells=True and
+# shuffle_seed=0, so imports shuffle cells unless asked not to.
 _PUBLIC_CLASS_SIGNATURE_DIGESTS = {
-    CrToZarr: "ba6eba6034c206f42ea6346625077a56e869733d6fc3510869f2ac57f444e089",
-    H5adToZarr: "14bea13120548bb8c892f1fb0d764a2acac8fdc5397b6c9c11a392ac58647e76",
-    SparseToZarr: "90e7620d7e115ac362cc6ff2947275f5204b8f05fddee8d5fb6d82364755928c",
-    CSVtoZarr: "ad1be0c95fd6c04557ea8736dd01fbe0390de34adccbfe6b3785a106eba3fd8d",
+    CrToZarr: "5784c48407c868c4a5decc107affe3670c9dae0294bf54b4cd1e8b780097ae90",
+    H5adToZarr: "fd2bbb8502504abe36ede4dd52272f9e365f6c72c78cb7c398375fb068f20787",
+    SparseToZarr: "1515ee27696b1479aa0f0f43ed2e6fded903f1c5df235af72a9d06297ef7f132",
+    CSVtoZarr: "45041e229b2a720ff45b4b47422471e854986cba60b36cd0ef827e67bcbd98a4",
     SubsetZarr: "17eee2007d317796e38322e9d81df3359beac96070a064728bbdd7530b2e79d9",
-    SeuratToZarr: "f9441dc90cb3ed4c547bcceb7458afe70856a4a0c3514969b38603229c418fcf",
-    TapestriToZarr: "9e430ed034d452201b9cb17d92907e7912f572a1b5056d918ff437d54328b7b3",
+    SeuratToZarr: "7e59e028a62e558aeb69672cf4f5dd481c921f55c88fe9818dc84defe2906f79",
+    TapestriToZarr: "b1638168eb8eeb7925c515a7fadb91fbcaa41239f7c14df450bc0fc847eba43c",
 }
 _MODULE_FUNCTIONS = (
     "create_zarr_count_assay",
@@ -158,7 +158,7 @@ def test_h5ad_writer_takes_keyword_categorical_columns_and_shuffle_options():
     hints = get_type_hints(H5adToZarr.__init__)
     for name, default, annotation in (
         ("categorical_columns", False, bool),
-        ("shuffle_cells", False, bool),
+        ("shuffle_cells", True, bool),
         ("shuffle_seed", 0, int),
     ):
         parameter = parameters[name]
@@ -170,7 +170,7 @@ def test_h5ad_writer_takes_keyword_categorical_columns_and_shuffle_options():
 
 @pytest.mark.parametrize(
     "writer",
-    [CrToZarr, CSVtoZarr, SeuratToZarr, SparseToZarr, TapestriToZarr],
+    [CrToZarr, MtxToZarr, CSVtoZarr, SeuratToZarr, SparseToZarr, TapestriToZarr],
     ids=lambda writer: writer.__name__,
 )
 def test_every_import_writer_takes_keyword_shuffle_options_last(writer):
@@ -178,7 +178,7 @@ def test_every_import_writer_takes_keyword_shuffle_options_last(writer):
     assert list(parameters)[-2:] == ["shuffle_cells", "shuffle_seed"]
     hints = get_type_hints(writer.__init__)
     for name, default, annotation in (
-        ("shuffle_cells", False, bool),
+        ("shuffle_cells", True, bool),
         ("shuffle_seed", 0, int),
     ):
         parameter = parameters[name]

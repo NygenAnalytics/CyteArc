@@ -368,6 +368,7 @@ def test_crtozarr_automatic_rows_and_preflight_before_consume(
         store,
         mem_budget="64M",
         policy=CountMatrixPolicy(unitBytes=16, chunkBytes=8),
+        shuffle_cells=False,
     )
     writer.dump()
 
@@ -388,6 +389,7 @@ def test_crtozarr_automatic_rows_and_preflight_before_consume(
             destination,
             mem_budget=1,
             policy=CountMatrixPolicy(unitBytes=16, chunkBytes=8),
+            shuffle_cells=False,
         )
     assert rejected.consumed == []
     with pytest.raises(FileNotFoundError):
@@ -560,12 +562,14 @@ def test_cellranger_h5_automatic_matches_explicit_and_caches_planning(
             stores[0],
             mem_budget="64M",
             policy=CountMatrixPolicy(unitBytes=24, chunkBytes=12),
+            shuffle_cells=False,
         )
         explicit = CrToZarr(
             readers[1],
             stores[1],
             mem_budget="64M",
             policy=CountMatrixPolicy(unitBytes=24, chunkBytes=12),
+            shuffle_cells=False,
         )
         automatic.dump()
         explicit.dump(batch_size=3)
@@ -640,6 +644,7 @@ def test_h5ad_automatic_matches_explicit_for_split_assays(
             assay_split_key="feature_types",
             mem_budget="64M",
             policy=CountMatrixPolicy(unitBytes=24, chunkBytes=12),
+            shuffle_cells=False,
         )
         explicit = H5adToZarr(
             readers[1],
@@ -647,6 +652,7 @@ def test_h5ad_automatic_matches_explicit_for_split_assays(
             assay_split_key="feature_types",
             mem_budget="64M",
             policy=CountMatrixPolicy(unitBytes=24, chunkBytes=12),
+            shuffle_cells=False,
         )
         automatic.dump()
         explicit.dump(batch_size=3)
@@ -731,6 +737,7 @@ def test_dense_h5ad_split_writes_dense_bands_of_each_assay(
                 mem_budget="64M",
                 nthreads=1,
                 policy=CountMatrixPolicy(unitBytes=120, chunkBytes=60),
+                shuffle_cells=False,
             )
             batches.clear()
             writers[name].dump(batch_size=None if name == "automatic" else 3)
@@ -790,6 +797,7 @@ def test_dense_h5ad_batches_hold_whole_rows_of_hdf5_chunks(
                 mem_budget="64M",
                 nthreads=1,
                 policy=CountMatrixPolicy(unitBytes=360, chunkBytes=180),
+                shuffle_cells=False,
             )
             batches.clear()
             writer.dump()
@@ -917,6 +925,7 @@ def test_sparse_automatic_matches_explicit() -> None:
             feature_ids=[f"feature-{index}" for index in range(values.shape[1])],
             mem_budget="64M",
             policy=CountMatrixPolicy(unitBytes=24, chunkBytes=12),
+            shuffle_cells=False,
         )
         for store in stores
     ]
@@ -1099,6 +1108,7 @@ def test_an_h5ad_import_sorts_no_batch_of_canonical_rows(
             nthreads=1,
             policy=CountMatrixPolicy(unitBytes=24, chunkBytes=12),
             values=None if kind == "counts" else kind,
+            shuffle_cells=False,
         ).dump()
     finally:
         reader.close()
@@ -1143,6 +1153,7 @@ def test_an_h5ad_import_sorts_and_sums_the_batches_of_rows_out_of_order(
                     mem_budget="64M",
                     nthreads=1,
                     policy=CountMatrixPolicy(unitBytes=24, chunkBytes=12),
+                    shuffle_cells=False,
                 ).dump()
             finally:
                 reader.close()
@@ -1179,6 +1190,7 @@ def test_sparse_to_zarr_sorts_no_batch_of_canonical_rows(
         nthreads=1,
         policy=CountMatrixPolicy(unitBytes=24, chunkBytes=12),
         values=None if kind == "counts" else kind,
+        shuffle_cells=False,
     ).dump()
     assert sorts == []
     stored = zarr.open_group(store=store, mode="r")["RNA/counts"][:]
@@ -1205,6 +1217,7 @@ def test_sparse_to_zarr_sorts_and_sums_the_batches_of_rows_out_of_order(
         mem_budget="64M",
         nthreads=1,
         policy=CountMatrixPolicy(unitBytes=24, chunkBytes=12),
+        shuffle_cells=False,
     ).dump()
     assert sorts == [
         int(matrix.indptr[4] - matrix.indptr[0]),

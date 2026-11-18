@@ -546,6 +546,7 @@ def test_feature_major_disk_csr_parity_filtering_and_cleanup(tmp_path: Path) -> 
         mem_budget="64M",
         policy=CountMatrixPolicy(unitBytes=32, chunkBytes=16),
         lines_in_mem=2,
+        shuffle_cells=False,
     ).dump()
     MtxToZarr(
         cell_reader,
@@ -553,6 +554,7 @@ def test_feature_major_disk_csr_parity_filtering_and_cleanup(tmp_path: Path) -> 
         mem_budget="64M",
         policy=CountMatrixPolicy(unitBytes=32, chunkBytes=16),
         lines_in_mem=2,
+        shuffle_cells=False,
     ).dump()
 
     first = zarr.open_group(store=stores[0], mode="r")["RNA/counts"][:]
@@ -605,6 +607,7 @@ def test_parse_orientation_duplicate_sum_and_metadata(tmp_path: Path) -> None:
         mem_budget="64M",
         policy=CountMatrixPolicy(unitBytes=16, chunkBytes=8),
         lines_in_mem=2,
+        shuffle_cells=False,
     ).dump()
 
     root = zarr.open_group(store=store, mode="r")
@@ -956,6 +959,7 @@ def test_feature_major_cleanup_after_planning_and_write_failures(
             str(destination),
             mem_budget=1,
             policy=CountMatrixPolicy(unitBytes=8, chunkBytes=8),
+            shuffle_cells=False,
         )
     assert not list(tmp_path.glob("cytearc-mtx-csr-*"))
     assert not destination.exists()
@@ -981,6 +985,7 @@ def test_feature_major_cleanup_after_planning_and_write_failures(
         mem_budget="64M",
         policy=CountMatrixPolicy(unitBytes=8, chunkBytes=8),
         lines_in_mem=1,
+        shuffle_cells=False,
     )
     with pytest.raises(RuntimeError, match="injected cancellation"):
         writer.dump()
@@ -1355,6 +1360,7 @@ def test_unordered_archive_imports_repeatedly_and_removes_its_temporary_files(
                 nthreads=1,
                 policy=CountMatrixPolicy(unitBytes=16, chunkBytes=8),
                 lines_in_mem=2,
+                shuffle_cells=False,
             ).dump()
             # Each import removes what it extracted and sorted, and the
             # next one extracts and sorts again.
@@ -1395,13 +1401,29 @@ def test_mtx_import_fits_the_parse_buffer_that_it_reads(tmp_path):
         # import is refused before the destination exists.
         destination = tmp_path / "default.zarr"
         with pytest.raises(MemoryError, match="count shards of one row"):
-            MtxToZarr(reader, str(destination), mem_budget="8M", nthreads=1)
+            MtxToZarr(
+                reader,
+                str(destination),
+                mem_budget="8M",
+                nthreads=1,
+                shuffle_cells=False,
+            )
         assert not destination.exists()
         with pytest.raises(ValueError, match="lines_in_mem must be positive"):
-            MtxToZarr(reader, str(tmp_path / "invalid.zarr"), lines_in_mem=0)
+            MtxToZarr(
+                reader,
+                str(tmp_path / "invalid.zarr"),
+                lines_in_mem=0,
+                shuffle_cells=False,
+            )
         # A smaller buffer fits the same budget.
         MtxToZarr(
-            reader, store, mem_budget="8M", nthreads=1, lines_in_mem=10_000
+            reader,
+            store,
+            mem_budget="8M",
+            nthreads=1,
+            lines_in_mem=10_000,
+            shuffle_cells=False,
         ).dump()
     finally:
         reader.close()
@@ -1505,6 +1527,7 @@ def _import_counts(
                 nthreads=1,
                 policy=CountMatrixPolicy(unitBytes=64, chunkBytes=32),
                 lines_in_mem=lines_in_mem,
+                shuffle_cells=False,
             ).dump()
     finally:
         reader.close()
@@ -1787,10 +1810,14 @@ def test_unordered_construction_reads_the_matrix_twice_and_imports_its_rows(
         assert reader.temporaryDiskBytes == 5 * (1 + 4)
         stores = [MemoryStore(), MemoryStore()]
         policy = CountMatrixPolicy(unitBytes=16, chunkBytes=8)
-        MtxToZarr(reader, stores[0], mem_budget="64M", policy=policy).dump()
+        MtxToZarr(
+            reader, stores[0], mem_budget="64M", policy=policy, shuffle_cells=False
+        ).dump()
         # The first import reads the rows that construction sorted.
         assert calls == ["_scan_matrix", "_build_unordered_rows"]
-        MtxToZarr(reader, stores[1], mem_budget="64M", policy=policy).dump()
+        MtxToZarr(
+            reader, stores[1], mem_budget="64M", policy=policy, shuffle_cells=False
+        ).dump()
         assert calls == ["_scan_matrix", *["_build_unordered_rows"] * 2]
     finally:
         reader.close()

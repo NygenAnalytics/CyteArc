@@ -50,7 +50,7 @@ with cytearc.SeuratReader("pbmc.rds", assays=["RNA"], reductions=["pca", "umap"]
 ds = cytearc.DataStore("pbmc.zarr", min_features_per_cell=-1)
 ```
 
-The store holds the `counts` layer of each imported assay and the cell metadata. `imported.activeIdentity` is a clustering artifact, so plots and `ds.markers.search` accept Seurat's identities as they accept a Leiden result; `imported.reductionArtifacts["umap"]` is a layout that plots draw, and a PCA imports as coordinates that a neighbor graph can be built on. `imported.notices` lists what stayed behind, such as the normalized `data` and `scale.data` layers and the command history; CyteArc computes normalized values from the raw counts when a step needs them.
+The store holds the `counts` layer of each imported assay and the cell metadata, with the cells in a random order and each cell's position in the object in `sourceRow` ([cell order](concepts/cell_order.md)). `imported.activeIdentity` is a clustering artifact, so plots and `ds.markers.search` accept Seurat's identities as they accept a Leiden result; `imported.reductionArtifacts["umap"]` is a layout that plots draw, and a PCA imports as coordinates that a neighbor graph can be built on. `imported.notices` lists what stayed behind, such as the normalized `data` and `scale.data` layers and the command history; CyteArc computes normalized values from the raw counts when a step needs them.
 
 The `counts` layer of an SCT assay holds SCTransform-corrected counts, not raw counts. When SCT is the active assay, the import therefore makes the assay whose raw counts the SCT models were fitted to, usually `RNA`, the store's default assay, and reports an `sct_default_assay` notice; `SeuratToZarr(..., default_assay="SCT")` keeps SCT as the default.
 

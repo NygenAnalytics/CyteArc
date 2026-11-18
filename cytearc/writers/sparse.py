@@ -205,14 +205,14 @@ class SparseToZarr:
             ``"log_normalized"`` or ``"log2_normalized"``, as the import
             reference's normalized values section describes, or a mapping of
             assays to these. None decides from the values.
-        shuffle_cells: If True, write the cells in a uniformly random order,
-            so that any contiguous slice of the store, such as one shard or
-            a training mini-batch, is a random sample of its cells. Every
-            assay's counts and the cell IDs follow the one order, and each
-            cell keeps its row in the matrices, from 0, in the int64 cell
-            column ``sourceRow``. The matrices are in memory, so each batch
-            gathers its rows from them; nothing is written to temporary
-            files. Off by default in this release.
+        shuffle_cells: If True, the default, write the cells in a uniformly
+            random order, so that any contiguous slice of the store, such as
+            one shard or a training mini-batch, is a random sample of its
+            cells. Every assay's counts and the cell IDs follow the one
+            order, and each cell keeps its row in the matrices, from 0, in
+            the int64 cell column ``sourceRow``. The matrices are in memory,
+            so each batch gathers its rows from them; nothing is written to
+            temporary files. False writes the cells in the matrices' order.
         shuffle_seed: The seed of the shuffle, from 0 to 2**64 - 1. One seed
             gives the same order on every platform.
 
@@ -266,7 +266,7 @@ class SparseToZarr:
         *,
         overwrite: bool = False,
         values: ImportValues = None,
-        shuffle_cells: bool = False,
+        shuffle_cells: bool = True,
         shuffle_seed: int = 0,
     ) -> None:
         overwrite = bool_argument(overwrite, "overwrite")

@@ -410,6 +410,9 @@ def _source(writer: str, directory: Path, values: np.ndarray, encoding: str) -> 
 
 
 def _writer(writer: str, source: Any, destination: str, **options: Any) -> Any:
+    # The contract pins rows and plans in the source's order of cells unless a
+    # test asks for the shuffle.
+    options = {"shuffle_cells": False, **options}
     if writer == "h5ad":
         return H5adToZarr(source, destination, **options)
     if writer in {"cellranger", "mtx"}:
@@ -535,18 +538,24 @@ _ENCODINGS = [
 @pytest.mark.parametrize(
     ("maximum", "expected"), [(2500, np.uint16), (70_000, np.uint32)]
 )
+@pytest.mark.parametrize("shuffle", [False, True], ids=["file_order", "shuffled"])
 def test_every_writer_stores_the_same_counts_identically(
-    tmp_path, writer, encoding, maximum, expected
+    tmp_path, writer, encoding, maximum, expected, shuffle
 ):
     values = _VALUES.copy()
     values[0, 4] = maximum
-    root = _import(writer, tmp_path, values, encoding)
+    root = _import(writer, tmp_path, values, encoding, shuffle_cells=shuffle)
+    # Row r of the store holds the source's row rows[r].
+    rows = root["cellData/sourceRow"][:] if shuffle else np.arange(values.shape[0])
+    assert shuffle != np.array_equal(rows, np.arange(values.shape[0]))
+    stored = values[rows]
     counts = root["RNA/counts"]
     assert counts.dtype == np.dtype(expected)
-    np.testing.assert_array_equal(counts[:], values)
-    np.testing.assert_array_equal(root["RNA/countsT"][:], values.T)
-    # The counts fingerprint depends on the canonical values alone.
-    assert counts.attrs["content_fingerprint"] == _fingerprint(values, expected)
+    np.testing.assert_array_equal(counts[:], stored)
+    np.testing.assert_array_equal(root["RNA/countsT"][:], stored.T)
+    # The counts fingerprint depends on the canonical values alone, in the
+    # order the store holds them.
+    assert counts.attrs["content_fingerprint"] == _fingerprint(stored, expected)
 
 
 def test_cellranger_h5_counts_range_over_the_selected_barcodes(tmp_path, monkeypatch):
@@ -574,7 +583,9 @@ def test_cellranger_h5_counts_range_over_the_selected_barcodes(tmp_path, monkeyp
         # Barcode 1 holds values between kept barcodes, so the scan skips it;
         # the empty barcode 3 lets barcodes 2 and 4 be scanned together.
         assert [list(pointers) for pointers in scans] == [[0, 2], [3, 5, 5, 7]]
-        CrToZarr(reader, str(tmp_path / "counts.zarr"), nthreads=1).dump()
+        CrToZarr(
+            reader, str(tmp_path / "counts.zarr"), nthreads=1, shuffle_cells=False
+        ).dump()
     finally:
         reader.close()
     counts = zarr.open_group(str(tmp_path / "counts.zarr"), mode="r")["RNA/counts"]
@@ -695,7 +706,9 @@ def test_the_csv_sample_reads_chunks_until_it_holds_enough_cells(tmp_path):
     linear = _cp10k(_poisson_counts())
     path = _write_csv(tmp_path / "logged.csv", np.log1p(linear), "exact")
     reader = CSVReader(str(path), batch_size=1)
-    writer = CSVtoZarr(reader, str(tmp_path / "logged.zarr"), assay_name="RNA")
+    writer = CSVtoZarr(
+        reader, str(tmp_path / "logged.zarr"), assay_name="RNA", shuffle_cells=False
+    )
     writer.dump()
 
     assert writer.values.kind == "log_normalized"
@@ -815,7 +828,9 @@ def test_cellranger_h5_scans_every_kept_barcode_group_for_non_finite_counts(
     try:
         assert reader.nCells == 20
         with pytest.raises(ValueError, match="finite values"):
-            CrToZarr(reader, str(tmp_path / "counts.zarr"), nthreads=1)
+            CrToZarr(
+                reader, str(tmp_path / "counts.zarr"), nthreads=1, shuffle_cells=False
+            )
     finally:
         reader.close()
     assert not (tmp_path / "counts.zarr").exists()
@@ -827,7 +842,9 @@ def test_cellranger_h5_import_that_keeps_no_barcode_stores_uint8(tmp_path):
     reader = CrH5Reader(str(path), is_filtered=False, filtering_cutoff=100)
     try:
         assert reader.count_value_ranges(1 << 20) == [CountValueRange()]
-        CrToZarr(reader, str(tmp_path / "counts.zarr"), nthreads=1).dump()
+        CrToZarr(
+            reader, str(tmp_path / "counts.zarr"), nthreads=1, shuffle_cells=False
+        ).dump()
     finally:
         reader.close()
     counts = zarr.open_group(str(tmp_path / "counts.zarr"), mode="r")["RNA/counts"]
@@ -875,6 +892,7 @@ def _import_split(
             assay_split_key="feature_types",
             nthreads=1,
             values=declared,
+            shuffle_cells=False,
         )
     else:
         source = (
@@ -894,7 +912,7 @@ def _import_split(
             )
         )
         create = lambda: CrToZarr(  # noqa: E731
-            source, destination, nthreads=1, values=declared
+            source, destination, nthreads=1, values=declared, shuffle_cells=False
         )
     try:
         create().dump()
@@ -936,6 +954,7 @@ def test_in_memory_assays_store_what_a_split_file_stores(tmp_path) -> None:
         zarr_loc=str(destination),
         cell_ids=_cells(_CITE_VALUES),
         nthreads=1,
+        shuffle_cells=False,
         **_cite_assays(_CITE_VALUES),
     ).dump()
     root = zarr.open_group(str(destination), mode="r")
@@ -968,6 +987,7 @@ def test_in_memory_assays_decide_their_dtypes_and_values_apart(tmp_path) -> None
         nthreads=1,
         # The fractional ADT values are counts here; RNA decides from its own.
         values={"ADT": "counts"},
+        shuffle_cells=False,
         **_cite_assays(values),
     )
     writer.dump()
@@ -1092,6 +1112,7 @@ def test_per_assay_arguments_beside_a_single_matrix_are_refused(tmp_path) -> Non
             str(tmp_path / "single.zarr"),
             _cells(_VALUES),
             {"RNA": _features(_VALUES)},
+            shuffle_cells=False,
         )
     with pytest.raises(TypeError, match="assay_type maps assays"):
         SparseToZarr(
@@ -1100,6 +1121,7 @@ def test_per_assay_arguments_beside_a_single_matrix_are_refused(tmp_path) -> Non
             _cells(_VALUES),
             _features(_VALUES),
             assay_type={"RNA": "RNA"},
+            shuffle_cells=False,
         )
     assert not (tmp_path / "single.zarr").exists()
 
@@ -1171,6 +1193,7 @@ def test_float_duplicates_resolve_the_dtype_of_the_sums_the_import_stores(
             feature_ids=_features(stored),
             nthreads=1,
             values="counts",
+            shuffle_cells=False,
         ).dump()
     else:
         path = (
@@ -1187,12 +1210,12 @@ def test_float_duplicates_resolve_the_dtype_of_the_sums_the_import_stores(
         if writer == "h5ad":
             reader: Any = H5adReader(str(path), feature_name_key="feature_name")
             create = lambda: H5adToZarr(  # noqa: E731
-                reader, destination, nthreads=1, values="counts"
+                reader, destination, nthreads=1, values="counts", shuffle_cells=False
             )
         else:
             reader = CrH5Reader(str(path))
             create = lambda: CrToZarr(  # noqa: E731
-                reader, destination, nthreads=1, values="counts"
+                reader, destination, nthreads=1, values="counts", shuffle_cells=False
             )
         try:
             create().dump()
@@ -1218,6 +1241,7 @@ def test_bands_of_canonical_and_unsorted_rows_keep_exact_large_counts(tmp_path):
         cell_ids=["c0", "c1"],
         feature_ids=["g0", "g1", "g2"],
         nthreads=1,
+        shuffle_cells=False,
     ).dump(batch_size=1)
     counts = zarr.open_group(destination, mode="r")["RNA/counts"]
     assert counts.dtype == np.uint64
@@ -1243,7 +1267,7 @@ def test_seurat_import_of_an_assay_without_cells_stores_uint8(tmp_path):
     with SeuratReader(
         _write_seurat(tmp_path / "empty.rds", np.zeros((0, 3)), "real"), reductions=[]
     ) as reader:
-        SeuratToZarr(reader, destination, nthreads=1).dump()
+        SeuratToZarr(reader, destination, nthreads=1, shuffle_cells=False).dump()
     counts = zarr.open_group(store=destination, mode="r")["RNA/counts"]
     assert (counts.shape, counts.dtype) == ((0, 3), np.uint8)
 
@@ -1254,7 +1278,9 @@ def test_csv_counts_the_stored_dtype_cannot_hold_raise_instead_of_wrapping(
     values = np.minimum(_VALUES, 200)
     path = _write_csv(tmp_path / "counts.csv", values, "integer")
     reader = CSVReader(str(path), batch_size=2)
-    writer = CSVtoZarr(reader, str(tmp_path / "counts.zarr"), assay_name="RNA")
+    writer = CSVtoZarr(
+        reader, str(tmp_path / "counts.zarr"), assay_name="RNA", shuffle_cells=False
+    )
     # The file changes after the reader scanned it, so the counts no longer
     # fit the uint8 dtype resolved from the scan; 300 would wrap to 44.
     values[0, 4] = 300
@@ -1273,7 +1299,9 @@ def test_seurat_dense_counts_the_stored_dtype_cannot_hold_raise_instead_of_wrapp
     with SeuratReader(
         _write_seurat(tmp_path / "counts.rds", values, "real"), reductions=[]
     ) as reader:
-        writer = SeuratToZarr(reader, str(tmp_path / "counts.zarr"), nthreads=1)
+        writer = SeuratToZarr(
+            reader, str(tmp_path / "counts.zarr"), nthreads=1, shuffle_cells=False
+        )
         assert writer.counts["RNA"].dtype == np.uint8
         counts = reader.get_assay("RNA").counts
         original = counts.read_cells
@@ -1352,6 +1380,7 @@ def large_store(tmp_path_factory) -> Path:
         cell_ids=_cells(values),
         feature_ids=_features(values),
         nthreads=1,
+        shuffle_cells=False,
     ).dump()
     return path
 
@@ -1523,13 +1552,20 @@ def test_the_named_layout_reads_one_band_of_dense_seurat_cells_per_batch(
         _write_seurat(tmp_path / "counts.rds", values, "real"), reductions=[]
     ) as reader:
         with pytest.raises(MemoryError, match="default count-matrix policy") as refused:
-            SeuratToZarr(reader, MemoryStore(), mem_budget=budget, nthreads=1)
+            SeuratToZarr(
+                reader,
+                MemoryStore(),
+                mem_budget=budget,
+                nthreads=1,
+                shuffle_cells=False,
+            )
         writer = SeuratToZarr(
             reader,
             MemoryStore(),
             mem_budget=budget,
             nthreads=1,
             policy=_named_policy(refused.value),
+            shuffle_cells=False,
         )
         writer.dump()
     shard_rows = array_shard_rows(writer.counts["RNA"])
@@ -1657,7 +1693,9 @@ def test_csc_imports_plan_batches_in_the_dtype_consume_yields(
         monkeypatch.setattr(sharding, name, record)
     reader = H5adReader(str(path))
     try:
-        H5adToZarr(reader, str(tmp_path / "counts.zarr"), nthreads=1).dump()
+        H5adToZarr(
+            reader, str(tmp_path / "counts.zarr"), nthreads=1, shuffle_cells=False
+        ).dump()
     finally:
         reader.close()
     assert {name for name, _dtype in planned} == {
@@ -1953,7 +1991,9 @@ def test_a_seurat_import_stores_the_counts_of_dense_and_coo_blocks_of_a_sparse_s
     values[3] = 0
     reader = _source("seurat", tmp_path, values, "sparse")
     try:
-        writer = SeuratToZarr(reader, str(tmp_path / "counts.zarr"), nthreads=1)
+        writer = SeuratToZarr(
+            reader, str(tmp_path / "counts.zarr"), nthreads=1, shuffle_cells=False
+        )
         # The scan counts the values that each cell stores.
         np.testing.assert_array_equal(
             np.diff(writer._cellValues["RNA"]), np.count_nonzero(values, axis=1)

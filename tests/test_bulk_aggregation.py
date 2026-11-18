@@ -500,6 +500,7 @@ def test_bulk_mean_fits_non_rna_normalization_once(tmp_path):
         feature_ids=[f"p{i}" for i in range(5)],
         assay_name="ADT",
         nthreads=1,
+        shuffle_cells=False,
     ).dump(batch_size=4)
     store = DataStore(path, default_assay="ADT", min_features_per_cell=0)
     store.cells.insert("all_cells", by_cell_id(store.cells, np.ones(12, dtype=bool)))

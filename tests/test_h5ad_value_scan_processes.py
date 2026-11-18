@@ -271,6 +271,7 @@ def test_h5ad_imports_store_the_same_counts_whether_one_process_or_three_scan(
                 mem_budget="1G",
                 nthreads=3,
                 io=io,
+                shuffle_cells=False,
             )
             dtypes = dict(writer.storageDtypes)
             writer.dump()

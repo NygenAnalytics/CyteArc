@@ -666,7 +666,11 @@ def test_an_h5ad_import_refuses_a_budget_of_one_byte_at_its_scan(
     try:
         refusal = refused(
             lambda: H5adToZarr(
-                reader, zarr_loc=str(tmp_path / "import.zarr"), mem_budget=1, nthreads=1
+                reader,
+                zarr_loc=str(tmp_path / "import.zarr"),
+                mem_budget=1,
+                nthreads=1,
+                shuffle_cells=False,
             ).dump()
         )
     finally:
@@ -808,6 +812,7 @@ def test_a_sparse_matrix_import_names_the_budget_of_its_scan_beside_the_matrix(
             feature_ids=[f"f{i}" for i in range(20)],
             mem_budget=budget,
             nthreads=1,
+            shuffle_cells=False,
         )
 
     # A budget one byte above the matrix holds no room to scan it.

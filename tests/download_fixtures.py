@@ -191,7 +191,8 @@ def build_citeseq_zarr_fixture(*, force: bool = False) -> None:
         reader = CrH5Reader(str(h5_path))
         if "ADT" in reader.assayFeats.columns:
             reader.rename_assays({"ADT": "assay2"})
-        CrToZarr(reader, zarr_loc=str(written), nthreads=2).dump()
+        # Tests pin values of this fixture in the file's order of its cells.
+        CrToZarr(reader, zarr_loc=str(written), nthreads=2, shuffle_cells=False).dump()
         repack_store(str(written), str(store), data_only=True, nthreads=2)
         staging = Path(tmp) / "archive.tar.gz"
         with tarfile.open(staging, "w:gz") as tar:

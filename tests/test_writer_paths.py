@@ -84,7 +84,9 @@ def test_h5ad_numeric_category_clusters_keep_missing_cells(tmp_path) -> None:
     destination = MemoryStore()
     try:
         # One-cell blocks leave the block of the unlabeled cell without values.
-        result = H5adToZarr(reader, zarr_loc=destination, nthreads=1).dump(batch_size=1)
+        result = H5adToZarr(
+            reader, zarr_loc=destination, nthreads=1, shuffle_cells=False
+        ).dump(batch_size=1)
     finally:
         reader.close()
 
@@ -116,7 +118,9 @@ def test_h5ad_repeated_dump_reuses_its_artifacts(tmp_path) -> None:
         cluster_keys=("leiden",),
     )
     try:
-        writer = H5adToZarr(reader, zarr_loc=MemoryStore(), nthreads=1)
+        writer = H5adToZarr(
+            reader, zarr_loc=MemoryStore(), nthreads=1, shuffle_cells=False
+        )
         first = writer.dump()
         second = writer.dump()
     finally:
@@ -454,7 +458,7 @@ def test_seurat_repeated_dump_reuses_its_artifacts(tmp_path) -> None:
     path = _write_seurat(tmp_path / "twice.rds", wire, reductions=[("pca", pca)])
     destination = MemoryStore()
     with SeuratReader(path) as reader:
-        writer = SeuratToZarr(reader, destination, nthreads=1)
+        writer = SeuratToZarr(reader, destination, nthreads=1, shuffle_cells=False)
         first = writer.dump()
         second = writer.dump()
 
@@ -523,6 +527,7 @@ def test_sparse_writer_batches_write_every_cell() -> None:
         [f"c{index}" for index in range(5)],
         ["f1", "f2", "f3"],
         nthreads=1,
+        shuffle_cells=False,
     )
     with pytest.raises(ValueError, match="batch_size must be positive"):
         writer.dump(batch_size=0)
@@ -607,6 +612,7 @@ def test_cellranger_assay_type_makes_a_custom_assay_rna() -> None:
         zarr_loc=store,
         nthreads=1,
         assay_types={"GEX": "RNA"},
+        shuffle_cells=False,
     )
     with pytest.raises(ValueError, match="batch_size must be positive"):
         writer.dump(batch_size=0)
@@ -633,7 +639,7 @@ def test_cellranger_assay_type_makes_a_custom_assay_rna() -> None:
 def test_cellranger_reader_metadata_must_align_with_its_axis(columns, message) -> None:
     reader = _CountsReader(np.eye(3, dtype=np.uint8), **columns)
     with pytest.raises(ValueError, match=message):
-        CrToZarr(reader, zarr_loc=MemoryStore(), nthreads=1)
+        CrToZarr(reader, zarr_loc=MemoryStore(), nthreads=1, shuffle_cells=False)
 
 
 _IMPORTED = np.array([[1, 0, 2], [0, 3, 0], [4, 0, 5]], dtype=np.uint8)
@@ -649,6 +655,7 @@ def _sparse(destination: Any, _stack: ExitStack, _tmp: Path, overwrite: bool) ->
         ["f1", "f2", "f3"],
         nthreads=1,
         overwrite=overwrite,
+        shuffle_cells=False,
     )
 
 
@@ -661,6 +668,7 @@ def _csv(destination: Any, _stack: ExitStack, tmp: Path, overwrite: bool) -> Any
         assay_name="RNA",
         nthreads=1,
         overwrite=overwrite,
+        shuffle_cells=False,
     )
 
 
@@ -668,7 +676,11 @@ def _cellranger(
     destination: Any, _stack: ExitStack, _tmp: Path, overwrite: bool
 ) -> Any:
     return CrToZarr(
-        _CountsReader(_IMPORTED), zarr_loc=destination, nthreads=1, overwrite=overwrite
+        _CountsReader(_IMPORTED),
+        zarr_loc=destination,
+        nthreads=1,
+        overwrite=overwrite,
+        shuffle_cells=False,
     )
 
 
@@ -678,13 +690,21 @@ def _h5ad(destination: Any, stack: ExitStack, tmp: Path, overwrite: bool) -> Any
         feature_name_key="feature_name",
     )
     stack.callback(reader.close)
-    return H5adToZarr(reader, zarr_loc=destination, nthreads=1, overwrite=overwrite)
+    return H5adToZarr(
+        reader,
+        zarr_loc=destination,
+        nthreads=1,
+        overwrite=overwrite,
+        shuffle_cells=False,
+    )
 
 
 def _seurat(destination: Any, stack: ExitStack, tmp: Path, overwrite: bool) -> Any:
     path = _write_seurat(tmp / "counts.rds", _Wire())
     reader = stack.enter_context(SeuratReader(path, reductions=[]))
-    return SeuratToZarr(reader, destination, nthreads=1, overwrite=overwrite)
+    return SeuratToZarr(
+        reader, destination, nthreads=1, overwrite=overwrite, shuffle_cells=False
+    )
 
 
 _IMPORTERS: dict[str, _Importer] = {
@@ -739,6 +759,7 @@ def _subset_source(location: str | MemoryStore) -> DataStore:
         ["c1", "c2", "c3", "c4"],
         ["f1", "f2", "f3"],
         nthreads=1,
+        shuffle_cells=False,
     ).dump()
     return DataStore(location, default_assay="RNA", min_features_per_cell=0, nthreads=1)
 
@@ -947,6 +968,7 @@ def test_csv_dump_refuses_a_file_whose_rows_changed(tmp_path, rows, message) -> 
         destination,
         assay_name="RNA",
         nthreads=1,
+        shuffle_cells=False,
     )
     write(rows)
     with pytest.raises(ValueError, match=message):

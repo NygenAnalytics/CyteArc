@@ -569,6 +569,7 @@ def test_add_melded_assay_uses_cell_key_for_idf_and_keeps_all_rows(tmp_path):
         feature_ids=peak_ids,
         assay_name="ATAC",
         nthreads=1,
+        shuffle_cells=False,
     ).dump(batch_size=2)
     store = DataStore(
         str(store_path),
@@ -691,6 +692,7 @@ def test_melded_gene_scores_of_an_rna_class_pass_through(
         feature_ids=peak_ids,
         assay_name="ATAC",
         nthreads=1,
+        shuffle_cells=False,
     ).dump(batch_size=2)
     store = DataStore(
         str(store_path), default_assay="ATAC", min_features_per_cell=0, nthreads=1

@@ -156,6 +156,7 @@ def template(tmp_path_factory) -> Path:
         feature_names=NAMES,
         assay_name="RNA",
         nthreads=1,
+        shuffle_cells=False,
     ).dump()
     store = _open(path)
     rows = np.arange(store.cells.N)
@@ -1350,6 +1351,7 @@ def test_correction_in_a_workspace_publishes_its_matrices(tmp_path):
         assay_name="RNA",
         workspace="ws1",
         nthreads=1,
+        shuffle_cells=False,
     ).dump()
     store = DataStore(
         str(path),

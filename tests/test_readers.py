@@ -972,7 +972,7 @@ def test_h5ad_reader_converts_csc_sparse_encoding(tmp_path):
             np.vstack([chunk.toarray() for chunk in chunks]),
             values,
         )
-        writer = H5adToZarr(reader, zarr_loc=str(zarr_path))
+        writer = H5adToZarr(reader, zarr_loc=str(zarr_path), shuffle_cells=False)
         writer.dump(batch_size=2)
     finally:
         reader.h5.close()
@@ -1008,7 +1008,7 @@ def test_h5ad_to_zarr_preserves_exact_sparse_batch(
     _write_sparse_h5ad(file_name, values)
     reader = H5adReader(str(file_name), feature_name_key="feature_name")
     try:
-        writer = H5adToZarr(reader, zarr_loc=str(zarr_path))
+        writer = H5adToZarr(reader, zarr_loc=str(zarr_path), shuffle_cells=False)
         writer.dump(batch_size=batch_size)
     finally:
         reader.h5.close()

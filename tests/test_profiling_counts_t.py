@@ -248,7 +248,11 @@ def test_create_store_defers_counts_t_to_write_stage(tmp_path):
     )
     after_create = zarr.open_group(str(store_path), mode="r")
     assert "countsT" not in after_create["RNA"]
-    np.testing.assert_array_equal(after_create["RNA/counts"][:], values)
+    # The stage imports as users do, with the cells shuffled; row r of the
+    # store holds the file's row sourceRow[r].
+    rows = after_create["cellData/sourceRow"][:]
+    assert not np.array_equal(rows, np.arange(values.shape[0]))
+    np.testing.assert_array_equal(after_create["RNA/counts"][:], values[rows])
 
     write = run_stage(
         "writeCountsT",
@@ -264,7 +268,7 @@ def test_create_store_defers_counts_t_to_write_stage(tmp_path):
     assert write.details["beforeComplete"] is None
     assert write.details["complete"] is True
     after_write = zarr.open_group(str(store_path), mode="r")
-    np.testing.assert_array_equal(after_write["RNA/countsT"][:], values.T)
+    np.testing.assert_array_equal(after_write["RNA/countsT"][:], values[rows].T)
 
 
 def _write_h5ad_input(path, matrix_key):
@@ -311,7 +315,10 @@ def test_create_store_inspects_h5ad_count_matrix_and_feature_names(
 
     assert result.status == "ok", result.error
     root = zarr.open_group(str(store_path), mode="r")
-    np.testing.assert_array_equal(root["RNA/counts"][:], counts)
+    # The stage imports as users do, with the cells shuffled.
+    rows = root["cellData/sourceRow"][:]
+    assert not np.array_equal(rows, np.arange(len(counts)))
+    np.testing.assert_array_equal(root["RNA/counts"][:], counts[rows])
     np.testing.assert_array_equal(
         root["RNA/featureData/names"][:], ["RPL1", "MT-X", "GENE"]
     )

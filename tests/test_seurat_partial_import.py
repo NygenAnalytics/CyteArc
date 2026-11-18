@@ -228,6 +228,7 @@ def _writer(
         mem_budget="64M",
         nthreads=1,
         policy=CountMatrixPolicy(unitBytes=4096, chunkBytes=1024),
+        shuffle_cells=False,
         **options,  # type: ignore[arg-type]
     )
 

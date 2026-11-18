@@ -799,18 +799,18 @@ class H5adToZarr:
             Every read returns the same labels either way. Off by default
             in this release, because releases before categorical columns
             cannot read such a store.
-        shuffle_cells: If True, write the cells in a uniformly random order,
-            so that any contiguous slice of the store, such as one shard or
-            a training mini-batch, is a random sample of its cells. Every
-            per-cell array follows the one order, and each cell keeps its
-            row in the file, from 0, in the int64 cell column ``sourceRow``.
-            The shuffle reads the file once, sending each row to temporary
-            files on local disk, in ``temp_dir`` of the reader, as the value
-            scan reads it. The import holds each selected embedding and each
-            key's cluster labels whole, and refuses before it writes
-            anything if they do not fit in ``mem_budget``. An import in the
-            file's order of a reader that another import shuffled reads the
-            file's rows. Off by default in this release.
+        shuffle_cells: If True, the default, write the cells in a uniformly
+            random order, so that any contiguous slice of the store, such as
+            one shard or a training mini-batch, is a random sample of its
+            cells. Every per-cell array follows the one order, and each cell
+            keeps its row in the file, from 0, in the int64 cell column
+            ``sourceRow``. The shuffle reads the file once, sending each row
+            to temporary files on local disk, in ``temp_dir`` of the reader,
+            as the value scan reads it. The import holds each selected
+            embedding and each key's cluster labels whole, and refuses before
+            it writes anything if they do not fit in ``mem_budget``. An import
+            in the file's order of a reader that another import shuffled reads
+            the file's rows. False writes the cells in the file's order.
         shuffle_seed: The seed of the shuffle, from 0 to 2**64 - 1. One seed
             gives the same order on every platform.
 
@@ -861,7 +861,7 @@ class H5adToZarr:
         overwrite: bool = False,
         values: ImportValues = None,
         categorical_columns: bool = False,
-        shuffle_cells: bool = False,
+        shuffle_cells: bool = True,
         shuffle_seed: int = 0,
     ) -> None:
         overwrite = bool_argument(overwrite, "overwrite")

@@ -355,6 +355,7 @@ def test_clr_does_not_reuse_artifacts_with_ambiguous_axis(monkeypatch):
         ["x", "y", "z"],
         assay_name="ADT",
         nthreads=1,
+        shuffle_cells=False,
     ).dump()
     datastore = DataStore(store, default_assay="ADT", nthreads=1)
     cells = datastore.snapshot_cell_selection()
@@ -654,6 +655,7 @@ def test_rna_normed_zero_total_cells_are_zero(tmp_path):
         feature_ids=["g0", "g1", "g2"],
         assay_name="RNA",
         nthreads=1,
+        shuffle_cells=False,
     ).dump(batch_size=3)
     store = DataStore(str(path), default_assay="RNA", min_features_per_cell=0)
     cells = np.arange(3)
@@ -693,6 +695,7 @@ def _zero_count_store(tmp_path) -> DataStore:
         feature_names=["MT-A", "MT-B", "G1", "G2"],
         assay_name="RNA",
         nthreads=1,
+        shuffle_cells=False,
     ).dump(batch_size=3)
     return DataStore(str(path), default_assay="RNA", min_features_per_cell=0)
 
