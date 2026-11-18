@@ -23,7 +23,7 @@ from loguru import logger
 from scipy.sparse import coo_matrix, csc_matrix, csr_matrix
 from zarr.storage import MemoryStore
 
-import cytearc.readers.h5ad as h5ad_reader
+import cytearc.readers._row_spill as row_spill
 import cytearc.writers.h5ad as h5ad_writer
 from cytearc.readers import H5adReader
 from cytearc.readers._sparse import SparseRowStore
@@ -492,6 +492,33 @@ def _spy_on_scan_processes(monkeypatch) -> list[Any]:
     return seen
 
 
+def test_a_failed_scan_in_processes_leaves_no_rows_behind(
+    tmp_path, monkeypatch
+) -> None:
+    source = tmp_path / "source.h5ad"
+    _write_source(source, "csr")
+    monkeypatch.setattr(count_values, "_SCAN_PROCESS_VALUES", 0)
+    windows: list[Any] = []
+
+    def fail(self, scanned, maxBytes, featureGroups, **kwargs):
+        windows.append(scanned)
+        raise RuntimeError("a scan process failed")
+
+    monkeypatch.setattr(H5adReader, "_scan_in_processes", fail)
+    with pytest.raises(RuntimeError, match="a scan process failed"):
+        _import(
+            source,
+            tmp_path / "refused.zarr",
+            mem_budget="1G",
+            nthreads=3,
+            shuffle_cells=True,
+            reader_options={"temp_dir": str(tmp_path)},
+        )
+    assert len(windows[0]) == 3
+    assert not [path for path in tmp_path.iterdir() if path.name.startswith("cytearc-")]
+    assert not (tmp_path / "refused.zarr").exists()
+
+
 @pytest.mark.parametrize("encoding", ["csr", "dense"])
 def test_scan_processes_each_spill_their_own_rows(
     tmp_path, monkeypatch, encoding
@@ -576,7 +603,7 @@ def test_producer_processes_read_and_delete_their_buckets(
     bucket_starts: list[list[int]] = []
     directory: list[Path] = []
     # Buckets of about three rows, so producer windows split some of them.
-    monkeypatch.setattr(h5ad_reader, "_SPILL_READ_BYTES", 600)
+    monkeypatch.setattr(row_spill, "_SPILL_READ_BYTES", 600)
     monkeypatch.setattr(h5ad_writer, "_producer_messages", messages)
     monkeypatch.setattr(H5adReader, "_release_shuffled_rows", release)
     destination = str(tmp_path / "shuffled.zarr") if direct else MemoryStore()
@@ -622,7 +649,7 @@ def test_a_single_producer_deletes_every_bucket_as_it_reads(
 
     monkeypatch.setattr(SparseRowStore, "_delete", delete)
     # Buckets of about ten rows.
-    monkeypatch.setattr(h5ad_reader, "_SPILL_READ_BYTES", 5_000)
+    monkeypatch.setattr(row_spill, "_SPILL_READ_BYTES", 5_000)
     reader = _reader(source, temp_dir=str(tmp_path))
     try:
         writer = H5adToZarr(

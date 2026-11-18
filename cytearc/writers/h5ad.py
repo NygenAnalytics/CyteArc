@@ -869,7 +869,11 @@ class H5adToZarr:
             categorical_columns, "categorical_columns"
         )
         self.shuffleCells = bool_argument(shuffle_cells, "shuffle_cells")
-        from ..storage.cell_order import shuffle_seed_argument, shuffled_order
+        from ..storage.cell_order import (
+            destination_rows,
+            shuffle_seed_argument,
+            shuffled_order,
+        )
 
         self.shuffleSeed = shuffle_seed_argument(shuffle_seed)
         from ..utils.matrix_values import import_values_argument
@@ -972,10 +976,7 @@ class H5adToZarr:
             # Embeddings and cluster labels that do not fit in memory are
             # refused before anything is written.
             self._check_shuffled_holds()
-            destinations = np.empty_like(self._cellOrder)
-            destinations[self._cellOrder] = np.arange(
-                self._cellOrder.size, dtype=np.int64
-            )
+            destinations = destination_rows(self._cellOrder)
         else:
             # Another import of the reader may hold its shuffled rows, which
             # this import, in the file's order, never reads.

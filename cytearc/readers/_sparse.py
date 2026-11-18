@@ -95,6 +95,11 @@ _ESTIMATE_MARGIN = 1.25
 type _Piece = tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]
 
 
+def _capitalized(text: str) -> str:
+    """Return ``text`` as a sentence starts with it."""
+    return text[:1].upper() + text[1:]
+
+
 def _unsigned_code(top: int) -> int:
     """Return the code of the narrowest unsigned dtype that holds ``top``."""
     for code, dtype in enumerate(_UNSIGNED[:-1]):
@@ -474,6 +479,8 @@ class SparseRowStore:
     Args:
         shape: Destination rows and columns.
         dtype: The dtype that reads return.
+        operation: What the store does, as its errors name it inside a
+            sentence, such as ``"shuffled Matrix Market import"``.
         bucket_rows: Destination rows of each bucket as rows arrive.
         whole_rows: Whether rows arrive whole, each once, through
             :meth:`append_rows`; otherwise entries arrive through
@@ -514,6 +521,7 @@ class SparseRowStore:
         shape: tuple[int, int],
         dtype: Any,
         *,
+        operation: str,
         bucket_rows: int,
         whole_rows: bool,
         buffer_bytes: int,
@@ -532,6 +540,11 @@ class SparseRowStore:
             raise ValueError(
                 f"A sparse row store's shape must not be negative, not {shape}"
             )
+        if not isinstance(operation, str) or not operation.strip():
+            raise ValueError(
+                "operation names what a sparse row store does, such as "
+                f"'shuffled Matrix Market import'; found {operation!r}"
+            )
         if int(bucket_rows) < 1:
             raise ValueError(f"bucket_rows must be at least 1, not {bucket_rows}")
         for name, value in (
@@ -549,6 +562,7 @@ class SparseRowStore:
         self._configure(
             {
                 "format": _FORMAT,
+                "operation": operation,
                 "nRows": n_rows,
                 "nColumns": n_columns,
                 "dtype": np.dtype(dtype).newbyteorder("=").str,
@@ -566,11 +580,11 @@ class SparseRowStore:
         least = self._bucket_cost(1, 1, 1)
         if self._bucketLimit < least:
             raise MemoryBudgetError(
-                "Sparse row conversion exceeds the memory limit. Reading one entry "
+                f"{_capitalized(self.operation)} exceeds the memory limit. Reading one entry "
                 f"needs at least {least} bytes.",
                 needed_bytes=least,
                 budget_bytes=self._bucketLimit,
-                item="reading one entry of the sparse row conversion",
+                item=f"reading one entry of the {self.operation}",
             )
         self._nnzError = nnz_error
         self._directory = tempfile.TemporaryDirectory(
@@ -595,6 +609,8 @@ class SparseRowStore:
                 f"format {_FORMAT}"
             )
         self._settings = settings
+        #: What the store does, as its errors name it.
+        self.operation = str(settings["operation"])
         self.shape = (int(settings["nRows"]), int(settings["nColumns"]))
         self.dtype: np.dtype[Any] = np.dtype(settings["dtype"])
         self._sourceDtype: np.dtype[Any] = np.dtype(settings["sourceDtype"])
@@ -684,7 +700,9 @@ class SparseRowStore:
     def _count_entries(self, entries: int) -> None:
         self._appended += entries
         if self._appended > self._maxNnz:
-            raise self._nnzError(f"Sparse row conversion exceeds maxNnz={self._maxNnz}")
+            raise self._nnzError(
+                f"{_capitalized(self.operation)} exceeds maxNnz={self._maxNnz}"
+            )
 
     def _check_columns(self, indices: np.ndarray) -> None:
         if indices.size and (
@@ -853,7 +871,7 @@ class SparseRowStore:
         free = shutil.disk_usage(self.directory).free
         if required > free:
             raise OSError(
-                f"Sparse row conversion needs {required} temporary bytes in "
+                f"{_capitalized(self.operation)} needs {required} temporary bytes in "
                 f"{self.directory}, which has {free} free; pass temp_dir on a "
                 "disk with more free space"
             )
@@ -933,7 +951,9 @@ class SparseRowStore:
             )
         del row_pieces
         if int(row_entries.sum()) > self._maxNnz:
-            raise self._nnzError(f"Sparse row conversion exceeds maxNnz={self._maxNnz}")
+            raise self._nnzError(
+                f"{_capitalized(self.operation)} exceeds maxNnz={self._maxNnz}"
+            )
         self.indptr = cumulative_nnz(row_entries)
         del row_entries
         self._partIds = np.asarray(
@@ -945,11 +965,11 @@ class SparseRowStore:
         widest = self.widest_row_bytes()
         if widest > self._bucketLimit:
             raise MemoryBudgetError(
-                "One sparse row exceeds the conversion memory limit. Reading it "
-                f"needs at least {widest} bytes.",
+                f"One row of the {self.operation} exceeds its memory limit. "
+                f"Reading it needs at least {widest} bytes.",
                 needed_bytes=widest,
                 budget_bytes=self._bucketLimit,
-                item="one sparse row of the conversion",
+                item=f"one row of the {self.operation}",
             )
         self._split_buckets()
         np.savez(
@@ -1426,6 +1446,10 @@ class SparseRowStore:
                     ahead[1].cancel()
                 executor.shutdown(wait=True, cancel_futures=True)
 
+    def release_cache(self) -> None:
+        """Drop the bucket that :meth:`read` keeps for the next window; a later read loads it again."""
+        self._cache = None
+
     def _delete(self, bucket: int, start: int, stop: int) -> None:
         """Delete a bucket's files if it lies wholly within ``[start, stop)``."""
         first, last = self._bucket_rows(bucket)
@@ -1504,6 +1528,7 @@ class SparseRowStore:
         shape: tuple[int, int],
         dtype: Any,
         *,
+        operation: str,
         max_bytes: int,
         entry_bytes: int,
         entries: int | None,
@@ -1523,7 +1548,8 @@ class SparseRowStore:
         bucket of one wider row, so that a reader holds little beside the
         writes that it feeds. They are sized from ``entries``, the entries
         expected, which also check the free disk; None sizes them for dense
-        rows.
+        rows. ``operation`` names the conversion in errors, as it names the
+        store's.
 
         Raises:
             MemoryBudgetError: If ``max_bytes`` holds less than the row bytes
@@ -1544,11 +1570,11 @@ class SparseRowStore:
         )
         if int(max_bytes) < least:
             raise MemoryBudgetError(
-                "Sparse row conversion exceeds the memory limit. It needs at "
-                f"least {least} bytes.",
+                f"{_capitalized(operation)} exceeds the memory "
+                f"limit. It needs at least {least} bytes.",
                 needed_bytes=least,
                 budget_bytes=int(max_bytes),
-                item="the row pointers and one entry of the sparse row conversion",
+                item=f"the row pointers and one entry of the {operation}",
             )
         half = (int(max_bytes) - fixed) // 2
         per_entry = _bucket_bytes(2, 2, 0, itemsize, sum_duplicates) - _bucket_bytes(
@@ -1570,6 +1596,7 @@ class SparseRowStore:
         store = cls(
             shape,
             dtype,
+            operation=operation,
             bucket_rows=max(1, min(n_rows, bucket_rows)),
             whole_rows=False,
             buffer_bytes=min(half, 4 * _PENDING_LIMIT_BYTES),
@@ -1594,8 +1621,8 @@ class SparseRowStore:
                 # Finalizing refuses only a row that one read cannot hold.
                 needed = fixed + 2 * error.needed_bytes
                 raise MemoryBudgetError(
-                    "One sparse row exceeds the conversion memory limit. It needs "
-                    f"at least {needed} bytes.",
+                    f"One row of the {store.operation} exceeds its memory "
+                    f"limit. It needs at least {needed} bytes.",
                     needed_bytes=needed,
                     budget_bytes=int(max_bytes),
                     item=error.item,

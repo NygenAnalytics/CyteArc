@@ -1,14 +1,15 @@
 import os
 import re
 from abc import ABC, abstractmethod
-from collections.abc import Generator, Iterator, Sequence
+from collections.abc import Callable, Generator, Iterator, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import h5py
 import numpy as np
 import pandas as pd
-from scipy.sparse import coo_matrix
+from scipy.sparse import coo_matrix, csr_matrix
 
 from ..utils.progress import iter_progress
 from ..utils.files import open_binary
@@ -28,6 +29,7 @@ from ._text import (
 )
 from ..utils.arrays import (
     assay_feature_ranges,
+    csr_to_coo,
     cumulative_nnz,
     has_duplicates,
     max_window_nnz,
@@ -38,6 +40,8 @@ from ..utils.count_values import (
     new_count_ranges,
 )
 from ..utils.arguments import bool_argument
+from ._row_spill import checked_destinations, row_spill_plan, sample_rows, spill_rows
+from ._sparse import SparseRowStore, encoded_entry_bytes
 
 
 class CrReader(ABC):
@@ -53,6 +57,10 @@ class CrReader(ABC):
         nCells: Number of cells in dataset.
         assayFeats: A DataFrame with information about the features in the assay.
     """
+
+    #: The rows of an import that shuffles cells, in the import's order, on
+    #: local disk; ``consume`` yields them once, deleting them as it goes.
+    _shuffledRows: SparseRowStore | None = None
 
     def __init__(self, grp_names: dict[str, Any]) -> None:
         self.autoNames = dict(AUTO_ASSAY_NAMES)
@@ -100,7 +108,11 @@ class CrReader(ABC):
 
     @abstractmethod
     def count_value_ranges(
-        self, maxBytes: int, featureGroups: np.ndarray | None = None
+        self,
+        maxBytes: int,
+        featureGroups: np.ndarray | None = None,
+        *,
+        destinationRows: np.ndarray | None = None,
     ) -> list[CountValueRange]:
         """Return the range of the canonical values of each group of features.
 
@@ -109,12 +121,131 @@ class CrReader(ABC):
         :func:`~cytearc.storage.count_dtype.count_storage_dtype` to resolve the
         storage dtype of its group's counts.
 
+        With ``destinationRows``, the reader also sends each selected cell to
+        its destination row in temporary files on local disk, for an import
+        that shuffles cells, and ``consume`` then yields the cells once in
+        destination order. ``maxBytes`` also holds what the files' writer
+        holds.
+
         Args:
             maxBytes: Memory available to the scan.
             featureGroups: Group, numbered from zero, of each feature, such as
                 the assay that stores it. None puts every feature in one
                 group.
+            destinationRows: The destination row of each selected cell, a
+                permutation, or None to keep the cells in place.
         """
+
+    def _file_rows(self) -> np.ndarray:
+        """Return each selected cell's row in the file, from 0, as int64.
+
+        A reader that keeps every cell of the file returns 0 to ``nCells -
+        1``; one that keeps only some, such as :class:`CrH5Reader` with
+        ``is_filtered=False``, returns the rows of those it keeps, in order.
+        An import that shuffles cells stores them as ``sourceRow``.
+        """
+        return np.arange(self.nCells, dtype=np.int64)
+
+    def _file_first_rows(self, count: int, lines_in_mem: int) -> csr_matrix:
+        """Return the first ``count`` selected cells in the file's order.
+
+        They decide what the values are, whether or not an import shuffles
+        the cells. A reader that shuffles reads them from the file.
+        """
+        batch = next(iter(self.consume(max(1, int(count)), lines_in_mem)), None)
+        if batch is None:
+            return csr_matrix((0, self.nFeatures), dtype=self.matrix_dtype)
+        return csr_matrix(batch.tocsr()[: int(count)])
+
+    def _spill_rows(
+        self,
+        destinationRows: np.ndarray,
+        maxBytes: int,
+        fill: Callable[[int, Callable[[int, Any], None]], Any],
+        *,
+        entries: int | None,
+        longest: int,
+        entry_bytes: float | None,
+        operation: str,
+        temp_dir: str | Path | None,
+        expected_entries: int | None = None,
+    ) -> Any:
+        """Send the selected cells to their destination rows as a scan reads them.
+
+        ``fill(scanBytes, consumer)`` scans every selected cell once within
+        ``scanBytes``, sends each block of consecutive cells to
+        ``consumer(first, block)``, and returns what the caller keeps, such
+        as the scan's value ranges. ``entries`` are the cells' stored values,
+        or None for dense rows, ``longest`` the most values of one cell, and
+        ``entry_bytes`` what the file's first cells take on disk per value,
+        as :func:`~cytearc.readers._sparse.encoded_entry_bytes` measures it.
+        Dense rows pass ``expected_entries``, the values they hold beside
+        zeros as :func:`~cytearc.readers._row_spill.dense_spill_estimate`
+        estimates them, so that the free disk is checked before the spill.
+        The finalized store then holds the rows that ``consume`` yields.
+
+        Raises:
+            ValueError: If ``destinationRows`` is not a permutation of the cells.
+            MemoryBudgetError: If ``maxBytes`` cannot hold the spill of the
+                longest cell.
+            OSError: If the temporary disk lacks room for the rows.
+        """
+        self._release_shuffled_rows()
+        destinations = checked_destinations(destinationRows, self.nCells)
+        plan = row_spill_plan(
+            destinations,
+            (self.nCells, self.nFeatures),
+            self.matrix_dtype,
+            entries=entries,
+            longest=longest,
+            maxBytes=int(maxBytes),
+        )
+        share = plan.maxBytes - plan.ownerBytes
+        store, result = spill_rows(
+            plan,
+            lambda consumer: fill(plan.scan_bytes(share, 0, self.nCells), consumer),
+            operation=operation,
+            entry_bytes=entry_bytes,
+            buffer_bytes=plan.buffer_bytes(share, 0, self.nCells),
+            dense=entries is None,
+            temp_dir=temp_dir,
+            entries=expected_entries,
+        )
+        self._shuffledRows = store
+        return result
+
+    def _consume_shuffled(self, batch_size: int) -> Generator[coo_matrix, None, None]:
+        """Yield the shuffled cells once, deleting each bucket of them once read.
+
+        The next bucket loads while the current one is yielded.
+        """
+        if batch_size <= 0:
+            raise ValueError("batch_size must be positive")
+        store = self._shuffledRows
+        assert store is not None
+        for batch in store.iter_rows(
+            0, self.nCells, batch_size, read_ahead=True, delete=True
+        ):
+            yield csr_to_coo(batch)
+
+    def _shuffled_staging_bytes(self, batch_size: int) -> int:
+        """Return what reading a batch of shuffled cells holds beside the batch.
+
+        The batch's row pointers, and a bucket of rows with the next one
+        loading ahead.
+        """
+        store = self._shuffledRows
+        assert store is not None
+        rows = min(max(1, int(batch_size)), self.nCells)
+        return int((rows + 1) * 3 * np.dtype(np.int64).itemsize) + store.read_bytes(
+            read_ahead=True
+        )
+
+    def _release_shuffled_rows(self) -> None:
+        """Remove the shuffled cells of an import, once written or given up."""
+        if self._shuffledRows is not None:
+            self._shuffledRows.close()
+        self._shuffledRows = None
 
     def producer_staging_bytes(
         self,
@@ -306,6 +437,8 @@ class CrH5Reader(CrReader):
             already IDs), as AnnData's ``var_names_make_unique`` does, and
             logs a warning. Feature names are never changed, and repeated
             barcodes always raise.
+        temp_dir: Parent directory of the temporary files of an import that
+            shuffles cells. None uses the system temporary directory.
 
     Attributes:
         autoNames: Specifies if the data is from RNA or ATAC sequencing.
@@ -325,11 +458,13 @@ class CrH5Reader(CrReader):
         filtering_cutoff: int = 500,
         *,
         duplicate_feature_ids: DuplicateFeatureIds = "error",
+        temp_dir: str | Path | None = None,
     ) -> None:
         is_filtered = bool_argument(is_filtered, "is_filtered")
         if filtering_cutoff < 0:
             raise ValueError("filtering_cutoff cannot be negative")
         self.duplicateFeatureIds = duplicate_feature_ids_option(duplicate_feature_ids)
+        self._tempDir = temp_dir
         self.h5obj: h5py.File = h5py.File(h5_fn, mode="r")
         self.grp: h5py.Group
         self.validBarcodeIdx: np.ndarray | None = None
@@ -437,24 +572,67 @@ class CrH5Reader(CrReader):
         return np.dtype(np.float32) if dtype == np.float16 else dtype
 
     def count_value_ranges(
-        self, maxBytes: int, featureGroups: np.ndarray | None = None
+        self,
+        maxBytes: int,
+        featureGroups: np.ndarray | None = None,
+        *,
+        destinationRows: np.ndarray | None = None,
     ) -> list[CountValueRange]:
         """Return the range of the canonical values of each group of features.
 
         Each barcode is one compressed vector of the matrix. Selected barcodes
         whose values are contiguous in the matrix are scanned together, as
         ``consume`` reads them; the barcodes between them hold no values.
+        With ``destinationRows``, the scan also sends each selected barcode
+        to its destination row as it reads it, so an import that shuffles
+        cells reads the file once.
 
         Raises:
             MemoryError: If one barcode holds more values than fit in
-                ``maxBytes``.
-            ValueError: If a value is NaN or infinite.
+                ``maxBytes``, or with ``destinationRows`` its spill does not.
+            OSError: If the temporary disk lacks room for the shuffled cells.
+            ValueError: If a value is NaN or infinite, or ``destinationRows``
+                is not a permutation of the selected barcodes.
+        """
+        value_ranges = new_count_ranges(featureGroups)
+        if destinationRows is None:
+            self._scan_runs(maxBytes, featureGroups, value_ranges, None)
+            return value_ranges
+        cumulative = self._selected_cumulative_nnz()
+        rows = sample_rows(cumulative)
+        self._spill_rows(
+            destinationRows,
+            maxBytes,
+            lambda scan_bytes, consumer: self._scan_runs(
+                scan_bytes, featureGroups, value_ranges, consumer
+            ),
+            entries=int(cumulative[-1]),
+            longest=int(np.diff(cumulative).max(initial=0)),
+            entry_bytes=(
+                encoded_entry_bytes(self._file_first_rows(rows, 0)) if rows else None
+            ),
+            operation="shuffled 10x HDF5 import",
+            temp_dir=self._tempDir,
+        )
+        return value_ranges
+
+    def _scan_runs(
+        self,
+        maxBytes: int,
+        featureGroups: np.ndarray | None,
+        value_ranges: list[CountValueRange],
+        consumer: Callable[[int, Any], None] | None,
+    ) -> None:
+        """Scan the runs of selected barcodes whose values are contiguous.
+
+        ``consumer`` receives each block of selected barcodes as the scan
+        reads it, by the position of its first barcode among the selected
+        ones; the barcodes between them, which hold no values, are left out.
         """
         valid_idx = self.validBarcodeIdx
         assert valid_idx is not None
-        value_ranges = new_count_ranges(featureGroups)
         if valid_idx.size == 0:
-            return value_ranges
+            return
         indptr = self._source_indptr()
         gaps = indptr[valid_idx[1:]] != indptr[valid_idx[:-1] + 1]
         bounds = np.r_[0, np.flatnonzero(gaps) + 1, valid_idx.size]
@@ -467,8 +645,14 @@ class CrH5Reader(CrReader):
                 maxBytes=maxBytes,
                 groups=featureGroups,
                 valueRanges=value_ranges,
+                consumer=(
+                    None
+                    if consumer is None
+                    else _selected_barcodes(
+                        consumer, valid_idx[int(left) : int(right)], int(left)
+                    )
+                ),
             )
-        return value_ranges
 
     def _read_dataset(self, key: str) -> list[str]:
         # Construction resolves repeated feature IDs once, so every caller
@@ -507,16 +691,38 @@ class CrH5Reader(CrReader):
                 )
             yield key, np.asarray(values[:])
 
-    # noinspection DuplicatedCode
     def consume(
         self, batch_size: int, lines_in_mem: int | None = None
     ) -> Generator[coo_matrix, None, None]:
         """Yield CSR chunks from the Cell Ranger H5 matrix.
 
+        After an import's scan shuffled the cells, the chunks hold its
+        shuffled cells, once.
+
         Args:
             batch_size: Number of cells per chunk.
             lines_in_mem: Unused; kept for CrReader API compatibility.
         """
+        if self._shuffledRows is not None:
+            return self._consume_shuffled(batch_size)
+        return self._consume_file(batch_size)
+
+    def _file_rows(self) -> np.ndarray:
+        """Return each selected barcode's row in the file, its index among the barcodes."""
+        valid_idx = self.validBarcodeIdx
+        assert valid_idx is not None
+        return np.asarray(valid_idx).astype(np.int64, copy=False)
+
+    def _file_first_rows(self, count: int, lines_in_mem: int) -> csr_matrix:
+        """Return the first ``count`` selected barcodes, read from the file."""
+        batch = next(self._consume_file(max(1, int(count))), None)
+        if batch is None:
+            return csr_matrix((0, self.nFeatures), dtype=self.matrix_dtype)
+        return csr_matrix(batch.tocsr()[: int(count)])
+
+    # noinspection DuplicatedCode
+    def _consume_file(self, batch_size: int) -> Generator[coo_matrix, None, None]:
+        """Yield chunks of the selected barcodes in the file's order."""
         valid_idx = self.validBarcodeIdx
         assert valid_idx is not None
         indptr = self._source_indptr()
@@ -556,7 +762,9 @@ class CrH5Reader(CrReader):
             )
 
     def max_window_nnz(self, window_rows: int) -> int:
-        """Return the largest selected-cell row-window nnz."""
+        """Return the largest selected-cell row-window nnz, in the order ``consume`` yields them."""
+        if self._shuffledRows is not None:
+            return max_window_nnz(self._shuffledRows.indptr, window_rows)
         return max_window_nnz(self._selected_cumulative_nnz(), window_rows)
 
     def producer_staging_bytes(
@@ -564,10 +772,16 @@ class CrH5Reader(CrReader):
         batch_size: int,
         lines_in_mem: int,
     ) -> int:
-        """Count row-pointer arrays created while one H5 batch is produced."""
+        """Count row-pointer arrays created while one H5 batch is produced.
+
+        Shuffled cells are read a bucket at a time with the next one loading
+        ahead.
+        """
         rows = min(max(1, int(batch_size)), self.nCells)
         if rows == 0:
             return 0
+        if self._shuffledRows is not None:
+            return self._shuffled_staging_bytes(rows)
         itemsize = self._source_indptr().dtype.itemsize
         return int(rows * (3 * itemsize + np.dtype(np.int64).itemsize))
 
@@ -580,7 +794,8 @@ class CrH5Reader(CrReader):
 
         They are the selected barcodes, the matrix pointers, and the cumulative
         entries of the selected barcodes, counted before they are loaded so
-        that an import can plan before it prepares.
+        that an import can plan before it prepares, and the row pointers of
+        an import's shuffled cells.
         """
         valid_idx = self.validBarcodeIdx
         assert valid_idx is not None
@@ -589,11 +804,41 @@ class CrH5Reader(CrReader):
             valid_idx.nbytes
             + int(pointers.shape[0]) * pointers.dtype.itemsize
             + (valid_idx.size + 1) * np.dtype(np.int64).itemsize
+            + (0 if self._shuffledRows is None else self._shuffledRows.resident_bytes)
         )
 
     def close(self) -> None:
-        """Closes file connection."""
+        """Closes file connection and removes any shuffled cells."""
+        self._release_shuffled_rows()
         self.h5obj.close()
+
+
+def _selected_barcodes(
+    consumer: Callable[[int, Any], None], selected: np.ndarray, first: int
+) -> Callable[[int, Any], None]:
+    """Return a scan consumer that passes on only the selected barcodes of each block.
+
+    The scan reads the barcodes from ``selected[0]`` to ``selected[-1]``,
+    sorted barcode indexes whose values are contiguous, so the barcodes
+    between them hold no values. ``consumer`` receives the selected ones by
+    their position among all the selected barcodes, of which ``selected``
+    starts at ``first``.
+    """
+    origin = int(selected[0])
+
+    def consume(start: int, block: Any) -> None:
+        barcodes = origin + start + np.arange(block.shape[0], dtype=np.int64)
+        positions = np.searchsorted(selected, barcodes)
+        kept = positions < selected.size
+        kept[kept] = selected[positions[kept]] == barcodes[kept]
+        if not kept.any():
+            return
+        if kept.all():
+            consumer(first + int(positions[0]), block)
+            return
+        consumer(first + int(positions[kept][0]), block[kept])
+
+    return consume
 
 
 _PROTOSPACER_COLUMNS = ("cell_barcode", "num_features", "feature_call", "num_umis")

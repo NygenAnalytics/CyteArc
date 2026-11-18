@@ -1,6 +1,7 @@
 import csv
 import itertools
 from collections.abc import Generator
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -109,6 +110,8 @@ class CSVReader:
                        ``compression`` here, the file's first bytes decide whether it is gzip,
                        bzip2, xz, Zstandard or ZIP-compressed, or a tar archive, whatever its
                        name.
+        temp_dir: Parent directory of the temporary files of an import that
+                  shuffles cells. None uses the system temporary directory.
 
     Attributes:
         nFeatures: Number of features in dataset.
@@ -118,6 +121,8 @@ class CSVReader:
                     their storage dtype.
         cellDataDtypes: Dtype of each ``cell_data_cols`` column across every
                         row; ``object`` marks a text column.
+        tempDir: Parent directory of the temporary files of an import that
+                 shuffles cells, or None for the system temporary directory.
     """
 
     def __init__(
@@ -132,8 +137,11 @@ class CSVReader:
         cell_data_cols: list[str] | None = None,
         batch_size: int = 10000,
         pandas_kwargs: dict[str, Any] | None = None,
+        *,
+        temp_dir: str | Path | None = None,
     ) -> None:
         has_header = bool_argument(has_header, "has_header")
+        self.tempDir = temp_dir
         rows_are_cells = bool_argument(rows_are_cells, "rows_are_cells")
         self._fn = csv_fn
         if rows_are_cells is False:

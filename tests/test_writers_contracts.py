@@ -58,15 +58,16 @@ _PUBLIC_CLASS_METHODS = {
     TapestriToZarr: ("__init__",),
 }
 # Every importer takes the keyword ``overwrite``.
+# Every import writer gained the keyword-only shuffle_cells=False and
+# shuffle_seed=0.
 _PUBLIC_CLASS_SIGNATURE_DIGESTS = {
-    CrToZarr: "0bad82837ebacaac338db06c264da8ded4ca3846fb909c8d4f9fc5cbe4c53c05",
-    # H5adToZarr gained the keyword-only shuffle_cells=False and shuffle_seed=0.
+    CrToZarr: "ba6eba6034c206f42ea6346625077a56e869733d6fc3510869f2ac57f444e089",
     H5adToZarr: "14bea13120548bb8c892f1fb0d764a2acac8fdc5397b6c9c11a392ac58647e76",
-    SparseToZarr: "4414be8892bf0a7f7baa9aacd4ff2f2a1648cb722d62f07878dda83fba22a3ef",
-    CSVtoZarr: "3044903008c618715e44e0127ca983d174eb27813e76144d4c48145be9996b7f",
+    SparseToZarr: "90e7620d7e115ac362cc6ff2947275f5204b8f05fddee8d5fb6d82364755928c",
+    CSVtoZarr: "ad1be0c95fd6c04557ea8736dd01fbe0390de34adccbfe6b3785a106eba3fd8d",
     SubsetZarr: "17eee2007d317796e38322e9d81df3359beac96070a064728bbdd7530b2e79d9",
-    SeuratToZarr: "8d42546ee3b47fc4d819745ecfeec48c53e11c4c802b3ca50b50dfc5bc61c901",
-    TapestriToZarr: "51b512936408314a83b9c3ce39de6ad97943eef360e1c36fb0ec1395aee37dcb",
+    SeuratToZarr: "f9441dc90cb3ed4c547bcceb7458afe70856a4a0c3514969b38603229c418fcf",
+    TapestriToZarr: "9e430ed034d452201b9cb17d92907e7912f572a1b5056d918ff437d54328b7b3",
 }
 _MODULE_FUNCTIONS = (
     "create_zarr_count_assay",
@@ -130,7 +131,13 @@ def test_writer_class_and_method_signatures_are_stable():
 
 def test_seurat_writer_takes_a_keyword_default_assay():
     parameters = inspect.signature(SeuratToZarr.__init__).parameters
-    assert list(parameters)[-3:] == ["overwrite", "default_assay", "values"]
+    assert list(parameters)[-5:] == [
+        "overwrite",
+        "default_assay",
+        "values",
+        "shuffle_cells",
+        "shuffle_seed",
+    ]
     parameter = parameters["default_assay"]
     assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
     assert parameter.default is None
@@ -149,6 +156,26 @@ def test_h5ad_writer_takes_keyword_categorical_columns_and_shuffle_options():
     hints = get_type_hints(H5adToZarr.__init__)
     for name, default, annotation in (
         ("categorical_columns", False, bool),
+        ("shuffle_cells", False, bool),
+        ("shuffle_seed", 0, int),
+    ):
+        parameter = parameters[name]
+        assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
+        assert parameter.default == default
+        assert type(parameter.default) is type(default)
+        assert hints[name] is annotation
+
+
+@pytest.mark.parametrize(
+    "writer",
+    [CrToZarr, CSVtoZarr, SeuratToZarr, SparseToZarr, TapestriToZarr],
+    ids=lambda writer: writer.__name__,
+)
+def test_every_import_writer_takes_keyword_shuffle_options_last(writer):
+    parameters = inspect.signature(writer.__init__).parameters
+    assert list(parameters)[-2:] == ["shuffle_cells", "shuffle_seed"]
+    hints = get_type_hints(writer.__init__)
+    for name, default, annotation in (
         ("shuffle_cells", False, bool),
         ("shuffle_seed", 0, int),
     ):

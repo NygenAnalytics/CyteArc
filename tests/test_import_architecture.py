@@ -1143,6 +1143,7 @@ def test_reader_implementations_are_runtime_isolated():
         "cellranger.py": {
             "readers._assay_names",
             "readers._contigs",
+            "readers._row_spill",
             "readers._sparse",
             "readers._text",
         },
@@ -1165,13 +1166,23 @@ def test_reader_implementations_are_runtime_isolated():
             "readers._h5ad_columns",
             "readers._h5ad_inspect",
             "readers._h5ad_values",
+            "readers._row_spill",
             "readers._sparse",
             "readers._text",
         },
-        "mtx.py": {"readers._matrix_market", "readers._sparse", "readers._text"},
+        "mtx.py": {
+            "readers._matrix_market",
+            "readers._row_spill",
+            "readers._sparse",
+            "readers._text",
+        },
         "phylogeny.py": {"readers._treedata"},
         "recorder_alleles.py": {"readers._treedata"},
-        "tapestri.py": {"readers._assay_names", "readers._text"},
+        "tapestri.py": {
+            "readers._assay_names",
+            "readers._row_spill",
+            "readers._text",
+        },
     }
     # Contig files are delimited tables, which the contig parser reads through
     # utils.delimited like every reader, so it imports no other reader module.
@@ -1285,7 +1296,14 @@ def test_writer_implementations_are_runtime_isolated():
     shared_edges = {"writers._materialize", "writers._store", "writers.counts_t"}
     # TreeData's reading and writing share one module, so a store that
     # character export writes is the layout that import reads.
-    shared_reader_codecs = {"characters.py": {"readers._treedata"}}
+    # Imports that shuffle cells send the rows they read in the file's order
+    # to the row bucket store, from which their counts write reads them.
+    row_spill = {"readers._row_spill", "readers._sparse"}
+    shared_reader_codecs = {
+        "characters.py": {"readers._treedata"},
+        "csv.py": row_spill,
+        "seurat.py": row_spill,
+    }
     matching_reader_exports = {
         "cellranger.py": {"CrReader"},
         "csv.py": {"CSVReader"},

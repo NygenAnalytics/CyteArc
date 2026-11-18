@@ -717,7 +717,7 @@ def test_a_csc_conversion_names_the_budget_of_its_rows_beside_its_pointers(
     # rows beside the column pointers.
     pointers_and_entry = refused(lambda: convert(1)).needed_bytes
     refusal = named_budget_runs(
-        convert, pointers_and_entry, item="one sparse row of the conversion"
+        convert, pointers_and_entry, item="one row of the CSC row conversion"
     )
     assert f"Beside the {pointers} bytes of the matrix's column pointers" in str(
         refusal
@@ -1007,6 +1007,7 @@ def test_the_sparse_row_conversion_names_its_pointers_and_its_widest_row(
             iter((matrix,)),
             matrix.shape,
             matrix.dtype,
+            operation="sparse row conversion",
             max_bytes=memory,
             entry_bytes=192,
             entries=matrix.nnz,
@@ -1028,7 +1029,7 @@ def test_the_sparse_row_conversion_names_its_pointers_and_its_widest_row(
     widest = named_budget_runs(
         lambda memory: convert(matrix, memory),
         600,
-        item="one sparse row of the conversion",
+        item="one row of the sparse row conversion",
     )
     assert widest.needed_bytes == 3 * 32 + 2 * (2 * 96 + 2 * 48 + 64)
     assert list(tmp_path.iterdir()) == []
@@ -1037,6 +1038,7 @@ def test_the_sparse_row_conversion_names_its_pointers_and_its_widest_row(
             iter((matrix,)),
             matrix.shape,
             matrix.dtype,
+            operation="sparse row conversion",
             max_bytes=1024,
             entry_bytes=192,
             entries=matrix.nnz,

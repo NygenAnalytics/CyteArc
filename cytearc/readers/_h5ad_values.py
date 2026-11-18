@@ -12,7 +12,6 @@ from typing import Any
 
 import h5py
 import numpy as np
-from scipy.sparse import csr_matrix
 
 from ..utils.count_values import (
     CountScan,
@@ -21,6 +20,7 @@ from ..utils.count_values import (
     dense_count_ranges,
     new_count_ranges,
 )
+from ._row_spill import row_spill_consumer
 from ._sparse import SparseRowStore
 
 
@@ -39,26 +39,6 @@ class RowSpill:
     part: int
     bufferBytes: int
     destinations: np.ndarray
-
-
-def row_spill_consumer(
-    store: SparseRowStore, destinations: np.ndarray, *, dense: bool
-) -> Callable[[int, Any], None]:
-    """Return a scan consumer that appends each block of rows to ``store``.
-
-    ``destinations`` holds the destination row of each row that the scan
-    reads, by the row's position in the scan. A dense block is appended as
-    sparse rows, its zeros left out.
-    """
-
-    def consume(first: int, block: Any) -> None:
-        rows = block.shape[0]
-        store.append_rows(
-            destinations[first : first + rows],
-            csr_matrix(block) if dense else block,
-        )
-
-    return consume
 
 
 def matrix_values(node: h5py.Dataset, selection: slice, dtype: Any) -> np.ndarray:

@@ -55,6 +55,23 @@ class CrToZarr:
             reference's normalized values section describes. None decides
             from the values. Matrix Market readers
             read whole numbers only.
+        shuffle_cells: If True, write the cells in a uniformly random order,
+            so that any contiguous slice of the store, such as one shard or
+            a training mini-batch, is a random sample of its cells. Every
+            per-cell array follows the one order, and each cell keeps its
+            row in the file, from 0, in the int64 cell column ``sourceRow``:
+            for a reader that drops barcodes, such as one with
+            ``is_filtered=False``, its barcode's index in the file. The
+            reader sends each cell to temporary files on local disk, in its
+            ``temp_dir``, as it reads it: a 10x HDF5 or Tapestri reader
+            during its value scan, a Matrix Market reader as it reads its
+            cells for the counts write, before the store is created. A
+            reader holds the shuffled cells of one import at a time, and an
+            import in the reader's order of a reader that another import
+            shuffled reads the reader's order. Off by default in this
+            release.
+        shuffle_seed: The seed of the shuffle, from 0 to 2**64 - 1. One seed
+            gives the same order on every platform.
 
     Each assay stores its counts in the dtype that
     :func:`~cytearc.storage.count_dtype.count_storage_dtype` resolves from the
@@ -62,12 +79,20 @@ class CrToZarr:
 
     Raises:
         FileExistsError: If ``zarr_loc`` is not empty, unless ``overwrite`` replaces it.
+        TypeError: If ``shuffle_cells`` is not a boolean, or ``shuffle_seed``
+            is not an integer, or ``shuffle_cells`` is True and the reader's
+            ``count_value_ranges`` takes no ``destinationRows``.
+        ValueError: If ``shuffle_seed`` lies outside its range.
+        OSError: If ``shuffle_cells`` is True and the temporary disk lacks
+            room for the shuffled cells.
 
     Attributes:
         cr: A CrReader object, containing the Cellranger data.
         z: The Zarr hierarchy (array or group).
         policy: The count-matrix layout that every imported assay was written
             with.
+        shuffleCells: Whether the import shuffles the cells.
+        shuffleSeed: The seed of the shuffle.
     """
 
     #: The tool whose files the writer reads, as its log names it.
@@ -89,8 +114,18 @@ class CrToZarr:
         *,
         overwrite: bool = False,
         values: ImportValues = None,
+        shuffle_cells: bool = False,
+        shuffle_seed: int = 0,
     ) -> None:
         overwrite = bool_argument(overwrite, "overwrite")
+        self.shuffleCells = bool_argument(shuffle_cells, "shuffle_cells")
+        from ..storage.cell_order import (
+            destination_rows,
+            shuffle_seed_argument,
+            shuffled_order,
+        )
+
+        self.shuffleSeed = shuffle_seed_argument(shuffle_seed)
         from ..utils.matrix_values import import_values_argument
 
         import_values_argument(values)
@@ -140,63 +175,128 @@ class CrToZarr:
         for code, spans in enumerate(ranges.values()):
             for start, end in spans:
                 groups[start:end] = code
-        value_ranges = dict(
-            zip(
-                ranges,
-                self.cr.count_value_ranges(self.resources.memoryBytes, groups),
-                strict=True,
+        # Row r of every per-cell array holds the reader's cell _cellOrder[r];
+        # the reader sends each cell to its destination as it reads it.
+        self._cellOrder: np.ndarray | None = None
+        scan_options: dict[str, Any] = {}
+        held = 0
+        if self.shuffleCells:
+            _require_shuffled_scan(self.cr)
+            # A Matrix Market reader reads its cells for the shuffle with the
+            # parse buffer that the import reserves.
+            configure_lines = getattr(self.cr, "_set_sparse_import_lines_in_mem", None)
+            if callable(configure_lines):
+                configure_lines(self.linesInMem)
+            self._cellOrder = shuffled_order(self.cr.nCells, self.shuffleSeed)
+            scan_options["destinationRows"] = destination_rows(self._cellOrder)
+            held = 2 * self._cellOrder.nbytes
+        else:
+            # Another import of the reader may hold its shuffled cells, which
+            # this import, in the reader's order, never reads.
+            self._release_other_shuffled_cells()
+        # The cells on local disk before the scan; cells there after a
+        # failure are this import's, which no later import may read.
+        rows_before = getattr(self.cr, "_shuffledRows", None)
+        try:
+            value_ranges = dict(
+                zip(
+                    ranges,
+                    self.cr.count_value_ranges(
+                        self.resources.memoryBytes - held, groups, **scan_options
+                    ),
+                    strict=True,
+                )
             )
-        )
-        storage_dtypes = {
-            name: count_storage_dtype(self.cr.matrix_dtype, value_range)
-            for name, value_range in value_ranges.items()
-        }
-        logger.debug(f"Resolved Cell Ranger count storage dtypes={storage_dtypes}")
-        self.values = resolve_import_values(
-            values,
-            value_ranges,
-            lambda: self._first_cells(ranges),
-            {name: self.assayTypes.get(name) for name in value_ranges},
-            storage_dtypes,
-        )
-        # A layout that does not fit fails here, before the destination exists.
-        self.policy = self._fit_count_layout(storage_dtypes, layout_request)
-        # The destination must be empty, or with overwrite an unprepared store.
-        self.z = create_destination(
-            zarr_loc, overwrite=overwrite, storage_options=storage_options
-        )
-        cell_group = create_cell_data(
-            root=self.z,
-            workspace=self.workspace,
-            ids=np.array(self.cr.cell_names()),
-            names=np.array(self.cr.cell_names()),
-            profile=self.profile,
-        )
-        for assay_name in assay_names:
-            create_zarr_count_assay(
-                z=self.z,
-                assay_name=assay_name,
-                workspace=workspace,
-                n_cells=self.cr.nCells,
-                feat_ids=self.cr.feature_ids(assay_name),
-                feat_names=self.cr.feature_names(assay_name),
-                dtype=storage_dtypes[assay_name],
+            del scan_options
+            # The rows that this import's counts write reads, which no other
+            # import of the same reader may replace.
+            self._shuffledStore = self.cr._shuffledRows if self.shuffleCells else None
+            storage_dtypes = {
+                name: count_storage_dtype(self.cr.matrix_dtype, value_range)
+                for name, value_range in value_ranges.items()
+            }
+            logger.debug(f"Resolved Cell Ranger count storage dtypes={storage_dtypes}")
+            self.values = resolve_import_values(
+                values,
+                value_ranges,
+                lambda: self._first_cells(ranges),
+                {name: self.assayTypes.get(name) for name in value_ranges},
+                storage_dtypes,
+            )
+            # A layout that does not fit fails here, before the destination exists.
+            self.policy = self._fit_count_layout(storage_dtypes, layout_request)
+            # The destination must be empty, or with overwrite an unprepared store.
+            self.z = create_destination(
+                zarr_loc, overwrite=overwrite, storage_options=storage_options
+            )
+            cell_names = np.array(self.cr.cell_names())
+            if self._cellOrder is not None:
+                cell_names = cell_names[self._cellOrder]
+            cell_group = create_cell_data(
+                root=self.z,
+                workspace=self.workspace,
+                ids=cell_names,
+                names=cell_names,
                 profile=self.profile,
-                policy=self.policy,
-                normalized_values=normalized_values_record(self.values[assay_name]),
             )
-        self._write_reader_metadata(cell_group, assay_names)
+            del cell_names
+            if self._cellOrder is not None:
+                from ..storage.cell_order import write_shuffled_cell_order
+
+                # Each cell's row in the file, which a reader that drops cells
+                # keeps with gaps. Written before the keys are planned, so a
+                # source column of the same name is skipped.
+                write_shuffled_cell_order(
+                    cell_group,
+                    self.cr._file_rows()[self._cellOrder],
+                    self.shuffleSeed,
+                    profile=self.profile,
+                )
+            for assay_name in assay_names:
+                create_zarr_count_assay(
+                    z=self.z,
+                    assay_name=assay_name,
+                    workspace=workspace,
+                    n_cells=self.cr.nCells,
+                    feat_ids=self.cr.feature_ids(assay_name),
+                    feat_names=self.cr.feature_names(assay_name),
+                    dtype=storage_dtypes[assay_name],
+                    profile=self.profile,
+                    policy=self.policy,
+                    normalized_values=normalized_values_record(self.values[assay_name]),
+                )
+            self._write_reader_metadata(cell_group, assay_names)
+        except BaseException:
+            held_rows = getattr(self.cr, "_shuffledRows", None)
+            if (
+                self.shuffleCells
+                and held_rows is not None
+                and held_rows is not rows_before
+            ):
+                self.cr._release_shuffled_rows()
+            raise
+
+    def _release_other_shuffled_cells(self) -> None:
+        """Release the shuffled cells that another import of the reader left.
+
+        An import in the reader's order then reads the cells in that order.
+        A reader that cannot shuffle holds none.
+        """
+        release = getattr(self.cr, "_release_shuffled_rows", None)
+        if callable(release):
+            release()
 
     def _first_cells(
         self, ranges: dict[str, tuple[tuple[int, int], ...]]
     ) -> dict[str, Any]:
-        """Return the values of each assay's first cells, which decide what they are."""
-        from scipy.sparse import csr_matrix
+        """Return the values of each assay's first cells, which decide what they are.
 
+        They are the reader's first cells, whether or not the import shuffles
+        them, so the shuffle never changes what the values are taken to be.
+        """
         from ..utils.matrix_values import DETECTION_CELLS
 
-        batch = next(iter(self.cr.consume(DETECTION_CELLS, self.linesInMem)), None)
-        cells = csr_matrix((0, self.cr.nFeatures)) if batch is None else batch.tocsr()
+        cells = self.cr._file_first_rows(DETECTION_CELLS, self.linesInMem)
         return {
             name: cells[:, np.concatenate([np.arange(a, b) for a, b in spans])]
             for name, spans in ranges.items()
@@ -221,10 +321,13 @@ class CrToZarr:
 
         reader_resident = getattr(self.cr, "_sparse_import_resident_bytes", None)
         resident = (
-            max(0, int(reader_resident())) if callable(reader_resident) else 0
-        ) + sum(
-            CountSummary.nbytes_for(self.cr.nCells, width)
-            for width in self._assay_widths().values()
+            (max(0, int(reader_resident())) if callable(reader_resident) else 0)
+            + sum(
+                CountSummary.nbytes_for(self.cr.nCells, width)
+                for width in self._assay_widths().values()
+            )
+            # A shuffled import holds the order of its cells.
+            + (0 if self._cellOrder is None else int(self._cellOrder.nbytes))
         )
         projection_value_bytes = int(
             max(
@@ -315,6 +418,8 @@ class CrToZarr:
                         f"Cell metadata column {name!r} has shape {values.shape}; "
                         f"expected ({self.cr.nCells},)"
                     )
+                if self._cellOrder is not None:
+                    values = values[self._cellOrder]
                 write_metadata_column(cell_group, key, values, profile=self.profile)
 
         feature_columns = getattr(self.cr, "get_feature_columns", None)
@@ -386,12 +491,19 @@ class CrToZarr:
     def dump(self, batch_size: int | None = None) -> None:
         """Writes the count values into the Zarr matrix.
 
+        A shuffled import reads its shuffled cells once, deleting them as
+        it goes, and removes them once the counts are written or the write
+        fails, so it writes its counts once. An import in the reader's order
+        removes the shuffled cells that another import of the reader left.
+
         Args:
             batch_size: Number of source cells per batch, at most one
                         destination row band, which is the default.
 
         Raises:
             ValueError: If ``batch_size`` is not positive.
+            RuntimeError: If the shuffled cells of this import were already
+                written, or another import of the reader replaced them.
 
         Returns:
             None
@@ -411,6 +523,19 @@ class CrToZarr:
 
         if batch_size is not None and batch_size <= 0:
             raise ValueError("batch_size must be positive")
+        if not self.shuffleCells:
+            # Another import of the reader, built after this one, may have
+            # left its shuffled cells; this import writes the reader's order.
+            self._release_other_shuffled_cells()
+        elif (
+            self._shuffledStore is None
+            or self.cr._shuffledRows is not self._shuffledStore
+        ):
+            raise RuntimeError(
+                "The shuffled cells of this import were written once and removed, "
+                f"or another import of the reader replaced them; create a new "
+                f"{type(self).__name__} to import the cells again"
+            )
         input_ranges = assay_feature_ranges(self.cr.assayFeats)
         stores = {
             assay: load_count_array(self.z, assay, self.workspace)
@@ -542,6 +667,10 @@ class CrToZarr:
             )
             for assay, summary in summaries.items():
                 finalize_counts(stores[assay], summary=summary)
+            if self.shuffleCells:
+                # The shuffled cells were read once; countsT reads counts.
+                self.cr._release_shuffled_rows()
+                self._shuffledStore = None
             from .counts_t import finalize_writer_counts_t_many
 
             finalize_writer_counts_t_many(
@@ -556,6 +685,37 @@ class CrToZarr:
         finally:
             if callable(release):
                 release()
+            if self.shuffleCells:
+                self.cr._release_shuffled_rows()
+                self._shuffledStore = None
+
+
+def _require_shuffled_scan(reader: CrReader) -> None:
+    """Refuse a reader that cannot shuffle its cells or name their rows in the file.
+
+    Raises:
+        TypeError: If the reader's ``count_value_ranges`` takes no
+            ``destinationRows``, as readers written before cells could be
+            shuffled do.
+        ValueError: If the reader's ``_file_rows`` does not give one row for
+            each selected cell.
+    """
+    import inspect
+
+    parameters = inspect.signature(reader.count_value_ranges).parameters
+    if "destinationRows" not in parameters:
+        raise TypeError(
+            f"{type(reader).__name__}.count_value_ranges takes no destinationRows, "
+            "so its cells cannot be shuffled; pass shuffle_cells=False, or give "
+            "the reader the keyword-only destinationRows that CrReader describes"
+        )
+    rows = np.asarray(reader._file_rows())
+    if rows.shape != (reader.nCells,) or rows.dtype.kind not in "iu":
+        raise ValueError(
+            f"{type(reader).__name__}._file_rows gave dtype {rows.dtype} and shape "
+            f"{rows.shape}; it must give one integer file row for each of the "
+            f"{reader.nCells} selected cells"
+        )
 
 
 MtxToZarr = CrToZarr

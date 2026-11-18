@@ -17,7 +17,11 @@ import pandas as pd
 from scipy.sparse import coo_matrix, csr_matrix
 
 from ..utils.arrays import cumulative_nnz, max_window_nnz
-from ..utils.count_values import CountValueRange, new_count_ranges
+from ..utils.count_values import (
+    CountValueRange,
+    new_count_ranges,
+    scan_window_values,
+)
 from ..utils.files import is_gzip, open_text
 from ._matrix_market import (
     matrix_market_entries,
@@ -26,6 +30,8 @@ from ._matrix_market import (
     read_matrix_market_header,
 )
 from .cellranger import CrReader
+from ._row_spill import RowSpillPlan, checked_destinations, row_spill_plan, spill_rows
+from ._sparse import encoded_entry_bytes
 from ._text import (
     DuplicateFeatureIds,
     duplicate_feature_ids_option,
@@ -1674,7 +1680,11 @@ class MtxReader(CrReader):
     of an unordered or feature-major matrix from these rows; a feature-major
     matrix is sorted into them when an import starts. ``temporaryDiskBytes``
     reports the size of the rows, which the end of an import and ``close``
-    remove.
+    remove. An import that shuffles cells reads the kept cells in this
+    order before it creates its store, as its counts write would, and sends
+    each to its destination row in temporary files in ``temp_dir``; the
+    counts write then reads them back in shuffled order instead of the
+    file.
 
     Args:
         matrix_path: A candidate returned by :func:`~cytearc.inspect_mtx`, or
@@ -1697,8 +1707,9 @@ class MtxReader(CrReader):
         filtering_cutoff: Total count that a cell must exceed to be kept
             when ``is_filtered`` is False.
         temp_dir: Parent directory of the temporary files: the selected
-            members of a ZIP archive and the sorted rows. None uses the
-            system temporary directory.
+            members of a ZIP archive, the sorted rows, and the rows of an
+            import that shuffles cells. None uses the system temporary
+            directory.
         duplicate_feature_ids: ``"error"`` rejects repeated feature IDs.
             ``"make_unique"`` keeps the first occurrence of each ID and
             renames each later one, in file order and across assays, by
@@ -1798,7 +1809,11 @@ class MtxReader(CrReader):
         return self._engine.matrixDtype
 
     def count_value_ranges(
-        self, maxBytes: int, featureGroups: np.ndarray | None = None
+        self,
+        maxBytes: int,
+        featureGroups: np.ndarray | None = None,
+        *,
+        destinationRows: np.ndarray | None = None,
     ) -> list[CountValueRange]:
         """Return the range of the counts of each group of features.
 
@@ -1808,15 +1823,104 @@ class MtxReader(CrReader):
         When the reader dropped cells from a sorted matrix, several groups
         need one more read of the file to find the largest counts of the kept
         cells.
+
+        With ``destinationRows``, the kept cells are read here, in the order
+        that :meth:`consume` would yield them, and each is sent to its
+        destination row in temporary files; ``consume`` then yields them
+        once in destination order, from those files. The pass holds what one batch of about a
+        million counts holds as it is read and sent, within ``maxBytes``.
+
+        Raises:
+            MemoryBudgetError: With ``destinationRows``, if ``maxBytes``
+                cannot hold the batch of the longest cell.
+            OSError: If the temporary disk lacks room for the shuffled cells.
+            ValueError: If ``destinationRows`` is not a permutation of the
+                kept cells.
         """
         value_ranges = new_count_ranges(featureGroups)
         if featureGroups is None or len(value_ranges) == 1:
             value_ranges[0].maximum = self._engine.countMaximum
-            return value_ranges
-        maxima = self._engine.kept_feature_maxima()
-        for code, value_range in enumerate(value_ranges):
-            value_range.maximum = int(maxima[featureGroups == code].max(initial=0))
+        else:
+            maxima = self._engine.kept_feature_maxima()
+            for code, value_range in enumerate(value_ranges):
+                value_range.maximum = int(maxima[featureGroups == code].max(initial=0))
+        if destinationRows is not None:
+            self._spill_kept_cells(destinationRows, int(maxBytes))
         return value_ranges
+
+    def _spill_kept_cells(self, destinationRows: np.ndarray, maxBytes: int) -> None:
+        """Read the kept cells in batches and send each to its destination row.
+
+        A batch holds about a million counts, or as many cells as the budget
+        holds beside the reader's arrays, the parse buffer and what sending a
+        batch holds.
+        """
+        self._release_shuffled_rows()
+        destinations = checked_destinations(destinationRows, self.nCells)
+        engine = self._engine
+        lines = engine._importLinesInMem
+        pointers = engine._cumulativeRowNnz
+        longest = int(np.diff(pointers).max(initial=0))
+        available = maxBytes - engine.resident_bytes()
+
+        def held(plan: RowSpillPlan, rows: int) -> int:
+            return int(plan.batch_bytes(engine.max_window_nnz(rows))) + int(
+                engine.producer_staging_bytes(rows, lines)
+            )
+
+        plan = row_spill_plan(
+            destinations,
+            (self.nCells, self.nFeatures),
+            engine.matrixDtype,
+            entries=int(pointers[-1]),
+            longest=longest,
+            maxBytes=available,
+            least=lambda plan: held(plan, 1),
+        )
+        # Batches start at the cells of a million counts on average and
+        # halve until their widest window fits.
+        window = scan_window_values(longest)
+        rows = max(
+            1, min(self.nCells, window * self.nCells // max(1, plan.entries or 0))
+        )
+        while rows > 1 and (
+            engine.max_window_nnz(rows) > window or held(plan, rows) > available
+        ):
+            rows //= 2
+        buffer_bytes = plan.batch_buffer_bytes(
+            available - plan.ownerBytes - engine.producer_staging_bytes(rows, lines),
+            engine.max_window_nnz(rows),
+        )
+        batches = engine.consume(rows, lines)
+        try:
+            first = next(batches, None)
+            # The first batch, of about a million counts, measures what the
+            # rows take on disk.
+            entry_bytes = (
+                None
+                if first is None or not first.nnz
+                else encoded_entry_bytes(first.tocsr())
+            )
+
+            def fill(consumer: Callable[[int, Any], None]) -> None:
+                start = 0
+                block = first
+                while block is not None:
+                    consumer(start, block.tocsr())
+                    start += int(block.shape[0])
+                    block = next(batches, None)
+
+            self._shuffledRows, _ = spill_rows(
+                plan,
+                fill,
+                operation="shuffled Matrix Market import",
+                entry_bytes=entry_bytes,
+                buffer_bytes=buffer_bytes,
+                dense=False,
+                temp_dir=engine.tempDir,
+            )
+        finally:
+            batches.close()
 
     def consume(
         self,
@@ -1825,6 +1929,9 @@ class MtxReader(CrReader):
     ) -> Generator[coo_matrix, None, None]:
         """Yield chunks of cell rows from the Matrix Market file.
 
+        After an import shuffled the cells, the chunks hold its shuffled
+        cells, once.
+
         Args:
             batch_size: Number of cells per yielded chunk.
             lines_in_mem: Number of Matrix Market lines parsed at a time.
@@ -1832,9 +1939,29 @@ class MtxReader(CrReader):
         Yields:
             scipy.sparse.coo_matrix chunks in ``matrix_dtype``.
         """
+        if self._shuffledRows is not None:
+            yield from self._consume_shuffled(batch_size)
+            return
         yield from self._engine.consume(batch_size, lines_in_mem)
 
+    def _file_rows(self) -> np.ndarray:
+        """Return each kept cell's row in the file, its index in the cell sidecar."""
+        return np.asarray(self._engine.validCellIndexes).astype(np.int64, copy=False)
+
+    def _file_first_rows(self, count: int, lines_in_mem: int) -> csr_matrix:
+        """Return the first ``count`` kept cells in the order construction found."""
+        batches = self._engine.consume(max(1, int(count)), lines_in_mem)
+        try:
+            batch = next(batches, None)
+        finally:
+            batches.close()
+        if batch is None:
+            return csr_matrix((0, self.nFeatures), dtype=self.matrix_dtype)
+        return csr_matrix(batch.tocsr()[: int(count)])
+
     def max_window_nnz(self, window_rows: int) -> int:
+        if self._shuffledRows is not None:
+            return max_window_nnz(self._shuffledRows.indptr, window_rows)
         return self._engine.max_window_nnz(window_rows)
 
     def producer_staging_bytes(
@@ -1842,6 +1969,8 @@ class MtxReader(CrReader):
         batch_size: int,
         lines_in_mem: int,
     ) -> int:
+        if self._shuffledRows is not None:
+            return self._shuffled_staging_bytes(batch_size)
         return self._engine.producer_staging_bytes(batch_size, lines_in_mem)
 
     def get_cell_columns(self) -> Iterator[tuple[str, np.ndarray]]:
@@ -1855,16 +1984,21 @@ class MtxReader(CrReader):
         self._engine.configure_import_lines(lines_in_mem)
 
     def _prepare_sparse_import(self) -> None:
-        self._engine.prepare()
-        self.temporaryDiskBytes = self._engine.temporaryDiskBytes
+        # Shuffled cells are read from their own files.
+        if self._shuffledRows is None:
+            self._engine.prepare()
+            self.temporaryDiskBytes = self._engine.temporaryDiskBytes
 
     def _release_sparse_import(self) -> None:
         self._engine.release()
 
     def _sparse_import_resident_bytes(self) -> int:
-        return self._engine.resident_bytes()
+        return self._engine.resident_bytes() + (
+            0 if self._shuffledRows is None else self._shuffledRows.resident_bytes
+        )
 
     def close(self) -> None:
+        self._release_shuffled_rows()
         self._engine.release()
 
 
