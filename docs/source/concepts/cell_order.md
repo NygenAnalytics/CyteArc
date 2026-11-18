@@ -46,6 +46,6 @@ reader = cytearc.H5adReader.from_inspect(cytearc.inspect_h5ad("counts.h5ad"))
 cytearc.H5adToZarr(reader, zarr_loc="counts.zarr", shuffle_cells=False).dump()
 ```
 
-Every import writer takes the option: `H5adToZarr`, `CrToZarr` and `MtxToZarr`, `TapestriToZarr`, `CSVtoZarr`, `SparseToZarr` and `SeuratToZarr`. An import in the file's order writes neither `sourceRow` nor `cellOrder`, and its store is the store that CyteArc 1.4.0 and earlier releases write. Stores imported by those releases keep their order, open unchanged and export in their stored order, which is their file's order.
+Every import writer takes the option: `H5adToZarr`, `CrToZarr` and `MtxToZarr`, `TapestriToZarr`, `CSVtoZarr`, `SparseToZarr` and `SeuratToZarr`. An import in the file's order writes neither `sourceRow` nor `cellOrder`, and its store is the store that CyteArc 1.4.0 and earlier releases write, except that `H5adToZarr` stores the file's categoricals as categorical columns unless given `categorical_columns=False`. Stores imported by those releases keep their order, open unchanged and export in their stored order, which is their file's order.
 
 A file imported again with the shuffle gets a store in another order than the store that an earlier release imported from it, so the two stores have different dataset fingerprints, and a composite or a mount that recorded the earlier store refuses the new one in its place. Import with `shuffle_cells=False` to rebuild the earlier store.

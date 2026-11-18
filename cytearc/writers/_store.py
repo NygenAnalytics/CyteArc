@@ -260,8 +260,10 @@ def write_categorical_column(
     Raises:
         TypeError: If ``name`` is not a string, or codes are not integers.
         ValueError: If ``name`` cannot name one Zarr array, or the
-            categories cannot be stored as categories, as
-            ``stored_categorical_codes`` raises.
+            categories are not one-dimensional.
+        UnstorableCategoriesError: If a categorical column cannot store the
+            categories, as ``stored_categorical_codes`` raises, before
+            anything is written.
     """
     from ..storage.identity import replace_metadata_column
 

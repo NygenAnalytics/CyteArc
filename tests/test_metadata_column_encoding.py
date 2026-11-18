@@ -444,8 +444,13 @@ def test_an_h5ad_import_converts_each_category_once(
     calls = _text_value_calls(monkeypatch)
     reader = H5adReader(str(path))
     try:
+        # A column of labels, which takes each category's text once.
         H5adToZarr(
-            reader, str(tmp_path / "cells.zarr"), nthreads=1, shuffle_cells=False
+            reader,
+            str(tmp_path / "cells.zarr"),
+            nthreads=1,
+            shuffle_cells=False,
+            categorical_columns=False,
         )
     finally:
         reader.close()
@@ -608,12 +613,14 @@ def test_an_h5ad_import_stores_the_columns_of_the_per_value_conversion(
     obs_names, assays = _write_h5ad_columns(path)
     reader = H5adReader(str(path))
     try:
+        # Label columns, which the per-value conversion wrote.
         H5adToZarr(
             reader,
             str(tmp_path / "store.zarr"),
             nthreads=1,
             assay_split_key="feature_types",
             shuffle_cells=False,
+            categorical_columns=False,
         ).dump()
         root = zarr.open_group(str(tmp_path / "store.zarr"), mode="r")
         cells = root["cellData"]

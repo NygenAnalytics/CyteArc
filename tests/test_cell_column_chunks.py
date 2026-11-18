@@ -522,8 +522,13 @@ def test_an_h5ad_import_chunks_its_cell_and_feature_columns_by_rows_and_bytes(
     ).write_h5ad(tmp_path / "narrow.h5ad")
     narrow = H5adReader(str(tmp_path / "narrow.h5ad"))
     try:
+        # Label columns, which the rule chunks by the bytes of their text.
         H5adToZarr(
-            narrow, str(tmp_path / "narrow.zarr"), nthreads=1, shuffle_cells=False
+            narrow,
+            str(tmp_path / "narrow.zarr"),
+            nthreads=1,
+            shuffle_cells=False,
+            categorical_columns=False,
         ).dump()
     finally:
         narrow.close()
@@ -554,7 +559,11 @@ def test_an_h5ad_import_chunks_its_cell_and_feature_columns_by_rows_and_bytes(
     reader = H5adReader(str(tmp_path / "cells.h5ad"))
     try:
         H5adToZarr(
-            reader, str(tmp_path / "imported.zarr"), nthreads=1, shuffle_cells=False
+            reader,
+            str(tmp_path / "imported.zarr"),
+            nthreads=1,
+            shuffle_cells=False,
+            categorical_columns=False,
         ).dump()
     finally:
         reader.close()

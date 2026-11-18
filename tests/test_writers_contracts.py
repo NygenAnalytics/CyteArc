@@ -59,10 +59,11 @@ _PUBLIC_CLASS_METHODS = {
 }
 # Every importer takes the keyword ``overwrite``.
 # Every import writer takes the keyword-only shuffle_cells=True and
-# shuffle_seed=0, so imports shuffle cells unless asked not to.
+# shuffle_seed=0, so imports shuffle cells unless asked not to, and
+# H5adToZarr the keyword-only categorical_columns=True.
 _PUBLIC_CLASS_SIGNATURE_DIGESTS = {
     CrToZarr: "5784c48407c868c4a5decc107affe3670c9dae0294bf54b4cd1e8b780097ae90",
-    H5adToZarr: "fd2bbb8502504abe36ede4dd52272f9e365f6c72c78cb7c398375fb068f20787",
+    H5adToZarr: "5f19815f0d617d3e42e55d0a11bbfd256aa2818883bfe715c99d6b6988a6175a",
     SparseToZarr: "1515ee27696b1479aa0f0f43ed2e6fded903f1c5df235af72a9d06297ef7f132",
     CSVtoZarr: "45041e229b2a720ff45b4b47422471e854986cba60b36cd0ef827e67bcbd98a4",
     SubsetZarr: "17eee2007d317796e38322e9d81df3359beac96070a064728bbdd7530b2e79d9",
@@ -157,7 +158,7 @@ def test_h5ad_writer_takes_keyword_categorical_columns_and_shuffle_options():
     ]
     hints = get_type_hints(H5adToZarr.__init__)
     for name, default, annotation in (
-        ("categorical_columns", False, bool),
+        ("categorical_columns", True, bool),
         ("shuffle_cells", True, bool),
         ("shuffle_seed", 0, int),
     ):

@@ -148,7 +148,7 @@ def test_import_keeps_categories_order_unused_levels_and_colors(
         "missing_label": "NA",
         "missing_color": "#bdbdbd",
     }
-    assert np.asarray(cells["clusters_int"][:]).tolist() == [0, 1, 2, 3, 1, 2, 3, 1]
+    assert store.cells.fetch_all("clusters_int").tolist() == [0, 1, 2, 3, 1, 2, 3, 1]
     assert dict(cells["flag"].attrs)["levels"] == [True, False]
     assert dict(cells["level"].attrs)["levels"] == [1.5, 0.5]
     # Named and short hexadecimal colors become #rrggbb.
@@ -160,9 +160,14 @@ def test_import_keeps_categories_order_unused_levels_and_colors(
     ] == _generated_colors(["p", "q", "r"])
     # A text column that is not categorical gets no attributes.
     assert "levels" not in cells["plain"].attrs
-    # Feature categoricals keep their categories, without a display.
+    # Feature categoricals keep their categories, without a display, beside
+    # the link of the categorical column that a default import stores.
     kind = dict(root["RNA/featureData/kind"].attrs)
-    assert kind == {"levels": ["y", "x", "z"], "ordered": False}
+    assert kind == {
+        "levels": ["y", "x", "z"],
+        "ordered": False,
+        "categories": "__cytearc_categories__kind",
+    }
 
 
 def test_plots_read_imported_category_order_and_colors(categorical_store) -> None:

@@ -68,7 +68,7 @@ def mount_datastore(
     workspace: str | None = None,
     storage_options: dict[str, Any] | None = None,
     source_storage_options: dict[str, Any] | None = None,
-    relative_sources: bool = False,
+    relative_sources: bool = True,
     **datastore_options: Any,
 ) -> "DataStore":
     """Create a writable DataStore whose count matrices come from ``source``.
@@ -97,14 +97,17 @@ def mount_datastore(
                                 than the target. Pass them again to
                                 ``DataStore`` when reopening the target; they
                                 are never saved in it.
-        relative_sources: Record a source in the directory that holds ``at``,
-                          or below it, by its path relative to that
-                          directory, so the directory can be moved, copied,
-                          or served from a bucket with the source in it. By
-                          default, and for a source elsewhere, the target
-                          records the source's absolute path or URL.
-                          Releases before this option cannot find a source
-                          recorded by a relative path.
+        relative_sources: If True, the default, record a source in the
+                          directory that holds ``at``, or below it, by its
+                          path relative to that directory, when both are
+                          local or both are URLs of one scheme and host, so
+                          the directory can be moved, copied, or served from
+                          a bucket with the source in it. The target records
+                          any other source by its absolute path or URL.
+                          CyteArc 1.4.0 and later find a source recorded by
+                          a relative path; False records the source by its
+                          absolute path or URL, which keeps the target
+                          readable by earlier releases.
         datastore_options: Keyword arguments forwarded to ``DataStore``.
                            ``zarr_loc`` is rejected; ``zarr_mode`` must be
                            ``r+`` when set.

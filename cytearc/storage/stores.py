@@ -541,15 +541,17 @@ def create_matrix_source(
     profile: StorageProfile | None = None,
     source_root: zarr.Group | None = None,
     resources: ResourceBudget | None = None,
-    relative_sources: bool = False,
+    relative_sources: bool = True,
 ) -> zarr.Group:
     """Create a writable store that mounts count matrices from ``source``.
 
     ``storage_options`` open the target ``at``, and ``source_storage_options``
     open ``source`` when ``source_root`` is None; the source takes
-    ``storage_options`` when they are None. The target records the source by
-    its absolute path or URL, or, with ``relative_sources``, as
-    :func:`record_source_location` records it.
+    ``storage_options`` when they are None. With ``relative_sources``, the
+    default, the target records the source as :func:`record_source_location`
+    records it, and otherwise by its absolute path or URL. CyteArc 1.4.0 and
+    later find a source recorded by a relative path; an absolute record keeps
+    the target readable by earlier releases.
     """
     from .arrays import create_metadata_column
     from .cell_order import copy_cell_order

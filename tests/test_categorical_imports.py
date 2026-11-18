@@ -1,13 +1,15 @@
-"""H5AD imports store source categoricals as categorical columns with ``categorical_columns=True``.
+"""H5AD imports store source categoricals as categorical columns by default.
 
 Each check compares a categorical import with codes, categories and labels
-written out by hand, or with a default import of the same file, whose label
-columns every release reads, so an import that stored, typed or fingerprinted
-a categorical differently fails.
+written out by hand, or with an import of the same file with
+``categorical_columns=False``, whose label columns every release reads, so an
+import that stored, typed or fingerprinted a categorical differently fails.
 """
 
 import hashlib
 import json
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -16,9 +18,11 @@ import numpy as np
 import pandas as pd
 import pytest
 import zarr
+from loguru import logger
 from scipy.sparse import csr_matrix
 
 from cytearc.metadata.encoding import (
+    UnstorableCategoriesError,
     missing_placeholder,
     stored_categorical_codes,
     stored_categorical_values,
@@ -47,7 +51,8 @@ _CELL_TYPES = [
 # Each obs categorical as the file holds it, its codes, categories and order,
 # and what a categorical import stores: its codes, -1 in missing rows, its
 # categories and their dtype, and the labels that every row reads, with the
-# placeholder of their dtype in missing rows, as a default import stores them.
+# placeholder of their dtype in missing rows, as an import of label columns
+# stores them.
 _OBS: dict[str, dict[str, Any]] = {
     "cell_type": {
         "codes": [0, 1, -1, 2, 3, 0, 1, -1, 2, 3, 0, 1],
@@ -107,8 +112,8 @@ _OBS: dict[str, dict[str, Any]] = {
         "kind": "b",
         "labels": [False, True] * 6,
     },
-    # No row holds a category, so a default import stores the column as
-    # text, and a categorical import its categories.
+    # No row holds a category, so an import of label columns stores the
+    # column as text, and a categorical import its categories.
     "unheld": {
         "codes": [-1] * 12,
         "categories": np.array([5, 60]),
@@ -280,6 +285,19 @@ def _import(source: Path, destination: Path, **options: Any) -> None:
         reader.close()
 
 
+@contextmanager
+def _warnings() -> Iterator[list[str]]:
+    """Collect the warnings logged inside the block."""
+    messages: list[str] = []
+    handler = logger.add(
+        lambda message: messages.append(message.record["message"]), level="WARNING"
+    )
+    try:
+        yield messages
+    finally:
+        logger.remove(handler)
+
+
 def _tables_digest(path: Path) -> str:
     """Digest every array of the cell and feature tables: values, dtype, shape, chunks and attributes."""
     root = zarr.open_group(str(path), mode="r")
@@ -324,12 +342,12 @@ def source(tmp_path_factory) -> Path:
 
 @pytest.fixture(scope="module")
 def imports(source: Path, tmp_path_factory) -> dict[str, Any]:
-    """A default and a categorical import of the source file, each split by feature_types."""
+    """An import of label columns and a default import of the source file, each split by feature_types."""
     folder = tmp_path_factory.mktemp("categorical_imports")
     found: dict[str, Any] = {}
     for layout, options in (
-        ("text", {}),
-        ("categorical", {"categorical_columns": True}),
+        ("text", {"categorical_columns": False}),
+        ("categorical", {}),
     ):
         path = folder / f"{layout}.zarr"
         _import(source, path, assay_split_key="feature_types", **options)
@@ -372,7 +390,9 @@ def test_source_categoricals_store_codes_beside_every_category(imports) -> None:
     assert "__cytearc_categories__plain" not in group
 
 
-def test_categorical_imports_read_the_labels_of_a_default_import(imports) -> None:
+def test_categorical_imports_read_the_labels_of_an_import_of_label_columns(
+    imports,
+) -> None:
     text, categorical = imports["text"].cells, imports["categorical"].cells
     for name, column in _OBS.items():
         labels = categorical.fetch_all(name)
@@ -428,7 +448,9 @@ def test_each_assay_of_a_split_keeps_its_own_categories(imports) -> None:
     assert widths == {"RNA": np.dtype("U1"), "ADT": np.dtype("U16")}
 
 
-def test_snapshots_and_dataset_identities_match_a_default_import(imports) -> None:
+def test_snapshots_and_dataset_identities_match_an_import_of_label_columns(
+    imports,
+) -> None:
     found = {}
     for layout in ("text", "categorical"):
         store = imports[layout]
@@ -538,7 +560,7 @@ def test_categories_that_number_the_rows_take_a_reserved_entry(
     genes = categorical["RNA/featureData/__cytearc_categories__symbol"]
     assert "padded" not in genes.attrs
     # A release before categorical columns refuses the table rather than read
-    # its codes as values, and opens the default import's.
+    # its codes as values, and opens the table of label columns.
     assert not _opens_before_categorical_columns(categorical["ADT/featureData"])
     assert _opens_before_categorical_columns(text["ADT/featureData"])
 
@@ -547,8 +569,8 @@ def test_categories_that_number_the_rows_take_a_reserved_entry(
     _single_categorical_source(source, np.array(["a", "b", "c", "d"], dtype=_TEXT))
     stores = {}
     for layout, options in (
-        ("text", {}),
-        ("categorical", {"categorical_columns": True}),
+        ("text", {"categorical_columns": False}),
+        ("categorical", {}),
     ):
         _import(source, tmp_path / f"{layout}.zarr", **options)
         stores[layout] = open_store(tmp_path / f"{layout}.zarr")
@@ -568,30 +590,31 @@ def test_categories_that_number_the_rows_take_a_reserved_entry(
     assert _opens_before_categorical_columns(stores["text"].zw["cellData"])
 
 
-def test_a_default_import_stores_the_tables_of_earlier_releases(
-    source: Path, tmp_path: Path
+def test_an_import_without_categorical_columns_stores_the_tables_of_earlier_releases(
+    imports,
 ) -> None:
-    _import(source, tmp_path / "default.zarr", assay_split_key="feature_types")
-
     # The digest of the tables that the import wrote from the source file
     # before it could write categorical columns, which every release reads.
-    assert _tables_digest(tmp_path / "default.zarr") == (
+    assert imports["text digest"] == (
         "5cdda353e73c93b5bb498d0ecfb3d77e1eb5c1e7ffde1cb139c08c8d6d6276a1"
     )
 
 
-def test_an_import_without_categorical_columns_stores_label_columns(
+def test_a_default_import_stores_what_categorical_columns_true_stores(
     source: Path, imports, tmp_path: Path
 ) -> None:
-    _import(
-        source,
-        tmp_path / "explicit.zarr",
-        assay_split_key="feature_types",
-        categorical_columns=False,
-    )
+    with _warnings() as messages:
+        _import(
+            source,
+            tmp_path / "explicit.zarr",
+            assay_split_key="feature_types",
+            categorical_columns=True,
+        )
 
-    assert _tables_digest(tmp_path / "explicit.zarr") == imports["text digest"]
+    assert _tables_digest(tmp_path / "explicit.zarr") == imports["categorical digest"]
     assert imports["categorical digest"] != imports["text digest"]
+    # Every categorical of the file fits the layout, so nothing falls back.
+    assert not [message for message in messages if "categorical" in message]
 
 
 def _write_compound_source(path: Path) -> None:
@@ -621,8 +644,8 @@ def test_compound_tables_of_anndata_0_6_import_their_categoricals(
     _write_compound_source(source)
     stores = {}
     for layout, options in (
-        ("text", {}),
-        ("categorical", {"categorical_columns": True}),
+        ("text", {"categorical_columns": False}),
+        ("categorical", {}),
     ):
         _import(source, tmp_path / f"{layout}.zarr", **options)
         stores[layout] = open_store(tmp_path / f"{layout}.zarr")
@@ -717,8 +740,8 @@ def _column_bytes(path: Path, name: str) -> tuple[int, int]:
 def test_categorical_imports_store_fewer_bytes(tmp_path: Path) -> None:
     source = tmp_path / "cells.h5ad"
     _size_source(source, 20_000)
-    _import(source, tmp_path / "text.zarr")
-    _import(source, tmp_path / "categorical.zarr", categorical_columns=True)
+    _import(source, tmp_path / "text.zarr", categorical_columns=False)
+    _import(source, tmp_path / "categorical.zarr")
 
     text = _column_bytes(tmp_path / "text.zarr", "cell_type")
     categorical = _column_bytes(tmp_path / "categorical.zarr", "cell_type")
@@ -784,26 +807,188 @@ def _single_categorical_source(path: Path, categories: np.ndarray) -> None:
         _write_index(var, ["g0", "g1"])
 
 
-@pytest.mark.parametrize(
-    ("categories", "message"),
-    [
-        (np.array([0.5, np.nan]), "NaN among its categories"),
-        (
-            np.array(["a", "a", "b"], dtype=_TEXT),
-            "categories that read alike once stored, .* 'a'",
-        ),
-    ],
-)
-def test_categories_that_a_categorical_column_cannot_hold_are_refused(
-    tmp_path: Path, categories: np.ndarray, message: str
-) -> None:
-    source = tmp_path / "source.h5ad"
-    _single_categorical_source(source, categories)
-    # A default import stores their labels.
-    _import(source, tmp_path / "text.zarr")
+# Categoricals that a categorical column cannot store: their codes, their
+# categories, the labels that their rows read, and the reason that the
+# warning of an import gives.
+_FALLBACKS: dict[str, tuple[list[int], np.ndarray, list[Any], str]] = {
+    "many": (
+        [0, 1, 10_000, -1],
+        np.array([f"c{index:05d}" for index in range(10_001)], dtype=_TEXT),
+        ["c00000", "c00001", "c10000", ""],
+        "Column 'many' has 10,001 categories, more than the 10,000 that an "
+        "import stores as a categorical column",
+    ),
+    "nan": (
+        [0, 2, 2, 0],
+        np.array([0.5, np.nan, 1.5]),
+        [0.5, 1.5, 1.5, 0.5],
+        "Column 'nan' has NaN among its categories; a categorical column marks "
+        "a missing row with code -1 and cannot store NaN as a category",
+    ),
+    "alike": (
+        [0, 2, 2, 0],
+        np.array(["a", "a", "b"], dtype=_TEXT),
+        ["a", "b", "b", "a"],
+        "Column 'alike' has categories that read alike once stored, as text or "
+        "numbers, so a categorical column cannot tell them apart, such as 'a'",
+    ),
+    # No row holds the category beyond int64, so the rows' labels are int64.
+    "beyond_int64": (
+        [0, 0, -1, 0],
+        np.array([7, 2**63], dtype=np.uint64),
+        [7, 7, 0, 7],
+        "Column 'beyond_int64' has categories that cannot all be stored as "
+        "int64, the type of the labels that its rows hold",
+    ),
+}
+# Categoricals beside them that a categorical column stores: its codes,
+# categories and labels.
+_KEPT: dict[str, tuple[list[int], np.ndarray, list[Any]]] = {
+    "kept": ([1, 0, 0, 1], np.array(["x", "y"], dtype=_TEXT), ["y", "x", "x", "y"]),
+    # As many categories as an import stores as a categorical column.
+    "at_the_limit": (
+        [0, 9_999, 9_999, -1],
+        np.array([f"c{index:04d}" for index in range(10_000)], dtype=_TEXT),
+        ["c0000", "c9999", "c9999", ""],
+    ),
+}
 
-    with pytest.raises(ValueError, match=f"Column 'label' has {message}"):
-        _import(source, tmp_path / "categorical.zarr", categorical_columns=True)
+
+def _fallback_source(path: Path) -> None:
+    """Write four cells and two genes with the categoricals of both tables."""
+    with h5py.File(path, "w") as h5:
+        _write_counts(h5, 4, 2)
+        obs = h5.create_group("obs")
+        _write_index(obs, [f"cell-{index}" for index in range(4)])
+        columns = {**_FALLBACKS, **_KEPT}
+        for name, (codes, categories, *_) in columns.items():
+            _categorical(obs, name, np.array(codes, dtype=np.int16), categories)
+        obs.attrs["column-order"] = np.array(list(columns), dtype=_TEXT)
+        var = h5.create_group("var")
+        _write_index(var, ["g0", "g1"])
+        # The feature names that the reader looks for, so it warns of nothing.
+        var.create_dataset("gene_short_name", data=np.array(["G0", "G1"], dtype=_TEXT))
+        _categorical(
+            var, "symbol", np.array([0, 2], dtype=np.int8), np.array([1.0, np.nan, 2.0])
+        )
+        var.attrs["column-order"] = np.array(["gene_short_name", "symbol"], dtype=_TEXT)
+
+
+@pytest.fixture(scope="module")
+def fallback_source(tmp_path_factory) -> Path:
+    path = tmp_path_factory.mktemp("fallback_source") / "source.h5ad"
+    _fallback_source(path)
+    return path
+
+
+@pytest.fixture(scope="module")
+def label_import(fallback_source: Path, tmp_path_factory) -> tuple[Path, list[str]]:
+    """An import of the fallback source with categorical_columns=False, and its warnings."""
+    destination = tmp_path_factory.mktemp("label_import") / "labels.zarr"
+    with _warnings() as messages:
+        _import(fallback_source, destination, categorical_columns=False)
+    return destination, messages
+
+
+def test_an_import_of_label_columns_stores_every_categorical_without_warnings(
+    label_import,
+) -> None:
+    destination, messages = label_import
+    assert messages == []
+    cells = zarr.open_group(str(destination), mode="r")["cellData"]
+    for name in (*_FALLBACKS, *_KEPT):
+        assert "categories" not in cells[name].attrs, name
+        assert f"__cytearc_categories__{name}" not in cells, name
+
+
+@pytest.mark.parametrize(
+    "options",
+    [{}, {"categorical_columns": True}],
+    ids=["default", "categorical_columns_true"],
+)
+def test_categoricals_that_a_categorical_column_cannot_store_import_as_labels(
+    fallback_source: Path, label_import, tmp_path: Path, options: dict[str, Any]
+) -> None:
+    with _warnings() as messages:
+        _import(fallback_source, tmp_path / "store.zarr", **options)
+
+    # Each warning names the column, its table and the reason.
+    assert sorted(messages) == sorted(
+        [
+            *(
+                f"Stored cell metadata column {name!r} as a column of its labels, "
+                f"not as a categorical column. {reason}"
+                for name, (*_, reason) in _FALLBACKS.items()
+            ),
+            "Stored RNA feature metadata column 'symbol' as a column of its labels, "
+            "not as a categorical column. Column 'symbol' has NaN among its "
+            "categories; a categorical column marks a missing row with code -1 "
+            "and cannot store NaN as a category",
+        ]
+    )
+    store = open_store(tmp_path / "store.zarr")
+    labels = zarr.open_group(str(label_import[0]), mode="r")
+    stored = zarr.open_group(str(tmp_path / "store.zarr"), mode="r")
+    tables = [("cellData", name) for name in _FALLBACKS] + [
+        ("RNA/featureData", "symbol")
+    ]
+    for table, name in tables:
+        # The column of an import of label columns, array for array:
+        # values, dtype, chunks, attributes and missing mask.
+        assert f"__cytearc_categories__{name}" not in stored[table], name
+        for key in (name, f"__cytearc_missing__{name}"):
+            assert (key in stored[table]) is (key in labels[table]), key
+            if key not in labels[table]:
+                continue
+            assert stored[table][key].dtype == labels[table][key].dtype, key
+            assert stored[table][key].chunks == labels[table][key].chunks, key
+            assert dict(stored[table][key].attrs) == dict(labels[table][key].attrs)
+            np.testing.assert_array_equal(
+                stored[table][key][:], labels[table][key][:], err_msg=key
+            )
+    for name, (_codes, _categories, expected, _reason) in _FALLBACKS.items():
+        assert isinstance(store.cells._get_array(name), zarr.Array), name
+        assert store.cells.fetch_all(name).tolist() == expected, name
+    assert store.RNA.feats.fetch_all("symbol").tolist() == [1.0, 2.0]
+    # More categories than an import keeps with a column: no levels.
+    assert "levels" not in stored["cellData/many"].attrs
+    # The categoricals beside them are categorical columns, at the limit too.
+    for name, (codes, categories, expected) in _KEPT.items():
+        array = store.cells._get_array(name)
+        assert isinstance(array, CategoricalColumn), name
+        assert array.codes[:].tolist() == codes, name
+        assert array.categories.tolist() == categories.tolist(), name
+        assert store.cells.fetch_all(name).tolist() == expected, name
+        assert array.attrs["levels"] == categories.tolist(), name
+
+
+def test_the_column_writer_stores_categories_of_more_than_one_type_as_labels(
+    tmp_path: Path,
+) -> None:
+    from cytearc.readers._h5ad_columns import CategoryCodes
+    from cytearc.writers.h5ad import _write_column
+
+    # An HDF5 dataset holds values of one type, so the categories of an H5AD
+    # file share one; the column writer falls back for mixed ones all the same.
+    group = zarr.open_group(str(tmp_path / "table.zarr"), mode="w")
+    column = CategoryCodes(
+        np.array([0, 0, -1, 0], dtype=np.int8), np.array([3, "x"], dtype=object)
+    )
+    with _warnings() as messages:
+        missing = _write_column(
+            group, "mixed", column, profile="fast_local", table="cell", categorical=True
+        )
+
+    assert messages == [
+        "Stored cell metadata column 'mixed' as a column of its labels, not as a "
+        "categorical column. Column 'mixed' has categories of more than one type: "
+        "the ones that rows hold are stored as int64, which cannot hold the others"
+    ]
+    assert missing.tolist() == [False, False, True, False]
+    assert group["mixed"].dtype == np.dtype(np.int64)
+    assert group["mixed"][:].tolist() == [3, 3, 0, 3]
+    assert "categories" not in group["mixed"].attrs
+    assert "__cytearc_categories__mixed" not in group
 
 
 # The codes and categories that a categorical column stores.
@@ -893,32 +1078,77 @@ def test_stored_codes_and_categories_written_out_by_hand() -> None:
         (
             np.array([0, -1]),
             np.array([1, "x"], dtype=object),
-            ValueError,
+            UnstorableCategoriesError,
             "more than one type: the ones that rows hold are stored as int64",
         ),
         (
             np.array([0, 1]),
             np.array([0.5, np.nan]),
-            ValueError,
+            UnstorableCategoriesError,
             "NaN among its categories",
         ),
-        (np.array([0, 1]), np.array(["a", "a"]), ValueError, "read alike once stored"),
+        (
+            np.array([0, 1]),
+            np.array(["a", "a"]),
+            UnstorableCategoriesError,
+            "read alike once stored",
+        ),
         (
             np.array([0, 1]),
             np.array([b"b", "b"], dtype=object),
-            ValueError,
+            UnstorableCategoriesError,
             "read alike once stored",
         ),
         (
             np.array([0]),
             np.array([1, 2**70], dtype=object),
-            ValueError,
-            "outside the int64 range",
+            UnstorableCategoriesError,
+            "cannot all be stored as int64, the type of the labels that its rows hold",
+        ),
+        (
+            np.array([0]),
+            np.array([1, 2**63], dtype=np.uint64),
+            UnstorableCategoriesError,
+            "cannot all be stored as int64",
+        ),
+        (
+            np.array([0]),
+            np.array([b"a", b"\xff"], dtype=object),
+            UnstorableCategoriesError,
+            "cannot all be stored as text",
         ),
     ],
 )
 def test_categories_that_cannot_be_stored_as_categories_are_refused(
     codes: np.ndarray, categories: np.ndarray, error: type[Exception], message: str
 ) -> None:
-    with pytest.raises(error, match=f"Column 'c' .*{message}"):
+    with pytest.raises(error, match=f"Column 'c' .*{message}") as refused:
         stored_categorical_codes(codes, categories, name="c")
+
+    # Only categories that a categorical column cannot store take the error
+    # that an import falls back from; the others are refused as before.
+    assert (refused.type is UnstorableCategoriesError) is (
+        error is UnstorableCategoriesError
+    )
+    assert issubclass(refused.type, ValueError) is (error is not TypeError)
+
+
+@pytest.mark.parametrize(
+    ("codes", "categories"),
+    [
+        # The second category is used, so the labels of the rows fail too.
+        (np.array([1]), np.array([1, 2**63], dtype=np.uint64)),
+        (np.array([1]), np.array([b"a", b"\xff"], dtype=object)),
+    ],
+    ids=["integer_beyond_int64", "invalid_utf8"],
+)
+def test_a_used_category_that_its_labels_cannot_hold_is_refused_as_labels_too(
+    codes: np.ndarray, categories: np.ndarray
+) -> None:
+    with pytest.raises(UnstorableCategoriesError):
+        stored_categorical_codes(codes, categories, name="c")
+    with pytest.raises(ValueError, match="Column 'c' ") as refused:
+        stored_categorical_values(codes, categories, name="c")
+    # A column of labels refuses them with its own error, which an import
+    # does not fall back from.
+    assert refused.type is ValueError

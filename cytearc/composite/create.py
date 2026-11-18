@@ -762,14 +762,15 @@ def create_composite(
     nthreads: int | None = None,
     storage_options: dict[str, Any] | None = None,
     source_column: str = "dataset",
-    relative_sources: bool = False,
+    relative_sources: bool = True,
 ) -> "DataStore":
     """Create a writable datastore that reads its counts from frozen sources.
 
     The composite copies cell and feature metadata and leaves the counts in the
-    sources, which must stay available and unchanged. It records each source
-    by its absolute path or URL, unless ``relative_sources`` asks for relative
-    paths. New arrays use the storage profile of ``at``.
+    sources, which must stay available and unchanged. It records a source in
+    the directory that holds the composite, or below it, by a relative path
+    unless ``relative_sources`` is False, and any other source by its
+    absolute path or URL. New arrays use the storage profile of ``at``.
 
     The composite lists its cells in a fixed order, neither the sources' order
     nor the order of ``rows``: the order of a merge of ``assay`` by
@@ -806,15 +807,17 @@ def create_composite(
                          with ``source_storage_options`` for its sources.
         source_column: Cell metadata column that holds each cell's source
                        name.
-        relative_sources: Record a source in the directory that holds ``at``,
-                          or below it, by its path relative to that
-                          directory, when both are local or both are URLs of
-                          one scheme and host, so the directory can be moved,
-                          copied, or served from a bucket with its sources in
-                          it. By default, and for any other source, the
-                          composite records the source's absolute path or
-                          URL. Releases before this option cannot find a
-                          source recorded by a relative path.
+        relative_sources: If True, the default, record a source in the
+                          directory that holds ``at``, or below it, by its
+                          path relative to that directory, when both are
+                          local or both are URLs of one scheme and host, so
+                          the directory can be moved, copied, or served from
+                          a bucket with its sources in it. The composite
+                          records any other source by its absolute path or
+                          URL. CyteArc 1.4.0 and later find a source recorded
+                          by a relative path; False records every source by
+                          its absolute path or URL, which keeps the
+                          composite readable by earlier releases.
 
     Returns:
         The composite, open for writing.

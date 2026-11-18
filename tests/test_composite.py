@@ -1329,9 +1329,11 @@ def test_a_composite_on_another_store_reads_as_a_local_one(
     reopened.z.store.close()
 
 
-@pytest.mark.parametrize("relative_sources", [False, True])
-def test_a_composite_in_the_bucket_of_its_sources_records_them_relative_when_asked(
-    composite_sources, tmp_path, monkeypatch, relative_sources
+@pytest.mark.parametrize(
+    "recording", [{"relative_sources": False}, {}], ids=["absolute", "default"]
+)
+def test_a_composite_in_the_bucket_of_its_sources_records_them_relative_by_default(
+    composite_sources, tmp_path, monkeypatch, recording
 ):
     from obstore.store import MemoryStore as ObjectMemoryStore
     from zarr.storage import ObjectStore
@@ -1364,7 +1366,7 @@ def test_a_composite_in_the_bucket_of_its_sources_records_them_relative_when_ask
         sources,
         at=f"{bucket}/joint.zarr",
         storage_options=_BUCKET_OPTIONS,
-        relative_sources=relative_sources,
+        **recording,
         **_SELECTED,
         **options,
     )
@@ -1372,8 +1374,7 @@ def test_a_composite_in_the_bucket_of_its_sources_records_them_relative_when_ask
     assert [
         binding["location"] for binding in joint.z.attrs["composite"]["sources"]
     ] == [
-        f"{name}.zarr" if relative_sources else f"{bucket}/{name}.zarr"
-        for name in ("a", "b")
+        f"{bucket}/{name}.zarr" if recording else f"{name}.zarr" for name in ("a", "b")
     ]
     # Sources in a bucket read through the source cache, however they are
     # recorded.
