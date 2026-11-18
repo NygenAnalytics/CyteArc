@@ -314,9 +314,10 @@ def test_an_import_stores_one_level_per_label_with_its_first_color(
             colors = [category["color"] for category in display]
             assert colors == spec["level_colors"], name
         assert ("missing_label" in attributes["display"]) is any(missing), name
-        assert isinstance(store.cells._get_array(_twin(name)), CategoricalColumn) is (
-            layout == "categorical"
-        )
+        # The twin, whose categories differ, is a categorical column by default.
+        twin_array = store.cells._get_array(_twin(name))
+        categorical = isinstance(twin_array, CategoricalColumn)
+        assert categorical is (layout == "categorical"), name
     # The labels keep the sign that their category gives them, and the level
     # of -0.0 and 0.0 is the first of them, -0.0.
     assert np.signbit(store.cells.fetch_all("zero")).tolist() == [
@@ -434,10 +435,12 @@ def test_cluster_labels_export_one_category_per_label(imports) -> None:
 
 
 def test_the_earlier_store_holds_the_attributes_of_cytearc_1_4_0(earlier) -> None:
-    cells = earlier["store"].zw["cellData"]
+    root = earlier["store"].zw
     for name, attributes in _EARLIER_CELL_ATTRIBUTES.items():
-        assert dict(cells[name].attrs) == attributes, name
-    values = artifact_group(earlier["store"].zw, earlier["clusters"])["values"]
+        assert dict(root["cellData"][name].attrs) == attributes, name
+    biotype = root["RNA/featureData/biotype"]
+    assert dict(biotype.attrs) == _EARLIER_BIOTYPE_ATTRIBUTES
+    values = artifact_group(root, earlier["clusters"])["values"]
     assert dict(values.attrs) == _EARLIER_CLUSTER_ATTRIBUTES
 
 
@@ -537,10 +540,8 @@ def test_a_merge_with_an_earlier_store_keeps_one_level_per_label(
         attributes = dict(cells[f"orig_{name}"].attrs)
         assert attributes["levels"] == spec["levels"], name
         assert attributes["ordered"] is spec["ordered"], name
-    assert (
-        dict(merged.zw["RNA/featureData/biotype"].attrs)["levels"]
-        == (_BIOTYPE["levels"])
-    )
+    biotype = dict(merged.zw["RNA/featureData/biotype"].attrs)
+    assert biotype["levels"] == _BIOTYPE["levels"]
     exported = merged.to_anndata()
     stage = exported.obs["orig_stage"]
     assert stage.cat.categories.tolist() == _ALIKE["stage"]["levels"]
