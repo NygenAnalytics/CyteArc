@@ -859,7 +859,11 @@ def test_per_cell_arrays_that_do_not_fit_are_refused_before_the_destination_exis
             )
         # The same budget imports the object in its own order.
         SeuratToZarr(
-            reader, str(tmp_path / "plain.zarr"), mem_budget="1M", nthreads=1
+            reader,
+            str(tmp_path / "plain.zarr"),
+            mem_budget="1M",
+            nthreads=1,
+            shuffle_cells=False,
         ).dump()
     assert caught.value.item == item
     assert caught.value.needed_bytes > caught.value.budget_bytes
@@ -967,7 +971,9 @@ def test_a_shuffled_import_keeps_no_bucket_of_its_converted_cells(tmp_path) -> N
         # reads none, so no bucket stays held through it.
         assert all(store._cache is None for store in stores)
         # Reads in the object's order load buckets again.
-        SeuratToZarr(reader, MemoryStore(), mem_budget="64M", nthreads=1).dump()
+        SeuratToZarr(
+            reader, MemoryStore(), mem_budget="64M", nthreads=1, shuffle_cells=False
+        ).dump()
 
 
 def test_imports_of_one_reader_each_hold_their_own_shuffled_cells(tmp_path) -> None:
@@ -984,7 +990,11 @@ def test_imports_of_one_reader_each_hold_their_own_shuffled_cells(tmp_path) -> N
         # in the object's order reads the object, and the shuffled one still
         # writes its own.
         SeuratToZarr(
-            reader, str(tmp_path / "plain.zarr"), mem_budget="64M", nthreads=1
+            reader,
+            str(tmp_path / "plain.zarr"),
+            mem_budget="64M",
+            nthreads=1,
+            shuffle_cells=False,
         ).dump()
         shuffled.dump()
     counts = _gene_counts(_N_CELLS).T

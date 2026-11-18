@@ -1010,7 +1010,9 @@ def test_an_import_in_the_files_order_reads_the_file_whatever_another_import_lef
             return H5adToZarr(reader, MemoryStore(), nthreads=1, shuffle_cells=True)
 
         def plain() -> H5adToZarr:
-            return H5adToZarr(reader, str(tmp_path / "plain.zarr"), nthreads=1)
+            return H5adToZarr(
+                reader, str(tmp_path / "plain.zarr"), nthreads=1, shuffle_cells=False
+            )
 
         if shuffled_first:
             shuffled_writer = shuffled()
@@ -1086,7 +1088,11 @@ def test_a_shuffled_import_refused_after_its_spill_leaves_no_rows_for_a_retry(
         assert not _temporary_folders(tmp_path)
         monkeypatch.undo()
         H5adToZarr(
-            reader, str(tmp_path / "retry.zarr"), nthreads=1, values="normalized"
+            reader,
+            str(tmp_path / "retry.zarr"),
+            nthreads=1,
+            values="normalized",
+            shuffle_cells=False,
         ).dump()
     finally:
         reader.close()

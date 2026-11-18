@@ -1388,7 +1388,13 @@ def test_an_import_in_the_readers_order_reads_it_whatever_another_import_left(
             )
 
         def plain() -> Any:
-            return writer(reader, str(tmp_path / "plain.zarr"), nthreads=1, **options)
+            return writer(
+                reader,
+                str(tmp_path / "plain.zarr"),
+                nthreads=1,
+                shuffle_cells=False,
+                **options,
+            )
 
         if shuffled_first:
             shuffled_writer = shuffled()
@@ -1428,7 +1434,9 @@ def test_a_shuffled_10x_import_refused_after_its_spill_leaves_no_cells_for_a_ret
         assert reader._shuffledRows is None
         assert _no_temporary_files(tmp_path)
         monkeypatch.undo()
-        CrToZarr(reader, str(tmp_path / "retry.zarr"), nthreads=1).dump()
+        CrToZarr(
+            reader, str(tmp_path / "retry.zarr"), nthreads=1, shuffle_cells=False
+        ).dump()
     finally:
         reader.close()
     root = _open(tmp_path / "retry.zarr")
@@ -1483,7 +1491,9 @@ def test_csv_imports_of_one_reader_each_hold_their_own_shuffled_rows(
     )
     # The shuffled rows are the writer's, so an import of the same reader in
     # the file's order reads the file, and the shuffled import still writes.
-    CSVtoZarr(reader, str(tmp_path / "plain.zarr"), "RNA", nthreads=1).dump()
+    CSVtoZarr(
+        reader, str(tmp_path / "plain.zarr"), "RNA", nthreads=1, shuffle_cells=False
+    ).dump()
     shuffled.dump()
     order = shuffled_order(_N_CELLS, 0)
     np.testing.assert_array_equal(
