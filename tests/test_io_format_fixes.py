@@ -162,9 +162,10 @@ def test_csv_cell_ids_stay_text(tmp_path) -> None:
 
     assert reader.cell_ids().tolist() == ["001", "002", "010"]
     assert reader.cell_ids().dtype.kind == "U"
-    # The caller's converters are kept and not changed.
+    # The caller's converters are kept and not changed, beside the ID column's.
     assert converters == {2: int}
-    assert reader.pandas_kwargs["converters"] == {2: int, 0: str}
+    assert reader.pandas_kwargs["converters"].keys() == {2, 0}
+    assert reader.pandas_kwargs["converters"][2] is int
     store = MemoryStore()
     CSVtoZarr(reader, store, assay_name="RNA", nthreads=1, shuffle_cells=False).dump()
     assert zarr.open_group(store, mode="r")["cellData/ids"][:].tolist() == [
