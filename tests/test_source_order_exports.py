@@ -155,7 +155,7 @@ def imported(tmp_path_factory) -> SimpleNamespace:
     folder = tmp_path_factory.mktemp("source_order")
     source = folder / "source.h5ad"
     _write_source(source)
-    plain = _import(source, folder / "plain.zarr")
+    plain = _import(source, folder / "plain.zarr", shuffle_cells=False)
     shuffled = _import(
         source, folder / "shuffled.zarr", shuffle_cells=True, shuffle_seed=_SEED
     )
@@ -1365,7 +1365,7 @@ def test_a_shuffled_matrix_market_import_exports_its_file(imported, tmp_path) ->
         return MtxReader(inspect_mtx(str(source))[0], temp_dir=str(tmp_path))
 
     shuffled = _cr_store(reader, tmp_path / "shuffled.zarr", shuffle_cells=True)
-    plain = _cr_store(reader, tmp_path / "plain.zarr")
+    plain = _cr_store(reader, tmp_path / "plain.zarr", shuffle_cells=False)
     rows = _file_rows(shuffled.cells.fetch_all("ids"))
     assert rows.tolist() != sorted(rows.tolist())
     np.testing.assert_array_equal(shuffled.cells.fetch_all(SOURCE_ROW), rows)
@@ -1402,7 +1402,7 @@ def test_a_filtered_10x_import_exports_its_kept_cells_in_the_files_order(
         )
 
     shuffled = _cr_store(reader, tmp_path / "shuffled.zarr", shuffle_cells=True)
-    plain = _cr_store(reader, tmp_path / "plain.zarr")
+    plain = _cr_store(reader, tmp_path / "plain.zarr", shuffle_cells=False)
     source_rows = shuffled.cells.fetch_all(SOURCE_ROW)
     # The reader dropped cells, so the file rows that sourceRow holds have
     # gaps straight from the import.
