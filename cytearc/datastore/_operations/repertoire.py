@@ -2318,8 +2318,9 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         the order of the contig files. In the file's order, the contigs are
         read and rendered in store order, the fastest, and each row is sent to
         its place in the file through temporary files on local disk, in
-        ``temp_dir``, which hold the rows compressed, each file deleted once
-        its rows are written; ``cell_order="stored"`` needs no temporary files.
+        ``temp_dir``, which hold the rows uncompressed, about the size of the
+        file without gzip, each file deleted once its rows are written;
+        ``cell_order="stored"`` needs no temporary files.
 
         The contigs are read and written in blocks of about 32 MiB, at most a
         sixteenth of the memory budget, as many contigs as fit when each

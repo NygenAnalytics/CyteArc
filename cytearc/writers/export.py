@@ -641,9 +641,6 @@ def in_memory_reordered_matrix(matrix: H5adMatrix, order: np.ndarray) -> H5adMat
 # and cut into its bucket's piece: its place and bucket, its order by bucket,
 # and its offsets and length.
 _TEXT_ROW_SEND_BYTES = 48
-# The rows of the first block that measure how the rows encode on disk, about
-# this many bytes of them.
-_TEXT_SAMPLE_BYTES = 1 << 20
 
 
 @dataclass(frozen=True, slots=True)
@@ -741,11 +738,11 @@ def reordered_text_rows(
     as ``plan`` gives it, and the buckets are read back in order, a bucket's
     rows at a time, each bucket's files deleted once its rows are yielded.
     A thread sends each block to its buckets while the next block arrives,
-    and the next bucket loads while the rows of one are yielded.
+    and the next bucket loads while the rows of one are yielded. The store
+    keeps the rows uncompressed, so the files take about the rows' bytes.
     The first block's rows estimate what every row takes, which sizes the
-    buckets, and the free disk is checked against a quarter more than the
-    rows are estimated to take there, as their first megabyte encodes.
-    Closing the generator, or an error, removes the temporary files.
+    buckets and the check of the free disk before a row is sent. Closing the
+    generator, or an error, removes the temporary files.
     ``operation`` names the reorder in its errors, such as ``"AIRR export in
     source order"``.
 
@@ -756,16 +753,15 @@ def reordered_text_rows(
         OSError: If the temporary directory lacks the disk that the rows take
             there.
     """
-    from ..readers._sparse import SparseRowStore, encoded_ragged_bytes
+    from ..readers._sparse import SparseRowStore
 
     n_rows = int(np.asarray(destinations).size)
     store: SparseRowStore | None = None
     bucket_rows = 1
 
-    def created(values: np.ndarray, offsets: np.ndarray) -> SparseRowStore:
+    def created(offsets: np.ndarray) -> SparseRowStore:
+        """Create the store, its buckets sized from a block's rows of ``offsets``."""
         nonlocal bucket_rows
-        n_sample = max(1, int(np.searchsorted(offsets, _TEXT_SAMPLE_BYTES)))
-        sample = min(n_sample, offsets.size - 1)
         mean = int(offsets[-1]) / max(1, offsets.size - 1)
         bucket_rows = SparseRowStore.ragged_bucket_rows(n_rows, mean, plan.read_bytes)
         return SparseRowStore(
@@ -778,13 +774,6 @@ def reordered_text_rows(
             buffer_bytes=plan.buffer_bytes,
             bucket_bytes=plan.bucket_bytes,
             entries=math.ceil(mean * n_rows),
-            entry_bytes=(
-                encoded_ragged_bytes(
-                    values[: int(offsets[sample])], offsets[: sample + 1]
-                )
-                if sample
-                else None
-            ),
             temp_dir=None if temp_dir is None else os.fspath(temp_dir),
         )
 
@@ -796,7 +785,7 @@ def reordered_text_rows(
             sending: Future[None] | None = None
             for values, offsets in rows:
                 if store is None:
-                    store = created(values, offsets)
+                    store = created(offsets)
                 count = int(offsets.size) - 1
                 if sent + count > n_rows:
                     raise ValueError(
@@ -819,7 +808,7 @@ def reordered_text_rows(
                 f"{operation} has places for {n_rows} rows and was sent {sent}"
             )
         if store is None:
-            store = created(np.zeros(0, dtype=np.uint8), np.zeros(1, dtype=np.int64))
+            store = created(np.zeros(1, dtype=np.int64))
         store.finalize()
         yield from store.iter_ragged_rows(
             0, n_rows, bucket_rows, read_ahead=True, delete=True
