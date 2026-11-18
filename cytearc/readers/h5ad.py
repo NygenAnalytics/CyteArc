@@ -71,6 +71,12 @@ _UNNAMED_INDEX = "_index"
 # The name under which a table's unnamed index imports when it is neither the
 # ID nor the name column.
 _SOURCE_INDEX = "source_index"
+# The bytes that the CSC row conversion holds for each entry of a chunk of
+# columns as it reads the chunk and sends its entries to their rows' buckets.
+_CSC_ENTRY_BYTES = 384
+# The most entries of one chunk of columns that the conversion reads. Each
+# chunk gives a row one piece, so larger chunks give fewer, longer pieces.
+_CSC_CHUNK_ENTRIES = 8 * 1024 * 1024
 
 
 def _texts(values: np.ndarray) -> list[str | None]:
@@ -1174,10 +1180,14 @@ class H5adReader:
         return dtype
 
     def materialized_csr_bytes(self) -> int:
-        """Return bytes retained by the materialized CSC-to-CSR conversion."""
+        """Return bytes retained by the materialized CSC-to-CSR conversion.
+
+        They are its row pointers; reading its rows holds more, which
+        :meth:`producer_batch_staging_bytes` counts.
+        """
         if self._convertedCsr is None:
             return 0
-        return int(self._convertedCsr.indptr.nbytes)
+        return int(self._convertedCsr.resident_bytes)
 
     def _csr_indptr(self) -> np.ndarray | None:
         if self._convertedCsr is not None:
@@ -1262,44 +1272,66 @@ class H5adReader:
         return max_window_nnz(indptr, batch_size)
 
     def producer_batch_staging_bytes(self, batch_size: int) -> int:
-        """Bound sparse row pointers retained while one batch is produced."""
+        """Bound what a producer holds beside one batch.
+
+        It holds the batch's sparse row pointers, and the rows of converted
+        CSC columns are read a bucket at a time with the next bucket loading
+        ahead, which the producer holds as it reads.
+        """
         rows = min(max(1, int(batch_size)), self.nCells)
         if rows == 0 or self.matrixOrientation == "dense":
             return 0
+        reading = 0
         if self._convertedCsr is not None:
             itemsize = np.asarray(self._convertedCsr.indptr).dtype.itemsize
+            reading = self._convertedCsr.read_bytes(read_ahead=True)
         else:
             itemsize = self.h5[self.matrixKey]["indptr"].dtype.itemsize
         normalized_itemsize = np.dtype(np.int32).itemsize
-        return int((rows + 1) * (2 * itemsize + normalized_itemsize))
+        return int((rows + 1) * (2 * itemsize + normalized_itemsize) + reading)
 
     def materialize_csc(self, maxBytes: int = 64 * 1024 * 1024) -> None:
         """Convert CSC into temporary row storage in bounded blocks.
 
-        The rows hold the source values with duplicate coordinates summed.
-        Floating-point values keep ``sourceMatrixDtype``; integers are held in
-        the 64-bit integer dtype in which their duplicates are summed, so a sum
-        past the range of a narrow source dtype is kept, as a CSR import keeps
-        it.
+        One pass over the columns sends each entry to the bucket of its row
+        on local disk, and reads join each bucket's rows. The rows hold the
+        source values with duplicate coordinates summed. Floating-point
+        values keep ``sourceMatrixDtype``; integers are held in the 64-bit
+        integer dtype in which their duplicates are summed, so a sum past the
+        range of a narrow source dtype is kept, as a CSR import keeps it.
         """
         if self.matrixOrientation != "csc" or self._convertedCsr is not None:
             return
         group = self.h5[self.matrixKey]
         data_node = group["data"]
-        metadata = (self.nCells + 1) * 32 + (self.nFeatures + 1) * 8
-        if maxBytes < metadata + 384:
-            # The pointers and one entry of 384 bytes in a read chunk.
-            needed = metadata + 384
+        source = np.dtype(self.sourceMatrixDtype)
+        dtype = (
+            np.dtype(np.uint64 if source.kind in "bu" else np.int64)
+            if source.kind in "biu"
+            else source
+        )
+        pointers = (self.nFeatures + 1) * np.dtype(np.int64).itemsize
+        least = pointers + SparseRowStore.conversion_bytes(
+            self.nCells,
+            entry_bytes=_CSC_ENTRY_BYTES,
+            itemsize=max(source.itemsize, dtype.itemsize),
+        )
+        if maxBytes < least:
             raise MemoryBudgetError(
                 "CSC row conversion exceeds the memory limit. It needs at least "
-                f"{needed} bytes.",
-                needed_bytes=needed,
+                f"{least} bytes.",
+                needed_bytes=least,
                 budget_bytes=int(maxBytes),
                 item="the pointers and one entry of the CSC row conversion",
             )
-        chunk_nnz = min(1024 * 1024, (maxBytes - metadata) // 384)
         indptr = np.asarray(group["indptr"][:], dtype=np.int64)
         shape = (self.nCells, self.nFeatures)
+        # The row store converts beside the source's pointers.
+        store_bytes = int(maxBytes) - indptr.nbytes
+        chunk_nnz = min(
+            _CSC_CHUNK_ENTRIES,
+            SparseRowStore.chunk_entries(store_bytes, self.nCells, _CSC_ENTRY_BYTES),
+        )
 
         def chunks() -> Iterator[coo_matrix]:
             for start in range(0, int(data_node.size), chunk_nnz):
@@ -1318,23 +1350,18 @@ class H5adReader:
                     shape=shape,
                 )
 
-        source = np.dtype(self.sourceMatrixDtype)
         try:
-            self._convertedCsr = SparseRowStore(
-                chunks,
+            self._convertedCsr = SparseRowStore.from_entries(
+                chunks(),
                 shape,
-                (
-                    np.dtype(np.uint64 if source.kind in "bu" else np.int64)
-                    if source.kind in "biu"
-                    else source
-                ),
-                max_bytes=maxBytes - indptr.nbytes,
+                dtype,
+                max_bytes=store_bytes,
+                entry_bytes=_CSC_ENTRY_BYTES,
+                entries=int(data_node.size),
                 source_dtype=source,
                 temp_dir=self._tempDir,
             )
         except MemoryBudgetError as error:
-            # The row store converts beside the source's pointers, so the
-            # budget it needs holds both.
             needed = indptr.nbytes + error.needed_bytes
             raise MemoryBudgetError(
                 f"{refusal_words(error)} Beside the {indptr.nbytes} bytes of the "
@@ -1399,9 +1426,11 @@ class H5adReader:
         if self._convertedCsr is None:
             self.materialize_csc()
         assert self._convertedCsr is not None
-        for offset in range(start, stop, batch_size):
-            end = min(offset + batch_size, stop)
-            yield csr_to_coo(self._convertedCsr.read(offset, end))
+        # The next bucket of rows decodes while this one's batches are written.
+        for batch in self._convertedCsr.iter_rows(
+            start, stop, batch_size, read_ahead=True
+        ):
+            yield csr_to_coo(batch)
 
     def consume_row_range(
         self,

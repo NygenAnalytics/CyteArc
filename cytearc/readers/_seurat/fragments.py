@@ -1506,6 +1506,9 @@ def _unsigned_vector(
 
 
 class FragmentDerivedMatrixSource(BaseMatrixSource):
+    # A fragment's counts are gathered as Python tuples before they are sent on.
+    _rowStoreEntryBytes = 2048
+
     def __init__(
         self,
         fragments: FragmentSource,
@@ -1899,12 +1902,8 @@ class FragmentDerivedMatrixSource(BaseMatrixSource):
             source_bytes=base_working,
         )
 
-    def _contribution_chunks(self) -> Iterator[coo_matrix]:
-        available = self._limits.maxBlockBytes - self.fragments.blockWorkingBytes
-        available -= (self.n_cells + 1) * 32
-        if self.matrixType == "PeakMatrix":
-            available -= self.n_features * 96
-        chunk_nnz = max(1, min(self._limits.compressedChunkNnz, available // 2048))
+    def _contribution_chunks(self, max_entries: int) -> Iterator[coo_matrix]:
+        chunk_nnz = max(1, min(self._limits.compressedChunkNnz, max_entries))
         events = self._contributions(0, self.n_cells)
         while batch := list(islice(events, chunk_nnz)):
             values = np.asarray(batch, dtype=np.int64)
@@ -1931,8 +1930,12 @@ class FragmentDerivedMatrixSource(BaseMatrixSource):
         if self.matrixType == "PeakMatrix":
             source_bytes += self.n_features * 96
         try:
+            # Most fragments count once at each end; the estimate sizes the
+            # conversion's buckets and checks its disk.
             self._prepare_row_store(
-                self._contribution_chunks, source_bytes=source_bytes
+                self._contribution_chunks,
+                entries=2 * self.fragments.recordCount,
+                source_bytes=source_bytes,
             )
         except OverflowError as error:
             raise MatrixSourceError(

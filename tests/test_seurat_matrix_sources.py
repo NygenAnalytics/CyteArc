@@ -2658,7 +2658,8 @@ def test_fragment_conversion_does_not_rescan_for_each_window(tmp_path, monkeypat
     assert underlying._rowStore is None
     pieces = [source.read_cells(i, i + 1).toarray() for i in range(3)]
     np.testing.assert_array_equal(np.vstack(pieces), source.read_cells(0, 3).toarray())
-    assert scans == [(0, 3), (0, 3)]
+    # The row store places each fragment's counts as it reads them once.
+    assert scans == [(0, 3)]
 
 
 @pytest.mark.parametrize("sparse", [False, True])
@@ -2694,7 +2695,8 @@ def test_transpose_streams_source_a_constant_number_of_times(sparse, subassignme
         block = source.read_cells(start, start + 3)
         pieces.append(block.toarray() if sparse else block)
     np.testing.assert_array_equal(np.vstack(pieces), values)
-    assert len(reads) == (12 if sparse else 6)
+    # Both transposes read each tile of source cells once.
+    assert len(reads) == 6
     directory = Path(
         source._rowStore._directory.name if sparse else source._transposeDirectory.name
     )

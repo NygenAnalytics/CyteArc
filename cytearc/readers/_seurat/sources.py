@@ -17,7 +17,7 @@ from scipy.sparse import (
 
 from .errors import MatrixSourceError, ResourceLimitError
 from .values import decode_text_values, read_window
-from .._sparse import SparseRowStore
+from .._sparse import ROW_BYTES, SparseRowStore
 from ...utils.arrays import cumulative_nnz, has_duplicates
 from ...utils.memory_budget import MemoryBudgetError, refusal_words
 
@@ -528,6 +528,10 @@ class BaseMatrixSource(ABC):
         self._rowStore: SparseRowStore | None = None
         self._tempDir: Path | None = None
 
+    # The bytes that a source holds for each entry of a chunk that it builds
+    # for its row store.
+    _rowStoreEntryBytes = 384
+
     @property
     def shape(self) -> tuple[int, int]:
         return self._shape
@@ -593,21 +597,32 @@ class BaseMatrixSource(ABC):
         nnz: int,
         source_bytes: int = 0,
     ) -> MemoryEstimate:
+        """Estimate reading cells from the row store, converting the cells first if needed.
+
+        Before the conversion, the read holds what converting holds; after
+        it, the bucket that the read loads beside the window's values.
+        """
         if start == stop:
             return MemoryEstimate(self.resident_bytes, 0, 8)
-        preparation = 0
+        preparation = reading = 0
         if self._rowStore is None:
             count = min(nnz, (stop - start) * self.n_features)
-            minimum = (self.n_cells + 1) * 32 + source_bytes + 192
+            minimum = source_bytes + SparseRowStore.conversion_bytes(
+                self.n_cells,
+                entry_bytes=self._rowStoreEntryBytes,
+                itemsize=self.dtype.itemsize,
+                sum_duplicates=False,
+            )
             preparation = max(
                 minimum,
                 min(self._limits.maxBlockBytes, minimum + nnz * 192),
             )
         else:
             count = int(self._rowStore.indptr[stop] - self._rowStore.indptr[start])
+            reading = self._rowStore.read_bytes()
         output = count * (self.dtype.itemsize + 8) + (stop - start + 1) * 8
         return MemoryEstimate(
-            self.resident_bytes, max(output, preparation - output), output
+            self.resident_bytes, max(output + reading, preparation - output), output
         )
 
     def _prepare_for_read(self) -> None:
@@ -615,24 +630,38 @@ class BaseMatrixSource(ABC):
 
     def _prepare_row_store(
         self,
-        chunks: Callable[[], Iterator[coo_matrix]],
+        chunks: Callable[[int], Iterator[coo_matrix]],
         *,
+        entries: int | None,
         source_bytes: int = 0,
     ) -> SparseRowStore:
+        """Convert the cells into a row store once, from chunks of loose entries.
+
+        ``chunks(max_entries)`` yields the entries in chunks of at most
+        ``max_entries``, each of :attr:`_rowStoreEntryBytes` as it is built,
+        and ``entries`` estimates how many there are, or None.
+        """
         if self._rowStore is None:
             if (
                 self.n_cells + 1
             ) * 8 + self._metadataBytes > self._limits.maxMetadataBytes:
                 raise ResourceLimitError("Sparse row pointers exceed maxMetadataBytes")
+            max_bytes = self._limits.maxBlockBytes - source_bytes
             try:
                 # Cell rows keep the source dtype and their duplicate
                 # coordinates, as cell-compressed sources do, so the writer
                 # sums the duplicates without wrapping a narrow dtype.
-                self._rowStore = SparseRowStore(
-                    chunks,
+                self._rowStore = SparseRowStore.from_entries(
+                    chunks(
+                        SparseRowStore.chunk_entries(
+                            max_bytes, self.n_cells, self._rowStoreEntryBytes
+                        )
+                    ),
                     (self.n_cells, self.n_features),
                     self.dtype,
-                    max_bytes=self._limits.maxBlockBytes - source_bytes,
+                    max_bytes=max_bytes,
+                    entry_bytes=self._rowStoreEntryBytes,
+                    entries=entries,
                     max_nnz=self._limits.maxNnz,
                     nnz_error=ResourceLimitError,
                     sum_duplicates=False,
@@ -743,6 +772,7 @@ class CompressedMatrixSource(BaseMatrixSource):
             return csr_matrix((0, self.n_features), dtype=self.dtype)
         return self._prepare_row_store(
             self._feature_chunks,
+            entries=self.nnz,
             source_bytes=(self.n_features + 1) * _INDEX_BYTES,
         ).read(start, stop)
 
@@ -750,22 +780,12 @@ class CompressedMatrixSource(BaseMatrixSource):
         if not self._cellsCompressed and self.n_cells:
             self._prepare_row_store(
                 self._feature_chunks,
+                entries=self.nnz,
                 source_bytes=(self.n_features + 1) * _INDEX_BYTES,
             )
 
-    def _feature_chunks(self) -> Iterator[coo_matrix]:
-        chunk_nnz = max(
-            1,
-            min(
-                self._limits.compressedChunkNnz,
-                (
-                    self._limits.maxBlockBytes
-                    - (self.n_cells + 1) * 32
-                    - (self.n_features + 1) * _INDEX_BYTES
-                )
-                // 384,
-            ),
-        )
+    def _feature_chunks(self, max_entries: int) -> Iterator[coo_matrix]:
+        chunk_nnz = max(1, min(self._limits.compressedChunkNnz, max_entries))
         pointers = self._read_pointers(0, self.n_features + 1)
         for start in range(0, self.nnz, chunk_nnz):
             stop = min(self.nnz, start + chunk_nnz)
@@ -1050,6 +1070,9 @@ class MappedMatrixSource(BaseMatrixSource):
 
 
 class TransposeMatrixSource(BaseMatrixSource):
+    # A transposed entry is sent on as it is read in a tile of source cells.
+    _rowStoreEntryBytes = 192
+
     def __init__(
         self,
         source: MatrixSource,
@@ -1112,7 +1135,7 @@ class TransposeMatrixSource(BaseMatrixSource):
         start = 0
         available = self._limits.maxBlockBytes
         if self.is_sparse:
-            available -= (self.n_cells + 1) * 32
+            available -= (self.n_cells + 1) * ROW_BYTES
         while start < self.source.shape[1]:
             width = min(self.tile_cells, self.source.shape[1] - start)
             while True:
@@ -1143,7 +1166,9 @@ class TransposeMatrixSource(BaseMatrixSource):
         for start, stop, _ in self._source_windows():
             yield start, self.source.read_cells(start, stop)
 
-    def _transposed_chunks(self) -> Iterator[coo_matrix]:
+    def _transposed_chunks(self, _max_entries: int) -> Iterator[coo_matrix]:
+        # A tile of source cells takes at most half of the block limit beside
+        # the row bytes, whatever its entries, as the row store's chunk does.
         for start, block in self._source_blocks():
             values = coo_matrix(block)
             yield coo_matrix(
@@ -1151,12 +1176,19 @@ class TransposeMatrixSource(BaseMatrixSource):
                 shape=(self.n_cells, self.n_features),
             )
 
+    def _stored_values(self) -> int | None:
+        """Return the values that the source stores, when it records them."""
+        nnz = getattr(self.source, "nnz", None)
+        return None if nnz is None else int(nnz)
+
     def _prepare_for_read(self) -> None:
         if not self.n_cells or not self.n_features:
             return
         self._admit(self.estimate_read_memory(0, 1))
         if self.is_sparse:
-            self._prepare_row_store(self._transposed_chunks)
+            self._prepare_row_store(
+                self._transposed_chunks, entries=self._stored_values()
+            )
         elif not (
             type(self.source) is DenseMatrixSource
             and isinstance(self.source._values, np.ndarray)
@@ -1214,7 +1246,9 @@ class TransposeMatrixSource(BaseMatrixSource):
         if start == stop:
             return _empty_block(0, self.n_features, self.dtype, self.is_sparse)
         if self.is_sparse:
-            return self._prepare_row_store(self._transposed_chunks).read(start, stop)
+            return self._prepare_row_store(
+                self._transposed_chunks, entries=self._stored_values()
+            ).read(start, stop)
         if self.n_features == 0:
             return np.empty((stop - start, 0), dtype=self.dtype)
         if type(self.source) is DenseMatrixSource and isinstance(

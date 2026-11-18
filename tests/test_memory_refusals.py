@@ -590,9 +590,9 @@ def test_a_seurat_row_store_lets_an_allocation_failure_through(
     )
     failure = MemoryError("the allocation failed")
     monkeypatch.setattr(
-        sources,
-        "SparseRowStore",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(failure),
+        sources.SparseRowStore,
+        "from_entries",
+        classmethod(lambda *_args, **_kwargs: (_ for _ in ()).throw(failure)),
     )
     with pytest.raises(MemoryError) as raised:
         source.read_cells(0, 1)
@@ -1003,37 +1003,43 @@ def test_the_sparse_row_conversion_names_its_pointers_and_its_widest_row(
     from cytearc.readers._sparse import SparseRowStore
 
     def convert(matrix: coo_matrix, memory: int) -> None:
-        SparseRowStore(
-            lambda: iter((matrix,)),
+        SparseRowStore.from_entries(
+            iter((matrix,)),
             matrix.shape,
             matrix.dtype,
             max_bytes=memory,
+            entry_bytes=192,
+            entries=matrix.nnz,
             temp_dir=tmp_path,
         ).close()
 
-    # Three row pointers of 32 bytes and one entry of 192 bytes.
+    # Three rows of 32 bytes, then twice what reading one int64 entry holds:
+    # 3 * 8 + 32 + 2 * 8 + 24 bytes for the entry, 48 for its piece and
+    # 2 * 32 for its row, more than a chunk's 192 bytes for it.
     diagonal = coo_matrix([[1, 0], [0, 2]])
     pointers = named_budget_runs(
         lambda memory: convert(diagonal, memory),
         100,
         item="the row pointers and one entry of the sparse row conversion",
     )
-    assert pointers.needed_bytes == 3 * 32 + 192
-    # A bucket holds whole rows, so the first row's two entries need two.
+    assert pointers.needed_bytes == 3 * 32 + 2 * (96 + 48 + 64)
+    # A bucket holds whole rows, so reading the first row reads its two entries.
     matrix = coo_matrix([[1, 2], [0, 0]])
     widest = named_budget_runs(
         lambda memory: convert(matrix, memory),
-        300,
+        600,
         item="one sparse row of the conversion",
     )
-    assert widest.needed_bytes == 3 * 32 + 2 * 192
+    assert widest.needed_bytes == 3 * 32 + 2 * (2 * 96 + 2 * 48 + 64)
     assert list(tmp_path.iterdir()) == []
     with pytest.raises(ValueError, match="exceeds maxNnz=1") as nnz:
-        SparseRowStore(
-            lambda: iter((matrix,)),
+        SparseRowStore.from_entries(
+            iter((matrix,)),
             matrix.shape,
             matrix.dtype,
             max_bytes=1024,
+            entry_bytes=192,
+            entries=matrix.nnz,
             max_nnz=1,
             temp_dir=tmp_path,
         )
