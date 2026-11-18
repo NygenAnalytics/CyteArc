@@ -27,6 +27,26 @@ _UNSUPPORTED_SETTINGS = frozenset({"comment", "dialect", "lineterminator"})
 # The compressions of a tar archive that pandas' tar reader decompresses
 # itself, None for an archive that is not compressed.
 _TAR_COMPRESSIONS = (None, "gzip", "bz2", "xz")
+# The name that the reader gives pandas for the ID column when names in
+# pandas_kwargs leaves that column unnamed or names it by something other than
+# text. pandas looks a converter's key up as a column name, then as a
+# position, so only a name of text reaches the ID column alone.
+_ID_COLUMN_LABEL = "__cytearc_cell_ids__"
+
+
+class _FieldText:
+    """One field of the ID column, as the file holds it.
+
+    read_csv reads text such as ``NA`` or ``null`` as a missing value, and
+    its python engine does so for what a converter returns too, unless that
+    is not text. The ID column's converter wraps each field in this class,
+    so that every field stays an ID.
+    """
+
+    __slots__ = ("text",)
+
+    def __init__(self, text: str) -> None:
+        self.text = text
 
 
 def _count_dtype(frame: pd.DataFrame, value_range: CountValueRange) -> np.dtype[Any]:
@@ -77,6 +97,110 @@ def _merged_dtype(current: np.dtype[Any] | None, dtype: np.dtype[Any]) -> np.dty
     return np.result_type(current, dtype)
 
 
+def _id_column_argument(id_column: Any) -> int | None:
+    """Return a validated ``id_column``: None, or a column's position from 0.
+
+    Raises:
+        TypeError: If ``id_column`` is neither None nor an integer.
+        ValueError: If ``id_column`` is negative.
+    """
+    if id_column is None:
+        return None
+    if isinstance(id_column, bool) or not isinstance(id_column, int | np.integer):
+        raise TypeError(
+            "id_column must be None or the position of the ID column, an "
+            f"integer, not {id_column!r}"
+        )
+    if id_column < 0:
+        raise ValueError(
+            f"id_column counts columns from 0, so it cannot be {id_column}"
+        )
+    return int(id_column)
+
+
+def _names_for_pandas(names: Any, n_fields: int, id_column: int | None) -> Any:
+    """Return ``names`` of pandas_kwargs as the reader passes it to read_csv.
+
+    ``names`` names every column of the file or, with ``id_column`` 0, every
+    column after the ID column, which pandas reads as an unnamed index then.
+    The reader names such an ID column, and one that ``names`` names by
+    something other than text, ``_ID_COLUMN_LABEL``; other names stay as
+    given.
+
+    Raises:
+        TypeError: If ``names`` is not an ordered collection of names.
+        ValueError: If ``names`` names another number of columns.
+    """
+    if not pd.api.types.is_list_like(names, allow_sets=False):
+        raise TypeError(
+            f"names in pandas_kwargs must list the column names in order, not {names!r}"
+        )
+    labels = list(names)
+    unnamed_id_column = id_column == 0 and len(labels) == n_fields - 1
+    if unnamed_id_column:
+        labels.insert(0, _ID_COLUMN_LABEL)
+    if len(labels) != n_fields:
+        columns = (
+            "every column, or every column after the ID column,"
+            if id_column == 0
+            else "every column"
+        )
+        raise ValueError(
+            f"names in pandas_kwargs names {len(names)} columns, but the rows of "
+            f"the CSV file have {n_fields} fields; name {columns} in the file's order"
+        )
+    if id_column is not None and not isinstance(labels[id_column], str):
+        labels[id_column] = _ID_COLUMN_LABEL
+    elif not unnamed_id_column:
+        return names
+    return labels
+
+
+def _named_positions(
+    option: str,
+    names: list[Any],
+    labels: list[Any],
+    texts: list[str],
+    file_positions: list[int],
+) -> list[int]:
+    """Return the positions of the columns that ``names`` name, in their order.
+
+    A name is a column's label as pandas holds it, in ``labels``, or else its
+    text, in ``texts``, as :meth:`CSVReader.feature_ids` gives it. The
+    positions index ``labels``; messages give the columns' ``file_positions``.
+
+    Raises:
+        KeyError: If a name names no column.
+        ValueError: If a name is no column's label but the text of several.
+    """
+    positions: list[int] = []
+    absent: list[Any] = []
+    for name in names:
+        matches = [position for position, label in enumerate(labels) if name == label]
+        if not matches:
+            matches = [position for position, text in enumerate(texts) if name == text]
+        if len(matches) > 1:
+            raise ValueError(
+                f"{option} names {name!r}, which is the text of the columns at "
+                f"positions {[file_positions[p] for p in matches]}; name one of "
+                "them by its label as pandas holds it"
+            )
+        if matches:
+            positions.append(matches[0])
+        else:
+            absent.append(name)
+    if absent:
+        raise KeyError(f"{option} are not CSV columns: {absent}")
+    return positions
+
+
+def _blank_or_missing(label: Any) -> bool:
+    """Return whether a column's name is missing, such as NaN, or blank text."""
+    if pd.api.types.is_scalar(label) and pd.isna(label):
+        return True
+    return not as_text(label).strip()
+
+
 class CSVReader:
     """A class to read in data from a CSV file.
 
@@ -90,23 +214,35 @@ class CSVReader:
 
     Args:
         csv_fn: Path to the CSV file
-        has_header: Does the CSV file has a header. (Default value: True)
-        id_column: The column number which contains row name. Its values are
-                   read as text, as the file holds them, so ``001`` stays
-                   ``"001"``; a missing or empty ID raises ValueError.
-                   (Default value: None)
+        has_header: Whether the first row names the columns. Without a
+                    header, ``names`` in ``pandas_kwargs`` can name them.
+                    (Default value: True)
+        id_column: The position of the column that holds the cell IDs,
+                   counted from 0. Its fields are the IDs as the file holds
+                   them, so ``001`` stays ``"001"`` and ``NA`` is an ID; an
+                   empty or blank ID raises ValueError. (Default value: None)
         rows_are_cells: If True then each row represents a cell and hence each column is a feature. If False then each
                         row is feature and each column in a cell
         sep: The column separator in the CSV file, one character. (Default value: ',')
         skip_rows: Number of rows to skip from the top of the file. (Default value: 0)
         skip_cols: Names of columns to skip. Must be provided as a list even if just one column.
-                        (Default value: None)
+                   A name is a column's label as pandas holds it, or its
+                   text, as :meth:`feature_ids` gives it, so ``"10"`` also
+                   names a column that ``names`` in ``pandas_kwargs`` names
+                   ``10``. A name of no column raises KeyError.
+                   (Default value: None)
         cell_data_cols: Names of columns to include in cell metadata rather than count matrix. Must be provided as a
-                       list even if just one column. (Default value: None)
+                       list even if just one column. Columns are found as
+                       for ``skip_cols``, and each name, which the cell
+                       metadata column takes, must be text.
+                       (Default value: None)
         batch_size: Number of lines to read at a time. Decrease this value if you have too many columns.
                     (Default value: 50,000)
         pandas_kwargs: A dictionary of keyword arguments to be passed to Pandas read_csv function.
-                       It cannot set ``comment``, ``dialect``, or ``lineterminator``. Without
+                       It cannot set ``comment``, ``dialect``, ``lineterminator``, or
+                       ``usecols``. ``names`` names every column of the file, with or
+                       without a header, or with ``id_column=0`` every column after the
+                       ID column. Without
                        ``compression`` here, the file's first bytes decide whether it is gzip,
                        bzip2, xz, Zstandard or ZIP-compressed, or a tar archive, whatever its
                        name.
@@ -161,39 +297,64 @@ class CSVReader:
                 "checks the fields of every row with sep and the quoting "
                 "settings alone"
             )
-        header_row: int | None
-        if has_header is False:
-            if skip_cols or cell_data_cols:
-                raise ValueError("Named columns require a CSV header")
-            header_row = None
-        else:
-            header_row = 0
+        if "usecols" in pandas_kwargs:
+            raise ValueError(
+                "pandas_kwargs cannot set usecols: pandas then counts columns "
+                "among those it selects, where id_column and names count every "
+                "column of the file; leave columns out with skip_cols"
+            )
+        self._idColumn = _id_column_argument(id_column)
+        names = pandas_kwargs.get("names")
+        # The header or names in pandas_kwargs name the columns.
+        self._namedColumns = has_header or names is not None
+        self.skipCols = [] if skip_cols is None else skip_cols
+        self.cellDataCols = [] if cell_data_cols is None else cell_data_cols
+        if not self._namedColumns and (self.skipCols or self.cellDataCols):
+            raise ValueError(
+                "Named columns require a CSV header or names in pandas_kwargs"
+            )
+        unnamed = [name for name in self.cellDataCols if not isinstance(name, str)]
+        if unnamed:
+            raise ValueError(
+                f"cell_data_cols names columns by {unnamed!r}, but a cell metadata "
+                "column takes its name from cell_data_cols, which must be text; "
+                f"name these columns by their text, {[as_text(name) for name in unnamed]!r}"
+            )
         # A copy, so that the reader's settings stay out of the caller's dict.
         self.pandas_kwargs: dict[str, Any] = dict(pandas_kwargs)
         self.pandas_kwargs["sep"] = sep
-        self.pandas_kwargs["header"] = header_row
+        self.pandas_kwargs["header"] = 0 if has_header else None
         self.pandas_kwargs["skiprows"] = skip_rows
         self.pandas_kwargs["chunksize"] = batch_size
-        self.pandas_kwargs["index_col"] = id_column
+        # The ID column is read as a column and taken out of each chunk, since
+        # pandas reads the text NA in an index as a missing value.
+        self.pandas_kwargs["index_col"] = None
         if "compression" not in self.pandas_kwargs:
             # pandas infers compression from the file's name; the file's first
             # bytes decide here, as they decide for every reader.
             self.pandas_kwargs["compression"] = self._compression()
-        if id_column is not None:
-            # Cell IDs are text as the file holds them: type inference would
-            # read "001" as the number 1.
+        n_fields = self._check_field_counts()
+        if n_fields is None:
+            raise ValueError("CSV file contains no data rows")
+        if self._idColumn is not None and self._idColumn >= n_fields:
+            raise ValueError(
+                f"id_column is {self._idColumn}, but the rows of the CSV file have "
+                f"{n_fields} fields, at positions 0 to {n_fields - 1}"
+            )
+        if names is not None:
+            self.pandas_kwargs["names"] = _names_for_pandas(
+                names, n_fields, self._idColumn
+            )
+        if self._idColumn is not None:
+            # Cell IDs are the text of their fields: type inference would read
+            # "001" as the number 1, and NA as a missing value. Without names,
+            # an integer key reaches the column at that position alone, since
+            # header names are text and positions name the columns otherwise.
+            labels = self.pandas_kwargs.get("names")
+            key = self._idColumn if labels is None else labels[self._idColumn]
             converters = dict(self.pandas_kwargs.get("converters") or {})
-            converters[id_column] = str
+            converters[key] = _FieldText
             self.pandas_kwargs["converters"] = converters
-
-        if skip_cols is None:
-            self.skipCols = []
-        else:
-            self.skipCols = skip_cols
-        if cell_data_cols is None:
-            self.cellDataCols = []
-        else:
-            self.cellDataCols = cell_data_cols
         (
             self.nCells,
             self.nFeatures,
@@ -240,11 +401,15 @@ class CSVReader:
         reader = pd.read_csv(self._fn, **self.pandas_kwargs)
         yield from reader
 
-    def _check_field_counts(self) -> None:
-        """Raise ValueError unless every row has as many fields as the first.
+    def _check_field_counts(self) -> int | None:
+        """Return the fields of each row, after checking that every row has as many as the first.
 
         The rows are the ones pandas reads: the text that ``read_csv`` opens,
-        after ``skip_rows`` rows, without blank lines.
+        after ``skip_rows`` rows, without blank lines. None means that there
+        is no such row.
+
+        Raises:
+            ValueError: If a row has another number of fields than the first.
         """
         kwargs = self.pandas_kwargs
         settings = {key: kwargs[key] for key in _QUOTING_SETTINGS if key in kwargs}
@@ -288,6 +453,7 @@ class CSVReader:
                     )
                 expected = count
                 expected_line = rows.line_num
+        return expected
 
     def _consistency_check(
         self,
@@ -302,11 +468,7 @@ class CSVReader:
         np.dtype,
         CountValueRange,
     ]:
-        """Stream every row once to fix the shape, dtypes, and count range.
-
-        The field count of every row is checked first.
-        """
-        self._check_field_counts()
+        """Stream every row once to fix the shape, names, dtypes, and count range."""
         stream = self._get_streamer()
         n_cells = 0
         n_features = 0
@@ -316,9 +478,7 @@ class CSVReader:
         cell_data_idx: list[int] | None = None
         count_dtype: np.dtype | None = None
         count_range = CountValueRange()
-        collected_cell_ids: list[Any] | None = None
-        if self.pandas_kwargs["index_col"] is not None:
-            collected_cell_ids = []
+        id_fields: list[_FieldText] = []
         for df in iter_progress(
             stream,
             desc="Checking CSV consistency",
@@ -327,28 +487,18 @@ class CSVReader:
                 # A header-only file yields one empty chunk of untyped columns.
                 continue
             n_cells += df.shape[0]
-            if collected_cell_ids is not None:
-                collected_cell_ids.extend(df.index.to_numpy())
+            fields = self._pop_id_column(df)
+            if fields is not None:
+                id_fields.extend(fields)
             if n_features == 0:
                 n_features = df.shape[1]
-                if self.pandas_kwargs["header"] is not None:
-                    feature_ids = np.asarray(df.columns.values)
-                    for option, names in (
-                        ("cell_data_cols", self.cellDataCols),
-                        ("skip_cols", self.skipCols),
-                    ):
-                        absent = [name for name in names if name not in df.columns]
-                        if absent:
-                            raise KeyError(f"{option} are not CSV columns: {absent}")
-                    if len(self.cellDataCols) > 0:
-                        cell_data_idx = df.columns.get_indexer(
-                            self.cellDataCols
-                        ).tolist()
-                    skip_names = set(self.skipCols).union(self.cellDataCols)
-                    if skip_names:
-                        keep_cols = [
-                            n for n, x in enumerate(feature_ids) if x not in skip_names
-                        ]
+                if self._namedColumns:
+                    # The labels as their array holds them: iterating the
+                    # index would turn a float32 label into a Python float,
+                    # whose text has more digits.
+                    feature_ids, keep_cols, cell_data_idx = self._column_roles(
+                        list(df.columns.to_numpy())
+                    )
             counts = df if keep_cols is None else df.iloc[:, keep_cols]
             count_dtype = _merged_dtype(count_dtype, _count_dtype(counts, count_range))
             if cell_data_idx is not None:
@@ -368,22 +518,12 @@ class CSVReader:
         if count_dtype is None:
             raise ValueError("CSV file contains no data rows")
         cell_ids: np.ndarray | None = None
-        if collected_cell_ids is not None:
-            # An ID that pandas reads as missing, such as an empty field, is
-            # rejected as blank.
-            cell_ids = np.asarray(
-                ["" if pd.isna(value) else value for value in collected_cell_ids],
-                dtype=str,
-            )
+        if self._idColumn is not None:
+            # Every field is an ID, an empty one too, which is refused as blank.
+            cell_ids = np.asarray([field.text for field in id_fields], dtype=str)
             require_unique_identifiers(cell_ids, "CSV cell IDs")
-        if feature_ids is not None and keep_cols is not None:
-            feature_ids = feature_ids[keep_cols]
+        if keep_cols is not None:
             n_features = len(keep_cols)
-        if feature_ids is not None:
-            # names in pandas_kwargs can be numbers, such as 10, and an import
-            # stores each name as its text, "10". The skipped columns were
-            # matched by the names as pandas holds them.
-            feature_ids = np.asarray([as_text(name) for name in feature_ids], dtype=str)
         return (
             n_cells,
             n_features,
@@ -396,51 +536,106 @@ class CSVReader:
             count_range,
         )
 
+    def _pop_id_column(self, frame: pd.DataFrame) -> pd.Series | None:
+        """Take the ID column out of one chunk and return it, None without one.
+
+        The chunk keeps the other columns in the file's order.
+        """
+        if self._idColumn is None:
+            return None
+        return frame.pop(frame.columns[self._idColumn])
+
+    def _column_roles(
+        self, labels: list[Any]
+    ) -> tuple[np.ndarray, list[int] | None, list[int] | None]:
+        """Return the feature IDs, count columns and cell metadata columns.
+
+        ``labels`` are the names of a chunk's columns as pandas holds them,
+        the ID column taken out. The count and cell metadata columns are
+        positions in ``labels``, None when every column holds counts or none
+        holds cell metadata.
+
+        Raises:
+            KeyError: If ``cell_data_cols`` or ``skip_cols`` names no column.
+            ValueError: If one of their names names two columns, or a count
+                column's name is missing or blank.
+        """
+        # A column's position in the file, which messages give, counts the ID
+        # column too.
+        file_positions = [
+            position
+            if self._idColumn is None or position < self._idColumn
+            else position + 1
+            for position in range(len(labels))
+        ]
+        texts = [as_text(label) for label in labels]
+        cell_data = _named_positions(
+            "cell_data_cols", self.cellDataCols, labels, texts, file_positions
+        )
+        skipped = set(
+            _named_positions("skip_cols", self.skipCols, labels, texts, file_positions)
+        ).union(cell_data)
+        counts = [
+            position for position in range(len(labels)) if position not in skipped
+        ]
+        unnamed = [
+            file_positions[position]
+            for position in counts
+            if _blank_or_missing(labels[position])
+        ]
+        if unnamed:
+            raise ValueError(
+                "CSV feature IDs must contain non-empty values; the count columns "
+                f"at positions {unnamed}, counted from 0, have blank or missing "
+                "names. Name them through names in pandas_kwargs, or leave them "
+                "out with skip_cols"
+            )
+        feature_ids = np.asarray([texts[position] for position in counts], dtype=str)
+        return feature_ids, counts if skipped else None, cell_data or None
+
     def cell_ids(self) -> np.ndarray:
         """Return the cell IDs in the file's order, as the text that an import stores.
 
-        The IDs are a NumPy array of ``str``: the values of the ID column, or
-        ``cell_0``, ``cell_1``, and so on without ``id_column``. Per-cell
-        values keyed by these IDs, such as
-        ``pd.Series(values, index=reader.cell_ids())`` for values in the
+        The IDs are a new NumPy array of ``str`` on each call: the fields of
+        the ID column as the file holds them, or ``cell_0``, ``cell_1``, and
+        so on without ``id_column``. Per-cell values keyed by these IDs, such
+        as ``pd.Series(values, index=reader.cell_ids())`` for values in the
         file's order, match the imported store's cells in ``ds.cells.insert``.
         """
         if self.cellIds is None:
             return np.array([f"cell_{x}" for x in range(self.nCells)])
-        else:
-            return self.cellIds
+        return self.cellIds.copy()
 
     def feature_ids(self) -> np.ndarray:
         """Return the feature IDs in the file's column order, as the text that an import stores.
 
-        The IDs are a NumPy array of ``str``: the names of the count columns,
-        which the header gives or ``names`` in ``pandas_kwargs`` replaces, or
-        ``feature_0``, ``feature_1``, and so on with ``has_header=False``. A
-        name that is not text, such as the number ``10`` in ``names``,
-        becomes its ``str`` text, ``"10"``, and a byte string is decoded as
-        UTF-8. Values keyed by these IDs, such as
+        The IDs are a new NumPy array of ``str`` on each call: the names of
+        the count columns, which ``names`` in ``pandas_kwargs`` gives, or
+        else the header, or ``feature_0``, ``feature_1``, and so on without
+        either. A name that is not text, such as the number ``10`` in
+        ``names``, becomes its ``str`` text, ``"10"``, and a byte string is
+        decoded as UTF-8. A count column whose name is missing, such as
+        ``None`` in ``names``, or blank raises ValueError when the reader is
+        built. Values keyed by these IDs, such as
         ``pd.Series(values, index=reader.feature_ids())``, match the imported
         assay's features in ``feats.insert``, for example
         ``ds.RNA.feats.insert``.
         """
         if self.featureIds is None:
             return np.array([f"feature_{x}" for x in range(self.nFeatures)])
-        else:
-            return self.featureIds
+        return self.featureIds.copy()
 
     def consume(self) -> Generator[tuple[np.ndarray, np.ndarray | None], None, None]:
         """Returns a generator that yield chunks of data."""
-        stream = self._get_streamer()
-        if self.keepCols is None:
-            for df in stream:
+        for df in self._get_streamer():
+            # The ID column holds neither counts nor cell metadata.
+            self._pop_id_column(df)
+            if self.keepCols is None:
                 yield df.values, None
-        else:
-            if self.cellDataIdx is not None:
-                for df in stream:
-                    yield (
-                        df.iloc[:, self.keepCols].to_numpy(),
-                        df.iloc[:, self.cellDataIdx].to_numpy(dtype=object),
-                    )
+            elif self.cellDataIdx is not None:
+                yield (
+                    df.iloc[:, self.keepCols].to_numpy(),
+                    df.iloc[:, self.cellDataIdx].to_numpy(dtype=object),
+                )
             else:
-                for df in stream:
-                    yield df.iloc[:, self.keepCols].to_numpy(), None
+                yield df.iloc[:, self.keepCols].to_numpy(), None

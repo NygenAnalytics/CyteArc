@@ -1412,8 +1412,7 @@ CyteArc validates persisted data and public arguments against the following cont
   Raw `uint8` and `uint16` counts export as `float32` unless `dtype` names another dtype.
 - `to_mtx` writes a feature-type column without compression too, one type per assay, formats
   integer counts with NumPy, and compresses with gzip level 6; the matrix text is unchanged.
-- `CSVReader` reads its ID column as text and rejects a missing ID. `SparseToZarr` rejects missing
-  or repeated cell and feature IDs and converts COO, CSC, and dense input to CSR.
+- `CSVReader` reads its ID column as the text that the file holds, `NA` included, and rejects an empty or blank ID, and a count column whose name is missing or blank. `SparseToZarr` rejects missing or repeated cell and feature IDs and converts COO, CSC, and dense input to CSR.
 - `run_marker_search` is at operation revision 2, so marker tables of earlier releases are
   recomputed rather than reused. Tables store their statistics at full float64 precision instead
   of rounding them to five decimals, which kept one or two significant digits of ATAC TF-IDF

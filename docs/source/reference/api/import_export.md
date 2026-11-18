@@ -273,34 +273,7 @@ An H5AD, 10x HDF5, Matrix Market or Tapestri reader holds the shuffled rows of o
 
 ## Writers
 
-Every writer owns the reserved metadata columns `ids`, `names` and `I` and the
-`__cytearc_missing__` prefix of missing-value masks. Source cell or feature metadata columns
-with these names are skipped with a warning, so imported identifiers are never replaced.
-Zarr reads `/` and `\` in a column name as path separators, so writers store a source column
-whose name contains either one under the name with `_` in their place and log the rename. A
-source name that is already valid keeps its name; a renamed column whose name is taken gets
-the first free `_2`, `_3`, and so on. `SeuratToZarr` raises for reserved names instead of
-skipping them.
-The H5AD, CSV, Matrix Market, and Cell Ranger readers reject missing or repeated cell IDs, and so
-does `SparseToZarr`, which also rejects missing or repeated feature IDs and converts a COO, CSC, or
-dense matrix to CSR before it scans it. `CSVReader` reads its ID column as text, as the file holds
-it, so `001` stays `"001"`. `H5adReader` renames repeated cell IDs on request
-(`duplicate_cell_ids="make_unique"`). All
-but the CSV reader also reject missing or repeated feature IDs: `CSVReader` takes its feature IDs
-from the header as pandas reads it, which names a column with a blank header
-`Unnamed: <position>` and renames each later occurrence of a repeated name by appending `.1`,
-`.2`, and so on, without a warning. Some exporters use gene symbols as feature IDs, and these
-repeat. Pass
-`duplicate_feature_ids="make_unique"` to `MtxReader`, `CrDirReader`, `CrH5Reader`, or
-`H5adReader`, also through `H5adReader.from_inspect`, to keep the first occurrence of each feature
-ID and rename each later one, in file order, by appending `-1`, `-2`, and so on, as AnnData's
-`var_names_make_unique` does. A suffixed name that is already an ID is
-skipped, so the result is unique, and the reader logs how many IDs it renamed. IDs are made
-unique across all features, whatever their assay, so an antibody that repeats the ID of an
-earlier gene is renamed in its own assay, for example to `CD4-1`. Feature names are
-not changed: an H5AD file without a feature name column takes the names from the IDs it holds,
-and a Matrix Market feature reference matches the IDs of the feature sidecar. Cell IDs must be
-unique in either mode.
+Every writer owns the reserved metadata columns `ids`, `names` and `I` and the `__cytearc_missing__` prefix of missing-value masks. Source cell or feature metadata columns with these names are skipped with a warning, so imported identifiers are never replaced. Zarr reads `/` and `\` in a column name as path separators, so writers store a source column whose name contains either one under the name with `_` in their place and log the rename. A source name that is already valid keeps its name; a renamed column whose name is taken gets the first free `_2`, `_3`, and so on. `SeuratToZarr` raises for reserved names instead of skipping them. The H5AD, CSV, Matrix Market, and Cell Ranger readers reject missing or repeated cell IDs, and so does `SparseToZarr`, which also rejects missing or repeated feature IDs and converts a COO, CSC, or dense matrix to CSR before it scans it. `CSVReader` reads its ID column as the text that the file holds, so `001` stays `"001"` and `NA` is an ID, and it takes an empty field as a missing ID. `H5adReader` renames repeated cell IDs on request (`duplicate_cell_ids="make_unique"`). The readers also reject missing feature IDs, which for `CSVReader` are missing or blank column names, and all but the CSV reader reject repeated ones: `CSVReader` takes its feature IDs from the header as pandas reads it, which names a column with an empty header `Unnamed: <position>` and renames each later occurrence of a repeated name by appending `.1`, `.2`, and so on, without a warning. Some exporters use gene symbols as feature IDs, and these repeat. Pass `duplicate_feature_ids="make_unique"` to `MtxReader`, `CrDirReader`, `CrH5Reader`, or `H5adReader`, also through `H5adReader.from_inspect`, to keep the first occurrence of each feature ID and rename each later one, in file order, by appending `-1`, `-2`, and so on, as AnnData's `var_names_make_unique` does. A suffixed name that is already an ID is skipped, so the result is unique, and the reader logs how many IDs it renamed. IDs are made unique across all features, whatever their assay, so an antibody that repeats the ID of an earlier gene is renamed in its own assay, for example to `CD4-1`. Feature names are not changed: an H5AD file without a feature name column takes the names from the IDs it holds, and a Matrix Market feature reference matches the IDs of the feature sidecar. Cell IDs must be unique in either mode.
 
 `H5adToZarr` reads and checks the cell IDs, feature IDs and feature names before it reads the matrix, so an import that refuses them writes nothing. NaN in an index or column of numbers counts as a missing ID, and IDs and names must be UTF-8 text. The refusal of a missing ID or of text that is not UTF-8 names the file, the table, the column and the rows. `inspect_h5ad` refuses text that is not UTF-8 in the columns that it reads to find the IDs and names, as an import would.
 
