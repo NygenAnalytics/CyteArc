@@ -4,6 +4,7 @@ import hashlib
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Any
 
 import h5py
 import numpy as np
@@ -572,6 +573,347 @@ def test_preferred_integer_cell_ids_are_identifiers(tmp_path) -> None:
     path = _duplicated_cells(tmp_path, cell_id=[5, 6, 7, 8])
 
     assert inspect_h5ad(path).cellIdsKey == "cell_id"
+
+
+def _h5ad_with(path: Path, members: dict[str, Any]) -> str:
+    """Write a four-cell, three-gene H5AD file, then replace the given members.
+
+    Each key is a member's path in the file. A dict writes a group of those
+    datasets, such as a categorical index's codes and categories, and None
+    removes the member.
+    """
+    adata = anndata.AnnData(csr_matrix(np.ones((4, 3), dtype=np.float32)))
+    adata.obs_names = [f"c{index}" for index in range(4)]
+    adata.var_names = [f"g{index}" for index in range(3)]
+    adata.write_h5ad(path)
+    with h5py.File(path, "r+") as h5:
+        for location, data in members.items():
+            if location in h5:
+                del h5[location]
+            if isinstance(data, dict):
+                group = h5.create_group(location)
+                for name, values in data.items():
+                    group.create_dataset(name, data=values)
+            elif data is not None:
+                h5.create_dataset(location, data=data)
+    return str(path)
+
+
+_ID_METHODS = ("cell_ids", "feat_ids", "feat_names")
+# What the reader gives and the import stores for the file that _h5ad_with
+# writes before it replaces any member.
+_WRITTEN_IDS = {
+    "cell_ids": ["c0", "c1", "c2", "c3"],
+    "feat_ids": ["g0", "g1", "g2"],
+    "feat_names": ["g0", "g1", "g2"],
+}
+
+
+def _read_and_stored_ids(
+    path: str, destination: Path, **reader_kwargs: Any
+) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray]]:
+    """Return the reader's IDs and names, and those that an import of the file stores.
+
+    The import runs on a reader of its own, in the file's order.
+    """
+    reader = H5adReader(path, **reader_kwargs)
+    try:
+        read = {method: getattr(reader, method)() for method in _ID_METHODS}
+    finally:
+        reader.close()
+    reader = H5adReader(path, **reader_kwargs)
+    try:
+        H5adToZarr(reader, str(destination), nthreads=1, shuffle_cells=False).dump()
+    finally:
+        reader.close()
+    store = cytearc.DataStore(str(destination), min_features_per_cell=0, nthreads=1)
+    stored = {
+        "cell_ids": store.cells.fetch_all("ids"),
+        "feat_ids": store.RNA.feats.fetch_all("ids"),
+        "feat_names": store.RNA.feats.fetch_all("names"),
+    }
+    return read, stored
+
+
+@pytest.mark.parametrize(
+    ("members", "reader_kwargs", "expected"),
+    [
+        pytest.param(
+            {"obs/_index": np.array([101, 102, 103, 104])},
+            {},
+            {"cell_ids": ["101", "102", "103", "104"]},
+            id="integer-cell-ids",
+        ),
+        pytest.param(
+            {"obs/_index": np.array([b"c0", b"c1", b"c2", b"c3"], dtype="S2")},
+            {},
+            {"cell_ids": ["c0", "c1", "c2", "c3"]},
+            id="fixed-length-byte-cell-ids",
+        ),
+        pytest.param(
+            {"var/_index": np.array([7, 8, 9])},
+            {},
+            {"feat_ids": ["7", "8", "9"], "feat_names": ["7", "8", "9"]},
+            id="integer-feature-ids-as-names",
+        ),
+        pytest.param(
+            {
+                "var/_index": np.array([b"g0", b"g1", b"g2"], dtype="S2"),
+                "var/symbol": np.array([b"A", b"BB", b"C"], dtype="S2"),
+            },
+            {"feature_name_key": "symbol"},
+            {"feat_ids": ["g0", "g1", "g2"], "feat_names": ["A", "BB", "C"]},
+            id="fixed-length-byte-feature-ids-and-names",
+        ),
+        pytest.param(
+            {"var/symbol": np.array([10, 20, 30])},
+            {"feature_name_key": "symbol"},
+            {"feat_names": ["10", "20", "30"]},
+            id="integer-feature-names",
+        ),
+        pytest.param(
+            {
+                "obs/_index": np.array(
+                    [text.encode() for text in ("café", "中文", "😀", "c3")]
+                )
+            },
+            {},
+            {"cell_ids": ["café", "中文", "😀", "c3"]},
+            id="non-ascii-utf8-bytes",
+        ),
+        pytest.param(
+            {
+                "obs/_index": np.array([-1, 0, 2**62, 2**63 - 1]),
+                "var/_index": np.array([2**64 - 1, 0, 7], dtype=np.uint64),
+            },
+            {},
+            {
+                "cell_ids": ["-1", "0", "4611686018427387904", "9223372036854775807"],
+                "feat_ids": ["18446744073709551615", "0", "7"],
+                "feat_names": ["18446744073709551615", "0", "7"],
+            },
+            id="negative-and-largest-integers",
+        ),
+        pytest.param(
+            {
+                "obs/_index": {
+                    "codes": np.array([3, 2, 1, 0], dtype=np.int8),
+                    "categories": np.array([7, 8, 9, 10]),
+                }
+            },
+            {},
+            {"cell_ids": ["10", "9", "8", "7"]},
+            id="categorical-index-of-integers",
+        ),
+        pytest.param(
+            {"obs/_index": None, "var/_index": None},
+            {},
+            {
+                "cell_ids": ["cell_0", "cell_1", "cell_2", "cell_3"],
+                "feat_ids": ["feature_0", "feature_1", "feature_2"],
+                "feat_names": ["feature_0", "feature_1", "feature_2"],
+            },
+            id="no-index",
+        ),
+        pytest.param(
+            {
+                "var/_index": np.array([5, 6, 7]),
+                "var/symbol": np.array([b"A", b"", b"C"]),
+            },
+            {"feature_name_key": "symbol"},
+            {"feat_ids": ["5", "6", "7"], "feat_names": ["A", "6", "C"]},
+            id="blank-name-takes-an-integer-id",
+        ),
+        pytest.param(
+            {"var/symbol": np.array([1.5, np.nan, 2.0])},
+            {"feature_name_key": "symbol"},
+            {"feat_names": ["1.5", "g1", "2.0"]},
+            id="missing-number-name-takes-the-id",
+        ),
+        pytest.param(
+            {"obs/_index": np.array([5, 5, 6, 7])},
+            {"duplicate_cell_ids": "make_unique"},
+            {"cell_ids": ["5", "5-1", "6", "7"]},
+            id="renamed-integer-cell-ids",
+        ),
+        pytest.param(
+            {"var/_index": np.array([7, 7, 8])},
+            {"duplicate_feature_ids": "make_unique"},
+            {"feat_ids": ["7", "7-1", "8"], "feat_names": ["7", "7", "8"]},
+            id="renamed-integer-feature-ids",
+        ),
+    ],
+)
+def test_reader_ids_and_names_are_the_text_that_an_import_stores(
+    tmp_path, members, reader_kwargs, expected
+) -> None:
+    path = _h5ad_with(tmp_path / "ids.h5ad", members)
+
+    read, stored = _read_and_stored_ids(path, tmp_path / "ids.zarr", **reader_kwargs)
+
+    for method in _ID_METHODS:
+        # The reader used to give the values as the file holds them, such as
+        # 101 or b"c0", where the store holds "101" or "c0".
+        assert read[method].dtype.kind == "U", method
+        assert read[method].tolist() == expected.get(method, _WRITTEN_IDS[method])
+        np.testing.assert_array_equal(read[method], stored[method], err_msg=method)
+
+
+def test_assay_features_are_the_text_that_a_split_import_stores(tmp_path) -> None:
+    path = _h5ad_with(
+        tmp_path / "split.h5ad",
+        {
+            "var/_index": np.array([7, 8, 9]),
+            "var/feature_types": np.array(
+                [b"Gene Expression", b"Antibody Capture", b"Gene Expression"]
+            ),
+        },
+    )
+    reader = H5adReader(path)
+    try:
+        assays = reader.assay_feature_slices("feature_types")
+    finally:
+        reader.close()
+    reader = H5adReader(path)
+    try:
+        H5adToZarr(
+            reader,
+            str(tmp_path / "split.zarr"),
+            assay_split_key="feature_types",
+            nthreads=1,
+            shuffle_cells=False,
+        ).dump()
+    finally:
+        reader.close()
+    store = cytearc.DataStore(
+        str(tmp_path / "split.zarr"),
+        default_assay="RNA",
+        min_features_per_cell=0,
+        nthreads=1,
+    )
+
+    assert {
+        name: (features.featureIds.tolist(), features.featureNames.tolist())
+        for name, features in assays.items()
+    } == {"RNA": (["7", "9"], ["7", "9"]), "ADT": (["8"], ["8"])}
+    for name, features in assays.items():
+        feats = getattr(store, name).feats
+        np.testing.assert_array_equal(features.featureIds, feats.fetch_all("ids"))
+        np.testing.assert_array_equal(features.featureNames, feats.fetch_all("names"))
+
+
+@pytest.mark.parametrize(
+    ("members", "reader_kwargs", "method", "message"),
+    [
+        pytest.param(
+            {"obs/_index": np.array([b"caf\xe9", b"c1", b"c2", b"c3"])},
+            {},
+            "cell_ids",
+            "can't decode byte 0xe9",
+            id="latin-1-cell-id",
+        ),
+        pytest.param(
+            {"var/_index": np.array([b"g\xe9", b"g1", b"g2"])},
+            {},
+            "feat_ids",
+            "can't decode byte 0xe9",
+            id="latin-1-feature-id",
+        ),
+        pytest.param(
+            {"var/symbol": np.array([b"A\xe9", b"B", b"C"])},
+            {"feature_name_key": "symbol"},
+            "feat_names",
+            "can't decode byte 0xe9",
+            id="latin-1-feature-name",
+        ),
+        pytest.param(
+            {
+                "obs/_index": {
+                    "values": np.array([b"c0", b"", b"c2", b"c3"]),
+                    "mask": np.array([False, True, False, False]),
+                }
+            },
+            {},
+            "cell_ids",
+            "H5AD cell IDs must contain non-empty values",
+            id="missing-cell-id",
+        ),
+        pytest.param(
+            {"var/_index": np.array([b"g0", b" ", b"g2"])},
+            {},
+            "feat_ids",
+            "H5AD feature IDs must contain non-empty values",
+            id="blank-feature-id",
+        ),
+        pytest.param(
+            {"obs/_index": np.array([5, 5, 6, 7])},
+            {},
+            "cell_ids",
+            "H5AD cell IDs must contain unique values",
+            id="repeated-integer-cell-id",
+        ),
+    ],
+)
+def test_reader_refuses_the_ids_and_names_that_an_import_refuses(
+    tmp_path, members, reader_kwargs, method, message
+) -> None:
+    path = _h5ad_with(tmp_path / "refused.h5ad", members)
+
+    reader = H5adReader(path, **reader_kwargs)
+    try:
+        with pytest.raises(ValueError, match=message) as refused_read:
+            getattr(reader, method)()
+    finally:
+        reader.close()
+    reader = H5adReader(path, **reader_kwargs)
+    try:
+        with pytest.raises(ValueError, match=message) as refused_import:
+            H5adToZarr(
+                reader, str(tmp_path / "refused.zarr"), nthreads=1, shuffle_cells=False
+            ).dump()
+    finally:
+        reader.close()
+
+    assert type(refused_read.value) is type(refused_import.value)
+    assert str(refused_read.value) == str(refused_import.value)
+
+
+@pytest.mark.parametrize(
+    ("index", "ids"),
+    [
+        (np.array([101, 102, 103, 104]), ["101", "102", "103", "104"]),
+        (np.array([b"c0", b"c1", b"c2", b"c3"], dtype="S2"), ["c0", "c1", "c2", "c3"]),
+    ],
+    ids=["integers", "fixed-length-bytes"],
+)
+def test_values_keyed_by_the_reader_cell_ids_insert_into_the_store(
+    tmp_path, index, ids
+) -> None:
+    # Issue 396: values keyed by the reader's IDs were refused, because the
+    # reader gave 101 or b"c0" where the store holds "101" or "c0".
+    path = _h5ad_with(tmp_path / "ids.h5ad", {"obs/_index": index})
+    reader = H5adReader.from_inspect(inspect_h5ad(path))
+    try:
+        cell_ids = reader.cell_ids()
+        # The import shuffles the cells, as every import does by default.
+        H5adToZarr(reader, str(tmp_path / "ids.zarr"), nthreads=1).dump()
+    finally:
+        reader.close()
+    store = cytearc.DataStore(
+        str(tmp_path / "ids.zarr"), min_features_per_cell=0, nthreads=1
+    )
+    rows = store.cells.fetch_all("sourceRow")
+    assert not np.array_equal(rows, np.arange(4))
+
+    store.cells.insert("score", pd.Series(np.arange(4.0), index=cell_ids))
+
+    assert cell_ids.tolist() == ids
+    # Each cell gets the value of its row in the file, wherever it is stored.
+    np.testing.assert_array_equal(store.cells.fetch_all("score"), rows.astype(float))
+    # Matching stays exact: the IDs as the file holds them name no cell.
+    with pytest.raises(ValueError, match="4 labels are not such ids"):
+        store.cells.insert("raw", pd.Series(np.arange(4.0), index=index.tolist()))
+    assert "raw" not in store.cells.columns
 
 
 def _write_matrices(path: Path, matrices: dict, n_cells: int, n_genes: int) -> str:

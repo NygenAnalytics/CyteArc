@@ -583,11 +583,11 @@ def test_inspect_h5ad_prefers_dimension_matched_raw_counts(tmp_path):
     try:
         np.testing.assert_array_equal(
             reader.feat_ids(),
-            [b"ENSG00000000001", b"ENSG00000000002", b"AB-1"],
+            ["ENSG00000000001", "ENSG00000000002", "AB-1"],
         )
         np.testing.assert_array_equal(
             reader.feat_names(),
-            [b"GENE1", b"GENE2", b"CD3"],
+            ["GENE1", "GENE2", "CD3"],
         )
         np.testing.assert_array_equal(
             np.vstack([chunk.toarray() for chunk in reader.consume(1)]),
@@ -1160,9 +1160,9 @@ def test_h5ad_reader_dense_matrix_and_group_metadata(tmp_path):
     )
     try:
         assert reader.groupCodes == {"obs": 2, "var": 2, "obsm": 2, "X": 1}
-        np.testing.assert_array_equal(reader.cell_ids(), [b"c1", b"c2", b"c3"])
-        np.testing.assert_array_equal(reader.feat_ids(), [b"f1", b"f2"])
-        np.testing.assert_array_equal(reader.feat_names(), [b"Gene B", b"Gene A"])
+        np.testing.assert_array_equal(reader.cell_ids(), ["c1", "c2", "c3"])
+        np.testing.assert_array_equal(reader.feat_ids(), ["f1", "f2"])
+        np.testing.assert_array_equal(reader.feat_names(), ["Gene B", "Gene A"])
 
         cell_columns = dict(reader.get_cell_columns())
         assert cell_columns.keys() == {"batch", "state", "nGenes"}

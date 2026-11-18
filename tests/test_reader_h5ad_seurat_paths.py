@@ -361,7 +361,7 @@ def test_h5ad_reader_treats_named_datatypes_as_absent(tmp_path) -> None:
         np.testing.assert_array_equal(
             reader.feat_ids(), ["feature_0", "feature_1", "feature_2"]
         )
-        np.testing.assert_array_equal(reader.cell_ids(), [b"c0", b"c1", b"c2", b"c3"])
+        np.testing.assert_array_equal(reader.cell_ids(), ["c0", "c1", "c2", "c3"])
         assert list(reader.get_cell_columns()) == []
     finally:
         reader.close()
