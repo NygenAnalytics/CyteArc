@@ -625,6 +625,20 @@ summed.
 Feature annotation columns are merged when the inputs agree. A column whose values differ for a
 shared feature, such as per-dataset highly variable gene flags, is left out with a warning. The same
 applies when features that share a name within one input disagree.
+
+(merged_cell_order)=
+
+A merge and a composite list their cells in an order of their own, neither the order of their sources nor a uniform random order. Pair per-cell values with their cells by cell ID, `{name}__{cell_id}`, or by `sourceRow`, each cell's row in the concatenation of its sources, and never by position. The cells taken from each source are split into blocks, one for each shard of the source's counts that holds any of them, and the cells of each block are shuffled with a fixed seed. The blocks of all sources then follow in a random order that `seed` draws, except that each source's last block comes at the end, in the order of the sources. When a merge takes several assays from a source, the source is split at the shards of the assay with the fewest rows to a shard, and a source that holds none of the merged assays is split at the chunks of its cell IDs. One set of sources and arguments gives the same order every time, and `seed=None` draws a new order of the blocks for each merge. `create_composite` takes no seed and orders the cells that `rows` selects by the same rule with the merge's default seed, 42. A composite of every cell of its sources therefore lists them as a merge of its assay alone, with `assays=[assay]`, does. `rows` selects cells and doesn't order them: `rows={"a": [12, 0, 7, 4]}` gives the composite that `rows={"a": [0, 4, 7, 12]}` gives. A source whose `rows` entry is empty contributes no cells, but its features still count toward the union or intersection that `features` asks for. For example, to attach `scores`, one value for each cell of `sources["a"]` in its store order, to `joint = create_composite(sources, ...)`:
+
+```python
+# Key the scores by the IDs that the cells of source a take in the composite.
+ids = sources["a"].cells.fetch_all("ids")
+keyed = pd.Series(scores, index=[f"a__{cell}" for cell in ids])
+
+# Line the scores up with the composite's cells; the cells of other sources get NaN.
+joint.cells.insert("score", keyed.reindex(joint.cells.fetch_all("ids")))
+```
+
 Each merged cell gets the int64 column `sourceRow`: its row in the concatenation of the sources, in the order that the merge receives them, each source's cells in the order that an export of the source writes them. A cell's `sourceRow` is the number of cells that the sources before its own hold, plus its rank in its source's `sourceRow`, or in its source's store order when the source holds none, so an export of the merged store in [file order](#cell-order-in-exports) writes the exports of its sources one after the other. The merge keeps its block shuffle of the cells, which is no uniform permutation, so the merged store records no `cellOrder` shuffle. A source column named `sourceRow` that no import wrote is replaced with a warning, and `source_column` cannot be `sourceRow`. `create_composite` writes `sourceRow` alike over the cells that `rows` selects, and neither copies a source's `sourceRow` as an ordinary column such as `orig_sourceRow`.
 Merged cell IDs are `{name}__{cell_id}`, so source names cannot contain `__`. Cell metadata columns
 keep their attributes when the inputs agree. Differing `levels` of an unordered categorical column
