@@ -17,6 +17,7 @@
   "tests/benchmarks/test_stages.py": 6.0,
   "tests/test_absent_fields.py": 0.9,
   "tests/test_algorithm_validation_coverage.py": 0.1,
+  "tests/test_alike_categories.py": 3.2,
   "tests/test_allele_clones.py": 40.4,
   "tests/test_allele_downloads.py": 3.5,
   "tests/test_allele_import.py": 21.5,
