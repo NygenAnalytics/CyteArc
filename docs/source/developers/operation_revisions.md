@@ -35,6 +35,7 @@ first entry; entries are numbered 2, 3, and so on. An entry has:
   revision also says which results it affects.
 - `applies`: `None` when the change affects every artifact of the operation, or a predicate
   `(kind, parameters, inputs) -> bool` that selects the affected artifacts.
+- `added_diagnostics`: the diagnostics that the operation saves from this revision on, empty unless the revision added some ({ref}`diagnostics_added_after_a_release`).
 
 When CyteArc plans an artifact, `effective_revision` returns the highest revision whose `applies`
 holds for the artifact's kind and serialized parameters and inputs, or 1. Provenance records it
@@ -74,15 +75,22 @@ Decide with this ladder, in order:
 2. Results become materially different, or were wrong, for an identifiable subset of artifacts:
    add a scoped revision whose `applies` selects that subset from recorded provenance.
 3. Otherwise: add a whole-operation revision with `applies=None`.
-4. A new reuse requirement that stops existing artifacts from being reused, such as a new required
-   array or attribute or a stricter reuse validator, also adds a revision, so that the log explains
-   the recomputation.
+4. A new reuse requirement that stops existing artifacts from being reused, such as a new required array or attribute, a new diagnostic ({ref}`diagnostics_added_after_a_release`), or a stricter reuse validator, also adds a revision, so that the log explains the recomputation.
 
 Do not change recorded parameters or inputs to invalidate results. That changes the identity of
 every artifact the operation writes without telling anyone why its stored results stopped
 matching. Use the operation revision registry for these changes.
 
 When a new default replaces a computation that callers may still ask for, keep the earlier computation reachable through an argument that the record names, and scope the revision to the records that do not name it. Records of earlier releases name nothing, so the revision supersedes them, while an artifact that asks for the earlier computation by name stays current and is reused. Revision 2 of `run_pseudotime_scoring` works this way: the untruncated potential became the default, and its predicate selects the pseudotimes that do not record `method="truncated"`.
+
+(diagnostics_added_after_a_release)=
+## Diagnostics added after a release
+
+Every artifact saves the diagnostics that its operation declares, and reuse requires them. A diagnostic added to an operation that a release has shipped therefore needs a revision that applies to every artifact, with `applies=None`, and lists the diagnostic in `added_diagnostics`. Every artifact computed from that revision on records it or a later revision and saves the diagnostic, so planning computes each artifact of an earlier revision anew and logs why.
+
+An artifact that records an earlier revision and lacks the diagnostic reads it as None, not measured. `ArtifactStatus.diagnostics`, which `ds.artifacts.inspect(ref)` and `require_complete_artifact` read, applies this rule, so such an artifact still serves the calls that pass it explicitly and the runs that reference it. Reading still refuses an artifact that lacks any other declared diagnostic, one that holds a key its operation does not declare, and one without diagnostics, as releases before 1.4.0 saved them. It also refuses an artifact that records the adding revision or a later one and lacks the diagnostic: every such artifact was saved with it, so only damage or a bug can have lost it.
+
+The registry refuses a scoped revision that adds diagnostics, and `declare_diagnostics` refuses the declaration of an operation when a revision of the operation adds a diagnostic that the declaration lacks. Revision 3 of `select_hvgs` added `selectedDetectionRatio`, so a selection that CyteArc 1.4.0 saved reads the ratio as None.
 
 ## Rules for entries
 
@@ -100,6 +108,7 @@ When a new default replaces a computation that callers may still ask for, keep t
 2. Add a test that a new artifact of the operation records the revision, as
    `ArtifactStatus.revision`, and that an artifact of the earlier revision is recomputed, not
    reused. For a scoped revision, also test an artifact that its predicate leaves out.
+3. For a revision that adds diagnostics, also test that an artifact of the earlier revision reads them as None and that an artifact of the new revision without them is refused.
 
 (stable_identity_result_changes)=
 ## Results that change while identities stay the same

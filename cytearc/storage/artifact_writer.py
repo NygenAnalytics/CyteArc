@@ -265,10 +265,10 @@ def planned_diagnostics(
     return checked_diagnostics(values, planned.diagnostics, operation=operation)
 
 
-def _holds_diagnostics(group: zarr.Group, operation: str) -> bool:
-    """Whether an artifact holds the diagnostics that its operation declares."""
+def _holds_diagnostics(group: zarr.Group, operation: str, revision: int) -> bool:
+    """Whether an artifact of ``revision`` holds the diagnostics that its operation declares."""
     try:
-        read_diagnostics(group.attrs, operation, path=group.path)
+        read_diagnostics(group.attrs, operation, path=group.path, revision=revision)
     except ValueError:
         return False
     return True
@@ -420,7 +420,8 @@ def plan_artifact(
         ):
             rejected.append((candidate, "invalid"))
             continue
-        if diagnostics and not _holds_diagnostics(group, operation):
+        # A candidate's provenance, its revision included, is the request's.
+        if diagnostics and not _holds_diagnostics(group, operation, revision):
             rejected.append((candidate, "missing_diagnostics"))
             continue
         if reuse_validator is not None and not reuse_validator(

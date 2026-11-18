@@ -28,9 +28,11 @@ from cytearc.storage.artifacts import (
 )
 from cytearc.storage.lineage import ArtifactLineage
 from cytearc.storage.operation_revisions import (
+    OPERATION_REVISIONS,
     OperationRevision,
     _validate_registry,
     applicable_revisions,
+    diagnostics_added_after,
     effective_revision,
 )
 from cytearc.utils.logging import logger
@@ -156,6 +158,75 @@ def test_registry_validation_rejects_misnumbered_revisions() -> None:
     entry = OperationRevision(3, "1.0.0", "Change.", None)
     with pytest.raises(ValueError, match="numbered 2, 3"):
         _validate_registry({"run_pca": (entry,)})
+
+
+def test_only_a_revision_of_every_artifact_adds_diagnostics() -> None:
+    # A scoped revision leaves out artifacts that are computed after it and
+    # save the diagnostic too, so their revision could not tell them from
+    # artifacts saved before it.
+    scoped = OperationRevision(
+        2,
+        "1.0.0",
+        "Fits save their passes.",
+        lambda _kind, parameters, _inputs: parameters.get("solver") == "fast",
+        added_diagnostics=("solverPasses",),
+    )
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"^Revision 2 of 'run_pca' adds the diagnostics \['solverPasses'\], "
+            r"which every artifact computed from it on saves, so it must apply to "
+            r"every artifact, with applies=None$"
+        ),
+    ):
+        _validate_registry({"run_pca": (scoped,)})
+    # The same revision for every artifact, and a scoped one that adds none, hold.
+    whole = OperationRevision(
+        2, "1.0.0", "Fits save their passes.", None, ("solverPasses",)
+    )
+    _validate_registry({"run_pca": (whole,)})
+    _validate_registry(
+        {"run_pca": (OperationRevision(2, "1.0.0", "x", scoped.applies),)}
+    )
+    # Every shipped revision that adds diagnostics applies to every artifact.
+    adding = [
+        entry
+        for entries in OPERATION_REVISIONS.values()
+        for entry in entries
+        if entry.added_diagnostics
+    ]
+    assert adding and all(entry.applies is None for entry in adding)
+
+
+def test_diagnostics_added_after_a_revision_are_those_of_the_later_revisions(
+    revisions: _Install,
+) -> None:
+    revisions(
+        {
+            "run_pca": (
+                OperationRevision(2, "1.0.0", "Passes.", None, ("solverPasses",)),
+                OperationRevision(
+                    3, "1.1.0", "Fast solves.", lambda *_: True, added_diagnostics=()
+                ),
+                OperationRevision(
+                    4, "1.2.0", "Shifts.", None, ("componentShift", "rounds")
+                ),
+            )
+        }
+    )
+
+    assert diagnostics_added_after("run_pca", 1) == {
+        "solverPasses",
+        "componentShift",
+        "rounds",
+    }
+    assert diagnostics_added_after("run_pca", 2) == {"componentShift", "rounds"}
+    assert diagnostics_added_after("run_pca", 3) == {"componentShift", "rounds"}
+    # An artifact of the newest revision, or of one this release does not
+    # know, predates no diagnostic.
+    assert diagnostics_added_after("run_pca", 4) == frozenset()
+    assert diagnostics_added_after("run_pca", 9) == frozenset()
+    assert diagnostics_added_after("run_umap", 1) == frozenset()
 
 
 def test_effective_revision_is_the_highest_applicable_revision(

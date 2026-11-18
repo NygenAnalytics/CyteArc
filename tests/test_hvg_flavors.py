@@ -52,8 +52,12 @@ from cytearc.features.variability import (
 )
 from cytearc.storage.artifacts import artifact_path, inspect_artifact
 from cytearc.storage.count_matrix import CountMatrixPolicy
+from cytearc.storage.diagnostics import declared_diagnostics
 from cytearc.storage.errors import ArtifactResolutionError
-from cytearc.storage.operation_revisions import OPERATION_REVISIONS
+from cytearc.storage.operation_revisions import (
+    OPERATION_REVISIONS,
+    applicable_revisions,
+)
 from cytearc.storage.schema import create_cell_data, create_zarr_count_assay
 from cytearc.utils.logging import logger
 from cytearc.writers.counts_t import finalize_writer_counts_t
@@ -1374,7 +1378,7 @@ _BLACKLIST_BEFORE_1_3 = (
 
 
 def test_hvg_revision_selects_variance_bounds_and_earlier_defaults() -> None:
-    (revision,) = OPERATION_REVISIONS["select_hvgs"]
+    revision = OPERATION_REVISIONS["select_hvgs"][0]
     applies = revision.applies
     assert (revision.revision, revision.release) == (2, "1.3.0")
     assert applies is not None
@@ -1414,45 +1418,79 @@ def test_hvg_revision_selects_variance_bounds_and_earlier_defaults() -> None:
         assert applies("feature_selection", parameters, {}) is expected
 
 
+def test_hvg_revision_3_adds_the_detection_ratio_to_every_selection() -> None:
+    revision = OPERATION_REVISIONS["select_hvgs"][1]
+
+    assert (revision.revision, revision.release, revision.applies) == (
+        3,
+        "1.5.0",
+        None,
+    )
+    assert revision.added_diagnostics == ("selectedDetectionRatio",)
+    assert "selectedDetectionRatio" in declared_diagnostics("select_hvgs")
+
+
+def _record_revision(store: DataStore, ref: Any, revision: int) -> None:
+    """Record ``revision`` in a selection's provenance, as an earlier release did."""
+    group = zarr.open_group(store.zw.store, mode="r+", path=artifact_path(ref))
+    provenance = dict(group.attrs["provenance"])
+    provenance.pop("revision", None)
+    if revision > 1:
+        provenance["revision"] = revision
+    group.attrs["provenance"] = provenance
+
+
 def test_hvg_selection_records_its_revision_and_recomputes_earlier_ones(
     banded,
 ) -> None:
     cells = banded.snapshot_cell_selection()
     options = {"min_cells": 0, "max_cells": np.inf, "top_n": 5, "blacklist": ""}
     bounded = banded.features.hvgs(cells, min_var=-1, show_plot=False, **options)
-    assert inspect_artifact(banded.zw, bounded).revision == 2
-
-    # A selection of the earlier code records no revision.
-    group = zarr.open_group(banded.zw.store, mode="r+", path=artifact_path(bounded))
-    provenance = dict(group.attrs["provenance"])
-    provenance.pop("revision")
-    group.attrs["provenance"] = provenance
-    recomputed = banded.features.hvgs(cells, min_var=-1, show_plot=False, **options)
-    assert recomputed != bounded
-    earlier = inspect_artifact(banded.zw, bounded)
-    assert earlier.revision == 1 and not earlier.is_current
-    assert [entry.revision for entry in earlier.superseded_by] == [2]
-
-    # A selection that the revision leaves out is reused.
     unbounded = banded.features.hvgs(cells, show_plot=False, **options)
-    assert inspect_artifact(banded.zw, unbounded).revision == 1
+    # Revision 3 applies to every selection, so every new one records it.
+    for ref in (bounded, unbounded):
+        assert inspect_artifact(banded.zw, ref).revision == 3
     assert banded.features.hvgs(cells, show_plot=False, **options) == unbounded
 
-    # The earlier defaults, requested explicitly, record the revision too.
-    defaults = banded.features.hvgs(
-        cells,
-        min_cells=20,
-        max_cells=70,
-        top_n=5,
-        blacklist=_BLACKLIST_BEFORE_1_3,
-        show_plot=False,
+    # Selections of the code before 1.3.0 record no revision. Revision 2
+    # supersedes the one with a variance bound, and revision 3 both.
+    for ref in (bounded, unbounded):
+        _record_revision(banded, ref, 1)
+    earlier = inspect_artifact(banded.zw, bounded)
+    assert earlier.revision == 1 and not earlier.is_current
+    assert [entry.revision for entry in earlier.superseded_by] == [2, 3]
+    assert [
+        entry.revision for entry in inspect_artifact(banded.zw, unbounded).superseded_by
+    ] == [3]
+    recomputed = banded.features.hvgs(cells, min_var=-1, show_plot=False, **options)
+    assert recomputed != bounded
+    assert inspect_artifact(banded.zw, recomputed).revision == 3
+    # Revision 3 alone supersedes a selection that 1.3.0 or 1.4.0 saved at 2.
+    _record_revision(banded, recomputed, 2)
+    assert inspect_artifact(banded.zw, recomputed).superseded_by == (
+        OPERATION_REVISIONS["select_hvgs"][1],
     )
-    assert inspect_artifact(banded.zw, defaults).revision == 2
-    # So do the earlier default bounds with another blacklist.
-    bounds = banded.features.hvgs(
-        cells, min_cells=20, max_cells=70, top_n=5, blacklist="", show_plot=False
-    )
-    assert inspect_artifact(banded.zw, bounds).revision == 2
+
+    # Revision 2 applies to the earlier defaults, requested explicitly, and to
+    # the earlier default bounds with another blacklist.
+    for blacklist in (_BLACKLIST_BEFORE_1_3, ""):
+        ref = banded.features.hvgs(
+            cells,
+            min_cells=20,
+            max_cells=70,
+            top_n=5,
+            blacklist=blacklist,
+            show_plot=False,
+        )
+        status = inspect_artifact(banded.zw, ref)
+        assert status.revision == 3
+        assert status.parameters is not None and status.inputs is not None
+        assert [
+            entry.revision
+            for entry in applicable_revisions(
+                "select_hvgs", ref.kind, status.parameters, status.inputs
+            )
+        ] == [2, 3]
 
 
 # Pipeline settings
@@ -1947,30 +1985,6 @@ def test_selected_detection_ratio_flags_a_selection_of_rarely_detected_genes(
     # about as widely as the median eligible gene.
     assert not rare & set(floored)
     assert floor_ratio > 0.9
-
-
-def test_a_selection_saved_with_earlier_diagnostics_is_computed_anew(
-    tmp_path,
-) -> None:
-    store = _store_of_batches(tmp_path / "hvg.zarr")
-    cells = store.snapshot_cell_selection()
-    saved = store.features.hvgs(cells, top_n=5, show_plot=False)
-    group = zarr.open_group(str(tmp_path / "hvg.zarr"))[artifact_path(saved)]
-    # As a selection saved before HVG selections recorded selectedDetectionRatio.
-    group.attrs["diagnostics"] = {
-        key: value
-        for key, value in group.attrs["diagnostics"].items()
-        if key != "selectedDetectionRatio"
-    }
-
-    recomputed = store.features.hvgs(cells, top_n=5, show_plot=False)
-
-    assert recomputed != saved
-    diagnostics = store.artifacts.inspect(recomputed).diagnostics
-    assert 0 < diagnostics["selectedDetectionRatio"]
-    np.testing.assert_array_equal(
-        store.artifacts.load(recomputed)["values"][:], group["values"][:]
-    )
 
 
 def test_a_selection_saved_without_diagnostics_is_computed_anew(tmp_path) -> None:

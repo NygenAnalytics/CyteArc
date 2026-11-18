@@ -1078,7 +1078,8 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
         the median number of selected cells that detect a selected gene over
         the same median for the genes it could select (detected, within the
         detection bounds and outside the blacklist), or None when none is
-        detected; and with ``batch``,
+        detected and for a selection that CyteArc 1.4.0 saved, which did not
+        measure it; and with ``batch``,
         ``batches``, ``batchesBelowTopN``, the batches with fewer candidates
         than ``top_n``, and ``batchBelowTopNExamples``, up to five of them with
         their candidate counts. When fewer than ``top_n`` genes are selected,

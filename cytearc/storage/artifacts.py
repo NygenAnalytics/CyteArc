@@ -740,7 +740,8 @@ class ArtifactStatus:
 
         They are the numbers that the operation recorded about what it read,
         kept, dropped and expected, empty when the operation records none or
-        the artifact does not exist.
+        the artifact does not exist. A diagnostic that a later revision of
+        the operation added is None when the artifact predates it.
 
         Raises:
             ValueError: If the operation records diagnostics and the artifact
@@ -750,7 +751,12 @@ class ArtifactStatus:
         """
         if not self.exists:
             return {}
-        return read_diagnostics(self.stored_diagnostics, self.operation, path=self.path)
+        return read_diagnostics(
+            self.stored_diagnostics,
+            self.operation,
+            path=self.path,
+            revision=self.revision,
+        )
 
     @property
     def revision(self) -> int | None:

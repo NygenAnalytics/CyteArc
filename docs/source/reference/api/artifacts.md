@@ -202,7 +202,7 @@ if numbers["unselectedBarcodes"] > 0.1 * numbers["fileBarcodes"]:
     print("A tenth of the clone file's barcodes are cells that the selection leaves out")
 ```
 
-An artifact that an earlier CyteArc saved without the diagnostics its operation now records is not reused: the next call computes it anew and leaves the old one in the store. Reading the old artifact, through `inspect(ref).diagnostics` or a loader, raises `ValueError` with the call that computes it anew.
+An artifact that an earlier CyteArc saved without the diagnostics its operation now records is not reused: the next call computes it anew and leaves the old one in the store. Reading the old artifact, through `inspect(ref).diagnostics` or a loader, raises `ValueError` with the call that computes it anew. A diagnostic that an operation gained in a later release is the exception: an artifact saved before it reads it as None, not measured, as an HVG selection that CyteArc 1.4.0 saved reads `selectedDetectionRatio`. Such an artifact still serves the calls that read it, and the call that saved it computes it anew instead of reusing it ([Diagnostics added after a release](../developers/operation-revisions#diagnostics-added-after-a-release)).
 
 ```{eval-rst}
 .. autoclass:: cytearc.DiagnosticWarning
