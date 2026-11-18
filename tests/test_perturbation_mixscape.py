@@ -39,7 +39,7 @@ from cytearc.storage.artifacts import artifact_group, inspect_artifact
 from cytearc.utils.logging import logger
 from tests.memory_helpers import named_budget
 from tests.perturbation_helpers import memory_screen, use_python_kernels, write_screen
-from tests.storage_helpers import copy_store, open_store, written
+from tests.storage_helpers import by_cell_id, copy_store, open_store, written
 
 N_A, N_B, N_C, N_CONTROL, N_GENES = 90, 60, 2, 150, 60
 # Guide 0 targets GENE_A, guide 1 GENE_B, guide 2 GENE_C, and guide 3 is
@@ -78,7 +78,9 @@ def _signature(store: DataStore, cells=None):
     labels = store.perturbation.labels(calls, controls=["NT"])
     rna_cells = store.select_measured_cells("RNA")
     coordinates = store.reduction.import_coordinates(
-        COORDINATES, cell_selection=rna_cells, name="X"
+        pd.DataFrame(COORDINATES, index=store.cells.fetch_all("ids")),
+        cell_selection=rna_cells,
+        name="X",
     )
     features = store.features.snapshot(feature_indexes=np.arange(5, N_GENES))
     return store.perturbation.signature(
@@ -192,7 +194,7 @@ def test_cells_outside_the_labels_are_unlabeled(store) -> None:
     # Labels of every cell but the last ten controls.
     keep = np.ones(N_CELLS, dtype=bool)
     keep[-11:-1] = False
-    store.cells.insert("labeled", keep)
+    store.cells.insert("labeled", by_cell_id(store.cells, keep))
     signature = _signature(store, store.snapshot_cell_selection("labeled"))
     result = store.perturbation.load_mixscape(store.perturbation.mixscape(signature))
     labels = result.cells["mixscape_class"]

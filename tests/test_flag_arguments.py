@@ -36,7 +36,7 @@ from cytearc.plotting import PlotOutputSettings
 from cytearc.regulons import ModuleParameters
 from cytearc.utils.arguments import bool_argument, optional_bool_argument
 from tests.stack_modules import STACK_MODULES
-from tests.storage_helpers import open_store, write_count_store
+from tests.storage_helpers import by_cell_id, open_store, write_count_store
 
 
 class _Placeholder:
@@ -541,6 +541,9 @@ def test_a_numpy_false_force_keeps_the_protected_columns(flag_store) -> None:
     before = flag_store.cells.fetch_all("I").tolist()
     with pytest.raises(ValueError, match="I is a protected column name"):
         flag_store.cells.insert(
-            "I", np.zeros(len(before), dtype=bool), overwrite=True, force=np.False_
+            "I",
+            by_cell_id(flag_store.cells, np.zeros(len(before), dtype=bool)),
+            overwrite=True,
+            force=np.False_,
         )
     assert flag_store.cells.fetch_all("I").tolist() == before

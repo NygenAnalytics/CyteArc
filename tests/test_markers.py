@@ -36,6 +36,7 @@ from cytearc.features.markers.regression import (
 )
 from cytearc.storage.artifacts import ArtifactRef
 from cytearc.features.statistical import adjust_pvalues
+from tests.storage_helpers import by_cell_id
 
 
 def _gene_major_stats(
@@ -94,7 +95,9 @@ def test_marker_public_contract_requires_explicit_artifacts() -> None:
 
 def _cluster_labels(store, values: np.ndarray) -> ArtifactRef:
     """Freeze one label per active cell as a cluster-label artifact."""
-    store.cells.insert("test_clusters", np.asarray(values), overwrite=True)
+    store.cells.insert(
+        "test_clusters", by_cell_id(store.cells, np.asarray(values)), overwrite=True
+    )
     return store.snapshot_cluster_labels(
         "test_clusters", cell_selection=store.snapshot_cell_selection()
     )
@@ -3114,8 +3117,14 @@ def test_marker_search_refuses_clusters_of_an_empty_cell_selection(
 ) -> None:
     store, *_ = _saved_marker_table(marker_table, tmp_path)
     saved = set(store.artifacts.list(kind="marker_table", from_assay="RNA"))
-    store.cells.insert("none", np.zeros(store.cells.N, dtype=bool), overwrite=True)
-    store.cells.insert("labels", _dtype_counts()[1], overwrite=True)
+    store.cells.insert(
+        "none",
+        by_cell_id(store.cells, np.zeros(store.cells.N, dtype=bool)),
+        overwrite=True,
+    )
+    store.cells.insert(
+        "labels", by_cell_id(store.cells, _dtype_counts()[1]), overwrite=True
+    )
     clusters = store.snapshot_cluster_labels(
         "labels", cell_selection=store.snapshot_cell_selection("none")
     )

@@ -23,6 +23,7 @@ from cytearc.utils.logging import collect_warnings
 
 from .test_graph_coverage import _memory_graph_store
 from .test_graph_feature_projection import _native_chain
+from tests.storage_helpers import by_cell_id
 
 
 def _y_graph() -> tuple[csr_matrix, np.ndarray, np.ndarray]:
@@ -913,7 +914,9 @@ def _scored_y_store(*, include_disconnected_cells: bool = False) -> _ScoredStore
     graph_group.create_array("edges", data=edges)
     graph_group.create_array("weights", data=np.full(len(edges), 0.5))
     graph_group.attrs.update({"n_cells": len(cell_ids), "n_neighbors": 2})
-    pseudotime = store.trajectory.pseudotime(graph_ref, ss_vec=source_sink)
+    pseudotime = store.trajectory.pseudotime(
+        graph_ref, ss_vec=by_cell_id(store.cells, source_sink)
+    )
     labels = resolve_metadata_snapshot(
         store.zw,
         values=label_values,

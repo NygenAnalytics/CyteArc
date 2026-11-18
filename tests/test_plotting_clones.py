@@ -37,6 +37,7 @@ from tests.clone_helpers import (
 )
 from tests.clone_truth import CELL_TYPES, N_CELLS, clone_truth, receptor_truth
 from tests.storage_helpers import (
+    by_cell_id,
     insert_nullable_cell_column,
     open_store,
     write_count_store,
@@ -55,10 +56,14 @@ def plotted(tmp_path_factory):
     path = tmp_path_factory.mktemp("clone_plot") / "store.zarr"
     write_count_store(str(path), {"RNA": np.ones((6, 3), dtype=int)}, "uint16")
     store = open_store(path)
-    store.cells.insert("lineage", np.asarray(CLONES, dtype=object))
-    store.cells.insert("group", np.asarray(GROUPS, dtype=object))
-    store.cells.insert("every_cell", np.ones(6, dtype=bool))
-    store.cells.insert("first_four", np.arange(6) < 4)
+    store.cells.insert(
+        "lineage", by_cell_id(store.cells, np.asarray(CLONES, dtype=object))
+    )
+    store.cells.insert(
+        "group", by_cell_id(store.cells, np.asarray(GROUPS, dtype=object))
+    )
+    store.cells.insert("every_cell", by_cell_id(store.cells, np.ones(6, dtype=bool)))
+    store.cells.insert("first_four", by_cell_id(store.cells, np.arange(6) < 4))
     cells = store.snapshot_cell_selection("every_cell")
     clones = store.clones.from_column("lineage", cell_selection=cells)
     return store, clones
@@ -155,7 +160,9 @@ def test_a_label_artifact_of_fewer_cells_leaves_the_others_ungrouped(plotted) ->
 def test_the_plot_refuses_clones_it_cannot_draw(plotted) -> None:
     store, clones = plotted
     figures = set(plt.get_fignums())
-    store.cells.insert("only_c4", np.arange(6) == 4, overwrite=True)
+    store.cells.insert(
+        "only_c4", by_cell_id(store.cells, np.arange(6) == 4), overwrite=True
+    )
     with pytest.raises(ValueError, match="^max_clones must be at least 1$"):
         clone_abundance(store, clones, max_clones=0, show=False)
     with pytest.raises(TypeError, match="^max_clones must be an integer$"):
@@ -172,7 +179,9 @@ def test_the_plot_refuses_clones_it_cannot_draw(plotted) -> None:
     with pytest.raises(ValueError, match="^No cell has a clone, so there is nothing"):
         clone_abundance(store, empty, show=False)
     store.cells.insert(
-        "c4_group", np.where(np.arange(6) == 4, "z", None), overwrite=True
+        "c4_group",
+        by_cell_id(store.cells, np.where(np.arange(6) == 4, "z", None)),
+        overwrite=True,
     )
     with pytest.raises(ValueError, match="^No cell with a group has a clone"):
         clone_abundance(store, clones, group_by="c4_group", show=False)
@@ -185,9 +194,13 @@ def test_groups_named_like_the_tables_columns_draw(plotted, name) -> None:
     # c1's group takes the name, beside x: c0 and c3 in x, c1 in the named
     # group, and c2 in x too.
     named = ["x", name, "x", "x", "x", None]
-    store.cells.insert("named_group", np.asarray(named), overwrite=True)
     store.cells.insert(
-        "neutral_group", np.asarray(["x", "w", "x", "x", "x", None]), overwrite=True
+        "named_group", by_cell_id(store.cells, np.asarray(named)), overwrite=True
+    )
+    store.cells.insert(
+        "neutral_group",
+        by_cell_id(store.cells, np.asarray(["x", "w", "x", "x", "x", None])),
+        overwrite=True,
     )
     found = clone_abundance(store, clones, group_by="named_group", show=False)
     neutral = clone_abundance(store, clones, group_by="neutral_group", show=False)
@@ -228,8 +241,14 @@ def test_plot_groups_align_labels_to_the_artifacts_cells(plotted) -> None:
 
 def test_plot_groups_align_labels_to_clones_of_later_cells(plotted) -> None:
     store, _clones = plotted
-    store.cells.insert("first_five", np.arange(6) < 5, overwrite=True)
-    store.cells.insert("middle_three", np.isin(np.arange(6), [2, 3, 4]), overwrite=True)
+    store.cells.insert(
+        "first_five", by_cell_id(store.cells, np.arange(6) < 5), overwrite=True
+    )
+    store.cells.insert(
+        "middle_three",
+        by_cell_id(store.cells, np.isin(np.arange(6), [2, 3, 4])),
+        overwrite=True,
+    )
     labels = store.snapshot_cluster_labels(
         "group", cell_selection=store.snapshot_cell_selection("first_five")
     )
@@ -248,7 +267,9 @@ def test_clones_of_equal_size_list_in_rank_order(plotted) -> None:
     # text would put 10 first.
     store.cells.insert(
         "tied",
-        np.asarray(["10", "10", "9", "9", "x", ""], dtype=object),
+        by_cell_id(
+            store.cells, np.asarray(["10", "10", "9", "9", "x", ""], dtype=object)
+        ),
         overwrite=True,
     )
     tied = store.clones.from_column(
@@ -1075,7 +1096,7 @@ def test_the_overlap_plot_prints_the_values_of_at_most_12_groups(truth_plot) -> 
     assert len(crossed.axes["matrix"].texts) == 30
     plt.close(crossed.figure)
     cell_ids = np.asarray([f"c{at:02d}" for at in range(N_CELLS)], dtype=object)
-    store.cells.insert("cell", cell_ids, overwrite=True)
+    store.cells.insert("cell", by_cell_id(store.cells, cell_ids), overwrite=True)
     each = clone_overlap(
         store, store.clones.overlap(clones, group_by="cell"), index="shared", show=False
     )
@@ -1234,7 +1255,9 @@ def test_tracking_groups_by_a_column_named_like_the_tables_columns(
     truth_plot, name
 ) -> None:
     store, clones = truth_plot.store, truth_plot.clones
-    store.cells.insert(name, TRUTH.samples.astype(object), overwrite=True)
+    store.cells.insert(
+        name, by_cell_id(store.cells, TRUTH.samples.astype(object)), overwrite=True
+    )
     # The tracking's labels stay in its keys, so the figure's table gives
     # each clone its label beside them, and the figure places the samples as
     # a column of any other name does.
@@ -1291,16 +1314,34 @@ def many_groups(tmp_path_factory) -> SimpleNamespace:
     write_count_store(str(path), {"RNA": np.ones((N_MANY, 3), dtype=int)}, "uint16")
     store = open_store(path)
     store.cells.insert(
-        "clone", np.asarray([f"k{i // 2:03d}" for i in range(N_MANY)], dtype=object)
+        "clone",
+        by_cell_id(
+            store.cells,
+            np.asarray([f"k{i // 2:03d}" for i in range(N_MANY)], dtype=object),
+        ),
     )
     store.cells.insert(
-        "cell", np.asarray([f"cell{i:03d}" for i in range(N_MANY)], dtype=object)
+        "cell",
+        by_cell_id(
+            store.cells,
+            np.asarray([f"cell{i:03d}" for i in range(N_MANY)], dtype=object),
+        ),
     )
-    store.cells.insert("half", np.asarray([f"h{i // 100}" for i in range(N_MANY)]))
-    store.cells.insert("eighth", np.asarray([f"e{i % 8}" for i in range(N_MANY)]))
-    store.cells.insert("every_cell", np.ones(N_MANY, dtype=bool))
+    store.cells.insert(
+        "half",
+        by_cell_id(store.cells, np.asarray([f"h{i // 100}" for i in range(N_MANY)])),
+    )
+    store.cells.insert(
+        "eighth",
+        by_cell_id(store.cells, np.asarray([f"e{i % 8}" for i in range(N_MANY)])),
+    )
+    store.cells.insert(
+        "every_cell", by_cell_id(store.cells, np.ones(N_MANY, dtype=bool))
+    )
     for n_first in (12, 13, 40, 41):
-        store.cells.insert(f"first_{n_first}", np.arange(N_MANY) < n_first)
+        store.cells.insert(
+            f"first_{n_first}", by_cell_id(store.cells, np.arange(N_MANY) < n_first)
+        )
     clones = store.clones.from_column(
         "clone", cell_selection=store.snapshot_cell_selection("every_cell")
     )
@@ -1560,8 +1601,12 @@ def _late_cells(clone: int) -> dict[str, int]:
 @pytest.fixture(scope="module")
 def fates_plot(truth_plot) -> SimpleNamespace:
     store = truth_plot.store
-    store.cells.insert("is_d2", TRUTH.samples == "d2", overwrite=True)
-    store.cells.insert("is_d4", TRUTH.samples == "d4", overwrite=True)
+    store.cells.insert(
+        "is_d2", by_cell_id(store.cells, TRUTH.samples == "d2"), overwrite=True
+    )
+    store.cells.insert(
+        "is_d4", by_cell_id(store.cells, TRUTH.samples == "d4"), overwrite=True
+    )
     bias = store.clones.fate_bias(
         truth_plot.clones,
         group_by="cell_type",
@@ -1712,8 +1757,12 @@ def test_the_fates_plot_names_at_most_40_clones(many_groups) -> None:
     store = many_groups.store
     # The even cell of each clone is early and the odd one late, in one of
     # four fates.
-    store.cells.insert("even_cell", np.arange(N_MANY) % 2 == 0, overwrite=True)
-    store.cells.insert("odd_cell", np.arange(N_MANY) % 2 == 1, overwrite=True)
+    store.cells.insert(
+        "even_cell", by_cell_id(store.cells, np.arange(N_MANY) % 2 == 0), overwrite=True
+    )
+    store.cells.insert(
+        "odd_cell", by_cell_id(store.cells, np.arange(N_MANY) % 2 == 1), overwrite=True
+    )
     bias = store.clones.fate_bias(
         many_groups.clones,
         group_by="eighth",
@@ -1747,7 +1796,9 @@ def test_the_fates_plot_draws_fates_named_like_its_tables_columns(
     # tables hold as a value; the figure and the late cells stay those of the
     # cell types.
     fate = np.where(TRUTH.cell_types == "Monocyte", name, TRUTH.cell_types)
-    store.cells.insert("named_fate", fate.astype(object), overwrite=True)
+    store.cells.insert(
+        "named_fate", by_cell_id(store.cells, fate.astype(object)), overwrite=True
+    )
     bias = store.clones.fate_bias(
         fates_plot.clones,
         group_by="named_fate",
@@ -1849,7 +1900,9 @@ def test_default_figure_sizes_follow_the_clones_and_groups_drawn(
     # receptor_qc stands its three panels in one column at the page width,
     # however many groups it draws: a label for each of the truth's 48 cells.
     store = truth_plot.store
-    store.cells.insert("own", TRUTH.cell_ids.astype(object), overwrite=True)
+    store.cells.insert(
+        "own", by_cell_id(store.cells, TRUTH.cell_ids.astype(object)), overwrite=True
+    )
     receptors = store.artifacts.inspect(truth_clonotypes).input_ref("receptors")
     qc = store.plots.receptor_qc(receptors, group_by="own", show=False)
     size = tuple(qc.figure.get_size_inches())
@@ -1863,8 +1916,12 @@ def test_each_summarys_figure_titles_its_named_artifact(truth_plot) -> None:
 
     store, clones, labels = truth_plot.store, truth_plot.clones, truth_plot.labels
     named = NamedCellArtifact("Cell type", labels)
-    store.cells.insert("is_d2", TRUTH.samples == "d2", overwrite=True)
-    store.cells.insert("is_d4", TRUTH.samples == "d4", overwrite=True)
+    store.cells.insert(
+        "is_d2", by_cell_id(store.cells, TRUTH.samples == "d2"), overwrite=True
+    )
+    store.cells.insert(
+        "is_d4", by_cell_id(store.cells, TRUTH.samples == "d4"), overwrite=True
+    )
     # Each summary groups by the named artifact, and its figure takes the
     # name; the record keeps the artifact alone.
     cases = [

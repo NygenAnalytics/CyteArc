@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
+import pandas as pd
 import zarr
 from numpy.typing import DTypeLike
 
@@ -162,6 +163,44 @@ def rechunk_feature_tables(location: str | Path) -> None:
         table = root[assay]["featureData"]
         for name in list(table.array_keys()):
             rechunk_column(table, name, rows=max(1, int(table[name].shape[0])))
+
+
+def by_cell_id(
+    cells: Any, values: Any, key: str = "I", *, rows: Any = None
+) -> pd.Series | pd.DataFrame:
+    """Key per-cell values in store order by cell ID, as public calls take them.
+
+    Values for every cell take the IDs of every cell. With ``rows``, values
+    for those store rows take their IDs; otherwise other values are for the
+    cells that ``key`` selects, as :meth:`MetaData.insert` reads them, and
+    take those cells' IDs in store order. Two-dimensional values and a
+    DataFrame become a DataFrame indexed by the IDs, other values a Series.
+    A Series is refused, since it already carries an index of its own.
+    """
+    if isinstance(values, pd.Series):
+        raise TypeError("by_cell_id keys values in store order, not a Series")
+    # A list reaches a call as the array that NumPy makes of it, as a list
+    # passed directly did, so that None stays missing among numbers.
+    if isinstance(values, list | tuple):
+        values = np.asarray(values)
+    ids = cells.fetch_all("ids")
+    if rows is not None:
+        ids = ids[np.asarray(rows)]
+    elif len(values) != cells.N:
+        ids = cells.fetch("ids", key)
+    if isinstance(values, pd.DataFrame):
+        return values.set_axis(pd.Index(ids), axis=0)
+    if np.ndim(values) == 2:
+        return pd.DataFrame(values, index=ids)
+    return pd.Series(values, index=ids)
+
+
+def graph_rows(store: Any, graph: Any) -> np.ndarray:
+    """Return the store rows of a graph's cells, in store order."""
+    from cytearc.graph.feature_projection import graph_cell_selection
+
+    selection = graph_cell_selection(store.zw, graph)
+    return np.flatnonzero(np.asarray(store.artifacts.load(selection)["values"][:]))
 
 
 def insert_nullable_cell_column(

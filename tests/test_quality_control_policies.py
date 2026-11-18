@@ -41,6 +41,7 @@ from tests.qc_helpers import (
     reference_mad_keep,
     write_small_store,
 )
+from tests.storage_helpers import by_cell_id
 
 LOG_TWO_SIDED = {"transform": "log1p", "bound_direction": "two_sided"}
 RAW_UPPER = {"transform": "identity", "bound_direction": "upper"}
@@ -344,8 +345,13 @@ def test_scanpy_named_columns_need_explicit_policies_to_match_cytearc_columns(sm
     # Imported copies of nCounts and nFeatures under scanpy names. Their names
     # do not say what they hold, so they get raw two-sided bounds with a
     # warning, as before; explicit policies give the bounds of the originals.
-    small.cells.insert("total_counts", small.cells.fetch_all("RNA_nCounts"))
-    small.cells.insert("n_genes_by_counts", small.cells.fetch_all("RNA_nFeatures"))
+    small.cells.insert(
+        "total_counts", by_cell_id(small.cells, small.cells.fetch_all("RNA_nCounts"))
+    )
+    small.cells.insert(
+        "n_genes_by_counts",
+        by_cell_id(small.cells, small.cells.fetch_all("RNA_nFeatures")),
+    )
     reference = small.qc.auto_filter(attrs=["RNA_nCounts", "RNA_nFeatures"])
 
     with pytest.warns(UserWarning, match="come from their names") as caught:
@@ -378,14 +384,16 @@ def test_scanpy_named_columns_need_explicit_policies_to_match_cytearc_columns(sm
 
 def test_metric_kinds_come_from_preparation_and_feature_percentages(prepared):
     has_counts = QC_VALUES.sum(axis=1) > 0
-    prepared.cells.insert("has_counts", has_counts)
+    prepared.cells.insert("has_counts", by_cell_id(prepared.cells, has_counts))
     cells = prepared.snapshot_cell_selection("has_counts")
     mito = prepared.qc.feature_percentage(
         cells, prepared.features.snapshot(feature_indexes=[0])
     )
     computed = NamedCellArtifact("percentHb", mito)
     imported = _quality_metric(prepared, cells, "percentHb2", np.arange(5.0))
-    prepared.cells.insert("RNA_percentOther", np.arange(6.0))
+    prepared.cells.insert(
+        "RNA_percentOther", by_cell_id(prepared.cells, np.arange(6.0))
+    )
 
     kinds = prepared._metric_kinds(
         [
@@ -414,7 +422,7 @@ def test_feature_percentage_artifacts_get_an_upper_bound(prepared):
     # cell with an unusually low percentage is no outlier. Its name used to
     # give it raw two-sided bounds.
     has_counts = QC_VALUES.sum(axis=1) > 0
-    prepared.cells.insert("has_counts", has_counts)
+    prepared.cells.insert("has_counts", by_cell_id(prepared.cells, has_counts))
     cells = prepared.snapshot_cell_selection("has_counts")
     mito = prepared.qc.feature_percentage(
         cells, prepared.features.snapshot(feature_indexes=[0])
@@ -753,7 +761,7 @@ def test_matching_bounds_and_open_sides_pass_for_every_column_kind():
 
 
 def test_text_bounds_on_numeric_columns_fail_before_any_read(prepared, monkeypatch):
-    prepared.cells.insert("label", np.array(list("abcabc")))
+    prepared.cells.insert("label", by_cell_id(prepared.cells, np.array(list("abcabc"))))
 
     def unread(*args, **kwargs):
         raise AssertionError("metrics were read")
@@ -818,7 +826,9 @@ def test_filter_bounds_are_exclusive_unless_kept(small):
 
 def test_feature_percentage_reads_only_the_selected_features(prepared, monkeypatch):
     # Every cell, including the one without counts, whose percentage is NaN.
-    prepared.cells.insert("every_cell", np.ones(len(QC_VALUES), dtype=bool))
+    prepared.cells.insert(
+        "every_cell", by_cell_id(prepared.cells, np.ones(len(QC_VALUES), dtype=bool))
+    )
     cells = prepared.snapshot_cell_selection("every_cell")
     features = prepared.features.snapshot(feature_indexes=[0, 3])
     streamed: list[tuple[int, int]] = []

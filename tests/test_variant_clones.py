@@ -14,7 +14,7 @@ import zarr
 from sklearn.metrics import adjusted_rand_score
 
 from tests.clone_helpers import every_cell
-from tests.storage_helpers import copy_store, open_store
+from tests.storage_helpers import by_cell_id, copy_store, open_store
 from tests.variant_helpers import (
     clone_band_budget,
     write_variant_store,
@@ -183,15 +183,18 @@ def test_two_within_columns_keep_every_combination_apart(store) -> None:
     # A second column across the samples: each clone holds the cells of one
     # sample and one half, as a single column of both labels would group them.
     halves = np.where(np.arange(TRUTH.n_cells) % 3 == 0, "x", "y").astype(object)
-    store.cells.insert("half", halves)
+    store.cells.insert("half", by_cell_id(store.cells, halves))
     store.cells.insert(
         "sample_half",
-        np.asarray(
-            [
-                f"{sample}-{half}"
-                for sample, half in zip(TRUTH.clones.samples, halves, strict=True)
-            ],
-            dtype=object,
+        by_cell_id(
+            store.cells,
+            np.asarray(
+                [
+                    f"{sample}-{half}"
+                    for sample, half in zip(TRUTH.clones.samples, halves, strict=True)
+                ],
+                dtype=object,
+            ),
         ),
     )
     clones = store.variants.frequency_clones(selection, within=["sample", "half"])
@@ -205,7 +208,9 @@ def test_two_within_columns_keep_every_combination_apart(store) -> None:
     assert single != clones
     assert store.artifacts.inspect(clones).parameters["within"] == ["sample", "half"]
     # Either column's labels enter the identity.
-    store.cells.insert("half", halves[::-1].copy(), overwrite=True)
+    store.cells.insert(
+        "half", by_cell_id(store.cells, halves[::-1].copy()), overwrite=True
+    )
     assert (
         store.variants.frequency_clones(selection, within=["sample", "half"]) != clones
     )
@@ -217,7 +222,11 @@ def test_groups_smaller_than_a_neighborhood_are_warned_of(store) -> None:
     _counts, selection = _inputs(store)
     # The first four cells in a group of their own, and the others in one.
     store.cells.insert(
-        "tiny", np.where(np.arange(TRUTH.n_cells) < 4, "few", "many").astype(object)
+        "tiny",
+        by_cell_id(
+            store.cells,
+            np.where(np.arange(TRUTH.n_cells) < 4, "few", "many").astype(object),
+        ),
     )
     expected = (
         "Of the 2 within groups, 1 holds fewer scored cells than n_neighbors=10, "
@@ -251,7 +260,9 @@ def test_groups_smaller_than_a_neighborhood_are_warned_of(store) -> None:
     # Statistics of 120 of the counts' cells score only those, which are
     # fewer than 121, though the counts hold 230.
     counts, _selection = _inputs(store)
-    store.cells.insert("first_120", np.arange(TRUTH.n_cells) < 120)
+    store.cells.insert(
+        "first_120", by_cell_id(store.cells, np.arange(TRUTH.n_cells) < 120)
+    )
     scored = store.variants.informative(
         counts,
         cell_selection=store.snapshot_cell_selection("first_120"),
@@ -303,7 +314,7 @@ def test_scored_cells_without_a_label_are_refused(store) -> None:
     counts, selection = _inputs(store)
     groups = TRUTH.clones.samples.astype(object).copy()
     groups[:10] = None
-    store.cells.insert("donor", groups)
+    store.cells.insert("donor", by_cell_id(store.cells, groups))
     with pytest.raises(
         ValueError,
         match="no label for 10 cells with counts that the statistics scored",
@@ -311,7 +322,7 @@ def test_scored_cells_without_a_label_are_refused(store) -> None:
         store.variants.frequency_clones(selection, within="donor")
     # A cell outside the selection's statistics needs no label: the
     # statistics of the labeled cells alone call clones within the donors.
-    store.cells.insert("labeled", ~pd.isna(groups))
+    store.cells.insert("labeled", by_cell_id(store.cells, ~pd.isna(groups)))
     labeled = store.variants.informative(
         counts, cell_selection=store.snapshot_cell_selection("labeled"), preset="atac"
     )
@@ -333,11 +344,15 @@ def test_clones_are_reused_and_follow_their_arguments(store) -> None:
     assert again != first
     np.testing.assert_array_equal(_called(store, again), _called(store, first))
     # Editing the within column gives new clones.
-    store.cells.insert("donor", TRUTH.clones.samples.astype(object))
+    store.cells.insert(
+        "donor", by_cell_id(store.cells, TRUTH.clones.samples.astype(object))
+    )
     grouped = store.variants.frequency_clones(selection, within="donor")
     store.cells.insert(
         "donor",
-        np.where(TRUTH.clones.samples == "d2", "a", "b").astype(object),
+        by_cell_id(
+            store.cells, np.where(TRUTH.clones.samples == "d2", "a", "b").astype(object)
+        ),
         overwrite=True,
     )
     assert store.variants.frequency_clones(selection, within="donor") != grouped
@@ -363,7 +378,7 @@ def test_clones_do_not_depend_on_threads_or_budget(store, tmp_path) -> None:
 def test_clones_of_scattered_cells_do_not_depend_on_the_budget(store) -> None:
     counts, _selection = _inputs(store)
     in_d2 = TRUTH.clones.samples == "d2"
-    store.cells.insert("in_d2", in_d2)
+    store.cells.insert("in_d2", by_cell_id(store.cells, in_d2))
     selection = store.variants.informative(
         counts, cell_selection=store.snapshot_cell_selection("in_d2"), preset="atac"
     )

@@ -161,8 +161,9 @@ per_cell = pd.Series(cluster_values).map(labels).fillna("unresolved").to_numpy()
 print(pd.Series(per_cell).value_counts())
 annotation = np.full(ds.cells.N, "not analyzed", dtype=object)
 annotation[in_run] = per_cell
-ds.cells.insert("annotation_v1", annotation, overwrite=True)  # live column, full cell axis
-ds.cells.insert("annotation_v1_cells", in_run, overwrite=True)
+ids = ds.cells.fetch_all("ids")  # cell tables take values keyed by cell ID
+ds.cells.insert("annotation_v1", pd.Series(annotation, index=ids), overwrite=True)  # full cell axis
+ds.cells.insert("annotation_v1_cells", pd.Series(in_run, index=ids), overwrite=True)
 named = sorted(int(c) for c, name in labels.items() if name != "unresolved")
 keep = ds.select_cells(clusters, include=named) if named else run["analysis_cell_selection"]
 ```

@@ -41,6 +41,7 @@ from tests.test_pipeline_plan import (
     read_only_plan,
 )
 from tests.test_pipeline_run_foundation import _completed_run, _root
+from tests.storage_helpers import by_cell_id
 
 # Two Leiden candidates, UMAP and markers, kept small: 200 genes and 5 PCs.
 SETTINGS: dict[str, Any] = {
@@ -70,7 +71,7 @@ def completed(datastore_zarr_root: str, tmp_path_factory) -> SimpleNamespace:
     shutil.copytree(datastore_zarr_root, location)
     datastore = DataStore(str(location), default_assay="RNA")
     batches = np.where(np.arange(datastore.cells.N) % 2 == 0, "a", "b")
-    datastore.cells.insert("batch", batches)
+    datastore.cells.insert("batch", by_cell_id(datastore.cells, batches))
     run = datastore.pipeline.rna(label="baseline", **SETTINGS)
     return SimpleNamespace(location=location, datastore=datastore, run=run)
 

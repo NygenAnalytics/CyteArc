@@ -23,6 +23,7 @@ from cytearc.storage.selections import (
     resolve_generated_selection_artifact,
 )
 from tests.test_mapping_reference import MappingStoreSource, build_mapping_store
+from tests.storage_helpers import by_cell_id
 
 
 def _snapshot_store(path: str) -> dict[str, bytes]:
@@ -50,6 +51,13 @@ def reference_store(mapping_source, tmp_path) -> DataStore:
 
 def _plain_reference(datastore, source: MappingStoreSource):
     return datastore.mapping.load_reference(source.reference)
+
+
+def _query_batches(query, reference, batches: pd.DataFrame) -> pd.DataFrame:
+    """Key the batches of the first selected query cells by cell ID."""
+    selected = query.artifacts.load(reference.cell_selection)["values"][:]
+    rows = np.flatnonzero(np.asarray(selected, dtype=bool))[: len(batches)]
+    return by_cell_id(query.cells, batches, rows=rows)
 
 
 def _symphony_reference(datastore, source: MappingStoreSource):
@@ -559,7 +567,9 @@ def test_mapping_guards_precede_query_writes(
         writable.mapping.run(
             reference,
             reference.cell_selection,
-            query_batches=pd.DataFrame({"batch": ["a"]}),
+            query_batches=pd.DataFrame(
+                {"batch": ["a"]}, index=writable.cells.fetch_all("ids")[:1]
+            ),
         )
     assert _snapshot_store(writable.zarr_loc) == writable_before
 
@@ -573,7 +583,7 @@ def test_mapping_guards_precede_query_writes(
 
     writable.cells.insert(
         "empty_mapping_selection",
-        np.zeros(writable.cells.N, dtype=bool),
+        by_cell_id(writable.cells, np.zeros(writable.cells.N, dtype=bool)),
         overwrite=True,
     )
     empty_selection = writable.snapshot_cell_selection("empty_mapping_selection")
@@ -706,7 +716,9 @@ def subset_fitted_pca(tmp_path_factory) -> tuple[Path, ArtifactRef]:
         str(path), default_assay="RNA", min_features_per_cell=0, nthreads=1
     )
     cells = datastore.snapshot_cell_selection("I")
-    datastore.cells.insert("pca_fit", np.arange(len(counts)) < 15)
+    datastore.cells.insert(
+        "pca_fit", by_cell_id(datastore.cells, np.arange(len(counts)) < 15)
+    )
     fit_cells = datastore.snapshot_cell_selection("pca_fit")
     features = datastore.features.universe(from_assay="RNA")
     normalized = datastore.features.normalize(cells, features)
@@ -732,7 +744,10 @@ def test_subset_fitted_pca_center_survives_mapping_reference_reload(
     assert np.linalg.norm(center) > 0.5
     coordinates = reduction
     if method == "symphony":
-        datastore.cells.insert("batch", np.where(np.arange(n_cells) % 2, "a", "b"))
+        datastore.cells.insert(
+            "batch",
+            by_cell_id(datastore.cells, np.where(np.arange(n_cells) % 2, "a", "b")),
+        )
         coordinates = datastore.reduction.harmony(
             reduction, ["batch"], harmony_params={"n_clusters": 2}
         )
@@ -783,7 +798,10 @@ def test_self_mapping_recovers_the_reference_graph_and_labels(
 ):
     reference_store.cells.insert(
         "mapping_labels",
-        np.array([f"c{index % 7}" for index in range(reference_store.cells.N)]),
+        by_cell_id(
+            reference_store.cells,
+            np.array([f"c{index % 7}" for index in range(reference_store.cells.N)]),
+        ),
         overwrite=True,
     )
     reference = _plain_reference(reference_store, mapping_source)
@@ -883,7 +901,8 @@ def test_symphony_mapping_validates_batches_and_persists_diagnostics(
         ),
         (
             pd.DataFrame({"batch": ["a"] * (n_cells - 1)}),
-            "one row per selected query cell",
+            r"the ids of the \d+ selected query cells, each once; 1 such ids have no "
+            "label",
         ),
         (
             pd.DataFrame(
@@ -903,7 +922,7 @@ def test_symphony_mapping_validates_batches_and_persists_diagnostics(
             query.mapping.run(
                 reference,
                 reference.cell_selection,
-                query_batches=batches,
+                query_batches=_query_batches(query, reference, batches),
             )
         assert _snapshot_store(query.zarr_loc) == before
 
@@ -959,7 +978,7 @@ def test_symphony_mapping_validates_batches_and_persists_diagnostics(
     result_ref = query.mapping.run(
         reference,
         reference.cell_selection,
-        query_batches=batches,
+        query_batches=_query_batches(query, reference, batches),
     )
     result = query.mapping.load_result(result_ref, reference=reference)
 
@@ -987,9 +1006,19 @@ def test_symphony_mapping_validates_batches_and_persists_diagnostics(
     reused = query.mapping.run(
         reference,
         reference.cell_selection,
-        query_batches=batches.copy(),
+        query_batches=_query_batches(query, reference, batches.copy()),
     )
     assert reused == result_ref
+    # Batches keyed by cell ID in reverse order are the batches of the same
+    # cells, so they reuse the projection too.
+    assert (
+        query.mapping.run(
+            reference,
+            reference.cell_selection,
+            query_batches=_query_batches(query, reference, batches).iloc[::-1],
+        )
+        == result_ref
+    )
     assert projected_rows == n_cells
     assert len(files) == 1
 
@@ -1024,7 +1053,13 @@ def test_symphony_mapping_matches_gathered_query_offsets(
         query = _copied_query(reference_store, tmp_path / f"{name}.zarr")
         for query_batches in (batches, None):
             result_ref = query.mapping.run(
-                reference, reference.cell_selection, query_batches=query_batches
+                reference,
+                reference.cell_selection,
+                query_batches=(
+                    None
+                    if query_batches is None
+                    else _query_batches(query, reference, query_batches)
+                ),
             )
             results.append(query.mapping.load_result(result_ref, reference=reference))
 
@@ -1073,7 +1108,10 @@ def test_zero_overlap_query_cells_are_uninformative(
 ):
     reference_store.cells.insert(
         "mapping_labels",
-        np.array([f"c{index % 3}" for index in range(reference_store.cells.N)]),
+        by_cell_id(
+            reference_store.cells,
+            np.array([f"c{index % 3}" for index in range(reference_store.cells.N)]),
+        ),
         overwrite=True,
     )
     reference = _plain_reference(reference_store, mapping_source)
@@ -1115,7 +1153,7 @@ def test_zero_overlap_query_cells_are_uninformative(
     scores = dict(
         query.mapping.compute_scores(
             result_ref,
-            target_groups=groups,
+            target_groups=pd.Series(groups, index=transfer.cell_ids),
             reference=reference,
             log_transform=False,
         )
@@ -1141,7 +1179,9 @@ def test_zero_overlap_query_cells_are_uninformative(
     # Symphony statistics use only informative cells, so mapping the
     # informative cells alone reproduces their corrected neighbors.
     symphony_reference = _symphony_reference(reference_store, mapping_source)
-    query.cells.insert("measured_cells", ~expected, overwrite=True)
+    query.cells.insert(
+        "measured_cells", by_cell_id(query.cells, ~expected), overwrite=True
+    )
     measured_cells = query.snapshot_cell_selection("measured_cells")
     with_empty = query.mapping.load_result(
         query.mapping.run(symphony_reference, cells, save_k=3),
@@ -1286,7 +1326,15 @@ def test_run_mapping_rejects_invalid_arguments_before_writing(
         (
             {"query_batches": {"batch": ["a"]}},
             TypeError,
-            "query_batches must be a pandas DataFrame or None",
+            r"^mapping\.run\(query_batches=\) takes per-cell values only as a pandas "
+            r"DataFrame keyed by cell ID, whose index holds the cell IDs; got values "
+            r"of type dict",
+        ),
+        (
+            {"query_batches": pd.DataFrame({"batch": ["a"]})},
+            TypeError,
+            "got a pandas DataFrame with a RangeIndex, which would assign values to "
+            "cells by position",
         ),
         ({"invalidate_cache": 1}, TypeError, "invalidate_cache must be a boolean"),
         ({"query_assay": "protein"}, ValueError, "Query assay 'protein' was not found"),

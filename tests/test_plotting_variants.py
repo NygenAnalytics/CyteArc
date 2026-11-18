@@ -19,7 +19,7 @@ from tests.clone_helpers import (
     write_embedding,
     write_selection_embedding,
 )
-from tests.storage_helpers import open_store, write_count_store
+from tests.storage_helpers import by_cell_id, open_store, write_count_store
 
 pytestmark = pytest.mark.usefixtures("figures_closed")
 
@@ -37,8 +37,10 @@ def plotted(tmp_path_factory):
         cell_ids=CELLS,
     )
     store = open_store(folder / "store.zarr")
-    store.cells.insert("group", np.asarray(GROUPS, dtype=object))
-    store.cells.insert("every_cell", np.ones(5, dtype=bool))
+    store.cells.insert(
+        "group", by_cell_id(store.cells, np.asarray(GROUPS, dtype=object))
+    )
+    store.cells.insert("every_cell", by_cell_id(store.cells, np.ones(5, dtype=bool)))
     cells = store.snapshot_cell_selection("every_cell")
     # Two GoT targets: c0 to c3 are covered at CALR, c0 at SF3B1 too; c4 is
     # not named.
@@ -110,7 +112,10 @@ def test_named_sites_are_bars_and_groups_split_the_cells(plotted) -> None:
 def test_the_plot_refuses_what_it_cannot_draw(plotted, tmp_path) -> None:
     store, targets, _positions = plotted
     store.cells.insert(
-        "only_c4", np.asarray([None, None, None, None, "z"], dtype=object)
+        "only_c4",
+        by_cell_id(
+            store.cells, np.asarray([None, None, None, None, "z"], dtype=object)
+        ),
     )
     with pytest.raises(ValueError, match="No cell that a file names has a group"):
         variant_depth(store, targets, group_by="only_c4", show=False)
@@ -135,7 +140,9 @@ def test_the_plot_refuses_what_it_cannot_draw(plotted, tmp_path) -> None:
 def test_groups_of_several_columns_split_the_cells(plotted) -> None:
     store, targets, _positions = plotted
     store.cells.insert(
-        "half", np.asarray(["a", "b", "a", "b", "a"], dtype=object), overwrite=True
+        "half",
+        by_cell_id(store.cells, np.asarray(["a", "b", "a", "b", "a"], dtype=object)),
+        overwrite=True,
     )
     result = variant_depth(store, targets, group_by=["group", "half"], show=False)
     # c4 has no group in the first column, so it has none.
@@ -166,7 +173,9 @@ def test_groups_are_drawn_in_the_natural_order_of_their_labels(plotted) -> None:
     # The first named cell is of s10, which comes after s2 in natural order.
     store.cells.insert(
         "lane",
-        np.asarray(["s10", "s2", "s10", "s2", "s2"], dtype=object),
+        by_cell_id(
+            store.cells, np.asarray(["s10", "s2", "s10", "s2", "s2"], dtype=object)
+        ),
         overwrite=True,
     )
     result = variant_depth(store, targets, group_by="lane", show=False)
@@ -198,7 +207,9 @@ def test_several_contigs_draw_one_line_each(tmp_path) -> None:
         cell_ids=cells,
     )
     store = open_store(tmp_path / "store.zarr")
-    store.cells.insert("every_cell", np.ones(len(cells), dtype=bool))
+    store.cells.insert(
+        "every_cell", by_cell_id(store.cells, np.ones(len(cells), dtype=bool))
+    )
     shutil.copytree(folder, tmp_path / "vartrix")
     counts = store.variants.import_counts(
         tmp_path / "vartrix",
@@ -456,7 +467,9 @@ def test_allele_frequencies_need_cells_with_a_clone(scored) -> None:
     store, _truth, _counts, selection, _clones = scored
     store.cells.insert(
         "no_clone",
-        np.full(len(store.cells.fetch_all("ids")), "", dtype=object),
+        by_cell_id(
+            store.cells, np.full(len(store.cells.fetch_all("ids")), "", dtype=object)
+        ),
         overwrite=True,
     )
     empty = store.clones.from_column(
@@ -530,7 +543,9 @@ def test_variant_statistics_of_stranded_counts_never_draw_depth_instead(
     store, truth, counts, _selection, _clones = scored
     # Scored over one cell, no variant has a strand correlation, though the
     # counts have strands and every variant a mean depth.
-    store.cells.insert("only_first_cell", np.arange(truth.n_cells) == 0)
+    store.cells.insert(
+        "only_first_cell", by_cell_id(store.cells, np.arange(truth.n_cells) == 0)
+    )
     selection = store.variants.informative(
         counts,
         cell_selection=store.snapshot_cell_selection("only_first_cell"),
@@ -630,7 +645,9 @@ def test_genotypes_draw_each_sites_calls_by_group(plotted) -> None:
     plt.close(grouped.figure)
     # Groups of two columns: c0 and c2 in a, c1 and c3 in b.
     store.cells.insert(
-        "half", np.asarray(["a", "b", "a", "b", "a"], dtype=object), overwrite=True
+        "half",
+        by_cell_id(store.cells, np.asarray(["a", "b", "a", "b", "a"], dtype=object)),
+        overwrite=True,
     )
     crossed = genotypes(store, called, group_by=["group", "half"], show=False)
     assert _shares(crossed)[("CALR", "x, a")] == {"alternative_present": 1.0}
@@ -640,7 +657,7 @@ def test_genotypes_draw_each_sites_calls_by_group(plotted) -> None:
     plt.close(crossed.figure)
     # A label artifact of the labeled cells draws the groups of the column.
     labeled = np.asarray([group is not None for group in GROUPS])
-    store.cells.insert("labeled", labeled, overwrite=True)
+    store.cells.insert("labeled", by_cell_id(store.cells, labeled), overwrite=True)
     labels = store.snapshot_cluster_labels(
         "group", cell_selection=store.snapshot_cell_selection("labeled")
     )
@@ -720,8 +737,12 @@ def test_genotypes_refuse_an_embedding_of_as_many_other_cells(
     plotted, tmp_path
 ) -> None:
     store, _targets, _positions = plotted
-    store.cells.insert("first_four", np.arange(5) < 4, overwrite=True)
-    store.cells.insert("last_four", np.arange(5) > 0, overwrite=True)
+    store.cells.insert(
+        "first_four", by_cell_id(store.cells, np.arange(5) < 4), overwrite=True
+    )
+    store.cells.insert(
+        "last_four", by_cell_id(store.cells, np.arange(5) > 0), overwrite=True
+    )
     calr = tmp_path / "CALR.tsv"
     calr.write_text("BC\twtUMIs\tmutUMIs\nc0\t3\t1\nc1\t2\t0\n")
     counts = store.variants.import_counts(
@@ -758,7 +779,9 @@ def test_genotypes_color_a_layout_of_their_cells_that_another_selection_holds(
     called = store.variants.genotypes(targets, method="threshold", min_mutant_umis=1)
     every = store.snapshot_cell_selection("every_cell")
     store.cells.insert(
-        "letter", np.asarray(list("abcde"), dtype=object), overwrite=True
+        "letter",
+        by_cell_id(store.cells, np.asarray(list("abcde"), dtype=object)),
+        overwrite=True,
     )
     letters = store.snapshot_cluster_labels("letter", cell_selection=every)
     # select_cells makes another selection of the genotypes' five cells.
@@ -798,7 +821,9 @@ def test_genotypes_show_and_close_the_figure_they_own(plotted) -> None:
 def test_genotypes_refuse_what_they_cannot_draw(plotted) -> None:
     store, targets, _positions = plotted
     called = store.variants.genotypes(targets, method="threshold", min_mutant_umis=1)
-    store.cells.insert("nobody", np.asarray([None] * 5, dtype=object))
+    store.cells.insert(
+        "nobody", by_cell_id(store.cells, np.asarray([None] * 5, dtype=object))
+    )
     with pytest.raises(ValueError, match="No cell of the genotypes has a group"):
         genotypes(store, called, group_by="nobody", show=False)
     flat = write_embedding(store, "every_cell", np.zeros((5, 2)))
@@ -810,7 +835,9 @@ def test_genotypes_refuse_what_they_cannot_draw(plotted) -> None:
     with pytest.raises(ValueError, match="have no site 'TP53'"):
         genotypes(store, called, sites=["TP53"], layout=flat, show=False)
     # The layout is an embedding of the genotypes' own cells.
-    store.cells.insert("first_four", np.arange(5) < 4, overwrite=True)
+    store.cells.insert(
+        "first_four", by_cell_id(store.cells, np.arange(5) < 4), overwrite=True
+    )
     fewer = write_embedding(store, "first_four", np.zeros((4, 2)))
     with pytest.raises(ValueError, match="embedding of the genotypes' cells"):
         genotypes(store, called, sites=["CALR"], layout=fewer, show=False)
@@ -849,7 +876,11 @@ def test_genotypes_of_many_sites_and_groups_keep_a_drawable_height(tmp_path) -> 
     ids = [f"cell{cell:03d}-1" for cell in range(400)]
     store = write_cells_store(tmp_path / "store.zarr", ids)
     store.cells.insert(
-        "group", np.asarray([f"g{cell % 8}" for cell in range(400)], dtype=object)
+        "group",
+        by_cell_id(
+            store.cells,
+            np.asarray([f"g{cell % 8}" for cell in range(400)], dtype=object),
+        ),
     )
     paths = []
     for site in range(120):
@@ -924,7 +955,10 @@ def test_a_depth_panel_of_groups_without_depth_says_so(plotted) -> None:
     # c3 is named at CALR without a UMI, so the one grouped cell has no depth,
     # while the sites hold the depth of every named cell.
     store.cells.insert(
-        "only_c3", np.asarray([None, None, None, "z", None], dtype=object)
+        "only_c3",
+        by_cell_id(
+            store.cells, np.asarray([None, None, None, "z", None], dtype=object)
+        ),
     )
     result = variant_depth(store, targets, group_by="only_c3", show=False)
     try:
@@ -1113,7 +1147,8 @@ def test_a_layout_colors_the_calls_of_cells_without_a_group(plotted) -> None:
     # the layout draws c0 and c2, whose mutant UMIs call them alternative
     # present, too.
     store.cells.insert(
-        "c1_and_c3", np.asarray([None, "a", None, "b", None], dtype=object)
+        "c1_and_c3",
+        by_cell_id(store.cells, np.asarray([None, "a", None, "b", None], dtype=object)),
     )
     layout = write_embedding(
         store, "every_cell", np.column_stack([np.arange(5), np.zeros(5)])
@@ -1230,7 +1265,8 @@ def test_depth_legends_list_the_groups_with_named_cells(plotted) -> None:
     store, targets, _positions = plotted
     # c4, alone in group w, is named by no file, so w draws no histogram.
     store.cells.insert(
-        "with_unnamed", np.asarray(["x", "x", "y", "y", "w"], dtype=object)
+        "with_unnamed",
+        by_cell_id(store.cells, np.asarray(["x", "x", "y", "y", "w"], dtype=object)),
     )
     result = variant_depth(store, targets, group_by="with_unnamed", show=False)
     try:

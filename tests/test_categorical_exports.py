@@ -22,7 +22,7 @@ from cytearc.metadata.rows import metadata_column_fingerprint, metadata_missing_
 from cytearc.readers import H5adReader
 from cytearc.storage.categorical import CategoricalColumn
 from cytearc.writers import H5adToZarr
-from tests.storage_helpers import open_store, write_count_store
+from tests.storage_helpers import by_cell_id, open_store, write_count_store
 
 anndata = pytest.importorskip("anndata")
 
@@ -97,18 +97,23 @@ def _build_store(path: Path) -> Any:
         (store.RNA.feats, _FEATURE_COLUMNS),
     ):
         for name, (categories, ordered, codes) in columns.items():
+            values = pd.Categorical.from_codes(
+                codes, categories=categories, ordered=ordered
+            )
+            # The cell table takes values keyed by cell ID, a feature table by position.
             table.insert(
-                name,
-                pd.Categorical.from_codes(
-                    codes, categories=categories, ordered=ordered
-                ),
+                name, by_cell_id(table, values) if table.cell_table else values
             )
             assert isinstance(table._get_array(name), CategoricalColumn), name
-    store.cells.insert("site", np.array(_SITES, dtype=object))
-    store.cells.insert("donor", np.array(_DONORS))
-    store.cells.insert("count", np.array(_COUNTS, dtype=object))
-    store.cells.insert("passed", np.array(_PASSED, dtype=object))
-    store.cells.insert("kind", np.array(_KINDS))
+    store.cells.insert("site", by_cell_id(store.cells, np.array(_SITES, dtype=object)))
+    store.cells.insert("donor", by_cell_id(store.cells, np.array(_DONORS)))
+    store.cells.insert(
+        "count", by_cell_id(store.cells, np.array(_COUNTS, dtype=object))
+    )
+    store.cells.insert(
+        "passed", by_cell_id(store.cells, np.array(_PASSED, dtype=object))
+    )
+    store.cells.insert("kind", by_cell_id(store.cells, np.array(_KINDS)))
     store.zw["cellData/kind"].attrs.update(
         {
             "levels": _KIND_LEVELS,
@@ -122,7 +127,9 @@ def _build_store(path: Path) -> Any:
             },
         }
     )
-    store.cells.insert("chosen", np.isin(np.arange(_N_CELLS), _CHOSEN))
+    store.cells.insert(
+        "chosen", by_cell_id(store.cells, np.isin(np.arange(_N_CELLS), _CHOSEN))
+    )
     store.RNA.feats.insert("strand", np.array(_STRANDS))
     return store
 

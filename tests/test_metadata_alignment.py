@@ -126,7 +126,7 @@ def test_series_cannot_be_aligned_to_ids_that_repeat():
     table = _table(ids=["c0", "c0", "c2", "c3"])
     values = pd.Series(["a", "b", "c", "d"], index=["c0", "c1", "c2", "c3"])
 
-    with pytest.raises(ValueError, match="the ids of those rows repeat a value"):
+    with pytest.raises(ValueError, match="those ids repeat a value"):
         table.insert("cell_type", values)
 
 

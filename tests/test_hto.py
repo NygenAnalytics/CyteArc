@@ -47,7 +47,7 @@ from cytearc.storage.artifacts import (
 from cytearc.storage.operation_revisions import effective_revision
 from cytearc.storage.selections import read_stored_selection_indices
 from cytearc.utils.logging import logger
-from tests.storage_helpers import write_count_store
+from tests.storage_helpers import by_cell_id, write_count_store
 from tests.test_reduction_graph_diagnostics import _warned
 
 HTOS = ["HTO_A", "HTO_B", "HTO_C"]
@@ -818,7 +818,7 @@ def test_hto_identity_artifact_holds_the_planted_identities_of_selected_cells(
     )
     keep = np.ones(n_cells, dtype=bool)
     keep[[2, 17, 40, 55]] = False
-    store.cells.insert("tagged", keep)
+    store.cells.insert("tagged", by_cell_id(store.cells, keep))
     selection = store.snapshot_cell_selection("tagged")
 
     ref = store.qc.hto_demultiplexing(selection)
@@ -981,8 +981,8 @@ def test_pools_that_use_different_hashtags_are_demultiplexed_one_at_a_time(
     counts, truth = two_pool_hto_counts()
     store = _hto_store(tmp_path, counts)
     first = np.arange(len(counts)) < 60
-    store.cells.insert("pool1", first, overwrite=True)
-    store.cells.insert("pool2", ~first, overwrite=True)
+    store.cells.insert("pool1", by_cell_id(store.cells, first), overwrite=True)
+    store.cells.insert("pool2", by_cell_id(store.cells, ~first), overwrite=True)
     several = int(((counts > 0).sum(axis=1) > 1).sum())
     assert several > 60
 
@@ -1111,9 +1111,11 @@ def _pool_store(tmp_path: Path, counts: pd.DataFrame) -> DataStore:
     """Write ``counts`` with each cell's pool, "a" or "b", as the column "pool"."""
     store = _hto_store(tmp_path, counts)
     first = np.arange(len(counts)) < 60
-    store.cells.insert("pool", np.where(first, "a", "b"), overwrite=True)
-    store.cells.insert("pool_a", first, overwrite=True)
-    store.cells.insert("pool_b", ~first, overwrite=True)
+    store.cells.insert(
+        "pool", by_cell_id(store.cells, np.where(first, "a", "b")), overwrite=True
+    )
+    store.cells.insert("pool_a", by_cell_id(store.cells, first), overwrite=True)
+    store.cells.insert("pool_b", by_cell_id(store.cells, ~first), overwrite=True)
     return store
 
 
@@ -1167,7 +1169,9 @@ def test_each_sample_is_demultiplexed_as_a_call_on_its_own_cells(tmp_path: Path)
     )
 
     # Other labels for the same pools make another artifact with the same calls.
-    store.cells.insert("pool", np.where(first, "a", "c"), overwrite=True)
+    store.cells.insert(
+        "pool", by_cell_id(store.cells, np.where(first, "a", "c")), overwrite=True
+    )
     with threadpool_limits(limits=1):
         relabeled = store.qc.hto_demultiplexing(
             store.snapshot_cell_selection("I"), sample_column="pool"
@@ -1286,7 +1290,7 @@ def test_hto_demultiplexing_checks_its_samples_before_reading_counts_of_them(
 ):
     counts, _ = two_pool_hto_counts()
     store = _hto_store(tmp_path, counts)
-    store.cells.insert("pool", labels, overwrite=True)
+    store.cells.insert("pool", by_cell_id(store.cells, labels), overwrite=True)
 
     def unread(*args, **kwargs):
         raise AssertionError("the counts were read")
@@ -1762,7 +1766,9 @@ def _pooled_store(tmp_path: Path, pools: dict[str, pd.DataFrame]) -> DataStore:
     """Write the counts of each pool in turn, with each cell's pool as the column "pool"."""
     store = _hto_store(tmp_path, pd.concat(list(pools.values()), ignore_index=True))
     sizes = [len(counts) for counts in pools.values()]
-    store.cells.insert("pool", np.repeat(list(pools), sizes), overwrite=True)
+    store.cells.insert(
+        "pool", by_cell_id(store.cells, np.repeat(list(pools), sizes)), overwrite=True
+    )
     return store
 
 

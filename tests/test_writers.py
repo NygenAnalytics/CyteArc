@@ -1,6 +1,7 @@
 import os
 
 import numpy as np
+import pandas as pd
 import pytest
 import zarr
 from zarr.storage import LocalStore, MemoryStore
@@ -14,6 +15,7 @@ from cytearc.writers import (
     SubsetZarr,
     subset_assay_zarr,
 )
+from tests.storage_helpers import by_cell_id
 
 
 def _value_range(values: np.ndarray) -> CountValueRange:
@@ -2059,10 +2061,12 @@ def test_to_h5ad_preserves_counts_metadata_and_embeddings(
             np.linspace(2.0, 3.0, n_cells),
         ]
     )
-    assay.cells.insert("RNA_UMAP1", umap[:, 0], overwrite=True)
-    assay.cells.insert("RNA_UMAP2", umap[:, 1], overwrite=True)
+    assay.cells.insert("RNA_UMAP1", by_cell_id(assay.cells, umap[:, 0]), overwrite=True)
+    assay.cells.insert("RNA_UMAP2", by_cell_id(assay.cells, umap[:, 1]), overwrite=True)
     assay.cells.insert(
-        "export_batch", np.array(["a", "b", "a"][:n_cells]), overwrite=True
+        "export_batch",
+        by_cell_id(assay.cells, np.array(["a", "b", "a"][:n_cells])),
+        overwrite=True,
     )
 
     path = tmp_path / "toy_export.h5ad"
@@ -2095,7 +2099,7 @@ def test_to_h5ad_preserves_counts_metadata_and_embeddings(
         assert "RNA_UMAP2" not in h5["obs"]
 
     # Two prefixes that would both export as obsm["X_umap"] are refused.
-    assay.cells.insert("RNA_umap1", umap[:, 0], overwrite=True)
+    assay.cells.insert("RNA_umap1", by_cell_id(assay.cells, umap[:, 0]), overwrite=True)
     clash = tmp_path / "clash.h5ad"
     with pytest.raises(ValueError, match=r"both export as obsm\['X_umap'\]"):
         to_h5ad(assay, str(clash), embeddings_cols=["UMAP", "umap"])
@@ -2907,7 +2911,9 @@ def test_to_h5ad_skips_a_metadata_column_of_unsupported_dtype(
 
     assay = export_assay_store.RNA
     pairs = np.zeros(3, dtype=[("a", "<i4"), ("b", "<f4")])
-    assay.cells.insert("pairs", pairs, overwrite=True)
+    # A pandas Series cannot hold a compound dtype, so the column is written in
+    # store order as an earlier release or another tool could have written it.
+    assay.cells._insert_in_store_order("pairs", pairs, overwrite=True)
     messages: list[str] = []
     sink = logger.add(
         lambda message: messages.append(message.record["message"]), level="WARNING"
@@ -2941,7 +2947,10 @@ def test_to_h5ad_with_a_skipped_column_stays_readable_by_anndata(
 
     pairs = [("a", "<i4"), ("b", "<f4")]
     assay = export_assay_store.RNA
-    assay.cells.insert("pairs", np.zeros(3, dtype=pairs), overwrite=True)
+    # A pandas Series cannot hold a compound dtype; write the column in store order.
+    assay.cells._insert_in_store_order(
+        "pairs", np.zeros(3, dtype=pairs), overwrite=True
+    )
     assay.feats.insert("pairs", np.zeros(assay.feats.N, dtype=pairs), overwrite=True)
     path = tmp_path / "pairs.h5ad"
     to_h5ad(assay, str(path))
@@ -3055,8 +3064,10 @@ def test_zarr_subset(datastore, tmp_path):
     from tests import full_path
 
     cell_idx = np.array([1, 10, 100, 500])
+    # The IDs come in another order; the subset keeps the cells in store order.
+    cell_ids = datastore.cells.fetch_all("ids")[[500, 1, 100, 10]]
     zarr_path = str(tmp_path / "subset.zarr")
-    writer = SubsetZarr(zarr_loc=zarr_path, assays=[datastore.RNA], cell_idx=cell_idx)
+    writer = SubsetZarr(zarr_loc=zarr_path, assays=[datastore.RNA], cell_ids=cell_ids)
     writer.dump()
     counts, barcodes, features = _read_cellranger_h5(full_path("1K_pbmc_citeseq.h5"))
     expected = counts[cell_idx][:, features["feature_type"] == "Gene Expression"]
@@ -3116,7 +3127,7 @@ def test_zarr_subset_preserves_custom_assay_types(workspace, assay_name, assay_t
         assays=[getattr(dataset, assay_name)],
         in_workspace=workspace,
         out_workspace=out_workspace,
-        cell_idx=np.array([0, 2]),
+        cell_ids=["c1", "c3"],
         nthreads=1,
     ).dump()
 
@@ -3151,7 +3162,7 @@ def test_zarr_subset_does_not_copy_source_pipeline_runs(
     SubsetZarr(
         zarr_loc=zarr_path,
         assays=[datastore_ephemeral.RNA],
-        cell_idx=np.array([1, 10, 100, 500]),
+        cell_ids=datastore_ephemeral.cells.fetch_all("ids")[[1, 10, 100, 500]],
     ).dump()
 
     assert "pipeline" in datastore_ephemeral.zw
@@ -3183,29 +3194,54 @@ def test_subset_zarr_rejects_invalid_assay_inputs():
     assert SubsetZarr._check_assays([rna, adt]) == [rna, adt]
 
 
-def test_subset_zarr_requires_cell_key_or_indices():
+def test_subset_zarr_requires_cell_key_or_ids():
     subset = object.__new__(SubsetZarr)
     subset.assays = []
     subset.assays = [_FakeAssay("RNA", 3)]
 
     with pytest.raises(ValueError, match="cannot be None"):
-        subset._check_idx(None, None)
+        subset._selected_rows(None, None)
 
 
 @pytest.mark.parametrize(
-    ("cell_idx", "message"),
+    ("cell_ids", "rows"),
     [
-        (np.array([0.5]), "integer type"),
-        (np.array([3]), "max value"),
+        (["a", "b", "c"], [0, 1, 2]),
+        (["c", "a"], [0, 2]),
+        (np.array(["b"]), [1]),
+        (pd.Series(["c", "b"], index=["x", "y"]), [1, 2]),
+        (("c", "b", "a"), [0, 1, 2]),
     ],
+    ids=["every", "reversed", "array", "series-values", "tuple"],
 )
-def test_subset_zarr_rejects_invalid_explicit_indices(cell_idx, message):
+def test_subset_zarr_selects_cell_ids_in_store_order(cell_ids, rows):
+    subset = object.__new__(SubsetZarr)
+    subset.assays = [_FakeAssay("RNA", 3, {"ids": np.array(["a", "b", "c"])})]
+
+    selected = subset._selected_rows(None, cell_ids)
+
+    np.testing.assert_array_equal(selected, rows)
+    assert selected.dtype == np.int64
+
+
+@pytest.mark.parametrize(
+    ("cell_ids", "error", "message"),
+    [
+        (np.array([0.5]), ValueError, "such as 0.5"),
+        (np.array([3]), ValueError, "1 of the 1 values of cell_ids are not cell IDs"),
+        (["a", "d", "a"], ValueError, "repeats 1 cell IDs, such as 'a'"),
+        ({"a", "b"}, TypeError, "found set of shape"),
+        (b"a", TypeError, "found bytes of shape"),
+    ],
+    ids=["float", "position", "repeated", "set", "bytes"],
+)
+def test_subset_zarr_rejects_invalid_cell_ids(cell_ids, error, message):
     subset = object.__new__(SubsetZarr)
     subset.assays = []
-    subset.assays = [_FakeAssay("RNA", 3)]
+    subset.assays = [_FakeAssay("RNA", 3, {"ids": np.array(["a", "b", "c"])})]
 
-    with pytest.raises(ValueError, match=message):
-        subset._check_idx(None, cell_idx)
+    with pytest.raises(error, match=message):
+        subset._selected_rows(None, cell_ids)
 
 
 def test_subset_zarr_validates_cell_key():
@@ -3213,13 +3249,13 @@ def test_subset_zarr_validates_cell_key():
     subset.assays = []
     subset.assays = [_FakeAssay("RNA", 3)]
     with pytest.raises(ValueError, match="was not found"):
-        subset._check_idx("selected", None)
+        subset._selected_rows("selected", None)
 
     subset.assays = [
         _FakeAssay("RNA", 3, {"selected": np.array([1, 0, 1])}),
     ]
     with pytest.raises(ValueError, match="not of boolean type"):
-        subset._check_idx("selected", None)
+        subset._selected_rows("selected", None)
 
 
 def test_subset_zarr_resolves_consistent_cell_key():
@@ -3232,7 +3268,7 @@ def test_subset_zarr_resolves_consistent_cell_key():
     ]
 
     np.testing.assert_array_equal(
-        subset._check_idx("selected", None),
+        subset._selected_rows("selected", None),
         np.array([0, 2]),
     )
 
@@ -3245,7 +3281,7 @@ def test_subset_zarr_rejects_different_cell_masks():
         _FakeAssay("ATAC", 2, {"selected": np.array([False, True])}),
     ]
     with pytest.raises(ValueError, match="cell_key selected is not consistent"):
-        subset._check_idx("selected", None)
+        subset._selected_rows("selected", None)
 
 
 @pytest.mark.parametrize("on_disk", [False, True])
@@ -3262,7 +3298,7 @@ def test_subset_zarr_never_replaces_foreign_content(tmp_path, memory_source, on_
             SubsetZarr(
                 store,
                 [memory_source.RNA],
-                cell_idx=np.array([0]),
+                cell_ids=["c0"],
                 overwrite_existing_file=overwrite,
             )
 
@@ -3273,7 +3309,7 @@ def test_subset_zarr_never_replaces_foreign_content(tmp_path, memory_source, on_
     ("invalid", "message"),
     [
         ("assays", "actual assay objects"),
-        ("cell_idx", "max value"),
+        ("cell_ids", "not cell IDs of the store"),
         ("out_workspace", "must not contain path separators"),
     ],
 )
@@ -3285,8 +3321,12 @@ def test_subset_zarr_validates_inputs_before_overwriting(invalid, message):
     with pytest.raises(ValueError, match=message):
         SubsetZarr(
             store,
-            assays=[object()] if invalid == "assays" else [_FakeAssay("RNA", 2)],
-            cell_idx=np.array([2 if invalid == "cell_idx" else 0]),
+            assays=(
+                [object()]
+                if invalid == "assays"
+                else [_FakeAssay("RNA", 2, {"ids": np.array(["c0", "c1"])})]
+            ),
+            cell_ids=["c2" if invalid == "cell_ids" else "c0"],
             out_workspace="a/b" if invalid == "out_workspace" else None,
             overwrite_existing_file=True,
         )
@@ -3310,7 +3350,7 @@ def test_subset_zarr_remote_uri_checks_contents(memory_source, monkeypatch):
         SubsetZarr(
             "s3://bucket/out.zarr",
             [memory_source.RNA],
-            cell_idx=np.array([0]),
+            cell_ids=["c0"],
             storage_options=options,
         )
     assert calls == [("s3://bucket/out.zarr", options, True)]
@@ -3332,7 +3372,7 @@ def test_subset_zarr_refuses_to_overwrite_after_probe_failure(
         SubsetZarr(
             store,
             [memory_source.RNA],
-            cell_idx=np.array([0]),
+            cell_ids=["c0"],
             overwrite_existing_file=True,
         )
 
@@ -3760,7 +3800,7 @@ def test_to_h5ad_orders_embedding_components_numerically(export_assay_store, tmp
     for component in range(1, 13):
         assay.cells.insert(
             f"RNA_PCA{component}",
-            np.full(n_cells, float(component)),
+            by_cell_id(assay.cells, np.full(n_cells, float(component))),
             overwrite=True,
         )
     path = tmp_path / "components.h5ad"

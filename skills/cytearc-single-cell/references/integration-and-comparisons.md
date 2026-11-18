@@ -64,7 +64,7 @@ print(pd.crosstab(units["batch"], units["condition"]))  # donors per batch x con
 `conditions == 1` for every donor means nested; `timepoints > 1` means repeated measures;
 `conditions > 1` puts a donor in two arms. A batch row with donors in one condition only is
 confounded with it. No sample column: join donor and timepoint strings (every row, none missing)
-and `ds.cells.insert("sample_id", values, overwrite=True)`; `insert` writes to the store at once.
+and `ds.cells.insert("sample_id", pd.Series(values, index=ds.cells.fetch_all("ids")), overwrite=True)`; `insert` writes to the store at once.
 
 ### Harmony through the pipeline, with a matched baseline
 
@@ -103,7 +103,8 @@ concordance (ARI) needs two clustering refs on the same frozen cell selection.
 
 ```python
 rng = np.random.default_rng(0)
-ds.cells.insert("batch_shuffled", rng.permutation(ds.cells.fetch_all("batch")), overwrite=True)
+shuffled = rng.permutation(ds.cells.fetch_all("batch"))
+ds.cells.insert("batch_shuffled", pd.Series(shuffled, index=ds.cells.fetch_all("ids")), overwrite=True)
 
 def scores(neighbors, graph):
     return {
@@ -197,12 +198,13 @@ and the cell selection is the denominator (snapshot the parent's cells for a par
 
 ```python
 labels, donors = ds.cells.fetch_all("cell_type"), ds.cells.fetch_all("donor_id")
+ids = ds.cells.fetch_all("ids")  # cell tables take values keyed by cell ID
 keys = []
 for pop in per_donor.columns:
     keys.append("is_" + re.sub(r"\W+", "_", pop))
-    ds.cells.insert(keys[-1], (labels == pop).astype(np.float64), overwrite=True)
+    ds.cells.insert(keys[-1], pd.Series((labels == pop).astype(np.float64), index=ids), overwrite=True)
 counted = in_run & ~np.isin(labels, excluded) & ~np.isin(donors, two_arm)
-ds.cells.insert("in_composition", counted, overwrite=True)
+ds.cells.insert("in_composition", pd.Series(counted, index=ids), overwrite=True)
 result = ds.compare.test(
     keys, CellField("condition"), cell_selection=ds.snapshot_cell_selection("in_composition"),
     groups=["ctrl", "case"], test="mann_whitney", sample_by="donor_id",
@@ -220,8 +222,8 @@ sample proportions per category (its intervals count samples, so a two-sample do
 
 ```python
 is_b = in_run & (labels == "B cell")
-ds.cells.insert("is_b_cell", is_b, overwrite=True)
-ds.cells.insert("one_arm_donor", ~np.isin(donors, two_arm), overwrite=True)
+ds.cells.insert("is_b_cell", pd.Series(is_b, index=ids), overwrite=True)
+ds.cells.insert("one_arm_donor", pd.Series(~np.isin(donors, two_arm), index=ids), overwrite=True)
 b_cells = ds.snapshot_cell_selection("is_b_cell")                  # frozen cell_selection ref
 between = ds.compare.test(                              # donors nested in condition
     ["CD79A", "MS4A1"], CellField("condition"), cell_selection=b_cells, subset_by="one_arm_donor",
@@ -331,7 +333,7 @@ an inserted copy records abstentions only as missing values and loses their reas
   CyteArc; `PermutationMethod(n_resamples=np.inf)` matches it but is exhaustive (12 versus 12: 20 s).
 - Without `cell_selection`, a `CellField` grouping covers every stored cell, `I` False included.
 - Marker search, Welch and ANOVA treat cells as observations; never use them for condition claims.
-- A Symphony-style mapping correction (`query_batches`) needs a technical batch, never a condition.
+- A Symphony-style mapping correction (`query_batches`, a DataFrame indexed by the query cells' IDs) needs a technical batch, never a condition. Per-cell inputs of mapping and its plots (`target_groups`, `known_labels`, `label_vote_shares`) are pandas Series indexed by cell ID, such as `pd.Series(values, index=transfer.cell_ids)`; arrays raise `TypeError`.
 
 ## See also
 

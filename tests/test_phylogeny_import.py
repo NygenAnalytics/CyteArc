@@ -44,7 +44,7 @@ from tests.clone_truth import (
     write_tree_zarr,
 )
 from tests.memory_helpers import budgeted
-from tests.storage_helpers import copy_store, open_store, write_count_store
+from tests.storage_helpers import by_cell_id, copy_store, open_store, write_count_store
 
 TRUTH = clone_truth()
 TREE = truth_phylogeny(TRUTH)
@@ -621,7 +621,9 @@ def _cells_store(folder: Path, ids: list[str]):
     counts = np.ones((len(ids), 3), dtype=np.uint16)
     write_count_store(str(path), {"RNA": counts}, "uint16", cell_ids=ids)
     store = open_store(path)
-    store.cells.insert("every_cell", np.ones(len(ids), dtype=bool))
+    store.cells.insert(
+        "every_cell", by_cell_id(store.cells, np.ones(len(ids), dtype=bool))
+    )
     return store
 
 

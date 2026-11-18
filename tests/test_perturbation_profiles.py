@@ -30,7 +30,7 @@ from tests.perturbation_helpers import (
     write_screen,
 )
 from tests.memory_helpers import climb_refusals
-from tests.storage_helpers import insert_nullable_cell_column, open_store
+from tests.storage_helpers import by_cell_id, insert_nullable_cell_column, open_store
 
 # Tests that check the warning about thin perturbations catch it themselves.
 pytestmark = pytest.mark.filterwarnings("ignore:.*and get no profile")
@@ -658,7 +658,9 @@ def test_profiles_of_mixscape_classes_average_knocked_out_cells(
     store = _store(tmp_path)
     labels = fixed_labels(store, ["NT"])
     coordinates = store.reduction.import_coordinates(
-        COORDINATES, cell_selection=store.select_measured_cells("RNA"), name="X"
+        pd.DataFrame(COORDINATES, index=store.cells.fetch_all("ids")),
+        cell_selection=store.select_measured_cells("RNA"),
+        name="X",
     )
     signature = store.perturbation.signature(
         labels, coordinates, features=_selected(store), dims=10, n_neighbors=10
@@ -864,7 +866,7 @@ def test_profiles_refuse_inputs_they_cannot_use(tmp_path) -> None:
     for column, last in (("batch", 1), ("plate", 0)):
         batch = np.where(CONTROL, "b1", "b2").astype(object)
         batch[np.flatnonzero(CONTROL)[:last]] = "b2"
-        store.cells.insert(column, batch)
+        store.cells.insert(column, by_cell_id(store.cells, batch))
         with pytest.raises(
             ValueError,
             match=f"need 2 control cells or more, but sample 'b2' has {last};",
@@ -898,7 +900,9 @@ def test_profiles_refuse_labels_with_one_control_cell(tmp_path) -> None:
     store = _store(tmp_path)
     # Of GENE_C's four cells, only cell 111 is selected, and the labels call
     # GENE_C the control, so they hold one control cell.
-    store.cells.insert("cells", ~np.isin(np.arange(N_CELLS), [110, 112, 113]))
+    store.cells.insert(
+        "cells", by_cell_id(store.cells, ~np.isin(np.arange(N_CELLS), [110, 112, 113]))
+    )
     calls = store.perturbation.call_guides(
         store.snapshot_cell_selection("cells"), method="fixed", min_umi=10
     )

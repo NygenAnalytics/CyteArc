@@ -29,7 +29,7 @@ from cytearc.storage.finite_values import (
     write_finite_array,
 )
 from cytearc.storage.sharding import write_dense_from_row_batches
-from tests.storage_helpers import write_count_store
+from tests.storage_helpers import by_cell_id, write_count_store
 
 N_CELLS = 40
 
@@ -218,7 +218,9 @@ def _open(zarr_loc: Path) -> DataStore:
 def _write_template(zarr_loc: Path) -> dict[str, ArtifactRef]:
     write_count_store(str(zarr_loc), _counts(), "uint16")
     store = _open(zarr_loc)
-    store.cells.insert("batch", np.where(np.arange(N_CELLS) % 2, "a", "b"))
+    store.cells.insert(
+        "batch", by_cell_id(store.cells, np.where(np.arange(N_CELLS) % 2, "a", "b"))
+    )
     cells = store.snapshot_cell_selection()
     normalized = store.features.normalize(
         cells, store.features.universe(from_assay="RNA")

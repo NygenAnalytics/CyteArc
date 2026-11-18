@@ -23,7 +23,7 @@ from cytearc.plotting import (
 )
 from cytearc.storage.artifacts import artifact_group
 from tests.clone_helpers import write_selection_embedding
-from tests.storage_helpers import open_store, write_count_store
+from tests.storage_helpers import by_cell_id, open_store, write_count_store
 
 pytestmark = pytest.mark.usefixtures("figures_closed")
 
@@ -60,14 +60,19 @@ def cells(tmp_path_factory):
     path = tmp_path_factory.mktemp("cell_selections") / "store.zarr"
     write_count_store(str(path), counts, "uint16")
     store = open_store(path)
-    store.cells.insert("cluster", CLUSTERS)
-    store.cells.insert("sample", SAMPLES)
-    store.cells.insert("kept", ~LEFT_OUT)
+    store.cells.insert("cluster", by_cell_id(store.cells, CLUSTERS))
+    store.cells.insert("sample", by_cell_id(store.cells, SAMPLES))
+    store.cells.insert("kept", by_cell_id(store.cells, ~LEFT_OUT))
     store.cells.insert(
-        "membership", np.where(LEFT_OUT, "left out", "kept").astype(object)
+        "membership",
+        by_cell_id(store.cells, np.where(LEFT_OUT, "left out", "kept").astype(object)),
     )
-    store.cells.insert("half", np.arange(N_CELLS) < N_CELLS // 2)
-    store.cells.insert("every_cell", np.ones(N_CELLS, dtype=bool))
+    store.cells.insert(
+        "half", by_cell_id(store.cells, np.arange(N_CELLS) < N_CELLS // 2)
+    )
+    store.cells.insert(
+        "every_cell", by_cell_id(store.cells, np.ones(N_CELLS, dtype=bool))
+    )
     every = store.snapshot_cell_selection("every_cell")
     selections = {
         "kept": store.snapshot_cell_selection("kept"),

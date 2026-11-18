@@ -41,7 +41,7 @@ from cytearc.neighbors.stages import (
 from cytearc.storage.artifacts import artifact_group
 from cytearc.storage.budget import ResourceBudget
 from cytearc.storage.execution import ExecutionReport, execution_report_scope
-from tests.storage_helpers import write_count_store
+from tests.storage_helpers import by_cell_id, write_count_store
 
 N_CELLS = 120
 
@@ -125,7 +125,9 @@ def _open(zarr_loc: Path, **options: Any) -> DataStore:
 def _write_template(zarr_loc: Path) -> dict[str, Any]:
     write_count_store(str(zarr_loc), _counts(), "uint16")
     store = _open(zarr_loc)
-    store.cells.insert("batch", np.where(np.arange(N_CELLS) % 2, "a", "b"))
+    store.cells.insert(
+        "batch", by_cell_id(store.cells, np.where(np.arange(N_CELLS) % 2, "a", "b"))
+    )
     cells = store.snapshot_cell_selection()
     refs: dict[str, Any] = {"cells": cells}
     for assay, dims in (("RNA", 5), ("ADT", 3)):

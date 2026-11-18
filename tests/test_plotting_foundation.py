@@ -17,6 +17,7 @@ import pytest
 import cytearc.plotting as splt
 from cytearc.assay.normalization import applicable_normalization_flags
 from cytearc.storage import ArtifactRef
+from tests.storage_helpers import by_cell_id
 
 
 class _ArrayCells:
@@ -663,7 +664,11 @@ def test_embedding_dotplot_matrixplot_on_artifacts(plot_artifacts):
         data.store,
         layout=data.layout,
         color_by=data.clusters,
-        point_sizes=sizes,
+        # The layout holds every cell; sizes keyed by cell ID in reverse order
+        # land on the cells of their IDs.
+        point_sizes=pd.Series(
+            sizes[::-1], index=data.store.cells.fetch_all("ids")[::-1]
+        ),
         sort_values=False,
         show=False,
     )
@@ -1350,10 +1355,18 @@ def _add_synthetic_embeddings(datastore, assay_name):
         f"plot_{assay_name.lower()}_native_a",
         f"plot_{assay_name.lower()}_native_b",
     ]
-    datastore.cells.insert(f"{layouts[0]}1", coordinates, overwrite=True)
-    datastore.cells.insert(f"{layouts[0]}2", coordinates**2, overwrite=True)
-    datastore.cells.insert(f"{layouts[1]}1", -coordinates, overwrite=True)
-    datastore.cells.insert(f"{layouts[1]}2", coordinates[::-1], overwrite=True)
+    datastore.cells.insert(
+        f"{layouts[0]}1", by_cell_id(datastore.cells, coordinates), overwrite=True
+    )
+    datastore.cells.insert(
+        f"{layouts[0]}2", by_cell_id(datastore.cells, coordinates**2), overwrite=True
+    )
+    datastore.cells.insert(
+        f"{layouts[1]}1", by_cell_id(datastore.cells, -coordinates), overwrite=True
+    )
+    datastore.cells.insert(
+        f"{layouts[1]}2", by_cell_id(datastore.cells, coordinates[::-1]), overwrite=True
+    )
     return layouts
 
 

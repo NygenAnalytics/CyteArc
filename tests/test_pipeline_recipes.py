@@ -41,7 +41,7 @@ from cytearc.datastore.pipeline_accessor import (
 from cytearc.storage.artifacts import ArtifactRef, artifact_group
 from cytearc.storage.pipeline_runs import pipeline_run_path, pipeline_stage_path
 from tests import full_path
-from tests.storage_helpers import write_count_store
+from tests.storage_helpers import by_cell_id, write_count_store
 from tests.test_cell_calling import _droplets
 from tests.test_cell_calling_datastore import _open as _open_droplets
 from tests.test_cell_calling_datastore import _write_store as _write_droplets
@@ -267,8 +267,13 @@ def cite(datastore_zarr_root: str, tmp_path_factory) -> SimpleNamespace:
     location = tmp_path_factory.mktemp("recipes_cite") / "data.zarr"
     shutil.copytree(datastore_zarr_root, location)
     datastore = _open_cite(location)
-    datastore.cells.insert("batch", _labels(datastore.cells.N, ("a", "b")))
-    datastore.cells.insert("donor", _labels(datastore.cells.N, ("d1", "d2", "d3")))
+    datastore.cells.insert(
+        "batch", by_cell_id(datastore.cells, _labels(datastore.cells.N, ("a", "b")))
+    )
+    datastore.cells.insert(
+        "donor",
+        by_cell_id(datastore.cells, _labels(datastore.cells.N, ("d1", "d2", "d3"))),
+    )
     rna = datastore.pipeline.rna(label="rna", **RNA_SETTINGS)
     adt = datastore.pipeline.adt(label="adt", cells=rna, **ADT_SETTINGS)
     return SimpleNamespace(location=location, datastore=datastore, rna=rna, adt=adt)
@@ -366,7 +371,9 @@ def atac(tmp_path_factory) -> SimpleNamespace:
 def atac_harmony(atac: SimpleNamespace) -> PipelineRun:
     """The ATAC run's settings with Harmony over a batch column of the store."""
     datastore = atac.datastore
-    datastore.cells.insert("batch", _labels(datastore.cells.N, ("a", "b")))
+    datastore.cells.insert(
+        "batch", by_cell_id(datastore.cells, _labels(datastore.cells.N, ("a", "b")))
+    )
     return datastore.pipeline.atac(
         harmony={"batch_columns": ["batch"]}, **ATAC_SETTINGS
     )
@@ -386,8 +393,10 @@ def droplets(tmp_path_factory) -> SimpleNamespace:
     _write_droplets(location, counts)
     datastore = _open_droplets(location)
     captures = np.where(np.arange(len(counts)) % 2 == 0, "a", "b")
-    datastore.cells.insert("capture", captures)
-    datastore.cells.insert("donor", _labels(len(counts), ("x", "y", "z")))
+    datastore.cells.insert("capture", by_cell_id(datastore.cells, captures))
+    datastore.cells.insert(
+        "donor", by_cell_id(datastore.cells, _labels(len(counts), ("x", "y", "z")))
+    )
     single = datastore.pipeline.rna(
         label="single",
         cell_calling=CELL_CALLING,
@@ -741,9 +750,9 @@ def test_adt_and_atac_refuse_a_harmony_column_without_every_label_before_the_run
     n_cells = datastore.cells.N
     every_fifth = np.arange(n_cells) % 5 == 4
     lane = np.where(every_fifth, None, _labels(n_cells, ("L1", "L2"))).astype(object)
-    datastore.cells.insert("lane", lane)
+    datastore.cells.insert("lane", by_cell_id(datastore.cells, lane))
     depth = np.where(every_fifth, np.nan, 1.0)
-    datastore.cells.insert("depth", depth)
+    datastore.cells.insert("depth", by_cell_id(datastore.cells, depth))
     unlabeled = int(np.count_nonzero(every_fifth & datastore.cells.fetch_all("I")))
     before = _written(datastore)
 
@@ -774,8 +783,11 @@ def test_adt_and_atac_check_the_harmony_labels_of_the_run_cells_only(
     n_cells = datastore.cells.N
     every_fifth = np.arange(n_cells) % 5 == 4
     lane = np.where(every_fifth, None, _labels(n_cells, ("L1", "L2"))).astype(object)
-    datastore.cells.insert("lane", lane)
-    datastore.cells.insert("labeled", datastore.cells.fetch_all("I") & ~every_fifth)
+    datastore.cells.insert("lane", by_cell_id(datastore.cells, lane))
+    datastore.cells.insert(
+        "labeled",
+        by_cell_id(datastore.cells, datastore.cells.fetch_all("I") & ~every_fifth),
+    )
 
     # The cells without a lane lie outside the run, so the recipe resolves.
     plan = _resolve(
@@ -1664,10 +1676,10 @@ def test_cell_calling_per_capture_needs_a_label_for_every_input_cell(
     # Cell 5 has no capture label, and cells 7 and 8 a NaN code.
     gaps = droplets.captures.astype(object)
     gaps[5] = None
-    datastore.cells.insert("capture_gaps", gaps)
+    datastore.cells.insert("capture_gaps", by_cell_id(datastore.cells, gaps))
     codes = np.where(droplets.captures == "a", 1.0, 2.0)
     codes[[7, 8]] = np.nan
-    datastore.cells.insert("capture_codes", codes)
+    datastore.cells.insert("capture_codes", by_cell_id(datastore.cells, codes))
     before = _run_ids(datastore)
 
     for column, count in (("capture_gaps", "1"), ("capture_codes", "2")):
@@ -1689,7 +1701,7 @@ def test_cell_calling_per_capture_needs_a_label_for_every_input_cell(
     # Only the run's own cells need a label.
     labeled = np.ones(datastore.cells.N, dtype=bool)
     labeled[[5, 7, 8]] = False
-    datastore.cells.insert("labeled", labeled)
+    datastore.cells.insert("labeled", by_cell_id(datastore.cells, labeled))
     for column in ("capture_gaps", "capture_codes"):
         _resolve(
             "rna",
@@ -1725,7 +1737,7 @@ def test_a_failed_capture_call_names_its_capture_and_column(
     totals = np.asarray(datastore.cells.fetch_all("RNA_nCounts"))
     lanes = np.where((totals <= 100) & ~droplets.truth, "a", "b")
     lanes[200:] = "b"
-    datastore.cells.insert("lane", lanes)
+    datastore.cells.insert("lane", by_cell_id(datastore.cells, lanes))
 
     with pytest.raises(PipelineExecutionError) as failed:
         datastore.pipeline.rna(
@@ -1928,8 +1940,10 @@ def test_pools_that_use_different_hashtags_run_apart(tmp_path) -> None:
     )
     datastore = _open_hashed(location)
     first = np.arange(len(hto)) < 60
-    datastore.cells.insert("pool_a", first, overwrite=True)
-    datastore.cells.insert("pool_b", ~first, overwrite=True)
+    datastore.cells.insert("pool_a", by_cell_id(datastore.cells, first), overwrite=True)
+    datastore.cells.insert(
+        "pool_b", by_cell_id(datastore.cells, ~first), overwrite=True
+    )
 
     # One run over both pools fails its hashing stage, which writes no calls.
     with pytest.raises(PipelineExecutionError) as failed:
@@ -1969,7 +1983,9 @@ def test_hashing_demultiplexes_each_sample_with_its_own_hashtags(tmp_path) -> No
     )
     datastore = _open_hashed(location)
     datastore.cells.insert(
-        "pool", np.where(np.arange(len(hto)) < 60, "a", "b"), overwrite=True
+        "pool",
+        by_cell_id(datastore.cells, np.where(np.arange(len(hto)) < 60, "a", "b")),
+        overwrite=True,
     )
     before = _run_ids(datastore)
 

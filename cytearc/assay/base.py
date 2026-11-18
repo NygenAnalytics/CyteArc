@@ -478,8 +478,10 @@ class Assay:
         totals = self._feature_totals(
             {name: result[0] for name, result in planned.items()}
         )
-        self.cells.insert(f"{self.name}_nCounts", n_counts, overwrite=True)
-        self.cells.insert(
+        self.cells._insert_in_store_order(
+            f"{self.name}_nCounts", n_counts, overwrite=True
+        )
+        self.cells._insert_in_store_order(
             f"{self.name}_nFeatures", n_features.astype(np.float64), overwrite=True
         )
         self.feats.insert("nCells", n_cells, overwrite=True)
@@ -621,7 +623,9 @@ class Assay:
         feature_fingerprint: str,
         n_counts: np.ndarray,
     ) -> None:
-        self.cells.insert(name, _percentage(total, n_counts), overwrite=False)
+        self.cells._insert_in_store_order(
+            name, _percentage(total, n_counts), overwrite=False
+        )
         self.cells._get_array(name).attrs["feature_selection_fingerprint"] = (
             feature_fingerprint
         )

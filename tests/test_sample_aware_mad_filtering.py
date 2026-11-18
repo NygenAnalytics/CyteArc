@@ -39,6 +39,7 @@ from tests.qc_helpers import (
     small_rna_counts,
     write_small_store,
 )
+from tests.storage_helpers import by_cell_id
 
 
 @pytest.fixture(scope="module")
@@ -615,8 +616,8 @@ def test_default_pooled_mad_retains_small_selections_with_a_warning(store, n_cel
     active = np.arange(store.cells.N) < n_cells
     values = np.zeros(store.cells.N)
     values[:n_cells] = np.r_[np.linspace(1, 2, n_cells - 1), 99.0]
-    store.cells.insert("boundary_score", values)
-    store.cells.insert("small_selection", active)
+    store.cells.insert("boundary_score", by_cell_id(store.cells, values))
+    store.cells.insert("small_selection", by_cell_id(store.cells, active))
     selection = store.snapshot_cell_selection("small_selection")
 
     result, messages = _capture_warnings(
@@ -687,7 +688,9 @@ def test_auto_filter_cells_global_combines_metadata_and_exact_artifact_metrics(
     subset = base_active.copy()
     excluded_index = int(base_indices[0])
     subset[excluded_index] = False
-    store.cells.insert("artifact_qc_subset", subset, overwrite=True)
+    store.cells.insert(
+        "artifact_qc_subset", by_cell_id(store.cells, subset), overwrite=True
+    )
     prior = store.snapshot_cell_selection("artifact_qc_subset")
 
     metadata_values[excluded_index] = 1e12
@@ -755,7 +758,7 @@ def test_auto_filter_cells_sample_column_raises_on_conflicts(store):
     n = store.cells.N
     store.cells.insert(
         "sample_id",
-        np.array(["A"] * (n // 2) + ["B"] * (n - n // 2)),
+        by_cell_id(store.cells, np.array(["A"] * (n // 2) + ["B"] * (n - n // 2))),
         overwrite=True,
     )
 
@@ -787,7 +790,9 @@ def test_auto_filter_cells_rejects_an_empty_selection_without_mutating_live_cell
     store,
 ):
     before = store.cells.fetch_all("I").copy()
-    store.cells.insert("empty_selection", np.zeros(store.cells.N, dtype=bool))
+    store.cells.insert(
+        "empty_selection", by_cell_id(store.cells, np.zeros(store.cells.N, dtype=bool))
+    )
     selection = store.snapshot_cell_selection("empty_selection")
     with pytest.raises(ValueError, match="Cell selection contains no active cells"):
         store.qc.auto_filter(attrs=["RNA_nCounts"], cell_selection=selection)
@@ -812,7 +817,7 @@ def test_auto_filter_cells_rejects_nonfinite_n_mads_without_mutating_selection(
     n = store.cells.N
     store.cells.insert(
         "sample_id",
-        np.array(["A"] * (n // 2) + ["B"] * (n - n // 2)),
+        by_cell_id(store.cells, np.array(["A"] * (n // 2) + ["B"] * (n - n // 2))),
         overwrite=True,
     )
     before = np.asarray(store.cells.fetch_all("I"), dtype=bool).copy()
@@ -831,7 +836,9 @@ def test_auto_filter_cells_rejects_nonfinite_n_mads_without_mutating_selection(
 
 def test_auto_filter_cells_rejects_overflowing_finite_n_mads_without_mutation(store):
     n = store.cells.N
-    store.cells.insert("sample_id", np.array(["A"] * n), overwrite=True)
+    store.cells.insert(
+        "sample_id", by_cell_id(store.cells, np.array(["A"] * n)), overwrite=True
+    )
     selection = store.zw["cellData"]["I"]
     selection_before = np.asarray(selection[:], dtype=bool).copy()
     provenance_before = dict(selection.attrs)
@@ -859,7 +866,9 @@ def test_auto_filter_cells_validates_provenance_before_selection_mutation(
     import cytearc.quality_control.filtering as qc_filtering
 
     n = store.cells.N
-    store.cells.insert("sample_id", np.array(["A"] * n), overwrite=True)
+    store.cells.insert(
+        "sample_id", by_cell_id(store.cells, np.array(["A"] * n)), overwrite=True
+    )
     selection = store.zw["cellData"]["I"]
     selection_before = np.asarray(selection[:], dtype=bool).copy()
     provenance_before = dict(selection.attrs)
@@ -897,7 +906,9 @@ def test_auto_filter_cells_rejects_negative_counts_without_selection_mutation(
     attr,
 ):
     n = store.cells.N
-    store.cells.insert("sample_id", np.array(["A"] * n), overwrite=True)
+    store.cells.insert(
+        "sample_id", by_cell_id(store.cells, np.array(["A"] * n)), overwrite=True
+    )
     bad = np.asarray(store.cells.fetch_all(attr), dtype=float)
     active = np.asarray(store.cells.fetch_all("I"), dtype=bool)
     bad[int(np.flatnonzero(active)[0])] = -2.0
@@ -923,7 +934,7 @@ def test_auto_filter_cells_sample_column_raises_on_missing_and_nonfinite(store):
     n = store.cells.N
     labels = np.array(["A"] * n, dtype=object)
     labels[0] = ""
-    store.cells.insert("sample_id", labels, overwrite=True)
+    store.cells.insert("sample_id", by_cell_id(store.cells, labels), overwrite=True)
     with pytest.raises(
         ValueError,
         match="^sample_column 'sample_id' contains missing labels among active cells$",
@@ -934,7 +945,9 @@ def test_auto_filter_cells_sample_column_raises_on_missing_and_nonfinite(store):
             min_cells_per_sample=2,
         )
 
-    store.cells.insert("sample_id", np.array(["A"] * n), overwrite=True)
+    store.cells.insert(
+        "sample_id", by_cell_id(store.cells, np.array(["A"] * n)), overwrite=True
+    )
     bad = np.asarray(store.cells.fetch_all("RNA_nCounts"), dtype=float)
     bad[0] = np.nan
     store.zw["cellData"].create_array("RNA_nCounts", data=bad, overwrite=True)
@@ -954,10 +967,10 @@ def test_auto_filter_cells_sample_column_raises_on_missing_and_nonfinite(store):
 def test_auto_filter_cells_sample_column_records_provenance(store):
     n = store.cells.N
     labels = np.array(["A"] * (n - 5) + ["tiny"] * 5)
-    store.cells.insert("sample_id", labels, overwrite=True)
+    store.cells.insert("sample_id", by_cell_id(store.cells, labels), overwrite=True)
     percent_mito = np.random.default_rng(3).uniform(1.0, 5.0, n)
     percent_mito[[7, n - 1]] = 60.0
-    store.cells.insert("RNA_percentMito", percent_mito)
+    store.cells.insert("RNA_percentMito", by_cell_id(store.cells, percent_mito))
     active = np.asarray(store.cells.fetch_all("I"), dtype=bool)
     prior_selection = store.snapshot_cell_selection("I")
     metrics = {
@@ -1084,7 +1097,7 @@ def test_auto_filter_cells_sample_mad_combines_exact_metric_and_hto_artifacts(st
 def test_pipeline_passes_sample_column_through(store):
     n = store.cells.N
     labels = np.array(["A"] * (n // 2) + ["B"] * (n - n // 2))
-    store.cells.insert("sample_id", labels, overwrite=True)
+    store.cells.insert("sample_id", by_cell_id(store.cells, labels), overwrite=True)
     counts = np.asarray(store.cells.fetch_all("RNA_nCounts"), dtype=float)
 
     run = store.pipeline.rna(

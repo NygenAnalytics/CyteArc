@@ -17,7 +17,7 @@ from cytearc.metadata.rows import text_read_bytes
 from cytearc.utils.logging import collect_warnings
 from cytearc.utils.memory_budget import MemoryBudgetError
 from tests.clone_helpers import assert_joined, every_cell
-from tests.storage_helpers import copy_store, open_store
+from tests.storage_helpers import by_cell_id, copy_store, open_store
 from tests.variant_helpers import (
     assert_tables,
     expected_gift,
@@ -768,7 +768,7 @@ def test_the_pass_over_the_stores_cell_ids_counts_every_barcode_of_the_files(
         cell_ids=[f"s1__{index:016d}-1" for index in range(n_cells)],
     )
     store = open_store(tmp_path / "store.zarr")
-    store.cells.insert("kept", np.arange(n_cells) < selected)
+    store.cells.insert("kept", by_cell_id(store.cells, np.arange(n_cells) < selected))
     cells = store.snapshot_cell_selection("kept")
     barcodes = [f"{index:016d}" for index in range(selected - 2, 5_010)] + [
         f"x{index:015d}" for index in range(1_000)
@@ -1019,7 +1019,10 @@ def test_load_counts_refuses_sites_and_cells_it_does_not_hold(store, tmp_path) -
         TypeError, match="^cell_selection must be a cell selection ArtifactRef"
     ):
         store.variants.load_counts(ref, cell_selection="d2__AAAC-1")
-    store.cells.insert("first_half", np.arange(TRUTH.n_cells) < TRUTH.n_cells // 2)
+    store.cells.insert(
+        "first_half",
+        by_cell_id(store.cells, np.arange(TRUTH.n_cells) < TRUTH.n_cells // 2),
+    )
     half = store.snapshot_cell_selection("first_half")
     with collect_warnings(), warnings.catch_warnings():
         warnings.simplefilter("ignore", UserWarning)
@@ -1078,7 +1081,9 @@ def test_import_refuses_files_without_rows_values_out_of_range_and_empty_selecti
             cell_selection=every_cell(store),
             swap_strands=True,
         )
-    store.cells.insert("nothing", np.zeros(TRUTH.n_cells, dtype=bool))
+    store.cells.insert(
+        "nothing", by_cell_id(store.cells, np.zeros(TRUTH.n_cells, dtype=bool))
+    )
     with pytest.raises(ValueError, match="selects no cell"):
         store.variants.import_counts(
             write_got(TRUTH, tmp_path / "y.tsv", style="xv"),
@@ -1525,7 +1530,9 @@ def test_load_counts_counts_the_chunks_a_read_decompresses(store, tmp_path) -> N
     # The one cell is read by a selection, and its ID as text, which decodes
     # a stored chunk of IDs, beside the chunks of the long arrays.
     store.cells.insert(
-        "is_first", np.arange(len(store.cells.fetch_all("ids"))) == 0, overwrite=True
+        "is_first",
+        by_cell_id(store.cells, np.arange(len(store.cells.fetch_all("ids"))) == 0),
+        overwrite=True,
     )
     first = store.snapshot_cell_selection("is_first")
     ids_bytes = text_read_bytes(store.cells._get_array("ids"), 1)

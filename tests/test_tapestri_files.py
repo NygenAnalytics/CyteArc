@@ -16,6 +16,7 @@ import pytest
 
 from tests.clone_helpers import every_cell, write_cells_store
 from tests.network_helpers import download_or_skip
+from tests.storage_helpers import by_cell_id
 
 _ZENODO = (
     "https://zenodo.org/records/20818440/files/"
@@ -168,7 +169,7 @@ def test_the_tapestri_example_reads_into_a_store_and_its_variants(tmp_path) -> N
     names = np.where(
         lines.isin(loaded["chosen"].clones["clone"].tolist()[:4]), lines, "other"
     ).astype(object)
-    ds.cells.insert("line", names, overwrite=True)
+    ds.cells.insert("line", by_cell_id(ds.cells, names), overwrite=True)
     alone = ds.clones.load_clones(
         ds.variants.genotype_clones(genotype_ref, within="line")
     ).cells["clone"]

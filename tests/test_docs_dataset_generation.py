@@ -24,30 +24,38 @@ def test_labeled_cluster_mask_rejects_blank_and_nan_values():
 def test_prepared_run_columns_are_explicit_full_axis_copies():
     class Cells:
         N = 3
+        ids = ["c0", "c1", "c2"]
 
         def __init__(self) -> None:
             self.columns = {"I": np.ones(self.N, dtype=bool)}
 
+        def fetch_all(self, name: str) -> np.ndarray:
+            assert name == "ids"
+            return np.asarray(self.ids)
+
         def insert(
             self,
             name: str,
-            values: np.ndarray,
+            values: pd.Series,
             *,
             fill_value: object,
             overwrite: bool,
         ) -> None:
+            # A cell table takes values keyed by cell ID.
+            assert values.index.tolist() == self.ids
             assert overwrite is True
             if np.issubdtype(values.dtype, np.integer):
                 assert fill_value == 0
             else:
                 assert np.isnan(fill_value)
-            self.columns[name] = np.asarray(values)
+            self.columns[name] = values.to_numpy()
 
         def reset_key(self, key: str) -> None:
             self.columns[key] = np.ones(self.N, dtype=bool)
 
-        def update_key(self, values: np.ndarray, key: str) -> None:
-            self.columns[key] &= np.asarray(values, dtype=bool)
+        def update_key(self, values: pd.Series, key: str) -> None:
+            assert values.index.tolist() == self.ids
+            self.columns[key] &= values.to_numpy(dtype=bool)
 
     class RunCells:
         columns = ("I", "umap_1", "clusters")
@@ -90,27 +98,33 @@ class _PreparedCells:
 
     def __init__(self, n_cells: int) -> None:
         self.N = n_cells
+        self.ids = [f"c{row}" for row in range(n_cells)]
         # A selection that the run's own must replace, not narrow.
         self.columns = {"I": np.arange(n_cells) != 0}
+
+    def fetch_all(self, name: str) -> np.ndarray:
+        assert name == "ids"
+        return np.asarray(self.ids)
 
     def insert(
         self,
         name: str,
-        values: np.ndarray,
+        values: pd.Series,
         *,
         fill_value: object,
         overwrite: bool,
     ) -> None:
-        # Full-axis values leave no row to the fill.
-        assert len(values) == self.N
+        # Full-axis values, keyed by cell ID, leave no row to the fill.
+        assert values.index.tolist() == self.ids
         assert overwrite is True
-        self.columns[name] = np.asarray(values)
+        self.columns[name] = values.to_numpy()
 
     def reset_key(self, key: str) -> None:
         self.columns[key] = np.ones(self.N, dtype=bool)
 
-    def update_key(self, values: np.ndarray, key: str) -> None:
-        self.columns[key] &= np.asarray(values, dtype=bool)
+    def update_key(self, values: pd.Series, key: str) -> None:
+        assert values.index.tolist() == self.ids
+        self.columns[key] &= values.to_numpy(dtype=bool)
 
 
 def test_prepared_run_columns_hold_the_fills_of_the_run_fields():
@@ -544,6 +558,7 @@ def test_teaseq_annotations_map_original_barcodes_through_well_suffix(tmp_path):
     class Cells:
         def __init__(self) -> None:
             self.columns = {
+                "ids": np.asarray([f"cell{index}" for index in range(n_cells)]),
                 "original_barcodes": original,
                 "well_id": np.full(n_cells, "X066-MP0C1W3"),
             }
@@ -554,15 +569,18 @@ def test_teaseq_annotations_map_original_barcodes_through_well_suffix(tmp_path):
         def insert(
             self,
             name: str,
-            values: np.ndarray,
+            values: pd.Series,
             *,
             overwrite: bool,
         ) -> None:
+            # A cell table takes values keyed by cell ID.
+            np.testing.assert_array_equal(values.index, self.columns["ids"])
             assert overwrite is True
-            self.columns[name] = np.asarray(values)
+            self.columns[name] = values.to_numpy()
 
-        def update_key(self, values: np.ndarray, key: str) -> None:
-            self.columns[key] = np.asarray(values) & self.columns[key]
+        def update_key(self, values: pd.Series, key: str) -> None:
+            np.testing.assert_array_equal(values.index, self.columns["ids"])
+            self.columns[key] = values.to_numpy() & self.columns[key]
 
     class Store:
         cells = Cells()

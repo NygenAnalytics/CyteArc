@@ -28,7 +28,12 @@ from tests.clone_helpers import (
 )
 from cytearc.utils.memory_budget import MemoryBudgetError
 from tests.clone_truth import CELL_TYPES, N_CELLS, clone_truth, number_label
-from tests.storage_helpers import copy_store, insert_nullable_cell_column, open_store
+from tests.storage_helpers import (
+    by_cell_id,
+    copy_store,
+    insert_nullable_cell_column,
+    open_store,
+)
 
 TRUTH = clone_truth()
 TYPES = sorted(CELL_TYPES)
@@ -41,9 +46,12 @@ def template(tmp_path_factory) -> SimpleNamespace:
     folder = tmp_path_factory.mktemp("clone_fate")
     store = write_truth_store(folder / "store.zarr", TRUTH)
     clones = import_truth_clones(store, TRUTH, folder)
-    store.cells.insert("is_d2", EARLY)
-    store.cells.insert("is_d4", LATE)
-    store.cells.insert("cell", np.asarray([f"c{at:02d}" for at in range(N_CELLS)]))
+    store.cells.insert("is_d2", by_cell_id(store.cells, EARLY))
+    store.cells.insert("is_d4", by_cell_id(store.cells, LATE))
+    store.cells.insert(
+        "cell",
+        by_cell_id(store.cells, np.asarray([f"c{at:02d}" for at in range(N_CELLS)])),
+    )
     insert_nullable_cell_column(
         store, "unlabeled", TRUTH.samples, np.ones(N_CELLS, dtype=bool)
     )
@@ -152,8 +160,13 @@ def test_pairs_whose_null_has_no_spread_are_counted(tmp_path) -> None:
     from tests.clone_helpers import write_cells_store
 
     store = write_cells_store(tmp_path / "store.zarr", [f"c{i}" for i in range(6)])
-    store.cells.insert("clone", np.asarray(["a"] * 6, dtype=object))
-    store.cells.insert("cell_type", np.asarray(["x"] * 3 + ["y"] * 3, dtype=object))
+    store.cells.insert(
+        "clone", by_cell_id(store.cells, np.asarray(["a"] * 6, dtype=object))
+    )
+    store.cells.insert(
+        "cell_type",
+        by_cell_id(store.cells, np.asarray(["x"] * 3 + ["y"] * 3, dtype=object)),
+    )
     clones = store.clones.from_column(
         "clone", cell_selection=store.snapshot_cell_selection("every_cell")
     )
@@ -250,7 +263,11 @@ def test_coupling_needs_two_groups_with_a_clone(copied) -> None:
     # other, and its labels stay in the keys.
     neutral = store.clones.coupling(clones, group_by="cell_type", n_permutations=0)
     for name in ("group", "n_cells", "n_clones", "coupling", "cells"):
-        store.cells.insert(name, TRUTH.cell_types.astype(object), overwrite=True)
+        store.cells.insert(
+            name,
+            by_cell_id(store.cells, TRUTH.cell_types.astype(object)),
+            overwrite=True,
+        )
         named = store.clones.coupling(clones, group_by=name, n_permutations=0)
         assert named.order == neutral.order
         pd.testing.assert_frame_equal(named.group_sizes, neutral.group_sizes)
@@ -303,7 +320,10 @@ def test_coupling_compares_only_groups_of_the_labels_kept_apart(kept_apart) -> N
     # The lineages join last in the tree.
     assert set(result.order[:2]) in ({"d2, A", "d4, A"}, {"d2, B", "d4, B"})
     store.cells.insert(
-        "one_lineage_each", (EARLY & (LINEAGES == "A")) | (LATE & (LINEAGES == "B"))
+        "one_lineage_each",
+        by_cell_id(
+            store.cells, (EARLY & (LINEAGES == "A")) | (LATE & (LINEAGES == "B"))
+        ),
     )
     with pytest.raises(
         ValueError, match=r"No two groups share their labels in \['lineage'\]"
@@ -460,9 +480,13 @@ def test_fate_bias_is_reused_and_selected_like_labels(copied) -> None:
     # Other labels in the columns of the fates give another result, and the
     # same labels again reuse it.
     renamed = np.char.add(TRUTH.cell_types.astype(str), "s").astype(object)
-    store.cells.insert("cell_type", renamed, overwrite=True)
+    store.cells.insert("cell_type", by_cell_id(store.cells, renamed), overwrite=True)
     assert store.clones.fate_bias(clones, **options) != first
-    store.cells.insert("cell_type", TRUTH.cell_types.astype(object), overwrite=True)
+    store.cells.insert(
+        "cell_type",
+        by_cell_id(store.cells, TRUTH.cell_types.astype(object)),
+        overwrite=True,
+    )
     assert store.clones.fate_bias(clones, **options) == first
 
 
@@ -519,7 +543,7 @@ def test_fate_bias_names_late_when_none_of_its_cells_has_a_clone(copied) -> None
     # clone, and early cells that hold clones.
     without = (TRUTH.clones < 0) & LATE
     assert without.any()
-    store.cells.insert("late_without_clone", without)
+    store.cells.insert("late_without_clone", by_cell_id(store.cells, without))
     late = store.snapshot_cell_selection("late_without_clone")
     with pytest.raises(
         ValueError,
@@ -576,7 +600,9 @@ def test_fate_bias_arguments_are_checked(copied) -> None:
     everyone = every_cell(store)
     with pytest.raises(ValueError, match=f"share {int(LATE.sum())} cells"):
         store.clones.fate_bias(clones, group_by="cell_type", early=everyone, late=late)
-    store.cells.insert("no_cell", np.zeros(N_CELLS, dtype=bool))
+    store.cells.insert(
+        "no_cell", by_cell_id(store.cells, np.zeros(N_CELLS, dtype=bool))
+    )
     none = store.snapshot_cell_selection("no_cell")
     with pytest.raises(ValueError, match="^early selects no cell$"):
         store.clones.fate_bias(clones, group_by="cell_type", early=none, late=late)
@@ -605,7 +631,9 @@ def test_fates_may_take_the_names_of_the_tables_columns(copied, name) -> None:
     # The monocytes take a fate named like a column of the tables, which holds
     # the shares of the monocytes' fate and changes nothing else.
     renamed = np.where(TRUTH.cell_types == "Monocyte", name, TRUTH.cell_types)
-    store.cells.insert("named", renamed.astype(object), overwrite=True)
+    store.cells.insert(
+        "named", by_cell_id(store.cells, renamed.astype(object)), overwrite=True
+    )
     loaded = store.clones.load_fate_bias(
         store.clones.fate_bias(clones, group_by="named", early=early, late=late)
     )
@@ -695,7 +723,7 @@ def test_fate_bias_tests_clones_within_the_labels_kept_apart(kept_apart) -> None
 
 def _own_labels(store, mask: np.ndarray):
     """A label artifact of a label of its own, three characters wide, for each cell of ``mask``."""
-    store.cells.insert("chosen", mask, overwrite=True)
+    store.cells.insert("chosen", by_cell_id(store.cells, mask), overwrite=True)
     own = store.snapshot_cluster_labels(
         "cell", cell_selection=store.snapshot_cell_selection("chosen")
     )

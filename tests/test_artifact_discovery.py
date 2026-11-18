@@ -14,7 +14,7 @@ from cytearc.storage.artifact_writer import (
 from cytearc.storage.artifacts import ArtifactRef, fingerprint_array
 from cytearc.storage.errors import ArtifactResolutionError
 from cytearc.storage.operation_revisions import OperationRevision
-from tests.storage_helpers import write_count_store
+from tests.storage_helpers import by_cell_id, write_count_store
 from tests.test_graph_operation_paths import N_CELLS, open_store, write_graph_template
 
 
@@ -311,7 +311,12 @@ def produced_store(tmp_path_factory):
     refs["clusters"] = datastore.clusters.leiden(refs["wnn"], resolution=1)
     initialization = np.random.default_rng(82).normal(size=(N_CELLS, 2))
     refs["umap"] = datastore.embeddings.umap(
-        refs["wnn"], initialization, n_epochs=10, min_dist=1, spread=2, nthreads=1
+        refs["wnn"],
+        by_cell_id(datastore.cells, initialization),
+        n_epochs=10,
+        min_dist=1,
+        spread=2,
+        nthreads=1,
     )
     return datastore, refs
 

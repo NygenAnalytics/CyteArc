@@ -219,7 +219,7 @@ Raw `uint8`/`uint16` counts export as `float32` by default (arithmetic on narrow
 pass `dtype=` to `to_anndata` or `to_h5ad` to choose. Store columns named `_index` export as
 `source_index`, and a column whose name the export already uses gets `_2`.
 
-A categorical column (written by `cells.insert(col, pd.Categorical(...))` or `H5adToZarr(..., categorical_columns=True)`) exports from `to_anndata` and `to_h5ad` as an AnnData categorical: every category in its stored order, unused ones included, and its `ordered` flag. A column of labels exports its labels, as the categorical of its `levels` when it keeps a source categorical's; a run export holds the run's frozen labels.
+A categorical column (written by `cells.insert(col, pd.Series(pd.Categorical(...), index=ids))` or `H5adToZarr(..., categorical_columns=True)`) exports from `to_anndata` and `to_h5ad` as an AnnData categorical: every category in its stored order, unused ones included, and its `ordered` flag. A column of labels exports its labels, as the categorical of its `levels` when it keeps a source categorical's; a run export holds the run's frozen labels.
 
 ### Export a gene panel or normalized values
 
@@ -283,8 +283,8 @@ donor (paired) or sum its samples first, and avoid rank-deficient designs
 ### Write a self-contained subset store
 
 ```python
-keep = np.flatnonzero(run.cells.fetch_all("I"))      # or cell_key="my_bool_column"
-cytearc.SubsetZarr("run_cells.zarr", assays=[ds.RNA], cell_idx=keep).dump()
+keep = ds.cells.fetch_all("ids")[run.cells.fetch_all("I")]  # or cell_key="my_bool_column"
+cytearc.SubsetZarr("run_cells.zarr", assays=[ds.RNA], cell_ids=keep).dump()  # store order
 sub = cytearc.DataStore("run_cells.zarr")              # first open must be writable
 ```
 

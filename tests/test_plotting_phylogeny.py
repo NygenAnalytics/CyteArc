@@ -38,7 +38,7 @@ from tests.clone_truth import (
     truth_forest,
     write_newick,
 )
-from tests.storage_helpers import open_store, write_count_store
+from tests.storage_helpers import by_cell_id, open_store, write_count_store
 
 pytestmark = pytest.mark.usefixtures("figures_closed")
 
@@ -465,7 +465,9 @@ def test_a_caterpillar_30000_levels_deep_is_drawn_without_recursion(tmp_path) ->
         cell_ids=ids,
     )
     store = open_store(path)
-    store.cells.insert("every_cell", np.ones(len(ids), dtype=bool))
+    store.cells.insert(
+        "every_cell", by_cell_id(store.cells, np.ones(len(ids), dtype=bool))
+    )
     tree = tmp_path / "caterpillar.nwk"
     tree.write_text(_caterpillar(depth, ids))
     phylogeny = store.clones.import_phylogeny(
@@ -507,7 +509,9 @@ def random_tree(tmp_path_factory) -> SimpleNamespace:
         cell_ids=ids,
     )
     store = open_store(path)
-    store.cells.insert("every_cell", np.ones(len(ids), dtype=bool))
+    store.cells.insert(
+        "every_cell", by_cell_id(store.cells, np.ones(len(ids), dtype=bool))
+    )
     tree = folder / "tree.nwk"
     tree.write_text(random_newick(ids[:20_000], rng))
     phylogeny = store.clones.import_phylogeny(

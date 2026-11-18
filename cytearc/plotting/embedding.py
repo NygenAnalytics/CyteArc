@@ -8,6 +8,11 @@ import numpy as np
 import pandas as pd
 
 from ..features.values import normalization_is_cell_local, resolve_feature_batch
+from ..metadata.alignment import (
+    align_to_cell_ids,
+    keyed_values_remedy,
+    require_keyed,
+)
 from ..metadata.rows import apply_missing_mask
 from ..metadata.selection import (
     CellFieldKind,
@@ -1426,7 +1431,7 @@ def embedding(
     from_assay: str | None = None,
     normalization: NormalizationSpec | None = None,
     point_size: float | None = None,
-    point_sizes: np.ndarray | Sequence[float] | None = None,
+    point_sizes: pd.Series | None = None,
     point_size_range: tuple[float, float] = (1.0, 28.0),
     point_edgecolor: str | None = None,
     point_edgewidth: float | None = None,
@@ -1483,7 +1488,8 @@ def embedding(
       UMAP2 labels on the outer panels.
     - ``point_size``: leave as ``None`` to size markers from the cell count.
       Pass a number (matplotlib marker area) or ``point_sizes`` for per-cell
-      sizes such as mapping confidence.
+      sizes such as mapping confidence: a pandas Series of the plotted cells'
+      sizes indexed by cell ID, whose values of other cells are left out.
     - ``sort_values``: whether continuous colors draw high values last, so
       expressing cells sit on top of the cloud. The default, ``None``, sorts
       gene and other feature colors and shuffles the rest; ``True`` sorts
@@ -1528,6 +1534,12 @@ def embedding(
     show_titles = bool_argument(show_titles, "show_titles")
     show = bool_argument(show, "show")
     clip_fraction = clip_fraction_argument(clip_fraction)
+    if point_sizes is not None:
+        require_keyed(
+            point_sizes,
+            name="plots.embedding(point_sizes=)",
+            remedy=keyed_values_remedy(),
+        )
     if (layout_key is None) == (layout is None):
         raise ValueError("Provide exactly one of layout_key or layout")
     if layout is None:
@@ -1629,8 +1641,19 @@ def embedding(
     finite_coordinates = np.isfinite(x) & np.isfinite(y)
     if not finite_coordinates.any():
         raise ValueError(f"Layout {layout_name!r} has no finite coordinates")
-    if point_sizes is not None and len(point_sizes) != n:
-        raise ValueError("point_sizes length must match number of selected cells")
+    keyed_sizes: np.ndarray | None = None
+    if point_sizes is not None:
+        plotted_ids = _fetch_cell_column(
+            store, "ids", cell_key=cell_key, cell_idx=artifact_cell_indices
+        )
+        keyed_sizes = align_to_cell_ids(
+            point_sizes,
+            plotted_ids,
+            name="plots.embedding(point_sizes=)",
+            cells=f"the {n} plotted cells",
+            remedy=keyed_values_remedy(),
+            leave_out_others=True,
+        ).to_numpy()
     if point_size is not None and (not np.isfinite(point_size) or point_size <= 0):
         raise ValueError("point_size must be finite and positive")
     auto_point_size = point_size is None and point_sizes is None
@@ -1644,8 +1667,8 @@ def embedding(
         )
     )
     size_arr = (
-        np.asarray(point_sizes, dtype=np.float64)
-        if point_sizes is not None
+        np.asarray(keyed_sizes, dtype=np.float64)
+        if keyed_sizes is not None
         else np.full(n, resolved_point_size, dtype=np.float64)
     )
     if not np.all(np.isfinite(size_arr)) or np.any(size_arr <= 0):

@@ -23,7 +23,7 @@ from cytearc.storage.refs import ArtifactRef
 from cytearc.storage.schema import create_cell_data, create_zarr_count_assay
 from cytearc.storage.stores import load_zarr
 from cytearc.writers.counts_t import finalize_writer_counts_t
-from tests.storage_helpers import finalize_test_counts
+from tests.storage_helpers import by_cell_id, finalize_test_counts
 from tests.test_cell_calling import _ambient_good_turing_slope, _droplets
 from tests.test_reduction_graph_diagnostics import _warned
 
@@ -250,7 +250,7 @@ def test_call_cells_reads_every_barcode_whatever_i_holds(store_path, droplets) -
     store = _open(store_path)
     baseline = store.qc.call_cells(n_iter=N_ITER, random_seed=3)
     # Remove the ambient pool from I, as an open-time feature floor can.
-    store.cells.update_key(counts.sum(axis=1) > 100, key="I")
+    store.cells.update_key(by_cell_id(store.cells, counts.sum(axis=1) > 100), key="I")
 
     assert store.qc.call_cells(n_iter=N_ITER, random_seed=3) == baseline
     ranks = store.qc.barcode_ranks()
@@ -352,10 +352,13 @@ def test_call_cells_checks_arguments_before_writing(
 def test_call_cells_reports_selections_and_pools_it_cannot_use(store_path) -> None:
     store = _open(store_path)
     empty = store.cells.fetch_all("I") & False
-    store.cells.insert("nothing", empty)
+    store.cells.insert("nothing", by_cell_id(store.cells, empty))
     with pytest.raises(ValueError, match="cell_selection selects no barcode"):
         store.qc.call_cells(cell_selection=store.snapshot_cell_selection("nothing"))
-    store.cells.insert("cells_only", store.cells.fetch_all("RNA_nCounts") > 100)
+    store.cells.insert(
+        "cells_only",
+        by_cell_id(store.cells, store.cells.fetch_all("RNA_nCounts") > 100),
+    )
     with pytest.raises(ValueError, match="no ambient pool"):
         store.qc.call_cells(
             cell_selection=store.snapshot_cell_selection("cells_only"), retain=5000
@@ -501,7 +504,7 @@ def test_barcode_ranks_reads_the_prepared_totals(store_path, droplets) -> None:
     assert store.artifacts.list(scope="datastore") == []
 
     writable = _open(store_path)
-    writable.cells.insert("large", totals > 50)
+    writable.cells.insert("large", by_cell_id(writable.cells, totals > 50))
     subset = writable.qc.barcode_ranks(
         cell_selection=writable.snapshot_cell_selection("large"), lower=60
     )

@@ -12,6 +12,7 @@ from functools import cache
 from typing import Any
 
 import numpy as np
+import pandas as pd
 import pytest
 import zarr
 from loguru import logger
@@ -50,6 +51,7 @@ from cytearc.trajectory.parameters import resolve_aggregation_ann_params
 
 from .test_graph_coverage import _memory_graph_store
 from .test_graph_feature_projection import _native_chain
+from tests.storage_helpers import by_cell_id
 
 _Y_EDGES = ((0, 1), (1, 2), (0, 3), (3, 4))
 _Y_LABELS = np.array(["root", "a-mid", "A", "b-mid", "B"])
@@ -412,8 +414,23 @@ _PSEUDOTIME_ARGUMENT_ERRORS: dict[
         ValueError,
         "source_sink is required when sources or sinks are provided",
     ),
+    "vector-by-position": (
+        lambda trajectory: {"ss_vec": _Y_SOURCE_SINK},
+        TypeError,
+        r"^trajectory\.pseudotime\(ss_vec=\) takes per-cell values only as a "
+        r"pandas Series keyed by cell ID, whose index holds the cell IDs; got a "
+        r"NumPy array, which would assign values to cells by position",
+    ),
+    "vector-with-a-range-index": (
+        lambda trajectory: {"ss_vec": pd.Series(_Y_SOURCE_SINK)},
+        TypeError,
+        "got a pandas Series with a RangeIndex",
+    ),
     "vector-and-labels": (
-        lambda trajectory: {"ss_vec": _Y_SOURCE_SINK, "sinks": ["A"]},
+        lambda trajectory: {
+            "ss_vec": by_cell_id(trajectory.store.cells, _Y_SOURCE_SINK),
+            "sinks": ["A"],
+        },
         ValueError,
         "Provide either ss_vec or source_sink",
     ),
@@ -439,33 +456,48 @@ _PSEUDOTIME_ARGUMENT_ERRORS: dict[
         "sinks must be a list",
     ),
     "unknown-component-policy": (
-        lambda trajectory: {"ss_vec": _Y_SOURCE_SINK, "component_policy": "smallest"},
+        lambda trajectory: {
+            "ss_vec": by_cell_id(trajectory.store.cells, _Y_SOURCE_SINK),
+            "component_policy": "smallest",
+        },
         ValueError,
         "component_policy must be 'largest', 'sources' or 'error'",
     ),
     "zero-max-iterations": (
-        lambda trajectory: {"ss_vec": _Y_SOURCE_SINK, "max_iterations": 0},
+        lambda trajectory: {
+            "ss_vec": by_cell_id(trajectory.store.cells, _Y_SOURCE_SINK),
+            "max_iterations": 0,
+        },
         ValueError,
         "max_iterations must be at least 1",
     ),
     "solver-tol-of-one": (
-        lambda trajectory: {"ss_vec": _Y_SOURCE_SINK, "solver_tol": 1.0},
+        lambda trajectory: {
+            "ss_vec": by_cell_id(trajectory.store.cells, _Y_SOURCE_SINK),
+            "solver_tol": 1.0,
+        },
         ValueError,
         "solver_tol must be less than 1.0",
     ),
     "unknown-method": (
-        lambda trajectory: {"ss_vec": _Y_SOURCE_SINK, "method": "exact"},
+        lambda trajectory: {
+            "ss_vec": by_cell_id(trajectory.store.cells, _Y_SOURCE_SINK),
+            "method": "exact",
+        },
         ValueError,
         "method must be 'untruncated' or 'truncated'",
     ),
     "modes-of-the-untruncated-potential": (
-        lambda trajectory: {"ss_vec": _Y_SOURCE_SINK, "n_singular_vals": 3},
+        lambda trajectory: {
+            "ss_vec": by_cell_id(trajectory.store.cells, _Y_SOURCE_SINK),
+            "n_singular_vals": 3,
+        },
         ValueError,
         "n_singular_vals applies only to method='truncated'; leave it unset",
     ),
     "seed-of-the-untruncated-potential": (
         lambda trajectory: {
-            "ss_vec": _Y_SOURCE_SINK,
+            "ss_vec": by_cell_id(trajectory.store.cells, _Y_SOURCE_SINK),
             "method": "untruncated",
             "random_seed": 4444,
         },
@@ -474,7 +506,7 @@ _PSEUDOTIME_ARGUMENT_ERRORS: dict[
     ),
     "modes-and-seed-of-the-untruncated-potential": (
         lambda trajectory: {
-            "ss_vec": _Y_SOURCE_SINK,
+            "ss_vec": by_cell_id(trajectory.store.cells, _Y_SOURCE_SINK),
             "n_singular_vals": 30,
             "random_seed": 4444,
         },
@@ -484,7 +516,7 @@ _PSEUDOTIME_ARGUMENT_ERRORS: dict[
     ),
     "one-mode-of-the-truncated-potential": (
         lambda trajectory: {
-            "ss_vec": _Y_SOURCE_SINK,
+            "ss_vec": by_cell_id(trajectory.store.cells, _Y_SOURCE_SINK),
             "method": "truncated",
             "n_singular_vals": 1,
         },
@@ -575,12 +607,42 @@ def _empty_graph_payload(trajectory: _Trajectory) -> None:
     _resize_graph(trajectory, 0)
 
 
+def test_a_source_sink_vector_keyed_by_cell_id_scores_the_cells_of_its_ids() -> None:
+    trajectory = _trajectory_store(_y_graph())
+    store = trajectory.store
+    ids = store.cells.fetch_all("ids")
+    in_order = store.trajectory.pseudotime(
+        trajectory.graph, ss_vec=pd.Series(_Y_SOURCE_SINK, index=ids)
+    )
+    # The same values in reverse order, and beside a value of a cell outside
+    # the graph, which is left out, give the same artifact: its identity holds
+    # the values aligned to the scored cells.
+    reversed_ids = store.trajectory.pseudotime(
+        trajectory.graph, ss_vec=pd.Series(_Y_SOURCE_SINK[::-1], index=ids[::-1])
+    )
+    with_another_cell = store.trajectory.pseudotime(
+        trajectory.graph,
+        ss_vec=pd.Series([*_Y_SOURCE_SINK, 5.0], index=[*ids, "elsewhere"]),
+    )
+    assert reversed_ids == in_order
+    assert with_another_cell == in_order
+    snapshot = store.artifacts.inspect(in_order).input_ref("source_sink")
+    np.testing.assert_array_equal(
+        artifact_group(store.zw, snapshot)["values"][:], _Y_SOURCE_SINK
+    )
+    # Values moved to other cells are other values, with another pseudotime.
+    moved = store.trajectory.pseudotime(
+        trajectory.graph, ss_vec=pd.Series(_Y_SOURCE_SINK, index=ids[::-1])
+    )
+    assert moved != in_order
+
+
 def test_pseudotime_scoring_requires_a_graph_of_at_least_four_cells() -> None:
     triangle = _trajectory_store(_adjacency(3, [(0, 1), (1, 2), (0, 2)]))
     with pytest.raises(ValueError, match="must contain at least 4 cells"):
         triangle.store.trajectory.pseudotime(
             triangle.graph,
-            ss_vec=np.array([-1.0, 0.0, 1.0]),
+            ss_vec=by_cell_id(triangle.store.cells, np.array([-1.0, 0.0, 1.0])),
         )
     assert triangle.artifacts("pseudotime") == []
 
@@ -588,9 +650,13 @@ def test_pseudotime_scoring_requires_a_graph_of_at_least_four_cells() -> None:
     emptied = _trajectory_store(_y_graph())
     _empty_graph_payload(emptied)
     with pytest.raises(ValueError, match="No cells were selected for pseudotime"):
-        emptied.store.trajectory.pseudotime(emptied.graph, ss_vec=_Y_SOURCE_SINK)
+        emptied.store.trajectory.pseudotime(
+            emptied.graph, ss_vec=by_cell_id(emptied.store.cells, _Y_SOURCE_SINK)
+        )
     with pytest.raises(TypeError, match="graph must be an ArtifactRef"):
-        emptied.store.trajectory.pseudotime("graph", ss_vec=_Y_SOURCE_SINK)
+        emptied.store.trajectory.pseudotime(
+            "graph", ss_vec=by_cell_id(emptied.store.cells, _Y_SOURCE_SINK)
+        )
     assert emptied.artifacts("pseudotime") == []
 
 
@@ -605,7 +671,7 @@ def test_pseudotime_scoring_refuses_a_graph_larger_than_its_selection() -> None:
     ):
         trajectory.store.trajectory.pseudotime(
             trajectory.graph,
-            ss_vec=_Y_SOURCE_SINK,
+            ss_vec=by_cell_id(trajectory.store.cells, _Y_SOURCE_SINK),
         )
     assert trajectory.artifacts("pseudotime") == []
 
@@ -624,12 +690,12 @@ def test_pseudotime_scoring_keeps_requested_modes_and_raw_potential(
     try:
         normalized = store.trajectory.pseudotime(
             trajectory.graph,
-            ss_vec=_Y_SOURCE_SINK,
+            ss_vec=by_cell_id(store.cells, _Y_SOURCE_SINK),
             method=method,
         )
         raw = store.trajectory.pseudotime(
             trajectory.graph,
-            ss_vec=_Y_SOURCE_SINK,
+            ss_vec=by_cell_id(store.cells, _Y_SOURCE_SINK),
             min_max_norm_ptime=False,
             method=method,
         )
@@ -701,7 +767,7 @@ def test_pseudotime_scoring_refuses_degenerate_potentials(
     ):
         trajectory.store.trajectory.pseudotime(
             trajectory.graph,
-            ss_vec=ss_vec,
+            ss_vec=by_cell_id(trajectory.store.cells, ss_vec),
             method="truncated",
             n_singular_vals=2,
         )
@@ -744,7 +810,9 @@ def test_the_untruncated_potential_refuses_degenerate_potentials(
         np.errstate(over="ignore", invalid="ignore"),
         pytest.raises(ValueError, match=message),
     ):
-        trajectory.store.trajectory.pseudotime(trajectory.graph, ss_vec=ss_vec)
+        trajectory.store.trajectory.pseudotime(
+            trajectory.graph, ss_vec=by_cell_id(trajectory.store.cells, ss_vec)
+        )
     assert trajectory.artifacts("pseudotime") == []
 
 
@@ -786,7 +854,7 @@ def _scored_template() -> _ScoredTrajectory:
         ),
         from_vector=trajectory.store.trajectory.pseudotime(
             trajectory.graph,
-            ss_vec=_Y_SOURCE_SINK,
+            ss_vec=by_cell_id(trajectory.store.cells, _Y_SOURCE_SINK),
         ),
         truncated=trajectory.store.trajectory.pseudotime(
             trajectory.graph,
@@ -1024,7 +1092,7 @@ def _move_fate_to_another_assay(mapped: _MappedTrajectory) -> None:
     other_graph = mapped.trajectory.graphs["ADT"]
     other_pseudotime = mapped.store.trajectory.pseudotime(
         other_graph,
-        ss_vec=_Y_SOURCE_SINK,
+        ss_vec=by_cell_id(mapped.store.cells, _Y_SOURCE_SINK),
     )
     _rewrite_inputs(
         mapped.store,

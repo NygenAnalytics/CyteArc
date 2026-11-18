@@ -60,7 +60,7 @@ from tests.perturbation_helpers import (
     warned,
     write_screen,
 )
-from tests.storage_helpers import open_store
+from tests.storage_helpers import by_cell_id, open_store
 
 
 def _python_kernels(monkeypatch: pytest.MonkeyPatch, python_kernels: bool) -> None:
@@ -1698,10 +1698,14 @@ def test_associations_ignore_missing_values_of_untested_cells(shared) -> None:
     # test reads them.
     runs = np.asarray(OPERATION_RUNS, dtype=object)
     runs[-3:] = None
-    store.cells.insert("run_untested_missing", runs, overwrite=True)
+    store.cells.insert(
+        "run_untested_missing", by_cell_id(store.cells, runs), overwrite=True
+    )
     mito = pd.array(OPERATION_MITO, dtype="Float64")
     mito[-3:] = pd.NA
-    store.cells.insert("mito_untested_missing", mito, overwrite=True)
+    store.cells.insert(
+        "mito_untested_missing", by_cell_id(store.cells, mito), overwrite=True
+    )
     complete = store.perturbation.load_associations(
         store.perturbation.associations(
             labels, features=features, sample_column="run", covariates=["mito"], **FAST
@@ -1722,7 +1726,9 @@ def test_associations_ignore_missing_values_of_untested_cells(shared) -> None:
         pd.testing.assert_frame_equal(getattr(partial, name), getattr(complete, name))
     # A tested cell still needs its sample label.
     runs[0] = None
-    store.cells.insert("run_tested_missing", runs, overwrite=True)
+    store.cells.insert(
+        "run_tested_missing", by_cell_id(store.cells, runs), overwrite=True
+    )
     with pytest.raises(ValueError, match="has no label for 1 selected cells"):
         store.perturbation.associations(
             labels, features=features, sample_column="run_tested_missing", **FAST
@@ -1745,7 +1751,7 @@ def test_associations_refuse_missing_covariates_of_tested_cells(
     # Cell 0 carries a guide of RNA0, so the tests would read its missing
     # value, which is stored as 0 or False.
     nullable[0] = pd.NA
-    store.cells.insert(column, nullable, overwrite=True)
+    store.cells.insert(column, by_cell_id(store.cells, nullable), overwrite=True)
 
     with pytest.raises(
         ValueError, match=f"The covariate '{column}' has values that are not finite"
@@ -1760,7 +1766,11 @@ def test_associations_refuse_a_covariate_of_one_value(shared) -> None:
     # The tests read the 300 control cells and the 240 cells of the two
     # targets, over which 1.1 repeated has a standard deviation above 0.
     assert np.full(540, 1.1).std() > 0
-    store.cells.insert("constant", np.full(len(OPERATION_RUNS), 1.1), overwrite=True)
+    store.cells.insert(
+        "constant",
+        by_cell_id(store.cells, np.full(len(OPERATION_RUNS), 1.1)),
+        overwrite=True,
+    )
 
     with pytest.raises(
         ValueError,

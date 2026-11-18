@@ -18,6 +18,7 @@ import cytearc.plotting as splt
 
 from cytearc.storage import ArtifactRef
 from cytearc.storage.selections import read_stored_selection_indices
+from tests.storage_helpers import by_cell_id
 
 
 def _artifact_cell_indices(store, ref: ArtifactRef) -> np.ndarray:
@@ -338,8 +339,15 @@ def test_embedding_validates_layout_coordinate_and_facet_inputs():
         ({"point_alpha": 1.1}, "point_alpha"),
         ({"max_on_data_labels": 0}, "max_on_data_labels"),
         ({"point_size": np.nan}, "point_size must be finite"),
-        ({"point_sizes": [1.0, 2.0]}, "point_sizes length"),
-        ({"point_sizes": [1.0, 2.0, np.inf]}, "finite positive"),
+        (
+            {"point_sizes": pd.Series([1.0, 2.0], index=["c0", "c1"])},
+            r"the ids of the 3 plotted cells, each once; 1 such ids have no label, "
+            r"such as 'c2'",
+        ),
+        (
+            {"point_sizes": pd.Series([1.0, 2.0, np.inf], index=["c0", "c1", "c2"])},
+            "finite positive",
+        ),
         ({"clip_fraction": 0.5}, "clip_fraction"),
     ],
 )
@@ -348,6 +356,7 @@ def test_embedding_validates_limits_and_point_sizes(options, message):
         layout1=[0.0, 1.0, 2.0],
         layout2=[0.0, 1.0, 0.0],
         score=[1.0, 2.0, 3.0],
+        ids=["c0", "c1", "c2"],
     )
 
     with pytest.raises(ValueError, match=message):
@@ -360,6 +369,30 @@ def test_embedding_validates_limits_and_point_sizes(options, message):
         )
 
 
+@pytest.mark.parametrize(
+    ("sizes", "kind"),
+    [
+        ([1.0, 2.0, 3.0], "values of type list"),
+        (np.ones(3), "a NumPy array"),
+        (pd.Series(np.ones(3)), "a pandas Series with a RangeIndex"),
+    ],
+    ids=["list", "array", "range-index"],
+)
+def test_embedding_refuses_point_sizes_by_position_before_reading_the_store(
+    sizes, kind
+):
+    # Reading anything from this store raises AttributeError instead.
+    with pytest.raises(TypeError) as raised:
+        splt.embedding(object(), layout_key="layout", point_sizes=sizes, show=False)
+
+    message = str(raised.value)
+    assert message.startswith(
+        "plots.embedding(point_sizes=) takes per-cell values only as a pandas "
+        "Series keyed by cell ID"
+    )
+    assert f"got {kind}, which would assign values to cells by position" in message
+
+
 @pytest.mark.parametrize("layout_key", ["layout", ["layout", "other"]])
 def test_embedding_validates_clip_fraction_before_reading_the_store(layout_key):
     # Reading anything from this store raises AttributeError instead.
@@ -370,10 +403,12 @@ def test_embedding_validates_clip_fraction_before_reading_the_store(layout_key):
 def test_embedding_categorical_colors_and_scatter_sizes_are_preserved():
     categories = np.asarray(["b", "a", None, "b"], dtype=object)
     sizes = np.asarray([4.0, 9.0, 16.0, 25.0])
+    ids = np.asarray(["c0", "c1", "c2", "c3"])
     store = _synthetic_plot_store(
         layout1=[0.0, 1.0, 2.0, 3.0],
         layout2=[0.0, 1.0, 0.0, 1.0],
         category=categories,
+        ids=ids,
     )
     scale = splt.CategoricalScale(
         order=("b", "a"),
@@ -388,7 +423,8 @@ def test_embedding_categorical_colors_and_scatter_sizes_are_preserved():
         layout_key="layout",
         color_by=splt.CellField("category", kind="categorical"),
         categorical_scale=scale,
-        point_sizes=sizes,
+        # Sizes keyed by cell ID in another order land on the cells of their IDs.
+        point_sizes=pd.Series(sizes[::-1], index=ids[::-1]),
         point_edgecolor="#111111",
         point_edgewidth=0.6,
         point_alpha=0.4,
@@ -427,10 +463,12 @@ def test_embedding_categorical_colors_and_scatter_sizes_are_preserved():
 def test_embedding_continuous_sorting_keeps_color_size_and_scatter_options_aligned():
     scores = np.asarray([2.0, np.nan, 1.0, 3.0])
     sizes = np.asarray([10.0, 20.0, 30.0, 40.0])
+    ids = np.asarray(["c0", "c1", "c2", "c3"])
     store = _synthetic_plot_store(
         layout1=[0.0, 1.0, 2.0, 3.0],
         layout2=[0.0, 1.0, 0.0, 1.0],
         score=scores,
+        ids=ids,
     )
 
     result = splt.embedding(
@@ -443,7 +481,7 @@ def test_embedding_continuous_sorting_keeps_color_size_and_scatter_options_align
             vmax=3.0,
             missing_color="#ff00ff",
         ),
-        point_sizes=sizes,
+        point_sizes=pd.Series(sizes, index=ids),
         point_edgecolor="#222222",
         point_edgewidth=0.4,
         point_alpha=0.7,
@@ -577,7 +615,7 @@ def partially_measured_store(tmp_path_factory):
         "keep": np.arange(30) < 9,
         "group": np.where(np.arange(30) % 3 == 0, "B", "A"),
     }.items():
-        store.cells.insert(name, values)
+        store.cells.insert(name, by_cell_id(store.cells, values))
     return store
 
 
@@ -666,7 +704,7 @@ def three_kept_cells_store(tmp_path_factory):
         "xy2": np.sin(np.arange(30)),
         "keep": np.arange(30) < 3,
     }.items():
-        store.cells.insert(name, values)
+        store.cells.insert(name, by_cell_id(store.cells, values))
     return store
 
 
@@ -887,8 +925,11 @@ def test_embedding_facets_preserve_sizes_filters_and_target_legend():
         category=["a", "b", "a", "b", "a", "b", "a", "b"],
         highlight_group=["hot", "cold", "hot", "cold"] * 2,
         density_group=["keep", "keep", "keep", "drop"] * 2,
+        ids=[f"c{row}" for row in range(8)],
     )
-    sizes = np.arange(2, 10, dtype=np.float64)
+    sizes = pd.Series(
+        np.arange(2, 10, dtype=np.float64), index=[f"c{row}" for row in range(8)]
+    )
     figure, target_axes = plt.subplots(1, 2, figsize=(6, 3))
     targets = {
         ("category", "left"): target_axes[0],
@@ -924,7 +965,7 @@ def test_embedding_facets_preserve_sizes_filters_and_target_legend():
     ):
         np.testing.assert_array_equal(
             axis.collections[0].get_sizes(),
-            sizes[cells[np.argsort(rank[cells], kind="stable")]],
+            sizes.to_numpy()[cells[np.argsort(rank[cells], kind="stable")]],
         )
     # One legend of both categories sits beside the last facet.
     assert target_axes[0].get_legend() is None
@@ -1514,11 +1555,18 @@ def test_distribution_rejects_cell_cycle_scores_for_other_cells(
     cells = _artifact_cell_indices(datastore, cell_cycle_scoring)
     assert len(cells) < datastore.cells.N
     datastore.cells.insert(
-        "plot_every_cell", np.ones(datastore.cells.N, dtype=bool), overwrite=True
+        "plot_every_cell",
+        by_cell_id(datastore.cells, np.ones(datastore.cells.N, dtype=bool)),
+        overwrite=True,
     )
     datastore.cells.insert(
         "plot_cell_parity",
-        np.asarray(["even", "odd"] * (datastore.cells.N // 2 + 1))[: datastore.cells.N],
+        by_cell_id(
+            datastore.cells,
+            np.asarray(["even", "odd"] * (datastore.cells.N // 2 + 1))[
+                : datastore.cells.N
+            ],
+        ),
         overwrite=True,
     )
 
@@ -1776,7 +1824,9 @@ def test_sample_aggregated_feature_axis_retains_requested_italics(
 ):
     data = imported_plot_store
     samples = np.asarray([f"sample_{index % 4}" for index in range(16)])
-    data.store.cells.insert("plot_italic_sample", samples, overwrite=True)
+    data.store.cells.insert(
+        "plot_italic_sample", by_cell_id(data.store.cells, samples), overwrite=True
+    )
 
     result = splt.distribution(
         data.store,

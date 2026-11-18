@@ -12,7 +12,7 @@ from cytearc.datastore.datastore import DataStore
 from cytearc.metadata.artifacts import plan_cell_data_artifact, write_cell_data_artifact
 from cytearc.storage.artifacts import ArtifactRef, artifact_group, artifact_path
 from cytearc.storage.selections import read_stored_selection_indices
-from tests.storage_helpers import write_count_store
+from tests.storage_helpers import by_cell_id, write_count_store
 
 _COMMON_ARRAYS = {
     "feature_ids",
@@ -107,10 +107,10 @@ def build_mapping_store(
     store = DataStore(str(path), default_assay="RNA", min_features_per_cell=0)
     keep = np.ones(MAPPING_N_CELLS, dtype=bool)
     keep[list(MAPPING_EXCLUDED_CELLS)] = False
-    store.cells.insert("reference_cells", keep)
+    store.cells.insert("reference_cells", by_cell_id(store.cells, keep))
     store.cells.insert(
         "mapping_batch",
-        np.where(np.arange(MAPPING_N_CELLS) % 2, "a", "b"),
+        by_cell_id(store.cells, np.where(np.arange(MAPPING_N_CELLS) % 2, "a", "b")),
     )
     cells = store.snapshot_cell_selection("reference_cells")
     features = store.features.snapshot(
@@ -1120,7 +1120,9 @@ def test_build_mapping_reference_rejects_each_inconsistent_chain_record(
     datastore = reference_store
     groups = _source_groups(datastore, mapping_source)
     datastore.cells.insert(
-        "no_cells", np.zeros(MAPPING_N_CELLS, dtype=bool), overwrite=True
+        "no_cells",
+        by_cell_id(datastore.cells, np.zeros(MAPPING_N_CELLS, dtype=bool)),
+        overwrite=True,
     )
     empty_cells = datastore.snapshot_cell_selection("no_cells").to_dict()
     other_kind = mapping_source.features.to_dict()

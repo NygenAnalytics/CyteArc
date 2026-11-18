@@ -22,7 +22,7 @@ from cytearc.storage.budget import resolve_budget
 from cytearc.storage.schema import create_cell_data, create_zarr_count_assay
 from cytearc.storage.stores import load_zarr
 from cytearc.writers.counts_t import finalize_writer_counts_t
-from tests.storage_helpers import finalize_test_counts
+from tests.storage_helpers import by_cell_id, finalize_test_counts
 
 N_CELLS = 80
 N_PEAKS = 300
@@ -89,7 +89,11 @@ def store_path(tmp_path_factory) -> tuple[str, str]:
         + "\n"
     )
     store = DataStore(path, default_assay="ATAC", min_features_per_cell=-1, nthreads=2)
-    store.cells.insert("everyone", np.ones(N_CELLS, dtype=bool), overwrite=True)
+    store.cells.insert(
+        "everyone",
+        by_cell_id(store.cells, np.ones(N_CELLS, dtype=bool)),
+        overwrite=True,
+    )
     return path, str(fasta)
 
 
@@ -171,7 +175,7 @@ def test_chromvar_scores_a_subset_of_cells_and_peaks(store_path, monkeypatch):
     cell_mask = np.arange(N_CELLS) % 4 != 3
     counts = _counts().astype(np.float64)[cell_mask]
     peak_mask = (np.arange(N_PEAKS) % 3 != 1) & (counts.sum(axis=0) > 0)
-    store.cells.insert("most", cell_mask, overwrite=True)
+    store.cells.insert("most", by_cell_id(store.cells, cell_mask), overwrite=True)
     cells = store.snapshot_cell_selection("most")
     peaks = store.features.snapshot(mask=peak_mask)
     gc = np.linspace(0.3, 0.7, N_PEAKS)
@@ -289,7 +293,9 @@ def test_chromvar_validates_its_inputs(store_path, change, error, message):
     store = _open(path)
     change = dict(change)
     store.cells.insert(
-        "chosen", change.pop("cells", np.ones(N_CELLS, dtype=bool)), overwrite=True
+        "chosen",
+        by_cell_id(store.cells, change.pop("cells", np.ones(N_CELLS, dtype=bool))),
+        overwrite=True,
     )
     peaks = change.pop("peaks", None)
     arguments = {
@@ -386,7 +392,7 @@ def test_profiles_name_atac_columns_by_peak_id(store_path):
     path, _fasta = store_path
     store = _open(path)
     halves = (np.arange(N_CELLS) >= N_CELLS // 2).astype(np.int64)
-    store.cells.insert("halves", halves, overwrite=True)
+    store.cells.insert("halves", by_cell_id(store.cells, halves), overwrite=True)
 
     profiles = store.regulons.profiles("halves")
 

@@ -48,7 +48,7 @@ from cytearc.features.statistical import (
     adjust_pvalues,
 )
 from cytearc.storage.artifacts import artifact_path
-from tests.storage_helpers import write_count_store
+from tests.storage_helpers import by_cell_id, write_count_store
 
 EVERY_ROW = {"min_frac_exp": None, "min_auc": None, "max_p_adj": None}
 TABLE_COLUMNS = [
@@ -65,8 +65,16 @@ def _store(directory, counts: np.ndarray, labels: np.ndarray, *, assays=("RNA",)
     path = str(directory / "markers.zarr")
     write_count_store(path, {assay: counts for assay in assays}, "float32")
     store = DataStore(path, default_assay="RNA", min_features_per_cell=0, nthreads=1)
-    store.cells.insert("everyone", np.ones(len(labels), dtype=bool), overwrite=True)
-    store.cells.insert("labels", np.asarray(labels, dtype=object), overwrite=True)
+    store.cells.insert(
+        "everyone",
+        by_cell_id(store.cells, np.ones(len(labels), dtype=bool)),
+        overwrite=True,
+    )
+    store.cells.insert(
+        "labels",
+        by_cell_id(store.cells, np.asarray(labels, dtype=object)),
+        overwrite=True,
+    )
     clusters = store.snapshot_cluster_labels(
         "labels", cell_selection=store.snapshot_cell_selection("everyone")
     )

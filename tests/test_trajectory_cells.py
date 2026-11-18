@@ -39,6 +39,7 @@ from .test_trajectory_record_paths import (
     _rewrite_inputs,
     _write_graph_payload,
 )
+from tests.storage_helpers import by_cell_id
 
 # Each arm's cells by label, in order along the arm.
 _ARMS = {
@@ -337,11 +338,16 @@ def test_cells_that_split_the_graph_are_scored_by_their_own_components() -> None
 
     some = store.trajectory.load_pseudotime(
         store.trajectory.pseudotime(
-            trajectory.graph, cells=trajectory.selections["split"], ss_vec=source_sink
+            trajectory.graph,
+            cells=trajectory.selections["split"],
+            ss_vec=by_cell_id(store.cells, source_sink, rows=split_rows),
         )
     )
     alone = store.trajectory.load_pseudotime(
-        store.trajectory.pseudotime(trajectory.alone["split"], ss_vec=source_sink)
+        store.trajectory.pseudotime(
+            trajectory.alone["split"],
+            ss_vec=by_cell_id(store.cells, source_sink, rows=split_rows),
+        )
     )
 
     # The graph is connected among the trunk, A and B, but the trunk's first
@@ -445,9 +451,14 @@ def test_a_vector_of_the_scored_cells_scores_them() -> None:
         source_sink[labels == sink] = 0.5 / np.count_nonzero(labels == sink)
 
     some = store.trajectory.pseudotime(
-        trajectory.graph, cells=trajectory.selections["part"], ss_vec=source_sink
+        trajectory.graph,
+        cells=trajectory.selections["part"],
+        ss_vec=by_cell_id(store.cells, source_sink, rows=trajectory.rows("part")),
     )
-    alone = store.trajectory.pseudotime(trajectory.alone["part"], ss_vec=source_sink)
+    alone = store.trajectory.pseudotime(
+        trajectory.alone["part"],
+        ss_vec=by_cell_id(store.cells, source_sink, rows=trajectory.rows("part")),
+    )
 
     np.testing.assert_allclose(
         store.trajectory.load_pseudotime(some).values,
@@ -461,11 +472,17 @@ def test_a_vector_of_the_scored_cells_scores_them() -> None:
         store.artifacts.inspect(snapshot).inputs["cell_selection"]
         == trajectory.selections["part"].to_dict()
     )
-    with pytest.raises(ValueError, match="ss_vec"):
+    # A vector that leaves out a scored cell is refused; values of the
+    # graph's other cells are left out.
+    with pytest.raises(ValueError, match=r"ss_vec=\) .* 1 such ids have no label"):
         store.trajectory.pseudotime(
             trajectory.graph,
             cells=trajectory.selections["part"],
-            ss_vec=np.zeros(len(trajectory.graph_rows)),
+            ss_vec=by_cell_id(
+                store.cells,
+                np.zeros(len(trajectory.graph_rows) - 1),
+                rows=np.setdiff1d(trajectory.graph_rows, trajectory.rows("part")[:1]),
+            ),
         )
 
 

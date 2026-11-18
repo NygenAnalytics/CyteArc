@@ -35,7 +35,7 @@ from cytearc.readers.got import got_source, got_table_format
 from cytearc.readers.mgatk import mgatk_source
 from cytearc.readers.mito_afm import mito_afm_source
 from cytearc.readers.vartrix import vartrix_source
-from tests.storage_helpers import open_store, write_count_store
+from tests.storage_helpers import by_cell_id, open_store, write_count_store
 from tests.network_helpers import download_or_skip
 from tests.variant_helpers import assert_tables
 
@@ -51,7 +51,9 @@ def _store(path: Path, cell_ids: list[str]):
         cell_ids=cell_ids,
     )
     store = open_store(path)
-    store.cells.insert("every_cell", np.ones(len(cell_ids), dtype=bool))
+    store.cells.insert(
+        "every_cell", by_cell_id(store.cells, np.ones(len(cell_ids), dtype=bool))
+    )
     return store, store.snapshot_cell_selection("every_cell")
 
 

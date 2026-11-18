@@ -52,6 +52,7 @@ from tests.perturbation_helpers import record_cell_reads, warned
 from tests.test_pipeline_plan import assert_plan_reuses_run, read_only_plan
 from tests.test_pipeline_rerun import assert_settings_name_every_keyword
 from tests.storage_helpers import (
+    by_cell_id,
     insert_nullable_cell_column,
     rechunk_column,
     rechunk_feature_tables,
@@ -210,18 +211,24 @@ def _write(
         "target_gene_id", np.asarray([gene for _, gene in GUIDES], dtype=object)
     )
     depth = np.log1p(RNA.sum(axis=1).astype(np.float64))
-    store.cells.insert("lane", np.asarray(LANES, dtype=object))
-    store.cells.insert("depth", depth)
+    store.cells.insert("lane", by_cell_id(store.cells, np.asarray(LANES, dtype=object)))
+    store.cells.insert("depth", by_cell_id(store.cells, depth))
     # A lane label and a depth that the cells outside FILLED lack; a lane label
     # of empty or whitespace text there; and a depth of NaN or infinity there.
     insert_nullable_cell_column(store, "lane_gaps", np.asarray(LANES), ~FILLED)
     insert_nullable_cell_column(store, "depth_gaps", depth, ~FILLED)
     first = np.arange(N_CELLS) % 20 == 0
-    store.cells.insert("lane_blank", np.where(FILLED, LANES, np.where(first, "", "  ")))
     store.cells.insert(
-        "depth_inf", np.where(FILLED, depth, np.where(first, np.nan, np.inf))
+        "lane_blank",
+        by_cell_id(store.cells, np.where(FILLED, LANES, np.where(first, "", "  "))),
     )
-    store.cells.insert("filled", FILLED)
+    store.cells.insert(
+        "depth_inf",
+        by_cell_id(
+            store.cells, np.where(FILLED, depth, np.where(first, np.nan, np.inf))
+        ),
+    )
+    store.cells.insert("filled", by_cell_id(store.cells, FILLED))
     return store
 
 
@@ -1367,7 +1374,7 @@ def test_one_call_file_reaches_the_cells_of_one_sample(screen, tmp_path) -> None
         "ids", data=ids, overwrite=True
     )
     store = _open(location)
-    store.cells.insert("lane1", LANES == "L1")
+    store.cells.insert("lane1", by_cell_id(store.cells, LANES == "L1"))
     path = _call_file(tmp_path / "protospacer_calls_per_cell.csv")
     remedy = (
         "or call the guides from their counts with guide_calling settings without path"
@@ -1575,7 +1582,7 @@ def test_the_call_file_check_reads_the_ids_of_the_runs_cells_only(
     screen, tmp_path, monkeypatch
 ) -> None:
     store = _copy(screen, tmp_path)
-    store.cells.insert("lane1", LANES == "L1")
+    store.cells.insert("lane1", by_cell_id(store.cells, LANES == "L1"))
     reads = record_cell_reads(monkeypatch, store, {"ids"})
 
     for prefix in (None, "cell"):
@@ -2454,7 +2461,7 @@ def test_cells_that_the_guide_assay_did_not_measure_are_refused(
 @pytest.mark.parametrize("recipe", ["perturbation", "rna"])
 def test_cells_that_select_no_cell_are_refused(screen, tmp_path, recipe) -> None:
     store = _copy(screen, tmp_path)
-    store.cells.insert("nobody", np.zeros(N_CELLS, dtype=bool))
+    store.cells.insert("nobody", by_cell_id(store.cells, np.zeros(N_CELLS, dtype=bool)))
     nobody = store.snapshot_cell_selection("nobody")
     keywords = {"labels": LABELS} if recipe == "perturbation" else {}
     before = written(store)
@@ -2553,7 +2560,7 @@ def test_a_run_with_association_tests_refuses_cells_without_counts(tmp_path) -> 
     rna = RNA.copy()
     rna[np.flatnonzero(GUIDE_OF == 6)[0]] = 0
     store = _write(tmp_path / "screen.zarr", rna=rna)
-    store.cells.insert("every", np.ones(N_CELLS, dtype=bool))
+    store.cells.insert("every", by_cell_id(store.cells, np.ones(N_CELLS, dtype=bool)))
     before = written(store)
 
     # The tests would refuse the cell after nine stages had written.
@@ -2583,8 +2590,10 @@ def test_a_covariate_of_one_value_over_the_runs_cells_is_refused(
     # One value over every cell, and one value over the cells of FILLED only:
     # NumPy gives 0.3 repeated a standard deviation just above 0, so the check
     # compares the values themselves.
-    store.cells.insert("ones", np.ones(N_CELLS))
-    store.cells.insert("one_value_where_filled", np.where(FILLED, 0.3, 1.0))
+    store.cells.insert("ones", by_cell_id(store.cells, np.ones(N_CELLS)))
+    store.cells.insert(
+        "one_value_where_filled", by_cell_id(store.cells, np.where(FILLED, 0.3, 1.0))
+    )
     assert np.full(int(FILLED.sum()), 0.3).std() > 0
     before = written(store)
 
@@ -2622,7 +2631,7 @@ def test_the_recipe_passes_the_moi_to_the_association_tests(tmp_path) -> None:
     # run's cells hold some.
     with_guides = guides.sum(axis=1) > 0
     assert not with_guides.all()
-    store.cells.insert("with_guides", with_guides)
+    store.cells.insert("with_guides", by_cell_id(store.cells, with_guides))
     settings = {"moi": "high", "n_resamples": [99, 499, 999]}
 
     # The efficiency and E-distance stages compare with control-only cells,

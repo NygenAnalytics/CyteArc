@@ -22,7 +22,7 @@ from cytearc.features.markers.table import (
 )
 from cytearc.storage.artifacts import artifact_path
 from cytearc.metadata.selection import resolve_complete_labels
-from tests.storage_helpers import write_count_store
+from tests.storage_helpers import by_cell_id, write_count_store
 
 EVERY_ROW = {"min_frac_exp": None, "min_auc": None, "max_p_adj": None}
 # Six groups of ten cells, and one cell of a seventh group that marker search
@@ -74,7 +74,11 @@ def _store(directory, labels: np.ndarray, counts: np.ndarray) -> DataStore:
     path = str(directory / "markers.zarr")
     write_count_store(path, {"RNA": counts}, "float32")
     store = DataStore(path, default_assay="RNA", min_features_per_cell=0, nthreads=1)
-    store.cells.insert("labels", np.asarray(labels, dtype=object), overwrite=True)
+    store.cells.insert(
+        "labels",
+        by_cell_id(store.cells, np.asarray(labels, dtype=object)),
+        overwrite=True,
+    )
     return store
 
 
@@ -91,7 +95,10 @@ def labeled(tmp_path_factory):
         counts[labels == label, 2 * position] += rng.integers(8, 20, 10)
     store = _store(tmp_path_factory.mktemp("labels"), labels, counts)
     store.cells.insert(
-        "twins", np.array([TWINS[label] for label in labels], dtype=object)
+        "twins",
+        by_cell_id(
+            store.cells, np.array([TWINS[label] for label in labels], dtype=object)
+        ),
     )
     cells = store.snapshot_cell_selection()
     features = store.features.universe(from_assay="RNA")

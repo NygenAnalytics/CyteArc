@@ -12,6 +12,7 @@ from cytearc.writers import SparseToZarr
 
 from .doublet_fixtures import write_doublet_target_zarr
 from .test_feature_stream import _counts_t_with_plan
+from tests.storage_helpers import by_cell_id
 
 
 def _bulk_store(tmp_path, counts, *, workers=1):
@@ -30,7 +31,9 @@ def _bulk_store(tmp_path, counts, *, workers=1):
     store = DataStore(
         path, default_assay="RNA", min_features_per_cell=0, nthreads=workers
     )
-    store.cells.insert("all_cells", np.ones(len(counts), dtype=bool))
+    store.cells.insert(
+        "all_cells", by_cell_id(store.cells, np.ones(len(counts), dtype=bool))
+    )
     return store, store.snapshot_cell_selection("all_cells")
 
 
@@ -101,10 +104,16 @@ def grouped_counts_store(tmp_path_factory):
     counts = np.random.default_rng(71).integers(0, 200, (7, 24), dtype=np.uint16)
     counts[:, -1] = 0
     store, _ = _bulk_store(tmp_path_factory.mktemp("grouped_counts"), counts)
-    store.cells.insert("selected", np.arange(7) != 5)
+    store.cells.insert("selected", by_cell_id(store.cells, np.arange(7) != 5))
     store.snapshot_cell_selection("selected")
-    store.cells.insert("group", np.array(["a", "a", "b", "skip", "a", "b", "b"]))
-    store.cells.insert("secondary", np.array(["x", "y", "x", "x", "x", "y", "y"]))
+    store.cells.insert(
+        "group",
+        by_cell_id(store.cells, np.array(["a", "a", "b", "skip", "a", "b", "b"])),
+    )
+    store.cells.insert(
+        "secondary",
+        by_cell_id(store.cells, np.array(["x", "y", "x", "x", "x", "y", "y"])),
+    )
     return str(store.zarr_loc), counts
 
 
@@ -181,7 +190,7 @@ def test_bulk_counts_t_matches_selected_groups_and_empty_replicates(
 def test_bulk_sum_keeps_large_integers_and_ignores_custom_normalizer(tmp_path, workers):
     counts = np.array([[2**53 + 3, 1], [2**53 + 7, 2]], dtype=np.uint64)
     store, cells = _bulk_store(tmp_path, counts, workers=workers)
-    store.cells.insert("group", np.array(["a", "a"]))
+    store.cells.insert("group", by_cell_id(store.cells, np.array(["a", "a"])))
 
     def forbidden(*args, **kwargs):
         raise AssertionError("Raw bulk sums must not call the normalizer")
@@ -200,7 +209,7 @@ def test_bulk_mean_uses_stored_totals_and_averages_zero_total_cells_as_zero(
 ):
     counts = np.array([[100, 10], [200, 20], [0, 0]], dtype=np.uint16)
     store, cells = _bulk_store(tmp_path, counts, workers=workers)
-    store.cells.insert("group", np.array(["a", "b", "b"]))
+    store.cells.insert("group", by_cell_id(store.cells, np.array(["a", "b", "b"])))
     store.zw["cellData"].create_array(
         "RNA_nCounts", data=np.array([220, 220, 0]), overwrite=True
     )
@@ -232,7 +241,7 @@ def two_cell_store(tmp_path_factory):
     """Write two cells of one group once; each test sets its normalizer."""
     counts = np.array([[100, 10], [200, 20]], dtype=np.uint32)
     store, _ = _bulk_store(tmp_path_factory.mktemp("two_cells"), counts)
-    store.cells.insert("group", np.array(["a", "a"]))
+    store.cells.insert("group", by_cell_id(store.cells, np.array(["a", "a"])))
     return str(store.zarr_loc), counts
 
 
@@ -288,8 +297,13 @@ def test_bulk_excludes_masked_labels_like_null_values(tmp_path, aggregation):
         np.array(["x", "x", "y", "", "y", "x"]),
         np.array([False, False, False, True, False, False]),
     )
-    store.cells.insert("group_nulls", np.array(["0", "1", "-", "0", "1", "-"]))
-    store.cells.insert("secondary_nulls", np.array(["x", "x", "y", "-", "y", "x"]))
+    store.cells.insert(
+        "group_nulls", by_cell_id(store.cells, np.array(["0", "1", "-", "0", "1", "-"]))
+    )
+    store.cells.insert(
+        "secondary_nulls",
+        by_cell_id(store.cells, np.array(["x", "x", "y", "-", "y", "x"])),
+    )
     options = {
         "cell_selection": cells,
         "aggr_type": aggregation,
@@ -327,10 +341,13 @@ def test_bulk_excludes_masked_labels_like_null_values(tmp_path, aggregation):
 def test_bulk_leaves_nan_none_and_blank_labels_out_of_every_group(tmp_path):
     counts = np.arange(1, 25, dtype=np.uint16).reshape(6, 4)
     store, cells = _bulk_store(tmp_path, counts)
-    store.cells.insert("float_group", np.array([1.0, 1.0, np.nan, 2.0, np.nan, 2.0]))
+    store.cells.insert(
+        "float_group",
+        by_cell_id(store.cells, np.array([1.0, 1.0, np.nan, 2.0, np.nan, 2.0])),
+    )
     store.cells.insert(
         "text_group",
-        np.array(["a", "", "a", None, "b", " "], dtype=object),
+        by_cell_id(store.cells, np.array(["a", "", "a", None, "b", " "], dtype=object)),
     )
     options = {
         "cell_selection": cells,
@@ -360,8 +377,12 @@ def test_bulk_columns_keep_apart_labels_that_join_to_one_name(tmp_path, aggregat
     # was refused; a column is now labeled by its group and sub-group.
     counts = np.arange(1, 25, dtype=np.uint16).reshape(6, 4)
     store, cells = _bulk_store(tmp_path, counts)
-    store.cells.insert("group", np.array(["a_b", "a_b", "a", "a", "a", "a_b"]))
-    store.cells.insert("donor", np.array(["c", "c", "b_c", "b_c", "c", "d_1"]))
+    store.cells.insert(
+        "group", by_cell_id(store.cells, np.array(["a_b", "a_b", "a", "a", "a", "a_b"]))
+    )
+    store.cells.insert(
+        "donor", by_cell_id(store.cells, np.array(["c", "c", "b_c", "b_c", "c", "d_1"]))
+    )
 
     bulk = store.compare.compute_bulk(
         "group",
@@ -420,10 +441,19 @@ def test_bulk_profiles_refuse_cell_counts_of_other_columns(tmp_path):
 def test_bulk_by_a_column_reads_the_live_cells_without_a_snapshot(tmp_path):
     counts = np.arange(1, 25, dtype=np.uint16).reshape(6, 4)
     store, cells = _bulk_store(tmp_path, counts)
-    store.cells.insert("group", np.array(["a", "a", "b", "b", "a", "b"]))
-    store.cells.insert("sub", np.array(["x", "y", "x", "y", "x", "y"]))
-    store.cells.insert("part", np.array([True, True, True, True, False, False]))
-    store.cells.insert("gap", np.array([True, False, True, True, True, True]))
+    store.cells.insert(
+        "group", by_cell_id(store.cells, np.array(["a", "a", "b", "b", "a", "b"]))
+    )
+    store.cells.insert(
+        "sub", by_cell_id(store.cells, np.array(["x", "y", "x", "y", "x", "y"]))
+    )
+    store.cells.insert(
+        "part",
+        by_cell_id(store.cells, np.array([True, True, True, True, False, False])),
+    )
+    store.cells.insert(
+        "gap", by_cell_id(store.cells, np.array([True, False, True, True, True, True]))
+    )
     labels = store.snapshot_cluster_labels("sub", cell_selection=cells)
     part = store.snapshot_cluster_labels(
         "sub", cell_selection=store.snapshot_cell_selection("part")
@@ -431,7 +461,9 @@ def test_bulk_by_a_column_reads_the_live_cells_without_a_snapshot(tmp_path):
     gap = store.snapshot_cluster_labels(
         "sub", cell_selection=store.snapshot_cell_selection("gap")
     )
-    store.cells.insert("I", np.arange(6) < 5, overwrite=True, force=True)
+    store.cells.insert(
+        "I", by_cell_id(store.cells, np.arange(6) < 5), overwrite=True, force=True
+    )
     options = {"aggr_type": "sum", "remove_empty_features": False}
 
     def files():
@@ -470,9 +502,9 @@ def test_bulk_mean_fits_non_rna_normalization_once(tmp_path):
         nthreads=1,
     ).dump(batch_size=4)
     store = DataStore(path, default_assay="ADT", min_features_per_cell=0)
-    store.cells.insert("all_cells", np.ones(12, dtype=bool))
+    store.cells.insert("all_cells", by_cell_id(store.cells, np.ones(12, dtype=bool)))
     cells = store.snapshot_cell_selection("all_cells")
-    store.cells.insert("group", np.repeat(["a", "b", "c"], 4))
+    store.cells.insert("group", by_cell_id(store.cells, np.repeat(["a", "b", "c"], 4)))
     options = {"cell_selection": cells, "remove_empty_features": False}
 
     every_group = store.compare.compute_bulk("group", **options).profiles
@@ -490,7 +522,7 @@ def test_bulk_rejects_unknown_aggregation(tmp_path):
     from cytearc.features.aggregation import aggregate_bulk_profiles, bulk_read_cells
 
     store, cells = _bulk_store(tmp_path, np.ones((2, 3), dtype=np.uint16))
-    store.cells.insert("group", np.array(["a", "a"]))
+    store.cells.insert("group", by_cell_id(store.cells, np.array(["a", "a"])))
     with pytest.raises(ValueError, match="aggr_type"):
         store.compare.compute_bulk("group", cell_selection=cells, aggr_type="median")
 
@@ -529,7 +561,7 @@ def test_bulk_checks_its_options_before_reading_any_cell(
     import cytearc.features.aggregation as aggregation
 
     store, cells = _bulk_store(tmp_path, np.ones((2, 3), dtype=np.uint16))
-    store.cells.insert("group", np.array(["a", "a"]))
+    store.cells.insert("group", by_cell_id(store.cells, np.array(["a", "a"])))
 
     def refuse(*_args, **_kwargs):
         raise AssertionError("bulk columns were read")
@@ -548,9 +580,15 @@ def test_bulk_leaves_out_combinations_without_cells_and_counts_cells(
     counts[:, 0] += 1
     store, cells = _bulk_store(tmp_path, counts)
     # Donor d2 has no cell of cluster B.
-    store.cells.insert("cluster", np.array(["A", "A", "B", "B", "A", "B", "A", "A"]))
     store.cells.insert(
-        "donor", np.array(["d1", "d2", "d1", "d1", "d2", "d1", "d2", "d1"])
+        "cluster",
+        by_cell_id(store.cells, np.array(["A", "A", "B", "B", "A", "B", "A", "A"])),
+    )
+    store.cells.insert(
+        "donor",
+        by_cell_id(
+            store.cells, np.array(["d1", "d2", "d1", "d1", "d2", "d1", "d2", "d1"])
+        ),
     )
     options = {
         "cell_selection": cells,
@@ -607,8 +645,10 @@ def test_bulk_leaves_out_combinations_without_cells_and_counts_cells(
 def test_bulk_sum_preserves_non_rna_assays(datastore_ephemeral):
     store = datastore_ephemeral
     selected = np.arange(store.cells.N) < 2
-    store.cells.insert("bulk_cells", selected)
-    store.cells.insert("bulk_group", np.repeat("a", store.cells.N))
+    store.cells.insert("bulk_cells", by_cell_id(store.cells, selected))
+    store.cells.insert(
+        "bulk_group", by_cell_id(store.cells, np.repeat("a", store.cells.N))
+    )
     cells = store.snapshot_cell_selection("bulk_cells")
     counts = store.assay2.rawData[np.flatnonzero(selected)].compute()
     bulk = store.compare.compute_bulk(
@@ -798,7 +838,9 @@ def _non_rna_store(tmp_path, counts, *, assay="ADT", workers=1):
     store = DataStore(
         path, default_assay=assay, min_features_per_cell=0, nthreads=workers
     )
-    store.cells.insert("all_cells", np.ones(len(counts), dtype=bool))
+    store.cells.insert(
+        "all_cells", by_cell_id(store.cells, np.ones(len(counts), dtype=bool))
+    )
     return store, store.snapshot_cell_selection("all_cells")
 
 
@@ -837,8 +879,8 @@ def grouped_adt_stores(tmp_path_factory):
             store, cells = _non_rna_store(tmp_path_factory.mktemp("adt"), counts)
             groups = rng.choice(["a", "b", "c", "d"], size=60)
             donors = rng.choice(["x", "y"], size=60)
-            store.cells.insert("group", groups)
-            store.cells.insert("donor", donors)
+            store.cells.insert("group", by_cell_id(store.cells, groups))
+            store.cells.insert("donor", by_cell_id(store.cells, donors))
             columns, column_rows = bulk_column_rows(
                 groups,
                 sorted(set(groups)),
@@ -920,7 +962,9 @@ def test_non_rna_bulk_reads_each_raw_row_once(tmp_path, monkeypatch):
 
     counts = np.random.default_rng(3).poisson(1.0, size=(40, 6)).astype(np.uint16)
     store, cells = _non_rna_store(tmp_path, counts)
-    store.cells.insert("group", np.repeat(["a", "b", "c", "d", "e"], 8))
+    store.cells.insert(
+        "group", by_cell_id(store.cells, np.repeat(["a", "b", "c", "d", "e"], 8))
+    )
     read = chunked.read_selection
     rows_read: list[int] = []
 

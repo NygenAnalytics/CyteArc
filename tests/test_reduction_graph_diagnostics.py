@@ -14,13 +14,14 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import pandas as pd
 import pytest
 
 import cytearc.embeddings.reduction as reduction_module
 from cytearc import DataStore, DiagnosticWarning
 from cytearc.storage.artifacts import ArtifactRef, artifact_path
 from cytearc.utils.logging import collect_warnings
-from tests.storage_helpers import open_store, write_count_store
+from tests.storage_helpers import by_cell_id, open_store, write_count_store
 
 N_CELLS = 120
 N_GENES = 40
@@ -43,7 +44,10 @@ def template(tmp_path_factory) -> tuple[Path, dict[str, ArtifactRef]]:
     write_count_store(str(zarr_loc), {"RNA": _counts()}, "uint16")
     store = open_store(zarr_loc)
     store.cells.insert(
-        "batch", np.where(np.arange(N_CELLS) % 2, "a", "b").astype(object)
+        "batch",
+        by_cell_id(
+            store.cells, np.where(np.arange(N_CELLS) % 2, "a", "b").astype(object)
+        ),
     )
     cells = store.snapshot_cell_selection()
     normalized = store.features.normalize(
@@ -238,7 +242,7 @@ def _equidistant(path: Path) -> tuple[DataStore, ArtifactRef]:
     )
     store = open_store(path)
     axes = store.reduction.import_coordinates(
-        np.eye(8, dtype=np.float32),
+        pd.DataFrame(np.eye(8, dtype=np.float32), index=store.cells.fetch_all("ids")),
         cell_selection=store.snapshot_cell_selection(),
         name="axes",
         source={"tool": "tests", "version": "1", "parameters": {}},
@@ -254,7 +258,10 @@ def test_densmap_over_equal_local_radii_warns_when_computed_and_when_reused(
 
     def embed() -> ArtifactRef:
         return datastore.embeddings.umap(
-            graph, _initial(8), n_epochs=5, use_density_map=True
+            graph,
+            by_cell_id(datastore.cells, _initial(8)),
+            n_epochs=5,
+            use_density_map=True,
         )
 
     topic = "densMAP local radii"
@@ -289,7 +296,7 @@ def test_a_layout_over_unequal_local_radii_gives_no_warning(
     def embed() -> ArtifactRef:
         return datastore.embeddings.umap(
             refs["graph"],
-            _initial(N_CELLS),
+            by_cell_id(datastore.cells, _initial(N_CELLS)),
             n_epochs=5,
             use_density_map=use_density_map,
         )
@@ -325,7 +332,7 @@ _CALLS: dict[str, tuple[str, str, Callable[[DataStore, dict[str, Any]], Any]]] =
         "run_umap",
         "values",
         lambda store, refs: store.embeddings.umap(
-            refs["graph"], _initial(N_CELLS), n_epochs=5
+            refs["graph"], by_cell_id(store.cells, _initial(N_CELLS)), n_epochs=5
         ),
     ),
 }

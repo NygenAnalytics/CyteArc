@@ -24,6 +24,7 @@ from zarr.storage import MemoryStore
 
 import cytearc
 from cytearc.utils.memory_budget import MemoryBudgetError, memory_refusal
+from tests.storage_helpers import by_cell_id
 
 CYTEARC_ROOT = Path(cytearc.__file__).parent
 
@@ -1328,8 +1329,13 @@ def test_cells_in_one_band_and_cells_over_many_read_their_values(
 
     n_cells, width = 8_000, 50
     store = _count_store(tmp_path / "bands.zarr", np.ones((n_cells, 1)), "c")
-    store.cells.insert("tail", np.arange(n_cells) >= n_cells - 3)
-    store.cells.insert("spread", np.isin(np.arange(n_cells), [0, 4_000, n_cells - 1]))
+    store.cells.insert(
+        "tail", by_cell_id(store.cells, np.arange(n_cells) >= n_cells - 3)
+    )
+    store.cells.insert(
+        "spread",
+        by_cell_id(store.cells, np.isin(np.arange(n_cells), [0, 4_000, n_cells - 1])),
+    )
     planned = plan_cell_data_artifact(
         store.zw,
         scope="assay",
@@ -1595,7 +1601,7 @@ def _banded_values(
     shape = (n_cells,) if width == 1 else (n_cells, width)
     store = _count_store(path, np.ones((n_cells, 1)), "c")
     for column, flags in columns.items():
-        store.cells.insert(column, flags)
+        store.cells.insert(column, by_cell_id(store.cells, flags))
     planned = plan_cell_data_artifact(
         store.zw,
         scope="assay",

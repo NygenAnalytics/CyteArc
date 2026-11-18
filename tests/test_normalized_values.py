@@ -34,6 +34,7 @@ from cytearc.writers import H5adToZarr
 from . import full_path
 from .perturbation_helpers import fixed_labels, write_screen
 from .storage_helpers import record_normalized_values, write_count_store
+from tests.storage_helpers import by_cell_id
 
 _DERIVED = {"importedAs": None, "cellTotal": None}
 
@@ -77,7 +78,9 @@ def stores(tmp_path_factory) -> _Stores:
     values = _grouped_counts()
     write_count_store(str(counts_path), {"RNA": values}, "uint16")
     counts = _open(counts_path)
-    counts.cells.insert("group", np.repeat(["a", "b", "c"], len(values) // 3))
+    counts.cells.insert(
+        "group", by_cell_id(counts.cells, np.repeat(["a", "b", "c"], len(values) // 3))
+    )
     run = counts.pipeline.rna(
         label="graph",
         filtering=False,
@@ -508,7 +511,9 @@ def _repack(source: DataStore, tmp_path: Path, *, data_only: bool) -> DataStore:
 
 def _subset(source: DataStore, tmp_path: Path) -> DataStore:
     SubsetZarr(
-        str(tmp_path / "subset.zarr"), [source.RNA], cell_idx=np.arange(20)
+        str(tmp_path / "subset.zarr"),
+        [source.RNA],
+        cell_ids=source.cells.fetch_all("ids")[:20],
     ).dump()
     return _open(tmp_path / "subset.zarr")
 

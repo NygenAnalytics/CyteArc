@@ -29,7 +29,7 @@ from cytearc.storage.feature_selection import (
     _ordered_feature_ids_fingerprint,
     _write_feature_selection,
 )
-from tests.storage_helpers import write_count_store
+from tests.storage_helpers import by_cell_id, write_count_store
 
 pytestmark = pytest.mark.filterwarnings("ignore:Cell-level statistical testing")
 
@@ -64,7 +64,11 @@ def _new_store(
     zarr_loc = str(directory / "store.zarr")
     write_count_store(zarr_loc, _counts() if counts is None else counts, dtype)
     store = _open(zarr_loc)
-    store.cells.insert("everyone", np.ones(store.cells.N, dtype=bool), overwrite=True)
+    store.cells.insert(
+        "everyone",
+        by_cell_id(store.cells, np.ones(store.cells.N, dtype=bool)),
+        overwrite=True,
+    )
     return store
 
 
@@ -85,7 +89,7 @@ def store(tmp_path_factory) -> DataStore:
         "val": VALUES,
     }
     for name, values in columns.items():
-        store.cells.insert(name, values, overwrite=True)
+        store.cells.insert(name, by_cell_id(store.cells, values), overwrite=True)
     return store
 
 
@@ -475,7 +479,7 @@ def test_make_bulk_leaves_out_empty_pseudo_replicates(
     store: DataStore,
 ) -> None:
     labels = np.array(["solo"] + ["rest"] * (N_CELLS - 1), dtype=object)
-    store.cells.insert("solo_group", labels, overwrite=True)
+    store.cells.insert("solo_group", by_cell_id(store.cells, labels), overwrite=True)
     options = {
         "from_assay": "ADT",
         "cell_selection": _cells(store),
@@ -649,7 +653,9 @@ def test_study_design_without_subjects_tests_independent_samples(
 
 
 def test_subset_by_leaves_out_cells_its_missing_mask_flags(store: DataStore) -> None:
-    store.cells.insert("keep", np.ones(N_CELLS, dtype=bool), overwrite=True)
+    store.cells.insert(
+        "keep", by_cell_id(store.cells, np.ones(N_CELLS, dtype=bool)), overwrite=True
+    )
     missing = np.zeros(N_CELLS, dtype=bool)
     missing[:4] = True
     cell_data = store.cells.locations["primary"]
@@ -714,7 +720,7 @@ def test_statistical_result_edited_outside_cytearc_is_recomputed(
 ) -> None:
     options, apply_edit = _REUSE_EDITS[edit]
     key = f"reuse_edit_{sorted(_REUSE_EDITS).index(edit)}"
-    store.cells.insert(key, VALUES, overwrite=True)
+    store.cells.insert(key, by_cell_id(store.cells, VALUES), overwrite=True)
     first = _statistical_tests(store, keys=key, **options)
     apply_edit(_artifact_group(store, first.artifact))
 
@@ -742,7 +748,11 @@ def test_statistical_tests_validate_their_design_once_for_every_key(
     keys = [f"design_key_{index}" for index in range(6)]
     rng = np.random.default_rng(23)
     for key in keys:
-        store.cells.insert(key, rng.poisson(3.0, N_CELLS).astype(float), overwrite=True)
+        store.cells.insert(
+            key,
+            by_cell_id(store.cells, rng.poisson(3.0, N_CELLS).astype(float)),
+            overwrite=True,
+        )
     prepared: list[str] = []
     checked = {"labels": 0}
     original_prepare = features_module.prepare_group_comparison
@@ -786,7 +796,7 @@ def test_statistical_tests_validate_their_design_once_for_every_key(
 def test_statistical_values_that_change_during_a_call_abort_it(
     store: DataStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    store.cells.insert("drifting", VALUES, overwrite=True)
+    store.cells.insert("drifting", by_cell_id(store.cells, VALUES), overwrite=True)
     _statistical_tests(store, keys="drifting")
     saved = set(store.artifacts.list(kind="statistical_tests", scope="datastore"))
     original = store._iter_statistical_values
@@ -835,7 +845,7 @@ def test_statistical_results_with_undefined_statistics_are_not_saved(
 
     monkeypatch.setattr(GroupComparisonDesign, "compare", undefined)
     key = f"undefined_{column}"
-    store.cells.insert(key, VALUES, overwrite=True)
+    store.cells.insert(key, by_cell_id(store.cells, VALUES), overwrite=True)
     saved = set(store.artifacts.list(kind="statistical_tests", scope="datastore"))
 
     with pytest.raises(ValueError, match=message):
@@ -924,7 +934,7 @@ def test_get_statistical_tests_rejects_records_edited_outside_cytearc(
 ) -> None:
     options, apply_edit, error, message = _SLOT_EDITS[edit]
     key = f"slot_edit_{sorted(_SLOT_EDITS).index(edit)}"
-    store.cells.insert(key, VALUES, overwrite=True)
+    store.cells.insert(key, by_cell_id(store.cells, VALUES), overwrite=True)
     saved = _statistical_tests(store, keys=key, **options).artifact
     apply_edit(_artifact_group(store, saved))
 

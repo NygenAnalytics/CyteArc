@@ -21,6 +21,7 @@ from cytearc.storage.budget import ResourceBudget
 from cytearc.storage.errors import ArtifactResolutionError
 from cytearc.utils import logger
 from tests import full_path
+from tests.storage_helpers import by_cell_id
 
 pytestmark = pytest.mark.slow
 
@@ -205,7 +206,9 @@ def graph_template(
         top_n=100,
         show_plot=False,
     )
-    datastore.cells.insert("graph_batch", _batch_labels(datastore.cells.N))
+    datastore.cells.insert(
+        "graph_batch", by_cell_id(datastore.cells, _batch_labels(datastore.cells.N))
+    )
     normalized = datastore.features.normalize(cell_selection, features)
     return zarr_loc, {
         "cells": cell_selection,
@@ -270,7 +273,7 @@ def test_pca_reopens_with_center_and_rebuilds_legacy_artifacts(
         path, default_assay="RNA", min_features_per_cell=0, nthreads=1
     )
     cells = datastore.snapshot_cell_selection("I")
-    datastore.cells.insert("pca_fit", np.arange(30) < 15)
+    datastore.cells.insert("pca_fit", by_cell_id(datastore.cells, np.arange(30) < 15))
     fit_cells = datastore.snapshot_cell_selection("pca_fit")
     features = datastore.features.universe(from_assay="RNA")
     normalized = datastore.features.normalize(cells, features)
@@ -507,7 +510,7 @@ def test_pca_rejects_empty_fit_selection(graph_store) -> None:
     datastore, refs = graph_store
     datastore.cells.insert(
         "no_pca_cells",
-        np.zeros(datastore.cells.N, dtype=bool),
+        by_cell_id(datastore.cells, np.zeros(datastore.cells.N, dtype=bool)),
         overwrite=True,
     )
     empty_selection = datastore.snapshot_cell_selection(cell_key="no_pca_cells")
@@ -525,7 +528,9 @@ def test_pca_rejects_fit_selection_outside_normalized_cells(graph_store) -> None
     wider_selection = refs["cells"]
     normalized_mask = _selection_mask(datastore, wider_selection)
     normalized_mask[np.flatnonzero(normalized_mask)[0]] = False
-    datastore.cells.insert("normalized_cells", normalized_mask, overwrite=True)
+    datastore.cells.insert(
+        "normalized_cells", by_cell_id(datastore.cells, normalized_mask), overwrite=True
+    )
     normalized_selection = datastore.snapshot_cell_selection(
         cell_key="normalized_cells"
     )
@@ -918,8 +923,12 @@ def test_historical_neighbors_preserve_named_lineage_inputs(graph_store) -> None
     datastore, refs = graph_store
     original_selection, features = refs["cells"], refs["features"]
     mask = _selection_mask(datastore, original_selection)
-    datastore.cells.insert("selection_a", mask, overwrite=True)
-    datastore.cells.insert("selection_b", mask, overwrite=True)
+    datastore.cells.insert(
+        "selection_a", by_cell_id(datastore.cells, mask), overwrite=True
+    )
+    datastore.cells.insert(
+        "selection_b", by_cell_id(datastore.cells, mask), overwrite=True
+    )
     selection_b = datastore.snapshot_cell_selection(cell_key="selection_b")
 
     normalized = datastore.features.normalize(selection_b, features)
@@ -946,7 +955,9 @@ def test_reduction_and_harmony_keep_immutable_selection_after_live_alias_change(
     assert len(selected) > 0 and len(excluded) > 0
     mask[selected[0]] = False
     mask[excluded[0]] = True
-    datastore.cells.insert("I", mask, overwrite=True, force=True)
+    datastore.cells.insert(
+        "I", by_cell_id(datastore.cells, mask), overwrite=True, force=True
+    )
 
     new_reduction = datastore.reduction.pca(
         normalized,

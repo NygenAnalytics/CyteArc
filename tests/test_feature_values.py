@@ -29,7 +29,7 @@ from cytearc.storage.count_matrix import CountMatrixPolicy
 from cytearc.storage.execution import execution_report_scope
 from cytearc.storage.schema import create_cell_data, create_zarr_count_assay
 from cytearc.writers.counts_t import finalize_writer_counts_t
-from tests.storage_helpers import finalize_test_counts
+from tests.storage_helpers import by_cell_id, finalize_test_counts
 
 
 @pytest.mark.parametrize("piece_rows", [1, 2, 10])
@@ -198,7 +198,9 @@ def _count_store(
     finalize_test_counts(array)
     finalize_writer_counts_t(root, "RNA", None)
     store = DataStore(root.store, min_features_per_cell=0, nthreads=1)
-    store.cells.insert("everyone", np.ones(n_cells, dtype=bool))
+    store.cells.insert(
+        "everyone", by_cell_id(store.cells, np.ones(n_cells, dtype=bool))
+    )
     return store
 
 

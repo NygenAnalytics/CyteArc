@@ -133,9 +133,10 @@ print(calibration.loc[calibration["significant"], "control_guides"].value_counts
 # they are no controls, and run again on the other analysis cells (taken as filtered).
 offending = {"<guide>"}  # guide IDs of the groups above, which join them with "+"
 called = ds.perturbation.load_guide_calls(run["guide_calls"]).calls
-carriers = np.isin(ds.cells.fetch_all("ids"), called.loc[called["guide"].isin(offending), "ids"])
+ids = ds.cells.fetch_all("ids")
+carriers = np.isin(ids, called.loc[called["guide"].isin(offending), "ids"])
 analyzed = ds.artifacts.load(run["analysis_cell_selection"])["values"][:]
-ds.cells.insert("cells_without_offending_controls", analyzed & ~carriers, overwrite=True)
+ds.cells.insert("cells_without_offending_controls", pd.Series(analyzed & ~carriers, index=ids), overwrite=True)
 again = ds.pipeline.perturbation(
     cells=ds.snapshot_cell_selection("cells_without_offending_controls"),
     labels={"controls": ["Non-Targeting"]},

@@ -91,14 +91,12 @@ Queries run on the datastore's `nthreads` threads, which never change the neighb
 
 A latent space computed by another tool, such as scVI's `X_scVI` or a Harmony correction saved
 as `X_pca_harmony`, becomes graph coordinates through
-{py:meth}`~cytearc.datastore.namespaces.ReductionAccessor.import_coordinates`. Pass an array with
-one row per cell of the selection, in store order, or a pandas DataFrame indexed by cell ID, which
-is aligned to the selected cells by ID:
+{py:meth}`~cytearc.datastore.namespaces.ReductionAccessor.import_coordinates`. Pass a pandas DataFrame indexed by cell ID, which is aligned to the selected cells by ID; rows of other cells are left out. An array raises `TypeError`, because its rows would land on cells by position, and a store's cells need not be in the order of the tool's cells:
 
 ```python
 cells = ds.snapshot_cell_selection("I")
 latent = ds.reduction.import_coordinates(
-    adata.obsm["X_scVI"],
+    pd.DataFrame(adata.obsm["X_scVI"], index=adata.obs_names),
     cell_selection=cells,
     name="X_scVI",
     source={"tool": "scvi-tools", "version": "1.2.0", "parameters": {"n_latent": 30}},

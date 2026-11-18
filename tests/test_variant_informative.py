@@ -13,7 +13,7 @@ import pytest
 
 from cytearc.variants import VariantSelection
 from tests.clone_helpers import every_cell
-from tests.storage_helpers import copy_store, open_store
+from tests.storage_helpers import by_cell_id, copy_store, open_store
 from tests.variant_helpers import (
     band_budget,
     expected_mito_statistics,
@@ -147,7 +147,7 @@ def test_the_atac_preset_selects_exactly_the_clone_variants(store) -> None:
 
 def test_cells_restrict_the_statistics_to_their_cells(store) -> None:
     counts = _counts(store)
-    store.cells.insert("in_d2", TRUTH.clones.samples == "d2")
+    store.cells.insert("in_d2", by_cell_id(store.cells, TRUTH.clones.samples == "d2"))
     chosen = store.snapshot_cell_selection("in_d2")
     selection = store.variants.load_informative(
         store.variants.informative(counts, cell_selection=chosen, min_vmr=0.01)
@@ -198,7 +198,7 @@ def test_scattered_cells_are_read_through_short_gaps_within_the_budget(
     store, monkeypatch
 ) -> None:
     counts = _counts(store)
-    store.cells.insert("in_d2", TRUTH.clones.samples == "d2")
+    store.cells.insert("in_d2", by_cell_id(store.cells, TRUTH.clones.samples == "d2"))
     chosen = store.snapshot_cell_selection("in_d2")
     rows = np.flatnonzero(TRUTH.clones.samples == "d2")
     reads = _recorded_depth_reads(monkeypatch)
@@ -244,7 +244,9 @@ def test_cells_a_chunk_apart_are_read_alone(store, monkeypatch, tmp_path) -> Non
     rows = np.arange(0, TRUTH.n_cells, 10)
     combined = group["depth_offsets"][:] + group["count_offsets"][:]
     assert np.all(combined[rows[1:]] - combined[rows[:-1] + 1] >= 64)
-    store.cells.insert("tenth", np.isin(np.arange(TRUTH.n_cells), rows))
+    store.cells.insert(
+        "tenth", by_cell_id(store.cells, np.isin(np.arange(TRUTH.n_cells), rows))
+    )
     reads = _recorded_depth_reads(monkeypatch)
     selection = store.variants.load_informative(
         store.variants.informative(
@@ -323,7 +325,7 @@ def test_cells_that_no_file_names_are_left_out(tmp_path) -> None:
         check_index_type=False,
         rtol=1e-9,
     )
-    store.cells.insert("first", np.arange(SMALL.n_cells) < 5)
+    store.cells.insert("first", by_cell_id(store.cells, np.arange(SMALL.n_cells) < 5))
     with pytest.raises(ValueError, match="No chosen cell is named"):
         store.variants.informative(
             counts, cell_selection=store.snapshot_cell_selection("first"), min_vmr=0.0

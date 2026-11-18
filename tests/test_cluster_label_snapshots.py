@@ -15,6 +15,7 @@ from cytearc.storage.artifacts import ArtifactRef, artifact_group, fingerprint_a
 from cytearc.storage.errors import ArtifactResolutionError
 from cytearc.storage.types import as_zarr_group
 from tests.fixtures_datastore import build_neighborhood_graph
+from tests.storage_helpers import by_cell_id
 
 N_CELLS = 120
 N_GENES = 30
@@ -117,7 +118,7 @@ def _open(path: Path, **options: Any) -> DataStore:
 
 
 def _selection(ds: DataStore, name: str, mask: np.ndarray) -> ArtifactRef:
-    ds.cells.insert(name, mask, overwrite=True)
+    ds.cells.insert(name, by_cell_id(ds.cells, mask), overwrite=True)
     return ds.snapshot_cell_selection(name)
 
 
@@ -196,14 +197,14 @@ def test_snapshot_reuses_identical_labels_and_never_reuses_changed_labels(
     assert _snapshots(ds) == [first]
 
     flipped = np.where(DISEASE == "covid", "normal", "covid")
-    ds.cells.insert("disease", flipped, overwrite=True)
+    ds.cells.insert("disease", by_cell_id(ds.cells, flipped), overwrite=True)
     changed = ds.snapshot_cluster_labels("disease", cell_selection=t_cells)
     assert changed != first
     np.testing.assert_array_equal(_labels(ds, first), DISEASE[CELL_TYPES == "T"])
     np.testing.assert_array_equal(_labels(ds, changed), flipped[CELL_TYPES == "T"])
 
     # The same text under another column is a different label source.
-    ds.cells.insert("condition", flipped, overwrite=True)
+    ds.cells.insert("condition", by_cell_id(ds.cells, flipped), overwrite=True)
     copied = ds.snapshot_cluster_labels("condition", cell_selection=t_cells)
     assert copied not in {first, changed}
     assert ds.artifacts.list(
@@ -215,9 +216,9 @@ def test_snapshot_reuses_identical_labels_and_never_reuses_changed_labels(
 
     # Integer labels never reuse text labels of equal text.
     codes = np.arange(N_CELLS) % 2
-    ds.cells.insert("groups", codes.astype(str), overwrite=True)
+    ds.cells.insert("groups", by_cell_id(ds.cells, codes.astype(str)), overwrite=True)
     text = ds.snapshot_cluster_labels("groups", cell_selection=t_cells)
-    ds.cells.insert("groups", codes, overwrite=True)
+    ds.cells.insert("groups", by_cell_id(ds.cells, codes), overwrite=True)
     integers = ds.snapshot_cluster_labels("groups", cell_selection=t_cells)
     assert integers != text
     np.testing.assert_array_equal(
@@ -237,7 +238,7 @@ def test_snapshot_reuses_identical_labels_and_never_reuses_changed_labels(
 )
 def test_snapshot_keeps_integer_and_boolean_labels(store_path, values):
     ds = _open(store_path)
-    ds.cells.insert("groups", values, overwrite=True)
+    ds.cells.insert("groups", by_cell_id(ds.cells, values), overwrite=True)
 
     labels = ds.snapshot_cluster_labels(
         "groups", cell_selection=ds.snapshot_cell_selection()
@@ -253,9 +254,9 @@ def test_snapshot_stores_whole_number_float_labels_as_int64(store_path, dtype):
     ds = _open(store_path)
     all_cells = ds.snapshot_cell_selection()
     codes = np.arange(N_CELLS) % 4
-    ds.cells.insert("groups", codes, overwrite=True)
+    ds.cells.insert("groups", by_cell_id(ds.cells, codes), overwrite=True)
     integers = ds.snapshot_cluster_labels("groups", cell_selection=all_cells)
-    ds.cells.insert("groups", codes.astype(dtype), overwrite=True)
+    ds.cells.insert("groups", by_cell_id(ds.cells, codes.astype(dtype)), overwrite=True)
 
     floats = ds.snapshot_cluster_labels("groups", cell_selection=all_cells)
 
@@ -278,7 +279,7 @@ def test_snapshot_rejects_float_labels_that_are_not_whole_numbers(
     all_cells = ds.snapshot_cell_selection()
     values = (np.arange(N_CELLS) % 3).astype(np.float64)
     values[7] = label
-    ds.cells.insert("level", values, overwrite=True)
+    ds.cells.insert("level", by_cell_id(ds.cells, values), overwrite=True)
 
     with pytest.raises(
         TypeError,
@@ -296,7 +297,9 @@ def test_snapshot_identity_ignores_the_declared_text_width(store_path):
 
     widened = DISEASE.astype(object)
     widened[np.flatnonzero(CELL_TYPES == "B")[0]] = "covid, second wave"
-    ds.cells.insert("disease", widened.astype(str), overwrite=True)
+    ds.cells.insert(
+        "disease", by_cell_id(ds.cells, widened.astype(str)), overwrite=True
+    )
 
     assert ds.cells.get_dtype("disease") == np.dtype("<U18")
     assert ds.snapshot_cluster_labels("disease", cell_selection=t_cells) == before
@@ -319,7 +322,7 @@ def test_snapshot_identity_ignores_the_text_encoding(store_path, encode):
     cell_data.create_array("condition", data=encode(DISEASE), overwrite=True)
     encoded = ds.snapshot_cluster_labels("condition", cell_selection=t_cells)
 
-    ds.cells.insert("condition", DISEASE, overwrite=True)
+    ds.cells.insert("condition", by_cell_id(ds.cells, DISEASE), overwrite=True)
 
     assert ds.snapshot_cluster_labels("condition", cell_selection=t_cells) == encoded
     assert _labels(ds, encoded).dtype == np.dtype("<U6")
@@ -386,7 +389,7 @@ def test_snapshot_restricts_labels_to_a_subset_of_clusters(store_path, leiden):
 def test_snapshot_rejects_unlabeled_column_values(store_path, values, unlabeled):
     ds = _open(store_path)
     all_cells = ds.snapshot_cell_selection()
-    ds.cells.insert("condition", values, overwrite=True)
+    ds.cells.insert("condition", by_cell_id(ds.cells, values), overwrite=True)
 
     with pytest.raises(
         ValueError,
@@ -443,17 +446,18 @@ def test_snapshot_rejects_invalid_sources_and_selections(store_path):
     b_cells = _selection(ds, "is_b_cell", CELL_TYPES == "B")
     t_labels = ds.snapshot_cluster_labels("disease", cell_selection=t_cells)
     collected = np.datetime64("2020-03-01") + np.arange(N_CELLS)
-    ds.cells.insert("collected", collected, overwrite=True)
+    # pandas holds the days at its coarsest unit, seconds.
+    ds.cells.insert("collected", by_cell_id(ds.cells, collected), overwrite=True)
     # The type is checked first, so a missing float label is not reported as
     # an unlabeled cell.
     scores = np.linspace(0.0, 1.0, N_CELLS)
     scores[0] = np.nan
-    ds.cells.insert("score", scores, overwrite=True)
+    ds.cells.insert("score", by_cell_id(ds.cells, scores), overwrite=True)
 
     with pytest.raises(
         TypeError,
         match=r"^Cluster labels must be text, integer, boolean, or whole-number "
-        r"values, but column 'collected' holds datetime64\[D\] values$",
+        r"values, but column 'collected' holds datetime64\[s\] values$",
     ):
         ds.snapshot_cluster_labels("collected", cell_selection=t_cells)
     with pytest.raises(TypeError, match=r"column 'score' holds 0\.0252"):
@@ -603,7 +607,7 @@ def test_snapshot_keeps_labels_with_a_slash_for_every_consumer(store_path):
     ds = _open(store_path)
     all_cells = ds.snapshot_cell_selection()
     subtype = np.where(CELL_TYPES == "B", "B", "NK/T")
-    ds.cells.insert("subtype", subtype, overwrite=True)
+    ds.cells.insert("subtype", by_cell_id(ds.cells, subtype), overwrite=True)
 
     labels = ds.snapshot_cluster_labels("subtype", cell_selection=all_cells)
 

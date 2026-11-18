@@ -20,7 +20,7 @@ from cytearc.plotting._data import _fetch_cell_column, _resolve_grouping
 from cytearc.storage.categorical import CategoricalColumn
 from cytearc.utils.memory_budget import MemoryLedger
 from tests.memory_helpers import climb_refusals, named_budget, recording_ledger
-from tests.storage_helpers import open_store, write_count_store
+from tests.storage_helpers import by_cell_id, open_store, write_count_store
 
 N_CELLS = 60
 # Labels of every kind that a grouping meets: digits that sort naturally, text
@@ -44,12 +44,21 @@ def store(tmp_path_factory):
     counts = rng.poisson(3.0, size=(N_CELLS, 5)).astype(np.uint16)
     write_count_store(str(path), {"RNA": counts}, "uint16")
     store = open_store(path)
-    store.cells.insert("text", LABELS)
-    store.cells.insert("categorical", pd.Categorical(LABELS, categories=CATEGORIES))
-    store.cells.insert("sub_text", SUBGROUPS)
-    store.cells.insert("sub_categorical", pd.Categorical(SUBGROUPS))
-    store.cells.insert("every_cell", np.ones(N_CELLS, dtype=bool))
-    store.cells.insert("some_cells", np.arange(N_CELLS) % 4 != 1)
+    store.cells.insert("text", by_cell_id(store.cells, LABELS))
+    store.cells.insert(
+        "categorical",
+        by_cell_id(store.cells, pd.Categorical(LABELS, categories=CATEGORIES)),
+    )
+    store.cells.insert("sub_text", by_cell_id(store.cells, SUBGROUPS))
+    store.cells.insert(
+        "sub_categorical", by_cell_id(store.cells, pd.Categorical(SUBGROUPS))
+    )
+    store.cells.insert(
+        "every_cell", by_cell_id(store.cells, np.ones(N_CELLS, dtype=bool))
+    )
+    store.cells.insert(
+        "some_cells", by_cell_id(store.cells, np.arange(N_CELLS) % 4 != 1)
+    )
     assert isinstance(store.cells._get_array("categorical"), CategoricalColumn)
     assert not isinstance(store.cells._get_array("text"), CategoricalColumn)
     return store
@@ -355,8 +364,10 @@ def test_coding_a_categorical_column_for_a_grouping_charges_codes_not_labels(
     path = tmp_path / "store.zarr"
     write_count_store(str(path), {"RNA": np.ones((n_cells, 2), dtype=int)}, "uint16")
     table = open_store(path).cells
-    table.insert("text", labels)
-    table.insert("categorical", pd.Categorical(labels, categories=categories))
+    table.insert("text", by_cell_id(table, labels))
+    table.insert(
+        "categorical", by_cell_id(table, pd.Categorical(labels, categories=categories))
+    )
 
     most = {}
     for layout in ("text", "categorical"):

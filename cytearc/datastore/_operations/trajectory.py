@@ -29,6 +29,11 @@ from ...graph.feature_projection import (
 )
 from ...graph.kinds import require_graph_kind
 from ...matrix import ChunkedArray
+from ...metadata.alignment import (
+    align_to_cell_ids,
+    keyed_values_remedy,
+    require_keyed,
+)
 from ...metadata.rows import (
     read_array_rows_chunkwise,
     read_metadata_missing_rows_chunkwise,
@@ -1069,7 +1074,7 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         source_sink: ArtifactRef | None = None,
         sources: list[Any] | None = None,
         sinks: list[Any] | None = None,
-        ss_vec: np.ndarray | None = None,
+        ss_vec: pd.Series | None = None,
         min_max_norm_ptime: bool = True,
         random_seed: int | None = None,
         component_policy: Literal["largest", "sources", "error"] = "largest",
@@ -1127,9 +1132,10 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
             sinks: A list of group/cluster ids from ``source_sink`` to be treated as sinks. Sinks are usually
                    more differentiated (or terminally differentiated) cell states.
             ss_vec: Custom source-sink value for each scored cell, of the
-                graph or of ``cells``. It must sum to zero, with negative
-                values for sources and positive values for sinks. This is
-                mutually exclusive with label-based arguments.
+                graph or of ``cells``, as a pandas Series indexed by cell ID;
+                values of other cells are left out. It must sum to zero, with
+                negative values for sources and positive values for sinks.
+                This is mutually exclusive with label-based arguments.
             min_max_norm_ptime: Whether to perform min-max normalization on the final pseudotime values so that values
                                 are in 0 to 1 range. (Default: True)
             random_seed: The seed of the start vector of ``svds``, for
@@ -1166,11 +1172,21 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
                 before it converges.
             SourceSinkLabelsError: If no selected cell, or no cell of the
                 scored component, holds a source or sink label.
+            TypeError: If ``ss_vec`` is not a pandas Series indexed by cell
+                ID, such as an array, whose values would land on cells by
+                position.
             ValueError: If ``method`` is neither ``"untruncated"`` nor
                 ``"truncated"``, ``n_singular_vals`` or ``random_seed`` is
-                set with ``method="untruncated"``, or ``cells`` holds cells
-                outside the graph's.
+                set with ``method="untruncated"``, ``cells`` holds cells
+                outside the graph's, or ``ss_vec`` lacks a scored cell or
+                repeats a cell ID.
         """
+        if ss_vec is not None:
+            require_keyed(
+                ss_vec,
+                name="trajectory.pseudotime(ss_vec=)",
+                remedy=keyed_values_remedy(),
+            )
         min_max_norm_ptime = bool_argument(min_max_norm_ptime, "min_max_norm_ptime")
         invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
 
@@ -1283,7 +1299,16 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
 
         selected_labels: pd.Series | None = None
         if ss_vec is not None:
-            owned_source_sink = np.array(ss_vec, copy=True)
+            scored_ids = self._cell_ids_at(selected_cell_indices)
+            aligned_source_sink = align_to_cell_ids(
+                ss_vec,
+                scored_ids,
+                name="trajectory.pseudotime(ss_vec=)",
+                cells=f"the {scored_ids.size} cells that the pseudotime scores",
+                remedy=keyed_values_remedy(),
+                leave_out_others=True,
+            )
+            owned_source_sink = np.array(aligned_source_sink.to_numpy(), copy=True)
             full_source_sink = np.array(
                 _validate_source_sink_vector_impl(
                     owned_source_sink,
@@ -1738,7 +1763,7 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
     def _load_fate_direction(
         self,
         graph: ArtifactRef,
-        direction: ArtifactRef | np.ndarray,
+        direction: ArtifactRef | pd.Series,
     ) -> tuple[_FateDirection, csr_matrix]:
         """Read a direction score of a graph's cells, with the symmetric graph.
 
@@ -1766,8 +1791,6 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
                 raise ValueError(
                     "Direction scores do not match the graph's cell selection"
                 )
-        else:
-            values, missing = direction, None
         selected_cell_indices = read_stored_selection_indices(
             self.zw,
             selection,
@@ -1776,6 +1799,26 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
             assay=None,
             table_path="cellData",
         )
+        if not isinstance(direction, ArtifactRef):
+            graph_ids = self._cell_ids_at(selected_cell_indices)
+            aligned = align_to_cell_ids(
+                direction,
+                graph_ids,
+                name="trajectory.fate(direction=)",
+                cells=f"the {graph_ids.size} cells of the graph",
+                remedy=keyed_values_remedy(),
+                leave_out_others=True,
+            )
+            # A nullable numeric Series leaves its missing values unscored.
+            numeric = pd.api.types.is_numeric_dtype(
+                aligned.dtype
+            ) and not pd.api.types.is_bool_dtype(aligned.dtype)
+            values = (
+                aligned.to_numpy(dtype=np.float64, na_value=np.nan)
+                if numeric
+                else aligned.to_numpy()
+            )
+            missing = None
         graph_matrix = self._load_graph_artifact(
             graph,
             symmetric=True,
@@ -1811,7 +1854,7 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         *,
         sinks: list[Any] | None = None,
         graph: ArtifactRef | None = None,
-        direction: ArtifactRef | np.ndarray | None = None,
+        direction: ArtifactRef | pd.Series | None = None,
         beta: float = 10.0,
         solver_tol: float = 1e-6,
         max_iterations: int = 1000,
@@ -1857,9 +1900,9 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
             direction: Per-cell score that directs the walk in place of a
                 pseudotime, higher meaning later: a cell-aligned artifact of
                 real values over the graph's cells, other than a pseudotime,
-                or an array with one value per cell of the graph's cell
-                selection, in its order. A missing or non-finite value leaves
-                a cell unscored.
+                or a pandas Series indexed by cell ID, aligned to the graph's
+                cells by ID; values of other cells are left out. A missing or
+                non-finite value leaves a cell unscored.
             beta: Strength of the penalty applied to backward graph edges.
             solver_tol: Absolute tolerance on the Bellman residual of each
                 solved sink column. A solve stops once its largest residual
@@ -1877,10 +1920,14 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         Raises:
             SourceSinkLabelsError: If no selected cell, or no cell that the
                 pseudotime or the direction scores, holds a sink label.
+            TypeError: If ``direction`` is neither an artifact reference nor
+                a pandas Series indexed by cell ID, such as an array, whose
+                values would land on cells by position.
             ValueError: If neither or both of ``pseudotime`` and
                 ``direction`` are given, ``graph`` comes without
-                ``direction``, or the direction scores some cells of a graph
-                component and leaves others unscored.
+                ``direction``, the direction scores some cells of a graph
+                component and leaves others unscored, or a Series lacks a cell
+                of the graph or repeats a cell ID.
         """
         invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         if sinks is None:
@@ -1922,8 +1969,12 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
                 raise ValueError("graph is required with direction")
             if not isinstance(graph, ArtifactRef):
                 raise TypeError("graph must be an ArtifactRef")
-            if not isinstance(direction, ArtifactRef | np.ndarray):
-                raise TypeError("direction must be an ArtifactRef or a NumPy array")
+            if not isinstance(direction, ArtifactRef):
+                require_keyed(
+                    direction,
+                    name="trajectory.fate(direction=)",
+                    remedy=keyed_values_remedy(),
+                )
         if sink_labels is None:
             raise ValueError("sink_labels must be provided")
         if not isinstance(sink_labels, ArtifactRef):

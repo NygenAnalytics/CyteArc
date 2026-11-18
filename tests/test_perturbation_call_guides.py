@@ -37,6 +37,7 @@ from cytearc.utils.logging import logger
 from cytearc.utils.memory_budget import MemoryBudgetError
 from tests.perturbation_helpers import record_cell_reads, warned, write_screen
 from tests.storage_helpers import (
+    by_cell_id,
     copy_store,
     open_store,
     rechunk_feature_tables,
@@ -718,7 +719,7 @@ def test_a_read_only_store_checks_the_budget_before_writing(
 
 
 def test_fixed_calls_of_one_lane_read_only_its_counts(store, monkeypatch) -> None:
-    store.cells.insert("in_l0", LANES == "L0")
+    store.cells.insert("in_l0", by_cell_id(store.cells, LANES == "L0"))
     lane = store.snapshot_cell_selection("in_l0")
     reads = record_cell_reads(monkeypatch, store, {"CRISPR_nFeatures"})
 
@@ -738,10 +739,10 @@ def test_fixed_calls_of_one_lane_read_only_its_counts(store, monkeypatch) -> Non
 def test_sample_labels_must_cover_every_selected_cell(store, template) -> None:
     blank = LANES.astype(object).copy()
     blank[3] = " "
-    store.cells.insert("blank_lane", blank)
+    store.cells.insert("blank_lane", by_cell_id(store.cells, blank))
     masked = pd.array(LANES.tolist(), dtype="string")
     masked[4] = pd.NA
-    store.cells.insert("masked_lane", masked)
+    store.cells.insert("masked_lane", by_cell_id(store.cells, masked))
     saved = written(store)
     for column in ("blank_lane", "masked_lane"):
         with pytest.raises(ValueError, match="has no label for 1 selected cells"):
@@ -788,7 +789,9 @@ def test_call_guides_refuses_arguments_it_cannot_use(
 
 
 def test_call_guides_refuses_a_selection_of_no_cell(store) -> None:
-    store.cells.insert("none", np.zeros(len(COUNTS), dtype=bool))
+    store.cells.insert(
+        "none", by_cell_id(store.cells, np.zeros(len(COUNTS), dtype=bool))
+    )
     nobody = store.snapshot_cell_selection("none")
     saved = written(store)
     with pytest.raises(TypeError, match="cell_selection must be an ArtifactRef"):
@@ -827,9 +830,12 @@ def _wide_screen(folder: Path) -> Path:
     )
     store = open_store(path)
     store.cells.insert(
-        "lane", np.where(np.arange(n_cells) % 2, "A", "B").astype(object)
+        "lane",
+        by_cell_id(
+            store.cells, np.where(np.arange(n_cells) % 2, "A", "B").astype(object)
+        ),
     )
-    store.cells.insert("every", np.ones(n_cells, dtype=bool))
+    store.cells.insert("every", by_cell_id(store.cells, np.ones(n_cells, dtype=bool)))
     store.snapshot_cell_selection("every")
     # Feature tables in chunks of their rows, so that the calls' own steps,
     # not a chunk of 100,000 guide IDs, set the budget.
@@ -876,7 +882,7 @@ def test_histograms_that_outgrow_the_budget_name_what_every_row_needs(
     store = write_screen(
         path, rng.poisson(1.0, size=(n_cells, 3)) + 1, counts.astype(np.uint16)
     )
-    store.cells.insert("every", np.ones(n_cells, dtype=bool))
+    store.cells.insert("every", by_cell_id(store.cells, np.ones(n_cells, dtype=bool)))
     cells = store.snapshot_cell_selection("every")
     rechunk_feature_tables(path)
     distinct = len(np.unique(np.arange(n_guides) * 2**32 + counts))

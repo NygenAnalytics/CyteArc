@@ -42,7 +42,7 @@ from cytearc.storage.diagnostics import (
 )
 from cytearc.utils.logging import collect_warnings
 from cytearc.utils.warnings import warn
-from tests.storage_helpers import open_store, write_count_store, written
+from tests.storage_helpers import by_cell_id, open_store, write_count_store, written
 
 # An operation that only these tests run: it saves a count, a share and
 # examples of what it counted.
@@ -435,7 +435,9 @@ def test_the_reader_refuses_an_artifact_without_its_operations_diagnostics(
 
 
 def test_a_loader_refuses_clones_saved_without_diagnostics(store) -> None:
-    store.cells.insert("clone", np.asarray(["a", "a", "b", ""], dtype=object))
+    store.cells.insert(
+        "clone", by_cell_id(store.cells, np.asarray(["a", "a", "b", ""], dtype=object))
+    )
     cells = store.snapshot_cell_selection()
     clones = store.clones.from_column("clone", cell_selection=cells)
     assert store.clones.load_clones(clones).diagnostics == {
@@ -456,8 +458,13 @@ def test_a_loader_refuses_clones_saved_without_diagnostics(store) -> None:
 
 def test_expansion_counts_the_cells_that_it_leaves_out(store) -> None:
     # Three cells with a clone, one of them without a sample.
-    store.cells.insert("clone", np.asarray(["a", "a", "b", ""], dtype=object))
-    store.cells.insert("sample", np.asarray(["s1", "s2", "", "s1"], dtype=object))
+    store.cells.insert(
+        "clone", by_cell_id(store.cells, np.asarray(["a", "a", "b", ""], dtype=object))
+    )
+    store.cells.insert(
+        "sample",
+        by_cell_id(store.cells, np.asarray(["s1", "s2", "", "s1"], dtype=object)),
+    )
     clones = store.clones.from_column(
         "clone", cell_selection=store.snapshot_cell_selection()
     )
@@ -565,7 +572,9 @@ def test_reading_the_diagnostics_of_an_absent_artifact_reads_none(
 def test_a_stage_reports_the_diagnostics_of_an_output_without_a_summary(store) -> None:
     from cytearc.datastore._pipeline.summaries import summarize_stage
 
-    store.cells.insert("clone", np.asarray(["a", "a", "b", ""], dtype=object))
+    store.cells.insert(
+        "clone", by_cell_id(store.cells, np.asarray(["a", "a", "b", ""], dtype=object))
+    )
     clones = store.clones.from_column(
         "clone", cell_selection=store.snapshot_cell_selection()
     )

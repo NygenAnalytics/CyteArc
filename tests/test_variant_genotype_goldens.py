@@ -19,7 +19,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from tests.storage_helpers import open_store, write_count_store
+from tests.storage_helpers import by_cell_id, open_store, write_count_store
 from tests.network_helpers import download_or_skip
 
 GOLDEN = json.loads((Path(__file__).parent / "giftwrap_0_6_2_golden.json").read_text())
@@ -43,7 +43,9 @@ def _store(path: Path, cell_ids: list[str]):
         cell_ids=cell_ids,
     )
     store = open_store(path)
-    store.cells.insert("every_cell", np.ones(len(cell_ids), dtype=bool))
+    store.cells.insert(
+        "every_cell", by_cell_id(store.cells, np.ones(len(cell_ids), dtype=bool))
+    )
     return store
 
 

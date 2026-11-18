@@ -150,12 +150,15 @@ _SIGNATURE_DIGESTS = {
     # source_storage_options: dict[str, Any] | None. run_fate_mapping takes
     # pseudotime: ArtifactRef | None = None and sink_labels: ArtifactRef |
     # None = None, and the keyword-only graph: ArtifactRef | None = None and
-    # direction: ArtifactRef | np.ndarray | None = None after sinks, so a
-    # per-cell score can direct the walk.
-    GraphDataStore: "195474045949f60de2656f4e5a2d0e95df0d7c2e5afc86bbdab0559ee5f2994e",
+    # direction: ArtifactRef | pd.Series | None = None after sinks, so a
+    # per-cell score keyed by cell ID can direct the walk. ss_vec is a
+    # pd.Series | None, and the UMAP, t-SNE and LocalMAP initialization an
+    # ArtifactRef | pd.DataFrame, each keyed by cell ID.
+    GraphDataStore: "acb38b1b0bca76685e5446ca82606f183fa3c95a50b7f361c25b5852ded46ea7",
     # run_mapping gained the keyword-only feature_key: Literal["ids",
-    # "names"] = "ids" after missing_feature_policy.
-    MappingDatastore: "12e809ed948d36552968c37dc3d2a9d3429ad06dcd5507673d95f839ef47171f",
+    # "names"] = "ids" after missing_feature_policy. get_mapping_score
+    # takes target_groups: pd.Series | None, keyed by cell ID.
+    MappingDatastore: "5af43f262bc00812accf1673e1e0231ed4d343a42b51bd65fdce00e3615d9ee8",
     # run_hto_demultiplexing gained the keyword-only positive_quantile: float
     # with the default 0.99, then hashtags: Sequence[str] | Mapping[str,
     # Sequence[str]] | None = None and sample_column: str | None = None after

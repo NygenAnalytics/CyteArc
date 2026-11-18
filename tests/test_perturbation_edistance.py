@@ -9,6 +9,7 @@ from collections.abc import Iterator
 from types import SimpleNamespace
 
 import numpy as np
+import pandas as pd
 import pytest
 import zarr
 from scipy.spatial.distance import cdist, pdist
@@ -57,9 +58,10 @@ COORDINATES = _coordinates()
 def _coordinate_ref(store: DataStore, cells=None):
     """Import COORDINATES for ``cells``, every cell by default."""
     cells = cells or store.select_measured_cells("RNA")
-    selected = np.asarray(store.artifacts.load(cells)["values"][:], dtype=bool)
+    # Rows of cells outside the selection are left out.
+    coordinates = pd.DataFrame(COORDINATES, index=store.cells.fetch_all("ids"))
     return store.reduction.import_coordinates(
-        COORDINATES[selected], cell_selection=cells, name="X_test"
+        coordinates, cell_selection=cells, name="X_test"
     )
 
 
@@ -191,9 +193,8 @@ def test_edistance_belongs_to_the_assay_of_its_coordinates(store, template) -> N
     # The same coordinates, owned by the guide assay rather than by the
     # default assay.
     cells = store.select_measured_cells("RNA")
-    selected = np.asarray(store.artifacts.load(cells)["values"][:], dtype=bool)
     coordinates = store.reduction.import_coordinates(
-        COORDINATES[selected],
+        pd.DataFrame(COORDINATES, index=store.cells.fetch_all("ids")),
         cell_selection=cells,
         name="X_guides",
         from_assay="CRISPR",
@@ -531,7 +532,9 @@ def large_screen(tmp_path_factory) -> SimpleNamespace:
             # budget.
             store.memoryBytes = 8 * values[0].nbytes * chunk_rows
         coordinates[n_dims] = store.reduction.import_coordinates(
-            values, cell_selection=cells, name=f"X_{n_dims}"
+            pd.DataFrame(values, index=store.cells.fetch_all("ids")),
+            cell_selection=cells,
+            name=f"X_{n_dims}",
         )
         store.memoryBytes = budget
     return SimpleNamespace(
@@ -590,7 +593,7 @@ def test_few_compared_cells_refuse_a_small_budget_and_measure_their_distance(
         path, rng.poisson(1.0, size=(n_cells, 2)) + 1, guides, targets=TARGETS[:-1]
     )
     coordinates = store.reduction.import_coordinates(
-        rng.normal(size=(n_cells, 2)),
+        pd.DataFrame(rng.normal(size=(n_cells, 2)), index=store.cells.fetch_all("ids")),
         cell_selection=store.select_measured_cells("RNA"),
         name="X_few",
     )

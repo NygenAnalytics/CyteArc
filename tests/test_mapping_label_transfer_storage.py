@@ -606,6 +606,8 @@ def test_label_transfer_result_rejects_misaligned_arrays() -> None:
 
     with pytest.raises(ValueError, match="cell_idx must have one row"):
         replace(loaded, cell_idx=np.arange(2))
+    with pytest.raises(ValueError, match="cell_ids must have one ID per"):
+        replace(loaded, cell_ids=loaded.cell_ids[:-1])
     with pytest.raises(ValueError, match="Vote arrays must have one row"):
         replace(
             loaded,

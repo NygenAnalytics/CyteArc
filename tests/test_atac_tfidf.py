@@ -17,6 +17,7 @@ from cytearc.storage.artifacts import (
 )
 from cytearc.utils import controlled_compute
 from cytearc.writers import SparseToZarr
+from tests.storage_helpers import by_cell_id
 
 
 def _build_store(store_path, counts):
@@ -51,7 +52,7 @@ def atac_tfidf_store(tmp_path):
     store = _build_store(tmp_path / "atac_tfidf.zarr", counts)
     store.cells.insert(
         "subset",
-        np.array([True, True, False, False]),
+        by_cell_id(store.cells, np.array([True, True, False, False])),
         overwrite=True,
     )
     return store, counts
@@ -420,7 +421,9 @@ def test_cells_without_accessible_peaks_keep_summary_finite(tmp_path):
         dtype=np.uint32,
     )
     store = _build_store(tmp_path / "atac_empty_cell.zarr", counts)
-    store.cells.insert("all_cells", np.ones(4, dtype=bool), overwrite=True)
+    store.cells.insert(
+        "all_cells", by_cell_id(store.cells, np.ones(4, dtype=bool)), overwrite=True
+    )
     selection = store.features.prevalent_peaks(
         store.snapshot_cell_selection("all_cells"),
         from_assay="ATAC",

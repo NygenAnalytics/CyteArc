@@ -62,6 +62,7 @@ beside axes you passed as `target=` can reach past your figure, so save that fig
 
 ```python
 import matplotlib.pyplot as plt
+import pandas as pd
 import cytearc
 import cytearc.plotting as splt
 
@@ -169,7 +170,8 @@ ds.plots.distribution(
     show=False,
 ).close()
 ds.plots.distribution(run["cell_cycle"], grouping=run["clusters"], show=False).close()
-ds.cells.insert("baseline_doublet_score", run.cells.fetch_all("doublet_score"), overwrite=True)
+score = pd.Series(run.cells.fetch_all("doublet_score"), index=ds.cells.fetch_all("ids"))
+ds.cells.insert("baseline_doublet_score", score, overwrite=True)
 ds.plots.distribution("baseline_doublet_score", grouping=run["clusters"], show=False).close()
 ```
 

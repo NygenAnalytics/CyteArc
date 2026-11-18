@@ -14,7 +14,7 @@ import pytest
 from cytearc import DataStore
 from cytearc.assay import ATACassay, RNAassay
 from cytearc.storage.artifacts import ArtifactRef
-from tests.storage_helpers import write_count_store
+from tests.storage_helpers import by_cell_id, write_count_store
 from tests.test_mapping_reference import build_mapping_query, build_mapping_store
 
 N_CELLS = 60
@@ -63,8 +63,13 @@ def template(tmp_path_factory) -> tuple[Path, dict[str, ArtifactRef]]:
     zarr_loc = tmp_path_factory.mktemp("read_only_reuse") / "store.zarr"
     write_count_store(str(zarr_loc), _counts(), "uint16")
     store = _open(zarr_loc)
-    store.cells.insert("first_half", np.arange(N_CELLS) < N_CELLS // 2)
-    store.cells.insert("batch", np.where(np.arange(N_CELLS) % 2 == 0, "a", "b"))
+    store.cells.insert(
+        "first_half", by_cell_id(store.cells, np.arange(N_CELLS) < N_CELLS // 2)
+    )
+    store.cells.insert(
+        "batch",
+        by_cell_id(store.cells, np.where(np.arange(N_CELLS) % 2 == 0, "a", "b")),
+    )
     cells = store.snapshot_cell_selection()
     refs = {
         "cells": cells,

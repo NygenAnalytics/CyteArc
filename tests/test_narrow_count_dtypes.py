@@ -35,7 +35,7 @@ from cytearc.trajectory.artifacts import (
     validate_aggregation_parameters,
     validate_marker_parameters,
 )
-from tests.storage_helpers import write_count_store
+from tests.storage_helpers import by_cell_id, write_count_store
 
 SIZE_FACTOR = 1000
 # Every dtype that holds the counts of ``_multimodal_counts`` exactly.
@@ -116,7 +116,11 @@ def _feature_mask(store: DataStore, assay: str, feat_idx: np.ndarray) -> Any:
 
 def _every_cell(store: DataStore) -> Any:
     """Select every cell, including cells without counts that ``I`` excludes."""
-    store.cells.insert("everyone", np.ones(store.cells.N, dtype=bool), overwrite=True)
+    store.cells.insert(
+        "everyone",
+        by_cell_id(store.cells, np.ones(store.cells.N, dtype=bool)),
+        overwrite=True,
+    )
     return store.snapshot_cell_selection("everyone")
 
 
@@ -207,7 +211,11 @@ def _count_results(store: DataStore) -> dict[str, Any]:
     results["feature_batches/subset"] = _feature_batches(
         store, RNA_SUBSET, renormalize_subset=True
     )
-    store.cells.insert("group", np.where(cell_idx % 3 == 0, "a", "b"), overwrite=True)
+    store.cells.insert(
+        "group",
+        by_cell_id(store.cells, np.where(cell_idx % 3 == 0, "a", "b")),
+        overwrite=True,
+    )
     tests = store.compare.test(
         [f"RNA{index}" for index in range(3)], CellField("group")
     )
@@ -418,7 +426,9 @@ def test_totals_beyond_float32_precision_are_exact(tmp_path, dtype):
         artifact_group(store.zw, percentage)["values"][:], percentages
     )
 
-    store.cells.insert("bulk", np.full(len(cell_idx), "all"), overwrite=True)
+    store.cells.insert(
+        "bulk", by_cell_id(store.cells, np.full(len(cell_idx), "all")), overwrite=True
+    )
     # RNA sums stream from countsT, and other assays sum their counts.
     for assay in ("RNA", "ATAC"):
         sums = store.compare.compute_bulk(

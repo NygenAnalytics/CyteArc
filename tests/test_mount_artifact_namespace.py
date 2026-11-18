@@ -33,6 +33,7 @@ from cytearc.storage.stores import (
 )
 from cytearc.tools.repack_zarr import repack_store
 from cytearc.writers import H5adToZarr
+from tests.storage_helpers import by_cell_id
 
 N_CELLS = 240
 RECIPE = {
@@ -702,7 +703,9 @@ def test_arrays_written_on_a_local_mount_use_the_local_profile(published, tmp_pa
     plain = DataStore(published.location, default_assay="RNA", min_features_per_cell=-1)
 
     assert resolve_storage_profile(mounted.z.store) == "fast_local"
-    mounted.cells.insert("flag", np.ones(N_CELLS, dtype=bool), overwrite=True)
+    mounted.cells.insert(
+        "flag", by_cell_id(mounted.cells, np.ones(N_CELLS, dtype=bool)), overwrite=True
+    )
     written = mounted.z["cellData"]["flag"]
     reference = plain.z["cellData"]["I"]
     assert [type(codec) for codec in written.compressors] == [

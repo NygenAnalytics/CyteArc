@@ -370,7 +370,7 @@ two_lineage = (((counts.CD3E > 0) & (counts.LYZ >= 5)) | ((counts.MS4A1 > 0) & (
 suspect = (called | (relative.to_numpy() > 3)) & two_lineage
 singlet = in_run.copy()
 singlet[np.flatnonzero(in_run)[suspect]] = False
-ds.cells.insert("qc_singlet", singlet, overwrite=True)
+ds.cells.insert("qc_singlet", pd.Series(singlet, index=ds.cells.fetch_all("ids")), overwrite=True)
 # Then run cells=ds.snapshot_cell_selection("qc_singlet"); cells="qc_singlet" MAD-filters again.
 # Explicit, per capture; thresholds and estimated doublet rates per sample.
 doublets = ds.qc.doublets(scaffold["clusters"], scaffold["connectivity_map"],

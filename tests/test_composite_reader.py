@@ -34,6 +34,7 @@ from cytearc.storage.io_policy import StorageIoPolicy
 from cytearc.storage.geometry import array_geometry
 from cytearc.storage.layout import PROFILE_METADATA_CHUNK
 from tests.test_composite import _write_source, count_fallbacks
+from tests.storage_helpers import by_cell_id
 
 
 @pytest.fixture(scope="module")
@@ -1387,14 +1388,22 @@ def test_composite_creation_caches_metadata_handles_without_caching_payloads(
         source = DataStore(str(destination), nthreads=1, mem_budget="64M")
         source.cells.insert(
             "nullable",
-            [
-                None if index % 4 == 0 else float(index)
-                for index in range(source.cells.N)
-            ],
+            by_cell_id(
+                source.cells,
+                [
+                    None if index % 4 == 0 else float(index)
+                    for index in range(source.cells.N)
+                ],
+                key=None,
+            ),
             key=None,
         )
         source.cells.insert(
-            "status", ["case", "control"] * (source.cells.N // 2), key=None
+            "status",
+            by_cell_id(
+                source.cells, ["case", "control"] * (source.cells.N // 2), key=None
+            ),
+            key=None,
         )
         source.cells._get_array("status").attrs.update(
             {"levels": ["case", "control"], "ordered": False}
@@ -1508,7 +1517,11 @@ def segmented_metadata_template(tmp_path_factory):
     )
     source.cells.insert(
         "nullable",
-        [None if index % 4 == 0 else float(index) for index in range(96)],
+        by_cell_id(
+            source.cells,
+            [None if index % 4 == 0 else float(index) for index in range(96)],
+            key=None,
+        ),
         key=None,
     )
     column = source.cells._get_array("nullable")
@@ -1688,7 +1701,11 @@ def test_composite_metadata_prefetch_bounds_actual_reads(
 ):
     source, _ = segmented_metadata_source
     source.cells.insert(
-        "cohort", [f"study-{index % 3}" for index in range(96)], key=None
+        "cohort",
+        by_cell_id(
+            source.cells, [f"study-{index % 3}" for index in range(96)], key=None
+        ),
+        key=None,
     )
     # The schema's columns in chunks of 100,000 rows, as stores written before
     # cell columns were chunked by their rows keep them, so that each read of
@@ -1830,7 +1847,11 @@ def test_composite_metadata_prefetch_warms_what_fits_without_extra_reads(
 ):
     source, _ = segmented_metadata_source
     source.cells.insert(
-        "cohort", [f"study-{index % 3}" for index in range(96)], key=None
+        "cohort",
+        by_cell_id(
+            source.cells, [f"study-{index % 3}" for index in range(96)], key=None
+        ),
+        key=None,
     )
     create = import_module("cytearc.composite.create")
     source_root = str(source.z.store.root)
@@ -2001,7 +2022,11 @@ def test_composite_metadata_prefetch_failure_drains_other_reads(
 ):
     source, expected_counts = segmented_metadata_source
     source.cells.insert(
-        "cohort", [f"study-{index % 3}" for index in range(96)], key=None
+        "cohort",
+        by_cell_id(
+            source.cells, [f"study-{index % 3}" for index in range(96)], key=None
+        ),
+        key=None,
     )
     source_root = str(source.z.store.root)
     for name in ("cytearc.composite.create", "cytearc.composite.store"):

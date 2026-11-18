@@ -24,7 +24,7 @@ CyteBase docs: <https://docs.nygen.io/CyteBase/>.
 - `I` is the live Boolean cell key (feature tables have one too). `fetch(col)` returns rows where
   `I` is true; `fetch_all(col)` returns every row. Analytical filtering returns a cell-selection
   artifact and never edits `I`.
-- A label column stores text values or, as a categorical column, integer codes beside its categories. `cells.insert(col, pd.Categorical(...))` writes a categorical column, other values write values, and every read returns the labels either way. `cells.fetch_categorical(col, key="I")` returns a pandas `Categorical` of any column (`key=None` for every row): a categorical column's stored codes and categories, unused ones included, or a text column's distinct values in natural order.
+- A label column stores text values or, as a categorical column, integer codes beside its categories. `cells.insert(col, pd.Series(pd.Categorical(...), index=ids))` writes a categorical column, other values write values, and every read returns the labels either way. `cells.fetch_categorical(col, key="I")` returns a pandas `Categorical` of any column (`key=None` for every row): a categorical column's stored codes and categories, unused ones included, or a text column's distinct values in natural order.
 - `zarr_mode="r+"` is the default. A writable open WRITES: first-open preparation of a freshly
   written store (QC columns, feature `nCells`/`dropOuts`), the `min_features_per_cell` filter
   applied to `I` by the first writable open only (recorded in `cellData`; reopening never filters
@@ -309,10 +309,7 @@ List the runs before opening one by label.
   rebuild is needed.
 - Percent patterns are fixed at first preparation; a different pattern later raises `ValueError`.
   Use `qc.feature_percentage` (see `quality-control.md`) for another gene set.
-- `cells.insert` assigns a pandas Series with a non-`RangeIndex` index by label: its labels must be
-  exactly the cell `ids` (or those of the `key` rows), in any order, or it raises `ValueError`.
-  A frame from `to_pandas_dataframe(..., key="I")` is indexed by row position, not by id: pass
-  `.to_numpy()` to assign by position. `to_pandas_dataframe` raises `KeyError` for a missing column.
+- `ds.cells.insert` and `update_key` take per-cell values only as a pandas Series keyed by cell ID: its index must hold exactly the cell `ids` (or those of the `key` rows), in any order, and each value lands on the cell with its ID. Arrays, lists, a bare `pd.Categorical` and a Series with a `RangeIndex` raise `TypeError`, because a store's cells need not be in the order of values you computed (a merge reorders them); other labels raise `ValueError`. Key values computed in store order with `pd.Series(values, index=ds.cells.fetch_all("ids"))`, or with `index=ds.cells.fetch("ids", key=...)` for the rows of a key; an AnnData's `adata.obs["col"]` is already keyed by `obs_names`. A frame from `to_pandas_dataframe(..., key="I")` is indexed by row position, not by ID. Feature tables (`ds.RNA.feats`) keep their order and still take arrays by position. `to_pandas_dataframe` raises `KeyError` for a missing column.
 - `cytearc.mount_datastore` rejects `zarr_mode="r"` and refuses an existing target; reopen a
   mount with `cytearc.DataStore`.
 - `SubsetZarr`, `DataStoreMerge`, `mount_datastore`, and repack refuse a source store that holds a
@@ -355,7 +352,7 @@ List the runs before opening one by label.
   as `cells=` (with `filtering=True`, since a given selection is not filtered by default), or a
   boolean column of the cells of `I` that its assay measured; normalized export takes such a
   column as `cell_key`. Never `RNA_I` itself, which also holds cells a filter removed from `I`:
-  `ds.cells.insert("RNA_measured", ds.cells.fetch_all("I") & ds.cells.fetch_all("RNA_I"))`, then
+  `ds.cells.insert("RNA_measured", pd.Series(ds.cells.fetch_all("I") & ds.cells.fetch_all("RNA_I"), index=ds.cells.fetch_all("ids")))`, then
   `ds.pipeline.rna(cells="RNA_measured")`. A QC metric is a column that an assay's preparation
   wrote (`<assay>_nCounts`, `<assay>_nFeatures`, its recorded `<assay>_percent*` columns) or a
   `quality_metric` artifact of that assay. Plots and `get_cell_vals` show unmeasured cells' gene

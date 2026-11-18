@@ -721,13 +721,18 @@ def _screen_store(tmp_path: Path) -> object:
 
 
 def _signature_call(tmp_path: Path) -> Callable[[], object]:
+    import pandas as pd
+
     from tests.perturbation_helpers import fixed_labels
 
     store: Any = _screen_store(tmp_path)
     labels = fixed_labels(store, ["NT"])
     cells = store.select_measured_cells("RNA")
     coordinates = store.reduction.import_coordinates(
-        np.random.default_rng(8).normal(size=(_SCREEN_CELLS, 4)),
+        pd.DataFrame(
+            np.random.default_rng(8).normal(size=(_SCREEN_CELLS, 4)),
+            index=store.cells.fetch_all("ids"),
+        ),
         cell_selection=cells,
         name="X",
     )

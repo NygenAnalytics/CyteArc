@@ -24,7 +24,7 @@ from cytearc.utils.memory_budget import (
     MemoryLedger,
 )
 from tests.clone_helpers import every_cell, write_cells_store
-from tests.storage_helpers import insert_nullable_cell_column
+from tests.storage_helpers import by_cell_id, insert_nullable_cell_column
 
 
 def test_identical_sets_refuse_a_budget_below_the_sets_hashes() -> None:
@@ -314,13 +314,21 @@ def column_store(tmp_path_factory) -> Any:
     store = write_cells_store(path, [f"c{i:07d}" for i in range(n_cells)])
     rng = np.random.default_rng(11)
     clone_of = rng.integers(0, 6_000, n_cells)
-    store.cells.insert("short", np.asarray([f"k{c}" for c in clone_of]))
-    store.cells.insert("long", np.asarray([f"{'ACGT' * 40}_{c}" for c in clone_of]))
     store.cells.insert(
-        "four_byte", np.asarray(["\U0001f600" * 12 + str(c) for c in clone_of])
+        "short", by_cell_id(store.cells, np.asarray([f"k{c}" for c in clone_of]))
     )
-    store.cells.insert("numbers", clone_of.astype(np.int64))
-    store.cells.insert("few", np.arange(n_cells) < 48)
+    store.cells.insert(
+        "long",
+        by_cell_id(store.cells, np.asarray([f"{'ACGT' * 40}_{c}" for c in clone_of])),
+    )
+    store.cells.insert(
+        "four_byte",
+        by_cell_id(
+            store.cells, np.asarray(["\U0001f600" * 12 + str(c) for c in clone_of])
+        ),
+    )
+    store.cells.insert("numbers", by_cell_id(store.cells, clone_of.astype(np.int64)))
+    store.cells.insert("few", by_cell_id(store.cells, np.arange(n_cells) < 48))
     return store
 
 
@@ -335,7 +343,7 @@ def test_the_stamp_of_a_column_follows_its_stored_chunks(column_store) -> None:
     # An edited label changes the stamp and gives new clones.
     labels = store.cells.fetch_all("short").copy()
     labels[7] = "edited"
-    store.cells.insert("short", labels, overwrite=True)
+    store.cells.insert("short", by_cell_id(store.cells, labels), overwrite=True)
     assert metadata_column_stamp(store.cells, "short") != stamp
     assert store.clones.from_column("short", cell_selection=cells) != first
 
@@ -423,10 +431,17 @@ def test_the_expansions_group_labels_read_back_as_the_grouping_gave_them(
 ) -> None:
     store = column_store
     store.cells.insert(
-        "sample", np.asarray([f"s{i % 3}" for i in range(store.cells.N)])
+        "sample",
+        by_cell_id(
+            store.cells, np.asarray([f"s{i % 3}" for i in range(store.cells.N)])
+        ),
     )
     store.cells.insert(
-        "donor", np.asarray([f"d\U0001f600{i % 2}" for i in range(store.cells.N)])
+        "donor",
+        by_cell_id(
+            store.cells,
+            np.asarray([f"d\U0001f600{i % 2}" for i in range(store.cells.N)]),
+        ),
     )
     clones = store.clones.from_column("short", cell_selection=every_cell(store))
     saved = store.clones.expansion(clones, group_by=["sample", "donor"])

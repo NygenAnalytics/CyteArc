@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 
 from tests.clone_helpers import write_truth_store
-from tests.storage_helpers import open_store
+from tests.storage_helpers import by_cell_id, open_store
 from tests.variant_truth import (
     BASES,
     CONTIG,
@@ -354,7 +354,9 @@ def rcrs_store(path: Path) -> "DataStore":
         cell_ids=list(RCRS_CELLS),
     )
     store = open_store(path)
-    store.cells.insert("every_cell", np.ones(len(RCRS_CELLS), dtype=bool))
+    store.cells.insert(
+        "every_cell", by_cell_id(store.cells, np.ones(len(RCRS_CELLS), dtype=bool))
+    )
     return store
 
 

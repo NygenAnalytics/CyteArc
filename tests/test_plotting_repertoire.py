@@ -17,7 +17,7 @@ from matplotlib.colors import to_hex
 from cytearc import plotting
 from cytearc.datastore.datastore import DataStore
 from tests.clone_helpers import N_RECEPTOR_CELLS, bcr_file, receptor_store, tcr_file
-from tests.storage_helpers import insert_nullable_cell_column
+from tests.storage_helpers import by_cell_id, insert_nullable_cell_column
 
 pytestmark = pytest.mark.usefixtures("figures_closed")
 
@@ -95,7 +95,10 @@ def test_receptor_qc_counts_cells_by_category(receptors) -> None:
 
 def test_receptor_qc_stacks_groups_of_a_cell_column(receptors) -> None:
     store, ref = receptors
-    store.cells.insert("sample", np.asarray(["a", "a", "b", "b", "a", "b", "a", "b"]))
+    store.cells.insert(
+        "sample",
+        by_cell_id(store.cells, np.asarray(["a", "a", "b", "b", "a", "b", "a", "b"])),
+    )
     result = plotting.receptor_qc(store, ref, group_by="sample", show=False)
     try:
         long = result.tables["receptor_type"]
@@ -127,8 +130,11 @@ def test_receptor_qc_groups_by_labels_of_fewer_cells(receptors) -> None:
     store, ref = receptors
     keep = np.zeros(N_CELLS, dtype=bool)
     keep[:4] = True
-    store.cells.insert("first", keep)
-    store.cells.insert("cluster", np.asarray(["x", "y", "x", "y", "x", "y", "x", "y"]))
+    store.cells.insert("first", by_cell_id(store.cells, keep))
+    store.cells.insert(
+        "cluster",
+        by_cell_id(store.cells, np.asarray(["x", "y", "x", "y", "x", "y", "x", "y"])),
+    )
     labels = store.snapshot_cluster_labels(
         "cluster", cell_selection=store.snapshot_cell_selection("first")
     )
@@ -248,8 +254,8 @@ def test_receptor_qc_groups_by_integer_labels_of_fewer_cells(receptors) -> None:
     store, ref = receptors
     keep = np.zeros(N_CELLS, dtype=bool)
     keep[:4] = True
-    store.cells.insert("first", keep)
-    store.cells.insert("cluster", np.arange(N_CELLS) % 2)
+    store.cells.insert("first", by_cell_id(store.cells, keep))
+    store.cells.insert("cluster", by_cell_id(store.cells, np.arange(N_CELLS) % 2))
     labels = store.snapshot_cluster_labels(
         "cluster", cell_selection=store.snapshot_cell_selection("first")
     )
@@ -296,7 +302,7 @@ def test_receptor_qc_draws_on_caller_axes(receptors) -> None:
 )
 def test_receptor_qc_checks_its_arguments(receptors, kwargs, error, message) -> None:
     store, ref = receptors
-    store.cells.insert("sample", np.asarray(list("aabbaabb")))
+    store.cells.insert("sample", by_cell_id(store.cells, np.asarray(list("aabbaabb"))))
     with pytest.raises(error, match=message):
         plotting.receptor_qc(store, ref, show=False, **kwargs)
 
@@ -305,8 +311,8 @@ def test_receptor_qc_groups_cells_by_several_columns(receptors) -> None:
     store, ref = receptors
     sample = np.asarray(["a", "a", "b", "b", "a", "b", "a", "b"])
     lane = np.asarray(["p", "q", "p", "q", "q", "q", "p", "p"])
-    store.cells.insert("sample", sample)
-    store.cells.insert("lane", lane)
+    store.cells.insert("sample", by_cell_id(store.cells, sample))
+    store.cells.insert("lane", by_cell_id(store.cells, lane))
     types = store.repertoire.load_receptors(ref, fields=()).cells["receptor_type"]
     result = plotting.receptor_qc(
         store, ref, group_by=["sample", "lane"], normalize=False, show=False
@@ -328,7 +334,7 @@ def test_receptor_qc_groups_cells_by_several_columns(receptors) -> None:
         result.close()
     keep = np.zeros(N_CELLS, dtype=bool)
     keep[:6] = True
-    store.cells.insert("first_six", keep)
+    store.cells.insert("first_six", by_cell_id(store.cells, keep))
     labels = store.snapshot_cluster_labels(
         "lane", cell_selection=store.snapshot_cell_selection("first_six")
     )
@@ -367,7 +373,11 @@ def test_receptor_qc_draws_one_group_named_like_the_tables_columns(
     store, ref = receptors
     drawn = {}
     for name in (label, "s1"):
-        store.cells.insert("batch", np.asarray([name] * N_CELLS), overwrite=True)
+        store.cells.insert(
+            "batch",
+            by_cell_id(store.cells, np.asarray([name] * N_CELLS)),
+            overwrite=True,
+        )
         result = plotting.receptor_qc(store, ref, group_by="batch", show=False)
         try:
             ax = result.axes["receptor_type"]
@@ -416,7 +426,10 @@ def test_receptor_qc_leaves_out_cells_with_a_missing_group(receptors) -> None:
     finally:
         result.close()
     # A blank label is a missing one.
-    store.cells.insert("lane", np.asarray(["p", " ", "p", "q", "", "q", "p", "q"]))
+    store.cells.insert(
+        "lane",
+        by_cell_id(store.cells, np.asarray(["p", " ", "p", "q", "", "q", "p", "q"])),
+    )
     result = plotting.receptor_qc(store, ref, group_by="lane", show=False)
     try:
         assert result.tables["receptor_type"]["group"].drop_duplicates().tolist() == [

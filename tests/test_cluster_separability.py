@@ -8,6 +8,7 @@ from cytearc.metrics import (
 )
 from cytearc.storage import ArtifactRef, ArtifactResolutionError
 from cytearc.storage.artifacts import artifact_path
+from tests.storage_helpers import by_cell_id
 
 
 def _score_by_name(result: ClusterSeparabilityResult, name: str):
@@ -540,7 +541,9 @@ def test_datastore_wrapper_uses_reduction_selection_after_live_alias_drift(
     original = np.asarray(datastore.cells.fetch_all("I"), dtype=bool)
     drifted = original.copy()
     drifted[::2] = False
-    datastore.cells.insert("I", drifted, overwrite=True, force=True)
+    datastore.cells.insert(
+        "I", by_cell_id(datastore.cells, drifted), overwrite=True, force=True
+    )
     try:
         result = datastore.integration.compute_cluster_separability(
             reduction,
@@ -549,7 +552,9 @@ def test_datastore_wrapper_uses_reduction_selection_after_live_alias_drift(
             max_silhouette_cells=100,
         )
     finally:
-        datastore.cells.insert("I", original, overwrite=True, force=True)
+        datastore.cells.insert(
+            "I", by_cell_id(datastore.cells, original), overwrite=True, force=True
+        )
 
     assert isinstance(result, ClusterSeparabilityResult)
     assert int(result.clustering_scores["n_sampled_cells"].iloc[0]) == min(

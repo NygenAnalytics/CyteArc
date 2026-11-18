@@ -17,6 +17,7 @@ from cytearc.storage.count_matrix import CountMatrixPolicy
 from cytearc.storage.schema import create_cell_data, create_zarr_count_assay
 from cytearc.writers.counts_t import finalize_writer_counts_t
 from tests.storage_helpers import (
+    by_cell_id,
     finalize_test_counts,
     write_count_store,
 )
@@ -122,7 +123,10 @@ def create_labeled_qc_store(path):
     )
     # insert flags the None labels in the linked mask __cytearc_missing__label.
     store.cells.insert(
-        "label", np.array(["a", None, "b", "a", None, "b"], dtype=object)
+        "label",
+        by_cell_id(
+            store.cells, np.array(["a", None, "b", "a", None, "b"], dtype=object)
+        ),
     )
     return store
 

@@ -17,7 +17,7 @@ from zarr.storage import MemoryStore
 import cytearc
 from cytearc.readers import CSVReader, CrDirReader
 from cytearc.writers import CrToZarr, CSVtoZarr, SparseToZarr, to_mtx
-from tests.storage_helpers import write_count_store
+from tests.storage_helpers import by_cell_id, write_count_store
 
 
 @contextmanager
@@ -262,7 +262,7 @@ def test_exports_rename_columns_that_anndata_reserves_or_repeats(tmp_path) -> No
     anndata = pytest.importorskip("anndata")
     store = _store(tmp_path, {"RNA": np.asarray([[1, 0], [2, 3]])}, np.uint8)
     # Columns that earlier imports stored and that clash on export.
-    store.cells.insert("_index", np.asarray(["x", "y"]))
+    store.cells.insert("_index", by_cell_id(store.cells, np.asarray(["x", "y"])))
     store.RNA.feats.insert("_index", np.asarray(["SYM0", "SYM1"]))
     store.RNA.feats.insert("gene_short_name", np.asarray(["S0", "S1"]))
     store.RNA.feats.insert("gene_ids", np.asarray(["E0", "E1"]))

@@ -15,7 +15,7 @@ import pytest
 from scipy.io import mmread
 
 from tests.network_helpers import download_or_skip
-from tests.storage_helpers import open_store, write_count_store
+from tests.storage_helpers import by_cell_id, open_store, write_count_store
 
 DATA = Path(__file__).parent / "data" / "clones"
 _LARRY = (
@@ -28,7 +28,9 @@ def _store(path: Path, cell_ids: list[str]):
     counts = np.ones((len(cell_ids), 2), dtype=np.uint16)
     write_count_store(str(path), {"RNA": counts}, "uint16", cell_ids=cell_ids)
     store = open_store(path)
-    store.cells.insert("every_cell", np.ones(len(cell_ids), dtype=bool))
+    store.cells.insert(
+        "every_cell", by_cell_id(store.cells, np.ones(len(cell_ids), dtype=bool))
+    )
     return store, store.snapshot_cell_selection("every_cell")
 
 

@@ -31,7 +31,7 @@ from tests.clone_truth import (
     allele_calling_truth,
     clone_truth,
 )
-from tests.storage_helpers import copy_store, open_store, write_count_store
+from tests.storage_helpers import by_cell_id, copy_store, open_store, write_count_store
 
 TRUTH = clone_truth()
 DATA = Path(__file__).parent / "data" / "recorders"
@@ -278,7 +278,11 @@ def test_within_calls_each_sample_as_it_would_alone(store, tmp_path) -> None:
         )
         assert loaded_partition(store, within) == expected
         for sample in SAMPLES:
-            store.cells.insert(f"is_{sample}", TRUTH.samples == sample, overwrite=True)
+            store.cells.insert(
+                f"is_{sample}",
+                by_cell_id(store.cells, TRUTH.samples == sample),
+                overwrite=True,
+            )
             alone = import_allele_truth(
                 store,
                 calling,
@@ -300,7 +304,7 @@ def test_within_needs_a_label_for_every_cell_with_an_edit(store, tmp_path) -> No
     labels = TRUTH.samples.astype(object).copy()
     edited = store.clones.load_alleles(alleles).cells["n_edits"].to_numpy() > 0
     labels[np.flatnonzero(edited)[0]] = None
-    store.cells.insert("partly", labels)
+    store.cells.insert("partly", by_cell_id(store.cells, labels))
     options = {"method": "graph", "frequencies": calling.banks, "max_frequency": 2e-5}
     with pytest.raises(ValueError, match="no label for 1 cells with an edit"):
         store.clones.allele_clones(alleles, within="partly", **options)
@@ -308,8 +312,12 @@ def test_within_needs_a_label_for_every_cell_with_an_edit(store, tmp_path) -> No
         store.clones.allele_clones(alleles, within="mouse", **options)
     # The within labels join no table, so a column named like the loaded
     # clones' n_alleles keeps clones apart as any column does.
-    store.cells.insert("n_alleles", TRUTH.samples.astype(object))
-    store.cells.insert("sample_copy", TRUTH.samples.astype(object))
+    store.cells.insert(
+        "n_alleles", by_cell_id(store.cells, TRUTH.samples.astype(object))
+    )
+    store.cells.insert(
+        "sample_copy", by_cell_id(store.cells, TRUTH.samples.astype(object))
+    )
     named = store.clones.load_clones(
         store.clones.allele_clones(alleles, within="n_alleles", **options)
     )
@@ -410,9 +418,13 @@ def test_saved_clones_are_reused_only_with_each_cells_rare_alleles(
 def test_other_labels_of_one_within_column_call_other_clones(store, tmp_path) -> None:
     calling, alleles = _imported(store, tmp_path)
     options = {"method": "graph", "frequencies": calling.banks, **DARLIN_RULES}
-    store.cells.insert("batch", TRUTH.samples.astype(object))
+    store.cells.insert("batch", by_cell_id(store.cells, TRUTH.samples.astype(object)))
     by_sample = store.clones.allele_clones(alleles, within="batch", **options)
-    store.cells.insert("batch", np.full(N_CELLS, "all", dtype=object), overwrite=True)
+    store.cells.insert(
+        "batch",
+        by_cell_id(store.cells, np.full(N_CELLS, "all", dtype=object)),
+        overwrite=True,
+    )
     together = store.clones.allele_clones(alleles, within="batch", **options)
     assert together != by_sample
     assert loaded_partition(store, together) == loaded_partition(
@@ -731,7 +743,10 @@ def test_p_clonal_counts_placeholders_and_not_missing_sites_among_the_edited_cel
 def test_bank_coverage_counts_each_allele_once_across_groups(tmp_path) -> None:
     header, rows = _PETRACER
     store, alleles = _characters_store(tmp_path, rows, header)
-    store.cells.insert("mouse", np.asarray(["m1"] * 3 + ["m2"] * 3, dtype=object))
+    store.cells.insert(
+        "mouse",
+        by_cell_id(store.cells, np.asarray(["m1"] * 3 + ["m2"] * 3, dtype=object)),
+    )
     # The bank of HEK3 lists the mark 1, which c2 of m1 and c3 of m2 hold, a
     # test in each group: one allele, two observations.
     banks = {

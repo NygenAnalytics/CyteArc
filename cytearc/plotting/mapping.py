@@ -8,6 +8,11 @@ import numpy as np
 import pandas as pd
 
 from ..mapping.label_transfer import validate_reference_label_source
+from ..metadata.alignment import (
+    align_to_cell_ids,
+    keyed_values_remedy,
+    require_keyed,
+)
 from ..mapping.reference import MappingReference
 from ..storage.refs import ArtifactRef
 from ._contracts import (
@@ -54,18 +59,34 @@ def _reference_layout(
     return values
 
 
+def _transfer_values(label_transfer: Any, values: Any, *, name: str) -> np.ndarray:
+    """Return per-cell values keyed by cell ID in the order of a transfer's cells.
+
+    The transfer's ``cell_ids`` hold the IDs of its cells, in the order of
+    its evidence; values of other cells are left out.
+    """
+    aligned = align_to_cell_ids(
+        values,
+        np.asarray(label_transfer.cell_ids),
+        name=name,
+        cells=f"the {len(label_transfer.evidence)} cells of the label transfer",
+        remedy=keyed_values_remedy(),
+        leave_out_others=True,
+    )
+    return np.asarray(aligned.to_numpy(dtype=object))
+
+
 def _external_groups(
-    values: Sequence[Any] | np.ndarray | None,
-    n_rows: int,
+    label_transfer: Any,
+    values: pd.Series | None,
     *,
     default: str,
     argument_name: str,
 ) -> np.ndarray:
+    """Return each transfer cell's group, from values keyed by cell ID."""
     if values is None:
-        return np.full(n_rows, default, dtype=object)
-    groups = np.asarray(values, dtype=object)
-    if groups.ndim != 1 or len(groups) != n_rows:
-        raise ValueError(f"{argument_name} must have one value per mapped cell")
+        return np.full(len(label_transfer.evidence), default, dtype=object)
+    groups = _transfer_values(label_transfer, values, name=argument_name)
     if pd.isna(groups).any():
         raise ValueError(f"{argument_name} cannot contain missing values")
     return groups
@@ -107,7 +128,7 @@ def mapping_score(
     result: ArtifactRef,
     *,
     reference: MappingReference,
-    target_groups: Sequence[Any] | np.ndarray | None = None,
+    target_groups: pd.Series | None = None,
     layout: ArtifactRef | None = None,
     kind: Literal["embedding", "histogram", "box"] = "embedding",
     reference_labels: str | ArtifactRef | None = None,
@@ -128,6 +149,8 @@ def mapping_score(
 ) -> PlotResult:
     """Plot reference-cell mapping scores for one or more query groups.
 
+    ``target_groups`` names the group of each projected query cell, as a
+    pandas Series indexed by cell ID; values of other cells are left out.
     ``kind="box"`` groups reference cells by ``reference_labels``, a cell
     column or cell-label artifact of the reference datastore. Reference cells
     without a usable label are left out of the boxes.
@@ -149,12 +172,18 @@ def mapping_score(
         raise ValueError("bins must be positive")
     if reference_labels is not None:
         reference_labels = validate_reference_label_source(reference_labels)
+    if target_groups is not None:
+        require_keyed(
+            target_groups,
+            name="plots.mapping_score(target_groups=)",
+            remedy=keyed_values_remedy(),
+        )
     score_loader = getattr(store, "_mapping_score_data", None)
     if not callable(score_loader):
         raise TypeError("store does not provide mapping score data")
     mapping, score_rows, reference_classes, layout_values = score_loader(
         result,
-        target_groups=(None if target_groups is None else np.asarray(target_groups)),
+        target_groups=target_groups,
         reference=reference,
         layout=layout if kind == "embedding" else None,
         reference_labels=reference_labels,
@@ -424,7 +453,7 @@ def mapping_evidence(
     store: Any,
     transfer: ArtifactRef,
     *,
-    target_groups: Sequence[Any] | np.ndarray | None = None,
+    target_groups: pd.Series | None = None,
     metrics: Sequence[str] = (
         "voteFraction",
         "topTwoMargin",
@@ -445,6 +474,8 @@ def mapping_evidence(
     ``transfer`` is a ``label_transfer`` artifact from
     ``ds.mapping.transfer_labels``. The plot reads its saved evidence, so it
     shows exactly the votes and distances that decided the saved labels.
+    ``target_groups`` names the group of each cell of the transfer, as a
+    pandas Series indexed by cell ID; values of other cells are left out.
     """
     show_legend = bool_argument(show_legend, "show_legend")
     show = bool_argument(show, "show")
@@ -455,10 +486,10 @@ def mapping_evidence(
     label_transfer = _label_transfer(store, transfer)
     evidence = label_transfer.evidence.copy()
     groups = _external_groups(
+        label_transfer,
         target_groups,
-        len(evidence),
         default="all query cells",
-        argument_name="target_groups",
+        argument_name="plots.mapping_evidence(target_groups=)",
     )
     evidence["group"] = groups
     requested_metrics = list(metrics)
@@ -569,7 +600,7 @@ def mapping_confusion(
     store: Any,
     transfer: ArtifactRef,
     *,
-    known_labels: Sequence[Any] | np.ndarray,
+    known_labels: pd.Series,
     normalize: Literal["none", "true", "predicted", "all"] = "true",
     known_order: Sequence[Any] | None = None,
     predicted_order: Sequence[Any] | None = None,
@@ -584,9 +615,11 @@ def mapping_confusion(
     """Plot known query labels against the labels of one saved transfer.
 
     ``transfer`` is a ``label_transfer`` artifact from
-    ``ds.mapping.transfer_labels``. Cells that abstained form the
-    ``abstention_label`` column, which must differ from every known and
-    transferred label.
+    ``ds.mapping.transfer_labels``. ``known_labels`` holds the known label of
+    each cell of the transfer, missing where it is unknown, as a pandas Series
+    indexed by cell ID; labels of other cells are left out. Cells that
+    abstained form the ``abstention_label`` column, which must differ from
+    every known and transferred label.
     """
     show_legend = bool_argument(show_legend, "show_legend")
     show = bool_argument(show, "show")
@@ -596,9 +629,9 @@ def mapping_confusion(
         raise TypeError("abstention_label must be a non-empty string")
     label_transfer = _label_transfer(store, transfer)
     evidence = label_transfer.evidence.copy()
-    known = np.asarray(known_labels, dtype=object)
-    if known.ndim != 1 or len(known) != len(evidence):
-        raise ValueError("known_labels must have one value per mapped cell")
+    known = _transfer_values(
+        label_transfer, known_labels, name="plots.mapping_confusion(known_labels=)"
+    )
     valid = pd.notna(known)
     truth = known[valid]
     transferred = evidence.loc[valid, "label"].to_numpy(dtype=object)
@@ -759,7 +792,7 @@ def mapping_calibration(
     store: Any,
     transfer: ArtifactRef,
     *,
-    known_labels: Sequence[Any] | np.ndarray,
+    known_labels: pd.Series,
     metric: str = "voteFraction",
     direction: Literal["auto", "higher", "lower"] = "auto",
     thresholds: Sequence[float] | np.ndarray | None = None,
@@ -773,7 +806,10 @@ def mapping_calibration(
     """Plot held-out label accuracy against retained coverage per threshold.
 
     ``transfer`` is a ``label_transfer`` artifact from
-    ``ds.mapping.transfer_labels``. Each threshold on ``metric`` is applied
+    ``ds.mapping.transfer_labels``, and ``known_labels`` the known label of
+    each of its cells, missing where it is unknown, as a pandas Series indexed
+    by cell ID; labels of other cells are left out. Each threshold on
+    ``metric`` is applied
     to the transfer's saved candidate labels, so no transfer is recomputed.
     The thresholds replace the transfer's own rule on the swept metric,
     ``threshold_fraction`` for ``voteFraction`` and ``max_distance`` for
@@ -811,9 +847,9 @@ def mapping_calibration(
     evidence = label_transfer.evidence.copy()
     if metric not in evidence:
         raise KeyError(f"Evidence has no threshold metric {metric!r}")
-    known = np.asarray(known_labels, dtype=object)
-    if known.ndim != 1 or len(known) != len(evidence):
-        raise ValueError("known_labels must have one value per mapped cell")
+    known = _transfer_values(
+        label_transfer, known_labels, name="plots.mapping_calibration(known_labels=)"
+    )
     metric_values = pd.to_numeric(
         evidence[metric],
         errors="coerce",

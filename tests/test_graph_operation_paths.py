@@ -22,7 +22,7 @@ from cytearc.storage.artifacts import (
 )
 from cytearc.storage.errors import ArtifactResolutionError
 from cytearc.utils.logging import collect_warnings, logger
-from tests.storage_helpers import write_count_store
+from tests.storage_helpers import by_cell_id, write_count_store
 from tests.storage_helpers import insert_nullable_cell_column
 
 N_CELLS = 40
@@ -415,7 +415,7 @@ def test_harmony_reads_masked_batch_labels_as_missing(graph_store) -> None:
         )
     assert not _artifacts(store, "batch_correction")
 
-    store.cells.insert("labeled", ~missing, overwrite=True)
+    store.cells.insert("labeled", by_cell_id(store.cells, ~missing), overwrite=True)
     normalized = store.features.normalize(
         store.snapshot_cell_selection("labeled"),
         refs["rna_features"],
@@ -430,7 +430,9 @@ def test_harmony_reads_masked_batch_labels_as_missing(graph_store) -> None:
 
 def test_harmony_reuses_a_matching_correction(graph_store, monkeypatch) -> None:
     store, refs = graph_store
-    store.cells.insert("batch", np.where(np.arange(N_CELLS) % 2, "a", "b"))
+    store.cells.insert(
+        "batch", by_cell_id(store.cells, np.where(np.arange(N_CELLS) % 2, "a", "b"))
+    )
     corrected = store.reduction.harmony(
         refs["rna_pca"],
         ["batch"],
@@ -451,7 +453,9 @@ def test_harmony_reuses_a_matching_correction(graph_store, monkeypatch) -> None:
 
 def test_harmony_artifact_layout(graph_store) -> None:
     store, refs = graph_store
-    store.cells.insert("batch", np.where(np.arange(N_CELLS) % 2, "a", "b"))
+    store.cells.insert(
+        "batch", by_cell_id(store.cells, np.where(np.arange(N_CELLS) % 2, "a", "b"))
+    )
 
     corrected = store.reduction.harmony(
         refs["rna_pca"], ["batch"], harmony_params={"n_clusters": 3}
@@ -500,7 +504,9 @@ def test_harmony_recomputes_a_correction_without_its_fitted_penalties(
     graph_store,
 ) -> None:
     store, refs = graph_store
-    store.cells.insert("batch", np.where(np.arange(N_CELLS) % 2, "a", "b"))
+    store.cells.insert(
+        "batch", by_cell_id(store.cells, np.where(np.arange(N_CELLS) % 2, "a", "b"))
+    )
     options: dict[str, Any] = {"harmony_params": {"n_clusters": 3}}
     earlier = store.reduction.harmony(refs["rna_pca"], ["batch"], **options)
     # A correction written by the earlier implementation has the same identity
@@ -592,8 +598,8 @@ def test_integration_requires_one_shared_cell_selection(
     adt_cells,
 ) -> None:
     store, _refs = graph_store
-    store.cells.insert("first", np.arange(N_CELLS) < 30)
-    store.cells.insert("adt_cells", adt_cells)
+    store.cells.insert("first", by_cell_id(store.cells, np.arange(N_CELLS) < 30))
+    store.cells.insert("adt_cells", by_cell_id(store.cells, adt_cells))
     rna = neighbors_for(store, "RNA", store.snapshot_cell_selection("first"), dims=3)
     adt = neighbors_for(store, "ADT", store.snapshot_cell_selection("adt_cells"))
     before = _artifacts(store, "integrated_graph", assay=None)
@@ -728,7 +734,10 @@ def test_densmap_on_an_integrated_graph_runs_and_records_standard_umap(
     )
     try:
         requested = store.embeddings.umap(
-            refs["wnn"], initial, n_epochs=5, use_density_map=True
+            refs["wnn"],
+            by_cell_id(store.cells, initial),
+            n_epochs=5,
+            use_density_map=True,
         )
     finally:
         logger.remove(sink)
@@ -737,4 +746,7 @@ def test_densmap_on_an_integrated_graph_runs_and_records_standard_umap(
     parameters = store.artifacts.inspect(requested).parameters
     assert parameters["use_density_map"] is False
     # The request is the standard embedding, so a standard call reuses it.
-    assert store.embeddings.umap(refs["wnn"], initial, n_epochs=5) == requested
+    assert (
+        store.embeddings.umap(refs["wnn"], by_cell_id(store.cells, initial), n_epochs=5)
+        == requested
+    )

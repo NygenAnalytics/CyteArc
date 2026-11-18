@@ -58,7 +58,7 @@ from cytearc.storage.selections import (
 )
 from cytearc.utils.logging import logger
 from cytearc.utils.shutdown import ShutdownRequested, current_shutdown_token
-from tests.storage_helpers import insert_nullable_cell_column
+from tests.storage_helpers import by_cell_id, insert_nullable_cell_column
 
 
 def _minimal_run_options() -> dict[str, Any]:
@@ -1195,7 +1195,9 @@ def test_pipeline_filtering_excludes_nullable_integer_metric_rows(
 def test_pipeline_auto_filtering_retains_constant_metric(datastore_ephemeral):
     datastore = datastore_ephemeral
     expected = datastore.cells.fetch_all("I")
-    datastore.cells.insert("constant_qc", np.zeros(datastore.cells.N))
+    datastore.cells.insert(
+        "constant_qc", by_cell_id(datastore.cells, np.zeros(datastore.cells.N))
+    )
 
     selection = _filtering_stage_selection(datastore, {"attrs": ["constant_qc"]})
 
@@ -2418,7 +2420,9 @@ def test_rich_pipeline_views_plots_and_markers_remain_frozen_after_live_i_drift(
     selected = np.flatnonzero(initial)[:250]
     limited = np.zeros(datastore.cells.N, dtype=bool)
     limited[selected] = True
-    datastore.cells.insert("I", limited, overwrite=True, force=True)
+    datastore.cells.insert(
+        "I", by_cell_id(datastore.cells, limited), overwrite=True, force=True
+    )
 
     assay = datastore.get_assay("RNA")
     cell_values_before = {
@@ -2492,7 +2496,7 @@ def test_rich_pipeline_views_plots_and_markers_remain_frozen_after_live_i_drift(
 
     datastore.cells.insert(
         "I",
-        np.zeros(datastore.cells.N, dtype=bool),
+        by_cell_id(datastore.cells, np.zeros(datastore.cells.N, dtype=bool)),
         overwrite=True,
         force=True,
     )
@@ -2545,7 +2549,7 @@ def test_harmony_doublets_are_scored_within_each_batch_without_another_graph(
 ) -> None:
     datastore = pipeline_store
     batch = np.where(np.arange(datastore.cells.N) % 2, "b", "a")
-    datastore.cells.insert("pipeline_batch", batch)
+    datastore.cells.insert("pipeline_batch", by_cell_id(datastore.cells, batch))
     captured: dict[str, Any] = {}
     original_doublets = type(datastore)._run_doublet_detection_artifact
 
@@ -2674,16 +2678,20 @@ def test_snapshot_columns_freeze_user_metadata_with_dtype_fills(
     datastore = pipeline_store
     flags = np.arange(datastore.cells.N) % 3 == 0
     visits = np.arange(datastore.cells.N, dtype=np.int64)
-    datastore.cells.insert("doublet_flag", flags)
-    datastore.cells.insert("visit", visits)
+    datastore.cells.insert("doublet_flag", by_cell_id(datastore.cells, flags))
+    datastore.cells.insert("visit", by_cell_id(datastore.cells, visits))
 
     run = datastore.pipeline.rna(
         snapshot_columns=("doublet_flag", "visit"),
         **_minimal_run_options(),
     )
     # Later edits of the live columns do not reach the frozen run.
-    datastore.cells.insert("doublet_flag", ~flags, overwrite=True)
-    datastore.cells.insert("visit", visits[::-1].copy(), overwrite=True)
+    datastore.cells.insert(
+        "doublet_flag", by_cell_id(datastore.cells, ~flags), overwrite=True
+    )
+    datastore.cells.insert(
+        "visit", by_cell_id(datastore.cells, visits[::-1].copy()), overwrite=True
+    )
     reopened = datastore.pipeline.open(run_id=run.run_id)
 
     assert reopened.cells.columns == ("I", "ids", "names", "doublet_flag", "visit")

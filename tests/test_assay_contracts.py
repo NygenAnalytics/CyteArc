@@ -26,6 +26,7 @@ from cytearc.matrix import ChunkedArray
 from cytearc.datastore.datastore import DataStore
 from cytearc.writers import SparseToZarr
 from tests.signature_contracts import signature_digest
+from tests.storage_helpers import by_cell_id
 
 
 _PUBLIC_CLASS_METHODS = {
@@ -672,7 +673,9 @@ def test_rna_normed_zero_total_cells_are_zero(tmp_path):
             np.log1p(lib_size) if log_transform else lib_size,
         )
 
-    store.cells.insert("everyone", np.ones(3, dtype=bool), overwrite=True)
+    store.cells.insert(
+        "everyone", by_cell_id(store.cells, np.ones(3, dtype=bool)), overwrite=True
+    )
     np.testing.assert_allclose(
         store.get_cell_vals(from_assay="RNA", cell_key="everyone", k="g0"),
         [store.RNA.sf * 3 / 4, 0.0, store.RNA.sf * 2 / 4],
@@ -703,7 +706,9 @@ def test_feature_percentages_share_one_definition_for_zero_count_cells(tmp_path)
         store.RNA._compute_feature_percentage(np.arange(3), np.array([0, 1])),
         expected,
     )
-    store.cells.insert("everyone", np.ones(3, dtype=bool), overwrite=True)
+    store.cells.insert(
+        "everyone", by_cell_id(store.cells, np.ones(3, dtype=bool)), overwrite=True
+    )
     ref = store.qc.feature_percentage(
         store.snapshot_cell_selection("everyone"),
         store.features.snapshot(from_assay="RNA", feature_indexes=[0, 1]),

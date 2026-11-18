@@ -25,7 +25,7 @@ from cytearc.trajectory.results import (
 )
 from cytearc.storage.schema import create_cell_data
 from cytearc.writers import create_zarr_count_assay
-from tests.storage_helpers import write_count_store
+from tests.storage_helpers import by_cell_id, write_count_store
 from tests.store_probes import RecordingStore
 
 from . import full_path
@@ -225,7 +225,9 @@ def test_skipped_open_filter_warns_with_its_likely_causes(tmp_path):
 def test_open_without_active_cells_leaves_the_cell_key_unchanged():
     store, _ = fresh_qc_store()
     dataset = open_qc_store(store, min_features_per_cell=-1)
-    dataset.cells.update_key(np.zeros(dataset.cells.N, dtype=bool), key="I")
+    dataset.cells.update_key(
+        by_cell_id(dataset.cells, np.zeros(dataset.cells.N, dtype=bool)), key="I"
+    )
     store.reset()
 
     dataset, skipped = _open_logging_warnings(
@@ -337,7 +339,9 @@ def test_prepared_percentage_is_protected_and_external_removal_requires_rebuildi
     with pytest.raises(ValueError, match="prepared data"):
         dataset.cells.drop("RNA_percentMito")
     with pytest.raises(ValueError, match="prepared data"):
-        dataset.cells.insert("RNA_percentMito", np.zeros(6), overwrite=True)
+        dataset.cells.insert(
+            "RNA_percentMito", by_cell_id(dataset.cells, np.zeros(6)), overwrite=True
+        )
     np.testing.assert_array_equal(
         open_qc_store(store).cells.fetch_all("RNA_percentMito"), previous
     )
@@ -439,7 +443,7 @@ def test_auto_filter_keeps_cells_with_zero_feature_percentages():
     store, _ = fresh_qc_store()
     dataset = open_qc_store(store, mito_pattern="^ZERO$")
     expected = QC_VALUES.sum(axis=1) > 0
-    dataset.cells.insert("has_counts", expected)
+    dataset.cells.insert("has_counts", by_cell_id(dataset.cells, expected))
     cells = dataset.snapshot_cell_selection("has_counts")
 
     result = dataset.qc.auto_filter(
@@ -681,7 +685,9 @@ def _normalized_qc_dataset() -> tuple[DataStore, ArtifactRef, ArtifactRef]:
 
 def test_new_normalization_rejects_an_empty_cell_selection():
     dataset, _, _ = _normalized_qc_dataset()
-    dataset.cells.insert("none", np.zeros(dataset.cells.N, dtype=bool))
+    dataset.cells.insert(
+        "none", by_cell_id(dataset.cells, np.zeros(dataset.cells.N, dtype=bool))
+    )
     empty = dataset.snapshot_cell_selection("none")
     features = dataset.features.universe(from_assay="RNA")
 
@@ -985,7 +991,7 @@ def test_get_cell_vals_clips_any_numeric_column_ignoring_missing_values(
     n_active = int(store.cells.fetch_all("I").sum())
     values = np.arange(store.cells.N, dtype=np.float32)
     values[0] = np.nan
-    store.cells.insert("score", values, overwrite=True)
+    store.cells.insert("score", by_cell_id(store.cells, values), overwrite=True)
 
     raw = store.get_cell_vals(from_assay="RNA", cell_key="I", k="score")
     clipped = store.get_cell_vals(
@@ -1006,7 +1012,7 @@ def test_get_cell_vals_clips_integer_columns_to_fractional_bounds():
     store, _ = fresh_qc_store()
     dataset = open_qc_store(store, min_features_per_cell=-1)
     values = np.array([0, 1, 2, 3, 5, 8], dtype=np.int64)
-    dataset.cells.insert("level", values)
+    dataset.cells.insert("level", by_cell_id(dataset.cells, values))
 
     clipped = dataset.get_cell_vals(
         from_assay="RNA", cell_key="I", k="level", clip_fraction=0.1
@@ -1015,7 +1021,9 @@ def test_get_cell_vals_clips_integer_columns_to_fractional_bounds():
     # The 10th and 90th percentiles fall between the stored integers.
     assert clipped.dtype == np.float64
     np.testing.assert_allclose(clipped, [0.5, 1.0, 2.0, 3.0, 5.0, 6.5])
-    dataset.cells.insert("nobody", np.zeros(len(values), dtype=bool))
+    dataset.cells.insert(
+        "nobody", by_cell_id(dataset.cells, np.zeros(len(values), dtype=bool))
+    )
     empty = dataset.get_cell_vals(
         from_assay="RNA", cell_key="nobody", k="level", clip_fraction=0.1
     )

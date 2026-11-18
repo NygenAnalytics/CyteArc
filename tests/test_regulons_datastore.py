@@ -14,7 +14,11 @@ from cytearc.utils.arrays import sort_categories
 from cytearc.utils.memory_budget import MemoryLedger
 from tests.memory_helpers import climb_refusals
 from tests.regulon_helpers import csi_by_definition, rss_by_definition
-from tests.storage_helpers import record_normalized_values, write_count_store
+from tests.storage_helpers import (
+    by_cell_id,
+    record_normalized_values,
+    write_count_store,
+)
 
 N_CELLS = 150
 FAST = {"max_stages": 150, "early_stop_window": 10}
@@ -64,7 +68,11 @@ def store_path(tmp_path_factory) -> str:
     # The ADT assay is one that GRN inference refuses.
     write_count_store(path, {"RNA": _counts(), "ADT": _counts()[:, :2]}, "uint16")
     store = _open(path)
-    store.cells.insert("everyone", np.ones(store.cells.N, dtype=bool), overwrite=True)
+    store.cells.insert(
+        "everyone",
+        by_cell_id(store.cells, np.ones(store.cells.N, dtype=bool)),
+        overwrite=True,
+    )
     return path
 
 
@@ -156,7 +164,9 @@ def test_grn_rejects_invalid_requests(store_path, changes, error, message):
 
 def test_grn_requires_a_writable_store_and_two_cells(store_path):
     store = _open(store_path)
-    store.cells.insert("first", np.arange(N_CELLS) == 0, overwrite=True)
+    store.cells.insert(
+        "first", by_cell_id(store.cells, np.arange(N_CELLS) == 0), overwrite=True
+    )
     universe = store.features.universe()
 
     with pytest.raises(ValueError, match="two selected cells"):
@@ -263,7 +273,7 @@ def test_grn_result_rejects_inconsistent_fields(store_path, changes, message):
 def test_profiles_are_log_cpm_of_each_groups_summed_counts(store_path):
     store = _open(store_path)
     groups = np.arange(N_CELLS) % 3
-    store.cells.insert("thirds", groups, overwrite=True)
+    store.cells.insert("thirds", by_cell_id(store.cells, groups), overwrite=True)
 
     profiles = store.regulons.profiles("thirds")
 
@@ -432,11 +442,19 @@ def _scored_store(
     path = str(folder / "scored.zarr")
     write_count_store(path, {"RNA": counts}, "uint16")
     store = _open(path)
-    store.cells.insert("everyone", np.ones(n_cells, dtype=bool), overwrite=True)
+    store.cells.insert(
+        "everyone",
+        by_cell_id(store.cells, np.ones(n_cells, dtype=bool)),
+        overwrite=True,
+    )
     groups = np.asarray([f"g{code}" for code in rng.integers(0, 7, n_cells)])
     groups[0] = "lone"
-    store.cells.insert("groups", groups.astype(object), overwrite=True)
-    store.cells.insert("many", rng.integers(0, 40, n_cells), overwrite=True)
+    store.cells.insert(
+        "groups", by_cell_id(store.cells, groups.astype(object)), overwrite=True
+    )
+    store.cells.insert(
+        "many", by_cell_id(store.cells, rng.integers(0, 40, n_cells)), overwrite=True
+    )
     targets = [rng.choice(140, 15, replace=False) for _ in range(n_sets)]
     net = pd.DataFrame(
         {
@@ -580,7 +598,7 @@ def test_specificity_reads_a_selection_of_the_scored_cells_and_label_artifacts(
     store = _open(path)
     everyone = store.snapshot_cell_selection("everyone")
     half = np.arange(store.cells.N) % 2 == 0
-    store.cells.insert("half", half, overwrite=True)
+    store.cells.insert("half", by_cell_id(store.cells, half), overwrite=True)
     some = store.snapshot_cell_selection("half")
 
     rss = store.regulons.specificity(auc, "groups", cell_selection=some)
@@ -641,14 +659,16 @@ def test_specificity_refuses_unlabeled_or_unscored_cells_and_negative_scores(
     store = _open(copy)
     labels = np.asarray(store.cells.fetch_all("groups"), dtype=object)
     labels[3] = None
-    store.cells.insert("unlabeled", labels, overwrite=True)
+    store.cells.insert("unlabeled", by_cell_id(store.cells, labels), overwrite=True)
     with pytest.raises(
         ValueError, match=f"groups holds no label for 1 of the {store.cells.N} cells"
     ):
         store.regulons.specificity(auc, "unlabeled")
 
     # Scores of some of the cells hold none of the others.
-    store.cells.insert("first", np.arange(store.cells.N) < 100, overwrite=True)
+    store.cells.insert(
+        "first", by_cell_id(store.cells, np.arange(store.cells.N) < 100), overwrite=True
+    )
     everyone = store.snapshot_cell_selection("everyone")
     first_auc = store.scores.aucell(
         pd.DataFrame({"source": "set0", "target": [f"RNA{gene}" for gene in range(9)]}),
@@ -692,7 +712,7 @@ def test_connection_specificity_streams_the_correlations_of_the_scores(scored):
     path, auc = scored
     store = _open(path)
     half = np.arange(store.cells.N) % 2 == 0
-    store.cells.insert("half", half, overwrite=True)
+    store.cells.insert("half", by_cell_id(store.cells, half), overwrite=True)
     some = store.snapshot_cell_selection("half")
 
     csi = store.regulons.connection_specificity(auc)

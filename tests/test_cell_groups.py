@@ -17,6 +17,7 @@ from cytearc.storage.categorical import CategoricalColumn
 from cytearc.storage.refs import ArtifactRef
 from cytearc.utils.memory_budget import MemoryBudgetError, MemoryLedger
 from tests.storage_helpers import (
+    by_cell_id,
     insert_nullable_cell_column,
     open_store,
     write_count_store,
@@ -39,20 +40,30 @@ def store(request, tmp_path_factory) -> DataStore:
     missing = np.zeros(N_CELLS, dtype=bool)
     missing[[0, 5]] = True
     if request.param == "text":
-        store.cells.insert("sample", SAMPLES.astype(object))
-        store.cells.insert("batch", BATCHES.astype(object))
-        store.cells.insert("cluster", CLUSTERS.astype(object))
+        store.cells.insert("sample", by_cell_id(store.cells, SAMPLES.astype(object)))
+        store.cells.insert("batch", by_cell_id(store.cells, BATCHES.astype(object)))
+        store.cells.insert("cluster", by_cell_id(store.cells, CLUSTERS.astype(object)))
         insert_nullable_cell_column(store, "partial", SAMPLES, missing)
     else:
-        store.cells.insert("sample", pd.Categorical(SAMPLES))
-        store.cells.insert("batch", pd.Categorical(BATCHES, categories=["b", "a", "c"]))
-        store.cells.insert("cluster", pd.Categorical(CLUSTERS))
-        store.cells.insert("partial", pd.Categorical(np.where(missing, None, SAMPLES)))
+        store.cells.insert("sample", by_cell_id(store.cells, pd.Categorical(SAMPLES)))
+        store.cells.insert(
+            "batch",
+            by_cell_id(
+                store.cells, pd.Categorical(BATCHES, categories=["b", "a", "c"])
+            ),
+        )
+        store.cells.insert("cluster", by_cell_id(store.cells, pd.Categorical(CLUSTERS)))
+        store.cells.insert(
+            "partial",
+            by_cell_id(store.cells, pd.Categorical(np.where(missing, None, SAMPLES))),
+        )
         for column in ("sample", "batch", "cluster", "partial"):
             assert isinstance(store.cells._get_array(column), CategoricalColumn)
-    store.cells.insert("every_cell", np.ones(N_CELLS, dtype=bool))
-    store.cells.insert("first_four", np.arange(N_CELLS) < 4)
-    store.cells.insert("odd", np.arange(N_CELLS) % 2 == 1)
+    store.cells.insert(
+        "every_cell", by_cell_id(store.cells, np.ones(N_CELLS, dtype=bool))
+    )
+    store.cells.insert("first_four", by_cell_id(store.cells, np.arange(N_CELLS) < 4))
+    store.cells.insert("odd", by_cell_id(store.cells, np.arange(N_CELLS) % 2 == 1))
     return store
 
 
@@ -208,8 +219,12 @@ def test_without_a_grouping_the_rows_form_one_group(store) -> None:
 def test_key_columns_named_like_a_results_columns_group_as_any_other(store) -> None:
     # Columns named like the columns of the summaries' tables hold the same
     # labels as the sample and batch, and group the cells as those do.
-    store.cells.insert("group", SAMPLES.astype(object), overwrite=True)
-    store.cells.insert("n_cells", BATCHES.astype(object), overwrite=True)
+    store.cells.insert(
+        "group", by_cell_id(store.cells, SAMPLES.astype(object)), overwrite=True
+    )
+    store.cells.insert(
+        "n_cells", by_cell_id(store.cells, BATCHES.astype(object)), overwrite=True
+    )
     neutral = _group(store, group_by=["sample", "batch"])
     named = _group(store, group_by=["group", "n_cells"])
     assert named.key_columns == ("group", "n_cells")
@@ -230,8 +245,16 @@ def test_key_columns_named_like_a_results_columns_group_as_any_other(store) -> N
 
 
 def test_groups_that_labels_with_commas_name_alike_are_refused(store) -> None:
-    store.cells.insert("first", np.asarray(["x, y"] * 4 + ["x"] * 4), overwrite=True)
-    store.cells.insert("second", np.asarray(["z"] * 4 + ["y, z"] * 4), overwrite=True)
+    store.cells.insert(
+        "first",
+        by_cell_id(store.cells, np.asarray(["x, y"] * 4 + ["x"] * 4)),
+        overwrite=True,
+    )
+    store.cells.insert(
+        "second",
+        by_cell_id(store.cells, np.asarray(["z"] * 4 + ["y, z"] * 4)),
+        overwrite=True,
+    )
     with pytest.raises(ValueError, match="remove the commas"):
         _group(store, group_by=["first", "second"])
 
@@ -240,7 +263,11 @@ def test_key_columns_are_checked(store) -> None:
     labels = store.snapshot_cluster_labels(
         "cluster", cell_selection=store.snapshot_cell_selection("every_cell")
     )
-    store.cells.insert("cluster_labels", CLUSTERS.astype(object), overwrite=True)
+    store.cells.insert(
+        "cluster_labels",
+        by_cell_id(store.cells, CLUSTERS.astype(object)),
+        overwrite=True,
+    )
     with pytest.raises(ValueError, match="name 'cluster_labels' twice"):
         _group(store, group_by="cluster_labels", groups=labels)
     # A group_by column whose labels the artifact keeps apart is named as such,
@@ -283,9 +310,14 @@ def test_a_label_artifact_too_large_for_the_budget_is_refused_in_the_ledgers_wor
     path = tmp_path / "store.zarr"
     write_count_store(str(path), {"RNA": np.ones((N_CELLS, 3), dtype=int)}, "uint16")
     store = open_store(path)
-    store.cells.insert("every_cell", np.ones(N_CELLS, dtype=bool))
-    store.cells.insert("cluster", CLUSTERS.astype(object))
-    store.cells.insert("long", np.char.multiply(CLUSTERS, 2_000).astype(object))
+    store.cells.insert(
+        "every_cell", by_cell_id(store.cells, np.ones(N_CELLS, dtype=bool))
+    )
+    store.cells.insert("cluster", by_cell_id(store.cells, CLUSTERS.astype(object)))
+    store.cells.insert(
+        "long",
+        by_cell_id(store.cells, np.char.multiply(CLUSTERS, 2_000).astype(object)),
+    )
     every_cell = store.snapshot_cell_selection("every_cell")
     short = store.snapshot_cluster_labels("cluster", cell_selection=every_cell)
     long = store.snapshot_cluster_labels("long", cell_selection=every_cell)
@@ -333,7 +365,9 @@ def test_a_column_of_several_chunks_groups_its_cells(tmp_path) -> None:
     path = tmp_path / "store.zarr"
     write_count_store(str(path), {"RNA": np.ones((N_CELLS, 3), dtype=int)}, "uint16")
     store = open_store(path)
-    store.cells.insert("every_cell", np.ones(N_CELLS, dtype=bool))
+    store.cells.insert(
+        "every_cell", by_cell_id(store.cells, np.ones(N_CELLS, dtype=bool))
+    )
     store.zw["cellData"].create_array("halves", data=SAMPLES, chunks=(4,))
     store = open_store(path)
     assert store.cells._get_array("halves").chunks == (4,)
@@ -350,7 +384,9 @@ def test_labels_beyond_ascii_read_in_chunks_form_their_groups(tmp_path, lead) ->
     n_cells = 20_000
     write_count_store(str(path), {"RNA": np.ones((n_cells, 1), dtype=int)}, "uint16")
     store = open_store(path)
-    store.cells.insert("every_cell", np.ones(n_cells, dtype=bool))
+    store.cells.insert(
+        "every_cell", by_cell_id(store.cells, np.ones(n_cells, dtype=bool))
+    )
     labels = np.asarray([lead * 30 + f"{index % 50:02d}" for index in range(n_cells)])
     store.zw["cellData"].create_array("label", data=labels, chunks=(2_000,))
     store = open_store(path)
@@ -412,16 +448,22 @@ def test_the_fingerprint_follows_each_cells_labels(store) -> None:
     # One cell in another sample.
     moved = SAMPLES.copy()
     moved[0] = "s10"
-    store.cells.insert("moved", moved.astype(object), overwrite=True)
+    store.cells.insert(
+        "moved", by_cell_id(store.cells, moved.astype(object)), overwrite=True
+    )
     assert _group(store, group_by="moved").fingerprint() != by_sample.fingerprint()
     # The same groups under other labels keep their codes.
     renamed = np.where(SAMPLES == "s2", "t2", "t10")
-    store.cells.insert("renamed", renamed.astype(object), overwrite=True)
+    store.cells.insert(
+        "renamed", by_cell_id(store.cells, renamed.astype(object)), overwrite=True
+    )
     other = _group(store, group_by="renamed")
     assert other.codes.tolist() == by_sample.codes.tolist()
     assert other.fingerprint() != by_sample.fingerprint()
     # The same labels in a column of another name.
-    store.cells.insert("copied", SAMPLES.astype(object), overwrite=True)
+    store.cells.insert(
+        "copied", by_cell_id(store.cells, SAMPLES.astype(object)), overwrite=True
+    )
     copied = _group(store, group_by="copied")
     assert [list(key.values()) for key in copied.keys] == [
         list(key.values()) for key in by_sample.keys

@@ -32,7 +32,7 @@ from cytearc.storage.stores import load_zarr
 from cytearc.utils import configure_output, logger
 from cytearc.writers import write_renorm_subset_to_zarr
 from cytearc.writers.counts_t import finalize_writer_counts_t
-from tests.storage_helpers import finalize_test_counts, write_count_store
+from tests.storage_helpers import by_cell_id, finalize_test_counts, write_count_store
 
 SIZE_FACTOR = 1000.0
 
@@ -63,7 +63,11 @@ def store(tmp_path_factory) -> DataStore:
     zarr_loc = str(tmp_path_factory.mktemp("assay_paths") / "store.zarr")
     write_count_store(zarr_loc, COUNTS, "uint16")
     opened = _open(zarr_loc)
-    opened.cells.insert("nobody", np.zeros(opened.cells.N, dtype=bool), overwrite=True)
+    opened.cells.insert(
+        "nobody",
+        by_cell_id(opened.cells, np.zeros(opened.cells.N, dtype=bool)),
+        overwrite=True,
+    )
     return opened
 
 

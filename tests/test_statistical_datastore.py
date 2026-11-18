@@ -15,6 +15,7 @@ from cytearc.features.statistical import (
 )
 from cytearc.plotting import CellField, FeatureRef, NormalizationSpec, StudyDesign
 from cytearc.utils.logging import collect_warnings
+from tests.storage_helpers import by_cell_id
 
 pytestmark = pytest.mark.filterwarnings("ignore:Cell-level statistical testing")
 
@@ -25,10 +26,10 @@ def _insert_group_columns(ds):
     groups3 = np.array([f"g{i % 3}" for i in range(n)], dtype=object)
     samples = np.array([f"s{i % 6}" for i in range(n)], dtype=object)
     subjects = np.array([f"d{i % 3}" for i in range(n)], dtype=object)
-    ds.cells.insert("stat_group2", groups2, overwrite=True)
-    ds.cells.insert("stat_group3", groups3, overwrite=True)
-    ds.cells.insert("stat_sample", samples, overwrite=True)
-    ds.cells.insert("stat_subject", subjects, overwrite=True)
+    ds.cells.insert("stat_group2", by_cell_id(ds.cells, groups2), overwrite=True)
+    ds.cells.insert("stat_group3", by_cell_id(ds.cells, groups3), overwrite=True)
+    ds.cells.insert("stat_sample", by_cell_id(ds.cells, samples), overwrite=True)
+    ds.cells.insert("stat_subject", by_cell_id(ds.cells, subjects), overwrite=True)
     return groups2, groups3, samples, subjects
 
 
@@ -525,7 +526,9 @@ def test_run_statistical_testing_rejects_missing_pair_in_selection(
     _groups, _groups3, _samples, subjects = _insert_group_columns(ds)
     subjects = subjects.copy()
     subjects[0] = ""
-    ds.cells.insert("stat_subject_missing", subjects, overwrite=True)
+    ds.cells.insert(
+        "stat_subject_missing", by_cell_id(ds.cells, subjects), overwrite=True
+    )
 
     grouping = _active_metadata_grouping(ds, "stat_group2")
     with pytest.raises(ValueError, match="valid pair value for every cell"):
@@ -599,7 +602,7 @@ def test_statistical_tested_metadata_rejects_effective_missing_mask(
     _insert_group_columns(ds)
     active = np.asarray(ds.cells.active_index("I"), dtype=np.int64)
     values = np.arange(len(active), dtype=np.float64)
-    ds.cells.insert("stat_tested_masked", values, overwrite=True)
+    ds.cells.insert("stat_tested_masked", by_cell_id(ds.cells, values), overwrite=True)
     missing = np.zeros(ds.cells.N, dtype=bool)
     missing[active[0]] = True
     cell_data = ds.cells.locations["primary"]
@@ -621,7 +624,9 @@ def test_statistical_tested_metadata_rejects_effective_missing_mask(
 
     subset = np.ones(len(active), dtype=bool)
     subset[0] = False
-    ds.cells.insert("stat_excludes_tested_missing", subset, overwrite=True)
+    ds.cells.insert(
+        "stat_excludes_tested_missing", by_cell_id(ds.cells, subset), overwrite=True
+    )
     result = ds.compare.test(
         CellField("stat_tested_masked"),
         subset_by="stat_excludes_tested_missing",
@@ -737,14 +742,14 @@ def test_subset_by_change_recomputes(datastore_ephemeral):
     n = len(ds.cells.active_index("I"))
     subset = np.ones(n, dtype=bool)
     subset[::3] = False
-    ds.cells.insert("stat_subset", subset, overwrite=True)
+    ds.cells.insert("stat_subset", by_cell_id(ds.cells, subset), overwrite=True)
     grouping = _active_metadata_grouping(ds, "stat_group2")
     first_result = ds.compare.test(
         ["MALAT1"],
         subset_by="stat_subset",
         **grouping,
     )
-    ds.cells.insert("stat_subset", ~subset, overwrite=True)
+    ds.cells.insert("stat_subset", by_cell_id(ds.cells, ~subset), overwrite=True)
     second_result = ds.compare.test(
         ["MALAT1"],
         subset_by="stat_subset",
@@ -768,7 +773,7 @@ def test_cell_field_without_selection_uses_all_physical_rows(datastore_ephemeral
     ds = datastore_ephemeral
     total = ds.cells.N
     all_groups = np.array([f"g{i % 2}" for i in range(total)], dtype=object)
-    ds.cells.insert("stat_all_groups", all_groups, overwrite=True)
+    ds.cells.insert("stat_all_groups", by_cell_id(ds.cells, all_groups), overwrite=True)
     result = ds.compare.test(
         ["MALAT1"],
         CellField("stat_all_groups"),
@@ -789,8 +794,10 @@ def test_int_and_bool_group_labels_roundtrip(datastore_ephemeral):
     n = len(ds.cells.active_index("I"))
     int_groups = np.array([i % 2 for i in range(n)], dtype=np.int64)
     bool_groups = np.array([i % 2 == 0 for i in range(n)], dtype=bool)
-    ds.cells.insert("stat_int_group", int_groups, overwrite=True)
-    ds.cells.insert("stat_bool_group", bool_groups, overwrite=True)
+    ds.cells.insert("stat_int_group", by_cell_id(ds.cells, int_groups), overwrite=True)
+    ds.cells.insert(
+        "stat_bool_group", by_cell_id(ds.cells, bool_groups), overwrite=True
+    )
     int_result = ds.compare.test(
         ["MALAT1"],
         **_active_metadata_grouping(ds, "stat_int_group"),
@@ -823,8 +830,8 @@ def test_auto_counts_surviving_groups_after_dropout(datastore_ephemeral):
     groups3 = np.array([f"g{i % 3}" for i in range(n)], dtype=object)
     samples = np.array([f"s{i % 6}" for i in range(n)], dtype=object)
     samples = np.where(groups3 == "g2", "", samples).astype(object)
-    ds.cells.insert("stat_grp_drop", groups3, overwrite=True)
-    ds.cells.insert("stat_samp_drop", samples, overwrite=True)
+    ds.cells.insert("stat_grp_drop", by_cell_id(ds.cells, groups3), overwrite=True)
+    ds.cells.insert("stat_samp_drop", by_cell_id(ds.cells, samples), overwrite=True)
     result = ds.compare.test(
         ["MALAT1"],
         sample_by="stat_samp_drop",
@@ -848,8 +855,8 @@ def test_explicit_test_rejects_filtered_requested_group(datastore_ephemeral):
     groups3 = np.array([f"g{i % 3}" for i in range(n)], dtype=object)
     samples = np.array([f"s{i % 6}" for i in range(n)], dtype=object)
     samples = np.where(groups3 == "g2", "", samples).astype(object)
-    ds.cells.insert("stat_grp_drop", groups3, overwrite=True)
-    ds.cells.insert("stat_samp_drop", samples, overwrite=True)
+    ds.cells.insert("stat_grp_drop", by_cell_id(ds.cells, groups3), overwrite=True)
+    ds.cells.insert("stat_samp_drop", by_cell_id(ds.cells, samples), overwrite=True)
     grouping = _active_metadata_grouping(ds, "stat_grp_drop")
     with pytest.warns(UserWarning, match="removed because all of its cells"):
         with pytest.raises(ValueError, match="must all retain at least one valid cell"):
@@ -1119,10 +1126,14 @@ def test_explicit_identity_uses_group_fields_and_selection_snapshots(
 ):
     ds = datastore_ephemeral
     groups, *_ = _insert_group_columns(ds)
-    ds.cells.insert("stat_group_alias", groups.copy(), overwrite=True)
+    ds.cells.insert(
+        "stat_group_alias", by_cell_id(ds.cells, groups.copy()), overwrite=True
+    )
     base_selection = np.asarray(ds.cells.fetch_all("I"), dtype=bool)
-    ds.cells.insert("all_cells", base_selection, overwrite=True)
-    ds.cells.insert("stat_selection_alias", base_selection, overwrite=True)
+    ds.cells.insert("all_cells", by_cell_id(ds.cells, base_selection), overwrite=True)
+    ds.cells.insert(
+        "stat_selection_alias", by_cell_id(ds.cells, base_selection), overwrite=True
+    )
 
     active = ds.snapshot_cell_selection("I")
     alias_selection_a = ds.snapshot_cell_selection("all_cells")
@@ -1200,7 +1211,7 @@ def test_statistical_effective_selection_identity_and_n_cells(
     groups = np.array(["g0" if i % 2 == 0 else "g1" for i in range(n)], dtype=object)
     groups[::7] = None
     groups[1::11] = ""
-    ds.cells.insert("stat_groups_missing", groups, overwrite=True)
+    ds.cells.insert("stat_groups_missing", by_cell_id(ds.cells, groups), overwrite=True)
     grouping = _active_metadata_grouping(ds, "stat_groups_missing")
     result = ds.compare.test(
         ["MALAT1"],
@@ -1221,7 +1232,7 @@ def test_statistical_selection_honors_metadata_missing_mask(datastore_ephemeral)
     groups = np.arange(ds.cells.N, dtype=np.int64) % 2
     missing = np.zeros(ds.cells.N, dtype=bool)
     missing[active[::7]] = True
-    ds.cells.insert("stat_groups_masked", groups, overwrite=True)
+    ds.cells.insert("stat_groups_masked", by_cell_id(ds.cells, groups), overwrite=True)
     cell_data = ds.cells.locations["primary"]
     missing_name = "__cytearc_missing__stat_groups_masked"
     cell_data.create_array(
@@ -1285,8 +1296,8 @@ def test_statistical_numeric_dtypes_and_infinite_statistic_roundtrip(
     n = len(ds.cells.active_index("I"))
     groups = np.array(["a" if i < n // 2 else "b" for i in range(n)], dtype=object)
     values = np.array([0.0 if value == "a" else 1.0 for value in groups])
-    ds.cells.insert("stat_constant_group", groups, overwrite=True)
-    ds.cells.insert("stat_constant_value", values, overwrite=True)
+    ds.cells.insert("stat_constant_group", by_cell_id(ds.cells, groups), overwrite=True)
+    ds.cells.insert("stat_constant_value", by_cell_id(ds.cells, values), overwrite=True)
     result = ds.compare.test(
         "stat_constant_value",
         test="welch",
@@ -1601,7 +1612,7 @@ def test_study_design_pairs_subjects_only_for_wilcoxon(datastore_ephemeral):
         [f"n{index % 2}{index // 4}" for index in sample_index],
         dtype=object,
     )
-    ds.cells.insert("stat_nested_subject", nested, overwrite=True)
+    ds.cells.insert("stat_nested_subject", by_cell_id(ds.cells, nested), overwrite=True)
     design = StudyDesign(sample_by="stat_sample", subject_by="stat_subject")
     group2 = _active_metadata_grouping(ds, "stat_group2")
     group3 = _active_metadata_grouping(ds, "stat_group3")

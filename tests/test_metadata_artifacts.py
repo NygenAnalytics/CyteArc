@@ -35,7 +35,7 @@ from cytearc.storage.selections import (
     resolve_generated_selection_artifact,
 )
 from tests.fixtures_datastore import build_neighborhood_graph
-from tests.storage_helpers import write_count_store
+from tests.storage_helpers import by_cell_id, write_count_store
 
 
 def _ensure_graph(datastore) -> ArtifactRef:
@@ -540,7 +540,7 @@ def test_hto_identity_is_artifact_backed(
     datastore = datastore_ephemeral
     keep = np.asarray(datastore.cells.fetch_all("I"), dtype=bool).copy()
     keep[np.flatnonzero(keep)[::4]] = False
-    datastore.cells.insert("hto_cells", keep)
+    datastore.cells.insert("hto_cells", by_cell_id(datastore.cells, keep))
     selection = datastore.snapshot_cell_selection("hto_cells")
     columns_before = set(datastore.cells.columns)
     calls: list[tuple[pd.DataFrame, dict]] = []
@@ -778,7 +778,7 @@ def test_imputation_batches_preserve_requested_columns_and_stream_rows(
     store.RNA.feats.insert("names", names, overwrite=True)
     numeric = np.arange(store.cells.N, dtype=np.float64)
     metadata_name = str(names[genes[2]])
-    store.cells.insert(metadata_name, numeric)
+    store.cells.insert(metadata_name, by_cell_id(store.cells, numeric))
     expression = store.RNA.normed(rows, genes[:2]).compute().mean(axis=1)
     expected = np.column_stack(
         (
@@ -894,7 +894,7 @@ def shared_name_store(tmp_path_factory) -> SimpleNamespace:
     store = DataStore(path, default_assay="RNA", min_features_per_cell=0, nthreads=1)
     store.RNA.feats.insert("names", names, overwrite=True)
     depth = counts.sum(axis=1).astype(np.float64)
-    store.cells.insert("depth", depth)
+    store.cells.insert("depth", by_cell_id(store.cells, depth))
     cells = store.snapshot_cell_selection("I")
     graph = build_neighborhood_graph(
         store,
@@ -1055,7 +1055,9 @@ def test_explicit_graph_consumers_ignore_later_live_selection_changes(
     selected = np.flatnonzero(mask)
     assert len(selected) > 1
     mask[selected[0]] = False
-    datastore.cells.insert("I", mask, overwrite=True, force=True)
+    datastore.cells.insert(
+        "I", by_cell_id(datastore.cells, mask), overwrite=True, force=True
+    )
 
     clusters = datastore.clusters.leiden(graph)
     embedding = datastore.embeddings.umap(graph, initialization, n_epochs=10)

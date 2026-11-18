@@ -28,6 +28,7 @@ from cytearc.storage.selections import read_stored_selection_mask
 from cytearc.utils.logging import logger
 from tests.test_graph_operation_paths import N_CELLS, open_store, write_graph_template
 from tests.qc_helpers import reference_mad_keep
+from tests.storage_helpers import by_cell_id
 
 # A cell-selection input that names no artifact.
 MALFORMED_SELECTION = {
@@ -110,13 +111,13 @@ def write_qc_template(zarr_loc: Path) -> dict[str, ArtifactRef]:
     store = open_store(zarr_loc)
     cells = refs["cells"]
     order = np.arange(N_CELLS)
-    store.cells.insert("cluster", order % 3)
+    store.cells.insert("cluster", by_cell_id(store.cells, order % 3))
     for column, values in (
         ("first_cells", order < 30),
         ("three_cells", order < 3),
         ("no_cells", np.zeros(N_CELLS, dtype=bool)),
     ):
-        store.cells.insert(column, values)
+        store.cells.insert(column, by_cell_id(store.cells, values))
         refs[column] = store.snapshot_cell_selection(column)
     refs["clusters"] = store.snapshot_cluster_labels("cluster", cell_selection=cells)
     refs["first_clusters"] = store.snapshot_cluster_labels(

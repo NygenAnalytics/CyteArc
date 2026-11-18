@@ -13,6 +13,7 @@ from cytearc.storage.sharding import write_counts_t
 from cytearc.utils.arrays import array_digest
 from cytearc.storage.schema import create_cell_data
 from cytearc.writers import create_zarr_count_assay
+from tests.storage_helpers import by_cell_id
 
 pytestmark = pytest.mark.slow
 
@@ -24,7 +25,9 @@ def _configure_enrichment_inputs(
     active_cells = datastore.cells.active_index("I")[:8]
     cell_mask = np.zeros(datastore.cells.N, dtype=bool)
     cell_mask[active_cells] = True
-    datastore.cells.insert("enrichment_cells", cell_mask, overwrite=True)
+    datastore.cells.insert(
+        "enrichment_cells", by_cell_id(datastore.cells, cell_mask), overwrite=True
+    )
     cell_selection = datastore.snapshot_cell_selection("enrichment_cells")
 
     all_names = np.asarray(assay.feats.fetch_all("names"))

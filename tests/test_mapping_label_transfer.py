@@ -51,6 +51,7 @@ from tests.test_mapping_reference import (
     build_mapping_query,
     build_mapping_store,
 )
+from tests.storage_helpers import by_cell_id
 
 
 class _RecordingProjectionArray:
@@ -92,6 +93,11 @@ def _snapshot_store(path: str) -> dict[str, bytes]:
     }
 
 
+def _projected(query, values: np.ndarray) -> pd.Series:
+    """Key values of the projected query cells, the first rows, by cell ID."""
+    return by_cell_id(query.cells, values, rows=np.arange(len(values)))
+
+
 def _write_projection(
     query,
     reference,
@@ -112,7 +118,7 @@ def _write_projection(
     else:
         cell_mask = np.zeros(query.cells.N, dtype=bool)
         cell_mask[:n_cells] = True
-        query.cells.insert(cell_key, cell_mask, overwrite=True)
+        query.cells.insert(cell_key, by_cell_id(query.cells, cell_mask), overwrite=True)
     cell_selection = resolve_generated_selection_artifact(
         query.zw,
         scope="datastore",
@@ -218,7 +224,9 @@ def _write_reference_column(reference, name: str, values: np.ndarray) -> None:
     else:
         full[:] = 0
     full[indices] = compact
-    reference.datastore.cells.insert(name, full, overwrite=True)
+    reference.datastore.cells.insert(
+        name, by_cell_id(reference.datastore.cells, full), overwrite=True
+    )
 
 
 def _attach_reference_missing_mask(
@@ -392,7 +400,7 @@ def test_mapping_scores_exclude_uninformative_rows_and_preserve_groups(
     weighted = list(
         query.mapping.compute_scores(
             result,
-            target_groups=groups,
+            target_groups=_projected(query, groups),
             reference=reference,
             log_transform=False,
             multiplier=1.0,
@@ -401,7 +409,7 @@ def test_mapping_scores_exclude_uninformative_rows_and_preserve_groups(
     unweighted = list(
         query.mapping.compute_scores(
             result,
-            target_groups=groups,
+            target_groups=_projected(query, groups),
             reference=reference,
             log_transform=False,
             multiplier=1.0,
@@ -412,6 +420,21 @@ def test_mapping_scores_exclude_uninformative_rows_and_preserve_groups(
 
     assert [group for group, _ in weighted] == ["informative", "empty"]
     assert [group for group, _ in unweighted] == ["informative", "empty"]
+    # Groups keyed by cell ID in reverse order are the groups of the same cells.
+    reversed_groups = list(
+        query.mapping.compute_scores(
+            result,
+            target_groups=_projected(query, groups).iloc[::-1],
+            reference=reference,
+            log_transform=False,
+            multiplier=1.0,
+        )
+    )
+    for (group, values), (expected_group, expected) in zip(
+        reversed_groups, weighted, strict=True
+    ):
+        assert group == expected_group
+        np.testing.assert_array_equal(values, expected)
     assert weighted[0][1].shape == (reference.selected_cell_count,)
     # Published weight, 1 / (log(distance + 1) + 1), divided by one informative
     # query cell times two neighbors.
@@ -421,30 +444,37 @@ def test_mapping_scores_exclude_uninformative_rows_and_preserve_groups(
     np.testing.assert_allclose(unweighted[0][1][:2], [0.1, 0.1])
     np.testing.assert_array_equal(unweighted[1][1], 0.0)
 
-    with pytest.raises(ValueError, match="one value per projected query cell"):
-        list(
-            query.mapping.compute_scores(
-                result,
-                target_groups=np.array(["short"]),
-                reference=reference,
-            )
+    # Every refusal below comes from the call itself, before any group is
+    # taken from the iterator it returns.
+    with pytest.raises(
+        ValueError,
+        match=r"its index must hold the ids of the 4 projected query cells, each "
+        r"once; 3 such ids have no label",
+    ):
+        query.mapping.compute_scores(
+            result,
+            target_groups=_projected(query, np.array(["short"])),
+            reference=reference,
+        )
+    # Groups by position are refused before the projection is read.
+    with pytest.raises(TypeError, match=r"^target_groups takes per-cell values only"):
+        query.mapping.compute_scores(result, target_groups=groups, reference=reference)
+    with pytest.raises(TypeError, match=r"^target_groups takes per-cell values only"):
+        query.mapping.compute_scores(
+            result, target_groups=pd.Series(groups), reference=reference
         )
     with pytest.raises(ValueError, match="fixed_weight must be finite and positive"):
-        list(
-            query.mapping.compute_scores(result, reference=reference, fixed_weight=0.0)
-        )
+        query.mapping.compute_scores(result, reference=reference, fixed_weight=0.0)
     with pytest.raises(TypeError, match="weighted must be a boolean"):
-        list(query.mapping.compute_scores(result, reference=reference, weighted=1))
+        query.mapping.compute_scores(result, reference=reference, weighted=1)
     with pytest.raises(TypeError, match="log_transform must be a boolean"):
-        list(query.mapping.compute_scores(result, reference=reference, log_transform=1))
+        query.mapping.compute_scores(result, reference=reference, log_transform=1)
     for multiplier in (-1.0, np.inf, True):
         with pytest.raises(
             ValueError, match="multiplier must be finite and non-negative"
         ):
-            list(
-                query.mapping.compute_scores(
-                    result, reference=reference, multiplier=multiplier
-                )
+            query.mapping.compute_scores(
+                result, reference=reference, multiplier=multiplier
             )
 
 
@@ -467,7 +497,7 @@ def test_mapping_scores_keep_missing_target_groups_distinct(
     scores = list(
         query.mapping.compute_scores(
             result,
-            target_groups=np.asarray(groups),
+            target_groups=_projected(query, np.asarray(groups)),
             reference=reference,
             log_transform=False,
             multiplier=1.0,
@@ -505,7 +535,7 @@ def test_mapping_score_data_reads_projection_once(
     # None and NaN are one missing group in both the generator and the table.
     groups = np.array(["b", "a", "a", np.nan, "c", "b", None], dtype=object)
     options = {
-        "target_groups": groups,
+        "target_groups": _projected(query, groups),
         "log_transform": True,
         "multiplier": 10.0,
         "weighted": weighted,
@@ -728,9 +758,12 @@ def test_label_transfer_excludes_explicitly_missing_reference_labels(
     )
     # Integer reference labels stay integers.
     assert permissive.labels.tolist() == [1, 1]
-    np.testing.assert_allclose(permissive.label_vote_shares([1, 1]), [0.1, 0.1])
+    np.testing.assert_allclose(
+        permissive.label_vote_shares(pd.Series([1, 1], index=permissive.cell_ids)),
+        [0.1, 0.1],
+    )
     with pytest.raises(ValueError, match="only as text"):
-        permissive.label_vote_shares(["1", "1"])
+        permissive.label_vote_shares(pd.Series(["1", "1"], index=permissive.cell_ids))
 
 
 def test_label_transfer_excludes_nan_reference_labels(
@@ -1024,12 +1057,20 @@ def test_label_vote_shares_calibrate_prediction_sets(labeled_consumer_context):
     )
     _, loaded = _transfer(query, result, reference)
 
-    shares = loaded.label_vote_shares(["winner", "winner", "absent"])
+    ids = loaded.cell_ids
+    # Labels keyed by cell ID in another order land on the cells of their IDs.
+    shares = loaded.label_vote_shares(
+        pd.Series(["absent", "winner", "winner"], index=ids[::-1])
+    )
     np.testing.assert_allclose(shares[[0, 2]], [0.9, 0.0])
     assert np.isnan(shares[1])
-    assert np.isnan(loaded.label_vote_shares([None, "winner", "winner"])[0])
-    with pytest.raises(ValueError, match="one value per"):
-        loaded.label_vote_shares(["winner"])
+    assert np.isnan(
+        loaded.label_vote_shares(pd.Series([None, "winner", "winner"], index=ids))[0]
+    )
+    with pytest.raises(ValueError, match="2 such ids have no label"):
+        loaded.label_vote_shares(pd.Series(["winner"], index=ids[:1]))
+    with pytest.raises(TypeError, match="got values of type list"):
+        loaded.label_vote_shares(["winner", "winner", "absent"])
 
     # With nonconformities 0.1 and 1.0, even a class without votes is not
     # exceeded by more than 40% of the calibration cells, so every reference
@@ -1127,7 +1168,9 @@ def test_label_transfer_loads_votes_only_on_request_without_copies(
     assert without_votes.evidence["candidateLabel"].tolist() == ["winner", "runner_up"]
     for use_votes in (
         lambda: without_votes.prediction_sets(np.array([0.1, 0.2])),
-        lambda: without_votes.label_vote_shares(["winner", "winner"]),
+        lambda: without_votes.label_vote_shares(
+            pd.Series(["winner", "winner"], index=without_votes.cell_ids)
+        ),
     ):
         with pytest.raises(ValueError, match="load_votes=True"):
             use_votes()
@@ -1145,6 +1188,7 @@ def test_label_transfer_loads_votes_only_on_request_without_copies(
         with_votes.vote_class_codes,
         with_votes.vote_class_fractions,
         with_votes.cell_idx,
+        with_votes.cell_ids,
         with_votes.categories,
     ):
         assert not array.flags.writeable
@@ -1387,7 +1431,9 @@ def test_reference_layout_reads_explicit_immutable_artifact(
     )
     reference.datastore.cells.insert(
         "unrelated_layout1",
-        np.full(reference.datastore.cells.N, -999.0),
+        by_cell_id(
+            reference.datastore.cells, np.full(reference.datastore.cells.N, -999.0)
+        ),
         overwrite=True,
     )
 

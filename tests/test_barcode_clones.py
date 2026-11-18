@@ -34,7 +34,7 @@ from tests.clone_truth import (
     clone_truth,
 )
 from tests.memory_helpers import named_budget
-from tests.storage_helpers import copy_store, open_store, write_count_store
+from tests.storage_helpers import by_cell_id, copy_store, open_store, write_count_store
 
 TRUTH = clone_truth()
 DATA = Path(__file__).parent / "data" / "barcodes"
@@ -144,7 +144,9 @@ def _trex_store(folder: Path, molecules: Path) -> DataStore:
         str(folder / "trex.zarr"), {"RNA": counts}, "uint16", cell_ids=cells
     )
     store = open_store(folder / "trex.zarr")
-    store.cells.insert("every_cell", np.ones(len(cells), dtype=bool))
+    store.cells.insert(
+        "every_cell", by_cell_id(store.cells, np.ones(len(cells), dtype=bool))
+    )
     return store
 
 
@@ -359,7 +361,9 @@ def test_clones_within_groups_are_those_of_each_group_alone(store, tmp_path) -> 
     } - {frozenset()}
     assert loaded_partition(store, within) == expected
     for sample in SAMPLES:
-        store.cells.insert(f"is_{sample}", TRUTH.samples == sample)
+        store.cells.insert(
+            f"is_{sample}", by_cell_id(store.cells, TRUTH.samples == sample)
+        )
         # The other sample's cells are cells of the store outside the
         # selection, which give no warning.
         with collect_warnings() as messages:
@@ -388,11 +392,15 @@ def test_clones_within_groups_are_those_of_each_group_alone(store, tmp_path) -> 
 
 def test_other_labels_of_one_within_column_call_other_clones(store, tmp_path) -> None:
     _calling, barcodes = _imported(store, tmp_path, "larry")
-    store.cells.insert("batch", TRUTH.samples.astype(object))
+    store.cells.insert("batch", by_cell_id(store.cells, TRUTH.samples.astype(object)))
     by_sample = store.clones.barcode_clones(barcodes, preset="larry", within="batch")
     # The column keeps its name and puts every cell in one batch: the labels
     # identify the clones, so they are called again, as without groups.
-    store.cells.insert("batch", np.full(N_CELLS, "all", dtype=object), overwrite=True)
+    store.cells.insert(
+        "batch",
+        by_cell_id(store.cells, np.full(N_CELLS, "all", dtype=object)),
+        overwrite=True,
+    )
     together = store.clones.barcode_clones(barcodes, preset="larry", within="batch")
     assert together != by_sample
     alone = store.clones.barcode_clones(barcodes, preset="larry")
@@ -420,7 +428,7 @@ def test_within_needs_a_label_for_every_cell_with_a_barcode(store, tmp_path) -> 
         store.clones.load_barcodes(barcodes).cells["n_barcodes"].to_numpy() > 0
     )
     labels[np.flatnonzero(with_barcodes)[0]] = None
-    store.cells.insert("partly", labels)
+    store.cells.insert("partly", by_cell_id(store.cells, labels))
     with pytest.raises(ValueError, match="no label for 1 cells with a barcode"):
         store.clones.barcode_clones(barcodes, preset="larry", within="partly")
     with pytest.raises(ValueError, match="not a cell metadata column"):
@@ -434,12 +442,14 @@ def test_within_may_name_any_column_since_its_labels_join_no_table(
     # loaded clones, so a column named like one of their columns keeps the
     # clones apart as any other column does.
     _calling, barcodes = _imported(store, tmp_path, "larry")
-    store.cells.insert("sample_copy", TRUTH.samples.astype(object))
+    store.cells.insert(
+        "sample_copy", by_cell_id(store.cells, TRUTH.samples.astype(object))
+    )
     expected = store.clones.load_clones(
         store.clones.barcode_clones(barcodes, preset="larry", within="sample_copy")
     ).cells["clone"]
     for name in ("clone", "clone_size", "n_barcodes", "doublet"):
-        store.cells.insert(name, TRUTH.samples.astype(object))
+        store.cells.insert(name, by_cell_id(store.cells, TRUTH.samples.astype(object)))
         loaded = store.clones.load_clones(
             store.clones.barcode_clones(barcodes, preset="larry", within=name)
         )

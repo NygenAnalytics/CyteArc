@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from tests.perturbation_helpers import write_screen
+from tests.storage_helpers import by_cell_id
 
 if TYPE_CHECKING:
     from cytearc.datastore.datastore import DataStore
@@ -61,7 +62,7 @@ def build_guide_store(path: Path) -> tuple["DataStore", "ArtifactRef"]:
     store = write_screen(path, rna, GUIDE_COUNTS)
     keep = np.ones(len(GUIDE_COUNTS), dtype=bool)
     keep[6] = False
-    store.cells.insert("screened", keep)
+    store.cells.insert("screened", by_cell_id(store.cells, keep))
     return store, store.snapshot_cell_selection("screened")
 
 
@@ -122,10 +123,14 @@ def build_join_store(path: Path) -> tuple["DataStore", "ArtifactRef"]:
         cell_ids=JOIN_CELLS,
     )
     store = open_store(path)
-    store.cells.insert("joined", np.ones(n_cells, dtype=bool))
+    store.cells.insert("joined", by_cell_id(store.cells, np.ones(n_cells, dtype=bool)))
     for sample in ("s1", "s2"):
         store.cells.insert(
-            sample, np.asarray([cell.startswith(f"{sample}__") for cell in JOIN_CELLS])
+            sample,
+            by_cell_id(
+                store.cells,
+                np.asarray([cell.startswith(f"{sample}__") for cell in JOIN_CELLS]),
+            ),
         )
     return store, store.snapshot_cell_selection("joined")
 

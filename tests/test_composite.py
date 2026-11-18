@@ -20,7 +20,7 @@ from cytearc.storage.count_matrix import CountMatrixPolicy
 from cytearc.storage.schema import create_cell_data, create_zarr_count_assay
 from cytearc.utils.logging import logger
 from cytearc.writers.counts_t import finalize_writer_counts_t
-from tests.storage_helpers import finalize_test_counts, stored_bytes
+from tests.storage_helpers import by_cell_id, finalize_test_counts, stored_bytes
 
 
 @pytest.fixture
@@ -125,8 +125,12 @@ def composite_sources(tmp_path_factory):
         ).astype(dtype)
         path = root / f"{name}.zarr"
         source = _write_source(path, values, features, policy=policy)
-        source.cells.insert("quality", np.arange(n_cells), key=None)
-        source.cells.update_key(np.arange(n_cells) % 2 == 0, "I")
+        source.cells.insert(
+            "quality", by_cell_id(source.cells, np.arange(n_cells), key=None), key=None
+        )
+        source.cells.update_key(
+            by_cell_id(source.cells, np.arange(n_cells) % 2 == 0), "I"
+        )
         sources[name] = path, values, features
     return sources
 
@@ -1264,7 +1268,9 @@ def test_existing_writers_materialize_composite_counts(
     options = {"nthreads": 1, "mem_budget": "64M", "policy": CountMatrixPolicy(128, 32)}
     if writer == "subset":
         selected = np.array([0, 2, 4])
-        SubsetZarr(str(path), [joint.RNA], cell_idx=selected, **options).dump()
+        SubsetZarr(
+            str(path), [joint.RNA], cell_ids=identities[selected], **options
+        ).dump()
         reference = dict(zip(identities[selected], expected[selected], strict=True))
     else:
         DataStoreMerge([joint, joint], str(path), ["left", "right"], **options).dump()

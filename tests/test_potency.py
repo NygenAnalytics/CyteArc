@@ -34,6 +34,7 @@ from cytearc.writers import H5adToZarr
 from scripts.build_string_networks import write_npz
 from tests.network_helpers import NETWORK_SKIP, hub_or_skip
 from tests.perturbation_helpers import use_python_kernels
+from tests.storage_helpers import by_cell_id, graph_rows
 
 LOG2_1_1 = math.log2(1.1)
 GOLDEN_RATIO = (1 + math.sqrt(5)) / 2
@@ -729,7 +730,11 @@ def test_a_potency_artifact_directs_fate_as_its_differentiation_does(
         datastore.trajectory.fate(
             sink_labels=leiden_clustering,
             graph=connectivity_graph,
-            direction=np.asarray(datastore.scores.load_potency(ref).differentiation),
+            direction=by_cell_id(
+                datastore.cells,
+                np.asarray(datastore.scores.load_potency(ref).differentiation),
+                rows=graph_rows(datastore, connectivity_graph),
+            ),
             sinks=sinks,
         )
     )

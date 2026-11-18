@@ -486,7 +486,10 @@ def test_subsets_and_merges_read_each_categorical_from_either_import(
     text, categorical = imports["text"], imports["categorical"]
     rows = np.array([0, 3, 4, 9])
     SubsetZarr(
-        str(tmp_path / "subset.zarr"), [categorical.RNA], cell_idx=rows, nthreads=1
+        str(tmp_path / "subset.zarr"),
+        [categorical.RNA],
+        cell_ids=categorical.cells.fetch_all("ids")[rows],
+        nthreads=1,
     ).dump()
     DataStoreMerge(
         [text, categorical],

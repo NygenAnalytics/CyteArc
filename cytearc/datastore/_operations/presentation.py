@@ -32,6 +32,7 @@ from ...metadata.arguments import (
     MembershipStrengthArguments,
     SmartLabelArguments,
 )
+from ...metadata.alignment import align_to_cell_ids, keyed_values_remedy
 from ...metadata.membership import exported_membership
 from ...metadata.rows import apply_missing_mask, read_metadata_missing_rows
 from ...metadata.selection import resolve_complete_labels
@@ -262,43 +263,20 @@ def _materialized(matrix: csr_matrix) -> Iterator[csr_matrix]:
 def _aligned_coordinates(values: Any, cell_ids: np.ndarray) -> np.ndarray:
     """Return imported coordinates with one row per selected cell, in order.
 
-    An array must already have those rows. A DataFrame is aligned by its
-    index of cell IDs; rows of other cells are left out.
+    The coordinates are a DataFrame indexed by cell ID, whose rows are aligned
+    to ``cell_ids`` by :func:`~cytearc.metadata.alignment.align_to_cell_ids`;
+    rows of other cells are left out.
     """
-    if isinstance(values, pd.DataFrame):
-        index = values.index.astype(str)
-        if index.has_duplicates:
-            repeated = index[index.duplicated()].unique().tolist()
-            raise ValueError(
-                f"The coordinates repeat cell IDs, such as {repeated[0]!r}"
-            )
-        positions = index.get_indexer(cell_ids)
-        absent = positions < 0
-        if absent.any():
-            raise ValueError(
-                f"The coordinates have no row for {int(absent.sum())} of the "
-                f"{cell_ids.size} selected cells, such as "
-                f"{str(cell_ids[absent][0])!r}; their index must hold the cell IDs"
-            )
-        if positions.size < len(values):
-            logger.info(
-                f"Left out {len(values) - positions.size} rows of cells outside "
-                "the cell selection"
-            )
-        array: np.ndarray = values.to_numpy()[positions]
-    else:
-        array = np.asarray(values)
-    if array.ndim != 2:
-        raise ValueError(
-            f"Imported coordinates must be two-dimensional; found {array.ndim} "
-            "dimensions"
-        )
-    if array.shape[0] != cell_ids.size:
-        raise ValueError(
-            f"Imported coordinates have {array.shape[0]} rows; the cell selection "
-            f"holds {cell_ids.size} cells"
-        )
-    return array
+    aligned = align_to_cell_ids(
+        values,
+        cell_ids,
+        name="reduction.import_coordinates",
+        cells=f"the {cell_ids.size} selected cells",
+        remedy=keyed_values_remedy("DataFrame"),
+        frame=True,
+        leave_out_others=True,
+    )
+    return np.asarray(aligned.to_numpy())
 
 
 class _PresentationOperationsMixin(_PresentationOperationsBase):
@@ -901,11 +879,11 @@ class _PresentationOperationsMixin(_PresentationOperationsBase):
         from.
 
         Args:
-            values: A two-dimensional array with one row per cell of
-                ``cell_selection``, in store order, or a pandas DataFrame
-                indexed by cell ID, whose rows are aligned to the selected
-                cells by ID; rows of other cells are left out. Integer and
-                boolean values are stored as float64.
+            values: A pandas DataFrame indexed by cell ID, such as
+                ``pd.DataFrame(adata.obsm["X_scVI"], index=adata.obs_names)``,
+                whose rows are aligned to the cells of ``cell_selection`` by
+                ID; rows of other cells are left out. Integer and boolean
+                values are stored as float64.
             cell_selection: Cell-selection artifact of the cells that the
                 coordinates describe.
             name: Name of the coordinates, recorded as their source key, such
@@ -922,11 +900,11 @@ class _PresentationOperationsMixin(_PresentationOperationsBase):
             Reference to the ``imported_coordinates`` artifact.
 
         Raises:
-            TypeError: If an argument has the wrong type, or the values are
-                not numbers.
-            ValueError: If the values do not have one row per selected cell,
-                a DataFrame lacks a selected cell or repeats a cell ID, or a
-                value is not finite.
+            TypeError: If an argument has the wrong type, the values are not
+                numbers, or they are not a DataFrame indexed by cell ID, such
+                as an array, whose rows would land on cells by position.
+            ValueError: If the DataFrame lacks a selected cell or repeats a
+                cell ID, or a value is not finite.
             PermissionError: If no matching result exists and the store is
                 not opened with ``zarr_mode='r+'``.
         """
@@ -947,7 +925,7 @@ class _PresentationOperationsMixin(_PresentationOperationsBase):
         assay = self._get_assay(from_assay)
         rows = cell_selection_rows(self.zw, cell_selection)
         cell_ids = np.asarray(read_metadata_rows_chunkwise(self.cells, "ids", rows))
-        coordinates = _aligned_coordinates(values, cell_ids.astype(str))
+        coordinates = _aligned_coordinates(values, cell_ids)
         dtype = floating_payload_dtype(coordinates.dtype, "Imported coordinates")
         coordinates = np.ascontiguousarray(coordinates, dtype=dtype)
         if coordinates.shape[1] < 1:

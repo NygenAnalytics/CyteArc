@@ -15,7 +15,7 @@ import pytest
 
 from cytearc.storage.artifacts import artifact_group
 from tests.clone_helpers import every_cell, write_cells_store
-from tests.storage_helpers import copy_store
+from tests.storage_helpers import by_cell_id, copy_store
 from tests.variant_helpers import write_variant_store
 from tests.variant_truth import mito_clone_truth, variant_truth, write_mgatk
 
@@ -223,7 +223,7 @@ def test_clones_of_chosen_sites_and_within_groups(store, tmp_path) -> None:
     alone = store.variants.genotype_clones(genotypes, sites=["S1"], method="exact")
     assert _clones(store, alone) == {"clone_1": [0, 1, 2, 3, 4]}
     donors = np.where(np.arange(len(IDS)) == 4, "d2", "d1").astype(object)
-    store.cells.insert("donor", donors)
+    store.cells.insert("donor", by_cell_id(store.cells, donors))
     within = store.variants.genotype_clones(genotypes, within="donor", method="exact")
     # X's donor holds no other cell, so it agrees with no clone that
     # disagrees with another and forms a clone of its own.
@@ -377,14 +377,20 @@ def test_genotype_clones_refuse_other_artifacts_and_arguments(store, tmp_path) -
     with pytest.raises(ValueError, match="not a cell metadata column"):
         store.variants.genotype_clones(genotypes, within="mouse")
     store.cells.insert(
-        "half", np.where(np.arange(len(IDS)) == 2, "", "a").astype(object)
+        "half",
+        by_cell_id(
+            store.cells, np.where(np.arange(len(IDS)) == 2, "", "a").astype(object)
+        ),
     )
     with pytest.raises(ValueError, match="no label for 1 cells with a mutant call"):
         store.variants.genotype_clones(genotypes, within="half", method="exact")
     # W, wild type at both sites, takes part in the likelihood's fit, so it
     # needs a label there and not in the exact rule.
     store.cells.insert(
-        "wild", np.where(np.arange(len(IDS)) == 7, "", "a").astype(object)
+        "wild",
+        by_cell_id(
+            store.cells, np.where(np.arange(len(IDS)) == 7, "", "a").astype(object)
+        ),
     )
     with pytest.raises(ValueError, match="no label for 1 cells with a call"):
         store.variants.genotype_clones(genotypes, within="wild")
@@ -398,8 +404,8 @@ def test_within_may_name_a_column_of_the_loaded_clones(store, tmp_path) -> None:
     # clones' ambiguous flag keeps clones apart as any column does.
     genotypes = _genotypes(store, tmp_path)
     donors = np.where(np.arange(len(IDS)) == 4, "d2", "d1").astype(object)
-    store.cells.insert("donor", donors)
-    store.cells.insert("ambiguous", donors.copy())
+    store.cells.insert("donor", by_cell_id(store.cells, donors))
+    store.cells.insert("ambiguous", by_cell_id(store.cells, donors.copy()))
     named = store.variants.genotype_clones(
         genotypes, within="ambiguous", method="exact"
     )

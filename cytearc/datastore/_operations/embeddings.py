@@ -1,6 +1,7 @@
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
+import pandas as pd
 
 from ...graph.arguments import graph_load_flags, umap_graph_flags
 from ...graph.distances import validate_distance_provenance
@@ -13,7 +14,13 @@ from ...metadata.artifacts import (
     plan_cell_data_artifact,
     write_cell_data_artifact,
 )
+from ...metadata.alignment import (
+    align_to_cell_ids,
+    keyed_values_remedy,
+    require_keyed,
+)
 from ...metadata.arguments import LocalmapArguments, TsneArguments, UmapArguments
+from ...storage.selections import read_stored_selection_indices
 from ...storage.validation_scope import validation_scoped
 from ...storage.artifacts import (
     ArtifactRef,
@@ -84,8 +91,8 @@ def _require_initialization_ref(initialization: ArtifactRef) -> None:
         raise ValueError(
             "initialization must be an embedding_initialization ref, not a "
             f"{initialization.kind!r} ref; build one from the graph's "
-            "coordinates with embeddings.initialization(coordinates), or pass an "
-            "array of initial coordinates"
+            "coordinates with embeddings.initialization(coordinates), or pass a "
+            "DataFrame of initial coordinates indexed by cell ID"
         )
     if initialization.scope != "assay" or initialization.assay is None:
         raise ValueError("initialization must be an assay-scoped artifact")
@@ -152,15 +159,22 @@ class _EmbeddingOperationsMixin(_EmbeddingOperationsBase):
     def _embedding_inputs(
         self,
         graph: ArtifactRef,
-        initialization: ArtifactRef | np.ndarray,
+        initialization: "ArtifactRef | pd.DataFrame",
         n_comps: int,
         dtype: type[np.floating[Any]] | None,
     ) -> tuple[ArtifactRef, int, object, np.ndarray | None]:
         """Validate embedding inputs without loading the graph.
 
         Returns the graph cell selection, the graph cell count, the
-        initialization identity input, and an array initialization when one
-        was given. An initialization artifact is expanded only when needed.
+        initialization identity input, and the coordinates of a DataFrame
+        initialization, aligned to the graph's cells by cell ID, when one was
+        given. An initialization artifact is expanded only when needed.
+
+        Raises:
+            TypeError: If ``initialization`` is neither an artifact reference
+                nor a DataFrame indexed by cell ID.
+            ValueError: If the DataFrame lacks a cell of the graph or repeats
+                a cell ID.
         """
         if not isinstance(graph, ArtifactRef):
             raise TypeError("graph must be an ArtifactRef")
@@ -170,9 +184,28 @@ class _EmbeddingOperationsMixin(_EmbeddingOperationsBase):
         n_cells = self._get_graph_ncells_k(self._graph_location(graph))[0]
         if isinstance(initialization, ArtifactRef):
             return cell_selection, n_cells, initialization, None
-        if not isinstance(initialization, np.ndarray):
-            raise TypeError("initialization must be an ArtifactRef or numpy array")
-        ini_embed = _checked_initialization(initialization, dtype)
+        remedy = keyed_values_remedy("DataFrame")
+        require_keyed(initialization, name="initialization", remedy=remedy, frame=True)
+        cell_ids = self._cell_ids_at(
+            read_stored_selection_indices(
+                self.zw,
+                cell_selection,
+                kind="cell_selection",
+                scope="datastore",
+                assay=None,
+                table_path="cellData",
+            )
+        )
+        aligned = align_to_cell_ids(
+            initialization,
+            cell_ids,
+            name="initialization",
+            cells=f"the {cell_ids.size} cells of the graph",
+            remedy=remedy,
+            frame=True,
+            leave_out_others=True,
+        )
+        ini_embed = _checked_initialization(np.asarray(aligned.to_numpy()), dtype)
         _check_initial_shape(ini_embed, n_cells, n_comps)
         identity = {"value_fingerprint": fingerprint_array(ini_embed)}
         return cell_selection, n_cells, identity, ini_embed
@@ -181,7 +214,7 @@ class _EmbeddingOperationsMixin(_EmbeddingOperationsBase):
     def _embeddings_tsne(
         self,
         graph: ArtifactRef,
-        initialization: ArtifactRef | np.ndarray,
+        initialization: "ArtifactRef | pd.DataFrame",
         *,
         symmetric_graph: bool = False,
         graph_upper_only: bool = False,
@@ -205,8 +238,9 @@ class _EmbeddingOperationsMixin(_EmbeddingOperationsBase):
         Args:
             graph: Explicit connectivity map or integrated graph to embed.
             initialization: Explicit initialization artifact from
-                            `embeddings.initialization`, or a coordinate array. An array must hold finite real
-                            values.
+                            `embeddings.initialization`, or a DataFrame of coordinates indexed by cell ID,
+                            aligned to the graph's cells by ID; rows of other cells are left out. Its
+                            values must be finite real numbers.
             symmetric_graph: Forwarded to `graph.load`: if True, t-SNE embeds the fuzzy union of the directed
                              edge weights. (Default value: False)
             graph_upper_only: Forwarded to `graph.load`: keep the upper triangle of the symmetrized graph. It
@@ -353,7 +387,7 @@ class _EmbeddingOperationsMixin(_EmbeddingOperationsBase):
     def _run_umap_artifact(
         self,
         graph: ArtifactRef,
-        initialization: ArtifactRef | np.ndarray,
+        initialization: "ArtifactRef | pd.DataFrame",
         *,
         symmetric_graph: bool = False,
         graph_upper_only: bool = False,
@@ -542,7 +576,7 @@ class _EmbeddingOperationsMixin(_EmbeddingOperationsBase):
     def _embeddings_umap(
         self,
         graph: ArtifactRef,
-        initialization: ArtifactRef | np.ndarray,
+        initialization: "ArtifactRef | pd.DataFrame",
         *,
         symmetric_graph: bool = False,
         graph_upper_only: bool = False,
@@ -574,9 +608,10 @@ class _EmbeddingOperationsMixin(_EmbeddingOperationsBase):
 
         Args:
             graph: Explicit connectivity map or integrated graph to embed.
-            initialization: Explicit initialization artifact from `embeddings.initialization`, or a coordinate
-                            array. An array must hold finite real values; UMAP optimizes a C-ordered float32 copy
-                            and leaves the caller's array unchanged.
+            initialization: Explicit initialization artifact from `embeddings.initialization`, or a DataFrame
+                            of coordinates indexed by cell ID, aligned to the graph's cells by ID; rows of other
+                            cells are left out. Its values must be finite real numbers; UMAP optimizes a
+                            C-ordered float32 copy and leaves the caller's DataFrame unchanged.
             symmetric_graph: Must be False. UMAP optimizes the fuzzy union of the graph's directed edge weights,
                              ``w_ij + w_ji - w_ij * w_ji``, which it forms itself, so a graph symmetrized by
                              `graph.load` would be united twice. True raises ``ValueError``. (Default value: False)
@@ -660,7 +695,7 @@ class _EmbeddingOperationsMixin(_EmbeddingOperationsBase):
     def _embeddings_localmap(
         self,
         graph: ArtifactRef,
-        initialization: ArtifactRef | np.ndarray,
+        initialization: "ArtifactRef | pd.DataFrame",
         *,
         localmap_dims: int = 2,
         n_mid_near: int = 5,
@@ -689,9 +724,11 @@ class _EmbeddingOperationsMixin(_EmbeddingOperationsBase):
             graph: Explicit connectivity map to embed. Its lineage names the
                 coordinates of the mid-near pairs, which the layout reads whole.
             initialization: Explicit initialization artifact from
-                `embeddings.initialization`, or a coordinate array of finite
-                real values. LocalMAP centers it and scales it to a standard
-                deviation of 1e-4, keeping its proportions.
+                `embeddings.initialization`, or a DataFrame of finite real
+                coordinates indexed by cell ID, aligned to the graph's cells
+                by ID; rows of other cells are left out. LocalMAP centers it
+                and scales it to a standard deviation of 1e-4, keeping its
+                proportions.
             localmap_dims: Dimensions of the layout. (Default value: 2)
             n_mid_near: Mid-near pairs per cell. More pairs hold the global
                 arrangement more firmly in the first two phases.

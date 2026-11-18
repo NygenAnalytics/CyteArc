@@ -28,9 +28,7 @@ the run. There is no live fallback in run mode:
   source run's assay. A run freezes no gene values, so a gene color requires an explicit
   `normalization=NormalizationSpec(...)`, which provenance records; without one it raises
   `ValueError`.
-- `cell_key` other than `"I"`, a `from_assay` other than the run's assay, and `point_sizes` raise
-  `ValueError`. For per-cell sizes, pass `layout=run["umap"]` with sizes in that layout's cell
-  order.
+- `cell_key` other than `"I"`, a `from_assay` other than the run's assay, and `point_sizes` raise `ValueError`. For per-cell sizes, pass `layout=run["umap"]` with `point_sizes` as a pandas Series indexed by cell ID.
 
 Run plots record the run as `provenance.extras["run"]`, a mapping with `runId` and `label`.
 `layout_key=` remains the live-metadata source. Mixed source modes are rejected. For large
