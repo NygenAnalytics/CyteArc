@@ -308,6 +308,159 @@ def test_teaseq_analysis_integrates_three_modality_runs(monkeypatch):
     assert not any(selection for _label, _columns, selection in copied)
 
 
+def _distinct_counts(n_cells: int, n_features: int) -> np.ndarray:
+    """Give each cell one count of its own, so a cell out of place shows."""
+    values = np.zeros((n_cells, n_features), dtype=np.int32)
+    values[np.arange(n_cells), np.arange(n_cells) % n_features] = np.arange(
+        1, n_cells + 1
+    )
+    return values
+
+
+def _assert_file_order(store: Path, ids: list[str], values: np.ndarray) -> None:
+    import zarr
+
+    root = zarr.open_group(str(store), mode="r")
+    # Row r of the store holds the file's row r. An import in the file's
+    # order records neither the sourceRow column nor the cellOrder seed.
+    np.testing.assert_array_equal(root["cellData/ids"][:], ids)
+    np.testing.assert_array_equal(root["RNA/counts"][:], values)
+    assert "sourceRow" not in root["cellData"]
+    assert "cellOrder" not in root["cellData"].attrs
+
+
+def _write_h5ad_source(source: Path, values: np.ndarray) -> list[str]:
+    import anndata
+    from scipy.sparse import csr_matrix
+
+    ids = [f"cell{row:02d}" for row in range(values.shape[0])]
+    anndata.AnnData(
+        X=csr_matrix(values.astype(np.float32)),
+        obs=pd.DataFrame(index=ids),
+        var=pd.DataFrame(index=[f"g{column}" for column in range(values.shape[1])]),
+    ).write_h5ad(source / "data.h5ad")
+    return ids
+
+
+def _write_cellranger_source(source: Path, values: np.ndarray) -> list[str]:
+    from tests.test_count_layout_fit import _write_10x_h5
+
+    _write_10x_h5(source / "data.h5", values)
+    return [f"c{row}" for row in range(values.shape[0])]
+
+
+@pytest.mark.parametrize(
+    "write_source, convert",
+    [
+        (_write_h5ad_source, generator._convert_h5ad),
+        (_write_cellranger_source, generator._convert_cellranger_h5),
+    ],
+    ids=["h5ad", "cellranger_h5"],
+)
+def test_raw_dataset_imports_write_cells_in_the_file_order(
+    tmp_path, write_source, convert
+):
+    values = _distinct_counts(30, 4)
+    source = tmp_path / "source"
+    source.mkdir()
+    ids = write_source(source, values)
+
+    convert(source, tmp_path / "data.zarr")
+
+    _assert_file_order(tmp_path / "data.zarr", ids, values)
+
+
+def test_tabula_sapiens_sample_draws_the_same_cells_as_from_the_file(
+    tmp_path, monkeypatch
+):
+    import anndata
+    import cytearc
+    from scipy.sparse import csr_matrix
+
+    # A miniature atlas with the source's tissue and donor columns, raw
+    # counts, raw feature table and author UMAPs.
+    n_cells, n_features = 48, 4
+    values = _distinct_counts(n_cells, n_features)
+    obs = pd.DataFrame(
+        {
+            "tissue": np.repeat(["blood", "liver", "lung"], 16),
+            "donor_id": np.tile(np.repeat(["TSP1", "TSP2"], 8), 3),
+        },
+        index=[f"cell{row:02d}" for row in range(n_cells)],
+    )
+    genes = [f"ENSG{column:011d}" for column in range(n_features)]
+    var = pd.DataFrame(
+        {"ensembl_id": genes, "feature_name": [f"GENE{j}" for j in range(n_features)]},
+        index=genes,
+    )
+    atlas = anndata.AnnData(X=csr_matrix(values.astype(np.float32)), obs=obs, var=var)
+    atlas.raw = atlas
+    rng = np.random.default_rng(0)
+    for key in generator.TABULA_SAPIENS_UMAPS:
+        atlas.obsm[key] = rng.normal(size=(n_cells, 2))
+    source = tmp_path / "source"
+    source.mkdir()
+    atlas.write_h5ad(source / "data.h5ad")
+    monkeypatch.setattr(generator, "TABULA_SAPIENS_CELLS", n_cells)
+    monkeypatch.setattr(generator, "TABULA_SAPIENS_FEATURES", n_features)
+    monkeypatch.setattr(generator, "TABULA_SAPIENS_MEMORY_BYTES", 1 << 30)
+
+    generator._convert_tabula_sapiens(source, tmp_path / "data.zarr")
+
+    _assert_file_order(tmp_path / "data.zarr", obs.index.tolist(), values)
+    # The sample draws row positions of the imported store, so it takes the
+    # cells that the same draw over the file's rows takes.
+    imported = cytearc.DataStore(str(tmp_path / "data.zarr"), zarr_mode="r", nthreads=1)
+    in_file = SimpleNamespace(
+        cells=SimpleNamespace(fetch_all=lambda key: obs[key].to_numpy())
+    )
+    sampled = generator._tabula_sample_indices(imported, n_cells=12)
+    np.testing.assert_array_equal(
+        imported.cells.fetch_all("ids")[sampled],
+        obs.index[generator._tabula_sample_indices(in_file, n_cells=12)],
+    )
+
+
+def test_teaseq_import_writes_cells_in_the_object_order(tmp_path, monkeypatch):
+    from unittest.mock import ANY
+
+    import cytearc
+    import cytearc.writers.seurat
+
+    # The recipe pins the dimensions of the published Seurat object, so no
+    # small object passes its check; this pins the import's argument instead.
+    class Reader:
+        def __init__(self, path: Path, **options: object) -> None:
+            pass
+
+        def __enter__(self) -> "Reader":
+            return self
+
+        def __exit__(self, *raised: object) -> None:
+            return None
+
+        def get_assay(self, assay: str) -> SimpleNamespace:
+            return SimpleNamespace(dimensions=ANY)
+
+    imports: list[dict[str, object]] = []
+
+    class Writer:
+        def __init__(self, reader: Reader, zarr_loc: str, **options: object) -> None:
+            imports.append(options)
+
+        def dump(self) -> None:
+            pass
+
+    monkeypatch.setattr(cytearc, "SeuratReader", Reader)
+    monkeypatch.setattr(cytearc.writers.seurat, "SeuratToZarr", Writer)
+    monkeypatch.setattr(cytearc, "DataStore", lambda *args, **kwargs: None)
+    monkeypatch.setattr(generator, "_add_teaseq_annotations", lambda *args: None)
+
+    generator._convert_teaseq(tmp_path, tmp_path / "data.zarr")
+
+    assert [options["shuffle_cells"] for options in imports] == [False]
+
+
 def test_kang_recipes_subset_current_sources_by_cluster_labels():
     for dataset in (
         generator.KANG_CONTROL_DATASET,

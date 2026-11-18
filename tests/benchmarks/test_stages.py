@@ -311,7 +311,12 @@ def _write_h5ad(path: Path, n_cells: int) -> Path:
 
 
 def test_stage_create_count_store(bench, tmp_path) -> None:
-    """Import H5AD counts into a new store, as the funnel's first stage does."""
+    """Import H5AD counts into a new store with the default shuffle, timing the whole import.
+
+    The profiling funnel's createStore stage imports in the file's order and
+    times only the counts write, so this benchmark is the one that times the
+    shuffle of a default import.
+    """
     from cytearc.readers import H5adReader
     from cytearc.writers import H5adToZarr
 
