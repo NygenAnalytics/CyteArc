@@ -30,9 +30,10 @@ from ..utils.arguments import bool_argument
 from ..utils.matrix_values import ImportValues, MatrixValuesKind
 
 
-# Categories longer than this list are not stored with their column: AnnData
-# makes a categorical of any text that repeats a value, so a column of nearly
-# unique text can hold about one category per row.
+# A categorical with more categories than this is stored as a column of its
+# labels, without its categories: AnnData makes a categorical of any text that
+# repeats a value, so a column of nearly unique text can hold about one
+# category per row.
 _MAX_STORED_CATEGORIES = 10_000
 # A dense matrix is read about this many values at a time, as its value scan
 # reads it, or in whole rows of its HDF5 chunks. Each batch is copied into a
@@ -117,6 +118,7 @@ def _write_column(
     column: TableColumn,
     *,
     profile: StorageProfile,
+    table: str,
     categorical: bool = False,
     ordered: bool = False,
 ) -> np.ndarray:
@@ -125,23 +127,46 @@ def _write_column(
     A categorical is written from its codes, so its categories are converted
     once each rather than once per row. With ``categorical`` it is stored as
     a categorical column, its codes beside its categories, which ``ordered``
-    records as ordered or not; otherwise as a column of its labels.
+    records as ordered or not; otherwise as a column of its labels. A
+    categorical of more than 10,000 categories, or whose categories a
+    categorical column cannot store, is stored as a column of its labels
+    either way, and with ``categorical`` a warning names the column of
+    ``table``, such as ``cell`` or ``RNA feature``, and the reason.
     """
+    from ..metadata.encoding import UnstorableCategoriesError
     from ._store import write_categorical_column, write_metadata_column
 
     if isinstance(column, CategoryCodes):
+        refusal: str | None = None
         if categorical:
-            return write_categorical_column(
-                group,
-                name,
-                column.codes,
-                column.categories,
-                ordered=ordered,
-                profile=profile,
-            )
+            count = len(column.categories)
+            if count > _MAX_STORED_CATEGORIES:
+                refusal = (
+                    f"Column {name!r} has {count:,} categories, more than the "
+                    f"{_MAX_STORED_CATEGORIES:,} that an import stores as a "
+                    "categorical column"
+                )
+            else:
+                try:
+                    return write_categorical_column(
+                        group,
+                        name,
+                        column.codes,
+                        column.categories,
+                        ordered=ordered,
+                        profile=profile,
+                    )
+                except UnstorableCategoriesError as error:
+                    # Refused before anything was written.
+                    refusal = str(error)
         write_metadata_column(
             group, name, column.codes, profile=profile, categories=column.categories
         )
+        if refusal is not None:
+            logger.warning(
+                f"Stored {table} metadata column {name!r} as a column of its "
+                f"labels, not as a categorical column. {refusal}"
+            )
         return column.missing
     values, missing = column
     write_metadata_column(group, name, values, missing, profile=profile)
@@ -793,12 +818,17 @@ class H5adToZarr:
             ``"log_normalized"`` or ``"log2_normalized"``, as the import
             reference's normalized values section describes. None decides
             from the values.
-        categorical_columns: If True, store each categorical column of
-            ``obs`` and ``var`` as a categorical column, its codes beside
-            every one of its categories, instead of a column of its labels.
-            Every read returns the same labels either way. Off by default
-            in this release, because releases before categorical columns
-            cannot read such a store.
+        categorical_columns: If True, the default, store each categorical
+            column of ``obs`` and ``var`` as a categorical column, its codes
+            beside every one of its categories, instead of a column of its
+            labels. Every read returns the same labels either way. A
+            categorical of more than 10,000 categories, or whose categories
+            a categorical column cannot store, such as NaN or categories
+            that read alike once stored, is stored as a column of its labels
+            with a warning that names the column and the reason. CyteArc
+            1.4.0 and later open a store with categorical columns; False
+            stores every column as its labels, which keeps the store
+            readable by earlier releases.
         shuffle_cells: If True, the default, write the cells in a uniformly
             random order, so that any contiguous slice of the store, such as
             one shard or a training mini-batch, is a random sample of its
@@ -860,7 +890,7 @@ class H5adToZarr:
         *,
         overwrite: bool = False,
         values: ImportValues = None,
-        categorical_columns: bool = False,
+        categorical_columns: bool = True,
         shuffle_cells: bool = True,
         shuffle_seed: int = 0,
     ) -> None:
@@ -1194,6 +1224,7 @@ class H5adToZarr:
                 key,
                 _column_rows(column, order),
                 profile=self.profile,
+                table="cell",
                 categorical=self._categoricalColumns,
                 ordered=categories is not None and categories.ordered,
             )
@@ -1249,7 +1280,7 @@ class H5adToZarr:
         from ..storage.metadata_keys import metadata_column_keys
         from ._store import keyed_metadata_columns
 
-        targets: list[tuple[Any, np.ndarray | None]] = []
+        targets: list[tuple[str, Any, np.ndarray | None]] = []
         for assay_name in self.assayNames:
             if self.workspace is None:
                 group_path = f"{assay_name}/featureData"
@@ -1261,11 +1292,11 @@ class H5adToZarr:
                 if self.assayFeatures is None
                 else self.assayFeatures[assay_name].featureIndexes
             )
-            targets.append((feat_group, feature_indexes))
+            targets.append((assay_name, feat_group, feature_indexes))
 
         keys = metadata_column_keys(
             self.h5ad._source_column_names(self.h5ad.featureAttrsKey),
-            taken={key for group, _indexes in targets for key in group.keys()},
+            taken={key for _assay, group, _indexes in targets for key in group.keys()},
         )
         # Stream one column at a time so a single decoded var column is held in
         # memory rather than every column for the full feature axis at once.
@@ -1277,7 +1308,7 @@ class H5adToZarr:
             keys,
             "feature",
         ):
-            for feat_group, feature_indexes in targets:
+            for assay_name, feat_group, feature_indexes in targets:
                 # Each assay of a split types its categories from its own
                 # codes, as it types the labels of a column of them.
                 selected_missing = _write_column(
@@ -1285,6 +1316,7 @@ class H5adToZarr:
                     column_name,
                     _column_rows(column, feature_indexes),
                     profile=self.profile,
+                    table=f"{assay_name} feature",
                     categorical=self._categoricalColumns,
                     ordered=categories is not None and categories.ordered,
                 )

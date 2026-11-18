@@ -25,6 +25,7 @@ import pandas as pd
 from ..storage.arrays import encode_metadata_values, missing_placeholder, text_array
 
 __all__ = [
+    "UnstorableCategoriesError",
     "categorical_codes",
     "checked_fill_value",
     "is_categorical",
@@ -35,6 +36,16 @@ __all__ = [
     "stored_categorical_values",
     "stored_values",
 ]
+
+
+class UnstorableCategoriesError(ValueError):
+    """Categories that a categorical column cannot store.
+
+    A categorical column types every category, unused ones included, as the
+    labels of its rows are typed, so it refuses categories that a column of
+    those labels may still store, such as NaN or a category of another type
+    that no row holds.
+    """
 
 
 def missing_rows(values: np.ndarray) -> np.ndarray:
@@ -243,9 +254,11 @@ def stored_categorical_codes(
 
     Raises:
         TypeError: If the codes are not integers.
-        ValueError: If the categories are not one-dimensional, are not all of
-            the type that the used ones share, hold NaN, read alike once
-            typed, or :func:`stored_values` refuses one.
+        ValueError: If the categories are not one-dimensional.
+        UnstorableCategoriesError: If the categories are not all of the type
+            that the used ones share, one cannot be stored as that type, such
+            as an integer outside the int64 range, or they hold NaN or read
+            alike once typed.
     """
     codes = np.asarray(codes)
     categories = np.asarray(categories)
@@ -268,23 +281,33 @@ def stored_categorical_codes(
     labels = np.empty(len(categories), dtype=object)
     labels[:] = categories
     dtype = _shared_dtype(labels[used])
-    if dtype is None:
-        typed = _text(labels, np.zeros(len(labels), dtype=bool), name=name)
-    elif _shared_dtype(labels) == dtype:
-        typed = _typed_numbers(labels, dtype, name=name)
-    else:
-        raise ValueError(
+    if dtype is not None and _shared_dtype(labels) != dtype:
+        raise UnstorableCategoriesError(
             f"Column {name!r} has categories of more than one type: the ones that "
             f"rows hold are stored as {dtype}, which cannot hold the others"
         )
+    try:
+        typed = (
+            _text(labels, np.zeros(len(labels), dtype=bool), name=name)
+            if dtype is None
+            else _typed_numbers(labels, dtype, name=name)
+        )
+    except ValueError as error:
+        # Typing a category that no row holds can fail where typing the
+        # labels of the rows does not, such as an integer beyond int64.
+        raise UnstorableCategoriesError(
+            f"Column {name!r} has categories that cannot all be stored as "
+            f"{'text' if dtype is None else dtype}, the type of the labels that "
+            "its rows hold"
+        ) from error
     if typed.dtype.kind in "fc" and bool(np.isnan(typed).any()):
-        raise ValueError(
+        raise UnstorableCategoriesError(
             f"Column {name!r} has NaN among its categories; a categorical column "
             "marks a missing row with code -1 and cannot store NaN as a category"
         )
     distinct, counts = np.unique(typed, return_counts=True)
     if len(distinct) != len(typed):
-        raise ValueError(
+        raise UnstorableCategoriesError(
             f"Column {name!r} has categories that read alike once stored, as text "
             "or numbers, so a categorical column cannot tell them apart, such as "
             f"{distinct[counts > 1][0].item()!r}"

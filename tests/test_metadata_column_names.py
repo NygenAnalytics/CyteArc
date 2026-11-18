@@ -87,8 +87,14 @@ def _import_h5ad(tmp_path: Path) -> _Imported:
     store = MemoryStore()
     reader = H5adReader(str(source), feature_name_key="feature_name")
     try:
+        # Label columns, whose stored values the checks read.
         H5adToZarr(
-            reader, zarr_loc=store, mem_budget="64M", nthreads=1, shuffle_cells=False
+            reader,
+            zarr_loc=store,
+            mem_budget="64M",
+            nthreads=1,
+            shuffle_cells=False,
+            categorical_columns=False,
         ).dump()
     finally:
         reader.close()
@@ -250,6 +256,7 @@ def test_anndata_written_separator_columns_round_trip(
                 mem_budget="64M",
                 nthreads=1,
                 shuffle_cells=False,
+                categorical_columns=False,
             ).dump()
         finally:
             reader.close()
@@ -264,6 +271,38 @@ def test_anndata_written_separator_columns_round_trip(
     imported, messages = _capture_warnings(build)
 
     _assert_imported(imported, messages)
+
+
+def test_a_renamed_categorical_keeps_its_categories_beside_its_key(
+    tmp_path: Path,
+) -> None:
+    source = _write_separator_h5ad(tmp_path / "separators.h5ad")
+    store = MemoryStore()
+    reader = H5adReader(str(source), feature_name_key="feature_name")
+    try:
+        H5adToZarr(
+            reader, zarr_loc=store, mem_budget="64M", nthreads=1, shuffle_cells=False
+        ).dump()
+    finally:
+        reader.close()
+
+    # A default import stores the categorical under the key that replaces its
+    # name, with its categories named after that key.
+    cells = zarr.open_group(store=store, mode="r")["cellData"]
+    categories = f"__cytearc_categories__{EGFR_KEY}"
+    assert cells[EGFR_KEY].attrs["categories"] == categories
+    assert cells[EGFR_KEY][:].tolist() == [0, 1, 0]
+    assert cells[categories][:].tolist() == ["<60", ">=60"]
+    datastore = DataStore(
+        store,
+        default_assay="RNA",
+        min_features_per_cell=0,
+        mem_budget="64M",
+        nthreads=1,
+    )
+    assert datastore.cells.fetch_all(EGFR_KEY).tolist() == ["<60", ">=60", "<60"]
+    assert EGFR_KEY in datastore.cells.columns
+    assert categories not in datastore.cells.columns
 
 
 def test_h5ad_without_column_order_skips_nested_columns(tmp_path: Path) -> None:

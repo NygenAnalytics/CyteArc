@@ -3784,8 +3784,13 @@ def test_h5ad_import_links_missing_masks_and_keeps_nullable_booleans(tmp_path):
 
     reader = H5adReader(str(path), feature_name_key="feature_name")
     try:
+        # Label columns, whose values the masks flag.
         writer = H5adToZarr(
-            reader, zarr_loc=MemoryStore(), nthreads=1, shuffle_cells=False
+            reader,
+            zarr_loc=MemoryStore(),
+            nthreads=1,
+            shuffle_cells=False,
+            categorical_columns=False,
         )
         writer.dump()
     finally:
