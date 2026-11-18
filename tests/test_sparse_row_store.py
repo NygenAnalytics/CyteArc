@@ -1273,3 +1273,277 @@ def test_a_store_without_an_operation_is_refused(tmp_path, operation):
             temp_dir=tmp_path,
         )
     assert list(tmp_path.iterdir()) == []
+
+
+# ---------------------------------------------------------------------------
+# Ragged rows
+
+
+def _ragged_rows(rng, n_rows, widest=60) -> tuple[np.ndarray, np.ndarray]:
+    """Rows of 0 to ``widest`` printable bytes: their bytes and the offset of each."""
+    lengths = rng.integers(0, widest + 1, n_rows)
+    values = rng.integers(32, 127, int(lengths.sum())).astype(np.uint8)
+    offsets = np.zeros(n_rows + 1, dtype=np.int64)
+    np.cumsum(lengths, out=offsets[1:])
+    return values, offsets
+
+
+def _row_bytes(values, offsets) -> list[bytes]:
+    return [bytes(values[offsets[i] : offsets[i + 1]]) for i in range(offsets.size - 1)]
+
+
+def _ragged_store(tmp_path, n_rows, widest=60, **options) -> SparseRowStore:
+    settings = {"bucket_rows": 7, "buffer_bytes": 4096, "bucket_bytes": _BIG}
+    settings.update(options)
+    return SparseRowStore(
+        (n_rows, widest),
+        np.uint8,
+        operation=_OPERATION,
+        whole_rows=True,
+        ragged=True,
+        temp_dir=tmp_path,
+        **settings,
+    )
+
+
+def _append_in_blocks(store, destinations, values, offsets, block_rows=41) -> None:
+    for first in range(0, destinations.size, block_rows):
+        last = min(first + block_rows, destinations.size)
+        store.append_ragged_rows(
+            destinations[first:last],
+            values[offsets[first] : offsets[last]],
+            offsets[first : last + 1] - offsets[first],
+        )
+
+
+@pytest.mark.parametrize("bucket_rows", [1, 7, 500])
+@pytest.mark.parametrize("read_ahead", [False, True])
+def test_ragged_rows_return_in_destination_order(tmp_path, bucket_rows, read_ahead):
+    rng = np.random.default_rng(bucket_rows)
+    values, offsets = _ragged_rows(rng, 300)
+    destinations = rng.permutation(300)
+    store = _ragged_store(tmp_path, 300, bucket_rows=bucket_rows)
+    try:
+        _append_in_blocks(store, destinations, values, offsets)
+        store.finalize()
+        rows = _row_bytes(values, offsets)
+        # Row i of the appended rows is destination row destinations[i].
+        expected = [rows[i] for i in np.argsort(destinations)]
+        found = []
+        for batch_values, batch_offsets in store.iter_ragged_rows(
+            0, 300, 23, read_ahead=read_ahead
+        ):
+            assert batch_values.dtype == np.uint8 and batch_offsets[0] == 0
+            assert batch_offsets[-1] == batch_values.size
+            found += _row_bytes(batch_values, batch_offsets)
+        assert found == expected
+        window = [
+            row
+            for batch in store.iter_ragged_rows(37, 211, 50)
+            for row in _row_bytes(*batch)
+        ]
+        assert window == expected[37:211]
+    finally:
+        store.close()
+
+
+def test_ragged_buckets_split_and_go_as_their_rows_are_read(tmp_path):
+    rng = np.random.default_rng(3)
+    values, offsets = _ragged_rows(rng, 400)
+    destinations = rng.permutation(400)
+    # One bucket of every row, split at finalize into bands that each read in
+    # a sixteenth of what the rows take.
+    split = SparseRowStore.ragged_row_read_bytes(int(offsets[-1]) // 16)
+    store = _ragged_store(tmp_path, 400, bucket_rows=400, split_bytes=split)
+    try:
+        _append_in_blocks(store, destinations, values, offsets)
+        store.finalize()
+        assert store.bucket_starts.size - 1 >= 16
+        assert store.read_bytes() <= store.bucket_starts.nbytes + split
+        expected = [_row_bytes(values, offsets)[i] for i in np.argsort(destinations)]
+        found = []
+        held = []
+        for batch in store.iter_ragged_rows(0, 400, 25, delete=True):
+            found += _row_bytes(*batch)
+            held.append(len(list(store.directory.glob("rows-*[0-9]"))))
+        assert found == expected
+        # Each band's files go once its rows are taken.
+        assert held == sorted(held, reverse=True) and held[0] > held[-1]
+        assert list(store.directory.glob("rows-*[0-9]")) == []
+        with pytest.raises(RuntimeError, match="were deleted once a read had taken"):
+            next(store.iter_ragged_rows(0, 1, 1))
+    finally:
+        store.close()
+
+
+def test_ragged_rows_hold_no_column_indices(tmp_path):
+    # Rows of one repeated text, which compress to a few bytes each.
+    rows = [b"TRAV1-2\tCASSLGTDTQYF\tIGHM\n"] * 500
+    values = np.frombuffer(b"".join(rows), dtype=np.uint8)
+    offsets = np.arange(0, values.size + 1, len(rows[0]), dtype=np.int64)
+    assert _sparse.encoded_ragged_bytes(values, offsets) < 0.2
+    store = _ragged_store(tmp_path, 500, bucket_rows=500)
+    try:
+        store.append_ragged_rows(np.arange(500), values, offsets)
+        store.finalize()
+        # The block's column indices take no bytes, and its values compress.
+        path = _bucket_file(store)
+        header = _sparse._HEADER.unpack_from(path.read_bytes())
+        assert header[4] == _sparse._RAGGED and header[-2 - 1] == 0
+        assert path.stat().st_size < values.size // 5
+        # An assembled bucket holds the bytes and the row offsets, without an
+        # eight-byte index for each byte.
+        assert store.read_bytes(read_ahead=True) - store.read_bytes() == (
+            values.size + 501 * 8
+        )
+    finally:
+        store.close()
+
+
+def test_a_ragged_read_holds_no_more_than_the_store_reports(tmp_path):
+    rng = np.random.default_rng(12)
+    values, offsets = _ragged_rows(rng, 3000, widest=400)
+    store = _ragged_store(tmp_path, 3000, widest=400, bucket_rows=700)
+    try:
+        _append_in_blocks(store, rng.permutation(3000), values, offsets, 333)
+        store.finalize()
+        reported = store.read_bytes()
+        tracemalloc.start()
+        try:
+            for bucket in range(store.bucket_starts.size - 1):
+                tracemalloc.reset_peak()
+                base = tracemalloc.get_traced_memory()[0]
+                store._load_ragged_bucket(bucket)
+                assert tracemalloc.get_traced_memory()[1] - base <= reported
+        finally:
+            tracemalloc.stop()
+    finally:
+        store.close()
+
+
+def test_wrong_ragged_rows_are_refused_with_what_was_expected(tmp_path):
+    for options in ({"whole_rows": False}, {"dtype": np.int32}):
+        settings = {"whole_rows": True, "dtype": np.uint8, **options}
+        with pytest.raises(ValueError, match="Ragged rows are bytes that arrive whole"):
+            SparseRowStore(
+                (3, 5),
+                settings.pop("dtype"),
+                operation=_OPERATION,
+                bucket_rows=2,
+                buffer_bytes=0,
+                bucket_bytes=_BIG,
+                ragged=True,
+                temp_dir=tmp_path,
+                **settings,
+            )
+    store = _ragged_store(tmp_path, 3, widest=5)
+    sparse = _whole_store(tmp_path, (3, 5), np.uint8)
+    values = np.frombuffer(b"abcdef", dtype=np.uint8)
+    try:
+        with pytest.raises(
+            TypeError, match="takes ragged rows; call append_ragged_rows"
+        ):
+            store.append_rows(np.arange(3), csr_matrix((3, 5), dtype=np.uint8))
+        with pytest.raises(TypeError, match="takes whole rows; call append_rows"):
+            sparse.append_ragged_rows(np.arange(2), values, np.asarray([0, 3, 6]))
+        with pytest.raises(TypeError, match="one-dimensional uint8 bytes"):
+            store.append_ragged_rows([0], np.asarray([1, 2], dtype=np.int64), [0, 2])
+        for bounds in ([0, 3], [1, 3, 6], [0, 4, 3], [0, 3, 5], [0.0, 3.0, 6.0]):
+            with pytest.raises(ValueError, match="integer offsets that rise from 0"):
+                store.append_ragged_rows([0, 1], values, np.asarray(bounds))
+        with pytest.raises(ValueError, match="holds at most 5 bytes; found one of 6"):
+            store.append_ragged_rows([0], values, [0, 6])
+        with pytest.raises(IndexError, match=r"must lie in \[0, 3\)"):
+            store.append_ragged_rows([3], values[:1], [0, 1])
+        store.append_ragged_rows([0, 1], values, [0, 3, 6])
+        with pytest.raises(ValueError, match="Destination row 1 was appended more"):
+            store.append_ragged_rows([1], values[:2], [0, 2])
+        with pytest.raises(ValueError, match="1 destination rows were never appended"):
+            store.finalize()
+    finally:
+        store.close()
+        sparse.close()
+    store = _ragged_store(tmp_path, 1, widest=5)
+    sparse = _whole_store(tmp_path, (1, 5), np.uint8)
+    try:
+        store.append_ragged_rows([0], values[:2], [0, 2])
+        store.finalize()
+        sparse.append_rows([0], csr_matrix((1, 5), dtype=np.uint8))
+        sparse.finalize()
+        with pytest.raises(TypeError, match="holds ragged rows; read them with"):
+            next(store.iter_rows(0, 1, 1))
+        with pytest.raises(TypeError, match="holds ragged rows; read them with"):
+            store.read(0, 1)
+        with pytest.raises(TypeError, match="holds sparse rows; read them with"):
+            next(sparse.iter_ragged_rows(0, 1, 1))
+    finally:
+        store.close()
+        sparse.close()
+
+
+@pytest.mark.parametrize("ragged", [False, True])
+def test_a_block_of_the_other_form_of_rows_is_refused(tmp_path, ragged):
+    if ragged:
+        store = _ragged_store(tmp_path, 2, widest=5)
+        store.append_ragged_rows([0, 1], np.frombuffer(b"abcde", np.uint8), [0, 2, 5])
+    else:
+        store = _whole_store(tmp_path, (2, 5), np.float32)
+        store.append_rows([0, 1], csr_matrix(np.eye(2, 5, dtype=np.float32)))
+    try:
+        store.finalize()
+        path = _bucket_file(store)
+        # The block's index code claims the other form of rows.
+        flipped = 0 if ragged else _sparse._RAGGED
+        path.write_bytes(_replace_header(path.read_bytes(), index=flipped))
+        found, expected = ("sparse", "ragged") if ragged else ("ragged", "sparse")
+        with pytest.raises(
+            RuntimeError, match=f"holds {found} rows in a store of {expected} rows"
+        ):
+            if ragged:
+                next(store.iter_ragged_rows(0, 2, 2))
+            else:
+                store.read(0, 2)
+    finally:
+        store.close()
+
+
+def test_ragged_rows_spill_their_bytes_and_a_wider_row_reads_alone(
+    tmp_path, monkeypatch
+):
+    # Without a measured rate, the disk check counts each byte once and no
+    # column index, and each of the four rows 16 bytes.
+    usage = _sparse.shutil.disk_usage(tmp_path)
+    with monkeypatch.context() as patched:
+        patched.setattr(
+            _sparse.shutil, "disk_usage", lambda path: usage._replace(free=1063)
+        )
+        with pytest.raises(OSError, match="needs 1064 temporary bytes"):
+            _ragged_store(tmp_path, 4, entries=1000)
+        patched.setattr(
+            _sparse.shutil, "disk_usage", lambda path: usage._replace(free=1064)
+        )
+        _ragged_store(tmp_path, 4, entries=1000).close()
+    # A row that one read cannot hold is refused at finalize, with the bytes
+    # that reading it holds.
+    store = _ragged_store(
+        tmp_path,
+        2,
+        bucket_bytes=SparseRowStore.ragged_row_read_bytes(50),
+        split_bytes=SparseRowStore.ragged_row_read_bytes(10),
+    )
+    try:
+        # A row of 51 bytes, one more than the limit reads.
+        values = np.full(60, ord("A"), dtype=np.uint8)
+        store.append_ragged_rows([0, 1], values, [0, 9, 60])
+        with pytest.raises(MemoryBudgetError) as refused:
+            store.finalize()
+        assert refused.value.needed_bytes == SparseRowStore.ragged_row_read_bytes(51)
+    finally:
+        store.close()
+    # Buckets sized for rows of 100 bytes read in about the bytes asked.
+    for read in (1, 2_000, 50_000, 10**9):
+        rows = SparseRowStore.ragged_bucket_rows(1000, 100, read)
+        assert 1 <= rows <= 1000
+        if 1 < rows < 1000:
+            cost = SparseRowStore.ragged_row_read_bytes(100)
+            assert rows * (cost - 32) <= read < (rows + 1) * (cost - 32)

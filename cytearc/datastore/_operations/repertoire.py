@@ -1,6 +1,7 @@
 import math
 import os
 from collections.abc import Iterator, Sequence
+from contextlib import closing
 from dataclasses import dataclass, fields
 from typing import TYPE_CHECKING, Any
 
@@ -90,6 +91,7 @@ from ...storage.artifacts import (
 )
 from ...storage.async_execution import zarr_decoding_threads, zarr_io_concurrency
 from ...storage.categorical import CategoricalColumn
+from ...storage.cell_order import CellOrder, cell_order_argument, destination_rows
 from ...storage.diagnostics import ExportSummary, export_summary, warn_diagnostics
 from ...storage.geometry import ROW_INDEX_BYTES, array_geometry
 from ...storage.types import as_zarr_array, read_array
@@ -101,6 +103,7 @@ from ...utils.memory_budget import (
     hash_table_bytes,
     object_array_bytes,
     python_text_bytes,
+    sort_bytes,
 )
 from .cell_barcodes import (
     BarcodeFile,
@@ -114,6 +117,7 @@ from .clone_steps import (
     CODES_WITHIN_TYPE,
     REPRESENTATIVES_WITHIN_TYPE,
     artifact_cell_ids,
+    exported_cell_positions,
     files_text,
     measured_within_types,
     plan_artifact_cells,
@@ -125,6 +129,7 @@ from .record_tables import (
 )
 
 if TYPE_CHECKING:
+    from ...writers.export import TextReorder
     from ..mapping_datastore import MappingDatastore as _RepertoireOperationsBase
 else:
     _RepertoireOperationsBase = object
@@ -2279,6 +2284,8 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         *,
         fields: Sequence[str] | None = None,
         chains_only: bool = False,
+        cell_order: CellOrder = "source",
+        temp_dir: str | os.PathLike[str] | None = None,
     ) -> ExportSummary:
         """Write imported contigs as an AIRR Rearrangement file.
 
@@ -2301,18 +2308,32 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         that take quotes read as an opening quote. A ``sequence_id``
         that repeats, such as ``<barcode>_contig_1`` of the TCR and the BCR
         files of one cell, gets ``_2``, ``_3`` and so on from its second
-        occurrence, in the order of the contigs, since the schema requires
-        unique identifiers. A path ending in ``.gz`` is gzip-compressed at
-        level 6.
+        occurrence, in the order of the file's rows, since the schema
+        requires unique identifiers. A path ending in ``.gz`` is
+        gzip-compressed at level 6.
+
+        Cells are written in the order of the file that the store imported,
+        as their ``sourceRow`` records it, or in store order with
+        ``cell_order="stored"``; each cell's contigs keep their stored order,
+        the order of the contig files. In the file's order, the contigs are
+        read and rendered in store order, the fastest, and each row is sent to
+        its place in the file through temporary files on local disk, in
+        ``temp_dir``, which hold the rows compressed, each file deleted once
+        its rows are written; ``cell_order="stored"`` needs no temporary files.
 
         The contigs are read and written in blocks of about 32 MiB, at most a
         sixteenth of the memory budget, as many contigs as fit when each
         field holds its longest value. Beside one block, the export holds the
         cells' IDs and clonotypes, the distinct values of the text fields and
         the repeated IDs' new names, and until it has named the repeated IDs,
-        a hash of each contig's ID. Every stored array is read a chunk at a
-        time, and what each step reads and holds is checked against the
-        memory budget before the step runs, all before the file is written.
+        a hash of each contig's ID. In the imported file's order, it also
+        holds the place of each row in the file, the block that a thread sends
+        to the temporary files while the next one renders, at most a block of
+        rows waiting for them, and two pieces of the files' rows, each sized
+        to read in about a block, as they are read back. Every stored array is
+        read a chunk at a time, and what each step reads and holds is checked
+        against the memory budget before the step runs, all before the file is
+        written.
 
         Args:
             source: An ``immune_receptors`` or ``clonotypes`` artifact.
@@ -2321,6 +2342,10 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
                 field; ``sequence_id`` and ``cell_id``, and with clonotypes
                 ``clone_id``, are always written.
             chains_only: Write only the contigs that count as chains.
+            cell_order: ``"source"`` writes the cells in the order of the
+                imported file, ``"stored"`` in store order.
+            temp_dir: Directory of the temporary files of an export in source
+                order. None uses the system's temporary directory.
 
         Returns:
             The file written, its ``rows``, the contigs written, and its
@@ -2335,8 +2360,9 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         Raises:
             TypeError: If an argument has the wrong type.
             ValueError: If ``source`` is not an ``immune_receptors`` or
-                ``clonotypes`` artifact, a field is not stored, or a value to
-                be written holds a tab, a newline or a carriage return.
+                ``clonotypes`` artifact, a field is not stored,
+                ``cell_order`` is unknown, or a value to be written holds a
+                tab, a newline or a carriage return.
             KeyError: If the store holds no such ``source`` artifact, or not
                 the receptors of the clonotypes.
             RuntimeError: If the ``source`` artifact or the receptors of the
@@ -2344,8 +2370,15 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
                 it finished leaves them.
             MemoryError: If a step of the export would hold more than the
                 memory budget.
+            OSError: If the temporary directory lacks the disk that the rows
+                take there.
         """
         chains_only = bool_argument(chains_only, "chains_only")
+        cell_order = cell_order_argument(cell_order)
+        if temp_dir is not None and not isinstance(temp_dir, str | os.PathLike):
+            raise TypeError(
+                f"temp_dir must be a path or None, not {type(temp_dir).__name__}"
+            )
         from ...writers.airr import (
             AIRR_EXPORT_DIAGNOSTICS,
             AIRR_EXPORT_RULES,
@@ -2353,6 +2386,7 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             AirrRearrangementWriter,
             suffix_repeated_ids,
         )
+        from ...writers.export import plan_text_reorder, reordered_text_rows
 
         if not isinstance(path, str | os.PathLike):
             raise TypeError("path must be a path")
@@ -2443,17 +2477,36 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
                     item="the clonotypes' labels",
                 )
                 clones = EncodedText(codes, labels.data, labels.offsets)
-            cells, cell_width = self._export_cell_ids(
-                ledger, receptors, n_cells, block_bytes
+            cells, cell_width, source_cells = self._export_cell_ids(
+                ledger, receptors, n_cells, block_bytes, cell_order
             )
             contigs.measure(block_bytes, cells=cells, clones=clones)
             hashes, id_rows = contigs.scan(block_bytes)
+            # The row of the file in stored order that each row of the export
+            # writes, None when the export keeps store order.
+            file_rows: np.ndarray | None = None
+            if source_cells is not None:
+                file_rows = contigs.file_order(source_cells)
+                ledger.release(source_cells.nbytes)
+                del source_cells
+            if file_rows is not None and len(file_rows):
+                # The hashes in the export's order, beside those they replace,
+                # whose charge they keep.
+                ledger.peak(
+                    "the hashes of the contigs' IDs in the imported file's order",
+                    8 * len(file_rows),
+                )
+                hashes = hashes[file_rows]
             # Sorting the hashes and finding those that repeat.
             naming = ledger.hold(
                 "finding the contig IDs that repeat",
                 _NAMING_BYTES_PER_ROW * len(hashes),
             )
             per_id = _ID_BYTES + _ID_BYTES_PER_BYTE * contigs.width("sequence_id")
+            if file_rows is not None:
+                # Each ID's row in stored order and its place among the rows
+                # read in ascending order.
+                per_id += _ORDERED_ID_BYTES
             # The pass that reads the repeated IDs holds a block of IDs, their
             # bytes and their offsets as read and searched.
             passing = contigs.id_pass_bytes(id_rows) + (
@@ -2468,12 +2521,36 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
                 ledger.peak(
                     f"naming {asked} repeated contig IDs", passing + per_id * asked
                 )
-                return contigs.ids_at(rows, id_rows)
+                if file_rows is None:
+                    return contigs.ids_at(rows, id_rows)
+                # The pass reads the rows in stored order, ascending.
+                stored = file_rows[rows]
+                ascending = np.argsort(stored, kind="stable")
+                found = np.empty(len(stored), dtype=object)
+                found[ascending] = contigs.ids_at(stored[ascending], id_rows)
+                return found
 
             renamed = suffix_repeated_ids(hashes, ids_at)
             del hashes
             ledger.release(naming + contigs.hash_bytes)
             ledger.hold("the repeated IDs' new names", per_id * len(renamed[0]))
+            # The place in the imported file of each row in store order, None
+            # when the export keeps store order.
+            destinations: np.ndarray | None = None
+            if file_rows is not None and len(file_rows):
+                # The blocks render in store order, so a repeated ID is named
+                # by its row there.
+                stored_rows = file_rows[renamed[0]]
+                ascending = np.argsort(stored_rows, kind="stable")
+                renamed = (stored_rows[ascending], renamed[1][ascending])
+                # The places, and the count that finds them, beside the rows
+                # that they replace, whose charge they keep.
+                ledger.peak(
+                    "the place of each row in the imported file's order",
+                    16 * len(file_rows),
+                )
+                destinations = destination_rows(file_rows)
+                file_rows = None
             block_rows = contigs.plan_blocks(
                 n_columns=len(AIRR_REQUIRED_FIELDS)
                 + sum(name not in AIRR_REQUIRED_FIELDS for name in order),
@@ -2481,11 +2558,57 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
                 clone_width=clone_width if clones is not None else None,
                 block_bytes=block_bytes,
             )
+            reorder: "TextReorder | None" = None
+            if destinations is not None:
+                # A renamed ID may be longer than any stored one.
+                longer = max(
+                    (len(str(name).encode("utf-8")) for name in renamed[1]), default=0
+                ) - contigs.width("sequence_id")
+                room = ledger.room
+                assert room is not None
+                reorder = plan_text_reorder(
+                    len(destinations),
+                    contigs.widest_row + max(0, longer),
+                    block_rows,
+                    block_bytes,
+                    room - contigs.block_peak,
+                )
+                item = (
+                    "sending the contigs to their places in the imported file's order"
+                )
+                remedy = "export with cell_order='stored'"
+                # The reorder is held beside the peak of writing a block.
+                ledger.peak(
+                    item, reorder.held_bytes + contigs.block_peak, remedy=remedy
+                )
+                ledger.hold(item, reorder.held_bytes, remedy=remedy)
             with AirrRearrangementWriter(path, order, whole=contigs.whole) as writer:
-                for block in contigs.blocks(block_rows, cells, clones, renamed):
-                    writer.write(block)
-                    # The block is let go before the next is read.
-                    del block
+                if destinations is None:
+                    for block in contigs.blocks(block_rows, cells, clones, renamed):
+                        writer.write(block)
+                        # The block is let go before the next is read.
+                        del block
+                else:
+                    assert reorder is not None
+
+                    def rendered() -> Iterator[tuple[np.ndarray, np.ndarray]]:
+                        for block in contigs.blocks(block_rows, cells, clones, renamed):
+                            rows = writer.render(block)
+                            # The block is let go before its rows are sent.
+                            del block
+                            yield rows
+
+                    with closing(
+                        reordered_text_rows(
+                            rendered(),
+                            destinations,
+                            reorder,
+                            operation="AIRR export in source order",
+                            temp_dir=temp_dir,
+                        )
+                    ) as batches:
+                        for values, offsets in batches:
+                            writer.write_rendered(values, int(offsets.size) - 1)
         written = writer.n_rows
         logger.info(f"Wrote {written} contigs to {os.fspath(path)}")
         return export_summary(
@@ -2503,15 +2626,21 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         receptors: ArtifactRef,
         n_cells: int,
         slice_bytes: int,
-    ) -> tuple[EncodedText, int]:
-        """The IDs of the receptors' cells as packed text, for an AIRR export.
+        cell_order: CellOrder,
+    ) -> tuple[EncodedText, int, np.ndarray | None]:
+        """The IDs of the receptors' cells as packed text, and their order, for an AIRR export.
 
         The positions of the receptors' cell selection are read, then the IDs
-        a slice at a time, as :func:`_packed_text` reads them; each step is
-        charged to ``ledger`` first, and the packed IDs stay charged.
+        a slice at a time, as :func:`_packed_text` reads them, and the order
+        in which ``cell_order`` writes the cells, as
+        :func:`~cytearc.datastore._operations.clone_steps.exported_cell_positions`
+        finds it; each step is charged to ``ledger`` first, and the packed
+        IDs and the order stay charged.
 
         Returns:
-            The IDs, whose codes are unused, and the bytes of the longest.
+            The IDs, whose codes are unused, the bytes of the longest, and the
+            position of each cell that the export writes, in its order, among
+            the receptors' cells, or None for store order.
         """
         selection = inspect_artifact(self.zw, receptors).input_ref("cell_selection")
         # The receptors hold the selection's cells, so its identity check runs
@@ -2523,16 +2652,17 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             item="the positions of the receptors' cells",
         )
         positions = int(cell_index.nbytes)
-        packed = _packed_text(
+        packed, longest = _packed_text(
             ledger,
             self.cells._get_array("ids"),
             cell_index,
             slice_bytes,
             item="the cells' IDs",
         )
+        order = exported_cell_positions(ledger, self.cells, cell_index, cell_order)
         del cell_index
         ledger.release(positions)
-        return packed
+        return packed, longest, order
 
 
 # An AIRR export renders its contigs in blocks of about this many bytes, at
@@ -2574,6 +2704,9 @@ _NAMING_BYTES_PER_ROW = 40
 # of the longest ID: its text, code, occurrence and new name.
 _ID_BYTES = 200
 _ID_BYTES_PER_BYTE = 4
+# In the imported file's order, naming a repeated ID also holds its row in
+# stored order and its place among the rows read in ascending order.
+_ORDERED_ID_BYTES = 16
 
 
 def _stored_chunk_bytes(array: zarr.Array) -> int:
@@ -2735,6 +2868,10 @@ class _ExportContigs:
         self._chunk = max(1, int(cells.chunks[0]))
         self._texts: dict[str, tuple[np.ndarray, np.ndarray]] = {}
         self._widths: dict[str, int] = {}
+        #: What writing a block holds at its peak, and the most bytes that a
+        #: rendered row holds, as plan_blocks finds them.
+        self.block_peak = 0
+        self.widest_row = 0
         #: The number fields whose rows hold only whole numbers, which are
         #: written as integers.
         self.whole: set[str] = set()
@@ -3142,8 +3279,8 @@ class _ExportContigs:
                 if kind == RAGGED
                 else (f"contig_{name}", 0)
             )
-        self.ledger.peak(
-            "writing a block of contigs",
+        self.widest_row = rendered
+        self.block_peak = (
             per_row * min(block_rows, self.n_contigs)
             + self._window_bytes(windows, block_rows)
             + self._read_bytes(
@@ -3153,8 +3290,9 @@ class _ExportContigs:
                     for name, kind in zip(self._fields, kinds)
                     if kind == RAGGED
                 ]
-            ),
+            )
         )
+        self.ledger.peak("writing a block of contigs", self.block_peak)
         return block_rows
 
     def _spans(self, block_rows: int) -> Iterator[tuple[int, int, np.ndarray | None]]:
@@ -3192,6 +3330,62 @@ class _ExportContigs:
                 ids.skip(start, stop)
             before += n_rows
         return found
+
+    def file_order(self, source_cells: np.ndarray) -> np.ndarray:
+        """Find where each row of the export comes from when its cells take another order.
+
+        The export writes the receptors' cells at positions ``source_cells``
+        in that order, and the rows of each cell in their stored order. Each
+        contig's cell is read whole, and with ``chains_only`` whether it
+        counts as a chain; each read and step is charged first.
+
+        Args:
+            source_cells: The position of each cell among the receptors'
+                cells, in the order of the export, as
+                :func:`~cytearc.datastore._operations.clone_steps.exported_cell_positions`
+                gives it.
+
+        Returns:
+            The row of the file in stored order that each row of the export
+            writes, as int64, which stays charged.
+        """
+        ledger = self.ledger
+        cells = read_whole(
+            ledger, self._group, "contig_cells", item="each contig's cell"
+        )
+        cells_bytes = int(cells.nbytes)
+        if self._chains_only:
+            chains = read_whole(
+                ledger,
+                self._group,
+                "contig_chain",
+                item="the contigs that count as chains",
+            )
+            chains_bytes = int(chains.nbytes)
+            chosen = chains.astype(bool, copy=False)
+            n_rows = int(np.count_nonzero(chosen))
+            # The positions of the chains while their cells are gathered.
+            ledger.hold("the cells of the chains", cells.itemsize * n_rows)
+            ledger.peak("finding the chains", 8 * n_rows)
+            cells = cells[chosen]
+            del chains, chosen
+            ledger.release(chains_bytes + cells_bytes)
+            cells_bytes = int(cells.nbytes)
+        n_rows = len(cells)
+        # Each cell's rank in the export's order, each row's rank, and their
+        # stable sort, which keeps the rows of a cell in stored order.
+        ledger.peak(
+            "the rows of the file in the imported file's order",
+            8 * len(source_cells)
+            + 8 * n_rows
+            + sort_bytes(n_rows, 8, stable=True, order=True),
+        )
+        ranks = destination_rows(source_cells)[cells]
+        rows: np.ndarray = np.argsort(ranks, kind="stable").astype(np.int64, copy=False)
+        del ranks, cells
+        ledger.hold("the rows of the file in the imported file's order", rows.nbytes)
+        ledger.release(cells_bytes)
+        return rows
 
     def blocks(
         self,

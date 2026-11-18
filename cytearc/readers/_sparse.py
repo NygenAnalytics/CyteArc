@@ -6,12 +6,15 @@ all receive rows in one order and need them in another. A
 writes them to buckets, bands of consecutive destination rows. A read loads
 one bucket and returns canonical CSR windows of destination rows.
 
-Rows arrive in one of two forms. Whole rows (``append_rows``) arrive once
+Rows arrive in one of three forms. Whole rows (``append_rows``) arrive once
 each, as in a shuffle, and a read only puts them in destination order. Loose
 entries (``append_entries``) may give a row in pieces over many appends, as a
 CSC conversion does, and a read joins each row's pieces in the order they
 were appended, sorts its columns and sums its duplicate coordinates, or keeps
-them sorted for a reader that sums them later.
+them sorted for a reader that sums them later. Ragged rows
+(``append_ragged_rows``) are whole rows of bytes without columns, such as the
+rows of a text file, and a read (``iter_ragged_rows``) returns each row's
+bytes in destination order.
 
 Several processes may write one store. The owner creates the directory and
 writes part 0; each other writer opens the directory with
@@ -27,9 +30,9 @@ byte shuffle): the row of each piece within its bucket, the entries of each
 piece, their column indices and their values. Values use the narrowest
 unsigned dtype that holds every value of the block exactly, and the source
 dtype otherwise; column indices are stored as gaps within each piece when
-they never decrease. The header records these codes, the payload sizes and a
-CRC-32 of the payloads, because Blosc decodes corrupted and truncated buffers
-without an error.
+they never decrease, and a block of ragged rows stores none. The header
+records these codes, the payload sizes and a CRC-32 of the payloads, because
+Blosc decodes corrupted and truncated buffers without an error.
 """
 
 import json
@@ -52,7 +55,12 @@ from scipy.sparse import coo_matrix, csr_matrix
 from ..utils.arrays import canonicalize_sparse, checked_sparse_cast, cumulative_nnz
 from ..utils.memory_budget import MemoryBudgetError
 
-__all__ = ["ROW_BYTES", "SparseRowStore", "encoded_entry_bytes"]
+__all__ = [
+    "ROW_BYTES",
+    "SparseRowStore",
+    "encoded_entry_bytes",
+    "encoded_ragged_bytes",
+]
 
 _CODEC = Blosc(cname="zstd", clevel=1, shuffle=Blosc.SHUFFLE)
 _UNSIGNED = tuple(np.dtype(name) for name in ("u1", "u2", "u4", "u8"))
@@ -60,6 +68,9 @@ _UNSIGNED = tuple(np.dtype(name) for name in ("u1", "u2", "u4", "u8"))
 _SOURCE_VALUES = 255
 # The index code's flag for column indices stored as gaps within each piece.
 _GAPS = 0x10
+# The index code's flag for a block of ragged rows, whose values have no
+# column indices.
+_RAGGED = 0x20
 # The block flag for pieces whose column indices strictly increase.
 _CANONICAL = 0x01
 _MAGIC = b"CRB1"
@@ -166,21 +177,22 @@ def _encode_payload(values: np.ndarray) -> bytes:
 
 
 def _encode_block(
-    pieces: list[_Piece], *, n_columns: int, bucket_rows: int
+    pieces: list[_Piece], *, n_columns: int, bucket_rows: int, ragged: bool = False
 ) -> tuple[bytes, bool]:
     """Encode pieces of rows as one block; return it and whether every piece is canonical.
 
     Each piece holds the rows of its pieces within the bucket, their entries,
-    and the column indices and values of those entries in turn.
+    and the column indices and values of those entries in turn; pieces of
+    ``ragged`` rows hold no column indices.
     """
     rows, lengths, indices, values = (
         np.concatenate([piece[k] for piece in pieces]) for k in range(4)
     )
     row_code = _unsigned_code(max(0, bucket_rows - 1))
     length_code = _unsigned_code(int(lengths.max(initial=0)))
-    column_code = _unsigned_code(max(0, n_columns - 1))
+    column_code = 0 if ragged else _unsigned_code(max(0, n_columns - 1))
     flags = _CANONICAL
-    index_code = column_code
+    index_code = _RAGGED if ragged else column_code
     stored_indices: np.ndarray = indices
     if indices.size:
         gaps = np.empty(indices.size, dtype=np.int64)
@@ -214,7 +226,8 @@ def _encode_block(
         index_code,
         value_code,
         int(rows.size),
-        int(indices.size),
+        # A piece of a sparse row has one column index for each value.
+        int(values.size),
         *(len(payload) for payload in payloads),
         0,
     )[: -_CHECKSUM.size]
@@ -264,6 +277,32 @@ def encoded_entry_bytes(matrix: csr_matrix) -> float:
     return len(block) / max(1, int(lengths.sum()))
 
 
+def encoded_ragged_bytes(values: np.ndarray, offsets: np.ndarray) -> float:
+    """Return the bytes on disk per byte of ragged rows like these, the bytes of each row ``i`` ``values[offsets[i]:offsets[i + 1]]``.
+
+    The rows are encoded as one block of a bucket, as a store of ragged rows
+    writes them, so the result reflects how they compress. Pass a sample of
+    the rows that a store will hold as ``entry_bytes`` of
+    :class:`SparseRowStore`.
+    """
+    bounds = np.asarray(offsets, dtype=np.int64)
+    lengths = np.diff(bounds)
+    block, _canonical = _encode_block(
+        [
+            (
+                np.arange(lengths.size, dtype=np.int64),
+                lengths,
+                np.zeros(0, dtype=np.int32),
+                np.asarray(values, dtype=np.uint8),
+            )
+        ],
+        n_columns=0,
+        bucket_rows=max(1, lengths.size),
+        ragged=True,
+    )
+    return len(block) / max(1, int(lengths.sum()))
+
+
 @dataclass(frozen=True, slots=True)
 class _Block:
     """The pieces of one block: rows within the bucket, entries, indices and values."""
@@ -298,8 +337,13 @@ def _read_blocks(
     source_dtype: np.dtype[Any],
     n_columns: int,
     bucket_rows: int,
+    ragged: bool = False,
 ) -> Iterator[_Block]:
-    """Yield the blocks of one bucket file in turn, checking every size and checksum."""
+    """Yield the blocks of one bucket file in turn, checking every size and checksum.
+
+    Blocks of ``ragged`` rows hold no column indices, and their ``indices``
+    are empty.
+    """
     number = position = 0
     while header := stream.read(_HEADER.size):
         where = f"Block {number} of {path}"
@@ -329,16 +373,27 @@ def _read_blocks(
         position += sum(sizes)
         if _checksum(header[: -_CHECKSUM.size], payloads) != checksum:
             raise RuntimeError(f"{where} fails its checksum; the file is corrupted")
-        if max(row_code, length_code, index_code & ~_GAPS) >= len(_UNSIGNED) or (
-            value_code >= len(_UNSIGNED) and value_code != _SOURCE_VALUES
-        ):
+        if max(row_code, length_code, index_code & ~(_GAPS | _RAGGED)) >= len(
+            _UNSIGNED
+        ) or (value_code >= len(_UNSIGNED) and value_code != _SOURCE_VALUES):
             raise RuntimeError(f"{where} names an unknown dtype; the file is corrupted")
+        if bool(index_code & _RAGGED) != ragged:
+            raise RuntimeError(
+                f"{where} holds "
+                + ("ragged" if index_code & _RAGGED else "sparse")
+                + " rows in a store of "
+                + ("ragged" if ragged else "sparse")
+                + " rows; the file is corrupted"
+            )
         rows = _decode_payload(payloads[0], _UNSIGNED[row_code], n_pieces, where)
         lengths = _decode_payload(
             payloads[1], _UNSIGNED[length_code], n_pieces, where
         ).astype(np.int64)
         stored = _decode_payload(
-            payloads[2], _UNSIGNED[index_code & ~_GAPS], n_entries, where
+            payloads[2],
+            _UNSIGNED[index_code & ~(_GAPS | _RAGGED)],
+            0 if ragged else n_entries,
+            where,
         )
         values = _decode_payload(
             payloads[3],
@@ -375,14 +430,18 @@ def _read_blocks(
         number += 1
 
 
-def _entry_bytes(itemsize: int, sum_duplicates: bool) -> int:
+def _entry_bytes(itemsize: int, sum_duplicates: bool, ragged: bool = False) -> int:
     """Return what loading a bucket holds for each entry.
 
     Its int64 column index and value as they are decoded, with one block's
     payloads and gaps beside them, then the pieces' CSR and its gather into
     row order; summing duplicates builds int64 coordinates and sums in at
-    least 64 bits. ``itemsize`` is the wider of the source and read dtypes.
+    least 64 bits. A byte of a ragged row is held as decoded, as joined and
+    as gathered into row order. ``itemsize`` is the wider of the source and
+    read dtypes.
     """
+    if ragged:
+        return 3 * itemsize
     per_entry = 3 * itemsize + 32
     if sum_duplicates:
         per_entry += 2 * max(itemsize, 8) + 24
@@ -390,15 +449,27 @@ def _entry_bytes(itemsize: int, sum_duplicates: bool) -> int:
 
 
 def _bucket_bytes(
-    entries: int, pieces: int, rows: int, itemsize: int, sum_duplicates: bool
+    entries: int,
+    pieces: int,
+    rows: int,
+    itemsize: int,
+    sum_duplicates: bool,
+    ragged: bool = False,
 ) -> int:
     """Return the most that loading and assembling one bucket holds.
 
     Besides its entries, each piece holds its row and length as they are
-    decoded, joined and sorted, and each row its pointers and counts.
+    decoded, joined and sorted, and each row its pointers and counts. A
+    piece of a ragged row also holds its start, end and flag, as found and
+    as gathered, while the bytes are gathered into row order.
     """
-    per_entry = _entry_bytes(itemsize, sum_duplicates)
-    return int(entries * per_entry + pieces * 48 + (rows + 1) * 32)
+    per_entry = _entry_bytes(itemsize, sum_duplicates, ragged)
+    return int(entries * per_entry + pieces * _piece_bytes(ragged) + (rows + 1) * 32)
+
+
+def _piece_bytes(ragged: bool) -> int:
+    """Return what loading a bucket holds for each piece, as :func:`_bucket_bytes` counts it."""
+    return 120 if ragged else 48
 
 
 class _PendingBuckets:
@@ -470,21 +541,26 @@ class SparseRowStore:
     """Disk-backed sparse rows that arrive in any order, read by destination row.
 
     The owner creates a store for a ``shape`` of destination rows and columns,
-    with buckets of ``bucket_rows`` rows. Rows then arrive as whole rows or
-    as loose entries, from this process as part 0 and from writers that other
-    processes open by part number; :meth:`finalize` joins every part, and
-    :meth:`read` and :meth:`iter_rows` return canonical CSR rows of
-    ``dtype``. Closing the owner removes its directory.
+    with buckets of ``bucket_rows`` rows. Rows then arrive as whole rows, as
+    loose entries or as ragged rows, from this process as part 0 and from
+    writers that other processes open by part number; :meth:`finalize` joins
+    every part, and :meth:`read` and :meth:`iter_rows` return canonical CSR
+    rows of ``dtype``, or :meth:`iter_ragged_rows` the bytes of ragged rows.
+    Closing the owner removes its directory.
 
     Args:
-        shape: Destination rows and columns.
-        dtype: The dtype that reads return.
+        shape: Destination rows and columns; for ragged rows, the most bytes
+            that one row holds.
+        dtype: The dtype that reads return; uint8 for ragged rows.
         operation: What the store does, as its errors name it inside a
             sentence, such as ``"shuffled Matrix Market import"``.
         bucket_rows: Destination rows of each bucket as rows arrive.
         whole_rows: Whether rows arrive whole, each once, through
             :meth:`append_rows`; otherwise entries arrive through
             :meth:`append_entries`.
+        ragged: Whether whole rows arrive as bytes without columns, through
+            :meth:`append_ragged_rows`, and read back through
+            :meth:`iter_ragged_rows`.
         buffer_bytes: The most that appending holds beside the rows passed to
             it: pending pieces and the encoding of one block. Every writer,
             and :meth:`finalize`, holds up to this much.
@@ -510,6 +586,7 @@ class SparseRowStore:
     Raises:
         MemoryBudgetError: If ``bucket_bytes`` cannot hold one entry.
         OSError: If the disk lacks the bytes that ``entries`` may need.
+        ValueError: If ``ragged`` rows do not arrive whole or are not uint8.
     """
 
     # The temporary directory that the owner removes when it closes.
@@ -534,11 +611,21 @@ class SparseRowStore:
         max_nnz: int = np.iinfo(np.int64).max,
         nnz_error: type[ValueError] = ValueError,
         temp_dir: str | Path | None = None,
+        ragged: bool = False,
     ) -> None:
         n_rows, n_columns = (int(value) for value in shape)
         if n_rows < 0 or n_columns < 0:
             raise ValueError(
                 f"A sparse row store's shape must not be negative, not {shape}"
+            )
+        if ragged and not (
+            whole_rows
+            and np.dtype(dtype) == np.uint8
+            and (source_dtype is None or np.dtype(source_dtype) == np.uint8)
+        ):
+            raise ValueError(
+                "Ragged rows are bytes that arrive whole; pass whole_rows=True and "
+                "dtype uint8 with ragged=True"
             )
         if not isinstance(operation, str) or not operation.strip():
             raise ValueError(
@@ -571,6 +658,7 @@ class SparseRowStore:
                 .str,
                 "bucketRows": int(bucket_rows),
                 "wholeRows": bool(whole_rows),
+                "ragged": bool(ragged),
                 "sumDuplicates": bool(sum_duplicates),
                 "bucketBytes": int(bucket_bytes),
                 "splitBytes": split,
@@ -616,6 +704,7 @@ class SparseRowStore:
         self._sourceDtype: np.dtype[Any] = np.dtype(settings["sourceDtype"])
         self._bucketRows = int(settings["bucketRows"])
         self._wholeRows = bool(settings["wholeRows"])
+        self._ragged = bool(settings["ragged"])
         self._sumDuplicates = bool(settings["sumDuplicates"])
         self._bucketLimit = int(settings["bucketBytes"])
         self._splitLimit = int(settings["splitBytes"])
@@ -637,7 +726,9 @@ class SparseRowStore:
 
     def _bucket_cost(self, entries: int, pieces: int, rows: int) -> int:
         itemsize = max(self._sourceDtype.itemsize, self.dtype.itemsize)
-        return _bucket_bytes(entries, pieces, rows, itemsize, self._sumDuplicates)
+        return _bucket_bytes(
+            entries, pieces, rows, itemsize, self._sumDuplicates, self._ragged
+        )
 
     def _folder(self, first_row: int) -> Path:
         return self.directory / f"rows-{first_row:012d}"
@@ -681,7 +772,10 @@ class SparseRowStore:
                 folder / f"rows-{int(starts[bucket]):012d}" / f"part-{part:04d}.bin"
             ),
             lambda pieces: _encode_block(
-                pieces, n_columns=self.shape[1], bucket_rows=self._bucketRows
+                pieces,
+                n_columns=self.shape[1],
+                bucket_rows=self._bucketRows,
+                ragged=self._ragged,
             ),
             self._check_disk,
         )
@@ -692,10 +786,18 @@ class SparseRowStore:
                 "This sparse row store takes no more rows: its part was finished, "
                 "or it was opened for reading"
             )
-        expected = "append_rows" if self._wholeRows else "append_entries"
+        expected, kind = self._form
         if form != expected:
-            kind = "whole rows" if self._wholeRows else "loose entries"
             raise TypeError(f"This sparse row store takes {kind}; call {expected}")
+
+    @property
+    def _form(self) -> tuple[str, str]:
+        """The method that appends this store's rows, and what it takes."""
+        if self._ragged:
+            return "append_ragged_rows", "ragged rows"
+        if self._wholeRows:
+            return "append_rows", "whole rows"
+        return "append_entries", "loose entries"
 
     def _count_entries(self, entries: int) -> None:
         self._appended += entries
@@ -754,22 +856,13 @@ class SparseRowStore:
                 f"append_rows takes {rows.size} rows of {self.shape[1]} columns, "
                 f"not a matrix of shape {matrix.shape}"
             )
-        assert self._rowPieces is not None
-        ordered = np.sort(rows)
-        repeated = ordered[1:][ordered[1:] == ordered[:-1]]
-        earlier = rows[self._rowPieces[rows] != 0]
-        if repeated.size or earlier.size:
-            twice = int(repeated[0] if repeated.size else earlier[0])
-            raise ValueError(
-                f"Destination row {twice} was appended more than once; whole rows "
-                "arrive once each"
-            )
-        del ordered, repeated, earlier
+        self._refuse_repeated_rows(rows)
         if rows.size == 0:
             return
         self._check_columns(matrix.indices)
         lengths = np.diff(matrix.indptr).astype(np.int64)
         self._count_entries(int(lengths.sum()))
+        assert self._rowPieces is not None
         self._rowPieces[rows] = 1
         self._rowEntries[rows] += lengths
         buckets = rows // self._bucketRows
@@ -782,6 +875,80 @@ class SparseRowStore:
             np.asarray(gathered.indptr, dtype=np.int64),
             self._column_indices(gathered.indices),
             checked_sparse_cast(np.asarray(gathered.data), self._sourceDtype),
+        )
+
+    def _refuse_repeated_rows(self, rows: np.ndarray) -> None:
+        """Refuse whole rows that repeat a destination row, here or in an earlier append."""
+        assert self._rowPieces is not None
+        ordered = np.sort(rows)
+        repeated = ordered[1:][ordered[1:] == ordered[:-1]]
+        earlier = rows[self._rowPieces[rows] != 0]
+        if repeated.size or earlier.size:
+            twice = int(repeated[0] if repeated.size else earlier[0])
+            raise ValueError(
+                f"Destination row {twice} was appended more than once; whole rows "
+                "arrive once each"
+            )
+
+    def append_ragged_rows(self, rows: Any, values: Any, offsets: Any) -> None:
+        """Append ragged rows: ``values[offsets[i]:offsets[i + 1]]`` is destination row ``rows[i]``.
+
+        Raises:
+            TypeError: If the store takes another form of rows, ``rows`` are
+                not integers, or ``values`` are not uint8.
+            IndexError: If a destination row is outside the store.
+            ValueError: If a destination row arrives a second time, the
+                offsets do not rise from 0 to the bytes of ``values``, one
+                more than the rows, a row holds more bytes than the store's
+                columns, or the bytes pass ``max_nnz``.
+        """
+        from ..metadata.records import take_ragged
+
+        self._require_writing("append_ragged_rows")
+        rows = self._check_rows(rows)
+        values = np.asarray(values)
+        if values.dtype != np.uint8 or values.ndim != 1:
+            raise TypeError(
+                "append_ragged_rows takes one-dimensional uint8 bytes, not an array "
+                f"of dtype {values.dtype} and shape {values.shape}"
+            )
+        bounds = np.asarray(offsets)
+        if (
+            bounds.shape != (rows.size + 1,)
+            or bounds.dtype.kind not in "iu"
+            or int(bounds[0]) != 0
+            or int(bounds[-1]) != values.size
+            or bool(np.any(np.diff(bounds.astype(np.int64)) < 0))
+        ):
+            raise ValueError(
+                f"append_ragged_rows takes {rows.size + 1} integer offsets that rise "
+                f"from 0 to the {values.size} bytes; found dtype {bounds.dtype} and "
+                f"shape {bounds.shape}"
+            )
+        bounds = bounds.astype(np.int64, copy=False)
+        self._refuse_repeated_rows(rows)
+        if rows.size == 0:
+            return
+        lengths = np.diff(bounds)
+        if int(lengths.max()) > self.shape[1]:
+            raise ValueError(
+                f"A ragged row of the {self.operation} holds at most {self.shape[1]} "
+                f"bytes; found one of {int(lengths.max())}"
+            )
+        self._count_entries(int(lengths.sum()))
+        assert self._rowPieces is not None
+        self._rowPieces[rows] = 1
+        self._rowEntries[rows] += lengths
+        buckets = rows // self._bucketRows
+        order = np.argsort(buckets, kind="stable")
+        gathered, pointers = take_ragged(values, bounds, order)
+        self._add_pieces(
+            buckets[order],
+            rows[order],
+            lengths[order],
+            pointers,
+            np.zeros(0, dtype=np.int32),
+            gathered,
         )
 
     def append_entries(self, rows: Any, columns: Any, values: Any) -> None:
@@ -863,7 +1030,11 @@ class SparseRowStore:
         """
         if entry_bytes is not None:
             return math.ceil(entries * float(entry_bytes) * _ESTIMATE_MARGIN)
-        index_bytes = _UNSIGNED[_unsigned_code(max(0, self.shape[1] - 1))].itemsize
+        index_bytes = (
+            0
+            if self._ragged
+            else _UNSIGNED[_unsigned_code(max(0, self.shape[1] - 1))].itemsize
+        )
         pieces = self.shape[0] if self._wholeRows else entries
         return entries * (self._sourceDtype.itemsize + index_bytes) + pieces * 16
 
@@ -1059,7 +1230,10 @@ class SparseRowStore:
                         (
                             block.rows[keep] + first - int(bands[target]),
                             block.lengths[keep],
-                            block.indices[entry_keep],
+                            # Ragged rows have no column indices.
+                            block.indices
+                            if self._ragged
+                            else block.indices[entry_keep],
                             block.values[entry_keep],
                         ),
                     )
@@ -1171,11 +1345,14 @@ class SparseRowStore:
             )
             itemsize = max(self._sourceDtype.itemsize, self.dtype.itemsize)
             peak = (
-                entries * _entry_bytes(itemsize, self._sumDuplicates)
-                + pieces * 48
+                entries * _entry_bytes(itemsize, self._sumDuplicates, self._ragged)
+                + pieces * _piece_bytes(self._ragged)
                 + (rows + 1) * 32
             )
-            held = entries * (self.dtype.itemsize + 8) + (rows + 1) * 8
+            # An assembled bucket holds its values, each with its int64
+            # column index unless the rows are ragged, and its row pointers.
+            index_bytes = 0 if self._ragged else 8
+            held = entries * (self.dtype.itemsize + index_bytes) + (rows + 1) * 8
             self._readBytes = (int(peak.max(initial=0)), int(held.max(initial=0)))
         peak, held = self._readBytes
         return int(self.bucket_starts.nbytes) + peak + (held if read_ahead else 0)
@@ -1216,26 +1393,37 @@ class SparseRowStore:
                     source_dtype=self._sourceDtype,
                     n_columns=self.shape[1],
                     bucket_rows=last - first,
+                    ragged=self._ragged,
                 )
 
-    def _load_bucket(self, bucket: int) -> csr_matrix:
-        """Read, check and assemble the rows of one bucket."""
+    def _read_pieces(
+        self, bucket: int
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Read and check the pieces of one bucket.
+
+        Returns:
+            Each piece's row within the bucket and entries, the column indices
+            and values of every entry, empty indices for ragged rows, and the
+            pieces' order by row, which keeps the pieces of a row in the order
+            they were appended.
+        """
         first, last = self._bucket_rows(bucket)
         n_rows = last - first
         entries = int(self.indptr[last] - self.indptr[first])
-        indices = np.empty(entries, dtype=np.int64)
+        indices = np.empty(0 if self._ragged else entries, dtype=np.int64)
         values = np.empty(entries, dtype=self._sourceDtype)
         piece_rows: list[np.ndarray] = []
         piece_lengths: list[np.ndarray] = []
         filled = 0
         for block in self._blocks(bucket):
-            count = block.indices.size
+            count = block.values.size
             if filled + count > entries:
                 raise RuntimeError(
                     f"The files of rows [{first}, {last}) hold more than the "
                     f"{entries} entries written to them"
                 )
-            indices[filled : filled + count] = block.indices
+            if not self._ragged:
+                indices[filled : filled + count] = block.indices
             values[filled : filled + count] = block.values
             filled += count
             piece_rows.append(block.rows)
@@ -1266,6 +1454,25 @@ class SparseRowStore:
             order = np.argsort(rows)
         else:
             order = np.argsort(rows, kind="stable")
+        return rows, lengths, indices, values, order
+
+    def _load_ragged_bucket(self, bucket: int) -> tuple[np.ndarray, np.ndarray]:
+        """Read, check and put in row order the ragged rows of one bucket.
+
+        Returns:
+            The rows' bytes, and the offset of each row in them, the last
+            their end.
+        """
+        from ..metadata.records import take_ragged
+
+        _rows, lengths, _indices, values, order = self._read_pieces(bucket)
+        return take_ragged(values, cumulative_nnz(lengths), order)
+
+    def _load_bucket(self, bucket: int) -> csr_matrix:
+        """Read, check and assemble the rows of one bucket."""
+        first, last = self._bucket_rows(bucket)
+        n_rows = last - first
+        rows, lengths, indices, values, order = self._read_pieces(bucket)
         pieces = csr_matrix(
             (values, indices, cumulative_nnz(lengths)), shape=(rows.size, self.shape[1])
         )
@@ -1369,7 +1576,9 @@ class SparseRowStore:
             IndexError: If the window is outside the matrix.
             RuntimeError: If the store is not finalized, or a bucket file is
                 missing, truncated or corrupted.
+            TypeError: If the store holds ragged rows.
         """
+        self._require_sparse_rows()
         start, stop = self._check_window(start, stop)
         pieces = []
         for bucket in self._buckets_of(start, stop):
@@ -1378,6 +1587,34 @@ class SparseRowStore:
                 self._cache = (bucket, self._load_bucket(bucket))
             pieces.append(self._slice(self._cache[1], bucket, start, stop))
         return self._join(pieces, stop - start)
+
+    def _require_sparse_rows(self) -> None:
+        if self._ragged:
+            raise TypeError(
+                "This sparse row store holds ragged rows; read them with "
+                "iter_ragged_rows"
+            )
+
+    def _slice_ragged(
+        self, rows: tuple[np.ndarray, np.ndarray], bucket: int, start: int, stop: int
+    ) -> tuple[np.ndarray, np.ndarray]:
+        first, last = self._bucket_rows(bucket)
+        values, offsets = rows
+        low, high = max(start, first) - first, min(stop, last) - first
+        begin = int(offsets[low])
+        return values[begin : int(offsets[high])], offsets[low : high + 1] - begin
+
+    def _join_ragged(
+        self, pieces: list[tuple[np.ndarray, np.ndarray]], rows: int
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Join the rows of a batch, which a batch of at least one row gives in one piece or more."""
+        if len(pieces) == 1:
+            return pieces[0]
+        values = np.concatenate([piece for piece, _ in pieces])
+        offsets = cumulative_nnz(
+            np.concatenate([np.diff(bounds) for _, bounds in pieces])
+        )
+        return values, offsets
 
     def iter_rows(
         self,
@@ -1399,7 +1636,68 @@ class SparseRowStore:
 
         Raises:
             ValueError: If ``batch_rows`` is below 1.
+            TypeError: If the store holds ragged rows, which
+                :meth:`iter_ragged_rows` reads.
         """
+        self._require_sparse_rows()
+        yield from self._batches(
+            start,
+            stop,
+            batch_rows,
+            read_ahead,
+            delete,
+            self._load_bucket,
+            self._slice,
+            self._join,
+        )
+
+    def iter_ragged_rows(
+        self,
+        start: int,
+        stop: int,
+        batch_rows: int,
+        *,
+        read_ahead: bool = False,
+        delete: bool = False,
+    ) -> Iterator[tuple[np.ndarray, np.ndarray]]:
+        """Yield the bytes of ragged destination rows ``[start, stop)`` in batches of ``batch_rows``.
+
+        Each batch is the rows' bytes and the offset of each row in them, the
+        last their end. ``read_ahead`` and ``delete`` work as they do for
+        :meth:`iter_rows`.
+
+        Raises:
+            ValueError: If ``batch_rows`` is below 1.
+            TypeError: If the store holds sparse rows, which :meth:`iter_rows`
+                reads.
+        """
+        if not self._ragged:
+            raise TypeError(
+                "This sparse row store holds sparse rows; read them with iter_rows"
+            )
+        yield from self._batches(
+            start,
+            stop,
+            batch_rows,
+            read_ahead,
+            delete,
+            self._load_ragged_bucket,
+            self._slice_ragged,
+            self._join_ragged,
+        )
+
+    def _batches[Rows](
+        self,
+        start: int,
+        stop: int,
+        batch_rows: int,
+        read_ahead: bool,
+        delete: bool,
+        load: Callable[[int], Rows],
+        cut: Callable[[Rows, int, int, int], Rows],
+        join: Callable[[list[Rows], int], Rows],
+    ) -> Iterator[Rows]:
+        """Yield batches of destination rows, each bucket loaded by ``load``, cut and joined into batches."""
         start, stop = self._check_window(start, stop)
         if int(batch_rows) < 1:
             raise ValueError(f"batch_rows must be at least 1, not {batch_rows}")
@@ -1409,19 +1707,19 @@ class SparseRowStore:
             if read_ahead and len(buckets) > 1
             else None
         )
-        loaded: dict[int, csr_matrix] = {}
-        ahead: tuple[int, Future[csr_matrix]] | None = None
+        loaded: dict[int, Rows] = {}
+        ahead: tuple[int, Future[Rows]] | None = None
 
-        def bucket_rows(bucket: int) -> csr_matrix:
+        def bucket_rows(bucket: int) -> Rows:
             nonlocal ahead
             if bucket not in loaded:
                 if ahead is not None and ahead[0] == bucket:
                     future, ahead = ahead[1], None
                     loaded[bucket] = future.result()
                 else:
-                    loaded[bucket] = self._load_bucket(bucket)
+                    loaded[bucket] = load(bucket)
             if executor is not None and ahead is None and bucket + 1 in buckets:
-                ahead = (bucket + 1, executor.submit(self._load_bucket, bucket + 1))
+                ahead = (bucket + 1, executor.submit(load, bucket + 1))
             return loaded[bucket]
 
         try:
@@ -1430,11 +1728,11 @@ class SparseRowStore:
                 pieces = []
                 done = []
                 for bucket in self._buckets_of(offset, end):
-                    pieces.append(self._slice(bucket_rows(bucket), bucket, offset, end))
+                    pieces.append(cut(bucket_rows(bucket), bucket, offset, end))
                     if self.bucket_starts[bucket + 1] <= end:
                         del loaded[bucket]
                         done.append(bucket)
-                yield self._join(pieces, end - offset)
+                yield join(pieces, end - offset)
                 del pieces
                 if delete:
                     for bucket in done:
@@ -1502,6 +1800,29 @@ class SparseRowStore:
         mean_entries = int(entries) / max(1, int(n_rows))
         row_bytes = mean_entries * per_entry + 48 + 32
         rows = int(max(0, int(read_bytes)) // max(1.0, row_bytes))
+        return max(1, min(max(1, int(n_rows)), rows))
+
+    @staticmethod
+    def ragged_row_read_bytes(row_bytes: int) -> int:
+        """Return what reading one ragged row of ``row_bytes`` bytes holds.
+
+        A store of ragged rows refuses, when it is finalized, a row that
+        needs more than its ``bucket_bytes``.
+        """
+        return _bucket_bytes(int(row_bytes), 1, 1, 1, False, ragged=True)
+
+    @staticmethod
+    def ragged_bucket_rows(n_rows: int, row_bytes: float, read_bytes: int) -> int:
+        """Return the rows of buckets of ragged rows of about ``row_bytes`` bytes that each read in about ``read_bytes``.
+
+        Each bucket holds at least one row and at most every row.
+        """
+        per_row = (
+            float(row_bytes) * _entry_bytes(1, False, ragged=True)
+            + _piece_bytes(ragged=True)
+            + 32
+        )
+        rows = int(max(0, int(read_bytes)) // per_row)
         return max(1, min(max(1, int(n_rows)), rows))
 
     # Conversion of loose entries.

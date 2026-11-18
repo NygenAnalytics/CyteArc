@@ -562,6 +562,180 @@ def test_a_reorder_refuses_a_disk_without_room_and_leaves_no_files(
 
 
 # ---------------------------------------------------------------------------
+# Reordering rows of text
+
+
+def _text_rows(n_rows: int, seed: int) -> list[bytes]:
+    """Rows of a text file: printable bytes of 0 to 80 bytes, each ending with a newline."""
+    rng = np.random.default_rng(seed)
+    return [
+        bytes(rng.integers(32, 127, int(rng.integers(0, 81))).astype(np.uint8)) + b"\n"
+        for _ in range(n_rows)
+    ]
+
+
+def _text_blocks(
+    rows: list[bytes], block_rows: int
+) -> Iterator[tuple[np.ndarray, np.ndarray]]:
+    """The rows in blocks: each block's bytes and the offset of each row in them."""
+    for first in range(0, len(rows), block_rows):
+        block = rows[first : first + block_rows]
+        offsets = np.zeros(len(block) + 1, dtype=np.int64)
+        np.cumsum([len(row) for row in block], out=offsets[1:])
+        yield np.frombuffer(b"".join(block), dtype=np.uint8).copy(), offsets
+
+
+def _text_plan(
+    n_rows: int, block_bytes: int = 1 << 20, max_bytes: int = 64 << 20
+) -> export.TextReorder:
+    """A plan for rows of at most 81 bytes, in blocks of 50 rows and about ``block_bytes``."""
+    return export.plan_text_reorder(n_rows, 81, 50, block_bytes, max_bytes)
+
+
+def _batch_rows(batches) -> list[bytes]:
+    return [
+        bytes(values[offsets[i] : offsets[i + 1]])
+        for values, offsets in batches
+        for i in range(offsets.size - 1)
+    ]
+
+
+@pytest.mark.parametrize("block_bytes", [1 << 20, 2048])
+def test_text_rows_reach_their_places_and_go_as_they_are_read(
+    tmp_path, block_bytes
+) -> None:
+    rows = _text_rows(700, 1)
+    destinations = np.random.default_rng(2).permutation(700)
+    # Blocks of a few kilobytes read back from buckets of a few rows, so the
+    # rows spread over many of them.
+    batches = export.reordered_text_rows(
+        _text_blocks(rows, 50),
+        destinations,
+        _text_plan(700, block_bytes),
+        operation="text reorder",
+        temp_dir=tmp_path,
+    )
+    # The rows go to the temporary files only once the batches are read.
+    assert list(tmp_path.iterdir()) == []
+    found = []
+    remaining = []
+    for batch in batches:
+        found += _batch_rows([batch])
+        (directory,) = tmp_path.iterdir()
+        remaining.append(len(list(directory.glob("rows-*[0-9]"))))
+    expected = [b""] * 700
+    for row, place in zip(rows, destinations.tolist(), strict=True):
+        expected[place] = row
+    assert found == expected
+    # Each bucket's files are deleted once its rows are taken, and the
+    # store's folder once the last batch is.
+    assert remaining == sorted(remaining, reverse=True)
+    assert (remaining[0] > 10) == (block_bytes < 1 << 20)
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_a_text_reorder_of_no_rows_yields_none(tmp_path) -> None:
+    batches = export.reordered_text_rows(
+        iter([]),
+        np.zeros(0, dtype=np.int64),
+        _text_plan(0),
+        operation="text reorder",
+        temp_dir=tmp_path,
+    )
+    assert _batch_rows(batches) == []
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    ("n_rows", "places", "message"),
+    [
+        (10, np.arange(9), "has places for 9 rows and was sent more"),
+        (9, np.arange(10), "has places for 10 rows and was sent 9"),
+        (10, np.r_[np.arange(9), 3], "Destination row 3 was appended more than once"),
+    ],
+)
+def test_a_text_reorder_refuses_rows_that_miss_their_places(
+    tmp_path, n_rows, places, message
+) -> None:
+    batches = export.reordered_text_rows(
+        _text_blocks(_text_rows(n_rows, 3), 4),
+        places,
+        _text_plan(places.size),
+        operation="text reorder",
+        temp_dir=tmp_path,
+    )
+    with pytest.raises(ValueError, match=message):
+        list(batches)
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_closing_a_text_reorder_early_removes_its_files(tmp_path) -> None:
+    batches = export.reordered_text_rows(
+        _text_blocks(_text_rows(300, 4), 50),
+        np.random.default_rng(5).permutation(300),
+        _text_plan(300, 2048),
+        operation="text reorder",
+        temp_dir=tmp_path,
+    )
+    next(batches)
+    assert len(list(tmp_path.iterdir())) == 1
+    batches.close()
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_a_text_reorder_refuses_a_disk_without_room(tmp_path, monkeypatch) -> None:
+    usage = shutil.disk_usage(tmp_path)
+    monkeypatch.setattr(
+        sparse_module.shutil, "disk_usage", lambda path: usage._replace(free=100)
+    )
+    batches = export.reordered_text_rows(
+        _text_blocks(_text_rows(300, 6), 50),
+        np.arange(300),
+        _text_plan(300),
+        operation="text reorder",
+        temp_dir=tmp_path,
+    )
+    with pytest.raises(OSError, match="Text reorder needs .* temporary bytes"):
+        list(batches)
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_a_text_reorder_plan_fits_its_bytes_or_names_bytes_that_fit_it() -> None:
+    widest = 81
+
+    def plan(max_bytes: int, block_bytes: int = 1 << 20) -> export.TextReorder:
+        return export.plan_text_reorder(1000, widest, 50, block_bytes, max_bytes)
+
+    # The plan of the smallest buckets reads one row of the widest at a time
+    # and keeps no rows waiting.
+    smallest = plan(0)
+    assert smallest.read_bytes == SparseRowStore.ragged_row_read_bytes(widest)
+    assert smallest.bucket_bytes == 2 * smallest.read_bytes
+    assert smallest.buffer_bytes == 0
+    least = smallest.held_bytes
+    for max_bytes in (least, least + 1, 10 * least, 64 << 20, 1 << 30):
+        fitted = plan(max_bytes)
+        assert fitted.held_bytes <= max_bytes
+        assert smallest.read_bytes <= fitted.read_bytes <= 1 << 20
+        assert fitted.bucket_bytes == 2 * fitted.read_bytes
+        assert fitted.buffer_bytes <= 1 << 20
+    # Below it, a plan fits, or holds more, and a plan within what it holds
+    # fits, so the budget that a refusal names passes.
+    for max_bytes in (0, 1_000, 20_000, least // 2, least - 1):
+        held = plan(max_bytes).held_bytes
+        assert held <= max_bytes or plan(held).held_bytes <= held
+    # With room, buckets read in about a block, and a block of rows waits.
+    roomy = plan(1 << 30)
+    assert roomy.read_bytes == 1 << 20 and roomy.buffer_bytes == 1 << 20
+    # A block of a few bytes still reads a row of the widest.
+    assert plan(1 << 30, block_bytes=10).read_bytes == smallest.read_bytes
+    # A block holds no more rows than the reorder.
+    assert export.plan_text_reorder(10, widest, 10**6, 1 << 20, 1 << 30) == (
+        export.plan_text_reorder(10, widest, 10, 1 << 20, 1 << 30)
+    )
+
+
+# ---------------------------------------------------------------------------
 # H5AD and AnnData exports of a shuffled import
 
 
