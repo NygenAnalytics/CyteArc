@@ -634,6 +634,39 @@ def test_text_rows_reach_their_places_and_go_as_they_are_read(
     assert list(tmp_path.iterdir()) == []
 
 
+def test_text_rows_wait_in_their_files_as_they_are(tmp_path, monkeypatch) -> None:
+    # Rows that repeat most of their text, which zstd would shrink to a fifth.
+    rows = [
+        f"cell{k:04d}_contig_1\tTRAV1-2\tCASSLGTDTQYF\n".encode() for k in range(600)
+    ]
+    finalize = SparseRowStore.finalize
+    spilled = []
+
+    def recorded(store):
+        finalize(store)
+        spilled.append(
+            sum(path.stat().st_size for path in store.directory.glob("rows-*/*.bin"))
+        )
+
+    monkeypatch.setattr(SparseRowStore, "finalize", recorded)
+    places = np.random.default_rng(7).permutation(600)
+    batches = export.reordered_text_rows(
+        _text_blocks(rows, 50),
+        places,
+        _text_plan(600),
+        operation="text reorder",
+        temp_dir=tmp_path,
+    )
+    expected = [b""] * 600
+    for row, place in zip(rows, places.tolist(), strict=True):
+        expected[place] = row
+    assert _batch_rows(batches) == expected
+    # The files hold every row's bytes, and little beside them: each row's
+    # place and length, and each block's headers.
+    total = sum(len(row) for row in rows)
+    assert total <= spilled[0] <= total + 8 * 600 + 4096
+
+
 def test_a_text_reorder_of_no_rows_yields_none(tmp_path) -> None:
     batches = export.reordered_text_rows(
         iter([]),

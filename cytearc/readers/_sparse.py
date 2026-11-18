@@ -25,14 +25,17 @@ more than the split size to read, and any process may open the finalized store
 by its path to read it.
 
 On disk, every bucket is a directory holding one file per writer. A file is a
-sequence of blocks, each a header and four Blosc payloads (zstd level 1 with
-byte shuffle): the row of each piece within its bucket, the entries of each
-piece, their column indices and their values. Values use the narrowest
-unsigned dtype that holds every value of the block exactly, and the source
-dtype otherwise; column indices are stored as gaps within each piece when
-they never decrease, and a block of ragged rows stores none. The header
-records these codes, the payload sizes and a CRC-32 of the payloads, because
-Blosc decodes corrupted and truncated buffers without an error.
+sequence of blocks, each a header and four Blosc payloads: the row of each
+piece within its bucket, the entries of each piece, their column indices and
+their values. Payloads are compressed with zstd at level 1 and byte shuffle,
+except those of ragged rows, which are stored uncompressed, since compressing
+text took half or more of the time that its reorder added; Blosc decodes
+either from the frame's header. Values use the narrowest unsigned dtype that
+holds every value of the block exactly, and the source dtype otherwise; column
+indices are stored as gaps within each piece when they never decrease, and a
+block of ragged rows stores none. The header records these codes, the payload
+sizes and a CRC-32 of the payloads, because Blosc decodes corrupted and
+truncated buffers without an error.
 """
 
 import json
@@ -55,14 +58,11 @@ from scipy.sparse import coo_matrix, csr_matrix
 from ..utils.arrays import canonicalize_sparse, checked_sparse_cast, cumulative_nnz
 from ..utils.memory_budget import MemoryBudgetError
 
-__all__ = [
-    "ROW_BYTES",
-    "SparseRowStore",
-    "encoded_entry_bytes",
-    "encoded_ragged_bytes",
-]
+__all__ = ["ROW_BYTES", "SparseRowStore", "encoded_entry_bytes"]
 
 _CODEC = Blosc(cname="zstd", clevel=1, shuffle=Blosc.SHUFFLE)
+# Ragged rows are stored as they are, in Blosc frames that _CODEC decodes.
+_RAGGED_CODEC = Blosc(cname="lz4", clevel=0, shuffle=Blosc.NOSHUFFLE)
 _UNSIGNED = tuple(np.dtype(name) for name in ("u1", "u2", "u4", "u8"))
 # The value code of a block whose values keep the source dtype.
 _SOURCE_VALUES = 255
@@ -169,11 +169,11 @@ def _piece_starts(lengths: np.ndarray) -> np.ndarray:
     return starts
 
 
-def _encode_payload(values: np.ndarray) -> bytes:
+def _encode_payload(values: np.ndarray, codec: Blosc = _CODEC) -> bytes:
     # Blosc refuses to decode the buffer of an empty array.
     if values.size == 0:
         return b""
-    return bytes(_CODEC.encode(np.ascontiguousarray(values)))
+    return bytes(codec.encode(np.ascontiguousarray(values)))
 
 
 def _encode_block(
@@ -183,7 +183,8 @@ def _encode_block(
 
     Each piece holds the rows of its pieces within the bucket, their entries,
     and the column indices and values of those entries in turn; pieces of
-    ``ragged`` rows hold no column indices.
+    ``ragged`` rows hold no column indices, and their block is stored
+    uncompressed.
     """
     rows, lengths, indices, values = (
         np.concatenate([piece[k] for piece in pieces]) for k in range(4)
@@ -210,13 +211,18 @@ def _encode_block(
             flags = 0
     value_code = _value_code(values)
     stored_values = (
-        values if value_code == _SOURCE_VALUES else values.astype(_UNSIGNED[value_code])
+        values
+        if value_code == _SOURCE_VALUES
+        else values.astype(_UNSIGNED[value_code], copy=False)
     )
+    codec = _RAGGED_CODEC if ragged else _CODEC
     payloads = (
-        _encode_payload(rows.astype(_UNSIGNED[row_code], copy=False)),
-        _encode_payload(lengths.astype(_UNSIGNED[length_code], copy=False)),
-        _encode_payload(stored_indices.astype(_UNSIGNED[column_code], copy=False)),
-        _encode_payload(stored_values),
+        _encode_payload(rows.astype(_UNSIGNED[row_code], copy=False), codec),
+        _encode_payload(lengths.astype(_UNSIGNED[length_code], copy=False), codec),
+        _encode_payload(
+            stored_indices.astype(_UNSIGNED[column_code], copy=False), codec
+        ),
+        _encode_payload(stored_values, codec),
     )
     header = _HEADER.pack(
         _MAGIC,
@@ -231,8 +237,10 @@ def _encode_block(
         *(len(payload) for payload in payloads),
         0,
     )[: -_CHECKSUM.size]
+    # One join, so that encoding holds three copies of an uncompressed block:
+    # the pieces joined, their payloads and the block.
     return (
-        header + _CHECKSUM.pack(_checksum(header, payloads)) + b"".join(payloads),
+        b"".join((header, _CHECKSUM.pack(_checksum(header, payloads)), *payloads)),
         bool(flags & _CANONICAL),
     )
 
@@ -273,32 +281,6 @@ def encoded_entry_bytes(matrix: csr_matrix) -> float:
         ],
         n_columns=n_columns,
         bucket_rows=max(1, n_rows),
-    )
-    return len(block) / max(1, int(lengths.sum()))
-
-
-def encoded_ragged_bytes(values: np.ndarray, offsets: np.ndarray) -> float:
-    """Return the bytes on disk per byte of ragged rows like these, the bytes of each row ``i`` ``values[offsets[i]:offsets[i + 1]]``.
-
-    The rows are encoded as one block of a bucket, as a store of ragged rows
-    writes them, so the result reflects how they compress. Pass a sample of
-    the rows that a store will hold as ``entry_bytes`` of
-    :class:`SparseRowStore`.
-    """
-    bounds = np.asarray(offsets, dtype=np.int64)
-    lengths = np.diff(bounds)
-    block, _canonical = _encode_block(
-        [
-            (
-                np.arange(lengths.size, dtype=np.int64),
-                lengths,
-                np.zeros(0, dtype=np.int32),
-                np.asarray(values, dtype=np.uint8),
-            )
-        ],
-        n_columns=0,
-        bucket_rows=max(1, lengths.size),
-        ragged=True,
     )
     return len(block) / max(1, int(lengths.sum()))
 

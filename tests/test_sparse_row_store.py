@@ -11,6 +11,7 @@ from multiprocessing import get_context
 from pathlib import Path
 from types import SimpleNamespace
 
+import numcodecs
 import numpy as np
 import pytest
 from scipy.sparse import coo_matrix, csr_matrix, vstack
@@ -715,6 +716,33 @@ def test_pending_pieces_stay_within_the_buffer(tmp_path):
         store.close()
 
 
+@pytest.mark.parametrize("ragged", [False, True], ids=["sparse", "ragged"])
+def test_encoding_a_block_holds_at_most_three_copies_of_its_pieces(ragged):
+    # Pending pieces take a quarter of the buffer and the encoding of one
+    # block the rest, three copies of it, though ragged rows stay uncompressed.
+    rng = np.random.default_rng(13)
+    lengths = rng.integers(0, 200, 20_000)
+    starts = np.repeat(np.cumsum(lengths) - lengths, lengths)
+    entries = int(lengths.sum())
+    if ragged:
+        indices = np.zeros(0, dtype=np.int32)
+        values = rng.integers(32, 127, entries).astype(np.uint8)
+    else:
+        indices = ((np.arange(entries) - starts) * 3).astype(np.int32)
+        values = rng.random(entries).astype(np.float32)
+    piece = (np.arange(lengths.size, dtype=np.int64), lengths, indices, values)
+    held = sum(int(array.nbytes) for array in piece)
+    tracemalloc.start()
+    try:
+        _sparse._encode_block(
+            [piece], n_columns=600, bucket_rows=lengths.size, ragged=ragged
+        )
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert peak <= 3 * held
+
+
 def _bucket_file(store: SparseRowStore, first_row: int = 0) -> Path:
     return next(store.directory.glob(f"rows-{first_row:012d}/part-*.bin"))
 
@@ -1376,21 +1404,25 @@ def test_ragged_buckets_split_and_go_as_their_rows_are_read(tmp_path):
         store.close()
 
 
-def test_ragged_rows_hold_no_column_indices(tmp_path):
-    # Rows of one repeated text, which compress to a few bytes each.
+def test_ragged_rows_are_stored_as_they_are_without_column_indices(tmp_path):
+    # Rows of one repeated text, which zstd compresses to a few bytes each.
     rows = [b"TRAV1-2\tCASSLGTDTQYF\tIGHM\n"] * 500
     values = np.frombuffer(b"".join(rows), dtype=np.uint8)
     offsets = np.arange(0, values.size + 1, len(rows[0]), dtype=np.int64)
-    assert _sparse.encoded_ragged_bytes(values, offsets) < 0.2
     store = _ragged_store(tmp_path, 500, bucket_rows=500)
     try:
         store.append_ragged_rows(np.arange(500), values, offsets)
         store.finalize()
-        # The block's column indices take no bytes, and its values compress.
-        path = _bucket_file(store)
-        header = _sparse._HEADER.unpack_from(path.read_bytes())
-        assert header[4] == _sparse._RAGGED and header[-2 - 1] == 0
-        assert path.stat().st_size < values.size // 5
+        data = _bucket_file(store).read_bytes()
+        fields = _sparse._HEADER.unpack_from(data)
+        row_bytes, length_bytes, index_bytes, value_bytes = fields[8:12]
+        # The block's column indices take no bytes, and its values are a
+        # Blosc frame of the bytes as they are: a 16-byte header, then the
+        # bytes.
+        assert fields[4] == _sparse._RAGGED and index_bytes == 0
+        assert value_bytes == values.size + 16
+        start = _sparse._HEADER.size + row_bytes + length_bytes + index_bytes + 16
+        assert data[start : start + values.size] == values.tobytes()
         # An assembled bucket holds the bytes and the row offsets, without an
         # eight-byte index for each byte.
         assert store.read_bytes(read_ahead=True) - store.read_bytes() == (
@@ -1398,6 +1430,21 @@ def test_ragged_rows_hold_no_column_indices(tmp_path):
         )
     finally:
         store.close()
+    # Sparse rows of the same bytes, in one block, still compress with zstd.
+    sparse = _whole_store(tmp_path, (500, 26), np.uint8, bucket_rows=500)
+    try:
+        sparse.append_rows(
+            np.arange(500), csr_matrix(values.reshape(500, 26).astype(np.uint8))
+        )
+        sparse.finalize()
+        data = _bucket_file(sparse).read_bytes()
+        fields = _sparse._HEADER.unpack_from(data)
+        start = _sparse._HEADER.size + sum(fields[8:11])
+        frame = data[start : start + fields[11]]
+        assert fields[11] < values.size // 5
+        assert numcodecs.blosc.cbuffer_complib(frame) == "Zstd"
+    finally:
+        sparse.close()
 
 
 def test_a_ragged_read_holds_no_more_than_the_store_reports(tmp_path):
