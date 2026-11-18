@@ -363,6 +363,10 @@ def _prepare_create_store(
             profile=_storage_profile(storeUri),
             policy=_count_matrix_policy(countMatrix),
             io=_storage_io_policy(storageIo),
+            # A shuffled import sends every row to temporary files while the
+            # writer is built, inside inputSetupSeconds. The file's order keeps
+            # seconds comparable with runs from before imports shuffled.
+            shuffle_cells=False,
         )
         # Keep multi-process writes for a wrapped store. The store probe then
         # counts only the operations of this process.
@@ -705,12 +709,13 @@ def install_stage_zarr_runtime() -> None:
     ensure_zarr_host_ceiling()
 
 
-# createStore times only the counts write, which keeps the definition of the
-# published benchmark tables.
+# createStore imports in the file's order and times only the counts write,
+# which keeps the definition of the published benchmark tables.
 CREATE_STORE_TIMING = (
     "seconds covers writer._write_counts only; inputSetupSeconds covers inspecting "
     "and opening the H5AD and constructing H5adToZarr (dtype scan, cell and feature metadata, "
-    "and assay creation)"
+    "and assay creation). The stage imports in the file's order (shuffle_cells=False), "
+    "so neither covers the shuffle that imports apply by default"
 )
 
 

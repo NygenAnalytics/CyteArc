@@ -1324,8 +1324,7 @@ CyteArc validates persisted data and public arguments against the following cont
   `MatrixSourceError` naming the slot, instead of `KeyError`.
 - Profiling fixtures name ribosomal features, so their files and checksums change; prepare fixtures
   under a new `datasetPrefixUri`.
-- A forced profiling `createStore` job deletes its store prefix before it downloads; an unforced one
-  refuses any non-empty destination.
+- A forced profiling `createStore` job deletes its store prefix before it downloads; an unforced one refuses any non-empty destination. The stage imports in the file's order and does not measure the shuffle that imports apply by default, as `profiling/AGENTS.md` describes.
 - Harmony is CyteArc's implementation of Harmony2: k-means++ seeding, a stabilized diversity
   penalty, a dynamic ridge penalty of `ridge_alpha` times each batch level's expected mass in a
   cluster, and batch pruning. `harmony_params` and the `fit_harmony` keywords rename `nclust` to

@@ -139,7 +139,11 @@ def _convert_cellranger_h5(source: Path, store: Path) -> None:
     import cytearc
 
     reader = cytearc.CrH5Reader(str(source / "data.h5"))
-    cytearc.CrToZarr(reader, zarr_loc=str(store), nthreads=ZARR_NTHREADS).dump()
+    # Import in the file's order, as the published stores were, so a rebuild
+    # keeps the clusters that the tutorials name.
+    cytearc.CrToZarr(
+        reader, zarr_loc=str(store), nthreads=ZARR_NTHREADS, shuffle_cells=False
+    ).dump()
 
 
 def _convert_h5ad(source: Path, store: Path) -> None:
@@ -147,7 +151,11 @@ def _convert_h5ad(source: Path, store: Path) -> None:
 
     inspection = cytearc.inspect_h5ad(str(source / "data.h5ad"))
     reader = cytearc.H5adReader.from_inspect(inspection)
-    cytearc.H5adToZarr(reader, zarr_loc=str(store), nthreads=ZARR_NTHREADS).dump()
+    # Import in the file's order, as the published stores were, so a rebuild
+    # keeps the clusters that the tutorials name.
+    cytearc.H5adToZarr(
+        reader, zarr_loc=str(store), nthreads=ZARR_NTHREADS, shuffle_cells=False
+    ).dump()
 
 
 def _convert_tabula_sapiens(source: Path, store: Path) -> None:
@@ -180,6 +188,10 @@ def _convert_tabula_sapiens(source: Path, store: Path) -> None:
             mem_budget=TABULA_SAPIENS_MEMORY_BYTES,
             nthreads=ZARR_NTHREADS,
             profile="cloud",
+            # Import in the file's order, as the published store was, so a
+            # rebuild draws the same 100,000-cell sample and keeps the
+            # clusters that the tutorials name.
+            shuffle_cells=False,
         ).dump()
     finally:
         reader.close()
@@ -718,6 +730,9 @@ def _convert_teaseq(source: Path, store: Path) -> None:
             str(store),
             mem_budget=24 * (1 << 30),
             nthreads=ZARR_NTHREADS,
+            # Import in the object's order, as the published store was, so a
+            # rebuild keeps the clusters that the tutorials name.
+            shuffle_cells=False,
         ).dump()
 
     import cytearc

@@ -248,11 +248,7 @@ def test_create_store_defers_counts_t_to_write_stage(tmp_path):
     )
     after_create = zarr.open_group(str(store_path), mode="r")
     assert "countsT" not in after_create["RNA"]
-    # The stage imports as users do, with the cells shuffled; row r of the
-    # store holds the file's row sourceRow[r].
-    rows = after_create["cellData/sourceRow"][:]
-    assert not np.array_equal(rows, np.arange(values.shape[0]))
-    np.testing.assert_array_equal(after_create["RNA/counts"][:], values[rows])
+    np.testing.assert_array_equal(after_create["RNA/counts"][:], values)
 
     write = run_stage(
         "writeCountsT",
@@ -268,7 +264,7 @@ def test_create_store_defers_counts_t_to_write_stage(tmp_path):
     assert write.details["beforeComplete"] is None
     assert write.details["complete"] is True
     after_write = zarr.open_group(str(store_path), mode="r")
-    np.testing.assert_array_equal(after_write["RNA/countsT"][:], values[rows].T)
+    np.testing.assert_array_equal(after_write["RNA/countsT"][:], values.T)
 
 
 def _write_h5ad_input(path, matrix_key):
@@ -315,10 +311,7 @@ def test_create_store_inspects_h5ad_count_matrix_and_feature_names(
 
     assert result.status == "ok", result.error
     root = zarr.open_group(str(store_path), mode="r")
-    # The stage imports as users do, with the cells shuffled.
-    rows = root["cellData/sourceRow"][:]
-    assert not np.array_equal(rows, np.arange(len(counts)))
-    np.testing.assert_array_equal(root["RNA/counts"][:], counts[rows])
+    np.testing.assert_array_equal(root["RNA/counts"][:], counts)
     np.testing.assert_array_equal(
         root["RNA/featureData/names"][:], ["RPL1", "MT-X", "GENE"]
     )
@@ -330,6 +323,53 @@ def test_create_store_inspects_h5ad_count_matrix_and_feature_names(
         "nColumns": 3,
     }
     assert "countsT" not in root["RNA"]
+
+
+@pytest.mark.parametrize("layout", ["csr", "csc"])
+def test_create_store_imports_cells_in_the_file_order(tmp_path, layout):
+    import anndata
+    import pandas as pd
+    from scipy.sparse import csc_matrix, csr_matrix
+
+    # Each cell holds one count of its own, so a cell out of place shows in
+    # the stored counts. A CSC matrix reaches the counts write through a
+    # conversion to rows, a CSR matrix directly.
+    n_cells, n_features = 40, 5
+    values = np.zeros((n_cells, n_features), dtype=np.float32)
+    values[np.arange(n_cells), np.arange(n_cells) % n_features] = np.arange(
+        1, n_cells + 1
+    )
+    ids = [f"cell{row:02d}" for row in range(n_cells)]
+    path = tmp_path / "cells.h5ad"
+    anndata.AnnData(
+        X=csr_matrix(values) if layout == "csr" else csc_matrix(values),
+        obs=pd.DataFrame(index=ids),
+        var=pd.DataFrame(index=[f"g{column}" for column in range(n_features)]),
+    ).write_h5ad(path)
+    store_path = tmp_path / "store.zarr"
+
+    result = run_stage(
+        "createStore",
+        nRows=n_cells,
+        storeUri=str(store_path),
+        workflow=WorkflowParameters(),
+        resources=_resources(),
+        localH5adPath=path,
+        sampleIntervalSeconds=0.01,
+        submissionId="testsubmission",
+    )
+
+    assert result.status == "ok", result.error
+    root = zarr.open_group(str(store_path), mode="r")
+    # Row r of the store holds the file's row r. An import in the file's
+    # order records neither the sourceRow column nor the cellOrder seed.
+    np.testing.assert_array_equal(root["cellData/ids"][:], ids)
+    np.testing.assert_array_equal(root["RNA/counts"][:], values)
+    assert "sourceRow" not in root["cellData"]
+    assert "cellOrder" not in root["cellData"].attrs
+    # The result tells its reader that the timings leave the shuffle out.
+    assert result.details is not None
+    assert "file's order (shuffle_cells=False)" in result.details["timingDefinition"]
 
 
 @pytest.mark.parametrize(
