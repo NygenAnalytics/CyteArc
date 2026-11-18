@@ -8,6 +8,7 @@ import zarr
 
 from ..storage.types import as_zarr_array, as_zarr_group
 from ..storage.arrays import create_zarr_obj_array
+from ..storage.cell_order import copy_cell_order
 from ..storage.count_matrix import (
     COUNT_MATRIX_LAYOUT_KEY,
     CountMatrixPolicy,
@@ -500,6 +501,9 @@ class SubsetZarr:
             profile=self.profile,
             chunk_rows=column_chunk_rows,
         )
+        # The subset keeps store order, so a shuffled store's rows stay in
+        # random order, and each keeps its sourceRow.
+        copy_cell_order(cell_data, cell_group)
         if self.resetCells:
             create_zarr_obj_array(
                 cell_group,

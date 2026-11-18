@@ -10,6 +10,7 @@ from zarr.core.sync import sync
 
 from cytearc.storage.arrays import create_numeric_array
 from cytearc.storage.budget import ResourceBudget, resolve_budget
+from cytearc.storage.cell_order import CELL_ORDER_ATTR
 from cytearc.storage.copy import (
     _copy_metadata_array,
     copy_zarr_group_tree,
@@ -250,6 +251,8 @@ def _copy_group(
                     "tfDenominator",
                     "defaultAssay",
                     "assayTypes",
+                    # The cells keep their order, and the cell table its record.
+                    CELL_ORDER_ATTR,
                 }:
                     continue
                 new_group.attrs[attr_key] = attr_val

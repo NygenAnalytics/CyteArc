@@ -1297,11 +1297,13 @@ def test_writer_implementations_are_runtime_isolated():
     # TreeData's reading and writing share one module, so a store that
     # character export writes is the layout that import reads.
     # Imports that shuffle cells send the rows they read in the file's order
-    # to the row bucket store, from which their counts write reads them.
+    # to the row bucket store, from which their counts write reads them. An
+    # export in source order sends its rows through the same store.
     row_spill = {"readers._row_spill", "readers._sparse"}
     shared_reader_codecs = {
         "characters.py": {"readers._treedata"},
         "csv.py": row_spill,
+        "export.py": {"readers._sparse"},
         "seurat.py": row_spill,
     }
     matching_reader_exports = {

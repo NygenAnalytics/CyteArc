@@ -1036,6 +1036,7 @@ def create_composite(
             block_rows=metadata_chunk_rows(row_plan),
             scan_rows=scan_rows,
             excluded_columns=excluded_columns,
+            n_cells=row_plan.nCells,
         )
         metadata_plan = admit_cell_metadata_plan(
             metadata_plan, row_plan, resources, resident_bytes=resident

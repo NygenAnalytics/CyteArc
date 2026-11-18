@@ -2480,7 +2480,7 @@ def test_composite_reopen_rejects_invalid_saved_contract(
         ("type", TypeError, "open DataStore"),
         ("selection", ValueError, "existing source"),
         ("occupied_store", FileExistsError, "already exists"),
-        ("source_column_reserved", ValueError, "not ids, I, or names"),
+        ("source_column_reserved", ValueError, "not ids, I, names, or sourceRow"),
         ("source_column_nested", ValueError, "must not contain '/'"),
         ("source_column_type", TypeError, "must be strings"),
         ("source_column_taken", ValueError, "conflicts with merged metadata"),

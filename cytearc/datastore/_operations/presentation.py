@@ -49,6 +49,9 @@ from ...storage.selections import (
 from ...utils.arguments import bool_argument
 
 if TYPE_CHECKING:
+    import os
+
+    from ...storage.cell_order import CellOrder
     from ...writers.export import (
         H5adCategorical,
         H5adExportPlan,
@@ -114,21 +117,25 @@ def _frozen_field(
 def _frozen_coordinates(
     view: "PipelineAxisView",
     columns: tuple[str, ...],
+    rows: np.ndarray | None = None,
 ) -> np.ndarray:
-    """Stack frozen coordinate fields into a cells-by-components array."""
-    return np.column_stack(
+    """Stack frozen coordinate fields into a cells-by-components array, at ``rows`` of them."""
+    stacked = np.column_stack(
         [apply_missing_mask(*view._selected_field(column)) for column in columns]
     )
+    return stacked if rows is None else stacked[rows]
 
 
 def _raw_count_blocks(
     assay: Any,
     cell_idx: np.ndarray,
     feat_idx: np.ndarray,
+    held_bytes: int = 0,
 ) -> Iterator[np.ndarray]:
     """Stream the raw counts of the selected cells and features by row block.
 
-    The export's conversion of each block to CSR is charged as resident.
+    The export's conversion of each block to CSR is charged as resident,
+    beside ``held_bytes``, what the export holds while the counts stream.
     """
     from ...writers.export import h5ad_conversion_bytes, largest_block_rows
 
@@ -138,7 +145,8 @@ def _raw_count_blocks(
         msg=f"Exporting {assay.name} raw counts",
         prefetch=None,
         row_mask=None,
-        resident_bytes=h5ad_conversion_bytes(
+        resident_bytes=int(held_bytes)
+        + h5ad_conversion_bytes(
             selected.dtype, selected.shape[1], largest_block_rows(selected)
         ),
     )
@@ -149,6 +157,7 @@ def _raw_count_matrix(
     assay: Any,
     cell_idx: np.ndarray,
     feat_idx: np.ndarray,
+    held_bytes: int = 0,
 ) -> "H5adMatrix":
     """Plan the export of the raw counts of selected cells and features."""
     from ...writers.export import H5adMatrix
@@ -156,7 +165,7 @@ def _raw_count_matrix(
     return H5adMatrix(
         shape=(len(cell_idx), len(feat_idx)),
         dtype=np.dtype(assay.rawData.dtype),
-        blocks=partial(_raw_count_blocks, assay, cell_idx, feat_idx),
+        blocks=partial(_raw_count_blocks, assay, cell_idx, feat_idx, held_bytes),
     )
 
 
@@ -165,10 +174,12 @@ def _stored_row_blocks(
     nthreads: int,
     resources: Any,
     msg: str,
+    held_bytes: int = 0,
 ) -> Iterator[np.ndarray]:
     """Stream a stored dense matrix by row block, as stored.
 
-    The export's conversion of each block to CSR is charged as resident.
+    The export's conversion of each block to CSR is charged as resident,
+    beside ``held_bytes``, what the export holds while the values stream.
     """
     from ...matrix import ChunkedArray
     from ...writers.export import h5ad_conversion_bytes, largest_block_rows
@@ -179,7 +190,8 @@ def _stored_row_blocks(
         msg=msg,
         prefetch=None,
         row_mask=None,
-        resident_bytes=h5ad_conversion_bytes(
+        resident_bytes=int(held_bytes)
+        + h5ad_conversion_bytes(
             data.dtype, int(data.shape[1]), largest_block_rows(matrix)
         ),
     )
@@ -260,6 +272,11 @@ def _materialized(matrix: csr_matrix) -> Iterator[csr_matrix]:
     yield matrix
 
 
+def _ordered_rows(matrix: csr_matrix, order: np.ndarray | None) -> csr_matrix:
+    """Return the rows of ``matrix`` at ``order``, or ``matrix`` without one."""
+    return matrix if order is None else csr_matrix(matrix[order])
+
+
 def _aligned_coordinates(values: Any, cell_ids: np.ndarray) -> np.ndarray:
     """Return imported coordinates with one row per selected cell, in order.
 
@@ -295,8 +312,14 @@ class _PresentationOperationsMixin(_PresentationOperationsBase):
         obs: "Mapping[str, H5adSource] | None" = None,
         graph: ArtifactRef | None = None,
         dtype: Any | None = None,
+        cell_order: "CellOrder" = "source",
     ) -> Any:
         """Return an assay as an in-memory AnnData object.
+
+        Cells are in the order of the file that the store imported, by
+        default, as their ``sourceRow`` records it, with or without ``run``;
+        a store that holds no ``sourceRow`` is in that order already, and
+        ``cell_order="stored"`` keeps store order.
 
         Cell and feature metadata are copied to ``obs`` and ``var``. A
         categorical column, which the store keeps as codes beside its
@@ -346,9 +369,9 @@ class _PresentationOperationsMixin(_PresentationOperationsBase):
             matrix: Whether ``X`` contains raw counts or normalized values.
             feature_indexes: Global feature rows to export, in the requested order.
             feature_names: Feature names to export, in the requested order.
-            cell_selection: Cell-selection artifact whose cells are exported, in
-                store order; it excludes ``cell_key``. The cells of an
-                artifact's selection are those that its values cover.
+            cell_selection: Cell-selection artifact whose cells are exported;
+                it excludes ``cell_key``. The cells of an artifact's
+                selection are those that its values cover.
             obsm: Artifacts to export as ``obsm`` arrays, by name.
             obs: Cell-aligned artifacts to export as ``obs`` columns, by name.
                 A pair ``(ref, name)`` names another per-cell array of the
@@ -361,6 +384,8 @@ class _PresentationOperationsMixin(_PresentationOperationsBase):
                 ``layers``. None keeps the stored dtype, except that
                 ``uint8`` and ``uint16`` counts become ``float32``, on which
                 arithmetic cannot wrap.
+            cell_order: ``"source"`` holds the cells in the order of the
+                imported file, ``"stored"`` in store order.
 
         Returns:
             An AnnData object.
@@ -380,6 +405,7 @@ class _PresentationOperationsMixin(_PresentationOperationsBase):
                 "DataStore.to_anndata requires anndata. "
                 "Install it with: pip install 'cytearc[extra]'"
             ) from exc
+        from ...storage.cell_order import cell_order_argument, exported_cell_order
         from ...writers.export import (
             export_count_dtype,
             with_artifacts,
@@ -392,6 +418,7 @@ class _PresentationOperationsMixin(_PresentationOperationsBase):
             raise ValueError("feature_indexes and feature_names are mutually exclusive")
         if dtype is not None:
             export_count_dtype(None, dtype)
+        cell_order = cell_order_argument(cell_order)
 
         if run is not None:
             from ..pipeline_run import PipelineRun
@@ -412,12 +439,18 @@ class _PresentationOperationsMixin(_PresentationOperationsBase):
                 raise ValueError(
                     "Run-aware export uses the frozen run feature selection"
                 )
-            plan = self._h5ad_run_plan(run, matrix=matrix, layers=layers)
+            plan = self._h5ad_run_plan(
+                run,
+                matrix=matrix,
+                layers=layers,
+                cell_order=cell_order,
+                in_memory=True,
+            )
             if obsm is not None or obs is not None or graph is not None:
                 plan = with_artifacts(
                     plan,
                     self.zw,
-                    cell_rows=np.flatnonzero(run.cells.fetch_all("I")),
+                    cell_rows=self._run_export_rows(run, cell_order),
                     obsm=obsm,
                     obs=obs,
                     graph=graph,
@@ -522,12 +555,18 @@ class _PresentationOperationsMixin(_PresentationOperationsBase):
                 if blocks
                 else csr_matrix((len(cell_idx), len(feat_idx)))
             )
-        plan = self._live_anndata_plan(assay, x, cell_idx, feat_idx, layer_features)
+        # The values are read in store order, the fastest, and gathered into
+        # the export's order once read.
+        order = exported_cell_order(self.cells._group, cell_idx, cell_order)
+        x = _ordered_rows(x, order)
+        plan = self._live_anndata_plan(
+            assay, x, cell_idx, feat_idx, layer_features, order
+        )
         if obsm is not None or obs is not None or graph is not None:
             plan = with_artifacts(
                 plan,
                 self.zw,
-                cell_rows=cell_idx,
+                cell_rows=cell_idx if order is None else cell_idx[order],
                 obsm=obsm,
                 obs=obs,
                 graph=graph,
@@ -545,19 +584,23 @@ class _PresentationOperationsMixin(_PresentationOperationsBase):
         cell_idx: np.ndarray,
         feat_idx: np.ndarray,
         layer_features: Mapping[str, tuple[Any, np.ndarray]],
+        order: np.ndarray | None = None,
     ) -> "H5adExportPlan":
         """Plan the in-memory export of live cells, features, and matrices.
 
         ``obs`` is indexed by ``ids`` and ``var`` by ``gene_ids``. Column
         names that AnnData reserves or that the index takes are renamed, and
         categorical columns and columns that keep a source categorical's
-        categories are categoricals.
+        categories are categoricals. ``x`` is in the export's order already;
+        with ``order``, the cell at position ``order[i]`` of ``cell_idx`` is
+        row ``i`` of every other per-cell value.
         """
         from ...writers.export import (
             H5adColumn,
             H5adExportPlan,
             H5adMatrix,
             _live_column,
+            exported_obs_columns,
             live_categorical,
             unique_column_names,
         )
@@ -583,15 +626,16 @@ class _PresentationOperationsMixin(_PresentationOperationsBase):
                 for key, name in zip(keys, names, strict=True)
             )
 
+        cell_rows = cell_idx if order is None else cell_idx[order]
         obs_index, obs_columns = table(
             self.cells,
             "ids",
             [
                 column
-                for column in self.cells.columns
-                if column != "ids" and column not in omitted
+                for column in exported_obs_columns(self.cells)
+                if column not in omitted
             ],
-            cell_idx,
+            cell_rows,
             "obs",
         )
         var_index, var_columns = table(
@@ -615,7 +659,10 @@ class _PresentationOperationsMixin(_PresentationOperationsBase):
                     shape=shape,
                     dtype=np.dtype(layer_assay.rawData.dtype),
                     blocks=partial(
-                        _materialized, raw_csr(layer_assay, cell_idx, layer_feat_idx)
+                        _materialized,
+                        _ordered_rows(
+                            raw_csr(layer_assay, cell_idx, layer_feat_idx), order
+                        ),
                     ),
                 )
                 for layer, (layer_assay, layer_feat_idx) in layer_features.items()
@@ -660,18 +707,39 @@ class _PresentationOperationsMixin(_PresentationOperationsBase):
             dtype=np.int64,
         )
 
+    def _run_export_rows(
+        self, run: "PipelineRun", cell_order: "CellOrder"
+    ) -> np.ndarray:
+        """Return the store rows of a run's cells in the order that its export writes them.
+
+        The run's frozen cells keep no ``sourceRow``, so their order in the
+        imported file is read from the live column.
+        """
+        from ...storage.cell_order import exported_cell_order
+
+        rows = np.flatnonzero(run.cells.fetch_all("I")).astype(np.int64, copy=False)
+        order = exported_cell_order(self.cells._group, rows, cell_order)
+        return rows if order is None else rows[order]
+
     def _h5ad_run_plan(
         self,
         run: "PipelineRun",
         *,
         matrix: Literal["raw", "normed"],
         layers: Mapping[str, str] | None = None,
+        cell_order: "CellOrder" = "source",
+        temp_dir: "str | os.PathLike[str] | None" = None,
+        in_memory: bool = False,
     ) -> "H5adExportPlan":
         """Resolve which rows, columns, and values a run export holds.
 
         ``to_anndata(run=...)`` materializes this plan and
         ``cytearc.writers.to_h5ad(..., run=...)`` streams it into a file, so
-        the two exports cannot differ. Rows are the run's cells. With
+        the two exports cannot differ. Rows are the run's cells, in the order
+        that ``cell_order`` gives them (:meth:`_run_export_rows`). The
+        matrices stream in store order: an export in source order reorders
+        them through temporary files in ``temp_dir``, or, ``in_memory``, as
+        a whole once read. With
         ``matrix="raw"``, columns are the run's feature universe and values
         its raw counts; with ``"normed"``, columns are the features of the
         run's ``normalized`` artifact, which must be exactly its selected
@@ -691,10 +759,14 @@ class _PresentationOperationsMixin(_PresentationOperationsBase):
         ``obsm["X_lsi"]`` and ``obsm["X_lsi_harmony"]``. ``layers`` maps layer names to assays whose raw
         counts are aligned to the exported features by ID.
         """
+        from ...storage.cell_order import cell_order_argument, exported_cell_order
         from ...writers.export import (
             H5adColumn,
             H5adExportPlan,
             H5adMatrix,
+            in_memory_reordered_matrix,
+            reorder_held_bytes,
+            reordered_matrix,
             with_artifacts,
         )
         from ..pipeline_run import PipelineRun
@@ -705,18 +777,46 @@ class _PresentationOperationsMixin(_PresentationOperationsBase):
             raise TypeError("run must be a PipelineRun")
         if run._owner is not self:
             raise ValueError("run must be opened from this datastore")
+        cell_order = cell_order_argument(cell_order)
         assay = self._get_assay(run.assay)
         cells = run.cells
         features = run.features
         cell_idx = np.flatnonzero(cells.fetch_all("I")).astype(np.int64, copy=False)
+        order = exported_cell_order(self.cells._group, cell_idx, cell_order)
+        streamed = order is not None and not in_memory
+
+        def held_bytes(shape: tuple[int, int], dtype: Any) -> int:
+            """What a reorder holds while the matrix of ``shape`` streams."""
+            return reorder_held_bytes(shape, dtype, self.memoryBytes) if streamed else 0
+
+        def ordered(values: H5adMatrix, label: str) -> H5adMatrix:
+            if order is None:
+                return values
+            if in_memory:
+                return in_memory_reordered_matrix(values, order)
+            return reordered_matrix(
+                values,
+                order,
+                max_bytes=self.memoryBytes,
+                temp_dir=temp_dir,
+                label=label,
+            )
+
         universe = np.asarray(features.fetch_all("I"), dtype=bool)
         # Exported rows among the selected rows of the feature view.
         feature_rows: np.ndarray | None = None
         if matrix == "raw":
             universe_idx = np.flatnonzero(universe).astype(np.int64, copy=False)
-            x = _raw_count_matrix(assay, cell_idx, universe_idx)
+            x = _raw_count_matrix(
+                assay,
+                cell_idx,
+                universe_idx,
+                held_bytes(
+                    (cell_idx.size, universe_idx.size), np.dtype(assay.rawData.dtype)
+                ),
+            )
         else:
-            x, normalized_features = self._run_normalized_values(run)
+            x, normalized_features = self._run_normalized_values(run, streamed=streamed)
             if x.shape[0] != len(cell_idx):
                 raise ValueError(
                     f"The normalized artifact of pipeline run {run.run_id} does "
@@ -728,6 +828,8 @@ class _PresentationOperationsMixin(_PresentationOperationsBase):
                     "features outside the run's feature universe"
                 )
             feature_rows = np.flatnonzero(normalized_features[universe])
+
+        x = ordered(x, "The X matrix")
 
         def frozen(
             view: "PipelineAxisView",
@@ -759,16 +861,27 @@ class _PresentationOperationsMixin(_PresentationOperationsBase):
                     self._require_measured_cells(
                         assay_name, cell_idx, operation="to_anndata", remedy="export"
                     )
-                plan_layers[layer] = _raw_count_matrix(
-                    layer_assay, cell_idx, layer_feat_idx
+                plan_layers[layer] = ordered(
+                    _raw_count_matrix(
+                        layer_assay,
+                        cell_idx,
+                        layer_feat_idx,
+                        held_bytes(
+                            (cell_idx.size, layer_feat_idx.size),
+                            np.dtype(layer_assay.rawData.dtype),
+                        ),
+                    ),
+                    f"Layer {layer!r}",
                 )
         plan = H5adExportPlan(
             x=x,
             obs_index=H5adColumn(
-                "ids", partial(_frozen_field, cells, "ids", None), "categorical"
+                "ids", partial(_frozen_field, cells, "ids", order), "categorical"
             ),
             obs=tuple(
-                frozen(cells, column) for column in cell_fields if column not in umap
+                frozen(cells, column, rows=order)
+                for column in cell_fields
+                if column not in umap
             ),
             var_index=frozen(features, "ids", "gene_ids", feature_rows),
             var=tuple(
@@ -777,7 +890,7 @@ class _PresentationOperationsMixin(_PresentationOperationsBase):
                 if column != "ids"
             ),
             obsm=(
-                {"X_umap": partial(_frozen_coordinates, cells, tuple(umap))}
+                {"X_umap": partial(_frozen_coordinates, cells, tuple(umap), order)}
                 if umap
                 else {}
             ),
@@ -792,7 +905,7 @@ class _PresentationOperationsMixin(_PresentationOperationsBase):
         return with_artifacts(
             plan,
             self.zw,
-            cell_rows=cell_idx,
+            cell_rows=cell_idx if order is None else cell_idx[order],
             obsm=coordinates,
             max_bytes=self.memoryBytes,
             codec_threads=self.nthreads,
@@ -801,6 +914,8 @@ class _PresentationOperationsMixin(_PresentationOperationsBase):
     def _run_normalized_values(
         self,
         run: "PipelineRun",
+        *,
+        streamed: bool = False,
     ) -> tuple["H5adMatrix", np.ndarray]:
         """Plan the export of a run's normalized values.
 
@@ -808,10 +923,11 @@ class _PresentationOperationsMixin(_PresentationOperationsBase):
         row bands as stored, and the mask of their features over the assay.
         The artifact's cell selection must be the run's cell selection, and
         its feature selection the run's selected features: its highly
-        variable features, prevalent peaks, or antibody panel.
+        variable features, prevalent peaks, or antibody panel. ``streamed``
+        values go through a reorder, whose bytes their stream holds beside it.
         """
         from ...assay.normalization import load_normalized_inputs
-        from ...writers.export import H5adMatrix
+        from ...writers.export import H5adMatrix, reorder_held_bytes
 
         if "normalized" not in run:
             raise ValueError(
@@ -842,8 +958,9 @@ class _PresentationOperationsMixin(_PresentationOperationsBase):
                 "cover the run's selected features"
             )
         data = as_zarr_array(group["data"], name="data")
+        shape = (int(data.shape[0]), int(data.shape[1]))
         values = H5adMatrix(
-            shape=(int(data.shape[0]), int(data.shape[1])),
+            shape=shape,
             dtype=np.dtype(np.float32),
             blocks=partial(
                 _stored_row_blocks,
@@ -851,6 +968,9 @@ class _PresentationOperationsMixin(_PresentationOperationsBase):
                 self.nthreads,
                 self.resources,
                 f"Exporting {run.assay} normalized values",
+                reorder_held_bytes(shape, np.float32, self.memoryBytes)
+                if streamed
+                else 0,
             ),
         )
         return values, np.asarray(selections.featureMask, dtype=bool)

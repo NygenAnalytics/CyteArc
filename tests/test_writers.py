@@ -2747,8 +2747,8 @@ def _completed_export_run(umap=True):
             assert name == "RNA"
             return assay
 
-        def _h5ad_run_plan(self, run, *, matrix):
-            self.requests.append((run, matrix))
+        def _h5ad_run_plan(self, run, *, matrix, cell_order, temp_dir):
+            self.requests.append((run, matrix, cell_order, temp_dir))
             counts = csr_matrix(np.asarray([[2, 0], [5, 7]], dtype=np.int32))
             coordinates = np.asarray([[1.5, 10.5], [3.5, 30.5]], dtype=np.float32)
             return H5adExportPlan(
@@ -2803,7 +2803,7 @@ def test_to_h5ad_exports_completed_run_frozen_fields_and_artifact_layout(tmp_pat
 
     to_h5ad(assay, str(path), run=run)
 
-    assert owner.requests == [(run, "raw")]
+    assert owner.requests == [(run, "raw", "source", None)]
     exported = read_h5ad(path)
     assert list(exported.obs_names) == ["c1", "c3"]
     assert list(exported.var_names) == ["g1", "g3"]
@@ -2888,7 +2888,7 @@ def test_to_h5ad_run_export_writes_without_anndata_from_a_datastore_owner(
     with monkeypatch.context() as patched:
         patched.setitem(sys.modules, "anndata", None)
         to_h5ad(assay, str(path), run=run, matrix="normed")
-    assert owner.requests == [(run, "normed")]
+    assert owner.requests == [(run, "normed", "source", None)]
     with h5py.File(path, "r") as h5:
         assert h5.attrs["encoding-type"] == "anndata"
         assert h5["obs/ids"].asstr()[:].tolist() == ["c1", "c3"]

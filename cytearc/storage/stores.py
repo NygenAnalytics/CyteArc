@@ -552,6 +552,7 @@ def create_matrix_source(
     :func:`record_source_location` records it.
     """
     from .arrays import create_metadata_column
+    from .cell_order import copy_cell_order
     from .copy import copy_zarr_group_tree
     from .layout import column_chunk_rows
     from .destinations import refuse_pending_assays
@@ -624,6 +625,7 @@ def create_matrix_source(
             resources=resources,
             chunk_rows=column_chunk_rows,
         )
+        copy_cell_order(source_cell_data, cell_data)
         for assay_name in assay_names:
             source_assay = source_assays[assay_name]
             target_assay = target_zw.create_group(assay_name)

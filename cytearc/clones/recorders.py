@@ -909,7 +909,7 @@ class CharacterMatrix:
 
     Attributes:
         cells: The position of each exported cell among the selected cells,
-            in ascending order.
+            in ascending order as :func:`character_matrix` gives them.
         integrations: Each character's integration.
         sites: Each character's site.
         codes: The state of each cell and character, as int32.

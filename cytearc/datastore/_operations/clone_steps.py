@@ -28,12 +28,16 @@ __all__ = [
     "CODES_WITHIN_TYPE",
     "REPRESENTATIVES_WITHIN_TYPE",
     "artifact_cell_ids",
+    "exported_cell_positions",
     "files_text",
     "hold_ranked_clone_labels",
     "measured_within_types",
     "plan_artifact_cells",
     "read_codes",
 ]
+
+# Bytes of one int64 row position.
+_INDEX_BYTES = 8
 
 #: The array in which clonotypes defined across receptor types save each
 #: cell's clonotype within its receptor type, as ``within_receptor_type=True``
@@ -116,6 +120,33 @@ def plan_artifact_cells(root: Any, artifact: ArtifactRef) -> CellSelectionRead:
     """
     selection = inspect_artifact(root, artifact).input_ref("cell_selection")
     return plan_cell_selection_read(root, selection)
+
+
+def exported_cell_positions(
+    ledger: MemoryLedger, cells: Any, rows: np.ndarray, cell_order: object
+) -> np.ndarray | None:
+    """The order in which an export writes the cells at store rows ``rows``, kept charged while it is held.
+
+    It is :func:`~cytearc.storage.cell_order.exported_cell_order` of the
+    store's cell table ``cells``: None for store order, else positions in
+    ``rows``. Finding it reads each cell's ``sourceRow`` and sorts them.
+
+    Raises:
+        TypeError: If ``cell_order`` is not a string.
+        ValueError: If ``cell_order`` is neither ``"source"`` nor ``"stored"``.
+        MemoryBudgetError: If the order would pass the ledger's budget.
+    """
+    from ...storage.cell_order import cell_order_argument, exported_cell_order
+
+    cell_order = cell_order_argument(cell_order)
+    item = "the cells' order in the imported file"
+    if cell_order == "source":
+        # Each cell's source row, its position in the sort, and the order.
+        ledger.peak(item, 3 * _INDEX_BYTES * int(rows.size))
+    order = exported_cell_order(cells._group, rows, cell_order)
+    if order is not None:
+        ledger.hold(item, order.nbytes)
+    return order
 
 
 def artifact_cell_ids(
