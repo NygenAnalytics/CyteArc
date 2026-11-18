@@ -159,6 +159,14 @@ def test_h5ad_cell_id_source_reads_ids_by_position(tmp_path) -> None:
             ids[3]
         with pytest.raises(ValueError, match="only contiguous reads"):
             ids[::2]
+        # Through a shuffled import's order, position r reads file row
+        # order[r].
+        shuffled = _H5adCellIdSource(reader, np.array([2, 0, 1]))
+        assert text([shuffled[0], shuffled[-1]]) == ["c2", "c1"]
+        assert text(shuffled[0:2]) == ["c2", "c0"]
+        assert text(shuffled) == ["c2", "c0", "c1"]
+        with pytest.raises(ValueError, match="only contiguous reads"):
+            shuffled[::2]
     finally:
         reader.close()
 
@@ -196,6 +204,7 @@ def test_h5ad_producer_sends_no_band_after_the_parent_stops(
         def produce(connection: _Connection, stop: threading.Event) -> None:
             h5ad_writer._read_h5ad_process_window(
                 reader._clone_kwargs(),
+                None,
                 4,
                 0,
                 8,

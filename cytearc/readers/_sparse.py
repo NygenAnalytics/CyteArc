@@ -33,6 +33,7 @@ without an error.
 """
 
 import json
+import math
 import os
 import shutil
 import struct
@@ -51,7 +52,7 @@ from scipy.sparse import coo_matrix, csr_matrix
 from ..utils.arrays import canonicalize_sparse, checked_sparse_cast, cumulative_nnz
 from ..utils.memory_budget import MemoryBudgetError
 
-__all__ = ["ROW_BYTES", "SparseRowStore"]
+__all__ = ["ROW_BYTES", "SparseRowStore", "encoded_entry_bytes"]
 
 _CODEC = Blosc(cname="zstd", clevel=1, shuffle=Blosc.SHUFFLE)
 _UNSIGNED = tuple(np.dtype(name) for name in ("u1", "u2", "u4", "u8"))
@@ -81,6 +82,15 @@ _BUCKET_TARGET_BYTES = 128 * 1024 * 1024
 _PENDING_LIMIT_BYTES = 256 * 1024 * 1024
 # The most buckets that from_entries makes when it cannot estimate the entries.
 _MAX_UNKNOWN_BUCKETS = 4096
+# Bytes per destination row that a writer holds: the entries appended to
+# each row and the mark of each whole row.
+_WRITER_ROW_BYTES = 9
+# Bytes per bucket that a writer holds: its first row, file bytes, pieces and
+# whether its pieces are canonical.
+_WRITER_BUCKET_BYTES = 25
+# The free disk that a measured spill estimate asks for beyond the bytes it
+# measured, since sample rows compress unlike the rest.
+_ESTIMATE_MARGIN = 1.25
 
 type _Piece = tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]
 
@@ -215,6 +225,38 @@ def _checksum(header: bytes, payloads: Iterable[bytes]) -> int:
     for payload in payloads:
         checksum = zlib.crc32(payload, checksum)
     return checksum
+
+
+def encoded_entry_bytes(matrix: csr_matrix) -> float:
+    """Return the bytes per entry that whole rows like ``matrix``'s take on disk.
+
+    The rows are encoded as one block of a bucket, as a store writes them,
+    so the result reflects how their values narrow and their columns and
+    values compress. Pass a sample of the rows that a store will hold, of
+    about a million entries, as ``entry_bytes`` of :class:`SparseRowStore`.
+
+    Raises:
+        TypeError: If ``matrix`` is not CSR.
+    """
+    if getattr(matrix, "format", None) != "csr":
+        raise TypeError(
+            f"encoded_entry_bytes takes a CSR matrix, not {type(matrix).__name__}"
+        )
+    n_rows, n_columns = matrix.shape
+    lengths = np.diff(matrix.indptr).astype(np.int64)
+    block, _canonical = _encode_block(
+        [
+            (
+                np.arange(n_rows, dtype=np.int64),
+                lengths,
+                np.asarray(matrix.indices),
+                np.asarray(matrix.data),
+            )
+        ],
+        n_columns=n_columns,
+        bucket_rows=max(1, n_rows),
+    )
+    return len(block) / max(1, int(lengths.sum()))
 
 
 @dataclass(frozen=True, slots=True)
@@ -446,6 +488,10 @@ class SparseRowStore:
             needs more; ``bucket_bytes`` by default, and at most that.
         entries: The entries expected, from which the free disk the spill may
             need is checked before anything is written, or None.
+        entry_bytes: The bytes that each entry is expected to take on disk,
+            as :func:`encoded_entry_bytes` measures them on sample rows; the
+            check then asks for a quarter more than ``entries`` take at that
+            rate. None bounds each entry by its bytes before compression.
         source_dtype: The dtype in which values arrive and in which a row's
             duplicate coordinates are summed; ``dtype`` by default.
         sum_duplicates: Whether reads sum a row's duplicate coordinates, or
@@ -474,6 +520,7 @@ class SparseRowStore:
         bucket_bytes: int,
         split_bytes: int | None = None,
         entries: int | None = None,
+        entry_bytes: float | None = None,
         source_dtype: Any | None = None,
         sum_duplicates: bool = True,
         max_nnz: int = np.iinfo(np.int64).max,
@@ -532,7 +579,7 @@ class SparseRowStore:
         self.directory = Path(self._directory.name)
         try:
             if entries is not None:
-                self._check_disk(self._spill_bound(int(entries)))
+                self._check_disk(self._spill_bound(int(entries), entry_bytes))
             (self.directory / "parts").mkdir()
             with (self.directory / "store.json").open("w") as stream:
                 json.dump(self._settings, stream)
@@ -790,8 +837,14 @@ class SparseRowStore:
                 ),
             )
 
-    def _spill_bound(self, entries: int) -> int:
-        """Return the most bytes that ``entries`` take on disk before compression."""
+    def _spill_bound(self, entries: int, entry_bytes: float | None = None) -> int:
+        """Return the bytes that ``entries`` may take on disk.
+
+        Without ``entry_bytes``, the most they take before compression;
+        with it, a quarter more than they take at that rate.
+        """
+        if entry_bytes is not None:
+            return math.ceil(entries * float(entry_bytes) * _ESTIMATE_MARGIN)
         index_bytes = _UNSIGNED[_unsigned_code(max(0, self.shape[1] - 1))].itemsize
         pieces = self.shape[0] if self._wholeRows else entries
         return entries * (self._sourceDtype.itemsize + index_bytes) + pieces * 16
@@ -1387,6 +1440,35 @@ class SparseRowStore:
         self._cache = None
         if self._directory is not None:
             self._directory.cleanup()
+
+    # Sizes for callers that plan a store.
+
+    @staticmethod
+    def writer_bytes(n_rows: int, bucket_rows: int) -> int:
+        """Return what each writer of a store holds beside its ``buffer_bytes``.
+
+        Every writer, the owner's part included, keeps a count of entries
+        and a mark for each of the ``n_rows`` destination rows, and a few
+        numbers for each bucket of ``bucket_rows`` rows.
+        """
+        n_buckets = -(-int(n_rows) // max(1, int(bucket_rows)))
+        return int(n_rows) * _WRITER_ROW_BYTES + (n_buckets + 1) * _WRITER_BUCKET_BYTES
+
+    @staticmethod
+    def whole_row_bucket_rows(
+        n_rows: int, entries: int, read_bytes: int, itemsize: int
+    ) -> int:
+        """Return the rows of buckets of whole rows that each read in about ``read_bytes``.
+
+        The rows hold ``entries`` in all, with values of ``itemsize`` bytes
+        that reads keep, without summing duplicates; each bucket holds at
+        least one row and at most every row.
+        """
+        per_entry = _entry_bytes(int(itemsize), False)
+        mean_entries = int(entries) / max(1, int(n_rows))
+        row_bytes = mean_entries * per_entry + 48 + 32
+        rows = int(max(0, int(read_bytes)) // max(1.0, row_bytes))
+        return max(1, min(max(1, int(n_rows)), rows))
 
     # Conversion of loose entries.
 

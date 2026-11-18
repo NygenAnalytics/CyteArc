@@ -94,11 +94,19 @@ def keyed_metadata_columns[T](
 
 
 def _skipped_column_reason(name: str, axis: str, membership: Mapping[str, str]) -> str:
+    from ..storage.cell_order import SOURCE_ROW
+
     if name in membership:
         return (
             f"Skipped source {axis} metadata column {name!r} because CyteArc "
             "reserves it for the membership of the imported assay "
             f"{membership[name]!r}"
+        )
+    if axis == "cell" and name == SOURCE_ROW:
+        return (
+            f"Skipped source {axis} metadata column {name!r} because CyteArc "
+            "stores each cell's row in the imported file under that name when "
+            "an import shuffles cells"
         )
     if is_reserved_metadata_name(metadata_column_key(name)):
         return (

@@ -180,7 +180,28 @@ def merge_count_scans(scans: list[CountScan]) -> CountScan:
     )
 
 
-def scan_processes(values: int, longest: int, maxBytes: int, processes: int) -> int:
+def scan_window_values(longest: int) -> int:
+    """Return the most values that a scan with room for whole windows reads at once.
+
+    A window holds about a million values, or the ``longest`` vector when
+    that holds more.
+    """
+    return max(_SCAN_WINDOW_VALUES, int(longest))
+
+
+def scan_window_bytes(values: int) -> int:
+    """Return what a scan holds while it reads a window of ``values`` values."""
+    return _SCAN_BYTES_PER_VALUE * int(values)
+
+
+def scan_processes(
+    values: int,
+    longest: int,
+    maxBytes: int,
+    processes: int,
+    *,
+    extraBytes: int = 0,
+) -> int:
     """Return how many processes scan a matrix, each over its own vectors.
 
     A matrix of fewer than about 67 million stored values
@@ -188,17 +209,21 @@ def scan_processes(values: int, longest: int, maxBytes: int, processes: int) -> 
     starting more would let it finish. Otherwise at most ``processes``
     processes share ``maxBytes``, each with room for a whole scan window and
     for the ``longest`` vector, so that each reads as one scan with all of
-    ``maxBytes`` would.
+    ``maxBytes`` would, and for ``extraBytes`` beside them.
 
     Args:
         values: Stored values of the matrix.
         longest: Values of its longest compressed vector.
         maxBytes: Memory available to the scan.
         processes: Most processes that may scan.
+        extraBytes: What each process holds beside its scan, such as the
+            rows that it keeps for an import that shuffles cells.
     """
     if int(processes) <= 1 or int(values) < _SCAN_PROCESS_VALUES:
         return 1
-    process_bytes = _SCAN_BYTES_PER_VALUE * max(_SCAN_WINDOW_VALUES, int(longest))
+    process_bytes = scan_window_bytes(scan_window_values(longest)) + max(
+        0, int(extraBytes)
+    )
     return max(1, min(int(processes), max(0, int(maxBytes)) // process_bytes))
 
 
@@ -274,6 +299,7 @@ def compressed_count_ranges(
     groupAxis: int = 1,
     valueRanges: list[CountValueRange] | None = None,
     indexOrder: IndexOrder | None = None,
+    consumer: Callable[[int, Any], None] | None = None,
 ) -> list[CountValueRange]:
     """Return the ranges of the canonical values of a compressed sparse matrix.
 
@@ -301,6 +327,12 @@ def compressed_count_ranges(
         indexOrder: The record in which the scan clears ``canonical`` when a
             vector it reads holds unsorted or repeated indices. None records
             nothing.
+        consumer: Called with each window of whole vectors as the scan reads
+            it: the position of its first vector among the vectors of
+            ``indptr``, and the window as a CSR matrix of its values in the
+            dtype in which duplicates are summed, before they are, so that a
+            caller can keep the vectors without reading them again. The
+            caller must not change the window.
 
     Returns:
         The range of each group.
@@ -353,6 +385,8 @@ def compressed_count_ranges(
                 ),
                 shape=(end - position, int(minorSize)),
             )
+            if consumer is not None:
+                consumer(start + position, block)
             if not block.has_canonical_format:
                 if indexOrder is not None:
                     indexOrder.canonical = False
@@ -382,6 +416,7 @@ def dense_count_ranges(
     maxBytes: int,
     groups: np.ndarray | None = None,
     rowNonzeros: np.ndarray | None = None,
+    consumer: Callable[[int, np.ndarray], None] | None = None,
 ) -> list[CountValueRange]:
     """Return the ranges of the values of a dense matrix read in row blocks.
 
@@ -397,6 +432,9 @@ def dense_count_ranges(
         rowNonzeros: An array of ``nRows`` integers in which the scan records
             the number of nonzero values of each row, from which an import
             plans its sparse batches. None records nothing.
+        consumer: Called with each block of rows as the scan reads it: its
+            first row and its values, which the caller must not change, so
+            that a caller can keep the rows without reading them again.
 
     Returns:
         The range of each group.
@@ -436,6 +474,8 @@ def dense_count_ranges(
     for start in range(0, int(nRows), max(1, rows)):
         stop = min(int(nRows), start + rows)
         block = read(start, stop)
+        if consumer is not None:
+            consumer(start, block)
         if rowNonzeros is not None:
             rowNonzeros[start:stop] = np.count_nonzero(block, axis=1)
         if columns is None:

@@ -16,7 +16,7 @@ import pytest
 from scipy.sparse import coo_matrix, csr_matrix, vstack
 
 from cytearc.readers import _sparse
-from cytearc.readers._sparse import ROW_BYTES, SparseRowStore
+from cytearc.readers._sparse import ROW_BYTES, SparseRowStore, encoded_entry_bytes
 from cytearc.utils.memory_budget import MemoryBudgetError
 
 _BIG = 1 << 40
@@ -1157,3 +1157,46 @@ def test_an_empty_bucket_beyond_the_split_size_splits_without_files(tmp_path):
         np.testing.assert_array_equal(store.read(0, 8).toarray(), expected)
     finally:
         store.close()
+
+
+def test_a_measured_rate_estimates_the_disk_that_whole_rows_take(tmp_path):
+    rng = np.random.default_rng(12)
+    counts = csr_matrix(rng.poisson(0.3, (2000, 3000)).astype(np.float32))
+    rate = encoded_entry_bytes(counts[:400])
+    # Small counts narrow to one byte and their columns to gaps, compressed.
+    assert 0.5 < rate < 2.0
+    store = _whole_store(
+        tmp_path,
+        counts.shape,
+        np.float32,
+        bucket_rows=250,
+        buffer_bytes=1 << 20,
+        entries=counts.nnz,
+        entry_bytes=rate,
+    )
+    try:
+        store.append_rows(np.arange(2000)[::-1], counts)
+        store.finalize()
+        written = int(store._fileBytes.sum())
+        # The estimate asks for a quarter more than the sample's rate gives,
+        # which covers what the rows took, and far less than the bound
+        # before compression, 4 + 2 bytes for each entry.
+        estimate = store._spill_bound(counts.nnz, rate)
+        assert estimate == int(np.ceil(counts.nnz * rate * 1.25))
+        assert written <= estimate < counts.nnz * 6 / 2
+    finally:
+        store.close()
+    with pytest.raises(TypeError, match="encoded_entry_bytes takes a CSR matrix"):
+        encoded_entry_bytes(counts.tocoo())
+    assert encoded_entry_bytes(csr_matrix((3, 4), dtype=np.float32)) > 0
+
+
+def test_store_sizes_for_planners_count_rows_and_buckets():
+    assert SparseRowStore.writer_bytes(10, 4) == 10 * 9 + (3 + 1) * 25
+    assert SparseRowStore.writer_bytes(0, 4) == 25
+    # 100 entries of float32 in 10 rows read in 44 bytes each, and each row
+    # 80 more; 5,200 bytes hold one row of 520.
+    assert SparseRowStore.whole_row_bucket_rows(10, 100, 5_200, 4) == 10
+    assert SparseRowStore.whole_row_bucket_rows(10, 100, 1_040, 4) == 2
+    assert SparseRowStore.whole_row_bucket_rows(10, 100, 10, 4) == 1
+    assert SparseRowStore.whole_row_bucket_rows(0, 0, 10, 4) == 1

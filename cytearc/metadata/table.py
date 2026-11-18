@@ -424,8 +424,9 @@ class MetaData:
         """Refuse a write that the store protects, before any value is read.
 
         Whether or not ``column`` exists, a cell table refuses the columns of
-        prepared data and the membership column ``<assay>_I`` of each of its
-        assays, and a feature table the columns of prepared data (see
+        prepared data, the membership column ``<assay>_I`` of each of its
+        assays and ``sourceRow``, and a feature table the columns of prepared
+        data (see
         :func:`~cytearc.storage.identity.protect_metadata_column`).
         """
         from ..storage.identity import protect_metadata_column
