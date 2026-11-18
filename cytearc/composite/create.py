@@ -771,6 +771,15 @@ def create_composite(
     by its absolute path or URL, unless ``relative_sources`` asks for relative
     paths. New arrays use the storage profile of ``at``.
 
+    The composite lists its cells in a fixed order, neither the sources' order
+    nor the order of ``rows``: the order of a merge of ``assay`` by
+    ``DataStoreMerge`` with its default ``seed``. The selected cells of each
+    source are split into blocks, one for each shard of the source's counts,
+    the cells of each block are shuffled, and the blocks of all sources are
+    interleaved, with each source's last block at the end. Pair per-cell
+    values with the composite by cell ID, ``{name}__{cell_id}``, or by
+    ``sourceRow``, and never by position.
+
     Args:
         sources: Open source DataStores by name. A cell's ID in the composite
                  is ``{name}__{cell_id}``, so a name cannot contain ``__``.
@@ -783,8 +792,11 @@ def create_composite(
                   to five of them. ``"intersection"`` keeps the features that
                   every source holds.
         assay: Assay to combine, which every source holds as one type.
-        rows: Positions of the cells to include, by source name. A source left
-              out contributes all of its stored cells.
+        rows: Positions of the cells to include, by source name. The
+              positions select cells and don't order them. A source left
+              out contributes all of its stored cells, and a source given no
+              positions contributes no cells but still contributes its
+              features.
         mem_budget: Memory budget for creation. When None, the tightest
                     source budget is used.
         nthreads: Maximum worker budget. When None, the tightest source worker

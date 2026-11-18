@@ -16,6 +16,8 @@ Every per-cell array follows the one order: `counts` and `countsT`, the cell IDs
 
 Analyses that draw random numbers, such as UMAP and Leiden clustering, draw them over the cells in store order. A store imported in another order therefore gives slightly different layouts and clusters, as another seed would, and its cluster numbers can differ.
 
+Merges and composites order their cells otherwise, in blocks that each hold the cells of one count shard of one source, shuffled within the block, so a contiguous slice of their rows, such as a training mini-batch, can hold the cells of a single source. The [import and export reference](/api/import_export.html#merged-cell-order) describes the order.
+
 ## Where each cell came from
 
 Each cell keeps its row in the imported file, counted from 0, in the int64 cell column `sourceRow`, and the cell table records the seed in its `cellOrder` attribute. A reader that drops cells, such as `CrH5Reader(is_filtered=False)`, keeps the row in the file of each cell it keeps, so the column has gaps where the dropped cells were. `insert`, `update_key`, `reset_key` and `drop` refuse `sourceRow`.

@@ -723,6 +723,173 @@ def test_empty_source_selection_still_participates_in_features(
     np.testing.assert_array_equal(joint.RNA.matrixGroup["countsT"][:], expected.T)
 
 
+# The rows of one count shard of each source of the composite_sources fixture.
+_FIXTURE_SHARD_ROWS = {"a": 12, "b": 9}
+
+# The order of every cell of the fixture's sources in a composite, and in a merge
+# with the default seed, by the rule of the merge section of the import and export
+# reference. Source a's 13 cells fall in the blocks a0 (c0 to c11) and a1 (c12),
+# and source b's 11 cells in b0 (c0 to c8) and b1 (c9, c10). The blocks a0 and b0
+# come first, in the order that the seed draws, and the last blocks a1 and b1
+# follow in source order. Each block's cells are in the order of its fixed shuffle.
+_ALL_CELLS_ORDER = [
+    *("b__c3", "b__c0", "b__c7", "b__c2", "b__c4", "b__c6", "b__c1", "b__c5"),
+    *("b__c8", "a__c0", "a__c7", "a__c6", "a__c9", "a__c11", "a__c3", "a__c5"),
+    *("a__c2", "a__c4", "a__c10", "a__c1", "a__c8", "a__c12", "b__c9", "b__c10"),
+]
+
+# The order with rows={"a": [12, 0, 7, 4]}: the selected cells of a fall in the
+# blocks a0 (c0, c4, c7) and a1 (c12), and b keeps every block, so the blocks come
+# in the order above.
+_SELECTED_CELLS_ORDER = [
+    *("b__c3", "b__c0", "b__c7", "b__c2", "b__c4", "b__c6", "b__c1", "b__c5"),
+    *("b__c8", "a__c7", "a__c4", "a__c0", "a__c12", "b__c9", "b__c10"),
+]
+
+# The order of a merge with seed=0, which draws a0 before b0. The cells within
+# each block keep the order of the default seed.
+_SEED_0_ORDER = [
+    *("a__c0", "a__c7", "a__c6", "a__c9", "a__c11", "a__c3", "a__c5", "a__c2"),
+    *("a__c4", "a__c10", "a__c1", "a__c8", "b__c3", "b__c0", "b__c7", "b__c2"),
+    *("b__c4", "b__c6", "b__c1", "b__c5", "b__c8", "a__c12", "b__c9", "b__c10"),
+]
+
+
+def _shard_runs(ids):
+    """Split merged cell IDs into runs of cells from one count shard of one source.
+
+    Each run is ``(source, shard, rows)``: the source name, the index of the
+    shard in the source's counts, and the source rows of the run's cells in
+    the listed order.
+    """
+    runs = []
+    for identity in ids:
+        name, cell = identity.split("__c")
+        row = int(cell)
+        shard = row // _FIXTURE_SHARD_ROWS[name]
+        if runs and runs[-1][:2] == (name, shard):
+            runs[-1][2].append(row)
+        else:
+            runs.append((name, shard, [row]))
+    return runs
+
+
+def _assert_merged_cell_order(ids, selected):
+    """Check merged cell IDs against the documented rule of the merged cell order.
+
+    ``selected`` maps each source name, in source order, to its selected rows.
+    Each source's selected cells form one block for each count shard that
+    holds any of them; each block comes once and whole, and each source's last
+    block follows every other block, in source order.
+    """
+    runs = _shard_runs(ids)
+    blocks = {
+        (name, shard): sorted(
+            row for row in rows if row // _FIXTURE_SHARD_ROWS[name] == shard
+        )
+        for name, rows in selected.items()
+        for shard in {row // _FIXTURE_SHARD_ROWS[name] for row in rows}
+    }
+    assert sorted((name, shard) for name, shard, _ in runs) == sorted(blocks)
+    for name, shard, rows in runs:
+        assert sorted(rows) == blocks[name, shard]
+    last_blocks = [
+        (name, max(row // _FIXTURE_SHARD_ROWS[name] for row in rows))
+        for name, rows in selected.items()
+        if len(rows)
+    ]
+    assert [run[:2] for run in runs[len(runs) - len(last_blocks) :]] == last_blocks
+
+
+def _concatenated_source_rows(ids, selected):
+    """Return each cell's row in the concatenation of the sources' selected cells.
+
+    The fixture's sources hold no ``sourceRow``, so each source's cells follow
+    its store order.
+    """
+    offsets = {}
+    preceding = 0
+    for name, rows in selected.items():
+        offsets[name] = preceding
+        preceding += len(rows)
+    source_rows = []
+    for identity in ids:
+        name, cell = identity.split("__c")
+        source_rows.append(offsets[name] + sorted(selected[name]).index(int(cell)))
+    return source_rows
+
+
+@pytest.mark.parametrize(
+    ("rows", "expected"),
+    [
+        (None, _ALL_CELLS_ORDER),
+        ({"a": [12, 0, 7, 4]}, _SELECTED_CELLS_ORDER),
+        # The positions select cells, so another order of them gives the same cells
+        # in the same order.
+        ({"a": [4, 0, 12, 7]}, _SELECTED_CELLS_ORDER),
+        ({"a": np.arange(13)[::-1], "b": np.arange(11)[::-1]}, _ALL_CELLS_ORDER),
+    ],
+    ids=["all", "selected", "selected_reordered", "all_selected_reversed"],
+)
+def test_composite_lists_cells_in_shuffled_blocks_of_their_count_shards(
+    sources, tmp_path, rows, expected
+):
+    for name, shard_rows in _FIXTURE_SHARD_ROWS.items():
+        assert sources[name].RNA.matrixGroup["counts"].shards[0] == shard_rows
+    selected = {
+        name: sorted(map(int, (rows or {}).get(name, range(source.cells.N))))
+        for name, source in sources.items()
+    }
+    _assert_merged_cell_order(expected, selected)
+
+    joint = create_composite(
+        sources,
+        at=tmp_path / "joint.zarr",
+        features="union",
+        rows=rows,
+        nthreads=1,
+        mem_budget="64M",
+    )
+
+    assert joint.cells.fetch_all("ids").tolist() == expected
+    assert joint.cells.fetch_all("sourceRow").tolist() == _concatenated_source_rows(
+        expected, selected
+    )
+
+
+@pytest.mark.parametrize(
+    ("options", "expected"),
+    [({}, _ALL_CELLS_ORDER), ({"seed": 0}, _SEED_0_ORDER)],
+    ids=["default_seed", "seed_0"],
+)
+def test_merge_seed_orders_the_blocks_and_not_the_cells_within_them(
+    sources, tmp_path, options, expected
+):
+    from cytearc.merge import DataStoreMerge
+
+    every = {"a": list(range(13)), "b": list(range(11))}
+    _assert_merged_cell_order(expected, every)
+    path = tmp_path / "merged.zarr"
+
+    DataStoreMerge(
+        [sources["a"], sources["b"]],
+        str(path),
+        ["a", "b"],
+        nthreads=1,
+        mem_budget="64M",
+        **options,
+    ).dump()
+
+    merged = DataStore(str(path), min_features_per_cell=-1, nthreads=1)
+    ids = merged.cells.fetch_all("ids").tolist()
+    assert ids == expected
+    assert merged.cells.fetch_all("sourceRow").tolist() == _concatenated_source_rows(
+        ids, every
+    )
+    # Each block keeps the cells and their order that the default seed gives.
+    assert sorted(_shard_runs(ids)) == sorted(_shard_runs(_ALL_CELLS_ORDER))
+
+
 @contextmanager
 def _unshared_feature_warnings():
     """Capture the warnings about features that not every source measured.

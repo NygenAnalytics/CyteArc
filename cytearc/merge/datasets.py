@@ -146,7 +146,7 @@ class DataStoreMerge:
         prepend_text: Prefix added to colliding metadata column names.
         reset_cell_filter: If True, mark every merged cell as selected.
         seed: RNG seed for interleaving source cell blocks. None draws a fresh,
-              unseeded interleaving, so the merged row order differs between runs.
+              unseeded interleaving, so the merged row order can differ between runs.
         storage_options: Backend options passed when opening the destination.
         source_column: Optional cell-metadata column storing source names.
         mem_budget: Memory budget for the merge. Accepts bytes, a size such
@@ -180,6 +180,15 @@ class DataStoreMerge:
     counts of that feature. Planning then logs a warning for the assay with
     the number of features that each such source lacks and up to five of
     their names, so that a merge of different antibody panels is flagged.
+
+    Merged cells are in an order of their own, neither the sources' order nor
+    a uniform random order. The cells of each source are split into blocks,
+    one for each shard of its counts, the cells of each block are shuffled
+    with a fixed seed, and the blocks of all sources follow in an order that
+    ``seed`` draws, with each source's last block at the end. Pair per-cell
+    values with merged cells by cell ID, ``{name}__{cell_id}``, or by
+    ``sourceRow``, each cell's row in the concatenation of the sources, and
+    never by position.
     """
 
     def __init__(
