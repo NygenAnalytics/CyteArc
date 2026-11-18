@@ -123,6 +123,8 @@ cells, reads 0.20 to 0.21, and 24% of its 2,000 HVGs get most of their detection
 Smart-seq cells. Check whether the cells mix technologies or batches, and compare with a
 selection made within one of them or with `batch=`, which ranks genes within each batch.
 
+The ratio is None when no gene that the selection could choose is detected, and for a selection that CyteArc 1.4.0 saved, as in a run of that release, which did not measure it. Select the HVGs again with `ds.features.hvgs` to measure it; with the same cells and the parameters that the saved selection records, `min_cells` among them, the genes stay the same.
+
 ### Alternative feature sets and a custom blacklist
 
 `blacklist` is one regex, matched (`re.match`, ignoring case) against every feature name. It

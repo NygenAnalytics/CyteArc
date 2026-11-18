@@ -3,19 +3,22 @@
 An operation declares its diagnostics on its arguments class; the writer
 refuses others, the reader refuses an artifact that holds others or none,
 and ``ds.artifacts.inspect(ref).diagnostics`` reads them for any artifact.
-Operations warn from saved diagnostics, so a reused artifact warns as a
-computed one does.
+An artifact saved before a revision of its operation added a diagnostic
+reads that one as None. Operations warn from saved diagnostics, so a reused
+artifact warns as a computed one does.
 """
 
 import pickle
 import warnings
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 import numpy as np
 import pytest
 
 import cytearc.metadata.arguments as arguments_module
+import cytearc.storage.operation_revisions as operation_revisions
 from cytearc import DiagnosticWarning, ExportSummary
 from cytearc.clones.allele_clones import ALLELE_DIAGNOSTICS
 from cytearc.clones.barcode_clones import BARCODE_DIAGNOSTICS
@@ -30,6 +33,10 @@ from cytearc.metadata.arguments import (
     GuideCallImportArguments,
 )
 from cytearc.metadata.artifacts import plan_cell_data_artifact, write_cell_data_artifact
+from cytearc.storage.artifact_writer import (
+    ArtifactComputationRequired,
+    artifact_forecast_scope,
+)
 from cytearc.storage.artifacts import artifact_group, require_complete_artifact
 from cytearc.storage.diagnostics import (
     EXAMPLES,
@@ -40,7 +47,8 @@ from cytearc.storage.diagnostics import (
     export_summary,
     warn_diagnostics,
 )
-from cytearc.utils.logging import collect_warnings
+from cytearc.storage.operation_revisions import OperationRevision
+from cytearc.utils.logging import collect_warnings, logger
 from cytearc.utils.warnings import warn
 from tests.storage_helpers import by_cell_id, open_store, write_count_store, written
 
@@ -432,6 +440,204 @@ def test_the_reader_refuses_an_artifact_without_its_operations_diagnostics(
     assert _plan(store).ref == again.ref
     assert _plan(store).reused
     assert planned.ref in store.artifacts.list(scope="datastore")
+
+
+# The revision after which count_test_cells saves testedShare, as a release
+# after the operation shipped would add it.
+_SHARE_REVISION = OperationRevision(
+    2,
+    "9.9.0",
+    "Artifacts save the share of tested cells.",
+    None,
+    added_diagnostics=("testedShare",),
+)
+_WITHOUT_SHARE = {"testedCells": 3, "testedCellExamples": ["c0", "c2"]}
+
+
+def _add_share_revision(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        operation_revisions,
+        "OPERATION_REVISIONS",
+        MappingProxyType(
+            {**operation_revisions.OPERATION_REVISIONS, _OPERATION: (_SHARE_REVISION,)}
+        ),
+    )
+
+
+def _write_earlier(store: Any, diagnostics: Any, revision: object = 1) -> Any:
+    """Save an artifact of the operation, then give it another record.
+
+    ``diagnostics`` replaces its diagnostics, or None removes them, and
+    ``revision`` is the revision that its provenance records.
+    """
+    planned = _plan(store)
+    _write(store, planned, diagnostics=_SAVED)
+    group = artifact_group(store.zw, planned.ref)
+    provenance = dict(group.attrs["provenance"])
+    provenance.pop("revision", None)
+    if revision != 1:
+        provenance["revision"] = revision
+    group.attrs["provenance"] = provenance
+    if diagnostics is None:
+        del group.attrs["diagnostics"]
+    else:
+        group.attrs["diagnostics"] = diagnostics
+    return planned.ref
+
+
+def test_an_earlier_artifact_reads_a_diagnostic_added_since_as_not_measured(
+    store, monkeypatch
+) -> None:
+    # Saved at revision 1, before the operation saved testedShare.
+    earlier = _write_earlier(store, _WITHOUT_SHARE)
+    _add_share_revision(monkeypatch)
+
+    status = store.artifacts.inspect(earlier)
+    assert (status.revision, status.current_revision) == (1, 2)
+    assert status.diagnostics == {
+        "testedCells": 3,
+        "testedShare": None,
+        "testedCellExamples": ["c0", "c2"],
+    }
+    assert list(status.diagnostics) == list(_KEYS)
+    # Reading changes nothing stored, and the calls that require it read it.
+    assert artifact_group(store.zw, earlier).attrs["diagnostics"] == _WITHOUT_SHARE
+    assert require_complete_artifact(store.zw, earlier).complete
+    # A rule of the warnings that the artifact's operation gives reads what
+    # was measured, and a rule of the added diagnostic reads None.
+    share_rule = DiagnosticRule(
+        "testedShare",
+        applies=lambda numbers: numbers["testedShare"] is not None,
+        message=lambda numbers: f"{numbers['testedShare']} of the cells were tested",
+    )
+    with pytest.warns(DiagnosticWarning) as caught:
+        warn_diagnostics(_Arguments(), status.diagnostics, (*_RULES, share_rule))
+    assert [str(record.message) for record in caught] == ["3 cells were tested"]
+    # An earlier artifact that saved the diagnostic, as code that measured it
+    # before a release recorded the revision did, reads what it saved.
+    artifact_group(store.zw, earlier).attrs["diagnostics"] = _SAVED
+    assert store.artifacts.inspect(earlier).diagnostics == _SAVED
+
+
+def test_a_call_computes_anew_what_an_earlier_artifact_did_not_measure(
+    store, monkeypatch
+) -> None:
+    earlier = _write_earlier(store, _WITHOUT_SHARE)
+    _add_share_revision(monkeypatch)
+
+    with (
+        artifact_forecast_scope(),
+        pytest.raises(ArtifactComputationRequired) as raised,
+    ):
+        _plan(store)
+    forecast = raised.value.computation
+    assert (forecast.reason, forecast.existing) == ("superseded", earlier)
+    assert forecast.revision_changes == ("Artifacts save the share of tested cells.",)
+    messages: list[str] = []
+    sink = logger.add(
+        lambda message: messages.append(message.record["message"]), level="INFO"
+    )
+    try:
+        planned = _plan(store)
+    finally:
+        logger.remove(sink)
+    assert not planned.reused
+    assert planned.provenance["revision"] == 2
+    assert [message for message in messages if message.startswith("Recomputing")] == [
+        f"Recomputing {_OPERATION}: artifact {earlier.artifact_id[:12]} is revision "
+        "1, current 2: Artifacts save the share of tested cells."
+    ]
+    _write(store, planned, diagnostics=_SAVED)
+    assert _plan(store).reused and _plan(store).ref == planned.ref
+
+
+def test_an_artifact_of_the_adding_revision_without_the_diagnostic_is_refused(
+    store, monkeypatch
+) -> None:
+    _add_share_revision(monkeypatch)
+    # Saved at revision 2, which saves testedShare, so damage or a bug lost it.
+    current = _write_earlier(store, _WITHOUT_SHARE, revision=2)
+    assert store.artifacts.inspect(current).is_current
+
+    message = (
+        f"holds other diagnostics than {_OPERATION} saves: .*missing testedShare. "
+        f"To read it, call {_CALL} again with the same arguments"
+    )
+    with pytest.raises(ValueError, match=message):
+        store.artifacts.inspect(current).diagnostics
+    with pytest.raises(ValueError, match=message):
+        require_complete_artifact(store.zw, current)
+    with (
+        artifact_forecast_scope(),
+        pytest.raises(ArtifactComputationRequired) as raised,
+    ):
+        _plan(store)
+    assert (raised.value.computation.reason, raised.value.computation.existing) == (
+        "missing_diagnostics",
+        current,
+    )
+    assert not _plan(store).reused
+
+
+@pytest.mark.parametrize(
+    ("revision", "diagnostics", "message"),
+    [
+        # An artifact of a revision that this release does not know predates
+        # no diagnostic that it knows.
+        (3, _WITHOUT_SHARE, "other diagnostics .*: .*missing testedShare"),
+        # Nor does one whose recorded revision cannot be read.
+        ("2", _WITHOUT_SHARE, "other diagnostics .*: .*missing testedShare"),
+        # An earlier artifact lacks only what a later revision added.
+        (
+            1,
+            {"testedShare": 0.75, "testedCellExamples": []},
+            "other diagnostics .*: .*missing testedCells",
+        ),
+        # Nor does it hold a key that the operation never declared.
+        (
+            1,
+            {**_WITHOUT_SHARE, "otherCells": 2},
+            "other diagnostics .*: .*not declared otherCells",
+        ),
+        # And one saved before CyteArc recorded diagnostics holds none.
+        (1, None, f"holds no diagnostics, which {_OPERATION} saves with every"),
+    ],
+)
+def test_an_artifact_is_refused_for_diagnostics_that_no_revision_explains(
+    store, monkeypatch, revision, diagnostics, message
+) -> None:
+    ref = _write_earlier(store, diagnostics, revision=revision)
+    _add_share_revision(monkeypatch)
+
+    expected = f"{message}.*call {_CALL} again with the same arguments"
+    with pytest.raises(ValueError, match=expected):
+        store.artifacts.inspect(ref).diagnostics
+    with pytest.raises(ValueError, match=expected):
+        require_complete_artifact(store.zw, ref)
+
+
+def test_a_declaration_holds_every_diagnostic_that_a_revision_adds(
+    monkeypatch,
+) -> None:
+    operation = "declare_test_revised_keys"
+    monkeypatch.setattr(
+        operation_revisions,
+        "OPERATION_REVISIONS",
+        MappingProxyType(
+            {operation: (OperationRevision(2, "9.9.0", "Saves b.", None, ("b",)),)}
+        ),
+    )
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"^A revision of declare_test_revised_keys adds the diagnostics "
+            r"\['b'\], which its declaration \['a'\] lacks$"
+        ),
+    ):
+        declare_diagnostics(operation, ("a",), call="ds.x")
+    assert declared_diagnostics(operation) == ()
+    declare_diagnostics(operation, ("a", "b"), call="ds.x")
+    assert declared_diagnostics(operation) == ("a", "b")
 
 
 def test_a_loader_refuses_clones_saved_without_diagnostics(store) -> None:

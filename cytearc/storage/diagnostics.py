@@ -9,6 +9,9 @@ the artifact holds them in one ``diagnostics`` attribute, written with its
 last write, so a reused artifact reports the numbers of its computation.
 The writer refuses a mapping with other keys, and the reader refuses an
 artifact whose keys differ, so the keys are a contract of each operation.
+A key that an operation revision added after the artifact's own revision
+is the one exception: an artifact saved before the operation saved it
+reads it as None.
 
 Keys are camelCase. A value is an integer, a finite float, a text, None for
 a number that was not measured, or, under a key that ends in ``Examples``, a
@@ -32,6 +35,7 @@ from typing import Any, Protocol
 import numpy as np
 
 from ..utils.warnings import DiagnosticWarning, warn
+from .operation_revisions import diagnostics_added_after
 
 __all__ = [
     "DIAGNOSTICS_ATTRIBUTE",
@@ -81,7 +85,9 @@ def declare_diagnostics(operation: str, keys: Sequence[str], *, call: str) -> No
 
     Raises:
         ValueError: If a key is not camelCase or repeats, ``call`` is empty,
-            or the operation was declared with other keys or another call.
+            a revision of the operation adds a diagnostic that ``keys``
+            lacks, or the operation was declared with other keys or another
+            call.
     """
     resolved = tuple(keys)
     for key in resolved:
@@ -94,6 +100,13 @@ def declare_diagnostics(operation: str, keys: Sequence[str], *, call: str) -> No
         raise ValueError(f"{operation} declares a diagnostic twice: {list(resolved)}")
     if not isinstance(call, str) or not call:
         raise ValueError(f"{operation} must name the call that computes its artifacts")
+    # Revisions are numbered from 2, so those after 1 are all of them.
+    undeclared = sorted(diagnostics_added_after(operation, 1) - set(resolved))
+    if undeclared:
+        raise ValueError(
+            f"A revision of {operation} adds the diagnostics {undeclared}, which "
+            f"its declaration {list(resolved)} lacks"
+        )
     declaration = _Declaration(resolved, call)
     existing = _DECLARED.get(operation)
     if existing is not None and existing != declaration:
@@ -192,17 +205,26 @@ def _recompute(operation: str) -> str:
 
 
 def read_diagnostics(
-    attributes: Mapping[str, Any], operation: str | None, *, path: str
+    attributes: Mapping[str, Any],
+    operation: str | None,
+    *,
+    path: str,
+    revision: int | None,
 ) -> dict[str, DiagnosticValue]:
     """Read an artifact's diagnostics, checked against those its operation declares.
 
     An operation that declares none reads none, whatever the artifact holds
-    under ``diagnostics``.
+    under ``diagnostics``. A diagnostic that a revision of the operation
+    after ``revision`` added reads as None, not measured, when the artifact
+    lacks it, since the artifact was saved before the operation saved it.
 
     Args:
         attributes: The attributes of the artifact's group.
         operation: The operation that saved the artifact.
         path: The artifact's path in the store, for errors.
+        revision: The operation revision that the artifact records, 1 when
+            it records none, or None when its record cannot tell, which lets
+            it lack no diagnostic.
 
     Raises:
         ValueError: If the operation declares diagnostics and the artifact
@@ -219,10 +241,12 @@ def read_diagnostics(
             f"The artifact at {path} holds no diagnostics, which {operation} saves "
             f"with every artifact; {_recompute(operation)}"
         )
+    stored = attributes[DIAGNOSTICS_ATTRIBUTE]
+    if revision is not None and isinstance(stored, Mapping):
+        unmeasured = diagnostics_added_after(operation, revision).difference(stored)
+        stored = {**stored, **dict.fromkeys(unmeasured)}
     try:
-        return checked_diagnostics(
-            attributes[DIAGNOSTICS_ATTRIBUTE], keys, operation=operation
-        )
+        return checked_diagnostics(stored, keys, operation=operation)
     except ValueError as error:
         raise ValueError(
             f"The artifact at {path} holds other diagnostics than {operation} saves: "

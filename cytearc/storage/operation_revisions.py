@@ -10,7 +10,9 @@ old code would keep being reused. This module records each such fix as an
 Planning computes the effective revision of a new artifact with
 :func:`effective_revision` and records it in provenance only when it is 2 or
 more. A revision changes only the identities of the artifacts it applies to.
-Artifacts that record no revision are revision 1.
+Artifacts that record no revision are revision 1. A revision after which the
+operation saves new diagnostics lists them, so that artifacts of earlier
+revisions, saved without them, still read.
 
 The registry is append-only. A released :class:`OperationRevision` is never
 edited, renumbered, or removed, and its predicate never changes: stored
@@ -40,12 +42,17 @@ class OperationRevision:
         release: The first CyteArc release that records it, such as ``"1.0.0"``.
         change: One line that says what changed.
         applies: A pure predicate that selects the affected artifacts, or None for all.
+        added_diagnostics: The diagnostics that the operation saves from this
+            revision on. An artifact of an earlier revision that lacks one
+            reads it as None, not measured. Only a revision that applies to
+            every artifact adds diagnostics.
     """
 
     revision: int
     release: str
     change: str
     applies: RevisionPredicate | None
+    added_diagnostics: tuple[str, ...] = ()
 
 
 def _repeats_cell_cycle_gene(
@@ -311,6 +318,19 @@ _OPERATION_REVISIONS: dict[str, tuple[OperationRevision, ...]] = {
             ),
             applies=_hvg_selection_1_3,
         ),
+        OperationRevision(
+            revision=3,
+            release="1.5.0",
+            change=(
+                "Selections save the selectedDetectionRatio diagnostic, which "
+                "earlier selections lack; for the same recorded parameters they "
+                "select the same genes, since a new default min_cells changes the "
+                "recorded min_cells and the restart of a stalled trend fit only "
+                "completes fits that raised before"
+            ),
+            applies=None,
+            added_diagnostics=("selectedDetectionRatio",),
+        ),
     ),
 }
 
@@ -325,6 +345,16 @@ def _validate_registry(
                 f"Revisions of {operation!r} must be numbered 2, 3, ... in order, "
                 f"got {numbers}"
             )
+        for entry in revisions:
+            # Every artifact computed from such a revision on records it or a
+            # later one, so one of an earlier revision predates its diagnostics.
+            if entry.added_diagnostics and entry.applies is not None:
+                raise ValueError(
+                    f"Revision {entry.revision} of {operation!r} adds the "
+                    f"diagnostics {list(entry.added_diagnostics)}, which every "
+                    "artifact computed from it on saves, so it must apply to every "
+                    "artifact, with applies=None"
+                )
 
 
 _validate_registry(_OPERATION_REVISIONS)
@@ -357,3 +387,17 @@ def effective_revision(
     """Return the highest applicable revision of ``operation`` for an artifact, or 1."""
     applicable = applicable_revisions(operation, kind, parameters, inputs)
     return applicable[-1].revision if applicable else 1
+
+
+def diagnostics_added_after(operation: str, revision: int) -> frozenset[str]:
+    """Return the diagnostics that revisions of ``operation`` after ``revision`` added.
+
+    An artifact that records ``revision`` was saved before ``operation``
+    saved them.
+    """
+    return frozenset(
+        key
+        for entry in OPERATION_REVISIONS.get(operation, ())
+        if entry.revision > revision
+        for key in entry.added_diagnostics
+    )
