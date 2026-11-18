@@ -1253,10 +1253,14 @@ class PipelineRun(Mapping[str, ArtifactRef | tuple[ArtifactRef, ...]]):
         multimodal run's source ``runs``, are reopened by their run IDs.
         A keyword or stage setting that the recipe gained after the run
         started is left out, so the recipe gives it its default, as a call
-        that omits it would. Passing the keywords to the recipe, as
-        ``getattr(ds.pipeline, run.recipe)(**run.settings())``, analyzes the
-        run's cells again and reuses the run's artifacts while the store's
-        cell columns and the release's defaults are unchanged;
+        that omits it would, except the ``normalization`` ``method``: a run
+        recorded before it, as by CyteArc 1.4.0, returns the normalizer that
+        its saved normalized values record and, for Pearson residuals or a
+        custom normalizer, the PCA ``feat_scaling`` of True that it applied
+        when its call set none. Passing the keywords to the recipe, as
+        ``getattr(ds.pipeline, run.recipe)(**run.settings())``,
+        analyzes the run's cells again and reuses the run's artifacts while
+        the store's cell columns and the release's defaults are unchanged;
         :meth:`~cytearc.datastore.pipeline_accessor.PipelineAccessor.rerun`
         takes them with changes. A run records its settings when it starts,
         so a run of any status returns them.
@@ -1264,7 +1268,9 @@ class PipelineRun(Mapping[str, ArtifactRef | tuple[ArtifactRef, ...]]):
         Raises:
             ValueError: If the run's recipe is not one of this release's, as
                 for a run that ``pipeline.run()`` of an earlier release saved,
-                or the run records a keyword that its recipe no longer takes.
+                the run records a keyword that its recipe no longer takes, or
+                a run recorded before the ``normalization`` ``method`` saved
+                normalized values that do not record their normalizer.
 
         Example:
             >>> run.settings()["leiden"]

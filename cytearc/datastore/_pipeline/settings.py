@@ -47,6 +47,7 @@ from .._operations.perturbation_mixscape import _PerturbationMixscapeOperationsM
 from .._operations.perturbation_profiles import _PerturbationProfileOperationsMixin
 from .._operations.presentation import _PresentationOperationsMixin
 from .._operations.quality_control import _QualityControlOperationsMixin
+from .normalizers import check_method_setting
 
 
 def keyword_default(method: Callable[..., Any], keyword: str) -> Any:
@@ -121,11 +122,12 @@ MULTIMODAL_LEIDEN_PARTITIONS: tuple[float, ...] = (1.0,)
 # omitting it uses that method's default. Some keys configure the recipe
 # instead: Leiden ``partitions`` and ``selected``, the ADT panel's
 # ``exclude``, the HTO ``assay`` of hashing, the capture ``sample_column`` of
-# cell calling, guide calling's ``path`` and ``barcode_prefix``, which import
-# Cell Ranger's calls in place of calling guides, and the ``cells`` of
-# profiles, which chooses between every cell of each label and Mixscape's
-# knocked-out cells. Harmony's ``batch_columns`` and the ``controls`` of
-# perturbation labels are required keywords of their methods.
+# cell calling, the normalizer ``method`` of normalization, guide calling's
+# ``path`` and ``barcode_prefix``, which import Cell Ranger's calls in place
+# of calling guides, and the ``cells`` of profiles, which chooses between
+# every cell of each label and Mixscape's knocked-out cells. Harmony's
+# ``batch_columns`` and the ``controls`` of perturbation labels are required
+# keywords of their methods.
 # ``_pipeline/description.py`` declares the recipe keys and the defaults that a
 # recipe fits to its data, for PipelineAccessor.describe.
 STAGE_SETTINGS: Mapping[str, frozenset[str]] = MappingProxyType(
@@ -177,7 +179,7 @@ STAGE_SETTINGS: Mapping[str, frozenset[str]] = MappingProxyType(
         ),
         "prevalent_peaks": frozenset({"top_n"}),
         "panel": frozenset({"exclude"}),
-        "normalization": frozenset({"log_transform", "renormalize_subset"}),
+        "normalization": frozenset({"method", "log_transform", "renormalize_subset"}),
         "pca": frozenset({"dims", "feat_scaling", "batch_size"}),
         "lsi": frozenset(
             {
@@ -586,6 +588,8 @@ def _check_stage_values(stage: str, value: Mapping[str, Any]) -> None:
                 for name, default in _LOCALMAP_SETTING_DEFAULTS.items()
             }
         )
+    elif stage == "normalization" and "method" in value:
+        check_method_setting(value["method"])
     elif stage == "harmony" and "harmony_params" in value:
         from ...embeddings.harmony import validate_harmony_parameters
 

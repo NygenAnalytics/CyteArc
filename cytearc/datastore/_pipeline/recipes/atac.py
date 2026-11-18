@@ -41,6 +41,7 @@ from .common import (
     resolve_graph,
     resolve_harmony,
     resolve_label,
+    resolve_normalization,
     resolve_run_filtering,
     resolve_snapshot_columns,
     run_reserved_fields,
@@ -124,9 +125,7 @@ def resolve_atac(
             f"prevalent_peaks top_n ({top_n}) must be at least 1 and below the "
             f"{n_peaks} peaks of assay {assay_name!r}"
         )
-    _norm, normalization_settings = stage_settings(
-        "normalization", normalization, optional=False
-    )
+    normalization_settings = resolve_normalization(store, assay_name, normalization)
     _lsi, lsi_settings = stage_settings("lsi", lsi, optional=False)
     skip_first = lsi_settings.get("skip_first", LSI_SKIP_FIRST_DEFAULT)
     skip_first = bool_argument(skip_first, "lsi skip_first")
@@ -194,7 +193,7 @@ def resolve_atac(
         ),
         filtering_stage(filtering_config, source),
         _prevalent_peaks_stage(assay_name, peak_settings),
-        normalization_stage("prevalent_peaks", normalization_settings),
+        normalization_stage("prevalent_peaks", normalization_settings.flags),
         _lsi_stage(lsi_settings),
         harmony_stage(harmony_columns, harmony_settings),
         *graph_stages(
@@ -213,7 +212,7 @@ def resolve_atac(
         "stages": {
             "filtering": filtering_config,
             "prevalent_peaks": peak_settings,
-            "normalization": normalization_settings,
+            "normalization": normalization_settings.to_config(),
             "lsi": lsi_settings,
             "harmony": harmony_config(harmony_columns, harmony_settings),
             **graph.to_config(),
@@ -255,6 +254,7 @@ def resolve_atac(
         fields=fields,
         start=lambda store: RunState(store=store, assay=store._get_assay(assay_name)),
         summarize=lambda stage, outputs: summarize_stage(store, stage, outputs),
+        normalizers={assay_name: normalization_settings.normalizer},
     )
 
 

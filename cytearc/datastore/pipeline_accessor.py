@@ -25,6 +25,7 @@ from ._pipeline.events import (
     pipeline_listener as pipeline_listener,
 )
 from ._pipeline.executor import RecipePlan, execute_recipe
+from ._pipeline.normalizers import add_applied_feat_scaling, recorded_normalizer
 from ._pipeline.planning import (
     PipelinePlan as PipelinePlan,
     PipelineStageEstimate as PipelineStageEstimate,
@@ -93,11 +94,30 @@ def recipe_keywords(recipe: str) -> frozenset[str]:
     return frozenset(parameters) - frozenset(_UNRECORDED_KEYWORDS)
 
 
-def recorded_settings(store: Any, record: PipelineRunRecord) -> dict[str, Any]:
-    """Return the keywords of the recipe call that ``record`` records.
+def recorded_settings(
+    store: Any,
+    record: PipelineRunRecord,
+    overrides: Mapping[str, object] | None = None,
+) -> dict[str, Any]:
+    """Return the keywords of the recipe call that ``record`` records, with ``overrides``.
 
-    ``PipelineRun.settings`` documents them. The settings are copies, so
-    changing them leaves the record as it is.
+    ``PipelineRun.settings`` documents the settings, and
+    ``PipelineAccessor.rerun`` the overrides: a mapping changes a stage's
+    settings key by key, and any other value replaces the run's. The
+    settings are copies, so changing them leaves the record as it is.
+
+    A run recorded before the ``normalization`` ``method``, as by 1.4.0,
+    applied the normalizer that its saved normalized values record, and its
+    PCA scaled its features unless the call set ``feat_scaling``. Its
+    settings take both, the scaling where the normalizer's default changed
+    since, once the overrides are in, so that a call that turns PCA off
+    with ``dims=0`` leaves the scaling out.
+
+    Raises:
+        ValueError: If the run's recipe is not one of this release's, the
+            run records a keyword that the recipe no longer takes, or its
+            saved normalized values do not record its normalizer.
+        TypeError: If an override is not a keyword of the run's recipe.
     """
     translate = _RECORDED_CALLS.get(record.recipe)
     if translate is None:
@@ -123,6 +143,28 @@ def recorded_settings(store: Any, record: PipelineRunRecord) -> dict[str, Any]:
             f"release's {record.recipe} recipe does not take; "
             "report()['run']['config'] holds the settings that it recorded"
         )
+    # A run recorded before its normalization stage recorded the normalizer,
+    # as by 1.4.0, applied the one that its saved normalized values record.
+    normalization = settings.get("normalization")
+    method = None
+    if isinstance(normalization, dict) and "method" not in normalization:
+        method = recorded_normalizer(store, record)
+        if method is not None:
+            normalization["method"] = method
+    if overrides:
+        unknown = sorted(set(overrides) - recipe_keywords(record.recipe) - {"label"})
+        if unknown:
+            raise TypeError(
+                f"A run of the {record.recipe} recipe takes the keywords of "
+                f"pipeline.{record.recipe}, which do not include {unknown!r}"
+            )
+        for name, value in overrides.items():
+            recorded = settings.get(name)
+            if isinstance(recorded, dict) and isinstance(value, Mapping):
+                value = {**recorded, **value}
+            settings[name] = value
+    if method is not None:
+        add_applied_feat_scaling(settings, method)
     return settings
 
 
@@ -369,8 +411,9 @@ class PipelineAccessor:
 
         The recipe optionally calls cells in raw droplets and demultiplexes
         hashtags, filters cells on their QC metrics, scores the cell cycle,
-        selects highly variable genes, normalizes them by library size and
-        log, reduces them with PCA, optionally corrects batches with Harmony,
+        selects highly variable genes, normalizes them, by default by library
+        size and log, reduces them with PCA, optionally corrects batches with
+        Harmony,
         builds a neighbor graph, embeds it with UMAP, clusters it with Leiden
         at several resolutions, saves the candidate with the best silhouette,
         scores doublets, and ranks markers:
@@ -411,11 +454,22 @@ class PipelineAccessor:
             hvg: The keywords of ``features.hvgs``; ``batch`` names a cell
                 column, and ``min_mean``, ``max_mean``, ``min_var``, and
                 ``max_var`` are log2 values.
-            normalization: The keywords of ``features.normalize``.
+            normalization: ``method``, the normalizer that every stage of the
+                run applies, and the keywords of ``features.normalize``.
+                ``method`` names a built-in normalizer, ``"lib_size"``,
+                ``"lib_size_log"``, ``"pearson_residuals"``, ``"clr"``,
+                ``"tf_idf"``, or ``"passthrough"`` for ``norm_dummy``, and
+                defaults to the assay's ``normMethod``. The run records the
+                normalizer by name, or a custom normalizer by its identity,
+                so a rerun normalizes as the run did; a custom normalizer
+                must be the assay's ``normMethod``.
             pca: The keywords of ``reduction.pca``. ``dims`` must be below
-                ``hvg`` ``top_n``. ``dims=0`` skips PCA and builds the graph
-                on the normalized values, which needs ``doublets=False`` and
-                no Harmony. ``feat_scaling=False`` needs ``doublets=False``.
+                ``hvg`` ``top_n``. ``feat_scaling`` defaults to False for a
+                run of Pearson residuals, which are already standardized,
+                and to True otherwise. ``dims=0`` skips PCA and builds the
+                graph on the normalized values, which needs
+                ``doublets=False`` and no Harmony. ``feat_scaling=False``
+                needs ``doublets=False``.
             harmony: ``batch_columns``, the cell columns whose batches Harmony
                 corrects, with ``harmony_params`` (the options of
                 ``cytearc.embeddings.harmony.fit_harmony``) and
@@ -445,8 +499,8 @@ class PipelineAccessor:
             doublets: Doublet scoring, with the keywords of ``qc.doublets``.
                 It normalizes simulated doublets by library size and projects
                 them onto the PCA with its feature scaling, so it needs the
-                assay's ``normMethod`` to be ``norm_lib_size`` and ``pca``
-                ``feat_scaling`` to be True, both the defaults.
+                run to normalize with ``"lib_size"``, the RNA default, and
+                ``pca`` ``feat_scaling`` to be True.
             markers: Rank markers for each saved cluster.
             snapshot_columns: Cell columns to freeze into the run's cell view.
             species: A species key recorded with the run.
@@ -550,7 +604,10 @@ class PipelineAccessor:
                 the assay's peaks, whichever is smaller, and must be below the
                 assay's number of peaks. The run records the resolved
                 ``top_n``.
-            normalization: The keywords of ``features.normalize``.
+            normalization: ``method`` and the keywords of
+                ``features.normalize``, as for :meth:`rna`. ``method``
+                defaults to the assay's ``normMethod``, ``"tf_idf"`` for an
+                ATAC assay.
             lsi: The keywords of ``reduction.lsi``, such as ``dims`` and
                 ``skip_first``, a bool. ``dims``, plus the first component
                 that ``skip_first`` leaves out, must not exceed
@@ -647,7 +704,10 @@ class PipelineAccessor:
                 "isotype", "control", and "ctrl" in any case), or None to keep
                 every antibody. The panel must keep at least two antibodies,
                 and the run records the excluded names.
-            normalization: The keywords of ``features.normalize``.
+            normalization: ``method`` and the keywords of
+                ``features.normalize``, as for :meth:`rna`. ``method``
+                defaults to the assay's ``normMethod``, ``"clr"`` for an ADT
+                assay.
             pca: The keywords of ``reduction.pca``. ``dims`` defaults to one
                 fewer than the panel's antibodies, at most the PCA default,
                 and must be below the panel's number of antibodies.
@@ -743,7 +803,9 @@ class PipelineAccessor:
                 ``partitions`` defaults to ``[1.0]`` and several partitions
                 need a ``selected`` resolution.
             markers: Rank each run's assay's features for the joint clusters,
-                as the ``markers_<assay>`` outputs.
+                as the ``markers_<assay>`` outputs, with the normalizer that
+                the run of that assay applied. A custom normalizer must be
+                the assay's ``normMethod``.
 
         The other arguments mean what they mean for :meth:`rna`.
         """
@@ -856,9 +918,11 @@ class PipelineAccessor:
                 gene, with the keywords of ``perturbation.efficiency`` (``by``
                 and ``id_column``).
             hvg: The keywords of ``features.hvgs``, as for :meth:`rna`.
-            normalization: The keywords of ``features.normalize``.
+            normalization: ``method`` and the keywords of
+                ``features.normalize``, as for :meth:`rna`.
             pca: The keywords of ``reduction.pca``. ``dims`` must be at least
-                1 and below ``hvg`` ``top_n``.
+                1 and below ``hvg`` ``top_n``, and ``feat_scaling`` defaults
+                as for :meth:`rna`.
             harmony: Harmony settings, as for :meth:`rna`. With Harmony, the
                 E-distances and the signature read the corrected coordinates.
             edistance: E-distances in the run's coordinates, with the keywords
@@ -952,19 +1016,7 @@ class PipelineAccessor:
                 f"run must be a pipeline run of this datastore; run {run.run_id} "
                 "is not recorded in it"
             ) from error
-        keywords = recorded_settings(self._store, record)
-        unknown = sorted(set(overrides) - recipe_keywords(record.recipe) - {"label"})
-        if unknown:
-            raise TypeError(
-                f"A run of the {record.recipe} recipe takes the keywords of "
-                f"pipeline.{record.recipe}, which do not include {unknown!r}"
-            )
-        for name, value in overrides.items():
-            recorded = keywords.get(name)
-            if isinstance(recorded, dict) and isinstance(value, Mapping):
-                value = {**recorded, **value}
-            keywords[name] = value
-        return record.recipe, keywords
+        return record.recipe, recorded_settings(self._store, record, overrides)
 
     @validation_scoped
     def rerun(

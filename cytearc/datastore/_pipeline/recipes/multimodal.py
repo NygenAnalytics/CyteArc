@@ -9,12 +9,14 @@ joint clusters.
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from ....assay import NormMethod
 from ....storage.artifacts import ArtifactRef, inspect_artifact
 from ....storage.pipeline_runs import load_pipeline_run_record
 from ....storage.selections import snapshot_run_metadata
 from ..cluster_selection import cluster_label_values
 from ..executor import PlannedStage, RecipePlan, RunState
 from ..fields import cell_fields, feature_fields
+from ..normalizers import method_normalizer, normalizer_label, recorded_normalizer
 from ..settings import (
     MULTIMODAL_LEIDEN_PARTITIONS,
     leiden_config,
@@ -136,6 +138,32 @@ def _resolve_runs(
                     f"{coordinates.kind} values; run it with a PCA or LSI reduction"
                 )
     return resolved, selection
+
+
+def _source_normalizer(store: Any, run: PipelineRun) -> NormMethod:
+    """Return the normalizer with which a source run normalized its assay.
+
+    The joint run ranks each assay's markers with it, so they rank the values
+    that the source run normalized, in any session. A custom normalizer must
+    be the assay's ``normMethod``.
+
+    Raises:
+        ValueError: If the source run normalized with a custom normalizer that
+            is not the assay's ``normMethod``.
+    """
+    record = load_pipeline_run_record(store.zw, run.run_id)
+    method = recorded_normalizer(store, record)
+    assay = store._get_assay(run.assay)
+    normalizer = method_normalizer(assay, method)
+    if normalizer is None:
+        raise ValueError(
+            f"Run {run.run_id} ({run.recipe}) normalized assay {run.assay!r} with "
+            f"the custom normalizer {method!r}, with which the multimodal run "
+            "ranks the assay's markers, but the assay's normMethod is "
+            f"{normalizer_label(assay.normMethod)}; set the assay's normMethod "
+            "to that normalizer, or pass markers=False"
+        )
+    return normalizer
 
 
 def _input_stage(
@@ -334,6 +362,13 @@ def resolve_multimodal(
             f"Run {sources[0].run_id} has no neighbors output whose coordinates "
             "could initialize the joint embedding"
         )
+    # Markers are the joint run's only normalized values, and each assay's
+    # take the normalizer of the run that analyzed it.
+    normalizers = (
+        {run.assay: _source_normalizer(store, run) for run in sources}
+        if markers
+        else {}
+    )
     check_tsne(embeddings)
 
     def start(store: Any) -> RunState:
@@ -415,6 +450,7 @@ def resolve_multimodal(
         fields=fields,
         start=start,
         summarize=lambda stage, outputs: summarize_stage(store, stage, outputs),
+        normalizers=normalizers,
     )
 
 

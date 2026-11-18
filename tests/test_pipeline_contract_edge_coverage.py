@@ -10,6 +10,7 @@ import zarr
 from zarr.storage import MemoryStore
 
 import cytearc.datastore._pipeline.ledger as ledger_module
+import cytearc.datastore._pipeline.normalizers as normalizers_module
 import cytearc.datastore._pipeline.recipes.rna as rna_module
 import cytearc.storage.pipeline_runs as run_storage
 from cytearc.assay import norm_lib_size
@@ -786,7 +787,10 @@ def test_run_filtering_defaults_to_where_the_cells_come_from() -> None:
 def test_resolve_rna_contract_errors(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # The fake assay stands in for an RNA assay, whose normalizers the
+    # library-size normalizer is among.
     monkeypatch.setattr(rna_module, "RNAassay", _FakeRNA)
+    monkeypatch.setattr(normalizers_module, "RNAassay", _FakeRNA)
     store = _RecipeStore()
     kwargs = _recipe_kwargs()
     plan = rna_module.resolve_rna(store, **kwargs)
