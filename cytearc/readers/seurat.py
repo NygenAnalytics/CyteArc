@@ -2744,6 +2744,12 @@ class SeuratReader:
 
         prepare_matrix_sources(self.get_assay(name).counts, max_bytes=max_bytes)
 
+    def _release_cached_rows(self, name: str) -> None:
+        """Drop the bucket of converted cells that an assay's counts keep between reads."""
+        from ._seurat.sources import release_cached_rows
+
+        release_cached_rows(self.get_assay(name).counts)
+
     def __enter__(self) -> "SeuratReader":
         self._ensure_open()
         return self

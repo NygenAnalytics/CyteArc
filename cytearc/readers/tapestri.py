@@ -62,6 +62,7 @@ from ..utils.count_values import (
 from ..utils.warnings import warn
 from ..variants.counts import ALLELE_ROLES, Contig, EntryBatch, SiteTable
 from ._assay_names import auto_name_feat_table
+from ._row_spill import dense_sample_rows, dense_spill_estimate
 from ._text import as_text, require_unique_identifiers
 from .cellranger import CrReader
 from ..utils.arguments import quoted_value
@@ -467,15 +468,22 @@ class TapestriReader(CrReader):
         if destinationRows is None:
             value_ranges = scan(maxBytes, None)
         else:
+            # The first cells, of about a million reads, estimate how many
+            # reads the cells hold beside zeros and what they take on disk.
+            expected, entry_bytes = dense_spill_estimate(
+                self._block(0, dense_sample_rows(self.nCells, self.nFeatures)),
+                self.nCells,
+            )
             value_ranges = self._spill_rows(
                 destinationRows,
                 maxBytes,
                 scan,
                 entries=None,
                 longest=self.nFeatures,
-                entry_bytes=None,
+                entry_bytes=entry_bytes,
                 operation="shuffled Tapestri import",
                 temp_dir=self._tempDir,
+                expected_entries=expected,
             )
         self._cumulativeRowNnz = cumulative_nnz(row_nonzeros)
         return value_ranges

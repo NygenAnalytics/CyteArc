@@ -1304,3 +1304,219 @@ def test_a_reader_that_names_too_few_file_rows_is_refused_before_it_is_read(
         reader.close()
     assert scans == []
     assert not (tmp_path / "refused.zarr").exists()
+
+
+def _reusable_source(
+    tmp_path: Path, kind: str
+) -> tuple[Callable[[], Any], type, dict[str, Any], dict[str, np.ndarray]]:
+    """Return a reader factory of ``kind``, its writer, the writer's options, and its counts by assay."""
+    counts = _counts()
+    scratch = str(tmp_path)
+    by_assay = {name: counts[:, columns] for name, columns in _ASSAY_COLUMNS.items()}
+    if kind == "10x":
+        path = _write_10x(tmp_path / "matrix.h5", counts)
+        return (
+            lambda: CrH5Reader(str(path), temp_dir=scratch),
+            CrToZarr,
+            {},
+            by_assay,
+        )
+    if kind.startswith("mtx-"):
+        directory = _write_mtx(tmp_path / "mtx", counts, kind.split("-")[1])
+        return (
+            lambda: MtxReader(inspect_mtx(directory)[0], temp_dir=scratch),
+            CrToZarr,
+            {"lines_in_mem": 50},
+            by_assay,
+        )
+    assert kind == "tapestri"
+    truth = tapestri_truth()
+    path = write_tapestri(truth, tmp_path / "run.dna+protein.h5")
+    return (
+        lambda: TapestriReader(str(path), temp_dir=scratch),
+        TapestriToZarr,
+        {},
+        {"CNV": truth.amplicon_reads, "ADT": truth.protein_reads},
+    )
+
+
+@pytest.mark.parametrize("shuffled_first", [True, False])
+@pytest.mark.parametrize(
+    "kind", ["10x", "mtx-cellMajor", "mtx-unordered", "mtx-featureMajor", "tapestri"]
+)
+def test_an_import_in_the_readers_order_reads_it_whatever_another_import_left(
+    tmp_path, kind, shuffled_first
+) -> None:
+    make_reader, writer, options, expected = _reusable_source(tmp_path, kind)
+    reader = make_reader()
+    try:
+
+        def shuffled() -> Any:
+            return writer(
+                reader,
+                str(tmp_path / "shuffled.zarr"),
+                nthreads=1,
+                shuffle_cells=True,
+                **options,
+            )
+
+        def plain() -> Any:
+            return writer(reader, str(tmp_path / "plain.zarr"), nthreads=1, **options)
+
+        if shuffled_first:
+            shuffled_writer = shuffled()
+            plain_writer = plain()
+        else:
+            # Built before the shuffled import sends its cells, dumped after.
+            plain_writer = plain()
+            shuffled_writer = shuffled()
+        plain_writer.dump()
+        # The plain import removed the shuffled cells, which the shuffled
+        # import cannot replace with the reader's order.
+        with pytest.raises(RuntimeError, match="written once and removed"):
+            shuffled_writer.dump()
+    finally:
+        reader.close()
+    root = _open(tmp_path / "plain.zarr")
+    for assay, values in expected.items():
+        np.testing.assert_array_equal(root[f"{assay}/counts"][...], values)
+    assert SOURCE_ROW not in root["cellData"]
+    assert _no_temporary_files(tmp_path)
+
+
+def test_a_shuffled_10x_import_refused_after_its_spill_leaves_no_cells_for_a_retry(
+    tmp_path, monkeypatch
+) -> None:
+    def refuse(self, *_args: Any) -> None:
+        raise OSError("the destination refused a write")
+
+    counts = _counts()
+    reader = _10x_reader(tmp_path)
+    try:
+        monkeypatch.setattr(CrToZarr, "_write_reader_metadata", refuse)
+        with pytest.raises(OSError, match="refused a write"):
+            CrToZarr(
+                reader, str(tmp_path / "refused.zarr"), nthreads=1, shuffle_cells=True
+            )
+        assert reader._shuffledRows is None
+        assert _no_temporary_files(tmp_path)
+        monkeypatch.undo()
+        CrToZarr(reader, str(tmp_path / "retry.zarr"), nthreads=1).dump()
+    finally:
+        reader.close()
+    root = _open(tmp_path / "retry.zarr")
+    np.testing.assert_array_equal(
+        root["cellData/ids"][...], [f"BC-{row}" for row in range(_N_CELLS)]
+    )
+    np.testing.assert_array_equal(root["RNA/counts"][...], counts[:, :9])
+
+
+def test_interleaved_shuffled_10x_imports_never_write_each_others_cells(
+    tmp_path,
+) -> None:
+    counts = _counts()
+    reader = _10x_reader(tmp_path)
+    try:
+        first = CrToZarr(
+            reader, str(tmp_path / "first.zarr"), nthreads=1, shuffle_cells=True
+        )
+        second = CrToZarr(
+            reader,
+            str(tmp_path / "second.zarr"),
+            nthreads=1,
+            shuffle_cells=True,
+            shuffle_seed=1,
+        )
+        # The second import's cells replaced the first's, in another order.
+        with pytest.raises(RuntimeError, match="another import of the reader"):
+            first.dump()
+        second.dump()
+        with pytest.raises(RuntimeError, match="another import of the reader"):
+            first.dump()
+    finally:
+        reader.close()
+    order = shuffled_order(_N_CELLS, 1)
+    assert not np.array_equal(order, shuffled_order(_N_CELLS, 0))
+    root = _open(tmp_path / "second.zarr")
+    np.testing.assert_array_equal(
+        root["cellData/ids"][...], [f"BC-{row}" for row in order]
+    )
+    np.testing.assert_array_equal(root["RNA/counts"][...], counts[order][:, :9])
+    assert _no_temporary_files(tmp_path)
+
+
+def test_csv_imports_of_one_reader_each_hold_their_own_shuffled_rows(
+    tmp_path,
+) -> None:
+    counts = _counts()
+    path = _write_csv(tmp_path / "counts.csv", counts)
+    reader = _csv_reader(path, temp_dir=str(tmp_path))
+    shuffled = CSVtoZarr(
+        reader, str(tmp_path / "shuffled.zarr"), "RNA", nthreads=1, shuffle_cells=True
+    )
+    # The shuffled rows are the writer's, so an import of the same reader in
+    # the file's order reads the file, and the shuffled import still writes.
+    CSVtoZarr(reader, str(tmp_path / "plain.zarr"), "RNA", nthreads=1).dump()
+    shuffled.dump()
+    order = shuffled_order(_N_CELLS, 0)
+    np.testing.assert_array_equal(
+        _open(tmp_path / "plain.zarr")["RNA/counts"][...], counts[:, :9]
+    )
+    np.testing.assert_array_equal(
+        _open(tmp_path / "shuffled.zarr")["RNA/counts"][...], counts[order][:, :9]
+    )
+    assert _no_temporary_files(tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("kind", "operation"),
+    [("tapestri", "Shuffled Tapestri import"), ("csv", "Shuffled CSV import")],
+)
+def test_a_disk_without_room_for_dense_rows_is_refused_before_any_is_written(
+    tmp_path, monkeypatch, kind, operation
+) -> None:
+    import cytearc.readers._sparse as sparse
+
+    run, _expected = _source(tmp_path, kind)
+    spilled: list[int] = []
+    appended: list[int] = []
+    original_finalize = SparseRowStore.finalize
+    original_append = SparseRowStore.append_rows
+
+    def finalize(self):
+        original_finalize(self)
+        spilled.append(int(self._fileBytes.sum()))
+
+    def append_rows(self, rows, matrix):
+        appended.append(int(matrix.nnz))
+        return original_append(self, rows, matrix)
+
+    monkeypatch.setattr(SparseRowStore, "finalize", finalize)
+    monkeypatch.setattr(SparseRowStore, "append_rows", append_rows)
+    run(tmp_path / "measured.zarr", {"shuffle_cells": True})
+    written = sum(spilled)
+    real_usage = sparse.shutil.disk_usage
+
+    def usage(free: int):
+        def disk_usage(path):
+            found = real_usage(path)
+            if "cytearc-sparse-" in str(path):
+                return found._replace(free=free)
+            return found
+
+        return disk_usage
+
+    appended.clear()
+    monkeypatch.setattr(sparse.shutil, "disk_usage", usage(0))
+    with pytest.raises(OSError, match=rf"^{operation} needs (\d+) temporary") as caught:
+        run(tmp_path / "refused.zarr", {"shuffle_cells": True})
+    # Refused from the first rows' estimate, before any row was sent.
+    assert not appended
+    required = int(str(caught.value).split(" needs ")[1].split()[0])
+    # The estimate, from the values beside zeros of the first rows and their
+    # encoding, covers what the spill wrote.
+    assert 0 < written <= required
+    monkeypatch.setattr(sparse.shutil, "disk_usage", usage(required))
+    run(tmp_path / "admitted.zarr", {"shuffle_cells": True})
+    assert not (tmp_path / "refused.zarr").exists()
+    assert _no_temporary_files(tmp_path)

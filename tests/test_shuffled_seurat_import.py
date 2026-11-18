@@ -762,28 +762,253 @@ def test_a_disk_without_room_for_the_spill_is_refused_before_it_is_written(
     assert not list(tmp_path.glob("cytearc-sparse-*"))
 
 
-def test_cell_arrays_held_in_memory_are_checked_against_the_budget(tmp_path) -> None:
+def _write_wide_object(
+    path: Path, *, dims: int = 400, text_width: int = 1, n_cells: int = _N_CELLS
+) -> Path:
+    """Write an object of sparse RNA counts, a text column and a reduction of ``dims`` dimensions."""
+    wire = _Wire()
+    cells = _cells(n_cells)
+    rna = wire.s4(
+        [
+            ("counts", _counts_matrix(wire, _gene_counts(n_cells), cells, True)),
+            (
+                "meta.features",
+                wire.data_frame([("symbol", wire.string_vector(_GENES))], _GENES),
+            ),
+            ("class", wire.string_vector(["Assay"])),
+        ]
+    )
+    pca = np.random.default_rng(4).normal(size=(n_cells, dims))
+    wide = wire.s4(
+        [
+            (
+                "cell.embeddings",
+                wire.matrix(
+                    pca.T.ravel().tolist(),
+                    pca.shape,
+                    rows=cells,
+                    columns=[f"PC_{k + 1}" for k in range(dims)],
+                    real=True,
+                ),
+            ),
+            ("feature.loadings", wire.matrix([], (0, 0), real=True)),
+            ("assay.used", wire.string_vector(["RNA"])),
+            ("global", wire.logical_vector([1])),
+            ("key", wire.string_vector(["PC_"])),
+            ("class", wire.string_vector(["DimReduc"])),
+        ]
+    )
+    text = ["t" * (text_width - 1) + str(index % 3) for index in range(n_cells)]
+    root = wire.s4(
+        [
+            ("assays", wire.vector([rna], names=["RNA"])),
+            (
+                "meta.data",
+                wire.data_frame([("text", wire.string_vector(text))], cells),
+            ),
+            ("active.assay", wire.string_vector(["RNA"])),
+            ("active.ident", wire.factor([1] * n_cells, ["a"], names=cells)),
+            ("reductions", wire.vector([wide], names=["pca"])),
+            ("graphs", wire.vector([], names=[])),
+            ("class", wire.string_vector(["Seurat"])),
+        ]
+    )
+    path.write_bytes(wire.document(root))
+    return path
+
+
+@pytest.mark.parametrize(
+    ("options", "item"),
+    [
+        ({"dims": 4000}, "the coordinates of reduction 'pca' in shuffled order"),
+        (
+            {"dims": 2, "text_width": 4000},
+            "cell metadata column 'text' in shuffled order",
+        ),
+    ],
+)
+def test_per_cell_arrays_that_do_not_fit_are_refused_before_the_destination_exists(
+    tmp_path, options, item
+) -> None:
+    source = _write_wide_object(tmp_path / "object.rds", **options)
+    destination = tmp_path / "refused.zarr"
+    with SeuratReader(source, temp_dir=tmp_path) as reader:
+        with pytest.raises(MemoryBudgetError) as caught:
+            SeuratToZarr(
+                reader,
+                str(destination),
+                mem_budget="1M",
+                nthreads=1,
+                shuffle_cells=True,
+            )
+        # The same budget imports the object in its own order.
+        SeuratToZarr(
+            reader, str(tmp_path / "plain.zarr"), mem_budget="1M", nthreads=1
+        ).dump()
+    assert caught.value.item == item
+    assert caught.value.needed_bytes > caught.value.budget_bytes
+    assert not destination.exists()
+    assert not list(tmp_path.glob("cytearc-sparse-*"))
+
+
+def test_what_a_shuffled_import_holds_beside_a_gathered_array_is_charged(
+    tmp_path,
+) -> None:
+    dims = 400
+    source = _write_wide_object(tmp_path / "object.rds", dims=dims)
+    with SeuratReader(source, temp_dir=tmp_path) as reader:
+        writer = SeuratToZarr(
+            reader, MemoryStore(), mem_budget="64M", nthreads=1, shuffle_cells=True
+        )
+        stores = list(writer._shuffledRows.values())
+        resident = writer._source_resident_bytes()
+        # Beside each array, the import holds at least the order of the cells
+        # and the row counts of the shuffled cells.
+        assert resident >= 8 * _N_CELLS + sum(store.indptr.nbytes for store in stores)
+        width = max(len(cell) for cell in _cells(_N_CELLS))
+        budget = 100_000
+        # Blocks of the reduction take an eighth of the budget at the 8 bytes
+        # a value it is read in. Each row holds its coordinates, its cell
+        # name as text of 4 bytes a character, and 16 bytes of its place in
+        # the rows' order; beside them, 9 bytes a cell of store rows and mask.
+        block = min(_N_CELLS, budget // (8 * dims * 8))
+        row_bytes = dims * 8 + 4 * width + 16
+        needed = resident + 9 * _N_CELLS + (_N_CELLS + block) * row_bytes
+        assert needed > budget
+        for memory in (budget, needed - 1):
+            writer.resources = dataclasses.replace(writer.resources, memoryBytes=memory)
+            with pytest.raises(MemoryBudgetError) as caught:
+                writer._check_shuffled_holds(np.dtype(f"U{width}"))
+            assert (
+                caught.value.item
+                == "the coordinates of reduction 'pca' in shuffled order"
+            )
+            block = min(_N_CELLS, memory // (8 * dims * 8))
+            assert caught.value.needed_bytes == (
+                resident + 9 * _N_CELLS + (_N_CELLS + block) * row_bytes
+            )
+        writer._release_shuffled_rows()
+
+
+def test_a_shuffled_import_without_an_assays_cells_refuses_its_counts(
+    tmp_path,
+) -> None:
     source = _write_object(tmp_path / "object.rds")
     with SeuratReader(source, temp_dir=tmp_path) as reader:
         writer = SeuratToZarr(
             reader, MemoryStore(), mem_budget="64M", nthreads=1, shuffle_cells=True
         )
-        # Every cell's three float64 coordinates and one gathered block of 7
-        # rows, beside the order.
-        needed = (_N_CELLS + 7) * 3 * 8 + 8 * _N_CELLS
-        writer.resources = dataclasses.replace(writer.resources, memoryBytes=needed - 1)
-        with pytest.raises(MemoryBudgetError) as caught:
-            writer._held_rows(
-                reader.get_reduction("pca").cellEmbeddings,
-                7,
-                np.dtype(np.float64),
-                "pca",
-            )
-        assert caught.value.needed_bytes == needed
-        assert (
-            caught.value.item == "the coordinates of reduction 'pca' in shuffled order"
+        # The RNA cells were lost, so its counts would read the object's order.
+        writer._shuffledRows.pop("RNA").close()
+        with pytest.raises(RuntimeError, match="shuffled cells of assay 'RNA'"):
+            writer.dump()
+    assert not list(tmp_path.glob("cytearc-sparse-*"))
+
+
+@pytest.mark.parametrize("reduction", ["pca", "umap", "tsne"])
+def test_reductions_gathered_in_another_order_than_the_ids_fail_their_check(
+    tmp_path, monkeypatch, reduction
+) -> None:
+    from cytearc.storage.errors import ArtifactResolutionError
+
+    source = _write_object(tmp_path / "object.rds")
+    original = SeuratToZarr._shuffled_reduction_cells
+
+    def reversed_rows(self, selected, cell_selection):
+        selection, order = original(self, selected, cell_selection)
+        return selection, order[::-1].copy()
+
+    # The rows of the reduction, of every cell in the object's order, of
+    # some cells, or of every cell in another order, are gathered in another
+    # order than the store's IDs were written in.
+    monkeypatch.setattr(SeuratToZarr, "_shuffled_reduction_cells", reversed_rows)
+    with SeuratReader(source, temp_dir=tmp_path, reductions=[reduction]) as reader:
+        writer = SeuratToZarr(
+            reader, MemoryStore(), mem_budget="64M", nthreads=1, shuffle_cells=True
         )
-        writer._release_shuffled_rows()
+        with pytest.raises(
+            ArtifactResolutionError, match="cell IDs do not match the selected"
+        ):
+            writer.dump()
+
+
+def test_a_shuffled_import_keeps_no_bucket_of_its_converted_cells(tmp_path) -> None:
+    from cytearc.readers._seurat.sources import BaseMatrixSource, _matrix_sources
+
+    # Fragment counts reach the import through a row store of their own.
+    source = _write_fragment_matrix_fixture(tmp_path / "fragments.rds")
+    with SeuratReader(source, temp_dir=tmp_path) as reader:
+        SeuratToZarr(
+            reader, MemoryStore(), mem_budget="64M", nthreads=1, shuffle_cells=True
+        )._release_shuffled_rows()
+        stores = [
+            current._rowStore
+            for current in _matrix_sources(reader.get_assay("ATAC").counts)
+            if isinstance(current, BaseMatrixSource) and current._rowStore is not None
+        ]
+        assert stores
+        # The scan read every converted cell, but the shuffled counts write
+        # reads none, so no bucket stays held through it.
+        assert all(store._cache is None for store in stores)
+        # Reads in the object's order load buckets again.
+        SeuratToZarr(reader, MemoryStore(), mem_budget="64M", nthreads=1).dump()
+
+
+def test_imports_of_one_reader_each_hold_their_own_shuffled_cells(tmp_path) -> None:
+    source = _write_object(tmp_path / "object.rds")
+    with SeuratReader(source, temp_dir=tmp_path) as reader:
+        shuffled = SeuratToZarr(
+            reader,
+            str(tmp_path / "shuffled.zarr"),
+            mem_budget="64M",
+            nthreads=1,
+            shuffle_cells=True,
+        )
+        # The shuffled cells are the writer's, so an import of the same reader
+        # in the object's order reads the object, and the shuffled one still
+        # writes its own.
+        SeuratToZarr(
+            reader, str(tmp_path / "plain.zarr"), mem_budget="64M", nthreads=1
+        ).dump()
+        shuffled.dump()
+    counts = _gene_counts(_N_CELLS).T
+    order = shuffled_order(_N_CELLS, 0)
+    np.testing.assert_array_equal(
+        _open(tmp_path / "plain.zarr")["RNA/counts"][...], counts
+    )
+    np.testing.assert_array_equal(
+        _open(tmp_path / "shuffled.zarr")["RNA/counts"][...], counts[order]
+    )
+    assert not list(tmp_path.glob("cytearc-sparse-*"))
+
+
+def test_a_disk_without_room_for_dense_cells_is_refused_before_any_is_written(
+    tmp_path, monkeypatch
+) -> None:
+    import cytearc.readers._sparse as sparse
+
+    source = _write_object(tmp_path / "object.rds", sparse=False)
+    appended: list[int] = []
+    original_append = SparseRowStore.append_rows
+
+    def append_rows(self, rows, matrix):
+        appended.append(int(matrix.nnz))
+        return original_append(self, rows, matrix)
+
+    monkeypatch.setattr(SparseRowStore, "append_rows", append_rows)
+    real_usage = sparse.shutil.disk_usage
+
+    def disk_usage(path):
+        usage = real_usage(path)
+        return usage._replace(free=0) if "cytearc-sparse-" in str(path) else usage
+
+    monkeypatch.setattr(sparse.shutil, "disk_usage", disk_usage)
+    with pytest.raises(OSError, match=r"^Shuffled Seurat import needs \d+ temporary"):
+        _import(source, MemoryStore(), temp_dir=tmp_path, shuffle_cells=True)
+    # The dense RNA cells, the first sent, were refused from the estimate of
+    # their first cells, before any was sent.
+    assert not appended
+    assert not list(tmp_path.glob("cytearc-sparse-*"))
 
 
 def test_cell_rows_keep_repeated_coordinates_in_the_blocks_order() -> None:

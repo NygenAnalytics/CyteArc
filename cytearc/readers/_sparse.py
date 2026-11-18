@@ -1446,6 +1446,10 @@ class SparseRowStore:
                     ahead[1].cancel()
                 executor.shutdown(wait=True, cancel_futures=True)
 
+    def release_cache(self) -> None:
+        """Drop the bucket that :meth:`read` keeps for the next window; a later read loads it again."""
+        self._cache = None
+
     def _delete(self, bucket: int, start: int, stop: int) -> None:
         """Delete a bucket's files if it lies wholly within ``[start, stop)``."""
         first, last = self._bucket_rows(bucket)

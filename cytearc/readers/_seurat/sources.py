@@ -138,6 +138,16 @@ def _matrix_sources(source: MatrixSource) -> Iterator[MatrixSource]:
                 pending.extend((item, False) for item in value)
 
 
+def release_cached_rows(source: MatrixSource) -> None:
+    """Drop the bucket of converted cells that each row store of ``source`` keeps between reads.
+
+    A later read loads it again.
+    """
+    for current in _matrix_sources(source):
+        if isinstance(current, BaseMatrixSource) and current._rowStore is not None:
+            current._rowStore.release_cache()
+
+
 def release_temporary_storage(source: MatrixSource) -> None:
     for current in _matrix_sources(source):
         if isinstance(current, BaseMatrixSource) and current._rowStore is not None:

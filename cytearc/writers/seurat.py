@@ -196,7 +196,7 @@ def _stored_cell_values(block: Any) -> np.ndarray:
 class _CellIdsAt(Sequence[str]):
     """The IDs at given positions of a cell ID sequence, read in runs."""
 
-    def __init__(self, ids: Sequence[str], positions: np.ndarray) -> None:
+    def __init__(self, ids: Sequence[str] | np.ndarray, positions: np.ndarray) -> None:
         self._ids = ids
         self._positions = positions
 
@@ -268,8 +268,10 @@ class SeuratToZarr:
             reductions; each cell keeps its position among the object's
             cells, from 0, in the int64 cell column ``sourceRow``. The value
             scan sends each cell's counts to temporary files on local disk,
-            in ``temp_dir`` of the reader, as it reads them. Off by default
-            in this release.
+            in ``temp_dir`` of the reader, as it reads them. The import holds
+            every per-cell array other than counts whole while it writes it,
+            and refuses before the destination exists if one does not fit
+            in ``mem_budget``. Off by default in this release.
         shuffle_seed: The seed of the shuffle, from 0 to 2**64 - 1. One seed
             gives the same order on every platform.
 
@@ -301,6 +303,9 @@ class SeuratToZarr:
             is not an integer.
         OSError: If ``shuffle_cells`` is True and the temporary disk lacks
             room for the shuffled cells.
+        MemoryBudgetError: If ``shuffle_cells`` is True and a per-cell array
+            that the import holds whole does not fit in memory beside what
+            it holds throughout.
 
     Attributes:
         policy: The count-matrix layout that each imported assay was written
@@ -520,10 +525,17 @@ class SeuratToZarr:
         if self.shuffleCells:
             self._cellOrder = shuffled_order(n_cells, self.shuffleSeed)
             self._destinations = destination_rows(self._cellOrder)
+        # The dtype of each cell metadata column, which a shuffled import
+        # finds before the destination exists.
+        self._cellMetadataDtypes: dict[str, np.dtype[Any]] = {}
         try:
             count_dtypes = {assay.name: self._prepare_counts(assay) for assay in assays}
             self._destinations = None
             self._residentSourceBytes = self._source_resident_bytes()
+            if self.shuffleCells:
+                # Per-cell arrays that do not fit in memory are refused
+                # before the destination exists.
+                self._check_shuffled_holds(cell_dtype)
             self.policy = {
                 assay.name: self._fit_count_layout(
                     assay, count_dtypes[assay.name], layout_request
@@ -732,7 +744,8 @@ class SeuratToZarr:
 
         Raises:
             ValueError: If ``batch_size`` is not positive.
-            RuntimeError: If a shuffled import was already dumped.
+            RuntimeError: If a shuffled import was already dumped, or holds
+                no shuffled cells of an assay with cells.
         """
         if batch_size is not None and (
             isinstance(batch_size, bool) or int(batch_size) <= 0
@@ -839,6 +852,7 @@ class SeuratToZarr:
                 name=key,
                 chunk_rows=_COLUMN_CHUNK_ROWS,
                 order=order,
+                dtype=self._cellMetadataDtypes.get(column.name),
             )
         for assay in self._assays:
             if assay.cellMembership.allIncluded:
@@ -857,9 +871,7 @@ class SeuratToZarr:
         """Write the cell IDs and names, held in the object's order, in shuffled order."""
         ids = cast(zarr.Array, self.cellData["ids"])
         names = cast(zarr.Array, self.cellData["names"])
-        self._check_shuffled_rows_memory(
-            ids.dtype.itemsize, block_rows, "the cell IDs in shuffled order"
-        )
+        # Construction checked that the IDs fit in memory.
         held = np.empty(len(self.reader.cellIds), dtype=ids.dtype)
         start = 0
         for values_block in _string_blocks(self.reader.cellIds, block_rows):
@@ -872,29 +884,108 @@ class SeuratToZarr:
             names[start:stop] = block.astype(names.dtype, copy=False)
             start = stop
 
+    def _check_shuffled_holds(self, cell_dtype: np.dtype[Any]) -> None:
+        """Refuse a shuffled import whose per-cell arrays do not fit in memory.
+
+        The import holds its cell IDs, each cell metadata column, each
+        partial assay membership, the active identity, and each reduction's
+        coordinates and cell names whole, in the object's order, with one
+        gathered block of them, to write them in shuffled order. A block
+        takes the most rows that any ``batch_size`` of :meth:`dump` gives
+        it, and each array is checked beside what the import holds when it
+        writes its cell table, before its counts: the count sources' row
+        counts, the order of the cells and the row counts of the shuffled
+        cells.
+
+        Raises:
+            MemoryBudgetError: If one of them does not fit in the budget.
+        """
+        assert self._cellOrder is not None
+        resident = self._source_resident_bytes()
+        n_cells = int(self._cellOrder.size)
+        largest = max(1, n_cells)
+        metadata_rows = self._bounded_block_rows(largest, row_bytes=64)
+        self._check_shuffled_rows_memory(
+            cell_dtype.itemsize,
+            metadata_rows,
+            "the cell IDs in shuffled order",
+            resident,
+        )
+        scan_rows = self._bounded_block_rows(None, row_bytes=64)
+        for column in self.reader.cellMetadata.columns:
+            dtype = self._metadata_dtype(column, scan_rows)
+            self._cellMetadataDtypes[column.name] = dtype
+            self._check_shuffled_rows_memory(
+                dtype.itemsize + 1,
+                metadata_rows,
+                f"cell metadata column {column.name!r} in shuffled order",
+                resident,
+            )
+        for assay in self._assays:
+            if not assay.cellMembership.allIncluded:
+                name = assay_membership_column(assay.name)
+                self._check_shuffled_rows_memory(
+                    1,
+                    metadata_rows,
+                    f"the membership column {name!r} in shuffled order",
+                    resident,
+                )
+        identity = self._activeIdentity
+        self._check_shuffled_rows_memory(
+            self._metadata_dtype(identity, scan_rows).itemsize + 1,
+            metadata_rows,
+            f"cell metadata column {identity.name!r} in shuffled order",
+            resident,
+        )
+        for reduction in self._reductions:
+            matrix = reduction.cellEmbeddings
+            # Each row's coordinates and cell name, and its place in the
+            # rows' order and among the store's rows; beside them, the
+            # store row of every cell and the mask of the reduction's cells.
+            row_bytes = (
+                max(1, matrix.shape[1]) * self._floating_dtype(matrix.dtype).itemsize
+                + cell_dtype.itemsize
+                + 16
+            )
+            self._check_shuffled_rows_memory(
+                row_bytes,
+                self._reduction_block_rows(reduction, largest),
+                f"the coordinates of reduction {reduction.name!r} in shuffled order",
+                resident + 9 * n_cells,
+                n_rows=int(matrix.shape[0]),
+            )
+
     def _check_shuffled_rows_memory(
-        self, row_bytes: int, block_rows: int, item: str
+        self,
+        row_bytes: int,
+        block_rows: int,
+        item: str,
+        resident: int,
+        *,
+        n_rows: int | None = None,
     ) -> None:
-        """Check that the budget holds a per-cell array of ``row_bytes`` per cell in memory.
+        """Check that the budget holds a per-cell array of ``row_bytes`` per row in memory.
 
         A shuffled import holds the object's rows of a cell array, such as a
-        metadata column or a reduction, with one gathered block of them, to
-        write them in shuffled order.
+        metadata column or a reduction, with one gathered block of them,
+        beside the ``resident`` bytes it holds throughout, to write them in
+        shuffled order. The array has a row for each cell unless ``n_rows``
+        says otherwise, as for a reduction of only some of the cells.
 
         Raises:
             MemoryBudgetError: If they do not fit in the import's budget.
         """
         assert self._cellOrder is not None
-        n_cells = int(self._cellOrder.size)
-        needed = (n_cells + min(int(block_rows), n_cells)) * int(row_bytes) + int(
-            self._cellOrder.nbytes
-        )
+        rows = int(self._cellOrder.size if n_rows is None else n_rows)
+        needed = int(resident) + (rows + min(int(block_rows), rows)) * int(row_bytes)
         budget = int(self.resources.memoryBytes)
         if needed > budget:
             raise MemoryBudgetError(
                 f"Writing {item} exceeds the memory limit. A shuffled import "
-                "holds the object's rows to write them in shuffled order, which "
-                f"needs {needed} bytes.",
+                "holds the object's rows to write them in shuffled order, beside "
+                f"the {int(resident)} bytes of its count sources and cell order, "
+                f"which needs {needed} bytes; raise mem_budget or import with "
+                "shuffle_cells=False.",
                 needed_bytes=needed,
                 budget_bytes=budget,
                 item=item,
@@ -980,11 +1071,7 @@ class SeuratToZarr:
         from ..storage.arrays import MetadataBlock
 
         if order is not None:
-            self._check_shuffled_rows_memory(
-                dtype.itemsize + 1,
-                block_rows,
-                f"cell metadata column {column.name!r} in shuffled order",
-            )
+            # Construction checked that the column fits in memory.
             held_values = np.empty(column.length, dtype=dtype)
             held_missing = np.empty(column.length, dtype=bool)
             for block in self._metadata_blocks(column, dtype, block_rows):
@@ -1036,6 +1123,7 @@ class SeuratToZarr:
         name: str | None = None,
         chunk_rows: ChunkRows | None = None,
         order: np.ndarray | None = None,
+        dtype: np.dtype[Any] | None = None,
     ) -> zarr.Array:
         """Write one metadata column of the source.
 
@@ -1043,11 +1131,12 @@ class SeuratToZarr:
         writers of the cell and feature tables pass it; without it, as for
         the active identity's artifact, a chunk holds the rows of one of the
         import's blocks. A cell column of a shuffled import passes the
-        ``order`` of its cells.
+        ``order`` of its cells, and the ``dtype`` that construction found.
         """
         from ..storage.arrays import create_streamed_metadata_column
 
-        dtype = self._metadata_dtype(column, block_rows)
+        if dtype is None:
+            dtype = self._metadata_dtype(column, block_rows)
         output = create_streamed_metadata_column(
             group,
             column.name if name is None else name,
@@ -1137,9 +1226,7 @@ class SeuratToZarr:
             for start in range(0, len(values), block_rows)
         )
         if order is not None:
-            self._check_shuffled_rows_memory(
-                1, block_rows, f"the membership column {name!r} in shuffled order"
-            )
+            # Construction checked that the column fits in memory.
             held = read_block(0, len(values))
             blocks = (
                 MetadataBlock(start, block)
@@ -1219,10 +1306,26 @@ class SeuratToZarr:
         )
 
     def _shuffled_store(self, assay_name: str) -> SparseRowStore | None:
-        """Return the store of an assay's shuffled cells, or None in the object's order."""
-        if self._cellOrder is None:
+        """Return the store of an assay's shuffled cells, or None in the object's order.
+
+        An object without cells has no shuffled cells, and its order is the
+        object's.
+
+        Raises:
+            RuntimeError: If a shuffled import with cells holds no store of
+                the assay's cells, which its counts would otherwise read in
+                the object's order.
+        """
+        if self._cellOrder is None or not self._cellOrder.size:
             return None
-        return self._shuffledRows.get(assay_name)
+        store = self._shuffledRows.get(assay_name)
+        if store is None:
+            raise RuntimeError(
+                f"The shuffled cells of assay {assay_name!r} were written once and "
+                "removed, or never sent to their rows; create a new SeuratToZarr "
+                "to import the object again"
+            )
+        return store
 
     def _release_shuffled_rows(self) -> None:
         """Remove every assay's shuffled cells that the counts write has not read."""
@@ -1454,6 +1557,11 @@ class SeuratToZarr:
             {assay.name: None},
             {assay.name: storage_dtype},
         )[assay.name]
+        if self.shuffleCells:
+            # The counts write reads the shuffled cells, never the source, so
+            # the bucket of converted cells that the source keeps between
+            # reads would stay held through it.
+            self.reader._release_cached_rows(assay.name)
         return storage_dtype
 
     def _row_spill_plan(self, source: Any, available: int) -> RowSpillPlan:
@@ -1492,17 +1600,31 @@ class SeuratToZarr:
 
         ``scan(start, stop, block)`` takes each block's values as the
         unshuffled scan does. The first block's first million values measure
-        what the cells take on disk.
+        what the cells take on disk, and for dense cells also how many values
+        they hold beside zeros, which check the free disk before the spill.
         """
-        from ..readers._row_spill import sample_rows, spill_rows
+        from ..readers._row_spill import (
+            dense_sample_rows,
+            dense_spill_estimate,
+            sample_rows,
+            spill_rows,
+        )
         from ..readers._sparse import encoded_entry_bytes
 
-        n_cells = int(source.shape[1])
+        n_features, n_cells = (int(value) for value in source.shape)
         first = source.read_cells(0, min(rows, n_cells))
         first_rows = _cell_rows(first)
-        sample = first_rows[: sample_rows(np.asarray(first_rows.indptr))]
-        entry_bytes = encoded_entry_bytes(sample) if sample.nnz else None
-        del sample
+        entries: int | None = None
+        if source.is_sparse:
+            sample = first_rows[: sample_rows(np.asarray(first_rows.indptr))]
+            entry_bytes = encoded_entry_bytes(sample) if sample.nnz else None
+            del sample
+        else:
+            # The first cells, of about a million values, estimate how many
+            # values the cells hold beside zeros and what they take on disk.
+            entries, entry_bytes = dense_spill_estimate(
+                first_rows[: dense_sample_rows(n_cells, n_features)], n_cells
+            )
 
         def fill(consumer: Callable[[int, Any], None]) -> None:
             nonlocal first, first_rows
@@ -1521,6 +1643,7 @@ class SeuratToZarr:
             fill,
             operation="shuffled Seurat import",
             entry_bytes=entry_bytes,
+            entries=entries,
             buffer_bytes=buffer_bytes,
             dense=False,
             temp_dir=(
@@ -1618,9 +1741,8 @@ class SeuratToZarr:
             finalize_counts(destination, summary=summary)
         finally:
             # A shuffled assay's cells are read once, written or not.
-            store = self._shuffled_store(assay.name)
+            store = self._shuffledRows.pop(assay.name, None)
             if store is not None:
-                del self._shuffledRows[assay.name]
                 store.close()
 
     def _write_sparse_counts(
@@ -1903,13 +2025,9 @@ class SeuratToZarr:
 
         Rows are stored in the order of the store's cells. A reduction of
         only some of the cells is stored over a selection of those cells; the
-        row order is None when the rows already follow the cells. A shuffled
-        import's rows follow its order, and its cell IDs are read from the
-        store.
+        row order is None when the rows already follow the cells.
         """
         positions = reduction.cellPositions
-        if self._cellOrder is not None:
-            return self._shuffled_reduction_cells(reduction, cell_selection)
         if positions is None:
             return cell_selection, self.reader.cellIds, None
         order = np.argsort(positions, kind="stable")
@@ -1943,8 +2061,8 @@ class SeuratToZarr:
         self,
         reduction: SeuratReduction,
         cell_selection: ArtifactRef,
-    ) -> tuple[ArtifactRef, Sequence[str] | np.ndarray | zarr.Array, np.ndarray]:
-        """Return a shuffled import's reduction cell selection, cell IDs, and row order.
+    ) -> tuple[ArtifactRef, np.ndarray]:
+        """Return a shuffled import's reduction cell selection and row order.
 
         Reduction row ``i`` belongs to the object's cell ``positions[i]``,
         which the shuffle sends to store row ``destination_rows[positions[i]]``;
@@ -1965,14 +2083,8 @@ class SeuratToZarr:
         order = np.argsort(store_rows, kind="stable")
         selected_rows = store_rows[order]
         del store_rows
-        ids = cast(zarr.Array, self.cellData["ids"])
         if selected_rows.size == n_cells:
-            return cell_selection, ids, order
-        self._check_shuffled_rows_memory(
-            ids.dtype.itemsize,
-            int(selected_rows.size),
-            f"the cell IDs of reduction {reduction.name!r} in shuffled order",
-        )
+            return cell_selection, order
         from ..storage.selections import resolve_generated_selection_artifact
 
         selected = np.zeros(n_cells, dtype=bool)
@@ -1982,7 +2094,7 @@ class SeuratToZarr:
             scope="datastore",
             kind="cell_selection",
             values=selected,
-            row_ids=ids,
+            row_ids=cast(zarr.Array, self.cellData["ids"]),
             operation="import_reduction_cells",
             parameters={"source": "seurat", "dimreduc_key": reduction.name},
             inputs={
@@ -1991,32 +2103,32 @@ class SeuratToZarr:
             },
             source_column="seurat",
         )
-        return cell_selection, np.asarray(ids[...])[selected_rows], order
+        return cell_selection, order
 
     def _held_rows(
         self,
         matrix: SeuratRMatrix,
         block_rows: int,
         dtype: np.dtype[Any],
-        name: str,
-    ) -> np.ndarray:
-        """Return a reduction's rows, read whole in the object's order, for a shuffled import.
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Return a reduction's rows and their cell names, read whole in the object's order.
 
-        Raises:
-            MemoryBudgetError: If the rows and one gathered block of them do
-                not fit in the import's budget.
+        A shuffled import gathers both in its order; construction checked
+        that they fit in memory.
         """
-        self._check_shuffled_rows_memory(
-            max(1, matrix.shape[1]) * dtype.itemsize,
-            block_rows,
-            f"the coordinates of reduction {name!r} in shuffled order",
-        )
         held = np.empty(matrix.shape, dtype=dtype)
         start = 0
         for block in self._matrix_blocks(matrix, block_rows, dtype):
             held[start : start + block.shape[0]] = block
             start += int(block.shape[0])
-        return held
+        names = np.empty(
+            matrix.shape[0], dtype=cast(zarr.Array, self.cellData["ids"]).dtype
+        )
+        start = 0
+        for values_block in _string_blocks(matrix.rowIds, block_rows):
+            names[start : start + len(values_block)] = values_block
+            start += len(values_block)
+        return held, names
 
     def _write_reductions(
         self,
@@ -2032,11 +2144,12 @@ class SeuratToZarr:
         for reduction in self._reductions:
             block_rows = self._reduction_block_rows(reduction, requested_rows)
             coordinate_dtype = self._floating_dtype(reduction.cellEmbeddings.dtype)
-            reduction_selection, cell_ids, row_order = self._reduction_cells(
-                reduction, cell_selection
-            )
             coordinate_blocks: Callable[[], Iterator[np.ndarray]]
+            cell_ids: Sequence[str] | np.ndarray | zarr.Array
             if self._cellOrder is None:
+                reduction_selection, cell_ids, row_order = self._reduction_cells(
+                    reduction, cell_selection
+                )
 
                 def coordinate_blocks(
                     matrix: SeuratRMatrix = reduction.cellEmbeddings,
@@ -2047,15 +2160,17 @@ class SeuratToZarr:
                     return self._matrix_blocks(matrix, rows, dtype, order)
 
             else:
+                reduction_selection, row_order = self._shuffled_reduction_cells(
+                    reduction, cell_selection
+                )
                 # Rows read one by one in a random order would each decode
                 # a block of the object, so they are read whole and gathered.
-                assert row_order is not None
-                held = self._held_rows(
-                    reduction.cellEmbeddings,
-                    block_rows,
-                    coordinate_dtype,
-                    reduction.name,
+                held, names = self._held_rows(
+                    reduction.cellEmbeddings, block_rows, coordinate_dtype
                 )
+                # The reduction's own cell names, in the order of its rows
+                # written, which the write checks against the store's IDs.
+                cell_ids = _CellIdsAt(names, row_order)
 
                 def coordinate_blocks(
                     values: np.ndarray = held,

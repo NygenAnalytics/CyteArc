@@ -168,6 +168,7 @@ class CrReader(ABC):
         entry_bytes: float | None,
         operation: str,
         temp_dir: str | Path | None,
+        expected_entries: int | None = None,
     ) -> Any:
         """Send the selected cells to their destination rows as a scan reads them.
 
@@ -178,6 +179,9 @@ class CrReader(ABC):
         or None for dense rows, ``longest`` the most values of one cell, and
         ``entry_bytes`` what the file's first cells take on disk per value,
         as :func:`~cytearc.readers._sparse.encoded_entry_bytes` measures it.
+        Dense rows pass ``expected_entries``, the values they hold beside
+        zeros as :func:`~cytearc.readers._row_spill.dense_spill_estimate`
+        estimates them, so that the free disk is checked before the spill.
         The finalized store then holds the rows that ``consume`` yields.
 
         Raises:
@@ -205,6 +209,7 @@ class CrReader(ABC):
             buffer_bytes=plan.buffer_bytes(share, 0, self.nCells),
             dense=entries is None,
             temp_dir=temp_dir,
+            entries=expected_entries,
         )
         self._shuffledRows = store
         return result

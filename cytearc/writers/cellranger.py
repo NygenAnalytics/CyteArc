@@ -65,8 +65,11 @@ class CrToZarr:
             reader sends each cell to temporary files on local disk, in its
             ``temp_dir``, as it reads it: a 10x HDF5 or Tapestri reader
             during its value scan, a Matrix Market reader as it reads its
-            cells for the counts write, before the store is created. Off by
-            default in this release.
+            cells for the counts write, before the store is created. A
+            reader holds the shuffled cells of one import at a time, and an
+            import in the reader's order of a reader that another import
+            shuffled reads the reader's order. Off by default in this
+            release.
         shuffle_seed: The seed of the shuffle, from 0 to 2**64 - 1. One seed
             gives the same order on every platform.
 
@@ -187,74 +190,101 @@ class CrToZarr:
             self._cellOrder = shuffled_order(self.cr.nCells, self.shuffleSeed)
             scan_options["destinationRows"] = destination_rows(self._cellOrder)
             held = 2 * self._cellOrder.nbytes
-        value_ranges = dict(
-            zip(
-                ranges,
-                self.cr.count_value_ranges(
-                    self.resources.memoryBytes - held, groups, **scan_options
-                ),
-                strict=True,
+        else:
+            # Another import of the reader may hold its shuffled cells, which
+            # this import, in the reader's order, never reads.
+            self._release_other_shuffled_cells()
+        # The cells on local disk before the scan; cells there after a
+        # failure are this import's, which no later import may read.
+        rows_before = getattr(self.cr, "_shuffledRows", None)
+        try:
+            value_ranges = dict(
+                zip(
+                    ranges,
+                    self.cr.count_value_ranges(
+                        self.resources.memoryBytes - held, groups, **scan_options
+                    ),
+                    strict=True,
+                )
             )
-        )
-        del scan_options
-        # The rows that this import's counts write reads, which no other
-        # import of the same reader may replace.
-        self._shuffledStore = self.cr._shuffledRows if self.shuffleCells else None
-        storage_dtypes = {
-            name: count_storage_dtype(self.cr.matrix_dtype, value_range)
-            for name, value_range in value_ranges.items()
-        }
-        logger.debug(f"Resolved Cell Ranger count storage dtypes={storage_dtypes}")
-        self.values = resolve_import_values(
-            values,
-            value_ranges,
-            lambda: self._first_cells(ranges),
-            {name: self.assayTypes.get(name) for name in value_ranges},
-            storage_dtypes,
-        )
-        # A layout that does not fit fails here, before the destination exists.
-        self.policy = self._fit_count_layout(storage_dtypes, layout_request)
-        # The destination must be empty, or with overwrite an unprepared store.
-        self.z = create_destination(
-            zarr_loc, overwrite=overwrite, storage_options=storage_options
-        )
-        cell_names = np.array(self.cr.cell_names())
-        if self._cellOrder is not None:
-            cell_names = cell_names[self._cellOrder]
-        cell_group = create_cell_data(
-            root=self.z,
-            workspace=self.workspace,
-            ids=cell_names,
-            names=cell_names,
-            profile=self.profile,
-        )
-        del cell_names
-        if self._cellOrder is not None:
-            from ..storage.cell_order import write_shuffled_cell_order
+            del scan_options
+            # The rows that this import's counts write reads, which no other
+            # import of the same reader may replace.
+            self._shuffledStore = self.cr._shuffledRows if self.shuffleCells else None
+            storage_dtypes = {
+                name: count_storage_dtype(self.cr.matrix_dtype, value_range)
+                for name, value_range in value_ranges.items()
+            }
+            logger.debug(f"Resolved Cell Ranger count storage dtypes={storage_dtypes}")
+            self.values = resolve_import_values(
+                values,
+                value_ranges,
+                lambda: self._first_cells(ranges),
+                {name: self.assayTypes.get(name) for name in value_ranges},
+                storage_dtypes,
+            )
+            # A layout that does not fit fails here, before the destination exists.
+            self.policy = self._fit_count_layout(storage_dtypes, layout_request)
+            # The destination must be empty, or with overwrite an unprepared store.
+            self.z = create_destination(
+                zarr_loc, overwrite=overwrite, storage_options=storage_options
+            )
+            cell_names = np.array(self.cr.cell_names())
+            if self._cellOrder is not None:
+                cell_names = cell_names[self._cellOrder]
+            cell_group = create_cell_data(
+                root=self.z,
+                workspace=self.workspace,
+                ids=cell_names,
+                names=cell_names,
+                profile=self.profile,
+            )
+            del cell_names
+            if self._cellOrder is not None:
+                from ..storage.cell_order import write_shuffled_cell_order
 
-            # Each cell's row in the file, which a reader that drops cells
-            # keeps with gaps. Written before the keys are planned, so a
-            # source column of the same name is skipped.
-            write_shuffled_cell_order(
-                cell_group,
-                self.cr._file_rows()[self._cellOrder],
-                self.shuffleSeed,
-                profile=self.profile,
-            )
-        for assay_name in assay_names:
-            create_zarr_count_assay(
-                z=self.z,
-                assay_name=assay_name,
-                workspace=workspace,
-                n_cells=self.cr.nCells,
-                feat_ids=self.cr.feature_ids(assay_name),
-                feat_names=self.cr.feature_names(assay_name),
-                dtype=storage_dtypes[assay_name],
-                profile=self.profile,
-                policy=self.policy,
-                normalized_values=normalized_values_record(self.values[assay_name]),
-            )
-        self._write_reader_metadata(cell_group, assay_names)
+                # Each cell's row in the file, which a reader that drops cells
+                # keeps with gaps. Written before the keys are planned, so a
+                # source column of the same name is skipped.
+                write_shuffled_cell_order(
+                    cell_group,
+                    self.cr._file_rows()[self._cellOrder],
+                    self.shuffleSeed,
+                    profile=self.profile,
+                )
+            for assay_name in assay_names:
+                create_zarr_count_assay(
+                    z=self.z,
+                    assay_name=assay_name,
+                    workspace=workspace,
+                    n_cells=self.cr.nCells,
+                    feat_ids=self.cr.feature_ids(assay_name),
+                    feat_names=self.cr.feature_names(assay_name),
+                    dtype=storage_dtypes[assay_name],
+                    profile=self.profile,
+                    policy=self.policy,
+                    normalized_values=normalized_values_record(self.values[assay_name]),
+                )
+            self._write_reader_metadata(cell_group, assay_names)
+        except BaseException:
+            held_rows = getattr(self.cr, "_shuffledRows", None)
+            if (
+                self.shuffleCells
+                and held_rows is not None
+                and held_rows is not rows_before
+            ):
+                self.cr._release_shuffled_rows()
+            raise
+
+    def _release_other_shuffled_cells(self) -> None:
+        """Release the shuffled cells that another import of the reader left.
+
+        An import in the reader's order then reads the cells in that order.
+        A reader that cannot shuffle holds none.
+        """
+        release = getattr(self.cr, "_release_shuffled_rows", None)
+        if callable(release):
+            release()
 
     def _first_cells(
         self, ranges: dict[str, tuple[tuple[int, int], ...]]
@@ -463,7 +493,8 @@ class CrToZarr:
 
         A shuffled import reads its shuffled cells once, deleting them as
         it goes, and removes them once the counts are written or the write
-        fails, so it writes its counts once.
+        fails, so it writes its counts once. An import in the reader's order
+        removes the shuffled cells that another import of the reader left.
 
         Args:
             batch_size: Number of source cells per batch, at most one
@@ -492,7 +523,11 @@ class CrToZarr:
 
         if batch_size is not None and batch_size <= 0:
             raise ValueError("batch_size must be positive")
-        if self.shuffleCells and (
+        if not self.shuffleCells:
+            # Another import of the reader, built after this one, may have
+            # left its shuffled cells; this import writes the reader's order.
+            self._release_other_shuffled_cells()
+        elif (
             self._shuffledStore is None
             or self.cr._shuffledRows is not self._shuffledStore
         ):

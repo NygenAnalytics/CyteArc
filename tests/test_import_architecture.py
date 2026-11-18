@@ -1178,7 +1178,11 @@ def test_reader_implementations_are_runtime_isolated():
         },
         "phylogeny.py": {"readers._treedata"},
         "recorder_alleles.py": {"readers._treedata"},
-        "tapestri.py": {"readers._assay_names", "readers._text"},
+        "tapestri.py": {
+            "readers._assay_names",
+            "readers._row_spill",
+            "readers._text",
+        },
     }
     # Contig files are delimited tables, which the contig parser reads through
     # utils.delimited like every reader, so it imports no other reader module.

@@ -261,7 +261,12 @@ class CSVtoZarr:
                 counted.
             OSError: If the temporary disk lacks room for the rows.
         """
-        from ..readers._row_spill import row_spill_plan, spill_rows
+        from ..readers._row_spill import (
+            dense_sample_rows,
+            dense_spill_estimate,
+            row_spill_plan,
+            spill_rows,
+        )
         from ..storage.cell_order import destination_rows
 
         assert self._cellOrder is not None
@@ -283,32 +288,54 @@ class CSVtoZarr:
             position: [] for _name, (position, _dtype) in self._cellDataColumns
         }
 
-        def fill(consumer: Callable[[int, Any], None]) -> None:
-            start = 0
-            for counts, cell_values in self.csvr.consume():
-                if start + counts.shape[0] > n_cells:
-                    raise ValueError(_changed_rows_message(n_cells))
-                if cell_values is not None:
-                    for _name, (position, dtype) in self._cellDataColumns:
-                        parts[position].append(
-                            _metadata_part(cell_values[:, position], dtype)
-                        )
-                consumer(start, counts)
-                start += int(counts.shape[0])
-            if start != n_cells:
-                raise ValueError(_changed_rows_message(n_cells))
+        chunks = self.csvr.consume()
+        try:
+            first = next(chunks, None)
+            # The first rows, of about a million values, estimate how many
+            # values the rows hold beside zeros and what they take on disk.
+            expected, entry_bytes = dense_spill_estimate(
+                np.zeros((0, n_features))
+                if first is None
+                else first[0][: dense_sample_rows(n_cells, n_features)],
+                n_cells,
+            )
 
-        self._shuffledStore, _ = spill_rows(
-            plan,
-            fill,
-            operation="shuffled CSV import",
-            entry_bytes=None,
-            buffer_bytes=plan.batch_buffer_bytes(
-                available - plan.ownerBytes - chunk_bytes, chunk_values
-            ),
-            dense=True,
-            temp_dir=self.csvr.tempDir,
-        )
+            def fill(consumer: Callable[[int, Any], None]) -> None:
+                nonlocal first
+                start = 0
+                chunk = first
+                first = None
+                while chunk is not None:
+                    counts, cell_values = chunk
+                    if start + counts.shape[0] > n_cells:
+                        raise ValueError(_changed_rows_message(n_cells))
+                    if cell_values is not None:
+                        for _name, (position, dtype) in self._cellDataColumns:
+                            parts[position].append(
+                                _metadata_part(cell_values[:, position], dtype)
+                            )
+                    consumer(start, counts)
+                    start += int(counts.shape[0])
+                    # The next chunk is not read beside this one.
+                    del chunk, counts, cell_values
+                    chunk = next(chunks, None)
+                if start != n_cells:
+                    raise ValueError(_changed_rows_message(n_cells))
+
+            self._shuffledStore, _ = spill_rows(
+                plan,
+                fill,
+                operation="shuffled CSV import",
+                entry_bytes=entry_bytes,
+                buffer_bytes=plan.batch_buffer_bytes(
+                    available - plan.ownerBytes - chunk_bytes, chunk_values
+                ),
+                dense=True,
+                temp_dir=self.csvr.tempDir,
+                entries=expected,
+            )
+        finally:
+            chunks.close()
         self._shuffledParts = parts
 
     def _release_shuffled_rows(self) -> None:
