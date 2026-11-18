@@ -311,19 +311,44 @@ def test_stored_levels_follow_the_stored_column_type(dtype, categories, levels):
 
 
 def test_display_metadata_that_would_be_invalid_is_not_stored() -> None:
-    from cytearc.metadata.artifacts import levels_display
     from cytearc.writers.h5ad import _categorical_attributes
 
-    # Two categories that compare equal cannot both be display values.
-    assert levels_display([1, 1.0], None, False) is None
+    # A display holds hexadecimal colors only.
     attributes = _categorical_attributes(
-        np.dtype(np.float64),
-        H5adCategories((1, 1.0), False),
-        colors=None,
+        np.dtype("U1"),
+        H5adCategories(("a", "b"), False),
+        colors=("red", "#000002"),
         has_missing=False,
         display=True,
     )
-    assert attributes == {"levels": [1.0, 1.0], "ordered": False}
+    assert attributes == {"levels": ["a", "b"], "ordered": False}
+
+
+def test_categories_that_compare_equal_keep_one_level_with_the_first_color() -> None:
+    from cytearc.metadata.artifacts import levels_display
+    from cytearc.writers.h5ad import _categorical_attributes
+
+    # Two categories that compare equal cannot both be display values, so a
+    # float column keeps one level for 1 and 1.0, with the color of the first.
+    assert levels_display([1, 1.0], None, False) is None
+    attributes = _categorical_attributes(
+        np.dtype(np.float64),
+        H5adCategories((1, 1.0, 2), True),
+        colors=("#000001", "#000002", "#000003"),
+        has_missing=False,
+        display=True,
+    )
+    assert attributes == {
+        "levels": [1.0, 2.0],
+        "ordered": True,
+        "display": {
+            "kind": "categorical",
+            "categories": [
+                {"value": 1.0, "label": "1.0", "color": "#000001"},
+                {"value": 2.0, "label": "2.0", "color": "#000003"},
+            ],
+        },
+    }
 
 
 @pytest.mark.parametrize(
