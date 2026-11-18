@@ -302,6 +302,8 @@ not changed: an H5AD file without a feature name column takes the names from the
 and a Matrix Market feature reference matches the IDs of the feature sidecar. Cell IDs must be
 unique in either mode.
 
+`H5adToZarr` reads and checks the cell IDs, feature IDs and feature names before it reads the matrix, so an import that refuses them writes nothing. NaN in an index or column of numbers counts as a missing ID, and IDs and names must be UTF-8 text. The refusal of a missing ID or of text that is not UTF-8 names the file, the table, the column and the rows. `inspect_h5ad` refuses text that is not UTF-8 in the columns that it reads to find the IDs and names, as an import would.
+
 The cell column `<assay>_I` of every assay that an import writes is reserved for the membership
 of that assay ([Assay membership](../developers/zarr-internals#assay-membership)), because a merge reads a column of that name as which
 cells the assay measured. `H5adToZarr` restores such a column as the membership of the assay

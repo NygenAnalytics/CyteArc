@@ -430,9 +430,10 @@ def test_h5ad_import_below_one_row_shards_fails_before_the_destination_exists(
 ):
     path, _values = wide_counts
     destination = tmp_path / "tiny.zarr"
-    # The count summaries alone need more than this budget.
+    # The scan fits beside the 127 KB of IDs and names that the reader keeps,
+    # but no count shard of one row does.
     with pytest.raises(MemoryError, match="count shards of one row"):
-        _build(path, destination, mem_budget=128 * 1024)
+        _build(path, destination, mem_budget=144 * 1024)
     assert not destination.exists()
 
 
@@ -771,11 +772,13 @@ def test_policy_fit_below_count_shards_of_one_row_refuses_as_subset_does(
 ):
     path, _values = wide_counts
     destination = tmp_path / "tiny.zarr"
+    # The scan fits beside the 127 KB of IDs and names that the reader keeps,
+    # but no count shard of one row does.
     with pytest.raises(MemoryBudgetError, match="count shards of one row") as fitted:
-        _build(path, destination, mem_budget=128 * 1024, policy="fit")
+        _build(path, destination, mem_budget=144 * 1024, policy="fit")
     assert type(fitted.value) is MemoryBudgetError
     with pytest.raises(CountLayoutMemoryError, match="even count shards") as default:
-        _build(path, destination, mem_budget=128 * 1024)
+        _build(path, destination, mem_budget=144 * 1024)
     assert default.value.fittingPolicy is None
     assert not destination.exists()
 
