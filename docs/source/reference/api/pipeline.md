@@ -345,7 +345,7 @@ A recipe checks its call against the store before it creates a run record, and a
 - `leiden selected must be one of the partitions`;
 - `snapshot_columns collide with reserved run fields: [...]`;
 - `TypeError("callback must be callable")` and a `cancel` that is not a `CancellationToken`;
-- `The rna recipe needs counts: its doublet scoring reads counts. ...`, for an assay of normalized values, naming every stage of the run that needs counts and the argument that turns it off, as [normalized values](#normalized_values) describes.
+- `The rna recipe needs counts: its doublet scoring reads counts. ...`, for an assay of normalized values, naming every stage of the run that needs counts and the argument that turns it off, as {ref}`normalized values <normalized_values>` describes.
 
 Before the run starts, the recipe also checks these settings, with the checks of the stage's
 method where it has them:
