@@ -239,6 +239,8 @@ def test_coding_unhashable_labels_refuses_before_it_makes_their_texts() -> None:
     assert names == expected_names
     assert names == [str(["label", "x" * 100, index]) for index in range(3)]
     assert codes.tolist() == expected_codes.tolist()
+    # Label k holds index k % 3, which names sort by.
+    assert codes.tolist() == [index % 3 for index in range(1_000)]
 
 
 @pytest.mark.parametrize(
@@ -557,7 +559,12 @@ def test_reading_a_label_artifact_gives_the_cells_of_its_selection(
     resolved = resolve_cell_aligned_artifact(
         store.zw, labels, cell_selection=cells, ledger=MemoryLedger(None, "Reading")
     )
-    assert len(resolved.cell_idx) == (50_000 if cells is None else 25_000)
+    # Every cell, or the even rows of the half, each with its own label.
+    rows = np.arange(0, 50_000, 1 if cells is None else 2)
+    np.testing.assert_array_equal(resolved.cell_idx, rows)
+    assert np.asarray(resolved.values).astype(str).tolist() == [
+        f"cluster_{row % 30:03d}" for row in rows
+    ]
 
 
 @pytest.fixture(scope="module")
@@ -616,4 +623,7 @@ def test_a_read_of_a_few_cells_of_many_gives_those_cells(
         cell_selection=first if requested else None,
         ledger=MemoryLedger(None, "Reading labels"),
     )
-    assert len(resolved.cell_idx) == 100
+    np.testing.assert_array_equal(resolved.cell_idx, np.arange(100))
+    assert np.asarray(resolved.values).astype(str).tolist() == [
+        f"cluster_{row % 30:03d}" for row in range(100)
+    ]

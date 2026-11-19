@@ -853,14 +853,20 @@ def test_a_sparse_matrix_import_refuses_a_budget_of_one_byte_at_its_matrix(
 def test_a_sparse_matrix_import_names_the_budget_of_its_scan_beside_the_matrix(
     tmp_path: Path, shuffle_cells: bool
 ) -> None:
-    from cytearc.storage.sharding import sparse_matrix_bytes
     from cytearc.writers import SparseToZarr
 
     matrix = csr_matrix(
         np.random.default_rng(5).poisson(2.0, size=(30, 20)).astype(np.uint32) + 1
     )
-    # A shuffle also holds the order of the 30 cells, 8 bytes each.
-    held = sparse_matrix_bytes(matrix) + (8 * 30 if shuffle_cells else 0)
+    # The matrix holds 600 uint32 values and their int32 columns, and 31
+    # int32 row pointers; a shuffle also holds the order of the 30 cells, 8
+    # bytes each.
+    assert (matrix.nnz, matrix.indices.dtype, matrix.indptr.dtype) == (
+        600,
+        np.int32,
+        np.int32,
+    )
+    held = 600 * 4 + 600 * 4 + 31 * 4 + (8 * 30 if shuffle_cells else 0)
     what = "the matrix and the cell order" if shuffle_cells else "the matrix"
     destination = tmp_path / "sparse.zarr"
 
