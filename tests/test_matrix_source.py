@@ -360,6 +360,28 @@ def test_mount_datastore_multiple_assays(default_sources, tmp_path):
     assert "counts" not in zarr.open_group(target, mode="r")["ADT"]
 
 
+@pytest.mark.parametrize("missing", ["assayTypes", "defaultAssay"])
+def test_a_mount_copies_only_the_workspace_records_that_its_source_holds(
+    default_sources, tmp_path, missing
+):
+    source = str(tmp_path / "source.zarr")
+    target = str(tmp_path / "target.zarr")
+    values = _copy_source(default_sources, source)
+    # A store written before it recorded its default assay or assay types.
+    source_root = zarr.open_group(source, mode="r+")
+    del source_root.attrs[missing]
+    kept = "defaultAssay" if missing == "assayTypes" else "assayTypes"
+    held = source_root.attrs[kept]
+
+    ds = mount_datastore(
+        source, at=target, default_assay="RNA", min_features_per_cell=1
+    )
+
+    np.testing.assert_array_equal(ds.RNA.rawData.compute(), values)
+    assert type(ds.RNA).__name__ == "RNAassay"
+    assert zarr.open_group(target, mode="r").attrs[kept] == held
+
+
 def test_mount_datastore_does_not_copy_source_pipeline_runs(default_sources, tmp_path):
     source = str(tmp_path / "source_with_run.zarr")
     target = str(tmp_path / "target_without_run.zarr")

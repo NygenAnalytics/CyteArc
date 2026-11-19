@@ -198,3 +198,18 @@ def test_a_consumed_stream_advances_its_bar_after_each_item() -> None:
     assert seen == [(0, []), (1, [False]), (2, [False, False])]
     (bar,) = bars
     assert (bar.updates, bar.closed, released) == (3, True, [False, False, False])
+
+
+def test_a_stream_of_items_without_close_still_closes_its_bar() -> None:
+    bars: list[_Bar] = []
+    # A list's iterator has no close method, unlike a generator.
+    stream = advance_on_consumption(iter(["a", "b", "c"]), _bar_factory(bars))
+
+    assert list(stream) == ["a", "b", "c"]
+    (bar,) = bars
+    assert (bar.updates, bar.closed) == (3, True)
+
+    early = advance_on_consumption(iter(["a", "b"]), _bar_factory(bars))
+    assert next(early) == "a"
+    early.close()
+    assert (bars[-1].updates, bars[-1].closed) == (0, True)

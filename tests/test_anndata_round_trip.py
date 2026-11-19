@@ -623,6 +623,48 @@ def test_integrated_graph_exports_connectivities_without_distances(multimodal):
 
 
 @pytest.mark.slow
+def test_an_integrated_graph_exports_its_cells_in_the_files_order(multimodal, tmp_path):
+    import shutil
+
+    import zarr
+
+    from cytearc.storage.cell_order import write_shuffled_cell_order
+
+    store, cells, integrated = multimodal
+    shutil.copytree(store.zarr_loc, tmp_path / "store.zarr")
+    # The store's rows claim the file rows of a shuffle.
+    source_rows = np.random.default_rng(29).permutation(_N_CELLS)
+    write_shuffled_cell_order(
+        zarr.open_group(str(tmp_path / "store.zarr"), mode="r+")["cellData"],
+        source_rows,
+        29,
+    )
+    shuffled = cytearc.DataStore(
+        str(tmp_path / "store.zarr"),
+        default_assay="RNA",
+        min_features_per_cell=0,
+        nthreads=1,
+    )
+
+    exported = shuffled.to_anndata(cell_selection=cells, graph=integrated)
+    stored = shuffled.to_anndata(
+        cell_selection=cells, graph=integrated, cell_order="stored"
+    )
+
+    # The selected cells in the order of their file rows; both axes of the
+    # connectivities follow them, and the graph records no distances.
+    rows = np.flatnonzero(shuffled.cells.fetch_all("I"))
+    perm = np.argsort(source_rows[rows], kind="stable")
+    assert not np.array_equal(perm, np.arange(perm.size))
+    assert exported.obs_names.tolist() == stored.obs_names[perm].tolist()
+    assert set(exported.obsp) == set(stored.obsp) == {"connectivities"}
+    np.testing.assert_array_equal(
+        exported.obsp["connectivities"].toarray(),
+        stored.obsp["connectivities"].toarray()[np.ix_(perm, perm)],
+    )
+
+
+@pytest.mark.slow
 def test_pca_entries_follow_the_coordinates_that_hold_them(analysis) -> None:
     from cytearc.embeddings.imported import write_imported_coordinates
 

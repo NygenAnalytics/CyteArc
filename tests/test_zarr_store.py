@@ -1633,6 +1633,25 @@ def test_staged_normed_array_reuses_matching_shape(tmp_path):
     np.testing.assert_array_equal(reopened[:], np.ones((32, 4), dtype=np.float32))
 
 
+def test_staged_normed_array_of_another_shape_or_without_data_starts_anew(tmp_path):
+    path = str(tmp_path / "cache" / "normalized.zarr")
+    first = create_or_open_staged_normed_array(path, (32, 4))
+    first[:] = 1
+    first.attrs["complete"] = True
+    # A cache of another shape is replaced by an empty array, which its
+    # caller fills again since it is not marked complete.
+    resized = create_or_open_staged_normed_array(path, (16, 4))
+    assert resized.shape == (16, 4)
+    assert "complete" not in resized.attrs
+    np.testing.assert_array_equal(resized[:], np.zeros((16, 4), dtype=np.float32))
+    # A cache group that lost its array, as an interrupted write can leave it,
+    # is made again too.
+    zarr.open_group(path, mode="w", use_consolidated=False)
+    remade = create_or_open_staged_normed_array(path, (16, 4))
+    assert remade.shape == (16, 4)
+    np.testing.assert_array_equal(remade[:], np.zeros((16, 4), dtype=np.float32))
+
+
 def test_remote_store_requires_obstore(monkeypatch):
     import builtins
 

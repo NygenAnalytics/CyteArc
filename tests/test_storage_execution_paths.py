@@ -772,6 +772,22 @@ def test_chunked_to_zarr_writes_every_band_to_its_mirror() -> None:
     np.testing.assert_array_equal(mirror[:], values)
 
 
+def test_chunked_to_zarr_names_its_progress_by_its_message_or_its_location() -> None:
+    from cytearc.utils.progress import observe_progress
+    from cytearc.writers import chunked_to_zarr
+
+    values = np.arange(40 * 3, dtype=np.float32).reshape(40, 3)
+    root = zarr.open_group(store=MemoryStore(), mode="w")
+    descriptions: set[str | None] = set()
+    with observe_progress(lambda _bar, text, _done, _total: descriptions.add(text)):
+        chunked_to_zarr(ChunkedArray.from_numpy(values), root, "plain", 1)
+        chunked_to_zarr(
+            ChunkedArray.from_numpy(values), root, "named", 1, msg="Staging values"
+        )
+    assert descriptions == {"Writing data to plain", "Staging values"}
+    np.testing.assert_array_equal(root["named"][:], values)
+
+
 def _paired_counts(values: np.ndarray) -> tuple[zarr.Group, zarr.Array]:
     plan = plan_count_matrix_pair(
         values.shape[0],

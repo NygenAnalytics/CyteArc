@@ -225,6 +225,21 @@ def test_text_arrays_hold_the_text_of_each_value(name: str) -> None:
     )
 
 
+@pytest.mark.parametrize(
+    ("values", "expected"),
+    [
+        (np.array([3, -1, 10], dtype=np.int16), ["3", "-1", "10"]),
+        (np.array([[0.5, 2.0]], dtype=np.float64), [["0.5", "2.0"]]),
+        (np.array([True, False]), ["True", "False"]),
+    ],
+    ids=["integers", "floats", "booleans"],
+)
+def test_text_arrays_hold_other_values_as_their_text(values, expected) -> None:
+    from cytearc.storage.arrays import text_array
+
+    _assert_same_array(text_array(values), np.array(expected, dtype=str))
+
+
 _CATEGORICALS = {
     # The unused category is wider than any used one, and code 5 names none.
     "text_bytes": (
