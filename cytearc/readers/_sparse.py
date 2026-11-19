@@ -577,12 +577,16 @@ class SparseRowStore:
             needs more; ``bucket_bytes`` by default, and at most that.
         entries: The entries expected, from which the free disk that the
             store's files may need is checked before anything is written, or
-            None. Beside the entries, the check counts a block for each
-            bucket and the settings and records that the owner writes.
+            None. Beside the entries, the check counts a block for each of
+            ``parts`` parts in each bucket, the settings, the record of each
+            part and the finalized record.
         entry_bytes: The bytes that each entry is expected to take on disk,
             as :func:`encoded_entry_bytes` measures them on sample rows; the
             check then asks for a quarter more than ``entries`` take at that
             rate. None bounds each entry by its bytes before compression.
+        parts: The parts that writers will finish, the owner's part 0 among
+            them, whose records the check of the free disk counts; 1 when
+            only the owner writes.
         source_dtype: The dtype in which values arrive and in which a row's
             duplicate coordinates are summed; ``dtype`` by default.
         sum_duplicates: Whether reads sum a row's duplicate coordinates, or
@@ -594,7 +598,8 @@ class SparseRowStore:
     Raises:
         MemoryBudgetError: If ``bucket_bytes`` cannot hold one entry.
         OSError: If the disk lacks the bytes that the store's files may need.
-        ValueError: If ``ragged`` rows do not arrive whole or are not uint8.
+        ValueError: If ``ragged`` rows do not arrive whole or are not uint8,
+            or ``parts`` is below 1.
     """
 
     # The temporary directory that the owner removes when it closes.
@@ -614,6 +619,7 @@ class SparseRowStore:
         split_bytes: int | None = None,
         entries: int | None = None,
         entry_bytes: float | None = None,
+        parts: int = 1,
         source_dtype: Any | None = None,
         sum_duplicates: bool = True,
         max_nnz: int = np.iinfo(np.int64).max,
@@ -642,6 +648,8 @@ class SparseRowStore:
             )
         if int(bucket_rows) < 1:
             raise ValueError(f"bucket_rows must be at least 1, not {bucket_rows}")
+        if int(parts) < 1:
+            raise ValueError(f"parts must be at least 1, not {parts}")
         for name, value in (
             ("buffer_bytes", buffer_bytes),
             ("bucket_bytes", bucket_bytes),
@@ -689,7 +697,9 @@ class SparseRowStore:
         self.directory = Path(self._directory.name)
         try:
             if entries is not None:
-                self._check_disk(self._spill_bound(int(entries), entry_bytes))
+                self._check_disk(
+                    self._spill_bound(int(entries), entry_bytes, int(parts))
+                )
             (self.directory / "parts").mkdir()
             with (self.directory / "store.json").open("w") as stream:
                 json.dump(self._settings, stream)
@@ -1030,16 +1040,20 @@ class SparseRowStore:
                 ),
             )
 
-    def _spill_bound(self, entries: int, entry_bytes: float | None = None) -> int:
+    def _spill_bound(
+        self, entries: int, entry_bytes: float | None = None, parts: int = 1
+    ) -> int:
         """Return the bytes that the store's files may take once ``entries`` are written.
 
         Without ``entry_bytes``, the entries take at most their bytes before
         compression, and each piece its place and length in two codes of at
         most 8 bytes; with it, a quarter more than they take at that rate.
-        Beside them, each bucket's file holds at least one block, and the
-        owner writes the store's settings and records (:meth:`_record_bytes`).
+        Beside them, it counts one block for each of ``parts`` parts in
+        each bucket, the least that a writer's file there holds, and the
+        settings and records that the store writes (:meth:`_record_bytes`).
         """
-        beside = (self.bucket_starts.size - 1) * _BLOCK_OVERHEAD + self._record_bytes()
+        blocks = (self.bucket_starts.size - 1) * parts * _BLOCK_OVERHEAD
+        beside = blocks + self._record_bytes(parts)
         if entry_bytes is not None:
             return math.ceil(entries * float(entry_bytes) * _ESTIMATE_MARGIN) + beside
         index_bytes = (
@@ -1052,13 +1066,14 @@ class SparseRowStore:
             entries * (self._sourceDtype.itemsize + index_bytes) + pieces * 16 + beside
         )
 
-    def _record_bytes(self) -> int:
-        """Return what the store's settings and the records of its owner take on disk.
+    def _record_bytes(self, parts: int) -> int:
+        """Return what the settings, the records of ``parts`` parts and the finalized record take on disk.
 
-        The owner's part record holds its writer's count of entries and mark
+        The record of each part holds its writer's count of entries and mark
         of each row, and the file bytes, pieces and flag of each bucket; the
         finalized record holds the row pointers, the parts' numbers, and the
-        first row, file bytes, pieces and flag of each bucket.
+        first row, each part's file bytes, the pieces and the flag of each
+        bucket.
         """
         n_rows = self.shape[0]
         n_buckets = self.bucket_starts.size - 1
@@ -1074,14 +1089,14 @@ class SparseRowStore:
         finalized = _archive_bytes(
             {
                 "indptr": (np.int64, (n_rows + 1,)),
-                "partIds": (np.int64, (1,)),
+                "partIds": (np.int64, (parts,)),
                 "bucketStarts": (np.int64, (n_buckets + 1,)),
-                "fileBytes": (np.int64, (1, n_buckets)),
+                "fileBytes": (np.int64, (parts, n_buckets)),
                 "bucketPieces": (np.int64, (n_buckets,)),
                 "bucketMixed": (np.bool_, (n_buckets,)),
             }
         )
-        return len(json.dumps(self._settings)) + part + finalized
+        return len(json.dumps(self._settings)) + parts * part + finalized
 
     def _check_disk(self, required: int) -> None:
         free = shutil.disk_usage(self.directory).free

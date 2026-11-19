@@ -572,6 +572,7 @@ def test_wrong_inputs_are_refused_with_what_was_expected(tmp_path):
         narrow.close()
     for options, message in (
         ({"bucket_rows": 0}, "bucket_rows must be at least 1"),
+        ({"parts": 0}, "parts must be at least 1, not 0"),
         ({"buffer_bytes": -1}, "buffer_bytes must not be negative"),
         ({"bucket_bytes": -1}, "bucket_bytes must not be negative"),
     ):
@@ -958,8 +959,14 @@ def _store_files(directory: Path) -> dict[str, int]:
     return kinds
 
 
-@pytest.mark.parametrize("form", ["whole", "loose", "ragged"])
-def test_the_disk_check_counts_every_file_that_the_store_writes(tmp_path, form):
+@pytest.mark.parametrize(
+    ("form", "writers"),
+    [("whole", 0), ("loose", 0), ("ragged", 0), ("whole", 2)],
+    ids=["whole", "loose", "ragged", "whole-from-two-writers"],
+)
+def test_the_disk_check_counts_every_file_that_the_store_writes(
+    tmp_path, form, writers
+):
     rng = np.random.default_rng(41)
     destinations = rng.permutation(300)
     matrix = _random_rows(rng, 300, 40, np.float32, density=0.1)
@@ -978,13 +985,19 @@ def test_the_disk_check_counts_every_file_that_the_store_writes(tmp_path, form):
         entries = int(matrix.nnz)
         # Each entry may be a piece of its own, of 16 bytes at most.
         rows = entries * (4 + 1 + 16)
-    # Each of the six buckets of 50 rows holds at least one block: a header
-    # of 64 bytes and four Blosc frames, each with a header of 16 bytes.
-    blocks = 6 * (64 + 4 * 16)
+    # Each part's file in each of the six buckets of 50 rows holds at least
+    # one block: a header of 64 bytes and four Blosc frames, each with a
+    # header of 16 bytes.
+    blocks = 6 * (1 + writers) * (64 + 4 * 16)
 
     def create() -> SparseRowStore:
         # Rows wait until they are finished, so each bucket takes one block.
-        options = {"bucket_rows": 50, "buffer_bytes": 1 << 20, "entries": entries}
+        options = {
+            "bucket_rows": 50,
+            "buffer_bytes": 1 << 20,
+            "entries": entries,
+            "parts": 1 + writers,
+        }
         if form == "ragged":
             return _ragged_store(tmp_path, 300, **options)
         builder = _whole_store if form == "whole" else _loose_store
@@ -1002,18 +1015,29 @@ def test_the_disk_check_counts_every_file_that_the_store_writes(tmp_path, form):
         try:
             if form == "ragged":
                 _append_in_blocks(store, destinations, values, offsets)
-            elif form == "whole":
-                store.append_rows(destinations, matrix)
-            else:
+            elif form == "loose":
                 coo = matrix.tocoo()
                 store.append_entries(destinations[coo.row], coo.col, coo.data)
+            elif not writers:
+                store.append_rows(destinations, matrix)
+            else:
+                # Other writers send half of the rows each, as the processes
+                # of a shuffle do, and the owner's part stays empty.
+                halves = np.array_split(np.arange(300), writers)
+                for part, share in enumerate(halves, start=1):
+                    writer = SparseRowStore.open(
+                        store.directory, part=part, buffer_bytes=1 << 20
+                    )
+                    writer.append_rows(destinations[share], matrix[share])
+                    writer.finish()
             store.finalize()
             written = _store_files(store.directory)
         finally:
             store.close()
-    # The check asks for the rows as it bounds them, a block for each bucket,
-    # and every byte of the store's settings and records: those of its own
-    # part and the finalized record.
+    # The check asks for the rows as it bounds them, a block for each part
+    # in each bucket, and every byte of the store's settings and records:
+    # those of its own part, of each other writer's part and the finalized
+    # record.
     assert asked == rows + blocks + written["settings"] + written["records"]
     assert sum(written.values()) <= asked
 

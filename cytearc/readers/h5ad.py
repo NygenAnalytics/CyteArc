@@ -1534,11 +1534,13 @@ class H5adReader:
                 temp_dir=self._tempDir,
             )
         else:
+            # The store holds its own empty part and one for each window.
             store = plan.new_store(
                 operation=_SHUFFLE_OPERATION,
                 entry_bytes=entry_bytes,
                 entries=entries,
                 temp_dir=self._tempDir,
+                parts=1 + len(windows),
             )
             try:
                 logger.debug(
