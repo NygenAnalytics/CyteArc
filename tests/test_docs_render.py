@@ -7,6 +7,7 @@ import re
 import shutil
 import subprocess
 import sys
+from urllib.parse import urlsplit
 from xml.etree import ElementTree
 
 import pytest
@@ -795,8 +796,8 @@ def test_html_fragment_rejects_missing_or_duplicate_navigation() -> None:
             build_docs.html_fragment(contents, "menu")
 
 
-class _PageAnchors(HTMLParser):
-    """The ids of a page's elements, and the anchors that its links within it name."""
+class _PageLinks(HTMLParser):
+    """The ids of a page's elements, and the targets of its links."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -807,35 +808,46 @@ class _PageAnchors(HTMLParser):
         attributes = dict(attrs)
         if attributes.get("id"):
             self.ids.add(str(attributes["id"]))
-        href = attributes.get("href") or ""
-        if tag == "a" and href.startswith("#") and len(href) > 1:
-            self.links.append(href[1:])
+        if tag == "a" and attributes.get("href"):
+            self.links.append(str(attributes["href"]))
 
 
 @pytest.mark.slow
-def test_links_within_an_api_page_name_an_anchor_of_it(tmp_path: Path) -> None:
-    # The API's Sphinx build takes every Markdown link as external, so it
-    # writes the anchor of [text](#a_label) as it is, while the label's own
-    # anchor turns its underscores into hyphens; a {ref} of the label finds
-    # it. Building every API page takes about 15 seconds.
+def test_links_of_an_api_page_find_their_page_and_anchor(tmp_path: Path) -> None:
+    # The API's Sphinx build takes every Markdown link as external and writes
+    # it as it is. [text](#a_label) names no anchor, since the label's anchor
+    # turns its underscores into hyphens, where a {ref} of the label finds
+    # it; [text](clones.md) names no built page; and [text](/api/clones.html)
+    # leaves the site, which is published under /CyteArc/. Building every API
+    # page takes about 15 seconds.
     pytest.importorskip("sphinx")
     pytest.importorskip("myst_parser")
     api = Path(__file__).resolve().parents[1] / "docs/source/reference/api"
     subprocess.run(
         [sys.executable, "-m", "sphinx", "-q", "-b", "html", api, tmp_path], check=True
     )
-    links = {}
-    missing = []
+    pages = {}
     for page in sorted(tmp_path.glob("*.html")):
-        anchors = _PageAnchors()
-        anchors.feed(page.read_text())
-        links[page.name] = anchors.links
-        missing += [
-            (page.name, anchor) for anchor in anchors.links if anchor not in anchors.ids
-        ]
-    # The links that the pages' authors wrote are among those checked.
-    assert "cell-order-in-exports" in links["import_export.html"]
-    assert missing == []
+        pages[page.name] = _PageLinks()
+        pages[page.name].feed(page.read_text())
+    broken = []
+    for name, page in pages.items():
+        for href in page.links:
+            target, _, anchor = href.partition("#")
+            if href.startswith("/"):
+                broken.append((name, href))
+            elif urlsplit(href).scheme or target.startswith("../"):
+                # The link leaves the API pages.
+                continue
+            elif target and not (tmp_path / target).is_file():
+                broken.append((name, href))
+            elif anchor and anchor not in pages[target or name].ids:
+                broken.append((name, href))
+    # The links that the pages' authors wrote, within a page and to another,
+    # are among those checked.
+    assert "#cell-order-in-exports" in pages["import_export.html"].links
+    assert "pipeline.html#normalization-method" in pages["assays.html"].links
+    assert broken == []
 
 
 @pytest.mark.parametrize("figure_count", [1, 2])
