@@ -287,7 +287,7 @@ def _family_record(
     matches: Sequence[str],
     species: str,
     skipped: str | None = None,
-    defaultExclude: bool | None = None,
+    defaultExclude: bool,
     catalogSuspect: str | None = None,
     **extra: Any,
 ) -> dict[str, Any]:
@@ -300,8 +300,7 @@ def _family_record(
     }
     if skipped is not None:
         record["skipped"] = skipped
-    if defaultExclude is not None:
-        record["defaultExclude"] = defaultExclude
+    record["defaultExclude"] = defaultExclude
     if catalogSuspect is not None:
         record["catalogSuspect"] = catalogSuspect
     record.update(extra)

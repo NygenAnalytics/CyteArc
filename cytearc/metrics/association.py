@@ -268,13 +268,12 @@ def association_pair(
 
 
 def _one_hot(values: np.ndarray) -> np.ndarray:
-    """Treatment-coded indicators with the first level dropped."""
+    """Treatment-coded indicators with the first level dropped.
+
+    Values of one level have no indicator column.
+    """
     dummies = pd.get_dummies(pd.Series(values), dummy_na=False, dtype=float)
-    if dummies.shape[1] > 1:
-        dummies = dummies.iloc[:, 1:]
-    elif dummies.shape[1] == 1:
-        return np.zeros((len(values), 0), dtype=float)
-    return cast(np.ndarray, dummies.to_numpy(dtype=float))
+    return cast(np.ndarray, dummies.iloc[:, 1:].to_numpy(dtype=float))
 
 
 def coefficient_estimability(

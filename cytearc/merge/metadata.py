@@ -372,12 +372,10 @@ def _max_text_width(
         block_rows=block_rows,
     ):
         if np.asarray(values).dtype.kind == "O":
-            if len(values):
-                width = max(width, max(len(str(value)) for value in values))
+            width = max(width, max((len(str(value)) for value in values), default=0))
             continue
         strings = np.asarray(values, dtype=str)
-        if strings.size:
-            width = max(width, int(np.char.str_len(strings).max()))
+        width = max(width, int(np.char.str_len(strings).max(initial=0)))
     return width
 
 
@@ -1201,9 +1199,10 @@ def _iter_column_blocks(
         else:
             source_col = source_columns[source_idx].get(spec.name)
             if source_col is None:
+                # The plan gives a column that a source lacks a missing mask,
+                # which flags the source's rows.
                 values = np.full(n, _fill_value(spec.dtype), dtype=spec.dtype)
-                if spec.hasMissing:
-                    missing = np.ones(n, dtype=bool)
+                missing = np.ones(n, dtype=bool)
             else:
                 raw = read_metadata_rows_chunkwise(table, source_col, local_rows)
                 values = raw.astype(spec.dtype, copy=False)
