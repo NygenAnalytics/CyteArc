@@ -879,18 +879,21 @@ def test_sampler_adds_a_child_that_a_worker_thread_started() -> None:
             [sys.executable, "-c", code], stdout=subprocess.PIPE, text=True
         )
 
-    own_before = time.process_time()
     try:
         with sample_process_resources(interval_seconds=0.05) as measurement:
+            # The CPU time of this process, all its threads, inside the
+            # window. Other threads of a busy test worker may spend some, so
+            # the tree's total must hold this and the child's on top of it.
+            own_before = time.process_time()
             starter = threading.Thread(target=start)
             starter.start()
             starter.join()
             child = started["child"]
             assert child.stdout is not None
             child_cpu = float(child.stdout.readline())
+            own = time.process_time() - own_before
             # The window closes while the child still lives, so only the walk
             # of the process tree can count its CPU time.
-        own = time.process_time() - own_before
         own_threads = process_module._parse_proc_status(
             Path(f"/proc/{os.getpid()}/status").read_text()
         ).threads
@@ -900,8 +903,8 @@ def test_sampler_adds_a_child_that_a_worker_thread_started() -> None:
             process.wait()
 
     final = measurement()
-    assert own < child_cpu / 2
-    assert final.cpu_seconds >= child_cpu - 0.02
+    # A walk that missed the child would count this process's time alone.
+    assert final.cpu_seconds >= own + child_cpu - 0.02
     assert final.baseline_bytes is not None and final.peak_bytes is not None
     assert final.peak_bytes >= final.baseline_bytes + 45 * 2**20
     assert own_threads is not None and final.threads_peak is not None
