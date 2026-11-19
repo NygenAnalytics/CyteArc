@@ -288,6 +288,49 @@ def test_read_store_handles_failure_after_its_reader_is_cancelled(
         store.close()
 
 
+def test_a_fetch_that_fails_after_a_close_keeps_the_fetch_that_followed_it(
+    tmp_path, monkeypatch
+):
+    calls = []
+    prototype = default_buffer_prototype()
+    store = huggingface.HfReadStore.from_url(str(tmp_path), read_only=True)
+
+    async def check():
+        started = [asyncio.Event(), asyncio.Event()]
+        release = [asyncio.Event(), asyncio.Event()]
+
+        async def read(self, key, prototype, byte_range=None):
+            calls.append(key)
+            fetch = len(calls) - 1
+            started[fetch].set()
+            await release[fetch].wait()
+            if fetch == 0:
+                raise OSError("The first transfer failed")
+            return prototype.buffer.from_bytes(b"metadata")
+
+        monkeypatch.setattr(FsspecStore, "get", read)
+        before = asyncio.create_task(store.get("zarr.json", prototype))
+        await asyncio.wait_for(started[0].wait(), timeout=5)
+        # Closing forgets the fetch in flight, so the next reader starts its
+        # own, which the readers after it share.
+        store.close()
+        after = asyncio.create_task(store.get("zarr.json", prototype))
+        await asyncio.wait_for(started[1].wait(), timeout=5)
+        release[0].set()
+        with pytest.raises(OSError, match="The first transfer failed"):
+            await before
+        release[1].set()
+        assert (await after).to_bytes() == b"metadata"
+        # The failed fetch did not drop the one that replaced it.
+        assert (await store.get("zarr.json", prototype)).to_bytes() == b"metadata"
+
+    try:
+        asyncio.run(check())
+        assert calls == ["zarr.json", "zarr.json"]
+    finally:
+        store.close()
+
+
 @pytest.mark.parametrize(
     ("key", "byte_range", "read_only"),
     [
@@ -1199,9 +1242,11 @@ def test_writable_read_store_lists_its_keys_through_the_file_system(
     def snapshot(*_args):
         raise AssertionError("a writable store must not list a snapshot")
 
-    # A writable store sees keys written after it opened.
+    # A writable store lists no snapshot, so it sees the keys that it writes
+    # after it opened.
     monkeypatch.setattr(huggingface, "_list_store", snapshot)
     store = _loopback_store(loopback_hub, read_only=False)
+    uploads = _accept_uploads(loopback_hub, store, monkeypatch)
     published = loopback_hub.root / "data.zarr"
     keys = sorted(
         path.relative_to(published).as_posix()
@@ -1211,10 +1256,18 @@ def test_writable_read_store_lists_its_keys_through_the_file_system(
     try:
         listed = sync(_names(store.list()), timeout=GUARD_SECONDS)
         under_c = sync(_names(store.list_prefix("c/1")), timeout=GUARD_SECONDS)
+        # A key that the store writes after it listed its keys.
+        sync(
+            store.set("c/1/9", _PROTOTYPE.buffer.from_bytes(b"late")),
+            timeout=GUARD_SECONDS,
+        )
+        relisted = sync(_names(store.list_prefix("c/1")), timeout=GUARD_SECONDS)
     finally:
         store.close()
     assert sorted(listed) == keys
     assert sorted(under_c) == [key for key in keys if key.startswith("c/1/")]
+    assert uploads == ["data.zarr/c/1/9"]
+    assert sorted(relisted) == sorted([*under_c, "c/1/9"])
 
 
 def _accept_uploads(hub, store, monkeypatch):

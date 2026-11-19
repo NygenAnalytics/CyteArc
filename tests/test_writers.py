@@ -3050,6 +3050,25 @@ def test_to_mtx_preserves_counts_barcodes_and_features(export_assay_store, tmp_p
     ]
 
 
+def test_to_mtx_writes_over_the_files_of_a_directory_that_exists(
+    export_assay_store, tmp_path
+):
+    from scipy.io import mmread
+
+    from cytearc.writers import to_mtx
+
+    assay = export_assay_store.RNA
+    assay.cells._get_array("RNA_nFeatures")[:] = 99
+    out_dir = tmp_path / "existing"
+    out_dir.mkdir()
+    (out_dir / "matrix.mtx").write_text("an earlier export\n")
+    to_mtx(assay, str(out_dir), compress=False)
+
+    exported = mmread(out_dir / "matrix.mtx", spmatrix=False).tocsr()
+    np.testing.assert_array_equal(exported.toarray(), _TOY_RNA_COUNTS.T)
+    assert (out_dir / "barcodes.tsv").read_text().splitlines() == ["b1", "b2", "b3"]
+
+
 def test_to_mtx_compress_writes_gzipped_matrix_market(export_assay_store, tmp_path):
     import gzip
 
@@ -3282,11 +3301,16 @@ def test_subset_zarr_selects_cell_ids_in_store_order(cell_ids, rows):
     [
         (np.array([0.5]), ValueError, "such as 0.5"),
         (np.array([3]), ValueError, "1 of the 1 values of cell_ids are not cell IDs"),
+        (
+            ["c", "z", "a"],
+            ValueError,
+            "1 of the 3 values of cell_ids are not cell IDs of the store, such as 'z'",
+        ),
         (["a", "d", "a"], ValueError, "repeats 1 cell IDs, such as 'a'"),
         ({"a", "b"}, TypeError, "found set of shape"),
         (b"a", TypeError, "found bytes of shape"),
     ],
-    ids=["float", "position", "repeated", "set", "bytes"],
+    ids=["float", "position", "one-unknown", "repeated", "set", "bytes"],
 )
 def test_subset_zarr_rejects_invalid_cell_ids(cell_ids, error, message):
     subset = object.__new__(SubsetZarr)
@@ -3866,12 +3890,18 @@ def test_to_h5ad_orders_embedding_components_numerically(export_assay_store, tmp
             by_cell_id(assay.cells, np.full(n_cells, float(component))),
             overwrite=True,
         )
+    # A column whose name ends in a number, of no embedding's prefix.
+    assay.cells.insert(
+        "RNA_score2", by_cell_id(assay.cells, np.full(n_cells, 7.0)), overwrite=True
+    )
     path = tmp_path / "components.h5ad"
     to_h5ad(assay, str(path), embeddings_cols=["PCA"])
 
     with h5py.File(path, "r") as h5:
         assert set(h5["obsm"]) == {"X_pca"}
         np.testing.assert_array_equal(h5["obsm/X_pca"][0], np.arange(1, 13))
+        np.testing.assert_array_equal(h5["obs/RNA_score2"][:], np.full(n_cells, 7.0))
+        assert not any(name.startswith("RNA_PCA") for name in h5["obs"])
 
 
 def test_csv_import_keeps_later_fractional_counts_and_missing_text(tmp_path):

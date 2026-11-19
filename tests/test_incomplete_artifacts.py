@@ -182,6 +182,37 @@ def test_prune_incomplete_finds_and_removes_only_the_residue_of_writes():
     assert root[artifact_path(malformed)].attrs["complete"] == "yes"
 
 
+def test_the_newest_of_two_interrupted_writes_of_a_request_is_the_one_named(
+    monkeypatch,
+):
+    from types import SimpleNamespace
+
+    import cytearc.storage.artifact_writer as artifact_writer
+    from cytearc.storage.artifacts import nearest_stored_artifacts
+
+    # Each write starts one tick after the one before it.
+    ticks = iter(range(1_000, 10_000, 1_000))
+    monkeypatch.setattr(
+        artifact_writer, "time", SimpleNamespace(time_ns=lambda: next(ticks))
+    )
+    root = zarr.open_group(store=MemoryStore(), mode="w")
+    _interrupted(root, "asked")
+    newest = _interrupted(root, "asked")
+    other = _write(root, "other")
+
+    found = nearest_stored_artifacts(
+        root,
+        scope="datastore",
+        kind="cell_selection",
+        provenance=_plan(root, "asked").provenance,
+    )
+    assert artifact_path(found.incomplete) == newest
+    assert found.superseded is None
+    # The complete artifact of another label is the nearest, by that label.
+    assert found.nearest is not None and found.nearest.ref == other
+    assert found.changed_parameters == ("label",)
+
+
 def test_prune_incomplete_of_a_store_without_artifacts_finds_nothing():
     root = zarr.open_group(store=MemoryStore(), mode="w")
     assert prune_incomplete_artifacts(root, ["RNA"], dry_run=False) == []

@@ -1,5 +1,6 @@
 import builtins
 import ctypes
+import io
 from types import SimpleNamespace
 
 import pytest
@@ -268,6 +269,32 @@ def test_detect_memory_uses_sysconf_when_meminfo_unavailable(monkeypatch):
     assert detect_total_memory_bytes() == 4096 * 1024
 
 
+def test_detect_memory_reads_memtotal_in_kibibytes_and_sysconf_without_it(
+    monkeypatch,
+):
+    served = {}
+    real_open = builtins.open
+
+    def fake_open(path, *args, **kwargs):
+        if str(path) == "/proc/meminfo":
+            return io.StringIO(served["meminfo"])
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", fake_open)
+    monkeypatch.setattr(budget_module, "_cgroup_memory_bytes", lambda: None)
+    monkeypatch.setattr(
+        "os.sysconf", {"SC_PAGE_SIZE": 4096, "SC_PHYS_PAGES": 1000}.__getitem__
+    )
+    # Linux states the total in kB, which are KiB, after other lines.
+    served["meminfo"] = (
+        "MemFree:         2000 kB\nMemTotal:       16384000 kB\nMemAvailable: 9 kB\n"
+    )
+    assert detect_total_memory_bytes() == 16_384_000 * 1024
+    # A file without the total leaves the answer to sysconf.
+    served["meminfo"] = "MemFree:         2000 kB\nMemAvailable:    9 kB\n"
+    assert detect_total_memory_bytes() == 4096 * 1000
+
+
 def test_detect_memory_uses_process_cgroup_path(monkeypatch):
     nested_limit = 2 * 1024**3
     monkeypatch.setattr(
@@ -377,6 +404,22 @@ def test_detect_workers_skips_unreadable_quotas_and_affinity(monkeypatch):
 
     # The root quota of three CPUs binds; the others carry no usable limit.
     assert detect_workers() == 3
+
+
+def test_cpu_quotas_of_zero_cpus_or_a_zero_period_set_no_limit(monkeypatch):
+    _serve_files(
+        monkeypatch,
+        {
+            "/proc/self/cgroup": "0::/batch/job/step\n",
+            "/sys/fs/cgroup/batch/job/step/cpu.max": "0 100000\n",
+            "/sys/fs/cgroup/batch/job/cpu.max": "200000 0\n",
+            "/sys/fs/cgroup/batch/cpu.max": "-100000 100000\n",
+            "/sys/fs/cgroup/cpu.max": "350000 100000\n",
+        },
+    )
+    # Only the root's quota of 3.5 CPUs is a limit; a zero period would
+    # divide by zero, and the others would admit no CPU at all.
+    assert budget_module.detect_cpu_quota_cores() == 3.5
 
 
 def test_detect_workers_uses_combined_legacy_controller_mount(monkeypatch):

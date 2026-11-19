@@ -104,6 +104,21 @@ def test_row_writer_refuses_values_that_overflow_its_dtype() -> None:
     assert caught.value.row == 1
 
 
+def test_row_writer_takes_empty_blocks_without_moving_its_next_row() -> None:
+    root = _root()
+    array = root.create_array("data", shape=(3, 2), dtype=np.float32, fill_value=-1)
+    with FiniteRowWriter(array, operation="run_test") as writer:
+        writer.write(np.empty((0, 2)))
+        writer.write(np.ones((1, 2)))
+        writer.write(np.empty((0, 2)))
+        writer.write(np.full((2, 2), 2.0))
+    np.testing.assert_array_equal(array[:], [[1, 1], [2, 2], [2, 2]])
+    # An array of no rows takes an empty block, and is then complete.
+    empty = root.create_array("empty", shape=(0, 2), dtype=np.float64)
+    with FiniteRowWriter(empty, operation="run_test") as writer:
+        writer.write(np.empty((0, 2)))
+
+
 def test_row_writer_requires_every_row_and_a_floating_array() -> None:
     root = _root()
     array = root.create_array("data", shape=(3,), dtype=np.float64)

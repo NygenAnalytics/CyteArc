@@ -130,7 +130,12 @@ def _aligned_feature_widths(
     read_limit: int,
     n_feats: int,
 ) -> tuple[int, int]:
-    """Return compatible counts-chunk and all-cell read widths."""
+    """Return compatible counts-chunk and all-cell read widths.
+
+    ``n_feats`` is at least 1, so both caps lie between 1 and ``n_feats``.
+    Each ratio tried is at most the larger cap divided by the smaller,
+    rounded up, so each candidate width is at least 1.
+    """
     source_cap = max(1, min(int(n_feats), int(source_limit)))
     read_cap = max(1, min(int(n_feats), int(read_limit)))
     candidates: set[tuple[int, int]] = set()
@@ -140,15 +145,13 @@ def _aligned_feature_widths(
         upper = max(1, (source_cap + read_cap - 1) // read_cap)
         for ratio in {1, lower, upper}:
             read_width = min(read_cap, source_cap // ratio, n_feats // ratio)
-            if read_width > 0:
-                candidates.add((ratio * read_width, read_width))
+            candidates.add((ratio * read_width, read_width))
     else:
         lower = max(1, read_cap // source_cap)
         upper = max(1, (read_cap + source_cap - 1) // source_cap)
         for ratio in {1, lower, upper}:
             source_width = min(source_cap, read_cap // ratio, n_feats // ratio)
-            if source_width > 0:
-                candidates.add((source_width, ratio * source_width))
+            candidates.add((source_width, ratio * source_width))
 
     def score(widths: tuple[int, int]) -> tuple[int, int, int, int]:
         source_width, read_width = widths

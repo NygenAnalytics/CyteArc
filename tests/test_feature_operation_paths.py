@@ -314,6 +314,26 @@ def test_reused_selection_emptied_outside_cytearc_is_refused_by_its_consumers(
     assert caught.value.code == "corrupt_payload"
 
 
+def test_selected_feature_indices_are_read_across_chunks_that_select_none(
+    tmp_path,
+) -> None:
+    from cytearc.storage.feature_selection import read_feature_selection_indices
+
+    store = _new_store(tmp_path)
+    mask = np.zeros(N_GENES, dtype=bool)
+    mask[[1, 2, 10]] = True
+    ref = store.features.snapshot(mask=mask)
+    # The flags stored in chunks of three features, as another writer could
+    # store them: the chunks of features 3 to 5 and 6 to 8 select none.
+    group = _artifact_group(store, ref)
+    del group["values"]
+    group.create_array("values", data=mask, chunks=(3,))
+    group.attrs["payload_fingerprint"] = fingerprint_stored_arrays(group, ("values",))
+
+    indices = read_feature_selection_indices(store.zw, "RNA", ref)
+    assert indices.tolist() == [1, 2, 10]
+
+
 @pytest.mark.parametrize("method", ["waggr", "aucell"])
 def test_enrichment_requires_an_artifact_cell_selection(
     store: DataStore, method: str

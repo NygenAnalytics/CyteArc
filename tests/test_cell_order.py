@@ -21,6 +21,8 @@ from cytearc.storage.cell_order import (
     recorded_shuffle_seed,
     shuffle_seed_argument,
     shuffled_order,
+    source_order_positions,
+    source_order_ranks,
     source_order_rows,
     write_shuffled_cell_order,
 )
@@ -208,6 +210,23 @@ def test_source_order_rows_keep_ties_and_ignore_a_plain_column() -> None:
     np.testing.assert_array_equal(
         source_order_rows(cells, np.ones(4, bool)), [1, 3, 0, 2]
     )
+
+
+def test_ranks_and_positions_keep_ties_in_store_order_among_many_cells() -> None:
+    # 2,000 cells over ten source rows, as merges of shuffled stores could
+    # give them; NumPy's unstable sorts reorder ties among this many values.
+    source_rows = np.random.default_rng(7).integers(0, 10, 2_000)
+    # Python's sort, keyed by the source row and then the store row.
+    expected = sorted(range(source_rows.size), key=lambda row: (source_rows[row], row))
+    ranks = source_order_ranks(source_rows)
+    assert ranks.dtype == np.int64
+    for rank, row in enumerate(expected):
+        assert ranks[row] == rank
+    cells = _cell_table(source_rows.size)
+    write_shuffled_cell_order(cells, source_rows, 0)
+    positions = source_order_positions(cells, np.arange(source_rows.size))
+    assert positions is not None
+    assert positions.tolist() == expected
 
 
 def test_source_order_rows_refuse_a_bad_selection_or_column() -> None:

@@ -21,7 +21,12 @@ from cytearc.storage.count_matrix import (
     validate_count_matrix_source,
     validate_live_count_matrix_geometry,
 )
-from cytearc.storage.layout import _CODEC_MAX_BYTES, count_array_spec
+from cytearc.storage.layout import (
+    _CODEC_MAX_BYTES,
+    ZarrArraySpec,
+    count_array_spec,
+    get_compressors,
+)
 
 
 def _shape(plan, which: str) -> tuple[tuple[int, int], tuple[int, int]]:
@@ -301,6 +306,30 @@ def test_policy_metadata_round_trip() -> None:
     }
     assert load_count_matrix_plan(root) == root.attrs["cytearc:countMatrixLayout"]
     assert policy_from_payload(load_count_matrix_plan(root)) == plan.policy
+
+
+def test_a_count_array_of_a_spec_without_shards_or_fill_keeps_every_chunk() -> None:
+    spec = ZarrArraySpec(
+        shape=(6, 4),
+        chunks=(3, 2),
+        dtype=np.dtype(np.uint16),
+        compressors=get_compressors("cloud", zarrFormat=3),
+    )
+    store = MemoryStore()
+    group = zarr.open_group(store=store, mode="w")
+    counts = create_count_matrix_array(group, "counts", spec)
+    # The array keeps the spec's chunks, unsharded, and Zarr's zero fill.
+    assert (counts.shape, counts.chunks, counts.shards) == ((6, 4), (3, 2), None)
+    assert counts.fill_value == 0
+    values = np.zeros((6, 4), dtype=np.uint16)
+    values[4, 3] = 7
+    counts[:] = values
+    # Every chunk is stored, the three of zeros too, so a lost one reads as
+    # lost rather than as zero counts.
+    assert sorted(key for key in store._store_dict if "/c/" in key) == [
+        f"counts/c/{row}/{column}" for row in (0, 1) for column in (0, 1)
+    ]
+    np.testing.assert_array_equal(counts[:], values)
 
 
 def test_require_count_matrix_layout_rejects_read_group_mismatch() -> None:

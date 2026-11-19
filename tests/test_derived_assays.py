@@ -653,6 +653,22 @@ def test_pending_assay_names_its_discard_path():
     del context
 
 
+def test_a_pending_assay_takes_its_name_in_every_workspace_and_no_other_name():
+    root = _memory_root("ws1")
+    context = derived_assay_transaction(root, "SCORES", "ws1", operation="op")
+    context.__enter__().create_counts(3, ["f0"], ["f0"], np.float64)
+
+    # Workspaces share matrices/SCORES, so the pending name is taken in ws2.
+    with pytest.raises(
+        ValueError, match=r"Assay 'SCORES' of workspace 'ws1' is pending"
+    ):
+        validate_new_assay(root, "SCORES", "ws2")
+    # Another name passes over the pending assay and is free.
+    validate_new_assay(root, "OTHER", "ws2")
+    validate_new_assay(root, "OTHER", "ws1")
+    del context
+
+
 def _finalized(counts: zarr.Array, value: float) -> None:
     counts[:] = value
     finalize_test_counts(counts)

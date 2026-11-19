@@ -1191,6 +1191,26 @@ def test_the_cells_ids_are_packed_for_the_export(tmp_path) -> None:
             # nine and 40 bytes of text.
             assert ledger.held_bytes == 8 * 8 + 8 * 9 + 40
 
+    class Recording(MemoryLedger):
+        """A ledger that notes each peak it checks."""
+
+        def __init__(self) -> None:
+            super().__init__(10**9, "Reading")
+            self.peaks: list[tuple[str, int]] = []
+
+        def peak(self, item, nbytes, *, remedy=None):
+            self.peaks.append((item, int(nbytes)))
+            super().peak(item, nbytes, remedy=remedy)
+
+    # Finding the file's order holds each of the eight cells' source row,
+    # its place in the sort and the order, 8 bytes each; store order finds
+    # nothing.
+    finding = "the cells' order in the imported file"
+    for cell_order, peaks in (("source", [(finding, 3 * 8 * 8)]), ("stored", [])):
+        recording = Recording()
+        claimed._export_cell_ids(recording, receptors, 8, 1, cell_order)
+        assert [peak for peak in recording.peaks if peak[0] == finding] == peaks
+
 
 def test_packing_text_counts_each_slice_and_their_join() -> None:
     # 60 values of 1,000 characters beyond ASCII, 1,997 bytes each, in
@@ -2292,6 +2312,111 @@ def test_the_files_rows_follow_each_cell_in_the_order_of_the_cells(
     assert rows.dtype == np.int64 and rows.tolist() == expected
     # The contigs' cells and flags were let go; the rows stay held.
     assert contigs.ledger.held_bytes == 8 * len(expected)
+
+
+def test_the_files_rows_keep_the_stored_order_of_each_cells_many_contigs(
+    tmp_path,
+) -> None:
+    # Six contigs of each of the eight cells: 48 rows, among which a sort that
+    # is not stable would move the rows of a cell.
+    rows = [
+        f"cell{k},true,cell{k}_contig_{j},true,500,TRB,TRBV{j},,TRBJ1,TRBC1,true,"
+        f"true,CASS{k},TGTGCCAGCAGC,100,5,ct{k},ct{k}_{j}"
+        for k in range(N_RECEPTOR_CELLS)
+        for j in range(1, 7)
+    ]
+    store, receptors = clonal_receptors(tmp_path, rows)
+    group = artifact_group(store.zw, receptors)
+    contigs = repertoire_operations._ExportContigs(
+        group,
+        ("sequence_id",),
+        chains_only=False,
+        ledger=MemoryLedger(10**9, "Ordering"),
+    )
+    found = contigs.file_order(np.asarray(_SOURCE_CELLS))
+    # Each cell in the file's order, its contigs in the rows that hold them.
+    cells = np.asarray(group["contig_cells"][:])
+    assert found.tolist() == [
+        row for cell in _SOURCE_CELLS for row in np.flatnonzero(cells == cell)
+    ]
+
+
+def test_a_renamed_id_can_make_the_widest_row_of_an_export_in_the_files_order(
+    tmp_path,
+) -> None:
+    # Two files name the one contig of a cell X, each holding the same values
+    # otherwise, so the row whose ID takes a suffix is wider than any stored
+    # row.
+    files = [
+        write_lines(
+            tmp_path,
+            f"cell{k}.csv",
+            CELLRANGER_HEADER,
+            [
+                f"cell{k},true,X,true,500,TRB,TRBV1,,TRBJ1,TRBC1,true,true,CASSA,"
+                "TGTGCCAGCAGCGCC,80,8,ct1,ct1_1"
+            ],
+        )
+        for k in (0, 7)
+    ]
+    receptor_store(tmp_path)
+    store = _claimed(tmp_path / "store.zarr")
+    receptors = store.repertoire.import_receptors(
+        files, cell_selection=store.snapshot_cell_selection()
+    )
+    # Text fields alone, whose widest values bound the rows exactly: 26 bytes
+    # with X and 28 with X_2.
+    store.repertoire.export_airr(receptors, tmp_path / "x.tsv", fields=["v_call"])
+    assert [len(line) for line in _text(tmp_path / "x.tsv").splitlines()[1:]] == [
+        25,
+        27,
+    ]
+    written = _read(tmp_path / "x.tsv")
+    # Cell7 claims file row 1 and cell0 file row 6, so cell7's contig keeps X.
+    assert written["cell_id"].tolist() == ["cell7", "cell0"]
+    assert written["sequence_id"].tolist() == ["X", "X_2"]
+
+
+def test_the_reorder_is_charged_beside_a_block_and_held_while_rows_are_written(
+    tmp_path, monkeypatch
+) -> None:
+    store, receptors = _shuffled_edge_receptors(tmp_path)
+    charges: list[tuple[str, str, int]] = []
+
+    class Recording(MemoryLedger):
+        """The export's ledger, noting each charge."""
+
+        def hold(self, item, nbytes, *, remedy=None):
+            charges.append(("hold", item, int(nbytes)))
+            return super().hold(item, nbytes, remedy=remedy)
+
+        def peak(self, item, nbytes, *, remedy=None):
+            charges.append(("peak", item, int(nbytes)))
+            super().peak(item, nbytes, remedy=remedy)
+
+    plans = []
+    plan = export_writer.plan_text_reorder
+
+    def recorded(*args):
+        plans.append(plan(*args))
+        return plans[-1]
+
+    monkeypatch.setattr(repertoire_operations, "MemoryLedger", Recording)
+    monkeypatch.setattr(export_writer, "plan_text_reorder", recorded)
+    store.repertoire.export_airr(receptors, tmp_path / "x.tsv", fields=EDGE_FIELDS)
+    assert _text(tmp_path / "x.tsv") == EXPECTED_EDGE
+
+    (reorder,) = plans
+    (block,) = [
+        nbytes for _, item, nbytes in charges if item == "writing a block of contigs"
+    ]
+    # The reorder is checked beside the block that each rendered batch holds,
+    # then held while its rows are written.
+    sending = "sending the contigs to their places in the imported file's order"
+    assert [(kind, nbytes) for kind, item, nbytes in charges if item == sending] == [
+        ("peak", reorder.held_bytes + block),
+        ("hold", reorder.held_bytes),
+    ]
 
 
 @pytest.mark.parametrize("source", ["receptors", "clonotypes"])
