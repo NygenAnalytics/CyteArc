@@ -2927,7 +2927,9 @@ def to_mtx(
     feature holds the same value, such as ``Antibody Capture``, else
     ``Gene Expression`` for an RNA assay and the assay name for another, so
     gene biotypes that CELLxGENE keeps in ``feature_type`` do not split the
-    assay on import. Compressed files use gzip level 6.
+    assay on import. With ``compress=True``, the matrix is compressed with
+    gzip level 6, and the barcode and feature files with pandas' default
+    level, 9.
 
     Cells are written in the order of the file that the store imported, by
     default, as their ``sourceRow`` records it; a store that holds no

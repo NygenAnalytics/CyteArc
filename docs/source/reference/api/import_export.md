@@ -428,7 +428,7 @@ For feature-selective disk export outside a pipeline run, call `to_anndata` and 
 writer.
 `to_mtx` writes a feature ID, name, and type column in the features file whether or not it
 compresses, `features.tsv.gz` with `compress=True` and `genes.tsv` without, so `CrDirReader`
-reads an ADT export back as ADT, and it compresses with gzip level 6.
+reads an ADT export back as ADT. With `compress=True` it compresses the matrix with gzip level 6, and the barcode and feature files with pandas' default level, 9.
 `to_mtx` writes each of its three files to a temporary file in the directory and moves it onto its name once all three are complete, so a failed export leaves no partial file, keeps the files that the directory held, and removes the directory if it made it; a replaced file keeps its permissions.
 A Matrix Market directory holds no cell metadata, so `to_mtx` cannot say which cells an assay
 measured, and a cell that it did not measure would be written as a zero row that `MtxToZarr`
