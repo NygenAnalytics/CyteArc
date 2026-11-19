@@ -282,8 +282,12 @@ def test_masters_csv_reader_reads_each_compression_pandas_reads_by_its_bytes(
     assert _csv_counts(named, pandas_kwargs={"compression": "bz2"}) == expected
     with pytest.raises(OSError):
         _csv_counts(named, pandas_kwargs={"compression": "gzip"})
-    with pytest.raises(UnicodeDecodeError):
+    # Read as text, the compressed bytes are not UTF-8.
+    with pytest.raises(
+        ValueError, match="^CSV files must be UTF-8 text; line 1 "
+    ) as refused:
         _csv_counts(named, pandas_kwargs={"compression": None})
+    assert type(refused.value) is ValueError
 
 
 @pytest.mark.parametrize("mode", ["w", "w:gz", "w:bz2", "w:xz"])

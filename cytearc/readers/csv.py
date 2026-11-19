@@ -1,6 +1,8 @@
+import codecs
 import csv
 import itertools
-from collections.abc import Generator
+import re
+from collections.abc import Callable, Generator
 from pathlib import Path
 from typing import Any
 
@@ -17,13 +19,31 @@ from ..utils.files import (
 )
 from ..utils.progress import iter_progress
 from ._text import as_text, require_unique_identifiers
-from ..utils.arguments import bool_argument
+from ..utils.arguments import bool_argument, quoted_value
 
 # read_csv settings that, besides the separator and ``quoting``, decide how
 # pandas splits a line into fields. The field check splits with the same ones.
 _QUOTING_SETTINGS = ("quotechar", "doublequote", "escapechar", "skipinitialspace")
 # read_csv settings that split lines in ways Python's csv module cannot follow.
 _UNSUPPORTED_SETTINGS = frozenset({"comment", "dialect", "lineterminator"})
+# read_csv settings that the reader sets from its own arguments, with the
+# argument that sets each. delimiter, and delim_whitespace before pandas 3,
+# set the separator as sep does.
+_READER_SETTINGS = {
+    "chunksize": "batch_size",
+    "delim_whitespace": "sep",
+    "delimiter": "sep",
+    "header": "has_header",
+    "index_col": "id_column",
+    "sep": "sep",
+    "skiprows": "skip_rows",
+}
+# The most repeated texts that the refusal of repeated feature names lists.
+_NAMED_REPEATS = 3
+# The error handler with which the reader finds the bytes that the file's
+# encoding cannot decode, and the lone surrogates that stand for them.
+_UNDECODABLE_BYTES = "cytearc.csv.undecodable_bytes"
+_MARKED_BYTES = re.compile("([\udc00-\udcff]+)")
 # The compressions of a tar archive that pandas' tar reader decompresses
 # itself, None for an archive that is not compressed.
 _TAR_COMPRESSIONS = (None, "gzip", "bz2", "xz")
@@ -129,7 +149,8 @@ def _names_for_pandas(names: Any, n_fields: int, id_column: int | None) -> Any:
 
     Raises:
         TypeError: If ``names`` is not an ordered collection of names.
-        ValueError: If ``names`` names another number of columns.
+        ValueError: If ``names`` names another number of columns, or a column
+            other than the ID column by bytes that are not UTF-8 text.
     """
     if not pd.api.types.is_list_like(names, allow_sets=False):
         raise TypeError(
@@ -149,6 +170,19 @@ def _names_for_pandas(names: Any, n_fields: int, id_column: int | None) -> Any:
             f"names in pandas_kwargs names {len(names)} columns, but the rows of "
             f"the CSV file have {n_fields} fields; name {columns} in the file's order"
         )
+    # The reader decodes the names of the other columns as UTF-8, and names
+    # the ID column itself.
+    for position, label in enumerate(labels):
+        if position == id_column or not isinstance(label, bytes):
+            continue
+        try:
+            label.decode("utf-8")
+        except UnicodeDecodeError:
+            raise ValueError(
+                "CSV column names must be UTF-8 text; names in pandas_kwargs names "
+                f"the column at position {position}, counted from 0, "
+                f"{quoted_value(bytes(label))}"
+            ) from None
     if id_column is not None and not isinstance(labels[id_column], str):
         labels[id_column] = _ID_COLUMN_LABEL
     elif not unnamed_id_column:
@@ -201,6 +235,58 @@ def _blank_or_missing(label: Any) -> bool:
     return not as_text(label).strip()
 
 
+def _listing(items: list[str]) -> str:
+    """Join ``items`` as a sentence lists them: ``a``, ``a and b``, or ``a, b and c``."""
+    if len(items) < 2:
+        return "".join(items)
+    return f"{', '.join(items[:-1])} and {items[-1]}"
+
+
+def _repeated_texts(
+    texts: list[str], positions: list[int]
+) -> list[tuple[str, list[int]]]:
+    """Return each text of several columns with their positions, in the file's order."""
+    columns: dict[str, list[int]] = {}
+    for text, position in zip(texts, positions, strict=True):
+        columns.setdefault(text, []).append(position)
+    return [(text, places) for text, places in columns.items() if len(places) > 1]
+
+
+def _mark_undecodable_bytes(error: UnicodeError) -> tuple[str, int]:
+    """Decode each byte that the encoding cannot decode as U+DC00 plus the byte.
+
+    A decode gives no lone surrogates otherwise, so these mark such bytes
+    alone. The ``surrogateescape`` handler marks bytes alike, but only from
+    0x80, which leaves out bytes of UTF-16 and UTF-32 text.
+    """
+    if not isinstance(error, UnicodeDecodeError):
+        raise error
+    undecodable = error.object[error.start : error.end]
+    return "".join(chr(0xDC00 + byte) for byte in undecodable), error.end
+
+
+codecs.register_error(_UNDECODABLE_BYTES, _mark_undecodable_bytes)
+
+
+def _field_bytes(field: str, encoding: str) -> bytes:
+    """Return a field that holds marked bytes as the bytes of the file.
+
+    The marked bytes are the file's own, and the text around them is encoded
+    again in ``encoding``.
+    """
+    encoder = codecs.getincrementalencoder(encoding)()
+    # Some encoders start with a byte order mark, which a field does not hold.
+    encoder.encode("")
+    # The text and the runs of marked bytes alternate, from a run of text.
+    parts = _MARKED_BYTES.split(field)
+    return b"".join(
+        bytes(ord(mark) - 0xDC00 for mark in part)
+        if index % 2
+        else encoder.encode(part)
+        for index, part in enumerate(parts)
+    )
+
+
 class CSVReader:
     """A class to read in data from a CSV file.
 
@@ -240,12 +326,20 @@ class CSVReader:
                     (Default value: 50,000)
         pandas_kwargs: A dictionary of keyword arguments to be passed to Pandas read_csv function.
                        It cannot set ``comment``, ``dialect``, ``lineterminator``, or
-                       ``usecols``. ``names`` names every column of the file, with or
-                       without a header, or with ``id_column=0`` every column after the
-                       ID column. Without
-                       ``compression`` here, the file's first bytes decide whether it is gzip,
-                       bzip2, xz, Zstandard or ZIP-compressed, or a tar archive, whatever its
-                       name.
+                       ``usecols``, nor what the reader sets from its own arguments:
+                       ``sep``, ``delimiter`` and ``delim_whitespace`` from ``sep``,
+                       ``header`` from ``has_header``, ``skiprows`` from ``skip_rows``,
+                       ``chunksize`` from ``batch_size``, ``index_col`` from
+                       ``id_column``, and a converter of the ID column, which the reader
+                       reads as the text of its fields. ``names`` names every column of
+                       the file, with or without a header, or with ``id_column=0`` every
+                       column after the ID column. Without ``compression`` here, the
+                       file's first bytes decide whether it is gzip, bzip2, xz, Zstandard
+                       or ZIP-compressed, or a tar archive, whatever its name. The file
+                       must be text in ``encoding`` here, or UTF-8 without it: bytes that
+                       this encoding cannot decode raise ValueError, naming the first line
+                       that holds them, unless pandas reads them under
+                       ``encoding_errors`` here.
         temp_dir: Parent directory of the temporary files of an import that
                   shuffles cells. None uses the system temporary directory.
 
@@ -303,6 +397,14 @@ class CSVReader:
                 "among those it selects, where id_column and names count every "
                 "column of the file; leave columns out with skip_cols"
             )
+        overridden = sorted(set(_READER_SETTINGS).intersection(pandas_kwargs))
+        if overridden:
+            arguments = list(dict.fromkeys(_READER_SETTINGS[key] for key in overridden))
+            raise ValueError(
+                f"pandas_kwargs cannot set {', '.join(overridden)}, which the reader "
+                f"sets from its own arguments; pass {_listing(arguments)} to "
+                "CSVReader instead"
+            )
         self._idColumn = _id_column_argument(id_column)
         names = pandas_kwargs.get("names")
         # The header or names in pandas_kwargs name the columns.
@@ -333,7 +435,7 @@ class CSVReader:
             # pandas infers compression from the file's name; the file's first
             # bytes decide here, as they decide for every reader.
             self.pandas_kwargs["compression"] = self._compression()
-        n_fields = self._check_field_counts()
+        n_fields = self._read_text(self._check_field_counts)
         if n_fields is None:
             raise ValueError("CSV file contains no data rows")
         if self._idColumn is not None and self._idColumn >= n_fields:
@@ -341,10 +443,16 @@ class CSVReader:
                 f"id_column is {self._idColumn}, but the rows of the CSV file have "
                 f"{n_fields} fields, at positions 0 to {n_fields - 1}"
             )
+        # The names that the caller gives the ID column, which the reader may
+        # replace with its own.
+        id_names: list[Any] = []
         if names is not None:
             self.pandas_kwargs["names"] = _names_for_pandas(
                 names, n_fields, self._idColumn
             )
+            if self._idColumn is not None and len(names) == n_fields:
+                id_names.append(list(names)[self._idColumn])
+        converter_keys = list(self.pandas_kwargs.get("converters") or {})
         if self._idColumn is not None:
             # Cell IDs are the text of their fields: type inference would read
             # "001" as the number 1, and NA as a missing value. Without names,
@@ -365,7 +473,7 @@ class CSVReader:
             self.cellDataIdx,
             self.countDtype,
             self.countRange,
-        ) = self._consistency_check()
+        ) = self._read_text(lambda: self._consistency_check(converter_keys, id_names))
 
     def _compression(self) -> str | None:
         """Return the file's compression by its first bytes, as pandas names it.
@@ -401,6 +509,74 @@ class CSVReader:
         reader = pd.read_csv(self._fn, **self.pandas_kwargs)
         yield from reader
 
+    def _read_text[T](self, read: Callable[[], T]) -> T:
+        """Return what ``read`` returns from the file's text, refusing bytes that its encoding cannot decode.
+
+        Raises:
+            ValueError: If the file holds such bytes, naming the first line
+                that holds them, from 1, and the field that holds them.
+        """
+        try:
+            return read()
+        except UnicodeDecodeError:
+            found = self._undecodable_field()
+            if found is None:
+                # The error came from elsewhere than the file's text, such as
+                # a converter.
+                raise
+            line, field = found
+            encoding = self.pandas_kwargs.get("encoding")
+            expectation = (
+                "UTF-8 text"
+                if encoding is None
+                else "text in the encoding that pandas_kwargs names, "
+                f"{quoted_value(encoding)}"
+            )
+            raise ValueError(
+                f"CSV files must be {expectation}; line {line} of "
+                f"{quoted_value(str(self._fn))} holds {quoted_value(field)}. Pass "
+                "the file's encoding as encoding in pandas_kwargs"
+            ) from None
+
+    def _undecodable_field(self) -> tuple[int, bytes] | None:
+        """Return the first line that holds bytes the file's encoding cannot decode, and their field.
+
+        Lines count from 1, as the field check counts them, and the field is
+        split from its line as pandas splits rows. None means that the
+        encoding decodes every byte.
+        """
+        kwargs = self.pandas_kwargs
+        encoding = kwargs.get("encoding") or "utf-8"
+        with get_handle(
+            self._fn,
+            "r",
+            encoding=encoding,
+            compression=kwargs["compression"],
+            errors=_UNDECODABLE_BYTES,
+            storage_options=kwargs.get("storage_options"),
+        ) as handles:
+            for line_number, line in enumerate(handles.handle, start=1):
+                if _MARKED_BYTES.search(line) is None:
+                    continue
+                fields = next(csv.reader([line], **self._split_settings()))
+                field = next(field for field in fields if _MARKED_BYTES.search(field))
+                return line_number, _field_bytes(field, encoding)
+        return None
+
+    def _split_settings(self) -> dict[str, Any]:
+        """Return the settings with which Python's csv module splits rows as pandas does."""
+        kwargs = self.pandas_kwargs
+        settings = {key: kwargs[key] for key in _QUOTING_SETTINGS if key in kwargs}
+        settings["delimiter"] = kwargs["sep"]
+        # pandas reads quotes under every quoting setting but QUOTE_NONE, and
+        # the csv module would convert unquoted fields under QUOTE_NONNUMERIC.
+        settings["quoting"] = (
+            csv.QUOTE_NONE
+            if kwargs.get("quoting") == csv.QUOTE_NONE
+            else csv.QUOTE_MINIMAL
+        )
+        return settings
+
     def _check_field_counts(self) -> int | None:
         """Return the fields of each row, after checking that every row has as many as the first.
 
@@ -412,7 +588,6 @@ class CSVReader:
             ValueError: If a row has another number of fields than the first.
         """
         kwargs = self.pandas_kwargs
-        settings = {key: kwargs[key] for key in _QUOTING_SETTINGS if key in kwargs}
         # read_csv opens its source with this function, so the check reads the
         # text that pandas parses.
         with get_handle(
@@ -427,17 +602,7 @@ class CSVReader:
             # pandas drops a byte order mark before it splits the first line.
             first = next(lines, "").removeprefix("\ufeff")
             rows = csv.reader(
-                itertools.chain((first,), lines),
-                delimiter=kwargs["sep"],
-                # pandas reads quotes under every quoting setting but
-                # QUOTE_NONE, and the csv module would convert unquoted fields
-                # under QUOTE_NONNUMERIC.
-                quoting=(
-                    csv.QUOTE_NONE
-                    if kwargs.get("quoting") == csv.QUOTE_NONE
-                    else csv.QUOTE_MINIMAL
-                ),
-                **settings,
+                itertools.chain((first,), lines), **self._split_settings()
             )
             expected: int | None = None
             expected_line = 0
@@ -456,7 +621,7 @@ class CSVReader:
         return expected
 
     def _consistency_check(
-        self,
+        self, converter_keys: list[Any], id_names: list[Any]
     ) -> tuple[
         int,
         int,
@@ -468,7 +633,11 @@ class CSVReader:
         np.dtype,
         CountValueRange,
     ]:
-        """Stream every row once to fix the shape, names, dtypes, and count range."""
+        """Stream every row once to fix the shape, names, dtypes, and count range.
+
+        ``converter_keys`` are the keys of the caller's converters, and
+        ``id_names`` the names that the caller gives the ID column.
+        """
         stream = self._get_streamer()
         n_cells = 0
         n_features = 0
@@ -486,6 +655,10 @@ class CSVReader:
             if df.shape[0] == 0:
                 # A header-only file yields one empty chunk of untyped columns.
                 continue
+            if n_cells == 0:
+                self._check_id_column_converters(
+                    list(df.columns), converter_keys, id_names
+                )
             n_cells += df.shape[0]
             fields = self._pop_id_column(df)
             if fields is not None:
@@ -545,6 +718,38 @@ class CSVReader:
             return None
         return frame.pop(frame.columns[self._idColumn])
 
+    def _check_id_column_converters(
+        self, labels: list[Any], converter_keys: list[Any], id_names: list[Any]
+    ) -> None:
+        """Refuse the caller's converters for the ID column.
+
+        pandas applies a converter to the column that its key names, or else
+        to the column at its key's position, so the reader's converter of the
+        ID column would replace such a converter or be replaced by it.
+        ``labels`` are the names of the columns as pandas holds them, the ID
+        column's included, ``converter_keys`` the keys of the caller's
+        converters, and ``id_names`` the names that ``names`` gives the ID
+        column, which count too, since the reader may name that column itself.
+
+        Raises:
+            ValueError: If a converter's key is a name of the ID column, or its
+                position where no column has that name.
+        """
+        position = self._idColumn
+        if position is None:
+            return
+        # Sets compare keys as dictionaries do, so a converter's key matches
+        # what pandas finds it by.
+        id_column_names = {labels[position], *id_names}
+        named = set(labels)
+        for key in converter_keys:
+            if key in id_column_names or (key in {position} and key not in named):
+                raise ValueError(
+                    "pandas_kwargs cannot set a converter for the ID column, which "
+                    "the reader reads as the text of its fields; remove "
+                    f"converters[{quoted_value(key)}]"
+                )
+
     def _column_roles(
         self, labels: list[Any]
     ) -> tuple[np.ndarray, list[int] | None, list[int] | None]:
@@ -558,7 +763,8 @@ class CSVReader:
         Raises:
             KeyError: If ``cell_data_cols`` or ``skip_cols`` names no column.
             ValueError: If one of their names names two columns, or a count
-                column's name is missing or blank.
+                column's name is missing or blank, or reads as the same text
+                as another count column's.
         """
         # A column's position in the file, which messages give, counts the ID
         # column too.
@@ -590,6 +796,24 @@ class CSVReader:
                 "names. Name them through names in pandas_kwargs, or leave them "
                 "out with skip_cols"
             )
+        # Names that pandas holds apart, such as 10 and "10", can share a text.
+        repeated = _repeated_texts(
+            [texts[position] for position in counts],
+            [file_positions[position] for position in counts],
+        )
+        if repeated:
+            named = [
+                f"{quoted_value(text)} at positions {places}"
+                for text, places in repeated[:_NAMED_REPEATS]
+            ]
+            if len(repeated) > len(named):
+                named.append(f"{len(repeated) - len(named)} more")
+            raise ValueError(
+                "CSV feature IDs must contain unique values; the names of count "
+                f"columns repeat once read as text: {_listing(named)}, counted "
+                "from 0. Give them names whose text differs through names in "
+                "pandas_kwargs, or leave them out with skip_cols"
+            )
         feature_ids = np.asarray([texts[position] for position in counts], dtype=str)
         return feature_ids, counts if skipped else None, cell_data or None
 
@@ -614,9 +838,11 @@ class CSVReader:
         else the header, or ``feature_0``, ``feature_1``, and so on without
         either. A name that is not text, such as the number ``10`` in
         ``names``, becomes its ``str`` text, ``"10"``, and a byte string is
-        decoded as UTF-8. A count column whose name is missing, such as
-        ``None`` in ``names``, or blank raises ValueError when the reader is
-        built. Values keyed by these IDs, such as
+        decoded as UTF-8. Names of bytes that are not UTF-8 text, a count
+        column whose name is missing, such as ``None`` in ``names``, or blank,
+        and count columns whose names read as the same text, such as ``10``
+        and ``"10"``, raise ValueError when the reader is built. Values keyed
+        by these IDs, such as
         ``pd.Series(values, index=reader.feature_ids())``, match the imported
         assay's features in ``feats.insert``, for example
         ``ds.RNA.feats.insert``.
