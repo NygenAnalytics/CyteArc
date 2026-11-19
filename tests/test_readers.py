@@ -595,7 +595,7 @@ def test_inspect_h5ad_prefers_dimension_matched_raw_counts(tmp_path):
         )
         np.testing.assert_array_equal(
             dict(reader.get_cell_columns())["batch"],
-            [b"A", b"B"],
+            ["A", "B"],
         )
     finally:
         reader.h5.close()
@@ -1024,9 +1024,11 @@ def test_h5ad_reader_streams_cell_and_feature_metadata(h5ad_reader):
     import h5py
 
     def decoded(codes, categories):
-        # AnnData 0.6 keeps the categories of a coded column in uns.
+        # AnnData 0.6 keeps the categories of a coded column in uns, as bytes
+        # that the reader returns as text.
         return np.array(
-            [categories[code] if code >= 0 else None for code in codes], dtype=object
+            [categories[code].decode() if code >= 0 else None for code in codes],
+            dtype=object,
         )
 
     with h5py.File(h5ad_reader.h5adFn, mode="r") as h5:
@@ -1050,7 +1052,7 @@ def test_h5ad_reader_streams_cell_and_feature_metadata(h5ad_reader):
         )
     np.testing.assert_array_equal(
         cell_columns["clusters_coarse"][:3],
-        np.array([b"Pre-endocrine", b"Ductal", b"Endocrine"]),
+        np.array(["Pre-endocrine", "Ductal", "Endocrine"]),
     )
     for column in ("S_score", "G2M_score"):
         np.testing.assert_array_equal(cell_columns[column], obs[column])
@@ -1065,7 +1067,7 @@ def test_h5ad_reader_streams_cell_and_feature_metadata(h5ad_reader):
     )
     np.testing.assert_array_equal(
         feature_columns["highly_variable_genes"][:3],
-        np.array([b"False", None, None], dtype=object),
+        np.array(["False", None, None], dtype=object),
     )
     assert h5ad_reader._check_exists("layers", "spliced")
 
@@ -1166,10 +1168,10 @@ def test_h5ad_reader_dense_matrix_and_group_metadata(tmp_path):
 
         cell_columns = dict(reader.get_cell_columns())
         assert cell_columns.keys() == {"batch", "state", "nGenes"}
-        np.testing.assert_array_equal(cell_columns["batch"], [b"A", b"B", b"A"])
+        np.testing.assert_array_equal(cell_columns["batch"], ["A", "B", "A"])
         np.testing.assert_array_equal(
             cell_columns["state"],
-            [b"cycling", b"resting", b"cycling"],
+            ["cycling", "resting", "cycling"],
         )
         # Numeric nullable columns stay numeric by representing missing values
         # as NaN.
@@ -1188,10 +1190,10 @@ def test_h5ad_reader_dense_matrix_and_group_metadata(tmp_path):
             "highly_variable",
             "reviewed",
         }
-        np.testing.assert_array_equal(feature_columns["chromosome"], [b"1", b"2"])
+        np.testing.assert_array_equal(feature_columns["chromosome"], ["1", "2"])
         np.testing.assert_array_equal(
             feature_columns["feature_type"],
-            [b"Gene Expression", b"Antibody Capture"],
+            ["Gene Expression", "Antibody Capture"],
         )
         # Nothing is masked here, so the source dtype is preserved.
         assert feature_columns["highly_variable"].dtype == np.dtype(bool)

@@ -859,7 +859,11 @@ class H5adToZarr:
         FileExistsError: If ``zarr_loc`` is not empty and may not be replaced.
         TypeError: If ``categorical_columns`` or ``shuffle_cells`` is not a
             boolean, or ``shuffle_seed`` is not an integer.
-        ValueError: If ``shuffle_seed`` lies outside its range.
+        ValueError: If ``shuffle_seed`` lies outside its range, or the file
+            holds IDs or names that the reader refuses, or bytes that are
+            not UTF-8 text in a metadata column or a cluster key, which are
+            refused before anything is written, naming the file, the table,
+            the column and the row, or the category of a categorical.
         OSError: If ``shuffle_cells`` is True and the temporary disk lacks
             room for the shuffled rows.
         MemoryBudgetError: If ``shuffle_cells`` is True and an embedding or
@@ -996,6 +1000,9 @@ class H5adToZarr:
         # over the source and before anything is written. The reader keeps
         # them for the import.
         self.h5ad._check_ids_and_names()
+        # So does text that is not UTF-8 in the metadata and cluster labels,
+        # which the reader reads again when the import writes them.
+        self.h5ad._check_metadata_text()
         self._sourceDigest = (
             bytes.fromhex(file_sha256(self.h5ad.h5adFn)) if has_analysis else None
         )
