@@ -362,15 +362,17 @@ def write_hierarchy_group(
     _write_array(plateau, "min_leaves", plateau_forest.min_leaves)
     _write_array(plateau, "component_roots", plateau_forest.component_roots)
 
-    if hierarchy.diagnostics is not None:
-        generation.attrs.update(
-            {
-                "preprocessing_seconds": hierarchy.diagnostics.preprocessing_seconds,
-                "component_seconds": hierarchy.diagnostics.component_seconds,
-                "fit_seconds": hierarchy.diagnostics.fit_seconds,
-                "reciprocal_rounds": len(hierarchy.diagnostics.rounds),
-            }
-        )
+    # Only a hierarchy just fitted is written, and a fit records its diagnostics.
+    diagnostics = hierarchy.diagnostics
+    assert diagnostics is not None
+    generation.attrs.update(
+        {
+            "preprocessing_seconds": diagnostics.preprocessing_seconds,
+            "component_seconds": diagnostics.component_seconds,
+            "fit_seconds": diagnostics.fit_seconds,
+            "reciprocal_rounds": len(diagnostics.rounds),
+        }
+    )
 
 
 def plan_paris_dendrogram(

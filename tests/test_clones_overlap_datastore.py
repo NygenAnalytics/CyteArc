@@ -336,6 +336,8 @@ def test_track_follows_labeled_clones_through_every_group(shared) -> None:
     assert tracked.table[["clone", "group", "n_cells"]].values.tolist() == [
         row[:3] for row in expected
     ]
+    # Each share is of the cells with a clone in that sample and cell type.
+    np.testing.assert_allclose(tracked.table["fraction"], [row[3] for row in expected])
     # A clone without cells among the selected cells is followed with none.
     d2 = store.snapshot_cell_selection("is_d2")
     alone = store.clones.track(

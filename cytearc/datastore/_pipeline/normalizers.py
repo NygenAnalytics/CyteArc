@@ -328,11 +328,12 @@ def recorded_normalizer(store: Any, record: PipelineRunRecord) -> MethodSetting 
 
 
 def _saved_normalized(store: Any, record: PipelineRunRecord) -> ArtifactRef | None:
-    """Return the normalized values that a run's normalization stage saved, or None."""
+    """Return the normalized values that a run's normalization stage saved, or None.
+
+    A stage that was interrupted before it saved them records no output.
+    """
     for stage in load_pipeline_stage_records(store.zw, record.run_id):
-        if stage.stage != "normalization":
-            continue
-        for output in stage.outputs:
-            if output.output_key == "normalized":
-                return output.artifact
+        if stage.stage == "normalization":
+            saved = {output.output_key: output.artifact for output in stage.outputs}
+            return saved.get("normalized")
     return None

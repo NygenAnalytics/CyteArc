@@ -149,9 +149,10 @@ def _score_blocks(
     chunk_rows = min(data._block_size, max(1, data.shape[0]))
     per_row = -(-data._block_owned_bytes() // chunk_rows) + scratch_bytes_per_row
     fixed = data._resident_bytes() + data._max_decode_bytes()
-    block_rows = chunk_rows
-    if ledger.room is not None:
-        block_rows = max(1, min(chunk_rows, (ledger.room - fixed) // max(1, per_row)))
+    # The store's budget always gives the ledger room.
+    room = ledger.room
+    assert room is not None
+    block_rows = max(1, min(chunk_rows, (room - fixed) // max(1, per_row)))
     charged = ledger.hold(
         "the scores read one block of cells at a time", fixed + block_rows * per_row
     )

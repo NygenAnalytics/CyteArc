@@ -9,6 +9,8 @@ import pytest
 import zarr
 
 import cytearc.datastore._operations.mapping as mapping_operations
+import cytearc.mapping.features as mapping_features
+import cytearc.mapping.projection as mapping_projection
 from cytearc.datastore.datastore import DataStore, mount_datastore
 from cytearc.mapping.features import AlignedFeatureStream
 from cytearc.mapping.projection import load_projection
@@ -406,6 +408,70 @@ def test_mapping_failure_discards_the_projection(
     )
     # The aborted projection writer deletes its incomplete slot.
     assert created == set()
+
+
+@pytest.mark.parametrize("method", ["pca", "symphony"])
+def test_query_blocks_without_an_informative_cell_map_as_larger_blocks(
+    mapping_source, reference_store, tmp_path, monkeypatch, method
+):
+    reference = (_plain_reference if method == "pca" else _symphony_reference)(
+        reference_store, mapping_source
+    )
+    query, empty = _panel_query(reference_store, reference, tmp_path / "panel.zarr")
+    cells = query.snapshot_cell_selection("I")
+
+    def mapped(**options) -> object:
+        ref = query.mapping.run(reference, cells, save_k=5, **options)
+        return query.mapping.load_result(ref, reference=reference, load_arrays=True)
+
+    whole = mapped()
+    # One cell per block, so each empty cell is a block without an
+    # informative cell; the mapping of each cell does not depend on it.
+    monkeypatch.setattr(mapping_features, "affordable_width", lambda fits, rows: 1)
+    single = mapped(invalidate_cache=True)
+
+    assert single.uninformative[empty].all()
+    np.testing.assert_array_equal(single.uninformative, whole.uninformative)
+    np.testing.assert_array_equal(single.indices, whole.indices)
+    np.testing.assert_allclose(single.distances, whole.distances, rtol=1e-9)
+    for name in ("uninformativeCellCount", "featureCoverage"):
+        assert single.diagnostics[name] == whole.diagnostics[name]
+    assert single.diagnostics["queryScaledDispersion"] == pytest.approx(
+        whole.diagnostics["queryScaledDispersion"], rel=1e-9
+    )
+
+
+def test_an_interruption_after_the_projection_is_published_keeps_it(
+    mapping_source, reference_store, tmp_path, monkeypatch
+):
+    reference = _plain_reference(reference_store, mapping_source)
+    query = _copied_query(reference_store, tmp_path / "query.zarr")
+    finish = mapping_projection.ProjectionWriter.finish
+    interruption = KeyboardInterrupt("stop after publishing")
+    before = set(
+        list_artifacts(query.zw, scope="assay", assay="RNA", kind="projection")
+    )
+
+    def finish_then_interrupt(writer, diagnostics):
+        finish(writer, diagnostics)
+        raise interruption
+
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            mapping_projection.ProjectionWriter, "finish", finish_then_interrupt
+        )
+        with pytest.raises(KeyboardInterrupt) as caught:
+            query.mapping.run(reference, reference.cell_selection)
+    assert caught.value is interruption
+
+    # The writer had finished, so the projection was kept complete, and the
+    # same call reuses it.
+    (published,) = (
+        set(list_artifacts(query.zw, scope="assay", assay="RNA", kind="projection"))
+        - before
+    )
+    assert query.artifacts.inspect(published).complete
+    assert query.mapping.run(reference, reference.cell_selection) == published
 
 
 def test_mapping_rejects_reference_handles_forged_from_a_stored_reference(

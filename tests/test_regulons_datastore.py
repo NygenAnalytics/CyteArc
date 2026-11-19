@@ -680,6 +680,23 @@ def test_specificity_refuses_unlabeled_or_unscored_cells_and_negative_scores(
         store.regulons.specificity(first_auc, "groups", cell_selection=everyone)
     with pytest.raises(ValueError, match="holds cells that scores did not score"):
         store.regulons.connection_specificity(first_auc, cell_selection=everyone)
+    # A cell between scored cells is refused too, though the rows around it
+    # hold scores.
+    store.cells.insert(
+        "all_but_cell_5",
+        by_cell_id(store.cells, np.arange(store.cells.N) != 5),
+        overwrite=True,
+    )
+    gapped_auc = store.scores.aucell(
+        pd.DataFrame({"source": "set0", "target": [f"RNA{gene}" for gene in range(9)]}),
+        store.snapshot_cell_selection("all_but_cell_5"),
+        features=store.scores.load(auc).feature_selection,
+        tmin=5,
+    )
+    with pytest.raises(ValueError, match="holds cells that scores did not score"):
+        store.regulons.specificity(gapped_auc, "groups", cell_selection=everyone)
+    with pytest.raises(ValueError, match="holds cells that scores did not score"):
+        store.regulons.connection_specificity(gapped_auc, cell_selection=everyone)
 
     # A score below 0, as chromVAR's z-scores can be, has no share of activity.
     artifact_group(zarr.open_group(copy, mode="r+"), auc)["scores"][5, 1] = -0.25

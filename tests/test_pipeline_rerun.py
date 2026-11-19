@@ -135,8 +135,16 @@ def test_settings_are_the_keywords_that_the_run_was_called_with(completed) -> No
     assert_settings_name_every_keyword(completed.run)
 
 
-def test_every_recipe_turns_its_record_back_into_its_keywords() -> None:
-    assert set(_RECORDED_CALLS) == set(_RESOLVERS)
+def test_every_recipe_has_a_resolver_and_a_translation_of_its_record() -> None:
+    # The recipes of this release, each a method of the pipeline accessor. The
+    # modules that commit runs of each recipe check that the translation of
+    # its record names every keyword of the method.
+    recipes = {"adt", "atac", "multimodal", "perturbation", "rna"}
+    assert set(_RESOLVERS) == set(_RECORDED_CALLS) == recipes
+    for recipe in recipes:
+        assert (
+            "label" in inspect.signature(getattr(PipelineAccessor, recipe)).parameters
+        )
 
 
 def test_settings_are_copies_that_leave_the_record_unchanged(completed) -> None:

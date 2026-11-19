@@ -190,9 +190,11 @@ def _mapping_memory_reservations(
     if symphony is None:
         return resident, per_row
 
-    if batch_codes is not None:
-        # The second pass replays one uninformative flag per selected cell.
-        resident += len(batch_codes) * np.dtype(bool).itemsize
+    # A Symphony mapping codes every selected cell's batch, all 0 without
+    # query_batches, and its second pass replays one uninformative flag per
+    # selected cell.
+    assert batch_codes is not None
+    resident += len(batch_codes) * np.dtype(bool).itemsize
     correction_arrays = (
         symphony.centroids,
         symphony.raw_centroids,
@@ -409,10 +411,8 @@ class _MappingOperationsMixin(_MappingOperationsBase):
                     frame=True,
                     leave_out_others=True,
                 ).copy(deep=True)
-                batch_codes, batch_design = self._query_batch_design(
-                    query_batches,
-                    n_cells,
-                )
+                # Aligned to the selected query cells, one row for each.
+                batch_codes, batch_design = self._query_batch_design(query_batches)
                 n_batches = batch_design.shape[0]
                 query_batch_fingerprint = _query_batch_fingerprint(query_batches)
             correction_method = "symphony"
@@ -642,10 +642,8 @@ class _MappingOperationsMixin(_MappingOperationsBase):
 
     @staticmethod
     def _query_batch_design(
-        query_batches: pd.DataFrame, n_cells: int
+        query_batches: pd.DataFrame,
     ) -> tuple[np.ndarray, csr_matrix]:
-        if len(query_batches) != n_cells:
-            raise ValueError("query_batches must have one row per selected query cell")
         if query_batches.shape[1] == 0:
             raise ValueError("query_batches must include at least one column")
         if query_batches.columns.duplicated().any():
@@ -845,14 +843,13 @@ class _MappingOperationsMixin(_MappingOperationsBase):
             low=0.0,
             low_open=True,
         )
-        if target_groups is None:
-            groups = np.zeros(loaded.n_cells, dtype=np.uint8)
-        else:
-            groups = np.asarray(target_groups)
-            if groups.shape != (loaded.n_cells,):
-                raise ValueError(
-                    "target_groups must contain one value per projected query cell"
-                )
+        # Groups keyed by cell ID come aligned to the projected query cells,
+        # one value for each.
+        groups = (
+            np.zeros(loaded.n_cells, dtype=np.uint8)
+            if target_groups is None
+            else np.asarray(target_groups)
+        )
         return groups, scale, weight
 
     def _aligned_target_groups(
