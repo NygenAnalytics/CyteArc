@@ -274,6 +274,10 @@ def test_the_m_step_sums_equal_the_posterior_weighted_calls(
     assert (posteriors.argmax(axis=1) < n_components - 1).all()
     mutant_bits, wild_bits = _packed(calls)
     gbits = pack_mask(np.vstack([np.zeros((1, n_sites), dtype=bool), genotypes]))
+    # The bits past the last site, which pad the last word, name no site, so
+    # genotypes that set them carry nothing more.
+    if n_sites % 64:
+        gbits[:, -1] |= ~np.uint64(0) << np.uint64(n_sites % 64)
     words = mutant_bits.shape[1]
     mutant = np.empty((n_components, n_sites))
     wild = np.empty((n_components, n_sites))
@@ -662,6 +666,10 @@ def test_genotype_clone_rules_resolve_the_likelihood_defaults() -> None:
     )
     assert (rules.dropout_probability, rules.min_size) == (0.0, 3)
     assert genotype_clone_rules("exact").min_size is None
+    # A posterior given from 0 to 1, both included, is kept as a float.
+    for given, kept in ((0.9, 0.9), (0, 0.0), (1, 1.0), (np.float32(0.25), 0.25)):
+        rules = genotype_clone_rules("likelihood", min_posterior=given)
+        assert rules.min_posterior == kept and type(rules.min_posterior) is float
 
 
 def _store_of_truth(folder: Path, calls: np.ndarray, donors: np.ndarray | None = None):
@@ -1389,6 +1397,84 @@ def test_a_split_fit_gains_the_evidence_bound_of_its_planted_children(
         assert site_gain + rest_gain > 0
         np.testing.assert_array_equal(first, children[0])
         np.testing.assert_array_equal(second, children[1])
+
+
+@pytest.mark.parametrize("python_kernels", [False, True])
+def test_a_split_fit_keeps_unread_sites_and_counts_no_entropy_of_certain_cells(
+    monkeypatch, python_kernels
+) -> None:
+    if python_kernels:
+        use_python_kernels(monkeypatch, mixture_module)
+    # A clone of sites 0 and 1 splits into a child adding sites 2 to 13 and
+    # one adding nothing, with no other component. A cell of the first child
+    # read at most of its 12 sites is certain of it: its share rounds to
+    # exactly 1, whose entropy is 0. No cell was read at site 14, so each
+    # child keeps the state it starts with there, the first carrying it.
+    rng = np.random.default_rng(6)
+    n_sites = 16
+    parent = np.zeros(n_sites, dtype=bool)
+    parent[:2] = True
+    children = np.vstack([parent, parent])
+    children[0, 2:14] = True
+    carried = children[np.repeat([0, 1], [24, 16])]
+    draw = rng.random(carried.shape)
+    calls = np.where(np.where(carried, draw >= 0.15, draw < 0.02), 1, 0)
+    calls[rng.random(calls.shape) < 0.1] = -1
+    calls[:, 14] = -1
+    calls = calls.astype(np.int8)
+    weights = np.ones(40)
+    mutant, wild = calls == 1, calls == 0
+    clone_mutant, clone_wild = weights @ mutant, weights @ wild
+    old_dropout, old_error = np.full(n_sites, 0.1), np.full(n_sites, 0.01)
+    first = children[0].copy()
+    first[14] = True
+    second = parent.copy()
+    shares = np.empty(40)
+
+    site_gain, rest_gain, share, dropout, error, *_rest, steps = (
+        mixture_module.split_fit(
+            *_packed(calls),
+            weights,
+            shares,
+            parent.copy(),
+            first,
+            second,
+            clone_mutant,
+            clone_wild,
+            np.where(parent, clone_wild, 0),
+            np.where(parent, clone_mutant + clone_wild, 0),
+            np.where(parent, 0, clone_mutant),
+            np.where(parent, 0, clone_mutant + clone_wild),
+            old_dropout,
+            old_error,
+            0.1,
+            0.01,
+            20.0,
+            200.0,
+            5.0,
+            -1.0,
+            -1.0,
+            30,
+            1e-9,
+            False,
+            0.5,
+        )
+    )
+
+    assert steps < 30 and (shares == 1.0).any()
+    assert first[14] and not second[14]
+    expected = children[0].copy()
+    expected[14] = True
+    np.testing.assert_array_equal(first, expected)
+    np.testing.assert_array_equal(second, parent)
+    # The gain is the evidence bound, whose entropy is 0 for certain cells,
+    # less the log-likelihood under the parent.
+    before = weights @ _model_loglik(calls, parent, old_dropout, old_error)
+    first_loglik = np.log(share) + _model_loglik(calls, first, dropout, error)
+    second_loglik = np.log1p(-share) + _model_loglik(calls, second, dropout, error)
+    entropy = -xlogy(shares, shares) - xlogy(1 - shares, 1 - shares)
+    bound = weights @ (shares * first_loglik + (1 - shares) * second_loglik + entropy)
+    assert before + site_gain + rest_gain == pytest.approx(bound, rel=1e-10)
 
 
 def test_a_site_that_no_cell_of_a_clone_was_read_at_keeps_its_state() -> None:

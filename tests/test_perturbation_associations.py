@@ -1217,6 +1217,14 @@ def test_negative_control_groups_are_distinct_random_sets_of_guides() -> None:
     shared = negative_control_groups(9, 4, 50, seed=3)
     assert len(shared) == 50
     assert len(np.unique(np.concatenate(shared))) == 9
+    # Three of the 15 pairs of 6 guides are drawn one at a time, so some
+    # seeds draw a pair twice; the second draw is set aside, and every seed
+    # gives three distinct pairs.
+    for seed in range(200):
+        drawn = negative_control_groups(6, 2, 3, seed=seed)
+        assert len(drawn) == 3
+        assert len({tuple(group.tolist()) for group in drawn}) == 3, seed
+        assert all(len(group) == 2 and group[0] < group[1] for group in drawn)
 
 
 @pytest.mark.parametrize("python_kernels", [False, True])

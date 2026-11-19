@@ -207,6 +207,50 @@ def test_singular_coarse_system_uses_sweeps_with_absorbing_boundaries():
     np.testing.assert_allclose(preconditioner @ (2 * residual), 2 * actual)
 
 
+def test_a_coarse_correction_that_is_not_finite_leaves_the_sweeps(monkeypatch):
+    # Cells 1 and 2 escape to the absorbing cells with weight 0.25, so the
+    # coarse system of their one aggregate is regular and its correction
+    # changes the result. A factor that solves it to NaN, as one of a nearly
+    # singular system can overflow, leaves the two smoothing sweeps alone,
+    # which triangular solves give as in the singular case above.
+    transition = csr_matrix(
+        [
+            [0.0, 0.0, 0.0, 0.0],
+            [0.25, 0.0, 0.75, 0.0],
+            [0.0, 0.75, 0.0, 0.25],
+            [0.0, 0.0, 0.0, 0.0],
+        ]
+    )
+    absorbing = np.array([True, False, False, True])
+    pseudotime = np.array([0.0, 0.25, 0.75, 1.0])
+    residual = np.array([1.0, 2.0, 3.0, 4.0])
+    operator = fate_module._dirichlet_operator(transition, absorbing)
+    system = np.eye(4) - transition.toarray()
+    sweeps = np.zeros(4)
+    for permutation in (np.array([0, 3, 2, 1]), np.array([0, 3, 1, 2])):
+        remainder = residual - system @ sweeps
+        sweeps[permutation] += solve_triangular(
+            system[np.ix_(permutation, permutation)],
+            remainder[permutation],
+            lower=True,
+        )
+    coarsened = fate_module._fate_preconditioner(
+        transition, pseudotime, absorbing, operator
+    )
+    assert not np.allclose(coarsened @ residual, sweeps, rtol=1e-6)
+
+    class Overflowing:
+        def solve(self, rhs: np.ndarray) -> np.ndarray:
+            return np.full_like(rhs, np.nan)
+
+    monkeypatch.setattr(fate_module, "splu", lambda matrix: Overflowing())
+    preconditioner = fate_module._fate_preconditioner(
+        transition, pseudotime, absorbing, operator
+    )
+
+    np.testing.assert_allclose(preconditioner @ residual, sweeps, rtol=1e-14)
+
+
 def test_fate_solver_rejects_nonfinite_backend_output(monkeypatch):
     graph = csr_matrix(
         np.array(

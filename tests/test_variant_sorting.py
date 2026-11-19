@@ -202,3 +202,39 @@ def test_bands_can_be_read_again() -> None:
         first = np.concatenate([band["counts"] for _f, _s, band in sorter.bands(20)])
         again = np.concatenate([band["counts"] for _f, _s, band in sorter.bands(1_000)])
     np.testing.assert_array_equal(first, again)
+
+
+def test_a_band_reads_only_the_runs_that_hold_its_cells(monkeypatch, tmp_path) -> None:
+    from cytearc.variants import sorting
+
+    # Twenty cells of 25 rows each, added two cells at a time with no room to
+    # buffer, spill ten runs of two cells. A band of 50 rows holds the two
+    # cells of one run and reads its 50 rows; the nine other runs hold none
+    # of the band's rows and are not read.
+    rows = np.zeros(500, dtype=COUNTS)
+    rows["cell"] = np.repeat(np.arange(20), 25)
+    rows["key"] = np.tile(np.arange(25)[::-1], 20)
+    rows["count"] = 1 + np.arange(500) % 7
+    rows["forward"] = rows["count"] // 2
+    reads: list[tuple[int, int]] = []
+    read = sorting._Run.read
+
+    def recorded(run, start: int, stop: int) -> np.ndarray:
+        reads.append((start, stop))
+        return read(run, start, stop)
+
+    monkeypatch.setattr(sorting._Run, "read", recorded)
+    with CellRowSorter(
+        {"counts": (COUNTS, ("cell", "key"))},
+        n_cells=20,
+        buffer_bytes=1,
+        temp_dir=tmp_path,
+    ) as sorter:
+        for pair in range(10):
+            sorter.add("counts", rows[50 * pair : 50 * (pair + 1)])
+        assert sorter.n_runs == 10
+        bounds, collected = _collect(sorter, max_rows=50)
+
+    assert bounds == [(cell, cell + 2) for cell in range(0, 20, 2)]
+    np.testing.assert_array_equal(collected, _sorted(rows))
+    assert reads == [(0, 50)] * 10

@@ -232,8 +232,22 @@ def test_each_fit_status_of_the_poisson_gaussian() -> None:
     assert unfitted.sum() == 5
 
 
-def test_gaussian_matches_scikit_learn() -> None:
-    counts = screen_counts(3_000, 3, seed=15)
+@pytest.mark.parametrize(
+    ("least", "python_kernels"),
+    [(0, False), (1, False), (1, True)],
+    ids=[
+        "cells without UMIs",
+        "every cell with a UMI",
+        "every cell with a UMI, kernels as Python",
+    ],
+)
+def test_gaussian_matches_scikit_learn(monkeypatch, least, python_kernels) -> None:
+    # With one UMI added to every count, no cell lacks the guide, so the
+    # histograms hold no zero counts beside their nonzero ones.
+    if python_kernels:
+        use_python_kernels(monkeypatch, mixtures)
+    counts = screen_counts(3_000, 3, seed=15) + np.uint32(least)
+    assert least == 0 or counts.min() == 1
     found = guide_count_histograms(
         [counts], np.zeros(3_000, dtype=np.int64), n_samples=1, n_guides=3
     )

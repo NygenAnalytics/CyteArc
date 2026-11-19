@@ -79,8 +79,11 @@ def test_count_summary_breaks_ties_by_assay_position() -> None:
         ],
         dtype=np.uint16,
     )
-    # Blocks of two, two, and one rows, as a stream delivers them.
-    summary = summarize_guide_counts([counts[:2], counts[2:4], counts[4:]], 5, 4)
+    # Blocks of two, two, and one rows, as a stream delivers them, with an
+    # empty block between the first two, which holds no cell.
+    summary = summarize_guide_counts(
+        [counts[:2], counts[2:2], counts[2:4], counts[4:]], 5, 4
+    )
     assert summary.top_code.tolist() == [1, -1, 0, 0, 3]
     assert summary.top_umi.tolist() == [5, 0, 9, 2, 3]
     assert summary.total_umi.tolist() == [11, 0, 9, 8, 4]

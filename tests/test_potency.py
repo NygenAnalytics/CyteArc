@@ -195,6 +195,20 @@ def test_the_kernel_matches_a_dense_reference_on_sparse_counts(
     np.testing.assert_array_equal(detected, (counts > 0).sum(axis=1))
 
 
+def test_a_block_of_no_cells_scores_none():
+    # A stream of blocks may end with one of no rows: its scores are empty
+    # arrays of their kinds.
+    entropy, correlation, detected = potency.network_scores(
+        np.zeros((0, 3), dtype=np.uint16), np.zeros(0), path_network(3)
+    )
+    assert (entropy.shape, correlation.shape, detected.shape) == ((0,), (0,), (0,))
+    assert (entropy.dtype, correlation.dtype, detected.dtype) == (
+        np.float64,
+        np.float64,
+        np.int64,
+    )
+
+
 def test_scores_are_invariant_to_gene_order_cell_order_and_depth():
     rng = np.random.default_rng(3)
     network = random_network(rng, 40, 60)

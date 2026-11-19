@@ -669,6 +669,28 @@ def test_fate_bias_tests_each_clone_within_its_stratum() -> None:
         )
 
 
+def test_a_fate_of_a_stratum_without_clones_tests_no_clone() -> None:
+    # Fates 0 and 1 are of stratum a, which holds clones 0 and 1; fate 2, of
+    # stratum b, holds two late cells without a clone. No clone is tested in
+    # fate 2, so its p-values and q-values are missing, and those of fates 0
+    # and 1 are the ones of stratum a alone.
+    fates = np.array([0, 0, 1, 2, 2])
+    clones = np.array([0, 1, 0, -1, -1])
+    counted = clones >= 0
+    pairs = _pairs(fates[counted], clones[counted])
+
+    result = fate_bias(
+        np.array([0, 1]), *pairs, np.bincount(fates), np.array(["a", "a", "b"])
+    )
+
+    assert np.isnan(result.p_values[:, 2]).all()
+    assert np.isnan(result.q_values[:, 2]).all()
+    alone = fate_bias(np.array([0, 1]), *pairs, np.bincount(fates[fates < 2]))
+    np.testing.assert_array_equal(result.p_values[:, :2], alone.p_values)
+    np.testing.assert_array_equal(result.q_values[:, :2], alone.q_values)
+    assert not np.isnan(alone.q_values).any()
+
+
 def test_fate_bias_refuses_inconsistent_counts() -> None:
     pairs = _late_pairs()
     with pytest.raises(ValueError, match="fewer late cells than its pairs"):
