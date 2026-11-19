@@ -1647,6 +1647,28 @@ def test_labeling_clonotypes_across_types_suggests_fewer_only_where_fewer_fit(
         store._clone_figure_labels(together, ["clonotype_1 (TCR)"])
 
 
+def test_receptors_of_cells_without_contigs_give_an_empty_clonotype_table(
+    tmp_path,
+) -> None:
+    store = receptor_store(tmp_path)
+    ids = np.asarray(store.cells.fetch_all("ids")).astype(str)
+    # cell7 has no row in the file, so its receptors hold no contig.
+    store.cells.insert("cell7_only", by_cell_id(store.cells, ids == "cell7"))
+    path = write_lines(tmp_path, "clonal.csv", CELLRANGER_HEADER, CLONAL_ROWS)
+    receptors = store.repertoire.import_receptors(
+        path, cell_selection=store.snapshot_cell_selection("cell7_only")
+    )
+
+    loaded = store.repertoire.load_clonotypes(store.repertoire.clonotypes(receptors))
+
+    # The table keeps the columns of every representative's chains.
+    assert loaded.clonotypes.empty
+    other, every = clonal_receptors(tmp_path / "every_cell")
+    full = other.repertoire.load_clonotypes(other.repertoire.clonotypes(every))
+    assert not full.clonotypes.empty
+    assert loaded.clonotypes.columns.tolist() == full.clonotypes.columns.tolist()
+
+
 def test_summaries_of_clonotypes_follow_a_cell_selection(tmp_path) -> None:
     store, receptors = clonal_receptors(tmp_path)
     ref = store.repertoire.clonotypes(receptors)

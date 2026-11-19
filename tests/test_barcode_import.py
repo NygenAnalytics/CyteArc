@@ -867,6 +867,56 @@ def test_rows_without_a_barcode_or_counted_zero_hold_none(shared, tmp_path) -> N
     assert shared.store.artifacts.inspect(ref).diagnostics["emptyRows"] == 2
 
 
+def test_pairs_without_counts_hold_the_rows_that_name_a_barcode(
+    shared, tmp_path
+) -> None:
+    cell = TRUTH.cell_ids[0]
+    path = tmp_path / "barcodes.csv"
+    path.write_text(f"cell,barcode\n{cell},AAAA\n{cell},NA\n{cell},CCCC\n")
+
+    ref = shared.store.clones.import_barcodes(
+        path,
+        cell_selection=shared.cells,
+        format="pairs",
+        columns={"cell": "cell", "barcode": "barcode"},
+    )
+
+    # Without counts, a row holds its pair whenever it names a barcode.
+    records = _records(shared.store.clones.load_barcodes(ref))
+    assert records[["barcode", "umis", "reads"]].values.tolist() == [
+        ["AAAA", -1, -1],
+        ["CCCC", -1, -1],
+    ]
+    assert shared.store.artifacts.inspect(ref).diagnostics["emptyRows"] == 1
+
+
+def test_a_library_column_names_the_library_of_each_row(shared, tmp_path) -> None:
+    first, second = TRUTH.cell_ids[:2]
+    path = tmp_path / "barcodes.csv"
+    path.write_text(
+        "cell,barcode,umis,library\n"
+        f"{first},AAAA,3,lineage\n{second},CCCC,2,lineage\n{first},GGGG,5,guides\n"
+    )
+
+    ref = shared.store.clones.import_barcodes(
+        path,
+        cell_selection=shared.cells,
+        format="pairs",
+        columns={
+            "cell": "cell",
+            "barcode": "barcode",
+            "umis": "umis",
+            "library": "library",
+        },
+    )
+
+    # Each row's library comes from the column, not from a library of the file.
+    loaded = shared.store.clones.load_barcodes(ref)
+    libraries = loaded.libraries.set_index("library")
+    assert sorted(libraries.index) == ["guides", "lineage"]
+    assert libraries["n_records"].to_dict() == {"guides": 1, "lineage": 2}
+
+
 def test_import_refuses_a_budget_too_small_and_writes_nothing(
     store, tmp_path, monkeypatch
 ) -> None:
