@@ -77,6 +77,9 @@ _ADAM_EPSILON = 1e-7
 # An initialization is centered and scaled to this standard deviation, as
 # the reference scales coordinates that it is given.
 _INITIAL_SCALE = 1e-4
+# The headers of a layout's arrays and the objects of its loop, which
+# tracemalloc counts at about 6 KiB beside the arrays.
+_LAYOUT_OBJECT_BYTES = 16 * 1024
 
 
 @dataclass(frozen=True, slots=True)
@@ -164,6 +167,16 @@ def _chunks(n_cells: int) -> int:
     return max(1, min(n_cells, 8 * numba.get_num_threads()))
 
 
+def _layout_threads(nthreads: int) -> int:
+    """Return the threads that a layout asked for ``nthreads`` runs its kernels on.
+
+    These are the threads that :func:`~cytearc.utils.numba.numba_threads` sets.
+    """
+    import numba
+
+    return min(nthreads, int(getattr(numba.config, "NUMBA_NUM_THREADS")))
+
+
 def localmap_peak_bytes(
     n_cells: int,
     n_edges: int,
@@ -171,14 +184,31 @@ def localmap_peak_bytes(
     dims: int,
     n_mid_near: int,
     n_further: int,
+    nthreads: int,
 ) -> int:
-    """Estimate the bytes a LocalMAP layout holds besides its graph.
+    """Estimate the most bytes a LocalMAP layout holds besides its graph.
 
-    Each cell's partners list every pair in both directions: the graph's
-    edges with float32 weights, and the mid-near and further pairs, whose
-    rows are kept as well. Building a partner list holds each pair's two
-    cells once more. The layout, its gradient and Adam's two moments are
-    float32.
+    A layout holds, from its start to its end:
+
+    - a copy of the graph with float32 weights and without stored zeros, which
+      :func:`localmap_layout` makes of a graph that stores a zero, as a
+      connectivity map stores the edge from each cell to itself;
+    - the rows of the mid-near and further pairs, which its caller keeps, and
+      its own copy of the further rows, which the third phase draws again;
+    - the layout, its gradient and Adam's two moments, in float32;
+    - each cell's partners, every pair in both directions: an int32 cell and
+      a float32 weight for each edge of the graph, an int32 cell for each
+      mid-near and further pair, and int64 offsets for each of the three lists.
+
+    Building a list of partners holds, beside the list, an int32 cell and an
+    int64 position for each pair, an int64 count for each cell, the int64
+    offsets of the pairs' rows, and two int64 tables with an entry for each
+    pair of the blocks of cells that the threads build the list in, eight
+    blocks for each thread. The peak comes while a list is built: the
+    neighbors', the mid-near pairs', or the further pairs' that a third phase
+    builds again while it holds their previous list. Every edge counts as a
+    weighted edge, though the copy keeps no edge of weight zero, and 16 KiB
+    covers the headers of the arrays and the objects of the layout's loop.
 
     Args:
         n_cells: Cells of the graph.
@@ -186,6 +216,8 @@ def localmap_peak_bytes(
         dims: Dimensions of the layout.
         n_mid_near: Mid-near pairs per cell.
         n_further: Further pairs per cell.
+        nthreads: Threads that the layout is asked to run on, as
+            :func:`localmap_layout` takes them.
 
     Returns:
         The estimated peak in bytes.
@@ -199,13 +231,43 @@ def localmap_peak_bytes(
     layout_dims = integer_argument(dims, "dims", minimum=1)
     mid_near = integer_argument(n_mid_near, "n_mid_near", minimum=0)
     further = integer_argument(n_further, "n_further", minimum=0)
-    neighbor_partners_bytes = 2 * edges * (4 + 4) + 8 * (cells + 1)
-    pair_rows = 4 * cells * (mid_near + further)
-    pair_partners_bytes = 2 * pair_rows + 16 * (cells + 1)
-    building = 2 * 4 * cells * max(mid_near, further, 1)
-    optimizer = 4 * 4 * cells * layout_dims
+    threads = _layout_threads(integer_argument(nthreads, "nthreads", minimum=1))
+    offsets = 8 * (cells + 1)
+    # The copy keeps SciPy's index dtype for the graph's cells and edges.
+    index = 4 if max(cells, edges) <= np.iinfo(np.int32).max else 8
+    held = (
+        (4 + index) * edges
+        + index * (cells + 1)
+        + 4 * cells * (mid_near + 2 * further)
+        + 4 * 4 * cells * layout_dims
+    )
+    neighbor_list = offsets + 2 * edges * (4 + 4)
+    mid_near_list = offsets + 2 * 4 * cells * mid_near
+    further_list = offsets + 2 * 4 * cells * further
+    blocks = max(1, min(cells, 8 * threads))
+    # Beside the tables, each thread holds the cursors of one block or the
+    # fill positions of one block's cells, and briefly the next block's too.
+    tables = (
+        2 * 8 * blocks**2
+        + 8 * (blocks + 1)
+        + 2 * min(threads, blocks) * 8 * max(blocks, -(-cells // blocks))
+    )
+
+    def building(pairs: int, row_offsets: int) -> int:
+        return row_offsets + tables + 12 * pairs + 8 * cells
+
     return (
-        neighbor_partners_bytes + pair_rows + pair_partners_bytes + building + optimizer
+        _LAYOUT_OBJECT_BYTES
+        + held
+        + max(
+            building(edges, 0) + neighbor_list,
+            neighbor_list + building(cells * mid_near, offsets) + mid_near_list,
+            neighbor_list
+            + mid_near_list
+            + further_list
+            + building(cells * further, offsets)
+            + further_list,
+        )
     )
 
 

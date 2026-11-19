@@ -715,70 +715,113 @@ def test_layout_rejects_inputs_of_other_cells():
         localmap.localmap_layout(start[:, 0], graph, mid_near, further)
 
 
+def _peak_bytes(**changes) -> int:
+    options = {
+        "n_cells": 1000,
+        "n_edges": 11000,
+        "dims": 2,
+        "n_mid_near": 5,
+        "n_further": 20,
+        "nthreads": 1,
+        **changes,
+    }
+    return localmap.localmap_peak_bytes(
+        options.pop("n_cells"), options.pop("n_edges"), **options
+    )
+
+
 def test_peak_bytes_grow_with_each_input():
-    base = localmap.localmap_peak_bytes(1000, 11000, dims=2, n_mid_near=5, n_further=20)
+    import numba
 
-    assert (
-        localmap.localmap_peak_bytes(2000, 11000, dims=2, n_mid_near=5, n_further=20)
-        > base
-    )
-    assert (
-        localmap.localmap_peak_bytes(1000, 22000, dims=2, n_mid_near=5, n_further=20)
-        > base
-    )
-    assert (
-        localmap.localmap_peak_bytes(1000, 11000, dims=3, n_mid_near=5, n_further=20)
-        > base
-    )
-    assert (
-        localmap.localmap_peak_bytes(1000, 11000, dims=2, n_mid_near=5, n_further=30)
-        > base
-    )
-    with pytest.raises(ValueError, match="n_cells"):
-        localmap.localmap_peak_bytes(0, 0, dims=2, n_mid_near=5, n_further=20)
-
-
-def test_peak_bytes_count_the_lists_and_arrays_that_a_layout_keeps():
-    n_cells = 40
-    rng = np.random.default_rng(9)
-    rows = np.stack(
-        [
-            rng.choice(np.delete(np.arange(n_cells), i), 8, replace=False)
-            for i in range(n_cells)
-        ]
-    )
-    narrow, wide = _rows_graph(rows[:, :7]), _rows_graph(rows)
-    cells, _ = _clusters(n_per_cluster=10)
-    mid_near = localmap.mid_near_pairs(cells, 5, 0)
-    further = localmap.further_pairs(wide, 20, 0)
-
-    def estimate(graph, dims=2):
-        return localmap.localmap_peak_bytes(
-            n_cells, graph.nnz, dims=dims, n_mid_near=5, n_further=20
-        )
-
-    def held(arrays):
-        return sum(array.nbytes for array in arrays)
-
-    # An edge adds what its partner entries hold in the neighbors' list: a
-    # cell and a weight for each of its two cells.
-    assert estimate(wide) - estimate(narrow) == held(
-        localmap.neighbor_partners(wide)
-    ) - held(localmap.neighbor_partners(narrow))
+    base = _peak_bytes()
+    for changes in (
+        {"n_cells": 2000},
+        {"n_edges": 22000},
+        {"dims": 3},
+        {"n_mid_near": 10},
+        {"n_further": 30},
+    ):
+        assert _peak_bytes(**changes) > base, changes
     # A dimension adds a float32 value of each cell to the layout, its
     # gradient and Adam's two moments.
-    assert estimate(wide, dims=3) - estimate(wide) == 4 * 4 * n_cells
-    # The estimate covers the lists and rows of every pair and the four
-    # arrays of the optimizer, which the layout keeps from its start.
-    kept = (
-        held(localmap.neighbor_partners(wide))
-        + held(localmap.pair_partners(mid_near))
-        + held(localmap.pair_partners(further))
-        + mid_near.nbytes
-        + further.nbytes
-        + 4 * 4 * n_cells * 2
+    assert _peak_bytes(dims=3) - base == 4 * 4 * 1000
+    # More threads build the partner lists in more blocks of cells, up to the
+    # threads that Numba started with, which a layout cannot pass.
+    most = numba.config.NUMBA_NUM_THREADS
+    if most > 1:
+        assert _peak_bytes(nthreads=2) > base
+    assert _peak_bytes(nthreads=most + 3) == _peak_bytes(nthreads=most)
+    with pytest.raises(ValueError, match="n_cells"):
+        _peak_bytes(n_cells=0, n_edges=0)
+    with pytest.raises(ValueError, match="nthreads"):
+        _peak_bytes(nthreads=0)
+
+
+def _connectivity_like_graph(
+    n_cells: int, n_neighbors: int, seed: int
+) -> tuple[np.ndarray, csr_matrix]:
+    """Return coordinates and a graph of their nearest cells, as a connectivity map holds.
+
+    Each cell's row names the cell itself at weight 0, then its nearest cells.
+    """
+    rng = np.random.default_rng(seed)
+    cells = rng.normal(size=(n_cells, 8)).astype(np.float32)
+    rows = np.argsort(
+        np.linalg.norm(cells[:, None] - cells[None], axis=2), axis=1, kind="stable"
+    )[:, : n_neighbors + 1]
+    weights = rng.uniform(0.2, 1.0, size=rows.shape).astype(np.float32)
+    weights[:, 0] = 0.0
+    return cells, _rows_graph(rows, weights)
+
+
+@pytest.mark.parametrize(
+    ("n_cells", "n_neighbors", "nthreads"),
+    [
+        (200, 5, 1),
+        (200, 15, 4),
+        # Larger lists take Python over a second to build.
+        pytest.param(300, 30, 2, marks=pytest.mark.slow),
+        pytest.param(400, 10, 8, marks=pytest.mark.slow),
+    ],
+)
+def test_peak_bytes_cover_what_a_layout_holds_at_its_peak(
+    monkeypatch, n_cells, n_neighbors, nthreads
+):
+    import tracemalloc
+
+    cells, graph = _connectivity_like_graph(n_cells, n_neighbors, seed=n_cells)
+    mid_near = localmap.mid_near_pairs(cells, 5, 0)
+    further = localmap.further_pairs(graph, 20, 0)
+    start = localmap.initial_layout(np.random.default_rng(1).normal(size=(n_cells, 2)))
+    # The third phase runs from iteration 3, and iteration 10 draws further
+    # pairs again, as each tenth iteration of a full third phase does.
+    options = {"iterations": (1, 1, 9), "nthreads": nthreads}
+    # A first layout loads what a layout imports and compiles, which would
+    # count otherwise.
+    localmap.localmap_layout(start, graph, mid_near, further, **options)
+    # The partner lists are built as Python, whose arrays tracemalloc sees; the
+    # other kernels allocate a few values for each block of cells.
+    monkeypatch.setattr(localmap, "_partners", localmap._partners.py_func)
+    tracemalloc.start()
+    try:
+        before, _ = tracemalloc.get_traced_memory()
+        localmap.localmap_layout(start, graph, mid_near, further, **options)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    # The estimate also counts the rows of the pairs, which the caller holds,
+    # and stays within a tenth above what the layout held.
+    held = peak - before + mid_near.nbytes + further.nbytes
+    estimate = localmap.localmap_peak_bytes(
+        n_cells,
+        graph.nnz,
+        dims=2,
+        n_mid_near=5,
+        n_further=20,
+        nthreads=nthreads,
     )
-    assert estimate(wide) >= kept
+    assert held <= estimate <= 1.1 * held
 
 
 def test_graph_check_copies_only_graphs_it_must_change():
