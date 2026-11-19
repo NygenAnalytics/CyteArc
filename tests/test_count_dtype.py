@@ -19,6 +19,7 @@ from cytearc.utils.count_values import (
     dense_count_ranges,
     new_count_ranges,
 )
+from cytearc.utils.memory_budget import MemoryBudgetError
 from cytearc.writers import H5adToZarr
 
 
@@ -219,12 +220,12 @@ def test_compressed_range_reads_a_long_vector_whole_and_every_value(monkeypatch)
     with pytest.raises(ValueError, match="finite values"):
         compressed_count_range(*_compressed(late), minorSize=8, maxBytes=1 << 20)
 
-    with pytest.raises(MemoryError, match="holds 8 values"):
+    with pytest.raises(MemoryError, match="for the 8 values of the longest"):
         compressed_count_range(
             *_compressed(matrix), minorSize=8, maxBytes=_PER_VALUE * 8 - 1
         )
-    # A budget that leaves nothing for the scan reports no negative limit.
-    with pytest.raises(MemoryError, match="more than the 0-byte limit"):
+    # A budget that leaves nothing for the scan reports no negative budget.
+    with pytest.raises(MemoryError, match="more than the memory budget of 0 bytes"):
         compressed_count_range(*_compressed(matrix), minorSize=8, maxBytes=-5)
 
 
@@ -242,6 +243,54 @@ def test_compressed_range_reads_each_pointer_once(monkeypatch):
     assert value_range == CountValueRange(integral=True, maximum=80)
     assert indptr.reads == 5
     assert data.reads == 10
+
+
+@pytest.mark.parametrize("part", [False, True], ids=["whole", "part"])
+def test_a_scan_refusal_names_a_longer_vector_beyond_the_pointers_it_read(
+    monkeypatch, part
+):
+    monkeypatch.setattr(count_values, "_SCAN_WINDOW_VALUES", 4)
+    # Row 0 holds 2 values, row 13 holds 5, and the others 1 each. A budget
+    # short of row 0 reads its two pointers alone before it refuses.
+    lengths = [2] + [1] * 12 + [5] + [1] * 6
+    rows = np.repeat(np.arange(len(lengths)), lengths)
+    columns = np.concatenate([np.arange(length) for length in lengths])
+    matrix = csr_matrix(
+        (np.ones(rows.size, dtype=np.float32), (rows, columns)),
+        shape=(len(lengths), 8),
+    )
+    # A part of the rows, as a scan process reads its window, holds rows 0
+    # to 10 and refuses within them.
+    pointers = matrix.indptr[:12] if part else matrix.indptr
+    longest = 2 if part else 5
+
+    def scan(budget: int, data=matrix.data) -> CountValueRange:
+        return compressed_count_range(
+            pointers, matrix.indices, data, minorSize=8, maxBytes=budget
+        )
+
+    data = _CountingSlices(matrix.data)
+    with pytest.raises(MemoryBudgetError) as refused:
+        scan(2 * _PER_VALUE - 1, data)
+    # The pointers name the longest row without reading any value.
+    assert data.reads == 0
+    needed = longest * _PER_VALUE
+    assert refused.value.needed_bytes == needed
+    assert refused.value.budget_bytes == 2 * _PER_VALUE - 1
+    assert (
+        refused.value.item == f"the {longest} values of the longest compressed vector"
+    )
+    assert str(refused.value) == (
+        f"Scanning the count values holds about {needed} bytes for the {longest} "
+        "values of the longest compressed vector, more than the memory budget of "
+        f"{2 * _PER_VALUE - 1} bytes. Raise mem_budget to at least {needed} bytes."
+    )
+    # The budget that it names scans every row; one byte less is refused at
+    # the longest row, naming the same budget.
+    assert scan(needed) == CountValueRange(integral=True, maximum=1)
+    with pytest.raises(MemoryBudgetError) as below:
+        scan(needed - 1)
+    assert below.value.needed_bytes == needed
 
 
 def test_compressed_range_does_not_depend_on_the_budget():
@@ -414,9 +463,9 @@ def test_dense_range_reads_row_blocks_within_the_budget():
     with pytest.raises(ValueError, match="finite values"):
         dense_count_range(read, 4, 3, maxBytes=3 * _PER_VALUE)
 
-    with pytest.raises(MemoryError, match="the 0-byte limit"):
+    with pytest.raises(MemoryError, match="the memory budget of 0 bytes"):
         dense_count_range(read, 4, 3, maxBytes=-1)
-    with pytest.raises(MemoryError, match="One dense row"):
+    with pytest.raises(MemoryError, match="for the 3 values of one dense row"):
         dense_count_range(read, 4, 3, maxBytes=3 * _PER_VALUE - 1)
     assert dense_count_range(read, 0, 3, maxBytes=0) == CountValueRange()
 
@@ -853,7 +902,7 @@ def test_h5ad_storage_dtype_does_not_depend_on_the_budget(tmp_path, monkeypatch)
     reader = H5adReader(str(path), feature_name_key="feature_name")
     try:
         # Scanning the dense column needs more than a 64 KiB budget allows.
-        with pytest.raises(MemoryError, match="compressed vector holds 3000"):
+        with pytest.raises(MemoryError, match="the 3000 values of the longest"):
             reader.count_value_ranges(64 * 1024)
     finally:
         reader.close()

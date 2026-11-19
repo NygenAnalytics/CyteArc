@@ -38,6 +38,7 @@ from cytearc.storage.count_matrix import CountMatrixPolicy
 from cytearc.storage.io_policy import StorageIoPolicy
 from cytearc.storage.refs import artifact_path
 from cytearc.utils import count_values
+from cytearc.utils.arguments import quoted_value
 from cytearc.utils.memory_budget import MemoryBudgetError
 from cytearc.writers import H5adToZarr
 
@@ -779,13 +780,15 @@ def test_a_budget_without_room_for_the_spill_is_refused_with_the_bytes_it_needs(
     nonzeros = np.count_nonzero(_counts(), axis=1)
     rows, longest = _N_CELLS, int(nonzeros.max())
     # The reader keeps the cell IDs, the feature IDs, and the feature IDs
-    # again as the names, which the reader finds no column of; the order and
-    # its inverse are held beside the scan too.
+    # again as the names, which the reader finds no column of; the import
+    # holds the declared RNA membership, one boolean a cell, and the order and
+    # its inverse beside the scan too.
     features = [f"feature-{f}" for f in range(_N_FEATURES)]
     held = (
         _id_bytes([f"cell-{row}" for row in range(rows)])
         + _id_bytes(features)
         + _text_bytes(features)
+        + rows
         + 2 * 8 * rows
     )
     # What the scan may hold beside them.
@@ -813,13 +816,18 @@ def test_a_budget_without_room_for_the_spill_is_refused_with_the_bytes_it_needs(
             )
         # The refusal states what the import needs in all, as a budget that
         # lets it pass the spill.
-        assert caught.value.needed_bytes == held + least
+        needed = held + least
+        item = (
+            f"the row spill of a cell shuffle beside the {held} bytes of its cell "
+            "order, IDs, names and other arrays"
+        )
+        assert caught.value.needed_bytes == needed
         assert caught.value.budget_bytes == budget
-        assert caught.value.item == "the row spill of a cell shuffle"
-        assert str(caught.value).startswith("Shuffling cells exceeds the memory limit")
-        assert str(caught.value).endswith(
-            f"The import also holds the {held} bytes of its IDs, names and cell "
-            f"order, so it needs at least {held + least} bytes."
+        assert caught.value.item == item
+        assert str(caught.value) == (
+            f"Importing {quoted_value(str(source))} holds about {needed} bytes for "
+            f"{item}, more than the memory budget of {budget} bytes. Raise "
+            f"mem_budget to at least {needed} bytes."
         )
         assert reader._convertedCsr is None
         # With that much, the spill fits; a later step of so small a budget
@@ -832,7 +840,7 @@ def test_a_budget_without_room_for_the_spill_is_refused_with_the_bytes_it_needs(
                 nthreads=1,
                 shuffle_cells=True,
             )
-        assert "Shuffling cells" not in str(caught.value)
+        assert "row spill" not in str(caught.value)
     finally:
         reader.close()
     assert not (tmp_path / "refused.zarr").exists()

@@ -220,7 +220,7 @@ def test_a_budget_without_room_for_two_processes_scans_in_this_process(
         assert seen == []
         # A row that does not fit the budget is refused as one process
         # refuses it.
-        with pytest.raises(MemoryBudgetError, match="One compressed vector holds"):
+        with pytest.raises(MemoryBudgetError, match="of the longest compressed vector"):
             reader.count_value_ranges(count_values._SCAN_BYTES_PER_VALUE, processes=4)
         with pytest.raises(ValueError, match="processes must be at least 1"):
             reader.count_value_ranges(1 << 30, processes=0)

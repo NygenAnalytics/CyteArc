@@ -16,8 +16,10 @@ import numpy as np
 from numpy.typing import DTypeLike
 
 from .arrays import canonicalize_sparse
-from .memory_budget import MemoryBudgetError
+from .memory_budget import MemoryBudgetError, memory_refusal
 
+# What the refusals of a scan say that it does.
+_SCANNING = "Scanning the count values"
 # A scan window holds its values and indices, a 64-bit copy of narrow integers,
 # the sort and sum buffers of its canonical values, the values of one group,
 # and the integrality checks, within 64 bytes per value. A block of up to one
@@ -249,6 +251,41 @@ def value_windows(pointers: np.ndarray, parts: int) -> list[tuple[int, int]]:
     return list(zip(bounds[:-1], bounds[1:], strict=True))
 
 
+def _values(count: int) -> str:
+    return "1 value" if count == 1 else f"{count} values"
+
+
+def longest_vector_refusal(longest: int, maxBytes: int) -> MemoryBudgetError:
+    """Return the refusal of a scan whose ``maxBytes`` cannot hold its longest vector.
+
+    ``longest`` is the most values of any compressed vector that the scan
+    reads, so a budget of the refusal's ``needed_bytes`` lets the whole scan
+    run. A scan in parts, such as the runs of a reader's selected cells,
+    passes the longest vector of every part.
+    """
+    return memory_refusal(
+        _SCANNING,
+        f"the {_values(int(longest))} of the longest compressed vector",
+        int(longest) * _SCAN_BYTES_PER_VALUE,
+        max(0, int(maxBytes)),
+    )
+
+
+def _longest_vector(indptr: Any, first: int, n_vectors: int) -> int:
+    """Return the most values of the vectors from ``first`` on, read from their pointers.
+
+    The pointers give it without reading any value, a million at a time.
+    """
+    longest = 0
+    for start in range(first, n_vectors, _SCAN_WINDOW_VALUES):
+        pointers = np.asarray(
+            indptr[start : min(n_vectors, start + _SCAN_WINDOW_VALUES) + 1],
+            dtype=np.int64,
+        )
+        longest = max(longest, int(np.diff(pointers).max(initial=0)))
+    return longest
+
+
 def _summable(values: np.ndarray) -> np.ndarray:
     """Return values in the dtype in which their duplicates are summed.
 
@@ -339,7 +376,8 @@ def compressed_count_ranges(
 
     Raises:
         MemoryError: If one compressed vector holds more values than fit in
-            ``maxBytes``.
+            ``maxBytes``. Its ``needed_bytes`` are those of the longest
+            vector of ``indptr``, which let the whole scan run.
         ValueError: If a value is NaN or infinite.
     """
     from scipy.sparse import csr_matrix
@@ -363,17 +401,11 @@ def compressed_count_ranges(
                 # A vector longer than a window is read whole when it fits.
                 length = int(pointers[position + 1] - pointers[position])
                 if length > limit:
-                    # The longest vector whose pointers are read names the
-                    # budget that scans them all, not this one alone.
-                    length = int(np.diff(pointers[position:]).max())
-                    raise MemoryBudgetError(
-                        f"One compressed vector holds {length} values; scanning "
-                        f"it needs about {length * _SCAN_BYTES_PER_VALUE} bytes, "
-                        f"more than the {max(0, int(maxBytes))}-byte limit. "
-                        "Increase mem_budget.",
-                        needed_bytes=length * _SCAN_BYTES_PER_VALUE,
-                        budget_bytes=max(0, int(maxBytes)),
-                        item="scanning one compressed vector",
+                    # Every vector before this one fit, so the longest from
+                    # here on is the longest of the scan.
+                    raise longest_vector_refusal(
+                        _longest_vector(indptr, start + position, n_vectors),
+                        maxBytes,
                     )
                 end = position + 1
             first, last = int(pointers[position]), int(pointers[end])
@@ -458,13 +490,13 @@ def dense_count_ranges(
     )
     value_ranges = new_count_ranges(groups)
     if int(nRows) and rows < 1:
-        raise MemoryBudgetError(
-            f"One dense row holds {row_values} values; scanning it needs about "
-            f"{row_values * _SCAN_BYTES_PER_VALUE} bytes, more than the "
-            f"{max(0, int(maxBytes))}-byte limit. Increase mem_budget.",
-            needed_bytes=row_values * _SCAN_BYTES_PER_VALUE,
-            budget_bytes=max(0, int(maxBytes)),
-            item="scanning one dense row",
+        # Every row holds as many values, so a budget that holds one row lets
+        # the whole scan run.
+        raise memory_refusal(
+            _SCANNING,
+            f"the {_values(row_values)} of one dense row",
+            row_values * _SCAN_BYTES_PER_VALUE,
+            max(0, int(maxBytes)),
         )
     columns = (
         None

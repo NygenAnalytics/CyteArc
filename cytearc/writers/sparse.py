@@ -24,7 +24,7 @@ from ..utils.arrays import (
 )
 from ..utils.count_values import compressed_count_ranges
 from ..utils.logging import logger
-from ..utils.memory_budget import MemoryBudgetError, refusal_words
+from ..utils.memory_budget import MemoryBudgetError, memory_refusal
 from ._store import decode_text
 from ..utils.arguments import bool_argument
 from ..utils.matrix_values import ImportValues
@@ -366,14 +366,14 @@ class SparseToZarr:
                 )
             except MemoryBudgetError as error:
                 # The scan runs beside the matrices, so the budget it needs holds both.
-                needed = held + error.needed_bytes
                 what = "the matrix" if single else "the matrices"
-                raise MemoryBudgetError(
-                    f"{refusal_words(error)} Beside the {held} bytes of {what}, the "
-                    f"import needs at least {needed} bytes.",
-                    needed_bytes=needed,
-                    budget_bytes=int(self.resources.memoryBytes),
-                    item=error.item,
+                if self._cellOrder is not None:
+                    what += " and the cell order"
+                raise memory_refusal(
+                    f"Importing the sparse {'matrix' if single else 'matrices'}",
+                    f"{error.item} beside the {held} bytes of {what}",
+                    held + error.needed_bytes,
+                    int(self.resources.memoryBytes),
                 ) from error
             value_ranges[assay.name] = value_range
             dtypes[assay.name] = count_storage_dtype(assay.matrix.dtype, value_range)

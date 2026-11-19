@@ -13,7 +13,7 @@ import pandas as pd
 import pytest
 import zarr
 from loguru import logger
-from scipy.sparse import csr_matrix
+from scipy.sparse import csc_matrix, csr_matrix
 
 import cytearc
 from cytearc.metadata.artifacts import categorical_display
@@ -24,6 +24,7 @@ from cytearc.readers._h5ad_columns import (
     column_categories,
     hex_color,
 )
+from cytearc.storage.count_matrix import DEFAULT_COUNT_MATRIX_POLICY
 from cytearc.utils.memory_budget import MemoryBudgetError
 from cytearc.writers import H5adToZarr
 
@@ -2018,11 +2019,39 @@ def test_inspection_warns_what_an_import_does_with_an_index_of_ids(
 _WRITTEN_ID_BYTES = 4 * (8 + 33 + 2) + 3 * (8 + 33 + 2) + 3 * 4 * 2
 
 
+_SPLIT_TYPES = np.array([b"Gene Expression", b"Antibody Capture", b"Gene Expression"])
+
+
+@pytest.mark.parametrize(
+    ("members", "options", "beside_ids"),
+    [
+        pytest.param({}, {}, 0, id="ids"),
+        # Each assay of a split keeps the IDs and names of its features, 4
+        # bytes a character, and the import its features' columns in the
+        # file and the assay and column of each, 8 bytes each.
+        pytest.param(
+            {"var/feature_types": _SPLIT_TYPES},
+            {"assay_split_key": "feature_types"},
+            3 * 4 * 2 * 2 + 3 * 8 + 2 * 3 * 8,
+            id="split",
+        ),
+        # A declared assay membership, one boolean a cell.
+        pytest.param(
+            {
+                "obs/RNA_I": np.ones(4, dtype=bool),
+                "uns/cytearc/assayMembership/RNA": "RNA_I",
+            },
+            {},
+            4,
+            id="membership",
+        ),
+    ],
+)
 @pytest.mark.parametrize("shuffle_cells", [False, True], ids=["file", "shuffled"])
-def test_the_scan_leaves_room_for_the_ids_and_names_that_the_reader_keeps(
-    tmp_path, monkeypatch, shuffle_cells
+def test_the_scan_leaves_room_for_what_the_import_holds(
+    tmp_path, monkeypatch, members, options, beside_ids, shuffle_cells
 ) -> None:
-    path = _h5ad_with(tmp_path / "ids.h5ad", {})
+    path = _h5ad_with(tmp_path / "ids.h5ad", members)
     budgets: dict[str, int] = {}
     scan = H5adReader.count_value_ranges
     convert = H5adReader.materialize_csc
@@ -2045,56 +2074,406 @@ def test_the_scan_leaves_room_for_the_ids_and_names_that_the_reader_keeps(
             mem_budget="64M",
             nthreads=1,
             shuffle_cells=shuffle_cells,
+            **options,
         )
     finally:
         reader.close()
 
     # A shuffle also holds the order and its inverse, 8 bytes a cell each.
-    held = _WRITTEN_ID_BYTES + (2 * 8 * 4 if shuffle_cells else 0)
+    held = _WRITTEN_ID_BYTES + beside_ids + (2 * 8 * 4 if shuffle_cells else 0)
     remaining = 64 * 1024**2 - held
     assert budgets == {"scan": remaining, "conversion": remaining}
 
 
+@pytest.mark.parametrize(
+    ("members", "options", "held", "held_items"),
+    [
+        pytest.param({}, {}, _WRITTEN_ID_BYTES, "IDs and names", id="ids"),
+        # The split's features, as the scan budget test counts them.
+        pytest.param(
+            {"var/feature_types": _SPLIT_TYPES},
+            {"assay_split_key": "feature_types"},
+            _WRITTEN_ID_BYTES + 3 * 4 * 2 * 2 + 3 * 8 + 2 * 3 * 8,
+            "IDs, names and other arrays",
+            id="split",
+        ),
+    ],
+)
 def test_a_scan_refusal_states_what_the_import_needs_beside_the_ids(
-    tmp_path,
+    tmp_path, monkeypatch, members, options, held, held_items
 ) -> None:
-    path = _h5ad_with(tmp_path / "ids.h5ad", {})
+    monkeypatch.chdir(tmp_path)
+    path = _h5ad_with(Path("ids.h5ad"), members)
     # Each cell holds three values, which the scan reads at 72 bytes each.
     vector = 3 * 72
-    budget = _WRITTEN_ID_BYTES + vector - 1
+    budget = held + vector - 1
     reader = H5adReader(path)
     try:
         with pytest.raises(MemoryBudgetError) as refused:
             H5adToZarr(
                 reader,
-                str(tmp_path / "refused.zarr"),
+                "refused.zarr",
                 mem_budget=budget,
                 nthreads=1,
                 shuffle_cells=False,
+                **options,
             )
         # The scan passes with the bytes that the refusal names.
         with pytest.raises(MemoryError) as later:
             H5adToZarr(
                 reader,
-                str(tmp_path / "admitted.zarr"),
+                "admitted.zarr",
                 mem_budget=refused.value.needed_bytes,
                 nthreads=1,
                 shuffle_cells=False,
+                **options,
             )
     finally:
         reader.close()
 
-    assert refused.value.needed_bytes == _WRITTEN_ID_BYTES + vector
-    assert refused.value.budget_bytes == budget
-    assert refused.value.item == "scanning one compressed vector"
-    assert str(refused.value) == (
-        f"One compressed vector holds 3 values; scanning it needs about {vector} "
-        f"bytes, more than the {vector - 1}-byte limit. Increase mem_budget. The "
-        f"import also holds the {_WRITTEN_ID_BYTES} bytes of its IDs and names, so "
-        f"it needs at least {_WRITTEN_ID_BYTES + vector} bytes."
+    needed = held + vector
+    item = (
+        f"the 3 values of the longest compressed vector beside the {held} bytes "
+        f"of its {held_items}"
     )
-    assert "scanning" not in str(later.value)
+    assert refused.value.needed_bytes == needed
+    assert refused.value.budget_bytes == budget
+    assert refused.value.item == item
+    assert str(refused.value) == (
+        f"Importing 'ids.h5ad' holds about {needed} bytes for {item}, more than "
+        f"the memory budget of {budget} bytes. Raise mem_budget to at least "
+        f"{needed} bytes."
+    )
+    assert "compressed vector" not in str(later.value)
     assert not (tmp_path / "refused.zarr").exists()
+
+
+def _write_vectors(path: Path, lengths: list[int], encoding: str) -> str:
+    """Write a CSR or CSC file of ones whose rows, or columns, hold ``lengths`` values.
+
+    Its 30 cells are ``c0`` to ``c29`` and its 30 genes ``g0`` to ``g29``.
+    """
+    values = np.zeros((30, 30), dtype=np.float32)
+    for vector, length in enumerate(lengths):
+        values[vector, :length] = 1
+    matrix = csr_matrix(values) if encoding == "csr" else csc_matrix(values.T)
+    adata = anndata.AnnData(matrix)
+    adata.obs_names = [f"c{index}" for index in range(30)]
+    adata.var_names = [f"g{index}" for index in range(30)]
+    adata.write_h5ad(path)
+    return str(path)
+
+
+# What the reader keeps of the IDs and names of a file that _write_vectors
+# writes: 30 cell IDs and 30 feature IDs as bytes objects, and the feature
+# IDs again as the names, at 4 bytes a character of the longest.
+_VECTOR_FILE_ID_BYTES = 2 * sum(8 + 33 + len(f"c{index}") for index in range(30)) + (
+    30 * 4 * 3
+)
+
+
+@pytest.mark.parametrize("encoding", ["csr", "csc"])
+def test_a_scan_refusal_names_a_longer_vector_after_the_one_it_refused(
+    tmp_path, encoding
+) -> None:
+    # The first vector holds 3 values, more than the scan's room, and the
+    # vector of 6 values comes long after the pointers that the scan read.
+    lengths = [3] + [1] * 19 + [6] + [1] * 9
+    path = _write_vectors(tmp_path / f"{encoding}.h5ad", lengths, encoding)
+    held = _VECTOR_FILE_ID_BYTES
+
+    def construct(budget: int) -> MemoryError:
+        with pytest.raises(MemoryError) as refused:
+            H5adToZarr(
+                reader,
+                str(tmp_path / f"{budget}.zarr"),
+                mem_budget=budget,
+                nthreads=1,
+                shuffle_cells=False,
+            )
+        return refused.value
+
+    reader = H5adReader(path)
+    try:
+        refusal = construct(held + 3 * 72 - 1)
+        below = construct(held + 6 * 72 - 1)
+        later = construct(held + 6 * 72)
+        # The scan runs at the room that the named budget leaves it.
+        (value_range,) = reader.count_value_ranges(6 * 72)
+    finally:
+        reader.close()
+
+    assert held == 2980
+    assert isinstance(refusal, MemoryBudgetError)
+    assert refusal.needed_bytes == held + 6 * 72
+    assert refusal.item == (
+        f"the 6 values of the longest compressed vector beside the {held} bytes "
+        "of its IDs and names"
+    )
+    assert isinstance(below, MemoryBudgetError)
+    assert (below.needed_bytes, below.item) == (refusal.needed_bytes, refusal.item)
+    # A later step refuses so small a budget.
+    assert "compressed vector" not in str(later)
+    assert value_range.maximum == 1
+
+
+def _counts_t_resident_spy(monkeypatch) -> list[int]:
+    """Record the bytes held beside each admission and write of countsT."""
+    import cytearc.storage.sharding as sharding
+
+    seen: list[int] = []
+    preflight = sharding.preflight_counts_t_spec
+
+    def spy(*args, residentBytes=0, **kwargs):
+        seen.append(residentBytes)
+        return preflight(*args, residentBytes=residentBytes, **kwargs)
+
+    monkeypatch.setattr(sharding, "preflight_counts_t_spec", spy)
+    return seen
+
+
+@pytest.mark.parametrize("shuffle_cells", [False, True], ids=["file", "shuffled"])
+def test_counts_t_is_planned_and_written_beside_what_the_import_holds(
+    tmp_path, monkeypatch, shuffle_cells
+) -> None:
+    path = _h5ad_with(tmp_path / "ids.h5ad", {})
+    with h5py.File(path, "r") as h5:
+        pointers = 5 * h5["X/indptr"].dtype.itemsize
+    seen = _counts_t_resident_spy(monkeypatch)
+    reader = H5adReader(path)
+    try:
+        H5adToZarr(
+            reader, str(tmp_path / "ids.zarr"), nthreads=1, shuffle_cells=shuffle_cells
+        ).dump()
+    finally:
+        reader.close()
+
+    # Beside the IDs and names, an import in the file's order holds the
+    # file's row pointers, which plan its counts write. A shuffle holds its
+    # order and, until its counts are written, the int64 pointers of its
+    # shuffled rows.
+    if shuffle_cells:
+        held = _WRITTEN_ID_BYTES + 8 * 4
+        assert seen == [held + 8 * 5, held]
+    else:
+        assert seen == [_WRITTEN_ID_BYTES + pointers] * 2
+    root = zarr.open_group(str(tmp_path / "ids.zarr"), mode="r")
+    np.testing.assert_array_equal(root["RNA/countsT"][:], np.ones((3, 4)))
+
+
+def test_a_conversion_again_in_the_files_order_leaves_room_for_what_the_import_holds(
+    tmp_path, monkeypatch
+) -> None:
+    path = _write_vectors(tmp_path / "csc.h5ad", [3, 1, 2] + [1] * 27, "csc")
+    budgets: list[int] = []
+    convert = H5adReader.materialize_csc
+
+    def convert_spy(self, maxBytes, **kwargs):
+        budgets.append(maxBytes)
+        return convert(self, maxBytes, **kwargs)
+
+    monkeypatch.setattr(H5adReader, "materialize_csc", convert_spy)
+    reader = H5adReader(path)
+    try:
+        in_order = H5adToZarr(
+            reader,
+            str(tmp_path / "order.zarr"),
+            mem_budget="64M",
+            nthreads=1,
+            shuffle_cells=False,
+        )
+        # A shuffled import of the same reader replaces the conversion with
+        # its shuffled rows, so the first import converts the columns again.
+        H5adToZarr(
+            reader, str(tmp_path / "shuffled.zarr"), mem_budget="64M", nthreads=1
+        )
+        in_order._write_counts()
+    finally:
+        reader.close()
+
+    # Each conversion runs beside the IDs and names, and a shuffled one
+    # beside its order and the inverse of it too.
+    in_file_order = 64 * 1024**2 - _VECTOR_FILE_ID_BYTES
+    assert budgets == [in_file_order, in_file_order - 2 * 8 * 30, in_file_order]
+    counts = zarr.open_group(str(tmp_path / "order.zarr"), mode="r")["RNA/counts"]
+    np.testing.assert_array_equal(np.count_nonzero(counts[:], axis=0)[:3], [3, 1, 2])
+
+
+def test_a_conversion_again_in_the_files_order_refuses_in_the_imports_budget(
+    tmp_path,
+) -> None:
+    from cytearc.storage.budget import ResourceBudget
+
+    path = _write_vectors(tmp_path / "csc.h5ad", [3, 1, 2] + [1] * 27, "csc")
+    reader = H5adReader(path)
+    try:
+        # What the conversion needs at least on its own, as the reader names it.
+        with pytest.raises(MemoryBudgetError) as alone:
+            reader.materialize_csc(1)
+        least = alone.value.needed_bytes
+        in_order = H5adToZarr(
+            reader,
+            str(tmp_path / "order.zarr"),
+            mem_budget="64M",
+            nthreads=1,
+            shuffle_cells=False,
+        )
+        # A shuffled import replaces the conversion, so the first import
+        # converts the columns again, within a budget one byte too small.
+        H5adToZarr(
+            reader, str(tmp_path / "shuffled.zarr"), mem_budget="64M", nthreads=1
+        )
+        needed = _VECTOR_FILE_ID_BYTES + least
+        in_order.resources = ResourceBudget(needed - 1, 1)
+        with pytest.raises(MemoryBudgetError) as refused:
+            in_order._write_counts()
+    finally:
+        reader.close()
+
+    assert refused.value.needed_bytes == needed
+    assert refused.value.budget_bytes == needed - 1
+    # The first row holds an entry of every column, the most of any row.
+    assert refused.value.item == (
+        "one row of the CSC row conversion beside the "
+        f"{_VECTOR_FILE_ID_BYTES} bytes of its IDs and names"
+    )
+
+
+def _cells_with_ids(path: Path, ids: list[str]) -> str:
+    """Write 600 cells of Poisson counts over 50 genes, with the given cell IDs."""
+    counts = np.random.default_rng(4).poisson(1.0, size=(600, 50)).astype(np.float32)
+    adata = anndata.AnnData(csr_matrix(counts))
+    adata.obs_names = ids
+    adata.var_names = [f"g{index}" for index in range(50)]
+    adata.write_h5ad(path)
+    return str(path)
+
+
+def test_the_count_layout_charges_the_ids_that_the_reader_keeps(tmp_path) -> None:
+    from cytearc.storage.sharding import CountLayoutMemoryError
+
+    short = [f"c{row}" for row in range(600)]
+    long = [f"cell-{row:06d}-ACGTACGTACGTACGT" for row in range(600)]
+    needed: dict[str, int] = {}
+    for name, ids in (("short", short), ("long", long)):
+        reader = H5adReader(_cells_with_ids(tmp_path / f"{name}.h5ad", ids))
+
+        def construct(budget: int, reader: H5adReader = reader) -> H5adToZarr:
+            # ADT writes no countsT, so its counts write alone sizes the layout.
+            return H5adToZarr(
+                reader,
+                str(tmp_path / f"{name}-{budget}.zarr"),
+                assay_name="ADT",
+                mem_budget=budget,
+                nthreads=1,
+                shuffle_cells=False,
+            )
+
+        try:
+            with pytest.raises(CountLayoutMemoryError) as refused:
+                construct(64 * 1024)
+            needed[name] = refused.value.needed_bytes
+            # One byte less than the budget it names is refused the same way,
+            # and that budget fits the layout.
+            with pytest.raises(CountLayoutMemoryError) as below:
+                construct(needed[name] - 1)
+            assert below.value.needed_bytes == needed[name]
+            assert construct(needed[name]).policy == DEFAULT_COUNT_MATRIX_POLICY
+        finally:
+            reader.close()
+
+    # The reader keeps each cell ID as a bytes object of its characters, so
+    # the longer IDs need exactly their extra characters more.
+    extra = sum(len(text) for text in long) - sum(len(text) for text in short)
+    assert needed["long"] - needed["short"] == extra == 14_510
+
+
+def test_imported_analyses_take_blocks_of_what_the_budget_leaves_beside_the_ids(
+    tmp_path,
+) -> None:
+    rng = np.random.default_rng(8)
+    n_cells = 20_000
+    adata = anndata.AnnData(
+        csr_matrix(rng.poisson(0.5, (n_cells, 10)).astype(np.float32))
+    )
+    adata.obs_names = [f"cell-{row:06d}-ACGTACGTACGTACGT" for row in range(n_cells)]
+    adata.var_names = [f"g{index}" for index in range(10)]
+    adata.obs["clusters"] = pd.Categorical(rng.integers(0, 5, n_cells).astype(str))
+    adata.obsm["X_wide"] = rng.normal(size=(n_cells, 64)).astype(np.float32)
+    path = tmp_path / "analyses.h5ad"
+    adata.write_h5ad(path)
+    with h5py.File(path, "r") as h5:
+        pointers = int(h5["X/indptr"].nbytes)
+    budget = 8 * 1024**2
+    reader = H5adReader(
+        str(path),
+        embedding_roles={"X_wide": "coordinates"},
+        cluster_keys=("clusters",),
+    )
+    try:
+        result = H5adToZarr(
+            reader,
+            str(tmp_path / "analyses.zarr"),
+            mem_budget=budget,
+            nthreads=1,
+            shuffle_cells=False,
+        ).dump()
+    finally:
+        reader.close()
+    store = cytearc.DataStore(
+        str(tmp_path / "analyses.zarr"), min_features_per_cell=0, nthreads=1
+    )
+    options = {
+        name: store.artifacts.inspect(ref).execution_options
+        for name, ref in (
+            ("embedding", result.embeddingArtifacts["X_wide"]),
+            ("labels", result.clusterArtifacts["clusters"]),
+        )
+    }
+
+    # The import holds the cell IDs of 28 characters and the feature IDs as
+    # bytes objects, the feature IDs again as the names, at 4 bytes a
+    # character, and the file's row pointers. A block takes an eighth of
+    # what is left: rows of 64 float32 values, and labels at 64 bytes a row.
+    held = n_cells * (8 + 33 + 28) + 10 * (8 + 33 + 2) + 10 * 4 * 2 + pointers
+    left = budget - held
+    assert options["embedding"]["block_rows"] == left // (8 * 64 * 4)
+    assert options["labels"]["block_rows"] == left // (8 * 64)
+
+
+def test_the_import_charges_what_tracing_finds_the_reader_keeps(tmp_path) -> None:
+    import gc
+    import tracemalloc
+
+    rng = np.random.default_rng(6)
+    barcodes = [
+        "".join(rng.choice(list("ACGT"), 16)) + f"-{row}" for row in range(50_000)
+    ]
+    adata = anndata.AnnData(csr_matrix((50_000, 20), dtype=np.float32))
+    adata.obs_names = barcodes
+    adata.var_names = [f"ENSG{index:011d}" for index in range(20)]
+    adata.var["gene_short_name"] = [f"GENE{index}" for index in range(20)]
+    path = str(tmp_path / "barcodes.h5ad")
+    adata.write_h5ad(path)
+    reader = H5adReader(path)
+    try:
+        gc.collect()
+        tracemalloc.start()
+        try:
+            reader._check_ids_and_names()
+            gc.collect()
+            kept, _peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        writer = H5adToZarr(reader, str(tmp_path / "barcodes.zarr"), nthreads=1)
+        charged = writer._kept_bytes()
+    finally:
+        reader.close()
+
+    # What the allocations that the reader keeps add up to, which the import
+    # charges, within 1%.
+    assert kept > 50_000 * (8 + 33 + 16)
+    assert abs(charged - kept) <= kept // 100
 
 
 def test_the_reader_counts_the_renamed_ids_beside_those_of_the_file(

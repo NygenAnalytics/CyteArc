@@ -106,6 +106,7 @@ def finalize_writer_counts_t(
     mem_budget: int | str | None = None,
     nthreads: int | None = None,
     io: StorageIoPolicy | None = None,
+    resident_bytes: int = 0,
 ) -> zarr.Array | None:
     """Write paired ``countsT`` when the assay type is RNA; seed ``assayTypes``.
 
@@ -125,6 +126,8 @@ def finalize_writer_counts_t(
         mem_budget: Memory budget used when ``resources`` is omitted.
         nthreads: Worker budget used when ``resources`` is omitted.
         io: Optional explicit read, compute, and write widths.
+        resident_bytes: Bytes that the writer holds beside the ``countsT``
+            write, which its plan leaves room for.
 
     Returns:
         The ``countsT`` array, or None when the assay is not RNA.
@@ -146,6 +149,7 @@ def finalize_writer_counts_t(
         group,
         profile=profile,
         resources=resources,
+        residentBytes=resident_bytes,
         io=io,
         overwrite="countsT" in group,
         featureSets=default_feature_sets(logical),
@@ -163,6 +167,7 @@ def finalize_writer_counts_t_many(
     resources: ResourceBudget | None = None,
     profile: StorageProfile | None = None,
     io: StorageIoPolicy | None = None,
+    resident_bytes: int = 0,
 ) -> dict[str, Any]:
     """Finalize ``countsT`` for each assay name (RNA only).
 
@@ -174,6 +179,8 @@ def finalize_writer_counts_t_many(
         resources: Optional resolved memory and worker budget.
         profile: Zarr encoding profile. When None, chosen from the store.
         io: Optional explicit read, compute, and write widths.
+        resident_bytes: Bytes that the writer holds beside each ``countsT``
+            write, which its plan leaves room for.
 
     Returns:
         Mapping of RNA assay name to the written ``countsT`` array.
@@ -189,6 +196,7 @@ def finalize_writer_counts_t_many(
             resources=resources,
             profile=profile,
             io=io,
+            resident_bytes=resident_bytes,
         )
         if result is not None:
             written[name] = result

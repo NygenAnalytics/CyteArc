@@ -845,9 +845,20 @@ def test_a_10x_budget_without_room_for_the_spill_is_refused_with_the_bytes_it_ne
                 nthreads=1,
                 shuffle_cells=True,
             )
-        assert caught.value.needed_bytes == least
-        assert caught.value.budget_bytes == budget - held
-        assert caught.value.item == "the row spill of a cell shuffle"
+        # The refusal states the import's budget: what the spill needs beside
+        # the order and its inverse.
+        needed = held + least
+        item = (
+            f"the row spill of a cell shuffle beside the {held} bytes of its cell order"
+        )
+        assert caught.value.needed_bytes == needed
+        assert caught.value.budget_bytes == budget
+        assert caught.value.item == item
+        assert str(caught.value) == (
+            f"Importing the counts of {rows} cells holds about {needed} bytes for "
+            f"{item}, more than the memory budget of {budget} bytes. Raise "
+            f"mem_budget to at least {needed} bytes."
+        )
         assert reader._shuffledRows is None
         # With that much, the spill fits; a later step of so small a budget
         # refuses for itself.
@@ -855,22 +866,24 @@ def test_a_10x_budget_without_room_for_the_spill_is_refused_with_the_bytes_it_ne
             CrToZarr(
                 reader,
                 str(tmp_path / "admitted.zarr"),
-                mem_budget=least + held,
+                mem_budget=needed,
                 nthreads=1,
                 shuffle_cells=True,
             )
-        assert "Shuffling cells" not in str(caught.value)
+        assert "row spill" not in str(caught.value)
     finally:
         reader.close()
     assert not (tmp_path / "refused.zarr").exists()
     assert _no_temporary_files(tmp_path)
 
 
-@pytest.mark.parametrize("kind", ["mtx-cellMajor-filtered", "csv"])
-def test_a_budget_without_room_for_a_batch_and_its_spill_names_the_bytes_it_needs(
-    tmp_path, kind
-) -> None:
-    run, _expected = _source(tmp_path, kind)
+def _spill_attempts(
+    tmp_path: Path, run: Callable[[Path, dict[str, Any]], Any]
+) -> Callable[[int], None]:
+    """Return a shuffled import at a budget that raises only the refusal of its spill.
+
+    A later step of so small a budget refuses for itself, which passes.
+    """
     attempts = iter(range(1_000))
 
     def at_budget(budget: int) -> None:
@@ -878,12 +891,44 @@ def test_a_budget_without_room_for_a_batch_and_its_spill_names_the_bytes_it_need
         try:
             run(destination, {"shuffle_cells": True, "mem_budget": budget})
         except MemoryBudgetError as error:
-            if error.item == "the row spill of a cell shuffle":
+            if error.item.startswith("the row spill of a cell shuffle"):
                 assert not destination.exists()
                 raise
         except MemoryError:
-            # A later step of so small a budget refuses for itself.
             pass
+
+    return at_budget
+
+
+@pytest.mark.parametrize("kind", ["10x-cutoff", "mtx-cellMajor-filtered", "tapestri"])
+def test_a_shuffled_import_of_a_reader_names_the_budget_that_passes_its_spill(
+    tmp_path, kind
+) -> None:
+    run, expected = _source(tmp_path, kind)
+    at_budget = _spill_attempts(tmp_path, run)
+    with pytest.raises(MemoryBudgetError) as caught:
+        at_budget(4_000)
+    # The spill runs beside the order of the cells and its inverse, 8 bytes a
+    # cell each, and a Matrix Market reader's arrays, so the refusal names
+    # the import's budget beside them.
+    cells = next(iter(expected.values())).shape[0]
+    assert caught.value.item == (
+        f"the row spill of a cell shuffle beside the {16 * cells} bytes of its "
+        "cell order"
+    )
+    assert caught.value.budget_bytes == 4_000
+    assert caught.value.needed_bytes > 4_000
+    # With the budget it names, the spill fits.
+    at_budget(caught.value.needed_bytes)
+    assert _no_temporary_files(tmp_path)
+
+
+@pytest.mark.parametrize("kind", ["csv"])
+def test_a_budget_without_room_for_a_batch_and_its_spill_names_the_bytes_it_needs(
+    tmp_path, kind
+) -> None:
+    run, _expected = _source(tmp_path, kind)
+    at_budget = _spill_attempts(tmp_path, run)
 
     with pytest.raises(MemoryBudgetError) as caught:
         at_budget(4_000)

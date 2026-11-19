@@ -1765,6 +1765,27 @@ class H5adReader:
         normalized_itemsize = np.dtype(np.int32).itemsize
         return int((rows + 1) * (2 * itemsize + normalized_itemsize) + reading)
 
+    def _csc_widest_row(self) -> int:
+        """Return the most entries that one row of a CSC matrix holds.
+
+        Repeated coordinates count each time, as the conversion appends them.
+        The row indices are read a chunk at a time, without any value.
+
+        Raises:
+            ValueError: If a row index lies outside the matrix.
+        """
+        indices = self.h5[self.matrixKey]["indices"]
+        counts = np.zeros(self.nCells, dtype=np.int64)
+        for start in range(0, int(indices.shape[0]), _CSC_CHUNK_ENTRIES):
+            rows = np.asarray(indices[start : start + _CSC_CHUNK_ENTRIES])
+            if rows.size and (int(rows.min()) < 0 or int(rows.max()) >= self.nCells):
+                raise ValueError(
+                    f"{self.matrixKey} holds a row index outside its {self.nCells} "
+                    "rows; the file is corrupted"
+                )
+            counts += np.bincount(rows, minlength=self.nCells)
+        return int(counts.max(initial=0))
+
     def materialize_csc(
         self,
         maxBytes: int = 64 * 1024 * 1024,
@@ -1785,6 +1806,12 @@ class H5adReader:
         ``consume`` yields the rows of an import that shuffles cells in
         their shuffled order at no extra cost. The conversion then also keeps
         the file's first rows, which decide what the values are.
+
+        Raises:
+            MemoryBudgetError: If ``maxBytes`` cannot hold the conversion. A
+                budget too small for the column pointers and one entry is
+                refused before any entry is read, naming the budget that
+                converts every row, as the row indices give it.
         """
         if self.matrixOrientation != "csc":
             return
@@ -1805,19 +1832,38 @@ class H5adReader:
             if source.kind in "biu"
             else source
         )
+        operation = _CSC_OPERATION if destinations is None else _SHUFFLE_OPERATION
+        itemsize = max(source.itemsize, dtype.itemsize)
         pointers = (self.nFeatures + 1) * np.dtype(np.int64).itemsize
         least = pointers + SparseRowStore.conversion_bytes(
-            self.nCells,
-            entry_bytes=_CSC_ENTRY_BYTES,
-            itemsize=max(source.itemsize, dtype.itemsize),
+            self.nCells, entry_bytes=_CSC_ENTRY_BYTES, itemsize=itemsize
         )
         if maxBytes < least:
+            # Converting also reads the row with the most entries whole, so
+            # the refusal names the budget that holds it, which the row
+            # indices give without converting anything.
+            needed = pointers + SparseRowStore.conversion_bytes(
+                self.nCells,
+                entry_bytes=_CSC_ENTRY_BYTES,
+                row_entries=max(1, self._csc_widest_row()),
+                itemsize=itemsize,
+            )
+            if needed == least:
+                raise MemoryBudgetError(
+                    "CSC row conversion exceeds the memory limit. It needs at "
+                    f"least {least} bytes.",
+                    needed_bytes=least,
+                    budget_bytes=int(maxBytes),
+                    item="the pointers and one entry of the CSC row conversion",
+                )
+            # Worded and named as the conversion refuses its widest row.
             raise MemoryBudgetError(
-                "CSC row conversion exceeds the memory limit. It needs at least "
-                f"{least} bytes.",
-                needed_bytes=least,
+                f"One row of the {operation} exceeds its memory limit. Beside the "
+                f"{pointers} bytes of the matrix's column pointers, the CSC row "
+                f"conversion needs at least {needed} bytes.",
+                needed_bytes=needed,
                 budget_bytes=int(maxBytes),
-                item="the pointers and one entry of the CSC row conversion",
+                item=f"one row of the {operation}",
             )
         indptr = np.asarray(group["indptr"][:], dtype=np.int64)
         shape = (self.nCells, self.nFeatures)
@@ -1853,9 +1899,7 @@ class H5adReader:
                 chunks(),
                 shape,
                 dtype,
-                operation=(
-                    _CSC_OPERATION if destinations is None else _SHUFFLE_OPERATION
-                ),
+                operation=operation,
                 max_bytes=store_bytes,
                 entry_bytes=_CSC_ENTRY_BYTES,
                 entries=int(data_node.size),
