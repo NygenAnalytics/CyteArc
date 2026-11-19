@@ -931,6 +931,20 @@ def test_molecule_info_without_a_recorded_umi_length_is_refused(tmp_path) -> Non
     assert molecule_info_library(path).umi_length == 10
 
 
+@pytest.mark.parametrize("metrics", [[{"chemistry_umi": {"length": 10}}], "10", 10])
+def test_molecule_info_whose_metrics_are_no_mapping_records_no_umi_length(
+    tmp_path, metrics
+) -> None:
+    path = write_molecule_info(BARCODES, tmp_path / "molecule_info.h5", sample="d2")
+    with h5py.File(path, "a") as handle:
+        del handle["metrics_json"]
+        handle.create_dataset(
+            "metrics_json", data=json.dumps(metrics), dtype=h5py.string_dtype()
+        )
+    with pytest.raises(ValueError, match="records no UMI length in its metrics_json"):
+        molecule_info_library(path)
+
+
 def test_molecule_info_files_that_break_the_layout_are_refused(tmp_path) -> None:
     path = write_molecule_info(BARCODES, tmp_path / "molecule_info.h5", sample="d2")
     with h5py.File(path, "a") as handle:
@@ -1785,6 +1799,12 @@ def test_a_sparse_dense_matrix_yields_its_entries_in_few_chunks(tmp_path) -> Non
     assert max(len(chunk.cells) for chunk in chunks) <= 10
     # A chunk per part of a tile held one or two entries each: 50 chunks.
     assert len(chunks) <= 2 * 50 // 10
+
+
+def test_a_dense_matrix_of_zeros_yields_no_entries(tmp_path) -> None:
+    values = np.zeros((20, 30), dtype=np.int64)
+    path = _matrix_h5ad(tmp_path / "dense.h5ad", values, layout="dense", chunks=(8, 16))
+    assert _rows(barcode_layout(path), 10) == []
 
 
 def test_zeros_stored_in_a_sparse_matrix_name_no_barcode(tmp_path) -> None:

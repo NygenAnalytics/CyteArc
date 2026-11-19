@@ -330,6 +330,63 @@ def test_dense_h5ad_producer_sends_no_band_after_the_parent_stops(
         reader.close()
 
 
+def test_dense_h5ad_writer_reports_done_only_when_the_parent_did_not_stop(
+    tmp_path,
+) -> None:
+    from cytearc.storage.budget import ResourceBudget
+    from cytearc.storage.sharding import plan_dense_band_writes
+    from cytearc.writers import h5ad as h5ad_writer
+
+    values = np.arange(1, 25, dtype=np.uint8).reshape(8, 3)
+    source = _write_h5ad(tmp_path / "dense.h5ad", values, encoding="dense")
+    location = str(tmp_path / "dense.zarr")
+    reader = H5adReader(str(source), feature_name_key="feature_name")
+    try:
+        # Constructing the writer creates the counts that the window fills.
+        counts = H5adToZarr(reader, location, nthreads=1, shuffle_cells=False).z[
+            "RNA/counts"
+        ]
+        plan = plan_dense_band_writes((counts,), ResourceBudget(1024**2, 1), 2)
+
+        def write(stop: Any) -> list:
+            counts[:] = 0
+            connection = _Connection()
+            h5ad_writer._write_dense_h5ad_process_window(
+                reader._clone_kwargs(),
+                4,
+                0,
+                8,
+                location,
+                None,
+                None,
+                ("RNA",),
+                None,
+                plan,
+                connection,
+                stop,
+                {},
+            )
+            assert connection.closed
+            return connection.messages
+
+        # A window that is not stopped writes its rows, then reports done.
+        ((kind, _payload),) = write(threading.Event())
+        assert kind == "done"
+        np.testing.assert_array_equal(counts[:], values)
+
+        class _StopOnceWritten:
+            """A stop that the parent sets once every row is written."""
+
+            def is_set(self) -> bool:
+                return bool(np.array_equal(counts[:], values))
+
+        # A stop that arrives after the last write suppresses done.
+        assert write(_StopOnceWritten()) == []
+        np.testing.assert_array_equal(counts[:], values)
+    finally:
+        reader.close()
+
+
 def _complex_matrix(wire: _Wire, values: list[float]) -> bytes:
     """Encode an R complex matrix of two genes and the three test cells."""
     return (

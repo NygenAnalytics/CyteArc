@@ -1550,6 +1550,47 @@ def test_categories_that_are_not_utf8_are_refused_by_position(tmp_path) -> None:
             assert str(refused.value) == (f"Categories must be UTF-8 text; {location}")
 
 
+def test_categories_read_as_text_and_python_numbers_and_other_values_as_read(
+    tmp_path,
+) -> None:
+    path = tmp_path / "categories.h5"
+    with h5py.File(path, "w") as h5:
+        obs = h5.create_group("obs")
+        for key, categories in (
+            ("text", _text(b"T cell", b"B cell")),
+            ("number", np.array([7, 3], dtype=np.int16)),
+        ):
+            group = obs.create_group(key)
+            group.create_dataset("codes", data=np.array([0, 1], dtype=np.int8))
+            group.create_dataset("categories", data=categories)
+        # h5py reads each value of a variable-length sequence as an array.
+        sequences = obs.create_group("sequence")
+        sequences.create_dataset("codes", data=np.array([0, 1], dtype=np.int8))
+        stored = sequences.create_dataset(
+            "categories", (2,), dtype=h5py.vlen_dtype(np.int64)
+        )
+        stored[0] = np.array([1, 2])
+        stored[1] = np.array([3])
+    with h5py.File(path, "r") as h5:
+        found = {
+            key: column_categories(
+                h5,
+                h5["obs"],
+                key,
+                ("__categories",),
+                expectation="Categories must be UTF-8 text",
+                place=f"the column {key!r}",
+            )
+            for key in ("text", "number", "sequence")
+        }
+    assert found["text"] == H5adCategories(("T cell", "B cell"), False)
+    assert found["number"] == H5adCategories((7, 3), False)
+    assert [type(value) for value in found["number"].values] == [int, int]
+    first, second = found["sequence"].values
+    assert isinstance(first, np.ndarray) and first.tolist() == [1, 2]
+    assert isinstance(second, np.ndarray) and second.tolist() == [3]
+
+
 @pytest.mark.parametrize("shuffle_cells", [False, True], ids=["file", "shuffled"])
 @pytest.mark.parametrize(
     ("types", "message"),
@@ -1628,6 +1669,27 @@ def test_an_import_refuses_a_membership_column_name_that_is_not_utf8(
         assert type(refused.value) is ValueError
         assert str(refused.value) == message
     assert not (tmp_path / "refused.zarr").exists()
+
+
+def test_a_membership_declaration_of_a_number_is_refused_as_its_text(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    path = _h5ad_with(Path("number.h5ad"), {"uns/cytearc/assayMembership/RNA": 7})
+
+    reader = H5adReader(path)
+    try:
+        with pytest.raises(ValueError) as refused:
+            reader.assay_membership()
+    finally:
+        reader.close()
+
+    # The number reads as the text '7', which is not the column 'RNA_I'.
+    assert str(refused.value) == (
+        "uns['cytearc']['assayMembership'] maps 'RNA' to '7'; CyteArc declares "
+        "each assay's membership column as '<assay>_I'. Remove the entry from the "
+        "file or correct it."
+    )
 
 
 def test_colors_that_are_not_utf8_import_as_colors_that_are_not_colors(
@@ -2713,6 +2775,79 @@ def test_inspection_skips_a_null_x(tmp_path) -> None:
         h5["X"].attrs["encoding-version"] = "0.1.0"
 
     assert inspect_h5ad(path).matrixKey == "layers/counts"
+
+
+def test_inspection_counts_the_cells_of_a_column_when_the_index_holds_no_rows(
+    tmp_path,
+) -> None:
+    path = tmp_path / "cells.h5ad"
+    with h5py.File(path, "w") as h5:
+        h5.create_dataset("X", data=np.ones((3, 2), dtype=np.float32))
+        # The conventional name ranks first, but it holds two cells.
+        h5.create_group("layers").create_dataset(
+            "counts", data=np.ones((2, 2), dtype=np.float32)
+        )
+        obs = h5.create_group("obs")
+        # The index names a group of no known encoding, which holds no rows.
+        obs.attrs["_index"] = "cell_id"
+        obs.create_group("cell_id").create_dataset("x", data=np.arange(5))
+        obs.create_dataset("batch", data=np.array([1, 2, 3]))
+        var = h5.create_group("var")
+        var.attrs["_index"] = "_index"
+        var.create_dataset("_index", data=_text(b"g0", b"g1"))
+
+    with _warnings() as messages:
+        inspection = inspect_h5ad(str(path))
+
+    # The obs table holds the three cells of its column 'batch'.
+    assert inspection.matrixKey == "X"
+    assert inspection.nCells == 3
+    assert (
+        "Ignoring matrix candidate layers/counts: 2 rows do not match obs length 3"
+        in [message.rstrip("\n") for message in messages]
+    )
+
+
+def test_a_column_named_categories_is_read_as_a_column(tmp_path) -> None:
+    path = tmp_path / "categories.h5ad"
+    with h5py.File(path, "w") as h5:
+        h5.create_dataset("X", data=np.ones((3, 2), dtype=np.float32))
+        obs = h5.create_group("obs")
+        obs.attrs["_index"] = "_index"
+        obs.create_dataset("_index", data=_text(b"c0", b"c1", b"c2"))
+        obs.create_dataset("categories", data=_text(b"a", b"b", b"a"))
+        # AnnData 0.7 kept the categories of integer codes in '__categories'.
+        obs.create_dataset("batch", data=np.array([0, 1, 0], dtype=np.int8))
+        obs.create_group("__categories").create_dataset("batch", data=_text(b"x", b"y"))
+        var = h5.create_group("var")
+        var.attrs["_index"] = "_index"
+        var.create_dataset("_index", data=_text(b"g0", b"g1"))
+
+    inspection = inspect_h5ad(str(path))
+
+    # A dataset named 'categories' is a column, not a group of categories.
+    assert inspection.categoryNamesKey == "__categories"
+    reader = H5adReader.from_inspect(inspection)
+    try:
+        columns = {name: values.tolist() for name, values in reader.get_cell_columns()}
+    finally:
+        reader.close()
+    assert columns == {"batch": ["x", "y", "x"], "categories": ["a", "b", "a"]}
+
+
+def test_inspection_reads_a_title_and_description_of_numbers_as_text(
+    tmp_path,
+) -> None:
+    path = tmp_path / "numbers.h5ad"
+    with h5py.File(path, "w") as h5:
+        h5.create_dataset("X", data=np.ones((3, 2), dtype=np.float32))
+        uns = h5.create_group("uns")
+        uns.create_dataset("title", data=np.int64(2024))
+        uns.create_dataset("description", data=np.array([1.5]))
+
+    inspection = inspect_h5ad(str(path))
+
+    assert (inspection.title, inspection.description) == ("2024", "1.5")
 
 
 def test_inspection_samples_values_across_the_whole_matrix(tmp_path) -> None:

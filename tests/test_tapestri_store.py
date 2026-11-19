@@ -121,6 +121,20 @@ def test_a_file_without_proteins_gives_the_amplicons_alone(tmp_path) -> None:
     assert "tapestri" not in root.attrs
 
 
+def test_a_file_without_dna_variants_flags_no_cell_as_filtered(tmp_path) -> None:
+    file = _edit(
+        write_tapestri(TRUTH, tmp_path / "run.h5"),
+        lambda h: h["assays"].__delitem__("dna_variants"),
+    )
+    _write_store(file, tmp_path / "store.zarr")
+    ds = _open(tmp_path / "store.zarr", default_assay="ADT")
+    np.testing.assert_array_equal(_counts(ds.CNV), TRUTH.amplicon_reads)
+    np.testing.assert_array_equal(_counts(ds.ADT), TRUTH.protein_reads)
+    assert ds.cells.fetch_all("sample_name").tolist() == TRUTH.samples.tolist()
+    # The filtered flags come from dna_variants alone.
+    assert "filtered" not in ds.cells.columns
+
+
 def test_assay_types_replace_the_defaults(tmp_path) -> None:
     file = write_tapestri(TRUTH, tmp_path / "run.h5")
     _write_store(file, tmp_path / "store.zarr", assay_types={"CNV": "CUSTOM"})

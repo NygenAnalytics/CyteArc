@@ -146,6 +146,44 @@ def test_table_members_resolves_a_nested_index_without_column_order(tmp_path):
         assert table_column_names(obs) == ["cell/id", "b"]
 
 
+@pytest.mark.parametrize("index", ["cell/id", "/cell/id", "cell/../b"])
+def test_table_members_leave_out_a_nested_index_that_names_no_member(tmp_path, index):
+    with h5py.File(tmp_path / "index.h5ad", "w") as h5:
+        # A dataset at the file root that an absolute name would reach.
+        h5.create_dataset("cell/id", data=np.asarray(["r1", "r2"], dtype="S"))
+        obs = h5.create_group("obs")
+        obs.attrs["_index"] = index
+        obs.create_dataset("b", data=np.asarray([1, 2]))
+        obs.attrs["column-order"] = ["b"]
+
+        members = table_members(obs)
+
+        # The index is not a listed column, so it is not unresolved either.
+        assert [name for name, _node in members.members] == ["b"]
+        assert members.unresolved == ()
+        assert table_column_names(obs) == ["b"]
+
+
+def test_table_members_keep_a_group_whose_deeper_levels_hold_unlisted_members(
+    tmp_path,
+):
+    with h5py.File(tmp_path / "levels.h5ad", "w") as h5:
+        obs = h5.create_group("obs")
+        obs.create_dataset("a/b/c", data=np.asarray([1, 2]))
+        obs.create_dataset("a/b/d", data=np.asarray([3, 4]))
+        _write_categorical(obs, "p/q", ["x", "y"])
+        obs.create_dataset("s/t/u", data=np.asarray([5, 6]))
+        # 'p/q/codes' runs through the categorical 'p/q', a column of its own.
+        obs.attrs["column-order"] = ["a/b/c", "p/q/codes", "s/t/u"]
+
+        names = [name for name, _node in table_members(obs).members]
+
+        # Below 'a', the unlisted 'a/b/d' keeps 'a' visible; below 'p', the
+        # categorical 'p/q' does. Every member below 's' is listed.
+        assert names == ["a/b/c", "p/q/codes", "s/t/u", "a", "p"]
+        assert table_column_names(obs) == ["a/b/c", "p/q/codes", "s/t/u"]
+
+
 def test_table_members_keeps_a_column_that_a_listed_path_runs_through(obs):
     # A malformed column-order that lists a path inside a real categorical
     # must not hide that categorical.
