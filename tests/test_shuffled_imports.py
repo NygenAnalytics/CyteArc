@@ -942,24 +942,39 @@ def test_a_shuffled_import_of_a_reader_names_the_budget_that_passes_its_spill(
     assert _no_temporary_files(tmp_path)
 
 
-@pytest.mark.parametrize("kind", ["csv"])
-def test_a_budget_without_room_for_a_batch_and_its_spill_names_the_bytes_it_needs(
-    tmp_path, kind
+def test_a_shuffled_csv_import_names_the_least_budget_that_passes_its_spill(
+    tmp_path,
 ) -> None:
-    run, _expected = _source(tmp_path, kind)
+    run, _expected = _source(tmp_path, "csv")
     at_budget = _spill_attempts(tmp_path, run)
-
-    with pytest.raises(MemoryBudgetError) as caught:
-        at_budget(4_000)
-    assert caught.value.item == "the row spill of a cell shuffle"
-    assert caught.value.needed_bytes > caught.value.budget_bytes
-    # The order and its inverse, 8 bytes a cell each, are held beside the
-    # spill, which the refusal names the bytes of alone.
-    held = 4_000 - caught.value.budget_bytes
-    assert held == 16 * _N_CELLS
-    # With the bytes it names beside them, the spill fits; buckets grow with
-    # the budget, so it needs no more there.
-    at_budget(caught.value.needed_bytes + held)
+    # A budget sizes the spill's buckets, and larger buckets need less beside
+    # them, so what the spill needs depends on the budget. Whatever budget it
+    # refuses, the refusal names the least import budget that passes it.
+    named = set()
+    for budget in (4_000, 20_000, 40_000):
+        with pytest.raises(MemoryBudgetError) as caught:
+            at_budget(budget)
+        # The order of the cells and its inverse, 8 bytes a cell each, are
+        # held beside the spill.
+        assert caught.value.item == (
+            f"the row spill of a cell shuffle beside the {16 * _N_CELLS} bytes of "
+            "its cell order"
+        )
+        assert caught.value.budget_bytes == budget
+        named.add(caught.value.needed_bytes)
+    (needed,) = named
+    assert needed > 40_000
+    # With the budget it names, the spill fits; one byte less is refused,
+    # naming the same budget.
+    at_budget(needed)
+    with pytest.raises(MemoryBudgetError) as below:
+        at_budget(needed - 1)
+    assert (below.value.needed_bytes, below.value.budget_bytes) == (needed, needed - 1)
+    assert str(below.value) == (
+        f"Importing the counts of {_N_CELLS} cells holds about {needed} bytes for "
+        f"{below.value.item}, more than the memory budget of {needed - 1} bytes. "
+        f"Raise mem_budget to at least {needed} bytes."
+    )
     assert _no_temporary_files(tmp_path)
 
 
