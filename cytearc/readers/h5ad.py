@@ -484,10 +484,9 @@ class H5adReader:
                 )
                 > 1
             ):
-                if sorted(self.h5[group].keys()) != ["data", "indices", "indptr"]:
-                    logger.warning(
-                        f"`{group}` slot in H5ad file has unequal sized child groups"
-                    )
+                logger.warning(
+                    f"`{group}` slot in H5ad file has unequal sized child groups"
+                )
         return ret_val
 
     def _get_matrix_dtype(self) -> Any:
