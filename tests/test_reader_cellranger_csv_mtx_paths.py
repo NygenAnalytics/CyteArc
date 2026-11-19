@@ -1155,6 +1155,599 @@ def test_csv_reader_refuses_columns_it_cannot_number(
         _csv_reader(tmp_path, text, **options)
 
 
+def _table(columns: int, id_column: int | None) -> str:
+    """Return a CSV table of a header and two rows of counts, cell IDs at ``id_column``."""
+    header = [f"h{position}" for position in range(columns)]
+    rows = [[str(row + position) for position in range(columns)] for row in (0, 1)]
+    if id_column is not None:
+        for row, cell in zip(rows, ("c1", "c2"), strict=True):
+            row[id_column] = cell
+    return "".join(",".join(fields) + "\n" for fields in (header, *rows))
+
+
+_REPEATED_TEXT = (
+    "CSV feature IDs must contain unique values; the names of count columns "
+    "repeat once read as text: {}, counted from 0. Give them names whose text "
+    "differs through names in pandas_kwargs, or leave them out with skip_cols"
+)
+
+
+@pytest.mark.parametrize(
+    ("names", "columns", "options", "repeats"),
+    [
+        pytest.param([10, "10"], 2, {}, "'10' at positions [0, 1]", id="int-and-str"),
+        pytest.param(
+            ["10", np.int64(10)],
+            2,
+            {},
+            "'10' at positions [0, 1]",
+            id="str-and-numpy-int",
+        ),
+        pytest.param([1.5, "1.5"], 2, {}, "'1.5' at positions [0, 1]", id="float"),
+        pytest.param(
+            [np.float32(2.1), "2.1"],
+            2,
+            {},
+            "'2.1' at positions [0, 1]",
+            id="float32",
+        ),
+        pytest.param([True, "True"], 2, {}, "'True' at positions [0, 1]", id="bool"),
+        pytest.param(["é", "é".encode()], 2, {}, "'é' at positions [0, 1]", id="bytes"),
+        pytest.param(
+            [1, "1", b"1"], 3, {}, "'1' at positions [0, 1, 2]", id="three-columns"
+        ),
+        # The positions count the ID column and the skipped column.
+        pytest.param(
+            ["cell", 10, "x", "10"],
+            4,
+            {"id_column": 0, "skip_cols": ["x"]},
+            "'10' at positions [1, 3]",
+            id="beside-id-and-skipped-columns",
+        ),
+        pytest.param(
+            [10, "10"],
+            3,
+            {"id_column": 0},
+            "'10' at positions [1, 2]",
+            id="after-an-unnamed-id-column",
+        ),
+        pytest.param(
+            [10, "cell", "10"],
+            3,
+            {"id_column": 1},
+            "'10' at positions [0, 2]",
+            id="around-the-id-column",
+        ),
+        pytest.param(
+            [10, "10", True, "True"],
+            4,
+            {},
+            "'10' at positions [0, 1] and 'True' at positions [2, 3]",
+            id="two-texts",
+        ),
+        pytest.param(
+            [1, "1", 2, "2", 3, "3", 4, "4"],
+            8,
+            {},
+            "'1' at positions [0, 1], '2' at positions [2, 3], '3' at positions "
+            "[4, 5] and 1 more",
+            id="four-texts",
+        ),
+    ],
+)
+def test_csv_reader_refuses_feature_names_that_repeat_once_read_as_text(
+    tmp_path: Path,
+    names: list[object],
+    columns: int,
+    options: dict[str, int | list[str]],
+    repeats: str,
+) -> None:
+    id_column = options.get("id_column")
+    text = _table(columns, id_column if isinstance(id_column, int) else None)
+
+    # pandas held these names apart, so the import stored two features of
+    # one ID, such as "10", which values keyed by ID cannot tell apart.
+    with pytest.raises(ValueError) as refused:
+        _csv_reader(tmp_path, text, pandas_kwargs={"names": names}, **options)
+
+    assert type(refused.value) is ValueError
+    assert str(refused.value) == _REPEATED_TEXT.format(repeats)
+
+
+@pytest.mark.parametrize(
+    ("options", "counts", "cell_data"),
+    [
+        # skip_cols names the column of the label 10, so "10" holds counts.
+        pytest.param({"skip_cols": [10]}, [[2, 3], [5, 6]], None, id="one-skipped"),
+        # cell_data_cols names the column of the label "10", so 10 holds counts.
+        pytest.param(
+            {"cell_data_cols": ["10"]},
+            [[1, 3], [4, 6]],
+            [2, 5],
+            id="one-cell-metadata",
+        ),
+    ],
+)
+def test_csv_names_that_share_a_text_import_when_one_holds_no_counts(
+    tmp_path: Path,
+    options: dict[str, object],
+    counts: list[list[int]],
+    cell_data: list[int] | None,
+) -> None:
+    reader = _csv_reader(
+        tmp_path,
+        _FOUR_COLUMNS,
+        id_column=0,
+        pandas_kwargs={"names": ["cell", 10, "10", 30]},
+        **options,
+    )
+
+    assert reader.feature_ids().tolist() == ["10", "30"]
+    root = _imported(reader)
+    assert root["RNA/featureData/ids"][:].tolist() == ["10", "30"]
+    np.testing.assert_array_equal(root["RNA/counts"][:], counts)
+    if cell_data is not None:
+        assert root["cellData/10"][:].tolist() == cell_data
+
+
+def test_csv_names_that_repeat_as_given_are_still_refused(tmp_path: Path) -> None:
+    # pandas refuses names that are equal, before they are read as text.
+    with pytest.raises(ValueError, match="Duplicate names are not allowed"):
+        _csv_reader(tmp_path, _TWO_ROW_CSV, pandas_kwargs={"names": ["a", "a"]})
+
+
+_SET_BY_THE_READER = (
+    "pandas_kwargs cannot set {}, which the reader sets from its own arguments; "
+    "pass {} to CSVReader instead"
+)
+
+
+@pytest.mark.parametrize(
+    ("settings", "refused", "arguments"),
+    [
+        # The reader's sep="," replaced this one and read one column of text.
+        pytest.param({"sep": ";"}, "sep", "sep", id="sep"),
+        pytest.param({"delimiter": ";"}, "delimiter", "sep", id="delimiter"),
+        pytest.param(
+            {"delim_whitespace": True}, "delim_whitespace", "sep", id="delim-whitespace"
+        ),
+        # The reader's header=0 replaced this one and took the first row of
+        # counts as the feature names.
+        pytest.param({"header": None}, "header", "has_header", id="no-header"),
+        # A value that the reader would set too is refused alike.
+        pytest.param({"header": 0}, "header", "has_header", id="header-row"),
+        pytest.param({"skiprows": 1}, "skiprows", "skip_rows", id="skiprows"),
+        pytest.param({"skiprows": [1]}, "skiprows", "skip_rows", id="skiprows-list"),
+        pytest.param({"chunksize": 7}, "chunksize", "batch_size", id="chunksize"),
+        pytest.param({"index_col": 0}, "index_col", "id_column", id="index-col"),
+        pytest.param({"index_col": False}, "index_col", "id_column", id="no-index"),
+        pytest.param(
+            {"header": None, "chunksize": 7},
+            "chunksize, header",
+            "batch_size and has_header",
+            id="two-settings",
+        ),
+        pytest.param(
+            {"sep": ";", "delimiter": ";", "skiprows": 1},
+            "delimiter, sep, skiprows",
+            "sep and skip_rows",
+            id="two-names-of-the-separator",
+        ),
+    ],
+)
+def test_csv_reader_refuses_settings_that_it_sets_itself(
+    tmp_path: Path, settings: dict[str, object], refused: str, arguments: str
+) -> None:
+    # The reader replaced each setting with its own without a word.
+    with pytest.raises(ValueError) as refusal:
+        _csv_reader(tmp_path, "cell;a\nc1;1\nc2;2\n", pandas_kwargs=settings)
+
+    assert type(refusal.value) is ValueError
+    assert str(refusal.value) == _SET_BY_THE_READER.format(refused, arguments)
+
+
+@pytest.mark.parametrize("engine", ["c", "python"])
+@pytest.mark.parametrize(
+    ("text", "options", "settings", "key"),
+    [
+        pytest.param(_NUMBERED_CELLS, {"id_column": 0}, {}, 0, id="by-position"),
+        # The C engine applied this converter instead of the reader's, and the
+        # reader failed with AttributeError.
+        pytest.param(_NUMBERED_CELLS, {"id_column": 0}, {}, "cell", id="by-header"),
+        pytest.param(
+            "a,cell,b\n1,001,2\n3,002,4\n",
+            {"id_column": 1},
+            {},
+            1,
+            id="by-a-later-position",
+        ),
+        pytest.param(
+            "a,cell,b\n1,001,2\n3,002,4\n",
+            {"id_column": 1},
+            {},
+            "cell",
+            id="by-a-later-header",
+        ),
+        pytest.param(
+            "001,1,2\n002,3,4\n",
+            {"id_column": 0, "has_header": False},
+            {},
+            0,
+            id="by-position-without-a-header",
+        ),
+        pytest.param(
+            _NUMBERED_CELLS,
+            {"id_column": 0},
+            {"names": ["id", "x", "y"]},
+            "id",
+            id="by-its-name-in-names",
+        ),
+        pytest.param(
+            _NUMBERED_CELLS,
+            {"id_column": 0},
+            {"names": ["id", "x", "y"]},
+            0,
+            id="by-position-beside-names",
+        ),
+        # The reader names the ID column itself here, so pandas applied the
+        # converter to the column at position 2.
+        pytest.param(
+            _NUMBERED_CELLS,
+            {"id_column": 0},
+            {"names": [2, "x", "y"]},
+            2,
+            id="by-a-name-that-the-reader-replaces",
+        ),
+    ],
+)
+def test_csv_reader_refuses_a_converter_for_the_id_column(
+    tmp_path: Path,
+    engine: str,
+    text: str,
+    options: dict[str, object],
+    settings: dict[str, object],
+    key: object,
+) -> None:
+    pandas_kwargs = {**settings, "engine": engine, "converters": {key: str.upper}}
+
+    with pytest.raises(ValueError) as refusal:
+        _csv_reader(tmp_path, text, pandas_kwargs=pandas_kwargs, **options)
+
+    assert type(refusal.value) is ValueError
+    assert str(refusal.value) == (
+        "pandas_kwargs cannot set a converter for the ID column, which the reader "
+        f"reads as the text of its fields; remove converters[{key!r}]"
+    )
+
+
+@pytest.mark.parametrize("engine", ["c", "python"])
+def test_csv_converter_keyed_by_a_count_column_name_is_kept(
+    tmp_path: Path, engine: str
+) -> None:
+    # The key 0 is the ID column's position and the name of the count column
+    # after it. pandas finds a converter by name first, so it converts that
+    # count column, and the reader keeps it.
+    reader = _csv_reader(
+        tmp_path,
+        _NUMBERED_CELLS,
+        id_column=0,
+        pandas_kwargs={
+            "names": ["cell", 0, 1],
+            "converters": {0: lambda field: int(field) * 10},
+            "engine": engine,
+        },
+    )
+
+    assert reader.cell_ids().tolist() == ["001", "002"]
+    counts = np.vstack([batch for batch, _metadata in reader.consume()])
+    np.testing.assert_array_equal(counts, [[10, 2], [30, 4]])
+
+
+def _undecodable(expectation: str, line: int, name: str, field: str) -> str:
+    return (
+        f"{expectation}; line {line} of '{name}' holds {field}. Pass the file's "
+        "encoding as encoding in pandas_kwargs"
+    )
+
+
+_UTF8 = "CSV files must be UTF-8 text"
+
+
+@pytest.mark.parametrize("compressed", [False, True], ids=["plain", "gzip"])
+@pytest.mark.parametrize(
+    ("data", "options", "expectation", "line", "field"),
+    [
+        pytest.param(
+            b"cell,a\ncaf\xe9,1\nc2,2\n",
+            {"id_column": 0},
+            _UTF8,
+            2,
+            r"b'caf\xe9'",
+            id="latin-1-cell-id",
+        ),
+        pytest.param(
+            b"cell,g\xe9ne,b\nc1,1,2\n",
+            {"id_column": 0},
+            _UTF8,
+            1,
+            r"b'g\xe9ne'",
+            id="latin-1-column-name",
+        ),
+        # Valid characters of two bytes come before the cut one.
+        pytest.param(
+            "cell,gène\nc1,1\ncafé,2\n".encode() + b"caf\xc3,3\n",
+            {"id_column": 0},
+            _UTF8,
+            4,
+            r"b'caf\xc3'",
+            id="cut-character-in-a-later-line",
+        ),
+        pytest.param(
+            b"a,cell\n1,c1\n2,caf\xc3",
+            {"id_column": 1},
+            _UTF8,
+            3,
+            r"b'caf\xc3'",
+            id="cut-character-at-the-end",
+        ),
+        # The field is split as pandas splits it, quotes included.
+        pytest.param(
+            b'cell,a\n"caf\xe9, x",1\n',
+            {"id_column": 0},
+            _UTF8,
+            2,
+            r"b'caf\xe9, x'",
+            id="quoted-field",
+        ),
+        pytest.param(
+            b"cell,a\rc1,1\rcaf\xe9,2\r",
+            {"id_column": 0},
+            _UTF8,
+            3,
+            r"b'caf\xe9'",
+            id="carriage-returns",
+        ),
+        pytest.param(
+            b"cell,a,note\nc1,1,x\nc2,2,\xff\n",
+            {"id_column": 0, "skip_cols": ["note"]},
+            _UTF8,
+            3,
+            r"b'\xff'",
+            id="skipped-column",
+        ),
+        pytest.param(
+            "cell,a\ncafé,1\n".encode("utf-16"),
+            {"id_column": 0},
+            _UTF8,
+            1,
+            r"b'\xff\xfec\x00e\x00l\x00l\x00'",
+            id="utf-16-read-as-utf-8",
+        ),
+        pytest.param(
+            b"cell,a\nc\x81,1\n",
+            {"id_column": 0, "pandas_kwargs": {"encoding": "cp1252"}},
+            "CSV files must be text in the encoding that pandas_kwargs names, 'cp1252'",
+            2,
+            r"b'c\x81'",
+            id="byte-that-cp1252-leaves-undefined",
+        ),
+        # A lone surrogate, which UTF-16 cannot decode.
+        pytest.param(
+            "cell,a\nc1,1\n".encode("utf-16")
+            + b"\x00\xd8"
+            + ",2\n".encode("utf-16-le"),
+            {"id_column": 0, "pandas_kwargs": {"encoding": "utf-16"}},
+            "CSV files must be text in the encoding that pandas_kwargs names, 'utf-16'",
+            3,
+            r"b'\x00\xd8'",
+            id="utf-16-lone-surrogate",
+        ),
+        # The field check reads this file, and pandas' C engine refused it
+        # with a UnicodeDecodeError.
+        pytest.param(
+            b"cell,a\ncaf\xe9,1\n",
+            {"id_column": 0, "pandas_kwargs": {"encoding_errors": "surrogateescape"}},
+            _UTF8,
+            2,
+            r"b'caf\xe9'",
+            id="surrogateescape-in-the-c-engine",
+        ),
+    ],
+)
+def test_csv_reader_refuses_text_that_its_encoding_cannot_decode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    compressed: bool,
+    data: bytes,
+    options: dict[str, object],
+    expectation: str,
+    line: int,
+    field: str,
+) -> None:
+    # A relative path, which the message names as given.
+    monkeypatch.chdir(tmp_path)
+    name = "counts.csv.gz" if compressed else "counts.csv"
+    Path(name).write_bytes(gzip.compress(data) if compressed else data)
+    temporary = tmp_path / "temporary"
+    temporary.mkdir()
+
+    with pytest.raises(ValueError) as refused:
+        CSVtoZarr(
+            CSVReader(name, temp_dir=temporary, **options),  # type: ignore[arg-type]
+            "refused.zarr",
+            assay_name="RNA",
+            nthreads=1,
+        )
+
+    # A ValueError of its own, not the UnicodeDecodeError of a decode.
+    assert type(refused.value) is ValueError
+    assert str(refused.value) == _undecodable(expectation, line, name, field)
+    assert not Path("refused.zarr").exists()
+    assert not list(temporary.iterdir())
+
+
+@pytest.mark.parametrize("compressed", [False, True], ids=["plain", "gzip"])
+@pytest.mark.parametrize(
+    ("data", "pandas_kwargs", "cells", "features"),
+    [
+        pytest.param(
+            b"cell,g\xe8ne\ncaf\xe9,1\nc2,2\n",
+            {"encoding": "latin-1"},
+            ["café", "c2"],
+            ["gène"],
+            id="latin-1",
+        ),
+        pytest.param(
+            "cell,gène\ncafé,1\nc2,2\n".encode("utf-16"),
+            {"encoding": "utf-16"},
+            ["café", "c2"],
+            ["gène"],
+            id="utf-16",
+        ),
+        pytest.param(
+            "﻿cell,gène\ncafé,1\n中文,2\n".encode(),
+            {},
+            ["café", "中文"],
+            ["gène"],
+            id="utf-8-with-a-byte-order-mark",
+        ),
+        pytest.param(
+            "﻿cell,gène\ncafé,1\nc2,2\n".encode(),
+            {"encoding": "utf-8-sig"},
+            ["café", "c2"],
+            ["gène"],
+            id="utf-8-sig",
+        ),
+        pytest.param(
+            b"cell,g\xe8ne\ncaf\xe9,1\nc2,2\n",
+            {"encoding_errors": "replace"},
+            ["caf�", "c2"],
+            ["g�ne"],
+            id="replaced",
+        ),
+        pytest.param(
+            b"cell,a\ncaf\xe9,1\nc2,2\n",
+            {"encoding_errors": "surrogateescape", "engine": "python"},
+            ["caf\udce9", "c2"],
+            ["a"],
+            id="surrogateescape-in-the-python-engine",
+        ),
+    ],
+)
+def test_csv_text_that_pandas_reads_imports_as_before(
+    tmp_path: Path,
+    compressed: bool,
+    data: bytes,
+    pandas_kwargs: dict[str, object],
+    cells: list[str],
+    features: list[str],
+) -> None:
+    path = tmp_path / ("counts.csv.gz" if compressed else "counts.csv")
+    path.write_bytes(gzip.compress(data) if compressed else data)
+
+    reader = CSVReader(
+        str(path), id_column=0, batch_size=1, pandas_kwargs=pandas_kwargs
+    )
+
+    assert reader.cell_ids().tolist() == cells
+    assert reader.feature_ids().tolist() == features
+    root = _imported(reader)
+    assert root["cellData/ids"][:].tolist() == cells
+    assert root["RNA/featureData/ids"][:].tolist() == features
+    np.testing.assert_array_equal(root["RNA/counts"][:], [[1], [2]])
+
+
+@pytest.mark.parametrize(
+    ("text", "names", "options", "position", "name"),
+    [
+        pytest.param(_TWO_ROW_CSV, [b"\xff", "b"], {}, 0, r"b'\xff'", id="first"),
+        pytest.param(
+            _TWO_ROW_CSV,
+            np.array([b"x", b"caf\xe9"]),
+            {},
+            1,
+            r"b'caf\xe9'",
+            id="numpy-bytes",
+        ),
+        # The position counts the unnamed ID column.
+        pytest.param(
+            "cell,a\nc1,1\nc2,2\n",
+            [b"g\xe9"],
+            {"id_column": 0},
+            1,
+            r"b'g\xe9'",
+            id="after-the-id-column",
+        ),
+        # The reader read every name as text, the skipped one too.
+        pytest.param(
+            _TWO_ROW_CSV,
+            [b"\xff", "b"],
+            {"skip_cols": [b"\xff"]},
+            0,
+            r"b'\xff'",
+            id="skipped-column",
+        ),
+    ],
+)
+def test_csv_reader_refuses_names_of_bytes_that_are_not_utf8(
+    tmp_path: Path,
+    text: str,
+    names: object,
+    options: dict[str, object],
+    position: int,
+    name: str,
+) -> None:
+    # The reader raised the UnicodeDecodeError of a decode.
+    with pytest.raises(ValueError) as refused:
+        _csv_reader(tmp_path, text, pandas_kwargs={"names": names}, **options)
+
+    assert type(refused.value) is ValueError
+    assert str(refused.value) == (
+        "CSV column names must be UTF-8 text; names in pandas_kwargs names the "
+        f"column at position {position}, counted from 0, {name}"
+    )
+
+
+def test_csv_id_column_named_by_bytes_that_are_not_utf8_imports(
+    tmp_path: Path,
+) -> None:
+    # The reader names the ID column itself, so its name is never decoded.
+    reader = _csv_reader(
+        tmp_path,
+        _NUMBERED_CELLS,
+        id_column=0,
+        pandas_kwargs={"names": [b"\xff", "x", "y"]},
+    )
+
+    assert reader.cell_ids().tolist() == ["001", "002"]
+    assert reader.feature_ids().tolist() == ["x", "y"]
+    np.testing.assert_array_equal(_imported(reader)["RNA/counts"][:], [[1, 2], [3, 4]])
+
+
+def test_csv_decode_errors_that_the_file_does_not_cause_are_raised_unchanged(
+    tmp_path: Path,
+) -> None:
+    def decode(field: str) -> int:
+        return len(b"\xff".decode())
+
+    # The file is UTF-8 text, so the converter's error is not the file's.
+    with pytest.raises(UnicodeDecodeError, match="can't decode byte 0xff"):
+        _csv_reader(
+            tmp_path,
+            "cell,a\ncafé,1\n",
+            id_column=0,
+            pandas_kwargs={"converters": {"a": decode}},
+        )
+
+
+def test_csv_undecodable_bytes_handler_refuses_to_encode() -> None:
+    from cytearc.readers.csv import _UNDECODABLE_BYTES
+
+    # The handler marks bytes that a decode fails on, and encodes nothing.
+    with pytest.raises(UnicodeEncodeError, match="surrogates not allowed"):
+        "caf\udce9".encode("utf-8", _UNDECODABLE_BYTES)
+
+
 def test_matrix_names_without_the_matrix_suffix_use_plain_sidecars(
     tmp_path: Path,
 ) -> None:
