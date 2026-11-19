@@ -23,9 +23,11 @@ from ._assay_names import (
 from ._text import (
     DuplicateFeatureIds,
     as_text,
+    dataset_place,
     duplicate_feature_ids_option,
     require_unique_identifiers,
     unique_feature_identifiers,
+    utf8_texts,
 )
 from ..utils.arrays import (
     assay_feature_ranges,
@@ -42,6 +44,15 @@ from ..utils.count_values import (
 from ..utils.arguments import bool_argument
 from ._row_spill import checked_destinations, row_spill_plan, sample_rows, spill_rows
 from ._sparse import SparseRowStore, encoded_entry_bytes
+
+# What refusals call the values of each dataset of a 10x HDF5 file, by its
+# ``grpNames`` key.
+_H5_VALUES = {
+    "cell_names": "Cell Ranger barcodes",
+    "feature_ids": "Cell Ranger feature IDs",
+    "feature_names": "Cell Ranger feature names",
+    "feature_types": "Cell Ranger feature types",
+}
 
 
 class CrReader(ABC):
@@ -449,6 +460,12 @@ class CrH5Reader(CrReader):
         h5obj: A File object from the h5py package.
         grp: Current active group in the hierarchy.
         duplicateFeatureIds: How repeated feature IDs are treated.
+
+    Raises:
+        ValueError: If a barcode, feature ID, feature name or feature type is
+            not UTF-8 text, or a barcode or feature ID is missing, blank or
+            repeated. The refusal names the dataset and the rows that hold
+            them, except for a repeat.
     """
 
     def __init__(
@@ -472,14 +489,21 @@ class CrH5Reader(CrReader):
         self._cumulativeRowNnz: np.ndarray | None = None
         self._featureIds: list[str] | None = None
         try:
+            # Decodes every barcode, feature name and feature type, refusing
+            # text that is not UTF-8.
             super().__init__(self._handle_version())
-            require_unique_identifiers(self.cell_names(), "Cell Ranger barcodes")
+            require_unique_identifiers(
+                self.cell_names(),
+                _H5_VALUES["cell_names"],
+                place=self._dataset_place("cell_names"),
+            )
             self._featureIds = [
                 as_text(value)
                 for value in unique_feature_identifiers(
                     np.asarray(self._read_dataset("feature_ids"), dtype=object),
-                    "Cell Ranger feature IDs",
+                    _H5_VALUES["feature_ids"],
                     self.duplicateFeatureIds,
+                    place=self._dataset_place("feature_ids"),
                 )
             ]
             if is_filtered:
@@ -660,7 +684,16 @@ class CrH5Reader(CrReader):
         if key == "feature_ids" and self._featureIds is not None:
             return list(self._featureIds)
         grp_key = self.grpNames[key]
-        return [as_text(x) for x in self.grp[grp_key][:]]
+        return utf8_texts(
+            self.grp[grp_key][:],
+            f"{_H5_VALUES[key]} must be UTF-8 text",
+            self._dataset_place(key),
+        )
+
+    def _dataset_place(self, key: str) -> str:
+        """Name the dataset of ``grpNames`` key ``key`` as refusals name it."""
+        name = self.grp[self.grpNames[key]].name
+        return dataset_place(self.h5obj.filename, name.lstrip("/"))
 
     def cell_names(self) -> list[str]:
         """Returns a list of names of the cells in the dataset."""

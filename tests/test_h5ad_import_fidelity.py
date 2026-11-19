@@ -1193,7 +1193,7 @@ def test_the_reader_counts_the_renamed_ids_beside_those_of_the_file(
     ],
 )
 def test_refusals_name_the_first_rows_and_how_many_more(rows, named) -> None:
-    from cytearc.readers.h5ad import _named_rows
+    from cytearc.readers._text import _named_rows
 
     assert _named_rows(rows) == named
 

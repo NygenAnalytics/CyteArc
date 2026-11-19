@@ -63,7 +63,7 @@ from ..utils.warnings import warn
 from ..variants.counts import ALLELE_ROLES, Contig, EntryBatch, SiteTable
 from ._assay_names import auto_name_feat_table
 from ._row_spill import dense_sample_rows, dense_spill_estimate
-from ._text import as_text, require_unique_identifiers
+from ._text import as_text, dataset_place, require_unique_identifiers, utf8_texts
 from .cellranger import CrReader
 from ..utils.arguments import quoted_value
 
@@ -191,6 +191,27 @@ def _dataset(group: h5py.Group, name: str, path: str) -> h5py.Dataset:
     return node
 
 
+def _dataset_texts(group: h5py.Group, name: str, path: str, subject: str) -> np.ndarray:
+    """Return the values of a dataset as text, refusing bytes that are not UTF-8.
+
+    Args:
+        group: The dataset's group.
+        name: The dataset's name in its group.
+        path: The file, as errors name it.
+        subject: What refusals call the values, such as ``"The barcodes of
+            assays/dna_read_counts"``.
+    """
+    node = _dataset(group, name, path)
+    return np.asarray(
+        utf8_texts(
+            np.asarray(node[:]).reshape(-1),
+            f"{subject} must be UTF-8 text",
+            dataset_place(path, node.name.lstrip("/")),
+        ),
+        dtype=object,
+    )
+
+
 def _metadata_value(value: Any) -> Any:
     """A metadata value as JSON-ready text, numbers or lists of them."""
     array = np.asarray(value)
@@ -224,8 +245,10 @@ def _assay_cells(handle: h5py.File, assay: str, path: str) -> _Cells:
     rows = handle[f"assays/{assay}"].get("ra")
     if not isinstance(rows, h5py.Group):
         raise ValueError(f"{path} lacks assays/{assay}/ra")
-    barcodes = _texts(_dataset(rows, "barcode", path)[:])
-    samples = _texts(_dataset(rows, "sample_name", path)[:])
+    barcodes = _dataset_texts(rows, "barcode", path, f"The barcodes of assays/{assay}")
+    samples = _dataset_texts(
+        rows, "sample_name", path, f"The sample names of assays/{assay}"
+    )
     if len(samples) != len(barcodes):
         raise ValueError(
             f"assays/{assay}/ra of {path} names {len(barcodes)} barcodes but "
@@ -284,8 +307,9 @@ class TapestriReader(CrReader):
         ValueError: If the file holds neither the amplicon nor the protein
             reads, lacks an assay's arrays, its assays list other cells, a
             sample's barcode repeats, an assay lists no features, a feature ID
-            repeats or is blank, or a ``ca`` or ``filtered`` array does not
-            align with its assay.
+            repeats or is blank, a barcode, sample name or feature ID is not
+            UTF-8 text, or a ``ca`` or ``filtered`` array does not align with
+            its assay.
     """
 
     def __init__(self, h5_fn: str, *, temp_dir: str | Path | None = None) -> None:
@@ -349,10 +373,13 @@ class TapestriReader(CrReader):
             columns = handle[f"assays/{name}"].get("ca")
             if not isinstance(columns, h5py.Group):
                 raise ValueError(f"{self.path} lacks assays/{name}/ca")
-            ids = _texts(_dataset(columns, "id", self.path)[:])
+            label = f"The feature IDs of assays/{name}"
+            ids = _dataset_texts(columns, "id", self.path, label)
             if not len(ids):
                 raise ValueError(f"assays/{name} of {self.path} lists no features")
-            require_unique_identifiers(ids, f"The feature IDs of assays/{name}")
+            require_unique_identifiers(
+                ids, label, place=dataset_place(self.path, f"assays/{name}/ca/id")
+            )
             if layer.shape != (len(cells.ids), len(ids)):
                 raise ValueError(
                     f"assays/{name}/layers/read_counts of {self.path} is "

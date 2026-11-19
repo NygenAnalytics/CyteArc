@@ -1,3 +1,4 @@
+import math
 from typing import Any, Literal
 
 import numpy as np
@@ -10,6 +11,12 @@ type DuplicateFeatureIds = Literal["error", "make_unique"]
 type DuplicateCellIds = Literal["error", "make_unique"]
 
 _DUPLICATE_FEATURE_ID_OPTIONS = ("error", "make_unique")
+# The most rows that a refusal names.
+_NAMED_ROWS = 5
+# The types of IDs that are text already, as most readers hold them.
+_TEXT_TYPES = frozenset({str, np.str_})
+# The values that a decode converts at once.
+_DECODE_ROWS = 65_536
 
 
 def as_text(value: Any) -> str:
@@ -19,7 +26,33 @@ def as_text(value: Any) -> str:
     return str(value)
 
 
-def utf8_refusal(value: bytes, row: int, expectation: str, place: str) -> ValueError:
+def dataset_place(path: str, dataset: str) -> str:
+    """Name a dataset of an HDF5 file as refusals name it.
+
+    For example ``the dataset 'matrix/barcodes' of 'pbmc.h5'``.
+    """
+    return f"the dataset {dataset!r} of {quoted_value(path)}"
+
+
+def _of(place: str | None) -> str:
+    """Return the words after a row of a refusal that say where the values are."""
+    return "" if place is None else f" of {place}"
+
+
+def _named_rows(rows: list[int]) -> str:
+    """Name rows as refusals name them, counting from 1: the first few and how many more."""
+    shown = [str(row + 1) for row in rows[:_NAMED_ROWS]]
+    more = len(rows) - len(shown)
+    if more:
+        return f"rows {', '.join(shown)} and {more:,} more"
+    if len(shown) == 1:
+        return f"row {shown[0]}"
+    return f"rows {', '.join(shown[:-1])} and {shown[-1]}"
+
+
+def utf8_refusal(
+    value: bytes, row: int, expectation: str, place: str | None
+) -> ValueError:
     """Return the refusal of bytes in a column that are not UTF-8 text.
 
     Args:
@@ -28,14 +61,15 @@ def utf8_refusal(value: bytes, row: int, expectation: str, place: str) -> ValueE
         expectation: What the column must hold, which the refusal starts
             with, such as ``"H5AD cell IDs must be UTF-8 text"``.
         place: Where the values are, such as
-            ``the obs index '_index' of 'pbmc.h5ad'``.
+            ``the obs index '_index' of 'pbmc.h5ad'``, or None to name the
+            row alone.
     """
     return ValueError(
-        f"{expectation}; row {row + 1} of {place} holds {quoted_value(bytes(value))}"
+        f"{expectation}; row {row + 1}{_of(place)} holds {quoted_value(bytes(value))}"
     )
 
 
-def check_utf8(values: np.ndarray, expectation: str, place: str) -> None:
+def check_utf8(values: np.ndarray, expectation: str, place: str | None) -> None:
     """Refuse values that include bytes that are not UTF-8 text.
 
     Raises:
@@ -50,32 +84,113 @@ def check_utf8(values: np.ndarray, expectation: str, place: str) -> None:
                 raise utf8_refusal(value, row, expectation, place) from None
 
 
-def _identifier_texts(values: Any, label: str) -> np.ndarray:
-    """Return identifiers as text after rejecting missing and blank ones."""
-    array = np.asarray(values, dtype=object)
-    if array.ndim != 1:
-        raise ValueError(f"{label} must be one-dimensional")
-    texts = np.asarray(
-        ["" if value is None else as_text(value) for value in array],
-        dtype=str,
-    )
-    if texts.size and bool(np.any(np.char.strip(texts) == "")):
-        raise ValueError(f"{label} must contain non-empty values")
+def utf8_texts(values: np.ndarray, expectation: str, place: str | None) -> list[str]:
+    """Return values as text, as :func:`as_text` converts each.
+
+    Args:
+        values: One-dimensional values, such as the bytes of a dataset.
+        expectation: What the values must be, which a refusal starts with.
+        place: Where the values are, which a refusal names, as
+            :func:`utf8_refusal` takes it.
+
+    Raises:
+        ValueError: If a value is bytes that are not UTF-8 text, as
+            :func:`check_utf8` refuses the first.
+    """
+    texts: list[str] = []
+    # Blocks bound the Python objects of the values held beside the texts.
+    for start in range(0, len(values), _DECODE_ROWS):
+        try:
+            texts += [
+                value.decode("utf-8") if isinstance(value, bytes) else str(value)
+                for value in values[start : start + _DECODE_ROWS].tolist()
+            ]
+        except UnicodeDecodeError:
+            # The refusal names the first such value, which the decode does not.
+            check_utf8(values, expectation, place)
+            raise
     return texts
 
 
-def require_unique_identifiers(values: Any, label: str) -> None:
+def check_identifiers(values: np.ndarray, label: str, place: str | None) -> None:
+    """Refuse IDs that an import cannot store.
+
+    Args:
+        values: The IDs as the file holds them.
+        label: What the IDs are, such as ``"H5AD cell IDs"``.
+        place: Where they are, such as ``the obs index '_index' of
+            'pbmc.h5ad'``, or None to name the rows alone.
+
+    Raises:
+        ValueError: If an ID is bytes that are not UTF-8 text, naming the
+            first row that holds them, or if IDs are missing, as None or as
+            NaN in a column of numbers, or blank, naming their rows.
+    """
+    # One pass, decoding inline: a call per ID would take several times as long.
+    missing: list[int] = []
+    for row, value in enumerate(values.tolist()):
+        if isinstance(value, bytes):
+            try:
+                value = value.decode("utf-8")
+            except UnicodeDecodeError:
+                raise utf8_refusal(
+                    value, row, f"{label} must be UTF-8 text", place
+                ) from None
+        elif value is None or (
+            isinstance(value, float | np.floating) and math.isnan(value)
+        ):
+            missing.append(row)
+            continue
+        # The text that an import stores: the decoded bytes, or the str of
+        # another value, such as a number.
+        if not str(value).strip():
+            missing.append(row)
+    if missing:
+        state = "is" if len(missing) == 1 else "are"
+        raise ValueError(
+            f"{label} must contain non-empty values; {_named_rows(missing)}"
+            f"{_of(place)} {state} missing or blank"
+        )
+
+
+def _identifier_texts(values: Any, label: str, place: str | None) -> np.ndarray:
+    """Return identifiers as the text that an import stores.
+
+    Raises:
+        ValueError: If the identifiers are not one-dimensional, or
+            :func:`check_identifiers` refuses one.
+    """
+    array = np.asarray(values, dtype=object)
+    if array.ndim != 1:
+        raise ValueError(f"{label} must be one-dimensional")
+    items = array.tolist()
+    # IDs that are text and not blank need neither a check nor a conversion
+    # of their own, and both tests run at C speed.
+    if not (set(map(type, items)) <= _TEXT_TYPES and all(map(str.strip, items))):
+        check_identifiers(array, label, place)
+        items = utf8_texts(array, f"{label} must be UTF-8 text", place)
+    return np.asarray(items, dtype=str)
+
+
+def require_unique_identifiers(
+    values: Any, label: str, *, place: str | None = None
+) -> None:
     """Reject identifiers that are missing, blank, or repeated.
 
     Args:
         values: One-dimensional identifiers. Byte strings are decoded as UTF-8.
         label: Name of the identifiers used in error messages, such as
             ``Cell IDs``.
+        place: Where the identifiers are, such as ``column 1 of
+            'barcodes.tsv'``, which refusals name with the rows. Without it,
+            refusals name the rows alone.
 
     Raises:
-        ValueError: If a value is missing or blank, or a value repeats.
+        ValueError: If a value is bytes that are not UTF-8 text, missing,
+            as None or NaN, or blank, as :func:`check_identifiers` refuses
+            it, or a value repeats.
     """
-    if has_duplicates(_identifier_texts(values, label)):
+    if has_duplicates(_identifier_texts(values, label, place)):
         raise ValueError(f"{label} must contain unique values")
 
 
@@ -118,6 +233,8 @@ def unique_feature_identifiers(
     values: np.ndarray,
     label: str,
     duplicates: DuplicateFeatureIds,
+    *,
+    place: str | None = None,
 ) -> np.ndarray:
     """Return feature identifiers that are present and unique.
 
@@ -135,6 +252,8 @@ def unique_feature_identifiers(
         label: Name of the identifiers used in messages, such as
             ``Feature IDs``.
         duplicates: ``"error"`` or ``"make_unique"``.
+        place: Where the identifiers are, which refusals name with the rows,
+            as :func:`require_unique_identifiers` takes it.
 
     Returns:
         ``values`` itself when no identifier repeats. Otherwise an object
@@ -142,7 +261,7 @@ def unique_feature_identifiers(
         occurrence of a repeated identifier is renamed.
 
     Raises:
-        ValueError: If a value is missing or blank, or, with
+        ValueError: If :func:`check_identifiers` refuses a value, or, with
             ``duplicates="error"``, if a value repeats.
     """
     return _unique_identifiers(
@@ -151,6 +270,7 @@ def unique_feature_identifiers(
         duplicates,
         option="duplicate_feature_ids",
         note=" Feature names are unchanged.",
+        place=place,
     )
 
 
@@ -158,6 +278,8 @@ def unique_cell_identifiers(
     values: np.ndarray,
     label: str,
     duplicates: DuplicateCellIds,
+    *,
+    place: str | None = None,
 ) -> np.ndarray:
     """Return cell identifiers that are present and unique.
 
@@ -167,12 +289,12 @@ def unique_cell_identifiers(
     ``"make_unique"``.
 
     Raises:
-        ValueError: If a value is missing or blank, or, with
+        ValueError: If :func:`check_identifiers` refuses a value, or, with
             ``duplicates="error"``, if a value repeats. The message names the
             ``duplicate_cell_ids`` option.
     """
     return _unique_identifiers(
-        values, label, duplicates, option="duplicate_cell_ids", note=""
+        values, label, duplicates, option="duplicate_cell_ids", note="", place=place
     )
 
 
@@ -183,8 +305,9 @@ def _unique_identifiers(
     *,
     option: str,
     note: str,
+    place: str | None,
 ) -> np.ndarray:
-    texts = _identifier_texts(values, label)
+    texts = _identifier_texts(values, label, place)
     if not has_duplicates(texts):
         return values
     if duplicates == "error":

@@ -6,7 +6,7 @@ import stat
 import tempfile
 import weakref
 import zipfile
-from collections.abc import Callable, Generator, Iterator
+from collections.abc import Callable, Generator, Hashable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
@@ -37,11 +37,46 @@ from ._text import (
     duplicate_feature_ids_option,
     require_unique_identifiers,
     unique_feature_identifiers,
+    utf8_refusal,
 )
-from ..utils.arguments import bool_argument
+from ..utils.arguments import bool_argument, quoted_value
 
 type MatrixOrientation = Literal["featuresByCells", "cellsByFeatures"]
 type CoordinateOrder = Literal["cellMajor", "featureMajor", "unordered"]
+
+# What refusals call the IDs and names that an import stores.
+_CELL_IDS = "Cell IDs"
+_FEATURE_IDS = "Feature IDs"
+_FEATURE_NAMES = "Feature names"
+_REFERENCE_IDS = "Feature-reference IDs"
+# What refusals call the values of the other columns of a sidecar, and of a
+# feature reference.
+_SIDECAR_VALUES = "Matrix Market sidecars"
+_REFERENCE_VALUES = "Feature references"
+# The columns of a Parse gene table that hold the feature IDs and names, and
+# of a 10x Feature Reference that hold the IDs, in order of preference.
+_PARSE_ID_COLUMNS = ("gene_id", "feature_id", "id", "gene")
+_PARSE_NAME_COLUMNS = ("gene_name", "feature_name", "name", "gene_symbol")
+_REFERENCE_ID_COLUMNS = ("id", "feature_id", "gene_id")
+# What refusals call the values of each column of a sidecar: by position in a
+# table without a header, as 10x Genomics writes them, and by name in lower
+# case in one with a header.
+_FEATURE_SUBJECTS: dict[Hashable, str] = {
+    0: _FEATURE_IDS,
+    1: _FEATURE_NAMES,
+    2: "Feature types",
+}
+_PEAK_SUBJECTS: dict[Hashable, str] = {0: _FEATURE_IDS}
+_CELL_SUBJECTS: dict[Hashable, str] = {0: _CELL_IDS}
+_PARSE_FEATURE_SUBJECTS: dict[Hashable, str] = {
+    **dict.fromkeys(_PARSE_ID_COLUMNS, _FEATURE_IDS),
+    **dict.fromkeys(_PARSE_NAME_COLUMNS, _FEATURE_NAMES),
+}
+_REFERENCE_SUBJECTS: dict[Hashable, str] = dict.fromkeys(
+    _REFERENCE_ID_COLUMNS, _REFERENCE_IDS
+)
+# The rows that the search for text that is not UTF-8 reads at once.
+_TEXT_SEARCH_ROWS = 65_536
 
 _CHANGED_COUNT_MESSAGE = (
     "A Matrix Market count exceeds the largest count found when the reader "
@@ -226,14 +261,174 @@ def _resolve_triplet(
 
 
 @contextmanager
-def _open_path_text(path: str) -> Iterator[TextIO]:
-    with open_text(path) as handle:
+def _open_path_text(path: str, errors: str = "strict") -> Iterator[TextIO]:
+    with open_text(path, errors=errors) as handle:
         yield handle
 
 
 def _compression(path: str) -> str | None:
     """The compression of a file for pandas to read, by its first bytes."""
     return "gzip" if is_gzip(path) else None
+
+
+def _column_place(column: Hashable, name: str) -> str:
+    """Name a column of a sidecar as refusals name it.
+
+    A table without a header names its columns by position, counting from 1,
+    such as ``column 2 of 'features.tsv'``, and one with a header by name,
+    such as ``the column 'gene_name' of 'all_genes.csv'``.
+    """
+    if isinstance(column, int):
+        return f"column {column + 1} of {name}"
+    return f"the column {column!r} of {name}"
+
+
+def _column_subject(
+    column: Hashable, subjects: Mapping[Hashable, str], other: str
+) -> str:
+    """Return what refusals call the values of a sidecar's column.
+
+    Args:
+        column: The column's position, or its name.
+        subjects: What refusals call the values of columns, by position or
+            by name in lower case.
+        other: What refusals call the values of the other columns.
+    """
+    key = column.lower() if isinstance(column, str) else column
+    return subjects.get(key, other)
+
+
+def _holds_escaped_bytes(text: str) -> bool:
+    """Return whether text read with ``surrogateescape`` holds bytes that are not UTF-8."""
+    if text.isascii():
+        return False
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        return True
+    return False
+
+
+def _first_escaped_value(frame: pd.DataFrame) -> tuple[int, int, str] | None:
+    """Return the first value of a table, row by row, that holds escaped bytes.
+
+    Returns:
+        The value's row and column, as positions, and the value, or None
+        when no value holds such bytes.
+    """
+    found: tuple[int, int, str] | None = None
+    for position in range(frame.shape[1]):
+        values = frame.iloc[:, position].tolist()
+        # A later column can only hold an earlier row.
+        for row in range(len(values) if found is None else found[0]):
+            value = values[row]
+            if isinstance(value, str) and _holds_escaped_bytes(value):
+                found = (row, position, value)
+                break
+    return found
+
+
+def _text_refusal(
+    path: str,
+    name: str,
+    subjects: Mapping[Hashable, str],
+    other: str,
+    *,
+    sep: str,
+    header: bool,
+) -> ValueError:
+    """Return the refusal of a sidecar that holds bytes that are not UTF-8.
+
+    The sidecar is read again, a chunk at a time, keeping such bytes, to find
+    the first value that holds them, its row and its column. A header is read
+    as the first row: pandas cannot name columns by text that holds such
+    bytes once pyarrow stores its text.
+
+    Args:
+        path: The file.
+        name: The file as refusals name it.
+        subjects: What refusals call the values of columns, as
+            :func:`_column_subject` takes them.
+        other: What refusals call the values of the other columns.
+        sep: The delimiter of the fields.
+        header: Whether the first row names the columns.
+    """
+    chunks = pd.read_csv(
+        path,
+        sep=sep,
+        header=None,
+        dtype=object,
+        keep_default_na=False,
+        encoding_errors="surrogateescape",
+        chunksize=_TEXT_SEARCH_ROWS,
+        compression=_compression(path),
+    )
+    with chunks:
+        # The column names, and the file's row of each chunk's first row.
+        names: list[Any] = []
+        start = 0
+        for chunk in chunks:
+            if header and not start:
+                names = chunk.iloc[0].tolist()
+            found = _first_escaped_value(chunk)
+            if found is not None:
+                row, position, value = found
+                row += start
+                held = value.encode("utf-8", "surrogateescape")
+                if header and not row:
+                    return ValueError(
+                        f"{other} must be UTF-8 text; the header of {name} holds "
+                        f"{quoted_value(held)}"
+                    )
+                column: Hashable = names[position] if header else position
+                return utf8_refusal(
+                    held,
+                    row - 1 if header else row,
+                    f"{_column_subject(column, subjects, other)} must be UTF-8 text",
+                    _column_place(column, name),
+                )
+            start += len(chunk)
+    return ValueError(f"{other} must be UTF-8 text, but {name} is not")
+
+
+def _read_sidecar(
+    path: str,
+    name: str,
+    subjects: Mapping[Hashable, str],
+    other: str,
+    *,
+    sep: str,
+    header: bool,
+    **options: Any,
+) -> pd.DataFrame:
+    """Read a sidecar table with pandas, refusing bytes that are not UTF-8.
+
+    Args:
+        path: The file.
+        name: The file as refusals name it, such as a member of a ZIP
+            archive.
+        subjects: What refusals call the values of columns, as
+            :func:`_column_subject` takes them.
+        other: What refusals call the values of the other columns.
+        sep: The delimiter of the fields.
+        header: Whether the first row names the columns.
+        options: Other arguments of :func:`pandas.read_csv`.
+
+    Raises:
+        ValueError: If the file holds bytes that are not UTF-8, naming the
+            first value that holds them, its row and its column.
+    """
+    try:
+        return pd.read_csv(
+            path,
+            sep=sep,
+            header=0 if header else None,
+            compression=_compression(path),
+            **options,
+        )
+    except UnicodeDecodeError:
+        pass
+    raise _text_refusal(path, name, subjects, other, sep=sep, header=header)
 
 
 def _zip_member_mode(info: zipfile.ZipInfo) -> int:
@@ -267,9 +462,10 @@ def _validated_zip_infos(archive: zipfile.ZipFile) -> dict[str, zipfile.ZipInfo]
 def _open_zip_text(
     archive: zipfile.ZipFile,
     info: zipfile.ZipInfo,
+    errors: str = "strict",
 ) -> Iterator[TextIO]:
     with archive.open(info, mode="r") as raw:
-        with open_text(raw) as text:
+        with open_text(raw, errors=errors) as text:
             yield text
 
 
@@ -294,16 +490,19 @@ def _candidate_from_triplet(
     source: str,
     archive_path: str | None,
     triplet: _ResolvedTriplet,
-    open_text: Callable[[str], Any],
+    open_text: Callable[..., Any],
 ) -> MtxCandidate:
     with open_text(triplet.matrix) as handle:
         header = read_matrix_market_header(handle, triplet.matrix)
+    # Counting rows reads no ID, so a sidecar that is not UTF-8 text is
+    # counted here, and the reader refuses it with the row that holds such
+    # text.
     feature_rows = _count_sidecar_rows(
-        lambda: open_text(triplet.features),
+        lambda: open_text(triplet.features, errors="surrogateescape"),
         header=triplet.parseLayout,
     )
     cell_rows = _count_sidecar_rows(
-        lambda: open_text(triplet.cells),
+        lambda: open_text(triplet.cells, errors="surrogateescape"),
         header=triplet.parseLayout,
     )
     preferred: MatrixOrientation = (
@@ -328,7 +527,8 @@ def _candidate_from_triplet(
         tuple(
             key
             for key in ("bc_wells", "bc_index")
-            if key in _csv_header(lambda: open_text(triplet.cells))
+            if key
+            in _csv_header(lambda: open_text(triplet.cells, errors="surrogateescape"))
         )
         if triplet.parseLayout
         else ()
@@ -367,8 +567,8 @@ def inspect_mtx(source: str | Path) -> tuple[MtxCandidate, ...]:
             )
 
             @contextmanager
-            def open_member(name: str) -> Iterator[TextIO]:
-                with _open_zip_text(archive, infos[name]) as handle:
+            def open_member(name: str, errors: str = "strict") -> Iterator[TextIO]:
+                with _open_zip_text(archive, infos[name], errors) as handle:
                     yield handle
 
             for matrix_name in (name for name in names if _is_matrix_path(name)):
@@ -400,7 +600,7 @@ def inspect_mtx(source: str | Path) -> tuple[MtxCandidate, ...]:
                     source=str(source_path),
                     archive_path=None,
                     triplet=triplet,
-                    open_text=lambda name: _open_path_text(name),
+                    open_text=_open_path_text,
                 )
             )
 
@@ -448,7 +648,7 @@ def _explicit_candidate(
             source=matrix,
             archive_path=None,
             triplet=triplet,
-            open_text=lambda name: _open_path_text(name),
+            open_text=_open_path_text,
         ),
         featureReferencePath=(
             str(_local_absolute(feature_reference_path))
@@ -541,18 +741,23 @@ class _MtxEngine:
                 self._sourceFeatureIds,
                 self._rawFeatureNames,
                 self._rawFeatureTypes,
+                feature_id_place,
             ) = self._read_features()
             (
                 self._rawCellNames,
                 self._rawCellColumns,
                 self.selectedCellIdKey,
+                cell_id_place,
             ) = self._read_cells(cell_id_key)
             self._rawFeatureIds = unique_feature_identifiers(
                 self._sourceFeatureIds,
-                "Feature IDs",
+                _FEATURE_IDS,
                 self.duplicateFeatureIds,
+                place=feature_id_place,
             )
-            require_unique_identifiers(self._rawCellNames, "Cell IDs")
+            require_unique_identifiers(
+                self._rawCellNames, _CELL_IDS, place=cell_id_place
+            )
 
             (
                 row_nnz,
@@ -648,6 +853,16 @@ class _MtxEngine:
             return self.candidate.matrixPath
         return f"{self.candidate.matrixPath} in {self.candidate.archivePath}"
 
+    def _sidecar_name(self, path: str) -> str:
+        """A sidecar as refusals name it: its path, or its member of a ZIP archive.
+
+        Args:
+            path: The sidecar's path in the candidate.
+        """
+        if self.candidate.archivePath is None:
+            return quoted_value(path)
+        return f"{quoted_value(path)} in {quoted_value(self.candidate.archivePath)}"
+
     def _set_valid_cells(self, valid: np.ndarray) -> None:
         self.validCellIndexes = valid
         self.nCells = int(valid.size)
@@ -663,38 +878,50 @@ class _MtxEngine:
         # Batches hold the kept counts in the narrowest dtype that holds them.
         self.matrixDtype: np.dtype[Any] = np.min_scalar_type(self.countMaximum)
 
-    def _read_features(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def _read_features(self) -> tuple[np.ndarray, np.ndarray, np.ndarray, str]:
+        """Return the feature IDs, names and types, and the place of the IDs.
+
+        The place names the IDs' column, as refusals name it.
+        """
+        sidecar = self._sidecar_name(self.candidate.featurePath)
         if _is_bed_sidecar(self.candidate.featurePath):
-            ids = self._read_bed_features()
+            ids = self._read_bed_features(sidecar)
             names = ids.copy()
             types = np.full(ids.size, "Peaks", dtype=object)
+            id_place = _column_place(0, sidecar)
         elif _is_parse_matrix(self.candidate.matrixPath):
-            frame = pd.read_csv(
-                self.featurePath, compression=_compression(self.featurePath)
+            # Each ID and name is the text of its field: pandas would read
+            # text such as NA as a missing value.
+            frame = _read_sidecar(
+                self.featurePath,
+                sidecar,
+                _PARSE_FEATURE_SUBJECTS,
+                _SIDECAR_VALUES,
+                sep=",",
+                header=True,
+                dtype=str,
+                keep_default_na=False,
             )
             columns = tuple(str(value) for value in frame.columns)
-            id_column = _column_name(
-                columns,
-                ("gene_id", "feature_id", "id", "gene"),
-            )
+            id_column = _column_name(columns, _PARSE_ID_COLUMNS)
             try:
-                name_column = _column_name(
-                    columns,
-                    ("gene_name", "feature_name", "name", "gene_symbol"),
-                )
+                name_column = _column_name(columns, _PARSE_NAME_COLUMNS)
             except ValueError:
                 name_column = id_column
             ids = frame[id_column].astype(str).to_numpy()
             names = frame[name_column].astype(str).to_numpy()
             types = np.full(ids.size, "Gene Expression", dtype=object)
+            id_place = _column_place(id_column, sidecar)
         else:
-            frame = pd.read_csv(
+            frame = _read_sidecar(
                 self.featurePath,
+                sidecar,
+                _FEATURE_SUBJECTS,
+                _SIDECAR_VALUES,
                 sep="\t",
-                header=None,
+                header=False,
                 dtype=str,
                 keep_default_na=False,
-                compression=_compression(self.featurePath),
             )
             ids = frame.iloc[:, 0].astype(str).to_numpy()
             names = (
@@ -707,21 +934,28 @@ class _MtxEngine:
                 if frame.shape[1] > 2
                 else np.full(ids.size, "Gene Expression", dtype=object)
             )
+            id_place = _column_place(0, sidecar)
         if ids.size != self.nFeatures:
             raise ValueError(
                 f"Feature sidecar has {ids.size} rows, expected {self.nFeatures}"
             )
-        return ids, names, types
+        return ids, names, types, id_place
 
-    def _read_bed_features(self) -> np.ndarray:
-        """Return ``chrom:start-end`` identifiers for peak BED rows."""
-        frame = pd.read_csv(
+    def _read_bed_features(self, sidecar: str) -> np.ndarray:
+        """Return ``chrom:start-end`` identifiers for peak BED rows.
+
+        Args:
+            sidecar: The BED file as refusals name it.
+        """
+        frame = _read_sidecar(
             self.featurePath,
+            sidecar,
+            _PEAK_SUBJECTS,
+            _SIDECAR_VALUES,
             sep="\t",
-            header=None,
+            header=False,
             dtype=str,
             keep_default_na=False,
-            compression=_compression(self.featurePath),
         )
         if frame.shape[1] < 3:
             raise ValueError(
@@ -743,9 +977,30 @@ class _MtxEngine:
     def _read_cells(
         self,
         cell_id_key: str | None,
-    ) -> tuple[np.ndarray, dict[str, np.ndarray], str | None]:
+    ) -> tuple[np.ndarray, dict[str, np.ndarray], str | None, str]:
+        """Return the cell IDs, cell metadata, the ID column's name and the IDs' place.
+
+        The name is that of the Parse cell metadata column of the IDs, None
+        for a 10x sidecar, and the place names the IDs' column, as refusals
+        name it.
+        """
+        sidecar = self._sidecar_name(self.candidate.cellPath)
         if _is_parse_matrix(self.candidate.matrixPath):
-            frame = pd.read_csv(self.cellPath, compression=_compression(self.cellPath))
+            id_keys = (
+                ("bc_wells", "bc_index") if cell_id_key is None else (cell_id_key,)
+            )
+            # Each ID is the text of its field: pandas would read text such as
+            # NA as a missing value. The metadata columns read as pandas
+            # reads them.
+            frame = _read_sidecar(
+                self.cellPath,
+                sidecar,
+                {key.lower(): _CELL_IDS for key in id_keys},
+                _SIDECAR_VALUES,
+                sep=",",
+                header=True,
+                converters=dict.fromkeys(id_keys, str),
+            )
             aliases = [key for key in ("bc_wells", "bc_index") if key in frame.columns]
             if cell_id_key is None:
                 if len(aliases) != 1:
@@ -765,15 +1020,18 @@ class _MtxEngine:
                 for name in frame.columns
                 if name != selected_key
             }
+            id_place = _column_place(selected_key, sidecar)
         else:
             try:
-                frame = pd.read_csv(
+                frame = _read_sidecar(
                     self.cellPath,
+                    sidecar,
+                    _CELL_SUBJECTS,
+                    _SIDECAR_VALUES,
                     sep="\t",
-                    header=None,
+                    header=False,
                     dtype=str,
                     keep_default_na=False,
-                    compression=_compression(self.cellPath),
                 )
             except pd.errors.EmptyDataError:
                 # A sidecar without lines lists no cells.
@@ -782,11 +1040,12 @@ class _MtxEngine:
                 names = frame.iloc[:, 0].astype(str).to_numpy()
             columns = {}
             selected_key = None
+            id_place = _column_place(0, sidecar)
         if names.size != self.rawCellCount:
             raise ValueError(
                 f"Cell sidecar has {names.size} rows, expected {self.rawCellCount}"
             )
-        return names, columns, selected_key
+        return names, columns, selected_key, id_place
 
     def _feature_reference_columns(self) -> dict[str, np.ndarray]:
         """Align optional feature-reference columns to the matrix features.
@@ -799,14 +1058,34 @@ class _MtxEngine:
         if reference_path is None:
             return {}
         path = self._local_path(reference_path)
-        frame = pd.read_csv(path, compression=_compression(path))
-        columns = tuple(str(value) for value in frame.columns)
+        sidecar = self._sidecar_name(reference_path)
+        # The header names the column of IDs, each of which is the text of its
+        # field: pandas would read text such as NA as a missing value.
+        labels = _read_sidecar(
+            path,
+            sidecar,
+            _REFERENCE_SUBJECTS,
+            _REFERENCE_VALUES,
+            sep=",",
+            header=True,
+            nrows=0,
+        ).columns
         id_column = _column_name(
-            columns,
-            ("id", "feature_id", "gene_id"),
+            tuple(str(value) for value in labels), _REFERENCE_ID_COLUMNS
+        )
+        frame = _read_sidecar(
+            path,
+            sidecar,
+            _REFERENCE_SUBJECTS,
+            _REFERENCE_VALUES,
+            sep=",",
+            header=True,
+            converters={id_column: str},
         )
         reference_ids = frame[id_column].astype(str).to_numpy()
-        require_unique_identifiers(reference_ids, "Feature-reference IDs")
+        require_unique_identifiers(
+            reference_ids, _REFERENCE_IDS, place=_column_place(id_column, sidecar)
+        )
         # The reference names features by their IDs in the feature sidecar,
         # before any repeated ID is renamed.
         unknown = sorted(set(reference_ids).difference(self._sourceFeatureIds))
