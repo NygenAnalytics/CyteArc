@@ -36,7 +36,6 @@ from ._h5ad_columns import (
     H5adCategories,
     TableColumn,
     category_colors,
-    check_utf8,
     column_categories,
     column_encoding,
     column_length,
@@ -54,7 +53,6 @@ from ._h5ad_columns import (
     table_column_dtype,
     table_column_names,
     table_members,
-    utf8_refusal,
 )
 from ._h5ad_inspect import H5adInspectResult, inspect_h5ad as inspect_h5ad
 from ._h5ad_values import (
@@ -77,10 +75,12 @@ from ._text import (
     DuplicateCellIds,
     DuplicateFeatureIds,
     as_text,
+    check_utf8,
     duplicate_cell_ids_option,
     duplicate_feature_ids_option,
     unique_cell_identifiers,
     unique_feature_identifiers,
+    utf8_refusal,
 )
 
 type H5adEmbeddingRole = Literal["umap", "tsne", "coordinates"]

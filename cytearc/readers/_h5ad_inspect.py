@@ -13,7 +13,6 @@ from ._assay_names import (
 )
 from ._h5ad_columns import (
     SPARSE_KEYS,
-    check_utf8,
     column_length,
     column_place,
     index_key as _index_key,
@@ -24,7 +23,7 @@ from ._h5ad_columns import (
     sparse_shape,
     table_column_names,
 )
-from ._text import as_text as _as_text
+from ._text import as_text as _as_text, check_utf8
 
 _FEATURE_ID_KEYS = (
     "_index",
