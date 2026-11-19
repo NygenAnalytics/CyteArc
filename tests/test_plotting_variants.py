@@ -148,6 +148,7 @@ def test_groups_of_several_columns_split_the_cells(plotted) -> None:
     # c4 has no group in the first column, so it has none.
     assert result.tables["cells"]["group"].tolist() == ["x, a", "x, b", "y, a", "y, b"]
     assert result.legends[0].label == "group, half"
+    assert _depth_legend_title(result) == "group, half"
     plt.close(result.figure)
     labels = store.snapshot_cluster_labels(
         "half", cell_selection=store.snapshot_cell_selection("every_cell")
@@ -155,8 +156,10 @@ def test_groups_of_several_columns_split_the_cells(plotted) -> None:
     # A column and a label artifact group the cells together.
     both = variant_depth(store, targets, group_by="group", groups=labels, show=False)
     assert both.tables["cells"]["group"].tolist() == ["x, a", "x, b", "y, a", "y, b"]
+    # The labels take the title of the column they copied, in the record and
+    # in the legend of the cells' depths.
     assert both.provenance.extras["grouping"] == "group, half"
-    plt.close(both.figure)
+    assert _depth_legend_title(both) == "group, half"
     named = variant_depth(
         store,
         targets,
@@ -164,7 +167,12 @@ def test_groups_of_several_columns_split_the_cells(plotted) -> None:
         groups=NamedCellArtifact("Half", labels),
         show=False,
     )
+    # A name titles the labels instead, and changes nothing else.
     assert named.provenance.extras["grouping"] == "group, Half"
+    assert named.legends[0].label == "group, Half"
+    assert _depth_legend_title(named) == "group, Half"
+    assert named.tables["cells"].equals(both.tables["cells"])
+    plt.close(both.figure)
     plt.close(named.figure)
 
 
@@ -299,9 +307,28 @@ def test_variant_statistics_without_strands_draws_depth(tmp_path) -> None:
     assert ax.get_xlabel() == "Mean depth at the site" and ax.get_xscale() == "log"
     assert result.provenance.extras["x"] == "mean_coverage"
     assert result.tables["variants"]["strand_correlation"].isna().all()
+    # Each threshold set is a dotted line: the VMR across, the depth upright.
+    assert _threshold_lines(ax) == [("across", 0.01), ("upright", 5.0)]
     plt.close(result.figure)
+    # A selection without a VMR threshold draws the depth's line alone.
+    by_depth = store.variants.informative(counts, min_depth=5)
+    alone = variant_statistics(store, by_depth, show=False)
+    assert _threshold_lines(alone.axes["variants"]) == [("upright", 5.0)]
+    plt.close(alone.figure)
     with pytest.raises(TypeError, match="does not provide variants.load_informative"):
         variant_statistics(object(), selection, show=False)
+
+
+def _threshold_lines(ax) -> list[tuple[str, float]]:
+    """Each dotted line of a panel: whether it runs across or upright, and where."""
+    found = []
+    for line in ax.get_lines():
+        if line.get_linestyle() != ":":
+            continue
+        xs, ys = (np.asarray(data, dtype=np.float64) for data in line.get_data())
+        across = ys[0] == ys[-1] and xs[0] != xs[-1]
+        found.append(("across", ys[0]) if across else ("upright", xs[0]))
+    return found
 
 
 def _truth_frequency(truth, cell: str, variant: str) -> float:
@@ -594,6 +621,41 @@ def test_allele_frequencies_show_and_need_a_store_with_clones(scored) -> None:
         )
 
 
+def _depth_legend_title(result) -> str:
+    """The title of the legend of the groups beside the cells' depths."""
+    return result.axes["cells"].get_legend().get_title().get_text()
+
+
+# Each genotype call by the color it is drawn in.
+_CALL_OF_COLOR = {
+    "#4c78a8": "wild_type",
+    "#f58518": "heterozygous",
+    "#e45756": "homozygous_alternative",
+    "#b279a2": "alternative_present",
+    "#bdbdbd": "missing",
+    "#e2e2e2": "filtered",
+}
+
+
+def _drawn_shares(ax) -> dict[tuple[str, str], float]:
+    """Each drawn bar part by its bar's name and its call, read from its color: its width."""
+    names = dict(
+        zip(
+            ax.get_yticks().tolist(),
+            [label.get_text() for label in ax.get_yticklabels()],
+            strict=True,
+        )
+    )
+    drawn = {}
+    for patch in ax.patches:
+        if patch.get_width() > 0:
+            middle = patch.get_y() + patch.get_height() / 2
+            name = names[min(names, key=lambda tick: abs(tick - middle))]
+            call = _CALL_OF_COLOR[to_hex(patch.get_facecolor())]
+            drawn[(name, call)] = patch.get_width()
+    return drawn
+
+
 def _shares(result) -> dict[tuple[str, str], dict[str, float]]:
     """Each bar's share of each call that is not zero."""
     shares: dict[tuple[str, str], dict[str, float]] = {}
@@ -630,6 +692,16 @@ def test_genotypes_draw_each_sites_calls_by_group(plotted) -> None:
         "Missing",
     ]
     assert set(calls["call"]) == set(GENOTYPE_CALL_SCALE.order)
+    # Each bar is drawn in parts of the calls' colors, as wide as their shares.
+    assert _drawn_shares(ax) == pytest.approx(
+        {
+            ("CALR", "wild_type"): 0.2,
+            ("CALR", "alternative_present"): 0.4,
+            ("CALR", "missing"): 0.4,
+            ("SF3B1", "alternative_present"): 0.2,
+            ("SF3B1", "missing"): 0.8,
+        }
+    )
     # c4 has no group and is left out.
     grouped = genotypes(store, called, group_by="group", show=False)
     assert _shares(grouped) == {
@@ -641,6 +713,16 @@ def test_genotypes_draw_each_sites_calls_by_group(plotted) -> None:
     assert grouped.provenance.n_cells == 4
     labels = [label.get_text() for label in grouped.axes["calls"].get_yticklabels()]
     assert labels == ["CALR, x", "CALR, y", "SF3B1, x", "SF3B1, y"]
+    by_group = {
+        ("CALR, x", "wild_type"): 0.5,
+        ("CALR, x", "alternative_present"): 0.5,
+        ("CALR, y", "alternative_present"): 0.5,
+        ("CALR, y", "missing"): 0.5,
+        ("SF3B1, x", "alternative_present"): 0.5,
+        ("SF3B1, x", "missing"): 0.5,
+        ("SF3B1, y", "missing"): 1.0,
+    }
+    assert _drawn_shares(grouped.axes["calls"]) == pytest.approx(by_group)
     plt.close(result.figure)
     plt.close(grouped.figure)
     # Groups of two columns: c0 and c2 in a, c1 and c3 in b.
@@ -663,12 +745,16 @@ def test_genotypes_draw_each_sites_calls_by_group(plotted) -> None:
     )
     by_labels = genotypes(store, called, groups=labels, show=False)
     assert _shares(by_labels) == _shares(grouped)
+    assert _drawn_shares(by_labels.axes["calls"]) == pytest.approx(by_group)
     assert by_labels.provenance.extras["grouping"] == "group"
     plt.close(by_labels.figure)
+    # A name titles the labels in the record; the bars are named by their
+    # sites and groups alone.
     named = genotypes(
         store, called, groups=NamedCellArtifact("Group", labels), show=False
     )
     assert named.provenance.extras["grouping"] == "Group"
+    assert _drawn_shares(named.axes["calls"]) == pytest.approx(by_group)
     plt.close(named.figure)
 
 
@@ -805,6 +891,21 @@ def test_genotypes_color_a_layout_of_their_cells_that_another_selection_holds(
         "alternative_present",
         "missing",
         "missing",
+    ]
+    # The drawing takes the same places and colors, the cells without a call
+    # first, so the others sit on top of them.
+    (points,) = result.axes["layout"].collections
+    drawn = [
+        (tuple(offset), to_hex(color))
+        for offset, color in zip(
+            points.get_offsets(), points.get_facecolors(), strict=True
+        )
+    ]
+    assert sorted(drawn[:2]) == [((3.0, 8.0), "#bdbdbd"), ((4.0, 9.0), "#bdbdbd")]
+    assert sorted(drawn[2:]) == [
+        ((0.0, 5.0), "#b279a2"),
+        ((1.0, 6.0), "#4c78a8"),
+        ((2.0, 7.0), "#b279a2"),
     ]
     assert result.provenance.extras["layout"] == layout.to_dict()
     plt.close(result.figure)

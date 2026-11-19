@@ -340,6 +340,24 @@ class _AxisProbe:
         self.texts.append((args, kwargs))
 
 
+def test_distribution_keeps_values_whose_mask_marks_no_plotted_row(monkeypatch) -> None:
+    counts = np.array([3, 1, 2], dtype=np.int64)
+    monkeypatch.setattr(distribution_plot, "read_metadata_rows", lambda *_: counts)
+    monkeypatch.setattr(
+        distribution_plot,
+        "read_metadata_missing_rows",
+        lambda *_: np.zeros(3, dtype=bool),
+    )
+
+    values, _ = distribution_plot._fetch_metadata_series(
+        SimpleNamespace(cells=object()), "count", np.arange(3)
+    )
+
+    # The column has a mask, but no plotted row is missing, so the counts
+    # are kept as read rather than copied into floats.
+    assert values is counts
+
+
 def test_distribution_fetch_and_drawing_edge_cases(monkeypatch) -> None:
     store = SimpleNamespace(cells=object())
     indices = np.array([0, 1])

@@ -20,6 +20,7 @@ from cytearc.plotting.embedding import (
     _soft_clip,
     _weighted_quantiles,
 )
+from tests.storage_helpers import by_cell_id
 
 embedding_module = import_module("cytearc.plotting.embedding")
 
@@ -303,6 +304,36 @@ def test_density_overlay_draws_filled_bands_and_haloed_lines():
     # The halo widens the line by the halo width on both sides.
     assert stroke._gc == {"linewidth": 0.8 + 2 * 1.5, "foreground": "#202020"}
     plt.close(figure)
+
+
+def test_a_mean_overlay_contours_means_below_zero():
+    import matplotlib.pyplot as plt
+    from matplotlib.contour import ContourSet
+
+    x, y = _clustered_points()
+    # Every value is below zero, and they fall from left to right.
+    values = -5.0 - x
+    figure, ax = plt.subplots()
+    try:
+        _draw_density_overlay(
+            ax,
+            x,
+            y,
+            overlay=DensityOverlay(statistic="mean", levels=2, sigma=1.0, pixels=32),
+            values=values,
+            xlim=(-4.0, 4.0),
+            ylim=(-4.0, 4.0),
+            theme="notebook",
+        )
+        # Means at or above zero would be contoured only where they exceed
+        # zero; means below it are contoured over their own range.
+        (contours,) = ax.collections
+        assert isinstance(contours, ContourSet)
+        levels = np.asarray(contours.levels)
+        assert len(levels) == 2
+        assert ((values.min() <= levels) & (levels <= values.max())).all()
+    finally:
+        plt.close(figure)
 
 
 def test_density_overlay_skips_levels_outside_the_surface_and_needs_values():
@@ -606,6 +637,26 @@ def test_labels_of_cells_that_hold_the_layouts_color_each_cell(screen, source):
         result.close()
 
 
+def _drawn_colors_by_label(store, layout, labels, label_of) -> dict[str, set[str]]:
+    """The colors that the cells of each label are drawn in on ``layout``.
+
+    Each cell stands at x equal to its store position, and ``label_of`` maps
+    a cell's position to its label.
+    """
+    from matplotlib.colors import to_hex
+
+    result = splt_embedding(store, layout=layout, color_by=labels, show=False)
+    try:
+        (points,) = next(iter(result.axes.values())).collections[:1]
+        cells = np.rint(np.asarray(points.get_offsets())[:, 0]).astype(np.int64)
+        drawn: dict[str, set[str]] = {}
+        for cell, color in zip(cells, points.get_facecolors(), strict=True):
+            drawn.setdefault(label_of(cell), set()).add(to_hex(color))
+        return drawn
+    finally:
+        result.close()
+
+
 def test_labels_of_more_cells_keep_their_colors_on_a_layout_of_fewer(screen):
     store, layouts = screen
     labels = _screen_labels(store, store.select_measured_cells("CRISPR"))
@@ -614,9 +665,47 @@ def test_labels_of_more_cells_keep_their_colors_on_a_layout_of_fewer(screen):
     kept = _palette(store, layouts["kept"], labels)
 
     # A1, which only the cells left out of "kept" carry, sorts between A and
-    # B, and still takes its place among the default colors.
-    assert list(every) == ["A", "A1", "B", "control"]
+    # B, and still takes its place among the default colors: the first four.
+    assert every == {
+        "A": "#1f77b4",
+        "A1": "#ff7f0e",
+        "B": "#279e68",
+        "control": "#d62728",
+    }
     assert kept == {label: every[label] for label in ("A", "B", "control")}
+    # The cells drawn on "kept" take those colors, B the third color, which
+    # colors over the three labels drawn would not give it.
+    label_of = store.perturbation.load_labels(labels).cells["label"]
+    ids = np.asarray(store.cells.fetch_all("ids"))
+    drawn = _drawn_colors_by_label(
+        store, layouts["kept"], labels, lambda cell: label_of[ids[cell]]
+    )
+    assert drawn == {label: {every[label]} for label in ("A", "B", "control")}
+
+
+def test_blank_labels_of_cells_off_the_layout_take_no_color(screen):
+    store, layouts = screen
+    # Clones of every cell, in which the cells left out of "kept" have none,
+    # so their label is blank; the others are of clone x or y. A blank label
+    # would sort first and shift both colors.
+    named = np.where(np.arange(SCREEN_CELLS) % 2 == 0, "x", "y")
+    column = np.where(LEFT_OUT, "", named).astype(object)
+    store.cells.insert(
+        "blank_off_layout", by_cell_id(store.cells, column), overwrite=True
+    )
+    labels = store.clones.from_column(
+        "blank_off_layout", cell_selection=store.snapshot_cell_selection("I")
+    )
+
+    drawn = _drawn_colors_by_label(
+        store, layouts["kept"], labels, lambda cell: column[cell]
+    )
+
+    assert drawn == {"x": {"#1f77b4"}, "y": {"#ff7f0e"}}
+    assert _palette(store, layouts["kept"], labels) == {
+        "x": "#1f77b4",
+        "y": "#ff7f0e",
+    }
 
 
 def test_labels_of_cells_that_miss_some_of_the_layouts_are_refused(screen):

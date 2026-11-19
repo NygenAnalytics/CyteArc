@@ -399,6 +399,26 @@ def test_cluster_connectivity_uses_caller_owned_target_and_optional_cells():
     plt.close(figure)
 
 
+def test_cluster_connectivity_keeps_a_chosen_cell_size_through_layout():
+    from cytearc.plotting._figure import compose_results
+
+    figure, ax = plt.subplots(figsize=(8.0, 8.0))
+    try:
+        result = _plot(_store(), target=ax, show_cells=True, cell_size=3.0)
+        # Composing lays the figure out and sizes the points that follow
+        # their panel, from 4 to 12; a chosen size stays as given.
+        compose_results(figure, [result], panel_labels=False)
+        figure.canvas.draw()
+        (cells,) = [
+            collection for collection in ax.collections if collection.get_zorder() == 0
+        ]
+        assert cells.get_sizes().tolist() == [3.0]
+        assert result.provenance.extras["cell_size"] == 3.0
+        assert result.provenance.extras["cell_size_source"] == "explicit"
+    finally:
+        plt.close(figure)
+
+
 @pytest.mark.parametrize(
     ("column", "replacement", "message"),
     [
@@ -691,7 +711,10 @@ def _artifact_plot(
         return cluster_connectivity(store, show=False, **arguments)
 
 
-def test_cluster_connectivity_reads_aligned_group_and_layout_artifacts(monkeypatch):
+def test_cluster_connectivity_draws_aligned_group_and_layout_artifacts(monkeypatch):
+    # The reads of the artifacts are replaced, so this checks what the plot
+    # makes of aligned groups and layout; the reads themselves are checked
+    # in tests/test_plotting_cell_selections.py.
     result = _artifact_plot(monkeypatch, minimum_edge_weight=0.0)
 
     nodes = result.tables["nodes"]
@@ -708,6 +731,18 @@ def test_cluster_connectivity_reads_aligned_group_and_layout_artifacts(monkeypat
     assert result.provenance.notes == ("cluster_connectivity", "artifact")
     assert result.provenance.extras["groups"] == _GROUPS.to_dict()
     assert result.provenance.extras["layout"] == _LAYOUT.to_dict()
+    # Each group is drawn at the median of its cells, x at (0.5, 0) and y at
+    # (5.5, 5), and their one edge joins them.
+    ax = result.axes["cluster_connectivity"]
+    lines, node_points = ax.collections
+    assert [segment.tolist() for segment in lines.get_segments()] == [
+        [[0.5, 0.0], [5.5, 5.0]]
+    ]
+    np.testing.assert_allclose(node_points.get_offsets(), [[0.5, 0.0], [5.5, 5.0]])
+    assert [(text.get_text(), text.get_position()) for text in ax.texts] == [
+        ("x", (0.5, 0.0)),
+        ("y", (5.5, 5.0)),
+    ]
     result.close()
 
 
@@ -842,11 +877,20 @@ def test_cluster_connectivity_merges_explicit_scale_over_stored_display():
     nodes = renamed.tables["nodes"]
     assert nodes["category"].tolist() == ["C", "A", "B"]
     assert nodes["displayLabel"].tolist() == ["Gamma", "First", "Beta"]
-    assert renamed.scales[0].palette == {
+    scale = renamed.scales[0]
+    assert scale.palette == {
         "C": "#0000aa",
         "A": "#aa0000",
         "B": "#00aa00",
     }
+    assert (scale.missing_label, scale.missing_color) == ("unassigned", "#cccccc")
+    # The nodes are drawn in the stored colors and named by the merged labels.
+    ax = renamed.axes["cluster_connectivity"]
+    np.testing.assert_allclose(
+        ax.collections[1].get_facecolors(),
+        [to_rgba(color) for color in ("#0000aa", "#aa0000", "#00aa00")],
+    )
+    assert [text.get_text() for text in ax.texts] == ["Gamma", "First", "Beta"]
     renamed.close()
 
 

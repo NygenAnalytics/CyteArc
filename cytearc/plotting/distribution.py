@@ -475,9 +475,10 @@ def _draw_ecdf(
         if max_points > 0 and len(vals) > max_points:
             vals = vals[rng.choice(len(vals), size=max_points, replace=False)]
             subsampled = True
+        # _panel_display_frame refuses a panel without a finite value, so the
+        # curve has a step.
         x, y = _ecdf_xy(vals)
-        if len(x):
-            ax.step(x, y, where="post", color=color, linewidth=1.5)
+        ax.step(x, y, where="post", color=color, linewidth=1.5)
         return subsampled
 
     levels = order if order is not None else list(pd.unique(df["group"]))
@@ -1890,10 +1891,10 @@ def distribution(
                 elif horizontal_stack and panel_index > 0:
                     ax.tick_params(axis="y", labelleft=False)
                     ax.set_ylabel("")
+            # _panel_display_frame refuses a panel without a finite value.
             finite = df["value"].to_numpy(dtype=np.float64)
             finite = finite[np.isfinite(finite)]
-            if len(finite):
-                y_limits.append((float(finite.min()), float(finite.max())))
+            y_limits.append((float(finite.min()), float(finite.max())))
 
         resolved_share_y = (
             any_feature and kind in ("violin", "box") if share_y is None else share_y

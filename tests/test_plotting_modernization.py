@@ -917,16 +917,28 @@ def test_embedding_multi_layout_derives_facets_from_selected_cells():
     assert not plt.fignum_exists(figure_number)
 
 
-def test_embedding_facets_preserve_sizes_filters_and_target_legend():
+def test_embedding_facets_preserve_sizes_filters_and_target_legend(monkeypatch):
+    # The highlighted and the kept cells differ between the facets, so each
+    # facet must filter its own cells.
     store = _synthetic_plot_store(
         layout1=np.arange(8, dtype=np.float64),
         layout2=[0.0, 1.0, 0.2, 1.2, 0.4, 1.4, 0.6, 1.6],
         facet=["left"] * 4 + ["right"] * 4,
         category=["a", "b", "a", "b", "a", "b", "a", "b"],
-        highlight_group=["hot", "cold", "hot", "cold"] * 2,
-        density_group=["keep", "keep", "keep", "drop"] * 2,
+        highlight_group=["hot", "cold", "hot", "cold", "cold", "hot", "cold", "cold"],
+        density_group=["keep", "keep", "keep", "drop", "drop", "keep", "keep", "keep"],
         ids=[f"c{row}" for row in range(8)],
     )
+    embedding_module = import_module("cytearc.plotting.embedding")
+    drawn_density = embedding_module._draw_density_overlay
+    density_cells = []
+
+    def record_density(ax, xx, yy, **options):
+        # Record the cells each facet's density takes, and draw it as before.
+        density_cells.append(np.column_stack([xx, yy]).tolist())
+        return drawn_density(ax, xx, yy, **options)
+
+    monkeypatch.setattr(embedding_module, "_draw_density_overlay", record_density)
     sizes = pd.Series(
         np.arange(2, 10, dtype=np.float64), index=[f"c{row}" for row in range(8)]
     )
@@ -944,7 +956,9 @@ def test_embedding_facets_preserve_sizes_filters_and_target_legend():
         groups=("left", "right"),
         point_sizes=sizes,
         legend_loc="right",
-        highlight=splt.Highlight(by="highlight_group", groups=("hot",)),
+        highlight=splt.Highlight(
+            by="highlight_group", groups=("hot",), dim_alpha=0.2, size_multiplier=2.0
+        ),
         density_overlay=splt.DensityOverlay(
             group_by="density_group",
             groups=("keep",),
@@ -973,7 +987,22 @@ def test_embedding_facets_preserve_sizes_filters_and_target_legend():
         "a",
         "b",
     ]
-    assert result.provenance.extras["highlight"]["n_highlighted"] == 4
+    # Each facet draws its own hot cells over its others, which fade, at
+    # twice their own sizes: c0 and c2 at the left, c5 at the right.
+    for axis, hot, hot_sizes in (
+        (target_axes[0], [[0.0, 0.0], [2.0, 0.2]], [4.0, 8.0]),
+        (target_axes[1], [[5.0, 1.4]], [14.0]),
+    ):
+        base, _density, highlighted = axis.collections
+        assert base.get_alpha() == 0.2
+        np.testing.assert_array_equal(highlighted.get_offsets(), hot)
+        np.testing.assert_array_equal(highlighted.get_sizes(), hot_sizes)
+    assert result.provenance.extras["highlight"]["n_highlighted"] == 3
+    # Each facet's density takes its own kept cells: c0 to c2, and c5 to c7.
+    assert density_cells == [
+        [[0.0, 0.0], [1.0, 1.0], [2.0, 0.2]],
+        [[5.0, 1.4], [6.0, 0.6], [7.0, 1.6]],
+    ]
     result.close()
     assert plt.fignum_exists(figure.number)
     plt.close(figure)
@@ -2112,6 +2141,51 @@ def test_composition_uses_two_exact_artifact_axes(
     # legend that of the cell cycle phases' kind.
     assert result.axes["composition"].get_xlabel() == "Leiden, resolution 1.0"
     assert result.figure.legends[0].get_title().get_text() == "Cell cycle"
+    # Each cluster's bar holds the shares of its cells in each phase, read
+    # from the two artifacts, which hold the same cells in the same order.
+    from cytearc.storage.artifacts import artifact_group
+
+    np.testing.assert_array_equal(
+        _artifact_cell_indices(datastore, cell_cycle_scoring),
+        _artifact_cell_indices(datastore, leiden_clustering),
+    )
+    clusters = np.asarray(artifact_group(datastore.zw, leiden_clustering)["values"][:])
+    phases = np.asarray(artifact_group(datastore.zw, cell_cycle_scoring)["phase"][:])
+    shares = pd.crosstab(clusters.astype(str), phases.astype(str), normalize="index")
+    expected = {
+        (cluster, phase): float(shares.loc[cluster, phase])
+        for cluster in shares.index
+        for phase in shares.columns
+        if shares.loc[cluster, phase] > 0
+    }
+    per_group = result.tables["per_group"]
+    assert {
+        (str(row.sample), str(row.category)): row.proportion
+        for row in per_group.itertuples()
+        if row.proportion > 0
+    } == pytest.approx(expected)
+    # The drawn bars stack those shares, each phase in its legend color.
+    ax = result.axes["composition"]
+    group_at = dict(
+        zip(
+            ax.get_xticks().tolist(),
+            [tick.get_text() for tick in ax.get_xticklabels()],
+            strict=True,
+        )
+    )
+    legend = result.figure.legends[0]
+    phase_of = {
+        mcolors.to_hex(handle.get_facecolor()): text.get_text()
+        for text, handle in zip(legend.get_texts(), legend.legend_handles, strict=True)
+    }
+    drawn = {}
+    for patch in ax.patches:
+        if patch.get_height() > 0:
+            middle = patch.get_x() + patch.get_width() / 2
+            group = group_at[min(group_at, key=lambda tick: abs(tick - middle))]
+            phase = phase_of[mcolors.to_hex(patch.get_facecolor())]
+            drawn[(group, phase)] = patch.get_height()
+    assert drawn == pytest.approx(expected)
     result.close()
 
     with pytest.raises(ValueError, match="mutually exclusive"):
@@ -2357,6 +2431,7 @@ def test_stacked_violin_mean_color_constant_row():
             ax for ax in result.figure.axes if ax.get_label().startswith("<colorbar")
         )
         assert colorbar.get_ylabel() == "mean standardized value"
+        assert colorbar.get_ylim() == pytest.approx((0.0, 1.0))
     finally:
         result.close()
 
@@ -2756,6 +2831,26 @@ def test_distribution_annotates_kruskal_omnibus_and_dunn_posthoc(
         result.close()
 
 
+def test_distribution_brackets_only_pairs_with_a_p_value():
+    store = _three_group_metric_store()
+    # The pair of a and c has no p-value, so only the pair of a and b is drawn.
+    table = pd.DataFrame(
+        {"group_1": ["a", "a"], "group_2": ["b", "c"], "p_value": [0.01, np.nan]}
+    )
+
+    result = _plot_metric_with_stats(store, _synthetic_stats_result(store, table))
+
+    try:
+        ax = result.axes["metric"]
+        assert [text.get_text() for text in ax.texts] == ["p=0.01"]
+        # One bracket, from group a at 0 to group b at 1.
+        (bracket,) = [line for line in ax.get_lines() if len(line.get_xdata()) == 4]
+        assert bracket.get_xdata().tolist() == [0, 0, 1, 1]
+        assert result.provenance.extras["stats_annotated"] is True
+    finally:
+        result.close()
+
+
 def test_distribution_stats_rejects_same_size_different_identity():
     store = _synthetic_plot_store(
         I=np.ones(12, dtype=bool),
@@ -2867,6 +2962,87 @@ def test_distribution_stats_warn_when_no_table_can_be_annotated(table):
         assert {warning.filename for warning in warned} == {__file__}
         assert result.provenance.extras["stats_annotated"] is False
         assert len(result.axes["metric"].texts) == 0
+    finally:
+        result.close()
+
+
+def test_distribution_stats_warn_once_for_panels_that_mismatch_alike():
+    store = _synthetic_plot_store(
+        I=np.ones(12, dtype=bool),
+        group=np.repeat(["a", "b", "c"], 4),
+        metric=np.arange(12, dtype=float),
+        other=np.arange(12, dtype=float)[::-1],
+    )
+    table = pd.DataFrame({"group_1": ["a"], "group_2": ["b"], "p_value": [0.01]})
+    stats = _synthetic_stats_result(store, table)
+    # The test grouped the cells by another column, which every panel checks
+    # first, so both panels mismatch for one reason.
+    stats.group_field = splt.CellField("other_group")
+
+    with pytest.warns(UserWarning) as warned:
+        result = splt.distribution(
+            store,
+            ["metric", "other"],
+            grouping=splt.CellField("group"),
+            max_points=0,
+            stats_results={"metric": stats, "other": stats},
+            show=False,
+        )
+    try:
+        # The reason is told once.
+        assert [str(warning.message) for warning in warned] == [
+            "stats_results metadata grouping does not match grouping; skipping "
+            "statistical annotations"
+        ]
+        assert result.provenance.extras["stats_annotated"] is False
+        assert not result.axes["metric"].texts and not result.axes["other"].texts
+    finally:
+        result.close()
+
+
+def test_distribution_annotates_feature_panels_grouped_by_a_label_artifact(
+    datastore_ephemeral,
+):
+    from cytearc.metadata.artifacts import (
+        plan_cell_data_artifact,
+        write_cell_data_artifact,
+    )
+
+    ds = datastore_ephemeral
+    # Labels of two groups, in turn, over the store's active cells.
+    labels = np.asarray(
+        [f"g{at % 2}" for at in range(len(ds.cells.active_index("I")))], dtype=object
+    )
+    planned = plan_cell_data_artifact(
+        ds.zw,
+        scope="assay",
+        assay="RNA",
+        kind="cluster_labels",
+        operation="test_cluster_labels",
+        parameters={},
+        inputs={},
+        execution_options={},
+        cell_selection=ds.snapshot_cell_selection("I"),
+        arrays={"values": (labels.shape, None)},
+    )
+    write_cell_data_artifact(ds.zw, planned, {"values": labels})
+    tested = ds.compare.test(["MALAT1", "B2M"], planned.ref)
+
+    result = ds.plots.distribution(
+        ["MALAT1", "B2M"],
+        grouping=planned.ref,
+        stats_results=tested,
+        max_points=0,
+        show=False,
+    )
+    try:
+        # Each panel of the one assay shows its own feature's p-value.
+        for feature in ("MALAT1", "B2M"):
+            p_value = tested.tables[feature].loc[0, "p_value_adjusted"]
+            assert [text.get_text() for text in result.axes[feature].texts] == [
+                f"p={p_value:.2g}"
+            ]
+        assert result.provenance.extras["stats_annotated"] is True
     finally:
         result.close()
 

@@ -218,7 +218,7 @@ def test_cluster_tree_shows_owned_results_by_default(monkeypatch):
 
 
 def test_cluster_tree_keeps_missing_clusters_gray_under_a_uniform_fill():
-    def node_colors(values, missing):
+    def drawn(values, missing):
         result = splt.cluster_tree(
             _tree_store(values, color_missing=missing),
             graph=_GRAPH,
@@ -229,21 +229,30 @@ def test_cluster_tree_keeps_missing_clusters_gray_under_a_uniform_fill():
             show=False,
         )
         try:
-            return _node_colors(result)
+            return _node_colors(result), result.scales[0]
         finally:
             result.close()
 
-    uniform = node_colors([5.0] * 6, [False] * 6)
-    partly_missing = node_colors(
+    uniform, _ = drawn([5.0] * 6, [False] * 6)
+    one_missing, _ = drawn(
         [5.0, 5.0, 5.0, 0.0, 0.0, 0.0], [False, False, False, True, True, True]
+    )
+    # Cluster 1's third cell is missing too, and its stored 1.0 is no value.
+    partly, partly_scale = drawn(
+        [5.0, 5.0, 1.0, 0.0, 0.0, 0.0], [False, False, True, True, True, True]
     )
 
     # Both clusters share the one observed value's color when nothing is
-    # missing; a cluster whose values are all missing shows as missing, and
-    # the observed cluster keeps its color.
-    assert uniform[1] == uniform[2] != splt.ColorScale().missing_color
-    assert partly_missing[1] == uniform[1]
-    assert partly_missing[2] == splt.ColorScale().missing_color
+    # missing; a cluster whose values are all missing shows in the missing
+    # gray, and the observed cluster keeps its color.
+    assert uniform[1] == uniform[2] != "#bdbdbd"
+    assert one_missing[1] == uniform[1]
+    assert one_missing[2] == "#bdbdbd"
+    # A cluster's mean leaves its missing cells out, so cluster 1 still
+    # means 5, and the limits span that one mean.
+    assert partly[1] == uniform[1]
+    assert partly[2] == "#bdbdbd"
+    assert (partly_scale.vmin, partly_scale.vmax) == (5.0, 6.0)
 
 
 def test_cluster_tree_keeps_a_constant_fill_value():

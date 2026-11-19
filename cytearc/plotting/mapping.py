@@ -1000,30 +1000,30 @@ def mapping_calibration(
             linewidth=1.4,
         )
         if marked_threshold is not None:
-            chosen = calibration.loc[
+            # A marked threshold is one of the calibration's: one that
+            # retained no cell was unmarked above.
+            selected = calibration.loc[
                 np.isclose(calibration["threshold"], marked_threshold)
-            ]
-            if not chosen.empty:
-                selected = chosen.iloc[0]
-                ax.scatter(
-                    [selected["coverage"]],
-                    [selected["accuracy"]],
-                    s=48,
-                    color="#d1495b",
-                    edgecolor=scatter_edgecolor(theme),
-                    linewidth=0.5,
-                    zorder=3,
-                )
-                ax.annotate(
-                    f"{metric} = {marked_threshold:g}",
-                    (
-                        float(selected["coverage"]),
-                        float(selected["accuracy"]),
-                    ),
-                    xytext=(5, 5),
-                    textcoords="offset points",
-                    fontsize=8,
-                )
+            ].iloc[0]
+            ax.scatter(
+                [selected["coverage"]],
+                [selected["accuracy"]],
+                s=48,
+                color="#d1495b",
+                edgecolor=scatter_edgecolor(theme),
+                linewidth=0.5,
+                zorder=3,
+            )
+            ax.annotate(
+                f"{metric} = {marked_threshold:g}",
+                (
+                    float(selected["coverage"]),
+                    float(selected["accuracy"]),
+                ),
+                xytext=(5, 5),
+                textcoords="offset points",
+                fontsize=8,
+            )
         # Pad the unit square so curves sitting at zero or one stay visible.
         ax.set_xlim(-0.02, 1.02)
         ax.set_ylim(-0.02, 1.02)

@@ -23,6 +23,7 @@ from cytearc.plotting import (
     clone_overlap,
     clone_tracking,
 )
+from cytearc.plotting._contracts import ColorScale
 from cytearc.plotting._groups import labels_by_group, plot_groups, table_groups
 from cytearc.plotting._style import MAX_FIGURE_WIDTH_INCHES
 from tests.clone_helpers import (
@@ -426,7 +427,28 @@ def test_the_expansion_plot_groups_cells_by_labels(truth_plot) -> None:
     ref = store.clones.expansion(truth_plot.clones)
     result = clonal_expansion(store, ref, groups=truth_plot.labels, show=False)
     assert result.tables["categories"]["group"].unique().tolist() == sorted(CELL_TYPES)
+    # Each cell type counts its cells in the category of their clone's size
+    # over every cell, as the labels place the cells.
+    counted = Counter(
+        (
+            cell_type,
+            CATEGORIES[0 if size == 1 else 1 if size == 2 else 2 if size <= 5 else 3],
+        )
+        for cell_type, size in zip(
+            TRUTH.cell_types, TRUTH.cell_clone_sizes().tolist(), strict=True
+        )
+        if size
+    )
+    table = result.tables["categories"].set_index(["group", "category"])
+    assert table["n_cells"].to_dict() == {
+        (cell_type, name): counted[(cell_type, name)]
+        for cell_type in sorted(CELL_TYPES)
+        for name in CATEGORIES
+    }
+    ax = result.axes["categories"]
+    assert [tick.get_text() for tick in ax.get_yticklabels()] == sorted(CELL_TYPES)
     assert result.provenance.extras["grouping"] == "cell_type"
+    assert result.provenance.n_cells == 32
     plt.close(result.figure)
     ungrouped = clonal_expansion(store, ref, show=False, show_legend=False)
     assert ungrouped.tables["categories"]["group"].unique().tolist() == ["all cells"]
@@ -1569,6 +1591,16 @@ def test_the_coupling_plot_blanks_values_that_are_not_finite(truth_plot) -> None
     low, high = negative.axes["matrix"].images[0].get_clim()
     assert low == -high == -coupling.pairs["coupling"].max()
     plt.close(negative.figure)
+    # A caller's scale replaces the default one, its limits and center
+    # included, so two figures can share them.
+    shared = ColorScale(cmap="magma", vmin=-3.0, vmax=1.0, vcenter=0.0)
+    chosen = clone_coupling(
+        store, below, value="coupling", color_scale=shared, show=False
+    )
+    image = chosen.axes["matrix"].images[0]
+    assert image.cmap.name == "magma" and image.get_clim() == (-3.0, 1.0)
+    assert image.norm(0.0) == pytest.approx(0.5)
+    plt.close(chosen.figure)
 
 
 def test_the_coupling_plot_checks_its_arguments(truth_plot) -> None:
@@ -1911,7 +1943,18 @@ def test_default_figure_sizes_follow_the_clones_and_groups_drawn(
     assert size == pytest.approx((7.5, 3 * 2.4))
 
 
-def test_each_summarys_figure_titles_its_named_artifact(truth_plot) -> None:
+def _legend_titles(result) -> list[str]:
+    """The title of each legend that a figure draws beside its panels."""
+    return [
+        legend.get_title().get_text()
+        for ax in result.figure.axes
+        if (legend := ax.get_legend()) is not None
+    ]
+
+
+def test_each_summarys_figure_takes_the_name_of_its_named_artifact(
+    truth_plot,
+) -> None:
     from cytearc.plotting import NamedCellArtifact
 
     store, clones, labels = truth_plot.store, truth_plot.clones, truth_plot.labels
@@ -1946,13 +1989,23 @@ def test_each_summarys_figure_titles_its_named_artifact(truth_plot) -> None:
             ),
         ),
     ]
+    # The figures that draw a legend of the groups; the overlap and coupling
+    # name their groups along their axes, and the tracking lists its clones.
+    group_legends = {clonal_rarefaction, clonal_diversity, clone_fate_bias}
     for figure, record in cases:
         result = figure(store, record, groups=named, show=False)
+        bare = figure(store, record, show=False)
         try:
             assert result.provenance.extras["grouping"] == "Cell type", figure
             # Without the name, the figure takes the column the labels copied.
-            bare = figure(store, record, show=False)
             assert bare.provenance.extras["grouping"] == "cell_type", figure
-            bare.close()
+            if figure in group_legends:
+                assert _legend_titles(result) == ["Cell type"], figure
+                assert _legend_titles(bare) == ["cell_type"], figure
+            # The name changes nothing that the figure counts.
+            assert result.tables.keys() == bare.tables.keys()
+            for key, table in result.tables.items():
+                pd.testing.assert_frame_equal(table, bare.tables[key])
         finally:
             result.close()
+            bare.close()

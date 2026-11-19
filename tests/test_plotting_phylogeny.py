@@ -305,6 +305,13 @@ def test_a_clone_keeps_its_color_whatever_else_is_drawn(truth, drawn) -> None:
     for code, color in some.scales[0].palette.items():
         if code >= 0:
             assert whole[code] == color
+    # The truth's third tree, drawn alone as one wedge, holds the third
+    # largest clone, which keeps the third color: the color of its rank,
+    # not of its place among the clones drawn.
+    alone = drawn(truth.forest, tree="truth_forest_3", max_leaves=1)
+    assert _wedges(alone)["n_cells"].tolist() == [SIZES[2]]
+    assert alone.scales[0].palette == {2: CLONE_COLORS[2]}
+    assert _wedge_colors(alone.figure.axes[0]) == [CLONE_COLORS[2]]
 
 
 def test_the_cut_is_a_dashed_line_at_its_time_or_depth(truth, drawn) -> None:
@@ -620,6 +627,36 @@ def test_the_legend_gives_each_clone_a_color_of_its_own_away_from_gray(
         ]
         assert min(pairs) >= 20
         assert not set(colors) & {*NEAR_GRAY, "#006fa6"}
+    finally:
+        result.close()
+
+
+def test_only_a_mixed_wedge_tall_enough_to_see_says_how_many_clones_it_holds(
+    random_tree, tmp_path
+) -> None:
+    # A root of two clades, of 98 cells and of 2, cut into one clone per cell
+    # and drawn as two mixed wedges: the clade of 2 spans a fiftieth of the
+    # height, less than the fortieth that a wedge needs to say what it holds.
+    store = random_tree.store
+    leaves = [f"cell{index:06d}-1" for index in range(100)]
+    big = ",".join(f"{leaf}:1" for leaf in leaves[:98])
+    small = ",".join(f"{leaf}:1" for leaf in leaves[98:])
+    path = tmp_path / "two_clades.nwk"
+    path.write_text(f"(({big}):1,({small}):1);\n")
+    phylogeny = store.clones.import_phylogeny(
+        path, cell_selection=every_cell(store), time_unit="days"
+    )
+    clones = store.clones.phylogeny_clones(phylogeny, time=1.5)
+    result = store.plots.phylogeny(clones, max_leaves=2, show=False)
+    try:
+        wedges = _wedges(result)
+        assert wedges[["n_cells", "n_clones", "low", "high"]].values.tolist() == [
+            [98, 98, 0, 98],
+            [2, 2, 98, 100],
+        ]
+        assert [text.get_text() for text in result.figure.axes[0].texts] == [
+            "98 clones"
+        ]
     finally:
         result.close()
 

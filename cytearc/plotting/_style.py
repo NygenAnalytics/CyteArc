@@ -1126,9 +1126,8 @@ def apply_figure_chrome(figure: Any, theme: str = "notebook") -> None:
             ax.patch.set_alpha(1.0)
         else:
             ax.patch.set_alpha(0)
-        if hasattr(ax, "spines"):
-            ax.spines["top"].set_visible(False)
-            ax.spines["right"].set_visible(False)
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
 
 
 @contextmanager

@@ -101,6 +101,9 @@ def test_the_color_bar_names_every_assay_of_features_from_several(plot):
     try:
         (colorbar,) = [spec for spec in result.legends if spec.kind == "colorbar"]
         assert colorbar.label == "Mean of GeneScores and RNA"
+        # The drawn color bar says the same.
+        (drawn,) = [ax for ax in result.figure.axes if ax.get_label() == "<colorbar>"]
+        assert "Mean of GeneScores and RNA" in (drawn.get_xlabel(), drawn.get_ylabel())
     finally:
         result.close()
 

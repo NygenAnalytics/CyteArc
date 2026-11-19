@@ -246,8 +246,10 @@ def test_on_data_labels_separate_on_a_vector_canvas():
         show=False,
     )
     positions = {text.get_text(): text.get_position() for text in axis.texts}
-    # The overlapping labels moved apart; the distant one stayed put.
-    assert positions["c00"] != pytest.approx(positions["c01"], abs=0.05)
+    # The overlapping labels moved apart, so their boxes no longer overlap;
+    # the distant one stayed put.
+    boxes = {text.get_text(): text.get_window_extent() for text in axis.texts}
+    assert not boxes["c00"].overlaps(boxes["c01"])
     assert positions["c02"] == pytest.approx((8.0, 8.0), abs=0.05)
     result.close()
 
@@ -256,13 +258,23 @@ def test_placing_labels_again_gives_the_same_positions():
     from cytearc.plotting._labels import place_layout_labels
 
     centers = [(0.0, 0.0), (1.0, 0.2), (0.4, 0.5), (8.0, 8.0)]
-    store, _, _, _ = _clustered_store(centers, 50, spread=0.2)
+    store, x, y, labels = _clustered_store(centers, 50, spread=0.2)
     result = splt.embedding(
         store, layout_key="U", color_by="cl", legend_loc="on_data", show=False
     )
     try:
         ax = result.axes["cl"]
         first = [text.get_position() for text in ax.texts]
+        # The first placement moved some label off its cluster's median.
+        medians = {
+            name: (np.median(x[labels == name]), np.median(y[labels == name]))
+            for name in set(labels)
+        }
+        moved = [
+            np.hypot(*np.subtract(text.get_position(), medians[text.get_text()]))
+            for text in ax.texts
+        ]
+        assert max(moved) > 0.01
         place_layout_labels(result.figure)
         assert [text.get_position() for text in ax.texts] == first
         # Labels sit on the data and never reshape the layout.

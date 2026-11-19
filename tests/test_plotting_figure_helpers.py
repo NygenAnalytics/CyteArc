@@ -4,6 +4,7 @@ import builtins
 import json
 import warnings
 from pathlib import Path
+from types import SimpleNamespace
 
 import matplotlib
 import numpy as np
@@ -227,6 +228,10 @@ def test_plot_result_show_in_ipython_closes_a_caller_figure_that_stays_usable(
     monkeypatch.setattr("IPython.display.display", displayed.append)
     monkeypatch.setattr(
         plt, "show", lambda: pytest.fail("IPython display must not call plt.show()")
+    )
+    # A canvas of an interactive backend, which plt.show() would draw again.
+    monkeypatch.setattr(
+        figure.canvas, "required_interactive_framework", "qt", raising=False
     )
     assert figure.number in plt.get_fignums()
 
@@ -1474,6 +1479,64 @@ def test_a_shared_legend_lists_the_missing_entry_when_any_child_draws_it(missing
         assert texts == ["a", "b"]
         assert colors == ["#1f77b4", "#ff7f0e"]
     plt.close(figure)
+
+
+def test_a_shared_legend_fills_a_missing_entry_that_the_scale_leaves_unset():
+    figure, axis = plt.subplots(figsize=(4, 3), layout="constrained")
+    # The child draws cells without a group, and its scale names neither
+    # their color nor their label.
+    child = _child_result(
+        figure,
+        axis,
+        legends=(
+            splt.LegendSpec(
+                kind="categorical", label="Group", extras={"missing": True}
+            ),
+        ),
+        scales=(
+            splt.CategoricalScale(
+                order=("a", "b"), palette={"a": "#1f77b4", "b": "#ff7f0e"}
+            ),
+        ),
+    )
+
+    compose_results(figure, [child], panel_labels=False)
+
+    # The shared legend lists them last in the default gray and words.
+    (legend,) = figure.legends
+    assert [text.get_text() for text in legend.get_texts()] == ["a", "b", "NA"]
+    assert [
+        to_hex(handle.get_markerfacecolor()) for handle in legend.legend_handles
+    ] == ["#1f77b4", "#ff7f0e", "#bdbdbd"]
+
+
+def test_the_drawn_axes_read_each_axis_once_however_often_it_is_held():
+    from cytearc.plotting._figure import _drawn_axes
+
+    class Held:
+        """An axis whose insets may be read once, and only once."""
+
+        def __init__(self, name: str) -> None:
+            self.name = name
+            self.insets: list[Held] = []
+            self.reads = 0
+
+        @property
+        def child_axes(self) -> list["Held"]:
+            self.reads += 1
+            assert self.reads == 1, f"{self.name}'s insets were read again"
+            return self.insets
+
+    # Two panels hold one inset, which holds the first panel again.
+    left, right, inset = Held("left"), Held("right"), Held("inset")
+    left.insets = [inset]
+    right.insets = [inset]
+    inset.insets = [left]
+
+    drawn = _drawn_axes(SimpleNamespace(axes=[left, right]))
+
+    assert drawn == {left, right, inset}
+    assert (left.reads, right.reads, inset.reads) == (1, 1, 1)
 
 
 def test_categorical_legend_requires_the_missing_flag():

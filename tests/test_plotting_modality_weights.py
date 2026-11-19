@@ -176,6 +176,27 @@ def test_modality_weights_respects_columns_colormap_and_rasterization(
     result.close()
 
 
+def test_modality_weights_take_a_given_figure_size(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    weights = np.asarray([[0.0, 1.0], [1.0, 0.0], [0.5, 0.5]], dtype=np.float64)
+    store, graph, layout, selection = _wnn_store(weights)
+    monkeypatch.setattr(
+        modality_weights_module,
+        "_resolve_layout",
+        lambda *_args: _resolved_layout(selection),
+    )
+
+    result = modality_weights(
+        store, graph=graph, layout=layout, figsize=(5.0, 2.0), show=False
+    )
+
+    # The given size replaces the one panel size per assay of the default.
+    assert tuple(result.figure.get_size_inches()) == (5.0, 2.0)
+    assert len(result.axes) == 2
+    result.close()
+
+
 def test_modality_weights_shows_owned_results_by_default(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

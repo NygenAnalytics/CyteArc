@@ -434,6 +434,23 @@ def test_external_recipe_coerces_plot_contracts_and_feature_refs() -> None:
     assert kwargs["size_scale"] == plotting.SizeScale(size_min=5, size_max=80)
 
 
+def test_external_recipe_passes_a_single_feature_name_on_whole() -> None:
+    recipe = PlotRecipe.from_dict(
+        {
+            "steps": [
+                {
+                    "name": "markers",
+                    "plot": "dotplot",
+                    "kwargs": {"features": "CD3D", "groupBy": "cluster"},
+                }
+            ]
+        }
+    )
+
+    # A name is text, not a list of one-letter features: the plot reads it.
+    assert recipe.steps[0].kwargs["features"] == "CD3D"
+
+
 def test_runner_injects_pipeline_artifacts_without_mutating_recipe_kwargs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

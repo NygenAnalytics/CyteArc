@@ -536,28 +536,29 @@ def marker_heatmap(
         displayed_matrix = ordered_matrix
 
     if show_legend and resolved_annotation_scales:
+        # Each annotation has a value or a missing value in some row, so it
+        # has an entry at least.
         annotation_handles = annotation_legend_handles(
             mpl,
             annotation_names,
             resolved_annotation_scales,
             annotation_missing,
         )
-        if annotation_handles:
-            if owns_figure:
-                _place_clustermap_annotation_legend(
-                    figure,
-                    axes,
-                    annotation_handles,
-                    has_column_dendrogram=column_linkage is not None,
-                )
-            else:
-                axes["heatmap"].legend(
-                    handles=annotation_handles,
-                    title="Annotations",
-                    frameon=False,
-                    loc="upper left",
-                    bbox_to_anchor=(1.02, 1),
-                )
+        if owns_figure:
+            _place_clustermap_annotation_legend(
+                figure,
+                axes,
+                annotation_handles,
+                has_column_dendrogram=column_linkage is not None,
+            )
+        else:
+            axes["heatmap"].legend(
+                handles=annotation_handles,
+                title="Annotations",
+                frameon=False,
+                loc="upper left",
+                bbox_to_anchor=(1.02, 1),
+            )
 
     resolved_scale = ColorScale(
         cmap=(
