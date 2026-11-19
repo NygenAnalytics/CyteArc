@@ -919,6 +919,38 @@ def test_got_tables_read_r_row_names_as_clone_tables_do(tmp_path) -> None:
     assert loaded.calls[["ids", "call"]].to_numpy().tolist() == [["AAAG-1", "MUT"]]
 
 
+@pytest.mark.parametrize(
+    ("with_reads", "without"), [("geneseq", "probebc"), ("probebc", "geneseq")]
+)
+def test_a_got_multi_table_that_gives_the_reads_of_one_channel_is_refused_once(
+    tmp_path, with_reads, without
+) -> None:
+    path = tmp_path / "got_multi.csv"
+    reads = [
+        f"{allele}_reads_per_umi_total_{with_reads}" for allele in ("wt", "mut", "amb")
+    ]
+    path.write_text(
+        "BC,target,genotype_merged,wt_calls_geneseq,mut_calls_geneseq,"
+        "amb_calls_geneseq,wt_calls_probebc,mut_calls_probebc,amb_calls_probebc,"
+        + ",".join(reads)
+        + "\nA,TP53,WT,2,0,0,1,0,0,10,0,0\nB,TP53,MUT,0,3,1,0,2,0,0,30,5\n"
+    )
+    message = (
+        f"{path} gives the reads_per_umi_total columns of its {with_reads} channel "
+        f"and not those of its {without} channel; give them for both channels or "
+        "for neither"
+    )
+    with pytest.raises(ValueError) as refused:
+        got_source(path, format="got_multi")
+    assert str(refused.value) == message
+    # An import used to refuse the table only as it stored its counts, naming
+    # it twice, as two files that give their counts different fields.
+    store, selection = _store(tmp_path / "store.zarr", ["A", "B"])
+    with pytest.raises(ValueError) as refused_import:
+        _import(store, selection, path)
+    assert str(refused_import.value) == message
+
+
 def test_an_hdf5_file_of_ad_counts_without_dp_is_no_mito_matrix(tmp_path) -> None:
     path = tmp_path / "ad.h5"
     with h5py.File(path, "w") as handle:
