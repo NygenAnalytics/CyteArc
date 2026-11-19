@@ -773,6 +773,36 @@ def test_unknown_characters_beyond_latin_one_are_coded_by_their_rank() -> None:
     ) == {(0, 1)}
 
 
+def test_an_unknown_character_beyond_latin_one_leaves_latin_one_texts_unchanged() -> (
+    None
+):
+    # The texts hold Latin-1 characters, coded by their code points. Ł,
+    # U+0141, holds none of their bases; read by its low byte it would make
+    # each A unknown, so that the first two texts compare their last three
+    # positions and pair, and the first and the third compare two.
+    texts = ["ACGT", "CCGT", "AC-T"]
+    for unknown in ("-", "-Ł"):
+        found = neighbor_pairs(texts, "hamming", 0, unknown=unknown, min_compared=3)
+        assert _pairs(*found) == {(0, 2)}, unknown
+
+
+def test_texts_shorter_than_min_compared_never_pair() -> None:
+    # Texts of two letters compare at most two positions, fewer than three,
+    # so the equal AC and AC and the near AG pair with none; the texts of
+    # four letters pair as without them, and the short ones expect no pair
+    # by chance either.
+    short = ["AC", "AC", "AG"]
+    long = ["ACGT", "ACGA", "TTGA"]
+    options = {"unknown": "-", "min_compared": 3}
+    assert _pairs(*neighbor_pairs(short + long, "hamming", 1, **options)) == {(3, 4)}
+    assert _pairs(*neighbor_pairs(short, "hamming", 1)) == {(0, 1), (0, 2), (1, 2)}
+    assert expected_chance_pairs(short, "hamming", 1, **options) == 0.0
+    assert expected_chance_pairs(short + long, "hamming", 1, **options) == (
+        expected_chance_pairs(long, "hamming", 1, **options)
+    )
+    assert expected_chance_pairs(long, "hamming", 1, **options) > 0.0
+
+
 def test_without_unknown_characters_the_search_is_unchanged() -> None:
     rng = np.random.default_rng(4)
     texts = ["".join(rng.choice(list("ACGT"), size=12)) for _ in range(300)]
@@ -1444,6 +1474,11 @@ def test_texts_that_cannot_pair_by_chance_expect_nothing() -> None:
     found, _second = neighbor_pairs(texts, "hamming", 0, unknown="-0")
     expected = expected_chance_pairs(texts, "hamming", 0, unknown="-0")
     assert len(found) == 1 and expected == 0.0
+    # Under edits, two equal texts of two components agree at every
+    # position, so no distinct pair of their length is left to expect.
+    equal = ["ACGT", "ACGT"]
+    assert len(neighbor_pairs(equal, "levenshtein", 1)[0]) == 1
+    assert expected_chance_pairs(equal, "levenshtein", 1, components=[0, 1]) == 0.0
     memory = MemoryLedger(None, "Finding pairs")
     # Lengths more edits apart than the cutoff, and positions that never
     # agree, are never within it.

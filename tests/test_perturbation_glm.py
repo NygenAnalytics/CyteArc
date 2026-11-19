@@ -111,6 +111,52 @@ def test_separated_cells_fall_towards_probability_zero(
     np.testing.assert_allclose(coefficients[:-1], rest.params, rtol=0, atol=1e-6)
 
 
+def test_a_logistic_fit_stops_after_its_steps(monkeypatch) -> None:
+    # Allowed one Newton step, the fit takes it from the start, where every
+    # probability is 1/2 and its weight 1/4, and stops short of the maximum.
+    # Run as Python, the kernels read the cap of steps at each call.
+    _python_kernels(monkeypatch, True)
+    monkeypatch.setattr(glm, "_LOGISTIC_ITERATIONS", 1)
+    design, y = _indicator(300, 5, np.array([-0.5, 1.5, 0.0, 0.0]))
+
+    coefficients, _, _ = _fit(y, design, np.zeros(4))
+
+    step = np.linalg.solve(0.25 * design.T @ design, design.T @ (y - 0.5))
+    np.testing.assert_allclose(coefficients, step, rtol=1e-10)
+    fitted = _binomial_fit(y, design).params
+    assert np.abs(coefficients - fitted).max() > 0.01
+
+
+def test_a_poisson_fit_stops_after_its_steps(monkeypatch) -> None:
+    # Allowed one Newton step, the fit halves the step from the start until
+    # the log-likelihood does not fall, takes it and stops short of the
+    # maximum. Run as Python, the kernels read the cap of steps at each call.
+    _python_kernels(monkeypatch, True)
+    monkeypatch.setattr(glm, "_FIT_ITERATIONS", 1)
+    rng = np.random.default_rng(1)
+    design = np.column_stack([np.ones(200), rng.normal(size=200)])
+    y = rng.poisson(np.exp(design @ np.array([1.0, 0.5]))).astype(np.float64)
+
+    def loglik(coefficients: np.ndarray) -> float:
+        eta = design @ coefficients
+        return float((y * eta - np.exp(eta)).sum())
+
+    start = np.zeros(2)
+    step = np.linalg.solve(design.T @ design, design.T @ (y - 1.0))
+    scale = 1.0
+    while loglik(start + scale * step) < loglik(start):
+        scale /= 2
+    # The full step overshoots, so the step taken is a halved one.
+    assert scale < 1.0
+    coefficients = start.copy()
+
+    glm.fit_poisson(y, design, coefficients, np.empty(200), np.empty(200))
+
+    np.testing.assert_allclose(coefficients, start + scale * step, rtol=1e-10)
+    fitted = sm.GLM(y, design, family=sm.families.Poisson()).fit(tol=1e-14).params
+    assert np.abs(coefficients - fitted).max() > 0.01
+
+
 @pytest.mark.parametrize("python_kernels", [False, True])
 def test_logistic_probabilities_stay_within_the_unit_interval(
     monkeypatch, python_kernels

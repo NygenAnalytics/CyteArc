@@ -701,6 +701,26 @@ def test_equal_mass_bin_operator_spreads_a_heavy_cell_over_several_bins():
     np.testing.assert_allclose(dense.sum(axis=1), 1.0, rtol=0.0, atol=1e-12)
 
 
+@pytest.mark.parametrize("python_kernels", [False, True])
+def test_a_cell_too_light_to_move_the_cut_takes_no_entry(monkeypatch, python_kernels):
+    # Cell 0 fills the first half of bin 0. Cell 1 weighs 1e-20, which adds
+    # nothing to the running position of 0.5, so it covers no part of a bin
+    # and the operator stores no entry for it, not even a zero; cell 2 fills
+    # the rest.
+    if python_kernels:
+        monkeypatch.setattr(
+            lineages_module, "_bin_overlaps", lineages_module._bin_overlaps.py_func
+        )
+    weights = np.array([[0.5], [1e-20], [2.5]])
+
+    operator, _, _ = equal_mass_bin_operator(np.arange(3.0), weights, 3)
+
+    assert operator.indptr.tolist() == [0, 1, 1, 4]
+    np.testing.assert_array_equal(
+        operator.toarray(), [[0.5, 0.0, 0.5], [0.0, 0.0, 1.0], [0.0, 0.0, 1.0]]
+    )
+
+
 @pytest.mark.parametrize("seed", range(6))
 def test_equal_mass_bin_operator_matches_brute_force_overlaps(seed):
     rng = np.random.default_rng(100 + seed)
