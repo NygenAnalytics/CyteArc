@@ -608,7 +608,7 @@ def _check_text_rows(
     the refusal of a value. The rows that ``mask`` flags are missing and are
     not checked.
     """
-    rows = int(values.shape[0])
+    rows = len(values)
     for start in range(0, rows, _TEXT_CHECK_ROWS):
         stop = min(start + _TEXT_CHECK_ROWS, rows)
         block = np.asarray(values[start:stop])
@@ -671,7 +671,11 @@ def check_column_text(
     values: Any
     mask: h5py.Dataset | None = None
     if isinstance(table, h5py.Dataset):
+        # A field of a compound dataset, as older h5py reads it, has no dtype
+        # or dimensions of its own, so they come from the dataset.
         values = table.fields(key)
+        dtype = table.dtype.fields[key][0]
+        ndim = table.ndim
     else:
         node = table[key]
         if is_categorical(node):
@@ -697,15 +701,16 @@ def check_column_text(
             values = node
         else:
             return
-    if values.ndim != 1 or values.dtype.subdtype is not None:
+        dtype, ndim = values.dtype, values.ndim
+    if ndim != 1 or dtype.subdtype is not None:
         return
-    if mask is None and values.dtype.kind in "iu":
+    if mask is None and dtype.kind in "iu":
         categories = legacy_categories(h5, table, key, category_groups)
         if categories is not None:
             if categories.ndim == 1 and _holds_text(categories.dtype):
                 _check_text_rows(categories, refuse_category)
             return
-    if _holds_text(values.dtype):
+    if _holds_text(dtype):
         _check_text_rows(values, refuse_row, mask=mask)
 
 
