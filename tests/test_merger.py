@@ -4571,6 +4571,74 @@ def test_row_plan_segments_and_identity_checks_cover_every_cell_once():
 
 
 @pytest.mark.parametrize(
+    ("segment_rows", "expected"),
+    [
+        (None, [(1, 0, [0, 2, 1]), (0, 3, [4, 1])]),
+        (2, [(1, 0, [0, 2]), (1, 2, [1]), (0, 3, [4, 1])]),
+    ],
+)
+def test_row_plan_segments_pass_over_a_block_without_rows(segment_rows, expected):
+    from cytearc.merge.row_plan import RowPlan, iter_row_plan_segments
+
+    # Source a's second block holds no rows, so source b's block starts the
+    # destination and a's first block follows it.
+    plan = RowPlan(
+        permutationsRows={
+            0: {0: np.array([4, 1]), 1: np.array([], dtype=np.int64)},
+            1: {0: np.array([0, 2, 1])},
+        },
+        coordinatesPermutations=np.array([[0, 1], [1, 0], [0, 0]]),
+        nCells=5,
+        sourceNames=("a", "b"),
+    )
+
+    segments = [
+        (segment.sourceIdx, segment.destStart, segment.localRows.tolist())
+        for segment in iter_row_plan_segments(plan, segment_rows=segment_rows)
+    ]
+
+    assert segments == expected
+
+
+def test_a_one_row_refusal_names_the_budget_that_admits_the_row():
+    from cytearc.merge.metadata import _refuse_one_row
+
+    def refuse(rows):
+        raise MemoryBudgetError(
+            f"{rows} rows need 900 bytes",
+            needed_bytes=900,
+            budget_bytes=500,
+            item=f"{rows} rows",
+        )
+
+    with pytest.raises(MemoryBudgetError) as refused:
+        _refuse_one_row(refuse, "Merged rows cannot fit", "one merged row")
+    assert str(refused.value) == "Merged rows cannot fit. It needs at least 900 bytes."
+    assert (refused.value.needed_bytes, refused.value.budget_bytes) == (900, 500)
+    assert refused.value.item == "one merged row"
+    assert str(refused.value.__cause__) == "1 rows need 900 bytes"
+    # A budget that admits the row it refused while the widths were tried is
+    # inconsistent, and the refusal says so rather than returning.
+    with pytest.raises(
+        RuntimeError, match="^one merged row was admitted after it was refused$"
+    ):
+        _refuse_one_row(lambda _rows: None, "Merged rows cannot fit", "one merged row")
+
+
+def test_a_destination_overlaps_a_source_known_by_its_location_alone(tmp_path):
+    from types import SimpleNamespace
+
+    from cytearc.merge.datasets import _overlaps_source
+
+    # A source without an open root group is compared by its location.
+    source = SimpleNamespace(zarr_loc=str(tmp_path / "source.zarr"))
+    assert _overlaps_source(str(tmp_path / "source.zarr" / "merged.zarr"), source)
+    assert _overlaps_source(str(tmp_path), source)
+    assert not _overlaps_source(str(tmp_path / "merged.zarr"), source)
+    assert not _overlaps_source(MemoryStore(), source)
+
+
+@pytest.mark.parametrize(
     "source_ids",
     [
         np.asarray(["AAAC-1", "G", "", "ünï-2"]),

@@ -682,6 +682,38 @@ def test_a_sampler_that_cannot_rule_out_children_walks_the_process_tree(
         assert sample == ResourceSample(8.0, 12 * 1024, 4)
 
 
+def test_default_readers_take_network_counters_from_a_readable_proc_file(
+    tmp_path, monkeypatch
+):
+    pid = os.getpid()
+    proc_root = tmp_path / "proc"
+    _write_proc_tree(proc_root, {pid: (1, "Threads:\t3\nVmRSS:\t8 kB\n", {pid: []})})
+    (proc_root / str(pid) / "net").mkdir()
+    (proc_root / str(pid) / "net" / "dev").write_text(
+        "Inter-|   Receive                                                |  "
+        "Transmit\n face |bytes    packets errs drop fifo frame compressed "
+        "multicast|bytes    packets errs drop fifo colls carrier compressed\n"
+        "    lo: 50 1 0 0 0 0 0 0 50 1 0 0 0 0 0 0\n"
+        "  eth0: 700 2 0 0 0 0 0 0 90 3 0 0 0 0 0 0\n"
+    )
+    monkeypatch.setattr(process_module, "_PROC_ROOT", proc_root)
+    monkeypatch.setitem(sys.modules, "resource", None)
+    monkeypatch.setattr(process_module.time, "process_time", lambda: 5.0)
+
+    def no_children(*_args: object) -> None:
+        raise ChildProcessError("waitid")
+
+    monkeypatch.setattr(os, "waitid", no_children)
+
+    readers = process_module.default_process_readers()
+
+    # Threads and network counters are read; only the peak RSS, which needs
+    # getrusage, is unavailable.
+    assert set(readers.unavailable) == {HIGH_WATER}
+    # Loopback is left out of the network bytes.
+    assert readers.sample() == ResourceSample(5.0, 8 * 1024, 3, 700, 90)
+
+
 def test_network_counters_that_fall_leave_the_window_without_network_bytes() -> None:
     readers = _scripted(
         [

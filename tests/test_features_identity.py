@@ -429,3 +429,107 @@ def test_exogenous_candidates_skip_features_without_a_label() -> None:
 
     # GFP scores for its token and for having no name.
     assert ranked == [{"id": "GFP", "name": "", "score": 4}]
+
+
+def test_resolve_species_reads_symbols_when_ensembl_prefixes_split(
+    tmp_path: Path, monkeypatch
+) -> None:
+    def no_download(*_args, **_kwargs):
+        raise AssertionError("no reference may be downloaded")
+
+    monkeypatch.setattr(identity, "ensure_reference", no_download)
+    given = _human_reference(tmp_path / "given")
+    cache = tmp_path / "cache"
+    # The cache holds a human table of one gene, which the given reference
+    # stands in for, and a mouse entry that holds no table.
+    write_reference_fixture(
+        cache / "homo_sapiens.tsv",
+        species="homo_sapiens",
+        release="cached",
+        rows=[("ENSG00000012048", "BRCA1", "17")],
+    )
+    (cache / "mus_musculus.tsv").mkdir()
+    # Four human and three mouse IDs are no clear majority.
+    ids = [
+        "ENSG00000075624",
+        "ENSG00000111640",
+        "ENSG00000012048",
+        "ENSG00000071082",
+        "ENSMUSG00000029580",
+        "ENSMUSG00000057654",
+        "ENSMUSG00000044533",
+    ]
+    names = [*_HUMAN_SYMBOLS, "Actb", "Gapdh"]
+
+    result = resolve_species(
+        ids, names, cacheDir=cache, references={"homo_sapiens": given}
+    )
+
+    assert (result["species"], result["method"]) == ("homo_sapiens", "symbolOverlap")
+    # The given reference's ten symbols scored the names, and no mouse table.
+    assert result["overlap"]["scores"] == {
+        "homo_sapiens": {
+            "hits": 5,
+            "share": 5 / 7,
+            "nQuery": 7,
+            "nReferenceSymbols": 10,
+        }
+    }
+
+
+def test_observe_families_counts_cell_cycle_genes_without_joining_a_reference(
+    tmp_path: Path,
+) -> None:
+    catalog = {"homo_sapiens": {"s": ["MCM5", "PCNA"], "g2m": ["TOP2A"]}}
+    symbols = ["MCM5", "TOP2A", "ACTB"]
+    ids = ["ENSG00000100297", "ENSG00000131747", "ENSG00000075624"]
+
+    def cell_cycle(reference, genes):
+        return next(
+            item
+            for item in observe_families(
+                species="homo_sapiens",
+                ids=ids,
+                symbols=symbols,
+                reference=reference,
+                cellCycleGenes=genes,
+            )
+            if item["family"] == "cellCycle"
+        )
+
+    # Without a reference there is nothing to join the catalog with.
+    unjoined = cell_cycle(None, catalog)
+    assert (unjoined["count"], unjoined["examples"]) == (2, ["MCM5", "TOP2A"])
+    assert unjoined["catalogSize"] == 3
+    assert "catalogJoinRate" not in unjoined and "catalogJoined" not in unjoined
+    # An empty catalog has no join rate either, even beside a reference.
+    empty = cell_cycle(
+        _human_reference(tmp_path), {"homo_sapiens": {"s": [], "g2m": []}}
+    )
+    assert (empty["count"], empty["catalogSize"]) == (0, 0)
+    assert "catalogJoinRate" not in empty
+    # A reference that holds one of the three catalog genes joins a third.
+    reference = write_reference_fixture(
+        tmp_path / "cell_cycle" / "homo_sapiens.tsv",
+        species="homo_sapiens",
+        release="test",
+        rows=[("ENSG00000100297", "MCM5", "22"), ("ENSG00000075624", "ACTB", "7")],
+    )
+    joined = cell_cycle(reference, catalog)
+    assert (joined["catalogJoined"], joined["catalogJoinRate"]) == (1, 1 / 3)
+
+
+def test_exogenous_candidates_score_a_name_apart_from_its_id() -> None:
+    ranked = exogenous_candidates(
+        ["tg1", "ERCC-00002", "x9"],
+        ["GFP-reporter", "ERCC-00002", "x9"],
+        reference=None,
+    )
+
+    # A token scores 3 and a dash or underscore 1; a label that is the ID
+    # itself scores 1 more, which a name of its own does not.
+    assert ranked == [
+        {"id": "ERCC-00002", "name": "ERCC-00002", "score": 5},
+        {"id": "tg1", "name": "GFP-reporter", "score": 4},
+        {"id": "x9", "name": "x9", "score": 1},
+    ]

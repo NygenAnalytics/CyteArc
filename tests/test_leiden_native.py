@@ -1895,6 +1895,29 @@ def test_group_sweeps_hand_over_to_the_tail_queue_as_python(
     assert next_free > first_free
 
 
+@pytest.mark.parametrize("parallel_min_items", [256, 1], ids=["serial", "parallel"])
+def test_group_sweeps_that_reach_their_cap_hand_over_to_the_tail_queue_as_python(
+    monkeypatch, parallel_min_items
+):
+    # With a tail divisor of 1, the check before a second sweep hands the
+    # active nodes over to the queue. A cap of one sweep ends the sweeps
+    # before that check, and must hand the same nodes over.
+    checked = _move_level_compiled_and_as_python(
+        monkeypatch, 2, parallel_min_items, 0, 1, 1000
+    )
+    monkeypatch.setattr(native_module, "MAX_PARALLEL_SWEEPS", 1)
+    # The kernels already run as Python, whose random streams wrap uint64
+    # products on purpose.
+    with np.errstate(over="ignore"):
+        capped = _move_level_compiled_and_as_python(
+            monkeypatch, 2, parallel_min_items, 0, 1, 1000
+        )
+
+    assert capped[2][2] == 1 and capped[2][4] == 1
+    assert capped[:2] == checked[:2]
+    np.testing.assert_array_equal(capped[2], checked[2])
+
+
 def test_a_group_asking_for_more_ids_than_remain_stays_as_python(monkeypatch):
     # Every node asks for a new community and every group needs more than the
     # one id left, so no node moves.
@@ -1970,6 +1993,28 @@ def test_stable_bucket_order_sorts_many_keys_range_by_range(n_workers, min_items
     np.testing.assert_array_equal(
         start, np.concatenate([[0], np.cumsum(np.bincount(keys, minlength=n_keys))])
     )
+
+
+@pytest.mark.usefixtures("kernel_mode")
+def test_split_into_components_passes_over_an_edge_within_a_joined_component():
+    # Nodes 0, 1 and 2 form a triangle of one community, so the edge 1-2
+    # joins two nodes that the edges 0-1 and 0-2 already joined. Node 3 shares
+    # the community but no edge, and nodes 4 and 5 form another community
+    # whose edge to node 2 crosses communities.
+    graph = build_leiden_graph(
+        sp.csr_matrix(
+            ([1.0, 1.0, 1.0, 1.0, 1.0], ([0, 0, 1, 4, 2], [1, 2, 2, 5, 4])),
+            shape=(6, 6),
+        ),
+        1,
+    )
+    labels = np.array([0, 0, 0, 0, 1, 1], dtype=np.int32)
+
+    components = aggregate_module.split_into_components(
+        graph.indptr, graph.indices, labels
+    )
+
+    np.testing.assert_array_equal(components, [0, 0, 0, 3, 4, 4])
 
 
 @pytest.mark.usefixtures("kernel_mode")

@@ -581,9 +581,9 @@ def test_projection_writer_constructor_and_start_failures_leave_incomplete_artif
     assert not inspect_artifact(root, second.ref).exists
 
 
-def test_projection_writer_requires_contiguous_complete_coverage_and_can_abort() -> (
-    None
-):
+def test_projection_writer_requires_contiguous_complete_coverage_and_can_abort(
+    monkeypatch,
+) -> None:
     root, cell_selection, feature_selection = _query_inputs()
     reference, _ = _mapping_reference()
     plan = _plan(root, cell_selection, feature_selection, reference.external_ref)
@@ -604,7 +604,18 @@ def test_projection_writer_requires_contiguous_complete_coverage_and_can_abort()
         invalidate_cache=True,
     )
     second = ProjectionWriter(root, second_plan, chunk_rows=2)
+    discarded = []
+    discard = projection_storage.discard_artifact
+
+    def counted_discard(*args, **kwargs):
+        discarded.append(args[1])
+        return discard(*args, **kwargs)
+
+    monkeypatch.setattr(projection_storage, "discard_artifact", counted_discard)
     second.abort()
+    # A writer that was aborted already has nothing more to discard.
+    second.abort()
+    assert discarded == [second_plan.artifact]
     assert not inspect_artifact(root, second_plan.ref).exists
     with pytest.raises(RuntimeError, match="aborted"):
         second.write_block(0, indices, distances, uninformative)

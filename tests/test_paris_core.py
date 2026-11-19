@@ -178,7 +178,11 @@ def test_parallel_contraction_matches_scipy_reference() -> None:
 
     np.testing.assert_array_equal(contracted.indptr, expected.indptr)
     np.testing.assert_array_equal(contracted.indices, expected.indices)
-    np.testing.assert_array_equal(contracted.data, expected.data)
+    # The contraction and SciPy add the weights of merged edges in different
+    # orders, which can change the last bit of a sum: with NumPy 2.1, 2 of the
+    # 290 weights differ by about 1.5e-16 of their value. A weight that gained
+    # or lost an edge, each of at least 0.1, would be off by far more.
+    np.testing.assert_allclose(contracted.data, expected.data, rtol=1e-15, atol=0)
     assert contracted.has_canonical_format
     assert np.isnan(values).all()
 

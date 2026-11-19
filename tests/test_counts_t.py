@@ -441,6 +441,48 @@ def test_iter_normed_feature_wise_batches_and_rejects_two_dimensional_indices():
         )
 
 
+def test_iter_normed_feature_wise_fills_a_batch_from_successive_read_groups():
+    from cytearc.storage.feature_stream import persisted_read_group
+
+    root = _memory_root()
+    values = (np.arange(8 * 32, dtype=np.uint32) % 7).reshape(8, 32)
+    _write_small_assay(
+        root,
+        workspace=None,
+        values=values,
+        policy=CountMatrixPolicy(unitBytes=256, chunkBytes=32),
+    )
+    cells = MetaData(root["cellData"])
+    n_counts = values.sum(axis=1).astype(np.float64)
+    cells.insert("RNA_nCounts", n_counts, overwrite=True)
+    assay = RNAassay(root, "RNA", cells, workspace=None, nthreads=1)
+    assay.sf = 1000.0
+    # Read groups of eight features, which batches of three do not divide.
+    assert persisted_read_group(assay.rawDataT)[0] == 8
+
+    batches = list(
+        assay.iter_normed_feature_wise(
+            cell_idx=np.arange(values.shape[0], dtype=np.int64),
+            feat_idx=np.arange(values.shape[1], dtype=np.int64),
+            batch_size=3,
+            msg=None,
+            as_dataframe=False,
+        )
+    )
+
+    # Every batch but the last holds three features, so the batch that a
+    # group leaves part filled takes its other features from the next group.
+    assert [matrix.shape for matrix, _labels in batches] == [(3, 8)] * 10 + [(2, 8)]
+    np.testing.assert_array_equal(
+        np.concatenate([labels for _matrix, labels in batches]), np.arange(32)
+    )
+    np.testing.assert_allclose(
+        np.concatenate([matrix for matrix, _labels in batches]),
+        (1000.0 * values / n_counts[:, None]).T,
+        rtol=1e-12,
+    )
+
+
 def test_iter_normed_feature_wise_splits_read_groups_to_fit_consumer_scratch():
     from cytearc.storage.feature_stream import (
         persisted_read_group,

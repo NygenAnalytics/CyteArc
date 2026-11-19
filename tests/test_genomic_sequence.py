@@ -133,6 +133,27 @@ def test_indexed_fasta_reads_empty_sequences_but_not_empty_files(tmp_path):
         IndexedFasta(fasta)
 
 
+def test_indexed_fasta_reads_a_last_line_without_a_line_break(tmp_path):
+    fasta = tmp_path / "genome.fa"
+    # Blank lines before the first header are passed over, and the last
+    # sequence's only line ends the file without a line break, so its bases
+    # are read as they are stored.
+    fasta.write_bytes(b"\n\n>chr1\nACGTA\nCG\n>chr2\nTTGCA")
+
+    with IndexedFasta(fasta) as genome:
+        assert genome.names == ("chr1", "chr2")
+        assert genome.fetch("chr1", 0, 7) == b"ACGTACG"
+        assert genome.fetch("chr1", 3, 6) == b"TAC"
+        assert genome.fetch("chr2", 0, 5) == b"TTGCA"
+        assert genome.fetch("chr2", 1, 4) == b"TGC"
+
+    # The context closed the genome; closing it again does nothing, and a
+    # closed genome reads no bases.
+    genome.close()
+    with pytest.raises(ValueError, match="closed"):
+        genome.fetch("chr2", 0, 1)
+
+
 def test_indexed_fasta_rejects_compressed_input(tmp_path):
     with pytest.raises(ValueError, match="uncompressed"):
         IndexedFasta(tmp_path / "genome.fa.gz")

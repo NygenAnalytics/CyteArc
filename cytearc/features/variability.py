@@ -116,7 +116,9 @@ def _fit_local_quantile(
     from scipy.optimize import minimize
 
     reference: tuple[np.ndarray, np.ndarray] | None = None
-    for _ in range(2):
+    # A fit in a narrower window carries the wider fit's reference, which ends
+    # the loop, so it fits at most twice.
+    while True:
         keep = np.abs(log_means - center) < bandwidth
         relative = (log_means[keep] - center) / bandwidth
         weight = 0.5 + 0.5 * (1 - np.abs(relative) ** 3) ** 3

@@ -198,3 +198,20 @@ def test_validate_assay_types_names_the_store_assays():
         validate_assay_types({"RNA": "rna"}, ["RNA"])
     with pytest.raises(TypeError, match="assay_types must be a mapping"):
         validate_assay_types([("RNA", "RNA")], ["RNA"])  # type: ignore[arg-type]
+
+
+def test_an_assay_type_of_no_named_assay_is_refused_by_itself():
+    from cytearc.assay.classification import validate_assay_type
+
+    validate_assay_type(None)
+    validate_assay_type("URNA")
+    # Without an assay the refusal names the type alone; with one it names
+    # the assay too.
+    with pytest.raises(
+        ValueError, match=r"^assay_type 'rna' is not a preset; names are case-sensitive"
+    ):
+        validate_assay_type("rna")
+    with pytest.raises(ValueError, match=r"^assay_type 'rna' of assay 'RNA' is not"):
+        validate_assay_type("rna", assay="RNA")
+    with pytest.raises(ValueError, match=r"^assay_type 3 is not a preset"):
+        validate_assay_type(3)

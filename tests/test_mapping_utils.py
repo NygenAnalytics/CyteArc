@@ -128,6 +128,45 @@ def test_distance_weights_keep_subnormal_positive_rows_finite():
     np.testing.assert_allclose(weights.sum(axis=1), 1.0)
 
 
+def test_distance_weights_of_rows_that_each_hold_a_zero_go_to_the_zeros():
+    weights = distance_weights(np.array([[0.0, 2.0, 0.0], [5.0, 0.0, 1.0]]))
+
+    np.testing.assert_array_equal(weights, [[0.5, 0.0, 0.5], [0.0, 1.0, 0.0]])
+
+
+def test_a_block_of_uninformative_cells_abstains_without_vote_metrics():
+    from cytearc.mapping.label_transfer import (
+        UNINFORMATIVE_CELL,
+        ReferenceDistancePercentiles,
+        transfer_label_block,
+    )
+
+    block = transfer_label_block(
+        np.array([[0, 1], [1, 1]]),
+        np.array([[0.5, 1.0], [0.2, 0.3]]),
+        np.array([True, True]),
+        threshold_fraction=0.5,
+        max_distance=None,
+        distance_percentiles=ReferenceDistancePercentiles(
+            distances=np.array([0.0, 10.0]), percentiles=np.array([0.0, 1.0])
+        ),
+    )
+
+    # Neither cell votes, though its neighbors hold labels.
+    assert block.abstention_reason.tolist() == [UNINFORMATIVE_CELL] * 2
+    assert block.label_codes.tolist() == block.candidate_codes.tolist() == [-1, -1]
+    assert block.vote_class_codes.tolist() == [[-1, -1], [-1, -1]]
+    assert not block.vote_class_fractions.any()
+    for name in (
+        "vote_fraction",
+        "top_two_margin",
+        "vote_entropy",
+        "nearest_distance",
+        "reference_distance_percentile",
+    ):
+        assert np.isnan(getattr(block, name)).all(), name
+
+
 def test_distance_weights_reject_invalid_metric_distances():
     with pytest.raises(ValueError, match="non-negative"):
         distance_weights(np.array([[-1.0, 1.0]]))

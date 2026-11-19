@@ -183,6 +183,29 @@ def test_a_file_whose_size_reads_as_zero_is_read_to_its_end() -> None:
     assert data and file_sha256(path) == hashlib.sha256(data).hexdigest()
 
 
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs named pipes")
+@pytest.mark.parametrize("size", [0, 1, 3 * READ_BYTES + 5])
+def test_a_pipe_whose_size_reads_as_zero_is_read_to_its_end(tmp_path, size) -> None:
+    import threading
+
+    # A named pipe reports a size of 0, whatever it holds.
+    pipe = tmp_path / "pipe"
+    os.mkfifo(pipe)
+    data = np.random.default_rng(size).bytes(size)
+
+    def write() -> None:
+        with open(pipe, "wb") as handle:
+            handle.write(data)
+
+    writer = threading.Thread(target=write, daemon=True)
+    writer.start()
+    try:
+        assert file_sha256(pipe) == hashlib.sha256(data).hexdigest()
+    finally:
+        writer.join(10)
+    assert not writer.is_alive()
+
+
 def test_splitmix64s_multipliers_live_only_in_the_one_finalizer() -> None:
     # Every module of the package and of the profiling tools mixes with
     # utils.digest's mix64 or mix64_array; another copy of the finalizer

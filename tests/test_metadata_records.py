@@ -175,6 +175,16 @@ def test_text_encoding_sorts_distinct_values_and_marks_missing() -> None:
     assert empty.codes.tolist() == [-1, -1] and len(empty.categories) == 0
 
 
+def test_text_encoding_reads_every_missing_value_among_text_as_missing() -> None:
+    # pandas does not name text mixed with NaT or pd.NA "string", so each
+    # value is checked on its own: text, or a missing value of any kind.
+    encoded = encode_text(["b", pd.NaT, "a", pd.NA, None])
+    assert encoded.categories.tolist() == ["a", "b"]
+    assert encoded.codes.tolist() == [1, -1, 0, -1, -1]
+    with pytest.raises(TypeError, match="^encode_text must be text or missing"):
+        encode_text(["b", pd.NaT, 5])
+
+
 def test_ragged_encoding_round_trips_and_tells_missing_from_values() -> None:
     values = ["ACGT", None, "", "TTGCA", None]
     data, offsets = encode_ragged(values)

@@ -134,19 +134,22 @@ def test_first_two_phases_match_pacmap():
     assert _relative_error(layout, REFERENCE["layout_200"]) < 1e-3
 
 
-def test_three_phases_from_fixed_pairs_match_pacmap():
-    # localmap_layout draws further pairs again in the third phase, which
-    # pacmap does from shared random state, so this replays its loop with
-    # the reference's fixed pairs.
-    neighbors, mid_near, further = _reference_inputs()
-    layout = REFERENCE["start"].copy()
+def _replayed_schedule(
+    start, neighbors, mid_near, further, iterations, learning_rate, local_scale
+):
+    """Replay PaCMAP's loop over fixed pairs: its phase weights and Adam's steps.
+
+    The third phase, after the first two, scales the neighbors' attraction
+    by ``local_scale``, half of LocalMAP's ``max_distance``.
+    """
+    layout = start.copy()
     first, second = np.zeros_like(layout), np.zeros_like(layout)
     gradient = np.zeros_like(layout)
-    for iteration in range(sum(ITERATIONS)):
+    for iteration in range(sum(iterations)):
         w_mid_near, w_neighbors, w_further = localmap.phase_weights(
-            iteration, ITERATIONS
+            iteration, iterations
         )
-        local = iteration > ITERATIONS[0] + ITERATIONS[1]
+        local = iteration > iterations[0] + iterations[1]
         localmap._gradient(
             layout,
             *neighbors,
@@ -155,14 +158,65 @@ def test_three_phases_from_fixed_pairs_match_pacmap():
             w_neighbors,
             w_mid_near,
             w_further,
-            5.0 if local else 0.0,
+            local_scale if local else 0.0,
             gradient,
             3,
         )
-        step = math.sqrt(1 - 0.999 ** (iteration + 1)) / (1 - 0.9 ** (iteration + 1))
+        step = (
+            learning_rate
+            * math.sqrt(1 - 0.999 ** (iteration + 1))
+            / (1 - 0.9 ** (iteration + 1))
+        )
         localmap._adam_step(layout, gradient, first, second, step)
+    return layout
+
+
+def test_three_phases_from_fixed_pairs_match_pacmap():
+    # localmap_layout draws further pairs again in the third phase, which
+    # pacmap does from shared random state, so this replays its loop with
+    # the reference's fixed pairs.
+    layout = _replayed_schedule(
+        REFERENCE["start"], *_reference_inputs(), ITERATIONS, 1.0, 5.0
+    )
 
     assert _relative_error(layout, REFERENCE["layout_450"]) < 2e-2
+
+
+def test_a_layout_whose_further_pairs_cannot_change_replays_pacmaps_schedule():
+    # Every cell names every other cell as a neighbor, so the third phase has
+    # no cell to draw as a further pair, and the layout keeps the pairs it is
+    # given. Its loop is then PaCMAP's, with a third phase from iteration 21
+    # whose neighbors attract at half of max_distance.
+    n_cells = 30
+    rng = np.random.default_rng(6)
+    rows = np.stack([np.delete(np.arange(n_cells), cell) for cell in range(n_cells)])
+    graph = _rows_graph(rows, rng.uniform(0.2, 1.0, size=rows.shape))
+    mid_near = rng.integers(0, n_cells, size=(n_cells, 4)).astype(np.int32)
+    further = rng.integers(0, n_cells, size=(n_cells, 6)).astype(np.int32)
+    start = localmap.initial_layout(rng.normal(size=(n_cells, 2)))
+    iterations = (10, 10, 25)
+
+    layout = localmap.localmap_layout(
+        start,
+        graph,
+        mid_near,
+        further,
+        iterations=iterations,
+        learning_rate=0.7,
+        max_distance=6.0,
+        random_seed=2,
+    )
+
+    expected = _replayed_schedule(
+        start,
+        localmap.neighbor_partners(graph),
+        localmap.pair_partners(mid_near),
+        localmap.pair_partners(further),
+        iterations,
+        0.7,
+        3.0,
+    )
+    np.testing.assert_array_equal(layout, expected)
 
 
 @pytest.mark.parametrize("python_kernels", [False, True])
@@ -323,9 +377,14 @@ def test_neighbor_partners_ignore_zero_weights():
     weights = np.ones(rows.shape)
     weights[0, 1] = 0.0
 
-    indptr, partners, _ = localmap.neighbor_partners(_rows_graph(rows, weights))
+    indptr, partners, scaled = localmap.neighbor_partners(_rows_graph(rows, weights))
 
-    assert 2 not in partners[indptr[0] : indptr[1]].tolist()
+    # Cell 0 keeps its edge to cell 1 and is named by cells 4 and 5; cell 2
+    # keeps its own two edges and is named by cell 1 alone.
+    assert partners[indptr[0] : indptr[1]].tolist() == [1, 4, 5]
+    assert partners[indptr[2] : indptr[3]].tolist() == [3, 4, 1]
+    # The eleven edges left share the attraction of ten pairs per cell.
+    np.testing.assert_allclose(scaled, 10 * 6 / 11, rtol=1e-6)
 
 
 @pytest.mark.parametrize(
@@ -493,6 +552,71 @@ def test_redraw_keeps_pairs_without_a_nearby_candidate(monkeypatch, python_kerne
         assert len(set(new.tolist())) == new.size
 
 
+def _redrawn_by_definition(layout, graph, pairs, key, max_distance):
+    """Each cell's further pairs after a redraw, drawn by the rules of the third phase.
+
+    A cell draws each pair in turn from its own SplitMix64 stream, at most
+    100 times, and takes the first cell that is not itself, lies within
+    ``max_distance`` in the layout, is not one of its neighbors and is not
+    one of its new pairs; a pair that no draw fills keeps its cell.
+    """
+    n_cells = layout.shape[0]
+    redrawn = pairs.copy()
+    for cell in range(n_cells):
+        stream = child_key(int(key), cell)
+        neighbors = set(graph.indices[graph.indptr[cell] : graph.indptr[cell + 1]])
+        counter = 0
+        new: list[int] = []
+        for pair in range(pairs.shape[1]):
+            for _trial in range(100):
+                candidate = (draw(stream, counter) >> 32) * n_cells >> 32
+                counter += 1
+                offset = layout[cell].astype(np.float64) - layout[candidate]
+                if (
+                    candidate != cell
+                    and offset @ offset <= max_distance**2
+                    and candidate not in neighbors
+                    and candidate not in new
+                ):
+                    new.append(candidate)
+                    redrawn[cell, pair] = candidate
+                    break
+    return redrawn
+
+
+@pytest.mark.parametrize("python_kernels", [False, True])
+def test_redraw_takes_the_first_draws_of_each_cells_stream_that_fit(
+    monkeypatch, python_kernels
+):
+    _python_kernels(monkeypatch, python_kernels)
+    # Twelve cells on a line, one apart, each naming the next two as its
+    # neighbors. Within a distance of 4, cell 0 has two cells to draw and
+    # cell 1 three, cell 0 among them.
+    n_cells = 12
+    layout = np.zeros((n_cells, 2), dtype=np.float32)
+    layout[:, 0] = np.arange(n_cells)
+    rows = np.array([[(i + 1) % n_cells, (i + 2) % n_cells] for i in range(n_cells)])
+    graph = localmap._checked_graph(_rows_graph(rows))
+    pairs = np.array(
+        [
+            [(i + 5) % n_cells, (i + 6) % n_cells, (i + 7) % n_cells]
+            for i in range(n_cells)
+        ],
+        dtype=np.int32,
+    )
+    key = localmap.draw_key(5, 3, 210)
+    expected = _redrawn_by_definition(layout, graph, pairs, key, 4.0)
+    # The draws give cell 1 the cell 0, and leave cell 0's third pair as it was.
+    assert 0 in expected[1].tolist()
+    assert expected[0, 2] == pairs[0, 2]
+
+    localmap._redraw_nearby_further_pairs(
+        layout, graph.indptr, graph.indices, pairs, key, 16.0, 4
+    )
+
+    np.testing.assert_array_equal(pairs, expected)
+
+
 def test_initial_layout_keeps_proportions_at_a_small_scale():
     values = np.column_stack([np.linspace(-30, 50, 101), np.linspace(1, 3, 101)])
 
@@ -591,27 +715,113 @@ def test_layout_rejects_inputs_of_other_cells():
         localmap.localmap_layout(start[:, 0], graph, mid_near, further)
 
 
-def test_peak_bytes_grow_with_each_input():
-    base = localmap.localmap_peak_bytes(1000, 11000, dims=2, n_mid_near=5, n_further=20)
+def _peak_bytes(**changes) -> int:
+    options = {
+        "n_cells": 1000,
+        "n_edges": 11000,
+        "dims": 2,
+        "n_mid_near": 5,
+        "n_further": 20,
+        "nthreads": 1,
+        **changes,
+    }
+    return localmap.localmap_peak_bytes(
+        options.pop("n_cells"), options.pop("n_edges"), **options
+    )
 
-    assert (
-        localmap.localmap_peak_bytes(2000, 11000, dims=2, n_mid_near=5, n_further=20)
-        > base
-    )
-    assert (
-        localmap.localmap_peak_bytes(1000, 22000, dims=2, n_mid_near=5, n_further=20)
-        > base
-    )
-    assert (
-        localmap.localmap_peak_bytes(1000, 11000, dims=3, n_mid_near=5, n_further=20)
-        > base
-    )
-    assert (
-        localmap.localmap_peak_bytes(1000, 11000, dims=2, n_mid_near=5, n_further=30)
-        > base
-    )
+
+def test_peak_bytes_grow_with_each_input():
+    import numba
+
+    base = _peak_bytes()
+    for changes in (
+        {"n_cells": 2000},
+        {"n_edges": 22000},
+        {"dims": 3},
+        {"n_mid_near": 10},
+        {"n_further": 30},
+    ):
+        assert _peak_bytes(**changes) > base, changes
+    # A dimension adds a float32 value of each cell to the layout, its
+    # gradient and Adam's two moments.
+    assert _peak_bytes(dims=3) - base == 4 * 4 * 1000
+    # More threads build the partner lists in more blocks of cells, up to the
+    # threads that Numba started with, which a layout cannot pass.
+    most = numba.config.NUMBA_NUM_THREADS
+    if most > 1:
+        assert _peak_bytes(nthreads=2) > base
+    assert _peak_bytes(nthreads=most + 3) == _peak_bytes(nthreads=most)
     with pytest.raises(ValueError, match="n_cells"):
-        localmap.localmap_peak_bytes(0, 0, dims=2, n_mid_near=5, n_further=20)
+        _peak_bytes(n_cells=0, n_edges=0)
+    with pytest.raises(ValueError, match="nthreads"):
+        _peak_bytes(nthreads=0)
+
+
+def _connectivity_like_graph(
+    n_cells: int, n_neighbors: int, seed: int
+) -> tuple[np.ndarray, csr_matrix]:
+    """Return coordinates and a graph of their nearest cells, as a connectivity map holds.
+
+    Each cell's row names the cell itself at weight 0, then its nearest cells.
+    """
+    rng = np.random.default_rng(seed)
+    cells = rng.normal(size=(n_cells, 8)).astype(np.float32)
+    rows = np.argsort(
+        np.linalg.norm(cells[:, None] - cells[None], axis=2), axis=1, kind="stable"
+    )[:, : n_neighbors + 1]
+    weights = rng.uniform(0.2, 1.0, size=rows.shape).astype(np.float32)
+    weights[:, 0] = 0.0
+    return cells, _rows_graph(rows, weights)
+
+
+@pytest.mark.parametrize(
+    ("n_cells", "n_neighbors", "nthreads"),
+    [
+        (200, 5, 1),
+        (200, 15, 4),
+        # Larger lists take Python over a second to build.
+        pytest.param(300, 30, 2, marks=pytest.mark.slow),
+        pytest.param(400, 10, 8, marks=pytest.mark.slow),
+    ],
+)
+def test_peak_bytes_cover_what_a_layout_holds_at_its_peak(
+    monkeypatch, n_cells, n_neighbors, nthreads
+):
+    import tracemalloc
+
+    cells, graph = _connectivity_like_graph(n_cells, n_neighbors, seed=n_cells)
+    mid_near = localmap.mid_near_pairs(cells, 5, 0)
+    further = localmap.further_pairs(graph, 20, 0)
+    start = localmap.initial_layout(np.random.default_rng(1).normal(size=(n_cells, 2)))
+    # The third phase runs from iteration 3, and iteration 10 draws further
+    # pairs again, as each tenth iteration of a full third phase does.
+    options = {"iterations": (1, 1, 9), "nthreads": nthreads}
+    # A first layout loads what a layout imports and compiles, which would
+    # count otherwise.
+    localmap.localmap_layout(start, graph, mid_near, further, **options)
+    # The partner lists are built as Python, whose arrays tracemalloc sees; the
+    # other kernels allocate a few values for each block of cells.
+    monkeypatch.setattr(localmap, "_partners", localmap._partners.py_func)
+    tracemalloc.start()
+    try:
+        before, _ = tracemalloc.get_traced_memory()
+        localmap.localmap_layout(start, graph, mid_near, further, **options)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    # The estimate also counts the rows of the pairs, which the caller holds,
+    # and stays within a tenth above what the layout held.
+    held = peak - before + mid_near.nbytes + further.nbytes
+    estimate = localmap.localmap_peak_bytes(
+        n_cells,
+        graph.nnz,
+        dims=2,
+        n_mid_near=5,
+        n_further=20,
+        nthreads=nthreads,
+    )
+    assert held <= estimate <= 1.1 * held
 
 
 def test_graph_check_copies_only_graphs_it_must_change():
@@ -627,6 +837,12 @@ def test_graph_check_copies_only_graphs_it_must_change():
     assert graph.nnz == 12 and graph.data.dtype == np.float64
     assert checked.nnz == 11 and checked.data.dtype == np.float32
     assert localmap._checked_graph(checked) is checked
+    # A float32 graph is copied as well when it stores a zero.
+    single = _rows_graph(rows, weights.astype(np.float32))
+    assert single.data.dtype == np.float32
+    checked_single = localmap._checked_graph(single)
+    assert checked_single is not single
+    assert single.nnz == 12 and checked_single.nnz == 11
 
 
 def test_graphs_of_more_cells_than_int32_partners_hold_are_refused():

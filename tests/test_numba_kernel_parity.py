@@ -68,6 +68,37 @@ def test_paris_python_nearest_neighbor_kernel_matches_compiled_kernel() -> None:
     np.testing.assert_array_equal(actual[0], [2, 0, -1, -1])
 
 
+@pytest.mark.parametrize(
+    "kernel",
+    [paris_core._nearest_neighbors, paris_core._nearest_neighbors.py_func],
+    ids=["jit", "python"],
+)
+def test_paris_nearest_neighbor_is_the_most_similar_with_ties_to_the_smaller_id(
+    kernel,
+) -> None:
+    # Row 0's first neighbor is more similar than its second; row 1's two
+    # neighbors tie, and the later one has the smaller logical id; row 2's
+    # tie keeps the earlier one, whose logical id is smaller.
+    graph = csr_matrix(
+        np.array(
+            [
+                [0.0, 4.0, 1.0, 0.0],
+                [2.0, 0.0, 2.0, 0.0],
+                [2.0, 0.0, 0.0, 2.0],
+                [0.0, 0.0, 1.0, 0.0],
+            ]
+        )
+    )
+    logical_ids = np.array([5, 7, 3, 9], dtype=np.int64)
+
+    nearest, between = kernel(
+        graph.indptr, graph.indices, graph.data, np.ones(4), logical_ids, 2
+    )
+
+    np.testing.assert_array_equal(nearest, [1, 2, 0, 2])
+    np.testing.assert_array_equal(between, [4.0, 2.0, 2.0, 1.0])
+
+
 def test_paris_python_contraction_kernels_match_sparse_aggregation() -> None:
     dense = np.zeros((6, 6), dtype=np.float64)
     for left, right, weight in (
@@ -212,6 +243,13 @@ def test_paris_python_union_find_kernels_cover_compression_and_rank_cases() -> N
 
     parents = np.arange(2, dtype=np.int64)
     ranks = np.zeros(2, dtype=np.uint8)
+    assert paris_modularity._union_sets.py_func(parents, ranks, 0, 1) == 0
+    np.testing.assert_array_equal(parents, [0, 0])
+    np.testing.assert_array_equal(ranks, [1, 0])
+
+    # A first root of the higher rank takes the second without growing.
+    parents = np.arange(2, dtype=np.int64)
+    ranks = np.array([1, 0], dtype=np.uint8)
     assert paris_modularity._union_sets.py_func(parents, ranks, 0, 1) == 0
     np.testing.assert_array_equal(parents, [0, 0])
     np.testing.assert_array_equal(ranks, [1, 0])
@@ -538,6 +576,18 @@ def test_connectivity_python_union_find_kernels_cover_all_edge_cases() -> None:
     )
     np.testing.assert_array_equal(parents, [1, 1, 1, 3])
     assert component_sizes[1] == 5
+
+    # A source component at least as large as the target's keeps its root.
+    parents = np.arange(4, dtype=np.int64)
+    component_sizes = np.array([3, 1, 2, 1], dtype=np.int64)
+    connectivity._union_same_label_edges.py_func(
+        np.array([[0, 1], [2, 3]], dtype=np.int64),
+        np.zeros(4, dtype=np.int64),
+        parents,
+        component_sizes,
+    )
+    np.testing.assert_array_equal(parents, [0, 0, 2, 2])
+    np.testing.assert_array_equal(component_sizes[[0, 2]], [4, 3])
 
     parents = np.array([1, 2, 2, 3], dtype=np.int64)
     connectivity._compress_paths.py_func(parents)

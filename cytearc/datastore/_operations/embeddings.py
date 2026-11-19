@@ -846,6 +846,7 @@ class _EmbeddingOperationsMixin(_EmbeddingOperationsBase):
                 dims=settings.localmap_dims,
                 n_mid_near=settings.n_mid_near,
                 n_further=settings.n_further,
+                nthreads=nthreads,
             ),
             work="LocalMAP",
         )

@@ -1869,3 +1869,35 @@ def test_the_kernel_walk_reports_files_without_njit(
         "helpers.py",
         "kernels.py",
     }
+
+
+def test_import_umap_does_not_repeat_an_import_that_finished_while_it_waited(
+    monkeypatch,
+) -> None:
+    import cytearc.utils.numba as numba_module
+
+    imports: list[frozenset[str]] = []
+
+    @contextmanager
+    def record(packages: frozenset[str]) -> Iterator[None]:
+        imports.append(packages)
+        yield
+
+    class FinishedWhileWaiting:
+        """The lock of an import that another thread completes before it is free."""
+
+        def __enter__(self) -> None:
+            numba_module._umap_imported = True
+
+        def __exit__(self, *_exc: object) -> None:
+            return None
+
+    monkeypatch.setattr(numba_module, "_caching_import_time_kernels", record)
+    monkeypatch.setattr(numba_module, "_umap_imported", False)
+    monkeypatch.setattr(numba_module, "_UMAP_IMPORT_LOCK", FinishedWhileWaiting())
+
+    numba_module.import_umap()
+
+    # The import was seen as missing before the lock and as done under it.
+    assert imports == []
+    assert numba_module._umap_imported is True

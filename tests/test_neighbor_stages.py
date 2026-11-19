@@ -986,6 +986,35 @@ def test_harmony_stage_holds_no_block_while_its_stream_reads_the_next(
     assert stream.held == [False, False]
 
 
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+def test_kmeans_plusplus_bytes_cover_what_scikit_learn_holds_while_it_seeds(
+    dtype,
+) -> None:
+    import tracemalloc
+
+    from sklearn.cluster import kmeans_plusplus
+
+    from cytearc.neighbors.stages import _kmeans_plusplus_bytes
+
+    rows, dims, clusters = 5_000, 3, 20
+    points = np.random.default_rng(0).normal(size=(rows, dims)).astype(dtype)
+    # A first call imports what seeding imports lazily, which would count.
+    kmeans_plusplus(points[:200], 3, random_state=0)
+    tracemalloc.start()
+    try:
+        base, _ = tracemalloc.get_traced_memory()
+        kmeans_plusplus(points, clusters, random_state=0)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    # The estimate covers what seeding holds beside the points, float32
+    # points with their float64 distance chunks and float64 points with
+    # their product temporaries, and is not far above it.
+    estimate = _kmeans_plusplus_bytes(rows, dims, clusters, np.dtype(dtype).itemsize)
+    assert peak - base <= estimate <= 2 * (peak - base)
+
+
 def test_kmeans_fit_memory_counts_what_each_mode_holds() -> None:
     options = {
         "n_rows": 200_000,

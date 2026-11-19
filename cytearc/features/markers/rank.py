@@ -318,8 +318,8 @@ def _argsort_positive(
             buckets[bucket] += 1
         source, target = target, source
         shift += bits
-    if source is not order:
-        order[:n] = source[:n]
+    # The third pass sorted into ``scratch``.
+    order[:n] = source[:n]
 
 
 @njit(cache=True, nogil=True, inline="always")
