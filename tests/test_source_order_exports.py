@@ -258,12 +258,18 @@ def test_positions_refuse_rows_that_are_not_increasing_rows_of_the_table(rows):
         source_order_positions(_table(np.arange(6)), rows)
 
 
-def test_positions_refuse_a_malformed_source_row_column() -> None:
+@pytest.mark.parametrize(
+    "column",
+    [np.arange(4, dtype=np.int32), np.arange(5, dtype=np.int64)],
+    ids=["int32", "a row too many"],
+)
+def test_positions_refuse_a_malformed_source_row_column(column) -> None:
     table = _table(np.arange(4))
-    table.create_array(SOURCE_ROW, data=np.arange(4, dtype=np.int32), overwrite=True)
+    table.create_array(SOURCE_ROW, data=column, overwrite=True)
     table[SOURCE_ROW].attrs["role"] = SOURCE_ROW_ROLE
-    with pytest.raises(ValueError, match="one int64 row of the imported file"):
-        source_order_positions(table, np.arange(4))
+    for rows in (np.arange(4), np.asarray([1, 3])):
+        with pytest.raises(ValueError, match="one int64 row of the imported file"):
+            source_order_positions(table, rows)
 
 
 def test_ranks_place_each_cell_in_source_order() -> None:
@@ -424,7 +430,7 @@ def test_reordered_rows_keep_the_export_dtype_cast(tmp_path) -> None:
         max_bytes=64 << 20,
         temp_dir=tmp_path,
     )
-    with pytest.raises(OverflowError):
+    with pytest.raises(OverflowError, match="exceed the destination dtype"):
         materialize_h5ad_matrix(overflow)
     # The failed export leaves no temporary files.
     assert list(tmp_path.iterdir()) == []
@@ -541,6 +547,98 @@ def test_a_large_budget_gathers_at_most_two_million_values_per_append(
     assert sum(appended) == np.count_nonzero(values)
     assert all(5_000 <= count < 5_000 + 3_000 for count in appended[:-1])
     assert len(appended) == 20
+
+
+def _recorded_buckets(monkeypatch) -> list[SparseRowStore]:
+    """Record each row bucket store that is finalized, once it is."""
+    stores: list[SparseRowStore] = []
+    finalize = SparseRowStore.finalize
+
+    def recorded(store):
+        finalize(store)
+        stores.append(store)
+
+    monkeypatch.setattr(SparseRowStore, "finalize", recorded)
+    return stores
+
+
+def test_a_reorder_sizes_its_buckets_to_read_in_a_thirty_second_of_its_budget(
+    tmp_path, monkeypatch
+) -> None:
+    # 500 rows of 40 uint32 values, none of them zero.
+    values = (np.random.default_rng(15).poisson(2.0, (500, 40)) + 1).astype(np.uint32)
+    order = np.random.default_rng(16).permutation(500)
+    stores = _recorded_buckets(monkeypatch)
+    for budget in (2 << 20, 64 << 20):
+        exported = materialize_h5ad_matrix(
+            reordered_matrix(
+                _matrix(values, rows=50),
+                order,
+                max_bytes=budget,
+                temp_dir=tmp_path,
+                entries=values.size,
+            )
+        )
+        np.testing.assert_array_equal(exported.toarray(), values[order])
+    # A row reads in 40 * 44 + 48 + 32 = 1,840 bytes. A budget of 2 MiB reads
+    # buckets in 65,536 bytes, 35 rows, so the 500 rows take 15 buckets; one
+    # of 64 MiB reads 2 MiB, which holds every row.
+    assert [store.bucket_starts.size - 1 for store in stores] == [15, 1]
+
+
+def test_a_reorder_splits_a_bucket_of_dense_rows_to_read_in_twice_its_read_size(
+    tmp_path, monkeypatch
+) -> None:
+    # The first 50 of 200 rows hold 100 values each, the rest none, and the
+    # order keeps them first, so the first bucket, sized for the mean row of
+    # 25 values, 55 rows of 1,180 bytes in 65,536 bytes, holds every value.
+    values = np.zeros((200, 100), dtype=np.float32)
+    values[:50] = np.arange(1, 101)
+    order = np.arange(200)
+    stores = _recorded_buckets(monkeypatch)
+    exported = materialize_h5ad_matrix(
+        reordered_matrix(
+            _matrix(values, rows=50),
+            order,
+            max_bytes=2 << 20,
+            temp_dir=tmp_path,
+            entries=5_000,
+        )
+    )
+    np.testing.assert_array_equal(exported.toarray(), values)
+    (store,) = stores
+    # A dense row reads in 100 * 44 + 48 + 32 bytes, so 29 rows fit in twice
+    # the read size, 131,072 bytes; the first bucket splits there, and the
+    # band after it holds the other 21 dense rows and five empty ones.
+    assert store.bucket_starts.tolist() == [0, 29, 55, 110, 165, 200]
+    assert store.read_bytes() - store.bucket_starts.nbytes <= 2 * 65_536
+
+
+def test_a_reorder_without_a_count_of_its_values_estimates_them_from_its_first_rows(
+    tmp_path,
+) -> None:
+    values = np.random.default_rng(13).poisson(1.0, (600, 30)).astype(np.float32)
+    order = np.random.default_rng(14).permutation(600)
+
+    def reorder() -> np.ndarray:
+        # Blocks of 30 rows: the first one estimates the values of all 600.
+        matrix = reordered_matrix(
+            _matrix(values, rows=30), order, max_bytes=64 << 20, temp_dir=tmp_path
+        )
+        return materialize_h5ad_matrix(matrix).toarray()
+
+    with finalized_bytes() as peaks:
+        found = reorder()
+    (peak,) = peaks
+    with free_disk(0), pytest.raises(OSError, match="which has 0 free") as full:
+        reorder()
+    asked = asked_bytes(full.value)
+    # The check asks for every byte of the files, from the rate at which the
+    # first rows compress and a quarter more, far less than the 4 bytes of a
+    # value and the byte of its column before compression.
+    assert peak <= asked <= 2 * peak
+    np.testing.assert_array_equal(found, values[order])
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_a_reorder_refuses_a_disk_without_room_and_leaves_no_files(
@@ -763,13 +861,27 @@ def test_a_text_reorder_plan_fits_its_bytes_or_names_bytes_that_fit_it() -> None
     def plan(max_bytes: int, block_bytes: int = 1 << 20) -> export.TextReorder:
         return export.plan_text_reorder(1000, widest, 50, block_bytes, max_bytes)
 
-    # The plan of the smallest buckets reads one row of the widest at a time
+    # The plan of the smallest buckets reads one row of the widest at a time,
+    # its bytes three times, 120 bytes for its piece and 64 for its pointers,
     # and keeps no rows waiting.
     smallest = plan(0)
-    assert smallest.read_bytes == SparseRowStore.ragged_row_read_bytes(widest)
+    assert smallest.read_bytes == 3 * 81 + 120 + 64
     assert smallest.bucket_bytes == 2 * smallest.read_bytes
     assert smallest.buffer_bytes == 0
+    # Buckets of one row of 395 bytes each, whose writer holds 9 bytes a row
+    # and 25 a bucket and one more, beside a block of 50 rows sent to them,
+    # each held three times and 48 bytes beside.
     least = smallest.held_bytes
+    assert least == 1_000 * 9 + 1_001 * 25 + 50 * (3 * 81 + 48)
+    # Ten times that reads buckets in a sixth of what 16 bytes for each row
+    # and one more leave, 78,289 bytes, which the reads fill; the waiting
+    # rows take half of what streaming leaves, beside a writer of buckets of
+    # 198 rows and the block.
+    tenfold = plan(10 * least)
+    assert tenfold.read_bytes == (10 * least - 16 * 1_001) // 6 == 78_289
+    assert tenfold.held_bytes == 10 * least
+    streaming = 1_000 * 9 + 7 * 25 + 50 * (3 * 81 + 48)
+    assert tenfold.buffer_bytes == (10 * least - streaming) // 2
     for max_bytes in (least, least + 1, 10 * least, 64 << 20, 1 << 30):
         fitted = plan(max_bytes)
         assert fitted.held_bytes <= max_bytes
@@ -781,9 +893,11 @@ def test_a_text_reorder_plan_fits_its_bytes_or_names_bytes_that_fit_it() -> None
     for max_bytes in (0, 1_000, 20_000, least // 2, least - 1):
         held = plan(max_bytes).held_bytes
         assert held <= max_bytes or plan(held).held_bytes <= held
-    # With room, buckets read in about a block, and a block of rows waits.
+    # With room, buckets read in about a block, and a block of rows waits;
+    # reading back holds the pointers and three buckets of twice that.
     roomy = plan(1 << 30)
     assert roomy.read_bytes == 1 << 20 and roomy.buffer_bytes == 1 << 20
+    assert roomy.held_bytes == 16 * 1_001 + 3 * 2 * (1 << 20)
     # A block of a few bytes still reads a row of the widest.
     assert plan(1 << 30, block_bytes=10).read_bytes == smallest.read_bytes
     # A block holds no more rows than the reorder.
@@ -1021,7 +1135,8 @@ def test_an_export_asks_for_the_disk_that_its_temporary_files_take(
     with free_disk(asked - 1), pytest.raises(OSError, match=f"needs {asked} "):
         export_to("short")
     assert list(spill.iterdir()) == []
-    assert not (tmp_path / "short.h5ad").exists()
+    if call == "to_h5ad":
+        assert not (tmp_path / "short.h5ad").exists()
     with free_disk(asked):
         assert export_to("enough").exists()
     assert list(spill.iterdir()) == []
