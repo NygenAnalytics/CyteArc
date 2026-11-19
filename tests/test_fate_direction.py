@@ -167,16 +167,29 @@ def test_a_score_keyed_by_cell_id_directs_the_walk_of_the_cells_of_its_ids() -> 
     ids = store.cells.fetch_all("ids")
     values = pseudotime.values
     in_order = _direct(scored, pd.Series(values, index=ids))
-    # Reversed, and beside a score of a cell outside the graph, which is left
-    # out, the score directs the same walk: the map records the aligned score.
+    # Reversed, shuffled, and beside a score of a cell outside the graph,
+    # which is left out, the score directs the same walk: the map records the
+    # aligned score.
+    shuffled = np.random.default_rng(3).permutation(len(ids))
     assert _direct(scored, pd.Series(values[::-1], index=ids[::-1])) == in_order
+    assert _direct(scored, pd.Series(values[shuffled], index=ids[shuffled])) == in_order
     assert (
         _direct(scored, pd.Series([*values, 0.5], index=[*ids, "elsewhere"]))
         == in_order
     )
+    snapshot = store.trajectory.load_fate(in_order).direction
     np.testing.assert_array_equal(
-        store.trajectory.load_fate(in_order).values,
-        store.trajectory.load_fate(_direct(scored, values)).values,
+        artifact_group(store.zw, snapshot)["values"][:], values
+    )
+    # The scores of the root and of A moved to each other's cells direct
+    # another walk, whose snapshot holds each score at the cell of its ID.
+    moved_values = values.copy()
+    moved_values[[0, 2]] = values[[2, 0]]
+    moved = _direct(scored, pd.Series(moved_values, index=ids))
+    assert moved != in_order
+    moved_snapshot = store.trajectory.load_fate(moved).direction
+    np.testing.assert_array_equal(
+        artifact_group(store.zw, moved_snapshot)["values"][:], moved_values
     )
 
 

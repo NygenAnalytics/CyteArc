@@ -537,6 +537,20 @@ def test_a_cell_follows_each_lineage_it_keeps_half_the_trunk_probability_of() ->
     )
 
 
+def test_a_cell_at_its_bins_distance_limit_lies_on_the_curve() -> None:
+    # The one bin's limit is 1. A cell at distance 1 from both curves lies on
+    # them and follows both lineages, whose trunk split it keeps; a cell the
+    # smallest step farther lies off both curves and follows none.
+    beyond = np.nextafter(1.0, 2.0)
+    members = _members_by_trunk(
+        [[0.8, 0.2], [0.8, 0.2]],
+        [0.8, 0.2],
+        distance=np.array([[1.0, 1.0], [beyond, beyond]]),
+    )
+
+    np.testing.assert_array_equal(members, [[1, 1], [0, 0]])
+
+
 def test_curves_of_some_sinks_compare_a_cell_with_its_largest_divided_probability() -> (
     None
 ):
@@ -1560,7 +1574,9 @@ def test_the_membership_loader_refuses_changed_records() -> None:
         store.trajectory.load_lineage_membership(ref)
     _rewrite_parameters(store, ref, band=0.5)
     _rewrite_inputs(store, ref, cell_selection=branching.graph)
-    with pytest.raises(Exception, match="cell"):
+    with pytest.raises(
+        ValueError, match="^Lineage membership does not use its curves' cells$"
+    ):
         store.trajectory.load_lineage_membership(ref)
 
 

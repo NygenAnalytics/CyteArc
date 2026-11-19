@@ -1090,6 +1090,23 @@ def test_entropy_tail_series_is_summed_exactly(
     assert dv._entropy_tail(n, a) == pytest.approx(expected, rel=1e-15, abs=0)
 
 
+@pytest.mark.parametrize("python_kernels", [False, True])
+def test_segment_sums_keep_the_error_of_a_term_larger_than_the_sum(
+    monkeypatch, python_kernels
+) -> None:
+    if python_kernels:
+        use_python_kernels(monkeypatch, dv)
+    # 1 + 1e100 + 1 - 1e100 is exactly 2: summed in order, each 1 is lost to
+    # 1e100. Kahan's compensation keeps the second 1 but loses the first,
+    # which the sum lost when the term outweighed it; Neumaier's keeps both.
+    # The second group sums to 3 without any loss.
+    sums = dv._segment_sums(
+        np.array([0, 4, 6]), np.array([1.0, 1e100, 1.0, -1e100, 1.0, 2.0])
+    )
+
+    assert sums.tolist() == [2.0, 3.0]
+
+
 def test_two_singletons_extrapolate_their_shannon_diversity() -> None:
     # Two singletons hold D(1) = 1 and D(2) = 2, and their asymptote is
     # exp(1 + 3 log 1.5 - 1) = 1.5**3; the rate (2 - 1) / (3.375 - 1) = 8/19

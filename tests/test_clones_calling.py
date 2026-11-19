@@ -838,10 +838,12 @@ def test_a_node_is_ambiguous_when_two_neighbors_disagree_where_it_does_not_know(
     # Cells 0 and 1 are a founder (0) and its subclone (0 and 1); cell 2 holds
     # 0 with 1 unknown and agrees with both; cell 3 holds 1 with 0 unknown and
     # agrees with the subclone alone; cell 4 holds 2 and 3 known where its
-    # partial neighbors 5 (3 unknown) and 6 (2 unknown) share nothing.
-    rows = [[0], [0, 1], [0], [1], [2, 3], [2], [3]]
-    unknown_rows = [[], [], [1], [0], [], [3], [2]]
-    pairs = [(0, 2), (1, 2), (1, 3), (4, 5), (4, 6)]
+    # partial neighbors 5 (3 unknown) and 6 (2 unknown) share nothing. Cell 7
+    # holds 4 with 5 unknown, and of its neighbors 8 holds 5 and 9 does not
+    # know it either, so no neighbor knows 5 absent and 7 is not ambiguous.
+    rows = [[0], [0, 1], [0], [1], [2, 3], [2], [3], [4], [4, 5], [4, 6]]
+    unknown_rows = [[], [], [1], [0], [], [3], [2], [5], [], [5]]
+    pairs = [(0, 2), (1, 2), (1, 3), (4, 5), (4, 6), (7, 8), (7, 9)]
     _python_kernels(monkeypatch, python_kernels)
     sets, unknown = _unknown_sets(rows, unknown_rows)
     nodes = identical_sets(sets, unknown=unknown)
