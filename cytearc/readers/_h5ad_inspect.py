@@ -1,9 +1,11 @@
+import math
 from dataclasses import dataclass
 from typing import Any
 
 import h5py
 import numpy as np
 
+from ..utils.arguments import quoted_value
 from ..utils.arrays import assay_feature_ranges
 from ..utils.logging import logger
 from ._assay_names import (
@@ -53,8 +55,9 @@ _CELL_ID_KEYS = (
     "barcodes",
 )
 _LEGACY_CATEGORY_GROUPS = ("__categories", "categories")
-# How inspection's refusal of text that is not UTF-8 starts.
+# How inspection's refusals of text that is not UTF-8 start.
 _TABLE_TEXT = "H5AD tables must hold UTF-8 text"
+_SCALAR_TEXT = "H5AD titles and descriptions must be UTF-8 text"
 _NON_MATRIX_PREFIXES = (
     "obs/",
     "var/",
@@ -397,6 +400,79 @@ def _is_identifier_column(values: np.ndarray | None, n_cells: int) -> bool:
     return values.dtype.kind in "iu" or _is_string_column(values)
 
 
+# What the warning about an index of IDs calls its values, by dtype kind.
+_VALUE_KINDS = {
+    "b": "booleans",
+    "i": "integers",
+    "u": "integers",
+    "f": "floating-point numbers",
+    "c": "complex numbers",
+}
+
+
+def _is_missing_id(value: Any) -> bool:
+    """Return whether an import refuses a value as an ID because it is missing or blank."""
+    if value is None:
+        return True
+    if isinstance(value, float | np.floating):
+        return math.isnan(value)
+    return isinstance(value, str | bytes) and not _as_text(value).strip()
+
+
+def _index_warning(
+    values: np.ndarray | None,
+    index: str,
+    *,
+    table: str,
+    item: str,
+    others: str,
+    stored: str,
+    option: str,
+) -> str:
+    """Return the warning that says what an import does with the IDs of an index.
+
+    Inspection names a table's index when no column holds IDs, and an
+    import reads the index as the IDs: it refuses missing or blank IDs,
+    renames repeated IDs only when ``option`` asks it to, and stores any
+    other value, such as a floating-point number, as its text.
+
+    Args:
+        values: The values of the index, or None when they cannot be read.
+        index: The name of the index.
+        table: The table, such as ``"obs"``.
+        item: What a row is, such as ``"cell"``.
+        others: Why inspection names the index, such as ``"no other column
+            holds unique text IDs"``.
+        stored: What an import stores the text of each value as, such as
+            ``"the cell's ID"``.
+        option: The reader argument that renames repeated IDs.
+    """
+    subject = f"The {item} IDs in the {table} index {index!r}"
+    if values is None:
+        return f"{subject} cannot be read, and {others}. An import refuses the file"
+    # The values as the import reads them, such as Python floats.
+    held = values.astype(object).tolist()
+    missing = [row for row, value in enumerate(held) if _is_missing_id(value)]
+    if missing:
+        return (
+            f"{subject} include missing or blank values, the first in row "
+            f"{missing[0] + 1}, and {others}. An import refuses {item}s without "
+            "an ID"
+        )
+    texts = [_as_text(value) for value in held]
+    if len(set(texts)) < len(texts):
+        return (
+            f"{subject} repeat values, and {others}. Pass {option}='make_unique' "
+            "to H5adReader, also through H5adReader.from_inspect, to rename "
+            "repeated IDs"
+        )
+    kind = _VALUE_KINDS.get(values.dtype.kind, "values that are not text")
+    return (
+        f"{subject} are {kind}, and {others}. An import stores the text of each "
+        f"as {stored}, such as {texts[0]!r}"
+    )
+
+
 def _find_cell_ids(
     node: h5py.Group | h5py.Dataset | None,
     n_cells: int,
@@ -405,7 +481,8 @@ def _find_cell_ids(
         return "_index"
     names = table_column_names(node)
     index = _table_index(node, names)
-    if index is not None and _is_identifier_column(_read_column(node, index), n_cells):
+    index_values = None if index is None else _read_column(node, index)
+    if index is not None and _is_identifier_column(index_values, n_cells):
         return index
     normalized = {name.lower(): name for name in names}
     for preferred in _CELL_ID_KEYS:
@@ -424,10 +501,15 @@ def _find_cell_ids(
 
     if index is not None:
         logger.warning(
-            f"The cell IDs in the obs index {index!r} repeat values, and no "
-            "other column holds unique text IDs. Pass "
-            "duplicate_cell_ids='make_unique' to H5adReader, also through "
-            "H5adReader.from_inspect, to rename repeated IDs"
+            _index_warning(
+                index_values,
+                index,
+                table=node.name.strip("/"),
+                item="cell",
+                others="no other column holds unique text IDs",
+                stored="the cell's ID",
+                option="duplicate_cell_ids",
+            )
         )
         return index
     logger.warning("No cell ID column found; generated IDs will be used")
@@ -539,7 +621,24 @@ def _find_features(
             )
 
     if id_key is None and name_key is None:
-        logger.warning("No feature ID or name column found; generated IDs will be used")
+        # The reader reads the table's index, when it has one, as the IDs and
+        # the names.
+        if index is None:
+            logger.warning(
+                "No feature ID or name column found; generated IDs will be used"
+            )
+        else:
+            logger.warning(
+                _index_warning(
+                    columns.values(index),
+                    index,
+                    table=node.name.strip("/"),
+                    item="feature",
+                    others="no other column holds text feature IDs or names",
+                    stored="the feature's ID and name",
+                    option="duplicate_feature_ids",
+                )
+            )
         return "_index", "_index"
     if id_key is None:
         id_key = name_key
@@ -565,11 +664,24 @@ def _read_text_scalar(
     key: str,
     max_length: int,
 ) -> str | None:
-    """Return a scalar or one-element text dataset, or None for any other node."""
+    """Return a scalar or one-element text dataset, or None for any other node.
+
+    Raises:
+        ValueError: If the value is bytes that are not UTF-8 text, naming
+            the dataset and the file.
+    """
     node = h5.get(key)
     if not isinstance(node, h5py.Dataset) or node.shape not in {(), (1,)}:
         return None
     value = node[()] if node.shape == () else node[0]
+    if isinstance(value, bytes):
+        try:
+            value = value.decode("utf-8")
+        except UnicodeDecodeError:
+            raise ValueError(
+                f"{_SCALAR_TEXT}; {key} of {quoted_value(h5.filename)} holds "
+                f"{quoted_value(bytes(value))}"
+            ) from None
     return _as_text(value)[:max_length]
 
 
@@ -652,6 +764,13 @@ def inspect_h5ad(
     totals; review ``matrixKey`` and ``matrixCandidates`` and pass
     ``matrix_key`` to choose another.
 
+    When no column holds IDs, inspection names the table's index anyway,
+    and a warning says what an import does with it: it refuses missing or
+    blank IDs, renames repeated ones only with ``duplicate_cell_ids`` or
+    ``duplicate_feature_ids`` set to ``"make_unique"``, and stores other
+    values, such as floating-point numbers, as their text. Only a table
+    without an index gets generated IDs.
+
     Args:
         h5ad_fn: Path to the H5AD file.
         matrix_key: Optional matrix path to force (for example ``X`` or
@@ -666,7 +785,8 @@ def inspect_h5ad(
         ValueError: If no matrix matches the ``obs`` and ``var`` tables,
             ``matrix_key`` names no matrix, or a column that inspection reads
             to find the IDs and names holds bytes that are not UTF-8 text,
-            which an import refuses.
+            which an import refuses, or so does the title or description
+            that ``uns`` holds.
     """
     with h5py.File(h5ad_fn, mode="r") as h5:
         candidates = _matrix_candidates(h5)

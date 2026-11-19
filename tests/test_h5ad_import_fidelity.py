@@ -1,6 +1,7 @@
-"""H5AD import fidelity: categoricals, colors, indexes, IDs, and matrix choice."""
+"""H5AD import fidelity: categoricals, colors, indexes, IDs, text, and matrix choice."""
 
 import hashlib
+import re
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -30,6 +31,11 @@ anndata = pytest.importorskip("anndata")
 
 _STAGES = ["early", "mid", "late", "unused"]
 _STAGE_COLORS = ["#000000", "#888888", "#ff0000", "#00ff00"]
+
+
+def _text(*values: bytes) -> np.ndarray:
+    """Return byte strings as AnnData writes text, of variable length, which h5py reads as bytes."""
+    return np.array(values, dtype=h5py.string_dtype())
 
 
 @contextmanager
@@ -389,6 +395,7 @@ def test_category_colors_follow_scanpy_rules(tmp_path) -> None:
         uns.create_dataset("c_colors", data=np.asarray([b"#000000", b"nonsense"]))
         uns.create_dataset("d_colors", data=np.zeros((2, 2)))
         uns.create_group("e_colors")
+        uns.create_dataset("f_colors", data=_text(b"#00FF00", b"#ff\xe90000"))
     with h5py.File(path, "r") as h5:
         # More colors than categories: the first ones are used.
         assert category_colors(h5, "a", 1) == ("#000000",)
@@ -400,6 +407,10 @@ def test_category_colors_follow_scanpy_rules(tmp_path) -> None:
         assert category_colors(h5, "d", 2) is None
         assert category_colors(h5, "e", 1) is None
         assert category_colors(h5, "missing", 1) is None
+        # Bytes that are not UTF-8 text are no color, which the import used
+        # to stop at with a UnicodeDecodeError after it created the store.
+        assert category_colors(h5, "f", 1) == ("#00ff00",)
+        assert category_colors(h5, "f", 2) is None
 
 
 def test_legacy_categoricals_keep_their_categories(tmp_path) -> None:
@@ -427,21 +438,21 @@ def test_legacy_categoricals_keep_their_categories(tmp_path) -> None:
         nullable.create_dataset("mask", data=np.asarray([False, False, True]))
     with h5py.File(path, "r") as h5:
         groups = ("__categories",)
-        assert column_categories(h5, h5["obs"], "batch", groups) == H5adCategories(
-            ("B", "A"), True
-        )
-        assert column_categories(h5, h5["obs"], "donor", groups) == H5adCategories(
-            ("d1", "d2"), False
-        )
-        assert column_categories(h5, h5["obs"], "score", groups) is None
+
+        def categories(table: str, key: str) -> H5adCategories | None:
+            return column_categories(
+                h5, h5[table], key, groups, expectation="unused", place="unused"
+            )
+
+        assert categories("obs", "batch") == H5adCategories(("B", "A"), True)
+        assert categories("obs", "donor") == H5adCategories(("d1", "d2"), False)
+        assert categories("obs", "score") is None
         # Integer codes without stored categories are plain integers.
-        assert column_categories(h5, h5["obs"], "other", groups) is None
-        assert column_categories(h5, h5["obs"], "nullable", groups) is None
+        assert categories("obs", "other") is None
+        assert categories("obs", "nullable") is None
         # AnnData 0.6 kept the categories of a compound column in uns.
-        assert column_categories(h5, h5["var"], "group", groups) == H5adCategories(
-            ("g", "h"), False
-        )
-        assert column_categories(h5, h5["var"], "value", groups) is None
+        assert categories("var", "group") == H5adCategories(("g", "h"), False)
+        assert categories("var", "value") is None
 
 
 @pytest.mark.filterwarnings("ignore:Observation names are not unique")
@@ -1011,6 +1022,13 @@ def test_reader_refuses_the_ids_and_names_that_an_import_refuses(
             "'_index' of 'split.h5ad' is missing or blank",
             id="missing-feature-id",
         ),
+        pytest.param(
+            {"var/description": _text(b"a gene", b"an antib\xf6dy", b"a gene")},
+            {},
+            "H5AD feature metadata must be UTF-8 text; row 2 of the var column "
+            "'description' of 'split.h5ad' holds b'an antib\\xf6dy'",
+            id="feature-metadata",
+        ),
     ],
 )
 @pytest.mark.parametrize("shuffle_cells", [False, True], ids=["file", "shuffled"])
@@ -1061,6 +1079,26 @@ def test_an_import_split_by_feature_type_refuses_before_it_writes(
             "'description' of 'inspected.h5ad' holds b'caf\\xe9'",
             id="feature-column",
         ),
+        pytest.param(
+            {"uns/title": np.bytes_(b"Caf\xe9 atlas")},
+            "H5AD titles and descriptions must be UTF-8 text; uns/title of "
+            "'inspected.h5ad' holds b'Caf\\xe9 atlas'",
+            id="title",
+        ),
+        pytest.param(
+            # One element of variable length, as AnnData writes a list.
+            {"uns/description": _text(b"\xffcells")},
+            "H5AD titles and descriptions must be UTF-8 text; uns/description of "
+            "'inspected.h5ad' holds b'\\xffcells'",
+            id="description",
+        ),
+        pytest.param(
+            # Read as the description of a file without one.
+            {"uns/citation": np.bytes_(b"S\xe3o Paulo")},
+            "H5AD titles and descriptions must be UTF-8 text; uns/citation of "
+            "'inspected.h5ad' holds b'S\\xe3o Paulo'",
+            id="citation",
+        ),
     ],
 )
 def test_inspection_refuses_text_that_is_not_utf8(
@@ -1075,6 +1113,658 @@ def test_inspection_refuses_text_that_is_not_utf8(
     # Inspection used to raise the UnicodeDecodeError of a decode.
     assert type(refused.value) is ValueError
     assert str(refused.value) == message
+
+
+@pytest.mark.parametrize("shuffle_cells", [False, True], ids=["file", "shuffled"])
+@pytest.mark.parametrize(
+    ("members", "reader_kwargs", "columns", "message"),
+    [
+        pytest.param(
+            {"obs/note": _text(b"tea", b"caf\xe9", b"milk", b"water")},
+            {},
+            "get_cell_columns",
+            "H5AD cell metadata must be UTF-8 text; row 2 of the obs column 'note' "
+            "of 'refused.h5ad' holds b'caf\\xe9'",
+            id="text-cell-column",
+        ),
+        pytest.param(
+            # The third value ends within a character of two bytes.
+            {"obs/note": np.array([b"tea", b"milk", b"caf\xc3", b"water"])},
+            {},
+            "get_cell_columns",
+            "H5AD cell metadata must be UTF-8 text; row 3 of the obs column 'note' "
+            "of 'refused.h5ad' holds b'caf\\xc3'",
+            id="cut-character-in-a-fixed-width-column",
+        ),
+        pytest.param(
+            # Row 2 is missing, so an import never stores its bytes.
+            {
+                "obs/note": {
+                    "values": _text(b"tea", b"\xff", b"caf\xe9", b"water"),
+                    "mask": np.array([False, True, False, False]),
+                }
+            },
+            {},
+            "get_cell_columns",
+            "H5AD cell metadata must be UTF-8 text; row 3 of the obs column 'note' "
+            "of 'refused.h5ad' holds b'caf\\xe9'",
+            id="nullable-column-past-a-missing-row",
+        ),
+        pytest.param(
+            {
+                "obs/kind": {
+                    "codes": np.array([0, 1, 0, 1], dtype=np.int8),
+                    "categories": _text(b"x", b"y\xe9"),
+                }
+            },
+            {},
+            "get_cell_columns",
+            "H5AD cell metadata must be UTF-8 text; category 2 of the obs column "
+            "'kind' of 'refused.h5ad' holds b'y\\xe9'",
+            id="categorical-column",
+        ),
+        pytest.param(
+            # No row holds the third category, which an import stores too.
+            {
+                "obs/kind": {
+                    "codes": np.array([0, 0, 1, -1], dtype=np.int8),
+                    "categories": _text(b"x", b"y", b"z\xe9"),
+                }
+            },
+            {},
+            "get_cell_columns",
+            "H5AD cell metadata must be UTF-8 text; category 3 of the obs column "
+            "'kind' of 'refused.h5ad' holds b'z\\xe9'",
+            id="unused-category",
+        ),
+        pytest.param(
+            # AnnData 0.7 kept the categories of codes beside the columns.
+            {
+                "obs/batch": np.array([0, 1, 0, 1], dtype=np.int8),
+                "obs/__categories": {"batch": np.array([b"one", b"tw\xf6"])},
+            },
+            {},
+            "get_cell_columns",
+            "H5AD cell metadata must be UTF-8 text; category 2 of the obs column "
+            "'batch' of 'refused.h5ad' holds b'tw\\xf6'",
+            id="categories-beside-the-columns",
+        ),
+        pytest.param(
+            # AnnData 0.6 kept them in uns.
+            {
+                "obs/batch": np.array([1, 0, 1, 0], dtype=np.int8),
+                "uns/batch_categories": np.array([b"on\xe9", b"two"]),
+            },
+            {},
+            "get_cell_columns",
+            "H5AD cell metadata must be UTF-8 text; category 1 of the obs column "
+            "'batch' of 'refused.h5ad' holds b'on\\xe9'",
+            id="categories-in-uns",
+        ),
+        pytest.param(
+            # AnnData 0.6 wrote a table as one compound dataset.
+            {
+                "obs": np.array(
+                    [
+                        (b"c0", b"tea"),
+                        (b"c1", b"milk"),
+                        (b"c2", b"soda"),
+                        (b"c3", b"t\xe9"),
+                    ],
+                    dtype=[("index", "S2"), ("note", "S4")],
+                )
+            },
+            {},
+            "get_cell_columns",
+            "H5AD cell metadata must be UTF-8 text; row 4 of the obs column 'note' "
+            "of 'refused.h5ad' holds b't\\xe9'",
+            id="compound-table",
+        ),
+        pytest.param(
+            # The cell IDs come from another column, so the index is metadata.
+            {
+                "obs/_index": _text(b"c0", b"caf\xe9", b"c2", b"c3"),
+                "obs/barcode": _text(b"b0", b"b1", b"b2", b"b3"),
+            },
+            {"cell_ids_key": "barcode"},
+            "get_cell_columns",
+            "H5AD cell metadata must be UTF-8 text; row 2 of the obs index '_index' "
+            "of 'refused.h5ad' holds b'caf\\xe9'",
+            id="index-as-metadata",
+        ),
+        pytest.param(
+            {
+                "obs/_index": {
+                    "codes": np.array([0, 1, 2, 3], dtype=np.int8),
+                    "categories": _text(b"c0", b"c1", b"c\xff", b"c3"),
+                },
+                "obs/barcode": _text(b"b0", b"b1", b"b2", b"b3"),
+            },
+            {"cell_ids_key": "barcode"},
+            "get_cell_columns",
+            "H5AD cell metadata must be UTF-8 text; category 3 of the obs index "
+            "'_index' of 'refused.h5ad' holds b'c\\xff'",
+            id="categorical-index-as-metadata",
+        ),
+        pytest.param(
+            {"var/description": _text(b"tea", b"milk", b"caf\xe9")},
+            {},
+            "get_feat_columns",
+            "H5AD feature metadata must be UTF-8 text; row 3 of the var column "
+            "'description' of 'refused.h5ad' holds b'caf\\xe9'",
+            id="text-feature-column",
+        ),
+        pytest.param(
+            {
+                "var/chromosome": {
+                    "codes": np.array([0, 1, 0], dtype=np.int8),
+                    "categories": _text(b"chr\xe9", b"chr2"),
+                }
+            },
+            {},
+            "get_feat_columns",
+            "H5AD feature metadata must be UTF-8 text; category 1 of the var "
+            "column 'chromosome' of 'refused.h5ad' holds b'chr\\xe9'",
+            id="categorical-feature-column",
+        ),
+        pytest.param(
+            {"obs/leiden": _text(b"1", b"2", b"\xff", b"1")},
+            {"cluster_keys": ("leiden",)},
+            None,
+            "H5AD cluster labels must be UTF-8 text; row 3 of the obs column "
+            "'leiden' of 'refused.h5ad' holds b'\\xff'",
+            id="text-cluster-labels",
+        ),
+        pytest.param(
+            {
+                "obs/leiden": {
+                    "codes": np.array([0, 1, 1, 0], dtype=np.int8),
+                    "categories": _text(b"T cell", b"B c\xe9ll"),
+                }
+            },
+            {"cluster_keys": ("leiden",)},
+            None,
+            "H5AD cluster labels must be UTF-8 text; category 2 of the obs column "
+            "'leiden' of 'refused.h5ad' holds b'B c\\xe9ll'",
+            id="categorical-cluster-labels",
+        ),
+    ],
+)
+def test_an_import_refuses_metadata_text_that_is_not_utf8_before_it_writes(
+    tmp_path, monkeypatch, members, reader_kwargs, columns, message, shuffle_cells
+) -> None:
+    # A relative path, which the messages name as given.
+    monkeypatch.chdir(tmp_path)
+    path = _h5ad_with(Path("refused.h5ad"), members)
+    temporary = tmp_path / "temporary"
+    temporary.mkdir()
+
+    if columns is not None:
+        reader = H5adReader(path, **reader_kwargs)
+        try:
+            with pytest.raises(ValueError) as refused_read:
+                dict(getattr(reader, columns)())
+        finally:
+            reader.close()
+        assert type(refused_read.value) is ValueError
+        assert str(refused_read.value) == message
+    reader = H5adReader(path, temp_dir=str(temporary), **reader_kwargs)
+    try:
+        with pytest.raises(ValueError) as refused_import:
+            H5adToZarr(reader, "refused.zarr", nthreads=1, shuffle_cells=shuffle_cells)
+    finally:
+        reader.close()
+
+    # A ValueError of its own: the import used to raise a UnicodeDecodeError,
+    # or a ValueError that named no row, after it created the destination.
+    assert type(refused_import.value) is ValueError
+    assert str(refused_import.value) == message
+    assert not (tmp_path / "refused.zarr").exists()
+    assert not list(temporary.iterdir())
+
+
+@pytest.mark.parametrize("block_rows", [1, 2, 3, 65_536])
+def test_the_text_check_reads_blocks_of_rows_and_counts_rows_across_them(
+    tmp_path, monkeypatch, block_rows
+) -> None:
+    import cytearc.readers._h5ad_columns as columns_module
+    from cytearc.readers._h5ad_columns import check_column_text
+
+    monkeypatch.setattr(columns_module, "_TEXT_CHECK_ROWS", block_rows)
+    decoded: list[int] = []
+    first_undecodable = columns_module._first_undecodable
+
+    def counted(values: list[bytes]) -> int | None:
+        decoded.append(len(values))
+        return first_undecodable(values)
+
+    monkeypatch.setattr(columns_module, "_first_undecodable", counted)
+    path = tmp_path / "blocks.h5"
+    with h5py.File(path, "w") as h5:
+        obs = h5.create_group("obs")
+        obs.create_dataset("text", data=_text(b"a", b"b", b"c", b"d", b"caf\xe9", b"f"))
+        # The missing rows 1 and 3 hold bytes that are not UTF-8 text.
+        nullable = obs.create_group("nullable")
+        nullable.create_dataset(
+            "values", data=_text(b"\xff", b"b", b"\xfe", b"d", b"e", b"\xfd")
+        )
+        nullable.create_dataset(
+            "mask", data=np.array([True, False, True, False, False, False])
+        )
+        kind = obs.create_group("kind")
+        kind.create_dataset("codes", data=np.zeros(6, dtype=np.int8))
+        kind.create_dataset("categories", data=_text(b"a", b"b", b"c", b"d\xe9"))
+        # An import skips a column of two dimensions, and a missing-value mask
+        # that does not align with its values, so the check passes them.
+        obs.create_dataset("table", data=np.array([[b"\xff"] * 2] * 6))
+        misaligned = obs.create_group("misaligned")
+        misaligned.create_dataset("values", data=_text(*[b"\xff"] * 6))
+        misaligned.create_dataset("mask", data=np.zeros(5, dtype=bool))
+        # Codes with numbers for categories hold no text.
+        obs.create_dataset("level", data=np.array([0, 1, 0, 1, 0, 1], dtype=np.int8))
+        obs.create_group("__categories").create_dataset("level", data=[0.5, 1.5])
+    with h5py.File(path, "r") as h5:
+
+        def check(key: str) -> None:
+            check_column_text(
+                h5,
+                h5["obs"],
+                key,
+                ("__categories",),
+                expectation="Text must be UTF-8",
+                place=f"the column {key!r}",
+            )
+
+        for key, location in (
+            ("text", "row 5 of the column 'text' holds b'caf\\xe9'"),
+            ("nullable", "row 6 of the column 'nullable' holds b'\\xfd'"),
+            ("kind", "category 4 of the column 'kind' holds b'd\\xe9'"),
+        ):
+            with pytest.raises(ValueError) as refused:
+                check(key)
+            assert str(refused.value) == f"Text must be UTF-8; {location}"
+        for key in ("table", "misaligned", "level"):
+            check(key)
+
+    # No check held more than a block of rows at a time.
+    assert decoded and max(decoded) <= block_rows
+
+
+def test_text_decodes_in_one_pass_exactly_when_each_value_decodes() -> None:
+    from cytearc.readers._h5ad_columns import _first_undecodable
+
+    def first_undecodable(values: list[bytes]) -> int | None:
+        for position, value in enumerate(values):
+            try:
+                value.decode("utf-8")
+            except UnicodeDecodeError:
+                return position
+        return None
+
+    # Characters split across two values decode once the values are put
+    # together, but neither value decodes alone.
+    assert _first_undecodable([b"caf\xc3", b"\xa9"]) == 0
+    assert _first_undecodable([b"\xe2\x82", b"\xac"]) == 0
+    assert _first_undecodable([b"\xf0\x9f\x98", b"\x80"]) == 0
+    assert _first_undecodable([b"ok", b"\xa9"]) == 1
+    assert _first_undecodable([b"a\nb", b"", "é".encode(), "😀".encode()]) is None
+    assert _first_undecodable([]) is None
+    # Lead, continuation and invalid bytes beside ASCII and the joining byte.
+    alphabet = [0x00, 0x0A, 0x41, 0x80, 0xA9, 0xBF, 0xC0, 0xC3, 0xE2, 0xED, 0xF0, 0xFF]
+    rng = np.random.default_rng(7)
+    for _ in range(3_000):
+        values = [
+            bytes(rng.choice(alphabet, size=int(rng.integers(0, 4))).tolist())
+            for _ in range(int(rng.integers(0, 5)))
+        ]
+        assert _first_undecodable(values) == first_undecodable(values), values
+
+
+@pytest.mark.parametrize("shuffle_cells", [False, True], ids=["file", "shuffled"])
+def test_reader_metadata_columns_are_the_text_that_an_import_stores(
+    tmp_path, shuffle_cells
+) -> None:
+    path = _h5ad_with(
+        tmp_path / "text.h5ad",
+        {
+            "obs/note": _text("café".encode(), b"tea", "中文".encode(), b""),
+            "obs/fixed": np.array([b"a", b"bb", b"a", b"ccc"]),
+            "obs/maybe": {
+                "values": _text(b"x", b"", "ü".encode(), b"z"),
+                "mask": np.array([False, True, False, False]),
+            },
+            "obs/kind": {
+                "codes": np.array([1, -1, 0, 1], dtype=np.int8),
+                "categories": _text("Zellé".encode(), b"T cell"),
+            },
+            "obs/count": np.array([3, 1, 4, 1]),
+            "var/chromosome": np.array([b"1", b"2", b"X"]),
+        },
+    )
+    expected = {
+        "note": ["café", "tea", "中文", ""],
+        "fixed": ["a", "bb", "a", "ccc"],
+        "maybe": ["x", None, "ü", "z"],
+        "kind": ["T cell", None, "Zellé", "T cell"],
+    }
+    reader = H5adReader(path)
+    try:
+        cells = dict(reader.get_cell_columns())
+        features = dict(reader.get_feat_columns())
+    finally:
+        reader.close()
+
+    for name, values in expected.items():
+        # The reader used to give byte strings, such as b"caf\xc3\xa9".
+        assert cells[name].dtype == object, name
+        assert cells[name].tolist() == values, name
+    assert cells["count"].tolist() == [3, 1, 4, 1]
+    assert features["chromosome"].tolist() == ["1", "2", "X"]
+
+    reader = H5adReader(path)
+    try:
+        H5adToZarr(
+            reader,
+            str(tmp_path / "text.zarr"),
+            nthreads=1,
+            shuffle_cells=shuffle_cells,
+        ).dump()
+    finally:
+        reader.close()
+    store = cytearc.DataStore(
+        str(tmp_path / "text.zarr"), min_features_per_cell=0, nthreads=1
+    )
+    stored = store.cells.to_pandas_dataframe(list(expected))
+    # The stored cells in the file's order.
+    rows = (
+        np.argsort(store.cells.fetch_all("sourceRow")) if shuffle_cells else slice(None)
+    )
+    for name, values in expected.items():
+        held = stored[name].to_numpy()[rows]
+        assert [None if pd.isna(value) else value for value in held] == values, name
+    assert store.RNA.feats.fetch_all("chromosome").tolist() == ["1", "2", "X"]
+
+
+def test_categories_that_are_not_utf8_are_refused_by_position(tmp_path) -> None:
+    path = tmp_path / "categories.h5"
+    with h5py.File(path, "w") as h5:
+        obs = h5.create_group("obs")
+        kind = obs.create_group("kind")
+        kind.create_dataset("codes", data=np.array([0, 1], dtype=np.int8))
+        kind.create_dataset("categories", data=_text(b"a", b"b\xe9"))
+        obs.create_dataset("batch", data=np.array([1, 1], dtype=np.int8))
+        legacy = obs.create_group("__categories")
+        legacy.create_dataset("batch", data=np.array([b"\xff", b"b"]))
+    with h5py.File(path, "r") as h5:
+        for key, location in (
+            ("kind", "category 2 of the column 'kind' holds b'b\\xe9'"),
+            # No row holds the first category.
+            ("batch", "category 1 of the column 'batch' holds b'\\xff'"),
+        ):
+            with pytest.raises(ValueError) as refused:
+                column_categories(
+                    h5,
+                    h5["obs"],
+                    key,
+                    ("__categories",),
+                    expectation="Categories must be UTF-8 text",
+                    place=f"the column {key!r}",
+                )
+            # It used to raise the UnicodeDecodeError of a decode.
+            assert type(refused.value) is ValueError
+            assert str(refused.value) == (f"Categories must be UTF-8 text; {location}")
+
+
+@pytest.mark.parametrize("shuffle_cells", [False, True], ids=["file", "shuffled"])
+@pytest.mark.parametrize(
+    ("types", "message"),
+    [
+        pytest.param(
+            np.array([b"Gene Expression", b"Antibody Captur\xe9", b"Gene Expression"]),
+            "H5AD feature types must be UTF-8 text; row 2 of the var column "
+            "'feature_types' of 'split.h5ad' holds b'Antibody Captur\\xe9'",
+            id="text",
+        ),
+        pytest.param(
+            # The feature types are read row by row, so the refusal names the
+            # first row that holds the category.
+            {
+                "codes": np.array([0, 0, 1], dtype=np.int8),
+                "categories": _text(b"Gene Expression", b"Antibody Captur\xe9"),
+            },
+            "H5AD feature types must be UTF-8 text; row 3 of the var column "
+            "'feature_types' of 'split.h5ad' holds b'Antibody Captur\\xe9'",
+            id="categorical",
+        ),
+    ],
+)
+def test_a_split_import_refuses_feature_types_that_are_not_utf8(
+    tmp_path, monkeypatch, types, message, shuffle_cells
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    path = _h5ad_with(Path("split.h5ad"), {"var/feature_types": types})
+
+    reader = H5adReader(path)
+    try:
+        with pytest.raises(ValueError) as refused_read:
+            reader.feature_types("feature_types")
+        with pytest.raises(ValueError) as refused_import:
+            H5adToZarr(
+                reader,
+                "split.zarr",
+                assay_split_key="feature_types",
+                nthreads=1,
+                shuffle_cells=shuffle_cells,
+            )
+    finally:
+        reader.close()
+
+    for refused in (refused_read, refused_import):
+        # Both used to raise the UnicodeDecodeError of a decode.
+        assert type(refused.value) is ValueError
+        assert str(refused.value) == message
+    assert not (tmp_path / "split.zarr").exists()
+
+
+@pytest.mark.parametrize("shuffle_cells", [False, True], ids=["file", "shuffled"])
+def test_an_import_refuses_a_membership_column_name_that_is_not_utf8(
+    tmp_path, monkeypatch, shuffle_cells
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    path = _h5ad_with(
+        Path("refused.h5ad"),
+        {"uns/cytearc/assayMembership/RNA": np.bytes_(b"RNA\xe9_I")},
+    )
+    message = (
+        "H5AD membership column names must be UTF-8 text; "
+        "uns/cytearc/assayMembership/RNA of 'refused.h5ad' holds b'RNA\\xe9_I'"
+    )
+
+    reader = H5adReader(path)
+    try:
+        with pytest.raises(ValueError) as refused_read:
+            reader.assay_membership()
+        with pytest.raises(ValueError) as refused_import:
+            H5adToZarr(reader, "refused.zarr", nthreads=1, shuffle_cells=shuffle_cells)
+    finally:
+        reader.close()
+
+    for refused in (refused_read, refused_import):
+        assert type(refused.value) is ValueError
+        assert str(refused.value) == message
+    assert not (tmp_path / "refused.zarr").exists()
+
+
+def test_colors_that_are_not_utf8_import_as_a_file_without_colors(tmp_path) -> None:
+    kind = {
+        "codes": np.array([0, 1, 0, 1], dtype=np.int8),
+        "categories": _text(b"a", b"b"),
+    }
+    displays = {}
+    for name, members in (
+        ("plain", {"obs/kind": kind}),
+        ("colors", {"obs/kind": kind, "uns/kind_colors": _text(b"#f00", b"#0\xe90")}),
+    ):
+        path = _h5ad_with(tmp_path / f"{name}.h5ad", members)
+        reader = H5adReader(path)
+        try:
+            H5adToZarr(
+                reader, str(tmp_path / f"{name}.zarr"), nthreads=1, shuffle_cells=False
+            ).dump()
+        finally:
+            reader.close()
+        root = zarr.open_group(str(tmp_path / f"{name}.zarr"), mode="r")
+        displays[name] = root["cellData/kind"].attrs["display"]
+
+    assert displays["colors"] == displays["plain"]
+
+
+@pytest.mark.parametrize(
+    ("members", "warning", "ids"),
+    [
+        pytest.param(
+            {"obs/_index": np.array([0.5, 1.5, 2.5, 3.5])},
+            "The cell IDs in the obs index '_index' are floating-point numbers, and "
+            "no other column holds unique text IDs. An import stores the text of "
+            "each as the cell's ID, such as '0.5'",
+            {"cell_ids": ["0.5", "1.5", "2.5", "3.5"]},
+            id="floating-point-cell-ids",
+        ),
+        pytest.param(
+            # The example is the text of the float32 value as an import stores it.
+            {"obs/_index": np.array([0.1, 0.2, 0.3, 0.4], dtype=np.float32)},
+            "The cell IDs in the obs index '_index' are floating-point numbers, and "
+            "no other column holds unique text IDs. An import stores the text of "
+            "each as the cell's ID, such as '0.10000000149011612'",
+            {
+                "cell_ids": [
+                    "0.10000000149011612",
+                    "0.20000000298023224",
+                    "0.30000001192092896",
+                    "0.4000000059604645",
+                ]
+            },
+            id="float32-cell-ids",
+        ),
+        pytest.param(
+            {"obs/_index": np.array([0.5, np.nan, 2.5, np.nan])},
+            "The cell IDs in the obs index '_index' include missing or blank "
+            "values, the first in row 2, and no other column holds unique text "
+            "IDs. An import refuses cells without an ID",
+            "H5AD cell IDs must contain non-empty values; rows 2 and 4 of the obs "
+            "index '_index' of 'inspected.h5ad' are missing or blank",
+            id="nan-cell-ids",
+        ),
+        pytest.param(
+            # Text with two missing rows, which inspection does not take for
+            # unique IDs.
+            {
+                "obs/_index": {
+                    "values": _text(b"c0", b"", b"c2", b""),
+                    "mask": np.array([False, True, False, True]),
+                }
+            },
+            "The cell IDs in the obs index '_index' include missing or blank "
+            "values, the first in row 2, and no other column holds unique text "
+            "IDs. An import refuses cells without an ID",
+            "H5AD cell IDs must contain non-empty values; rows 2 and 4 of the obs "
+            "index '_index' of 'inspected.h5ad' are missing or blank",
+            id="missing-text-cell-ids",
+        ),
+        pytest.param(
+            {"obs/_index": np.array([1.5, 1.5, 2.5, 3.5])},
+            "The cell IDs in the obs index '_index' repeat values, and no other "
+            "column holds unique text IDs. Pass duplicate_cell_ids='make_unique' "
+            "to H5adReader, also through H5adReader.from_inspect, to rename "
+            "repeated IDs",
+            "H5AD cell IDs must contain unique values; pass "
+            "duplicate_cell_ids='make_unique' to rename repeated IDs",
+            id="repeated-floating-point-cell-ids",
+        ),
+        pytest.param(
+            {
+                "obs/_index": {
+                    "values": _text(b"c0", b"c1", b"c2", b"c3"),
+                    "mask": np.zeros(3, dtype=bool),
+                }
+            },
+            "The cell IDs in the obs index '_index' cannot be read, and no other "
+            "column holds unique text IDs. An import refuses the file",
+            "Column '/obs/_index' has a missing-value mask that does not align "
+            "with its values",
+            id="unreadable-cell-ids",
+        ),
+        pytest.param(
+            {"obs/_index": None},
+            "No cell ID column found; generated IDs will be used",
+            {"cell_ids": ["cell_0", "cell_1", "cell_2", "cell_3"]},
+            id="no-cell-index",
+        ),
+        pytest.param(
+            {"var/_index": np.array([7, 8, 9])},
+            "The feature IDs in the var index '_index' are integers, and no other "
+            "column holds text feature IDs or names. An import stores the text of "
+            "each as the feature's ID and name, such as '7'",
+            {"feat_ids": ["7", "8", "9"], "feat_names": ["7", "8", "9"]},
+            id="integer-feature-ids",
+        ),
+        pytest.param(
+            {"var/_index": np.array([np.nan, 1.5, 2.5])},
+            "The feature IDs in the var index '_index' include missing or blank "
+            "values, the first in row 1, and no other column holds text feature "
+            "IDs or names. An import refuses features without an ID",
+            "H5AD feature IDs must contain non-empty values; row 1 of the var "
+            "index '_index' of 'inspected.h5ad' is missing or blank",
+            id="nan-feature-ids",
+        ),
+        pytest.param(
+            {"var/_index": np.array([7, 7, 9])},
+            "The feature IDs in the var index '_index' repeat values, and no other "
+            "column holds text feature IDs or names. Pass "
+            "duplicate_feature_ids='make_unique' to H5adReader, also through "
+            "H5adReader.from_inspect, to rename repeated IDs",
+            "H5AD feature IDs must contain unique values; pass "
+            "duplicate_feature_ids='make_unique' to rename repeated IDs",
+            id="repeated-integer-feature-ids",
+        ),
+        pytest.param(
+            {"var/_index": None},
+            "No feature ID or name column found; generated IDs will be used",
+            {"feat_ids": ["feature_0", "feature_1", "feature_2"]},
+            id="no-feature-index",
+        ),
+        pytest.param(
+            # Unique integer and text IDs need no warning.
+            {"obs/_index": np.array([5, 6, 7, 8])},
+            None,
+            {"cell_ids": ["5", "6", "7", "8"], "feat_ids": ["g0", "g1", "g2"]},
+            id="integer-cell-ids",
+        ),
+    ],
+)
+def test_inspection_warns_what_an_import_does_with_an_index_of_ids(
+    tmp_path, monkeypatch, members, warning, ids
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    path = _h5ad_with(Path("inspected.h5ad"), members)
+
+    with _warnings() as messages:
+        inspection = inspect_h5ad(path)
+
+    # Inspection used to warn that the IDs of a floating-point index repeat,
+    # and that a feature index of numbers left the features generated IDs.
+    id_warnings = [message.rstrip("\n") for message in messages if " ID" in message]
+    assert id_warnings == ([] if warning is None else [warning])
+    reader = H5adReader.from_inspect(inspection)
+    try:
+        if isinstance(ids, str):
+            with pytest.raises(ValueError, match=re.escape(ids)):
+                reader._check_ids_and_names()
+        else:
+            for method, values in ids.items():
+                assert getattr(reader, method)().tolist() == values, method
+    finally:
+        reader.close()
 
 
 # What the reader keeps of the IDs and names of the file that _h5ad_with
@@ -1641,7 +2331,7 @@ def test_tables_without_an_index_import_every_column(tmp_path) -> None:
     reader = H5adReader(str(path), cell_ids_key="barcode", feature_ids_key="gene_ids")
     try:
         assert reader._index_member("var") is None
-        assert dict(reader.get_feat_columns())["chromosome"].tolist() == [b"1", b"2"]
+        assert dict(reader.get_feat_columns())["chromosome"].tolist() == ["1", "2"]
         assert list(dict(reader.get_cell_columns())) == []
     finally:
         reader.close()

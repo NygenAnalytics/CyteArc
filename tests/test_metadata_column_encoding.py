@@ -663,13 +663,14 @@ def test_an_h5ad_import_stores_the_columns_of_the_per_value_conversion(
         ]
         assert cells["with_missing"].attrs["display"]["missing_label"] == "NA"
         assert "missing_label" not in cells["cell_type"].attrs["display"]
-        # The reader's public columns still hold decoded labels as objects.
+        # The reader's public columns hold the labels as the text that the
+        # store holds, in object arrays, and None in missing rows.
         public = dict(reader.get_cell_columns())
         assert public["cell_type"].dtype == object
-        np.testing.assert_array_equal(
-            public["with_missing"],
-            np.asarray(reader._read_column("obs", "with_missing")[0]),
-        )
+        codes = reader.h5["obs/with_missing/codes"][:].tolist()
+        assert public["with_missing"].tolist() == [
+            ["a", "bb", "ccc"][code] if code >= 0 else None for code in codes
+        ]
     finally:
         reader.close()
 

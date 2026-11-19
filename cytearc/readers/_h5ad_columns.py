@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -5,7 +6,7 @@ import h5py
 import numpy as np
 
 from ..utils.arguments import quoted_value
-from ._text import as_text
+from ._text import as_text, utf8_refusal
 
 # AnnData writes a dataframe column as a group when it needs more than one
 # array: a categorical needs codes with categories, and a pandas nullable
@@ -13,6 +14,8 @@ from ._text import as_text
 CATEGORICAL_KEYS = frozenset({"codes", "categories"})
 NULLABLE_KEYS = frozenset({"values", "mask"})
 SPARSE_KEYS = frozenset({"data", "indices", "indptr"})
+# The rows of a column that the check of its text reads at a time.
+_TEXT_CHECK_ROWS = 65_536
 
 type H5adNode = h5py.Group | h5py.Dataset
 
@@ -382,10 +385,45 @@ class H5adCategories:
     ordered: bool
 
 
-def _category_value(value: Any) -> Any:
-    if isinstance(value, bytes | np.bytes_):
-        return as_text(value)
-    return value.item() if isinstance(value, np.generic) else value
+def category_refusal(
+    value: bytes, position: int, expectation: str, place: str
+) -> ValueError:
+    """Return the refusal of a category that is bytes that are not UTF-8 text.
+
+    Args:
+        value: The bytes.
+        position: The category's position, counting from 0, which the
+            refusal counts from 1.
+        expectation: What the column must hold, which the refusal starts
+            with, such as ``"H5AD cell metadata must be UTF-8 text"``.
+        place: Where the column is, as :func:`column_place` names it.
+    """
+    return ValueError(
+        f"{expectation}; category {position + 1} of {place} holds "
+        f"{quoted_value(bytes(value))}"
+    )
+
+
+def _category_values(
+    categories: np.ndarray, expectation: str, place: str
+) -> tuple[Any, ...]:
+    """Return categories with byte strings as text and NumPy scalars as Python scalars.
+
+    Raises:
+        ValueError: If a category is bytes that are not UTF-8 text, as
+            :func:`category_refusal` refuses it.
+    """
+    values = []
+    for position, value in enumerate(categories):
+        if isinstance(value, bytes):
+            try:
+                value = value.decode("utf-8")
+            except UnicodeDecodeError:
+                raise category_refusal(value, position, expectation, place) from None
+        elif isinstance(value, np.generic):
+            value = value.item()
+        values.append(value)
+    return tuple(values)
 
 
 def column_categories(
@@ -393,6 +431,9 @@ def column_categories(
     table: H5adNode,
     key: str,
     category_groups: tuple[str, ...],
+    *,
+    expectation: str,
+    place: str,
 ) -> H5adCategories | None:
     """Return the categories of a categorical column, or None for another column.
 
@@ -401,12 +442,26 @@ def column_categories(
     categories of integer codes apart from them, as
     :func:`legacy_categories` finds them, and such categories are unordered
     unless their dataset records ``ordered``.
+
+    Args:
+        h5: The file.
+        table: The dataframe group, or an old compound dataset.
+        key: The column.
+        category_groups: Groups beside the columns that may hold the
+            categories of integer codes, as :func:`legacy_categories` reads.
+        expectation: What the column must hold, which a refusal starts
+            with, such as ``"H5AD cell metadata must be UTF-8 text"``.
+        place: Where the column is, as :func:`column_place` names it.
+
+    Raises:
+        ValueError: If a category is bytes that are not UTF-8 text, as
+            :func:`category_refusal` refuses it.
     """
     if isinstance(table, h5py.Group):
         node = table[key]
         if is_categorical(node):
             return H5adCategories(
-                tuple(_category_value(value) for value in node["categories"][:]),
+                _category_values(node["categories"][:], expectation, place),
                 bool(node.attrs.get("ordered", False)),
             )
         if not isinstance(node, h5py.Dataset):
@@ -426,9 +481,144 @@ def column_categories(
             if isinstance(group, h5py.Group) and key in group:
                 ordered = bool(group[key].attrs.get("ordered", False))
                 break
-    return H5adCategories(
-        tuple(_category_value(value) for value in categories), ordered
-    )
+    return H5adCategories(_category_values(categories, expectation, place), ordered)
+
+
+def _holds_text(dtype: np.dtype[Any]) -> bool:
+    """Return whether values of an HDF5 dtype read as byte strings."""
+    if dtype.kind == "S":
+        return True
+    return dtype.kind == "O" and h5py.check_string_dtype(dtype) is not None
+
+
+def _first_undecodable(values: list[bytes]) -> int | None:
+    """Return the position of the first value that is not UTF-8 text, or None."""
+    # Joined by a byte of one character, which no character of several bytes
+    # holds, the values decode together exactly when each decodes alone, and
+    # one decode takes a fraction of the time of one decode per value.
+    try:
+        b"\n".join(values).decode("utf-8")
+    except UnicodeDecodeError:
+        for position, value in enumerate(values):
+            try:
+                value.decode("utf-8")
+            except UnicodeDecodeError:
+                return position
+    return None
+
+
+def _check_text_rows(
+    values: Any,
+    refusal: Callable[[bytes, int], ValueError],
+    *,
+    mask: h5py.Dataset | None = None,
+) -> None:
+    """Refuse the first byte string of ``values`` that is not UTF-8 text.
+
+    ``values`` is one-dimensional, such as a dataset, which is read
+    ``_TEXT_CHECK_ROWS`` rows at a time, and ``refusal(value, row)`` returns
+    the refusal of a value. The rows that ``mask`` flags are missing and are
+    not checked.
+    """
+    rows = int(values.shape[0])
+    for start in range(0, rows, _TEXT_CHECK_ROWS):
+        stop = min(start + _TEXT_CHECK_ROWS, rows)
+        block = np.asarray(values[start:stop])
+        positions = None
+        if mask is not None:
+            present = ~np.asarray(mask[start:stop], dtype=bool)
+            positions = np.flatnonzero(present)
+            block = block[present]
+        if block.dtype.kind == "S":
+            # Bytes below 0x80 are ASCII, which is UTF-8 text.
+            if int(np.ascontiguousarray(block).view(np.uint8).max(initial=0)) < 0x80:
+                continue
+        texts = block.tolist()
+        position = _first_undecodable(texts)
+        if position is not None:
+            row = position if positions is None else int(positions[position])
+            raise refusal(texts[position], start + row)
+
+
+def check_column_text(
+    h5: h5py.File,
+    table: H5adNode,
+    key: str,
+    category_groups: tuple[str, ...],
+    *,
+    expectation: str,
+    place: str,
+) -> None:
+    """Refuse a column of an H5AD table that holds bytes that are not UTF-8 text.
+
+    The column's text is read in blocks of rows: the values of a column of
+    text, except those of its missing rows, or every category of a
+    categorical, used or not, which an import stores with the column. A
+    column without text passes, and so does one that an import skips, such
+    as one of more than one dimension or whose missing-value mask does not
+    align with its values.
+
+    Args:
+        h5: The file.
+        table: The dataframe group, or an old compound dataset.
+        key: The column, which ``table`` holds.
+        category_groups: Groups beside the columns that may hold the
+            categories of integer codes, as :func:`legacy_categories` reads.
+        expectation: What the column must hold, which a refusal starts
+            with, such as ``"H5AD cell metadata must be UTF-8 text"``.
+        place: Where the column is, as :func:`column_place` names it.
+
+    Raises:
+        ValueError: If a value is bytes that are not UTF-8 text, naming its
+            row as ``utf8_refusal`` does, or if a category is, as
+            :func:`category_refusal` refuses it.
+    """
+
+    def refuse_row(value: bytes, row: int) -> ValueError:
+        return utf8_refusal(value, row, expectation, place)
+
+    def refuse_category(value: bytes, position: int) -> ValueError:
+        return category_refusal(value, position, expectation, place)
+
+    values: Any
+    mask: h5py.Dataset | None = None
+    if isinstance(table, h5py.Dataset):
+        values = table.fields(key)
+    else:
+        node = table[key]
+        if is_categorical(node):
+            codes, categories = node["codes"], node["categories"]
+            if (
+                isinstance(codes, h5py.Dataset)
+                and isinstance(categories, h5py.Dataset)
+                and codes.ndim == 1
+                and categories.ndim == 1
+                and _holds_text(categories.dtype)
+            ):
+                _check_text_rows(categories, refuse_category)
+            return
+        if is_nullable(node):
+            values, mask = node["values"], node["mask"]
+            if not (
+                isinstance(values, h5py.Dataset)
+                and isinstance(mask, h5py.Dataset)
+                and mask.shape == values.shape
+            ):
+                return
+        elif isinstance(node, h5py.Dataset):
+            values = node
+        else:
+            return
+    if values.ndim != 1 or values.dtype.subdtype is not None:
+        return
+    if mask is None and values.dtype.kind in "iu":
+        categories = legacy_categories(h5, table, key, category_groups)
+        if categories is not None:
+            if categories.ndim == 1 and _holds_text(categories.dtype):
+                _check_text_rows(categories, refuse_category)
+            return
+    if _holds_text(values.dtype):
+        _check_text_rows(values, refuse_row, mask=mask)
 
 
 _HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
@@ -465,7 +655,8 @@ def category_colors(h5: h5py.File, key: str, count: int) -> tuple[str, ...] | No
     AnnData and Scanpy keep one color per category, in category order. Like
     Scanpy, a list with more colors than categories gives each category the
     color at its position. A list with fewer colors, or with a value that is
-    not a color, is not used, and None is returned.
+    not a color, such as bytes that are not UTF-8 text, is not used, and None
+    is returned.
     """
     node = h5.get(f"uns/{key}_colors")
     if not isinstance(node, h5py.Dataset) or node.ndim != 1 or count < 1:
@@ -474,9 +665,14 @@ def category_colors(h5: h5py.File, key: str, count: int) -> tuple[str, ...] | No
         return None
     colors = []
     for value in node[:count]:
-        if not isinstance(value, str | bytes | np.str_ | np.bytes_):
+        if isinstance(value, bytes):
+            try:
+                value = value.decode("utf-8")
+            except UnicodeDecodeError:
+                return None
+        if not isinstance(value, str):
             return None
-        color = hex_color(as_text(value))
+        color = hex_color(value)
         if color is None:
             return None
         colors.append(color)

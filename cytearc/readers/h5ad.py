@@ -23,7 +23,7 @@ from ..utils.count_values import (
     scan_processes,
     value_windows,
 )
-from ..utils.arguments import integer_argument
+from ..utils.arguments import integer_argument, quoted_value
 from ..utils.logging import logger
 from ..utils.matrix_values import DETECTION_CELLS
 from ..utils.memory_budget import MemoryBudgetError, refusal_words
@@ -35,6 +35,7 @@ from ._h5ad_columns import (
     H5adCategories,
     TableColumn,
     category_colors,
+    check_column_text,
     column_categories,
     column_encoding,
     column_length,
@@ -115,6 +116,23 @@ def _stored_texts(values: np.ndarray) -> np.ndarray:
     return np.asarray([as_text(value) for value in values.astype(object)], dtype=str)
 
 
+def _decoded_texts(values: np.ndarray) -> np.ndarray:
+    """Return a column's values with byte strings as text, in an object array.
+
+    The caller checked that the byte strings are UTF-8 text. Other values,
+    such as numbers or None in missing rows, stay as they are, and so does
+    a column of a dtype that holds no byte strings.
+    """
+    if values.dtype.kind not in "OS":
+        return values
+    texts = np.empty(values.shape, dtype=object)
+    texts[:] = [
+        value.decode("utf-8") if isinstance(value, bytes) else value
+        for value in values.tolist()
+    ]
+    return texts
+
+
 def _is_missing_name(value: Any) -> bool:
     if value is None:
         return True
@@ -123,10 +141,15 @@ def _is_missing_name(value: Any) -> bool:
     return not as_text(value).strip()
 
 
-# What refusals call the IDs and names that an import stores.
+# What refusals call the IDs, names and other text that an import stores.
 _CELL_IDS = "H5AD cell IDs"
 _FEATURE_IDS = "H5AD feature IDs"
 _FEATURE_NAMES = "H5AD feature names"
+_CELL_METADATA = "H5AD cell metadata"
+_FEATURE_METADATA = "H5AD feature metadata"
+_CLUSTER_LABELS = "H5AD cluster labels"
+_FEATURE_TYPES = "H5AD feature types"
+_MEMBERSHIP_COLUMNS = "H5AD membership column names"
 
 
 def _array_bytes(values: np.ndarray) -> int:
@@ -757,6 +780,81 @@ class H5adReader:
         self._feature_identifiers()
         self._feature_names()
 
+    def _check_metadata_text(self) -> None:
+        """Refuse text that is not UTF-8 in the metadata and cluster labels that an import stores.
+
+        An import calls this before it writes anything. It checks the
+        metadata columns of ``obs`` and ``var``, as :meth:`_check_table_text`
+        does, and the column of each cluster key.
+
+        Raises:
+            ValueError: If a column holds bytes that are not UTF-8 text,
+                naming the file, the table, the column, and the row, or the
+                category of a categorical, that holds them.
+        """
+        self._check_table_text(self.cellAttrsKey)
+        self._check_table_text(self.featureAttrsKey)
+        for key in self.clusterKeys:
+            check_column_text(
+                self.h5,
+                self.h5[self.cellAttrsKey],
+                key,
+                self._categoryGroups,
+                expectation=f"{_CLUSTER_LABELS} must be UTF-8 text",
+                place=self._column_place(self.cellAttrsKey, key),
+            )
+
+    def _check_table_text(self, group: str) -> None:
+        """Refuse text that is not UTF-8 in the metadata columns of a table.
+
+        The columns are those that :meth:`_table_columns` reads, the index
+        among them, and the check reads their text a block of rows at a
+        time: the values of a column of text, except those of its missing
+        rows, and every category of a categorical, used or not, which an
+        import stores with the column.
+
+        Raises:
+            ValueError: If a column holds bytes that are not UTF-8 text, as
+                :meth:`_check_metadata_text` refuses them.
+        """
+        code = self.groupCodes.get(group)
+        if code not in {1, 2}:
+            return
+        table = self.h5[group]
+        names: Sequence[str]
+        if code == 1:
+            names = table.dtype.names or ()
+        else:
+            names = [name for name, _node in table_members(table).members]
+        left_out = self._left_out_columns(group)
+        for name in names:
+            if name in left_out:
+                continue
+            check_column_text(
+                self.h5,
+                table,
+                name,
+                self._categoryGroups,
+                expectation=self._metadata_expectation(group),
+                place=self._column_place(group, name),
+            )
+
+    def _left_out_columns(self, group: str) -> tuple[str, ...]:
+        """Return the columns of a table that metadata leaves out.
+
+        They are the IDs and names, which an import stores as such, the
+        group of categories that old AnnData files keep beside the columns,
+        and the cluster keys.
+        """
+        if group == self.cellAttrsKey:
+            return (self.cellIdsKey, self.catNamesKey, *self.clusterKeys)
+        return (self.featIdsKey, self.featNamesKey, self.catNamesKey)
+
+    def _metadata_expectation(self, group: str) -> str:
+        """Return what a refusal of a table's metadata says it must be."""
+        held = _CELL_METADATA if group == self.cellAttrsKey else _FEATURE_METADATA
+        return f"{held} must be UTF-8 text"
+
     def _id_bytes(self) -> int:
         """Return the bytes of the IDs and names that the reader keeps once it read them.
 
@@ -894,7 +992,8 @@ class H5adReader:
         source name except for an unnamed index. A dataframe group lists them
         in ``column-order``, which resolves a name that old AnnData versions
         nested into groups because it contains ``/``. An index that repeats
-        the table's IDs or names is left out.
+        the table's IDs or names is left out. Callers check the table's text
+        with :meth:`_check_table_text` first, so that its byte strings decode.
         """
         code = self.groupCodes[group]
         if code not in {1, 2}:
@@ -945,7 +1044,14 @@ class H5adReader:
                     "IDs or the names that the import stores"
                 )
                 continue
-            categories = column_categories(self.h5, table, name, self._categoryGroups)
+            categories = column_categories(
+                self.h5,
+                table,
+                name,
+                self._categoryGroups,
+                expectation=self._metadata_expectation(group),
+                place=self._column_place(group, name),
+            )
             yield self._import_name(group, name), column, categories
 
     def _source_column_names(self, group: str) -> list[str]:
@@ -971,9 +1077,14 @@ class H5adReader:
         return category_colors(self.h5, name, len(categories.values))
 
     def _cell_column_categories(self, key: str) -> H5adCategories | None:
-        """Return the categories of an ``obs`` column, such as a cluster key."""
+        """Return the categories of a cluster key's ``obs`` column."""
         return column_categories(
-            self.h5, self.h5[self.cellAttrsKey], key, self._categoryGroups
+            self.h5,
+            self.h5[self.cellAttrsKey],
+            key,
+            self._categoryGroups,
+            expectation=f"{_CLUSTER_LABELS} must be UTF-8 text",
+            place=self._column_place(self.cellAttrsKey, key),
         )
 
     def _cell_column_value_dtype(self, key: str) -> np.dtype[Any]:
@@ -1035,34 +1146,54 @@ class H5adReader:
         self,
     ) -> Iterator[tuple[str, TableColumn, H5adCategories | None]]:
         return self._table_columns(
-            self.cellAttrsKey,
-            [self.cellIdsKey, self.catNamesKey, *self.clusterKeys],
+            self.cellAttrsKey, self._left_out_columns(self.cellAttrsKey)
         )
 
     def _feature_columns(
         self,
     ) -> Iterator[tuple[str, TableColumn, H5adCategories | None]]:
         return self._table_columns(
-            self.featureAttrsKey,
-            [self.featIdsKey, self.featNamesKey, self.catNamesKey],
+            self.featureAttrsKey, self._left_out_columns(self.featureAttrsKey)
         )
 
     def get_cell_columns(self) -> Generator[tuple[str, np.ndarray], None, None]:
-        """Yield raw ``obs`` metadata, excluding selected cluster artifacts.
+        """Yield the ``obs`` metadata columns, excluding selected cluster keys.
 
-        Missing categorical and text values are ``None``; missing numeric
-        values are NaN.
+        Text comes back as ``str`` in an object array, the text that an
+        import stores: byte strings are decoded as UTF-8. Missing
+        categorical and text values are ``None``; missing numeric values
+        are NaN.
+
+        Raises:
+            ValueError: If a column holds bytes that are not UTF-8 text,
+                naming the file, the table, the column, and the row, or the
+                category of a categorical, that holds them, before any
+                column is yielded.
         """
+        self._check_table_text(self.cellAttrsKey)
         for name, column, _categories in self._cell_columns():
-            yield name, present_column(*decoded_column(column))
+            yield name, _decoded_texts(present_column(*decoded_column(column)))
 
     def get_feat_columns(self) -> Generator[tuple[str, np.ndarray], None, None]:
-        """Creates a Generator that yields the feature columns."""
+        """Yield the feature metadata columns, as :meth:`get_cell_columns` yields those of cells.
+
+        Raises:
+            ValueError: If a column holds bytes that are not UTF-8 text, as
+                :meth:`get_cell_columns` refuses them.
+        """
+        self._check_table_text(self.featureAttrsKey)
         for name, column, _categories in self._feature_columns():
-            yield name, present_column(*decoded_column(column))
+            yield name, _decoded_texts(present_column(*decoded_column(column)))
 
     def assay_membership(self) -> dict[str, str]:
-        """Return the membership column of each assay that the file declares."""
+        """Return the membership column of each assay that the file declares.
+
+        Raises:
+            ValueError: If the declaration is not a mapping from assay name
+                to one text value, a column name is bytes that are not UTF-8
+                text, naming the file and where the bytes are, or it names
+                a column other than ``<assay>_I``.
+        """
         from ..metadata.membership import (
             MEMBERSHIP_UNS_KEY,
             CYTEARC_UNS_KEY,
@@ -1084,11 +1215,28 @@ class H5adReader:
                     f"{location}/{assay} must hold one text value, the membership "
                     "column of the assay"
                 )
-            declared[assay] = as_text(entry[()])
+            value = entry[()]
+            if isinstance(value, bytes):
+                try:
+                    value = value.decode("utf-8")
+                except UnicodeDecodeError:
+                    raise ValueError(
+                        f"{_MEMBERSHIP_COLUMNS} must be UTF-8 text; "
+                        f"{location}/{assay} of {quoted_value(str(self.h5adFn))} "
+                        f"holds {quoted_value(bytes(value))}"
+                    ) from None
+            declared[assay] = as_text(value)
         return parse_membership_declaration(declared)
 
     def feature_types(self, key: str) -> list[str]:
-        """Return decoded feature types from a var column."""
+        """Return decoded feature types from a var column.
+
+        Raises:
+            KeyError: If the column is absent.
+            ValueError: If it does not hold one value per feature, or a
+                value is bytes that are not UTF-8 text, naming the file, the
+                table, the column and the row.
+        """
         if not self._check_exists(self.featureAttrsKey, key):
             raise KeyError(
                 f"Feature type key `{key}` was not found in {self.featureAttrsKey}"
@@ -1099,6 +1247,11 @@ class H5adReader:
                 f"Feature type key `{key}` has {len(values)} values; "
                 f"expected {self.nFeatures}"
             )
+        check_utf8(
+            values,
+            f"{_FEATURE_TYPES} must be UTF-8 text",
+            self._column_place(self.featureAttrsKey, key),
+        )
         return [as_text(value) for value in values]
 
     def assay_feature_slices(
