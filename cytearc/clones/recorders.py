@@ -1164,16 +1164,15 @@ def character_matrix(
     ] = record_codes[with_state]
 
     characters = [character_name(*pair) for pair in ranked_names]
-    if len(set(characters)) != len(characters):
-        seen: dict[str, tuple[str, str]] = {}
-        for name, pair in zip(characters, ranked_names, strict=True):
-            if name in seen:
-                raise ValueError(
-                    f"The integration {quoted_value(seen[name][0])} at site {quoted_value(seen[name][1])} and "
-                    f"{quoted_value(pair[0])} at {quoted_value(pair[1])} are both the character {quoted_value(name)}; "
-                    "rename an integration so that each character has its own name"
-                )
-            seen[name] = pair
+    seen: dict[str, tuple[str, str]] = {}
+    for name, pair in zip(characters, ranked_names, strict=True):
+        if name in seen:
+            raise ValueError(
+                f"The integration {quoted_value(seen[name][0])} at site {quoted_value(seen[name][1])} and "
+                f"{quoted_value(pair[0])} at {quoted_value(pair[1])} are both the character {quoted_value(name)}; "
+                "rename an integration so that each character has its own name"
+            )
+        seen[name] = pair
     allele_of_rank = np.empty(len(allele_names), dtype=object)
     allele_of_rank[allele_ranks] = allele_names
     state_table = pd.DataFrame(

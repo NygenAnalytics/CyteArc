@@ -196,6 +196,35 @@ def test_chunk_states_refuse_tokens_and_apply_lengths_by_integration():
     assert classified.states.tolist() == [[MARK, MARK, MARK, NOT_APPLICABLE]]
 
 
+def test_a_refusal_names_every_row_and_the_first_five_tokens_it_refuses():
+    # Lowercase letters do not match the rules' pattern. Site 1 holds the
+    # refused tokens a, b, c and d, a again in the last row, and site 2 the
+    # refused e, f and g beside the mark X and the unedited "". Every row
+    # holds a refused token; the first five distinct tokens, site by site,
+    # are named, and f and g are left out.
+    rules = SiteRules(kind="ordered", unedited=frozenset({""}), pattern="[A-Z]")
+    rows = _rows(
+        barcodes=np.array(list("vwxyz"), dtype=object),
+        rows=np.arange(5),
+        tokens=np.array(
+            [["a", "e"], ["b", "f"], ["c", "X"], ["d", "g"], ["a", ""]], dtype=object
+        ),
+        integrations=np.array(["T1"] * 5, dtype=object),
+    )
+
+    with pytest.raises(RefusedTokens) as refused:
+        chunk_states(rows, rules, n_slots=2)
+
+    assert refused.value.rows == (0, 1, 2, 3, 4)
+    assert refused.value.tokens == (
+        ("1", "a"),
+        ("1", "b"),
+        ("1", "c"),
+        ("1", "d"),
+        ("2", "e"),
+    )
+
+
 def _table(records: list[tuple]) -> object:
     """A record table of (cell, source, integration, site, allele, state, umis, reads, row) tuples."""
     frame = pd.DataFrame(
