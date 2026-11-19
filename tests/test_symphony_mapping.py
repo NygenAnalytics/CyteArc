@@ -674,14 +674,14 @@ def test_query_batch_design_rejects_values_that_share_their_text(values):
     # The query batch fingerprint hashes values by their text.
     batches = pd.DataFrame({"batch": pd.Series(values, dtype=object)})
     with pytest.raises(ValueError, match="same text"):
-        _MappingOperationsMixin._query_batch_design(batches, len(batches))
+        _MappingOperationsMixin._query_batch_design(batches)
 
 
 def test_query_batch_design_keeps_mixed_types_with_distinct_text():
     from cytearc.datastore._operations.mapping import _MappingOperationsMixin
 
     batches = pd.DataFrame({"batch": pd.Series([1, "2", 1, "2"], dtype=object)})
-    codes, design = _MappingOperationsMixin._query_batch_design(batches, 4)
+    codes, design = _MappingOperationsMixin._query_batch_design(batches)
     assert codes.tolist() == [0, 1, 0, 1]
     np.testing.assert_array_equal(design.toarray(), np.eye(2))
 
@@ -703,7 +703,7 @@ def test_query_batch_design_rejects_rows_without_a_batch_code(monkeypatch):
     batches = pd.DataFrame({"batch": ["a", "b", "a"]})
 
     with pytest.raises(ValueError, match="unencodable row"):
-        _MappingOperationsMixin._query_batch_design(batches, len(batches))
+        _MappingOperationsMixin._query_batch_design(batches)
 
 
 @pytest.mark.parametrize("n_variables", [1, 2, 3])
@@ -718,7 +718,7 @@ def test_additive_batch_correction_matches_direct_cell_design(n_variables):
             "constant": "same",
         }
     ).iloc[:, :n_variables]
-    codes, design = _MappingOperationsMixin._query_batch_design(batches, len(batches))
+    codes, design = _MappingOperationsMixin._query_batch_design(batches)
     coordinates = rng.normal(size=(len(batches), 3))
     assignments = rng.uniform(size=(len(batches), 2))
     assignments /= assignments.sum(axis=1, keepdims=True)

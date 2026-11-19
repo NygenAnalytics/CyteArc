@@ -625,7 +625,6 @@ def stage_settings(
     value: object,
     *,
     optional: bool,
-    allowed: frozenset[str] | None = None,
 ) -> tuple[bool, dict[str, Any]]:
     """Validate one stage keyword into whether it runs and its settings.
 
@@ -633,8 +632,7 @@ def stage_settings(
     settings, which enables it. A stage that always runs takes None for its
     defaults or a mapping of settings.
     """
-    if allowed is None:
-        allowed = STAGE_SETTINGS[stage]
+    allowed = STAGE_SETTINGS[stage]
     if isinstance(value, bool | np.bool_):
         if not optional:
             raise TypeError(f"{stage} must be a mapping because the stage always runs")

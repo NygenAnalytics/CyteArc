@@ -1491,8 +1491,7 @@ def _text_width(group: zarr.Group) -> int:
         block = max(1, int(values.chunks[0]))
         for start in range(0, int(values.shape[0]), block):
             chunk = np.asarray(values[start : start + block])
-            if len(chunk):
-                largest = max(largest, int(chunk.max()))
+            largest = max(largest, int(chunk.max()))
     return _utf8_width(largest)
 
 

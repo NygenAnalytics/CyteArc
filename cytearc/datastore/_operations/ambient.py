@@ -194,7 +194,7 @@ def _write_artifact(
     planned: PlannedArtifact,
     arrays: Mapping[str, np.ndarray],
     attributes: Mapping[str, Any],
-    diagnostics: Mapping[str, Any] | None = None,
+    diagnostics: Mapping[str, Any],
 ) -> None:
     """Write the arrays, attributes and diagnostics of a planned artifact and publish it.
 
@@ -203,6 +203,9 @@ def _write_artifact(
             declares.
     """
     saved = planned_diagnostics(planned, diagnostics)
+    # Only ambient_contamination artifacts are written here, and their
+    # operation declares the diagnostics that each saves.
+    assert saved is not None
     with artifact_transaction(root, planned) as group:
         for name, values in arrays.items():
             chunks = (min(max(int(values.shape[0]), 1), 100_000), *values.shape[1:])
@@ -211,8 +214,7 @@ def _write_artifact(
             )
             output[...] = values
         group.attrs.update(dict(attributes))
-        if saved is not None:
-            group.attrs[DIAGNOSTICS_ATTRIBUTE] = saved
+        group.attrs[DIAGNOSTICS_ATTRIBUTE] = saved
 
 
 def _estimate_record(value: float) -> float | None:

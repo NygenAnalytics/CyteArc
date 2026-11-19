@@ -1164,7 +1164,9 @@ class BaseDataStore:
             )
         return self._assays[from_assay]
 
-    if not TYPE_CHECKING:
+    # TYPE_CHECKING is False whenever the code runs; the condition only hides
+    # __getattr__ from type checkers, so the branch past it never runs.
+    if not TYPE_CHECKING:  # pragma: no branch
 
         def __getattr__(self, name: str) -> Assay:
             # Python calls this only after normal lookup fails, so the

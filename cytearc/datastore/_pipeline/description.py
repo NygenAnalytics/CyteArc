@@ -187,9 +187,11 @@ def _filter_columns(modality: str, suffixes: tuple[str, ...]) -> _Declared:
     columns = (
         names[0] if len(names) == 1 else f"{', '.join(names[:-1])} and {names[-1]}"
     )
-    rule = f"the {modality} assay's QC columns that preparation wrote, {columns}"
-    if "nCounts" in suffixes:
-        rule += ", without <assay>_nCounts for an assay of normalized values"
+    # Every recipe's QC columns include nCounts.
+    rule = (
+        f"the {modality} assay's QC columns that preparation wrote, {columns}, "
+        "without <assay>_nCounts for an assay of normalized values"
+    )
     return _Declared("collections.abc.Sequence[str]", rule=rule)
 
 
