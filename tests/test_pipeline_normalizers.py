@@ -40,7 +40,7 @@ from cytearc.datastore._pipeline.normalizers import (
     normalizer_setting,
 )
 from cytearc.datastore.pipeline_accessor import PipelineEvent
-from cytearc.storage.artifacts import ArtifactRef, callable_identity
+from cytearc.storage.artifacts import ArtifactRef, artifact_group, callable_identity
 from cytearc.storage.pipeline_runs import pipeline_run_path, pipeline_stage_path
 from tests.perturbation_helpers import write_screen
 from tests.storage_helpers import open_store, write_count_store, written
@@ -679,14 +679,10 @@ def test_a_run_that_saved_no_normalized_values_takes_the_session_normalizer(
     assert plan.config["stages"]["normalization"] == {"method": "lib_size"}
 
 
-def test_a_run_whose_normalized_values_are_gone_has_no_settings(
-    saved, tmp_path
+def _point_normalization_at_a_missing_artifact(
+    location: Path, run: PipelineRun
 ) -> None:
-    location = _copy(saved.location, tmp_path)
-    run = saved.residuals
-    _record_as_1_4(location, run.run_id)
-    # Point the normalization stage's output at an artifact that the store
-    # does not hold.
+    """Point a run's normalization stage output at an artifact that the store lacks."""
     ordinal = list(run.report()["run"]["stageOrder"]).index("normalization")
     group = zarr.open_group(str(location), mode="r+")[
         pipeline_stage_path(run.run_id, ordinal)
@@ -694,6 +690,25 @@ def test_a_run_whose_normalized_values_are_gone_has_no_settings(
     attrs = dict(group.attrs)
     attrs["outputs"][0]["artifact"]["artifact_id"] = "0" * 64
     group.attrs.put(attrs)
+
+
+@pytest.mark.parametrize("damage", ["missing", "incomplete"])
+def test_a_run_whose_normalized_values_are_gone_has_no_settings(
+    saved, tmp_path, damage
+) -> None:
+    location = _copy(saved.location, tmp_path)
+    run = saved.residuals
+    _record_as_1_4(location, run.run_id)
+    if damage == "missing":
+        _point_normalization_at_a_missing_artifact(location, run)
+        artifact = "0" * 12
+    else:
+        # The values are there and record their normalizer, but their write
+        # never completed, so they do not say what the run applied.
+        root = zarr.open_group(str(location), mode="r+")
+        artifact_group(root, run["normalized"]).attrs["complete"] = False
+        assert _method(_view(saved.location), run["normalized"]) == PEARSON
+        artifact = run["normalized"].artifact_id[:12]
     earlier = _open(location).pipeline.open(label="residuals")
 
     with pytest.raises(ValueError) as caught:
@@ -701,10 +716,56 @@ def test_a_run_whose_normalized_values_are_gone_has_no_settings(
 
     assert str(caught.value) == (
         f"Pipeline run {run.run_id}, recorded by CyteArc 1.4.0, records no "
-        "normalization method, and its normalized values, artifact "
-        "000000000000, are missing or record no normalization_method; "
+        f"normalization method, and its normalized values, artifact {artifact}, "
+        "are missing or record no normalization_method; "
         "report()['run']['config'] holds the settings that it recorded"
     )
+
+
+def test_a_run_that_records_its_method_lends_it_without_its_normalized_values(
+    saved, tmp_path
+) -> None:
+    location = _copy(saved.location, tmp_path)
+    _point_normalization_at_a_missing_artifact(location, saved.residuals)
+    store = _open(location)
+
+    # The joint run ranks the RNA markers with the residuals that the RNA run
+    # records by name, so its plan reuses every stage without reading the
+    # normalized values that the record no longer finds.
+    plan = store.pipeline.plan(store.pipeline.open(label="wnn"))
+
+    assert plan.computed == ()
+    assert store.RNA.normMethod is norm_lib_size
+
+
+def test_a_run_interrupted_while_it_normalized_takes_the_session_normalizer(
+    saved, tmp_path, monkeypatch
+) -> None:
+    location = _copy(saved.location, tmp_path)
+    store = _open(location)
+
+    def interrupted(*_args: Any, **_kwargs: Any) -> Any:
+        raise KeyboardInterrupt("stopped while normalizing")
+
+    monkeypatch.setattr(store, "_features_normalize", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        store.pipeline.rna(normalization={"method": "pearson_residuals"}, **SETTINGS)
+    (run_id,) = [
+        run.run_id for run in store.pipeline.list_runs(status="interrupted", limit=100)
+    ]
+    _record_as_1_4(location, run_id)
+    earlier = _open(location).pipeline.open(run_id=run_id)
+
+    # The normalization stage started and saved no values, so nothing says
+    # which normalizer the run applied, and a call takes the session's.
+    statuses = {
+        stage["stage"]: (stage["status"], stage["outputs"])
+        for stage in earlier.report()["stages"]
+    }
+    assert statuses["normalization"] == ("interrupted", [])
+    assert earlier.settings()["normalization"] == {}
+    plan = store.pipeline.plan(earlier)
+    assert plan.config["stages"]["normalization"] == {"method": "lib_size"}
 
 
 # The session's normalizer -------------------------------------------------------
