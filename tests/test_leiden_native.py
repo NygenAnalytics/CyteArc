@@ -2035,8 +2035,14 @@ def _merge_subset(merge, graph, labels, members, gamma: float):
 def test_a_member_whose_neighbors_are_poorly_connected_stays_alone():
     # Node 0 is well connected to its community {0, 1, 2}, but nodes 1 and 2
     # lean on nodes outside it, so neither is a community node 0 may join.
+    # With 2m = 12 and K = 8 for {0, 1, 2}, node 0 holds 2 inside, above
+    # 2 * (8 - 2) / 12 = 1, while nodes 1 and 2 hold 1 each, below
+    # 3 * (8 - 3) / 12 = 1.25. Joining either would gain 1 - 2 * 3 / 12 = 0.5,
+    # 33 times the refinement's randomness, theta 0.01 of the mean weight 1.5,
+    # so a move would be all but certain: only their poor connection keeps
+    # node 0 apart.
     W = sp.csr_matrix(
-        ([1.0, 1.0, 50.0, 50.0], ([0, 1, 1, 2], [1, 2, 3, 4])), shape=(5, 5)
+        ([1.0, 1.0, 2.0, 2.0], ([0, 0, 1, 2], [1, 2, 3, 4])), shape=(5, 5)
     )
     graph = build_leiden_graph(W, 1)
     labels = np.array([0, 0, 0, 1, 1], dtype=np.int32)
