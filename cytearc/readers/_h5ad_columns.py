@@ -45,36 +45,6 @@ def column_place(path: str, table: str, key: str, *, index: bool) -> str:
     return f"the {table} {kind} {key!r} of {quoted_value(path)}"
 
 
-def utf8_refusal(value: bytes, row: int, expectation: str, place: str) -> ValueError:
-    """Return the refusal of bytes in a column that are not UTF-8 text.
-
-    Args:
-        value: The bytes.
-        row: Their row, counting from 0, which the refusal counts from 1.
-        expectation: What the column must hold, which the refusal starts
-            with, such as ``"H5AD cell IDs must be UTF-8 text"``.
-        place: Where the column is, as :func:`column_place` names it.
-    """
-    return ValueError(
-        f"{expectation}; row {row + 1} of {place} holds {quoted_value(bytes(value))}"
-    )
-
-
-def check_utf8(values: np.ndarray, expectation: str, place: str) -> None:
-    """Refuse a column that holds bytes that are not UTF-8 text.
-
-    Raises:
-        ValueError: If a value is such bytes, as :func:`utf8_refusal`
-            refuses the first.
-    """
-    for row, value in enumerate(values.tolist()):
-        if isinstance(value, bytes):
-            try:
-                value.decode("utf-8")
-            except UnicodeDecodeError:
-                raise utf8_refusal(value, row, expectation, place) from None
-
-
 @dataclass(frozen=True, slots=True)
 class H5adTableMembers:
     """Children of an H5AD dataframe group, found without reading values.

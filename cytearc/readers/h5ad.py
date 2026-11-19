@@ -1,4 +1,3 @@
-import math
 import sys
 from collections.abc import Generator, Iterator, Mapping, Sequence
 from dataclasses import dataclass
@@ -36,7 +35,6 @@ from ._h5ad_columns import (
     H5adCategories,
     TableColumn,
     category_colors,
-    check_utf8,
     column_categories,
     column_encoding,
     column_length,
@@ -54,7 +52,6 @@ from ._h5ad_columns import (
     table_column_dtype,
     table_column_names,
     table_members,
-    utf8_refusal,
 )
 from ._h5ad_inspect import H5adInspectResult, inspect_h5ad as inspect_h5ad
 from ._h5ad_values import (
@@ -77,6 +74,8 @@ from ._text import (
     DuplicateCellIds,
     DuplicateFeatureIds,
     as_text,
+    check_identifiers,
+    check_utf8,
     duplicate_cell_ids_option,
     duplicate_feature_ids_option,
     unique_cell_identifiers,
@@ -128,59 +127,6 @@ def _is_missing_name(value: Any) -> bool:
 _CELL_IDS = "H5AD cell IDs"
 _FEATURE_IDS = "H5AD feature IDs"
 _FEATURE_NAMES = "H5AD feature names"
-# The most rows that a refusal names.
-_NAMED_ROWS = 5
-
-
-def _named_rows(rows: list[int]) -> str:
-    """Name rows as refusals name them, counting from 1: the first few and how many more."""
-    shown = [str(row + 1) for row in rows[:_NAMED_ROWS]]
-    more = len(rows) - len(shown)
-    if more:
-        return f"rows {', '.join(shown)} and {more:,} more"
-    if len(shown) == 1:
-        return f"row {shown[0]}"
-    return f"rows {', '.join(shown[:-1])} and {shown[-1]}"
-
-
-def _check_identifiers(values: np.ndarray, label: str, place: str) -> None:
-    """Refuse IDs that an import cannot store.
-
-    Args:
-        values: The IDs as the file holds them.
-        label: What the IDs are, such as ``"H5AD cell IDs"``.
-        place: Where they are, as :func:`column_place` names it.
-
-    Raises:
-        ValueError: If an ID is bytes that are not UTF-8 text, naming the
-            first row that holds them, or if IDs are missing, as None or as
-            NaN in a column of numbers, or blank, naming their rows.
-    """
-    # One pass, decoding inline: a call per ID would take several times as long.
-    missing: list[int] = []
-    for row, value in enumerate(values.tolist()):
-        if isinstance(value, bytes):
-            try:
-                value = value.decode("utf-8")
-            except UnicodeDecodeError:
-                raise utf8_refusal(
-                    value, row, f"{label} must be UTF-8 text", place
-                ) from None
-        elif value is None or (
-            isinstance(value, float | np.floating) and math.isnan(value)
-        ):
-            missing.append(row)
-            continue
-        # The text that an import stores: the decoded bytes, or the str of
-        # another value, such as a number.
-        if not str(value).strip():
-            missing.append(row)
-    if missing:
-        state = "is" if len(missing) == 1 else "are"
-        raise ValueError(
-            f"{label} must contain non-empty values; {_named_rows(missing)} of "
-            f"{place} {state} missing or blank"
-        )
 
 
 def _array_bytes(values: np.ndarray) -> int:
@@ -750,7 +696,7 @@ class H5adReader:
         """
         if self._check_exists(group, key):
             values = present_column(*self._read_column(group, key)).astype(object)
-            _check_identifiers(values, label, self._column_place(group, key))
+            check_identifiers(values, label, self._column_place(group, key))
         else:
             n_rows = self.nCells if group == self.cellAttrsKey else self.nFeatures
             logger.warning(

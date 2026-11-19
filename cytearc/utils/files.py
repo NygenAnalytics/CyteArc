@@ -141,17 +141,26 @@ def open_binary(source: str | os.PathLike[str] | IO[bytes]) -> io.BufferedIOBase
     return stream
 
 
-def open_text(source: str | os.PathLike[str] | IO[bytes]) -> io.TextIOWrapper:
+def open_text(
+    source: str | os.PathLike[str] | IO[bytes], *, errors: str = "strict"
+) -> io.TextIOWrapper:
     """Open a file, or an open binary stream, for reading UTF-8 text.
 
     A gzip-compressed file is decompressed, a byte-order mark at the start is
     dropped, and lines keep their endings. Text that is not UTF-8 raises
-    ``UnicodeDecodeError`` as it is read. Closing the text of a stream closes
-    that stream too.
+    ``UnicodeDecodeError`` as it is read, unless ``errors`` reads it. Closing
+    the text of a stream closes that stream too.
 
     Args:
         source: A path, or a binary stream such as a member of a ZIP archive.
+        errors: How bytes that are not UTF-8 are read, as :func:`open` takes
+            it: ``"strict"`` raises, and ``"surrogateescape"`` reads each such
+            byte as a lone surrogate, so the lines of such a file can still be
+            counted.
     """
     return io.TextIOWrapper(
-        cast(Any, open_binary(source)), encoding="utf-8-sig", newline=""
+        cast(Any, open_binary(source)),
+        encoding="utf-8-sig",
+        errors=errors,
+        newline="",
     )
