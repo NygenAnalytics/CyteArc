@@ -2,7 +2,6 @@ import csv
 import gzip
 import hashlib
 import io
-import shutil
 import weakref
 import warnings
 import zlib
@@ -45,6 +44,7 @@ from tests.clone_helpers import (
 from cytearc.utils.memory_budget import MemoryLedger
 from tests.memory_helpers import climb_refusals, named_budget
 from tests.perturbation_helpers import use_python_kernels
+from tests.row_store_helpers import asked_bytes, finalized_bytes, free_disk
 from tests.storage_helpers import by_cell_id, open_store
 
 # Contig IDs repeat across the three files: X takes _3 and then _4, since the
@@ -2401,21 +2401,38 @@ def test_temporary_files_go_when_the_export_fails(
     assert _store_folders(temporary) == []
 
 
-def test_a_full_disk_is_refused_before_a_row_is_sent(tmp_path, monkeypatch) -> None:
+def test_a_disk_short_of_the_temporary_files_is_refused_before_a_row_is_sent(
+    tmp_path,
+) -> None:
     store, receptors = _shuffled_edge_receptors(tmp_path)
     temporary = tmp_path / "temporary"
     temporary.mkdir()
-    usage = shutil.disk_usage(temporary)
-    monkeypatch.setattr(
-        "cytearc.readers._sparse.shutil.disk_usage",
-        lambda path: usage._replace(free=10),
-    )
-    path = tmp_path / "x.tsv"
-    with pytest.raises(OSError, match="AIRR export in source order needs") as refused:
-        store.repertoire.export_airr(receptors, path, temp_dir=temporary)
-    assert "pass temp_dir on a disk with more free space" in str(refused.value)
-    # The file holds the header alone, and the temporary files are gone.
-    assert _text(path).count("\n") == 1
+
+    def export(name: str) -> str:
+        store.repertoire.export_airr(receptors, tmp_path / name, temp_dir=temporary)
+        return _text(tmp_path / name)
+
+    with finalized_bytes() as peaks:
+        written = export("roomy.tsv")
+    (peak,) = peaks
+    with (
+        free_disk(10),
+        pytest.raises(OSError, match="AIRR export in source order needs") as full,
+    ):
+        export("full.tsv")
+    assert "pass temp_dir on a disk with more free space" in str(full.value)
+    asked = asked_bytes(full.value)
+    # The check asks for every byte that the files take: the rows, the
+    # store's record of each row, and its settings.
+    assert peak <= asked
+    # One byte short, the export is refused before a row is sent: the file
+    # holds the header alone, and the temporary files are gone.
+    with free_disk(asked - 1), pytest.raises(OSError, match=f"needs {asked} "):
+        export("short.tsv")
+    assert _text(tmp_path / "short.tsv").count("\n") == 1
+    assert _store_folders(temporary) == []
+    with free_disk(asked):
+        assert export("enough.tsv") == written
     assert _store_folders(temporary) == []
 
 

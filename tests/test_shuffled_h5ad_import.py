@@ -877,9 +877,11 @@ def test_a_disk_without_room_for_the_spill_is_refused_before_it_is_written(
         _import(source, MemoryStore(), shuffle_cells=True, **in_tmp)
     required = int(re.search(r"needs (\d+) temporary", str(caught.value)).group(1))
     # The estimate measured on the file's first rows covers what the spill
-    # wrote, and stays well below the bytes of the entries before compression.
+    # wrote, and stays well below the bytes of the entries before compression
+    # beside the store's records: 17 bytes for each cell, and under 4 KiB of
+    # the records' headers, the settings and the block of a bucket.
     entries = int(np.count_nonzero(_counts()))
-    assert spilled <= required < entries * (4 + 1)
+    assert spilled <= required < entries * (4 + 1) + _N_CELLS * 17 + 4096
     monkeypatch.setattr(sparse.shutil, "disk_usage", usage(required - 1))
     with pytest.raises(OSError, match=f"needs {required} temporary bytes"):
         _import(source, MemoryStore(), shuffle_cells=True, **in_tmp)

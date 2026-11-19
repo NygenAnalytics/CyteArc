@@ -38,6 +38,7 @@ sizes and a CRC-32 of the payloads, because Blosc decodes corrupted and
 truncated buffers without an error.
 """
 
+import io
 import json
 import math
 import os
@@ -52,7 +53,7 @@ from pathlib import Path
 from typing import Any, BinaryIO, Self
 
 import numpy as np
-from numcodecs import Blosc
+from numcodecs import Blosc, blosc
 from scipy.sparse import coo_matrix, csr_matrix
 
 from ..utils.arrays import canonicalize_sparse, checked_sparse_cast, cumulative_nnz
@@ -79,6 +80,9 @@ _MAGIC = b"CRB1"
 # the payloads.
 _HEADER = struct.Struct("<4sBBBBB3xQQQQQQI")
 _CHECKSUM = struct.Struct("<I")
+# The most that a block holds beside its payloads: its header and the
+# header of the Blosc frame of each of its four payloads.
+_BLOCK_OVERHEAD = _HEADER.size + 4 * int(blosc.MAX_OVERHEAD)
 _FORMAT = 1
 
 #: Bytes per destination row that a store holds: the entries appended to each
@@ -251,6 +255,26 @@ def _checksum(header: bytes, payloads: Iterable[bytes]) -> int:
     for payload in payloads:
         checksum = zlib.crc32(payload, checksum)
     return checksum
+
+
+def _archive_bytes(arrays: dict[str, tuple[Any, tuple[int, ...]]]) -> int:
+    """Return the bytes of an ``np.savez`` archive of arrays of these dtypes and shapes.
+
+    Beside each array's data, the archive holds a header and an entry that
+    take the same bytes for any number of rows, up to archives of 4 GiB,
+    so an archive of the arrays without rows measures them.
+    """
+    rowless: dict[str, Any] = {
+        name: np.zeros((0, *shape[1:]), dtype=dtype)
+        for name, (dtype, shape) in arrays.items()
+    }
+    headers = io.BytesIO()
+    np.savez(headers, **rowless)
+    data = sum(
+        int(np.dtype(dtype).itemsize) * math.prod(shape)
+        for dtype, shape in arrays.values()
+    )
+    return headers.tell() + data
 
 
 def encoded_entry_bytes(matrix: csr_matrix) -> float:
@@ -551,8 +575,10 @@ class SparseRowStore:
         split_bytes: The read size above which :meth:`finalize` splits a
             bucket into bands of rows, each read within it unless one row
             needs more; ``bucket_bytes`` by default, and at most that.
-        entries: The entries expected, from which the free disk the spill may
-            need is checked before anything is written, or None.
+        entries: The entries expected, from which the free disk that the
+            store's files may need is checked before anything is written, or
+            None. Beside the entries, the check counts a block for each
+            bucket and the settings and records that the owner writes.
         entry_bytes: The bytes that each entry is expected to take on disk,
             as :func:`encoded_entry_bytes` measures them on sample rows; the
             check then asks for a quarter more than ``entries`` take at that
@@ -567,7 +593,7 @@ class SparseRowStore:
 
     Raises:
         MemoryBudgetError: If ``bucket_bytes`` cannot hold one entry.
-        OSError: If the disk lacks the bytes that ``entries`` may need.
+        OSError: If the disk lacks the bytes that the store's files may need.
         ValueError: If ``ragged`` rows do not arrive whole or are not uint8.
     """
 
@@ -1005,20 +1031,57 @@ class SparseRowStore:
             )
 
     def _spill_bound(self, entries: int, entry_bytes: float | None = None) -> int:
-        """Return the bytes that ``entries`` may take on disk.
+        """Return the bytes that the store's files may take once ``entries`` are written.
 
-        Without ``entry_bytes``, the most they take before compression;
-        with it, a quarter more than they take at that rate.
+        Without ``entry_bytes``, the entries take at most their bytes before
+        compression, and each piece its place and length in two codes of at
+        most 8 bytes; with it, a quarter more than they take at that rate.
+        Beside them, each bucket's file holds at least one block, and the
+        owner writes the store's settings and records (:meth:`_record_bytes`).
         """
+        beside = (self.bucket_starts.size - 1) * _BLOCK_OVERHEAD + self._record_bytes()
         if entry_bytes is not None:
-            return math.ceil(entries * float(entry_bytes) * _ESTIMATE_MARGIN)
+            return math.ceil(entries * float(entry_bytes) * _ESTIMATE_MARGIN) + beside
         index_bytes = (
             0
             if self._ragged
             else _UNSIGNED[_unsigned_code(max(0, self.shape[1] - 1))].itemsize
         )
         pieces = self.shape[0] if self._wholeRows else entries
-        return entries * (self._sourceDtype.itemsize + index_bytes) + pieces * 16
+        return (
+            entries * (self._sourceDtype.itemsize + index_bytes) + pieces * 16 + beside
+        )
+
+    def _record_bytes(self) -> int:
+        """Return what the store's settings and the records of its owner take on disk.
+
+        The owner's part record holds its writer's count of entries and mark
+        of each row, and the file bytes, pieces and flag of each bucket; the
+        finalized record holds the row pointers, the parts' numbers, and the
+        first row, file bytes, pieces and flag of each bucket.
+        """
+        n_rows = self.shape[0]
+        n_buckets = self.bucket_starts.size - 1
+        part = _archive_bytes(
+            {
+                "rowEntries": (np.int64, (n_rows,)),
+                "rowPieces": (np.uint8, (n_rows if self._wholeRows else 0,)),
+                "bucketBytes": (np.int64, (n_buckets,)),
+                "bucketPieces": (np.int64, (n_buckets,)),
+                "bucketMixed": (np.bool_, (n_buckets,)),
+            }
+        )
+        finalized = _archive_bytes(
+            {
+                "indptr": (np.int64, (n_rows + 1,)),
+                "partIds": (np.int64, (1,)),
+                "bucketStarts": (np.int64, (n_buckets + 1,)),
+                "fileBytes": (np.int64, (1, n_buckets)),
+                "bucketPieces": (np.int64, (n_buckets,)),
+                "bucketMixed": (np.bool_, (n_buckets,)),
+            }
+        )
+        return len(json.dumps(self._settings)) + part + finalized
 
     def _check_disk(self, required: int) -> None:
         free = shutil.disk_usage(self.directory).free
@@ -1869,7 +1932,7 @@ class SparseRowStore:
                 and one entry, or than reading the row with the most entries.
             ValueError: If a chunk has the wrong shape; ``nnz_error`` beyond
                 ``max_nnz``.
-            OSError: If the disk lacks the bytes that the entries may need.
+            OSError: If the disk lacks the bytes that the store's files may need.
         """
         n_rows, n_columns = (int(value) for value in shape)
         source = np.dtype(dtype if source_dtype is None else source_dtype)
