@@ -291,16 +291,27 @@ def test_dense_h5ad_producer_sends_no_band_after_the_parent_stops(
             values,
         )
 
-        # A stop that arrives while a band is sent ends the window after it.
+        # A stop that arrives while a band is sent ends the window after it,
+        # before the window reads its next batch.
         stop = threading.Event()
-        connection = _Connection(on_send=stop.set)
-        assert produce(stop, connection) == [(0, 4)]
+        read_batches = H5adReader.consume_dense_rows
+        batch_rows: list[int] = []
+
+        def count_batches(self, *args, **kwargs):
+            for batch in read_batches(self, *args, **kwargs):
+                batch_rows.append(len(batch))
+                yield batch
+
+        with monkeypatch.context() as patch:
+            patch.setattr(H5adReader, "consume_dense_rows", count_batches)
+            connection = _Connection(on_send=stop.set)
+            assert produce(stop, connection) == [(0, 4)]
         assert [kind for kind, _payload in connection.messages] == ["band"]
+        assert batch_rows == [4]
 
         # A stop that arrives while the next batch is read ends the window
         # before that batch fills a band.
         stop = threading.Event()
-        read_batches = H5adReader.consume_dense_rows
 
         def stop_after_the_first_batch(self, *args, **kwargs):
             for batch in read_batches(self, *args, **kwargs):

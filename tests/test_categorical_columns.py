@@ -5,6 +5,7 @@ column of the same labels with a categorical one, so a layout that read or
 fingerprinted its labels differently fails.
 """
 
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -439,9 +440,20 @@ def test_a_categorical_read_charges_the_codes_it_returns_beside_its_categories(
     assert values.codes.dtype == np.dtype(codes_dtype)
     assert values.categories.tolist() == categories
     assert values.tolist() == [labels[row] for row in rows]
+    # The categories are charged as stored, as the references of an object
+    # array, and as Python values: a string takes what sys.getsizeof gives,
+    # and a float its 24 bytes, which pymalloc's 16-byte blocks round up to 32.
+    if isinstance(categories[0], str):
+        stored = 4 * max(map(len, categories)) * len(categories)
+        python_values = sum(sys.getsizeof(category) for category in categories)
+    else:
+        stored = 8 * len(categories)
+        python_values = len(categories) * -(-sys.getsizeof(0.5) // 16) * 16
+    category_bytes = stored + 8 * len(categories) + python_values
+    assert category_values_bytes(column) == category_bytes
     # The codes stay charged once, at the width returned, beside the
     # categories; codes that pandas widened replace the stored ones.
-    assert ledger.held_bytes == values.codes.nbytes + category_values_bytes(column)
+    assert ledger.held_bytes == values.codes.nbytes + category_bytes
 
 
 @pytest.mark.parametrize("layout", ["text", "categorical"])

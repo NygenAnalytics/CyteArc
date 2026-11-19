@@ -110,6 +110,20 @@ def test_series_whose_labels_are_not_the_row_ids_is_refused(index, message):
     assert "cell_type" not in table.columns
 
 
+def test_series_with_a_label_beyond_the_rows_is_refused():
+    table = _table()
+    # Every row's id is there, and one label more.
+    values = pd.Series(["a", "b", "c", "d", "e"], index=["c3", "c0", "c2", "c1", "c9"])
+
+    with pytest.raises(
+        ValueError,
+        match=r"1 labels are not such ids, such as 'c9', and 0 such ids have no label",
+    ):
+        table.insert("cell_type", values)
+
+    assert "cell_type" not in table.columns
+
+
 def test_series_of_the_wrong_length_names_the_rows_that_key_selects():
     table = _table(active=[True, False, True, True])
     values = pd.Series(["a", "b"], index=["c0", "c2"])

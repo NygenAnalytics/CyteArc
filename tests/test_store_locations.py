@@ -260,7 +260,9 @@ def test_sources_are_recorded_by_absolute_paths_with_relative_sources_false(
             DataStore(str(moved / name), nthreads=1)
 
 
-def test_every_entry_point_records_nearby_sources_by_relative_paths_by_default():
+def test_every_entry_point_records_nearby_sources_by_relative_paths_by_default(
+    tmp_path,
+):
     import inspect
 
     from cytearc.storage.stores import create_matrix_source
@@ -269,6 +271,18 @@ def test_every_entry_point_records_nearby_sources_by_relative_paths_by_default()
         parameter = inspect.signature(function).parameters["relative_sources"]
         assert parameter.kind is inspect.Parameter.KEYWORD_ONLY, function
         assert parameter.default is True, function
+    # mount_datastore passes its own setting on, and the folder tests below
+    # record its default and the composite's; called alone, the matrix
+    # source records a source beside it by a relative path too.
+    _write_store(str(tmp_path / "source.zarr"))
+    # A first writable open prepares the store to be mounted.
+    DataStore(str(tmp_path / "source.zarr"), min_features_per_cell=-1, nthreads=1)
+    target = create_matrix_source(
+        str(tmp_path / "source.zarr"),
+        str(tmp_path / "mount.zarr"),
+        required_transposes=frozenset(),
+    )
+    assert target.attrs[MATRIX_SOURCE_ATTR]["location"] == "source.zarr"
 
 
 def test_relative_sources_must_be_a_boolean(tmp_path):

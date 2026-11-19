@@ -2333,6 +2333,31 @@ def test_composite_store_inventory_matches_readable_objects(composite_adapter):
     sync(check())
 
 
+def test_composite_store_lists_a_chunk_once_beside_a_stray_file_of_its_name(
+    composite_adapter,
+):
+    from math import ceil
+
+    joint = composite_adapter
+    store = joint.z.store
+    array = joint.RNA.matrixGroup["counts"]
+    rows = ceil(array.shape[0] / array.shards[0])
+    assert rows > 1
+    # A file left where the virtual counts keep their first row of chunks,
+    # as from an earlier store in the same folder.
+    stray = store.root / "RNA" / "counts" / "c" / "0" / "0"
+    stray.parent.mkdir(parents=True)
+    stray.write_bytes(b"stray")
+
+    async def children(prefix: str) -> list[str]:
+        return [key async for key in store.list_dir(prefix)]
+
+    # The row of the stray file is listed once, among the rows of the grid.
+    assert sorted(sync(children("RNA/counts/c")), key=int) == [
+        str(row) for row in range(rows)
+    ]
+
+
 def test_composite_store_batches_preserve_bytes_and_missing_keys(composite_adapter):
     store = composite_adapter.z.store
     prototype = default_buffer_prototype()
@@ -2739,6 +2764,11 @@ def test_composite_source_locations_require_persistent_credential_free_paths(
 
     local = WrapperStore(LocalStore(sources["a"].z.store.root))
     source = SimpleNamespace(zarr_loc=local, z=zarr.open_group(store=local, mode="r"))
+    assert _source_location(source) == str(sources["a"].z.store.root.resolve())
+    # A store wrapped twice, as a cache wraps a store that is wrapped already,
+    # names the location of the store inside both.
+    twice = WrapperStore(local)
+    source = SimpleNamespace(zarr_loc=twice, z=SimpleNamespace(store=twice))
     assert _source_location(source) == str(sources["a"].z.store.root.resolve())
     # An fsspec store names its location by URL: a local file system's
     # resolves to the path, and any other stays a URL.

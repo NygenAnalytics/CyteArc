@@ -156,11 +156,18 @@ def _pseudotime_of_components(
 @pytest.mark.parametrize(
     ("valid", "component", "sizes", "message"),
     [
-        # One component number for each of four cells is needed.
+        # One component number for each of four cells is needed, no fewer
+        # and no more.
         (
             [True] * 4,
             [0, 0, 1],
             (2, 1),
+            "Pseudotime components must align with the values",
+        ),
+        (
+            [True] * 4,
+            [0, 0, 0, 0, 0],
+            (5,),
             "Pseudotime components must align with the values",
         ),
         (

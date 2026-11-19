@@ -43,6 +43,20 @@ def test_metadata_fetch(dummy_metadata):
     np.testing.assert_array_equal(dummy_metadata.fetch_all("order"), np.arange(10, 19))
 
 
+def test_index_to_bool_marks_the_rows_given(dummy_metadata):
+    rows = np.array([2, 7])
+    assert dummy_metadata.index_to_bool(rows).tolist() == [
+        i in (2, 7) for i in range(9)
+    ]
+    assert dummy_metadata.index_to_bool(rows, invert=True).tolist() == [
+        i not in (2, 7) for i in range(9)
+    ]
+    # No rows mark no row, or every row once inverted.
+    none = np.array([], dtype=np.int64)
+    assert dummy_metadata.index_to_bool(none).tolist() == [False] * 9
+    assert dummy_metadata.index_to_bool(none, invert=True).tolist() == [True] * 9
+
+
 def test_metadata_grep_preserves_regex_character_classes(dummy_metadata):
     dummy_metadata.insert(
         "names",
@@ -148,7 +162,9 @@ def test_datastore_open_names_a_zero_dimensional_metadata_column(tmp_path, table
         DataStore(path, default_assay="RNA", min_features_per_cell=0, nthreads=1)
 
 
-def test_metadata_table_opens_valid_columns_as_before(tmp_path):
+def test_metadata_table_counts_its_rows_by_the_columns_beside_categories_and_masks(
+    tmp_path,
+):
     import pandas as pd
 
     from cytearc.metadata import MetaData
@@ -169,7 +185,7 @@ def test_metadata_table_opens_valid_columns_as_before(tmp_path):
     frame = reopened.to_pandas_dataframe(["value"])["value"]
     assert frame.isna().tolist() == [i >= 5 for i in range(9)]
 
-    # Columns of unequal lengths are still refused as before.
+    # Columns of unequal lengths are refused.
     group.create_array("short", data=np.arange(4))
     with pytest.raises(ValueError, match="Not all columns are of same length"):
         MetaData(group)
