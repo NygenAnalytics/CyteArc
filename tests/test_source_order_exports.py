@@ -8,8 +8,11 @@ against the same exports in store order, gathered in the order of the
 cells' file rows, which the cell IDs, ``cell-<row>``, also give.
 """
 
+import errno
 import gzip
+import os
 import shutil
+import stat
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -1121,7 +1124,7 @@ def test_an_export_asks_for_the_disk_that_its_temporary_files_take(
         return target
 
     with finalized_bytes() as peaks:
-        export_to("roomy")
+        roomy = export_to("roomy")
     (peak,) = peaks
     with free_disk(0), pytest.raises(OSError, match="which has 0 free") as full:
         export_to("full")
@@ -1131,12 +1134,11 @@ def test_an_export_asks_for_the_disk_that_its_temporary_files_take(
     # files.
     assert peak <= asked
     # One byte short, the export is refused and removes its temporary files,
-    # and to_h5ad leaves no file.
+    # and leaves no file or directory of its own.
     with free_disk(asked - 1), pytest.raises(OSError, match=f"needs {asked} "):
         export_to("short")
     assert list(spill.iterdir()) == []
-    if call == "to_h5ad":
-        assert not (tmp_path / "short.h5ad").exists()
+    assert sorted(tmp_path.iterdir()) == [roomy, spill]
     with free_disk(asked):
         assert export_to("enough").exists()
     assert list(spill.iterdir()) == []
@@ -1214,6 +1216,85 @@ def test_matrix_market_refuses_a_budget_before_writing(imported, tmp_path) -> No
     with pytest.raises(MemoryBudgetError, match="the counts in source order"):
         to_mtx(store.RNA, str(tmp_path / "mtx"))
     assert not (tmp_path / "mtx").exists()
+
+
+def _files(folder: Path) -> dict[str, tuple[bytes, int]]:
+    """The bytes and permission bits of each file in ``folder``."""
+    return {
+        path.name: (path.read_bytes(), stat.S_IMODE(path.stat().st_mode))
+        for path in sorted(folder.iterdir())
+    }
+
+
+@contextmanager
+def _full_disk_while_writing() -> Iterator[None]:
+    """Fail the write of the matrix's entries, after its header, as a full disk does."""
+
+    def full(_piece: Any, _start: int) -> bytes:
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(export, "_csr_lines", full)
+        yield
+
+
+@pytest.mark.parametrize(
+    ("cell_order", "failure"),
+    [
+        ("source", "temporary files"),
+        ("source", "matrix"),
+        ("stored", "matrix"),
+    ],
+)
+def test_a_matrix_market_export_that_fails_partway_leaves_its_directory_as_it_was(
+    imported, tmp_path, cell_order, failure
+) -> None:
+    store = _open(imported.shuffled)
+    spill = tmp_path / "spill"
+    spill.mkdir()
+    # The reorder's temporary files find no room once the first counts are
+    # read, or the disk fills while the entries are written: either fails
+    # after the export opened its files and wrote the matrix's header.
+    if failure == "temporary files":
+        failing, message = (lambda: free_disk(10)), "Export in source order needs"
+    else:
+        failing, message = _full_disk_while_writing, "No space left on device"
+
+    def export_to(folder: Path, compress: bool) -> None:
+        to_mtx(store.RNA, str(folder), compress, cell_order=cell_order, temp_dir=spill)
+
+    # A directory that the export makes is gone again.
+    with failing(), pytest.raises(OSError, match=message):
+        export_to(tmp_path / "new", False)
+    assert not (tmp_path / "new").exists()
+
+    # A directory that held an earlier export and a file of its own keeps
+    # every file as it was.
+    existing = tmp_path / "existing"
+    existing.mkdir()
+    for name in ("matrix.mtx.gz", "barcodes.tsv.gz", "features.tsv.gz", "notes"):
+        (existing / name).write_bytes(f"earlier {name}".encode())
+    (existing / "matrix.mtx.gz").chmod(0o640)
+    before = _files(existing)
+    with failing(), pytest.raises(OSError, match=message):
+        export_to(existing, True)
+    assert _files(existing) == before
+    assert list(spill.iterdir()) == []
+
+    # Once it succeeds, the export replaces its three files, the matrix with
+    # the permissions it had, and keeps the other.
+    export_to(existing, True)
+    after = _files(existing)
+    assert sorted(after) == sorted(before)
+    assert after["notes"] == before["notes"]
+    if os.name != "nt":
+        assert after["matrix.mtx.gz"][1] == 0o640
+    expected = _COUNTS if cell_order == "source" else _COUNTS[_ORDER]
+    exported = mmread(existing / "matrix.mtx.gz")
+    np.testing.assert_array_equal(np.asarray(exported.todense()).T, expected)
+    assert gzip.decompress(after["barcodes.tsv.gz"][0]).decode().split() == [
+        f"cell-{row}" for row in (range(_N_CELLS) if cell_order == "source" else _ORDER)
+    ]
 
 
 # ---------------------------------------------------------------------------

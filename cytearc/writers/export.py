@@ -13,6 +13,7 @@ form of the same plan, which ``DataStore.to_anndata`` returns.
 """
 
 import gzip
+import io
 import math
 import os
 import re
@@ -30,7 +31,7 @@ from collections.abc import (
     Sequence,
 )
 from concurrent.futures import Future, ThreadPoolExecutor
-from contextlib import suppress
+from contextlib import contextmanager, nullcontext, suppress
 from dataclasses import dataclass, field, replace
 from functools import partial
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -1515,6 +1516,37 @@ def _write_plan(h5: Any, plan: H5adExportPlan, threads: int) -> None:
             _write_uns_value(group, name, value)
 
 
+@contextmanager
+def _replaced_once_complete(path: str | os.PathLike[str], suffix: str) -> Iterator[str]:
+    """Yield a new temporary file beside ``path``, which replaces ``path`` once the block completes.
+
+    The empty file ``.<random><suffix>.tmp`` is made in the directory of
+    ``path``, so that moving it onto ``path`` is a rename within one file
+    system. A replaced file keeps its permissions, which the temporary file
+    takes once complete; until then only its owner may read it. When the
+    block raises, the temporary file is removed and ``path`` keeps what it
+    held.
+    """
+    directory = os.path.dirname(os.path.abspath(path))
+    temporary = os.path.join(directory, f".{secrets.token_hex(8)}{suffix}.tmp")
+    try:
+        mode: int | None = stat.S_IMODE(os.stat(path).st_mode)
+    except FileNotFoundError:
+        mode = None
+    # A replaced file keeps its permissions, also while its data is written.
+    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+    os.close(os.open(temporary, flags, 0o666 if mode is None else 0o600))
+    try:
+        yield temporary
+        if mode is not None:
+            os.chmod(temporary, mode)
+        os.replace(temporary, path)
+    except BaseException:
+        with suppress(OSError):
+            os.remove(temporary)
+        raise
+
+
 def write_h5ad_plan(
     plan: H5adExportPlan,
     path: str | os.PathLike[str],
@@ -1534,25 +1566,11 @@ def write_h5ad_plan(
 
     threads = integer_argument(threads, "threads", minimum=1)
     _check_plan(plan)
-    directory = os.path.dirname(os.path.abspath(path))
-    temporary = os.path.join(directory, f".{secrets.token_hex(8)}.h5ad.tmp")
-    try:
-        mode: int | None = stat.S_IMODE(os.stat(path).st_mode)
-    except FileNotFoundError:
-        mode = None
-    # A replaced file keeps its permissions, also while its data is written.
-    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
-    os.close(os.open(temporary, flags, 0o666 if mode is None else 0o600))
-    try:
-        with h5py.File(temporary, "w") as h5:
-            _write_plan(h5, plan, threads)
-        if mode is not None:
-            os.chmod(temporary, mode)
-        os.replace(temporary, path)
-    except BaseException:
-        with suppress(OSError):
-            os.remove(temporary)
-        raise
+    with (
+        _replaced_once_complete(path, ".h5ad") as temporary,
+        h5py.File(temporary, "w") as h5,
+    ):
+        _write_plan(h5, plan, threads)
 
 
 def with_count_dtype(
@@ -2874,6 +2892,23 @@ def _csr_lines(piece: csr_matrix, start: int) -> bytes:
     )
 
 
+def _write_tsv(
+    frame: "pd.DataFrame", temporary: str, path: str, compress: bool
+) -> None:
+    """Write the rows of ``frame``, tab-separated, to ``temporary`` as pandas writes them to ``path``.
+
+    With ``compress``, they are compressed as pandas compresses a file whose
+    name ends in ``.gz``, and the gzip header names ``path``, the file that
+    ``temporary`` becomes.
+    """
+    with open(temporary, "wb") as raw:
+        binary = (
+            gzip.GzipFile(filename=path, mode="wb", fileobj=raw) if compress else raw
+        )
+        with io.TextIOWrapper(binary, encoding="utf-8", newline="") as text:
+            frame.to_csv(text, sep="\t", header=False, index=False)
+
+
 def to_mtx(
     assay: Any,
     mtx_directory: str,
@@ -2901,6 +2936,12 @@ def to_mtx(
     rows through temporary files on local disk, in ``temp_dir``, each
     deleted once its rows are written. ``cell_order="stored"`` writes the
     cells in store order and needs no temporary files.
+
+    Each of the three files is written to a temporary file in
+    ``mtx_directory`` and moved onto its name once all three are complete,
+    so a failed export leaves no partial file, keeps the files that the
+    directory held, and removes the directory if it made it. A replaced
+    file keeps its permissions.
 
     Args:
         assay: CyteArc assay. For example: `ds.RNA`
@@ -2973,47 +3014,65 @@ def to_mtx(
             label="The counts",
             entries=tot_counts,
         )
-    if os.path.isdir(mtx_directory) is False:
+    created = not os.path.isdir(mtx_directory)
+    if created:
         os.mkdir(mtx_directory)
-    if compress:
-        barcodes_fn = "barcodes.tsv.gz"
-        features_fn = "features.tsv.gz"
-        matrix_path = os.path.join(mtx_directory, "matrix.mtx.gz")
-    else:
-        barcodes_fn = "barcodes.tsv"
-        features_fn = "genes.tsv"
-        matrix_path = os.path.join(mtx_directory, "matrix.mtx")
-    numeric_type = "integer" if np.issubdtype(dtype, np.integer) else "real"
-    with (
-        gzip.open(matrix_path, "wb", compresslevel=6)
+    names = (
+        ("matrix.mtx.gz", "barcodes.tsv.gz", "features.tsv.gz")
         if compress
-        else open(matrix_path, "wb")
-    ) as handle:
-        handle.write(
-            f"%%MatrixMarket matrix coordinate {numeric_type} general\n"
-            "% Generated by CyteArc\n"
-            f"{assay.feats.N} {assay.cells.N} {tot_counts}\n".encode()
-        )
-        start = 0
-        for piece in iter_h5ad_blocks(counts, "The counts"):
-            handle.write(_csr_lines(piece, start))
-            start += piece.shape[0]
-    barcodes = assay.cells.to_pandas_dataframe(["ids"])
-    if order is not None:
-        barcodes = barcodes.iloc[order]
-    barcodes.to_csv(
-        os.path.join(mtx_directory, barcodes_fn), sep="\t", header=False, index=False
+        else ("matrix.mtx", "barcodes.tsv", "genes.tsv")
     )
+    matrix_path, barcodes_path, features_path = (
+        os.path.join(mtx_directory, name) for name in names
+    )
+    numeric_type = "integer" if np.issubdtype(dtype, np.integer) else "real"
+    try:
+        # Each file is written beside its name and moved onto it once all
+        # three are complete, so a failed export leaves the directory as it
+        # was.
+        with (
+            _replaced_once_complete(matrix_path, ".mtx") as matrix_file,
+            _replaced_once_complete(barcodes_path, ".tsv") as barcodes_file,
+            _replaced_once_complete(features_path, ".tsv") as features_file,
+        ):
+            with (
+                open(matrix_file, "wb") as raw,
+                (
+                    # The gzip header names the file that the export writes.
+                    gzip.GzipFile(
+                        filename=matrix_path, mode="wb", compresslevel=6, fileobj=raw
+                    )
+                    if compress
+                    else nullcontext(raw)
+                ) as handle,
+            ):
+                handle.write(
+                    f"%%MatrixMarket matrix coordinate {numeric_type} general\n"
+                    "% Generated by CyteArc\n"
+                    f"{assay.feats.N} {assay.cells.N} {tot_counts}\n".encode()
+                )
+                start = 0
+                for piece in iter_h5ad_blocks(counts, "The counts"):
+                    handle.write(_csr_lines(piece, start))
+                    start += piece.shape[0]
+            barcodes = assay.cells.to_pandas_dataframe(["ids"])
+            if order is not None:
+                barcodes = barcodes.iloc[order]
+            _write_tsv(barcodes, barcodes_file, barcodes_path, compress)
 
-    features = assay.feats.to_pandas_dataframe(["ids", "names"])
-    # Cell Ranger 3 feature files carry a third feature-type column, which
-    # holds the one type of the exported assay.
-    features["feature_type"] = _assay_feature_type(
-        assay, "Gene Expression" if is_rna_assay_type(assay) else assay.name
-    )
-    features.to_csv(
-        os.path.join(mtx_directory, features_fn), sep="\t", header=False, index=False
-    )
+            features = assay.feats.to_pandas_dataframe(["ids", "names"])
+            # Cell Ranger 3 feature files carry a third feature-type column,
+            # which holds the one type of the exported assay.
+            features["feature_type"] = _assay_feature_type(
+                assay, "Gene Expression" if is_rna_assay_type(assay) else assay.name
+            )
+            _write_tsv(features, features_file, features_path, compress)
+    except BaseException:
+        if created:
+            # The export made the directory, which its failure leaves empty.
+            with suppress(OSError):
+                os.rmdir(mtx_directory)
+        raise
     logger.info(
         f"Exported {assay.cells.N} cells and {assay.feats.N} features "
         f"to {mtx_directory}"
