@@ -839,6 +839,13 @@ def test_the_json_scan_counts_objects_members_and_the_values_held(
     greek = np.frombuffer('{"λ": 1}'.encode(), dtype=np.uint8)
     shape = _scan_json(greek, np.empty(8, dtype=np.int64), np.empty(8, dtype=np.bool_))
     assert shape == (1, 1, 1, 8, 0xCE)
+    # A root array holds its five values, its inner array's among them, to its
+    # end. A ',' outside every container, which only text that is not JSON
+    # holds, holds no value, so the object after it makes six.
+    text = "[1, [2, 3], 4], {}"
+    data = np.frombuffer(text.encode(), dtype=np.uint8)
+    shape = _scan_json(data, np.empty(8, dtype=np.int64), np.empty(8, dtype=np.bool_))
+    assert shape == (1, 0, 6, len(text), ord("}"))
     deep = np.frombuffer(b"[[[]]]", dtype=np.uint8)
     assert (
         _scan_json(deep, np.empty(2, dtype=np.int64), np.empty(2, dtype=np.bool_))[0]

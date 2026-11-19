@@ -428,6 +428,8 @@ def _got_multi_targets(table: _Table) -> tuple[_Target, ...]:
         )
         if refined:
             continue
+        # Whether each channel gives the reads behind its UMIs.
+        given: dict[str, bool] = {}
         for channel, columns in channel_columns.items():
             if not set(columns.values()) <= set(frame.columns):
                 missing = sorted(set(columns.values()) - set(frame.columns))[0]
@@ -446,6 +448,17 @@ def _got_multi_targets(table: _Table) -> tuple[_Target, ...]:
                 raise ValueError(
                     f"{table.path} lacks the column {quoted_value(missing)}, which its other "
                     "reads_per_umi_total columns need"
+                )
+            given[channel] = bool(present)
+            if len(set(given.values())) > 1:
+                # An import stores one set of count fields, reads with every
+                # count or with none.
+                with_reads = [name for name, reads in given.items() if reads][0]
+                without = [name for name, reads in given.items() if not reads][0]
+                raise ValueError(
+                    f"{table.path} gives the reads_per_umi_total columns of its "
+                    f"{with_reads} channel and not those of its {without} channel; "
+                    "give them for both channels or for neither"
                 )
             counts = {
                 allele: _counts(part, column) for allele, column in columns.items()
@@ -531,7 +544,9 @@ def got_source(path: str | os.PathLike[str], *, format: str) -> GotSource:
 
     Raises:
         ValueError: If the table is malformed, lacks the columns of its
-            format, or holds counts that are not whole numbers.
+            format, holds counts that are not whole numbers, or is a
+            GoT-Multi table that gives the reads of one channel and not of
+            the other.
     """
     text = os.fspath(path)
     if format not in GOT_FORMATS:

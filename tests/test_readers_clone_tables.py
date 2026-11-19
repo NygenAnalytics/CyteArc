@@ -471,6 +471,22 @@ def test_quoted_barcodes_that_hold_delimiters_stay_one_field(tmp_path) -> None:
     assert matrix_clone_ids(layout).tolist() == ["0"]
 
 
+def test_every_entry_of_a_pattern_matrix_is_a_membership(tmp_path) -> None:
+    folder = tmp_path / "matrix"
+    folder.mkdir()
+    _write(folder / "cells.tsv", "cell\na\nb\nc\n")
+    _write(
+        folder / "clones.mtx",
+        "%%MatrixMarket matrix coordinate pattern general\n3 2 3\n1 2\n3 1\n2 2\n",
+    )
+
+    entries = list(matrix_entries(clone_layout(folder / "clones.mtx"), 10))
+
+    # Cells a, c and b, counted from 0, in clones 1, 0 and 1.
+    assert np.concatenate([e.cells for e in entries]).tolist() == [0, 2, 1]
+    assert np.concatenate([e.clones for e in entries]).tolist() == [1, 0, 1]
+
+
 def _larry(folder: Path, matrix: str, metadata: str) -> Path:
     _write(folder / "x_metadata.txt.gz", metadata, compress=True)
     return _write(folder / "x_clone_matrix.mtx.gz", matrix, compress=True)

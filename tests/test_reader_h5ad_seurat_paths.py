@@ -487,9 +487,11 @@ def test_h5ad_reader_batch_bounds(tmp_path) -> None:
         with pytest.raises(ValueError, match="batch_size must be positive"):
             list(reader.consume(0))
         assert reader.max_batch_nnz(3) == 5
-        # Producing a batch of three rows holds at least the four int32
-        # pointers that the file stores for them.
-        assert reader.producer_batch_staging_bytes(3) >= 4 * 4
+        # Producing a batch of three rows holds the four int32 pointers that
+        # the file stores for them twice, and as the batch's int32 pointers
+        # once more; a batch of more rows than the file holds holds them all.
+        assert reader.producer_batch_staging_bytes(3) == 4 * (2 * 4 + 4)
+        assert reader.producer_batch_staging_bytes(100) == 5 * (2 * 4 + 4)
     finally:
         reader.close()
 
@@ -702,3 +704,32 @@ def test_an_h5ad_without_embeddings_opens_without_a_warning(tmp_path) -> None:
     # An embedding asked of the empty obsm is still refused, naming it.
     with pytest.raises(KeyError, match="'X_umap' was not found in obsm"):
         H5adReader(str(path), embedding_roles={"X_umap": "umap"})
+
+
+@pytest.mark.parametrize(
+    "names",
+    [
+        ("a", "b", "c"),
+        # A sparse matrix's arrays differ in length, but a table is no matrix.
+        ("data", "indices", "indptr"),
+    ],
+)
+def test_an_h5ad_table_of_members_of_unequal_lengths_is_warned_of(
+    tmp_path, names
+) -> None:
+    from cytearc.utils.logging import logger
+
+    path = _write_h5ad(tmp_path / "unequal.h5ad")
+    with h5py.File(path, "a") as h5:
+        obsm = h5.create_group("obsm")
+        for name, rows in zip(names, (4, 4, 5), strict=True):
+            obsm.create_dataset(name, data=np.zeros((rows, 2), dtype=np.float32))
+    warnings: list[str] = []
+    sink = logger.add(
+        lambda message: warnings.append(message.record["message"]), level="WARNING"
+    )
+    try:
+        H5adReader(str(path)).close()
+    finally:
+        logger.remove(sink)
+    assert warnings == ["`obsm` slot in H5ad file has unequal sized child groups"]

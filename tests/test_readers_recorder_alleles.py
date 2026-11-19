@@ -654,6 +654,18 @@ def test_cassiopeia_parquet_reads_passing_rows_and_null_as_missing(tmp_path):
     )
     with pytest.raises(ValueError, match="holds 2 samples"):
         allele_layout(samples)
+    # One sample leaves the cell barcodes apart.
+    one_sample = _parquet(
+        tmp_path / "w.alleles.parquet",
+        {
+            "sample": ["a", "a"],
+            "cellBC": ["c1", "c2"],
+            "intBC": ["i1", "i1"],
+            "r1": ["None", "A"],
+            "r2": ["A", "A"],
+        },
+    )
+    assert read_all(one_sample)["barcode"].tolist() == ["c1", "c1", "c2", "c2"]
 
 
 def test_cassiopeia_parquet_reads_known_insertions_by_their_lookup(tmp_path):
@@ -834,6 +846,11 @@ def test_unknown_and_ambiguous_tables_name_the_formats(tmp_path):
     path.write_text("cell,clone\nc1,1\n")
     with pytest.raises(ValueError, match="'laml' reads a character matrix"):
         allele_layout(path)
+    # PEtracer's character columns after a first column of another name are
+    # no PEtracer matrix.
+    path.write_text("barcode,intID1-EMX1\nc1,x\n")
+    with pytest.raises(ValueError, match="'laml' reads a character matrix"):
+        allele_layout(path)
     both = tmp_path / "both.csv"
     both.write_text("intID,cellBC,intBC,r1,RNF2,HEK3,EMX1\na,b,c,d,e,f,g\n")
     with pytest.raises(ValueError, match="several formats, 'cassiopeia', 'petracer'"):
@@ -863,6 +880,15 @@ def test_carlin_pairs_must_align_and_list_each_cell_once(tmp_path):
         allele_file(lone / "AlleleAnnotations.txt")
     with pytest.raises(ValueError, match="neither a CARLIN pair nor a Zarr store"):
         allele_file(tmp_path / "1" / ".." / ".." / tmp_path.name)
+
+
+def test_molecule_keys_that_share_a_first_half_are_told_apart() -> None:
+    from cytearc.readers.recorder_alleles import _lookup
+
+    # Keys of 128 bits, as two halves; distinct keys may share a first half.
+    known = np.asarray([[1, 5], [1, 7], [3, 2]], dtype=np.uint64)
+    asked = np.asarray([[1, 6], [1, 7], [3, 2], [2, 5], [1, 5]], dtype=np.uint64)
+    assert _lookup(known, asked).tolist() == [-1, 1, 2, -1, 0]
 
 
 def test_darlin_molecules_must_match_their_tables(tmp_path):
@@ -899,6 +925,17 @@ def test_cassiopeias_molecule_tables_are_refused(tmp_path):
     path.write_text("cellBC\tintBC\tallele\tUMI\nc1\ti1\tA\t3\n")
     with pytest.raises(ValueError, match="has no site column"):
         allele_layout(path, format="cassiopeia")
+
+
+def test_a_typewriter_table_without_umis_reads_its_tokens_alone(tmp_path):
+    path = tmp_path / "typewriter.csv"
+    path.write_text("Cell,TargetBC,Site1,Site2\nc1,T1,AAAGGA,\nc2,T1,AAAGGA,CCCGGA\n")
+    read = read_all(path)
+    assert read["barcode"].tolist() == ["c1", "c1", "c2", "c2"]
+    assert read["allele"].tolist() == ["AAAGGA", None, "AAAGGA", "CCCGGA"]
+    assert read["state"].tolist() == ["mark", "unedited", "mark", "mark"]
+    # Without an nUMI column, no row counts UMIs.
+    assert read["umis"].tolist() == [-1, -1, -1, -1]
 
 
 def test_typewriter_rows_must_fit_its_header(tmp_path):
@@ -973,6 +1010,11 @@ def test_typewriter_chains_refuse_columns_they_do_not_know(tmp_path):
         ),
         ({"cell": "c", "allele": "a", "slots": 3}, ValueError, "ordered sites only"),
         ({"cell": "c", "allele": "a", "unedited": 3}, TypeError, "text or a sequence"),
+        (
+            {"cell": "c", "allele": "a", "unedited": ["x", 3]},
+            TypeError,
+            r"columns\['unedited'\] must be text or a sequence of text",
+        ),
         (
             {"cell": "c", "allele": "a", "unedited": "x", "missing": "x"},
             ValueError,

@@ -1354,6 +1354,54 @@ def test_temp_manager_close_is_idempotent_and_tolerates_removed_files(
         manager.create("again")
 
 
+@pytest.mark.parametrize(
+    "decoded",
+    [b"Z\nnot an RDS stream", b"X\n\x00\x00\x00\x03"],
+    ids=["unknown format", "truncated header"],
+)
+def test_a_compressed_stream_that_fails_to_parse_removes_its_spooled_payload(
+    tmp_path: Path, decoded: bytes
+) -> None:
+    with pytest.raises(RdsFormatError, match=r"at \$header"):
+        open_rds(io.BytesIO(gzip.compress(decoded)), temp_dir=tmp_path)
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_flushes_write_open_storages_and_skip_the_others(tmp_path: Path) -> None:
+    class _Unflushable:
+        """A caller's stream that can be read but has no flush."""
+
+        def __init__(self, data: bytes) -> None:
+            self._stream = io.BytesIO(data)
+
+        def read(self, size: int = -1) -> bytes:
+            return self._stream.read(size)
+
+        def seek(self, offset: int, whence: int = 0) -> int:
+            return self._stream.seek(offset, whence)
+
+        def tell(self) -> int:
+            return self._stream.tell()
+
+        def close(self) -> None:
+            self._stream.close()
+
+    storage = RandomAccessStorage(_Unflushable(b"abc"), name="caller", close_file=True)
+    storage.flush()
+    assert storage.read_at(0, 3) == b"abc"
+
+    manager = TempManager(RdsLimits(), temp_dir=tmp_path)
+    closed = manager.create("closed")
+    kept = manager.create("kept")
+    assert manager.append(kept, b"xyz", path="$") == 0
+    closed.close()
+    # The bytes wait in the file's buffer until the manager flushes it.
+    manager.flush()
+    assert Path(kept.name).read_bytes() == b"xyz"
+    manager.close()
+    assert list(tmp_path.iterdir()) == []
+
+
 def test_temporary_writes_detect_short_and_interleaved_appends(
     tmp_path: Path,
 ) -> None:

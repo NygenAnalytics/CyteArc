@@ -519,6 +519,22 @@ def test_a_writer_that_did_not_finish_stops_finalize(tmp_path):
         store.close()
 
 
+def test_an_owner_that_finished_its_part_finalizes_it_as_written(tmp_path):
+    matrix = csr_matrix(np.asarray([[1, 0], [0, 2]], dtype=np.float32))
+    store = _whole_store(tmp_path, (2, 2), np.float32)
+    try:
+        store.append_rows([1, 0], matrix)
+        store.finish()
+        with pytest.raises(RuntimeError, match="takes no more rows"):
+            store.append_rows([0], matrix[:1])
+        store.finalize()
+        # Destination row 0 holds the matrix's row 1, and row 1 its row 0.
+        _assert_same_rows(store.read(0, 2), matrix[[1, 0]])
+    finally:
+        store.close()
+    assert list(tmp_path.iterdir()) == []
+
+
 def test_wrong_inputs_are_refused_with_what_was_expected(tmp_path):
     whole = _whole_store(tmp_path, (3, 4), np.float32)
     loose = _loose_store(tmp_path, (3, 4), np.float32)

@@ -1232,6 +1232,23 @@ def test_factory_executes_structural_delayedarray_nodes() -> None:
         [[1, 9, 3], [4, 9, 6]],
     )
 
+    # A replacement matrix of the one feature by the two cells it assigns.
+    assigned_matrix = matrix_source_from_slots(
+        {
+            "class": ["DelayedSubassign", "DelayedUnaryIsoOp"],
+            "slots": {
+                "seed": delayed,
+                "Lindex": [[2], [1, 2]],
+                "Rvalue": DenseMatrixSource(np.asarray([[7, 8]])),
+            },
+        },
+        object_path="assays/RNA/subassign",
+    )
+    np.testing.assert_array_equal(
+        assigned_matrix.read_cells(0, 2),
+        [[1, 7, 3], [4, 8, 6]],
+    )
+
 
 def test_factory_executes_allowlisted_delayedarray_primitives() -> None:
     source = DenseMatrixSource(np.asarray([[1, 2], [3, 4]], dtype=np.float64))
@@ -2205,6 +2222,71 @@ def test_unsupported_fragment_sources_are_typed_rejections(class_name: str) -> N
     assert error.value.objectPath == "assays/ATAC/counts@fragments"
     assert error.value.className == class_name
     assert error.value.operation == "fragment-source"
+
+
+def test_an_unsupported_operation_without_a_reason_names_none() -> None:
+    error = UnsupportedMatrixOperation("assays/RNA/counts", "scale", "DelayedMatrix")
+    assert str(error) == (
+        "Unsupported matrix operation at assays/RNA/counts: operation 'scale', "
+        "class 'DelayedMatrix'"
+    )
+    assert error.reason is None
+
+
+def test_fragment_wrappers_yield_only_blocks_that_hold_fragments() -> None:
+    from cytearc.readers._seurat.fragments import (
+        CellMappedFragmentSource,
+        MergedFragmentSource,
+        ShiftedFragmentSource,
+    )
+
+    # chr2 holds no fragment; one fragment per block.
+    fragments = _RecordFragments(
+        [(0, 0, 1, 4), (0, 1, 2, 6), (0, 2, 5, 9)],
+        ["chr1", "chr2"],
+        ["a", "b", "c"],
+        block_records=1,
+    )
+    shifted = ShiftedFragmentSource(fragments, 1, 2)
+    assert list(shifted.iter_chromosome(1)) == []
+    assert _fragment_records(shifted) == [(0, 0, 2, 6), (0, 1, 3, 8), (0, 2, 6, 11)]
+
+    # Keeping a and c drops the block of b's fragment rather than yield it empty.
+    selected = CellMappedFragmentSource(
+        fragments, np.asarray([0, -1, 1], dtype=np.int64), ["a", "c"]
+    )
+    blocks = list(selected.iter_chromosome(0))
+    assert [block.size for block in blocks] == [1, 1]
+    assert _fragment_records(selected) == [(0, 0, 1, 4), (0, 1, 5, 9)]
+
+    # The second source has no chr2, so chr2 merges the first source's alone.
+    other = _RecordFragments([(0, 0, 3, 7)], ["chr1"], ["d"])
+    with_chr2 = _RecordFragments([(1, 1, 2, 3)], ["chr1", "chr2"], ["e", "f"])
+    merged = MergedFragmentSource([with_chr2, other])
+    assert merged.chromosomeNames == ("chr1", "chr2")
+    assert _fragment_records(merged) == [(0, 2, 3, 7), (1, 1, 2, 3)]
+
+
+def test_untransposed_tile_windows_skip_the_tiles_outside_them() -> None:
+    # Tiles [0, 10) and [10, 20) of chr1. Each fragment inserts at its start
+    # and end - 1: a in tile 0 alone, b in tiles 0 and 1, c in tile 1 alone.
+    fragments = _RecordFragments(
+        [(0, 0, 1, 4), (0, 1, 2, 15), (0, 2, 12, 18)], ["chr1"], ["a", "b", "c"]
+    )
+    source = _fragment_matrix(
+        fragments,
+        [(0, 0, 20, 10)],
+        matrix_type="TileMatrix",
+        mode="fragments",
+        transpose=False,
+    )
+    assert isinstance(source, FragmentDerivedMatrixSource)
+    # Untransposed, the tiles are the rows: tile 0 holds a and b, tile 1 b and c.
+    assert list(source._contributions(0, 1)) == [(0, 0, 1), (0, 1, 1)]
+    assert list(source._contributions(1, 2)) == [(0, 1, 1), (0, 2, 1)]
+    np.testing.assert_array_equal(
+        source.read_cells(0, 2).toarray(), [[1, 1, 0], [0, 1, 1]]
+    )
 
 
 def test_rank_transform_matches_bpcells_zero_offset_and_ties() -> None:
@@ -3407,6 +3489,29 @@ def test_sidecar_path_resolution_anchors_remaps_and_contains(
     )
 
 
+def test_absolute_paths_take_the_remap_whose_prefix_holds_them(tmp_path: Path) -> None:
+    nested_root = tmp_path / "nested"
+    other_root = tmp_path / "other"
+    for root in (nested_root, other_root):
+        root.mkdir()
+        (root / "counts.h5").write_bytes(b"h5")
+    resolver = SidecarPathResolver(
+        tmp_path,
+        absolute_prefix_remaps={
+            "/original/data/nested": nested_root,
+            "/other": other_root,
+        },
+    )
+    # The longer prefix is tried first and does not hold '/other/counts.h5'.
+    assert resolver.resolve("/other/counts.h5") == (other_root / "counts.h5").resolve()
+    assert (
+        resolver.resolve("/original/data/nested/counts.h5")
+        == (nested_root / "counts.h5").resolve()
+    )
+    with pytest.raises(UnsafeSidecarError, match="no explicit prefix remap"):
+        resolver.resolve("/original/data/counts.h5")
+
+
 def test_path_resolution_rejects_symlink_escape(tmp_path: Path) -> None:
     outside = tmp_path.parent / "outside-target.h5"
     outside.write_bytes(b"h5")
@@ -3490,6 +3595,28 @@ def test_hdf5_rejects_external_storage_virtual_and_reference_data(
         dataset[0] = target.ref
     with pytest.raises(UnsafeSidecarError, match="reference dataset"):
         validate_hdf5_file(references)
+
+
+def test_hdf5_accepts_an_optional_filter_that_this_library_lacks(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "optional-filter.h5"
+    filter_id = 50_000
+    assert not h5py.h5z.filter_avail(filter_id)
+    with h5py.File(path, mode="w") as handle:
+        space = h5py.h5s.create_simple((3,))
+        properties = h5py.h5p.create(h5py.h5p.DATASET_CREATE)
+        properties.set_chunk((3,))
+        # HDF5 skips an optional filter it lacks, so the values are stored plain.
+        properties.set_filter(filter_id, h5py.h5z.FLAG_OPTIONAL, ())
+        created = h5py.h5d.create(
+            handle.id, b"data", h5py.h5t.NATIVE_INT32, space, dcpl=properties
+        )
+        h5py.Dataset(created)[...] = np.asarray([1, 2, 3], dtype=np.int32)
+
+    assert validate_hdf5_file(path) == path.resolve()
+    with h5py.File(path, mode="r") as handle:
+        np.testing.assert_array_equal(handle["data"][:], [1, 2, 3])
 
 
 @pytest.mark.parametrize(
@@ -4459,6 +4586,28 @@ def test_operations_validate_recipes_and_execute_sparse_local_paths() -> None:
         scaled.read_cells(0, 3).toarray(),
         values.T * np.asarray([2, 3]) * 0.5 * np.asarray([1, 2, 4])[:, np.newaxis],
     )
+
+
+def test_a_sparse_source_scaled_by_its_features_alone_reads_sparse() -> None:
+    values = np.asarray([[1, 0, 2], [0, 3, 4]], dtype=np.float64)
+    matrix = csc_matrix(values)
+    source = CscMatrixSource(matrix.data, matrix.indices, matrix.indptr, values.shape)
+    scaled = ScaleShiftMatrixSource(source, feature_scale=[2, 5])
+    assert scaled.is_sparse
+    block = scaled.read_cells(0, 3)
+    assert issparse(block)
+    # Cells by features, each feature scaled by its own factor.
+    np.testing.assert_array_equal(block.toarray(), [[2, 0], [0, 15], [4, 20]])
+
+
+def test_a_dense_mask_keeps_or_drops_the_values_where_it_is_nonzero() -> None:
+    source = DenseMatrixSource(np.asarray([[1, 2, 3], [4, 5, 6]], dtype=np.float64))
+    mask = DenseMatrixSource(np.asarray([[1, 0, 1], [0, 1, 0]], dtype=bool))
+    kept = MaskMatrixSource(source, mask, fill_value=-1)
+    dropped = MaskMatrixSource(source, mask, fill_value=-1, keep_nonzero=False)
+    assert not kept.is_sparse
+    np.testing.assert_array_equal(kept.read_cells(0, 3), [[1, -1], [-1, 5], [3, -1]])
+    np.testing.assert_array_equal(dropped.read_cells(0, 3), [[-1, 4], [2, -1], [-1, 6]])
 
 
 def test_subassignment_residual_and_rank_validation_paths() -> None:

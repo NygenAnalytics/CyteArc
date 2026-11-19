@@ -28,6 +28,7 @@ __all__ = [
     "checked_destinations",
     "dense_sample_rows",
     "dense_spill_estimate",
+    "least_admitted_budget",
     "row_spill_consumer",
     "row_spill_plan",
     "sample_rows",
@@ -313,6 +314,30 @@ def row_spill_plan(
             item="the row spill of a cell shuffle",
         )
     return plan
+
+
+def least_admitted_budget(
+    plan: Callable[[int], RowSpillPlan], refused: MemoryBudgetError
+) -> int:
+    """Return the least budget at which ``plan`` admits a spill that it refused.
+
+    ``plan`` returns the plan of a budget, as :func:`row_spill_plan` does,
+    and raises MemoryBudgetError for a budget that it refuses. A larger
+    budget sizes larger buckets, beside which a spill needs no more, so the
+    ``refused`` budget's ``needed_bytes`` admit the spill and the least budget
+    that does lies above the refused one, up to them. It is found by
+    bisection, which plans the spill at each budget but reads no rows.
+    """
+    low, high = int(refused.budget_bytes), int(refused.needed_bytes)
+    while high - low > 1:
+        middle = (low + high) // 2
+        try:
+            plan(middle)
+        except MemoryBudgetError:
+            low = middle
+        else:
+            high = middle
+    return high
 
 
 def row_spill_consumer(

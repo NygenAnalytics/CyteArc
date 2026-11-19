@@ -956,25 +956,27 @@ def test_a_disk_that_fills_while_dense_rows_spill_is_refused(
     assert not [path for path in tmp_path.iterdir() if path.name.startswith("cytearc-")]
 
 
-def test_embeddings_held_in_memory_are_checked_against_the_budget(tmp_path) -> None:
+def test_the_check_of_rows_held_in_memory_charges_every_row_and_one_block(
+    tmp_path,
+) -> None:
     source = tmp_path / "source.h5ad"
     _write_source(source, "csr", n_cells=20)
     reader = _reader(source)
     try:
         writer = H5adToZarr(reader, MemoryStore(), nthreads=1, shuffle_cells=True)
         # Twenty rows and a block of four, of 40 bytes each, beside the 300
-        # bytes the import holds throughout.
-        needed = (20 + 4) * 40 + 300
-        for budget in (needed, needed - 1):
-            writer.resources = ResourceBudget(budget, 1)
-            if budget == needed:
-                writer._check_shuffled_rows_memory(40, 4, "rows", 300)
-                continue
+        # bytes the import holds throughout; a block of more rows than the
+        # cells holds the twenty.
+        for block_rows, needed in ((4, (20 + 4) * 40 + 300), (50, 40 * 40 + 300)):
+            writer.resources = ResourceBudget(needed, 1)
+            writer._check_shuffled_rows_memory(40, block_rows, "rows", 300)
+            writer.resources = ResourceBudget(needed - 1, 1)
             with pytest.raises(
                 MemoryBudgetError, match="Writing rows exceeds"
             ) as caught:
-                writer._check_shuffled_rows_memory(40, 4, "rows", 300)
+                writer._check_shuffled_rows_memory(40, block_rows, "rows", 300)
             assert caught.value.needed_bytes == needed
+            assert caught.value.budget_bytes == needed - 1
             assert caught.value.item == "rows"
     finally:
         reader.close()
@@ -984,15 +986,23 @@ def test_destination_rows_must_be_a_permutation(tmp_path) -> None:
     source = tmp_path / "source.h5ad"
     _write_source(source, "csr", n_cells=6)
     reader = H5adReader(str(source))
+    shape = (
+        "destinationRows must hold one integer row for each of the 6 cells; "
+        "found dtype {} and shape {}"
+    )
+    permutation = (
+        "destinationRows must be a permutation of the rows, each row from 0 once"
+    )
     try:
-        for rows in (
-            np.arange(5),
-            np.zeros(6, dtype=int),
-            np.arange(6) - 1,
-            np.ones(6) * 0.5,
+        for rows, message in (
+            (np.arange(5), shape.format("int64", (5,))),
+            (np.ones(6) * 0.5, shape.format("float64", (6,))),
+            (np.zeros(6, dtype=int), permutation),
+            (np.arange(6) - 1, permutation),
         ):
-            with pytest.raises(ValueError, match="destinationRows must"):
+            with pytest.raises(ValueError) as refused:
                 reader.count_value_ranges(1 << 30, destinationRows=rows)
+            assert str(refused.value) == message
         assert reader._convertedCsr is None
     finally:
         reader.close()

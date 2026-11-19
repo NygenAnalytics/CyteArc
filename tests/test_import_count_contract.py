@@ -1891,6 +1891,35 @@ def test_a_seurat_import_reserves_what_its_producer_holds(
         assert record["reserve"] <= bound * record["held"]
 
 
+@pytest.mark.parametrize("encoding", ["sparse", "sparse-integer"])
+def test_a_shuffled_seurat_import_reserves_what_its_producer_holds(
+    tmp_path, monkeypatch, encoding
+):
+    values = _producer_counts()[:, :-4]
+    records = _drain_sparse_writes(monkeypatch)
+    source = _source("seurat", tmp_path, values, encoding)
+    try:
+        instance = _writer(
+            "seurat",
+            source,
+            str(tmp_path / "counts.zarr"),
+            nthreads=1,
+            policy=_PRODUCER_BANDS,
+            shuffle_cells=True,
+        )
+        # Nothing is written, so the counts are refused once the bands are out.
+        with pytest.raises(RuntimeError, match="does not cover its row window"):
+            instance.dump()
+    finally:
+        _close(source)
+    (record,) = records
+    # The producer reads the shuffled cells a bucket at a time, with the next
+    # bucket loading ahead, which its reserve holds beside each batch.
+    assert record["bands"] > 1
+    assert record["kept"] == 0
+    assert record["held"] <= record["reserve"]
+
+
 @pytest.mark.parametrize(
     ("values", "declared", "canonical"),
     [

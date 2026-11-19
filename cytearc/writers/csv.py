@@ -256,34 +256,55 @@ class CSVtoZarr:
         buckets holds, beside up to 1 GiB of rows waiting for their files.
 
         Raises:
-            MemoryBudgetError: If the budget cannot hold one chunk and its spill.
+            MemoryBudgetError: If the budget cannot hold one chunk and its
+                spill, naming the least budget that holds them beside the
+                order and its inverse.
             ValueError: If the file no longer holds the rows that the reader
                 counted.
             OSError: If the temporary disk lacks room for the rows.
         """
         from ..readers._row_spill import (
+            RowSpillPlan,
             dense_sample_rows,
             dense_spill_estimate,
+            least_admitted_budget,
             row_spill_plan,
             spill_rows,
         )
         from ..storage.cell_order import destination_rows
+        from ..utils.memory_budget import MemoryBudgetError, memory_refusal
 
         assert self._cellOrder is not None
         n_cells, n_features = self.csvr.nCells, self.csvr.nFeatures
         destinations = destination_rows(self._cellOrder)
-        available = int(self.resources.memoryBytes) - 2 * int(destinations.nbytes)
+        held = 2 * int(destinations.nbytes)
+        available = int(self.resources.memoryBytes) - held
         chunk_values = self._chunk_rows() * n_features
         chunk_bytes = 2 * chunk_values * self.csvr.countDtype.itemsize
-        plan = row_spill_plan(
-            destinations,
-            (n_cells, n_features),
-            self.csvr.countDtype,
-            entries=None,
-            longest=n_features,
-            maxBytes=available,
-            least=lambda plan: plan.batch_bytes(chunk_values) + chunk_bytes,
-        )
+
+        def planned(budget: int) -> RowSpillPlan:
+            return row_spill_plan(
+                destinations,
+                (n_cells, n_features),
+                self.csvr.countDtype,
+                entries=None,
+                longest=n_features,
+                maxBytes=budget,
+                least=lambda plan: plan.batch_bytes(chunk_values) + chunk_bytes,
+            )
+
+        try:
+            plan = planned(available)
+        except MemoryBudgetError as error:
+            # The spill runs beside the order and its inverse, so the budget
+            # that passes it holds those too, beside the least budget at
+            # which the spill's plan admits it.
+            raise memory_refusal(
+                f"Importing the counts of {n_cells} cells",
+                f"{error.item} beside the {held} bytes of its cell order",
+                held + least_admitted_budget(planned, error),
+                int(self.resources.memoryBytes),
+            ) from error
         parts: dict[int, list[tuple[np.ndarray, np.ndarray]]] = {
             position: [] for _name, (position, _dtype) in self._cellDataColumns
         }

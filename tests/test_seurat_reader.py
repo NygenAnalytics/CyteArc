@@ -4622,6 +4622,13 @@ def _legacy_with(
             "assays/RNA/meta.features",
             {"rType": "INTEGER"},
         ),
+        # R's compact c(NA, -3) counts three rows, but the assay has two features.
+        (
+            "compact-features",
+            "invalid_row_names",
+            "assays/RNA/meta.features/row.names",
+            {},
+        ),
     ],
 )
 def test_legacy_assay_structure_is_validated(
@@ -4700,6 +4707,11 @@ def test_legacy_assay_structure_is_validated(
                     ("row.names", wire.string_vector(_GENES)),
                     ("class", wire.string_vector(["data.frame"])),
                 ],
+            )
+        },
+        "compact-features": {
+            "features": wire.data_frame(
+                [("symbol", wire.string_vector(["G1", "G2", "G3"]))], 3
             )
         },
     }

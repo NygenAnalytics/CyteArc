@@ -919,6 +919,79 @@ def test_got_tables_read_r_row_names_as_clone_tables_do(tmp_path) -> None:
     assert loaded.calls[["ids", "call"]].to_numpy().tolist() == [["AAAG-1", "MUT"]]
 
 
+@pytest.mark.parametrize(
+    ("with_reads", "without"), [("geneseq", "probebc"), ("probebc", "geneseq")]
+)
+def test_a_got_multi_table_that_gives_the_reads_of_one_channel_is_refused_once(
+    tmp_path, with_reads, without
+) -> None:
+    path = tmp_path / "got_multi.csv"
+    reads = [
+        f"{allele}_reads_per_umi_total_{with_reads}" for allele in ("wt", "mut", "amb")
+    ]
+    path.write_text(
+        "BC,target,genotype_merged,wt_calls_geneseq,mut_calls_geneseq,"
+        "amb_calls_geneseq,wt_calls_probebc,mut_calls_probebc,amb_calls_probebc,"
+        + ",".join(reads)
+        + "\nA,TP53,WT,2,0,0,1,0,0,10,0,0\nB,TP53,MUT,0,3,1,0,2,0,0,30,5\n"
+    )
+    message = (
+        f"{path} gives the reads_per_umi_total columns of its {with_reads} channel "
+        f"and not those of its {without} channel; give them for both channels or "
+        "for neither"
+    )
+    with pytest.raises(ValueError) as refused:
+        got_source(path, format="got_multi")
+    assert str(refused.value) == message
+    # An import used to refuse the table only as it stored its counts, naming
+    # it twice, as two files that give their counts different fields.
+    store, selection = _store(tmp_path / "store.zarr", ["A", "B"])
+    with pytest.raises(ValueError) as refused_import:
+        _import(store, selection, path)
+    assert str(refused_import.value) == message
+
+
+def test_an_hdf5_file_of_ad_counts_without_dp_is_no_mito_matrix(tmp_path) -> None:
+    path = tmp_path / "ad.h5"
+    with h5py.File(path, "w") as handle:
+        handle.create_group("layers").create_dataset("AD", data=np.zeros((2, 2)))
+    with pytest.raises(ValueError, match="none of giftwrap's counts, MiTo's allele"):
+        hdf5_format(str(path))
+    with h5py.File(path, "a") as handle:
+        handle["layers"].create_dataset("DP", data=np.zeros((2, 2)))
+    assert hdf5_format(str(path)) == "mito"
+
+
+def test_got_multi_tables_without_read_columns_import_their_umis(tmp_path) -> None:
+    path = tmp_path / "got_multi.csv"
+    path.write_text(
+        "BC,target,genotype_merged,wt_calls_geneseq,mut_calls_geneseq,"
+        "amb_calls_geneseq,wt_calls_probebc,mut_calls_probebc,amb_calls_probebc\n"
+        "A,TP53,WT,2,0,0,1,0,0\n"
+        "B,TP53,MUT,0,3,1,0,2,0\n"
+        "A,DNMT3A,WT,1,0,0,0,0,4\n"
+    )
+    store, selection = _store(tmp_path / "store.zarr", ["A", "B"])
+    loaded, _group = _import(store, selection, path)
+    # Each channel's calls count the UMIs of a site; the table gives no reads.
+    expected = pd.DataFrame(
+        [
+            ("A", "DNMT3A (geneseq)", "WT", 1),
+            ("A", "DNMT3A (probebc)", "ambiguous", 4),
+            ("A", "TP53 (geneseq)", "WT", 2),
+            ("A", "TP53 (probebc)", "WT", 1),
+            ("B", "TP53 (geneseq)", "MUT", 3),
+            ("B", "TP53 (geneseq)", "ambiguous", 1),
+            ("B", "TP53 (probebc)", "MUT", 2),
+        ],
+        columns=["ids", "site", "allele", "count"],
+    )
+    assert list(loaded.counts.columns) == ["ids", "site", "allele", "count"]
+    assert_tables(loaded.counts, expected)
+    depth = expected.groupby(["ids", "site"], as_index=False)["count"].sum()
+    assert_tables(loaded.depth, depth.rename(columns={"count": "depth"}))
+
+
 def test_got_formats_and_their_columns(tmp_path) -> None:
     path = tmp_path / "t.tsv"
     path.write_text("BC\tnum.WT.call\nA\t1\n")
@@ -1184,6 +1257,26 @@ def test_text_helpers_refuse_binary_text_and_short_vcf_records(tmp_path) -> None
     vcf.write_text("##contig=<ID=chrM,length=16569>\n#CHROM\tPOS\tID\tREF\tALT\n")
     records = read_vcf(str(vcf))
     assert len(records.pos) == 0 and records.contig_lengths == {"chrM": 16569}
+
+
+def test_vcf_contig_lengths_come_from_lines_that_name_an_id_and_a_length(
+    tmp_path,
+) -> None:
+    vcf = tmp_path / "contigs.vcf"
+    vcf.write_text(
+        "##fileformat=VCFv4.2\n"
+        "##contig=<ID=chrM,length=16569>\n"
+        "##contig=<ID=chrX>\n"
+        "##contig=<ID=chrY,length=unknown>\n"
+        "##contig=<length=100,assembly=hg38>\n"
+        "#CHROM\tPOS\tID\tREF\tALT\n"
+        "chrX\t5\t.\ta\tg,t\n"
+    )
+    records = read_vcf(str(vcf))
+    # Only chrM's line names both; the others leave their contig's length out.
+    assert records.contig_lengths == {"chrM": 16569}
+    assert records.chrom.tolist() == ["chrX"] and records.pos.tolist() == [5]
+    assert (records.ref.tolist(), records.alt.tolist()) == (["A"], ["G,T"])
 
 
 # Files that tests marked integration download; each skips when its host is
