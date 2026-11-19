@@ -316,6 +316,72 @@ def test_whole_rows_with_unsorted_or_repeated_columns_are_sorted(tmp_path, summe
         store.close()
 
 
+@pytest.mark.parametrize("summed", [True, False])
+def test_whole_rows_whose_sorted_columns_repeat_are_summed_or_kept(tmp_path, summed):
+    # Every row's columns rise or repeat: row 0 repeats column 1, and row 2
+    # column 0, which a column gap of zero alone does not tell from a row
+    # that starts at column 0.
+    matrix = csr_matrix(
+        (
+            np.array([1, 2, 3, 4, 5, 6], dtype=np.int32),
+            np.array([0, 1, 1, 2, 0, 0]),
+            np.array([0, 3, 4, 6]),
+        ),
+        shape=(3, 3),
+    )
+    store = _whole_store(
+        tmp_path, matrix.shape, np.int64, source_dtype=np.int32, sum_duplicates=summed
+    )
+    try:
+        store.append_rows([0, 1, 2], matrix)
+        store.finalize()
+        found = store.read(0, 3)
+        # The raw pointers, columns and values, since toarray would sum the
+        # repeats of a row that a read left unsummed.
+        if summed:
+            np.testing.assert_array_equal(found.indptr, [0, 2, 3, 4])
+            np.testing.assert_array_equal(found.indices, [0, 1, 2, 0])
+            np.testing.assert_array_equal(found.data, [1, 5, 4, 11])
+            assert found.has_canonical_format
+        else:
+            np.testing.assert_array_equal(found.indptr, [0, 3, 4, 6])
+            np.testing.assert_array_equal(found.indices, [0, 1, 1, 2, 0, 0])
+            np.testing.assert_array_equal(found.data, [1, 2, 3, 4, 5, 6])
+            assert not found.has_canonical_format
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize("second", ["block", "part"])
+def test_a_bucket_with_one_unsorted_block_sorts_every_read(tmp_path, second):
+    # Row 0 arrives with its columns out of order, then row 1 sorted, in a
+    # later block of the same bucket or from another writer's part.
+    unsorted = csr_matrix(
+        (np.array([1, 2], dtype=np.float32), np.array([2, 0]), np.array([0, 2])),
+        shape=(1, 3),
+    )
+    sorted_row = csr_matrix(np.array([[0, 3, 0]], dtype=np.float32))
+    store = _whole_store(tmp_path, (2, 3), np.float32, buffer_bytes=0)
+    try:
+        store.append_rows([0], unsorted)
+        if second == "block":
+            store.append_rows([1], sorted_row)
+        else:
+            writer = SparseRowStore.open(store.directory, part=1, buffer_bytes=0)
+            writer.append_rows([1], sorted_row)
+            writer.finish()
+        store.finalize()
+        # Without buffer, each append is a block of its own in one bucket.
+        assert store.bucket_starts.tolist() == [0, 2]
+        found = store.read(0, 2)
+        np.testing.assert_array_equal(found.indptr, [0, 2, 3])
+        np.testing.assert_array_equal(found.indices, [0, 2, 1])
+        np.testing.assert_array_equal(found.data, [2, 1, 3])
+        assert found.has_canonical_format
+    finally:
+        store.close()
+
+
 @pytest.mark.parametrize("whole_rows", [True, False])
 @pytest.mark.parametrize("shape", [(0, 4), (4, 0), (5, 3)])
 def test_empty_axes_rows_and_buckets_round_trip(tmp_path, whole_rows, shape):
@@ -338,7 +404,14 @@ def test_empty_axes_rows_and_buckets_round_trip(tmp_path, whole_rows, shape):
         assert [batch.shape[0] for batch in store.iter_rows(0, shape[0], 2)] == [
             min(2, shape[0] - start) for start in range(0, shape[0], 2)
         ]
-        assert store.read_bytes() >= 0
+        # Reading a bucket of two empty rows holds three row pointers of 32
+        # bytes, and whole rows a piece of 48 bytes each, beside the int64
+        # bucket starts; a store of no rows reads nothing.
+        starts = store.bucket_starts.nbytes
+        assert starts == 8 * (1 + -(-shape[0] // 2))
+        assert store.read_bytes() == (
+            starts if shape[0] == 0 else starts + 3 * 32 + (2 * 48 if whole_rows else 0)
+        )
     finally:
         store.close()
     assert list(tmp_path.iterdir()) == []
@@ -912,7 +985,8 @@ def test_blocks_that_disagree_with_the_written_rows_are_refused(tmp_path):
         write([0], [1], [0], np.ones(1, np.float32))
         with pytest.raises(RuntimeError, match="hold 1 entries where"):
             store.read(0, 1)
-        write([7], [1], [0], np.ones(1, np.float32))
+        # Row 6, the first past the bucket's six rows.
+        write([6], [1], [0], np.ones(1, np.float32))
         with pytest.raises(RuntimeError, match="holds a row outside its bucket"):
             store.read(0, 1)
         # One piece of one entry that holds two.
@@ -1062,8 +1136,11 @@ def test_a_bucket_limit_below_one_row_is_refused(tmp_path):
     with pytest.raises(MemoryBudgetError) as raised:
         _whole_store(tmp_path, (2, 2), np.float32, bucket_bytes=10)
     assert raised.value.item == "reading one entry of the sparse row conversion"
-    assert raised.value.needed_bytes == _sparse._bucket_bytes(1, 1, 1, 4, True)
-    limit = _sparse._bucket_bytes(3, 1, 1, 4, True)
+    # A float32 entry that a read may sum reads in 3 * 4 + 32 + 2 * 8 + 24
+    # bytes, its piece in 48 and its row's two pointers in 64.
+    assert raised.value.needed_bytes == 84 + 48 + 64
+    # A row of three entries in one piece.
+    limit = 3 * 84 + 48 + 64
     store = _whole_store(tmp_path, (2, 4), np.float32, bucket_bytes=limit - 1)
     try:
         store.append_rows(
@@ -1305,10 +1382,10 @@ def test_buckets_split_to_the_split_size_and_one_wider_row_reads_alone(tmp_path)
         expected = np.zeros(shape, dtype=np.int64)
         expected[rows, columns] = values
         np.testing.assert_array_equal(store.read(0, 12).toarray(), expected)
-        # The widest read is row 5's band: one piece of 30 entries.
-        assert store.read_bytes() - store.bucket_starts.nbytes == (
-            _sparse._bucket_bytes(30, 1, 1, 8, True)
-        )
+        # The widest read is row 5's band: one piece of 30 int64 entries, each
+        # read in 3 * 8 + 32 + 2 * 8 + 24 bytes, beside the piece's 48 bytes
+        # and its row's two pointers of 32.
+        assert store.read_bytes() - store.bucket_starts.nbytes == (30 * 96 + 48 + 64)
     finally:
         store.close()
 
@@ -1376,9 +1453,12 @@ def test_store_sizes_for_planners_count_rows_and_buckets():
     assert SparseRowStore.writer_bytes(10, 4) == 10 * 9 + (3 + 1) * 25
     assert SparseRowStore.writer_bytes(0, 4) == 25
     # 100 entries of float32 in 10 rows read in 44 bytes each, and each row
-    # 80 more; 5,200 bytes hold one row of 520.
+    # 80 more, so a row of ten entries reads in 520 bytes and 5,200 hold ten.
     assert SparseRowStore.whole_row_bucket_rows(10, 100, 5_200, 4) == 10
     assert SparseRowStore.whole_row_bucket_rows(10, 100, 1_040, 4) == 2
+    # Three rows need 1,560 bytes: one byte less reads two.
+    assert SparseRowStore.whole_row_bucket_rows(10, 100, 1_559, 4) == 2
+    assert SparseRowStore.whole_row_bucket_rows(10, 100, 1_560, 4) == 3
     assert SparseRowStore.whole_row_bucket_rows(10, 100, 10, 4) == 1
     assert SparseRowStore.whole_row_bucket_rows(0, 0, 10, 4) == 1
 
@@ -1699,31 +1779,56 @@ def test_ragged_rows_spill_their_bytes_and_a_wider_row_reads_alone(tmp_path):
     # and its int64 pointer in the finalized record.
     assert asked[4, 2000] - asked[4, 1000] == 1000
     assert asked[5, 1000] - asked[4, 1000] == 16 + 8 + 1 + 8
-    with free_disk(asked[4, 1000] - 1), pytest.raises(OSError):
+    with (
+        free_disk(asked[4, 1000] - 1),
+        pytest.raises(OSError, match=f"needs {asked[4, 1000]} temporary bytes"),
+    ):
         _ragged_store(tmp_path, 4, entries=1000)
     with free_disk(asked[4, 1000]):
         _ragged_store(tmp_path, 4, entries=1000).close()
+    # Reading a ragged row of n bytes holds them three times, 120 bytes for
+    # its piece and 32 for each of its two row pointers: 3 * n + 184 bytes.
+    assert SparseRowStore.ragged_row_read_bytes(50) == 334
+    assert SparseRowStore.ragged_row_read_bytes(10) == 214
     # A row that one read cannot hold is refused at finalize, with the bytes
     # that reading it holds.
-    store = _ragged_store(
-        tmp_path,
-        2,
-        bucket_bytes=SparseRowStore.ragged_row_read_bytes(50),
-        split_bytes=SparseRowStore.ragged_row_read_bytes(10),
-    )
+    store = _ragged_store(tmp_path, 2, bucket_bytes=334, split_bytes=214)
+    values = np.full(60, ord("A"), dtype=np.uint8)
     try:
         # A row of 51 bytes, one more than the limit reads.
-        values = np.full(60, ord("A"), dtype=np.uint8)
         store.append_ragged_rows([0, 1], values, [0, 9, 60])
         with pytest.raises(MemoryBudgetError) as refused:
             store.finalize()
-        assert refused.value.needed_bytes == SparseRowStore.ragged_row_read_bytes(51)
+        assert refused.value.needed_bytes == 3 * 51 + 184
     finally:
         store.close()
-    # Buckets sized for rows of 100 bytes read in about the bytes asked.
-    for read in (1, 2_000, 50_000, 10**9):
+    # Within a limit that holds it, the row of 51 bytes reads alone: the
+    # bucket of both rows needs 3 * 60 + 2 * 120 + 3 * 32 bytes, more than
+    # the split size, and row 0 of 9 bytes fits it by itself.
+    store = _ragged_store(tmp_path, 2, bucket_bytes=3 * 51 + 184, split_bytes=214)
+    try:
+        store.append_ragged_rows([0, 1], values, [0, 9, 60])
+        store.finalize()
+        assert store.bucket_starts.tolist() == [0, 1, 2]
+        assert store.read_bytes() - store.bucket_starts.nbytes == 3 * 51 + 184
+        batches = list(store.iter_ragged_rows(0, 2, 2))
+        assert [row for batch in batches for row in _row_bytes(*batch)] == [
+            b"A" * 9,
+            b"A" * 51,
+        ]
+    finally:
+        store.close()
+    # Buckets sized for rows of 100 bytes read in about the bytes asked: each
+    # row takes 3 * 100 + 120 + 32 bytes beside the bucket's last pointer.
+    for read, expected in (
+        (1, 1),
+        (2_000, 4),
+        (50_000, 110),
+        (451_999, 999),
+        (452_000, 1000),
+        (10**9, 1000),
+    ):
         rows = SparseRowStore.ragged_bucket_rows(1000, 100, read)
-        assert 1 <= rows <= 1000
+        assert rows == expected
         if 1 < rows < 1000:
-            cost = SparseRowStore.ragged_row_read_bytes(100)
-            assert rows * (cost - 32) <= read < (rows + 1) * (cost - 32)
+            assert rows * 452 <= read < (rows + 1) * 452
