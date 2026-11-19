@@ -24,9 +24,9 @@ from ..storage.profiles import (
 from ..utils.digest import file_sha256
 from ..utils.logging import logger
 
-from ..utils.memory_budget import MemoryBudgetError
+from ..utils.memory_budget import MemoryBudgetError, memory_refusal
 from ..utils.progress import iter_progress
-from ..utils.arguments import bool_argument
+from ..utils.arguments import bool_argument, quoted_value
 from ..utils.matrix_values import ImportValues, MatrixValuesKind
 
 
@@ -998,8 +998,10 @@ class H5adToZarr:
         )
         # IDs and names that the import refuses fail here, before the passes
         # over the source and before anything is written. The reader keeps
-        # them for the import.
+        # them for the import, which charges what they take, measured once,
+        # to every step.
         self.h5ad._check_ids_and_names()
+        self._idBytes = self.h5ad._id_bytes()
         # So does text that is not UTF-8 in the metadata and cluster labels,
         # which the reader reads again when the import writes them.
         self.h5ad._check_metadata_text()
@@ -1028,11 +1030,9 @@ class H5adToZarr:
             # Another import of the reader may hold its shuffled rows, which
             # this import, in the file's order, never reads.
             self.h5ad._release_shuffled_rows()
-        # The reader keeps the IDs and names, and a shuffle holds the order
-        # and its inverse, beside the scan and the CSC conversion.
-        held = self.h5ad._id_bytes() + (
-            0 if destinations is None else 2 * destinations.nbytes
-        )
+        # The scan and the CSC conversion run beside what the import holds
+        # throughout and a shuffle's inverse of its order.
+        held = self._held_bytes() + (0 if destinations is None else destinations.nbytes)
         # The rows on local disk before the scan; rows there after a failure
         # are this import's, which no later import of the reader may read.
         rows_before = self.h5ad._convertedCsr
@@ -1140,23 +1140,62 @@ class H5adToZarr:
     def _refusal_beside_held(
         self, error: MemoryBudgetError, held: int
     ) -> MemoryBudgetError:
-        """Restate a refusal of the scan or the CSC conversion in the import's budget.
+        """Restate a refusal of the scan or a CSC conversion in the import's budget.
 
         Both run within what the budget leaves beside the ``held`` bytes of
-        the IDs and names that the reader keeps and of a shuffle's order, so
-        the import needs those bytes beside what they refused for.
+        the IDs, names and other arrays that the import holds, so the budget
+        that passes them holds those bytes beside what they refused for.
         """
-        held_items = (
-            "IDs, names and cell order" if self.shuffleCells else "IDs and names"
+        items = ["cell order"] if self._cellOrder is not None else []
+        items += ["IDs", "names"]
+        if self._membership or self.assayFeatures is not None:
+            items.append("other arrays")
+        held_items = f"{', '.join(items[:-1])} and {items[-1]}"
+        return memory_refusal(
+            f"Importing {quoted_value(str(self.h5ad.h5adFn))}",
+            f"{error.item} beside the {int(held)} bytes of its {held_items}",
+            int(held) + error.needed_bytes,
+            int(self.resources.memoryBytes),
         )
-        needed = int(held) + error.needed_bytes
-        return MemoryBudgetError(
-            f"{error} The import also holds the {int(held)} bytes of its "
-            f"{held_items}, so it needs at least {needed} bytes.",
-            needed_bytes=needed,
-            budget_bytes=int(self.resources.memoryBytes),
-            item=error.item,
+
+    def _kept_bytes(self) -> int:
+        """Return the bytes of the IDs, names and assay memberships that the import keeps.
+
+        They are the cell and feature IDs and the feature names that the
+        reader keeps, as measured when the import checked them, each
+        declared assay membership, and the feature IDs and names of each
+        assay of a split. This process holds them from the scan to the last
+        write; producer processes never read them.
+        """
+        kept = self._idBytes + sum(
+            int(values.nbytes) for values in self._membership.values()
         )
+        if self.assayFeatures is not None:
+            kept += sum(
+                int(assay.featureIds.nbytes) + int(assay.featureNames.nbytes)
+                for assay in self.assayFeatures.values()
+            )
+        return kept
+
+    def _held_bytes(self) -> int:
+        """Return the bytes that the import holds from its scan to its last write.
+
+        They are the IDs, names and assay memberships that
+        :meth:`_kept_bytes` counts, the source features of each assay of a
+        split with the assay and column of every source feature, and a
+        shuffled import's order of the cells.
+        """
+        held = self._kept_bytes()
+        if self.assayFeatures is not None:
+            held += sum(
+                int(assay.featureIndexes.nbytes)
+                for assay in self.assayFeatures.values()
+            )
+        if self._projection is not None:
+            held += sum(int(array.nbytes) for array in self._projection)
+        if self._cellOrder is not None:
+            held += int(self._cellOrder.nbytes)
+        return held
 
     def _other_count_matrices(self) -> list[str]:
         """Return the file's other matrices whose sampled values are counts."""
@@ -1403,6 +1442,7 @@ class H5adToZarr:
             resources=self.resources,
             profile=self.profile,
             io=self.io,
+            resident_bytes=self._counts_t_resident_bytes(),
         )
         cell_selection = self._write_cell_selection()
         cluster_artifacts = self._write_cluster_artifacts(
@@ -1479,22 +1519,14 @@ class H5adToZarr:
     def _shuffled_resident_bytes(self) -> int:
         """Return what a shuffled import holds while it writes an embedding or cluster labels.
 
-        It holds the order of the cells, the IDs and names that the reader
-        keeps, each declared assay membership, a dense matrix's count of the
-        values in each row, and the features of each assay of a split.
+        It holds what it holds throughout, as :meth:`_held_bytes` counts it,
+        the order of the cells included, and a dense matrix's count of the
+        values in each row.
         """
         assert self._cellOrder is not None
-        resident = int(self._cellOrder.nbytes) + self.h5ad._id_bytes()
-        resident += sum(int(values.nbytes) for values in self._membership.values())
+        resident = self._held_bytes()
         if self.h5ad.matrixOrientation == "dense":
             resident += 8 * (self.h5ad.nCells + 1)
-        if self.assayFeatures is not None:
-            resident += sum(
-                int(assay.featureIndexes.nbytes)
-                for assay in self.assayFeatures.values()
-            )
-        if self._projection is not None:
-            resident += sum(int(array.nbytes) for array in self._projection)
         return resident
 
     def _check_shuffled_rows_memory(
@@ -1860,32 +1892,40 @@ class H5adToZarr:
             for name in self.assayNames
         }
 
-    def _count_resident_bytes(self) -> int:
-        """Return the bytes that the counts write holds from start to end.
+    def _reader_rows_bytes(self) -> int:
+        """Return the bytes of the reader's row counts or converted rows, which plan the reads."""
+        return self.h5ad.materialized_csr_bytes() + max(
+            0, int(self.h5ad._sparse_import_resident_bytes())
+        )
 
-        They are the reader's row counts or converted rows, the count
-        summaries of every cell, the features of each assay, and a shuffled
-        import's order of the cells.
+    def _count_resident_bytes(self) -> int:
+        """Return the bytes that this process holds from the start of the counts write to its end.
+
+        They are what the import holds throughout, as :meth:`_held_bytes`
+        counts it, the reader's row counts or converted rows, and the count
+        summaries of every cell. A producer process that writes its own
+        window is charged them less the IDs, names and memberships of
+        :meth:`_kept_bytes`, which it never reads.
         """
         from ..storage.identity import CountSummary
 
-        resident = (
-            self.h5ad.materialized_csr_bytes()
-            + max(0, int(self.h5ad._sparse_import_resident_bytes()))
+        return (
+            self._held_bytes()
+            + self._reader_rows_bytes()
             + sum(
                 CountSummary.nbytes_for(self.h5ad.nCells, width)
                 for width in self._assay_widths().values()
             )
         )
-        if self.assayFeatures is not None:
-            resident += sum(
-                assay.featureIndexes.nbytes for assay in self.assayFeatures.values()
-            )
-        if self._projection is not None:
-            resident += sum(array.nbytes for array in self._projection)
-        if self._cellOrder is not None:
-            resident += int(self._cellOrder.nbytes)
-        return resident
+
+    def _counts_t_resident_bytes(self) -> int:
+        """Return the bytes that this process holds while it writes ``countsT``.
+
+        They are what the import holds throughout and the reader's row
+        counts or converted rows. The layout fit also counts the rows of a
+        shuffled import, which its counts write releases before ``countsT``.
+        """
+        return self._held_bytes() + self._reader_rows_bytes()
 
     def _count_import_requirements(
         self,
@@ -2036,6 +2076,7 @@ class H5adToZarr:
             transposed=counts_t_assays(self.assayNames, self.assayTypes),
             admitCounts=admit_counts,
             requested=requested,
+            countsTResidentBytes=self._counts_t_resident_bytes(),
         )
 
     def _dense_counts(self) -> bool:
@@ -2074,9 +2115,14 @@ class H5adToZarr:
         if not self.shuffleCells:
             # Another import of the reader, built after this one, may have
             # left its shuffled rows, or replaced a CSC conversion with them;
-            # this import writes the file's order.
+            # this import writes the file's order, converted beside what it
+            # holds, as its construction converted them.
             self.h5ad._release_shuffled_rows()
-            self.h5ad.materialize_csc(self.resources.memoryBytes)
+            held = self._held_bytes()
+            try:
+                self.h5ad.materialize_csc(self.resources.memoryBytes - held)
+            except MemoryBudgetError as error:
+                raise self._refusal_beside_held(error, held) from error
         elif (
             self._shuffledStore is None
             or self.h5ad._convertedCsr is not self._shuffledStore
@@ -2203,7 +2249,8 @@ class H5adToZarr:
             candidate_windows = aligned_row_windows(n_cells, shard_rows, candidate)
             if direct:
                 # Each writer process holds its batch, the bands it fills, and
-                # the count summaries of its window.
+                # the count summaries of its window. It never reads the IDs,
+                # names and memberships that this process keeps.
                 window_rows = max(stop - start for start, stop in candidate_windows)
                 candidate_resources = ResourceBudget(
                     (self.resources.memoryBytes - resident) // candidate,
@@ -2214,6 +2261,7 @@ class H5adToZarr:
                 )
                 candidate_resident = (
                     resident
+                    - self._kept_bytes()
                     + sum(
                         CountSummary.nbytes_for(window_rows, array.shape[1])
                         for array in arrays
@@ -2373,6 +2421,9 @@ class H5adToZarr:
         resident_source_bytes, extra_producer_bytes, canonical_batches = (
             self._count_import_requirements()
         )
+        # Producer processes that write their own windows never read the IDs,
+        # names and memberships that this process keeps.
+        process_resident_bytes = resident_source_bytes - self._kept_bytes()
 
         plan = resolve_sparse_import_batch(
             tuple(destinations.values()),
@@ -2413,7 +2464,7 @@ class H5adToZarr:
                         self.h5ad.nCells, shard_rows, candidate
                     )
                 )
-                candidate_resident = resident_source_bytes + sum(
+                candidate_resident = process_resident_bytes + sum(
                     CountSummary.nbytes_for(window_rows, destination.shape[1])
                     for destination in destinations.values()
                 )
@@ -2503,7 +2554,7 @@ class H5adToZarr:
                 projection,
                 windows,
                 resources=process_resources,
-                residentBytes=resident_source_bytes,
+                residentBytes=process_resident_bytes,
                 producerReserveBytes=self._lastImportPlan.producerReserveBytes,
                 summaries=summaries,
             )

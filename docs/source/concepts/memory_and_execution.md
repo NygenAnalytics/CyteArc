@@ -78,9 +78,11 @@ The error holds the same numbers as `needed_bytes` and `budget_bytes`, and the s
 - writing an artifact: what `cell_data_write_bytes` states, the chunks that Zarr encodes from the costliest array at once;
 - a stream of counts, as guide calling streams the guide counts: a block of the rows of a stored chunk and the stream's decode beside what the call holds, since a smaller block would decode the same chunk again for each block, then as many blocks ahead as the budget leaves room for.
 
+The count value scan, which reads every count of an import to choose the dtype that stores the counts, words its refusal as the example above does. It names the budget of the longest row or column of the matrix, also when that comes after the one that the scan stopped at, so a budget of `needed_bytes` scans the whole matrix. An H5AD import restates the refusals of its scan, of its shuffle and of its conversion of a matrix compressed by column in the same words, with its own budget: what the step needs beside the IDs, names and other arrays that the import holds throughout. `SparseToZarr` restates its scan's refusal beside the matrices that it holds.
+
 Every other memory check raises a `MemoryBudgetError` with the same three fields and keeps its own message, which ends with the bytes the step needs where it named none:
 
-- the plans of streamed work: the units and tasks of a storage plan, asynchronous buffers, feature streams, count value scans, and copies of metadata;
+- the plans of streamed work: the units and tasks of a storage plan, asynchronous buffers, feature streams, and copies of metadata;
 - imports and other count writes: the count layout, whose `CountLayoutMemoryError` is a `MemoryBudgetError`, the sparse and dense band writes, `countsT`, the conversions of the readers (sparse rows, H5AD matrices compressed by column, Seurat sources), composites, and merges;
 - normalization, its document frequencies and its feature batches;
 - the steps that state their own peak: PCA, k-means, Harmony, ANN indexes, integration, graph loads, streaming and materialized LSI, diffusion, imputation, fate mapping, lineage curves, trees and binning, Paris, cell calling, HTO demultiplexing, chromVAR, GRN inference, marker search, cluster selection, melding, mapping and graph export;

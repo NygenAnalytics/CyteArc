@@ -719,10 +719,16 @@ def test_h5ad_parallel_producer_count_is_memory_admitted(tmp_path):
             reader.h5.close()
 
     # Producer processes keep buffering while the parent writes, so two of
-    # them need both of their reserves beside the parent's write band.
-    producers, store = write(5_300)
+    # them need both of their reserves beside the parent's write band, and
+    # beside the IDs and names that the parent keeps: the cell and feature IDs
+    # as bytes objects, 33 bytes and one a character each with a reference of
+    # 8, and the names as text, 4 bytes a character of the longest.
+    cells = [f"c{i}" for i in range(12)]
+    kept = sum(8 + 33 + len(text) for text in [*cells, "f0", "f1", "f2"]) + 3 * 4 * 2
+    assert kept == 671
+    producers, store = write(5_300 + kept)
     assert producers == 2
-    assert write(5_299)[0] == 1
+    assert write(5_299 + kept)[0] == 1
 
     root = zarr.open_group(store=store, mode="r")
     np.testing.assert_array_equal(root["RNA/counts"][:], values)
@@ -826,7 +832,7 @@ def test_h5ad_reader_processes_undo_the_log_of_their_bands(tmp_path, encoding):
 
 
 @pytest.mark.parametrize("encoding", ["csr", "dense"])
-def test_h5ad_direct_writers_fit_their_window_summaries(
+def test_h5ad_direct_writers_fit_their_window_summaries_without_the_parents_ids(
     tmp_path, monkeypatch, encoding
 ):
     import cytearc.storage.sharding as sharding
@@ -919,6 +925,12 @@ def test_h5ad_direct_writers_fit_their_window_summaries(
             ),
         )
         assert smallest_process_budget() == budget + 2_000
+    # The parent keeps the IDs and names, which writer processes never read,
+    # so IDs that take 1,000 bytes more raise that budget by 1,000 bytes only.
+    ids = H5adReader._id_bytes
+    with monkeypatch.context() as patch:
+        patch.setattr(H5adReader, "_id_bytes", lambda self: ids(self) + 1_000)
+        assert smallest_process_budget() == budget + 1_000
 
     # At that budget two processes, of two workers each, write every count
     # into disjoint row windows of the destination.

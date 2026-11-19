@@ -662,22 +662,41 @@ def test_an_h5ad_import_refuses_a_budget_of_one_byte_at_its_scan(
 
     values = np.random.default_rng(3).poisson(1.5, size=(40, 30)).astype(np.uint16)
     source = _h5ad(tmp_path / f"{encoding}.h5ad", values, encoding=encoding)
+    # The reader keeps the cell and feature IDs as bytes objects, 33 bytes and
+    # one a character each with a reference of 8, and the feature IDs again
+    # as the names, which it finds no column of, at 4 bytes a character.
+    ids = [f"c{i}" for i in range(40)] + [f"f{i}" for i in range(30)]
+    held = sum(8 + 33 + len(text) for text in ids) + 30 * 4 * 3
+    # The vectors are the rows of CSR and the columns of CSC.
+    longest = int(np.count_nonzero(values, axis=1 if encoding == "csr" else 0).max())
+
+    def construct(budget: int) -> None:
+        H5adToZarr(
+            reader,
+            zarr_loc=str(tmp_path / "import.zarr"),
+            mem_budget=budget,
+            nthreads=1,
+            shuffle_cells=False,
+        ).dump()
+
     reader = H5adReader(str(source))
     try:
-        refusal = refused(
-            lambda: H5adToZarr(
-                reader,
-                zarr_loc=str(tmp_path / "import.zarr"),
-                mem_budget=1,
-                nthreads=1,
-                shuffle_cells=False,
-            ).dump()
-        )
+        refusal = refused(lambda: construct(1))
+        below = refused(lambda: construct(refusal.needed_bytes - 1))
+        later = refused(lambda: construct(refusal.needed_bytes))
     finally:
         reader.close()
-    # The count scan names the longer vector it meets.
-    assert refusal.item == "scanning one compressed vector"
+    # The count scan names the longest vector, beside the IDs and names.
+    assert held == 3420
+    assert refusal.needed_bytes == held + 72 * longest
+    assert refusal.item == (
+        f"the {longest} values of the longest compressed vector beside the "
+        f"{held} bytes of its IDs and names"
+    )
     assert refusal.budget_bytes == 1
+    assert (below.needed_bytes, below.item) == (refusal.needed_bytes, refusal.item)
+    # The budget it names passes the scan, and a later step refuses next.
+    assert "compressed vector" not in later.item
 
 
 def test_a_csc_conversion_names_the_budget_of_its_pointers(tmp_path: Path) -> None:
@@ -792,8 +811,9 @@ def test_a_sparse_matrix_import_refuses_a_budget_of_one_byte_at_its_matrix(
     assert refusal.item == "the sparse matrix"
 
 
+@pytest.mark.parametrize("shuffle_cells", [False, True], ids=["file", "shuffled"])
 def test_a_sparse_matrix_import_names_the_budget_of_its_scan_beside_the_matrix(
-    tmp_path: Path,
+    tmp_path: Path, shuffle_cells: bool
 ) -> None:
     from cytearc.storage.sharding import sparse_matrix_bytes
     from cytearc.writers import SparseToZarr
@@ -801,7 +821,9 @@ def test_a_sparse_matrix_import_names_the_budget_of_its_scan_beside_the_matrix(
     matrix = csr_matrix(
         np.random.default_rng(5).poisson(2.0, size=(30, 20)).astype(np.uint32) + 1
     )
-    held = sparse_matrix_bytes(matrix)
+    # A shuffle also holds the order of the 30 cells, 8 bytes each.
+    held = sparse_matrix_bytes(matrix) + (8 * 30 if shuffle_cells else 0)
+    what = "the matrix and the cell order" if shuffle_cells else "the matrix"
     destination = tmp_path / "sparse.zarr"
 
     def construct(budget: int) -> None:
@@ -812,15 +834,23 @@ def test_a_sparse_matrix_import_names_the_budget_of_its_scan_beside_the_matrix(
             feature_ids=[f"f{i}" for i in range(20)],
             mem_budget=budget,
             nthreads=1,
-            shuffle_cells=False,
+            shuffle_cells=shuffle_cells,
         )
 
-    # A budget one byte above the matrix holds no room to scan it.
+    # A budget one byte above what the import holds leaves no room to scan the
+    # matrix. Every row holds 20 values, which the scan reads at 72 bytes each.
     refusal = refused(lambda: construct(held + 1))
-    assert refusal.item == "scanning one compressed vector"
+    item = (
+        f"the 20 values of the longest compressed vector beside the {held} bytes "
+        f"of {what}"
+    )
+    assert refusal.item == item
+    assert refusal.needed_bytes == held + 20 * 72
     assert refusal.budget_bytes == held + 1
-    assert f"Beside the {held} bytes of the matrix, the import needs at least" in (
-        str(refusal)
+    assert str(refusal) == (
+        f"Importing the sparse matrix holds about {held + 20 * 72} bytes for "
+        f"{item}, more than the memory budget of {held + 1} bytes. Raise "
+        f"mem_budget to at least {held + 20 * 72} bytes."
     )
     assert not destination.exists()
     below = refused(lambda: construct(refusal.needed_bytes - 1))
@@ -1105,19 +1135,33 @@ def test_count_value_scans_name_the_bytes_of_their_longest_vector() -> None:
             matrix.indptr, matrix.indices, matrix.data, minorSize=4, maxBytes=memory
         ),
         10,
-        item="scanning one compressed vector",
+        item="the 3 values of the longest compressed vector",
     )
     # The longest vector holds three values, scanned at 72 bytes each.
     assert refusal.needed_bytes == 3 * 72
+    assert str(refusal) == (
+        "Scanning the count values holds about 216 bytes for the 3 values of the "
+        "longest compressed vector, more than the memory budget of 10 bytes. "
+        "Raise mem_budget to at least 216 bytes."
+    )
     dense = np.ones((5, 3), dtype=np.uint16)
     refusal = named_budget_runs(
         lambda memory: dense_count_ranges(
             lambda start, stop: dense[start:stop], 5, 3, maxBytes=memory
         ),
         0,
-        item="scanning one dense row",
+        item="the 3 values of one dense row",
     )
     assert refusal.needed_bytes == 3 * 72
+    # A row of one value names it alone.
+    refusal = named_budget_runs(
+        lambda memory: dense_count_ranges(
+            lambda start, stop: dense[start:stop, :1], 5, 1, maxBytes=memory
+        ),
+        0,
+        item="the 1 value of one dense row",
+    )
+    assert refusal.needed_bytes == 72
 
 
 # Algorithm checks that state their own peak.
