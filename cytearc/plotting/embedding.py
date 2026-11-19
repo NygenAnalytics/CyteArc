@@ -1015,20 +1015,21 @@ def _draw_density_overlay(
     color = overlay.color or ("#f0f0f0" if theme == "dark" else "#202020")
     contour_surface = np.ma.masked_invalid(surface)
     if overlay.kind == "filled":
+        # A retained hotspot reaches the lowest level, so the levels and the
+        # bound just above the surface's maximum make one band at least.
         upper = np.nextafter(surface_max, np.inf)
         fill_levels = np.unique(np.append(levels, upper))
-        if len(fill_levels) >= 2:
-            ax.contourf(
-                xcenters,
-                ycenters,
-                contour_surface,
-                levels=fill_levels,
-                cmap=overlay.cmap,
-                colors=None if overlay.cmap else [color],
-                alpha=overlay.alpha,
-                antialiased=True,
-                zorder=overlay.zorder,
-            )
+        ax.contourf(
+            xcenters,
+            ycenters,
+            contour_surface,
+            levels=fill_levels,
+            cmap=overlay.cmap,
+            colors=None if overlay.cmap else [color],
+            alpha=overlay.alpha,
+            antialiased=True,
+            zorder=overlay.zorder,
+        )
     else:
         contours = ax.contour(
             xcenters,

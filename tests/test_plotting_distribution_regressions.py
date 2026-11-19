@@ -285,3 +285,122 @@ def test_typed_category_masks_skip_the_per_value_check(monkeypatch):
     assert valid_category_mask(np.array([1.0, np.nan])).tolist() == [True, False]
     assert valid_category_mask(np.array([b"", b"x"])).tolist() == [False, True]
     assert valid_category_mask(np.array([3, 4])).tolist() == [True, True]
+
+
+def _three_groups(b_values=(np.nan,) * 4) -> object:
+    """Groups a, b and c of four cells each; b's values are given, NaN by default."""
+    return _violin_store(
+        np.repeat(["a", "b", "c"], 4),
+        np.concatenate(([4.0, 1.0, 3.0, 2.0], b_values, [5.0, 2.0, 4.0, 3.0])),
+    )
+
+
+def test_ecdfs_draw_the_groups_with_values_and_can_hide_their_legend():
+    store = _three_groups()
+    options = {"grouping": splt.CellField("group"), "kind": "ecdf", "show": False}
+    shown = splt.distribution(store, "metric", **options)
+    hidden = splt.distribution(store, "metric", show_legend=False, **options)
+    try:
+        for result in (shown, hidden):
+            ax = result.axes["metric"]
+            # b holds no value, so it draws no curve; each other group's
+            # curve steps through its sorted values.
+            assert [line.get_label() for line in ax.get_lines()] == ["a", "c"]
+            assert [line.get_xdata().tolist() for line in ax.get_lines()] == [
+                [1.0, 2.0, 3.0, 4.0],
+                [2.0, 3.0, 4.0, 5.0],
+            ]
+            assert result.scales[0].order == ("a", "b", "c")
+        legend = shown.axes["metric"].get_legend()
+        assert [text.get_text() for text in legend.get_texts()] == ["a", "c"]
+        assert hidden.axes["metric"].get_legend() is None
+        assert hidden.legends == shown.legends
+    finally:
+        shown.close()
+        hidden.close()
+
+
+def test_histograms_can_hide_their_legend():
+    store = _three_groups(b_values=(1.0, 2.0, 2.0, 3.0))
+    options = {"grouping": splt.CellField("group"), "kind": "hist", "show": False}
+    shown = splt.distribution(store, "metric", **options)
+    hidden = splt.distribution(store, "metric", show_legend=False, **options)
+    try:
+        legend = shown.axes["metric"].get_legend()
+        assert [text.get_text() for text in legend.get_texts()] == ["a", "b", "c"]
+        assert hidden.axes["metric"].get_legend() is None
+        assert hidden.legends == shown.legends
+        # The bars are drawn alike either way.
+        assert [patch.get_height() for patch in hidden.axes["metric"].patches] == [
+            patch.get_height() for patch in shown.axes["metric"].patches
+        ]
+    finally:
+        shown.close()
+        hidden.close()
+
+
+def test_a_split_legend_stands_beside_the_last_panel_alone():
+    rng = np.random.default_rng(2)
+    store = _bind_store(
+        {
+            "I": np.ones(24, dtype=bool),
+            "group": np.repeat(np.asarray(["a", "b"], dtype=object), 12),
+            "batch": np.tile(np.asarray(["b1", "b2"], dtype=object), 12),
+            "metric": rng.normal(size=24),
+            "other": rng.normal(size=24),
+        },
+        rng,
+        None,
+    )
+
+    result = splt.distribution(
+        store,
+        ["metric", "other"],
+        grouping=splt.CellField("group"),
+        split_by="batch",
+        split_scale=splt.CategoricalScale(labels={"b1": "first", "b2": "second"}),
+        max_points=0,
+        show=False,
+    )
+    try:
+        assert result.axes["metric"].get_legend() is None
+        legend = result.axes["other"].get_legend()
+        assert legend.get_title().get_text() == "batch"
+        assert [text.get_text() for text in legend.get_texts()] == ["first", "second"]
+    finally:
+        result.close()
+
+
+def test_shared_value_axes_of_one_tied_value_keep_their_own_limits():
+    import warnings
+
+    store = _bind_store(
+        {
+            "I": np.ones(8, dtype=bool),
+            "group": np.repeat(np.asarray(["a", "b"], dtype=object), 4),
+            "metric": np.full(8, 5.0),
+            "other": np.full(8, 5.0),
+        },
+        np.random.default_rng(0),
+        None,
+    )
+
+    with warnings.catch_warnings():
+        # Equal limits would make Matplotlib warn that the axis is singular.
+        warnings.filterwarnings("error", message="Attempting to set identical")
+        result = splt.distribution(
+            store,
+            ["metric", "other"],
+            grouping=splt.CellField("group"),
+            kind="box",
+            share_y=True,
+            show=False,
+        )
+    try:
+        # Every value is 5, so no shared span exists; each axis keeps limits
+        # around 5 of its own.
+        for key in ("metric", "other"):
+            low, high = result.axes[key].get_ylim()
+            assert low < 5.0 < high
+    finally:
+        result.close()

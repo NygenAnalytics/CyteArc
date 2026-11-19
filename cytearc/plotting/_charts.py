@@ -938,18 +938,16 @@ def draw_tree(
         # A text stands inside its wedge's base, or beside a point.
         said_at = np.asarray(texts, dtype=object)
         for row in np.flatnonzero(wedge & (said_at != "")).tolist():
-            said = str(said_at[row])
-            if said:
-                ax.annotate(
-                    said,
-                    (end[row], middle[row]),
-                    xytext=(-2, 0) if wide[row] else (4, 0),
-                    textcoords="offset points",
-                    ha="right" if wide[row] else "left",
-                    va="center",
-                    fontsize="x-small",
-                    color=line_color,
-                )
+            ax.annotate(
+                str(said_at[row]),
+                (end[row], middle[row]),
+                xytext=(-2, 0) if wide[row] else (4, 0),
+                textcoords="offset points",
+                ha="right" if wide[row] else "left",
+                va="center",
+                fontsize="x-small",
+                color=line_color,
+            )
     if cut is not None:
         ax.axvline(cut, color=line_color, linestyle="--", linewidth=1.0)
     ax.update_datalim(

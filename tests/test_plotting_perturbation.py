@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 import pytest
 from matplotlib.collections import PolyCollection
-from matplotlib.colors import to_rgba
+from matplotlib.colors import to_hex, to_rgba
 from matplotlib.markers import MarkerStyle
 from matplotlib.patches import Rectangle
 from matplotlib.text import Annotation, Text
@@ -172,6 +172,50 @@ def _calls_store(
     )
 
 
+def _store_of_cells(guides_of_cells: list[list[int]], n_guides: int) -> SimpleNamespace:
+    """A store whose loader returns calls of each cell's guides, by position.
+
+    A cell of no guide has no call, and the first of a cell's guides is its
+    top guide.
+    """
+    guide_ids = np.asarray([f"g{index}" for index in range(n_guides)], dtype=object)
+    pairs = [
+        (cell, guide) for cell, found in enumerate(guides_of_cells) for guide in found
+    ]
+    arrays = guide_call_arrays(
+        np.asarray([cell for cell, _ in pairs], dtype=np.int64),
+        np.asarray([guide for _, guide in pairs], dtype=np.int64),
+        np.full(len(pairs), 20),
+        n_cells=len(guides_of_cells),
+        guide_ids=guide_ids,
+    )
+    called = arrays.n_guides > 0
+    frames = guide_calls_frames(
+        np.asarray([f"cell{index}" for index in range(len(guides_of_cells))]),
+        values=arrays.values,
+        n_guides=arrays.n_guides,
+        top_guide=np.asarray(
+            [guide_ids[found[0]] if found else None for found in guides_of_cells],
+            dtype=object,
+        ),
+        top_umi=np.where(called, 20, 0),
+        top_fraction=np.where(called, 1.0 / np.maximum(arrays.n_guides, 1), np.nan),
+        total_umi=20 * arrays.n_guides,
+        guide_codes=arrays.guide_codes,
+        guide_umis=arrays.guide_umis,
+        guide_ids=guide_ids,
+    )
+    loaded = GuideCalls(
+        cells=frames[0],
+        calls=frames[1],
+        guides=pd.Index(guide_ids, name="guide"),
+        source="import_guide_calls",
+    )
+    return SimpleNamespace(
+        perturbation=SimpleNamespace(load_guide_calls=lambda ref: loaded)
+    )
+
+
 def test_a_large_library_ranks_guides_by_their_cells() -> None:
     result = guide_calls(_store(50), CALLS, show=False)
 
@@ -206,7 +250,10 @@ def test_a_small_library_labels_one_bar_per_guide() -> None:
 
 
 def test_cells_without_a_call_take_the_gray_of_the_threshold_panels() -> None:
-    result = guide_calls(_store(5), CALLS, max_guides_per_cell=3, show=False)
+    # Two cells without a call, two of one guide, one of two, and one each of
+    # three and four guides, which the last bar holds together.
+    store = _store_of_cells([[0, 1, 2], [0, 1, 2, 3], [], [], [0], [1], [2, 3]], 4)
+    result = guide_calls(store, CALLS, max_guides_per_cell=3, show=False)
 
     try:
         # The bars of no guide, one guide, two guides, and three or more.
@@ -218,6 +265,11 @@ def test_cells_without_a_call_take_the_gray_of_the_threshold_panels() -> None:
             several,
             several,
         ]
+        assert [bar.get_height() for bar in bars] == [2, 2, 1, 2]
+        assert result.tables["guides_per_cell"].to_dict("list") == {
+            "guides": ["0", "1", "2", "3+"],
+            "cells": [2, 2, 1, 2],
+        }
     finally:
         result.close()
 
@@ -686,6 +738,38 @@ def test_the_threshold_overview_draws_every_fit(
         assert result.provenance.extras["guides"] is None
         assert result.provenance.extras["rasterized"] is False
         assert not any(collection.get_rasterized() for collection in ax.collections)
+    finally:
+        result.close()
+
+
+@pytest.mark.parametrize("status", ["fitted", "no_positive"])
+def test_the_threshold_overview_draws_only_the_statuses_of_its_fits(status) -> None:
+    # Every fit of one sample holds one status, so the overview draws one
+    # group of points and its legend names that group alone.
+    fits = {
+        guide: fit
+        for guide, fit in ONE_SAMPLE[None].items()
+        if (fit[0] == "fitted") == (status == "fitted")
+    }
+    store = _threshold_store("poisson_gaussian", {None: fits}, min_umi=None)
+
+    result = guide_thresholds(store, THRESHOLDS, show=False)
+
+    try:
+        table = result.tables["thresholds"]
+        assert table["guide"].tolist() == (
+            ["g1"] if status == "fitted" else ["g2", "g3"]
+        )
+        ax = result.axes["thresholds"]
+        (points,) = ax.collections
+        color = "#2b6cb0" if status == "fitted" else "#9e9e9e"
+        assert to_hex(points.get_facecolor()[0]) == color
+        np.testing.assert_array_equal(
+            points.get_offsets(), table[["n_umi_cells", "threshold"]].to_numpy()
+        )
+        assert [text.get_text() for text in ax.get_legend().get_texts()] == [
+            "fitted" if status == "fitted" else "other statuses"
+        ]
     finally:
         result.close()
 
@@ -2207,6 +2291,38 @@ def test_mixscape_scores_draw_one_panel_per_fitted_target() -> None:
             "max_targets": 40,
             "statuses": {"fitted": 3, "few_de_genes": 1, "few_cells": 1, "no_fit": 0},
         }
+    finally:
+        result.close()
+
+
+def test_mixscape_scores_of_a_target_of_one_class_draw_that_class_alone() -> None:
+    # Every scored cell of RUNX1 is KO, and none of GATA1's is.
+    rows: list[MixscapeRow] = [
+        ("RUNX1", None, "fitted", [0.81, 0.93, 1.07, 1.22], [], (0.0, 0.2, 1.0, 0.15)),
+        (
+            "GATA1",
+            None,
+            "fitted",
+            [],
+            [-0.31, -0.08, 0.06, 0.29],
+            (0.0, 0.2, 1.0, 0.15),
+        ),
+    ]
+
+    result = mixscape(
+        _record_store(_mixscape_record(rows)), MIXSCAPE, panel="scores", show=False
+    )
+
+    try:
+        assert list(result.axes) == ["RUNX1", "GATA1"]
+        for name, _split, _status, _ko, _np, fit in rows:
+            _check_score_panel(result, name, fit)
+        # Each panel draws the bars of the one class it holds, in its color.
+        colors = {
+            name: {to_hex(bar.get_facecolor()) for bar in result.axes[name].patches}
+            for name in ("RUNX1", "GATA1")
+        }
+        assert colors == {"RUNX1": {"#2b6cb0"}, "GATA1": {"#9e9e9e"}}
     finally:
         result.close()
 
@@ -4036,6 +4152,8 @@ def _check_map(
         if chosen.any()
     ]
     size = default_point_size(len(drawn), size_min=6.0, size_max=30.0)
+    # Every group of points is drawn, before anything drawn over them.
+    assert len(ax.collections) >= len(groups)
     for collection, (chosen, order) in zip(ax.collections, groups, strict=False):
         np.testing.assert_array_equal(
             np.asarray(collection.get_offsets()), np.column_stack([x, y])[chosen]
@@ -4313,6 +4431,24 @@ def test_cluster_heatmap_numbers_longer_runs_first_without_overlaps() -> None:
             )
     finally:
         result.close()
+
+
+def test_squaring_a_heatmap_stops_after_three_passes() -> None:
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    from matplotlib.figure import Figure
+
+    from cytearc.plotting.perturbation import _square_heatmap
+
+    # A box at a fixed eight tenths of an 8 by 4 inch figure at 100 dpi: each
+    # pass narrows the figure by the box's shortfall, which shrinks to a fifth,
+    # 320, then 64 and 12.8 pixels, still more than half a pixel after three.
+    figure = Figure(figsize=(8.0, 4.0), dpi=100)
+    FigureCanvasAgg(figure)
+    ax = figure.add_axes((0.1, 0.1, 0.8, 0.8))
+
+    _square_heatmap(figure, ax)
+
+    assert tuple(figure.get_size_inches()) == pytest.approx((4.032, 4.0))
 
 
 def test_cluster_heatmap_keeps_a_chosen_figure_size() -> None:
@@ -5077,6 +5213,12 @@ def test_composed_cluster_plots_share_their_cluster_legend(panel: str) -> None:
             )
             for legend in figure.legends
         ] == [("Cluster", ["0", "1", "2", "Unassigned"])]
+        # Each entry takes its cluster's color, cluster 2 first in the leaf
+        # order and so the first color, and the unassigned their gray.
+        (legend,) = figure.legends
+        assert [
+            to_hex(handle.get_markerfacecolor()) for handle in legend.legend_handles
+        ] == ["#e69f00", "#009e73", "#0072b2", "#d4d4d4"]
         colorbars = [axis for axis in figure.axes if axis.get_label() == "<colorbar>"]
         if panel == "heatmap":
             assert child_colorbar not in figure.axes

@@ -393,26 +393,62 @@ def test_bars_refuse_what_they_cannot_draw(ax) -> None:
         )
 
 
-def test_charts_refuse_scales_without_an_order_or_a_color(ax) -> None:
-    table = pd.DataFrame({"group": ["x"], "value": [1.0]})
-    with pytest.raises(ValueError, match="need an order and a palette"):
+def _chart_of_x(ax, what: str, colors: CategoricalScale) -> None:
+    """Draw the chart named by ``what`` over one item, series or wedge, x."""
+    if what == "bars":
         draw_bars(
             ax,
-            table,
+            pd.DataFrame({"group": ["x"], "value": [1.0]}),
             item="group",
             value="value",
-            colors=CategoricalScale(palette={"x": RED}),
+            colors=colors,
             value_label="",
         )
-    with pytest.raises(ValueError, match="give no color to 'y'"):
-        draw_bars(
+    elif what == "lines":
+        draw_lines(
             ax,
-            table,
-            item="group",
-            value="value",
-            colors=CategoricalScale(order=("x", "y"), palette={"x": RED}),
-            value_label="",
+            pd.DataFrame({"series": ["x"], "x": [0.0], "y": [1.0]}),
+            x="x",
+            y="y",
+            series="series",
+            colors=colors,
+            y_label="",
         )
+    elif what == "histograms":
+        draw_histograms(
+            ax,
+            pd.DataFrame({"series": ["x"], "value": [1.0]}),
+            value="value",
+            series="series",
+            colors=colors,
+            bins=2,
+            x_label="",
+            y_label="",
+        )
+    else:
+        draw_tree(
+            ax,
+            _tree(),
+            categories=np.asarray(["", "x", "x", "x"], dtype=object),
+            colors=colors,
+            line_color="#333333",
+            x_label="",
+        )
+
+
+@pytest.mark.parametrize("what", ["bars", "lines", "histograms", "wedges"])
+def test_charts_refuse_scales_without_an_order_or_a_color(ax, what) -> None:
+    # Each chart names itself, so the refusal comes from the scale's check,
+    # before anything reads the order or the palette.
+    with pytest.raises(
+        ValueError, match=f"^The colors of the {what} need an order and a palette$"
+    ):
+        _chart_of_x(ax, what, CategoricalScale(palette={"x": RED}))
+    with pytest.raises(
+        ValueError, match=f"^The colors of the {what} give no color to 'y'$"
+    ):
+        _chart_of_x(ax, what, CategoricalScale(order=("x", "y"), palette={"x": RED}))
+    assert not ax.lines and not ax.patches and not ax.collections
 
 
 SERIES = CategoricalScale(order=("q", "p"), palette={"p": RED, "q": BLUE})
@@ -470,6 +506,45 @@ def test_lines_follow_the_scale_with_dashed_parts_and_marked_points(ax) -> None:
         RED,
     ]
     assert drawn.scale.order == ("q", "p")
+
+
+def test_a_series_dashed_from_its_first_row_draws_no_solid_part(ax) -> None:
+    # p is extrapolated from its first row, so no solid row comes before its
+    # dashed part; q, which the scale lists, has no row at all.
+    table = pd.DataFrame(
+        {
+            "series": ["p", "p", "p"],
+            "x": [1.0, 2.0, 3.0],
+            "y": [10.0, 20.0, 30.0],
+            "dashed": [True, True, True],
+        }
+    )
+    draw_lines(
+        ax,
+        table,
+        x="x",
+        y="y",
+        series="series",
+        colors=SERIES,
+        dashed="dashed",
+        y_label="",
+        legend_title="group",
+    )
+    q_solid, q_dashed, p_solid, p_dashed = ax.get_lines()
+    # p's dashed line runs from its own first row, and its solid line is empty.
+    assert p_solid.get_xdata().tolist() == []
+    assert p_dashed.get_xdata().tolist() == [1.0, 2.0, 3.0]
+    assert p_dashed.get_ydata().tolist() == [10.0, 20.0, 30.0]
+    assert p_dashed.get_linestyle() == "--"
+    # q draws empty lines in its color, and the legend lists both series.
+    assert q_solid.get_xdata().tolist() == q_dashed.get_xdata().tolist() == []
+    assert {to_hex(line.get_color()) for line in (q_solid, q_dashed)} == {BLUE}
+    legend = ax.get_legend()
+    assert [text.get_text() for text in legend.get_texts()] == ["q", "p"]
+    assert [to_hex(handle.get_color()) for handle in legend.legend_handles] == [
+        BLUE,
+        RED,
+    ]
 
 
 def test_lines_along_named_positions_leave_gaps(ax) -> None:
@@ -679,14 +754,18 @@ def test_heatmaps_color_through_their_scale_and_blank_the_diagonal(ax) -> None:
 
 
 def test_heatmaps_take_their_scales_limits_and_center(ax) -> None:
-    scale = ColorScale(cmap="RdBu_r", vmin=-2.0, vmax=2.0, vcenter=0.0)
+    # Limits that 0 does not halve, so only the center puts 0 at the middle.
+    scale = ColorScale(cmap="RdBu_r", vmin=-1.0, vmax=3.0, vcenter=0.0)
     draw_matrix(
         ax, _matrix() - 0.5, color_scale=scale, value_label="", show_legend=False
     )
     image = ax.images[0]
-    assert image.get_clim() == (-2.0, 2.0) and image.cmap.name == "RdBu_r"
-    # 0 sits at the middle of the map.
+    assert image.get_clim() == (-1.0, 3.0) and image.cmap.name == "RdBu_r"
+    # Each side of 0 spans its half of the map: -1 to 0 the lower half and 0
+    # to 3 the upper, where limits alone would put 0 at a quarter.
     assert image.norm(0.0) == pytest.approx(0.5)
+    assert image.norm(-0.5) == pytest.approx(0.25)
+    assert image.norm(1.5) == pytest.approx(0.75)
     # Without the legend, no color bar is drawn.
     assert len(ax.figure.axes) == 1
 
@@ -773,6 +852,22 @@ def test_a_trees_leaves_stand_over_the_matrixs_columns(ax) -> None:
     leaves = sorted(set(segments[segments[:, 1] == 0, 0].tolist()))
     assert leaves == list(range(5))
     assert inset.get_xlim() == ax.get_xlim()
+    # Each merge of two leaves joins the columns of those leaves at the
+    # height of the merge, so the tree stands over the matrix in its order.
+    joined = {
+        (frozenset(np.rint(cap[[0, 3], 0]).astype(int).tolist()), round(cap[1, 1], 9))
+        for cap in inset.collections[0].get_segments()
+        if cap[0, 1] == 0.0 and cap[3, 1] == 0.0
+    }
+    merged = {
+        (
+            frozenset({names.index(f"g{int(a)}"), names.index(f"g{int(b)}")}),
+            round(float(height), 9),
+        )
+        for a, b, height, _size in tree
+        if a < len(names) and b < len(names)
+    }
+    assert merged and joined == merged
 
 
 def test_item_extents_stop_growing_where_names_stop() -> None:

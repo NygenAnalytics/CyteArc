@@ -86,8 +86,13 @@ def test_continuous_norm_supports_center_and_validates_bounds():
     np.testing.assert_allclose(
         norm(np.array([-2.0, -1.0, 0.0, 1.5, 3.0])), [0.0, 0.25, 0.5, 0.75, 1.0]
     )
-    with pytest.raises(ValueError, match="vcenter"):
-        continuous_norm(mpl, vmin=0, vmax=3, vcenter=4)
+    # A center at either limit, or outside them, is refused in CyteArc's own
+    # words, before Matplotlib's norm sees it.
+    for vcenter in (-1, 0, 3, 4):
+        with pytest.raises(
+            ValueError, match="^vcenter must be strictly between the color limits$"
+        ):
+            continuous_norm(mpl, vmin=0, vmax=3, vcenter=vcenter)
 
 
 def test_generated_palette_and_flat_norm_edge_cases():

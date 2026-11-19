@@ -1197,6 +1197,41 @@ def test_mapping_calibration_keeps_the_transfers_other_rules():
     marked.close()
 
 
+def test_mapping_calibration_keeps_cells_at_the_transfers_cutoffs():
+    # The first cell's vote fraction is the transfer's cutoff and the second
+    # cell's distance its limit, both of which the transfer's rules keep; the
+    # third cell's vote falls short of the cutoff.
+    evidence = pd.DataFrame(
+        {
+            "label": ["A", "A", None],
+            "candidateLabel": ["A", "A", "B"],
+            "voteFraction": [0.8, 0.9, 0.7],
+            "topTwoMargin": [0.5, 0.5, 0.5],
+            "nearestDistance": [1.0, 2.0, 1.0],
+        }
+    )
+    store = _controlled_mapping_store(
+        evidence=evidence, threshold_fraction=0.8, max_distance=2.0
+    )
+
+    plot = plotting_mapping.mapping_calibration(
+        store,
+        _TRANSFER_REF,
+        known_labels=_keyed_query(["A", "A", "A"]),
+        metric="topTwoMargin",
+        direction="higher",
+        thresholds=[0.0],
+        show=False,
+    )
+
+    try:
+        (row,) = plot.tables["calibration"].to_dict("records")
+        assert (row["nAccepted"], row["nEvaluated"]) == (2, 3)
+        assert (row["coverage"], row["accuracy"]) == (2 / 3, 1.0)
+    finally:
+        plot.close()
+
+
 def _producer_evidence(uninformative: np.ndarray) -> pd.DataFrame:
     """Evidence decided by the saved-transfer producer, as the loader frames it.
 
@@ -1818,3 +1853,85 @@ def test_mapping_plots_refuse_per_cell_values_by_position(plot, options, name):
         f"{name} takes per-cell values only as a pandas Series keyed by cell ID"
     )
     assert "which would assign values to cells by position" in message
+
+
+def _drawn_legends(figure) -> tuple[list[str], list[str]]:
+    """The titles of the legends that a figure draws and the labels of its color bars."""
+    from cytearc.plotting._figure import is_colorbar_axes
+
+    legends = [
+        ax.get_legend().get_title().get_text()
+        for ax in figure.axes
+        if ax.get_legend() is not None
+    ]
+    colorbars = [ax.get_xlabel() for ax in figure.axes if is_colorbar_axes(ax)]
+    return legends, colorbars
+
+
+@pytest.mark.parametrize(
+    ("kind", "drawn"),
+    [
+        ("embedding", ([], ["Mapping score", "Mapping score"])),
+        ("histogram", (["Query group"], [])),
+    ],
+)
+def test_mapping_score_reports_a_hidden_legend_and_takes_a_given_size(kind, drawn):
+    store = _controlled_mapping_store(
+        score_rows=[
+            ("q1", np.asarray([0.0, 0.5, 1.0])),
+            ("q2", np.asarray([1.0, 0.0, 0.25])),
+        ],
+        layout=np.asarray([[0.0, 0.0], [1.0, 1.0], [2.0, 0.0]]),
+    )
+    options = {
+        "reference": object(),
+        "target_groups": _keyed_query(["q1", "q2"]),
+        "kind": kind,
+        "show": False,
+    }
+    if kind == "embedding":
+        options["layout"] = ArtifactRef(
+            scope="assay", assay="RNA", kind="embedding", artifact_id="c" * 64
+        )
+
+    shown = plotting_mapping.mapping_score(store, _RESULT_REF, **options)
+    hidden = plotting_mapping.mapping_score(
+        store, _RESULT_REF, show_legend=False, figsize=(5.0, 2.5), **options
+    )
+
+    try:
+        assert _drawn_legends(shown.figure) == drawn
+        # Without its legends the figure draws none, takes the size it is
+        # given, and still reports what the legends would show.
+        assert _drawn_legends(hidden.figure) == ([], [])
+        assert tuple(hidden.figure.get_size_inches()) == (5.0, 2.5)
+        assert hidden.legends == shown.legends
+        assert hidden.scales == shown.scales
+    finally:
+        shown.close()
+        hidden.close()
+
+
+def test_mapping_confusion_reports_a_hidden_color_bar():
+    known = _keyed_query(np.asarray(["A", "A", "A", "A", "B", "B"]))
+
+    shown = plotting_mapping.mapping_confusion(
+        _confusion_store(), _TRANSFER_REF, known_labels=known, show=False
+    )
+    hidden = plotting_mapping.mapping_confusion(
+        _confusion_store(),
+        _TRANSFER_REF,
+        known_labels=known,
+        show_legend=False,
+        show=False,
+    )
+
+    try:
+        # Counts normalized by default, as the color bar says.
+        assert _drawn_legends(shown.figure) == ([], ["Fraction of cells"])
+        assert _drawn_legends(hidden.figure) == ([], [])
+        assert hidden.legends == shown.legends
+        pd.testing.assert_frame_equal(hidden.tables["matrix"], shown.tables["matrix"])
+    finally:
+        shown.close()
+        hidden.close()

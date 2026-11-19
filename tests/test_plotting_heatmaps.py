@@ -123,6 +123,17 @@ def test_artifact_plots_require_their_graph_and_aggregation_inputs() -> None:
         assert signature(function).parameters["graph"].default is Parameter.empty
 
 
+def test_hierarchy_positions_keep_a_tree_that_stands_at_x_zero():
+    # A lone node placed by its leaf's position alone stands at x 0, which no
+    # scaling to the width can move, so it stays there.
+    graph = nx.DiGraph()
+    graph.add_node("root")
+
+    positions = _hierarchy_positions(graph, width=2.0, leaf_vs_root_factor=1.0)
+
+    assert positions == {"root": (0.0, 0.0)}
+
+
 def test_hierarchy_positions_rejects_non_trees():
     cyclic = nx.DiGraph([(0, 1), (1, 2), (2, 0)])
     with pytest.raises(TypeError, match="not a tree"):
@@ -263,6 +274,81 @@ def test_marker_heatmap_returns_owned_result(marker_store):
     assert plt.fignum_exists(figure_number)
     result.close()
     assert not plt.fignum_exists(figure_number)
+
+
+def test_an_owned_marker_heatmap_leaves_out_its_color_bar_and_tick_labels(
+    marker_store,
+):
+    data = marker_store
+    shown = splt.marker_heatmap(data.store, marker=data.markers, topn=2, show=False)
+    bare = splt.marker_heatmap(
+        data.store,
+        marker=data.markers,
+        topn=2,
+        show_legend=False,
+        xticklabels=False,
+        yticklabels=False,
+        show=False,
+    )
+    try:
+        # Without its legend the figure draws no color bar, and reports it.
+        assert "colorbar" in shown.axes
+        assert "colorbar" not in bare.axes
+        assert bare.legends == shown.legends
+        # Without tick labels the rows and columns are left unnamed.
+        bare.figure.canvas.draw()
+        heatmap = bare.axes["heatmap"]
+        assert [tick.get_text() for tick in heatmap.get_yticklabels()] == []
+        assert [tick.get_text() for tick in heatmap.get_xticklabels()] == []
+        # The matrix drawn is the same.
+        pd.testing.assert_frame_equal(bare.tables["matrix"], shown.tables["matrix"])
+        np.testing.assert_allclose(
+            np.asarray(heatmap.collections[0].get_array()),
+            bare.tables["matrix"].to_numpy(),
+        )
+    finally:
+        shown.close()
+        bare.close()
+
+
+@pytest.mark.parametrize(("top", "moved"), [(0.6, False), (0.95, True)])
+def test_a_clustermap_legend_moves_the_axes_down_only_when_it_reaches_them(top, moved):
+    import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
+
+    from cytearc.plotting.heatmaps import _place_clustermap_annotation_legend
+
+    figure = plt.figure(figsize=(4.0, 8.0))
+    try:
+        axes = {
+            "heatmap": figure.add_axes((0.1, 0.1, 0.6, top - 0.3)),
+            "column_dendrogram": figure.add_axes((0.1, top - 0.2, 0.6, 0.2)),
+        }
+        before = {key: ax.get_position().bounds for key, ax in axes.items()}
+        handle = Line2D([], [], marker="s", linestyle="", label="kind: x")
+
+        _place_clustermap_annotation_legend(
+            figure, axes, [handle], has_column_dendrogram=True
+        )
+
+        (legend,) = figure.legends
+        bottom = (
+            legend.get_window_extent().transformed(figure.transFigure.inverted()).y0
+        )
+        after = {key: ax.get_position().bounds for key, ax in axes.items()}
+        if moved:
+            # The axes shrink toward the bottom until the tallest ends just
+            # under the legend.
+            assert max(y + height for _x, y, _w, height in after.values()) == (
+                pytest.approx(bottom - 0.01)
+            )
+            assert [bounds[0] for bounds in after.values()] == [0.1, 0.1]
+        else:
+            # The legend stands above the axes, which stay where they were.
+            assert bottom - 0.01 > top
+            assert after == before
+    finally:
+        plt.close(figure)
 
 
 def test_marker_heatmap_selects_features_by_named_score(marker_store):
@@ -1766,6 +1852,34 @@ def test_pseudotime_heatmap_draws_saved_rows_clusters_and_bins():
     np.testing.assert_array_equal(heatmap.get_yticks(), [2])
     assert result.provenance.n_cells == 4
     result.close()
+
+
+def test_pseudotime_heatmap_on_caller_axes_can_leave_out_its_color_bar():
+    import matplotlib.pyplot as plt
+
+    figure, (heatmap, clusters, pseudotime) = plt.subplots(1, 3)
+    try:
+        result = splt.pseudotime_heatmap(
+            _pseudotime_store(),
+            aggregation=_AGGREGATION,
+            target={
+                "heatmap": heatmap,
+                "feature_clusters": clusters,
+                "pseudotime": pseudotime,
+            },
+            show_legend=False,
+            show=False,
+        )
+        # No color bar is drawn or added to the caller's figure, and the rows
+        # are drawn as without one: g5, then g4 and g6.
+        assert "colorbar" not in result.axes
+        assert figure.axes == [heatmap, clusters, pseudotime]
+        np.testing.assert_array_equal(
+            heatmap.images[0].get_array(), [[2, 3], [0, 1], [4, 5]]
+        )
+        assert result.legends[0].kind == "colorbar"
+    finally:
+        plt.close(figure)
 
 
 @pytest.mark.parametrize(

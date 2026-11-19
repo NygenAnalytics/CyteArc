@@ -248,6 +248,41 @@ def _expected_curve(
     )
 
 
+def _luv_lightness_and_hue(color: str) -> tuple[float, float]:
+    """A color's CIE L* and its LCh(uv) hue in degrees, by the CIE formulas under D65."""
+    rgb = np.asarray([int(color[at : at + 2], 16) / 255 for at in (1, 3, 5)])
+    linear = np.where(rgb <= 0.04045, rgb / 12.92, ((rgb + 0.055) / 1.055) ** 2.4)
+    x, y, z = (
+        np.asarray(
+            [
+                [0.4124564, 0.3575761, 0.1804375],
+                [0.2126729, 0.7151522, 0.0721750],
+                [0.0193339, 0.1191920, 0.9503041],
+            ]
+        )
+        @ linear
+    )
+    lightness = 116 * np.cbrt(y) - 16 if y > (6 / 29) ** 3 else y * (29 / 3) ** 3
+    denominator = x + 15 * y + 3 * z
+    u = 13 * lightness * (4 * x / denominator - 0.19783)
+    v = 13 * lightness * (9 * y / denominator - 0.46832)
+    return float(lightness), float(np.degrees(np.arctan2(v, u)) % 360)
+
+
+def _assert_evenly_spaced_hues(colors: list[str]) -> None:
+    """Check colors of one lightness whose hues turn evenly around the circle.
+
+    Husl colors at 65% lightness have CIE L* 64.35, and the k-th of n starts
+    0.01 turns round, at 359 * (0.01 + k / n) degrees of LCh(uv) hue; eight
+    bits per channel keep each within a degree.
+    """
+    for k, color in enumerate(colors):
+        lightness, hue = _luv_lightness_and_hue(color)
+        assert lightness == pytest.approx(64.35, abs=0.5), color
+        turned = 359 * (0.01 + k / len(colors))
+        assert abs((hue - turned + 180) % 360 - 180) < 1.0, color
+
+
 def _marker_symbol(collection: Any) -> str:
     """The symbol, of a square, a triangle or a circle, whose path a scatter drew."""
     vertices = collection.get_paths()[0].vertices
@@ -528,8 +563,10 @@ def test_lineage_palette_warns_and_keeps_colors_distinct_beyond_the_palette():
 
     # Thirteen lineages take thirteen evenly spaced hues, never a repeat.
     assert list(palette) == names
-    assert list(palette.values()) == sns.color_palette("husl", n_colors=13).as_hex()
+    _assert_evenly_spaced_hues(list(palette.values()))
     assert len({to_hex(color) for color in palette.values()}) == 13
+    # They are seaborn's husl palette, which this pins.
+    assert list(palette.values()) == sns.color_palette("husl", n_colors=13).as_hex()
     assert any(
         "Requested 13 colorblind-safe colors but only 12 are available" in message
         for message in messages
@@ -949,6 +986,12 @@ def test_lineage_heatmap_shows_unscaled_profiles_as_mean_expression(
         kind="colorbar", label="mean expression", extras={"vmin": low, "vmax": high}
     )
     assert chosen.scales[0] == splt.ColorScale(cmap="coolwarm", vmin=0.5, vmax=1.5)
+    # Each lineage's heatmap and the color bar are drawn over those limits.
+    for drawn, limits in ((result, (low, high)), (chosen, (0.5, 1.5))):
+        for name in LINEAGES:
+            (image,) = drawn.axes[("heatmap", name)].images
+            assert (image.norm.vmin, image.norm.vmax) == pytest.approx(limits)
+        assert drawn.axes["colorbar"].get_ylim() == pytest.approx(limits)
 
 
 def test_lineage_heatmap_spans_sparse_unscaled_profiles_to_their_maximum(
@@ -1255,6 +1298,9 @@ def test_lineage_trends_draw_chosen_lineages_in_a_custom_style(
     # Set1 at 0 and 1.
     palette = {"4": "#e41a1c", "2": "#999999"}
     assert tuple(result.figure.get_size_inches()) == (5.0, 3.0)
+    data = np.asarray(loaded_aggregation.data)
+    # Lines run along lineage progress by default: the middle of each bin.
+    progress = (np.arange(N_BINS) + 0.5) / N_BINS
     for feature in features:
         axis = result.axes[feature]
         assert [line.get_label() for line in axis.get_lines()] == ["4", "2"]
@@ -1262,6 +1308,12 @@ def test_lineage_trends_draw_chosen_lineages_in_a_custom_style(
             palette["4"],
             palette["2"],
         ]
+        # Each chosen lineage draws its own profile: lineage 4 is the
+        # aggregation's third column and lineage 2 its first.
+        row = _feature_row(feature_names, feature)
+        for line, column in zip(axis.get_lines(), (2, 0), strict=True):
+            np.testing.assert_allclose(line.get_xdata(), progress)
+            np.testing.assert_array_equal(line.get_ydata(), data[row, column])
         assert {line.get_linewidth() for line in axis.get_lines()} == {1.5}
         assert axis.get_legend() is None
         # The paper theme sets smaller titles.
@@ -1351,7 +1403,9 @@ def test_lineage_trends_color_more_lineages_than_the_palette_holds(
     lines = result.axes[feature_names[0]].get_lines()
     assert [line.get_label() for line in lines] == list(many.lineages)
     colors = [line.get_color() for line in lines]
-    # Every lineage keeps a color of its own, from evenly spaced hues.
+    # Every lineage keeps a color of its own, from evenly spaced hues: those
+    # of seaborn's husl palette, which this pins.
+    _assert_evenly_spaced_hues(colors)
     assert colors == sns.color_palette("husl", n_colors=n_lineages).as_hex()
     assert len({to_hex(color) for color in colors}) == n_lineages
     assert result.scales[0].palette == dict(zip(many.lineages, colors, strict=True))
@@ -1906,6 +1960,8 @@ def test_curves_in_layout_refuse_layouts_other_than_two_finite_columns(
     stored = np.asarray(group["values"][:])
     infinite = stored.copy()
     infinite[3, 1] = np.inf
+    missing = stored.copy()
+    missing[5, 0] = np.nan
     for values, error, message in (
         (
             np.column_stack([stored, stored[:, 0]]),
@@ -1913,6 +1969,7 @@ def test_curves_in_layout_refuse_layouts_other_than_two_finite_columns(
             "Embedding must have two columns and one row per selected cell",
         ),
         (infinite, ValueError, "Embedding coordinates must be finite"),
+        (missing, ValueError, "Embedding coordinates must be finite"),
         (stored > 0, TypeError, "Embedding coordinates must be numeric"),
     ):
         del group["values"]
@@ -2220,6 +2277,24 @@ def test_lineage_tree_without_a_root_marks_every_leaf(
     assert result.provenance.extras["root"] is None
     assert result.provenance.extras["candidate_sinks"] == list(loaded_tree.leaves)
     assert set(loaded_tree.leaves) == leaves
+
+    # Rooted at one of those leaves instead, the tree draws that leaf as the
+    # root's square and leaves it out of the candidate sinks, which the
+    # unrooted tree marks it as.
+    leaf = sorted(leaves)[0]
+    rooted = dataclasses.replace(loaded_tree, root=leaf, lineages=())
+    monkeypatch.setattr(
+        TrajectoryAccessor, "load_lineage_tree", lambda accessor, ref: rooted
+    )
+    at_leaf = closing(
+        splt.lineage_tree(datastore, tree=lineage_tree, layout=layout.ref, show=False)
+    )
+    position = list(loaded_tree.clusters).index(leaf)
+    assert nodes["candidate_sink"].tolist()[position]
+    assert not at_leaf.tables["nodes"]["candidate_sink"].tolist()[position]
+    assert _marker_symbol(markers[position]) == "^"
+    assert _marker_symbol(at_leaf.axes["tree"].collections[1:][position]) == "s"
+    assert at_leaf.provenance.extras["candidate_sinks"] == sorted(leaves - {leaf})
 
 
 def test_lineage_tree_draws_within_the_budget_of_its_labels_without_cell_ids(

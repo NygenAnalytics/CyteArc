@@ -217,6 +217,9 @@ def test_elbow_marks_the_number_of_the_pc_where_the_curve_bends(last_steep_pc, n
     # The first PC sits at tick 1 and the last at tick n_pcs.
     assert ax.lines[0].get_xdata()[0] == 1
     assert ax.get_xticks()[[0, -1]].tolist() == [1, n_pcs]
+    # The default width spends a quarter inch on each PC.
+    width = {12: 3.0, 30: 7.5}[n_pcs]
+    assert result.figure.get_size_inches() == pytest.approx((width, 2.0))
     result.close()
 
 
@@ -414,6 +417,25 @@ def test_qc_vertical_layout_single_group_titles_and_figure_size():
     assert not plt.fignum_exists(figure_number)
 
 
+def test_qc_takes_a_given_size_and_titles_a_median_only_of_finite_values():
+    data = pd.DataFrame(
+        {
+            "groups": ["only"] * 4,
+            "metricA": [1.0, 2.0, 3.0, 4.0],
+            "metricB": [np.nan] * 4,
+        }
+    )
+    result = splt.qc(data, max_points=0, figsize=(4.5, 3.0), show=False)
+    try:
+        assert result.figure.get_size_inches() == pytest.approx((4.5, 3.0))
+        # A single group's panel says its median, which a metric without a
+        # finite value does not have.
+        assert result.axes["metricA"].get_title() == "Median: 2.5"
+        assert result.axes["metricB"].get_title() == ""
+    finally:
+        result.close()
+
+
 def test_qc_orders_natural_and_missing_groups_without_subsampling():
     groups = ["group10", "group2", None] * 3
     data = pd.DataFrame(
@@ -436,16 +458,17 @@ def test_qc_orders_natural_and_missing_groups_without_subsampling():
 
 def test_elbow_without_detection_uses_data_driven_width():
     # A straight line has no point of maximum curvature, so no elbow.
-    values = np.linspace(1.0, 0.1, 8)
+    values = np.linspace(1.0, 0.1, 12)
     result = splt.elbow(values, show=False)
 
-    assert result.figure.get_size_inches() == pytest.approx((2.0, 2.0))
+    # A quarter inch for each of the 12 PCs, beside the default height.
+    assert result.figure.get_size_inches() == pytest.approx((3.0, 2.0))
     assert result.provenance.extras["elbow_pc"] is None
     assert result.legends == ()
     assert len(result.axes["elbow"].lines) == 1
     table = result.tables["variance_explained"]
     assert not table["is_elbow"].any()
-    np.testing.assert_array_equal(table["pc"], [1, 2, 3, 4, 5, 6, 7, 8])
+    np.testing.assert_array_equal(table["pc"], np.arange(1, 13))
     result.close()
 
 

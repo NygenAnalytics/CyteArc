@@ -387,6 +387,68 @@ def test_summary_tables_name_two_grouping_keys_group_and_subgroup():
         result.close()
 
 
+def test_matrixplot_columns_pair_two_grouping_keys_in_natural_order():
+    feature = np.repeat(["b", "a"], 4)
+    mean = np.tile(["y", "x"], 4)
+    store = _keyed_summary_store(feature=feature, mean=mean)
+    gene = store.RNA._values[:, 0]
+
+    result = splt.matrixplot(
+        store, features=["GeneA"], group_by=("feature", "mean"), show=False
+    )
+    try:
+        pairs = [("a", "x"), ("a", "y"), ("b", "x"), ("b", "y")]
+        names = [f"{first} | {second}" for first, second in pairs]
+        matrix = result.tables["matrix"]
+        assert matrix.columns.tolist() == names
+        ax = result.axes["matrixplot"]
+        assert [text.get_text() for text in ax.get_xticklabels()] == names
+        # Each column is the mean of the cells of its pair.
+        expected = [
+            gene[(feature == first) & (mean == second)].mean()
+            for first, second in pairs
+        ]
+        np.testing.assert_allclose(matrix.to_numpy(), [expected])
+        np.testing.assert_allclose(ax.images[0].get_array(), [expected])
+    finally:
+        result.close()
+
+
+def test_summary_tables_weight_samples_whose_condition_is_constant():
+    # Three cells in each of four samples, two of each condition; the groups
+    # cut across the samples unevenly.
+    sample = np.repeat(["s1", "s2", "s3", "s4"], 3)
+    condition = np.repeat(["control", "treated"], 6)
+    group = np.asarray(["g1", "g1", "g2", "g1", "g2", "g2"] * 2)
+    store = _keyed_summary_store(sample=sample, condition=condition, group=group)
+    gene = store.RNA._values[:, 0]
+
+    result = splt.matrixplot(
+        store,
+        features=["GeneA"],
+        group_by="group",
+        study_design=splt.StudyDesign(sample_by="sample", condition_by="condition"),
+        show=False,
+    )
+    try:
+        # Each group averages its samples' means, whose conditions only
+        # need to hold one value per sample.
+        expected = [
+            np.mean(
+                [
+                    gene[(group == name) & (sample == each)].mean()
+                    for each in ("s1", "s2", "s3", "s4")
+                ]
+            )
+            for name in ("g1", "g2")
+        ]
+        np.testing.assert_allclose(result.tables["matrix"].to_numpy(), [expected])
+        aggregate = result.tables["aggregate"]
+        assert aggregate["n_samples"].tolist() == [4, 4]
+    finally:
+        result.close()
+
+
 def test_summary_tables_keep_a_sample_grouping_apart_from_sample_by():
     sample = np.repeat(["s2", "s1"], 4)
     donor = np.tile(["d1", "d2"], 4)
@@ -1031,10 +1093,30 @@ def test_mapping_confusion_rejects_text_only_label_matches():
         )
 
 
-def test_mapping_confusion_rejects_an_abstention_label_that_names_a_class():
+@pytest.mark.parametrize(
+    ("transferred", "known", "counted"),
+    [
+        # A known label named like the abstentions.
+        (
+            ["T", None],
+            ["Abstained", "T"],
+            {("Abstained", "T"): 1, ("T", "No label"): 1},
+        ),
+        # A transferred label named like them.
+        (
+            ["Abstained", None],
+            ["T", "T"],
+            {("T", "Abstained"): 1, ("T", "No label"): 1},
+        ),
+    ],
+    ids=["known", "transferred"],
+)
+def test_mapping_confusion_rejects_an_abstention_label_that_names_a_class(
+    transferred, known, counted
+):
     evidence = pd.DataFrame(
         {
-            "label": np.asarray(["Abstained", None], dtype=object),
+            "label": np.asarray(transferred, dtype=object),
             "voteFraction": [0.9, 0.2],
             "abstained": [False, True],
         }
@@ -1052,17 +1134,23 @@ def test_mapping_confusion_rejects_an_abstention_label_that_names_a_class():
         splt.mapping_confusion(
             store,
             SimpleNamespace(assay="RNA"),
-            known_labels=pd.Series(["Abstained", "T"], index=transfer.cell_ids),
+            known_labels=pd.Series(known, index=transfer.cell_ids),
             show=False,
         )
     plot = splt.mapping_confusion(
         store,
         SimpleNamespace(assay="RNA"),
-        known_labels=pd.Series(["Abstained", "T"], index=transfer.cell_ids),
+        known_labels=pd.Series(known, index=transfer.cell_ids),
         abstention_label="No label",
         show=False,
     )
-    assert plot.tables["counts"].set_index("known").loc["T", "No label"] == 1
+    counts = plot.tables["counts"].set_index("known")
+    assert {
+        (row, column): int(counts.loc[row, column])
+        for row in counts.index
+        for column in counts.columns
+        if counts.loc[row, column]
+    } == counted
     plot.close()
 
 

@@ -142,6 +142,14 @@ def test_legends_are_reported_with_their_scales_and_agree_with_the_drawing(
             ]
             assert colors == [scale.palette[value] for value in scale.order]
             assert set(colors) <= _drawn_colors(artist.axes)
+            # A line that the legend's panel draws for an entry takes the
+            # entry's color, so no two entries trade colors.
+            lines = {
+                (line.get_label(), to_hex(line.get_color()))
+                for line in artist.axes.get_lines()
+                if not line.get_label().startswith("_")
+            }
+            assert lines <= set(zip(labels, colors, strict=True))
         colorbar_legends = [
             legend for legend in result.legends if legend.kind == "colorbar"
         ]
@@ -225,6 +233,8 @@ def test_figures_grouped_by_one_column_share_one_legend_when_composed(truth) -> 
 def test_figures_of_clonotypes_name_clonotypes(truth, name) -> None:
     result = truth.calls["clonotypes"][name](show=False)
     try:
+        # Bars take their names as the figure draws, so draw it first.
+        result.figure.draw_without_rendering()
         texts = _texts(result)
         # Clonotypes are labeled by their junctions, never their IDs, and no
         # text that names them says "clone".
@@ -232,6 +242,17 @@ def test_figures_of_clonotypes_name_clonotypes(truth, name) -> None:
         assert not [
             text for text in texts if re.search(r"\bclones?\b", text, re.IGNORECASE)
         ]
+        # Every figure but the overlap, whose title names its index alone,
+        # says "clonotype" where a figure of clones says "clone".
+        said = [text for text in texts if re.search(r"\bclonotypes?\b", text, re.I)]
+        assert bool(said) == (name != "clone_overlap")
+        # Figures that name clonotypes along an axis name each by its label.
+        for key, axis in (("top", "y"), ("fates", "x")):
+            if key in result.axes:
+                ticks = getattr(result.axes[key], f"get_{axis}ticklabels")()
+                assert [tick.get_text() for tick in ticks] == list(
+                    dict.fromkeys(result.tables[key]["label"])
+                )
     finally:
         result.close()
 
@@ -581,6 +602,15 @@ def test_receptor_types_take_their_vocabularys_colors(truth) -> None:
         assert list(scale.order) == [
             kind for kind in RECEPTOR_TYPE_SCALE.order if kind in scale.order
         ]
+        # The truth's clonotypes hold T and B cell receptors, one ambiguous
+        # and one multichain; each type's line of sizes takes the type's color.
+        assert scale.order == ("TCR", "BCR", "ambiguous", "multichain")
+        assert _line_colors(result.axes["sizes"]) == {
+            "TCR": "#2b6cb0",
+            "BCR": "#dd6b20",
+            "ambiguous": "#805ad5",
+            "multichain": "#c53030",
+        }
     finally:
         result.close()
 
@@ -609,27 +639,40 @@ def test_label_artifacts_color_groups_over_all_their_labels(truth) -> None:
     )
     try:
         full = every.scales[0].palette
-        assert list(full) == ["Monocyte", "Neutrophil", "Undifferentiated"]
+        # The first three default colors, over the labels in natural order.
+        assert full == {
+            "Monocyte": "#1f77b4",
+            "Neutrophil": "#ff7f0e",
+            "Undifferentiated": "#279e68",
+        }
         assert rest.scales[0].order == ("Neutrophil", "Undifferentiated")
         assert rest.scales[0].palette == {
             "Neutrophil": full["Neutrophil"],
             "Undifferentiated": full["Undifferentiated"],
         }
-        assert full["Neutrophil"] != full["Monocyte"]
+        # The drawn curves, and the dashed parts beyond them, take those
+        # colors too.
+        drawn = rest.axes["order_0"].get_lines()
+        assert {
+            line.get_label(): to_hex(line.get_color())
+            for line in drawn
+            if not line.get_label().startswith("_")
+        } == {"Neutrophil": "#ff7f0e", "Undifferentiated": "#279e68"}
+        assert {to_hex(line.get_color()) for line in drawn} == {"#ff7f0e", "#279e68"}
     finally:
         every.close()
         rest.close()
 
 
 def _insert_masked_labels(store) -> None:
-    """Insert labels x and y, each monocyte's missing, with a placeholder z."""
+    """Insert labels x and y, each monocyte's missing, with a placeholder a."""
     if "masked_xy" not in store.cells.columns:
         insert_nullable_cell_column(
             store,
             "masked_xy",
             np.where(
                 TRUTH.cell_types == "Monocyte",
-                "z",
+                "a",
                 np.where(TRUTH.samples == "d2", "x", "y"),
             ),
             TRUTH.cell_types == "Monocyte",
@@ -639,12 +682,13 @@ def _insert_masked_labels(store) -> None:
 def test_missing_labels_take_no_color(truth) -> None:
     store, clones = truth.store, truth.clones
     _insert_masked_labels(store)
-    # A missing label, which would sort before x as the text of no label,
-    # takes no color.
+    # A missing label takes no color, neither as the text of no label nor as
+    # its placeholder a; either would sort before x and shift its color.
     result = store.plots.clone_abundance(clones, group_by="masked_xy", show=False)
     try:
         assert result.scales[0].order == ("x", "y")
         assert result.scales[0].palette == {"x": "#1f77b4", "y": "#ff7f0e"}
+        assert _line_colors(result.axes["sizes"]) == {"x": "#1f77b4", "y": "#ff7f0e"}
     finally:
         result.close()
 
@@ -664,7 +708,7 @@ def test_a_columns_labels_are_read_in_blocks(truth, monkeypatch) -> None:
 
     monkeypatch.setattr(groups_module, "iter_metadata_column_blocks", blocks)
     # Every label of the column from blocks of five rows, without the
-    # placeholder z of its missing rows, whose masks align with the blocks.
+    # placeholder a of its missing rows, whose masks align with the blocks.
     assert sorted(groups_module._column_labels(store, "masked_xy")) == ["x", "y"]
     assert sum(read) == N_CELLS and max(read) == 5
     assert sorted(groups_module._column_labels(store, "cell_type")) == sorted(
@@ -683,6 +727,45 @@ _PANELS = {
     "clone_coupling": ["matrix"],
     "clone_fate_bias": ["early", "fates"],
 }
+
+
+def _composed_entries(figure) -> dict[str, list[tuple[str, str]]]:
+    """Each legend that a composite draws, by title: its entries' texts and colors."""
+    return {
+        legend.get_title().get_text(): [
+            (text.get_text(), to_hex(handle.get_markerfacecolor()))
+            for text, handle in zip(
+                legend.get_texts(), legend.legend_handles, strict=True
+            )
+        ]
+        for legend in figure.legends
+    }
+
+
+def _reported_entries(result) -> dict[str, list[tuple[str, str]]]:
+    """Each categorical legend that a figure reports, by title: its scale's labels and colors, then the entry of values without a category."""
+    reported = {}
+    for legend, scale in zip(result.legends, result.scales, strict=True):
+        if legend.kind != "categorical":
+            continue
+        labels = scale.labels or {}
+        entries = [
+            (str(labels.get(value, value)), scale.palette[value])
+            for value in scale.order
+        ]
+        if legend.extras.get("missing"):
+            entries.append(
+                (scale.missing_label or "NA", scale.missing_color or "#bdbdbd")
+            )
+        reported[legend.label] = entries
+    return reported
+
+
+def _colorbar_labels(figure) -> list[str]:
+    """The label of each color bar of a figure, along its long side."""
+    return sorted(
+        ax.get_xlabel() or ax.get_ylabel() for ax in figure.axes if is_colorbar_axes(ax)
+    )
 
 
 @pytest.mark.parametrize("name", CLONE_FIGURES)
@@ -708,6 +791,12 @@ def test_each_figure_draws_in_a_composite_with_its_legends_once(truth, name) -> 
         colorbars = [ax for ax in figure.axes if is_colorbar_axes(ax)]
         assert len(colorbars) == kinds.count("colorbar")
         assert len(composite.legends) == len(result.legends)
+        # Each legend is redrawn as the figure reports it: its title, and its
+        # entries' words and colors in order; each color bar keeps its label.
+        assert _composed_entries(figure) == _reported_entries(result)
+        assert _colorbar_labels(figure) == sorted(
+            legend.label for legend in result.legends if legend.kind == "colorbar"
+        )
         # The composite names every axis that the figure still draws, a
         # matrix's tree included, and none of the color bars it replaced.
         assert {key for _, key in composite.axes} == {
@@ -1922,6 +2011,26 @@ def test_genotype_calls_take_one_palette_with_one_gray_for_no_value(variants) ->
         ]
         assert "wild_type" in set(result.tables["calls"]["call"])
         assert "wild_type" in set(result.tables["cells"]["call"])
+        # Each entry and each bar part of a call takes the call's color, the
+        # calls without evidence among them in their grays.
+        hexes = {
+            "wild_type": "#4c78a8",
+            "heterozygous": "#f58518",
+            "homozygous_alternative": "#e45756",
+            "alternative_present": "#b279a2",
+            "missing": "#bdbdbd",
+            "filtered": "#e2e2e2",
+        }
+        assert {"missing", "filtered"} & set(held)
+        assert [to_hex(handle.get_facecolor()) for handle in legend.legend_handles] == [
+            hexes[call] for call in held
+        ]
+        calls = result.tables["calls"]
+        assert {
+            to_hex(patch.get_facecolor())
+            for patch in result.axes["calls"].patches
+            if patch.get_width() > 0
+        } == {hexes[call] for call in set(calls.loc[calls["share"] > 0, "call"])}
     finally:
         result.close()
 
@@ -2145,6 +2254,12 @@ def test_each_variant_figure_draws_in_a_composite_with_its_legends_once(
         colorbars = [ax for ax in figure.axes if is_colorbar_axes(ax)]
         assert len(colorbars) == kinds.count("colorbar")
         assert len(composite.legends) == len(result.legends)
+        # Each legend is redrawn as the figure reports it: its title, and its
+        # entries' words and colors in order; each color bar keeps its label.
+        assert _composed_entries(figure) == _reported_entries(result)
+        assert _colorbar_labels(figure) == sorted(
+            legend.label for legend in result.legends if legend.kind == "colorbar"
+        )
         # The composite names every axis that the figure still draws, a
         # strip of clone colors included, and none of the color bars it
         # replaced.

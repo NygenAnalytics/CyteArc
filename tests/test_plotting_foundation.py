@@ -2569,6 +2569,57 @@ def test_per_sample_composition_uses_foreign_panel_and_condition_summary(
     plt.close(figure)
 
 
+@pytest.mark.parametrize("condition_by", [None, "condition"])
+def test_per_sample_composition_hides_its_legends_or_its_summary(
+    synthetic_plot_store, condition_by
+):
+    from matplotlib.legend import Legend
+
+    def drawn_legends(result):
+        legends = list(result.figure.legends) + [
+            artist
+            for ax in result.figure.axes
+            for artist in ax.get_children()
+            if isinstance(artist, Legend)
+        ]
+        return sorted(legend.get_title().get_text() for legend in legends)
+
+    options = {
+        "category_by": "category_complete",
+        "sample_by": "sample",
+        "condition_by": condition_by,
+        "kind": "per_sample",
+        "show": False,
+    }
+    shown = splt.composition(synthetic_plot_store, **options)
+    hidden = splt.composition(synthetic_plot_store, show_legend=False, **options)
+    bare = splt.composition(synthetic_plot_store, show_summary=False, **options)
+    try:
+        blocks = ["Condition"] if condition_by else []
+        assert drawn_legends(shown) == sorted(["category_complete", *blocks, "Summary"])
+        # A hidden legend is drawn nowhere and still reported.
+        assert drawn_legends(hidden) == []
+        assert hidden.legends == shown.legends
+        # Without the summary, its markers are neither drawn nor listed.
+        assert "summary" in shown.tables and "summary" not in bare.tables
+        assert drawn_legends(bare) == sorted(["category_complete", *blocks])
+
+        def error_bars(result):
+            return [
+                type(container).__name__
+                for container in result.axes["composition"].containers
+            ]
+
+        assert error_bars(shown) and set(error_bars(shown)) == {"ErrorbarContainer"}
+        assert error_bars(bare) == []
+        pd.testing.assert_frame_equal(
+            bare.tables["per_sample"], shown.tables["per_sample"]
+        )
+    finally:
+        for result in (shown, hidden, bare):
+            result.close()
+
+
 def test_composition_summary_uncertainty_handles_singleton_groups():
     from cytearc.plotting.composition import _summarize_proportions
 
