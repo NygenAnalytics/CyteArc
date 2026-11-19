@@ -39,7 +39,6 @@ from ._h5ad_columns import (
     column_categories,
     column_encoding,
     column_length,
-    column_order,
     column_place,
     decoded_column,
     index_key,
@@ -285,11 +284,12 @@ class H5adReader:
                 self.obsmAttrsKey: self._validate_group(self.obsmAttrsKey),
                 self.matrixKey: self._matrix_slot_code(),
             }
-            # A malformed column-order must fail here, before a writer opens
-            # its destination.
+            # A malformed column-order, and an attribute or a member name of a
+            # table that is not UTF-8 text, must fail here, before a writer
+            # opens its destination.
             for group in (self.cellAttrsKey, self.featureAttrsKey):
                 if self.groupCodes[group] == 2:
-                    column_order(self.h5[group])
+                    table_members(self.h5[group])
             self.matrixOrientation = self._validate_sparse_matrix()
             self.sourceMatrixDtype: Any = self._get_matrix_dtype()
             # The rows that consume yields from local disk: a CSC matrix's

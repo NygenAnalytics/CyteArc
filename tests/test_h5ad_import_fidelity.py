@@ -1079,26 +1079,6 @@ def test_an_import_split_by_feature_type_refuses_before_it_writes(
             "'description' of 'inspected.h5ad' holds b'caf\\xe9'",
             id="feature-column",
         ),
-        pytest.param(
-            {"uns/title": np.bytes_(b"Caf\xe9 atlas")},
-            "H5AD titles and descriptions must be UTF-8 text; uns/title of "
-            "'inspected.h5ad' holds b'Caf\\xe9 atlas'",
-            id="title",
-        ),
-        pytest.param(
-            # One element of variable length, as AnnData writes a list.
-            {"uns/description": _text(b"\xffcells")},
-            "H5AD titles and descriptions must be UTF-8 text; uns/description of "
-            "'inspected.h5ad' holds b'\\xffcells'",
-            id="description",
-        ),
-        pytest.param(
-            # Read as the description of a file without one.
-            {"uns/citation": np.bytes_(b"S\xe3o Paulo")},
-            "H5AD titles and descriptions must be UTF-8 text; uns/citation of "
-            "'inspected.h5ad' holds b'S\\xe3o Paulo'",
-            id="citation",
-        ),
     ],
 )
 def test_inspection_refuses_text_that_is_not_utf8(
@@ -1113,6 +1093,60 @@ def test_inspection_refuses_text_that_is_not_utf8(
     # Inspection used to raise the UnicodeDecodeError of a decode.
     assert type(refused.value) is ValueError
     assert str(refused.value) == message
+
+
+@pytest.mark.parametrize(
+    ("members", "title", "description", "warning"),
+    [
+        pytest.param(
+            {
+                "uns/title": np.bytes_(b"Caf\xe9 atlas"),
+                "uns/description": np.bytes_(b"ok"),
+            },
+            None,
+            "ok",
+            "Leaving out uns/title of 'inspected.h5ad': it holds b'Caf\\xe9 atlas', "
+            "which is not UTF-8 text",
+            id="title",
+        ),
+        pytest.param(
+            # One element of variable length, as AnnData writes a list. The
+            # citation stands in for it, as for a file without a description.
+            {
+                "uns/description": _text(b"\xffcells"),
+                "uns/citation": np.bytes_(b"Smith 2026"),
+            },
+            None,
+            "Smith 2026",
+            "Leaving out uns/description of 'inspected.h5ad': it holds "
+            "b'\\xffcells', which is not UTF-8 text",
+            id="description",
+        ),
+        pytest.param(
+            {"uns/citation": np.bytes_(b"S\xe3o Paulo")},
+            None,
+            None,
+            "Leaving out uns/citation of 'inspected.h5ad': it holds b'S\\xe3o Paulo', "
+            "which is not UTF-8 text",
+            id="citation",
+        ),
+    ],
+)
+def test_inspection_leaves_out_uns_text_that_is_not_utf8_and_the_file_imports(
+    tmp_path, monkeypatch, members, title, description, warning
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    path = _h5ad_with(Path("inspected.h5ad"), members)
+
+    # An import never reads them, so inspection used to refuse a file that
+    # imports, with the UnicodeDecodeError of a decode.
+    with _warnings() as messages:
+        inspection = inspect_h5ad(path)
+
+    assert (inspection.title, inspection.description) == (title, description)
+    assert [message.rstrip("\n") for message in messages] == [warning]
+    store, _result = _import(path, tmp_path / "inspected.zarr")
+    assert store.cells.fetch_all("ids").tolist() == _WRITTEN_IDS["cell_ids"]
 
 
 @pytest.mark.parametrize("shuffle_cells", [False, True], ids=["file", "shuffled"])
@@ -1595,28 +1629,179 @@ def test_an_import_refuses_a_membership_column_name_that_is_not_utf8(
     assert not (tmp_path / "refused.zarr").exists()
 
 
-def test_colors_that_are_not_utf8_import_as_a_file_without_colors(tmp_path) -> None:
+def test_colors_that_are_not_utf8_import_as_colors_that_are_not_colors(
+    tmp_path,
+) -> None:
     kind = {
         "codes": np.array([0, 1, 0, 1], dtype=np.int8),
         "categories": _text(b"a", b"b"),
     }
     displays = {}
+    warnings = {}
     for name, members in (
         ("plain", {"obs/kind": kind}),
-        ("colors", {"obs/kind": kind, "uns/kind_colors": _text(b"#f00", b"#0\xe90")}),
+        (
+            "nonsense",
+            {"obs/kind": kind, "uns/kind_colors": _text(b"#f00", b"nonsense")},
+        ),
+        ("bytes", {"obs/kind": kind, "uns/kind_colors": _text(b"#f00", b"#0\xe90")}),
     ):
         path = _h5ad_with(tmp_path / f"{name}.h5ad", members)
         reader = H5adReader(path)
         try:
-            H5adToZarr(
-                reader, str(tmp_path / f"{name}.zarr"), nthreads=1, shuffle_cells=False
-            ).dump()
+            with _warnings() as messages:
+                H5adToZarr(
+                    reader,
+                    str(tmp_path / f"{name}.zarr"),
+                    nthreads=1,
+                    shuffle_cells=False,
+                ).dump()
         finally:
             reader.close()
         root = zarr.open_group(str(tmp_path / f"{name}.zarr"), mode="r")
         displays[name] = root["cellData/kind"].attrs["display"]
+        warnings[name] = messages
 
-    assert displays["colors"] == displays["plain"]
+    # Colors that are not colors take the palette, without a warning, as a
+    # file without colors does; the import used to stop at bytes that are not
+    # UTF-8 with a UnicodeDecodeError after it created the store.
+    assert displays["bytes"] == displays["nonsense"] == displays["plain"]
+    assert warnings["bytes"] == warnings["nonsense"] == warnings["plain"]
+
+
+def _rename(table: str, name: bytes) -> Any:
+    """Return an edit that adds a member named ``name`` to ``table``."""
+
+    def edit(h5: h5py.File) -> None:
+        h5[table].create_dataset(name, data=np.arange(len(h5[table]["_index"])))
+
+    return edit
+
+
+def _attribute(table: str, name: str, value: Any, *, text: bool = False) -> Any:
+    """Return an edit that sets an attribute of ``table``, as text of variable length with ``text``."""
+
+    def edit(h5: h5py.File) -> None:
+        if text:
+            h5[table].attrs.create(name, value, dtype=h5py.string_dtype())
+        else:
+            h5[table].attrs[name] = value
+
+    return edit
+
+
+def _nested_member(h5: h5py.File) -> None:
+    # Old AnnData nested a column named "a/b" into groups, which also hold a
+    # member whose name is not UTF-8 text.
+    group = h5["obs"].create_group("a")
+    group.create_dataset("b", data=np.arange(4))
+    group.create_dataset(b"x\xe9", data=np.arange(4))
+    h5["obs"].attrs.create("column-order", ["a/b"], dtype=h5py.string_dtype())
+
+
+@pytest.mark.parametrize(
+    ("edit", "message"),
+    [
+        pytest.param(
+            _attribute("obs", "column-order", np.array([b"k\xe9"])),
+            "H5AD column names must be UTF-8 text; the column-order attribute of "
+            "the obs table of 'refused.h5ad' holds b'k\\xe9'",
+            id="fixed-width-column-order",
+        ),
+        pytest.param(
+            # h5py reads text of variable length that is not UTF-8 as lone
+            # surrogates, which reached the store's column names unrefused.
+            _attribute(
+                "var", "column-order", np.array([b"k\xe9"], dtype=object), text=True
+            ),
+            "H5AD column names must be UTF-8 text; the column-order attribute of "
+            "the var table of 'refused.h5ad' holds b'k\\xe9'",
+            id="column-order-of-variable-length",
+        ),
+        pytest.param(
+            _attribute("var", "_index", np.bytes_(b"_ind\xe9")),
+            "H5AD column names must be UTF-8 text; the _index attribute of the var "
+            "table of 'refused.h5ad' holds b'_ind\\xe9'",
+            id="fixed-width-index-attribute",
+        ),
+        pytest.param(
+            _attribute("obs", "_index", b"_ind\xe9", text=True),
+            "H5AD column names must be UTF-8 text; the _index attribute of the obs "
+            "table of 'refused.h5ad' holds b'_ind\\xe9'",
+            id="index-attribute-of-variable-length",
+        ),
+        pytest.param(
+            _rename("obs", b"n\xe9"),
+            "H5AD column names must be UTF-8 text; the obs table of 'refused.h5ad' "
+            "holds a member named b'n\\xe9'",
+            id="cell-column-name",
+        ),
+        pytest.param(
+            _rename("var", b"n\xe9"),
+            "H5AD column names must be UTF-8 text; the var table of 'refused.h5ad' "
+            "holds a member named b'n\\xe9'",
+            id="feature-column-name",
+        ),
+        pytest.param(
+            _nested_member,
+            "H5AD column names must be UTF-8 text; the obs table of 'refused.h5ad' "
+            "holds a member named b'a/x\\xe9'",
+            id="nested-member-name",
+        ),
+    ],
+)
+def test_table_names_that_are_not_utf8_are_refused_when_the_reader_opens(
+    tmp_path, monkeypatch, edit, message
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    path = _h5ad_with(Path("refused.h5ad"), {})
+    with h5py.File(path, "r+") as h5:
+        edit(h5)
+
+    with pytest.raises(ValueError) as refused_read:
+        H5adReader(path)
+    with pytest.raises(ValueError) as refused_inspection:
+        inspect_h5ad(path)
+
+    # Both used to raise the UnicodeDecodeError of a decode or a TypeError, or
+    # took a name of variable length for a column name that no store holds.
+    for refused in (refused_read, refused_inspection):
+        assert type(refused.value) is ValueError
+        assert str(refused.value) == message
+
+
+def test_names_outside_the_tables_that_are_not_utf8_leave_the_file_importable(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    path = _h5ad_with(Path("names.h5ad"), {})
+    with h5py.File(path, "r+") as h5:
+        layers = h5.require_group("layers")
+        layers.create_dataset(b"c\xe9", data=np.ones((4, 3), dtype=np.float32))
+        layers.create_dataset("counts", data=np.ones((4, 3), dtype=np.float32))
+        sparse = layers.create_group(b"s\xe9")
+        matrix = csr_matrix(np.ones((4, 3), dtype=np.float32))
+        sparse.attrs.update({"encoding-type": "csr_matrix", "shape": matrix.shape})
+        for part in ("data", "indices", "indptr"):
+            sparse.create_dataset(part, data=getattr(matrix, part))
+        h5["uns"].create_dataset(b"u\xe9", data=np.arange(3))
+        h5["obsm"].create_dataset(b"X_\xe9", data=np.ones((4, 2)))
+
+    with _warnings() as messages:
+        inspection = inspect_h5ad(path)
+
+    # A matrix that no reader argument can name is no candidate, and the
+    # search for matrices used to raise a TypeError at its path.
+    warned = [message.rstrip("\n") for message in messages]
+    for layer in ("c", "s"):
+        assert (
+            f"Ignoring matrix candidate b'layers/{layer}\\xe9': its path is not UTF-8 "
+            "text" in warned
+        )
+    assert inspection.layers == ("counts",)
+    assert "layers/counts" in inspection.matrixCandidates
+    store, _result = _import(path, tmp_path / "names.zarr")
+    assert store.cells.fetch_all("ids").tolist() == _WRITTEN_IDS["cell_ids"]
 
 
 @pytest.mark.parametrize(
@@ -1740,6 +1925,64 @@ def test_colors_that_are_not_utf8_import_as_a_file_without_colors(tmp_path) -> N
             {"cell_ids": ["5", "6", "7", "8"], "feat_ids": ["g0", "g1", "g2"]},
             id="integer-cell-ids",
         ),
+        pytest.param(
+            # One missing value leaves the other IDs unique, so inspection
+            # takes the index for the IDs.
+            {
+                "obs/_index": {
+                    "values": _text(b"c0", b"", b"c2", b"c3"),
+                    "mask": np.array([False, True, False, False]),
+                }
+            },
+            "The cell IDs in the obs index '_index' include missing or blank "
+            "values, the first in row 2. An import refuses cells without an ID",
+            "H5AD cell IDs must contain non-empty values; row 2 of the obs index "
+            "'_index' of 'inspected.h5ad' is missing or blank",
+            id="one-missing-cell-id-of-unique-ones",
+        ),
+        pytest.param(
+            {"obs/_index": _text(b"c0", b"c1", b"c2", b" ")},
+            "The cell IDs in the obs index '_index' include missing or blank "
+            "values, the first in row 4. An import refuses cells without an ID",
+            "H5AD cell IDs must contain non-empty values; row 4 of the obs index "
+            "'_index' of 'inspected.h5ad' is missing or blank",
+            id="one-blank-cell-id-of-unique-ones",
+        ),
+        pytest.param(
+            # The index repeats, so inspection takes the barcodes for the IDs.
+            {
+                "obs/_index": _text(b"c0", b"c0", b"c2", b"c3"),
+                "obs/barcode": _text(b"AC", b"", b"GT", b"TT"),
+            },
+            "The cell IDs in the obs column 'barcode' include missing or blank "
+            "values, the first in row 2. An import refuses cells without an ID",
+            "H5AD cell IDs must contain non-empty values; row 2 of the obs column "
+            "'barcode' of 'inspected.h5ad' is missing or blank",
+            id="blank-cell-id-in-a-barcode-column",
+        ),
+        pytest.param(
+            {
+                "var/_index": {
+                    "values": _text(b"g0", b"g1", b""),
+                    "mask": np.array([False, False, True]),
+                }
+            },
+            "The feature IDs in the var index '_index' include missing or blank "
+            "values, the first in row 3. An import refuses features without an ID",
+            "H5AD feature IDs must contain non-empty values; row 3 of the var "
+            "index '_index' of 'inspected.h5ad' is missing or blank",
+            id="one-missing-feature-id-of-unique-ones",
+        ),
+        pytest.param(
+            # An ID column wins over the index of symbols.
+            {"var/gene_ids": _text(b"E0", b" ", b"E2")},
+            "The feature IDs in the var column 'gene_ids' include missing or "
+            "blank values, the first in row 2. An import refuses features without "
+            "an ID",
+            "H5AD feature IDs must contain non-empty values; row 2 of the var "
+            "column 'gene_ids' of 'inspected.h5ad' is missing or blank",
+            id="blank-feature-id-in-an-id-column",
+        ),
     ],
 )
 def test_inspection_warns_what_an_import_does_with_an_index_of_ids(
@@ -1752,7 +1995,8 @@ def test_inspection_warns_what_an_import_does_with_an_index_of_ids(
         inspection = inspect_h5ad(path)
 
     # Inspection used to warn that the IDs of a floating-point index repeat,
-    # and that a feature index of numbers left the features generated IDs.
+    # and that a feature index of numbers left the features generated IDs,
+    # and it took IDs with one missing or blank value without a warning.
     id_warnings = [message.rstrip("\n") for message in messages if " ID" in message]
     assert id_warnings == ([] if warning is None else [warning])
     reader = H5adReader.from_inspect(inspection)

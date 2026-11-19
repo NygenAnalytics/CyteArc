@@ -1,6 +1,5 @@
-import math
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, TypeIs
 
 import h5py
 import numpy as np
@@ -55,9 +54,8 @@ _CELL_ID_KEYS = (
     "barcodes",
 )
 _LEGACY_CATEGORY_GROUPS = ("__categories", "categories")
-# How inspection's refusals of text that is not UTF-8 start.
+# How inspection's refusal of text that is not UTF-8 starts.
 _TABLE_TEXT = "H5AD tables must hold UTF-8 text"
-_SCALAR_TEXT = "H5AD titles and descriptions must be UTF-8 text"
 _NON_MATRIX_PREFIXES = (
     "obs/",
     "var/",
@@ -226,13 +224,29 @@ def _is_matrix_path(key: str) -> bool:
     return not key.startswith(_NON_MATRIX_PREFIXES)
 
 
+def _unnamed_matrix(key: str | bytes) -> TypeIs[bytes]:
+    """Return whether a matrix's path is not UTF-8 text, warning that it is ignored.
+
+    h5py gives such a path as bytes, which no reader argument can name.
+    """
+    if isinstance(key, str):
+        return False
+    logger.warning(
+        f"Ignoring matrix candidate {quoted_value(key)}: its path is not UTF-8 text"
+    )
+    return True
+
+
 def _matrix_candidates(h5: h5py.File) -> list[_MatrixCandidate]:
     candidates: list[_MatrixCandidate] = []
 
-    def visit(key: str, node: h5py.Group | h5py.Dataset) -> None:
-        if not _is_matrix_path(key):
+    def visit(key: str | bytes, node: h5py.Group | h5py.Dataset) -> None:
+        path = key if isinstance(key, str) else key.decode("utf-8", "backslashreplace")
+        if not _is_matrix_path(path):
             return
         if isinstance(node, h5py.Group) and SPARSE_KEYS.issubset(node.keys()):
+            if _unnamed_matrix(key):
+                return
             encoding = sparse_encoding(node)
             if encoding is None:
                 logger.warning(
@@ -262,7 +276,7 @@ def _matrix_candidates(h5: h5py.File) -> list[_MatrixCandidate]:
             and node.shape is not None
             and len(node.shape) == 2
         ):
-            if not np.issubdtype(node.dtype, np.number):
+            if not np.issubdtype(node.dtype, np.number) or _unnamed_matrix(key):
                 return
             integer_like, total = _dense_counts(node)
             candidates.append(
@@ -410,13 +424,43 @@ _VALUE_KINDS = {
 }
 
 
-def _is_missing_id(value: Any) -> bool:
-    """Return whether an import refuses a value as an ID because it is missing or blank."""
-    if value is None:
-        return True
-    if isinstance(value, float | np.floating):
-        return math.isnan(value)
-    return isinstance(value, str | bytes) and not _as_text(value).strip()
+def _first_missing_id(values: np.ndarray) -> int | None:
+    """Return the first row, from 0, whose value an import refuses as an ID, or None.
+
+    An import refuses a missing ID, None or NaN, and a blank one, text that
+    is empty or only whitespace. The values' text is UTF-8, which reading
+    them checked.
+    """
+    if values.dtype.kind in "biu":
+        return None
+    # One loop with its tests inline: a call per value took several times as
+    # long.
+    for row, value in enumerate(values.tolist()):
+        if value is None or value != value:
+            return row
+        if isinstance(value, bytes):
+            value = value.decode("utf-8")
+        if isinstance(value, str) and not value.strip():
+            return row
+    return None
+
+
+def _warn_of_missing_ids(
+    values: np.ndarray | None, key: str, *, table: str, item: str, index: bool
+) -> None:
+    """Warn that an import refuses the missing or blank IDs of the column that inspection chose.
+
+    A column whose IDs are unique but for one missing value, or that holds
+    blank values that differ, passes the search for unique IDs.
+    """
+    row = None if values is None else _first_missing_id(values)
+    if row is not None:
+        kind = "index" if index else "column"
+        logger.warning(
+            f"The {item} IDs in the {table} {kind} {key!r} include missing or "
+            f"blank values, the first in row {row + 1}. An import refuses "
+            f"{item}s without an ID"
+        )
 
 
 def _index_warning(
@@ -452,11 +496,11 @@ def _index_warning(
         return f"{subject} cannot be read, and {others}. An import refuses the file"
     # The values as the import reads them, such as Python floats.
     held = values.astype(object).tolist()
-    missing = [row for row, value in enumerate(held) if _is_missing_id(value)]
-    if missing:
+    missing = _first_missing_id(values)
+    if missing is not None:
         return (
             f"{subject} include missing or blank values, the first in row "
-            f"{missing[0] + 1}, and {others}. An import refuses {item}s without "
+            f"{missing + 1}, and {others}. An import refuses {item}s without "
             "an ID"
         )
     texts = [_as_text(value) for value in held]
@@ -481,15 +525,19 @@ def _find_cell_ids(
         return "_index"
     names = table_column_names(node)
     index = _table_index(node, names)
+    table = node.name.strip("/")
     index_values = None if index is None else _read_column(node, index)
     if index is not None and _is_identifier_column(index_values, n_cells):
+        _warn_of_missing_ids(index_values, index, table=table, item="cell", index=True)
         return index
     normalized = {name.lower(): name for name in names}
     for preferred in _CELL_ID_KEYS:
         name = normalized.get(preferred)
-        if name is not None and _is_identifier_column(
-            _read_column(node, name), n_cells
-        ):
+        values = None if name is None else _read_column(node, name)
+        if name is not None and _is_identifier_column(values, n_cells):
+            _warn_of_missing_ids(
+                values, name, table=table, item="cell", index=name == index
+            )
             return name
 
     # Other columns hold IDs only as text: a column of distinct numbers, such
@@ -497,6 +545,9 @@ def _find_cell_ids(
     for name in sorted(names):
         values = _read_column(node, name)
         if _is_unique_text(values, n_cells):
+            _warn_of_missing_ids(
+                values, name, table=table, item="cell", index=name == index
+            )
             return name
 
     if index is not None:
@@ -504,7 +555,7 @@ def _find_cell_ids(
             _index_warning(
                 index_values,
                 index,
-                table=node.name.strip("/"),
+                table=table,
                 item="cell",
                 others="no other column holds unique text IDs",
                 stored="the cell's ID",
@@ -646,6 +697,13 @@ def _find_features(
         name_key = id_key
     assert id_key is not None
     assert name_key is not None
+    _warn_of_missing_ids(
+        columns.values(id_key),
+        id_key,
+        table=node.name.strip("/"),
+        item="feature",
+        index=id_key == index,
+    )
     return id_key, name_key
 
 
@@ -666,9 +724,9 @@ def _read_text_scalar(
 ) -> str | None:
     """Return a scalar or one-element text dataset, or None for any other node.
 
-    Raises:
-        ValueError: If the value is bytes that are not UTF-8 text, naming
-            the dataset and the file.
+    An import never reads such a dataset, so bytes that are not UTF-8 text
+    are left out with a warning that names the dataset and the file, and
+    None is returned, as for a file without the dataset.
     """
     node = h5.get(key)
     if not isinstance(node, h5py.Dataset) or node.shape not in {(), (1,)}:
@@ -678,10 +736,11 @@ def _read_text_scalar(
         try:
             value = value.decode("utf-8")
         except UnicodeDecodeError:
-            raise ValueError(
-                f"{_SCALAR_TEXT}; {key} of {quoted_value(h5.filename)} holds "
-                f"{quoted_value(bytes(value))}"
-            ) from None
+            logger.warning(
+                f"Leaving out {key} of {quoted_value(h5.filename)}: it holds "
+                f"{quoted_value(bytes(value))}, which is not UTF-8 text"
+            )
+            return None
     return _as_text(value)[:max_length]
 
 
@@ -768,8 +827,12 @@ def inspect_h5ad(
     and a warning says what an import does with it: it refuses missing or
     blank IDs, renames repeated ones only with ``duplicate_cell_ids`` or
     ``duplicate_feature_ids`` set to ``"make_unique"``, and stores other
-    values, such as floating-point numbers, as their text. Only a table
-    without an index gets generated IDs.
+    values, such as floating-point numbers, as their text. A column of IDs
+    that holds missing or blank values, such as an index of unique text but
+    for one missing ID, gets a warning that an import refuses them. Only a
+    table without an index gets generated IDs. An import never reads the
+    title or description in ``uns``, so one that is not UTF-8 text is left
+    out with a warning.
 
     Args:
         h5ad_fn: Path to the H5AD file.
@@ -783,10 +846,10 @@ def inspect_h5ad(
 
     Raises:
         ValueError: If no matrix matches the ``obs`` and ``var`` tables,
-            ``matrix_key`` names no matrix, or a column that inspection reads
-            to find the IDs and names holds bytes that are not UTF-8 text,
-            which an import refuses, or so does the title or description
-            that ``uns`` holds.
+            ``matrix_key`` names no matrix, or what an import refuses is not
+            UTF-8 text: a column that inspection reads to find the IDs and
+            names, or the ``column-order`` or ``_index`` attribute or a
+            member name of a table.
     """
     with h5py.File(h5ad_fn, mode="r") as h5:
         candidates = _matrix_candidates(h5)
@@ -853,8 +916,11 @@ def inspect_h5ad(
                         suggested_assays = _suggested_assays(feature_types)
 
         layers_node = h5.get("layers")
+        # h5py gives a name that is not UTF-8 text as bytes, which no reader
+        # argument can name; the search for matrices warns of such a layer
+        # when it holds a matrix.
         layers = (
-            tuple(sorted(layers_node.keys()))
+            tuple(sorted(key for key in layers_node.keys() if isinstance(key, str)))
             if isinstance(layers_node, h5py.Group)
             else ()
         )

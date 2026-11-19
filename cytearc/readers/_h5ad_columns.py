@@ -48,6 +48,63 @@ def column_place(path: str, table: str, key: str, *, index: bool) -> str:
     return f"the {table} {kind} {key!r} of {quoted_value(path)}"
 
 
+# How the refusal of a name that is not UTF-8 text starts.
+_NAME_TEXT = "H5AD column names must be UTF-8 text"
+
+
+def _table_place(table: h5py.Group) -> str:
+    """Name a table of an H5AD file as refusals name it, such as ``the obs table of 'pbmc.h5ad'``."""
+    name = str(table.name).strip("/")
+    return f"the {name} table of {quoted_value(table.file.filename)}"
+
+
+def _name_text(value: Any, refusal: Callable[[bytes], ValueError]) -> str:
+    """Return a name that h5py read from an attribute or a link, as text.
+
+    h5py gives a name whose bytes are not UTF-8 text as bytes, or, from a
+    text attribute, as text that holds each such byte as a lone surrogate.
+
+    Raises:
+        ValueError: As ``refusal`` refuses the bytes of such a name.
+    """
+    if isinstance(value, bytes):
+        try:
+            return value.decode("utf-8")
+        except UnicodeDecodeError:
+            raise refusal(bytes(value)) from None
+    text = str(value)
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        # The escape gives back the bytes that the surrogates stand for.
+        raise refusal(text.encode("utf-8", "surrogateescape")) from None
+    return text
+
+
+def _member_name(table: h5py.Group, name: Any, group: str = "") -> str:
+    """Return the name of a member of a table, refusing one that is not UTF-8 text.
+
+    Args:
+        table: The table.
+        name: The member's name as h5py gives it.
+        group: The path, within the table, of the group that holds the
+            member, or an empty string for the table itself.
+
+    Raises:
+        ValueError: If the name is not UTF-8 text, naming the table and the
+            member's path within it.
+    """
+
+    def refusal(raw: bytes) -> ValueError:
+        member = b"/".join([group.encode(), raw]) if group else raw
+        return ValueError(
+            f"{_NAME_TEXT}; {_table_place(table)} holds a member named "
+            f"{quoted_value(member)}"
+        )
+
+    return _name_text(name, refusal)
+
+
 @dataclass(frozen=True, slots=True)
 class H5adTableMembers:
     """Children of an H5AD dataframe group, found without reading values.
@@ -73,8 +130,17 @@ def column_order(table: h5py.Group) -> tuple[str, ...] | None:
         The listed names without repeats, or None when the attribute is absent.
 
     Raises:
-        ValueError: If the attribute holds values that are not text.
+        ValueError: If the attribute holds values that are not text, or a
+            name that is not UTF-8 text, naming the table and the name's
+            bytes.
     """
+
+    def refusal(name: bytes) -> ValueError:
+        return ValueError(
+            f"{_NAME_TEXT}; the column-order attribute of {_table_place(table)} "
+            f"holds {quoted_value(name)}"
+        )
+
     raw = table.attrs.get("column-order")
     if raw is None:
         return None
@@ -86,7 +152,7 @@ def column_order(table: h5py.Group) -> tuple[str, ...] | None:
                 f"H5AD table {table.name!r} has a column-order attribute that "
                 "does not list column names"
             )
-        names.append(as_text(value))
+        names.append(_name_text(value, refusal))
     return tuple(dict.fromkeys(names))
 
 
@@ -114,6 +180,11 @@ def table_members(table: h5py.Group) -> H5adTableMembers:
 
     Returns:
         The resolved members and the listed names that resolve to nothing.
+
+    Raises:
+        ValueError: If ``column-order`` does not list text, or it, the
+            ``_index`` attribute or the name of a member is not UTF-8 text,
+            naming the table and the attribute or the member.
     """
     order = column_order(table)
     listed: tuple[str, ...] = () if order is None else order
@@ -137,7 +208,8 @@ def table_members(table: h5py.Group) -> H5adTableMembers:
         for name in resolved
         for depth in range(1, name.count("/") + 1)
     }
-    for name in table.keys():
+    for key in table.keys():
+        name = _member_name(table, key)
         if name in resolved:
             continue
         node = table[name]
@@ -145,26 +217,30 @@ def table_members(table: h5py.Group) -> H5adTableMembers:
         # through it. A group of nested levels is dropped only when resolved
         # names cover everything in it; otherwise the reader reports it.
         if name in levels and not is_column(node):
-            if _holds_only(node, name, resolved, levels):
+            if _holds_only(table, node, name, resolved, levels):
                 continue
         members.append((name, node))
     return H5adTableMembers(tuple(members), tuple(unresolved))
 
 
 def _holds_only(
+    table: h5py.Group,
     group: h5py.Group,
     path: str,
     resolved: set[str],
     levels: set[str],
 ) -> bool:
-    """Return whether resolved names cover every member under ``group``."""
-    for child in group.keys():
+    """Return whether resolved names cover every member under ``group`` of ``table``."""
+    for key in group.keys():
+        child = _member_name(table, key, path)
         child_path = f"{path}/{child}"
         if child_path in resolved:
             continue
         node = group[child]
         if child_path in levels and isinstance(node, h5py.Group):
-            if not is_column(node) and _holds_only(node, child_path, resolved, levels):
+            if not is_column(node) and _holds_only(
+                table, node, child_path, resolved, levels
+            ):
                 continue
         return False
     return True
@@ -208,11 +284,23 @@ def column_length(node: Any) -> int | None:
 
 
 def index_key(table: Any) -> str | None:
-    """Return the dataframe index name that AnnData records in ``_index``."""
+    """Return the dataframe index name that AnnData records in ``_index``.
+
+    Raises:
+        ValueError: If the name is not UTF-8 text, naming the table and the
+            name's bytes.
+    """
     if not isinstance(table, h5py.Group):
         return None
+
+    def refusal(name: bytes) -> ValueError:
+        return ValueError(
+            f"{_NAME_TEXT}; the _index attribute of {_table_place(table)} holds "
+            f"{quoted_value(name)}"
+        )
+
     value = table.attrs.get("_index")
-    return None if value is None else as_text(value)
+    return None if value is None else _name_text(value, refusal)
 
 
 def decode_categories(
