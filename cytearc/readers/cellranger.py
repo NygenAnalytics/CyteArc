@@ -39,8 +39,10 @@ from ..utils.arrays import (
 from ..utils.count_values import (
     CountValueRange,
     compressed_count_ranges,
+    longest_vector_refusal,
     new_count_ranges,
 )
+from ..utils.memory_budget import MemoryBudgetError
 from ..utils.arguments import bool_argument
 from ._row_spill import checked_destinations, row_spill_plan, sample_rows, spill_rows
 from ._sparse import SparseRowStore, encoded_entry_bytes
@@ -652,6 +654,11 @@ class CrH5Reader(CrReader):
         ``consumer`` receives each block of selected barcodes as the scan
         reads it, by the position of its first barcode among the selected
         ones; the barcodes between them, which hold no values, are left out.
+
+        Raises:
+            MemoryBudgetError: If ``maxBytes`` cannot hold one selected
+                barcode. It names the budget of the longest selected barcode,
+                whichever run holds it, so that budget scans every run.
         """
         valid_idx = self.validBarcodeIdx
         assert valid_idx is not None
@@ -660,23 +667,29 @@ class CrH5Reader(CrReader):
         indptr = self._source_indptr()
         gaps = indptr[valid_idx[1:]] != indptr[valid_idx[:-1] + 1]
         bounds = np.r_[0, np.flatnonzero(gaps) + 1, valid_idx.size]
-        for left, right in zip(bounds[:-1], bounds[1:]):
-            compressed_count_ranges(
-                indptr[int(valid_idx[left]) : int(valid_idx[right - 1]) + 2],
-                self.grp["indices"],
-                self.grp["data"],
-                minorSize=self.nFeatures,
-                maxBytes=maxBytes,
-                groups=featureGroups,
-                valueRanges=value_ranges,
-                consumer=(
-                    None
-                    if consumer is None
-                    else _selected_barcodes(
-                        consumer, valid_idx[int(left) : int(right)], int(left)
-                    )
-                ),
-            )
+        try:
+            for left, right in zip(bounds[:-1], bounds[1:]):
+                compressed_count_ranges(
+                    indptr[int(valid_idx[left]) : int(valid_idx[right - 1]) + 2],
+                    self.grp["indices"],
+                    self.grp["data"],
+                    minorSize=self.nFeatures,
+                    maxBytes=maxBytes,
+                    groups=featureGroups,
+                    valueRanges=value_ranges,
+                    consumer=(
+                        None
+                        if consumer is None
+                        else _selected_barcodes(
+                            consumer, valid_idx[int(left) : int(right)], int(left)
+                        )
+                    ),
+                )
+        except MemoryBudgetError as error:
+            # A run's scan names the longest barcode of that run; a later run
+            # can hold a longer one.
+            longest = int(np.diff(self._selected_cumulative_nnz()).max(initial=0))
+            raise longest_vector_refusal(longest, maxBytes) from error
 
     def _read_dataset(self, key: str) -> list[str]:
         # Construction resolves repeated feature IDs once, so every caller

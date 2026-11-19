@@ -255,15 +255,26 @@ def _values(count: int) -> str:
     return "1 value" if count == 1 else f"{count} values"
 
 
-def _longest_vector_refusal(
-    indptr: Any, first: int, n_vectors: int, maxBytes: int
-) -> MemoryBudgetError:
-    """Return the refusal of a scan whose budget cannot hold vector ``first``.
+def longest_vector_refusal(longest: int, maxBytes: int) -> MemoryBudgetError:
+    """Return the refusal of a scan whose ``maxBytes`` cannot hold its longest vector.
 
-    Every vector before ``first`` fit, so the longest from ``first`` on is
-    the longest that the scan reads, and a budget that holds it lets the
-    whole scan run. The pointers give it without reading any value, a
-    million at a time.
+    ``longest`` is the most values of any compressed vector that the scan
+    reads, so a budget of the refusal's ``needed_bytes`` lets the whole scan
+    run. A scan in parts, such as the runs of a reader's selected cells,
+    passes the longest vector of every part.
+    """
+    return memory_refusal(
+        _SCANNING,
+        f"the {_values(int(longest))} of the longest compressed vector",
+        int(longest) * _SCAN_BYTES_PER_VALUE,
+        max(0, int(maxBytes)),
+    )
+
+
+def _longest_vector(indptr: Any, first: int, n_vectors: int) -> int:
+    """Return the most values of the vectors from ``first`` on, read from their pointers.
+
+    The pointers give it without reading any value, a million at a time.
     """
     longest = 0
     for start in range(first, n_vectors, _SCAN_WINDOW_VALUES):
@@ -272,12 +283,7 @@ def _longest_vector_refusal(
             dtype=np.int64,
         )
         longest = max(longest, int(np.diff(pointers).max(initial=0)))
-    return memory_refusal(
-        _SCANNING,
-        f"the {_values(longest)} of the longest compressed vector",
-        longest * _SCAN_BYTES_PER_VALUE,
-        max(0, int(maxBytes)),
-    )
+    return longest
 
 
 def _summable(values: np.ndarray) -> np.ndarray:
@@ -395,8 +401,11 @@ def compressed_count_ranges(
                 # A vector longer than a window is read whole when it fits.
                 length = int(pointers[position + 1] - pointers[position])
                 if length > limit:
-                    raise _longest_vector_refusal(
-                        indptr, start + position, n_vectors, maxBytes
+                    # Every vector before this one fit, so the longest from
+                    # here on is the longest of the scan.
+                    raise longest_vector_refusal(
+                        _longest_vector(indptr, start + position, n_vectors),
+                        maxBytes,
                     )
                 end = position + 1
             first, last = int(pointers[position]), int(pointers[end])

@@ -699,35 +699,20 @@ def test_an_h5ad_import_refuses_a_budget_of_one_byte_at_its_scan(
     assert "compressed vector" not in later.item
 
 
-def test_a_csc_conversion_names_the_budget_of_its_pointers(tmp_path: Path) -> None:
+def _csc_conversion(
+    source: Path, scratch: Path, order: np.ndarray | None = None
+) -> Callable[[int], np.ndarray]:
+    """Return a conversion of ``source``'s CSC matrix within a budget, to the rows it yields.
+
+    A refused conversion leaves no rows behind it, in the reader or in ``scratch``.
+    """
     from cytearc.readers import H5adReader
-
-    values = np.random.default_rng(3).poisson(1.5, size=(40, 30)).astype(np.uint16)
-    reader = H5adReader(str(_h5ad(tmp_path / "csc.h5ad", values, encoding="csc")))
-    try:
-        refusal = refused(lambda: reader.materialize_csc(maxBytes=1))
-    finally:
-        reader.close()
-    assert refusal.item == "the pointers and one entry of the CSC row conversion"
-    assert refusal.needed_bytes > refusal.budget_bytes == 1
-
-
-def test_a_csc_conversion_names_the_budget_of_its_rows_beside_its_pointers(
-    tmp_path: Path,
-) -> None:
-    from cytearc.readers import H5adReader
-
-    values = np.random.default_rng(3).poisson(1.5, size=(40, 30)).astype(np.uint16)
-    source = _h5ad(tmp_path / "csc.h5ad", values, encoding="csc")
-    scratch = tmp_path / "scratch"
-    scratch.mkdir()
-    pointers = (values.shape[1] + 1) * np.dtype(np.int64).itemsize
 
     def convert(budget: int) -> np.ndarray:
         reader = H5adReader(str(source), temp_dir=scratch)
         try:
             try:
-                reader.materialize_csc(maxBytes=budget)
+                reader.materialize_csc(maxBytes=budget, destinationRows=order)
             except MemoryBudgetError:
                 assert reader._convertedCsr is None
                 assert list(scratch.iterdir()) == []
@@ -736,17 +721,70 @@ def test_a_csc_conversion_names_the_budget_of_its_rows_beside_its_pointers(
         finally:
             reader.close()
 
-    # The budget that passes the pointers and one entry is too small for the
-    # rows beside the column pointers.
-    pointers_and_entry = refused(lambda: convert(1)).needed_bytes
+    return convert
+
+
+def test_a_csc_conversion_of_short_rows_names_the_budget_of_its_pointers(
+    tmp_path: Path,
+) -> None:
+    # One entry a row, whose read holds less than an entry of a chunk of
+    # columns, so the pointers and one entry decide the budget.
+    values = np.zeros((40, 30), dtype=np.uint16)
+    values[np.arange(40), np.arange(40) % 30] = np.arange(1, 41)
+    source = _h5ad(tmp_path / "csc.h5ad", values, encoding="csc")
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    convert = _csc_conversion(source, scratch)
+
     refusal = named_budget_runs(
-        convert, pointers_and_entry, item="one row of the CSC row conversion"
+        convert, 1, item="the pointers and one entry of the CSC row conversion"
     )
+    np.testing.assert_array_equal(convert(refusal.needed_bytes), values)
+
+
+@pytest.mark.parametrize("shuffled", [False, True], ids=["file", "shuffled"])
+def test_a_csc_conversion_names_the_budget_of_its_widest_row_beside_its_pointers(
+    tmp_path: Path, shuffled: bool
+) -> None:
+    values = np.random.default_rng(3).poisson(1.5, size=(40, 30)).astype(np.uint16)
+    source = _h5ad(tmp_path / "csc.h5ad", values, encoding="csc")
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    order = np.random.default_rng(4).permutation(40) if shuffled else None
+    convert = _csc_conversion(source, scratch, order)
+    pointers = (values.shape[1] + 1) * np.dtype(np.int64).itemsize
+
+    # A budget too small for the pointers and one entry is refused before
+    # any entry is read, naming the budget of the row with the most entries;
+    # one byte less is refused once every entry is read, as that row is.
+    operation = "shuffled H5AD import" if shuffled else "CSC row conversion"
+    refusal = named_budget_runs(convert, 1, item=f"one row of the {operation}")
     assert f"Beside the {pointers} bytes of the matrix's column pointers" in str(
         refusal
     )
-    np.testing.assert_array_equal(convert(refusal.needed_bytes), values)
+    # Destination row d holds the file's row that the order sends there.
+    expected = values if order is None else values[np.argsort(order)]
+    np.testing.assert_array_equal(convert(refusal.needed_bytes), expected)
     assert list(scratch.iterdir()) == []
+
+
+def test_a_csc_conversion_refuses_a_row_index_outside_the_matrix(
+    tmp_path: Path,
+) -> None:
+    from cytearc.readers import H5adReader
+
+    values = np.ones((4, 3), dtype=np.uint16)
+    source = _h5ad(tmp_path / "csc.h5ad", values, encoding="csc")
+    with h5py.File(source, mode="r+") as h5:
+        indices = h5["X/indices"][...]
+        indices[-1] = 4
+        h5["X/indices"][...] = indices
+    reader = H5adReader(str(source))
+    try:
+        with pytest.raises(ValueError, match="X holds a row index outside its 4 rows"):
+            reader.materialize_csc(maxBytes=1)
+    finally:
+        reader.close()
 
 
 def test_an_h5ad_import_lets_an_allocation_failure_of_a_producer_split_through(
@@ -1162,6 +1200,67 @@ def test_count_value_scans_name_the_bytes_of_their_longest_vector() -> None:
         item="the 1 value of one dense row",
     )
     assert refusal.needed_bytes == 72
+
+
+def test_a_10x_scan_names_the_longest_barcode_of_every_run(tmp_path: Path) -> None:
+    from cytearc.readers import CrH5Reader
+    from cytearc.writers import CrToZarr
+
+    # Barcodes 0 and 2 to 6 pass the cutoff of 5 and barcode 1, of one
+    # count, does not, so the scan reads barcode 0 in one run and the other
+    # five in a second run, whose barcode 4 holds the most values, 6.
+    counts = np.zeros((7, 8), dtype=np.int32)
+    counts[[0, 2, 3, 4, 5, 6], 0] = 10
+    counts[[0, 2, 3, 5, 6], 1] = 10
+    counts[0, 2] = 10
+    counts[4, :6] = 10
+    counts[1, 0] = 1
+    matrix = csr_matrix(counts)
+    path = tmp_path / "matrix.h5"
+    with h5py.File(path, "w") as h5:
+        group = h5.create_group("matrix")
+        group.create_dataset("data", data=matrix.data)
+        group.create_dataset("indices", data=matrix.indices.astype(np.int64))
+        group.create_dataset("indptr", data=matrix.indptr.astype(np.int64))
+        group.create_dataset("shape", data=np.array([8, 7], dtype=np.int32))
+        group.create_dataset(
+            "barcodes", data=np.array([f"c{i}".encode() for i in range(7)])
+        )
+        features = group.create_group("features")
+        names = np.array([f"g{j}".encode() for j in range(8)])
+        features.create_dataset("id", data=names)
+        features.create_dataset("name", data=names)
+        features.create_dataset("feature_type", data=np.array([b"Gene Expression"] * 8))
+    reader = CrH5Reader(str(path), is_filtered=False, filtering_cutoff=5)
+    try:
+        assert reader.validBarcodeIdx.tolist() == [0, 2, 3, 4, 5, 6]
+        # The first run's barcode of 3 values does not fit; the budget named
+        # holds the 6 values of the second run's barcode 4, and scans both.
+        refusal = named_budget_runs(
+            lambda memory: reader.count_value_ranges(memory),
+            3 * 72 - 1,
+            item="the 6 values of the longest compressed vector",
+        )
+        # An import in the file's order scans within its whole budget, so its
+        # refusal is the scan's.
+        imported = refused(
+            lambda: CrToZarr(
+                reader,
+                str(tmp_path / "refused.zarr"),
+                mem_budget=3 * 72 - 1,
+                nthreads=1,
+                shuffle_cells=False,
+            )
+        )
+    finally:
+        reader.close()
+    assert refusal.needed_bytes == 6 * 72
+    assert (imported.needed_bytes, imported.budget_bytes, imported.item) == (
+        6 * 72,
+        3 * 72 - 1,
+        "the 6 values of the longest compressed vector",
+    )
+    assert not (tmp_path / "refused.zarr").exists()
 
 
 # Algorithm checks that state their own peak.

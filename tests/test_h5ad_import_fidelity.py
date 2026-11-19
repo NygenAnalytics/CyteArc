@@ -2332,8 +2332,9 @@ def test_a_conversion_again_in_the_files_order_refuses_in_the_imports_budget(
 
     assert refused.value.needed_bytes == needed
     assert refused.value.budget_bytes == needed - 1
+    # The first row holds an entry of every column, the most of any row.
     assert refused.value.item == (
-        "the pointers and one entry of the CSC row conversion beside the "
+        "one row of the CSC row conversion beside the "
         f"{_VECTOR_FILE_ID_BYTES} bytes of its IDs and names"
     )
 
@@ -2385,6 +2386,59 @@ def test_the_count_layout_charges_the_ids_that_the_reader_keeps(tmp_path) -> Non
     # the longer IDs need exactly their extra characters more.
     extra = sum(len(text) for text in long) - sum(len(text) for text in short)
     assert needed["long"] - needed["short"] == extra == 14_510
+
+
+def test_imported_analyses_take_blocks_of_what_the_budget_leaves_beside_the_ids(
+    tmp_path,
+) -> None:
+    rng = np.random.default_rng(8)
+    n_cells = 20_000
+    adata = anndata.AnnData(
+        csr_matrix(rng.poisson(0.5, (n_cells, 10)).astype(np.float32))
+    )
+    adata.obs_names = [f"cell-{row:06d}-ACGTACGTACGTACGT" for row in range(n_cells)]
+    adata.var_names = [f"g{index}" for index in range(10)]
+    adata.obs["clusters"] = pd.Categorical(rng.integers(0, 5, n_cells).astype(str))
+    adata.obsm["X_wide"] = rng.normal(size=(n_cells, 64)).astype(np.float32)
+    path = tmp_path / "analyses.h5ad"
+    adata.write_h5ad(path)
+    with h5py.File(path, "r") as h5:
+        pointers = int(h5["X/indptr"].nbytes)
+    budget = 8 * 1024**2
+    reader = H5adReader(
+        str(path),
+        embedding_roles={"X_wide": "coordinates"},
+        cluster_keys=("clusters",),
+    )
+    try:
+        result = H5adToZarr(
+            reader,
+            str(tmp_path / "analyses.zarr"),
+            mem_budget=budget,
+            nthreads=1,
+            shuffle_cells=False,
+        ).dump()
+    finally:
+        reader.close()
+    store = cytearc.DataStore(
+        str(tmp_path / "analyses.zarr"), min_features_per_cell=0, nthreads=1
+    )
+    options = {
+        name: store.artifacts.inspect(ref).execution_options
+        for name, ref in (
+            ("embedding", result.embeddingArtifacts["X_wide"]),
+            ("labels", result.clusterArtifacts["clusters"]),
+        )
+    }
+
+    # The import holds the cell IDs of 28 characters and the feature IDs as
+    # bytes objects, the feature IDs again as the names, at 4 bytes a
+    # character, and the file's row pointers. A block takes an eighth of
+    # what is left: rows of 64 float32 values, and labels at 64 bytes a row.
+    held = n_cells * (8 + 33 + 28) + 10 * (8 + 33 + 2) + 10 * 4 * 2 + pointers
+    left = budget - held
+    assert options["embedding"]["block_rows"] == left // (8 * 64 * 4)
+    assert options["labels"]["block_rows"] == left // (8 * 64)
 
 
 def test_the_import_charges_what_tracing_finds_the_reader_keeps(tmp_path) -> None:

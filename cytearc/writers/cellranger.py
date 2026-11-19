@@ -14,6 +14,7 @@ from ..storage.profiles import (
 )
 from ..utils.arrays import assay_feature_ranges
 from ..utils.logging import logger
+from ..utils.memory_budget import MemoryBudgetError, memory_refusal
 from ..utils.progress import iter_progress
 from ..utils.arguments import bool_argument
 from ..utils.matrix_values import ImportValues
@@ -198,16 +199,23 @@ class CrToZarr:
         # failure are this import's, which no later import may read.
         rows_before = getattr(self.cr, "_shuffledRows", None)
         try:
-            value_ranges = dict(
-                zip(
-                    ranges,
-                    self.cr.count_value_ranges(
-                        self.resources.memoryBytes - held, groups, **scan_options
-                    ),
-                    strict=True,
+            try:
+                scanned = self.cr.count_value_ranges(
+                    self.resources.memoryBytes - held, groups, **scan_options
                 )
-            )
-            del scan_options
+            except MemoryBudgetError as error:
+                if not held:
+                    raise
+                # The scan and its spill run beside the order of the cells and
+                # its inverse, so the budget that passes them holds those too.
+                raise memory_refusal(
+                    f"Importing the counts of {self.cr.nCells} cells",
+                    f"{error.item} beside the {held} bytes of its cell order",
+                    held + error.needed_bytes,
+                    int(self.resources.memoryBytes),
+                ) from error
+            value_ranges = dict(zip(ranges, scanned, strict=True))
+            del scan_options, scanned
             # The rows that this import's counts write reads, which no other
             # import of the same reader may replace.
             self._shuffledStore = self.cr._shuffledRows if self.shuffleCells else None

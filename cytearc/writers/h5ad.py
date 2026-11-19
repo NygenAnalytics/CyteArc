@@ -1442,7 +1442,7 @@ class H5adToZarr:
             resources=self.resources,
             profile=self.profile,
             io=self.io,
-            resident_bytes=self._counts_t_resident_bytes(),
+            resident_bytes=self._resident_bytes(),
         )
         cell_selection = self._write_cell_selection()
         cluster_artifacts = self._write_cluster_artifacts(
@@ -1467,12 +1467,18 @@ class H5adToZarr:
         *,
         row_bytes: int,
     ) -> int:
+        """Return the rows of each block of an imported embedding or cluster labels.
+
+        A block takes an eighth of what the budget leaves beside what the
+        import holds, as :meth:`_resident_bytes` counts it, and at least one
+        row.
+        """
         from ._store import bounded_block_rows
 
         return bounded_block_rows(
             requested,
             row_bytes=row_bytes,
-            memory_bytes=int(self.resources.memoryBytes),
+            memory_bytes=int(self.resources.memoryBytes) - self._resident_bytes(),
         )
 
     def _check_shuffled_holds(self) -> None:
@@ -1898,34 +1904,32 @@ class H5adToZarr:
             0, int(self.h5ad._sparse_import_resident_bytes())
         )
 
+    def _resident_bytes(self) -> int:
+        """Return the bytes that this process holds beside the steps after its scan.
+
+        They are what the import holds throughout, as :meth:`_held_bytes`
+        counts it, and the reader's row counts or converted rows. The counts
+        write holds the count summaries beside them, and ``countsT`` and the
+        imported embeddings and cluster labels are written beside them alone.
+        The layout fit also counts the rows of a shuffled import, which its
+        counts write releases before ``countsT``.
+        """
+        return self._held_bytes() + self._reader_rows_bytes()
+
     def _count_resident_bytes(self) -> int:
         """Return the bytes that this process holds from the start of the counts write to its end.
 
-        They are what the import holds throughout, as :meth:`_held_bytes`
-        counts it, the reader's row counts or converted rows, and the count
-        summaries of every cell. A producer process that writes its own
-        window is charged them less the IDs, names and memberships of
+        They are what :meth:`_resident_bytes` counts and the count summaries
+        of every cell. A producer process that writes its own window is
+        charged them less the IDs, names and memberships of
         :meth:`_kept_bytes`, which it never reads.
         """
         from ..storage.identity import CountSummary
 
-        return (
-            self._held_bytes()
-            + self._reader_rows_bytes()
-            + sum(
-                CountSummary.nbytes_for(self.h5ad.nCells, width)
-                for width in self._assay_widths().values()
-            )
+        return self._resident_bytes() + sum(
+            CountSummary.nbytes_for(self.h5ad.nCells, width)
+            for width in self._assay_widths().values()
         )
-
-    def _counts_t_resident_bytes(self) -> int:
-        """Return the bytes that this process holds while it writes ``countsT``.
-
-        They are what the import holds throughout and the reader's row
-        counts or converted rows. The layout fit also counts the rows of a
-        shuffled import, which its counts write releases before ``countsT``.
-        """
-        return self._held_bytes() + self._reader_rows_bytes()
 
     def _count_import_requirements(
         self,
@@ -2032,9 +2036,10 @@ class H5adToZarr:
     ) -> CountMatrixPolicy:
         """Return the ``requested`` count layout if its writes fit the budget.
 
-        None fits the default layout to the budget. A dense matrix is admitted as its write runs, through dense row bands
-        of every assay, and a sparse one, or a dense one whose rows a shuffle
-        holds as sparse rows, through the sparse band writer.
+        None fits the default layout to the budget. A dense matrix is
+        admitted as its write runs, through dense row bands of every assay,
+        and a sparse one, or a dense one whose rows a shuffle holds as sparse
+        rows, through the sparse band writer.
         """
         from ..storage.sharding import (
             dense_counts_admission,
@@ -2076,7 +2081,7 @@ class H5adToZarr:
             transposed=counts_t_assays(self.assayNames, self.assayTypes),
             admitCounts=admit_counts,
             requested=requested,
-            countsTResidentBytes=self._counts_t_resident_bytes(),
+            countsTResidentBytes=self._resident_bytes(),
         )
 
     def _dense_counts(self) -> bool:

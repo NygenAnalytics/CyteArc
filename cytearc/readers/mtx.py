@@ -23,6 +23,7 @@ from ..utils.count_values import (
     scan_window_values,
 )
 from ..utils.files import is_gzip, open_text
+from ..utils.memory_budget import MemoryBudgetError
 from ._matrix_market import (
     matrix_market_entries,
     matrix_market_entry_object_bytes,
@@ -2140,22 +2141,36 @@ class MtxReader(CrReader):
         lines = engine._importLinesInMem
         pointers = engine._cumulativeRowNnz
         longest = int(np.diff(pointers).max(initial=0))
-        available = maxBytes - engine.resident_bytes()
+        resident = engine.resident_bytes()
+        available = maxBytes - resident
 
         def held(plan: RowSpillPlan, rows: int) -> int:
             return int(plan.batch_bytes(engine.max_window_nnz(rows))) + int(
                 engine.producer_staging_bytes(rows, lines)
             )
 
-        plan = row_spill_plan(
-            destinations,
-            (self.nCells, self.nFeatures),
-            engine.matrixDtype,
-            entries=int(pointers[-1]),
-            longest=longest,
-            maxBytes=available,
-            least=lambda plan: held(plan, 1),
-        )
+        try:
+            plan = row_spill_plan(
+                destinations,
+                (self.nCells, self.nFeatures),
+                engine.matrixDtype,
+                entries=int(pointers[-1]),
+                longest=longest,
+                maxBytes=available,
+                least=lambda plan: held(plan, 1),
+            )
+        except MemoryBudgetError as error:
+            # The spill runs beside the reader's arrays, so the budget that
+            # passes it holds them too.
+            needed = resident + error.needed_bytes
+            raise MemoryBudgetError(
+                "Shuffling cells exceeds the memory limit. Beside the "
+                f"{resident} bytes of the reader's arrays, reading the rows and "
+                f"sending them to their buckets needs at least {needed} bytes.",
+                needed_bytes=needed,
+                budget_bytes=int(maxBytes),
+                item=error.item,
+            ) from error
         # Batches start at the cells of a million counts on average and
         # halve until their widest window fits.
         window = scan_window_values(longest)
