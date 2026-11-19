@@ -129,6 +129,26 @@ def test_columns_group_cells_by_their_labels_in_natural_order(store) -> None:
     assert grouped.codes.dtype == np.int64
 
 
+def test_a_categorical_column_of_numbers_groups_cells_by_number(tmp_path) -> None:
+    path = tmp_path / "store.zarr"
+    write_count_store(str(path), {"RNA": np.ones((N_CELLS, 3), dtype=int)}, "uint16")
+    store = open_store(path)
+    # Lanes numbered 10 and 2, stored as the categories of a categorical column.
+    lanes = np.asarray([10, 2, 10, 2, 2, 2, 10, 10])
+    store.cells.insert("lane", by_cell_id(store.cells, pd.Categorical(lanes)))
+    store.cells.insert(
+        "every_cell", by_cell_id(store.cells, np.ones(N_CELLS, dtype=bool))
+    )
+    column = store.cells._get_array("lane")
+    assert isinstance(column, CategoricalColumn) and column.dtype.kind == "i"
+
+    grouped = _group(store, group_by="lane")
+
+    # The groups name the lanes by their text, 2 before 10 in natural order.
+    assert grouped.keys == [{"lane": "2"}, {"lane": "10"}]
+    assert grouped.codes.tolist() == [1, 0, 1, 0, 0, 0, 1, 1]
+
+
 def test_cells_outside_the_rows_or_without_a_label_have_no_group(store) -> None:
     rows = np.ones(N_CELLS, dtype=bool)
     rows[3] = False

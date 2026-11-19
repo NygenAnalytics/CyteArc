@@ -270,6 +270,12 @@ def test_every_genotype_method_names_sites_by_label_or_position(tmp_path) -> Non
     assert by_position.sites.index.tolist() == [labels[1]]
     pd.testing.assert_frame_equal(by_position.calls, by_label.calls)
     assert len(by_label.calls) > 0
+    # Several positions, or positions beside labels, name their sites alike.
+    every = mito.variants.load_genotypes(genotypes)
+    for sites in ([second, first], [labels[0], second]):
+        named = mito.variants.load_genotypes(genotypes, sites=sites)
+        assert named.sites.index.tolist() == labels
+        pd.testing.assert_frame_equal(named.calls, every.calls)
     clones = mito.variants.genotype_clones(genotypes, sites=[labels[0]])
     assert mito.variants.genotype_clones(genotypes, sites=[first]) == clones
     assert mito.artifacts.inspect(clones).parameters["sites"] == [labels[0]]

@@ -305,6 +305,7 @@
   "tests/test_pipeline_settings.py": 33.0,
   "tests/test_pipeline_shutdown_subprocess.py": 26.7,
   "tests/test_pipeline_stage_resources.py": 10.1,
+  "tests/test_pipeline_stage_summaries.py": 0.5,
   "tests/test_pipeline_view_edge_coverage.py": 5.4,
   "tests/test_plotting_artifact_titles.py": 5.1,
   "tests/test_plotting_barcode_calls.py": 4.3,

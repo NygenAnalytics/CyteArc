@@ -1844,6 +1844,55 @@ def test_completed_records_with_overlapping_stage_windows_still_read() -> None:
     assert completed.report()["run"]["status"] == "completed"
 
 
+def test_markdown_diagnostics_list_a_stage_by_its_summary_and_its_warnings() -> None:
+    root = _root()
+    run = create_pipeline_run_record(
+        root,
+        recipe="rna",
+        requested_label=None,
+        assay="RNA",
+        config={},
+        stage_order=("hvg", "pca", "umap"),
+        cytearc_version="1.0.0",
+    )
+    # A stage with warnings and no summary, one with a summary and no
+    # warnings, and one with neither.
+    details: list[dict[str, Any]] = [
+        {"warnings": ("Only 3 features passed the HVG candidate filters",)},
+        {"summary": {"cells": 4, "dims": 2}},
+        {},
+    ]
+    for ordinal, stage in enumerate(run.stage_order):
+        start_pipeline_stage_record(
+            root, run_id=run.run_id, ordinal=ordinal, stage=stage
+        )
+        finish_pipeline_stage_record(
+            root,
+            run_id=run.run_id,
+            ordinal=ordinal,
+            status="completed",
+            metrics=_metrics(),
+            **details[ordinal],
+        )
+    complete_pipeline_run_record(root, run_id=run.run_id, outputs=(), fields=())
+    completed = PipelineRun(_Owner(root), load_pipeline_run_record(root, run.run_id))
+
+    markdown = completed.report(format="markdown")
+
+    diagnostics = markdown.split("\n## Diagnostics\n", 1)[1].split("\n## ", 1)[0]
+    assert diagnostics.strip().splitlines() == [
+        "### hvg",
+        "",
+        "- Warning: Only 3 features passed the HVG candidate filters",
+        "",
+        "### pca",
+        "",
+        "```json",
+        '{"cells": 4, "dims": 2}',
+        "```",
+    ]
+
+
 def _candidate(value: str) -> ArtifactRef:
     return ArtifactRef(
         scope="assay", assay="RNA", kind="cluster_labels", artifact_id=value * 64

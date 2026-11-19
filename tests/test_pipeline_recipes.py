@@ -1498,6 +1498,14 @@ def test_a_joint_embedding_starts_from_the_first_runs_neighbors(
     ):
         datastore.pipeline.multimodal([cite.rna, cite.adt], method="snn")
     assert _run_ids(datastore) == before
+    # Without a joint embedding nothing reads those coordinates, so the run
+    # starts without them; with the neighbors, it starts from the RNA PCA.
+    runs = [cite.rna, cite.adt]
+    plan = _resolve("multimodal", datastore, runs=runs, method="snn", umap=False)
+    assert plan.start(datastore).coordinates is None
+    monkeypatch.undo()
+    plan = _resolve("multimodal", datastore, runs=runs, method="snn", umap=False)
+    assert plan.start(datastore).coordinates == cite.rna["pca"]
 
 
 def test_l2_normalize_applies_only_to_wnn(cite, joint, wnn_selected) -> None:

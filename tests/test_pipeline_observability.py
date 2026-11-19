@@ -1342,6 +1342,64 @@ def test_a_token_cancelled_before_the_run_writes_nothing(
     assert [run.run_id for run in observed_store.pipeline.list_runs(limit=100)] == runs
 
 
+def test_a_completed_run_stays_completed_when_reading_it_back_fails(
+    observed_store: DataStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    events: list[PipelineEvent] = []
+    failure = OSError("the store could not be read")
+    opened = pipeline_executor.open_pipeline_run
+
+    def unreadable(store: Any, *, run_id: str) -> Any:
+        raise failure
+
+    monkeypatch.setattr(pipeline_executor, "open_pipeline_run", unreadable)
+    with pytest.raises(OSError) as caught:
+        observed_store.pipeline.rna(callback=events.append, **_OPTIONS)
+
+    # The caller receives the read's error; the run neither failed nor was
+    # interrupted, so no event says so.
+    assert caught.value is failure
+    assert [event.kind for event in events if event.kind.startswith("run_")] == [
+        "run_started",
+        "run_completed",
+    ]
+    (run_id,) = {event.run_id for event in events}
+    assert opened(observed_store, run_id=run_id).status == "completed"
+
+
+def test_a_cancellation_as_the_run_starts_writes_no_run_record(
+    observed_store: DataStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    token = CancellationToken()
+    runs = [run.run_id for run in observed_store.pipeline.list_runs(limit=100)]
+    events: list[PipelineEvent] = []
+    applied = pipeline_executor.applied_normalizers
+
+    @contextmanager
+    def cancelled_as_the_run_starts(*args: Any, **kwargs: Any) -> Iterator[None]:
+        # The token is cancelled after the call checked it and before the
+        # run writes its record.
+        token.cancel("cancelled as the run starts")
+        with applied(*args, **kwargs):
+            yield
+
+    monkeypatch.setattr(
+        pipeline_executor, "applied_normalizers", cancelled_as_the_run_starts
+    )
+
+    with pytest.raises(PipelineCancelled) as caught:
+        observed_store.pipeline.rna(callback=events.append, cancel=token, **_OPTIONS)
+
+    error = caught.value
+    assert (error.run_id, error.stage, error.reason) == (
+        None,
+        None,
+        "cancelled as the run starts",
+    )
+    assert events == []
+    assert [run.run_id for run in observed_store.pipeline.list_runs(limit=100)] == runs
+
+
 @pytest.mark.parametrize(
     "cancel", ["stop", threading.Event()], ids=["string", "threading_event"]
 )

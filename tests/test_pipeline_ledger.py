@@ -485,6 +485,66 @@ def test_the_run_ends_when_its_interrupted_stage_cannot_be_recorded(
     assert [(event.kind, event.stage) for event in events] == expected
 
 
+@pytest.mark.parametrize(
+    ("method", "error", "status", "kinds"),
+    [
+        (
+            "run",
+            OSError("the store failed after the write"),
+            "failed",
+            [("stage_started", "first"), ("stage_failed", "first")],
+        ),
+        (
+            "skip",
+            OSError("the store failed after the write"),
+            "failed",
+            [("stage_failed", "first")],
+        ),
+        (
+            "skip",
+            KeyboardInterrupt("stop after the write"),
+            "interrupted",
+            [("run_interrupted", None)],
+        ),
+    ],
+    ids=["run-failure", "skip-failure", "skip-interruption"],
+)
+def test_an_error_after_the_stage_record_is_written_keeps_the_record(
+    monkeypatch: pytest.MonkeyPatch,
+    method: str,
+    error: BaseException,
+    status: str,
+    kinds: list[tuple[str, str | None]],
+) -> None:
+    root, ledger, events = _ledger("first", "second")
+    record = ledger_module.finish_pipeline_stage_record
+    written = "completed" if method == "run" else "skipped"
+
+    def write_then_raise(*args: Any, **kwargs: Any) -> Any:
+        # The stage's record is written, and the error lands right after it.
+        finished = record(*args, **kwargs)
+        if kwargs["status"] == written:
+            raise error
+        return finished
+
+    monkeypatch.setattr(ledger_module, "finish_pipeline_stage_record", write_then_raise)
+
+    expected = KeyboardInterrupt if status == "interrupted" else PipelineExecutionError
+    with pytest.raises(expected) as caught:
+        if method == "run":
+            ledger.run("first", lambda: ())
+        else:
+            ledger.skip("first")
+
+    cause = caught.value if status == "interrupted" else caught.value.__cause__
+    assert cause is error
+    # The record that was written stays as it was, and the run ends.
+    assert _statuses(root, ledger) == {"first": written}
+    run = load_pipeline_run_record(root, ledger.run_id)
+    assert (run.status, run.complete) == (status, True)
+    assert [(event.kind, event.stage) for event in events] == kinds
+
+
 def test_stages_start_only_after_every_earlier_stage_succeeded() -> None:
     root = zarr.open_group(store=MemoryStore(), mode="w")
     run = create_pipeline_run_record(
