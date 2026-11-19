@@ -197,6 +197,32 @@ def test_counting_rows_checks_every_rows_fields(tmp_path) -> None:
         count_rows(text_layout(wide))
 
 
+@pytest.mark.parametrize("header", [True, False])
+def test_a_table_without_a_header_counts_and_chunks_its_first_line_as_a_row(
+    tmp_path, header
+) -> None:
+    rows = "A\t1\n\nB\t2\nC\t3\n"
+    path = _write(tmp_path / "barcodes.tsv", ("cell\tclone\n" if header else "") + rows)
+    text = TextLayout(
+        path=path,
+        names=("cell", "clone"),
+        delimiter="\t",
+        row_names=False,
+        header=header,
+    )
+
+    # The rows are the same with or without a header; only their file lines
+    # move by the header's line.
+    first = 2 if header else 1
+    assert count_rows(text) == 3
+    assert [
+        (numbers.tolist(), lines) for numbers, lines in delimited.line_chunks(text, 2)
+    ] == [
+        ([first, first + 2], ["A\t1\n", "B\t2\n"]),
+        ([first + 3], ["C\t3\n"]),
+    ]
+
+
 def test_quoted_and_unquoted_tables_split_fields_as_their_readers_do() -> None:
     assert split_fields('"a\tb"\tc', "\t") == ["a\tb", "c"]
     assert split_fields('"a\tb"\tc', "\t", quoted=False) == ['"a', 'b"', "c"]

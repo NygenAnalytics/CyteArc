@@ -213,3 +213,27 @@ def test_a_stream_of_items_without_close_still_closes_its_bar() -> None:
     assert next(early) == "a"
     early.close()
     assert (bars[-1].updates, bars[-1].closed) == (0, True)
+
+
+def test_an_observed_bar_passes_its_own_attributes_to_the_bar_it_wraps() -> None:
+    from cytearc.utils.progress import tqdmbar
+
+    updates: list[tuple[int, int | None]] = []
+
+    def observe(
+        _bar: int, _description: str | None, done: int, total: int | None
+    ) -> None:
+        updates.append((done, total))
+
+    with observe_progress(observe):
+        bar = tqdmbar(total=3, desc="Reading", disable=True)
+        # The description is the wrapped bar's; the total is also observed.
+        bar.desc = "Writing"
+        bar.update(1)
+        bar.total = 5
+        bar.update(2)
+        bar.close()
+
+    assert bar.desc == "Writing" and bar._bar.desc == "Writing"
+    assert (bar.total, bar._bar.total) == (5, 5)
+    assert updates == [(1, 3), (3, 5)]

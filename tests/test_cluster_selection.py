@@ -242,6 +242,30 @@ def test_cluster_selection_reports_each_invalid_candidate() -> None:
         )
 
 
+def test_cluster_selection_scores_no_candidate_over_non_finite_coordinates() -> None:
+    coordinates = np.asarray([[0.0], [1.0], [np.nan], [3.0], [4.0], [5.0]])
+
+    # The coordinates fail every candidate that could be scored, after the
+    # checks of its own labels.
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"^No clustering candidate is silhouette-scoreable: "
+            r"pairs: sampled coordinates contain non-finite values; "
+            r"single: sample contains fewer than two clusters; "
+            r"halves: sampled coordinates contain non-finite values$"
+        ),
+    ):
+        select_clusters_by_silhouette(
+            coordinates,
+            (
+                ("pairs", np.asarray([0, 0, 1, 1, 2, 2])),
+                ("single", np.zeros(6, dtype=np.int64)),
+                ("halves", np.asarray([0, 0, 0, 1, 1, 1])),
+            ),
+        )
+
+
 def test_shared_sample_covers_rare_clusters_and_fails_when_the_cap_is_too_small() -> (
     None
 ):

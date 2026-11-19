@@ -487,6 +487,25 @@ def test_randomized_pca_warns_when_it_reaches_the_last_pass(
     assert (quiet.n_passes_, quiet.component_shift_) == (3, model.component_shift_)
 
 
+def test_a_fit_limited_to_one_pass_has_no_earlier_pass_to_measure_a_shift_against(
+    monkeypatch, wide_values: np.ndarray
+) -> None:
+    monkeypatch.setattr(reduction_module, "_RANDOMIZED_PCA_MAX_PASSES", 1)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        loadings, model = _fit(wide_values, block_size=64, dims=10)
+
+    assert (model.solver_, model.n_passes_) == ("randomized", 1)
+    assert model.component_shift_ is None
+    np.testing.assert_allclose(loadings.T @ loadings, np.eye(10), atol=1e-12)
+    # One pass projects onto a random subspace, whose Ritz values cannot
+    # exceed the variances of the principal axes, one by one.
+    _axes, ratios = _exact_pca(wide_values, 10)
+    assert np.all(model.explained_variance_ratio_ > 0)
+    assert np.all(model.explained_variance_ratio_ <= ratios * (1 + 1e-9))
+
+
 def test_a_fit_that_settles_records_no_component_shift(monkeypatch) -> None:
     monkeypatch.setattr(reduction_module, "_GRAM_PCA_MAX_FEATURES", 4)
     values = _spectrum_values(60, 30, 5, n_signal=6)

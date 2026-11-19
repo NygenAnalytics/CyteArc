@@ -360,6 +360,30 @@ def test_category_codes_and_categories_are_checked() -> None:
 
 
 @pytest.mark.parametrize(
+    ("values", "flagged"),
+    [
+        (np.array([3, 1, 2], dtype=np.int16), [3, 0, 2]),
+        (np.array([0.5, -1.0, 2.0]), [0.5, np.nan, 2.0]),
+        (np.array([True, True, False]), [True, False, False]),
+    ],
+    ids=["int16", "float64", "bool"],
+)
+def test_stored_numbers_hold_a_placeholder_only_in_the_missing_rows(
+    values: np.ndarray, flagged: list
+) -> None:
+    # Without a missing row, the numbers are stored as they are, in a copy.
+    stored = stored_values(values, np.zeros(3, dtype=bool), name="score")
+    assert stored.dtype == values.dtype
+    assert stored.tolist() == values.tolist()
+    assert not np.shares_memory(stored, values)
+    # A missing row holds 0, NaN or False, by the column's dtype.
+    flagged_stored = stored_values(values, np.array([False, True, False]), name="score")
+    assert flagged_stored.dtype == values.dtype
+    np.testing.assert_array_equal(flagged_stored, np.array(flagged, dtype=values.dtype))
+    assert values.tolist() != flagged_stored.tolist()
+
+
+@pytest.mark.parametrize(
     "values",
     [
         np.array([b"ok", b"\xff", b"later"], dtype=object),

@@ -2341,6 +2341,66 @@ def test_composite_feature_stream_limits_compute_to_available_groups(reader_join
         )
 
 
+def test_a_composite_group_whose_bytes_come_after_the_consumer_stopped_is_not_computed(
+    reader_joint, monkeypatch
+):
+    from contextlib import asynccontextmanager
+
+    from cytearc.composite import streams
+    from cytearc.storage.async_execution import AsyncStorageRunner
+
+    joint, expected = reader_joint
+    stops: list[Event] = []
+    handoff = streams.iter_bounded_handoff
+
+    def keep_stop(*, in_flight, run):
+        def tracked(deliver, stop):
+            stops.append(stop)
+            run(deliver, stop)
+
+        return handoff(in_flight=in_flight, run=tracked)
+
+    reserve = AsyncStorageRunner.reserve_bytes
+    reservations: list[int] = []
+
+    @asynccontextmanager
+    async def reserve_after_a_stop(self, nbytes):
+        reservations.append(nbytes)
+        if len(reservations) > 1:
+            # Every group after the first waits for its bytes until the
+            # consumer has stopped.
+            async with asyncio.timeout(10):
+                while not stops[0].is_set():
+                    await asyncio.sleep(0.005)
+        async with reserve(self, nbytes):
+            yield
+
+    monkeypatch.setattr(streams, "iter_bounded_handoff", keep_stop)
+    monkeypatch.setattr(AsyncStorageRunner, "reserve_bytes", reserve_after_a_stop)
+    computed: list[int] = []
+
+    def process(item):
+        computed.append(item.unitIndex)
+        return item
+
+    groups = map_feature_read_groups(
+        joint.RNA.matrixGroup["countsT"],
+        process,
+        resources=ResourceBudget(joint.resources.memoryBytes, 8),
+        orderedCompute=False,
+    )
+    first = next(groups)
+    groups.close()
+
+    # A second group passed the first check of the stop and then waited for
+    # its bytes; once it had them, it saw the stop and computed nothing.
+    assert len(reservations) > 1
+    assert computed == [first.unitIndex]
+    np.testing.assert_array_equal(
+        first.values, expected.T[first.featStart : first.featEnd]
+    )
+
+
 @pytest.mark.parametrize("stream", (map_feature_read_groups, map_feature_cell_bands))
 def test_composite_feature_stream_empty_features_read_nothing(
     reader_joint, source_reads, stream

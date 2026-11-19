@@ -76,6 +76,23 @@ def test_read_gff3_follows_ncbi_and_ensembl_conventions(tmp_path):
     assert len(read_gene_annotation(path, gene_types={"protein_coding"})) == 1
 
 
+def test_read_gff3_passes_over_attributes_without_a_value(tmp_path):
+    path = tmp_path / "genes.gff3"
+    # An attribute without "=" and a trailing ";" name no value, and do not
+    # hide the attributes around them.
+    path.write_text(
+        "##gff-version 3\n"
+        "chr1\tensembl\tgene\t101\t200\t.\t+\t.\t"
+        "ID=gene:ENSG1;partial;Name=ALPHA; ;biotype=protein_coding;\n"
+    )
+
+    genes = read_gene_annotation(path)
+
+    assert genes[["gene_id", "gene_name", "gene_type"]].values.tolist() == [
+        ["ENSG1", "ALPHA", "protein_coding"]
+    ]
+
+
 def test_read_bed_annotation_requires_strand(tmp_path):
     path = tmp_path / "genes.bed"
     path.write_text("chr1\t100\t200\tALPHA\t0\t+\tENSG1\n")

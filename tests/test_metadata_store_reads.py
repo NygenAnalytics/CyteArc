@@ -240,6 +240,27 @@ def test_membership_columns_read_each_column_once() -> None:
     assert sum(counts.values()) == 1 + 66 + 5
 
 
+def test_a_membership_role_marks_an_assay_only_under_that_assays_column_name() -> None:
+    table, _store = _wide_table()
+    measured = np.asarray([True, True, False, True, True, True])
+    group = table._group
+    group.create_array(
+        "ADT_I", data=measured, attributes=assay_membership_attributes("ADT")
+    )
+    # A copy of the column under another name, and a column whose assay
+    # attribute names no assay, carry the role but mark no assay's cells.
+    group.create_array(
+        "ADT_copy", data=measured, attributes=assay_membership_attributes("ADT")
+    )
+    group.create_array(
+        "HTO_I",
+        data=measured,
+        attributes={**assay_membership_attributes("HTO"), "assay": 7},
+    )
+
+    assert membership_columns(table) == {"ADT": "ADT_I"}
+
+
 def _small_store(path: Path) -> str:
     rng = np.random.default_rng(0)
     write_count_store(

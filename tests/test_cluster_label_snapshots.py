@@ -618,3 +618,23 @@ def test_snapshot_keeps_labels_with_a_slash_for_every_consumer(store_path):
     marker = ds.markers.search(labels, features=ds.features.universe(from_assay="RNA"))
     table = ds.markers.load(marker, min_frac_exp=None, min_auc=None, max_p_adj=None)
     assert list(dict.fromkeys(table["group_id"])) == ["B", "NK/T"]
+
+
+def test_complete_cluster_labels_take_a_mask_that_flags_no_row() -> None:
+    from zarr.storage import MemoryStore
+
+    from cytearc.metadata.selection import require_complete_cluster_labels
+
+    group = zarr.open_group(store=MemoryStore(), mode="w")
+    values = group.create_array("values", data=np.array([2, 0, 1, 1, 0]), chunks=(2,))
+    values.attrs["missing_mask"] = f"{MISSING_MASK_PREFIX}values"
+    mask = group.create_array(
+        f"{MISSING_MASK_PREFIX}values", data=np.zeros(5, dtype=bool), chunks=(2,)
+    )
+
+    # Every label is present, so the labels pass.
+    require_complete_cluster_labels(group, "values", name="clusters")
+    # One flagged row, in the mask's last chunk, is refused.
+    mask[4] = True
+    with pytest.raises(ValueError, match="^clusters contains missing cluster labels$"):
+        require_complete_cluster_labels(group, "values", name="clusters")

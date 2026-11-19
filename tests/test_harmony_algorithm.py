@@ -276,6 +276,48 @@ def test_block_elimination_matches_dense_solve(layout: str) -> None:
     np.testing.assert_array_equal(coefficients[~active], np.zeros((1, dims)))
 
 
+def test_elimination_solves_a_cluster_that_pruned_the_largest_column() -> None:
+    # In cluster 1 every level of the largest column, sample, is pruned, so
+    # its regression holds only the intercept and the levels of the other
+    # columns, with nothing to eliminate.
+    rng = np.random.default_rng(13)
+    n_cells, dims, n_clusters = 400, 3, 2
+    first = rng.integers(0, 10, size=n_cells)
+    first[:10] = np.arange(10)
+    second = rng.integers(0, 4, size=n_cells)
+    second[:4] = np.arange(4)
+    third = rng.integers(0, 3, size=n_cells)
+    third[:3] = np.arange(3)
+    metadata = pd.DataFrame({"sample": first, "dataset": second, "lane": third})
+    design = encode_batch_design(metadata)
+    assert design.column_sizes == (10, 4, 3) and design.largest_column == 0
+    codes = np.stack([first, 10 + second, 14 + third])
+    indicators = _indicators(codes, design.n_levels)
+    assignments = rng.uniform(0.05, 1.0, size=(n_cells, n_clusters))
+    coordinates = rng.normal(size=(n_cells, dims))
+    statistics = _dense_statistics(design, indicators, assignments, coordinates)
+    level_counts = indicators.sum(axis=1)
+    penalties = 0.2 * (level_counts / n_cells)[:, None] * assignments.sum(axis=0)
+    active = np.ones((design.n_levels, n_clusters), dtype=bool)
+    active[:10, 1] = False
+
+    coefficients = solve_cluster_regressions(statistics, penalties, active, design)
+
+    for cluster in range(n_clusters):
+        kept = np.flatnonzero(active[:, cluster])
+        expected = _dense_coefficients(
+            indicators,
+            assignments[:, cluster],
+            coordinates,
+            penalties[:, cluster],
+            kept,
+        )
+        np.testing.assert_allclose(
+            coefficients[kept, cluster, :], expected, rtol=1e-10, atol=1e-12
+        )
+    np.testing.assert_array_equal(coefficients[:10, 1], np.zeros((10, dims)))
+
+
 def test_pruned_levels_match_the_restricted_dense_solve() -> None:
     rng, labels, design, indicators = _single_column_case(4)
     n_cells, dims, n_clusters = 300, 4, 2

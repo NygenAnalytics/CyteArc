@@ -1794,6 +1794,43 @@ def test_imported_feature_id_streams_must_match_their_declaration(
     assert _imported_coordinate_artifacts(root) == []
 
 
+def test_imported_object_feature_ids_stream_past_a_block_without_ids() -> None:
+    root, selection, cell_ids, mask = _root_with_selection()
+    coordinates = np.arange(24, dtype=np.float32).reshape(8, 3)
+    loadings = np.arange(12, dtype=np.float64).reshape(4, 3)
+    declared = np.array(["a", "bbbb", "cc", "ddd"])
+
+    def blocks():
+        # The middle block holds no IDs; the width comes from the others.
+        return [
+            np.array(["a", "bbbb"], dtype=object),
+            np.array([], dtype=object),
+            np.array(["cc", "ddd"], dtype=object),
+        ]
+
+    ref = write_imported_coordinates(
+        root,
+        assay="RNA",
+        dimreduc_key="pca",
+        role="pca",
+        coordinates=coordinates,
+        source_digest=_SOURCE_DIGEST,
+        payload_fingerprints=_fingerprints(
+            data=coordinates, loadings=loadings, feature_ids=declared
+        ),
+        source_cell_ids=cell_ids[mask],
+        cell_selection=selection,
+        loadings=loadings,
+        feature_ids=blocks,
+        feature_id_shape=(4,),
+        feature_id_dtype=object,
+    )
+
+    stored = artifact_group(root, ref)["feature_ids"]
+    assert stored.dtype == np.dtype("<U4")
+    assert stored[:].tolist() == declared.tolist()
+
+
 def test_imported_coordinate_alignment_detects_a_selection_changed_while_reading(
     monkeypatch,
 ) -> None:
