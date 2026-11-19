@@ -19,6 +19,7 @@ from scipy.sparse import coo_matrix, csr_matrix, vstack
 from cytearc.readers import _sparse
 from cytearc.readers._sparse import ROW_BYTES, SparseRowStore, encoded_entry_bytes
 from cytearc.utils.memory_budget import MemoryBudgetError
+from tests.row_store_helpers import asked_bytes, free_disk
 
 _BIG = 1 << 40
 # The operation that the stores of these tests name in their errors.
@@ -571,6 +572,7 @@ def test_wrong_inputs_are_refused_with_what_was_expected(tmp_path):
         narrow.close()
     for options, message in (
         ({"bucket_rows": 0}, "bucket_rows must be at least 1"),
+        ({"parts": 0}, "parts must be at least 1, not 0"),
         ({"buffer_bytes": -1}, "buffer_bytes must not be negative"),
         ({"bucket_bytes": -1}, "bucket_bytes must not be negative"),
     ):
@@ -916,12 +918,18 @@ def test_a_full_disk_is_refused_before_and_while_writing(tmp_path, monkeypatch):
         "cytearc.readers._sparse.shutil.disk_usage",
         lambda _: SimpleNamespace(free=free["bytes"]),
     )
-    # Ten float32 values with uint8 column indices, each its own piece of 16
-    # bytes at most: 10 * (4 + 1 + 16) bytes before compression.
-    with pytest.raises(OSError, match="needs 210 temporary bytes .* which has 0 free"):
-        _loose_store(tmp_path, (5, 3), np.float32, entries=10)
+    asked = {}
+    for entries in (10, 20):
+        with pytest.raises(
+            OSError, match="temporary bytes .* which has 0 free"
+        ) as full:
+            _loose_store(tmp_path, (5, 3), np.float32, entries=entries)
+        asked[entries] = asked_bytes(full.value)
     assert list(tmp_path.iterdir()) == []
-    free["bytes"] = 210
+    # Ten more float32 values with uint8 column indices, each its own piece
+    # of 16 bytes at most: 10 * (4 + 1 + 16) bytes before compression.
+    assert asked[20] - asked[10] == 210
+    free["bytes"] = asked[10]
     store = _loose_store(tmp_path, (5, 3), np.float32, entries=10, buffer_bytes=0)
     try:
         free["bytes"] = 10
@@ -930,6 +938,108 @@ def test_a_full_disk_is_refused_before_and_while_writing(tmp_path, monkeypatch):
     finally:
         store.close()
     assert list(tmp_path.iterdir()) == []
+
+
+def _store_files(directory: Path) -> dict[str, int]:
+    """The bytes of a store's files by kind: its settings, its records and its buckets' files."""
+    kinds = {"settings": 0, "records": 0, "buckets": 0}
+    for path in directory.rglob("*"):
+        if not path.is_file():
+            continue
+        size = path.stat().st_size
+        if path.name == "store.json":
+            kinds["settings"] += size
+        elif path.suffix == ".npz":
+            kinds["records"] += size
+        elif path.suffix == ".bin":
+            kinds["buckets"] += size
+        else:
+            # The mark of an open part holds nothing.
+            assert size == 0, path
+    return kinds
+
+
+@pytest.mark.parametrize(
+    ("form", "writers"),
+    [("whole", 0), ("loose", 0), ("ragged", 0), ("whole", 2)],
+    ids=["whole", "loose", "ragged", "whole-from-two-writers"],
+)
+def test_the_disk_check_counts_every_file_that_the_store_writes(
+    tmp_path, form, writers
+):
+    rng = np.random.default_rng(41)
+    destinations = rng.permutation(300)
+    matrix = _random_rows(rng, 300, 40, np.float32, density=0.1)
+    values, offsets = _ragged_rows(rng, 300)
+    if form == "ragged":
+        entries = int(offsets[-1])
+        # Each byte once, without a column index, and each row's place and
+        # length in two codes of at most 8 bytes.
+        rows = entries + 300 * 16
+    elif form == "whole":
+        entries = int(matrix.nnz)
+        # float32 values and uint8 column indices before compression, and
+        # each row's place and length in at most 16 bytes.
+        rows = entries * (4 + 1) + 300 * 16
+    else:
+        entries = int(matrix.nnz)
+        # Each entry may be a piece of its own, of 16 bytes at most.
+        rows = entries * (4 + 1 + 16)
+    # Each part's file in each of the six buckets of 50 rows holds at least
+    # one block: a header of 64 bytes and four Blosc frames, each with a
+    # header of 16 bytes.
+    blocks = 6 * (1 + writers) * (64 + 4 * 16)
+
+    def create() -> SparseRowStore:
+        # Rows wait until they are finished, so each bucket takes one block.
+        options = {
+            "bucket_rows": 50,
+            "buffer_bytes": 1 << 20,
+            "entries": entries,
+            "parts": 1 + writers,
+        }
+        if form == "ragged":
+            return _ragged_store(tmp_path, 300, **options)
+        builder = _whole_store if form == "whole" else _loose_store
+        return builder(tmp_path, matrix.shape, np.float32, **options)
+
+    with free_disk(0), pytest.raises(OSError, match="which has 0 free") as full:
+        create()
+    asked = asked_bytes(full.value)
+    # One byte short, the store is refused before it writes anything.
+    with free_disk(asked - 1), pytest.raises(OSError, match=f"needs {asked} "):
+        create()
+    assert list(tmp_path.iterdir()) == []
+    with free_disk(asked):
+        store = create()
+        try:
+            if form == "ragged":
+                _append_in_blocks(store, destinations, values, offsets)
+            elif form == "loose":
+                coo = matrix.tocoo()
+                store.append_entries(destinations[coo.row], coo.col, coo.data)
+            elif not writers:
+                store.append_rows(destinations, matrix)
+            else:
+                # Other writers send half of the rows each, as the processes
+                # of a shuffle do, and the owner's part stays empty.
+                halves = np.array_split(np.arange(300), writers)
+                for part, share in enumerate(halves, start=1):
+                    writer = SparseRowStore.open(
+                        store.directory, part=part, buffer_bytes=1 << 20
+                    )
+                    writer.append_rows(destinations[share], matrix[share])
+                    writer.finish()
+            store.finalize()
+            written = _store_files(store.directory)
+        finally:
+            store.close()
+    # The check asks for the rows as it bounds them, a block for each part
+    # in each bucket, and every byte of the store's settings and records:
+    # those of its own part, of each other writer's part and the finalized
+    # record.
+    assert asked == rows + blocks + written["settings"] + written["records"]
+    assert sum(written.values()) <= asked
 
 
 def test_a_bucket_limit_below_one_row_is_refused(tmp_path):
@@ -1225,13 +1335,20 @@ def test_a_measured_rate_estimates_the_disk_that_whole_rows_take(tmp_path):
     try:
         store.append_rows(np.arange(2000)[::-1], counts)
         store.finalize()
-        written = int(store._fileBytes.sum())
+        written = _store_files(store.directory)
         # The estimate asks for a quarter more than the sample's rate gives,
-        # which covers what the rows took, and far less than the bound
-        # before compression, 4 + 2 bytes for each entry.
+        # a block of 64 + 4 * 16 bytes for each of the 8 buckets, and the
+        # store's settings and records. That covers what the store wrote,
+        # and is far less than the bound before compression, 4 + 2 bytes for
+        # each entry.
         estimate = store._spill_bound(counts.nnz, rate)
-        assert estimate == int(np.ceil(counts.nnz * rate * 1.25))
-        assert written <= estimate < counts.nnz * 6 / 2
+        assert estimate == (
+            int(np.ceil(counts.nnz * rate * 1.25))
+            + 8 * 128
+            + written["settings"]
+            + written["records"]
+        )
+        assert sum(written.values()) <= estimate < counts.nnz * 6 / 2
     finally:
         store.close()
     with pytest.raises(TypeError, match="encoded_entry_bytes takes a CSR matrix"):
@@ -1554,21 +1671,21 @@ def test_a_block_of_the_other_form_of_rows_is_refused(tmp_path, ragged):
         store.close()
 
 
-def test_ragged_rows_spill_their_bytes_and_a_wider_row_reads_alone(
-    tmp_path, monkeypatch
-):
+def test_ragged_rows_spill_their_bytes_and_a_wider_row_reads_alone(tmp_path):
+    asked = {}
+    for n_rows, entries in ((4, 1000), (4, 2000), (5, 1000)):
+        with free_disk(0), pytest.raises(OSError, match="temporary bytes") as full:
+            _ragged_store(tmp_path, n_rows, entries=entries)
+        asked[n_rows, entries] = asked_bytes(full.value)
     # Without a measured rate, the disk check counts each byte once and no
-    # column index, and each of the four rows 16 bytes.
-    usage = _sparse.shutil.disk_usage(tmp_path)
-    with monkeypatch.context() as patched:
-        patched.setattr(
-            _sparse.shutil, "disk_usage", lambda path: usage._replace(free=1063)
-        )
-        with pytest.raises(OSError, match="needs 1064 temporary bytes"):
-            _ragged_store(tmp_path, 4, entries=1000)
-        patched.setattr(
-            _sparse.shutil, "disk_usage", lambda path: usage._replace(free=1064)
-        )
+    # column index. Each row takes 16 bytes for its place and length, and
+    # 17 in the records: its count of int64 and mark of uint8 in the part,
+    # and its int64 pointer in the finalized record.
+    assert asked[4, 2000] - asked[4, 1000] == 1000
+    assert asked[5, 1000] - asked[4, 1000] == 16 + 8 + 1 + 8
+    with free_disk(asked[4, 1000] - 1), pytest.raises(OSError):
+        _ragged_store(tmp_path, 4, entries=1000)
+    with free_disk(asked[4, 1000]):
         _ragged_store(tmp_path, 4, entries=1000).close()
     # A row that one read cannot hold is refused at finalize, with the bytes
     # that reading it holds.

@@ -220,15 +220,18 @@ class RowSpillPlan:
         operation: str,
         entry_bytes: float | None,
         temp_dir: str | Path | None,
+        parts: int,
         entries: int | None = None,
     ) -> SparseRowStore:
         """Create the store, its own part empty, after checking its disk.
 
         ``entry_bytes``, as :func:`~cytearc.readers._sparse.encoded_entry_bytes`
         measures them on the first rows, estimates the disk the rows take;
-        None bounds each entry by its bytes before compression. ``entries``
-        are the values that the rows hold beside zeros: the plan's own by
-        default, and for dense rows, whose plan counts none, the estimate of
+        None bounds each entry by its bytes before compression. ``parts``
+        counts the parts whose records the store will hold: its own empty
+        part and one for each writer. ``entries`` are the values that the
+        rows hold beside zeros: the plan's own by default, and for dense
+        rows, whose plan counts none, the estimate of
         :func:`dense_spill_estimate`.
 
         Raises:
@@ -245,6 +248,7 @@ class RowSpillPlan:
             split_bytes=2 * self.readBytes,
             entries=self.entries if entries is None else entries,
             entry_bytes=entry_bytes,
+            parts=parts,
             sum_duplicates=False,
             temp_dir=temp_dir,
         )
@@ -354,10 +358,12 @@ def spill_rows[T](
     Returns:
         The finalized store and what ``fill`` returned.
     """
+    # The store holds its own empty part and the writer's part 1.
     store = plan.new_store(
         operation=operation,
         entry_bytes=entry_bytes,
         temp_dir=temp_dir,
+        parts=2,
         entries=entries,
     )
     try:

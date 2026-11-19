@@ -41,6 +41,12 @@ from cytearc.utils import count_values
 from cytearc.utils.arguments import quoted_value
 from cytearc.utils.memory_budget import MemoryBudgetError
 from cytearc.writers import H5adToZarr
+from tests.row_store_helpers import (
+    asked_bytes,
+    file_bytes,
+    finalized_bytes,
+    free_disk,
+)
 
 anndata = pytest.importorskip("anndata")
 
@@ -539,6 +545,36 @@ def test_a_failed_scan_in_processes_leaves_no_rows_behind(
     assert not (tmp_path / "refused.zarr").exists()
 
 
+def test_the_disk_check_of_a_spill_in_processes_counts_the_part_of_each(
+    tmp_path, monkeypatch
+) -> None:
+    source = tmp_path / "source.h5ad"
+    _write_source(source, "csr")
+    seen = _spy_on_scan_processes(monkeypatch)
+    options = {
+        "mem_budget": "1G",
+        "nthreads": 3,
+        "shuffle_cells": True,
+        "reader_options": {"temp_dir": str(tmp_path)},
+    }
+    with finalized_bytes() as peaks:
+        _import(source, MemoryStore(), **options)
+    (peak,) = peaks
+    ((windows, _spills),) = seen
+    assert len(windows) == 3
+    with free_disk(0), pytest.raises(OSError, match="which has 0 free") as full:
+        _import(source, MemoryStore(), **options)
+    required = asked_bytes(full.value)
+    # The check counts the record of each scan process's part beside that of
+    # the store's own part, so it covers every file that the spill wrote.
+    assert peak <= required
+    # One byte short, the import is refused before a process starts.
+    with free_disk(required - 1), pytest.raises(OSError, match=f"needs {required} "):
+        _import(source, MemoryStore(), **options)
+    assert len(seen) == 1
+    assert not [path for path in tmp_path.iterdir() if path.name.startswith("cytearc-")]
+
+
 @pytest.mark.parametrize("encoding", ["csr", "dense"])
 def test_scan_processes_each_spill_their_own_rows(
     tmp_path, monkeypatch, encoding
@@ -853,17 +889,17 @@ def test_a_disk_without_room_for_the_spill_is_refused_before_it_is_written(
 
     source = tmp_path / "source.h5ad"
     _write_source(source, "csr")
-    actual: list[int] = []
+    actual: list[tuple[int, int]] = []
     original_finalize = SparseRowStore.finalize
 
     def finalize(self):
         original_finalize(self)
-        actual.append(int(self._fileBytes.sum()))
+        actual.append((int(self._fileBytes.sum()), file_bytes(self.directory)))
 
     monkeypatch.setattr(SparseRowStore, "finalize", finalize)
     in_tmp = {"reader_options": {"temp_dir": str(tmp_path)}}
     _import(source, MemoryStore(), shuffle_cells=True, **in_tmp)
-    (spilled,) = actual
+    ((spilled, peak),) = actual
     real_usage = sparse.shutil.disk_usage
 
     def usage(free: int):
@@ -876,10 +912,16 @@ def test_a_disk_without_room_for_the_spill_is_refused_before_it_is_written(
     with pytest.raises(OSError, match=r"needs (\d+) temporary bytes") as caught:
         _import(source, MemoryStore(), shuffle_cells=True, **in_tmp)
     required = int(re.search(r"needs (\d+) temporary", str(caught.value)).group(1))
-    # The estimate measured on the file's first rows covers what the spill
-    # wrote, and stays well below the bytes of the entries before compression.
+    # The estimate measured on the file's first rows covers every file that
+    # the spill wrote, the record of the store's own part and the writer's
+    # among them. It stays well below the bytes of the entries before
+    # compression beside the records: 26 bytes for each cell, its count and
+    # mark in each of the two parts and its pointer in the finalized record,
+    # and under 8 KiB of the records' headers, the settings and the block of
+    # a bucket.
     entries = int(np.count_nonzero(_counts()))
-    assert spilled <= required < entries * (4 + 1)
+    assert spilled < peak <= required
+    assert required < entries * (4 + 1) + _N_CELLS * (2 * 9 + 8) + 8192
     monkeypatch.setattr(sparse.shutil, "disk_usage", usage(required - 1))
     with pytest.raises(OSError, match=f"needs {required} temporary bytes"):
         _import(source, MemoryStore(), shuffle_cells=True, **in_tmp)
@@ -1325,14 +1367,14 @@ def test_a_disk_without_room_for_dense_rows_is_refused_before_any_is_written(
 
     source = tmp_path / "source.h5ad"
     _write_source(source, "dense")
-    actual: list[int] = []
+    actual: list[tuple[int, int]] = []
     appended: list[int] = []
     original_finalize = SparseRowStore.finalize
     original_append = SparseRowStore.append_rows
 
     def finalize(self):
         original_finalize(self)
-        actual.append(int(self._fileBytes.sum()))
+        actual.append((int(self._fileBytes.sum()), file_bytes(self.directory)))
 
     def append_rows(self, rows, matrix):
         appended.append(int(matrix.nnz))
@@ -1342,7 +1384,7 @@ def test_a_disk_without_room_for_dense_rows_is_refused_before_any_is_written(
     monkeypatch.setattr(SparseRowStore, "append_rows", append_rows)
     in_tmp = {"reader_options": {"temp_dir": str(tmp_path)}}
     _import(source, MemoryStore(), shuffle_cells=True, **in_tmp)
-    (spilled,) = actual
+    ((spilled, peak),) = actual
     real_usage = sparse.shutil.disk_usage
 
     def usage(free: int):
@@ -1358,9 +1400,12 @@ def test_a_disk_without_room_for_dense_rows_is_refused_before_any_is_written(
     assert not appended
     required = int(re.search(r"needs (\d+) temporary", str(caught.value)).group(1))
     # Estimated from the first rows' values beside zeros and their encoding:
-    # it covers what the spill wrote, and stays well below every value of
-    # the matrix before compression.
-    assert spilled <= required < _N_CELLS * _N_FEATURES * (4 + 1)
+    # it covers every file that the spill wrote, and stays well below every
+    # value of the matrix before compression beside the records: the count
+    # and mark of each cell in each of the two parts and its pointer, and
+    # under 8 KiB of the records' headers, the settings and a bucket's block.
+    assert spilled < peak <= required
+    assert required < _N_CELLS * _N_FEATURES * (4 + 1) + _N_CELLS * (2 * 9 + 8) + 8192
     monkeypatch.setattr(sparse.shutil, "disk_usage", usage(required - 1))
     with pytest.raises(OSError, match=f"needs {required} temporary bytes"):
         _import(source, MemoryStore(), shuffle_cells=True, **in_tmp)

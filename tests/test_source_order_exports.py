@@ -56,6 +56,7 @@ from cytearc.writers.export import (
     reorder_held_bytes,
     reordered_matrix,
 )
+from tests.row_store_helpers import asked_bytes, finalized_bytes, free_disk
 from tests.storage_helpers import by_cell_id
 
 anndata = pytest.importorskip("anndata")
@@ -716,20 +717,43 @@ def test_closing_a_text_reorder_early_removes_its_files(tmp_path) -> None:
     assert list(tmp_path.iterdir()) == []
 
 
-def test_a_text_reorder_refuses_a_disk_without_room(tmp_path, monkeypatch) -> None:
-    usage = shutil.disk_usage(tmp_path)
-    monkeypatch.setattr(
-        sparse_module.shutil, "disk_usage", lambda path: usage._replace(free=100)
-    )
-    batches = export.reordered_text_rows(
-        _text_blocks(_text_rows(300, 6), 50),
-        np.arange(300),
-        _text_plan(300),
-        operation="text reorder",
-        temp_dir=tmp_path,
-    )
-    with pytest.raises(OSError, match="Text reorder needs .* temporary bytes"):
-        list(batches)
+def test_a_text_reorder_asks_for_the_disk_that_its_files_take(tmp_path) -> None:
+    # Rows of one length, so the first block's rows give every row's bytes.
+    rows = [
+        f"cell{k:04d}_contig_1\tTRAV1-2\tCASSLGTDTQYF\n".encode() for k in range(600)
+    ]
+    places = np.random.default_rng(10).permutation(600)
+
+    def reorder() -> list[bytes]:
+        return _batch_rows(
+            export.reordered_text_rows(
+                _text_blocks(rows, 50),
+                places,
+                _text_plan(600),
+                operation="text reorder",
+                temp_dir=tmp_path,
+            )
+        )
+
+    with finalized_bytes() as peaks:
+        found = reorder()
+    (peak,) = peaks
+    with free_disk(0), pytest.raises(OSError, match="Text reorder needs") as full:
+        reorder()
+    asked = asked_bytes(full.value)
+    # The check asks for at least every byte that the files take, the
+    # store's records among them, and at most 16 bytes more for each row.
+    assert peak <= asked <= peak + 16 * 600
+    # One byte short, the reorder is refused before a row is sent.
+    with free_disk(asked - 1), pytest.raises(OSError, match=f"needs {asked} "):
+        reorder()
+    assert list(tmp_path.iterdir()) == []
+    with free_disk(asked):
+        assert reorder() == found
+    expected = [b""] * 600
+    for row, place in zip(rows, places.tolist(), strict=True):
+        expected[place] = row
+    assert found == expected
     assert list(tmp_path.iterdir()) == []
 
 
@@ -968,19 +992,38 @@ def test_an_export_refuses_a_budget_below_its_reorder_before_writing(
     assert list(tmp_path.iterdir()) == []
 
 
-def test_an_export_refuses_a_full_disk_and_leaves_no_file(
-    imported, tmp_path, monkeypatch
+@pytest.mark.parametrize("call", ["to_h5ad", "to_mtx"])
+def test_an_export_asks_for_the_disk_that_its_temporary_files_take(
+    imported, tmp_path, call
 ) -> None:
     store = _open(imported.shuffled)
-    usage = shutil.disk_usage(tmp_path)
-    monkeypatch.setattr(
-        sparse_module.shutil, "disk_usage", lambda path: usage._replace(free=10)
-    )
     spill = tmp_path / "spill"
     spill.mkdir()
-    with pytest.raises(OSError, match="temporary bytes"):
-        to_h5ad(store.RNA, str(tmp_path / "full.h5ad"), temp_dir=spill)
-    assert sorted(path.name for path in tmp_path.iterdir()) == ["spill"]
+    write = {"to_h5ad": to_h5ad, "to_mtx": to_mtx}[call]
+
+    def export_to(name: str) -> Path:
+        target = tmp_path / (f"{name}.h5ad" if call == "to_h5ad" else name)
+        write(store.RNA, str(target), temp_dir=spill)
+        return target
+
+    with finalized_bytes() as peaks:
+        export_to("roomy")
+    (peak,) = peaks
+    with free_disk(0), pytest.raises(OSError, match="which has 0 free") as full:
+        export_to("full")
+    asked = asked_bytes(full.value)
+    # The cells hold few counts, so the store's record of each cell takes
+    # more than its counts, and the check still asks for every byte of the
+    # files.
+    assert peak <= asked
+    # One byte short, the export is refused and removes its temporary files,
+    # and to_h5ad leaves no file.
+    with free_disk(asked - 1), pytest.raises(OSError, match=f"needs {asked} "):
+        export_to("short")
+    assert list(spill.iterdir()) == []
+    assert not (tmp_path / "short.h5ad").exists()
+    with free_disk(asked):
+        assert export_to("enough").exists()
     assert list(spill.iterdir()) == []
 
 
