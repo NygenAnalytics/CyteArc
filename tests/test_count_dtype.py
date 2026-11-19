@@ -245,6 +245,31 @@ def test_compressed_range_reads_each_pointer_once(monkeypatch):
     assert data.reads == 10
 
 
+def test_a_scan_refusal_reads_the_pointers_after_the_refused_vector_once(
+    monkeypatch,
+):
+    monkeypatch.setattr(count_values, "_SCAN_WINDOW_VALUES", 4)
+    # Rows 0 to 12 hold one value each, row 13 holds 5, and the others 1. A
+    # budget of four values reads pointer blocks of four rows; the block of
+    # rows 12 to 15 refuses row 13.
+    lengths = [1] * 13 + [5] + [1] * 6
+    rows = np.repeat(np.arange(len(lengths)), lengths)
+    columns = np.concatenate([np.arange(length) for length in lengths])
+    matrix = csr_matrix(
+        (np.ones(rows.size, dtype=np.float32), (rows, columns)),
+        shape=(len(lengths), 8),
+    )
+    indptr = _CountingSlices(matrix.indptr)
+    with pytest.raises(MemoryBudgetError) as refused:
+        compressed_count_range(
+            indptr, matrix.indices, matrix.data, minorSize=8, maxBytes=4 * _PER_VALUE
+        )
+    assert refused.value.needed_bytes == 5 * _PER_VALUE
+    # Four blocks of the scan, then the pointers from row 13 on, four rows at
+    # a time: none before the refused row is read again.
+    assert indptr.reads == 4 + 2
+
+
 @pytest.mark.parametrize("part", [False, True], ids=["whole", "part"])
 def test_a_scan_refusal_names_a_longer_vector_beyond_the_pointers_it_read(
     monkeypatch, part

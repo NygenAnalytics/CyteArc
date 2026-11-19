@@ -487,9 +487,11 @@ def test_h5ad_reader_batch_bounds(tmp_path) -> None:
         with pytest.raises(ValueError, match="batch_size must be positive"):
             list(reader.consume(0))
         assert reader.max_batch_nnz(3) == 5
-        # Producing a batch of three rows holds at least the four int32
-        # pointers that the file stores for them.
-        assert reader.producer_batch_staging_bytes(3) >= 4 * 4
+        # Producing a batch of three rows holds the four int32 pointers that
+        # the file stores for them twice, and as the batch's int32 pointers
+        # once more; a batch of more rows than the file holds holds them all.
+        assert reader.producer_batch_staging_bytes(3) == 4 * (2 * 4 + 4)
+        assert reader.producer_batch_staging_bytes(100) == 5 * (2 * 4 + 4)
     finally:
         reader.close()
 

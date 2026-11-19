@@ -846,6 +846,11 @@ def test_unknown_and_ambiguous_tables_name_the_formats(tmp_path):
     path.write_text("cell,clone\nc1,1\n")
     with pytest.raises(ValueError, match="'laml' reads a character matrix"):
         allele_layout(path)
+    # PEtracer's character columns after a first column of another name are
+    # no PEtracer matrix.
+    path.write_text("barcode,intID1-EMX1\nc1,x\n")
+    with pytest.raises(ValueError, match="'laml' reads a character matrix"):
+        allele_layout(path)
     both = tmp_path / "both.csv"
     both.write_text("intID,cellBC,intBC,r1,RNF2,HEK3,EMX1\na,b,c,d,e,f,g\n")
     with pytest.raises(ValueError, match="several formats, 'cassiopeia', 'petracer'"):

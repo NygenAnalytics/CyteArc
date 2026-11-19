@@ -919,6 +919,17 @@ def test_got_tables_read_r_row_names_as_clone_tables_do(tmp_path) -> None:
     assert loaded.calls[["ids", "call"]].to_numpy().tolist() == [["AAAG-1", "MUT"]]
 
 
+def test_an_hdf5_file_of_ad_counts_without_dp_is_no_mito_matrix(tmp_path) -> None:
+    path = tmp_path / "ad.h5"
+    with h5py.File(path, "w") as handle:
+        handle.create_group("layers").create_dataset("AD", data=np.zeros((2, 2)))
+    with pytest.raises(ValueError, match="none of giftwrap's counts, MiTo's allele"):
+        hdf5_format(str(path))
+    with h5py.File(path, "a") as handle:
+        handle["layers"].create_dataset("DP", data=np.zeros((2, 2)))
+    assert hdf5_format(str(path)) == "mito"
+
+
 def test_got_multi_tables_without_read_columns_import_their_umis(tmp_path) -> None:
     path = tmp_path / "got_multi.csv"
     path.write_text(
