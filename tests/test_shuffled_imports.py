@@ -796,22 +796,36 @@ def test_cells_of_many_buckets_are_read_ahead_and_each_deleted_once_read(
     assert _no_temporary_files(tmp_path)
 
 
-@pytest.mark.parametrize(
-    ("options", "error"),
-    [
-        ({"shuffle_cells": "yes"}, TypeError),
-        ({"shuffle_cells": True, "shuffle_seed": -1}, ValueError),
-        ({"shuffle_cells": True, "shuffle_seed": 2**64}, ValueError),
-        ({"shuffle_cells": True, "shuffle_seed": 1.5}, TypeError),
-    ],
-)
+# Shuffle arguments that an import refuses, the error and its message.
+BAD_SHUFFLE_ARGUMENTS = [
+    ({"shuffle_cells": "yes"}, TypeError, "shuffle_cells must be a boolean"),
+    (
+        {"shuffle_cells": True, "shuffle_seed": -1},
+        ValueError,
+        "shuffle_seed must be at least 0",
+    ),
+    (
+        {"shuffle_cells": True, "shuffle_seed": 2**64},
+        ValueError,
+        "shuffle_seed must be at most 18446744073709551615",
+    ),
+    (
+        {"shuffle_cells": True, "shuffle_seed": 1.5},
+        TypeError,
+        "shuffle_seed must be an integer",
+    ),
+]
+
+
+@pytest.mark.parametrize(("options", "error", "message"), BAD_SHUFFLE_ARGUMENTS)
 @pytest.mark.parametrize("kind", ["10x-filtered", "tapestri", "csv", "sparse"])
 def test_bad_shuffle_arguments_are_refused_before_the_store_exists(
-    tmp_path, kind, options, error
+    tmp_path, kind, options, error, message
 ) -> None:
     run, _expected = _source(tmp_path, kind)
-    with pytest.raises(error, match="shuffle_"):
+    with pytest.raises(error) as refused:
         run(tmp_path / "refused.zarr", options)
+    assert str(refused.value) == message
     assert not (tmp_path / "refused.zarr").exists()
     assert _no_temporary_files(tmp_path)
 
@@ -917,9 +931,14 @@ def test_a_shuffled_import_of_a_reader_names_the_budget_that_passes_its_spill(
         "cell order"
     )
     assert caught.value.budget_bytes == 4_000
-    assert caught.value.needed_bytes > 4_000
-    # With the budget it names, the spill fits.
-    at_budget(caught.value.needed_bytes)
+    needed = caught.value.needed_bytes
+    assert needed > 4_000
+    # With the budget it names, the spill fits; one byte less is refused,
+    # naming the same budget.
+    at_budget(needed)
+    with pytest.raises(MemoryBudgetError) as below:
+        at_budget(needed - 1)
+    assert (below.value.needed_bytes, below.value.budget_bytes) == (needed, needed - 1)
     assert _no_temporary_files(tmp_path)
 
 
@@ -934,10 +953,10 @@ def test_a_budget_without_room_for_a_batch_and_its_spill_names_the_bytes_it_need
         at_budget(4_000)
     assert caught.value.item == "the row spill of a cell shuffle"
     assert caught.value.needed_bytes > caught.value.budget_bytes
-    # The order and its inverse, and the reader's own arrays, are held
-    # beside the spill.
+    # The order and its inverse, 8 bytes a cell each, are held beside the
+    # spill, which the refusal names the bytes of alone.
     held = 4_000 - caught.value.budget_bytes
-    assert held >= 16 * _N_CELLS
+    assert held == 16 * _N_CELLS
     # With the bytes it names beside them, the spill fits; buckets grow with
     # the budget, so it needs no more there.
     at_budget(caught.value.needed_bytes + held)
@@ -973,6 +992,36 @@ def test_a_disk_without_room_for_the_spill_is_refused(
     ):
         run(tmp_path / "refused.zarr", {"shuffle_cells": True})
     assert not (tmp_path / "refused.zarr").exists()
+    assert _no_temporary_files(tmp_path)
+
+
+@pytest.mark.parametrize("kind", ["10x", "mtx-unordered", "tapestri"])
+def test_a_reader_refuses_destination_rows_that_are_no_permutation(
+    tmp_path, kind
+) -> None:
+    make_reader, _writer, _options, _expected = _reusable_source(tmp_path, kind)
+    reader = make_reader()
+    n_cells = reader.nCells
+    shape = (
+        "destinationRows must hold one integer row for each of the "
+        f"{n_cells} cells; found dtype {{}} and shape {{}}"
+    )
+    permutation = (
+        "destinationRows must be a permutation of the rows, each row from 0 once"
+    )
+    try:
+        for rows, message in (
+            (np.arange(n_cells - 1), shape.format("int64", (n_cells - 1,))),
+            (np.full(n_cells, 0.5), shape.format("float64", (n_cells,))),
+            (np.zeros(n_cells, dtype=np.int64), permutation),
+            (np.arange(n_cells) - 1, permutation),
+        ):
+            with pytest.raises(ValueError) as refused:
+                reader.count_value_ranges(1 << 28, destinationRows=rows)
+            assert str(refused.value) == message
+            assert reader._shuffledRows is None
+    finally:
+        reader.close()
     assert _no_temporary_files(tmp_path)
 
 

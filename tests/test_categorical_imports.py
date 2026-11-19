@@ -1134,21 +1134,38 @@ def test_categories_that_cannot_be_stored_as_categories_are_refused(
 
 
 @pytest.mark.parametrize(
-    ("codes", "categories"),
+    ("codes", "categories", "kind", "labels"),
     [
         # The second category is used, so the labels of the rows fail too.
-        (np.array([1]), np.array([1, 2**63], dtype=np.uint64)),
-        (np.array([1]), np.array([b"a", b"\xff"], dtype=object)),
+        (
+            np.array([1]),
+            np.array([1, 2**63], dtype=np.uint64),
+            "int64",
+            "holds integers outside the int64 range, such as 9223372036854775808; "
+            "pass them as a NumPy array of a dtype that holds them, such as uint64, "
+            "or as text",
+        ),
+        (
+            np.array([1]),
+            np.array([b"a", b"\xff"], dtype=object),
+            "text",
+            "holds text that is not valid UTF-8; pass str values or UTF-8 encoded bytes",
+        ),
     ],
     ids=["integer_beyond_int64", "invalid_utf8"],
 )
 def test_a_used_category_that_its_labels_cannot_hold_is_refused_as_labels_too(
-    codes: np.ndarray, categories: np.ndarray
+    codes: np.ndarray, categories: np.ndarray, kind: str, labels: str
 ) -> None:
-    with pytest.raises(UnstorableCategoriesError):
+    with pytest.raises(UnstorableCategoriesError) as unstorable:
         stored_categorical_codes(codes, categories, name="c")
-    with pytest.raises(ValueError, match="Column 'c' ") as refused:
+    with pytest.raises(ValueError) as refused:
         stored_categorical_values(codes, categories, name="c")
+    assert str(unstorable.value) == (
+        f"Column 'c' has categories that cannot all be stored as {kind}, the type "
+        "of the labels that its rows hold"
+    )
     # A column of labels refuses them with its own error, which an import
     # does not fall back from.
     assert refused.type is ValueError
+    assert str(refused.value) == f"Column 'c' {labels}"

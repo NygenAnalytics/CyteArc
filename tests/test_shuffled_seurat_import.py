@@ -698,21 +698,34 @@ def test_a_failed_dump_removes_the_shuffled_cells(tmp_path, monkeypatch) -> None
 
 
 @pytest.mark.parametrize(
-    ("options", "error", "words"),
+    ("options", "error", "message"),
     [
-        ({"shuffle_cells": 1}, TypeError, "shuffle_cells"),
-        ({"shuffle_cells": True, "shuffle_seed": -1}, ValueError, "shuffle_seed"),
-        ({"shuffle_cells": True, "shuffle_seed": 2**64}, ValueError, "shuffle_seed"),
-        ({"shuffle_cells": True, "shuffle_seed": 1.5}, TypeError, "shuffle_seed"),
+        ({"shuffle_cells": 1}, TypeError, "shuffle_cells must be a boolean"),
+        (
+            {"shuffle_cells": True, "shuffle_seed": -1},
+            ValueError,
+            "shuffle_seed must be at least 0",
+        ),
+        (
+            {"shuffle_cells": True, "shuffle_seed": 2**64},
+            ValueError,
+            "shuffle_seed must be at most 18446744073709551615",
+        ),
+        (
+            {"shuffle_cells": True, "shuffle_seed": 1.5},
+            TypeError,
+            "shuffle_seed must be an integer",
+        ),
     ],
 )
 def test_bad_shuffle_arguments_are_refused_before_the_store_exists(
-    tmp_path, options, error, words
+    tmp_path, options, error, message
 ) -> None:
     source = _write_object(tmp_path / "object.rds", n_cells=5)
     with SeuratReader(source, temp_dir=tmp_path) as reader:
-        with pytest.raises(error, match=words):
+        with pytest.raises(error) as refused:
             SeuratToZarr(reader, str(tmp_path / "refused.zarr"), **options)
+    assert str(refused.value) == message
     assert not (tmp_path / "refused.zarr").exists()
     assert not list(tmp_path.glob("cytearc-sparse-*"))
 
@@ -882,9 +895,13 @@ def test_what_a_shuffled_import_holds_beside_a_gathered_array_is_charged(
         )
         stores = list(writer._shuffledRows.values())
         resident = writer._source_resident_bytes()
-        # Beside each array, the import holds at least the order of the cells
-        # and the row counts of the shuffled cells.
-        assert resident >= 8 * _N_CELLS + sum(store.indptr.nbytes for store in stores)
+        # Beside each array, the import holds the order of the cells, 8 bytes
+        # a cell, the row pointers of the shuffled cells, and the prefix sums
+        # of each cell's stored values, 8 bytes a cell and one each. The
+        # dgCMatrix stays in the file, so its source holds nothing.
+        pointers = 8 * (_N_CELLS + 1)
+        assert [store.indptr.nbytes for store in stores] == [pointers]
+        assert resident == 8 * _N_CELLS + pointers + pointers
         width = max(len(cell) for cell in _cells(_N_CELLS))
         budget = 100_000
         # Blocks of the reduction take an eighth of the budget at the 8 bytes
@@ -907,6 +924,37 @@ def test_what_a_shuffled_import_holds_beside_a_gathered_array_is_charged(
             assert caught.value.needed_bytes == (
                 resident + 9 * _N_CELLS + (_N_CELLS + block) * row_bytes
             )
+        writer._release_shuffled_rows()
+
+
+def test_the_check_of_rows_held_in_memory_charges_every_row_and_one_block(
+    tmp_path,
+) -> None:
+    source = _write_wide_object(tmp_path / "object.rds", dims=2)
+    with SeuratReader(source, temp_dir=tmp_path) as reader:
+        writer = SeuratToZarr(
+            reader, MemoryStore(), mem_budget="64M", nthreads=1, shuffle_cells=True
+        )
+        # Rows of 40 bytes beside 300 held throughout: every cell's row and a
+        # block of four, or of every row when a block holds more rows than
+        # there are; a reduction of 20 cells holds its own rows alone.
+        for block_rows, n_rows, needed in (
+            (4, None, (_N_CELLS + 4) * 40 + 300),
+            (100, None, 2 * _N_CELLS * 40 + 300),
+            (100, 20, 2 * 20 * 40 + 300),
+        ):
+            writer.resources = dataclasses.replace(writer.resources, memoryBytes=needed)
+            writer._check_shuffled_rows_memory(
+                40, block_rows, "rows", 300, n_rows=n_rows
+            )
+            writer.resources = dataclasses.replace(
+                writer.resources, memoryBytes=needed - 1
+            )
+            with pytest.raises(MemoryBudgetError) as caught:
+                writer._check_shuffled_rows_memory(
+                    40, block_rows, "rows", 300, n_rows=n_rows
+                )
+            assert (caught.value.needed_bytes, caught.value.item) == (needed, "rows")
         writer._release_shuffled_rows()
 
 
