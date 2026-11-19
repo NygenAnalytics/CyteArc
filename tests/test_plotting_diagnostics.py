@@ -457,18 +457,20 @@ def test_qc_orders_natural_and_missing_groups_without_subsampling():
 
 
 def test_elbow_without_detection_uses_data_driven_width():
-    # A straight line has no point of maximum curvature, so no elbow.
-    values = np.linspace(1.0, 0.1, 12)
+    # A straight line has no point of maximum curvature, so no elbow. Its
+    # length matters: kneed 0.8.1, the oldest supported, finds an elbow in
+    # the rounding of a straight line of 12 values.
+    values = np.linspace(1.0, 0.1, 10)
     result = splt.elbow(values, show=False)
 
-    # A quarter inch for each of the 12 PCs, beside the default height.
-    assert result.figure.get_size_inches() == pytest.approx((3.0, 2.0))
+    # A quarter inch for each of the 10 PCs, beside the default height.
+    assert result.figure.get_size_inches() == pytest.approx((2.5, 2.0))
     assert result.provenance.extras["elbow_pc"] is None
     assert result.legends == ()
     assert len(result.axes["elbow"].lines) == 1
     table = result.tables["variance_explained"]
     assert not table["is_elbow"].any()
-    np.testing.assert_array_equal(table["pc"], np.arange(1, 13))
+    np.testing.assert_array_equal(table["pc"], np.arange(1, 11))
     result.close()
 
 
