@@ -6,6 +6,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import sys
 from xml.etree import ElementTree
 
 import pytest
@@ -792,6 +793,49 @@ def test_html_fragment_rejects_missing_or_duplicate_navigation() -> None:
     ):
         with pytest.raises(ValueError, match="Expected one complete .menu element"):
             build_docs.html_fragment(contents, "menu")
+
+
+class _PageAnchors(HTMLParser):
+    """The ids of a page's elements, and the anchors that its links within it name."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.ids: set[str] = set()
+        self.links: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        attributes = dict(attrs)
+        if attributes.get("id"):
+            self.ids.add(str(attributes["id"]))
+        href = attributes.get("href") or ""
+        if tag == "a" and href.startswith("#") and len(href) > 1:
+            self.links.append(href[1:])
+
+
+@pytest.mark.slow
+def test_links_within_an_api_page_name_an_anchor_of_it(tmp_path: Path) -> None:
+    # The API's Sphinx build takes every Markdown link as external, so it
+    # writes the anchor of [text](#a_label) as it is, while the label's own
+    # anchor turns its underscores into hyphens; a {ref} of the label finds
+    # it. Building every API page takes about 15 seconds.
+    pytest.importorskip("sphinx")
+    pytest.importorskip("myst_parser")
+    api = Path(__file__).resolve().parents[1] / "docs/source/reference/api"
+    subprocess.run(
+        [sys.executable, "-m", "sphinx", "-q", "-b", "html", api, tmp_path], check=True
+    )
+    links = {}
+    missing = []
+    for page in sorted(tmp_path.glob("*.html")):
+        anchors = _PageAnchors()
+        anchors.feed(page.read_text())
+        links[page.name] = anchors.links
+        missing += [
+            (page.name, anchor) for anchor in anchors.links if anchor not in anchors.ids
+        ]
+    # The links that the pages' authors wrote are among those checked.
+    assert "cell-order-in-exports" in links["import_export.html"]
+    assert missing == []
 
 
 @pytest.mark.parametrize("figure_count", [1, 2])
