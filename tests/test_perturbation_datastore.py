@@ -819,14 +819,26 @@ def test_guide_calls_plot_summarizes_the_calls(store, template, tmp_path) -> Non
         assert per_guide.loc["CRISPR3"].tolist() == [0, 1, 1]
         assert per_guide["cells"].tolist() == sorted(per_guide["cells"], reverse=True)
         top = result.tables["top_fraction"]
-        assert (
-            int(
-                top[["No guide called", "One guide called", "Several guides called"]]
-                .sum()
-                .sum()
-            )
-            == 6
-        )
+        groups = ["No guide called", "One guide called", "Several guides called"]
+        assert top.columns.tolist() == ["bin_start", "bin_stop", *groups]
+        np.testing.assert_allclose(top["bin_start"], np.arange(20) / 20)
+        np.testing.assert_allclose(top["bin_stop"], np.arange(1, 21) / 20)
+        # Each cell's top guide holds this share of its guide UMIs, binned by
+        # twentieths: cell4 holds 2/3 in CRISPR2 without a call; cell1, cell0
+        # and cell7 hold 25/27, 30/31 and all of theirs in their one call;
+        # and cell2 and cell5 hold 1/2 and 40/43 in the top of their two
+        # calls. cell3 has no guide UMI, so it has no share.
+        binned = {
+            group: {
+                int(row): int(cells) for row, cells in enumerate(top[group]) if cells
+            }
+            for group in groups
+        }
+        assert binned == {
+            "No guide called": {13: 1},
+            "One guide called": {18: 1, 19: 2},
+            "Several guides called": {10: 1, 18: 1},
+        }
         assert result.provenance.extras["guide_calls"] == ref.to_dict()
         assert result.provenance.n_cells == 7
     finally:

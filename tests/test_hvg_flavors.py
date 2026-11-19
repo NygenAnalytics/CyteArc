@@ -1812,13 +1812,21 @@ def test_a_selection_of_too_few_candidates_warns_when_computed_and_when_reused(
 
 
 def _pooled_detection_ratio(store: DataStore, ref: Any) -> float:
-    """The selected genes' median detection over that of the genes within the bounds."""
+    """The selected genes' median detection over that of the genes within the bounds.
+
+    Each gene's detection is counted here from the stored counts of all 120
+    cells, whichever batch holds them. The default bounds of 120 cells keep
+    the genes detected in 6 to 119 cells: 5% of the cells, rounded up, and
+    the 99.5% of them below which a gene is not ubiquitous.
+    """
+    counts = np.asarray(store.RNA.rawData[np.arange(120), :].compute())
+    detected = np.count_nonzero(counts, axis=0)
     group = store.artifacts.load(ref)
-    detected = np.asarray(group["detected"][:])
-    selected = np.asarray(group["values"][:], dtype=bool)
+    np.testing.assert_array_equal(group["detected"][:], detected)
     parameters = store.artifacts.inspect(ref).parameters
-    within = (detected > 0) & (detected >= parameters["min_cells"])
-    within &= detected < parameters["max_cells"]
+    assert (parameters["min_cells"], parameters["max_cells"]) == (6, 120)
+    selected = np.asarray(group["values"][:], dtype=bool)
+    within = (detected >= 6) & (detected < 120)
     return float(np.median(detected[selected]) / np.median(detected[within]))
 
 

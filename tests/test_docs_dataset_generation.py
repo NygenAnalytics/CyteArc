@@ -265,14 +265,44 @@ def test_citeseq_analysis_integrates_modality_runs_of_the_same_cells(monkeypatch
         assert [run.label for run in runs] == ["rna", "adt"]
         assert settings["method"] == settings["label"]
     assert rna[2]["markers"] is False
-    # The teaching columns keep the names that the tutorials read.
+    # The teaching columns keep the names that the tutorials read, written out
+    # here rather than by the helper that the analysis calls.
     assert copied == [
-        ("adt", generator._embedding_columns("ADT"), False),
-        ("snn", generator._embedding_columns("RNA+ADT"), False),
-        ("wnn", generator._embedding_columns("RNA+ADT_wnn"), False),
+        (
+            "adt",
+            {
+                "ADT_UMAP1": "umap_1",
+                "ADT_UMAP2": "umap_2",
+                "ADT_leiden_cluster": "clusters",
+            },
+            False,
+        ),
+        (
+            "snn",
+            {
+                "RNA+ADT_UMAP1": "umap_1",
+                "RNA+ADT_UMAP2": "umap_2",
+                "RNA+ADT_leiden_cluster": "clusters",
+            },
+            False,
+        ),
+        (
+            "wnn",
+            {
+                "RNA+ADT_wnn_UMAP1": "umap_1",
+                "RNA+ADT_wnn_UMAP2": "umap_2",
+                "RNA+ADT_wnn_leiden_cluster": "clusters",
+            },
+            False,
+        ),
         (
             "rna",
-            {**generator._embedding_columns("RNA"), "RNA_clusters": "clusters"},
+            {
+                "RNA_UMAP1": "umap_1",
+                "RNA_UMAP2": "umap_2",
+                "RNA_leiden_cluster": "clusters",
+                "RNA_clusters": "clusters",
+            },
             True,
         ),
     ]
