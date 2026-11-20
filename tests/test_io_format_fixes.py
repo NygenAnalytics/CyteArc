@@ -169,8 +169,8 @@ def test_a_compressed_matrix_market_export_writes_its_three_files_at_gzip_level_
     bases = np.asarray(list("ACGT"))
     letters = np.asarray(list("ABCDEGHIKLMNPRSTUVWY"))
     location = str(tmp_path / "store.zarr")
-    # Random barcodes, IDs and names, which each gzip level compresses
-    # differently.
+    # Random barcodes, IDs and names, so that their compressed bytes tell
+    # gzip levels apart.
     write_count_store(
         location,
         {"RNA": counts},
