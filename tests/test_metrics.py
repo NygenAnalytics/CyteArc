@@ -21,7 +21,11 @@ from cytearc.metrics import (
     silhouette_scoring,
 )
 from cytearc.metrics.graph import neighbor_label_agreement
-from cytearc.metrics.lisi import _effective_perplexity, _neighbor_probabilities
+from cytearc.metrics.lisi import (
+    _effective_perplexity,
+    _neighbor_probabilities,
+    _simpson_from_probabilities,
+)
 from cytearc.metadata.artifacts import plan_cell_data_artifact, write_cell_data_artifact
 from cytearc.storage.artifacts import ArtifactRef, ArtifactScope
 from cytearc.storage.selections import resolve_stored_selection_artifact
@@ -994,6 +998,14 @@ def test_lisi_summaries_score_a_categorical_as_its_column_does():
     assert ilisi_knn(distances, indices, labels, scale=False) == float(
         np.nanmedian(per_cell[:, 0])
     )
+    # The Simpson index of the categorical's own codes and categories.
+    probabilities = _neighbor_probabilities(
+        distances, _effective_perplexity(None, 6), tol=1e-5
+    )
+    simpson = _simpson_from_probabilities(
+        probabilities, indices, np.asarray(labels.codes), len(labels.categories)
+    )
+    np.testing.assert_array_equal(per_cell[:, 0], 1 / simpson)
 
 
 def test_lisi_and_connectivity_keep_integers_above_2_53_beside_floats_apart():
