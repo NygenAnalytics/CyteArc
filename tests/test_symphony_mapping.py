@@ -671,20 +671,24 @@ def test_symphony_r_0_1_3_static_golden_fixture():
         # The query batch fingerprint hashes values by their text...
         (
             [1, "1", "1", 1],
-            "holds different values that print alike, such as 1 and '1'",
+            "holds values that print alike but would form separate labels, such "
+            "as 1 and '1'",
         ),
         (
             [1.5, "1.5", 1.5, "1.5"],
-            "holds different values that print alike, such as 1.5 and '1.5'",
+            "holds values that print alike but would form separate labels, such "
+            "as 1.5 and '1.5'",
         ),
         (
             [np.float32(0.1), 0.1, 0.1, np.float32(0.1)],
-            "holds different values that print alike, such as np.float32(0.1) and 0.1",
+            "holds values that print alike but would form separate labels, such "
+            "as np.float32(0.1) and 0.1",
         ),
         # ...and pandas takes 1, 1.0 and True for one batch...
         (
             [1, 1.0, True, 1],
-            "holds equal values that print differently, such as 1, 1.0 and True",
+            "holds values that would form one label but print differently, such "
+            "as 1, 1.0 and True",
         ),
         # ...and the fingerprint hashes a byte string by the text it encodes.
         (

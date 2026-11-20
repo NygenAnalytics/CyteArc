@@ -1,3 +1,5 @@
+import re
+
 import numpy as np
 import pytest
 
@@ -32,6 +34,23 @@ def _fixture_reduction(datastore, graph: ArtifactRef) -> ArtifactRef:
     reduction = resolve_native_graph_inputs(datastore.zw, graph).coordinates
     assert reduction.kind == "reduction"
     return reduction
+
+
+def test_clusterings_that_print_otherwise_than_they_compare_are_refused():
+    coordinates = np.random.default_rng(3).normal(size=(8, 2))
+
+    # 1, 1.0 and True compare equal, so the clustering would hold two clusters.
+    with pytest.raises(
+        ValueError,
+        match=re.escape(
+            "Clustering 'leiden' holds values that would form one label but print "
+            "differently, such as 1, 1.0 and True; convert them to text, or to one "
+            "type, first"
+        ),
+    ):
+        evaluate_cluster_separability(
+            coordinates, {"leiden": [1, 1, 1.0, 1.0, True, True, 2, 2]}
+        )
 
 
 def test_sampling_is_deterministic_stratified_and_shared():

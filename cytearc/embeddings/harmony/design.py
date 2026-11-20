@@ -17,7 +17,7 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
-from ...utils.arguments import require_labels_distinct_as_text
+from ...utils.arguments import require_labels_match_their_text
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,13 +138,9 @@ def _ordered_levels(column: pd.Series, name: object, out: np.ndarray) -> list[ob
     other column orders its distinct values with Python's ``sorted``, so numbers
     sort numerically and text by code point. Results name levels by their text,
     and pandas takes values that compare equal for one level, so a column whose
-    values group otherwise by value than by text is refused first.
+    values would group otherwise than their text reads is refused first.
     """
-    require_labels_distinct_as_text(
-        column,
-        name=f"Batch column {name!r}",
-        remedy="convert it to text, or to one type, first",
-    )
+    require_labels_match_their_text(column, name=f"Batch column {name!r}")
     if isinstance(column.dtype, pd.CategoricalDtype):
         used = column.cat.remove_unused_categories()
         out[...] = used.cat.codes.to_numpy()
@@ -167,11 +163,10 @@ def _ordered_levels(column: pd.Series, name: object, out: np.ndarray) -> list[ob
 def encode_batch_design(metadata: pd.DataFrame) -> BatchDesign:
     """Encode batch columns as global level codes in design order and group cells by level combination.
 
-    Unused categories of a categorical column are not levels. A column's
-    values must group alike by value and by text, since results name levels by
-    text: equal values that print differently, such as ``1``, ``1.0`` and
-    ``True``, which pandas would take for one level, and different values that
-    print alike, such as ``1`` and ``"1"``, are refused.
+    Unused categories of a categorical column are not levels. Results name
+    levels by text, so values that would form one level but print differently,
+    such as ``1``, ``1.0`` and ``True``, and values that print alike but would
+    form separate levels, such as ``1`` and ``"1"``, are refused.
 
     Args:
         metadata: One row per cell and one column per batch variable, already
@@ -181,9 +176,9 @@ def encode_batch_design(metadata: pd.DataFrame) -> BatchDesign:
         The encoded design.
 
     Raises:
-        ValueError: If a column holds equal values that print differently or
-            different values that print alike, or values that cannot be
-            ordered.
+        ValueError: If a column holds values that would form one level but
+            print differently, values that print alike but would form separate
+            levels, or values that cannot be ordered.
     """
     n_cells = len(metadata)
     n_columns = int(metadata.shape[1])

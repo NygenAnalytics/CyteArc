@@ -27,6 +27,18 @@ from cytearc.storage.artifacts import ArtifactRef, ArtifactScope
 from cytearc.storage.selections import resolve_stored_selection_artifact
 from tests.storage_helpers import by_cell_id
 
+_REMEDY = "; convert them to text, or to one type, first"
+# 1, 1.0 and True compare equal, so pandas would take them for one label.
+_MERGED = np.asarray([1, 1, 1.0, 1.0, True, True, 2, 2], dtype=object)
+_MERGED_FOUND = (
+    "holds values that would form one label but print differently, such as 1, "
+    "1.0 and True" + _REMEDY
+)
+_ALIKE_FOUND = (
+    "holds values that print alike but would form separate labels, such as 1 "
+    "and '1'" + _REMEDY
+)
+
 
 def _graph_neighbors(datastore, graph: ArtifactRef) -> ArtifactRef:
     raw = datastore.artifacts.inspect(graph).inputs["neighbors"]
@@ -417,18 +429,33 @@ def test_graph_connectivity_refuses_labels_that_print_otherwise_than_they_compar
     # Each pair of cells is joined by an edge, so each label of two cells is
     # whole; 1, 1.0 and True as one label would leave it in three pieces.
     edges = np.array([[0, 1], [2, 3], [4, 5], [6, 7]])
-    merged = np.asarray([1, 1, 1.0, 1.0, True, True, 2, 2], dtype=object)
 
-    with pytest.raises(
-        ValueError,
-        match=re.escape(
-            "labels holds equal values that print differently, such as 1, 1.0 and "
-            "True; convert the labels to text, or to one type, first"
-        ),
-    ):
-        graph_connectivity(edges, merged)
+    with pytest.raises(ValueError, match=re.escape(f"labels {_MERGED_FOUND}")):
+        graph_connectivity(edges, _MERGED)
     mixed = np.asarray(["a", "a", 2, 2, 2.5, 2.5, True, True], dtype=object)
     assert graph_connectivity(edges, mixed) == 1.0
+
+
+def test_cluster_similarity_refuses_true_beside_one():
+    graph = csr_matrix(np.ones((4, 4)) - np.eye(4))
+
+    # NumPy would read the list's True as the integer 1.
+    for similarity in (
+        lambda labels: calculate_weighted_cluster_similarity(graph, labels),
+        lambda labels: calculate_knn_cluster_similarity(
+            np.array([[1, 2], [0, 2], [0, 3], [0, 1]]),
+            np.ones((4, 2)),
+            labels,
+        ),
+    ):
+        with pytest.raises(
+            ValueError,
+            match=re.escape(
+                "cluster_labels holds values that would form one label but print "
+                "differently, such as 1 and True" + _REMEDY
+            ),
+        ):
+            similarity([0, 0, 1, True])
 
 
 def test_cluster_similarity_is_symmetric_with_unit_diagonal():
@@ -861,28 +888,57 @@ def test_label_concordance_requires_exactly_two_partitions():
 
 def test_label_concordance_refuses_labels_that_print_otherwise_than_they_compare():
     four = np.asarray(list("aabbccdd"), dtype=object)
-    merged = np.asarray([1, 1, 1.0, 1.0, True, True, 2, 2], dtype=object)
 
-    with pytest.raises(
-        ValueError,
-        match=re.escape(
-            "label_sets[0] holds equal values that print differently, such as 1, "
-            "1.0 and True; convert the labels to text, or to one type, first"
-        ),
-    ):
-        label_concordance_score([merged, four])
+    with pytest.raises(ValueError, match=re.escape(f"label_sets[0] {_MERGED_FOUND}")):
+        label_concordance_score([_MERGED, four])
     # NumPy would read the list's 1 and "1" as one text.
-    with pytest.raises(
-        ValueError,
-        match=re.escape(
-            "label_sets[1] holds different values that print alike, such as 1 and '1'"
-        ),
-    ):
+    with pytest.raises(ValueError, match=re.escape(f"label_sets[1] {_ALIKE_FOUND}")):
         label_concordance_score([four, [1, 1, "1", "1", 2, 2, 3, 3]])
-    # Numbers of several types that print apart are four labels, which match
-    # the four letters exactly.
-    numbers = np.asarray([2, 2, 2.5, 2.5, True, True, 3, 3], dtype=object)
-    assert label_concordance_score([numbers, four]) == 1.0
+
+
+@pytest.mark.parametrize("metric", ["ari", "nmi"])
+@pytest.mark.parametrize(
+    "labels",
+    [
+        # Text beside numbers, which scikit-learn cannot sort.
+        np.asarray(["a", "a", 2, 2, 2.5, 2.5, True, True], dtype=object),
+        # Lists that NumPy would read as fewer labels: two texts of a, the
+        # bytes b"1" twice, and one float for two integers above 2**53.
+        [b"a", b"a", "a", "a", "z", "z", "y", "y"],
+        [b"1", b"1", 1, 1, "z", "z", "y", "y"],
+        [2**53, 2**53, 2**53 + 1, 2**53 + 1, 0.5, 0.5, 3, 3],
+    ],
+)
+def test_label_concordance_scores_four_labels_of_mixed_types(labels, metric):
+    # Each of the four labels holds the two cells of one letter: identical
+    # partitions agree fully.
+    four = np.asarray(list("aabbccdd"), dtype=object)
+
+    assert label_concordance_score([labels, four], metric) == pytest.approx(1.0)
+    assert label_concordance_score([four, labels], metric) == pytest.approx(1.0)
+
+
+def test_lisi_functions_refuse_labels_that_print_otherwise_than_they_compare():
+    distances, indices, _labels = _uniform_self_free_knn()
+    merged = np.asarray([1, 1.0, True, 2], dtype=object)
+    found = (
+        "holds values that would form one label but print differently, such as "
+        "1, 1.0 and True" + _REMEDY
+    )
+
+    with pytest.raises(ValueError, match=re.escape(f"batch_labels {found}")):
+        ilisi_knn(distances, indices, merged)
+    with pytest.raises(ValueError, match=re.escape(f"cell_labels {found}")):
+        clisi_knn(distances, indices, merged)
+    with pytest.raises(ValueError, match=re.escape(f"Label column 'batch' {found}")):
+        compute_lisi(distances, indices, pd.DataFrame({"batch": merged}), ["batch"])
+    with pytest.raises(ValueError, match=re.escape(f"batch_labels {found}")):
+        lisi_batch_mixing_score(np.ones(4), merged)
+    # Four cells in two batches of text beside a number, as the integers 0
+    # and 1 score them.
+    mixed = np.asarray(["a", "a", 2, 2], dtype=object)
+    assert ilisi_knn(distances, indices, mixed) == pytest.approx(0.8)
+    assert lisi_batch_mixing_score(np.full(4, 2.0), mixed) == pytest.approx(1)
 
 
 def test_lisi_batch_mixing_score():
@@ -1369,6 +1425,16 @@ def test_silhouette_needs_two_clusters():
     assert scores.shape == (1,)
     assert np.isnan(scores).all()
     assert messages == ["Silhouette scoring requires at least two clusters"]
+
+
+def test_silhouette_refuses_clusters_that_print_otherwise_than_they_compare():
+    data = np.random.default_rng(8).normal(size=(24, 3))
+    merged = np.asarray([1] * 6 + [1.0] * 6 + [True] * 6 + [2] * 6, dtype=object)
+
+    with pytest.raises(
+        ValueError, match=re.escape(f"Cluster column 'RNA_cluster' {_MERGED_FOUND}")
+    ):
+        _silhouette(merged, data)
 
 
 def test_cluster_sampling_draws_disjoint_seeded_groups():

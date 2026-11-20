@@ -5,6 +5,7 @@ import pandas as pd
 from scipy.sparse import csr_matrix
 
 from ..metadata.rows import metadata_missing_mask, read_array_rows_chunkwise
+from ..utils.arguments import require_labels_match_their_text
 from ..utils.logging import logger
 from ..utils.progress import iter_progress
 from ._rows import read_matrix_rows
@@ -100,7 +101,11 @@ def silhouette_scoring(
 
     Raises:
         ValueError: If a selected cell has a missing cluster label, either a
-            null value or a row that the column's linked missing mask flags.
+            null value or a row that the column's linked missing mask flags,
+            or the labels hold values that would form one cluster but print
+            differently, such as ``1``, ``1.0`` and ``True``, or values that
+            print alike but would form separate clusters, such as ``1`` and
+            ``"1"``.
 
     Notes:
         Scores are calculated using a sampling approach for efficiency.
@@ -131,6 +136,9 @@ def silhouette_scoring(
             f"Cluster column {cluster_column!r} contains missing values. Use a "
             "cell_key that selects only labeled cells"
         )
+    require_labels_match_their_text(
+        raw_clusters, name=f"Cluster column {cluster_column!r}"
+    )
     clusters = np.asarray(categorical.codes, dtype=np.int64)
     if hvg_data.shape[0] != len(clusters):
         raise ValueError(

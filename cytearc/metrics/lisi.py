@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 import zarr
 
+from ..utils.arguments import label_array, require_labels_match_their_text
 from ..utils.logging import logger
 from ..utils.progress import iter_progress
 from ._types import ZarrArray
@@ -137,6 +138,14 @@ def compute_lisi(
         Scores with shape (n_cells, n_labels), one column per entry of
         ``label_colnames``.
 
+    Raises:
+        ValueError: If the KNN arrays are not two-dimensional of one shape,
+            the metadata does not hold one row per cell, or a label column
+            holds missing values, values that would form one label but print
+            differently, such as ``1``, ``1.0`` and ``True``, or values that
+            print alike but would form separate labels, such as ``1`` and
+            ``"1"``.
+
     References:
         Korsunsky et al. 2019 doi: 10.1038/s41592-019-0619-0
     """
@@ -157,15 +166,27 @@ def compute_lisi(
     if n_labels == 0:
         return np.empty((n_cells, 0), dtype=np.float64)
 
-    effective_perplexity = _effective_perplexity(perplexity, n_neighbors)
     categoricals: list[pd.Categorical] = []
     for label in label_cols:
         categorical = pd.Categorical(metadata[label])
         if np.any(categorical.codes < 0):
             raise ValueError(f"Label column {label!r} contains missing values")
+        require_labels_match_their_text(metadata[label], name=f"Label column {label!r}")
         categoricals.append(categorical)
         logger.debug(f"Preparing LISI labels from {label}")
+    return _lisi_scores(distances, indices, categoricals, perplexity)
 
+
+def _lisi_scores(
+    distances: np.ndarray | ZarrArray,
+    indices: np.ndarray | ZarrArray,
+    categoricals: Sequence[pd.Categorical],
+    perplexity: float | None,
+) -> np.ndarray:
+    """Return the LISI of each cell for each set of checked labels, as :func:`compute_lisi` does."""
+    n_cells, n_neighbors = distances.shape
+    n_labels = len(categoricals)
+    effective_perplexity = _effective_perplexity(perplexity, n_neighbors)
     chunk_rows = _LISI_BATCH_SIZE
     if isinstance(distances, zarr.Array):
         chunk_rows = min(chunk_rows, int(distances.chunks[0]))
@@ -210,24 +231,19 @@ def _lisi_knn_summary(
     if n_neighbors < 3:
         raise ValueError("LISI requires at least three neighbors per cell")
 
-    categorical = pd.Categorical(labels)
+    values = label_array(labels)
+    categorical = pd.Categorical(values)
     if len(categorical) != n_cells:
         raise ValueError(f"{label_name} labels must match the number of cells")
     if np.any(categorical.codes < 0):
         raise ValueError(f"{label_name} labels must not contain missing values")
+    require_labels_match_their_text(values, name=f"{label_name.lower()}_labels")
 
     n_categories = int(np.unique(categorical.codes).size)
     if n_categories < 2:
         raise ValueError(f"{label_name} LISI requires at least two categories")
 
-    metadata = pd.DataFrame({"labels": categorical})
-    per_cell = compute_lisi(
-        distances,
-        indices,
-        metadata,
-        ["labels"],
-        perplexity=perplexity,
-    )[:, 0]
+    per_cell = _lisi_scores(distances, indices, [categorical], perplexity)[:, 0]
     summary = float(np.nanmedian(per_cell))
     if not scale:
         return summary
@@ -323,11 +339,16 @@ def lisi_batch_mixing_score(
 
     Raises:
         ValueError: If the inputs are misaligned, contain non-finite scores or
-            missing labels, or assign the cells to fewer than two batches.
+            missing labels, assign the cells to fewer than two batches, or the
+            labels hold values that would form one batch but print
+            differently, such as ``1``, ``1.0`` and ``True``, or values that
+            print alike but would form separate batches, such as ``1`` and
+            ``"1"``.
     """
     scores = np.asarray(lisi_scores, dtype=np.float64)
+    values = label_array(batch_labels)
     # A declared category without cells is not a batch.
-    labels = pd.Categorical(batch_labels).remove_unused_categories()
+    labels = pd.Categorical(values).remove_unused_categories()
     if scores.ndim != 1 or len(scores) != len(labels):
         raise ValueError("LISI scores and batch labels must be aligned vectors")
     if not np.all(np.isfinite(scores)):
@@ -336,6 +357,7 @@ def lisi_batch_mixing_score(
         raise ValueError("Batch labels must not contain missing values")
     if len(labels.categories) < 2:
         raise ValueError("Batch mixing requires at least two batches")
+    require_labels_match_their_text(values, name="batch_labels")
 
     counts = np.bincount(labels.codes, minlength=len(labels.categories))
     proportions = counts / counts.sum()

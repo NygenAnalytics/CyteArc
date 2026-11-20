@@ -257,8 +257,9 @@ def test_batch_columns_need_orderable_values_with_distinct_text() -> None:
     with pytest.raises(
         ValueError,
         match=re.escape(
-            "Batch column 'batch' holds different values that print alike, such as "
-            "1 and '1'; convert it to text, or to one type, first"
+            "Batch column 'batch' holds values that print alike but would form "
+            "separate labels, such as 1 and '1'; convert them to text, or to one "
+            "type, first"
         ),
     ):
         fit_harmony(
@@ -276,8 +277,9 @@ def test_batch_columns_keep_apart_values_that_python_takes_for_one() -> None:
     with pytest.raises(
         ValueError,
         match=re.escape(
-            "Batch column 'batch' holds equal values that print differently, such "
-            "as 1, 1.0 and True; convert it to text, or to one type, first"
+            "Batch column 'batch' holds values that would form one label but print "
+            "differently, such as 1, 1.0 and True; convert them to text, or to one "
+            "type, first"
         ),
     ):
         fit_harmony(

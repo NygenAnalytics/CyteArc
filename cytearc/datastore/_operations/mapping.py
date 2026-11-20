@@ -73,7 +73,7 @@ from ...storage.feature_selection import (
     _ordered_feature_ids_fingerprint,
     _write_feature_selection,
 )
-from ...utils.arguments import bool_argument, require_labels_distinct_as_text
+from ...utils.arguments import bool_argument, require_labels_match_their_text
 
 if TYPE_CHECKING:
     from ..graph_datastore import GraphDataStore as _MappingOperationsBase
@@ -305,10 +305,10 @@ class _MappingOperationsMixin(_MappingOperationsBase):
             ValueError: If ``feature_key`` is ``"names"`` and reference
                 features share a name, before anything is written, or
                 ``query_batches`` lacks a selected query cell, repeats a
-                cell ID, or holds in a column equal values that print
-                differently, such as ``1``, ``1.0`` and ``True``, or
-                different values that print alike, such as ``1`` and
-                ``"1"``.
+                cell ID, or holds in a column values that would form one
+                batch but print differently, such as ``1``, ``1.0`` and
+                ``True``, or values that print alike but would form separate
+                batches, such as ``1`` and ``"1"``.
             PermissionError: If the projection or its overlap selection must be
                 written and the query store is not opened with
                 ``zarr_mode='r+'``, before any query cell is projected.
@@ -654,15 +654,12 @@ class _MappingOperationsMixin(_MappingOperationsBase):
         if query_batches.isna().any().any():
             raise ValueError("query_batches cannot contain missing values")
         for name, column in query_batches.items():
-            # pandas takes equal values for one batch, and the batch
-            # fingerprint hashes values by their text, so equal values that
-            # print differently, such as 1, 1.0 and True, would form one
-            # batch, and different values that print alike, such as 1 and
-            # "1", two batches with one digest.
-            require_labels_distinct_as_text(
-                column,
-                name=f"query_batches column {name!r}",
-                remedy="convert it to text, or to one type, first",
+            # pandas takes values that compare equal for one batch, and the
+            # batch fingerprint hashes values by their text, so 1, 1.0 and
+            # True would form one batch, and 1 and "1" two batches with one
+            # digest.
+            require_labels_match_their_text(
+                column, name=f"query_batches column {name!r}"
             )
             # The fingerprint also hashes a byte string by the text that it
             # encodes, which str() does not show.

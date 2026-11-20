@@ -1,3 +1,5 @@
+import re
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -93,6 +95,24 @@ def test_source_sink_labels_reject_missing_and_overlap():
         _validate_source_sink_labels(labels, ["a"], ["a"], "test cells")
     with pytest.raises(ValueError, match="Missing sources"):
         _validate_source_sink_labels(labels, ["missing"], [], "test cells")
+
+
+def test_source_sink_labels_refuse_labels_that_print_otherwise_than_they_compare():
+    # 1, 1.0 and True compare equal, so a sink of 1 would take all six cells.
+    merged = pd.Series([1, 1, 1.0, 1.0, True, True, 2, 2], dtype=object)
+    found = (
+        "labels holds values that would form one label but print differently, such "
+        "as 1, 1.0 and True; convert them to text, or to one type, first"
+    )
+
+    with pytest.raises(ValueError, match=re.escape(found)):
+        _make_source_sink_vector(merged, [2], [1])
+    with pytest.raises(ValueError, match=re.escape(found)):
+        _validate_source_sink_labels(merged, [2], [1], "test cells")
+    # Labels of two types that print apart mark their own cells.
+    mixed = pd.Series(["a", "a", 1, 1, 2.5, 2.5], dtype=object)
+    vector = _make_source_sink_vector(mixed, [1], [2.5])
+    np.testing.assert_array_equal(vector, [0.0, 0.0, -1.0, -1.0, 1.0, 1.0])
 
 
 def test_source_sink_vector_rejects_unbalanced_and_nonfinite_values():

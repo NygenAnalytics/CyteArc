@@ -304,6 +304,9 @@ def test_regulon_specificity_refuses_cells_without_a_label(labels, unlabeled):
         # Labels of several types that print as they compare.
         (["a", "a", 1, 1], ["a", 1]),
         ([1, 1, 2.5, 2.5], [1, 2.5]),
+        # 0.0 and -0.0 compare equal and form one group.
+        (np.asarray([0.0, -0.0, 1.5, 1.5]), [0.0, 1.5]),
+        (["a", "a", -0.0, 0.0], ["a", -0.0]),
         ([True, True, 2, 2], [True, 2]),
         ([b"a", b"a", "a", "a"], [b"a", "a"]),
         # Nullable and categorical columns.
@@ -344,25 +347,22 @@ def test_regulon_specificity_scores_every_kind_of_label_alike(labels, groups):
         # Python takes 1, 1.0 and True for one label...
         (
             [1, 1, 1.0, 1.0, True, True],
-            "equal values that print differently, such as 1, 1.0 and True",
+            "values that would form one label but print differently, such as 1, "
+            "1.0 and True",
         ),
         # ...and keeps 1 and "1" apart, though they print alike.
         (
             [1, 1, "1", "1", 2, 2],
-            "different values that print alike, such as 1 and '1'",
+            "values that print alike but would form separate labels, such as 1 and '1'",
         ),
         (
             [np.float32(0.1)] * 2 + [0.1] * 2 + [0.5] * 2,
-            "different values that print alike, such as np.float32(0.1) and 0.1",
-        ),
-        (
-            np.asarray([0.0, 0.0, -0.0, -0.0, 1.0, 1.0]),
-            "equal values that print differently, such as np.float64(0.0) and "
-            "np.float64(-0.0)",
+            "values that print alike but would form separate labels, such as "
+            "np.float32(0.1) and 0.1",
         ),
         (
             pd.Categorical(["a", "a", 1, 1, "1", "1"], categories=["a", 1, "1"]),
-            "different values that print alike, such as 1 and '1'",
+            "values that print alike but would form separate labels, such as 1 and '1'",
         ),
     ],
 )
@@ -376,7 +376,7 @@ def test_regulon_specificity_refuses_labels_that_print_otherwise_than_they_compa
     with pytest.raises(
         ValueError,
         match=re.escape(
-            f"labels holds {found}; convert the labels to text, or to one type, first"
+            f"labels holds {found}; convert them to text, or to one type, first"
         ),
     ):
         regulon_specificity(activity, labels)

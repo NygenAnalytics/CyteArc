@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 
-from ..utils.arguments import require_labels_distinct_as_text
+from ..utils.arguments import label_array, require_labels_match_their_text
 
 __all__ = [
     "association_pair",
@@ -21,15 +21,21 @@ __all__ = [
 
 ColumnKind = Literal["categorical", "continuous"]
 
-#: What each refusal of labels that group otherwise by value than by text asks for.
-_LABEL_REMEDY = "convert the labels to text, or to one type, first"
-
 
 def _as_1d(values: Any) -> np.ndarray:
-    array = np.asarray(values)
+    # A list keeps the type of each value, which NumPy would cast to one.
+    array = label_array(values)
     if array.ndim != 1:
         raise ValueError("values must be one-dimensional")
     return array
+
+
+def _level_codes(values: np.ndarray) -> np.ndarray:
+    """Number each level of labels in their sorted order, or in order of first appearance where they cannot be sorted, such as bytes beside numbers."""
+    try:
+        return pd.factorize(values, sort=True)[0]
+    except TypeError:
+        return pd.factorize(values, sort=False)[0]
 
 
 def _to_float(values: np.ndarray) -> np.ndarray | None:
@@ -70,17 +76,26 @@ def directional_mapping(
 
     Raises:
         ValueError: If a column is not one-dimensional, the columns differ in
-            length, or a column holds equal values that print differently,
-            such as ``1``, ``1.0`` and ``True``, or different values that
-            print alike, such as ``1`` and ``"1"``.
+            length, or a column holds values that would form one label but
+            print differently, such as ``1``, ``1.0`` and ``True``, or values
+            that print alike but would form separate labels, such as ``1`` and
+            ``"1"``.
     """
     left_values = _as_1d(left)
     right_values = _as_1d(right)
     mask = _pairwise_mask(left_values, right_values)
-    require_labels_distinct_as_text(left, name="left", remedy=_LABEL_REMEDY)
-    require_labels_distinct_as_text(right, name="right", remedy=_LABEL_REMEDY)
-    rows_used = int(mask.sum())
-    rows_missing = int((~mask).sum())
+    require_labels_match_their_text(left_values, name="left")
+    require_labels_match_their_text(right_values, name="right")
+    return _directional_mapping(
+        left_values[mask], right_values[mask], rows_missing=int((~mask).sum())
+    )
+
+
+def _directional_mapping(
+    left_values: np.ndarray, right_values: np.ndarray, *, rows_missing: int
+) -> dict[str, Any]:
+    """Report the directional mapping of two columns of present labels, checked."""
+    rows_used = len(left_values)
     blank = {
         "leftMapsToRight": False,
         "rightMapsToLeft": False,
@@ -90,7 +105,9 @@ def directional_mapping(
     }
     if rows_used == 0:
         return blank
-    frame = pd.DataFrame({"left": left_values[mask], "right": right_values[mask]})
+    frame = pd.DataFrame(
+        {"left": _level_codes(left_values), "right": _level_codes(right_values)}
+    )
     n_left = int(frame["left"].nunique(dropna=False))
     n_right = int(frame["right"].nunique(dropna=False))
     # A constant column is nested inside everything, which is true but useless.
@@ -127,15 +144,16 @@ def cramers_v(left: Any, right: Any) -> dict[str, Any]:
 
     Raises:
         ValueError: If a column is not one-dimensional, the columns differ in
-            length, or a column holds equal values that print differently,
-            such as ``1``, ``1.0`` and ``True``, or different values that
-            print alike, such as ``1`` and ``"1"``.
+            length, or a column holds values that would form one label but
+            print differently, such as ``1``, ``1.0`` and ``True``, or values
+            that print alike but would form separate labels, such as ``1`` and
+            ``"1"``.
     """
     left_values = _as_1d(left)
     right_values = _as_1d(right)
     mask = _pairwise_mask(left_values, right_values)
-    require_labels_distinct_as_text(left, name="left", remedy=_LABEL_REMEDY)
-    require_labels_distinct_as_text(right, name="right", remedy=_LABEL_REMEDY)
+    require_labels_match_their_text(left_values, name="left")
+    require_labels_match_their_text(right_values, name="right")
     rows_used = int(mask.sum())
     rows_missing = int((~mask).sum())
     if rows_used < 2:
@@ -144,7 +162,9 @@ def cramers_v(left: Any, right: Any) -> dict[str, Any]:
             rowsUsed=rows_used,
             rowsMissing=rows_missing,
         )
-    contingency = pd.crosstab(left_values[mask], right_values[mask])
+    contingency = pd.crosstab(
+        _level_codes(left_values[mask]), _level_codes(right_values[mask])
+    )
     if contingency.shape[0] < 2 or contingency.shape[1] < 2:
         return _not_computed(
             "constantOrSingleLevel",
@@ -159,7 +179,9 @@ def cramers_v(left: Any, right: Any) -> dict[str, Any]:
     r_corr = r - (r - 1) ** 2 / (n - 1)
     k_corr = k - (k - 1) ** 2 / (n - 1)
     denominator = min(r_corr - 1.0, k_corr - 1.0)
-    mapping = directional_mapping(left_values[mask], right_values[mask])
+    mapping = _directional_mapping(
+        left_values[mask], right_values[mask], rows_missing=0
+    )
     common = {
         "rowsUsed": rows_used,
         "rowsMissing": rows_missing,
@@ -184,15 +206,14 @@ def eta_squared(continuous: Any, categorical: Any) -> dict[str, Any]:
 
     Raises:
         ValueError: If a column is not one-dimensional, the columns differ in
-            length, or ``categorical`` holds equal values that print
-            differently, such as ``1``, ``1.0`` and ``True``, or different
-            values that print alike, such as ``1`` and ``"1"``.
+            length, or ``categorical`` holds values that would form one group
+            but print differently, such as ``1``, ``1.0`` and ``True``, or
+            values that print alike but would form separate groups, such as
+            ``1`` and ``"1"``.
     """
     raw = _as_1d(continuous)
     groups = _as_1d(categorical)
-    require_labels_distinct_as_text(
-        categorical, name="categorical", remedy=_LABEL_REMEDY
-    )
+    require_labels_match_their_text(groups, name="categorical")
     values = _to_float(raw)
     if values is None:
         return _not_computed("nonNumeric", rowsMissing=len(raw))
@@ -205,7 +226,7 @@ def eta_squared(continuous: Any, categorical: Any) -> dict[str, Any]:
             rowsUsed=rows_used,
             rowsMissing=rows_missing,
         )
-    frame = pd.DataFrame({"y": values[mask], "g": groups[mask]})
+    frame = pd.DataFrame({"y": values[mask], "g": _level_codes(groups[mask])})
     n_levels = int(frame["g"].nunique(dropna=False))
     if n_levels < 2:
         return _not_computed(
@@ -320,8 +341,17 @@ def coefficient_estimability(
     The matrix carries an explicit intercept. Without it, treatment-coded
     indicators of two perfectly complementary factors look linearly
     independent and a fully aliased coefficient is reported as estimable.
+
+    Raises:
+        ValueError: If a column is not one-dimensional, or a categorical
+            column holds values that would form one level but print
+            differently, such as ``1``, ``1.0`` and ``True``, or values that
+            print alike but would form separate levels, such as ``1`` and
+            ``"1"``.
     """
     coeff = _as_1d(coefficient)
+    if coefficientKind != "continuous":
+        require_labels_match_their_text(coeff, name="coefficient")
     n = len(coeff)
     if n == 0:
         return _not_computed("emptyInput")
@@ -333,8 +363,11 @@ def coefficient_estimability(
         if coeff_float is None:
             return _not_computed("nonNumeric", rowsMissing=n)
         mask &= np.isfinite(coeff_float)
-    for values in technicals.values():
-        mask &= np.asarray(~pd.isna(_as_1d(values)), dtype=bool)
+    for name, values in technicals.items():
+        technical = _as_1d(values)
+        if technicalKinds[name] != "continuous":
+            require_labels_match_their_text(technical, name=f"technicals[{name!r}]")
+        mask &= np.asarray(~pd.isna(technical), dtype=bool)
     rows_used = int(mask.sum())
     if rows_used < 2:
         return _not_computed(

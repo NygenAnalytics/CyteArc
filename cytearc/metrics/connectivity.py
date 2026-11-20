@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import zarr
 
-from ..utils.arguments import require_labels_distinct_as_text
+from ..utils.arguments import label_array, require_labels_match_their_text
 from ..utils.numba import njit
 from ..utils.progress import iter_progress
 from ._types import ZarrArray
@@ -66,9 +66,10 @@ def graph_connectivity(
 
     This follows the original scIB symmetrized-graph definition. It does not
     match the directed strong-component calculation currently implemented by
-    YosefLab ``scib-metrics``. Labels that are equal but print differently,
-    such as ``1``, ``1.0`` and ``True``, or that differ but print alike, such
-    as ``1`` and ``"1"``, raise ``ValueError``.
+    YosefLab ``scib-metrics``. Labels that would form one label but print
+    differently, such as ``1``, ``1.0`` and ``True``, or that print alike but
+    would form separate labels, such as ``1`` and ``"1"``, raise
+    ``ValueError``.
 
     References:
         Luecken et al. 2022 doi: 10.1038/s41592-021-01336-8
@@ -85,17 +86,14 @@ def graph_connectivity(
         if weights.dtype.kind not in "fiu":
             raise TypeError("Graph weights must be real numbers")
 
-    categorical = pd.Categorical(labels)
+    values = label_array(labels)
+    categorical = pd.Categorical(values)
     n_cells = len(categorical)
     if n_cells == 0:
         raise ValueError("Graph connectivity requires at least one cell")
     if np.any(categorical.codes < 0):
         raise ValueError("Graph connectivity labels must not contain missing values")
-    require_labels_distinct_as_text(
-        labels,
-        name="labels",
-        remedy="convert the labels to text, or to one type, first",
-    )
+    require_labels_match_their_text(values, name="labels")
 
     _, label_codes = np.unique(categorical.codes, return_inverse=True)
     label_codes = np.asarray(label_codes, dtype=np.int64)
