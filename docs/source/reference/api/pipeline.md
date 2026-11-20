@@ -1166,13 +1166,7 @@ is the first signal, so it does not escalate ([Cancellation](#cancellation)). A 
 thread records that signal protection was unavailable, in
 `run.report()["summary"]["signalProtection"]`; stop it with a cancellation token.
 
-`KeyboardInterrupt` and an escaped `asyncio.CancelledError` use the same durable interruption
-boundary, with interruption kinds `keyboard_interrupt` and `asyncio_cancelled`. Ordinary stage
-exceptions produce a failed run instead. Run and stage records hold at most 512 characters of an
-error or interruption message. A longer message keeps its first 509 characters followed by `...`;
-the raised exception keeps its full message. If a termination signal races with an ordinary failure
-or the final successful handoff, the run preserves that durable outcome and still propagates the
-pending signal after cleanup.
+`KeyboardInterrupt`, an escaped `asyncio.CancelledError`, and the `concurrent.futures.CancelledError` that Zarr's synchronous API raises for a cancelled read or write use the same durable interruption boundary, with interruption kinds `keyboard_interrupt` and `asyncio_cancelled`, the latter for both cancellation classes. Other stage exceptions produce a failed run instead. Run and stage records hold at most 512 characters of an error or interruption message. A longer message keeps its first 509 characters followed by `...`; the raised exception keeps its full message. If a termination signal races with an ordinary failure or the final successful handoff, the run preserves that durable outcome and still propagates the pending signal after cleanup.
 
 `SIGKILL`, `SIGSTOP`, out-of-memory termination, power loss, and expired shutdown grace periods
 cannot perform cleanup. Their durable contract is an incomplete artifact or run, followed by a new

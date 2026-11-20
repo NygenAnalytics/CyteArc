@@ -1,5 +1,6 @@
 """Durable pipeline-run records, label claims, and pipeline execution outcomes."""
 
+import concurrent.futures
 import hashlib
 import json
 import shutil
@@ -934,6 +935,43 @@ def test_finalize_failure_fails_the_run_after_every_stage_ended(
     assert report["run"]["outputs"] == []
     assert report["run"]["error"] == {"type": "RuntimeError", "message": str(expected)}
     assert _stage_statuses(failed) == list(_GRAPH_STAGE_STATUSES)
+    with pytest.raises(KeyError, match="No completed pipeline run"):
+        datastore.pipeline.open(label="finalized")
+
+
+def test_a_cancelled_finalize_ends_the_run_interrupted_after_every_stage_ended(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    datastore = _graph_datastore(tmp_path / "data.zarr")
+    # Zarr's synchronous API reports a cancelled write with the CancelledError
+    # of concurrent.futures, an Exception.
+    cancelled = concurrent.futures.CancelledError()
+
+    def cancelled_completion(*_args: Any, **_kwargs: Any) -> PipelineRunRecord:
+        raise cancelled
+
+    monkeypatch.setattr(
+        pipeline_executor, "complete_pipeline_run_record", cancelled_completion
+    )
+    events: list[PipelineEvent] = []
+
+    with pytest.raises(concurrent.futures.CancelledError) as caught:
+        datastore.pipeline.rna(
+            label="finalized", callback=events.append, **_GRAPH_STAGES
+        )
+
+    assert caught.value is cancelled
+    assert _lifecycle(events)[-2:] == [
+        ("stage_skipped", "markers"),
+        ("run_interrupted", None),
+    ]
+    interrupted = datastore.pipeline.open(run_id=events[-1].run_id)
+    assert (interrupted.status, interrupted.label) == ("interrupted", None)
+    report = interrupted.report()
+    assert report["run"]["interruption"]["kind"] == "asyncio_cancelled"
+    assert report["run"]["outputs"] == []
+    assert _stage_statuses(interrupted) == list(_GRAPH_STAGE_STATUSES)
     with pytest.raises(KeyError, match="No completed pipeline run"):
         datastore.pipeline.open(label="finalized")
 

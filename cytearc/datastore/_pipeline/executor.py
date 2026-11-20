@@ -314,6 +314,10 @@ def _execute(
                 try:
                     stage.on_skip(state)
                 except Exception as error:
+                    if interruption_record(error) is not None:
+                        # A cancelled Zarr call passes, as asyncio's
+                        # CancelledError does, and ends the run interrupted.
+                        raise
                     # A skipped stage's hook fails before its record exists,
                     # so the run ends failed as when a record cannot start.
                     ledger.terminate(error)
@@ -354,6 +358,10 @@ def _execute(
             fields=fields,
         )
     except Exception as error:
+        if interruption_record(error) is not None:
+            # A cancelled Zarr call passes, as asyncio's CancelledError does,
+            # and ends the run interrupted.
+            raise
         ledger.terminate(error)
         raise PipelineExecutionError(record.run_id, "finalize", error) from error
     # The run is complete and durable, so listeners learn it before a pending

@@ -108,16 +108,7 @@ ordinary stores with copied counts; there is no separate composite materializati
 
 ## Artifact publication
 
-A producer creates an artifact group with `complete=False` at a path that ends in its random
-256-bit `artifact_id`, so the path belongs to that producer alone. After it validates the payload,
-one metadata write sets `complete=True` and publishes the artifact. The producer deletes the group
-that it created after an exception only before that write; once the write is issued, the group
-stays, complete or not, because the write can persist even when it reports an error. An
-interruption (`KeyboardInterrupt`, `asyncio.CancelledError`, `SystemExit`, or a shutdown request)
-keeps the group with `complete=False`, as derived assays keep a pending assay (Rule C below),
-because Zarr may still be running the interrupted write. `DataStore.artifacts.prune_incomplete`
-removes the incomplete groups and the artifact-ID directories that hold chunks but no `zarr.json`
-once no process writes to the store.
+A producer creates an artifact group with `complete=False` at a path that ends in its random 256-bit `artifact_id`, so the path belongs to that producer alone. After it validates the payload, one metadata write sets `complete=True` and publishes the artifact. The producer deletes the group that it created after an exception only before that write; once the write is issued, the group stays, complete or not, because the write can persist even when it reports an error. An interruption (`KeyboardInterrupt`, `asyncio.CancelledError`, the `concurrent.futures.CancelledError` that Zarr's synchronous API raises for a cancelled call, `SystemExit`, or a shutdown request) keeps the group with `complete=False`, as derived assays keep a pending assay (Rule C below), because Zarr may still be running the interrupted write. `DataStore.artifacts.prune_incomplete` removes the incomplete groups and the artifact-ID directories that hold chunks but no `zarr.json` once no process writes to the store.
 
 Listings and planning read each child of an artifact kind on its own when one child's `zarr.json`
 cannot be read, and skip that child and any kind that the release does not know with a warning.
@@ -179,18 +170,7 @@ and reports. A `basic_rna_analysis` run therefore reopens, reports, plots, and e
 `cellKey`, per-option, and `params` configuration and the stage order that it recorded.
 A 2.0 release may change records with an entry in the compatibility inventory.
 
-The run record is created before `input_snapshot`; final outputs and field descriptors are written
-only when the complete recipe succeeds. A handled failure or interruption first commits terminal
-stage and run details. An interrupted run records an `interruption`, whose `kind` names the cause:
-`signal`, `shutdown_request`, `keyboard_interrupt`, `asyncio_cancelled`, or `cancelled` for a run
-stopped through its `CancellationToken`, whose reason becomes the `message`. A run that receives a
-signal after a cancellation records the kind of the first request, `cancelled`. The stage whose
-work the interruption cut short records the same `interruption`. A stage whose work had finished
-is recorded as completed, so a run that stops between stages, or just after a stage's work
-finished, holds the interruption on its run record only. `abandoned_label_claim` is a run-only
-kind as well: it marks an unfinished label owner that `pipeline.abandon_label_claim` interrupted,
-with its `reason` as the `message`. A hard process death can leave a run or stage incomplete.
-There is no on-disk resume, repair, or same-ID retry protocol.
+The run record is created before `input_snapshot`; final outputs and field descriptors are written only when the complete recipe succeeds. A handled failure or interruption first commits terminal stage and run details. An interrupted run records an `interruption`, whose `kind` names the cause: `signal`, `shutdown_request`, `keyboard_interrupt`, `asyncio_cancelled` for an escaped `asyncio.CancelledError` or the `concurrent.futures.CancelledError` of a cancelled Zarr call, or `cancelled` for a run stopped through its `CancellationToken`, whose reason becomes the `message`. A run that receives a signal after a cancellation records the kind of the first request, `cancelled`. The stage whose work the interruption cut short records the same `interruption`. A stage whose work had finished is recorded as completed, so a run that stops between stages, or just after a stage's work finished, holds the interruption on its run record only. `abandoned_label_claim` is a run-only kind as well: it marks an unfinished label owner that `pipeline.abandon_label_claim` interrupted, with its `reason` as the `message`. A hard process death can leave a run or stage incomplete. There is no on-disk resume, repair, or same-ID retry protocol.
 
 Requested run labels use append-only atomic claims below
 `pipeline/runs/.label-claims/{labelDigest}` while a run is finalized. The completed run record is
@@ -371,9 +351,7 @@ follow, and one attribute write then replaces `cytearc:pending_assay` with `is_a
 
 - Rule A: nothing is deleted once that publication write is issued, even when it fails.
 - Rule B: cleanup deletes only the groups that the failed call created.
-- Rule C: an ordinary exception deletes them. An interruption (`KeyboardInterrupt`,
-  `asyncio.CancelledError`, `SystemExit`) keeps the pending assay, because Zarr may still be
-  running the interrupted write, and logs how to remove it.
+- Rule C: an ordinary exception deletes them. An interruption (`KeyboardInterrupt`, `asyncio.CancelledError`, the `concurrent.futures.CancelledError` of a cancelled Zarr call, `SystemExit`) keeps the pending assay, because Zarr may still be running the interrupted write, and logs how to remove it.
 
 Every workspace keeps the counts of `{assay}` in `matrices/{assay}`, so a name that is pending in
 any workspace is refused in all of them, and `DataStore.discard_interrupted_assay` never removes

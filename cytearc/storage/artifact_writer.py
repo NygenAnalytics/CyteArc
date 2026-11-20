@@ -11,6 +11,7 @@ import zarr
 from zarr.errors import ContainsArrayError, ContainsGroupError
 
 from ..utils.logging import logger
+from ..utils.shutdown import is_interruption
 from .artifacts import (
     ArtifactRef,
     ArtifactScope,
@@ -589,7 +590,8 @@ def artifact_transaction(
     If starting the group, the body, or the payload validation raises an
     exception, the group that this call created is deleted before the error
     propagates, so a failed write leaves no incomplete artifact behind. An
-    interruption (``KeyboardInterrupt``, ``asyncio.CancelledError``,
+    interruption (``KeyboardInterrupt``, ``asyncio.CancelledError``, the
+    ``concurrent.futures.CancelledError`` of a Zarr call that was cancelled,
     ``SystemExit``, or a shutdown request) keeps the group, marked incomplete,
     and logs how to remove it: Zarr may still be running the write that the
     interruption stopped waiting for, and a deleted group would collect its
@@ -601,7 +603,7 @@ def artifact_transaction(
         yield group
         validate_artifact_payload(group, planned)
     except BaseException as error:
-        if not isinstance(error, Exception):
+        if is_interruption(error):
             logger.warning(interrupted_artifact_message(artifact_path(planned.ref)))
         elif group is not None:
             discard_artifact(root, planned)

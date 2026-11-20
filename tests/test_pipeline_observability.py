@@ -3,6 +3,7 @@
 A run also stops at its next safe checkpoint once its token is cancelled.
 """
 
+import concurrent.futures
 import contextvars
 import dataclasses
 import inspect
@@ -2214,3 +2215,35 @@ def test_a_failing_skip_hook_fails_the_run_before_its_stage_is_recorded(
     run = observed_store.pipeline.open(run_id=caught.value.run_id)
     assert run.status == "failed"
     assert "filtering" not in [stage["stage"] for stage in run.report()["stages"]]
+
+
+def test_a_cancelled_skip_hook_ends_the_run_interrupted_before_its_stage_is_recorded(
+    observed_store: DataStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Zarr's synchronous API reports a cancelled call with the CancelledError
+    # of concurrent.futures, an Exception.
+    cancelled = concurrent.futures.CancelledError()
+
+    def cancelled_input(_state: Any) -> None:
+        raise cancelled
+
+    monkeypatch.setattr(
+        rna_recipe,
+        "filtering_stage",
+        lambda *_args, **_kwargs: PlannedStage(
+            "filtering", None, on_skip=cancelled_input
+        ),
+    )
+    events: list[PipelineEvent] = []
+
+    with pytest.raises(concurrent.futures.CancelledError) as caught:
+        observed_store.pipeline.rna(callback=events.append, **_OPTIONS)
+
+    assert caught.value is cancelled
+    assert [event.kind for event in events][-1] == "run_interrupted"
+    run = observed_store.pipeline.open(run_id=events[0].run_id)
+    assert run.status == "interrupted"
+    report = run.report()
+    assert report["run"]["interruption"]["kind"] == "asyncio_cancelled"
+    assert "filtering" not in [stage["stage"] for stage in report["stages"]]
