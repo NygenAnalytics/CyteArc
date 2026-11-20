@@ -13,7 +13,8 @@ import gzip
 import os
 import shutil
 import stat
-from collections.abc import Iterator
+import warnings
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -48,8 +49,10 @@ from cytearc.storage.cell_order import (
     source_order_ranks,
     write_shuffled_cell_order,
 )
+from cytearc.storage.count_matrix import CountMatrixPolicy
 from cytearc.tools.repack_zarr import repack_store
 from cytearc.utils.memory_budget import MemoryBudgetError
+from cytearc.utils.warnings import DiagnosticWarning
 from cytearc.writers import H5adToZarr, SubsetZarr, to_h5ad, to_mtx
 from cytearc.writers.export import (
     H5adMatrix,
@@ -60,7 +63,7 @@ from cytearc.writers.export import (
     reordered_matrix,
 )
 from tests.row_store_helpers import asked_bytes, finalized_bytes, free_disk
-from tests.storage_helpers import by_cell_id
+from tests.storage_helpers import by_cell_id, write_count_store
 
 anndata = pytest.importorskip("anndata")
 
@@ -617,14 +620,101 @@ def test_a_reorder_splits_a_bucket_of_dense_rows_to_read_in_twice_its_read_size(
     assert store.read_bytes() - store.bucket_starts.nbytes <= 2 * 65_536
 
 
-def test_a_reorder_without_a_count_of_its_values_estimates_them_from_its_first_rows(
-    tmp_path,
+@pytest.mark.parametrize(
+    "counted",
+    [
+        "by the caller",
+        "by the matrix",
+        "by the reorder",
+        "by the reorder, of sparse blocks",
+    ],
+)
+def test_a_reorder_counts_its_values_before_it_writes_a_row(
+    tmp_path, monkeypatch, counted
 ) -> None:
-    values = np.random.default_rng(13).poisson(1.0, (600, 30)).astype(np.float32)
+    rng = np.random.default_rng(13)
+    values = rng.poisson(1.0, (600, 30)).astype(np.float32)
+    # The rows stream in blocks of 30, and the first block holds one value per
+    # row, from which the 600 rows would hold 600 values.
+    values[:30] = 0
+    values[np.arange(30), rng.integers(0, 30, 30)] = 1
+    n_values = int(np.count_nonzero(values))
+    assert n_values > 15 * 600
+    sparse = csr_matrix(values)
+    if counted.endswith("sparse blocks"):
+        # A sparse block's zeros that it stores are values that the files
+        # hold too.
+        sparse.data[100:107] = 0
+        values = sparse.toarray()
     order = np.random.default_rng(14).permutation(600)
+    streams: list[int] = []
+    expected: list[int] = []
+    created = SparseRowStore.__init__
+
+    def recorded(self, *args, **kwargs):
+        expected.append(kwargs["entries"])
+        created(self, *args, **kwargs)
+
+    monkeypatch.setattr(SparseRowStore, "__init__", recorded)
+
+    def blocks() -> Iterator[np.ndarray | csr_matrix]:
+        streams.append(1)
+        if counted.endswith("sparse blocks"):
+            return (sparse[start : start + 30] for start in range(0, 600, 30))
+        return _blocks(values, 30)
+
+    matrix = H5adMatrix(
+        shape=values.shape,
+        dtype=values.dtype,
+        blocks=blocks,
+        reserve=(lambda: n_values) if counted == "by the matrix" else None,
+    )
 
     def reorder() -> np.ndarray:
-        # Blocks of 30 rows: the first one estimates the values of all 600.
+        reordered = reordered_matrix(
+            matrix,
+            order,
+            max_bytes=64 << 20,
+            temp_dir=tmp_path,
+            entries=n_values if counted == "by the caller" else None,
+        )
+        return materialize_h5ad_matrix(reordered).toarray()
+
+    messages: list[str] = []
+    handler = logger.add(messages.append, level="INFO", format="{message}")
+    try:
+        with finalized_bytes() as peaks:
+            found = reorder()
+    finally:
+        logger.remove(handler)
+    (peak,) = peaks
+    # The buckets and the disk check take the number of values that the
+    # files hold, and the reorder reads the rows a second time only to count
+    # them, which it says.
+    assert expected == [n_values]
+    by_reorder = counted.startswith("by the reorder")
+    assert len(streams) == (2 if by_reorder else 1)
+    assert (
+        "Counting the values of the X matrix before sending them through "
+        "temporary files" in [message.rstrip() for message in messages]
+    ) == by_reorder
+    with free_disk(0), pytest.raises(OSError, match="which has 0 free") as full:
+        reorder()
+    # The check asks for every byte of the files, at the rate at which the
+    # first rows compress and a quarter more.
+    assert peak <= asked_bytes(full.value)
+    np.testing.assert_array_equal(found, values[order])
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_a_reorder_of_rows_like_its_first_asks_for_at_most_twice_its_files(
+    tmp_path,
+) -> None:
+    rng = np.random.default_rng(23)
+    values = rng.poisson(3.0, (600, 60)).astype(np.float32)
+    order = rng.permutation(600)
+
+    def reorder() -> np.ndarray:
         matrix = reordered_matrix(
             _matrix(values, rows=30), order, max_bytes=64 << 20, temp_dir=tmp_path
         )
@@ -636,9 +726,10 @@ def test_a_reorder_without_a_count_of_its_values_estimates_them_from_its_first_r
     with free_disk(0), pytest.raises(OSError, match="which has 0 free") as full:
         reorder()
     asked = asked_bytes(full.value)
-    # The check asks for every byte of the files, from the rate at which the
-    # first rows compress and a quarter more, far less than the 4 bytes of a
-    # value and the byte of its column before compression.
+    # Every block holds rows like the first, so the first rows' bytes per
+    # value and a quarter more, and 16 bytes for each row's place and length,
+    # cover the files within twice their size: far less than the 4 bytes of
+    # a value and the byte of its column before compression.
     assert peak <= asked <= 2 * peak
     np.testing.assert_array_equal(found, values[order])
     assert list(tmp_path.iterdir()) == []
@@ -1006,8 +1097,19 @@ def test_selected_cells_export_in_the_files_order(imported, tmp_path) -> None:
     store.cells.insert("chosen", by_cell_id(store.cells, chosen))
     selection = store.snapshot_cell_selection("chosen")
     expected = np.sort(rows[chosen])
+    sized: list[int] = []
+    created = SparseRowStore.__init__
 
-    to_h5ad(store.RNA, str(tmp_path / "chosen.h5ad"), cell_selection=selection)
+    def recorded(self, *args, **kwargs):
+        sized.append(kwargs["entries"])
+        created(self, *args, **kwargs)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(SparseRowStore, "__init__", recorded)
+        to_h5ad(store.RNA, str(tmp_path / "chosen.h5ad"), cell_selection=selection)
+    # The temporary files are sized for the values of the selected cells.
+    assert sized == [np.count_nonzero(_COUNTS[expected])]
+    assert sized[0] < np.count_nonzero(_COUNTS)
     exported = anndata.read_h5ad(tmp_path / "chosen.h5ad")
     assert _file_rows(exported.obs_names).tolist() == expected.tolist()
     np.testing.assert_array_equal(exported.X.toarray(), _COUNTS[expected])
@@ -1109,18 +1211,137 @@ def test_an_export_refuses_a_budget_below_its_reorder_before_writing(
     assert list(tmp_path.iterdir()) == []
 
 
-@pytest.mark.parametrize("call", ["to_h5ad", "to_mtx"])
+def _shuffled_store_with_a_run(
+    folder: Path, counts: np.ndarray, block: int
+) -> SimpleNamespace:
+    """Import whole counts below 256 shuffled, in shards of ``block`` cells, and run on them.
+
+    Cell ``cell-<row>`` holds row ``row`` of ``counts``. Each count takes a
+    byte, so ``block`` cells fill a shard, the block in which counts stream.
+    """
+    n_cells, n_features = counts.shape
+    source = folder / "source.h5ad"
+    anndata.AnnData(
+        csr_matrix(counts.astype(np.float32)),
+        obs=pd.DataFrame(index=[f"cell-{row}" for row in range(n_cells)]),
+        var=pd.DataFrame(index=[f"feature-{f}" for f in range(n_features)]),
+    ).write_h5ad(source)
+    reader = H5adReader(str(source))
+    try:
+        H5adToZarr(
+            reader,
+            str(folder / "store.zarr"),
+            mem_budget="256M",
+            nthreads=1,
+            shuffle_cells=True,
+            shuffle_seed=_SEED,
+            policy=CountMatrixPolicy(
+                unitBytes=block * n_features, chunkBytes=block * n_features // 4
+            ),
+        ).dump()
+    finally:
+        reader.close()
+    store = _open(folder / "store.zarr")
+    assert store.RNA.rawData.dtype == np.uint8
+    first = next(iter(store.RNA.rawData.stream_blocks()))
+    assert first.shape[0] == block
+    # Cells of few counts have alike profiles, which the neighbor search
+    # warns of; the exports do not read them.
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DiagnosticWarning)
+        run = store.pipeline.rna(
+            label="export",
+            filtering=False,
+            cell_cycle=False,
+            hvg={"top_n": 10},
+            pca={"dims": 3},
+            neighbors={"k": 5},
+            doublets=False,
+            markers=False,
+        )
+    assert run.status == "completed"
+    return SimpleNamespace(store=store, run=run, first=first)
+
+
+@pytest.fixture(scope="module")
+def sparse_first_block(tmp_path_factory) -> SimpleNamespace:
+    """A shuffled store of 600 cells in blocks of 200, with a run and a cell selection.
+
+    The 200 cells that the store holds first have counts of two of the 20
+    features each, and the other 400 a count of every feature. The selection
+    holds the cells of every third row of the file.
+    """
+    rng = np.random.default_rng(17)
+    counts = rng.integers(1, 10, (600, 20))
+    first = shuffled_order(600, _SEED)[:200]
+    kept = np.argsort(rng.random((first.size, 20)), axis=1)[:, 2:]
+    counts[first[:, None], kept] = 0
+    exported = _shuffled_store_with_a_run(
+        tmp_path_factory.mktemp("sparse_first_block"), counts, 200
+    )
+    assert np.count_nonzero(exported.first) == 2 * 200
+    store = exported.store
+    rows = _file_rows(store.cells.fetch_all("ids"))
+    chosen = rows % 3 == 0
+    store.cells.insert("chosen", by_cell_id(store.cells, chosen))
+    exported.selection = store.snapshot_cell_selection("chosen")
+    exported.selected = int(np.count_nonzero(counts[rows[chosen]]))
+    return exported
+
+
+@pytest.fixture(scope="module")
+def dense_first_block(tmp_path_factory) -> SimpleNamespace:
+    """A shuffled store of 3,000 cells in blocks of 100, with a run.
+
+    The 100 cells that the store holds first have counts of all 60 features,
+    and the other 2,900 one count each.
+    """
+    rng = np.random.default_rng(19)
+    counts = np.zeros((3000, 60), dtype=np.int64)
+    first = shuffled_order(3000, _SEED)[:100]
+    counts[first] = rng.integers(1, 200, (100, 60))
+    rest = np.setdiff1d(np.arange(3000), first)
+    counts[rest, rng.integers(0, 60, rest.size)] = rng.integers(1, 200, rest.size)
+    exported = _shuffled_store_with_a_run(
+        tmp_path_factory.mktemp("dense_first_block"), counts, 100
+    )
+    assert np.count_nonzero(exported.first) == 100 * 60
+    return exported
+
+
+# The exports that send counts through temporary files in source order: a
+# file of an assay, the same after a preliminary count of its values, a
+# Matrix Market directory, and a file of a pipeline run.
+_SOURCE_ORDER_EXPORTS: dict[str, Callable[[SimpleNamespace, Path, Path], None]] = {
+    "to_h5ad": lambda source, target, spill: to_h5ad(
+        source.store.RNA, str(target), temp_dir=spill
+    ),
+    "to_h5ad counting first": lambda source, target, spill: to_h5ad(
+        source.store.RNA, str(target), skip_recalc_nfeats=False, temp_dir=spill
+    ),
+    "to_mtx": lambda source, target, spill: to_mtx(
+        source.store.RNA, str(target), temp_dir=spill
+    ),
+    "run to_h5ad": lambda source, target, spill: to_h5ad(
+        source.store.RNA, str(target), run=source.run, temp_dir=spill
+    ),
+}
+
+
+@pytest.mark.parametrize("call", list(_SOURCE_ORDER_EXPORTS))
+@pytest.mark.parametrize(
+    "source", ["shuffled_run", "sparse_first_block", "dense_first_block"]
+)
 def test_an_export_asks_for_the_disk_that_its_temporary_files_take(
-    imported, tmp_path, call
+    request, tmp_path, source, call
 ) -> None:
-    store = _open(imported.shuffled)
+    exported = request.getfixturevalue(source)
     spill = tmp_path / "spill"
     spill.mkdir()
-    write = {"to_h5ad": to_h5ad, "to_mtx": to_mtx}[call]
 
     def export_to(name: str) -> Path:
-        target = tmp_path / (f"{name}.h5ad" if call == "to_h5ad" else name)
-        write(store.RNA, str(target), temp_dir=spill)
+        target = tmp_path / (name if call == "to_mtx" else f"{name}.h5ad")
+        _SOURCE_ORDER_EXPORTS[call](exported, target, spill)
         return target
 
     with finalized_bytes() as peaks:
@@ -1129,9 +1350,13 @@ def test_an_export_asks_for_the_disk_that_its_temporary_files_take(
     with free_disk(0), pytest.raises(OSError, match="which has 0 free") as full:
         export_to("full")
     asked = asked_bytes(full.value)
-    # The cells hold few counts, so the store's record of each cell takes
-    # more than its counts, and the check still asks for every byte of the
-    # files.
+    # The check asks for every byte of the files. The shuffled store's cells
+    # hold few counts, so the store's record of each cell takes more than its
+    # counts. The sparse store's first block holds two values per cell, from
+    # which the 600 cells would hold 1,200 values, where they hold 8,400. The
+    # dense store's first block holds 60 values per cell, whose bytes per
+    # value share out their place and length, which the other cells, of one
+    # value each, take for that one value.
     assert peak <= asked
     # One byte short, the export is refused and removes its temporary files,
     # and leaves no file or directory of its own.
@@ -1142,6 +1367,142 @@ def test_an_export_asks_for_the_disk_that_its_temporary_files_take(
     with free_disk(asked):
         assert export_to("enough").exists()
     assert list(spill.iterdir()) == []
+
+
+_NEGATIVE_CELLS = 120
+
+
+@pytest.fixture(scope="module", params=["int16", "float32"])
+def negative_counts(request, tmp_path_factory) -> SimpleNamespace:
+    """A store of signed or float counts, some negative, whose cells claim the rows of a shuffle.
+
+    Its cell selection holds every third cell in store order.
+    """
+    dtype = np.dtype(request.param)
+    folder = tmp_path_factory.mktemp(f"negative_{dtype}")
+    rng = np.random.default_rng(21)
+    values = rng.poisson(1.0, (_NEGATIVE_CELLS, 15)).astype(dtype)
+    # Corrected counts can be negative, and the store's summaries count only
+    # the positive ones.
+    values[rng.random(values.shape) < 0.1] = -2 if dtype.kind == "i" else -1.5
+    order = shuffled_order(_NEGATIVE_CELLS, _SEED)
+    write_count_store(str(folder / "store.zarr"), {"RNA": values}, dtype)
+    root = zarr.open_group(str(folder / "store.zarr"), mode="r+")
+    write_shuffled_cell_order(root["cellData"], order, _SEED)
+    store = _open(folder / "store.zarr")
+    assert store.RNA.rawData.dtype == dtype
+    chosen = np.arange(_NEGATIVE_CELLS) % 3 == 0
+    store.cells.insert("chosen", by_cell_id(store.cells, chosen))
+    return SimpleNamespace(
+        store=store,
+        values=values,
+        order=order,
+        selection=store.snapshot_cell_selection("chosen"),
+        selected=int(np.count_nonzero(values[chosen])),
+    )
+
+
+# The exports in source order, and one of a cell selection.
+_COUNTING_EXPORTS: dict[str, Callable[[SimpleNamespace, Path, Path], None]] = {
+    **_SOURCE_ORDER_EXPORTS,
+    "to_h5ad of a selection": lambda source, target, spill: to_h5ad(
+        source.store.RNA,
+        str(target),
+        cell_selection=source.selection,
+        temp_dir=spill,
+    ),
+}
+
+
+def _counted_export(
+    exported: SimpleNamespace, call: str, folder: Path, monkeypatch
+) -> tuple[int, int, list[int]]:
+    """Run an export; return its count reductions, reads of the counts and the values its files are sized for."""
+    from cytearc.matrix import ChunkedArray
+
+    counted: list[int | None] = []
+    streamed: list[tuple[Any, ...]] = []
+    sized: list[int] = []
+    count_nonzero = ChunkedArray.count_nonzero
+    count_blocks = export._live_count_blocks
+    created = SparseRowStore.__init__
+
+    def counting(self, axis=None):
+        counted.append(axis)
+        return count_nonzero(self, axis)
+
+    def streaming(*args):
+        streamed.append(args)
+        return count_blocks(*args)
+
+    def recorded(self, *args, **kwargs):
+        sized.append(kwargs["entries"])
+        created(self, *args, **kwargs)
+
+    monkeypatch.setattr(ChunkedArray, "count_nonzero", counting)
+    monkeypatch.setattr(export, "_live_count_blocks", streaming)
+    monkeypatch.setattr(SparseRowStore, "__init__", recorded)
+    target = folder / ("mtx" if call == "to_mtx" else "out.h5ad")
+    _COUNTING_EXPORTS[call](exported, target, folder)
+    return len(counted), len(streamed), sized
+
+
+@pytest.mark.parametrize(
+    "call", ["to_mtx", "to_h5ad counting first", "to_h5ad", "to_h5ad of a selection"]
+)
+def test_an_export_of_unsigned_counts_counts_them_from_the_store_summaries(
+    sparse_first_block, tmp_path, monkeypatch, call
+) -> None:
+    counts, streams, sized = _counted_export(
+        sparse_first_block, call, tmp_path, monkeypatch
+    )
+    # No export reads the counts more than to write them once.
+    assert (counts, streams) == (0, 1)
+    # The files are sized for every value of the exported cells: the store
+    # holds 200 cells of two values and 400 of 20.
+    assert sized == [
+        sparse_first_block.selected
+        if call == "to_h5ad of a selection"
+        else 200 * 2 + 400 * 20
+    ]
+
+
+@pytest.mark.parametrize(
+    ("call", "counts", "streams"),
+    [
+        ("to_mtx", 1, 1),
+        ("to_h5ad counting first", 1, 1),
+        ("to_h5ad", 0, 2),
+        ("to_h5ad of a selection", 0, 2),
+    ],
+)
+def test_an_export_of_counts_that_can_be_negative_counts_them_in_a_pass(
+    negative_counts, tmp_path, monkeypatch, call, counts, streams
+) -> None:
+    # The store's summaries leave the negative values out, so to_mtx counts
+    # them for its header and to_h5ad in its preliminary pass, which the
+    # reorder takes, or else the reorder in a read of its own before it
+    # writes.
+    assert _counted_export(negative_counts, call, tmp_path, monkeypatch) == (
+        counts,
+        streams,
+        [
+            negative_counts.selected
+            if call == "to_h5ad of a selection"
+            else np.count_nonzero(negative_counts.values)
+        ],
+    )
+
+
+def test_an_export_of_counts_that_can_be_negative_writes_them_in_the_files_order(
+    negative_counts, tmp_path
+) -> None:
+    values, order = negative_counts.values, negative_counts.order
+    assert np.count_nonzero(values < 0) > 0
+    to_h5ad(negative_counts.store.RNA, str(tmp_path / "out.h5ad"), temp_dir=tmp_path)
+    exported = anndata.read_h5ad(tmp_path / "out.h5ad")
+    # The cell that the store holds at row r is row order[r] of the file.
+    np.testing.assert_array_equal(exported.X.toarray(), values[np.argsort(order)])
 
 
 def test_an_export_leaves_no_temporary_files(imported, tmp_path) -> None:

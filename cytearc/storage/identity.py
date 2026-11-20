@@ -280,10 +280,8 @@ def load_feature_sums(
     return np.asarray(array[:])
 
 
-def load_count_summaries(
-    matrix: zarr.Group, counts: zarr.Array
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Return row sums, row positive counts, and column positive counts."""
+def _matching_summaries(matrix: zarr.Group, counts: zarr.Array) -> zarr.Group:
+    """Return the group of the summaries of ``counts``, checked against its fingerprint."""
     fingerprint = count_fingerprint(counts)
     totals = matrix.get(COUNT_SUMMARIES)
     if (
@@ -291,6 +289,14 @@ def load_count_summaries(
         or totals.attrs.get("source_fingerprint") != fingerprint
     ):
         raise ValueError(f"Count summaries do not match the counts. {REBUILD_REQUIRED}")
+    return totals
+
+
+def load_count_summaries(
+    matrix: zarr.Group, counts: zarr.Array
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return row sums, row positive counts, and column positive counts."""
+    totals = _matching_summaries(matrix, counts)
     n_rows, n_columns = counts.shape
     loaded = []
     for name, length in (
@@ -303,6 +309,39 @@ def load_count_summaries(
             raise ValueError(f"Count summaries are malformed. {REBUILD_REQUIRED}")
         loaded.append(np.asarray(array[:]))
     return loaded[0], loaded[1], loaded[2]
+
+
+def positive_value_count(
+    matrix: zarr.Group, counts: zarr.Array, rows: np.ndarray | None = None
+) -> int:
+    """Return how many positive values ``counts`` holds in ``rows``, every row by default.
+
+    ``rows`` are increasing row indices. The number of positive values of
+    each row that the counts' writer stored is summed a chunk of rows at a
+    time, so no more than a chunk of them is held.
+
+    Raises:
+        ValueError: If the summaries do not match the counts.
+    """
+    n_rows = int(counts.shape[0])
+    row_positive = as_zarr_array(
+        _matching_summaries(matrix, counts)["rowPositive"], name="rowPositive"
+    )
+    if row_positive.shape != (n_rows,):
+        raise ValueError(f"Count summaries are malformed. {REBUILD_REQUIRED}")
+    selected = None if rows is None else np.asarray(rows, dtype=np.int64)
+    step = max(1, int(row_positive.chunks[0]))
+    total = 0
+    for start in range(0, n_rows, step):
+        stop = min(n_rows, start + step)
+        if selected is None:
+            total += int(np.asarray(row_positive[start:stop]).sum(dtype=np.int64))
+            continue
+        first, last = (int(bound) for bound in np.searchsorted(selected, (start, stop)))
+        if first < last:
+            chunk = np.asarray(row_positive[start:stop])
+            total += int(chunk[selected[first:last] - start].sum(dtype=np.int64))
+    return total
 
 
 def _hash_column(

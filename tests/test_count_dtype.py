@@ -720,6 +720,36 @@ def test_count_summary_rejects_non_finite_counts_and_keeps_negative_values():
     assert signed.rowSums[0] == 1
 
 
+def test_positive_values_are_summed_from_the_stored_summaries(tmp_path) -> None:
+    from cytearc.storage.identity import COUNT_SUMMARIES, positive_value_count
+    from tests.storage_helpers import write_count_store
+
+    values = np.random.default_rng(31).poisson(0.8, (10, 6)).astype(np.int16)
+    values[[2, 7], 1] = -3
+    write_count_store(str(tmp_path / "store.zarr"), {"RNA": values}, np.int16)
+    matrix = zarr.open_group(str(tmp_path / "store.zarr"), mode="r+")["RNA"]
+    counts = matrix["counts"]
+    # Rows of 3 counts each, so that sums cross the summary's chunks.
+    totals = matrix[COUNT_SUMMARIES]
+    stored = totals["rowPositive"][:]
+    totals.create_array("rowPositive", data=stored, chunks=(3,), overwrite=True)
+    positive = np.count_nonzero(values > 0, axis=1)
+
+    assert positive_value_count(matrix, counts) == positive.sum()
+    for rows in ([0, 2, 3, 7, 8, 9], [4], [5, 6, 8], []):
+        assert positive_value_count(matrix, counts, np.asarray(rows)) == (
+            positive[rows].sum()
+        )
+    # The negative counts are no positive values.
+    assert positive_value_count(matrix, counts) == np.count_nonzero(values) - 2
+    totals.create_array("rowPositive", data=stored[:9], overwrite=True)
+    with pytest.raises(ValueError, match="Count summaries are malformed"):
+        positive_value_count(matrix, counts)
+    totals.attrs["source_fingerprint"] = "another"
+    with pytest.raises(ValueError, match="Count summaries do not match the counts"):
+        positive_value_count(matrix, counts)
+
+
 _VALUES = np.array(
     [
         [0, 3, 0, 1, 0],
