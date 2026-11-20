@@ -1947,8 +1947,12 @@ def test_recipes_check_integer_settings_before_writing(
 ) -> None:
     before = {run.run_id for run in observed_store.pipeline.list_runs()}
 
-    for neighbors in ({"k": 0}, {"k": "15"}):
-        with pytest.raises((TypeError, ValueError), match=r"neighbors\['k'\]"):
+    # The recipe refuses them with the message of graph.neighbors.
+    for neighbors, error, message in (
+        ({"k": 0}, ValueError, "^k must be at least 1$"),
+        ({"k": "15"}, TypeError, "^k must be an integer$"),
+    ):
+        with pytest.raises(error, match=message):
             observed_store.pipeline.rna(**{**_OPTIONS, "neighbors": neighbors})
 
     assert {run.run_id for run in observed_store.pipeline.list_runs()} == before

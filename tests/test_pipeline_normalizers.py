@@ -800,11 +800,11 @@ def test_the_session_normalizer_returns_however_the_run_ends(saved, tmp_path) ->
         )
     ]
     assert store.RNA.normMethod is norm_lib_size
-    # A stage that fails ends the run failed.
+    # A stage that fails ends the run failed: Paris refuses more clusters
+    # than the graph's cells only when it reads the graph.
     with pytest.raises(PipelineExecutionError):
         store.pipeline.rna(
-            normalization=residuals,
-            **{**SETTINGS, "leiden": {"partitions": [0.5], "backend": "nope"}},
+            normalization=residuals, **{**SETTINGS, "paris": {"n_clusters": 100_000}}
         )
     assert store.RNA.normMethod is norm_lib_size
     # A cancellation ends the run interrupted.
@@ -827,8 +827,8 @@ def test_the_session_normalizer_returns_however_the_run_ends(saved, tmp_path) ->
     assert store.RNA.normMethod is norm_lib_size
     # A plan that a stage's check stops, after the stages before it reused
     # their artifacts, leaves it as it was too.
-    with pytest.raises(ValueError, match="backend"):
-        store.pipeline.plan(run, leiden={"backend": "nope"})
+    with pytest.raises(ValueError, match="n_clusters must not exceed the graph size"):
+        store.pipeline.plan(run, paris={"n_clusters": 100_000})
     assert store.RNA.normMethod is norm_lib_size
 
 

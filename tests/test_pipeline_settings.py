@@ -1640,6 +1640,58 @@ _REFUSED_SETTINGS: list[tuple[str, dict[str, Any], type[Exception], str]] = [
 ]
 
 
+# The settings that a recipe checks apart from its stage's settings function:
+# the PCA and LSI dims, which it checks against the features, the columns
+# and hashtags, which it checks against the store, hashing's assay, the graph
+# flags, which umap_graph_flags and graph_load_flags check as the methods do,
+# the Leiden candidates, and the normalizer that the run applies.
+_RECIPE_CHECKED_SETTINGS: dict[str, frozenset[str]] = {
+    "pca": frozenset({"dims"}),
+    "lsi": frozenset({"dims"}),
+    "harmony": frozenset({"batch_columns"}),
+    "doublets": frozenset({"sample_column"}),
+    "hashing": frozenset({"assay", "hashtags", "sample_column"}),
+    "umap": frozenset({"symmetric_graph", "graph_upper_only"}),
+    "leiden": frozenset(
+        {"partitions", "selected", "symmetric_graph", "graph_upper_only"}
+    ),
+    "normalization": frozenset({"method"}),
+}
+
+
+def test_every_setting_of_a_checked_stage_reaches_its_methods_check():
+    from cytearc.assay.normalization import normalization_settings
+    from cytearc.clustering.leiden import leiden_settings
+    from cytearc.datastore._operations.clustering import _ClusteringOperationsMixin
+    from cytearc.datastore._operations.embeddings import _EmbeddingOperationsMixin
+    from cytearc.datastore._operations.graph import _GraphOperationsMixin
+    from cytearc.datastore._pipeline.settings import _SETTING_CHECKS
+    from cytearc.embeddings.umap import umap_settings
+
+    checks = {
+        **_SETTING_CHECKS,
+        "umap": (umap_settings, _EmbeddingOperationsMixin._embeddings_umap),
+        "leiden": (leiden_settings, _ClusteringOperationsMixin._clusters_leiden),
+        "normalization": (
+            normalization_settings,
+            _GraphOperationsMixin._features_normalize,
+        ),
+    }
+    for stage, (check, method) in checks.items():
+        parameters = set(inspect.signature(check).parameters)
+        # A check takes the settings by the keyword names of the stage's
+        # method, which also gives the default of an omitted setting.
+        keywords = _keywords(method)
+        assert parameters <= set(keywords), (stage, parameters - set(keywords))
+        assert all(
+            keywords[name] is not inspect.Parameter.empty for name in parameters
+        ), stage
+        # Every setting of the stage is checked: by the check, or by the
+        # recipe itself.
+        recipe = _RECIPE_CHECKED_SETTINGS.get(stage, frozenset())
+        assert parameters | recipe == STAGE_SETTINGS[stage], stage
+
+
 def test_settings_at_the_bounds_of_their_methods_pass_a_recipe(readonly_store):
     # Each value is the least or the most that the stage's method takes, and
     # NumPy scalars are the same settings as Python numbers.

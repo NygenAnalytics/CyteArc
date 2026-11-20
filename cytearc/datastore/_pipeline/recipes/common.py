@@ -240,6 +240,9 @@ def require_applicable_flags(
     the recipe checks them the same way before the run starts. ``caller``
     names the operation of the stage, as its method names it.
     """
+    if all(value is None for value in flags.values()):
+        # An omitted flag takes the normalizer's default, which it applies.
+        return
     with applied_normalizers(store, {assay: normalizer}):
         resolve_normalization_params(
             store._get_assay(assay), flags, caller=caller, default=True

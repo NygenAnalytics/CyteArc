@@ -400,26 +400,21 @@ def test_a_failed_run_runs_again_with_the_failing_setting_changed(
 ) -> None:
     datastore = _copy(completed.location, tmp_path)
     base = datastore.pipeline.open(label="baseline")
-    # The Leiden stage checks its backend only when it runs.
+    # Paris refuses more clusters than the graph's cells only when it reads
+    # the graph.
     with pytest.raises(PipelineExecutionError) as caught:
-        datastore.pipeline.rerun(base, label="retry", leiden={"backend": "nope"})
+        datastore.pipeline.rerun(base, label="retry", paris={"n_clusters": 100_000})
     failed = datastore.pipeline.open(run_id=caught.value.run_id)
-    assert (failed.status, caught.value.stage) == ("failed", "leiden")
+    assert (failed.status, caught.value.stage) == ("failed", "paris")
 
-    retried = datastore.pipeline.rerun(
-        failed, label="retry", leiden={"backend": "cytearc"}
-    )
+    retried = datastore.pipeline.rerun(failed, label="retry", paris={"n_clusters": 5})
 
     assert (retried.label, retried.status) == ("retry", "completed")
-    assert retried.settings()["leiden"] == {
-        "backend": "cytearc",
-        "partitions": [0.5, 1.0],
-        "selected": None,
-    }
+    assert retried.settings()["paris"] == {"n_clusters": 5}
     dispositions = _dispositions(retried)
     stages = list(dispositions)
-    before_leiden = stages[: stages.index("leiden")]
-    assert {dispositions[stage] for stage in before_leiden} <= {"reused", "skipped"}
+    before_paris = stages[: stages.index("paris")]
+    assert {dispositions[stage] for stage in before_paris} <= {"reused", "skipped"}
 
 
 def test_a_rerun_is_refused_before_anything_is_written(
