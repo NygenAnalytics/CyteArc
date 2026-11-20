@@ -77,9 +77,10 @@ _SOURCE_INDEX = "source_index"
 class H5adMatrix:
     """A cells-by-features matrix that an H5AD export reads in row blocks.
 
-    ``reserve``, when set, counts the values that the blocks store apart
-    from them: the export allocates the file's arrays for them, and a
-    reorder (:func:`reordered_matrix`) checks the free disk for them.
+    ``reserve``, when set, returns the number of values that ``blocks``
+    yields, counted without iterating ``blocks``: the export allocates the
+    file's arrays for that many values, and a reorder
+    (:func:`reordered_matrix`) checks the free disk for them.
     ``export_dtype``, when set, is the dtype that the export stores instead
     of ``dtype``: each converted piece is cast to it, and a value that it
     cannot hold raises ``OverflowError``.

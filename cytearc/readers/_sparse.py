@@ -583,7 +583,8 @@ class SparseRowStore:
         entry_bytes: The bytes that each entry is expected to take on disk,
             as :func:`encoded_entry_bytes` measures them on sample rows; the
             check then asks for a quarter more than ``entries`` take at that
-            rate. None bounds each entry by its bytes before compression.
+            rate, and 16 bytes for the place and length of each row. None
+            bounds each entry by its bytes before compression.
         parts: The parts that writers will finish, the owner's part 0 among
             them, whose records the check of the free disk counts; 1 when
             only the owner writes.
@@ -1047,7 +1048,10 @@ class SparseRowStore:
 
         Without ``entry_bytes``, the entries take at most their bytes before
         compression, and each piece its place and length in two codes of at
-        most 8 bytes; with it, a quarter more than they take at that rate.
+        most 8 bytes; with it, a quarter more than they take at that rate,
+        and each row its place and length in two codes of at most 8 bytes.
+        The rate holds those of the measured rows, spread over their values,
+        so rows of fewer values would take more than it charges them.
         Beside them, it counts one block for each of ``parts`` parts in
         each bucket, the least that a writer's file there holds, and the
         settings and records that the store writes (:meth:`_record_bytes`).
@@ -1055,7 +1059,11 @@ class SparseRowStore:
         blocks = (self.bucket_starts.size - 1) * parts * _BLOCK_OVERHEAD
         beside = blocks + self._record_bytes(parts)
         if entry_bytes is not None:
-            return math.ceil(entries * float(entry_bytes) * _ESTIMATE_MARGIN) + beside
+            return (
+                math.ceil(entries * float(entry_bytes) * _ESTIMATE_MARGIN)
+                + self.shape[0] * 16
+                + beside
+            )
         index_bytes = (
             0
             if self._ragged

@@ -1430,13 +1430,15 @@ def test_a_measured_rate_estimates_the_disk_that_whole_rows_take(tmp_path):
         store.finalize()
         written = _store_files(store.directory)
         # The estimate asks for a quarter more than the sample's rate gives,
-        # a block of 64 + 4 * 16 bytes for each of the 8 buckets, and the
+        # 16 bytes for the place and length of each of the 2,000 rows, a
+        # block of 64 + 4 * 16 bytes for each of the 8 buckets, and the
         # store's settings and records. That covers what the store wrote,
         # and is far less than the bound before compression, 4 + 2 bytes for
         # each entry.
         estimate = store._spill_bound(counts.nnz, rate)
         assert estimate == (
             int(np.ceil(counts.nnz * rate * 1.25))
+            + 2000 * 16
             + 8 * 128
             + written["settings"]
             + written["records"]

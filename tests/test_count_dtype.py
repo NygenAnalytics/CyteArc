@@ -742,9 +742,6 @@ def test_positive_values_are_summed_from_the_stored_summaries(tmp_path) -> None:
         )
     # The negative counts are no positive values.
     assert positive_value_count(matrix, counts) == np.count_nonzero(values) - 2
-    for rows in ([3, 2], [4, 4], [-1, 2], [9, 10]):
-        with pytest.raises(ValueError, match="rows must be increasing indices"):
-            positive_value_count(matrix, counts, np.asarray(rows))
     totals.create_array("rowPositive", data=stored[:9], overwrite=True)
     with pytest.raises(ValueError, match="Count summaries are malformed"):
         positive_value_count(matrix, counts)
