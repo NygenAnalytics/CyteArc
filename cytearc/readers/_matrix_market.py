@@ -24,7 +24,7 @@ import numpy as np
 import pandas as pd
 
 from ..utils.arguments import quoted_value
-from ..utils.files import is_gzip, open_text
+from ..utils.files import GZIP_SIGNATURE, open_text
 
 __all__ = [
     "MatrixMarketHeader",
@@ -35,23 +35,22 @@ __all__ = [
     "read_matrix_market_header",
 ]
 
+# The buffer through which a parse reads its file.
+_FILE_BUFFER_BYTES = 128 * 1024
 # What pandas' C reader holds from its first chunk on, whatever the chunk
 # size: its buffers, the text of the 256 KiB that it reads at a time, decoded,
-# and the buffers of the file it reads, 128 KiB on Python 3.14 where 3.13's
-# are 8 KiB. Parsing plain and gzip-compressed files of short and wide lines
-# 10 entries at a time, tracemalloc traced at most 1.28 MB on Python 3.13,
-# with pandas 2.2.3, the oldest supported release, and with 3.0.6, and
-# 1.40 MB on Python 3.14 with pandas 3.0.6. The charge leaves room for the
-# zlib builds and platforms that differ from the one measured.
+# and the buffer through which the parse reads its file. Parsing plain and
+# gzip-compressed files of short and wide lines 10 entries at a time,
+# tracemalloc traced at most 1.33 MB with pandas 2.2.3, the oldest supported
+# release, on Python 3.13, and 1.40 MB with pandas 3.0.6 on Python 3.13 and
+# 3.14, the same with a file system that reports a block of 4 MiB. The charge
+# leaves room for the zlib builds and platforms that differ from the one
+# measured.
 _READER_BYTES = 1_500_000
-# pandas 2.2 keeps three floats of 24 bytes for each chunk it reads, until the
-# parse ends, in a list of 8-byte slots that grows by up to an eighth more.
+# pandas before 3.0 keeps three floats of 24 bytes for each chunk it reads,
+# until the parse ends, in a list of 8-byte slots that grows by up to an
+# eighth more.
 _CHUNK_BYTES = 3 * (24 + 9)
-
-
-def _compression(path: str) -> str | None:
-    """The compression of a file for pandas to read, by its first bytes."""
-    return "gzip" if is_gzip(path) else None
 
 
 @dataclass(frozen=True, slots=True)
@@ -222,8 +221,8 @@ def matrix_market_parse_bytes(header: MatrixMarketHeader, chunk_rows: int) -> in
     holds, as a count reader parses it.
 
     pandas' C reader holds its buffers and the text that it reads at a time
-    from the first chunk on, whatever the chunk size, and pandas 2.2 keeps
-    three floats for each chunk that it has read until the parse ends. A
+    from the first chunk on, whatever the chunk size, and pandas before 3.0
+    keeps three floats for each chunk that it has read until the parse ends. A
     chunk holds at most ``chunk_rows`` entries and never more than the file
     declares: for each, an int64 row and column and a uint64 value in four
     copies, as the parse and a reader that sums duplicate coordinates make
@@ -335,59 +334,71 @@ def matrix_market_entries(
     # drop the last field of one that starts a chunk.
     dtype[width] = np.float32
     seen = 0
-    with _entry_errors(path, header.field):
-        # The names of the columns make a matrix without entries, which ends
-        # at its dimensions line, parse to an empty chunk.
-        chunks = iter(
-            pd.read_csv(
-                file,
-                comment="%",
-                sep=r"\s+" if separator == " " else separator,
-                header=None,
-                skiprows=header.header_lines,
-                names=list(range(width + 1)),
-                index_col=False,
-                dtype=dtype,
-                chunksize=max(1, int(chunk_rows)),
-                compression=_compression(file),
-            )
-        )
-    while True:
+    # pandas would open the file with open()'s default buffer, which follows
+    # the block size that the file system reports, without a limit on Python
+    # 3.13 and up to 8 MiB on 3.14, so a file system that reports a block of
+    # megabytes would add megabytes to the parse; the file is read through
+    # 128 KiB instead.
+    with open(file, "rb", buffering=_FILE_BUFFER_BYTES) as handle:
+        # The first bytes, read into that buffer, say whether the file is
+        # gzip-compressed, which no second opening of the file has to find.
+        gzipped = handle.read(len(GZIP_SIGNATURE)) == GZIP_SIGNATURE
+        handle.seek(0)
         with _entry_errors(path, header.field):
-            frame = next(chunks, None)
-        if frame is None:
-            break
-        if not len(frame):
-            continue
-        wider = ~np.isnan(frame[width].to_numpy(copy=False))
-        if wider.any():
-            raise ValueError(
-                f"{_entry_fields(header.field)}, but entry "
-                f"{seen + int(np.argmax(wider)) + 1} of {path} holds more"
-            )
-        seen += len(frame)
-        rows = frame[0].to_numpy(dtype=np.int64, copy=False) + index_offset
-        columns = frame[1].to_numpy(dtype=np.int64, copy=False) + index_offset
-        if (
-            np.any(rows < 0)
-            or np.any(rows >= header.n_rows)
-            or np.any(columns < 0)
-            or np.any(columns >= header.n_columns)
-        ):
-            raise ValueError(
-                f"A Matrix Market coordinate of {path} is outside the declared "
-                f"dimensions, {header.n_rows} by {header.n_columns}"
-            )
-        values = None if pattern else frame[2].to_numpy(copy=False)
-        if counts and values is not None:
-            whole = np.isfinite(values) & (values >= 0) & (values == np.floor(values))
-            if not whole.all():
-                raise ValueError(
-                    "Matrix Market counts must be finite non-negative integers, but "
-                    f"{path} holds {quoted_value(values[~whole][0].item())}"
-                    + ("" if remedy is None else f". {remedy}")
+            # The names of the columns make a matrix without entries, which
+            # ends at its dimensions line, parse to an empty chunk.
+            chunks = iter(
+                pd.read_csv(
+                    handle,
+                    comment="%",
+                    sep=r"\s+" if separator == " " else separator,
+                    header=None,
+                    skiprows=header.header_lines,
+                    names=list(range(width + 1)),
+                    index_col=False,
+                    dtype=dtype,
+                    chunksize=max(1, int(chunk_rows)),
+                    compression="gzip" if gzipped else None,
                 )
-        yield rows, columns, values
+            )
+        while True:
+            with _entry_errors(path, header.field):
+                frame = next(chunks, None)
+            if frame is None:
+                break
+            if not len(frame):
+                continue
+            wider = ~np.isnan(frame[width].to_numpy(copy=False))
+            if wider.any():
+                raise ValueError(
+                    f"{_entry_fields(header.field)}, but entry "
+                    f"{seen + int(np.argmax(wider)) + 1} of {path} holds more"
+                )
+            seen += len(frame)
+            rows = frame[0].to_numpy(dtype=np.int64, copy=False) + index_offset
+            columns = frame[1].to_numpy(dtype=np.int64, copy=False) + index_offset
+            if (
+                np.any(rows < 0)
+                or np.any(rows >= header.n_rows)
+                or np.any(columns < 0)
+                or np.any(columns >= header.n_columns)
+            ):
+                raise ValueError(
+                    f"A Matrix Market coordinate of {path} is outside the declared "
+                    f"dimensions, {header.n_rows} by {header.n_columns}"
+                )
+            values = None if pattern else frame[2].to_numpy(copy=False)
+            if counts and values is not None:
+                whole = (
+                    np.isfinite(values) & (values >= 0) & (values == np.floor(values))
+                )
+                if not whole.all():
+                    raise ValueError(
+                        "Matrix Market counts must be finite non-negative integers, "
+                        f"but {path} holds {quoted_value(values[~whole][0].item())}"
+                        + ("" if remedy is None else f". {remedy}")
+                    )
+            yield rows, columns, values
     if seen != header.n_entries:
         raise ValueError(
             f"The Matrix Market header declares {header.n_entries} entries, but "

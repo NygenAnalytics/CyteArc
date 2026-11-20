@@ -2184,19 +2184,6 @@ class MtxReader(CrReader):
         longest = int(np.diff(pointers).max(initial=0))
         resident = engine.resident_bytes()
         available = maxBytes - resident
-        # The batches of a feature-major matrix are read from rows that its
-        # entries are sorted into first, alone beside the reader's arrays.
-        preparation = engine.preparation_bytes(lines)
-        if preparation and preparation > available:
-            raise MemoryBudgetError(
-                "Shuffling cells exceeds the memory limit. Beside the "
-                f"{resident} bytes of the reader's arrays, sorting the Matrix "
-                f"Market entries into rows of cells, {lines} lines at a time, "
-                f"needs at least {resident + preparation} bytes.",
-                needed_bytes=resident + preparation,
-                budget_bytes=int(maxBytes),
-                item="sorting the Matrix Market entries into rows of cells",
-            )
 
         def held(plan: RowSpillPlan, rows: int) -> int:
             return int(plan.batch_bytes(engine.max_window_nnz(rows))) + int(
@@ -2343,10 +2330,10 @@ class MtxReader(CrReader):
             self.temporaryDiskBytes = self._engine.temporaryDiskBytes
 
     def _sparse_import_preparation_bytes(self, lines_in_mem: int) -> int:
-        """Return what :meth:`_prepare_sparse_import` holds while it sorts the
-        entries into rows, parsing ``lines_in_mem`` lines at a time."""
-        if self._shuffledRows is not None:
-            return 0
+        """Return what sorting the entries into rows holds, parsing
+        ``lines_in_mem`` lines at a time, as :meth:`_prepare_sparse_import`
+        and the shuffle of the cells sort them; nothing while sorted rows
+        exist."""
         return self._engine.preparation_bytes(lines_in_mem)
 
     def _release_sparse_import(self) -> None:

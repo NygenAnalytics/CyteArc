@@ -2321,6 +2321,53 @@ def test_a_matrix_market_parse_of_the_largest_values_holds_no_more_than_its_char
     )
 
 
+@pytest.mark.parametrize("compressed", [False, True], ids=["plain", "gzip"])
+def test_a_matrix_market_parse_reads_through_its_own_buffer_on_a_large_block_file_system(
+    tmp_path, monkeypatch, compressed
+):
+    import builtins
+    import gc
+    import gzip
+    import tracemalloc
+
+    from cytearc.readers._matrix_market import (
+        matrix_market_entries,
+        matrix_market_header,
+        matrix_market_parse_bytes,
+    )
+
+    # 60,000 entries of 6 bytes, more than the 256 KiB that pandas reads at
+    # a time.
+    path = tmp_path / ("large_block.mtx.gz" if compressed else "large_block.mtx")
+    with gzip.open(path, "wt") if compressed else path.open("w") as handle:
+        handle.write("%%MatrixMarket matrix coordinate integer general\n")
+        handle.write("9 9 60000\n")
+        handle.writelines(
+            f"{1 + index % 9} {1 + index % 7} {1 + index % 5}\n"
+            for index in range(60_000)
+        )
+    header = matrix_market_header(path)
+    opened = builtins.open
+
+    def large_block_open(file, mode="r", buffering=-1, *args, **kwargs):
+        # open() buffers a file that it opens without a buffer size by the
+        # block that the file system reports, here one of 4 MiB.
+        buffering = 4 * 1024**2 if buffering == -1 else buffering
+        return opened(file, mode, buffering, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", large_block_open)
+    gc.collect()
+    tracemalloc.start()
+    try:
+        for entries in matrix_market_entries(header, 1_000, counts=True):
+            del entries
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    # Read through 4 MiB, the parse would hold more than twice its charge.
+    assert peak <= matrix_market_parse_bytes(header, 1_000) < 4 * 1024**2
+
+
 @pytest.mark.slow
 def test_a_matrix_market_parse_of_many_chunks_holds_no_more_than_its_charge(
     tmp_path,
@@ -2335,7 +2382,7 @@ def test_a_matrix_market_parse_of_many_chunks_holds_no_more_than_its_charge(
         matrix_market_parse_bytes,
     )
 
-    # pandas 2.2 keeps 99 bytes for each chunk that it reads until the parse
+    # pandas before 3.0 keeps 99 bytes for each chunk that it reads until the parse
     # ends: 0.59 MB for 6,000 chunks of 10 entries, beside its buffers.
     path = tmp_path / "many.mtx.gz"
     with gzip.open(path, "wt") as handle:
@@ -2508,38 +2555,87 @@ def test_a_shuffled_feature_major_import_refuses_a_budget_that_cannot_sort_its_e
     values = _producer_counts()[:, :-4]
     reader = _feature_major_reader(tmp_path, values)
     destination = tmp_path / "counts.zarr"
+
+    def shuffled(path: Path, budget: int, **options: Any) -> Any:
+        return _writer(
+            "mtx",
+            reader,
+            str(path),
+            mem_budget=budget,
+            policy="fit",
+            shuffle_cells=True,
+            **options,
+        )
+
     try:
         sorting = reader._sparse_import_preparation_bytes(100_000)
         # The cells are shuffled as they are read for the scan, which sorts
-        # the entries into rows first.
+        # the entries into rows first, beside the reader's arrays and the
+        # order of the cells and its inverse.
+        with pytest.raises(MemoryBudgetError) as refused:
+            shuffled(destination, sorting)
+        needed = refused.value.needed_bytes
+        # The order of the 3,000 cells and its inverse take 8 bytes a cell each.
+        assert needed == sorting + reader._sparse_import_resident_bytes() + 48_000
+        assert refused.value.item.startswith(
+            "sorting the Matrix Market entries into rows of cells, 100000 lines"
+        )
+        assert not destination.exists()
+        assert list((tmp_path / "rows").iterdir()) == []
+        # A budget one byte short of the bytes it names is refused again.
+        with pytest.raises(MemoryBudgetError) as again:
+            shuffled(destination, needed - 1)
+        assert again.value.needed_bytes == needed
+        # The refusal also names lines_in_mem halved until the sorting fits,
+        # which imports within the refused budget.
+        lines = int(re.search(r"lines_in_mem=(\d+)", str(refused.value))[1])
+        assert lines < 100_000
+        shuffled(tmp_path / "fewer_lines.zarr", sorting, lines_in_mem=lines).dump()
+        # A budget of the bytes it names sorts the entries and imports them.
+        shuffled(destination, needed).dump()
+    finally:
+        _close(reader)
+    for imported in (destination, tmp_path / "fewer_lines.zarr"):
+        root = zarr.open_group(str(imported), mode="r")
+        order = np.asarray(root["cellData/sourceRow"][:])
+        np.testing.assert_array_equal(root["RNA/counts"][:], values[order])
+
+
+def test_a_second_shuffle_of_a_reader_is_refused_a_budget_that_cannot_sort_its_entries(
+    tmp_path,
+):
+    from cytearc.utils.memory_budget import MemoryBudgetError
+
+    reader = _feature_major_reader(tmp_path, _producer_counts()[:, :-4])
+    try:
+        sorting = reader._sparse_import_preparation_bytes(100_000)
+        # The first import shuffles the cells, and its read of them removes
+        # the rows that its sorting made.
+        _writer("mtx", reader, str(tmp_path / "first.zarr"), shuffle_cells=True)
+        first = reader._shuffledRows
+        assert first is not None
+        assert reader._sparse_import_preparation_bytes(100_000) == sorting
+        # Another shuffle sorts the entries again, which the budget of the
+        # sorting alone cannot hold beside the reader's arrays and the cells'
+        # order.
         with pytest.raises(MemoryBudgetError) as refused:
             _writer(
                 "mtx",
                 reader,
-                str(destination),
+                str(tmp_path / "second.zarr"),
                 mem_budget=sorting,
-                policy="fit",
                 shuffle_cells=True,
+                shuffle_seed=1,
             )
         assert refused.value.item.startswith(
-            "sorting the Matrix Market entries into rows of cells beside"
+            "sorting the Matrix Market entries into rows of cells"
         )
-        assert sorting < refused.value.needed_bytes
-        assert not destination.exists()
-        assert list((tmp_path / "rows").iterdir()) == []
-        _writer(
-            "mtx",
-            reader,
-            str(destination),
-            mem_budget=refused.value.needed_bytes,
-            policy="fit",
-            shuffle_cells=True,
-        ).dump()
+        # The refusal came before the second shuffle read any cell, so the
+        # first import's shuffled cells remain.
+        assert reader._shuffledRows is first
+        assert not (tmp_path / "second.zarr").exists()
     finally:
         _close(reader)
-    root = zarr.open_group(str(destination), mode="r")
-    order = np.asarray(root["cellData/sourceRow"][:])
-    np.testing.assert_array_equal(root["RNA/counts"][:], values[order])
 
 
 def test_a_matrix_market_import_is_charged_no_more_lines_than_its_file_holds(

@@ -49,10 +49,12 @@ class CrToZarr:
                      their type from their name.
         lines_in_mem: Matrix Market lines parsed at a time (Matrix Market
                       readers only). A file sorted by cell is parsed as its
-                      counts are written, and any other file before the
-                      write, as its entries are sorted into rows of cells;
-                      the import reserves this parse buffer for the step
-                      that parses, and never more lines than the file holds.
+                      counts are written, and a feature-major file before
+                      the write, as its entries are sorted into rows of
+                      cells; an unordered file's entries are sorted when its
+                      reader is built. The import reserves this parse buffer
+                      for the step that parses, never for more lines than
+                      the file holds.
         overwrite: If True, replace a CyteArc store that no ``DataStore`` has opened.
         values: What the matrix holds, ``"counts"``, ``"normalized"``,
             ``"log_normalized"`` or ``"log2_normalized"``, as the import
@@ -90,9 +92,10 @@ class CrToZarr:
         OSError: If ``shuffle_cells`` is True and the temporary disk lacks
             room for the shuffled cells.
         MemoryBudgetError: If ``mem_budget`` cannot hold the sorting of a
-            Matrix Market file's entries into rows of cells, before anything
-            is parsed or the destination exists. It names the budget that
-            holds it and, when one fits, a smaller ``lines_in_mem``.
+            feature-major Matrix Market file's entries into rows of cells,
+            before the sorting starts and before the destination exists. It
+            names the budget that holds it and, when one fits, a smaller
+            ``lines_in_mem``.
 
     Attributes:
         cr: A CrReader object, containing the Cellranger data.
@@ -198,6 +201,10 @@ class CrToZarr:
             self._cellOrder = shuffled_order(self.cr.nCells, self.shuffleSeed)
             scan_options["destinationRows"] = destination_rows(self._cellOrder)
             held = 2 * self._cellOrder.nbytes
+            # A Matrix Market reader sorts a feature-major file's entries into
+            # rows as it reads its cells for the shuffle, beside its arrays and
+            # the order of the cells and its inverse.
+            self._admit_reader_preparation(self._reader_resident_bytes() + held)
         else:
             # Another import of the reader may hold its shuffled cells, which
             # this import, in the reader's order, never reads.
@@ -239,8 +246,10 @@ class CrToZarr:
                 storage_dtypes,
             )
             # A preparation or a layout that does not fit fails here, before
-            # the destination exists.
-            self._admit_reader_preparation()
+            # the destination exists. A shuffled import's counts write reads
+            # the shuffled cells, which need no sorting.
+            if not self.shuffleCells:
+                self._admit_reader_preparation(self._count_import_resident_bytes())
             self.policy = self._fit_count_layout(storage_dtypes, layout_request)
             # The destination must be empty, or with overwrite an unprepared store.
             self.z = create_destination(
@@ -326,13 +335,17 @@ class CrToZarr:
             for name, spans in assay_feature_ranges(self.cr.assayFeats).items()
         }
 
+    def _reader_resident_bytes(self) -> int:
+        """Return the bytes of the arrays that the reader holds for an import."""
+        reader_resident = getattr(self.cr, "_sparse_import_resident_bytes", None)
+        return max(0, int(reader_resident())) if callable(reader_resident) else 0
+
     def _count_import_resident_bytes(self) -> int:
         """Return what the import holds from the start of its counts write to its end."""
         from ..storage.identity import CountSummary
 
-        reader_resident = getattr(self.cr, "_sparse_import_resident_bytes", None)
         return int(
-            (max(0, int(reader_resident())) if callable(reader_resident) else 0)
+            self._reader_resident_bytes()
             + sum(
                 CountSummary.nbytes_for(self.cr.nCells, width)
                 for width in self._assay_widths().values()
@@ -341,14 +354,15 @@ class CrToZarr:
             + (0 if self._cellOrder is None else int(self._cellOrder.nbytes))
         )
 
-    def _admit_reader_preparation(self) -> None:
+    def _admit_reader_preparation(self, held: int) -> None:
         """Refuse a budget that cannot hold the reader's sorting of its entries into rows.
 
         A Matrix Market reader sorts a feature-major file's entries, and an
         unordered file's whose sorted rows were removed, into rows of cells
-        before the counts write reads them, beside what the import holds
-        through the write. The refusal names ``lines_in_mem`` halved until
-        the sorting fits, when such a value exists.
+        before the counts write reads them, or as it reads its cells for a
+        shuffle, beside the ``held`` bytes that the import holds then. The
+        refusal names ``lines_in_mem`` halved until the sorting fits, when
+        such a value exists.
         """
         preparation = getattr(self.cr, "_sparse_import_preparation_bytes", None)
         if not callable(preparation):
@@ -357,7 +371,6 @@ class CrToZarr:
         if not sorting:
             return
         budget = int(self.resources.memoryBytes)
-        held = self._count_import_resident_bytes()
         needed = held + sorting
         if needed <= budget:
             return
@@ -372,7 +385,7 @@ class CrToZarr:
             f"Importing the counts of {self.cr.nCells} cells",
             "sorting the Matrix Market entries into rows of cells, "
             f"{self.linesInMem} lines at a time, beside the {held} bytes that "
-            "the import holds throughout",
+            "the import holds",
             needed,
             budget,
             remedy=remedy,
@@ -617,8 +630,10 @@ class CrToZarr:
             if callable(configure_lines):
                 configure_lines(self.linesInMem)
             # The reader prepares its rows before the write is planned, alone
-            # beside what the import holds.
-            self._admit_reader_preparation()
+            # beside what the import holds; a shuffled import reads its
+            # shuffled cells instead.
+            if not self.shuffleCells:
+                self._admit_reader_preparation(self._count_import_resident_bytes())
             if callable(prepare):
                 prepare()
             (
