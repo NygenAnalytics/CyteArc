@@ -1,7 +1,7 @@
 """WNN modality-weight plots over an explicit embedding."""
 
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pandas as pd
@@ -28,6 +28,8 @@ from ._style import (
     DEFAULT_RASTERIZE_THRESHOLD,
     FrameStyle,
     apply_figure_chrome,
+    colormap_argument,
+    colormap_name,
     default_point_edgewidth,
     default_point_size,
     finish_embedding_axes,
@@ -36,6 +38,9 @@ from ._style import (
     theme_context,
 )
 from ..utils.arguments import bool_argument
+
+if TYPE_CHECKING:
+    from matplotlib.colors import Colormap
 
 
 def _wnn_assays(
@@ -140,7 +145,7 @@ def modality_weights(
     layout: ArtifactRef,
     point_size: float | None = None,
     point_alpha: float = 1.0,
-    cmap: str = "viridis",
+    cmap: "str | Colormap" = "viridis",
     n_columns: int | None = None,
     target: Any | None = None,
     figsize: tuple[float, float] | None = None,
@@ -152,15 +157,15 @@ def modality_weights(
     """Plot each assay's WNN contribution over an explicit embedding.
 
     ``layout`` must hold the graph's cells, whichever operation made its cell
-    selection; a layout of other cells raises ``ValueError``.
+    selection; a layout of other cells raises ``ValueError``. ``cmap`` takes
+    a Matplotlib colormap name or a ``Colormap``.
     """
     show = bool_argument(show, "show")
     if point_size is not None and (not np.isfinite(point_size) or point_size <= 0):
         raise ValueError("point_size must be positive and finite")
     if not np.isfinite(point_alpha) or not 0 <= point_alpha <= 1:
         raise ValueError("point_alpha must be between zero and one")
-    if not isinstance(cmap, str) or not cmap:
-        raise TypeError("cmap must be a non-empty string")
+    cmap = colormap_argument(cmap, "cmap")
     if (
         isinstance(rasterize_threshold, bool)
         or not isinstance(rasterize_threshold, int)
@@ -271,7 +276,9 @@ def modality_weights(
                 extras={"assays": assays},
             ),
         ),
-        scales=(ColorScale(cmap=cmap, vmin=0.0, vmax=1.0, scope="shared"),),
+        scales=(
+            ColorScale(cmap=colormap_name(cmap), vmin=0.0, vmax=1.0, scope="shared"),
+        ),
         provenance=PlotProvenance(
             n_cells=len(cell_indices),
             renderer="matplotlib",

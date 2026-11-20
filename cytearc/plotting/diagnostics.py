@@ -1,6 +1,7 @@
 """Native diagnostic plots."""
 
-from typing import Any
+from collections.abc import Sequence
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pandas as pd
@@ -14,8 +15,16 @@ from ._figure import (
     normalize_axes_target,
 )
 from ..utils.arrays import sort_categories
-from ._style import apply_figure_chrome, theme_context
+from ._style import (
+    apply_figure_chrome,
+    colormap_argument,
+    colormap_name,
+    theme_context,
+)
 from ..utils.arguments import RANDOM_STATE_MAX, bool_argument, integer_argument
+
+if TYPE_CHECKING:
+    from matplotlib.colors import Colormap
 
 
 def _clean_axis(ax: Any, *, tick_size: float = 10.0) -> None:
@@ -52,7 +61,10 @@ def qc(
     """Plot grouped distributions for cell-level QC metrics.
 
     Above ``max_points`` cells, each panel draws the points it shows with
-    ``seed``, a seed of NumPy's ``RandomState`` from 0 to 2**32 - 1.
+    ``seed``, a seed of NumPy's ``RandomState`` from 0 to 2**32 - 1. The
+    groups take the colors of ``cmap``, a palette that seaborn's
+    ``color_palette`` reads: the name of a seaborn palette or a Matplotlib
+    colormap, or a list of colors.
     """
     show_on_single_row = bool_argument(show_on_single_row, "show_on_single_row")
     show = bool_argument(show, "show")
@@ -94,7 +106,14 @@ def qc(
             1.0 + (2.5 * n_rows),
         )
 
-    palette_colors = sns.color_palette(cmap, n_colors=n_groups).as_hex()
+    try:
+        palette_colors = sns.color_palette(cmap, n_colors=n_groups).as_hex()
+    except (TypeError, ValueError) as error:
+        raised = TypeError if isinstance(error, TypeError) else ValueError
+        raise raised(
+            "cmap must be a seaborn palette or Matplotlib colormap name, or a "
+            f"list of colors, not {cmap!r}"
+        ) from error
     palette = dict(zip(group_order, palette_colors, strict=True))
     if n_groups == 1:
         palette[group_order[0]] = color
@@ -448,12 +467,28 @@ def highly_variable_features(
     label_size: float = 12,
     figsize: tuple[float, float] = (4.5, 4.0),
     point_sizes: tuple[float, float] = (3, 30),
-    colormaps: tuple[str, str] = ("winter", "magma_r"),
+    colormaps: "tuple[str | Colormap, str | Colormap]" = ("winter", "magma_r"),
     theme: str = "notebook",
     show: bool = True,
 ) -> PlotResult:
-    """Plot mean-variance diagnostics for feature selection."""
+    """Plot mean-variance diagnostics for feature selection.
+
+    ``colormaps`` colors the features not selected and the selected ones by
+    the number of cells that express them, each a Matplotlib colormap name
+    or a ``Colormap``.
+    """
     show = bool_argument(show, "show")
+    if isinstance(colormaps, str) or not isinstance(colormaps, Sequence):
+        raise TypeError(
+            "colormaps must be a pair of colormaps, for the features not "
+            "selected and the selected ones"
+        )
+    if len(colormaps) != 2:
+        raise ValueError("colormaps must contain two values")
+    colormaps = (
+        colormap_argument(colormaps[0], "colormaps[0]"),
+        colormap_argument(colormaps[1], "colormaps[1]"),
+    )
     require_matplotlib()
     means = np.asarray(mean_nonzero, dtype=np.float64)
     variances = np.asarray(corrected_variance, dtype=np.float64)
@@ -467,8 +502,6 @@ def highly_variable_features(
     selected_mask = selected_mask.astype(bool, copy=False)
     if len(point_sizes) != 2:
         raise ValueError("point_sizes must contain two values")
-    if len(colormaps) != 2:
-        raise ValueError("colormaps must contain two values")
 
     with np.errstate(divide="ignore", invalid="ignore"):
         log_means = np.log2(means)
@@ -540,7 +573,7 @@ def highly_variable_features(
                     float(np.nanmax(cell_counts)) if len(cell_counts) else 0.0
                 ),
                 "point_sizes": list(point_sizes),
-                "colormaps": list(colormaps),
+                "colormaps": [colormap_name(colormap) for colormap in colormaps],
             },
         ),
         owns_figure=owns_figure,

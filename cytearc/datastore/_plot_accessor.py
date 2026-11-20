@@ -39,6 +39,8 @@ from .pipeline_run import PipelineRun
 from ..utils.arguments import bool_argument
 
 if TYPE_CHECKING:
+    from matplotlib.colors import Colormap
+
     from .datastore import DataStore
 
 
@@ -1261,7 +1263,7 @@ class DataStorePlotAccessor:
         layout: ArtifactRef,
         point_size: float | None = None,
         point_alpha: float = 1.0,
-        cmap: str = "viridis",
+        cmap: "str | Colormap" = "viridis",
         n_columns: int | None = None,
         target: Any | None = None,
         figsize: tuple[float, float] | None = None,
@@ -1293,7 +1295,7 @@ class DataStorePlotAccessor:
         fontsize: float = 10,
         root_color: str = "#C0C0C0",
         non_leaf_color: str = "k",
-        cmap: str = "tab20",
+        cmap: "str | Colormap | None" = None,
         color_key: dict[Any, str] | None = None,
         edgecolors: str = "k",
         edgewidth: float = 1,
@@ -1316,9 +1318,9 @@ class DataStorePlotAccessor:
         figsize: tuple[float, float] = (5, 10),
         vmin: float = -2.0,
         vmax: float = 2.0,
-        heatmap_cmap: str | None = None,
-        pseudotime_cmap: str | None = None,
-        clusterbar_cmap: str | None = None,
+        heatmap_cmap: "str | Colormap | None" = None,
+        pseudotime_cmap: "str | Colormap | None" = None,
+        clusterbar_cmap: "str | Colormap | None" = None,
         color_scale: "ColorScale | None" = None,
         feature_cluster_scale: "CategoricalScale | None" = None,
         pseudotime_scale: "ColorScale | None" = None,
@@ -1342,9 +1344,9 @@ class DataStorePlotAccessor:
         figsize: tuple[float, float] | None = None,
         vmin: float | None = None,
         vmax: float | None = None,
-        heatmap_cmap: str = "coolwarm",
-        pseudotime_cmap: str = "viridis",
-        clusterbar_cmap: str = "tab20",
+        heatmap_cmap: "str | Colormap" = "coolwarm",
+        pseudotime_cmap: "str | Colormap" = "viridis",
+        clusterbar_cmap: "str | Colormap | None" = None,
         tick_fontsize: int = 10,
         axis_fontsize: int = 12,
         feature_label_fontsize: int = 10,
@@ -1362,7 +1364,7 @@ class DataStorePlotAccessor:
         features: Sequence[str | FeatureRef],
         lineages: Sequence[Any] | None = None,
         axis: Literal["progress", "pseudotime"] = "progress",
-        lineage_cmap: str | None = None,
+        lineage_cmap: "str | Colormap | None" = None,
         line_width: float = 2.0,
         n_columns: int | None = None,
         target: Any | None = None,
@@ -1381,7 +1383,7 @@ class DataStorePlotAccessor:
         layout: ArtifactRef,
         lineages: Sequence[Any] | None = None,
         df: float | None = None,
-        lineage_cmap: str | None = None,
+        lineage_cmap: "str | Colormap | None" = None,
         line_width: float = 2.5,
         point_size: float | None = None,
         point_alpha: float = 0.6,

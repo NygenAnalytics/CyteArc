@@ -4,7 +4,7 @@ import functools
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from weakref import WeakKeyDictionary
 
 import numpy as np
@@ -18,6 +18,9 @@ from ._contracts import (
     LegendLoc,
     SizeScale,
 )
+
+if TYPE_CHECKING:
+    from matplotlib.colors import Colormap
 
 # Shared CyteArc figure defaults used by embedding-like plots.
 DEFAULT_RASTERIZE_THRESHOLD = 50_000
@@ -800,8 +803,63 @@ def categorical_color_map(
     return dict(zip(cats, colors))
 
 
-def colormap_palette(categories: Sequence[Any], cmap: str) -> dict[Any, str]:
-    """Assign categories evenly spaced colors from a Matplotlib colormap."""
+def colormap_argument(value: object, name: str, *, optional: bool = False) -> Any:
+    """Check an argument that takes a Matplotlib colormap, and return it.
+
+    The argument takes the name of a colormap that ``matplotlib.colormaps``
+    holds, such as ``"viridis"``, or a ``matplotlib.colors.Colormap``, and
+    None where ``optional`` allows it. Plots check each colormap argument
+    before they read the store.
+
+    Raises:
+        TypeError: If ``value`` is of another type.
+        ValueError: If ``value`` names no colormap that Matplotlib holds.
+    """
+    from ._deps import require_matplotlib
+
+    _, mpl = require_matplotlib()
+    if value is None and optional:
+        return None
+    if isinstance(value, mpl.colors.Colormap):
+        return value
+    if not isinstance(value, str):
+        allowed = "None, a" if optional else "a"
+        raise TypeError(
+            f"{name} must be {allowed} Matplotlib colormap name or a Colormap, "
+            f"not {type(value).__name__}"
+        )
+    if value not in mpl.colormaps:
+        raise ValueError(
+            f"{name} must name a Matplotlib colormap, such as 'viridis'; "
+            f"{value!r} is not one"
+        )
+    return value
+
+
+def colormap_name(cmap: "str | Colormap") -> str:
+    """Return the name of a colormap that :func:`colormap_argument` accepts.
+
+    Plot results record a colormap by its name, as a ``Colormap`` names
+    itself.
+    """
+    return cmap if isinstance(cmap, str) else str(cmap.name)
+
+
+def colormap_palette(
+    categories: Sequence[Any], cmap: "str | Colormap | None"
+) -> dict[Any, str]:
+    """Color categories in their order, from a colormap or the colorblind palette.
+
+    A colormap is sampled at evenly spaced positions from 0 to 1, so a single
+    category takes its first color. Without one, the categories take the
+    colorblind palette in order, as a ``CategoricalScale`` of
+    ``palette_name="colorblind"`` does, and more categories than its 12
+    colors take evenly spaced hues, with a warning that they may not be
+    colorblind safe.
+    """
+    if cmap is None:
+        colors = palette_for_n(len(categories), palette_name="colorblind")
+        return dict(zip(categories, colors, strict=True))
     from ._deps import require_matplotlib
 
     _, mpl = require_matplotlib()

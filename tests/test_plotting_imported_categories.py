@@ -1,5 +1,6 @@
 """Plots and exports of imported cluster labels, of label snapshots and of frozen run columns keep their stored categories."""
 
+import shutil
 import warnings
 from types import SimpleNamespace
 
@@ -345,6 +346,98 @@ def test_only_a_store_with_a_root_reads_an_artifacts_categories(imported):
     stored = stored_artifact_scale(imported.store, imported.clusters)
     assert stored.order == tuple(FILE_ORDER)
     assert stored_artifact_scale(SimpleNamespace(), imported.clusters) is None
+
+
+@pytest.fixture(scope="module")
+def paris_tree(imported, tmp_path_factory) -> SimpleNamespace:
+    """A Paris clustering of the cells of codes 2 and 10, on a copy of the store.
+
+    The copy keeps the graph and the column that selects the cells out of
+    the store that the other tests read.
+    """
+    from tests.fixtures_datastore import _graph_coordinates, build_neighborhood_graph
+
+    path = tmp_path_factory.mktemp("imported_paris") / "cells.zarr"
+    shutil.copytree(imported.store.zarr_loc, path)
+    store = cytearc.DataStore(str(path), min_features_per_cell=0, zarr_mode="r+")
+    codes = np.asarray(store.cells.fetch_all("cluster_codes"))
+    store.cells.insert("tree_cells", by_cell_id(store.cells, codes != "1"))
+    cells = store.snapshot_cell_selection("tree_cells")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        graph = build_neighborhood_graph(
+            store,
+            cell_selection=cells,
+            features=store.features.detected(cells, min_cells=1),
+            dims=5,
+            k=10,
+        )
+        clusters = store.clusters.paris(graph, n_clusters=3)
+        initialization = store.embeddings.initialization(
+            _graph_coordinates(store, graph)
+        )
+        layout = store.embeddings.umap(graph, initialization, n_epochs=10)
+    return SimpleNamespace(store=store, layout=layout, graph=graph, clusters=clusters)
+
+
+def test_cluster_trees_color_categories_as_embeddings_do(paris_tree):
+    store = paris_tree.store
+
+    def scale_colors(result):
+        (scale,) = [
+            scale for scale in result.scales if isinstance(scale, splt.CategoricalScale)
+        ]
+        return [(value, to_hex(color)) for value, color in scale.palette.items()]
+
+    def tree(**options):
+        result = store.plots.cluster_tree(
+            graph=paris_tree.graph,
+            clusters=paris_tree.clusters,
+            show_labels=False,
+            show=False,
+            **options,
+        )
+        wedges = {
+            to_hex(color)
+            for collection in result.axes["tree"].collections
+            if collection.get_gid() == "cluster-tree-pie"
+            for color in collection.get_facecolors()
+        }
+        colors = scale_colors(result)
+        result.close()
+        return colors, wedges
+
+    def embedding(color_by):
+        result = store.plots.embedding(
+            layout=paris_tree.layout, color_by=color_by, show=False
+        )
+        colors = scale_colors(result)
+        result.close()
+        return colors
+
+    # The tree holds the cells of codes 2 and 10, whose stages are early and
+    # late. The imported cell types take the file's order and colors; the
+    # ordered stage takes default colors over every stage in its stored
+    # order, early, mid, late and unused; and the unordered codes take
+    # default colors over every code in natural order, 1, 2 and 10, though
+    # the tree holds no code 1.
+    expected = {
+        "cell_type": FILE_LEGEND,
+        "stage": [("early", "#1f77b4"), ("late", "#279e68")],
+        "cluster_codes": [("2", "#ff7f0e"), ("10", "#279e68")],
+    }
+    for column, colors in expected.items():
+        palette, wedges = tree(fill_by_value=column)
+        assert palette == colors
+        # The pies draw those colors, and an embedding of the same cells
+        # colors the column alike.
+        assert wedges == {color for _, color in colors}
+        assert embedding(column) == colors
+    # The Paris groups take the default colors in their order, as an
+    # embedding colored by the clustering draws them.
+    clusters, _ = tree()
+    assert clusters == [(1, "#1f77b4"), (2, "#ff7f0e"), (3, "#279e68")]
+    assert embedding(paris_tree.clusters) == clusters
 
 
 @pytest.mark.slow

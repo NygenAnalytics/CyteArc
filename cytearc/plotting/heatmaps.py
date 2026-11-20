@@ -2,7 +2,7 @@
 
 from collections.abc import Hashable, Mapping, Sequence
 from dataclasses import replace
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 import pandas as pd
@@ -36,12 +36,17 @@ from ..utils.arguments import bool_argument, integer_argument, optional_bool_arg
 from ..utils.arrays import sort_categories
 from ._style import (
     apply_figure_chrome,
+    colormap_argument,
+    colormap_name,
     colormap_palette,
     continuous_norm,
     resolve_category_scale,
     resolve_color_limits,
     theme_context,
 )
+
+if TYPE_CHECKING:
+    from matplotlib.colors import Colormap
 
 
 def _marker_log_transform(assay: Any, value: bool | None) -> bool:
@@ -326,7 +331,16 @@ def marker_heatmap(
     show: bool = True,
     **heatmap_kwargs: Any,
 ) -> PlotResult:
-    """Plot standardized expression of the top marker features."""
+    """Plot standardized expression of the top marker features.
+
+    ``cmap`` takes a Matplotlib colormap name, a ``Colormap`` or a list of
+    colors, and a ``color_scale`` that names a colormap replaces it.
+    """
+    if isinstance(cmap, list):
+        # A list of colors is their colormap, as seaborn's heatmap reads it.
+        _, mpl = require_matplotlib()
+        cmap = mpl.colors.ListedColormap(cmap, name="from_list")
+    cmap = colormap_argument(cmap, "cmap")
     log_transform = optional_bool_argument(log_transform, "log_transform")
     cluster_rows = bool_argument(cluster_rows, "cluster_rows")
     cluster_columns = bool_argument(cluster_columns, "cluster_columns")
@@ -344,11 +358,7 @@ def marker_heatmap(
         )
     if "z_score" in heatmap_kwargs or "standard_scale" in heatmap_kwargs:
         raise ValueError("marker_heatmap already standardizes features before plotting")
-    resolved_color_scale = color_scale or ColorScale(
-        cmap=(cmap if isinstance(cmap, str) else getattr(cmap, "name", None)),
-        vmin=vmin,
-        vmax=vmax,
-    )
+    resolved_color_scale = color_scale or ColorScale(vmin=vmin, vmax=vmax)
     if resolved_color_scale.scale != "linear":
         raise NotImplementedError("marker_heatmap supports only linear color scales")
     resolved_vmin = (
@@ -561,11 +571,7 @@ def marker_heatmap(
             )
 
     resolved_scale = ColorScale(
-        cmap=(
-            resolved_cmap
-            if isinstance(resolved_cmap, str)
-            else getattr(resolved_cmap, "name", None)
-        ),
+        cmap=colormap_name(resolved_cmap),
         vmin=resolved_vmin,
         vmax=resolved_vmax,
         vcenter=resolved_color_scale.vcenter,
@@ -716,9 +722,9 @@ def pseudotime_heatmap(
     figsize: tuple[float, float] = (5, 10),
     vmin: float = -2.0,
     vmax: float = 2.0,
-    heatmap_cmap: str | None = None,
-    pseudotime_cmap: str | None = None,
-    clusterbar_cmap: str | None = None,
+    heatmap_cmap: "str | Colormap | None" = None,
+    pseudotime_cmap: "str | Colormap | None" = None,
+    clusterbar_cmap: "str | Colormap | None" = None,
     color_scale: ColorScale | None = None,
     feature_cluster_scale: CategoricalScale | None = None,
     pseudotime_scale: ColorScale | None = None,
@@ -739,14 +745,27 @@ def pseudotime_heatmap(
     name. A name that several retained features share raises ``ValueError``
     naming their IDs; pick one with ``FeatureRef(value=feature_id,
     by="id")``. A feature that the aggregation did not retain is skipped.
+
+    Without ``feature_cluster_scale``, the strip beside the rows colors the
+    modules from the colorblind palette in module order, as
+    ``lineage_heatmap`` does, and more than 12 modules take evenly spaced
+    hues, with a warning; a ``clusterbar_cmap`` is sampled at evenly spaced
+    positions instead. ``heatmap_cmap`` colors the profiles, coolwarm by
+    default, and ``pseudotime_cmap`` the pseudotime strip, viridis by
+    default, unless ``color_scale`` or ``pseudotime_scale`` names a
+    colormap. Each colormap argument takes a Matplotlib colormap name or a
+    ``Colormap``.
     """
     show_legend = bool_argument(show_legend, "show_legend")
     show = bool_argument(show, "show")
-    resolved_color_scale = color_scale or ColorScale(
-        cmap=heatmap_cmap or "coolwarm",
-        vmin=vmin,
-        vmax=vmax,
+    heatmap_cmap = colormap_argument(heatmap_cmap, "heatmap_cmap", optional=True)
+    pseudotime_cmap = colormap_argument(
+        pseudotime_cmap, "pseudotime_cmap", optional=True
     )
+    clusterbar_cmap = colormap_argument(
+        clusterbar_cmap, "clusterbar_cmap", optional=True
+    )
+    resolved_color_scale = color_scale or ColorScale(vmin=vmin, vmax=vmax)
     if resolved_color_scale.scale != "linear":
         raise NotImplementedError("pseudotime_heatmap supports linear scales")
     resolved_vmin = (
@@ -770,9 +789,7 @@ def pseudotime_heatmap(
     feature_labels = np.asarray(prepared["feature_labels"])
     pseudotime = np.asarray(prepared["pseudotime"], dtype=float)
     resolved_heatmap_cmap = resolved_color_scale.cmap or heatmap_cmap or "coolwarm"
-    pseudotime_color_scale = pseudotime_scale or ColorScale(
-        cmap=pseudotime_cmap or "viridis",
-    )
+    pseudotime_color_scale = pseudotime_scale or ColorScale()
     if pseudotime_color_scale.scale != "linear":
         raise NotImplementedError("pseudotime annotations support linear scales")
     resolved_pseudotime_cmap = (
@@ -802,9 +819,12 @@ def pseudotime_heatmap(
     )
     cluster_order = list(resolved_feature_cluster_scale.order or ())
     if feature_cluster_scale is None:
+        # Modules take the colorblind palette in order, as lineages do, or
+        # evenly spaced samples of the caller's colormap.
         resolved_feature_cluster_scale = replace(
             resolved_feature_cluster_scale,
-            palette=colormap_palette(cluster_order, clusterbar_cmap or "tab20"),
+            palette=colormap_palette(cluster_order, clusterbar_cmap),
+            palette_name="colorblind" if clusterbar_cmap is None else None,
         )
     cluster_palette = resolved_feature_cluster_scale.palette or {}
     if feature_order is not None:
@@ -1038,14 +1058,14 @@ def pseudotime_heatmap(
         ),
         scales=(
             ColorScale(
-                cmap=resolved_heatmap_cmap,
+                cmap=colormap_name(resolved_heatmap_cmap),
                 vmin=resolved_vmin,
                 vmax=resolved_vmax,
                 vcenter=resolved_color_scale.vcenter,
             ),
             resolved_feature_cluster_scale,
             ColorScale(
-                cmap=resolved_pseudotime_cmap,
+                cmap=colormap_name(resolved_pseudotime_cmap),
                 vmin=pseudotime_vmin,
                 vmax=pseudotime_vmax,
             ),

@@ -14,10 +14,13 @@ import cytearc.plotting as splt
 from cytearc.plotting._deps import require_matplotlib
 from cytearc.plotting._style import (
     categorical_color_map,
+    colormap_argument,
+    colormap_name,
     continuous_norm,
     palette_for_n,
     theme_context,
 )
+from cytearc.storage.refs import ArtifactRef
 
 
 @pytest.mark.parametrize(
@@ -350,6 +353,179 @@ def test_padded_square_limits_and_colormap_palette():
         "b": mpl.colors.to_hex(colormap(0.5)),
         "c": mpl.colors.to_hex(colormap(1.0)),
     }
+
+
+def test_colormap_argument_takes_a_colormap_name_or_a_colormap():
+    from matplotlib.colors import ListedColormap
+
+    custom = ListedColormap(["#ff0000", "#0000ff"], name="red_blue")
+
+    assert colormap_argument("viridis", "cmap") == "viridis"
+    assert colormap_argument(np.str_("magma_r"), "cmap") == "magma_r"
+    assert colormap_argument(custom, "cmap") is custom
+    assert colormap_argument(None, "cmap", optional=True) is None
+    # Results record a colormap by its name, a Colormap by the name it gives.
+    assert colormap_name("magma_r") == "magma_r"
+    assert colormap_name(custom) == "red_blue"
+
+
+@pytest.mark.parametrize(
+    ("value", "optional", "error", "message"),
+    [
+        (
+            3,
+            False,
+            TypeError,
+            "cmap must be a Matplotlib colormap name or a Colormap, not int",
+        ),
+        (
+            None,
+            False,
+            TypeError,
+            "cmap must be a Matplotlib colormap name or a Colormap, not NoneType",
+        ),
+        (
+            True,
+            True,
+            TypeError,
+            "cmap must be None, a Matplotlib colormap name or a Colormap, not bool",
+        ),
+        # A list of colors is no colormap.
+        (
+            ["#ff0000", "#0000ff"],
+            True,
+            TypeError,
+            "cmap must be None, a Matplotlib colormap name or a Colormap, not list",
+        ),
+        (
+            "not_a_colormap",
+            True,
+            ValueError,
+            "cmap must name a Matplotlib colormap, such as 'viridis'; "
+            "'not_a_colormap' is not one",
+        ),
+        # Matplotlib's names are case-sensitive, and no colormap is unnamed.
+        (
+            "Viridis",
+            False,
+            ValueError,
+            "cmap must name a Matplotlib colormap, such as 'viridis'; "
+            "'Viridis' is not one",
+        ),
+        (
+            "",
+            False,
+            ValueError,
+            "cmap must name a Matplotlib colormap, such as 'viridis'; '' is not one",
+        ),
+    ],
+)
+def test_colormap_argument_names_the_argument_and_the_value_it_refuses(
+    value, optional, error, message
+):
+    with pytest.raises(error) as raised:
+        colormap_argument(value, "cmap", optional=optional)
+
+    assert raised.value.args == (message,)
+
+
+class _UnreadableStore:
+    """A store whose every read fails, so a check must run before any read."""
+
+    def __getattr__(self, name: str) -> object:
+        raise AssertionError(f"The plot read store.{name}")
+
+
+def _ref(kind: str, *, scope: str = "assay") -> ArtifactRef:
+    assay = "RNA" if scope == "assay" else None
+    return ArtifactRef(scope=scope, assay=assay, kind=kind, artifact_id="1" * 64)
+
+
+# Each colormap argument of a plot that reads the store, the arguments that
+# the plot needs besides it, and what the argument takes.
+_COLORMAP_ARGUMENTS = [
+    (
+        "lineage_trends",
+        "lineage_cmap",
+        {"aggregation": _ref("lineage_aggregation"), "features": ["CD3E"]},
+        "None, a Matplotlib colormap name or a Colormap",
+    ),
+    (
+        "lineage_curves",
+        "lineage_cmap",
+        {"curves": _ref("lineage_curves"), "layout": _ref("embedding")},
+        "None, a Matplotlib colormap name or a Colormap",
+    ),
+    *(
+        (
+            "lineage_heatmap",
+            argument,
+            {"aggregation": _ref("lineage_aggregation")},
+            takes,
+        )
+        for argument, takes in (
+            ("heatmap_cmap", "a Matplotlib colormap name or a Colormap"),
+            ("pseudotime_cmap", "a Matplotlib colormap name or a Colormap"),
+            ("clusterbar_cmap", "None, a Matplotlib colormap name or a Colormap"),
+        )
+    ),
+    *(
+        (
+            "pseudotime_heatmap",
+            argument,
+            {"aggregation": _ref("pseudotime_aggregation")},
+            "None, a Matplotlib colormap name or a Colormap",
+        )
+        for argument in ("heatmap_cmap", "pseudotime_cmap", "clusterbar_cmap")
+    ),
+    (
+        "cluster_tree",
+        "cmap",
+        {"graph": _ref("connectivity_map"), "clusters": _ref("cluster_cut")},
+        "None, a Matplotlib colormap name or a Colormap",
+    ),
+    (
+        "marker_heatmap",
+        "cmap",
+        {"marker": _ref("marker_table")},
+        "a Matplotlib colormap name or a Colormap",
+    ),
+    (
+        "modality_weights",
+        "cmap",
+        {
+            "graph": _ref("integrated_graph", scope="datastore"),
+            "layout": _ref("embedding"),
+        },
+        "a Matplotlib colormap name or a Colormap",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("plot", "argument", "required", "takes"),
+    _COLORMAP_ARGUMENTS,
+    ids=[f"{plot}-{argument}" for plot, argument, _, _ in _COLORMAP_ARGUMENTS],
+)
+def test_plots_check_each_colormap_argument_before_they_read_the_store(
+    plot, argument, required, takes
+):
+    draw = getattr(splt, plot)
+
+    with pytest.raises(TypeError) as wrong_type:
+        draw(_UnreadableStore(), **required, **{argument: 3}, show=False)
+    with pytest.raises(ValueError) as unknown:
+        draw(_UnreadableStore(), **required, **{argument: "not_a_colormap"}, show=False)
+    # A colormap that the argument takes passes the check, and the plot goes
+    # on to read the store, which the store double refuses.
+    with pytest.raises(AssertionError, match="The plot read store"):
+        draw(_UnreadableStore(), **required, **{argument: "magma"}, show=False)
+
+    assert wrong_type.value.args == (f"{argument} must be {takes}, not int",)
+    assert unknown.value.args == (
+        f"{argument} must name a Matplotlib colormap, such as 'viridis'; "
+        "'not_a_colormap' is not one",
+    )
 
 
 @pytest.mark.parametrize(

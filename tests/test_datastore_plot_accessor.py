@@ -397,8 +397,15 @@ def test_plot_accessor_signatures_match_standalone_functions(name: str):
 
 @pytest.mark.parametrize("name", _STORE_PLOT_METHODS)
 def test_plot_accessor_type_hints_match_standalone_functions(name: str):
-    standalone_hints = get_type_hints(getattr(splt, name))
-    accessor_hints = get_type_hints(getattr(DataStorePlotAccessor, name))
+    from matplotlib.colors import Colormap
+
+    # Colormap arguments name Matplotlib's Colormap, which the plotting
+    # modules import only for type checkers, since Matplotlib is optional.
+    optional_types = {"Colormap": Colormap}
+    standalone_hints = get_type_hints(getattr(splt, name), localns=optional_types)
+    accessor_hints = get_type_hints(
+        getattr(DataStorePlotAccessor, name), localns=optional_types
+    )
 
     standalone_hints.pop("store")
     if name in {"embedding", "embedding_raster"}:

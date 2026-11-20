@@ -1,7 +1,7 @@
 """Plots of lineage profiles, lineage curves, and cluster trees."""
 
 from collections.abc import Hashable, Sequence
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
 import pandas as pd
@@ -24,14 +24,18 @@ from ._figure import (
 from ._style import (
     DEFAULT_PANEL_INCHES,
     apply_figure_chrome,
+    colormap_argument,
+    colormap_name,
     colormap_palette,
     continuous_norm,
     default_point_size,
     finish_embedding_axes,
     padded_square_limits,
-    palette_for_n,
     theme_context,
 )
+
+if TYPE_CHECKING:
+    from matplotlib.colors import Colormap
 
 __all__ = ["lineage_curves", "lineage_heatmap", "lineage_trends", "lineage_tree"]
 
@@ -60,19 +64,6 @@ def _lineage_selection(
     return [int(column) for column in columns]
 
 
-def _lineage_palette(names: Sequence[str], cmap: str | None) -> dict[str, str]:
-    """Color each lineage, in the order of ``names``.
-
-    Without a colormap the lineages take the colorblind palette in order, as
-    ``CategoricalScale(palette_name="colorblind")`` does; a colormap name
-    spreads that colormap evenly over them.
-    """
-    if cmap is None:
-        colors = palette_for_n(len(names), palette_name="colorblind")
-        return dict(zip(names, colors, strict=True))
-    return colormap_palette(list(names), cmap)
-
-
 # A node's marker shows its role in a lineage tree, so the roles differ by
 # shape as well as by color.
 _ROLE_MARKERS = {"root": "s", "candidate sink": "^", "cluster": "o"}
@@ -88,9 +79,9 @@ def lineage_heatmap(
     figsize: tuple[float, float] | None = None,
     vmin: float | None = None,
     vmax: float | None = None,
-    heatmap_cmap: str = "coolwarm",
-    pseudotime_cmap: str = "viridis",
-    clusterbar_cmap: str = "tab20",
+    heatmap_cmap: "str | Colormap" = "coolwarm",
+    pseudotime_cmap: "str | Colormap" = "viridis",
+    clusterbar_cmap: "str | Colormap | None" = None,
     tick_fontsize: int = 10,
     axis_fontsize: int = 12,
     feature_label_fontsize: int = 10,
@@ -115,9 +106,22 @@ def lineage_heatmap(
     name. A name that several retained features share raises ``ValueError``
     naming their IDs; pick one with ``FeatureRef(value=feature_id,
     by="id")``. A feature that the aggregation did not retain is skipped.
+
+    The strip beside the rows colors the modules from the colorblind
+    palette in module order, as ``lineage_trends`` colors lineages, and
+    more than 12 modules take evenly spaced hues, with a warning; a
+    ``clusterbar_cmap`` is sampled at evenly spaced positions instead.
+    ``heatmap_cmap`` and ``pseudotime_cmap`` color the profiles and the
+    pseudotime strips. Each colormap argument takes a Matplotlib colormap
+    name or a ``Colormap``.
     """
     show_legend = bool_argument(show_legend, "show_legend")
     show = bool_argument(show, "show")
+    heatmap_cmap = colormap_argument(heatmap_cmap, "heatmap_cmap")
+    pseudotime_cmap = colormap_argument(pseudotime_cmap, "pseudotime_cmap")
+    clusterbar_cmap = colormap_argument(
+        clusterbar_cmap, "clusterbar_cmap", optional=True
+    )
     if not isinstance(aggregation, ArtifactRef):
         raise TypeError("aggregation must be an ArtifactRef")
     for limit in (vmin, vmax):
@@ -290,7 +294,7 @@ def lineage_heatmap(
             LegendSpec(kind="categorical", label="feature modules"),
         ),
         scales=(
-            ColorScale(cmap=heatmap_cmap, vmin=vmin, vmax=vmax),
+            ColorScale(cmap=colormap_name(heatmap_cmap), vmin=vmin, vmax=vmax),
             CategoricalScale(order=tuple(cluster_order), palette=palette),
         ),
         provenance=PlotProvenance(
@@ -324,7 +328,7 @@ def lineage_trends(
     features: Sequence[str | FeatureRef],
     lineages: Sequence[Any] | None = None,
     axis: Literal["progress", "pseudotime"] = "progress",
-    lineage_cmap: str | None = None,
+    lineage_cmap: "str | Colormap | None" = None,
     line_width: float = 2.0,
     n_columns: int | None = None,
     target: Any | None = None,
@@ -353,12 +357,14 @@ def lineage_trends(
     By default the lineages take the 12 colors of the colorblind palette in
     order, as ``CategoricalScale(palette_name="colorblind")`` assigns them.
     More than 12 lineages take evenly spaced hues instead, with a warning
-    that they may not be colorblind safe. ``lineage_cmap`` names a
-    Matplotlib colormap to sample at evenly spaced positions from 0 to 1,
-    and a single lineage then takes the colormap's first color.
+    that they may not be colorblind safe. ``lineage_cmap`` takes a
+    Matplotlib colormap, by name or as a ``Colormap``, to sample at evenly
+    spaced positions from 0 to 1, and a single lineage then takes the
+    colormap's first color.
     """
     show_legend = bool_argument(show_legend, "show_legend")
     show = bool_argument(show, "show")
+    lineage_cmap = colormap_argument(lineage_cmap, "lineage_cmap", optional=True)
     if not isinstance(aggregation, ArtifactRef):
         raise TypeError("aggregation must be an ArtifactRef")
     if (
@@ -416,7 +422,7 @@ def lineage_trends(
             DEFAULT_PANEL_INCHES * min(resolved_columns, len(panel_keys)),
             DEFAULT_PANEL_INCHES * 0.8 * n_rows,
         )
-    palette = _lineage_palette(names, lineage_cmap)
+    palette = colormap_palette(names, lineage_cmap)
     data = np.asarray(loaded.data)
     bin_pseudotime = np.asarray(loaded.bin_pseudotime)
     n_bins = data.shape[2]
@@ -505,7 +511,7 @@ def lineage_curves(
     layout: ArtifactRef,
     lineages: Sequence[Any] | None = None,
     df: float | None = None,
-    lineage_cmap: str | None = None,
+    lineage_cmap: "str | Colormap | None" = None,
     line_width: float = 2.5,
     point_size: float | None = None,
     point_alpha: float = 0.6,
@@ -534,6 +540,7 @@ def lineage_curves(
     """
     show_legend = bool_argument(show_legend, "show_legend")
     show = bool_argument(show, "show")
+    lineage_cmap = colormap_argument(lineage_cmap, "lineage_cmap", optional=True)
     if not isinstance(curves, ArtifactRef):
         raise TypeError("curves must be an ArtifactRef")
     line_width = _positive(line_width, "line_width")
@@ -558,7 +565,7 @@ def lineage_curves(
     degrees_of_freedom = float(
         (status.parameters or {})["df"] if df is None else float_argument(df, "df")
     )
-    palette = _lineage_palette(names, lineage_cmap)
+    palette = colormap_palette(names, lineage_cmap)
     xlim, ylim = padded_square_limits(coordinates[:, 0], coordinates[:, 1])
     if figsize is None and target is None:
         # Room on the right for the legend beside the square panel.

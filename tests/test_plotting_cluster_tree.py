@@ -12,11 +12,14 @@ import matplotlib.pyplot as plt
 import networkx as nx
 import numpy as np
 import pytest
-from matplotlib.colors import to_hex, to_rgb
+import zarr
+from matplotlib.colors import ListedColormap, to_hex, to_rgb
+from zarr.storage import MemoryStore
 
 import cytearc.plotting as splt
 from cytearc.plotting.cluster_tree import _draw_tree_pie
 from cytearc.storage import ArtifactRef
+from cytearc.storage.artifacts import artifact_path
 
 _GRAPH = ArtifactRef(
     scope="assay", assay="RNA", kind="connectivity_map", artifact_id="1" * 64
@@ -26,8 +29,17 @@ _CLUSTERS = ArtifactRef(
 )
 
 
-def _tree_store(color_values, color_missing=None):
-    """A root over clusters 1 and 2, each holding three of six cells."""
+# The first colors of CyteArc's default palette, which plots assign over a
+# column's labels in natural order.
+DEFAULT_COLORS = ["#1f77b4", "#ff7f0e", "#279e68", "#d62728"]
+
+
+def _tree_store(color_values, color_missing=None, *, column=None):
+    """A root over clusters 1 and 2, each holding three of six cells.
+
+    ``column`` holds every label of the fill column, the tree's cells and
+    others; it is ``color_values`` by default.
+    """
     graph = nx.DiGraph([(0, 1), (0, 2)])
     nx.set_node_attributes(graph, {0: 6, 1: 3, 2: 3}, "nleaves")
     nx.set_node_attributes(graph, {1: 1, 2: 2}, "partition_id")
@@ -44,7 +56,11 @@ def _tree_store(color_values, color_missing=None):
             scope="datastore", kind="cell_selection", artifact_id="3" * 64
         ),
     }
-    return SimpleNamespace(_prepare_cluster_tree=lambda **_kwargs: prepared)
+    labels = np.asarray(color_values if column is None else column)
+    return SimpleNamespace(
+        _prepare_cluster_tree=lambda **_kwargs: prepared,
+        cells=SimpleNamespace(fetch_all=lambda _column: labels),
+    )
 
 
 def _node_colors(result):
@@ -277,6 +293,131 @@ def test_cluster_tree_keeps_a_constant_fill_value():
         # The shared policy places a constant value at the low end of the map.
         low = to_hex(matplotlib.colormaps["viridis"](0.0))
         assert _node_colors(result)[1:] == [low, low]
+    finally:
+        result.close()
+
+
+def test_cluster_tree_colors_clusters_as_embeddings_do():
+    result = splt.cluster_tree(
+        _tree_store(None),
+        graph=_GRAPH,
+        clusters=_CLUSTERS,
+        show_labels=False,
+        show=False,
+    )
+    try:
+        # Clusters 1 and 2 take the first two default colors, in their order.
+        assert _node_colors(result)[1:] == DEFAULT_COLORS[:2]
+        assert result.scales[0] == splt.CategoricalScale(
+            order=(1, 2), palette={1: DEFAULT_COLORS[0], 2: DEFAULT_COLORS[1]}
+        )
+    finally:
+        result.close()
+
+
+def test_cluster_tree_colors_clusters_in_the_colors_their_clustering_stores():
+    # A clustering that records its categories, as an H5AD import records
+    # those of the clusterings it imports, orders and colors the clusters.
+    root = zarr.open_group(store=MemoryStore(), mode="w")
+    labels = root.create_group(artifact_path(_CLUSTERS)).create_array(
+        "labels", data=np.array([1, 1, 1, 2, 2, 2])
+    )
+    labels.attrs["display"] = {
+        "kind": "categorical",
+        "categories": [
+            {"value": 2, "label": "2", "color": "#00aa00"},
+            {"value": 1, "label": "1", "color": "#ff0000"},
+        ],
+    }
+    store = _tree_store(None)
+    store.zw = root
+
+    result = splt.cluster_tree(
+        store, graph=_GRAPH, clusters=_CLUSTERS, show_labels=False, show=False
+    )
+    try:
+        assert _node_colors(result)[1:] == ["#ff0000", "#00aa00"]
+        assert result.scales[0] == splt.CategoricalScale(
+            order=(2, 1), palette={2: "#00aa00", 1: "#ff0000"}
+        )
+    finally:
+        result.close()
+
+
+def test_cluster_tree_colors_categories_over_every_label_of_the_column():
+    # Cell type A labels only cells outside the tree, and still takes the
+    # first default color, so B and C keep the colors of a plot of all cells.
+    result = splt.cluster_tree(
+        _tree_store(
+            ["B", "B", "C", "C", "C", "B"],
+            column=["A", "C", "B", "B", "C", "C", "C", "B", "A"],
+        ),
+        graph=_GRAPH,
+        clusters=_CLUSTERS,
+        fill_by_value="cell_type",
+        show_labels=False,
+        show=False,
+    )
+    try:
+        assert result.scales[0] == splt.CategoricalScale(
+            order=("B", "C"), palette={"B": DEFAULT_COLORS[1], "C": DEFAULT_COLORS[2]}
+        )
+        pies = _pies(result.axes["tree"])
+        assert {to_hex(color) for pie in pies for color in pie.get_facecolors()} == set(
+            DEFAULT_COLORS[1:3]
+        )
+    finally:
+        result.close()
+
+
+@pytest.mark.parametrize(
+    "cmap", ["viridis", ListedColormap(["#440154", "#fde725"], name="ends")]
+)
+def test_cluster_tree_samples_a_colormap_over_the_categories_in_order(cmap):
+    result = splt.cluster_tree(
+        _tree_store(["B", "B", "A", "A", "B", "B"]),
+        graph=_GRAPH,
+        clusters=_CLUSTERS,
+        fill_by_value="cell_type",
+        cmap=cmap,
+        show_labels=False,
+        show=False,
+    )
+    try:
+        # A and B, in natural order, take the colormap at 0 and 1.
+        assert result.scales[0].palette == {"A": "#440154", "B": "#fde725"}
+    finally:
+        result.close()
+
+
+@pytest.mark.parametrize(
+    ("cmap", "low", "high", "name"),
+    [
+        # viridis at 0 and 1.
+        (None, "#440154", "#fde725", "viridis"),
+        (
+            ListedColormap(["#ff0000", "#0000ff"], name="red_blue"),
+            "#ff0000",
+            "#0000ff",
+            "red_blue",
+        ),
+    ],
+)
+def test_cluster_tree_fills_numbers_from_a_colormap(cmap, low, high, name):
+    # Cluster 1 means 1 and cluster 2 means 3, the ends of the color range.
+    result = splt.cluster_tree(
+        _tree_store([0.0, 1.0, 2.0, 3.0, 3.0, 3.0]),
+        graph=_GRAPH,
+        clusters=_CLUSTERS,
+        fill_by_value="score",
+        force_ints_as_cats=False,
+        cmap=cmap,
+        show_labels=False,
+        show=False,
+    )
+    try:
+        assert _node_colors(result)[1:] == [low, high]
+        assert result.scales[0] == splt.ColorScale(cmap=name, vmin=1.0, vmax=3.0)
     finally:
         result.close()
 
