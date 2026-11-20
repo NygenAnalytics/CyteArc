@@ -239,12 +239,13 @@ jobs:
         pytest_args=(-n logical --durations=25 --shard "${{ matrix.shard }}/4")
         if [ "${{ matrix.resolution }}" = "locked" ] && [ "${{ matrix.python-version }}" = "3.14" ]; then
           # Codecov merges the four shard reports; codecov.yml waits for all of them.
-          pytest_args+=(--cov=cytearc --cov-report=xml)
+          # Branch coverage needs sys.monitoring's branch events, which Python 3.14 added.
+          pytest_args+=(--cov=cytearc --cov-branch --cov-report=xml)
         fi
         uv run --no-sync pytest "${pytest_args[@]}"
     - name: Upload coverage to Codecov
       if: matrix.resolution == 'locked' && matrix.python-version == '3.14'
-      uses: codecov/codecov-action@v5
+      uses: codecov/codecov-action@v7
       with:
         token: ${{ secrets.CODECOV_TOKEN }}
         files: coverage.xml
