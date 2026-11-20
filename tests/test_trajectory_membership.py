@@ -26,7 +26,9 @@ against 0.45 for Beta.
 The membership calls load their fate map and its graph once, and refuse a memory budget that cannot hold the graph before they read it. Copies of the store with arms of thousands of cells and a graph of 11 neighbors, stored as the pipeline stores a graph, check that each call runs within the budget that its refusal names.
 """
 
+import gc
 import math
+import threading
 import tracemalloc
 from collections.abc import Callable
 from dataclasses import dataclass, replace
@@ -1990,6 +1992,118 @@ def test_a_budget_below_the_graph_load_is_refused_before_the_graph_is_read(
     assert reads == {"_store_to_sparse": 1}
 
 
+def _full_collections() -> int:
+    """Return how many full collections the cyclic garbage collector has run."""
+    return int(gc.get_stats()[-1]["collections"])
+
+
+def _allocations_near_peak(
+    call: Callable[[], Any], peak: int
+) -> tuple[tracemalloc.Snapshot | None, int, int]:
+    """Run ``call`` traced with 25 frames, and snapshot its allocations near the traced ``peak``.
+
+    From 80% of ``peak`` on, a profiler on every thread snapshots the traced
+    allocations each time they rise 16 KiB above the last snapshot, and
+    keeps the last one, with the traced bytes that it holds; the snapshots
+    themselves are left out of those bytes. Returns the snapshot, those
+    bytes and the run's traced peak, which the profiler and the snapshots
+    add to.
+    """
+    lock = threading.Lock()
+    state: dict[str, Any] = {"high": int(0.8 * peak), "own": 0, "snapshot": None}
+
+    def watch(_frame: Any, event: str, _arg: Any) -> None:
+        if event not in ("return", "c_return"):
+            return
+        with lock:
+            traced = tracemalloc.get_traced_memory()[0] - start - state["own"]
+            if traced < state["high"] + 16 * 1024:
+                return
+            state["snapshot"] = None
+            base = tracemalloc.get_traced_memory()[0]
+            state["high"] = base - start
+            state["snapshot"] = tracemalloc.take_snapshot()
+            state["own"] = tracemalloc.get_traced_memory()[0] - base
+
+    tracemalloc.start(25)
+    try:
+        start = tracemalloc.get_traced_memory()[0]
+        threading.setprofile_all_threads(watch)
+        try:
+            call()
+        finally:
+            threading.setprofile_all_threads(None)
+        run_peak = tracemalloc.get_traced_memory()[1] - start
+    finally:
+        tracemalloc.stop()
+    return state["snapshot"], state["high"], run_peak
+
+
+def _over_budget_report(
+    store: Any,
+    calls: dict[str, Callable[[], Any]],
+    over: dict[str, tuple[int, int]],
+    full_collections: dict[str, tuple[int, int]],
+    unbounded: int,
+) -> str:
+    """Name each call over its budget, with the largest allocations near its peak in a second run.
+
+    The second run follows a full collection, which empties CPython's free
+    lists, so that it allocates, and traces, every object that it holds.
+    """
+    lines = []
+    for name, (peak, budget) in over.items():
+        before, during = full_collections[name]
+        lines.append(
+            f"{name}: peak {peak} bytes, budget {budget} bytes "
+            f"({peak / budget:.3f} times); full collections since the last "
+            f"traced call {before}, during this one {during}"
+        )
+        _set_budget(store, budget)
+        try:
+            gc.collect()
+            snapshot, held, run_peak = _allocations_near_peak(calls[name], peak)
+        except Exception as error:  # noqa: BLE001 - the report names it instead
+            lines.append(f"  a second run raised {error!r}")
+            continue
+        finally:
+            _set_budget(store, unbounded)
+        if snapshot is None:
+            lines.append(
+                f"  a second run, after a full collection, peaked at {run_peak} "
+                "bytes, under 80% of the first"
+            )
+            continue
+        lines.append(
+            f"  a second run, after a full collection, peaked at {run_peak} bytes; "
+            f"where it held {held}, the largest blocks were allocated at:"
+        )
+        for stat in snapshot.statistics("traceback")[:10]:
+            lines.append(f"  {stat.size} bytes in {stat.count} blocks, innermost first")
+            lines.extend(
+                f"    {_short_path(frame.filename)}:{frame.lineno}"
+                for frame in reversed(stat.traceback)
+            )
+        lines.append("  and by the line that allocated them:")
+        for stat in snapshot.statistics("lineno")[:20]:
+            frame = stat.traceback[0]
+            lines.append(
+                f"    {stat.size} bytes in {stat.count} blocks at "
+                f"{_short_path(frame.filename)}:{frame.lineno}"
+            )
+    return "\n".join(lines)
+
+
+def _short_path(path: str) -> str:
+    """Return ``path`` from its package directory on, as a log line reads it."""
+    if "site-packages/" in path:
+        return path.rsplit("site-packages/", 1)[1]
+    for package in ("cytearc", "tests"):
+        if f"/{package}/" in path:
+            return package + "/" + path.rsplit(f"/{package}/", 1)[1]
+    return path
+
+
 @pytest.mark.slow
 @pytest.mark.parametrize(
     "n_cells, neighbors, name",
@@ -2077,6 +2191,10 @@ def test_trajectory_and_graph_calls_run_within_the_budget_they_name(
         "graph.load nearest": lambda: store.graph.load(branching.graph, use_k=2),
     }
     peaks = {}
+    # Full collections empty CPython's free lists, after which a call's small
+    # objects are allocated, and traced, anew; the report counts them.
+    full_collections = {}
+    last_full = _full_collections()
     for call_name, call in calls.items():
         # Each refusal names a budget, which runs the call or a later step
         # refuses and names more.
@@ -2088,6 +2206,7 @@ def test_trajectory_and_graph_calls_run_within_the_budget_they_name(
                 break
             except MemoryBudgetError as refused:
                 budget = refused.needed_bytes
+        full = _full_collections()
         tracemalloc.start()
         try:
             before, _ = tracemalloc.get_traced_memory()
@@ -2096,6 +2215,8 @@ def test_trajectory_and_graph_calls_run_within_the_budget_they_name(
         finally:
             tracemalloc.stop()
         peaks[call_name] = (peak - before, budget)
+        full_collections[call_name] = (full - last_full, _full_collections() - full)
+        last_full = _full_collections()
         _set_budget(store, unbounded)
         if call_name == "membership":
             np.testing.assert_array_equal(
@@ -2105,7 +2226,10 @@ def test_trajectory_and_graph_calls_run_within_the_budget_they_name(
             np.testing.assert_array_equal(
                 cell_selection_indices(store.zw, result), window
             )
-    assert all(peak <= budget for peak, budget in peaks.values()), peaks
+    over = {name: held for name, held in peaks.items() if held[0] > held[1]}
+    assert not over, _over_budget_report(
+        store, calls, over, full_collections, unbounded
+    )
 
 
 def test_a_sink_named_like_a_membership_label_is_refused() -> None:
