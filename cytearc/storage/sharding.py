@@ -1249,6 +1249,10 @@ def write_dense_from_row_batches(
                     )
                 for band in buffer.add(values):
                     yield DenseWriteBand(dst, band)
+                    # The write holds the band it was handed; keeping it here
+                    # would hold its values while the source makes the next
+                    # batch.
+                    del band
             buffer.finish()
         finally:
             _close_iterator(source)

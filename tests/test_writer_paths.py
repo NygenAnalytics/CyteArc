@@ -398,6 +398,144 @@ def test_dense_h5ad_writer_reports_done_only_when_the_parent_did_not_stop(
         reader.close()
 
 
+def _watch_dense_bands(monkeypatch) -> tuple[list[Any], list[int]]:
+    """Watch the bands that dense band buffers hand over.
+
+    Returns weak references to the values of each band handed over, and the
+    number of them alive whenever a buffer takes another batch.
+    """
+    import weakref
+
+    from cytearc.storage import sharding
+
+    handed: list[weakref.ref] = []
+    alive: list[int] = []
+    add = sharding.DenseBandBuffer.add
+
+    def hand(band: Any) -> Any:
+        handed.append(weakref.ref(band.values))
+        return band
+
+    def counting_add(self, values):
+        alive.append(sum(band() is not None for band in handed))
+        # map hands each band on and keeps none of them.
+        yield from map(hand, add(self, values))
+
+    monkeypatch.setattr(sharding.DenseBandBuffer, "add", counting_add)
+    return handed, alive
+
+
+def test_a_dense_h5ad_import_frees_each_band_it_wrote_before_it_reads_more(
+    tmp_path, monkeypatch
+) -> None:
+    values = np.arange(1, 33, dtype=np.uint8).reshape(8, 4)
+    source = _write_h5ad(
+        tmp_path / "dense.h5ad",
+        values,
+        encoding="dense",
+        feature_types=[b"Gene Expression", b"Antibody Capture"] * 2,
+    )
+    handed, alive = _watch_dense_bands(monkeypatch)
+    reader = H5adReader(str(source), feature_name_key="feature_name")
+    try:
+        # 4 bytes of uint8 counts of two features make bands of two cells in
+        # each assay, which the batches that the write reads fill.
+        H5adToZarr(
+            reader,
+            str(tmp_path / "dense.zarr"),
+            assay_split_key="feature_types",
+            nthreads=1,
+            shuffle_cells=False,
+            policy=CountMatrixPolicy(unitBytes=4, chunkBytes=4),
+        ).dump(batch_size=2)
+    finally:
+        reader.close()
+    root = zarr.open_group(str(tmp_path / "dense.zarr"), mode="r")
+    np.testing.assert_array_equal(root["RNA/counts"][:], values[:, [0, 2]])
+    np.testing.assert_array_equal(root["ADT/counts"][:], values[:, [1, 3]])
+    assert len(handed) == 8
+    # Each band was written, and freed, before the next part of a batch was
+    # buffered, in the other assay or in the next batch.
+    assert len(alive) >= len(handed)
+    assert alive == [0] * len(alive)
+
+
+class _PicklingConnection(_Connection):
+    """A connection that keeps copies of what it sends, as a pipe pickles it."""
+
+    def send(self, message: tuple[str, object]) -> None:
+        import pickle
+
+        super().send(pickle.loads(pickle.dumps(message)))
+
+
+@pytest.mark.parametrize("window", ["writes its bands", "sends its bands"])
+def test_a_dense_h5ad_producer_process_frees_each_band_before_its_next_batch(
+    tmp_path, monkeypatch, window
+) -> None:
+    from cytearc.storage.budget import ResourceBudget
+    from cytearc.storage.sharding import plan_dense_band_writes
+    from cytearc.writers import h5ad as h5ad_writer
+
+    values = np.arange(1, 25, dtype=np.uint8).reshape(8, 3)
+    source = _write_h5ad(tmp_path / "dense.h5ad", values, encoding="dense")
+    location = str(tmp_path / "dense.zarr")
+    reader = H5adReader(str(source), feature_name_key="feature_name")
+    try:
+        # 12 bytes of uint8 counts make bands of four cells, and constructing
+        # the writer creates the counts that the window fills.
+        counts = H5adToZarr(
+            reader,
+            location,
+            nthreads=1,
+            shuffle_cells=False,
+            policy=CountMatrixPolicy(unitBytes=12, chunkBytes=12),
+        ).z["RNA/counts"]
+        handed, alive = _watch_dense_bands(monkeypatch)
+        connection = _PicklingConnection()
+        # Each process runs here, reading the window's batches of four cells.
+        if window == "writes its bands":
+            h5ad_writer._write_dense_h5ad_process_window(
+                reader._clone_kwargs(),
+                4,
+                0,
+                8,
+                location,
+                None,
+                None,
+                ("RNA",),
+                None,
+                plan_dense_band_writes((counts,), ResourceBudget(1024**2, 1), 2),
+                connection,
+                threading.Event(),
+                {},
+            )
+            np.testing.assert_array_equal(counts[:], values)
+        else:
+            h5ad_writer._read_dense_h5ad_process_window(
+                reader._clone_kwargs(),
+                4,
+                0,
+                8,
+                {"RNA": counts},
+                None,
+                connection,
+                threading.Event(),
+                {},
+            )
+            np.testing.assert_array_equal(
+                np.vstack(
+                    [band.values for kind, (_name, band) in connection.messages[:2]]
+                ),
+                values,
+            )
+    finally:
+        reader.close()
+    assert [kind for kind, _payload in connection.messages][-1] == "done"
+    assert len(handed) == 2
+    assert alive == [0, 0]
+
+
 def _complex_matrix(wire: _Wire, values: list[float]) -> bytes:
     """Encode an R complex matrix of two genes and the three test cells."""
     return (

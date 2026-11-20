@@ -787,6 +787,84 @@ def test_dense_row_batches_flush_at_shard_boundaries():
     np.testing.assert_array_equal(destination[:], expected.astype(np.uint16))
 
 
+@pytest.mark.parametrize("writers", [1, 4])
+@pytest.mark.parametrize(
+    "batch_rows",
+    [100, 30, 250],
+    ids=["a band a batch", "bands across batches", "batches across bands"],
+)
+def test_a_dense_write_frees_each_written_band_before_its_source_makes_the_next_batch(
+    monkeypatch, writers, batch_rows
+):
+    import threading
+    import weakref
+
+    from cytearc.storage import sharding
+    from cytearc.storage.execution import execution_report_scope
+
+    class WatchedWrite(sharding.DenseWriteBand):
+        """A band write whose end a weak reference can watch."""
+
+    root = zarr.open_group(store=MemoryStore(), mode="w")
+    # Six bands of 100 rows.
+    destination = root.create_array(
+        "values", shape=(600, 40), chunks=(50, 40), shards=(100, 40), dtype=np.float64
+    )
+    expected = np.repeat(np.arange(600, dtype=np.float64)[:, None], 40, axis=1)
+    handed: list[weakref.ref] = []
+    alive: list[int] = []
+    released = 0
+    release = threading.Condition()
+    add = sharding.DenseBandBuffer.add
+    write = sharding.write_dense_bands
+
+    def counting_add(self, values):
+        # The bands handed to the writes that are alive as a batch is buffered.
+        alive.append(sum(band() is not None for band in handed))
+        yield from add(self, values)
+
+    def on_release() -> None:
+        nonlocal released
+        with release:
+            released += 1
+            release.notify_all()
+
+    def watched(item):
+        handed.append(weakref.ref(item.band.values))
+        copy = WatchedWrite(item.destination, item.band)
+        weakref.finalize(copy, on_release)
+        return copy
+
+    def watched_write(writes, **options):
+        # map hands each write on and keeps none of them.
+        return write(map(watched, writes), **options)
+
+    def batches():
+        for start in range(0, 600, batch_rows):
+            if writers > 1:
+                # Writes run beside the source, so it waits until the writes
+                # of the bands handed so far have let go of them; a write that
+                # has not finished holds its band as it should.
+                with release:
+                    assert release.wait_for(lambda: released == len(handed), 30)
+            yield expected[start : start + batch_rows].copy()
+
+    monkeypatch.setattr(sharding.DenseBandBuffer, "add", counting_add)
+    monkeypatch.setattr(sharding, "write_dense_bands", watched_write)
+    with execution_report_scope() as reports:
+        rows = write_dense_from_row_batches(
+            destination, batches(), resources=ResourceBudget(1024**3, writers)
+        )
+    assert rows == 600
+    np.testing.assert_array_equal(destination[:], expected)
+    (report,) = reports
+    assert report.actualWriteWorkers == writers
+    assert len(handed) == 6
+    # No band whose write ended was alive as the source made a batch.
+    assert len(alive) == -(-600 // batch_rows)
+    assert alive == [0] * len(alive)
+
+
 @pytest.mark.parametrize(
     ("value", "message"),
     [
