@@ -154,11 +154,15 @@ def test_categorical_measures_refuse_labels_that_print_otherwise_than_they_compa
     with pytest.raises(ValueError, match=re.escape(f"right {_MERGED_FOUND}")):
         measure(_FOUR, _MERGED)
     # NumPy would read the list's 1 and "1" as one text.
-    with pytest.raises(
-        ValueError,
-        match=re.escape("left holds different values that print alike, such as 1"),
-    ):
-        measure([1, 1, "1", "1", 2, 2, 3, 3], _FOUR)
+    alike = [1, 1, "1", "1", 2, 2, 3, 3]
+    for left, right, name in ((alike, _FOUR, "left"), (_FOUR, alike, "right")):
+        with pytest.raises(
+            ValueError,
+            match=re.escape(
+                f"{name} holds different values that print alike, such as 1 and '1'"
+            ),
+        ):
+            measure(left, right)
 
 
 def test_eta_squared_refuses_groups_that_print_otherwise_than_they_compare() -> None:
