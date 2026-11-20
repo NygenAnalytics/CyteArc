@@ -136,9 +136,11 @@ def _frozen_column_display(root: Any, column: str) -> dict[str, Any] | None:
     A snapshot stores a column's labels and none of its attributes, so the
     run's field records how plots draw the live column: its stored display,
     or else, for a column stored as ordered, its categories in their stored
-    order with the default colors that plots give them in that order. Any
-    other column gets none, and plots sort its categories naturally, as they
-    sort the live column's.
+    order with the default colors that plots give them in that order. Run
+    plots draw the column with it, and run exports write the column as a
+    categorical of its categories in that order, with those colors. Any
+    other column gets none, and run plots and exports sort its categories
+    naturally, as plots sort the live column's.
     """
     display = column_display(root, column)
     if display is not None:

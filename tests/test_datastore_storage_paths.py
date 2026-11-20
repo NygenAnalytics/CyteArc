@@ -21,6 +21,7 @@ from cytearc.metadata.artifacts import (
     categorical_display,
     column_category_order,
     column_display,
+    label_categories,
     plan_cell_data_artifact,
     recorded_categories,
     validate_display_metadata,
@@ -889,6 +890,52 @@ def test_column_category_order_reads_only_columns_stored_as_ordered() -> None:
     assert column_category_order(root, "absent") is None
     with pytest.raises(TypeError, match="Stored levels must be a list"):
         column_category_order(root, "broken")
+
+
+def test_label_categories_read_every_category_of_a_column() -> None:
+    import pandas as pd
+
+    from cytearc.metadata import MetaData
+
+    root = zarr.open_group(store=MemoryStore(), mode="w")
+    cell_data = root.create_group("cellData")
+    cell_data.create_array("I", data=np.ones(3, dtype=bool))
+    cell_data.create_array("ids", data=np.asarray(["c0", "c1", "c2"]))
+    table = MetaData(cell_data)
+    # Categorical columns, one with an unused category and a display.
+    table.insert("tag", pd.Categorical(["b", "a", "b"], categories=["b", "z", "a"]))
+    display = {
+        "kind": "categorical",
+        "categories": [{"value": "b", "label": "B", "color": "#112233"}],
+    }
+    cell_data["tag"].attrs["display"] = display
+    table.insert(
+        "grade",
+        pd.Categorical(
+            ["low", "high", "low"], categories=["low", "mid", "high"], ordered=True
+        ),
+    )
+    # A column of labels with the attributes that an import keeps.
+    cell_data.create_array("kept", data=np.asarray(["y", "x", "y"])).attrs.update(
+        {"levels": ["y", "x", "y"], "ordered": True}
+    )
+    cell_data.create_array("plain", data=np.asarray(["b", "a", "b"]))
+
+    assert label_categories(root, "tag") == RecordedCategories(
+        levels=("b", "z", "a"), ordered=False, display=display
+    )
+    assert label_categories(root, "grade") == RecordedCategories(
+        levels=("low", "mid", "high"), ordered=True, display=None
+    )
+    assert label_categories(root, "kept") == RecordedCategories(
+        levels=("y", "x"), ordered=True, display=None
+    )
+    none = RecordedCategories(levels=None, ordered=False, display=None)
+    assert label_categories(root, "plain") == none
+    assert label_categories(root, "absent") == none
+    # Plots order only the columns stored as ordered.
+    assert column_category_order(root, "tag") is None
+    assert column_category_order(root, "grade") == ("low", "mid", "high")
 
 
 def test_recorded_categories_validates_the_attributes_an_import_writes() -> None:

@@ -28,13 +28,9 @@ from ..utils.memory_budget import MemoryBudgetError, memory_refusal
 from ..utils.progress import iter_progress
 from ..utils.arguments import bool_argument, quoted_value
 from ..utils.matrix_values import ImportValues, MatrixValuesKind
+from ..metadata.artifacts import MAX_STORED_CATEGORIES
 
 
-# A categorical with more categories than this is stored as a column of its
-# labels, without its categories: AnnData makes a categorical of any text that
-# repeats a value, so a column of nearly unique text can hold about one
-# category per row.
-_MAX_STORED_CATEGORIES = 10_000
 # A dense matrix is read about this many values at a time, as its value scan
 # reads it, or in whole rows of its HDF5 chunks. Each batch is copied into a
 # band of every assay, so a batch need not hold a destination row band.
@@ -91,7 +87,7 @@ def _categorical_attributes(
     """
     from ..metadata.artifacts import distinct_level_positions, levels_display
 
-    if len(categories.values) > _MAX_STORED_CATEGORIES:
+    if len(categories.values) > MAX_STORED_CATEGORIES:
         return {}
     levels = _stored_levels(dtype, categories.values)
     if levels is None:
@@ -146,10 +142,10 @@ def _write_column(
         refusal: str | None = None
         if categorical:
             count = len(column.categories)
-            if count > _MAX_STORED_CATEGORIES:
+            if count > MAX_STORED_CATEGORIES:
                 refusal = (
                     f"Column {name!r} has {count:,} categories, more than the "
-                    f"{_MAX_STORED_CATEGORIES:,} that an import stores as a "
+                    f"{MAX_STORED_CATEGORIES:,} that an import stores as a "
                     "categorical column"
                 )
             else:

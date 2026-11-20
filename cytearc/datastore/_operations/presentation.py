@@ -250,20 +250,28 @@ def _run_label_categorical(
     ``paris``, ``cell_cycle_phase``, or an earlier run's
     ``leiden_<resolution>``, is a categorical whose categories are its labels
     as text in natural order, with the display colors. A cell column that
-    the run froze keeps its display for plots and exports as the run's other
-    frozen columns do.
+    the run froze with a categorical display, which runs record for a column
+    with a stored display or stored as ordered, is a categorical of the
+    display's categories in their order, unused ones included, with their
+    colors, as run plots draw it. The display records no ``ordered`` flag,
+    so the categorical is unordered.
     """
     from ...writers.export import H5adCategorical
 
     display = view._field_display(column)
     if display is None or display.get("kind") != "categorical":
         return None
+    categories = display["categories"]
     if view._descriptor(column).artifact.kind == "metadata_snapshot":
-        return None
+        return H5adCategorical(
+            levels=tuple(category["value"] for category in categories),
+            colors={
+                category["value"]: str(category["color"]) for category in categories
+            },
+        )
     return H5adCategorical(
         colors={
-            str(category["value"]): str(category["color"])
-            for category in display["categories"]
+            str(category["value"]): str(category["color"]) for category in categories
         }
     )
 
@@ -346,7 +354,10 @@ class _PresentationOperationsMixin(_PresentationOperationsBase):
         ``obsm["X_lsi"]`` (and its Harmony correction
         ``obsm["X_lsi_harmony"]``), and label fields, such as ``clusters``
         and ``paris``, are categoricals with string categories in
-        natural order and the run's display colors.
+        natural order and the run's display colors. A ``snapshot_columns``
+        field whose run records a display, a column with a stored display or
+        stored as ordered, is a categorical of the display's categories in
+        their order, unused ones included, with its colors, unordered.
 
         ``matrix="normed"`` means two different things. Without ``run``,
         ``X`` holds the assay's ``normed`` values of the exported features:
@@ -751,7 +762,9 @@ class _PresentationOperationsMixin(_PresentationOperationsBase):
         categoricals and in what order their categories are, for the file
         and for the object alike. A field with a categorical display, such
         as ``clusters`` or ``paris``, is a categorical of its
-        labels as text, in natural order, with the display's colors.
+        labels as text, in natural order, with the display's colors, and a
+        frozen cell column with one is a categorical of the display's
+        categories in their order (:func:`_run_label_categorical`).
         Consecutive ``umap_<k>`` fields become ``obsm["X_umap"]``, the
         run's ``pca`` and ``harmony`` outputs ``obsm["X_pca"]`` and
         ``obsm["X_pca_harmony"]``, with the PCA loadings in

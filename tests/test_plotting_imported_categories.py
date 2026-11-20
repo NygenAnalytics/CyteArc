@@ -1,4 +1,4 @@
-"""Plots of imported cluster labels and of frozen run columns keep their stored categories."""
+"""Plots and exports of imported cluster labels, of label snapshots and of frozen run columns keep their stored categories."""
 
 import warnings
 from types import SimpleNamespace
@@ -33,8 +33,8 @@ def imported(tmp_path_factory) -> SimpleNamespace:
     """One categorical imported as an obs column and as cluster labels.
 
     The store also holds a categorical column whose categories are ordered,
-    one of them unused, and an unordered one whose natural order differs
-    from its stored order.
+    one of them unused, an unordered one whose natural order differs from
+    its stored order, and ordered integer categories out of natural order.
     """
     folder = tmp_path_factory.mktemp("imported_categories")
     rng = np.random.default_rng(0)
@@ -94,6 +94,15 @@ def imported(tmp_path_factory) -> SimpleNamespace:
             ),
         ),
     )
+    store.cells.insert(
+        "grade",
+        by_cell_id(
+            store.cells,
+            pd.Categorical(
+                np.array([2, 3, 1])[blocks], categories=[3, 1, 2], ordered=True
+            ),
+        ),
+    )
     return SimpleNamespace(
         store=store,
         layout=result.embeddingArtifacts["X_umap"],
@@ -103,7 +112,7 @@ def imported(tmp_path_factory) -> SimpleNamespace:
 
 @pytest.fixture(scope="module")
 def frozen_run(imported) -> SimpleNamespace:
-    """A run that freezes the imported, ordered, and unordered columns."""
+    """A run that freezes the imported, ordered, unordered, and integer columns."""
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         run = imported.store.pipeline.rna(
@@ -117,7 +126,7 @@ def frozen_run(imported) -> SimpleNamespace:
             leiden={"partitions": [1.0]},
             doublets=False,
             markers=False,
-            snapshot_columns=("cell_type", "stage", "cluster_codes"),
+            snapshot_columns=("cell_type", "stage", "cluster_codes", "grade"),
         )
     return SimpleNamespace(**vars(imported), run=run)
 
@@ -221,6 +230,115 @@ def test_label_artifacts_and_exports_read_one_record_of_categories(imported):
     assert dict(exported.colors) == dict(FILE_LEGEND)
 
 
+def _exported_categorical(adata, column):
+    """The categories, order flag and colors of an exported categorical."""
+    values = adata.obs[column]
+    colors = adata.uns.get(f"{column}_colors")
+    return (
+        values.cat.categories.tolist(),
+        bool(values.cat.ordered),
+        None if colors is None else list(colors),
+    )
+
+
+def test_snapshots_draw_and_export_the_categories_of_their_sources(imported):
+    store, layout = imported.store, imported.layout
+    cells = store.snapshot_cell_selection()
+    sources = {
+        "cell_type": "cell_type",
+        "stage": "stage",
+        "cluster_codes": "cluster_codes",
+        "grade": "grade",
+        "clusters": imported.clusters,
+    }
+    snapshots = {
+        name: store.snapshot_cluster_labels(source, cell_selection=cells)
+        for name, source in sources.items()
+    }
+    legends = {
+        # The file's order and colors.
+        "cell_type": FILE_LEGEND,
+        "clusters": FILE_LEGEND,
+        # The stored order of ordered categories, with the default colors
+        # over every stored category.
+        "stage": list(zip(["early", "mid", "late"], DEFAULT_COLORS, strict=False)),
+        # Unordered categories in natural order, as plots of the column draw
+        # them.
+        "cluster_codes": list(zip(["1", "2", "10"], DEFAULT_COLORS, strict=False)),
+        "grade": list(zip(["3", "1", "2"], DEFAULT_COLORS, strict=False)),
+    }
+    try:
+        for name, legend in legends.items():
+            for color_by in (sources[name], snapshots[name]):
+                drawn = store.plots.embedding(
+                    layout=layout, color_by=color_by, legend_loc="right", show=False
+                )
+                assert _legend(drawn) == legend, (name, color_by)
+    finally:
+        plt.close("all")
+
+    exported = store.to_anndata(
+        obs={f"{name}_snapshot": ref for name, ref in snapshots.items()}
+    )
+    categoricals = {
+        "cell_type": (FILE_ORDER, False, FILE_COLORS),
+        "clusters": (FILE_ORDER, False, FILE_COLORS),
+        # Every stored category, unused ones included, and the ordered flag.
+        "stage": (["early", "mid", "late", "unused"], True, None),
+        "cluster_codes": (["10", "2", "1"], False, None),
+        "grade": ([3, 1, 2], True, None),
+    }
+    live = store.to_anndata()
+    for name, categorical in categoricals.items():
+        assert _exported_categorical(exported, f"{name}_snapshot") == categorical
+        if name != "clusters":
+            assert _exported_categorical(live, name) == categorical, name
+        # Each cell keeps its label.
+        assert exported.obs[f"{name}_snapshot"].astype(str).tolist() == (
+            exported.obs["cell_type" if name == "clusters" else name]
+            .astype(str)
+            .tolist()
+        ), name
+
+
+def test_a_snapshot_of_some_clusters_keeps_every_category_and_color(imported):
+    from cytearc.metadata.artifacts import artifact_categories
+
+    store, clusters = imported.store, imported.clusters
+    some = store.select_cells(clusters, include=["NK", "T"])
+    narrowed = store.snapshot_cluster_labels(clusters, cell_selection=some)
+
+    recorded = artifact_categories(store.zw, narrowed)
+    assert recorded.levels == tuple(FILE_ORDER)
+    assert [category["color"] for category in recorded.display["categories"]] == (
+        FILE_COLORS
+    )
+    violin = store.plots.distribution(
+        "RNA_nCounts", grouping=narrowed, max_points=0, show=False
+    )
+    try:
+        # The file's order, where natural order puts NK first, and its colors.
+        ticks = violin.axes["RNA_nCounts"].get_xticklabels()
+        assert [tick.get_text() for tick in ticks] == ["T", "NK"]
+        palette = {
+            value: to_hex(color) for value, color in violin.scales[0].palette.items()
+        }
+        assert {label: palette[label] for label in ("T", "NK")} == {
+            "T": "#ff0000",
+            "NK": "#0000ff",
+        }
+    finally:
+        violin.close()
+    exported = store.to_anndata(cell_selection=some, obs={"types": narrowed})
+    # B, which no exported cell holds, stays a category with its color.
+    assert _exported_categorical(exported, "types") == (FILE_ORDER, False, FILE_COLORS)
+    assert set(exported.obs["types"].astype(str)) == {"NK", "T"}
+    # A snapshot of the snapshot keeps them too.
+    t_cells = store.select_cells(narrowed, include=["T"])
+    again = store.snapshot_cluster_labels(narrowed, cell_selection=t_cells)
+    assert artifact_categories(store.zw, again) == recorded
+
+
 def test_only_a_store_with_a_root_reads_an_artifacts_categories(imported):
     from cytearc.plotting._display import stored_artifact_scale
 
@@ -310,13 +428,83 @@ def test_cluster_connectivity_draws_imported_groups_in_the_files_colors(frozen_r
 
 
 @pytest.mark.slow
-def test_a_run_export_writes_frozen_columns_as_before(frozen_run):
-    # The display of a frozen column serves plots; the run export still
-    # writes the column as other frozen text, and gives colors only to the
-    # run's own label fields.
-    exported = frozen_run.store.to_anndata(run=frozen_run.run)
-    assert exported.obs["cell_type"].cat.categories.tolist() == ["B", "NK", "T"]
-    assert exported.obs["stage"].cat.categories.tolist() == ["early", "late", "mid"]
-    assert "cell_type_colors" not in exported.uns
-    assert "stage_colors" not in exported.uns
+def test_a_run_export_writes_frozen_columns_in_the_order_and_colors_of_run_plots(
+    frozen_run, tmp_path
+):
+    store, run = frozen_run.store, frozen_run.run
+    path = tmp_path / "run.h5ad"
+    cytearc.to_h5ad(store.RNA, str(path), run=run)
+    columns = ["cell_type", "stage", "cluster_codes", "grade"]
+    labels = store.cells.to_pandas_dataframe(columns)
+    labels.index = store.cells.fetch_all("ids")
+    for adata in (store.to_anndata(run=run), anndata.read_h5ad(path)):
+        # The file's order and colors.
+        assert _exported_categorical(adata, "cell_type") == (
+            FILE_ORDER,
+            False,
+            FILE_COLORS,
+        )
+        # Every stored category in its stored order, with the default colors
+        # that run plots draw; the run records no ordered flag.
+        assert _exported_categorical(adata, "stage") == (
+            ["early", "mid", "late", "unused"],
+            False,
+            DEFAULT_COLORS,
+        )
+        assert _exported_categorical(adata, "grade") == (
+            [3, 1, 2],
+            False,
+            DEFAULT_COLORS[:3],
+        )
+        # A column whose run records no display stays in natural order.
+        assert _exported_categorical(adata, "cluster_codes") == (
+            ["1", "2", "10"],
+            False,
+            None,
+        )
+        assert "clusters_colors" in adata.uns
+        # Each cell keeps its label.
+        for column in columns:
+            assert (
+                adata.obs[column].astype(str).tolist()
+                == labels.loc[adata.obs_names, column].astype(str).tolist()
+            ), column
+
+
+@pytest.mark.slow
+def test_a_run_that_records_no_display_exports_its_frozen_columns_as_before(
+    frozen_run, monkeypatch
+):
+    from cytearc.datastore._pipeline import fields
+
+    # Runs saved before CyteArc recorded the displays of frozen columns.
+    monkeypatch.setattr(fields, "_frozen_column_display", lambda root, column: None)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        earlier = frozen_run.store.pipeline.rna(
+            label="frozen_without_displays",
+            filtering=False,
+            cell_cycle=False,
+            hvg={"top_n": 60},
+            pca={"dims": 5},
+            neighbors={"k": 8},
+            umap={"n_epochs": 30},
+            leiden={"partitions": [1.0]},
+            doublets=False,
+            markers=False,
+            snapshot_columns=("cell_type", "stage", "cluster_codes", "grade"),
+        )
+    assert earlier.cells._field_display("cell_type") is None
+
+    exported = frozen_run.store.to_anndata(run=earlier)
+    assert _exported_categorical(exported, "cell_type") == (
+        ["B", "NK", "T"],
+        False,
+        None,
+    )
+    assert _exported_categorical(exported, "stage") == (
+        ["early", "late", "mid"],
+        False,
+        None,
+    )
     assert "clusters_colors" in exported.uns

@@ -212,6 +212,39 @@ def test_bytes_that_are_not_ascii_are_refused_and_nothing_is_published(
     assert not inspect_artifact(root, planned.ref).exists
 
 
+def test_array_attributes_are_stored_on_their_arrays_before_publication(
+    tmp_path,
+) -> None:
+    root, selection = _root(tmp_path / "store.zarr")
+    categories = {"levels": ["b", "a"], "ordered": True}
+    planned = plan_cell_data_artifact(
+        root,
+        scope="datastore",
+        kind="cluster_labels",
+        operation="probe_writes",
+        parameters={"write": next(_planned)},
+        inputs={},
+        execution_options={},
+        cell_selection=selection,
+        arrays={"values": ((_N_CELLS,), "U")},
+        # The payload check runs before the artifact is published, so it
+        # sees the attributes only if they are written by then.
+        reuse_validator=lambda _ref, group: dict(group["values"].attrs) == categories,
+    )
+
+    write_cell_data_artifact(
+        root,
+        planned,
+        {"values": np.asarray(["a", "b", "a"]), "sizes": np.arange(_N_CELLS)},
+        array_attributes={"values": categories},
+    )
+
+    group = artifact_group(root, planned.ref)
+    assert inspect_artifact(root, planned.ref).complete
+    assert dict(group["values"].attrs) == categories
+    assert dict(group["sizes"].attrs) == {}
+
+
 def test_the_costliest_array_sets_the_cost_whatever_their_order() -> None:
     text = {"labels": ((250_000,), "U40")}
     numbers = {"codes": ((250_000,), np.int32), "sizes": ((250_000,), np.int64)}

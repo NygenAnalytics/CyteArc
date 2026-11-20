@@ -1960,12 +1960,25 @@ def test_drivers_take_the_cells_where_two_lineages_part(
 
 # The pancreas, where the progenitors give Delta a small share
 
+# The cell types of the pancreas file in its order, with its colors.
+PANCREAS_COLORS = {
+    "Ductal": "#8fbc8f",
+    "Ngn3 low EP": "#f4a460",
+    "Ngn3 high EP": "#fdbf6f",
+    "Pre-endocrine": "#ff7f00",
+    "Beta": "#b2df8a",
+    "Alpha": "#1f78b4",
+    "Delta": "#6a3d9a",
+    "Epsilon": "#cab2d6",
+}
+
 
 @pytest.mark.slow
 def test_every_pancreas_lineage_shares_the_progenitor_trunk(
     bastidas_ponce_data, tmp_path
 ) -> None:
     from cytearc.datastore.datastore import DataStore
+    from cytearc.plotting._display import stored_artifact_scale
     from cytearc.readers import H5adReader
     from cytearc.writers import H5adToZarr
 
@@ -2000,6 +2013,11 @@ def test_every_pancreas_lineage_shares_the_progenitor_trunk(
     labels = ds.snapshot_cluster_labels(
         "clusters", cell_selection=pseudotime.cell_selection
     )
+    # The sink labels keep the file's order and colors of the cell types.
+    sink_scale = stored_artifact_scale(ds, labels)
+    assert sink_scale is not None
+    assert sink_scale.palette == PANCREAS_COLORS
+    assert sink_scale.order == tuple(PANCREAS_COLORS)
     fate_ref = ds.trajectory.fate(pseudotime_ref, labels, sinks=fates)
     fate = ds.trajectory.load_fate(fate_ref)
     trunk = np.isin(types, ["Ductal", "Ngn3 low EP", "Ngn3 high EP"])
