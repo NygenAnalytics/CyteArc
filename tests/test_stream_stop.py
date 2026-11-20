@@ -10,17 +10,21 @@ cache fill or listing that a stopped read started runs to its end for the
 reads that wait for it. A stream started within a read stops with the stream
 that runs the read, and a stream running beside it never stops.
 
+A read cancelled by anything but a stop raises ``asyncio.CancelledError`` on
+either loop, so a pipeline run ends interrupted, and the artifact or derived
+assay that the read was written into stays, marked incomplete.
+
 The tests hold reads at a ``Gate`` and require ``close()`` to return while the
 gate is still closed; an implementation that waits for the reads instead fails
 when the deadline passes, after which the gate opens so nothing hangs.
 """
 
 import asyncio
-import concurrent.futures
 import contextvars
 import threading
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Coroutine, Iterator
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from typing import Any
 
 import numpy as np
@@ -31,8 +35,11 @@ from zarr.core.sync import SyncError
 from zarr.storage import MemoryStore, ZipStore
 
 from cytearc.composite.source_cache import SourceCache
+from cytearc.datastore._pipeline.ledger import interruption_record
 from cytearc.matrix import ChunkedArray
 from cytearc.storage import async_execution
+from cytearc.storage.artifact_writer import artifact_transaction
+from cytearc.storage.artifacts import inspect_artifact
 from cytearc.storage.async_execution import (
     ReadStop,
     ReadStopped,
@@ -42,6 +49,8 @@ from cytearc.storage.async_execution import (
 )
 from cytearc.storage.huggingface import _SharedFetches
 from cytearc.storage.parallel import stream_shards
+from cytearc.storage.pipeline_runs import load_pipeline_run_record
+from cytearc.storage.schema import derived_assay_transaction, pending_assays
 from cytearc.storage.virtual_arrays import read_selection
 from cytearc.utils.shutdown import ShutdownRequest, ShutdownRequested
 from tests.test_composite_source_cache import (
@@ -50,6 +59,9 @@ from tests.test_composite_source_cache import (
     populated_source,
     wait_until,
 )
+from tests.test_derived_assays import _memory_root
+from tests.test_incomplete_artifacts import _plan
+from tests.test_pipeline_ledger import _ledger, _statuses
 
 VALUES = np.arange(32 * 12, dtype=np.uint16).reshape(32, 12)
 # Each stream item reads one row chunk of eight rows.
@@ -260,20 +272,138 @@ def test_close_stops_a_read_before_the_next_operation_of_its_block(
         assert reads.threads and set(reads.threads) == {"zarr_io"}
 
 
-@pytest.mark.parametrize("path", ["own loop", "Zarr's loop"])
-def test_a_cancellation_that_no_stop_made_keeps_its_meaning(path):
+def _read_through(path: str, coroutine: Coroutine[Any, Any, Any]) -> Any:
+    """Run ``coroutine`` on the read path that ``path`` names."""
+    if path == "own loop":
+        return run_read(coroutine)
+    if path == "Zarr's loop":
+        return run_on_zarr_loop(coroutine)
+
+    async def inside() -> Any:
+        # A thread that runs an event loop reads through Zarr's loop.
+        return run_read(coroutine)
+
+    return asyncio.run(inside())
+
+
+READ_PATHS = ["own loop", "Zarr's loop", "inside a running loop"]
+
+
+@pytest.mark.parametrize("scope", ["under a stream stop", "outside a stream"])
+@pytest.mark.parametrize("path", READ_PATHS)
+def test_a_cancellation_that_no_stop_made_keeps_its_meaning(path, scope):
     async def cancelled() -> None:
         raise asyncio.CancelledError
 
-    read = run_read if path == "own loop" else run_on_zarr_loop
-    # Zarr's sync() reports a cancelled read as concurrent.futures does.
-    expected = (
-        asyncio.CancelledError
-        if path == "own loop"
-        else concurrent.futures.CancelledError
-    )
-    with read_stop_scope(ReadStop()), pytest.raises(expected):
-        read(cancelled())
+    stop = ReadStop() if scope == "under a stream stop" else None
+    with (
+        nullcontext() if stop is None else read_stop_scope(stop),
+        pytest.raises(asyncio.CancelledError) as caught,
+    ):
+        _read_through(path, cancelled())
+    # A cancellation passes handlers of ordinary errors, as Python's own
+    # cancellations do, and a pipeline run records it as an interruption.
+    assert not isinstance(caught.value, Exception)
+    record = interruption_record(caught.value)
+    assert record is not None and record.kind == "asyncio_cancelled"
+
+
+@pytest.mark.parametrize("scope", ["under a stream stop", "outside a stream"])
+@pytest.mark.parametrize("path", READ_PATHS)
+def test_an_ordinary_error_of_a_read_is_raised_as_it_is(path, scope):
+    error = ValueError("the read failed")
+
+    async def failing() -> None:
+        raise error
+
+    stop = ReadStop() if scope == "under a stream stop" else None
+    with (
+        nullcontext() if stop is None else read_stop_scope(stop),
+        pytest.raises(ValueError) as caught,
+    ):
+        _read_through(path, failing())
+    assert caught.value is error
+
+
+def _cancel_chunk_reads(monkeypatch, store: Any) -> None:
+    """Cancel every chunk read from ``store``, as a cancellation that no stop made would."""
+    original = type(store).get
+
+    async def get(self, key, prototype, byte_range=None):  # type: ignore[no-untyped-def]
+        if self is store and "/c/" in key:
+            raise asyncio.CancelledError
+        return await original(self, key, prototype, byte_range)
+
+    monkeypatch.setattr(type(store), "get", get)
+
+
+def _cancelled_counts(path: str, tmp_path, monkeypatch) -> zarr.Array:
+    """Return counts whose chunk reads are cancelled, read on the loop that ``path`` names."""
+    array = _zip_counts(tmp_path) if path == "Zarr's loop" else _memory_counts()
+    _cancel_chunk_reads(monkeypatch, array.store)
+    return array
+
+
+@pytest.mark.parametrize("path", ["own loop", "Zarr's loop"])
+def test_an_artifact_whose_read_was_cancelled_is_kept_marked_incomplete(
+    path, tmp_path, monkeypatch
+):
+    array = _cancelled_counts(path, tmp_path, monkeypatch)
+    root = zarr.open_group(store=MemoryStore(), mode="w")
+    planned = _plan(root, "a")
+
+    with pytest.raises(asyncio.CancelledError):
+        with artifact_transaction(root, planned) as group:
+            values = read_selection(array, slice(0, ROWS), slice(None))
+            group.create_array("values", data=values)
+
+    # As after any interruption, the artifact is kept, marked incomplete,
+    # instead of being deleted.
+    status = inspect_artifact(root, planned.ref)
+    assert status.exists and not status.complete
+
+
+@pytest.mark.parametrize("path", ["own loop", "Zarr's loop"])
+def test_a_derived_assay_whose_read_was_cancelled_stays_pending(
+    path, tmp_path, monkeypatch
+):
+    array = _cancelled_counts(path, tmp_path, monkeypatch)
+    root = _memory_root("ws")
+
+    with pytest.raises(asyncio.CancelledError):
+        with derived_assay_transaction(
+            root, "SCORES", "ws", operation="add_melded_assay"
+        ) as transaction:
+            counts = transaction.create_counts(3, ["f0"], ["f0"], np.float64)
+            counts[:] = read_selection(array, slice(0, 3), slice(0, 1))
+
+    assert pending_assays(root) == [("SCORES", "ws", "add_melded_assay")]
+
+
+@pytest.mark.parametrize("path", ["own loop", "Zarr's loop"])
+def test_a_pipeline_stage_whose_read_was_cancelled_ends_its_run_interrupted(
+    path, tmp_path, monkeypatch
+):
+    array = _cancelled_counts(path, tmp_path, monkeypatch)
+    root, ledger, events = _ledger("first", "second")
+
+    def first_stage() -> tuple[()]:
+        read_selection(array, slice(0, ROWS), slice(None))
+        return ()
+
+    with pytest.raises(asyncio.CancelledError):
+        ledger.run("first", first_stage)
+
+    run = load_pipeline_run_record(root, ledger.run_id)
+    assert (run.status, run.complete) == ("interrupted", True)
+    assert run.interruption is not None
+    assert run.interruption.kind == "asyncio_cancelled"
+    assert _statuses(root, ledger) == {"first": "interrupted"}
+    assert [event.kind for event in events] == [
+        "stage_started",
+        "stage_interrupted",
+        "run_interrupted",
+    ]
 
 
 @pytest.mark.parametrize("path", ["own loop", "Zarr's loop"])

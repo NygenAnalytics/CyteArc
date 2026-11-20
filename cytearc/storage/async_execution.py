@@ -671,13 +671,22 @@ def run_on_zarr_loop(coroutine: Coroutine[Any, Any, T]) -> T:
 
     The stop of the block stream that runs the read cancels the read's task
     on Zarr's loop, and this raises ``ReadStopped`` once the task has ended.
-    Every read on Zarr's loop shares Zarr's codec pool, so a store call or
-    decode that a stopped read had started there can end after this returns.
+    A read cancelled otherwise raises ``asyncio.CancelledError``, as a read on
+    its own loop does. Every read on Zarr's loop shares Zarr's codec pool, so
+    a store call or decode that a stopped read had started there can end
+    after this returns.
     """
     sync_module = importlib.import_module("zarr.core.sync")
     stop = _READ_STOP.get()
     if stop is None:
-        return cast(T, sync_module.sync(coroutine))
+        try:
+            return cast(T, sync_module.sync(coroutine))
+        except CancelledError:
+            # Zarr's sync() waits on a concurrent.futures future, which reports
+            # the read's cancelled task with its own CancelledError, an
+            # Exception. asyncio's is a BaseException, so that no handler of
+            # ordinary errors takes a cancellation for a failure.
+            raise asyncio.CancelledError from None
     started: Future[asyncio.Task[T]] = Future()
 
     async def tracked() -> T:
@@ -709,7 +718,9 @@ def run_on_zarr_loop(coroutine: Coroutine[Any, Any, T]) -> T:
     except (CancelledError, asyncio.CancelledError):
         if stopped:
             raise ReadStopped("The block stream closed while this read ran") from None
-        raise
+        # A cancellation that the stop did not make raises asyncio's class, as
+        # a read without a stop does.
+        raise asyncio.CancelledError from None
 
 
 class ByteLedger:
