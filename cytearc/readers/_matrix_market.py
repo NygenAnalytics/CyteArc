@@ -31,8 +31,22 @@ __all__ = [
     "matrix_market_entries",
     "matrix_market_entry_object_bytes",
     "matrix_market_header",
+    "matrix_market_parse_bytes",
     "read_matrix_market_header",
 ]
+
+# What pandas' C reader holds from its first chunk on, whatever the chunk
+# size: its buffers, the text of the 256 KiB that it reads at a time, decoded,
+# and the buffers of the file it reads, 128 KiB on Python 3.14 where 3.13's
+# are 8 KiB. Parsing plain and gzip-compressed files of short and wide lines
+# 10 entries at a time, tracemalloc traced at most 1.28 MB on Python 3.13,
+# with pandas 2.2.3, the oldest supported release, and with 3.0.6, and
+# 1.40 MB on Python 3.14 with pandas 3.0.6. The charge leaves room for the
+# zlib builds and platforms that differ from the one measured.
+_READER_BYTES = 1_500_000
+# pandas 2.2 keeps three floats of 24 bytes for each chunk it reads, until the
+# parse ends, in a list of 8-byte slots that grows by up to an eighth more.
+_CHUNK_BYTES = 3 * (24 + 9)
 
 
 def _compression(path: str) -> str | None:
@@ -201,6 +215,36 @@ def matrix_market_entry_object_bytes(header: MatrixMarketHeader) -> int:
     fields = _entry_width(header.field) + 1
     largest = sys.getsizeof(int(np.iinfo(np.int64).max))
     return fields * (np.dtype(object).itemsize + largest)
+
+
+def matrix_market_parse_bytes(header: MatrixMarketHeader, chunk_rows: int) -> int:
+    """Return what parsing a Matrix Market file ``chunk_rows`` entries at a time
+    holds, as a count reader parses it.
+
+    pandas' C reader holds its buffers and the text that it reads at a time
+    from the first chunk on, whatever the chunk size, and pandas 2.2 keeps
+    three floats for each chunk that it has read until the parse ends. A
+    chunk holds at most ``chunk_rows`` entries and never more than the file
+    declares: for each, an int64 row and column and a uint64 value in four
+    copies, as the parse and a reader that sums duplicate coordinates make
+    them, a mask, and the Python objects of
+    :func:`matrix_market_entry_object_bytes`. pandas 3.0 keeps no floats and
+    makes no such objects, so these bytes are the worst case of the supported
+    versions.
+
+    Args:
+        header: The matrix's header, from :func:`matrix_market_header`.
+        chunk_rows: The most entries of a chunk, at least 1.
+    """
+    value_bytes = 2 * np.dtype(np.int64).itemsize + np.dtype(np.uint64).itemsize
+    entry_bytes = (
+        4 * value_bytes
+        + np.dtype(np.bool_).itemsize
+        + matrix_market_entry_object_bytes(header)
+    )
+    chunks = -(-header.n_entries // int(chunk_rows))
+    entries = min(int(chunk_rows), header.n_entries)
+    return _READER_BYTES + _CHUNK_BYTES * chunks + entries * entry_bytes
 
 
 def _entry_fields(field: str) -> str:

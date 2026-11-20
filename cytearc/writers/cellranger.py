@@ -48,8 +48,11 @@ class CrToZarr:
                      assays whose names are not presets. Other assays take
                      their type from their name.
         lines_in_mem: Matrix Market lines parsed at a time (Matrix Market
-                      readers only). The layout fit and the write reserve
-                      this parse buffer.
+                      readers only). A file sorted by cell is parsed as its
+                      counts are written, and any other file before the
+                      write, as its entries are sorted into rows of cells;
+                      the import reserves this parse buffer for the step
+                      that parses, and never more lines than the file holds.
         overwrite: If True, replace a CyteArc store that no ``DataStore`` has opened.
         values: What the matrix holds, ``"counts"``, ``"normalized"``,
             ``"log_normalized"`` or ``"log2_normalized"``, as the import
@@ -86,6 +89,10 @@ class CrToZarr:
         ValueError: If ``shuffle_seed`` lies outside its range.
         OSError: If ``shuffle_cells`` is True and the temporary disk lacks
             room for the shuffled cells.
+        MemoryBudgetError: If ``mem_budget`` cannot hold the sorting of a
+            Matrix Market file's entries into rows of cells, before anything
+            is parsed or the destination exists. It names the budget that
+            holds it and, when one fits, a smaller ``lines_in_mem``.
 
     Attributes:
         cr: A CrReader object, containing the Cellranger data.
@@ -231,7 +238,9 @@ class CrToZarr:
                 {name: self.assayTypes.get(name) for name in value_ranges},
                 storage_dtypes,
             )
-            # A layout that does not fit fails here, before the destination exists.
+            # A preparation or a layout that does not fit fails here, before
+            # the destination exists.
+            self._admit_reader_preparation()
             self.policy = self._fit_count_layout(storage_dtypes, layout_request)
             # The destination must be empty, or with overwrite an unprepared store.
             self.z = create_destination(
@@ -317,18 +326,12 @@ class CrToZarr:
             for name, spans in assay_feature_ranges(self.cr.assayFeats).items()
         }
 
-    def _count_import_requirements(
-        self,
-        storage_dtypes: Iterable[Any],
-    ) -> tuple[int, Callable[[int], int], Callable[[int], int]]:
-        """Return the resident, staging, and projection bytes of the counts write.
-
-        The layout fit and the write plan the same import from these.
-        """
+    def _count_import_resident_bytes(self) -> int:
+        """Return what the import holds from the start of its counts write to its end."""
         from ..storage.identity import CountSummary
 
         reader_resident = getattr(self.cr, "_sparse_import_resident_bytes", None)
-        resident = (
+        return int(
             (max(0, int(reader_resident())) if callable(reader_resident) else 0)
             + sum(
                 CountSummary.nbytes_for(self.cr.nCells, width)
@@ -337,6 +340,53 @@ class CrToZarr:
             # A shuffled import holds the order of its cells.
             + (0 if self._cellOrder is None else int(self._cellOrder.nbytes))
         )
+
+    def _admit_reader_preparation(self) -> None:
+        """Refuse a budget that cannot hold the reader's sorting of its entries into rows.
+
+        A Matrix Market reader sorts a feature-major file's entries, and an
+        unordered file's whose sorted rows were removed, into rows of cells
+        before the counts write reads them, beside what the import holds
+        through the write. The refusal names ``lines_in_mem`` halved until
+        the sorting fits, when such a value exists.
+        """
+        preparation = getattr(self.cr, "_sparse_import_preparation_bytes", None)
+        if not callable(preparation):
+            return
+        sorting = int(preparation(self.linesInMem))
+        if not sorting:
+            return
+        budget = int(self.resources.memoryBytes)
+        held = self._count_import_resident_bytes()
+        needed = held + sorting
+        if needed <= budget:
+            return
+        remedy = None
+        lines = self.linesInMem
+        while lines > 1:
+            lines //= 2
+            if held + int(preparation(lines)) <= budget:
+                remedy = f"pass lines_in_mem={lines}"
+                break
+        raise memory_refusal(
+            f"Importing the counts of {self.cr.nCells} cells",
+            "sorting the Matrix Market entries into rows of cells, "
+            f"{self.linesInMem} lines at a time, beside the {held} bytes that "
+            "the import holds throughout",
+            needed,
+            budget,
+            remedy=remedy,
+        )
+
+    def _count_import_requirements(
+        self,
+        storage_dtypes: Iterable[Any],
+    ) -> tuple[int, Callable[[int], int], Callable[[int], int]]:
+        """Return the resident, staging, and projection bytes of the counts write.
+
+        The layout fit and the write plan the same import from these.
+        """
+        resident = self._count_import_resident_bytes()
         projection_value_bytes = int(
             max(
                 [
@@ -512,6 +562,9 @@ class CrToZarr:
             ValueError: If ``batch_size`` is not positive.
             RuntimeError: If the shuffled cells of this import were already
                 written, or another import of the reader replaced them.
+            MemoryBudgetError: If the reader must sort a Matrix Market
+                file's entries into rows again, as after another import of
+                it removed them, and ``mem_budget`` cannot hold that.
 
         Returns:
             None
@@ -563,6 +616,9 @@ class CrToZarr:
         try:
             if callable(configure_lines):
                 configure_lines(self.linesInMem)
+            # The reader prepares its rows before the write is planned, alone
+            # beside what the import holds.
+            self._admit_reader_preparation()
             if callable(prepare):
                 prepare()
             (

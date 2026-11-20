@@ -238,9 +238,10 @@ def test_crdir_reader_splits_many_cells_from_one_input_chunk(tmp_path):
     reader = CrDirReader(str(tmp_path))
     chunks = list(reader.consume(batch_size=1, lines_in_mem=100))
 
-    assert reader.producer_staging_bytes(1, 100) > (
-        100 * 3 * np.dtype(np.int64).itemsize
-    )
+    # The one chunk of 100 lines holds the file's five entries, so it is
+    # charged as five lines at a time are, and four lines at a time less.
+    assert reader.producer_staging_bytes(1, 100) == reader.producer_staging_bytes(1, 5)
+    assert reader.producer_staging_bytes(1, 4) < reader.producer_staging_bytes(1, 5)
     assert [chunk.shape for chunk in chunks] == [(1, 1)] * 5
     np.testing.assert_array_equal(
         np.vstack([chunk.toarray() for chunk in chunks]),
