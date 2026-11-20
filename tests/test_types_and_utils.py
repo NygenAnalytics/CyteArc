@@ -622,6 +622,8 @@ def test_clip_fraction_argument_requires_a_finite_fraction_below_one_half():
         np.asarray([1, "1"]),
         np.asarray([b"a", b"b"]),
         np.asarray(["2020-01-01", "2020-01-02"], dtype="datetime64[D]"),
+        # Complex numbers are grouped value by value.
+        np.asarray([1 + 1j, 2 + 0j, 1 + 1j]),
         # A categorical's unused categories are no labels.
         pd.Categorical([1, 1], categories=[1, "1"]),
         pd.Series(["a", "b"], dtype="category"),
