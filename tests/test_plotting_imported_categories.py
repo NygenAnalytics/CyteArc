@@ -508,3 +508,89 @@ def test_a_run_that_records_no_display_exports_its_frozen_columns_as_before(
         None,
     )
     assert "clusters_colors" in exported.uns
+
+
+def test_label_artifacts_refuse_display_fields_that_the_display_kind_does_not_hold(
+    imported,
+):
+    from cytearc.plotting._display import stored_artifact_scale
+    from cytearc.storage.artifacts import artifact_group
+
+    values = artifact_group(imported.store.zw, imported.clusters)["values"]
+    display = dict(values.attrs["display"])
+    try:
+        values.attrs["display"] = {**display, "ordered": True}
+        with pytest.raises(ValueError, match="has unknown fields"):
+            stored_artifact_scale(imported.store, imported.clusters)
+    finally:
+        values.attrs["display"] = display
+    assert stored_artifact_scale(imported.store, imported.clusters).order == tuple(
+        FILE_ORDER
+    )
+
+
+def _what_run_plots_and_exports_show(store, run):
+    """The legends and color scales of a run's plots, and its exported categoricals."""
+    shown = {}
+    for column in ("cell_type", "stage", "cluster_codes", "grade", "clusters"):
+        shown[column] = _legend(
+            store.plots.embedding(
+                run=run, color_by=column, legend_loc="right", show=False
+            )
+        )
+    for name, plot in (
+        ("embedding", store.plots.embedding),
+        ("raster", store.plots.embedding_raster),
+    ):
+        result = plot(run=run, color_by="umap_1", show=False)
+        shown[f"umap_1 {name}"] = result.scales
+        result.close()
+    adata = store.to_anndata(run=run)
+    for column in ("cell_type", "stage", "cluster_codes", "grade", "clusters"):
+        shown[f"{column} export"] = _exported_categorical(adata, column)
+    return shown
+
+
+@pytest.mark.slow
+def test_run_plots_and_exports_ignore_display_fields_that_a_later_release_adds(
+    frozen_run,
+):
+    store, run = frozen_run.store, frozen_run.run
+    group = store.zw[f"pipeline/runs/{run.run_id}"]
+    recorded = group.attrs["fields"]
+
+    def with_later_fields(display):
+        # A later release could record whether a column is ordered and its
+        # stored order, here the reverse of the display's order.
+        if display["kind"] == "continuous":
+            return {**display, "unit": "counts"}
+        values = [category["value"] for category in display["categories"]]
+        return {**display, "ordered": True, "levels": values[::-1]}
+
+    before = _what_run_plots_and_exports_show(store, run)
+    try:
+        group.attrs["fields"] = [
+            field
+            if field["display"] is None
+            else {**field, "display": with_later_fields(field["display"])}
+            for field in recorded
+        ]
+        later = store.pipeline.open(label="frozen")
+        assert later.cells._field_display("stage")["ordered"] is True
+        assert later.cells._field_display("umap_1")["unit"] == "counts"
+        after = _what_run_plots_and_exports_show(store, later)
+    finally:
+        group.attrs["fields"] = recorded
+    plt.close("all")
+    assert after == before
+    # The display's order and colors, unordered, as the run draws and exports
+    # them without the added fields.
+    assert after["stage"] == list(
+        zip(["early", "mid", "late"], DEFAULT_COLORS, strict=False)
+    )
+    assert after["stage export"] == (
+        ["early", "mid", "late", "unused"],
+        False,
+        DEFAULT_COLORS,
+    )
+    assert after["cell_type"] == FILE_LEGEND

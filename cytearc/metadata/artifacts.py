@@ -73,15 +73,44 @@ _MEASURED_ROWS = 4_096
 # categorical of any text that repeats a value, so a column of nearly unique
 # text can hold about one category per row.
 MAX_STORED_CATEGORIES = 10_000
+# The fields of each kind of display: a continuous display holds all of its
+# fields, and a categorical display holds kind and categories and may hold the
+# missing label and color.
+_DISPLAY_FIELDS = {
+    "continuous": frozenset({"kind", "colormap", "minimum", "maximum", "scale"}),
+    "categorical": frozenset({"kind", "categories", "missing_label", "missing_color"}),
+}
 
 
 def validate_display_metadata(
     display: Mapping[str, Any],
+    *,
+    ignore_unknown_fields: bool = False,
 ) -> dict[str, Any]:
+    """Return a copy of a display that holds the fields of its kind, each checked.
+
+    With ``ignore_unknown_fields``, fields that the display's kind does not
+    hold are left out of the copy instead of refused, as readers of a run's
+    field display leave out the fields that a later release adds to it.
+
+    Raises:
+        ValueError: If the kind is not continuous or categorical, a field that
+            the kind requires is missing, a field that it does not hold is
+            present without ``ignore_unknown_fields``, or a field holds a
+            value that the display cannot hold, such as a color that is not a
+            hex color.
+        TypeError: If a field holds a value of the wrong type.
+    """
     value = dict(display)
     kind = value.get("kind")
+    if ignore_unknown_fields and kind in _DISPLAY_FIELDS:
+        value = {
+            field: item
+            for field, item in value.items()
+            if field in _DISPLAY_FIELDS[kind]
+        }
     if kind == "continuous":
-        required = {"kind", "colormap", "minimum", "maximum", "scale"}
+        required = _DISPLAY_FIELDS["continuous"]
         if not required.issubset(value):
             raise ValueError("Continuous display metadata is incomplete")
         if set(value) != required:
@@ -114,13 +143,7 @@ def validate_display_metadata(
     if kind == "categorical":
         if not {"kind", "categories"}.issubset(value):
             raise ValueError("Categorical display metadata is incomplete")
-        allowed = {
-            "kind",
-            "categories",
-            "missing_label",
-            "missing_color",
-        }
-        if not set(value).issubset(allowed):
+        if not set(value).issubset(_DISPLAY_FIELDS["categorical"]):
             raise ValueError("Categorical display metadata has unknown fields")
         categories = value.get("categories")
         if not isinstance(categories, list):

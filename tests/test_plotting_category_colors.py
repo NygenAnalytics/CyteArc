@@ -1040,3 +1040,136 @@ def test_only_a_live_store_reads_a_column_stored_as_ordered():
     assert stored_categorical_scale(frozen, "grade") is None
     # A store without a root stores no scale.
     assert stored_categorical_scale(SimpleNamespace(), "grade") is None
+
+
+# A field display of a run, and fields that a later release could add to it:
+# whether the column is ordered, and its stored order.
+RUN_STAGE_DISPLAY = {
+    "kind": "categorical",
+    "categories": [
+        {"value": "late", "label": "Late", "color": "#112233"},
+        {"value": "early", "label": "Early", "color": "#445566"},
+    ],
+    "missing_label": "NA",
+    "missing_color": "#bdbdbd",
+}
+RUN_SCORE_DISPLAY = {
+    "kind": "continuous",
+    "colormap": "magma",
+    "minimum": 1.0,
+    "maximum": 4.0,
+    "scale": "log",
+}
+LATER_FIELDS = {"ordered": True, "levels": ["late", "early", "unused"]}
+
+
+def _run_plot_store(**displays):
+    return SimpleNamespace(_stored_display_metadata=displays.get)
+
+
+def test_run_plots_ignore_display_fields_that_a_later_release_adds():
+    from cytearc.plotting._display import (
+        continuous_display_scale,
+        stored_categorical_scale,
+        stored_display_metadata,
+    )
+
+    store = _run_plot_store(
+        stage={**RUN_STAGE_DISPLAY, **LATER_FIELDS},
+        score={**RUN_SCORE_DISPLAY, "unit": "counts"},
+    )
+    # The display's order, colors, labels and missing cells, as a run without
+    # the added fields draws them.
+    assert stored_categorical_scale(store, "stage") == splt.CategoricalScale(
+        order=("late", "early"),
+        palette={"late": "#112233", "early": "#445566"},
+        labels={"late": "Late", "early": "Early"},
+        missing_color="#bdbdbd",
+        missing_label="NA",
+    )
+    assert stored_display_metadata(store, "stage") == RUN_STAGE_DISPLAY
+    assert stored_display_metadata(store, "score") == RUN_SCORE_DISPLAY
+    assert continuous_display_scale(
+        stored_display_metadata(store, "score")
+    ) == splt.ColorScale(cmap="magma", vmin=1.0, vmax=4.0, scale="log")
+    # The record keeps the added fields; readers leave them out of their copy.
+    assert store._stored_display_metadata("stage")["ordered"] is True
+
+
+@pytest.mark.parametrize(
+    ("display", "error_type", "message"),
+    [
+        (
+            {
+                **RUN_STAGE_DISPLAY,
+                "categories": [{"value": "a", "label": "a", "color": "red"}],
+                **LATER_FIELDS,
+            },
+            ValueError,
+            "color must be a hex color",
+        ),
+        ({"kind": "categorical", **LATER_FIELDS}, ValueError, "is incomplete"),
+        (
+            {**RUN_SCORE_DISPLAY, "scale": "sqrt", "unit": "counts"},
+            ValueError,
+            "scale is invalid",
+        ),
+        (
+            {key: value for key, value in RUN_SCORE_DISPLAY.items() if key != "scale"}
+            | {"unit": "counts"},
+            ValueError,
+            "is incomplete",
+        ),
+        (
+            {**RUN_STAGE_DISPLAY, "kind": "ordinal"},
+            ValueError,
+            "continuous or categorical",
+        ),
+        # The entries of the categories hold their three fields alone.
+        (
+            {
+                **RUN_STAGE_DISPLAY,
+                "categories": [
+                    {"value": "a", "label": "a", "color": "#112233", "rank": 1}
+                ],
+            },
+            ValueError,
+            "requires value, label, and color",
+        ),
+    ],
+    ids=[
+        "category_color",
+        "categories_missing",
+        "continuous_scale",
+        "continuous_field_missing",
+        "unknown_kind",
+        "category_field",
+    ],
+)
+def test_run_plots_still_check_the_display_fields_they_know(
+    display, error_type, message
+):
+    from cytearc.plotting._display import stored_display_metadata
+
+    with pytest.raises(error_type, match=message):
+        stored_display_metadata(_run_plot_store(stage=display), "stage")
+
+
+def test_live_column_displays_refuse_fields_that_the_display_kind_does_not_hold():
+    import zarr
+    from zarr.storage import MemoryStore
+
+    from cytearc.plotting._display import stored_categorical_scale
+
+    root = zarr.open_group(store=MemoryStore(), mode="w")
+    stage = root.create_group("cellData").create_array(
+        "stage", data=np.asarray(["late", "early"])
+    )
+    stage.attrs["display"] = RUN_STAGE_DISPLAY
+    assert stored_categorical_scale(SimpleNamespace(zw=root), "stage").order == (
+        "late",
+        "early",
+    )
+    stage.attrs["display"] = {**RUN_STAGE_DISPLAY, **LATER_FIELDS}
+    with pytest.raises(ValueError, match="has unknown fields"):
+        stored_categorical_scale(SimpleNamespace(zw=root), "stage")

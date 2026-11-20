@@ -13,11 +13,21 @@ from ._contracts import CategoricalScale, ColorScale
 
 
 def stored_display_metadata(store: Any, column: str) -> dict[str, Any] | None:
-    """Return validated display metadata for a cell column, when available."""
+    """Return validated display metadata for a cell column, when available.
+
+    A run's plot store returns its field's display, whose known fields are
+    checked and whose other fields are left out, since a later release may
+    add fields to the display of a run's field. A live column's display may
+    hold only the fields of its kind.
+    """
     frozen_display = getattr(store, "_stored_display_metadata", None)
     if callable(frozen_display):
         display = frozen_display(column)
-        return None if display is None else validate_display_metadata(display)
+        return (
+            None
+            if display is None
+            else validate_display_metadata(display, ignore_unknown_fields=True)
+        )
     try:
         root = store.zw
     except AttributeError:
