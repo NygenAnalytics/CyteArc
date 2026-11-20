@@ -672,7 +672,7 @@ The definitions were checked against CoSpar 0.5.0 run on a synthetic experiment 
 
 ## Measure the fate bias of early cells
 
-The cells of an early cell's clone sampled later, such as the clone-mates at day 4 or day 6 of a progenitor at day 2, show which fates its progenitor took. {meth}`ds.clones.fate_bias <cytearc.datastore.namespaces.ClonesAccessor.fate_bias>` takes the `early` and `late` cells as two cell selections that share no cell, and the fates as the groups of the late cells: the combinations of the labels of `group_by` columns and of a `groups` label artifact. It saves a `clone_fate_bias` artifact that labels the early cells, which {meth}`ds.clones.load_fate_bias <cytearc.datastore.namespaces.ClonesAccessor.load_fate_bias>` reads as a {class}`~cytearc.clones.CloneFateBias` record.
+The cells of an early cell's clone sampled later, such as the clone-mates at day 4 or day 6 of a progenitor at day 2, show which fates its progenitor took. {meth}`ds.clones.fate_bias <cytearc.datastore.namespaces.ClonesAccessor.fate_bias>` takes the `early` and `late` cells as two cell selections that share no cell, and the fates as the groups of the late cells: the combinations of the labels of `group_by` columns and of a `groups` label artifact. It saves a `clone_fate_bias` artifact that labels the early cells, which {meth}`ds.clones.load_fate_bias <cytearc.datastore.namespaces.ClonesAccessor.load_fate_bias>` reads as a {class}`~cytearc.clones.CloneFateBias` record. Early cells of which none has a clone, as when the clones were imported on the late cells alone, are refused with a `ValueError` before anything is saved, and so are late cells of which none has a clone.
 
 ```python
 early = ds.snapshot_cell_selection("is_day_2")

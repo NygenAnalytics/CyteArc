@@ -17,6 +17,7 @@ import pytest
 from scipy.cluster.hierarchy import leaves_list
 from scipy.stats import fisher_exact
 
+import cytearc.datastore._operations.clones as clone_operations
 from cytearc.clones import COUPLING_METHODS, CloneCoupling, CloneFateBias
 from cytearc.storage.artifacts import artifact_group
 from tests.clone_helpers import (
@@ -556,34 +557,72 @@ def test_fate_bias_names_late_when_none_of_its_cells_has_a_clone(copied) -> None
     assert store.artifacts.list(kind="clone_fate_bias", scope="datastore") == []
 
 
-def test_late_cells_that_are_the_clones_own_test_each_clone_as_every_cell_does(
-    copied, tmp_path
+def test_fate_bias_names_early_when_none_of_its_cells_has_a_clone(
+    copied, tmp_path, monkeypatch
 ) -> None:
     store = copied.store
-    # Clones imported on the late cells alone, so the late cells are the
-    # clones' own and no early cell has a clone.
+    # Clones imported on the late cells alone give no early cell a clone, as
+    # in a call that passes the clones of the wrong cells; so do the clones
+    # of every cell to early cells that none of them holds.
     own = import_truth_clones(store, TRUTH, tmp_path, cell_selection=copied.late)
-    options = {"group_by": "cell_type", "early": copied.early, "late": copied.late}
-    found = store.clones.load_fate_bias(store.clones.fate_bias(own, **options))
-    every = store.clones.load_fate_bias(
-        store.clones.fate_bias(copied.clones, **options)
-    )
-    cells = found.cells
-    assert cells.index.tolist() == TRUTH.cell_ids[EARLY].tolist()
-    assert cells["clone"].isna().all() and cells["fate"].isna().all()
-    assert (cells["n_late_cells"] == 0).all()
-    # Each clone's late cells are tested as those of clones of every cell;
-    # the clones rank by their late cells alone, so the rows match by label.
-    assert (found.clone_fates["n_early_cells"] == 0).all()
+    without = (TRUTH.clones < 0) & EARLY
+    assert without.any() and not (without & LATE).any()
+    store.cells.insert("early_without_clone", by_cell_id(store.cells, without))
+    unclonal = store.snapshot_cell_selection("early_without_clone")
+    options = {"group_by": "cell_type", "late": copied.late}
 
-    def by_label(table: pd.DataFrame) -> pd.DataFrame:
-        table = table.drop(columns="n_early_cells").astype({"clone": str})
-        return table.sort_values(["clone", "fate"], ignore_index=True)
+    # The refusal comes before the call groups the late cells or plans its
+    # result, so a saved result whose early cells have no clone is never
+    # returned in its place.
+    def reached(*_args, **_kwargs):
+        raise AssertionError("fate_bias went past the refusal of its early cells")
 
-    pd.testing.assert_frame_equal(
-        by_label(found.clone_fates), by_label(every.clone_fates)
+    monkeypatch.setattr(clone_operations, "cell_groups", reached)
+    monkeypatch.setattr(clone_operations, "plan_cell_data_artifact", reached)
+    for clones, early, n_early in (
+        (own, copied.early, int(EARLY.sum())),
+        (copied.clones, unclonal, int(without.sum())),
+    ):
+        with pytest.raises(
+            ValueError,
+            match=f"^None of the {n_early} cells of early has a clone; pass early "
+            "cells that the clones give a clone, or clones imported on the early "
+            "cells too$",
+        ):
+            store.clones.fate_bias(clones, early=early, **options)
+    assert store.artifacts.list(kind="clone_fate_bias", scope="datastore") == []
+
+
+def test_one_early_cell_with_a_clone_is_enough(copied) -> None:
+    store, clones = copied.store, copied.clones
+    # The early cells without a clone and one early cell of the first clone,
+    # whose code is 0.
+    first = int(np.flatnonzero(EARLY & (TRUTH.clones == 0))[0])
+    chosen = (TRUTH.clones < 0) & EARLY
+    chosen[first] = True
+    store.cells.insert("one_clonal", by_cell_id(store.cells, chosen))
+    early = store.snapshot_cell_selection("one_clonal")
+    loaded = store.clones.load_fate_bias(
+        store.clones.fate_bias(
+            clones, group_by="cell_type", early=early, late=copied.late
+        )
     )
-    pd.testing.assert_frame_equal(found.fates, every.fates)
+    cells = loaded.cells
+    assert cells.index.tolist() == TRUTH.cell_ids[chosen].tolist()
+    found = _late_cells_by_type(0)
+    total = sum(found.values())
+    cell = TRUTH.cell_ids[first]
+    assert cells["clone"].notna().tolist() == (TRUTH.clones[chosen] >= 0).tolist()
+    assert (cells.loc[cell, "clone"], cells.loc[cell, "n_late_cells"]) == (
+        number_label(0),
+        total,
+    )
+    for name in TYPES:
+        assert loaded.fractions.loc[cell, name] == pytest.approx(
+            found[name] / total, rel=1e-15
+        )
+    others = cells.drop(index=cell)
+    assert (others["n_late_cells"] == 0).all() and others["fate"].isna().all()
 
 
 def test_fate_bias_arguments_are_checked(copied) -> None:

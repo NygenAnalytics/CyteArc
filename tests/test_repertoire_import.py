@@ -8,7 +8,9 @@ encoding recovers each cell's chains. The join of barcodes to cells runs in
 """
 
 import gzip
+import re
 import shutil
+import warnings
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -16,6 +18,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from cytearc import DiagnosticWarning
 from cytearc.repertoire import ImmuneReceptors
 from cytearc.utils.logging import collect_warnings
 from tests.clone_helpers import (
@@ -47,6 +50,8 @@ from tests.clone_truth import (
 N_CELLS = N_RECEPTOR_CELLS
 TRUTH = clone_truth()
 RECEPTORS = receptor_truth(TRUTH)
+# The fewest fields of an AIRR file that the import reads.
+BARE_AIRR = "cell_id\tsequence_id\tlocus\tjunction_aa\tproductive"
 
 
 @pytest.fixture(scope="module")
@@ -470,27 +475,204 @@ def test_a_named_format_reads_files_as_their_header_would(tmp_path) -> None:
         )
 
 
+@pytest.mark.parametrize(
+    "name, header", [("empty.csv", CELLRANGER_HEADER), ("empty.tsv", BARE_AIRR)]
+)
 def test_a_file_without_contig_rows_leaves_every_cell_without_a_receptor(
-    tmp_path,
+    tmp_path, name, header
 ) -> None:
     store = receptor_store(tmp_path)
-    for name, header in (
-        ("empty.csv", CELLRANGER_HEADER),
-        ("empty.tsv", "cell_id\tsequence_id\tlocus\tjunction_aa\tproductive"),
-    ):
-        with collect_warnings() as messages:
-            ref = store.repertoire.import_receptors(
-                write_lines(tmp_path, name, header, []),
-                cell_selection=store.snapshot_cell_selection(),
-            )
-        loaded = store.repertoire.load_receptors(ref)
-        assert loaded.cells["receptor_type"].tolist() == ["no IR"] * N_CELLS
-        assert loaded.cells["n_contigs"].tolist() == [0] * N_CELLS
-        assert len(loaded.chains) == 0
-        diagnostics = store.artifacts.inspect(ref).diagnostics
-        assert (diagnostics["fileContigs"], diagnostics["cellsWithChain"]) == (0, 0)
-        assert_joined(diagnostics, n_file=0)
-        assert list(messages) == []
+    cells = store.snapshot_cell_selection()
+    path = write_lines(tmp_path, name, header, [])
+    # The import warns, naming the file, and a reused import warns again.
+    refs = []
+    for _call in range(2):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            refs.append(store.repertoire.import_receptors(path, cell_selection=cells))
+        assert [type(item.message) for item in caught] == [DiagnosticWarning]
+        warning = caught[0].message
+        assert isinstance(warning, DiagnosticWarning)
+        assert re.fullmatch(
+            "The import read no contig from the contig file '[^']*"
+            + re.escape(name)
+            + "', so no selected cell has a receptor. Pass a file that holds the "
+            r"V\(D\)J library's contigs, such as Cell Ranger's "
+            r"filtered_contig_annotations\.csv\.",
+            str(warning),
+        )
+        assert (warning.operation, warning.diagnostic, warning.value) == (
+            "import_immune_receptors",
+            "fileContigs",
+            0,
+        )
+    assert refs[0] == refs[1]
+    loaded = store.repertoire.load_receptors(refs[0])
+    assert loaded.cells["receptor_type"].tolist() == ["no IR"] * N_CELLS
+    assert loaded.cells["n_contigs"].tolist() == [0] * N_CELLS
+    assert len(loaded.chains) == 0
+    diagnostics = store.artifacts.inspect(refs[0]).diagnostics
+    assert (diagnostics["fileContigs"], diagnostics["cellsWithChain"]) == (0, 0)
+    assert_joined(diagnostics, n_file=0)
+
+
+def test_only_an_import_that_reads_no_contig_warns_of_its_files(tmp_path) -> None:
+    store = receptor_store(tmp_path)
+    cells = store.snapshot_cell_selection()
+    empty_csv = write_lines(tmp_path, "empty.csv", CELLRANGER_HEADER, [])
+    empty_tsv = write_lines(tmp_path, "empty.tsv", BARE_AIRR, [])
+    # The warning names every file of the import.
+    with pytest.warns(DiagnosticWarning) as caught:
+        store.repertoire.import_receptors([empty_csv, empty_tsv], cell_selection=cells)
+    assert len(caught) == 1
+    named = re.fullmatch(
+        "The import read no contig from the contig files '([^']*)', '([^']*)', so "
+        "no selected cell has a receptor. .*",
+        str(caught[0].message),
+    )
+    assert named is not None
+    assert {Path(path).name for path in named.groups()} == {"empty.csv", "empty.tsv"}
+    # One contig of a selected cell beside an empty file is enough, and a
+    # contig of no cell of the store is named only by the barcodes' warning.
+    one = write_lines(tmp_path, "one.tsv", BARE_AIRR, ["cell0\tc1\tTRB\tCASS\tT"])
+    stray = write_lines(tmp_path, "stray.tsv", BARE_AIRR, ["stray\tc1\tTRB\tCASS\tT"])
+    with collect_warnings() as messages:
+        store.repertoire.import_receptors([empty_csv, one], cell_selection=cells)
+    assert messages == []
+    with collect_warnings() as messages:
+        store.repertoire.import_receptors(stray, cell_selection=cells)
+    assert len(messages) == 1
+    assert messages[0].startswith("1 of 1 barcodes of the contig file match no cell")
+
+
+def _contig_reads(store, receptors, folder: Path) -> dict:
+    """The calls that read contigs, each of which refuses receptors without one."""
+    path = folder / "receptors.tsv"
+    return {
+        "gene_usage": lambda: store.repertoire.gene_usage(receptors),
+        "spectratype": lambda: store.repertoire.spectratype(receptors, sequence="aa"),
+        "clonotypes": lambda: store.repertoire.clonotypes(receptors),
+        "clonotypes of residues and V genes": lambda: store.repertoire.clonotypes(
+            receptors, sequence="aa", same_v_gene=True
+        ),
+        "export_airr": lambda: store.repertoire.export_airr(receptors, path),
+        "export_airr of chains": lambda: store.repertoire.export_airr(
+            receptors, path, chains_only=True
+        ),
+        "export_airr of fields": lambda: store.repertoire.export_airr(
+            receptors, path, fields=["locus"]
+        ),
+    }
+
+
+@pytest.mark.parametrize(
+    "name, header, rows",
+    [
+        ("empty.csv", CELLRANGER_HEADER, []),
+        ("empty.tsv", BARE_AIRR, []),
+        # A row of empty fields holds no contig, but its header gives the
+        # receptors their fields.
+        ("blank.tsv", BARE_AIRR, ["\t\t\t\t"]),
+    ],
+)
+def test_calls_that_read_contigs_refuse_receptors_whose_import_read_none(
+    tmp_path, name, header, rows
+) -> None:
+    store = receptor_store(tmp_path)
+    with pytest.warns(DiagnosticWarning, match="read no contig"):
+        receptors = store.repertoire.import_receptors(
+            write_lines(tmp_path, name, header, rows),
+            cell_selection=store.snapshot_cell_selection(),
+        )
+    refusal = (
+        "^The receptors hold no contig: their import read no contig from its "
+        r"contig files; import a file that holds the V\(D\)J library's contigs, "
+        r"such as Cell Ranger's filtered_contig_annotations\.csv$"
+    )
+    saved = store.artifacts.list(scope="datastore")
+    for call, read in _contig_reads(store, receptors, tmp_path).items():
+        with pytest.raises(ValueError, match=refusal):
+            read()
+        assert store.artifacts.list(scope="datastore") == saved, call
+    assert not (tmp_path / "receptors.tsv").exists()
+    # The tables read them; receptors that store no field say why they hold
+    # none of the fields asked for, rather than list none.
+    loaded = store.repertoire.load_receptors(receptors, fields=[])
+    assert loaded.cells["receptor_type"].tolist() == ["no IR"] * N_CELLS
+    if rows:
+        assert (
+            len(store.repertoire.load_receptors(receptors, fields=["locus"]).chains)
+            == 0
+        )
+    else:
+        with pytest.raises(ValueError, match=refusal):
+            store.repertoire.load_receptors(receptors, fields=["locus"])
+
+
+def test_a_selection_without_the_files_contigs_gives_empty_results(tmp_path) -> None:
+    store = receptor_store(tmp_path)
+    ids = store.cells.fetch_all("ids").astype(str)
+    store.cells.insert("first", by_cell_id(store.cells, np.isin(ids, ["cell0"])))
+    # A contig of a cell outside the selection and one of no cell of the
+    # store: the selection holds none of the file's contigs, as a cluster
+    # without T or B cells holds none of a library's.
+    header = "cell_id\tsequence_id\tlocus\tv_call\tjunction\tjunction_aa\tproductive"
+    rows = [
+        "cell6\tc1\tTRB\tTRBV1*01\tTGTGCCAGCAGC\tCASS\tT",
+        "stray\tc2\tTRB\tTRBV1*01\tTGTGCCAGCAGC\tCASS\tT",
+    ]
+    with collect_warnings() as messages:
+        receptors = store.repertoire.import_receptors(
+            write_lines(tmp_path, "elsewhere.tsv", header, rows),
+            cell_selection=store.snapshot_cell_selection("first"),
+        )
+    # Only the barcode of no cell of the store is warned of.
+    assert len(messages) == 1
+    assert messages[0].startswith("1 of 2 barcodes of the contig file match no cell")
+    diagnostics = store.artifacts.inspect(receptors).diagnostics
+    assert (diagnostics["fileContigs"], diagnostics["unmatchedContigs"]) == (2, 2)
+    # The calls that read contigs give empty results of cell0, without a chain.
+    usage = store.repertoire.gene_usage(receptors)
+    assert (len(usage.table), usage.diagnostics["cellsWithoutClone"]) == (0, 1)
+    lengths = store.repertoire.spectratype(receptors, sequence="aa")
+    assert (len(lengths.table), lengths.diagnostics["cellsWithoutClone"]) == (0, 1)
+    clonotypes = store.repertoire.load_clonotypes(
+        store.repertoire.clonotypes(receptors)
+    )
+    assert clonotypes.cells.index.tolist() == ["cell0"]
+    assert clonotypes.cells["clonotype"].isna().all() and clonotypes.clonotypes.empty
+    path = tmp_path / "receptors.tsv"
+    assert store.repertoire.export_airr(receptors, path).rows == 0
+    written = path.read_text()
+    assert written.count("\n") == 1 and written.startswith("sequence_id\t")
+
+
+def test_one_contig_is_enough_for_the_calls_that_read_contigs(tmp_path) -> None:
+    store = receptor_store(tmp_path)
+    header = "cell_id\tsequence_id\tlocus\tv_call\tjunction\tjunction_aa\tproductive"
+    row = "cell0\tc1\tTRB\tTRBV1*01\tTGTGCCAGCAGC\tCASS\tT"
+    with collect_warnings() as messages:
+        receptors = store.repertoire.import_receptors(
+            write_lines(tmp_path, "one.tsv", header, [row]),
+            cell_selection=store.snapshot_cell_selection(),
+        )
+    assert messages == []
+    usage = store.repertoire.gene_usage(receptors).table
+    assert usage[["locus", "v_call", "n_cells"]].values.tolist() == [
+        ["TRB", "TRBV1", 1]
+    ]
+    lengths = store.repertoire.spectratype(receptors, sequence="aa").table
+    assert lengths[["locus", "length", "n_cells"]].values.tolist() == [["TRB", 4, 1]]
+    clonotypes = store.repertoire.load_clonotypes(
+        store.repertoire.clonotypes(receptors)
+    )
+    assert clonotypes.cells["clonotype"].dropna().to_dict() == {"cell0": "clonotype_1"}
+    summary = store.repertoire.export_airr(receptors, tmp_path / "one_out.tsv")
+    written = pd.read_csv(tmp_path / "one_out.tsv", sep="\t", dtype=str)
+    assert summary.rows == 1
+    assert written[["sequence_id", "cell_id", "junction_aa"]].values.tolist() == [
+        ["c1", "cell0", "CASS"]
+    ]
 
 
 def test_import_refuses_an_empty_cell_selection(tmp_path) -> None:

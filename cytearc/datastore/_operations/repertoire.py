@@ -92,7 +92,12 @@ from ...storage.artifacts import (
 from ...storage.async_execution import zarr_decoding_threads, zarr_io_concurrency
 from ...storage.categorical import CategoricalColumn
 from ...storage.cell_order import CellOrder, cell_order_argument, destination_rows
-from ...storage.diagnostics import ExportSummary, export_summary, warn_diagnostics
+from ...storage.diagnostics import (
+    DiagnosticRule,
+    ExportSummary,
+    export_summary,
+    warn_diagnostics,
+)
 from ...storage.geometry import ROW_INDEX_BYTES, array_geometry
 from ...storage.types import as_zarr_array, read_array
 from ...storage.validation_scope import validation_scoped
@@ -297,6 +302,21 @@ def _contig_sources(
             _ContigSource(file=file, format=file_format, n_columns=len(header))
         )
     return tuple(sources)
+
+
+def _no_contig_rule(sources: Sequence[_ContigSource]) -> DiagnosticRule:
+    """Return the import's warning when its files hold no contig, naming them."""
+    files = files_text("contig", len(sources))
+    names = ", ".join(quoted_value(os.fspath(source.file.path)) for source in sources)
+    return DiagnosticRule(
+        "fileContigs",
+        applies=lambda diagnostics: int(diagnostics["fileContigs"]) == 0,
+        message=lambda _diagnostics: (
+            f"The import read no contig from {files} {names}, so no selected cell "
+            "has a receptor. Pass a file that holds the V(D)J library's contigs, "
+            "such as Cell Ranger's filtered_contig_annotations.csv."
+        ),
+    )
 
 
 def _iter_source(
@@ -805,7 +825,9 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         then ``fileContigs``, the files' contigs, ``unmatchedContigs``, those
         that match no selected cell, and ``cellsWithChain``, the selected
         cells with a chain. Barcodes that match no cell of the store are
-        named in a warning, which a reused import gives again. A file is identified by the
+        named in a warning, and an import that reads no contig names its files
+        in another, since the calls that read contigs refuse its receptors; a
+        reused import gives both warnings again. A file is identified by the
         SHA-256 of its bytes, so a moved file reuses the saved receptors and
         an edited file gives new ones, and the order of the files does not
         matter.
@@ -912,7 +934,10 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             required_attributes=_IMPORT_ATTRIBUTES,
             reuse_validator=has_contigs,
         )
-        warnings = unmatched_barcode_rules(files_text("contig", len(sources)))
+        warnings = (
+            *unmatched_barcode_rules(files_text("contig", len(sources))),
+            _no_contig_rule(sources),
+        )
         if planned.reused:
             # Saved receptors warn as they did when they were imported.
             warn_diagnostics(
@@ -1055,6 +1080,9 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
                 raise TypeError("fields must be a sequence of field names or None")
             unknown = [name for name in fields if name not in stored]
             if unknown:
+                # Only an import that read no contig stores no field.
+                if not stored:
+                    self._require_file_contigs(receptors, group)
                 raise ValueError(
                     "The receptors store no field "
                     + ", ".join(quoted_value(str(name)) for name in unknown)
@@ -1134,6 +1162,29 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         require_complete_artifact(self.zw, receptors)
         group = artifact_group(self.zw, receptors)
         return group, _stored_fields(group)
+
+    def _require_file_contigs(self, receptors: ArtifactRef, group: zarr.Group) -> None:
+        """Refuse receptors whose import read no contig, for a call that reads their contigs.
+
+        :meth:`_receptor_group` opens such receptors, which ``load_receptors``
+        and ``receptor_qc`` read. The calls that read contigs refuse them
+        with one message that names the empty import, rather than name a
+        field that the receptors lack. Receptors whose files hold contigs of
+        no selected cell, as a selection without T or B cells gives, are an
+        empty result, which these calls read.
+
+        Raises:
+            ValueError: If the receptors' import read no contig.
+        """
+        if _n_contigs(group):
+            return
+        if int(inspect_artifact(self.zw, receptors).diagnostics["fileContigs"]):
+            return
+        raise ValueError(
+            "The receptors hold no contig: their import read no contig from its "
+            "contig files; import a file that holds the V(D)J library's contigs, "
+            "such as Cell Ranger's filtered_contig_annotations.csv"
+        )
 
     def _within_groups(
         self,
@@ -1251,8 +1302,8 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             TypeError: If an argument has the wrong type.
             ValueError: If ``receptors`` is not an ``immune_receptors``
                 artifact, an option is unknown, a distance metric has no
-                ``max_distance``, the receptors store no junction of the
-                compared kind,
+                ``max_distance``, the receptors' import read no contig, the
+                receptors store no junction of the compared kind,
                 or a ``within`` column is not a cell metadata column or has
                 no label for a cell with a receptor.
             KeyError: If the store holds no such receptors.
@@ -1308,6 +1359,7 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
                     "A normalized_hamming max_distance is a percentage of the "
                     "length, at most 100"
                 )
+        self._require_file_contigs(receptors, group)
         field_name = "junction" if sequence == "nt" else "junction_aa"
         if field_name not in fields:
             raise ValueError(
@@ -1850,9 +1902,11 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
                 "source must be an immune_receptors or clonotypes artifact, not "
                 f"{quoted_value(source.kind)}"
             )
+        # An import that parses a contig row stores the locus field, read or
+        # inferred from the gene calls, so receptors whose import read a
+        # contig store the locus that the chains count by.
         group, stored = self._receptor_group(receptors)
-        if "locus" not in stored:
-            raise ValueError("The receptors store no locus")
+        self._require_file_contigs(receptors, group)
         for name in fields:
             if name not in stored:
                 raise ValueError(
@@ -2076,10 +2130,11 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         Raises:
             TypeError: If an argument has the wrong type.
             ValueError: If ``source`` is not an ``immune_receptors`` or
-                ``clonotypes`` artifact, an option is unknown, a gene field is
-                not stored, ``count="clonotypes"`` is asked of receptors, a
-                column of the groups is missing or named twice, two key columns
-                share a name, or two groups get one name.
+                ``clonotypes`` artifact, an option is unknown, the receptors'
+                import read no contig, a gene field is not stored,
+                ``count="clonotypes"`` is asked of receptors, a column of the
+                groups is missing or named twice, two key columns share a
+                name, or two groups get one name.
             KeyError: If the store holds no such ``source`` artifact, or not
                 the receptors of the clonotypes.
             RuntimeError: If the ``source`` artifact or the receptors of the
@@ -2203,8 +2258,9 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         Raises:
             TypeError: If an argument has the wrong type.
             ValueError: If ``source`` is not an ``immune_receptors`` or
-                ``clonotypes`` artifact, an option is unknown, the junctions
-                are not stored, ``count="clonotypes"`` is asked of receptors,
+                ``clonotypes`` artifact, an option is unknown, the receptors'
+                import read no contig, the junctions are not stored,
+                ``count="clonotypes"`` is asked of receptors,
                 a column of the groups is missing or named twice, two key
                 columns share a name, or two groups get one name.
             KeyError: If the store holds no such ``source`` artifact, or not
@@ -2361,9 +2417,9 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         Raises:
             TypeError: If an argument has the wrong type.
             ValueError: If ``source`` is not an ``immune_receptors`` or
-                ``clonotypes`` artifact, a field is not stored,
-                ``cell_order`` is unknown, or a value to be written holds a
-                tab, a newline or a carriage return.
+                ``clonotypes`` artifact, the receptors' import read no contig,
+                a field is not stored, ``cell_order`` is unknown, or a value to
+                be written holds a tab, a newline or a carriage return.
             KeyError: If the store holds no such ``source`` artifact, or not
                 the receptors of the clonotypes.
             RuntimeError: If the ``source`` artifact or the receptors of the
@@ -2420,6 +2476,7 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
                 ],
             ]
         group, stored = self._receptor_group(receptors)
+        self._require_file_contigs(receptors, group)
         if fields is None:
             chosen = stored
         else:
