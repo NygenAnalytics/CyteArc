@@ -33,9 +33,10 @@ def _as_1d(values: Any) -> np.ndarray:
 def _level_codes(values: np.ndarray) -> np.ndarray:
     """Number each level of labels in their sorted order, or in order of first appearance where they cannot be sorted, such as bytes beside numbers."""
     try:
-        return pd.factorize(values, sort=True)[0]
+        codes, _ = pd.factorize(values, sort=True)
     except TypeError:
-        return pd.factorize(values, sort=False)[0]
+        codes, _ = pd.factorize(values, sort=False)
+    return np.asarray(codes)
 
 
 def _to_float(values: np.ndarray) -> np.ndarray | None:
