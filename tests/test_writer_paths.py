@@ -30,6 +30,7 @@ from cytearc.writers import (
     SparseToZarr,
     SubsetZarr,
 )
+from tests.memory_helpers import HandedArrays
 from tests.test_seurat_reader import _Wire, _legacy_assay
 from tests.test_writers import _write_h5ad
 from tests.storage_helpers import by_cell_id
@@ -396,6 +397,211 @@ def test_dense_h5ad_writer_reports_done_only_when_the_parent_did_not_stop(
         np.testing.assert_array_equal(counts[:], values)
     finally:
         reader.close()
+
+
+def _watch_dense_bands(monkeypatch) -> HandedArrays:
+    """Watch the values of the bands that dense band buffers hand over.
+
+    Whenever a buffer takes another batch, it first waits until the bands
+    handed over so far are freed.
+    """
+    from cytearc.storage import sharding
+
+    handed = HandedArrays()
+    add = sharding.DenseBandBuffer.add
+
+    def hand(band: Any) -> Any:
+        handed.hand(band.values)
+        return band
+
+    def watching_add(self, values):
+        handed.wait_until_freed()
+        # map hands each band on and keeps none of them.
+        yield from map(hand, add(self, values))
+
+    monkeypatch.setattr(sharding.DenseBandBuffer, "add", watching_add)
+    return handed
+
+
+def test_a_dense_h5ad_import_frees_each_band_it_wrote_before_it_reads_more(
+    tmp_path, monkeypatch
+) -> None:
+    values = np.arange(1, 33, dtype=np.uint8).reshape(8, 4)
+    source = _write_h5ad(
+        tmp_path / "dense.h5ad",
+        values,
+        encoding="dense",
+        feature_types=[b"Gene Expression", b"Antibody Capture"] * 2,
+    )
+    handed = _watch_dense_bands(monkeypatch)
+    reader = H5adReader(str(source), feature_name_key="feature_name")
+    try:
+        # 4 bytes of uint8 counts of two features make bands of two cells in
+        # each assay, which the batches that the write reads fill.
+        H5adToZarr(
+            reader,
+            str(tmp_path / "dense.zarr"),
+            assay_split_key="feature_types",
+            nthreads=1,
+            shuffle_cells=False,
+            policy=CountMatrixPolicy(unitBytes=4, chunkBytes=4),
+        ).dump(batch_size=2)
+    finally:
+        reader.close()
+    root = zarr.open_group(str(tmp_path / "dense.zarr"), mode="r")
+    np.testing.assert_array_equal(root["RNA/counts"][:], values[:, [0, 2]])
+    np.testing.assert_array_equal(root["ADT/counts"][:], values[:, [1, 3]])
+    assert len(handed) == 8
+    # Each band was written, and freed, before the next part of a batch was
+    # buffered, in the other assay or in the next batch.
+    assert len(handed.freed) >= len(handed)
+    assert handed.freed == [True] * len(handed.freed)
+
+
+class _PicklingConnection(_Connection):
+    """A connection that keeps copies of what it sends, as a pipe pickles it."""
+
+    def send(self, message: tuple[str, object]) -> None:
+        import pickle
+
+        super().send(pickle.loads(pickle.dumps(message)))
+
+
+@pytest.mark.parametrize("window", ["writes its bands", "sends its bands"])
+def test_a_dense_h5ad_producer_process_frees_each_band_before_its_next_batch(
+    tmp_path, monkeypatch, window
+) -> None:
+    from cytearc.storage.budget import ResourceBudget
+    from cytearc.storage.sharding import plan_dense_band_writes
+    from cytearc.writers import h5ad as h5ad_writer
+
+    values = np.arange(1, 25, dtype=np.uint8).reshape(8, 3)
+    source = _write_h5ad(tmp_path / "dense.h5ad", values, encoding="dense")
+    location = str(tmp_path / "dense.zarr")
+    reader = H5adReader(str(source), feature_name_key="feature_name")
+    try:
+        # 12 bytes of uint8 counts make bands of four cells, and constructing
+        # the writer creates the counts that the window fills.
+        counts = H5adToZarr(
+            reader,
+            location,
+            nthreads=1,
+            shuffle_cells=False,
+            policy=CountMatrixPolicy(unitBytes=12, chunkBytes=12),
+        ).z["RNA/counts"]
+        handed = _watch_dense_bands(monkeypatch)
+        connection = _PicklingConnection()
+        # Each process runs here, reading the window's batches of four cells.
+        if window == "writes its bands":
+            h5ad_writer._write_dense_h5ad_process_window(
+                reader._clone_kwargs(),
+                4,
+                0,
+                8,
+                location,
+                None,
+                None,
+                ("RNA",),
+                None,
+                plan_dense_band_writes((counts,), ResourceBudget(1024**2, 1), 2),
+                connection,
+                threading.Event(),
+                {},
+            )
+            np.testing.assert_array_equal(counts[:], values)
+        else:
+            h5ad_writer._read_dense_h5ad_process_window(
+                reader._clone_kwargs(),
+                4,
+                0,
+                8,
+                {"RNA": counts},
+                None,
+                connection,
+                threading.Event(),
+                {},
+            )
+            np.testing.assert_array_equal(
+                np.vstack(
+                    [band.values for kind, (_name, band) in connection.messages[:2]]
+                ),
+                values,
+            )
+    finally:
+        reader.close()
+    assert [kind for kind, _payload in connection.messages][-1] == "done"
+    assert len(handed) == 2
+    assert handed.freed == [True, True]
+
+
+@pytest.mark.parametrize("encoding", ["dense", "csr"])
+def test_an_h5ad_import_frees_each_band_it_received_once_its_write_has_it(
+    tmp_path, monkeypatch, encoding
+) -> None:
+    from multiprocessing import connection as pipes
+
+    from cytearc.storage import sharding
+    from cytearc.storage.io_policy import StorageIoPolicy
+
+    values = np.arange(1, 4_001, dtype=np.float32).reshape(1_000, 4)
+    source = _write_h5ad(tmp_path / "counts.h5ad", values, encoding=encoding)
+    dense = encoding == "dense"
+    handed = HandedArrays()
+    name = "write_dense_bands" if dense else "write_sparse_bands"
+    write = getattr(sharding, name)
+
+    class Handing:
+        """Hands each band that the import received to the writes, keeping none."""
+
+        def __init__(self, writes: Any) -> None:
+            self.writes = iter(writes)
+
+        def __iter__(self) -> "Handing":
+            return self
+
+        def __next__(self) -> Any:
+            item = next(self.writes)
+            handed.hand(item.band.values if dense else item.band.row)
+            return item
+
+    receive = pipes.Connection.recv
+
+    def watching_receive(self):
+        # The import receives the next message from a producer process once
+        # the bands handed to the writes so far are freed.
+        handed.wait_until_freed()
+        return receive(self)
+
+    monkeypatch.setattr(
+        sharding, name, lambda writes, **options: write(Handing(writes), **options)
+    )
+    monkeypatch.setattr(pipes.Connection, "recv", watching_receive)
+    reader = H5adReader(str(source), feature_name_key="feature_name")
+    store = MemoryStore()
+    try:
+        # A destination in memory has producer processes send their bands to
+        # this process; of three workers two read and one writes, each band
+        # before the next is pulled. 400 bytes of the uint16 counts of four
+        # features make bands of 50 cells, one for each batch.
+        writer = H5adToZarr(
+            reader,
+            store,
+            mem_budget="1G",
+            nthreads=3,
+            io=StorageIoPolicy(readWorkers=2),
+            shuffle_cells=False,
+            policy=CountMatrixPolicy(unitBytes=400, chunkBytes=400),
+        )
+        writer.dump(batch_size=50)
+    finally:
+        reader.close()
+    assert (writer._lastImportProducerCount, writer._lastImportWriteWorkers) == (2, 1)
+    np.testing.assert_array_equal(
+        zarr.open_group(store=store, mode="r")["RNA/counts"][:], values
+    )
+    assert len(handed) == 20
+    assert len(handed.freed) > len(handed)
+    assert handed.freed == [True] * len(handed.freed)
 
 
 def _complex_matrix(wire: _Wire, values: list[float]) -> bytes:

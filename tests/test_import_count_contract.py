@@ -1735,14 +1735,41 @@ def _split_source(writer: str, directory: Path, values: np.ndarray) -> Any:
     )
 
 
-def _drain_sparse_writes(monkeypatch) -> list[dict[str, Any]]:
-    """Replace the band writes with a drain that measures the sparse producer.
+def _largest_allocations(snapshot: Any, count: int = 5) -> str:
+    """Return the ``count`` largest groups of a snapshot's allocations, by where each was made."""
+    import tracemalloc
 
-    The drain drops each band before the producer resumes, as a write would
-    once it wrote the band, and records the producer's peak traced bytes
-    against the reserve its plan admitted, and how many of the bands it
-    handed over the producer still held whenever it buffered a batch.
+    statistics = snapshot.filter_traces(
+        [tracemalloc.Filter(False, tracemalloc.__file__)]
+    ).statistics("traceback")
+    return "\n".join(
+        f"{stat.size} bytes in {stat.count} blocks, allocated at\n"
+        + "\n".join(stat.traceback.format(limit=8))
+        for stat in statistics[:count]
+    )
+
+
+def _drain_sparse_writes(
+    monkeypatch, directory: Path, run_import: Any
+) -> dict[str, Any]:
+    """Run an import whose band writes a drain replaces, and measure its sparse producer.
+
+    ``run_import`` imports into the directory it is given. The drain drops
+    each band before the producer resumes, as a write would once it wrote
+    the band, and records the producer's peak traced bytes against the
+    reserve its plan admitted, and how many of the bands it handed over the
+    producer still held whenever it buffered a batch. Garbage is collected
+    before the tracing starts, so no object that an earlier test left is
+    finalized, and counted, during the drain.
+
+    Tracing covers every thread of the process, so a peak above the reserve
+    may come from outside the producer. The import then runs once more,
+    tracing 25 frames of each allocation, and the record's ``why`` names the
+    largest allocations held after the band at which that drain held the
+    most, so a failure says what held the memory. The check stays on the
+    first drain's peak.
     """
+    import gc
     import tracemalloc
     import weakref
 
@@ -1751,6 +1778,7 @@ def _drain_sparse_writes(monkeypatch) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
     handed: list[weakref.ref] = []
     kept: list[int] = []
+    frames = 1
     buffer_batch = sharding.SparseShardBuffer.add
 
     def add(self, batch):
@@ -1758,12 +1786,23 @@ def _drain_sparse_writes(monkeypatch) -> list[dict[str, Any]]:
         yield from buffer_batch(self, batch)
 
     def drain(writes, *, producerReserveBytes: int = 0, **_options: Any) -> None:
-        tracemalloc.start()
+        handed.clear()
+        kept.clear()
+        largest, allocations = 0, ""
+        gc.collect()
+        tracemalloc.start(frames)
         try:
             base, _ = tracemalloc.get_traced_memory()
             for item in writes:
                 handed.append(weakref.ref(item.band.row))
                 del item
+                if frames > 1:
+                    current = tracemalloc.get_traced_memory()[0] - base
+                    if current > largest:
+                        snapshot = tracemalloc.take_snapshot()
+                        largest = current
+                        allocations = _largest_allocations(snapshot)
+                        del snapshot
             _current, peak = tracemalloc.get_traced_memory()
         finally:
             tracemalloc.stop()
@@ -1773,12 +1812,32 @@ def _drain_sparse_writes(monkeypatch) -> list[dict[str, Any]]:
                 "reserve": int(producerReserveBytes),
                 "bands": len(handed),
                 "kept": max(kept, default=0),
+                "largest": largest,
+                "allocations": allocations,
             }
         )
 
     monkeypatch.setattr(sharding.SparseShardBuffer, "add", add)
     monkeypatch.setattr(sharding, "write_sparse_bands", drain)
-    return records
+    first = directory / "import"
+    first.mkdir()
+    run_import(first)
+    (record,) = records
+    record["why"] = ""
+    if record["held"] > record["reserve"]:
+        frames = 25
+        traced = directory / "traced"
+        traced.mkdir()
+        run_import(traced)
+        repeat = records[-1]
+        record["why"] = (
+            f"The producer's traced peak, {record['held']} bytes, passed the "
+            f"{record['reserve']} bytes that its plan reserves. Traced again with "
+            f"frames, the drain peaked at {repeat['held']} bytes and held "
+            f"{repeat['largest']} bytes after a band at most, the largest "
+            f"allocations then being:\n{repeat['allocations']}"
+        )
+    return record
 
 
 @pytest.mark.parametrize(
@@ -1790,6 +1849,12 @@ def _drain_sparse_writes(monkeypatch) -> list[dict[str, Any]]:
         ("cellranger", "int32", True, None),
         ("mtx", "integer", False, None),
         ("mtx", "real", False, None),
+        # A feature-major or unordered file's batches are copied out of rows
+        # sorted before the write, whose parse the producer does not hold.
+        # Charged that parse as well, the plan reserved 6.5 times what the
+        # producer holds; it reserves 2.7 times.
+        ("mtx", "featureMajor", False, 3),
+        ("mtx", "unordered", False, 3),
         # A Seurat matrix estimates a read as its output with int64 indices
         # and a working copy as large. That is a third more than a dgCMatrix
         # read holds, which the plan charges beyond the batch it returns.
@@ -1803,32 +1868,132 @@ def test_every_sparse_producer_holds_no_more_than_its_plan_reserves(
     values = _producer_counts()
     if not split:
         values = values[:, :-4]
-    source = (
-        _split_source(writer, tmp_path, values)
-        if split
-        else _source(writer, tmp_path, values, encoding)
-    )
-    records = _drain_sparse_writes(monkeypatch)
-    try:
-        options: dict[str, Any] = {"nthreads": 1, "policy": _PRODUCER_BANDS}
-        if writer == "h5ad" and split:
-            options["assay_split_key"] = "feature_types"
-        instance = _writer(writer, source, str(tmp_path / "counts.zarr"), **options)
-        # Nothing is written, so the counts are refused once the bands are out.
-        with pytest.raises(RuntimeError, match="does not cover its row window"):
-            instance.dump()
-    finally:
-        _close(source)
-    (record,) = records
+    options: dict[str, Any] = {"nthreads": 1, "policy": _PRODUCER_BANDS}
+    if writer == "h5ad" and split:
+        options["assay_split_key"] = "feature_types"
+
+    def run_import(directory: Path) -> None:
+        source = (
+            _split_source(writer, directory, values)
+            if split
+            else _source(writer, directory, values, encoding)
+        )
+        try:
+            instance = _writer(
+                writer, source, str(directory / "counts.zarr"), **options
+            )
+            # Nothing is written, so the counts are refused once the bands
+            # are out.
+            with pytest.raises(RuntimeError, match="does not cover its row window"):
+                instance.dump()
+        finally:
+            _close(source)
+
+    record = _drain_sparse_writes(monkeypatch, tmp_path, run_import)
     # The producer let go of every band it handed over before it buffered
     # more, so a band it wrote is not held beside the next batch.
     assert record["bands"] > 1
     assert record["kept"] == 0
-    assert record["held"] <= record["reserve"]
+    assert record["held"] <= record["reserve"], record["why"]
     if bound is not None:
-        # Readers that hold one batch are planned close to what they hold;
-        # the plan charged two to six times it, and a Seurat import twelve.
+        # Readers that hold one batch are planned within ``bound`` times what
+        # they hold; the plan once charged two to six times it, and a Seurat
+        # import twelve.
         assert record["reserve"] <= bound * record["held"]
+
+
+def test_a_drain_past_its_reserve_names_what_held_the_memory(tmp_path, monkeypatch):
+    from cytearc.storage import sharding
+
+    hoard: list[bytes] = []
+    buffer_batch = sharding.SparseShardBuffer.add
+
+    def hoarding_add(self, batch):
+        # 50 MB that something beside the producer holds through the drain.
+        if not hoard:
+            hoard.append(bytes(50_000_000))
+        yield from buffer_batch(self, batch)
+
+    monkeypatch.setattr(sharding.SparseShardBuffer, "add", hoarding_add)
+    values = _producer_counts(1_000, 400)[:, :-4]
+
+    def run_import(directory: Path) -> None:
+        instance = _writer(
+            "sparse",
+            _sparse(values, "float32"),
+            str(directory / "counts.zarr"),
+            nthreads=1,
+            policy=_PRODUCER_BANDS,
+        )
+        try:
+            with pytest.raises(RuntimeError, match="does not cover its row window"):
+                instance.dump()
+        finally:
+            hoard.clear()
+
+    record = _drain_sparse_writes(monkeypatch, tmp_path, run_import)
+    assert record["held"] > 50_000_000 > record["reserve"]
+    assert record["why"].startswith(
+        f"The producer's traced peak, {record['held']} bytes, passed the "
+        f"{record['reserve']} bytes that its plan reserves."
+    )
+    # The traced repeat names the allocation and the frames that led to it.
+    assert "hoard.append(bytes(50_000_000))" in record["why"]
+    assert "yield from buffer_batch(self, batch)" in record["why"]
+
+
+def test_a_drain_finalizes_what_earlier_tests_left_before_it_traces(
+    tmp_path, monkeypatch
+):
+    import gc
+
+    from cytearc.storage import sharding
+
+    finalized: list[bytes] = []
+
+    class Garbage:
+        """An object that only a collection frees, whose finalizer allocates,
+        as a store that closes or a buffer that flushes does."""
+
+        def __init__(self) -> None:
+            self.cycle = self
+
+        def __del__(self) -> None:
+            finalized.append(bytes(30_000_000))
+
+    buffer_batch = sharding.SparseShardBuffer.add
+
+    def collecting_add(self, batch):
+        # A collection during the drain, as the producer's allocations can
+        # start one.
+        gc.collect()
+        yield from buffer_batch(self, batch)
+
+    monkeypatch.setattr(sharding.SparseShardBuffer, "add", collecting_add)
+    values = _producer_counts(1_000, 400)[:, :-4]
+
+    def run_import(directory: Path) -> None:
+        instance = _writer(
+            "sparse",
+            _sparse(values, "float32"),
+            str(directory / "counts.zarr"),
+            nthreads=1,
+            policy=_PRODUCER_BANDS,
+        )
+        # What an earlier test left, which no automatic collection frees.
+        Garbage()
+        with pytest.raises(RuntimeError, match="does not cover its row window"):
+            instance.dump()
+
+    enabled = gc.isenabled()
+    gc.disable()
+    try:
+        record = _drain_sparse_writes(monkeypatch, tmp_path, run_import)
+    finally:
+        if enabled:
+            gc.enable()
+    assert len(finalized) == 1
+    assert record["held"] <= record["reserve"], record["why"]
 
 
 def _record_sparse_plans(monkeypatch) -> list[dict[str, Any]]:
@@ -1864,29 +2029,32 @@ def test_a_seurat_import_reserves_what_its_producer_holds(
 ):
     values = _producer_counts()[:, :-4]
     plans = _record_sparse_plans(monkeypatch)
-    records = _drain_sparse_writes(monkeypatch)
-    source = _source("seurat", tmp_path, values, encoding)
-    try:
-        instance = _writer(
-            "seurat",
-            source,
-            str(tmp_path / "counts.zarr"),
-            nthreads=nthreads,
-            policy=_PRODUCER_BANDS,
-        )
-        # Nothing is written, so the counts are refused once the bands are out.
-        with pytest.raises(RuntimeError, match="does not cover its row window"):
-            instance.dump()
-    finally:
-        _close(source)
-    (plan,) = plans
-    (record,) = records
+
+    def run_import(directory: Path) -> None:
+        source = _source("seurat", directory, values, encoding)
+        try:
+            instance = _writer(
+                "seurat",
+                source,
+                str(directory / "counts.zarr"),
+                nthreads=nthreads,
+                policy=_PRODUCER_BANDS,
+            )
+            # Nothing is written, so the counts are refused once the bands
+            # are out.
+            with pytest.raises(RuntimeError, match="does not cover its row window"):
+                instance.dump()
+        finally:
+            _close(source)
+
+    record = _drain_sparse_writes(monkeypatch, tmp_path, run_import)
+    plan = plans[0]
     # Only batches whose cells hold their features sorted without repeats
     # skip the sort and sum, and its charge.
     assert plan["canonicalBatches"] is canonical
     assert record["bands"] > 1
     assert record["kept"] == 0
-    assert record["held"] <= record["reserve"]
+    assert record["held"] <= record["reserve"], record["why"]
     if bound is not None:
         assert record["reserve"] <= bound * record["held"]
 
@@ -1896,10 +2064,42 @@ def test_a_shuffled_seurat_import_reserves_what_its_producer_holds(
     tmp_path, monkeypatch, encoding
 ):
     values = _producer_counts()[:, :-4]
-    records = _drain_sparse_writes(monkeypatch)
-    source = _source("seurat", tmp_path, values, encoding)
+
+    def run_import(directory: Path) -> None:
+        source = _source("seurat", directory, values, encoding)
+        try:
+            instance = _writer(
+                "seurat",
+                source,
+                str(directory / "counts.zarr"),
+                nthreads=1,
+                policy=_PRODUCER_BANDS,
+                shuffle_cells=True,
+            )
+            # Nothing is written, so the counts are refused once the bands
+            # are out.
+            with pytest.raises(RuntimeError, match="does not cover its row window"):
+                instance.dump()
+        finally:
+            _close(source)
+
+    record = _drain_sparse_writes(monkeypatch, tmp_path, run_import)
+    # The producer reads the shuffled cells a bucket at a time, with the next
+    # bucket loading ahead, which its reserve holds beside each batch.
+    assert record["bands"] > 1
+    assert record["kept"] == 0
+    assert record["held"] <= record["reserve"], record["why"]
+
+
+def test_a_shuffled_seurat_batch_charges_three_pointer_arrays(tmp_path):
+    # This pins the charge on purpose. The reserve leaves far more room than
+    # the pointers take, so no traced peak of the producer tells three int64
+    # pointer arrays of a batch from one: 16 bytes a row, 16,176 bytes for a
+    # batch of 1,010 rows, against a reserve of 29 MB.
+    values = _producer_counts()[:, :-4]
+    source = _source("seurat", tmp_path, values, "sparse")
     try:
-        instance = _writer(
+        writer = _writer(
             "seurat",
             source,
             str(tmp_path / "counts.zarr"),
@@ -1907,17 +2107,29 @@ def test_a_shuffled_seurat_import_reserves_what_its_producer_holds(
             policy=_PRODUCER_BANDS,
             shuffle_cells=True,
         )
-        # Nothing is written, so the counts are refused once the bands are out.
-        with pytest.raises(RuntimeError, match="does not cover its row window"):
-            instance.dump()
+        try:
+            (assay,) = writer._assays
+            _values, staging, _canonical = writer._sparse_write_plan(
+                assay.name, assay.counts
+            )
+            read = writer._shuffled_store(assay.name).read_bytes(read_ahead=True)
+            # Three arrays of 8-byte pointers, one more than the batch's rows,
+            # which are at least one and at most the 3,000 cells: 3 * 8 * 2
+            # bytes for a batch of one row, 3 * 8 * 1,011 for 1,010 rows, and
+            # 3 * 8 * 3,001 for 3,000 rows or more.
+            for rows, pointers in (
+                (0, 48),
+                (1, 48),
+                (1_010, 24_264),
+                (2_999, 72_000),
+                (3_000, 72_024),
+                (4_500, 72_024),
+            ):
+                assert staging(rows) - read == pointers, rows
+        finally:
+            writer._release_shuffled_rows()
     finally:
         _close(source)
-    (record,) = records
-    # The producer reads the shuffled cells a bucket at a time, with the next
-    # bucket loading ahead, which its reserve holds beside each batch.
-    assert record["bands"] > 1
-    assert record["kept"] == 0
-    assert record["held"] <= record["reserve"]
 
 
 @pytest.mark.parametrize(
@@ -2038,46 +2250,49 @@ def test_a_seurat_import_stores_the_counts_of_dense_and_coo_blocks_of_a_sparse_s
     np.testing.assert_array_equal(root["RNA/counts"][:], values)
 
 
+@pytest.mark.parametrize("compressed", [False, True], ids=["plain", "gzip"])
 @pytest.mark.parametrize("encoding", ["integer", "real"])
-def test_a_matrix_market_reader_charges_each_line_it_parses_at_its_largest(
-    tmp_path, encoding
+def test_a_matrix_market_parse_of_the_largest_values_holds_no_more_than_its_charge(
+    tmp_path, encoding, compressed
 ):
+    import gc
+    import gzip
     import tracemalloc
 
     from cytearc.readers._matrix_market import (
         matrix_market_entries,
         matrix_market_header,
+        matrix_market_parse_bytes,
     )
 
-    reader = _source("mtx", tmp_path, _producer_counts(40, 20), encoding)
-    try:
-        # What the reader charges for each line it parses at a time.
-        line_bytes = reader.producer_staging_bytes(1, 2)
-        line_bytes -= reader.producer_staging_bytes(1, 1)
-    finally:
-        _close(reader)
     # Coordinates and counts near the largest int64 each parse to a Python int
     # of an int64's full size, and real counts to floats.
     largest = int(np.iinfo(np.int64).max)
-    n_entries = 120_000
-    rng = np.random.default_rng(3)
-    coordinates = rng.integers(largest // 2, largest, (n_entries, 2))
-    counts = (
-        rng.integers(largest // 2, largest, n_entries)
-        if encoding == "integer"
-        else np.floor(rng.random(n_entries) * 1e6)
-    )
-    path = tmp_path / "largest.mtx"
-    with path.open("w") as handle:
-        handle.write(f"%%MatrixMarket matrix coordinate {encoding} general\n")
-        handle.write(f"{largest} {largest} {n_entries}\n")
-        handle.writelines(
-            f"{row} {column} {count}\n"
-            for (row, column), count in zip(coordinates, counts, strict=True)
-        )
-    header = matrix_market_header(path)
 
-    def parse_peak(chunk_rows: int) -> int:
+    def write(path: Path, n_entries: int) -> Path:
+        rng = np.random.default_rng(3)
+        coordinates = rng.integers(largest // 2, largest, (n_entries, 2))
+        counts = (
+            rng.integers(largest // 2, largest, n_entries)
+            if encoding == "integer"
+            else np.floor(rng.random(n_entries) * 1e6)
+        )
+        text = "".join(
+            [
+                f"%%MatrixMarket matrix coordinate {encoding} general\n",
+                f"{largest} {largest} {n_entries}\n",
+                *(
+                    f"{row} {column} {count}\n"
+                    for (row, column), count in zip(coordinates, counts, strict=True)
+                ),
+            ]
+        ).encode()
+        with gzip.open(path, "wb") if compressed else path.open("wb") as handle:
+            handle.write(text)
+        return path
+
+    def parse_peak(header: Any, chunk_rows: int) -> int:
+        gc.collect()
         tracemalloc.start()
         try:
             for entries in matrix_market_entries(header, chunk_rows, counts=True):
@@ -2086,9 +2301,367 @@ def test_a_matrix_market_reader_charges_each_line_it_parses_at_its_largest(
         finally:
             tracemalloc.stop()
 
-    # The parser also holds read buffers of a fixed size, which the growth
-    # from one chunk size to the next leaves out.
-    assert (parse_peak(40_000) - parse_peak(10_000)) / 30_000 <= line_bytes
+    # Lines of about 60 characters: 6,000 of them, more than the 256 KiB
+    # that pandas reads at a time, in chunks of 10, where pandas' buffers
+    # outweigh the lines; and 120,000 in chunks of 10,000 and 40,000, where
+    # the lines outweigh them.
+    small = matrix_market_header(write(tmp_path / "small.mtx", 6_000))
+    large = matrix_market_header(write(tmp_path / "large.mtx", 120_000))
+    peaks = {
+        (header.n_entries, chunk_rows): parse_peak(header, chunk_rows)
+        for header, chunk_rows in ((small, 10), (large, 10_000), (large, 40_000))
+    }
+    for (n_entries, chunk_rows), peak in peaks.items():
+        header = small if n_entries == small.n_entries else large
+        assert peak <= matrix_market_parse_bytes(header, chunk_rows), chunk_rows
+    # The charge grows with the lines of a chunk at least as fast as the parse.
+    assert peaks[120_000, 40_000] - peaks[120_000, 10_000] <= (
+        matrix_market_parse_bytes(large, 40_000)
+        - matrix_market_parse_bytes(large, 10_000)
+    )
+
+
+@pytest.mark.parametrize("compressed", [False, True], ids=["plain", "gzip"])
+def test_a_matrix_market_parse_reads_through_its_own_buffer_on_a_large_block_file_system(
+    tmp_path, monkeypatch, compressed
+):
+    import builtins
+    import gc
+    import gzip
+    import tracemalloc
+
+    from cytearc.readers._matrix_market import (
+        matrix_market_entries,
+        matrix_market_header,
+        matrix_market_parse_bytes,
+    )
+
+    # 60,000 entries of 6 bytes, more than the 256 KiB that pandas reads at
+    # a time.
+    path = tmp_path / ("large_block.mtx.gz" if compressed else "large_block.mtx")
+    with gzip.open(path, "wt") if compressed else path.open("w") as handle:
+        handle.write("%%MatrixMarket matrix coordinate integer general\n")
+        handle.write("9 9 60000\n")
+        handle.writelines(
+            f"{1 + index % 9} {1 + index % 7} {1 + index % 5}\n"
+            for index in range(60_000)
+        )
+    header = matrix_market_header(path)
+    opened = builtins.open
+
+    def large_block_open(file, mode="r", buffering=-1, *args, **kwargs):
+        # open() buffers a file that it opens without a buffer size by the
+        # block that the file system reports, here one of 4 MiB.
+        buffering = 4 * 1024**2 if buffering == -1 else buffering
+        return opened(file, mode, buffering, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", large_block_open)
+    gc.collect()
+    tracemalloc.start()
+    try:
+        for entries in matrix_market_entries(header, 1_000, counts=True):
+            del entries
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    # Read through 4 MiB, the parse would hold more than twice its charge.
+    assert peak <= matrix_market_parse_bytes(header, 1_000) < 4 * 1024**2
+
+
+@pytest.mark.slow
+def test_a_matrix_market_parse_of_many_chunks_holds_no_more_than_its_charge(
+    tmp_path,
+):
+    import gc
+    import gzip
+    import tracemalloc
+
+    from cytearc.readers._matrix_market import (
+        matrix_market_entries,
+        matrix_market_header,
+        matrix_market_parse_bytes,
+    )
+
+    # pandas before 3.0 keeps 99 bytes for each chunk that it reads until the parse
+    # ends: 0.59 MB for 6,000 chunks of 10 entries, beside its buffers.
+    path = tmp_path / "many.mtx.gz"
+    with gzip.open(path, "wt") as handle:
+        handle.write("%%MatrixMarket matrix coordinate integer general\n")
+        handle.write("9 9 60000\n")
+        handle.writelines(
+            f"{1 + index % 9} {1 + index % 7} {1 + index % 5}\n"
+            for index in range(60_000)
+        )
+    header = matrix_market_header(path)
+    gc.collect()
+    tracemalloc.start()
+    try:
+        for entries in matrix_market_entries(header, 10, counts=True):
+            del entries
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert peak <= matrix_market_parse_bytes(header, 10)
+
+
+@pytest.mark.parametrize(
+    ("order", "shape", "lines"),
+    [
+        # 150,000 entries, 225,000 once the unordered file splits its counts,
+        # parsed 1,000 lines at a time, where pandas' buffers outweigh the
+        # lines, and in five chunks or more of 30,000, where the lines
+        # outweigh them and each chunk is parsed beside the last one's arrays.
+        ("featureMajor", (1_500, 400), 1_000),
+        ("featureMajor", (1_500, 400), 30_000),
+        ("unordered", (1_500, 400), 1_000),
+        ("unordered", (1_500, 400), 30_000),
+        # Cells of one entry or two, whose map and free slots outweigh the
+        # room that the charge of pandas' buffers leaves.
+        ("featureMajor", (100_000, 4), 1_000),
+        # Cells of one entry or two, whose arrays the sort holds beside each
+        # block of entries, outweighing the parse.
+        pytest.param("unordered", (400_000, 2), 2_000, marks=pytest.mark.slow),
+    ],
+)
+def test_sorting_matrix_market_entries_into_rows_holds_no_more_than_its_charge(
+    tmp_path, order, shape, lines
+):
+    import gc
+    import tracemalloc
+
+    reader = _source("mtx", tmp_path, _producer_counts(*shape)[:, :-4], order)
+    try:
+        engine = reader._engine
+        # The rows that construction sorted for an unordered file are sorted
+        # again once a release has removed them, as a later import does.
+        engine.release()
+        charge = reader._sparse_import_preparation_bytes(lines)
+        gc.collect()
+        tracemalloc.start()
+        try:
+            engine.prepare(lines)
+            held = tracemalloc.get_traced_memory()[1]
+        finally:
+            tracemalloc.stop()
+        assert engine._csrIndptr is not None
+    finally:
+        _close(reader)
+    assert held <= charge
+    # The charge counts the Python objects that pandas 2.2 makes of each
+    # line, which pandas 3.0 does not, so it may reach 2.2 times what a sort
+    # with pandas 3.0 holds.
+    assert charge <= 2.5 * held
+
+
+def _feature_major_reader(directory: Path, values: np.ndarray) -> MtxReader:
+    """Open ``values`` as a feature-major Matrix Market file whose sorted rows
+    go to ``directory / "rows"``."""
+    rows = directory / "rows"
+    rows.mkdir()
+    return MtxReader(
+        inspect_mtx(_write_mtx(directory / "mtx", values, "featureMajor"))[0],
+        temp_dir=str(rows),
+    )
+
+
+def test_a_feature_major_import_refuses_a_budget_that_cannot_sort_its_entries(
+    tmp_path,
+):
+    from cytearc.utils.memory_budget import MemoryBudgetError
+
+    values = _producer_counts()[:, :-4]
+    reader = _feature_major_reader(tmp_path, values)
+    destination = tmp_path / "counts.zarr"
+    try:
+        sorting = reader._sparse_import_preparation_bytes(100_000)
+        with pytest.raises(MemoryBudgetError) as refused:
+            _writer("mtx", reader, str(destination), mem_budget=sorting, policy="fit")
+        needed = refused.value.needed_bytes
+        # The reader's arrays and the count summaries are held beside it.
+        assert sorting < needed
+        assert refused.value.item.startswith(
+            "sorting the Matrix Market entries into rows of cells, 100000 lines"
+        )
+        # Nothing was parsed or created.
+        assert not destination.exists()
+        assert list((tmp_path / "rows").iterdir()) == []
+        # A budget one byte short of the bytes it names is refused again.
+        with pytest.raises(MemoryBudgetError) as again:
+            _writer("mtx", reader, str(destination), mem_budget=needed - 1)
+        assert again.value.needed_bytes == needed
+        # The refusal also names lines_in_mem halved until the sorting fits,
+        # which imports within the refused budget.
+        lines = int(re.search(r"lines_in_mem=(\d+)", str(refused.value))[1])
+        assert lines < 100_000
+        _writer(
+            "mtx",
+            reader,
+            str(tmp_path / "fewer_lines.zarr"),
+            mem_budget=sorting,
+            policy="fit",
+            lines_in_mem=lines,
+        ).dump()
+        # A budget of the bytes it names sorts the entries and imports them.
+        _writer("mtx", reader, str(destination), mem_budget=needed, policy="fit").dump()
+    finally:
+        _close(reader)
+    for imported in (destination, tmp_path / "fewer_lines.zarr"):
+        root = zarr.open_group(str(imported), mode="r")
+        np.testing.assert_array_equal(root["RNA/counts"][:], values)
+
+
+def test_an_import_admits_sorting_the_rows_that_a_release_removed_before_it_writes(
+    tmp_path,
+):
+    from cytearc.utils.memory_budget import MemoryBudgetError
+
+    values = _producer_counts()[:, :-4]
+    rows = tmp_path / "rows"
+    rows.mkdir()
+    reader = MtxReader(
+        inspect_mtx(_write_mtx(tmp_path / "mtx", values, "unordered"))[0],
+        temp_dir=str(rows),
+    )
+    destination = tmp_path / "counts.zarr"
+    try:
+        # The rows that construction sorted need no sorting again, so the
+        # import is built within a budget too small to sort them.
+        assert reader._sparse_import_preparation_bytes(100_000) == 0
+        reader._release_sparse_import()
+        sorting = reader._sparse_import_preparation_bytes(100_000)
+        assert sorting > 0
+        reader._prepare_sparse_import()
+        writer = _writer(
+            "mtx", reader, str(destination), mem_budget=sorting, policy="fit"
+        )
+        # Another import's end removes the rows before this import writes.
+        reader._release_sparse_import()
+        with pytest.raises(MemoryBudgetError) as refused:
+            writer.dump()
+        assert refused.value.item.startswith(
+            "sorting the Matrix Market entries into rows of cells"
+        )
+        assert sorting < refused.value.needed_bytes
+        assert list(rows.iterdir()) == []
+    finally:
+        _close(reader)
+
+
+def test_a_shuffled_feature_major_import_refuses_a_budget_that_cannot_sort_its_entries(
+    tmp_path,
+):
+    from cytearc.utils.memory_budget import MemoryBudgetError
+
+    values = _producer_counts()[:, :-4]
+    reader = _feature_major_reader(tmp_path, values)
+    destination = tmp_path / "counts.zarr"
+
+    def shuffled(path: Path, budget: int, **options: Any) -> Any:
+        return _writer(
+            "mtx",
+            reader,
+            str(path),
+            mem_budget=budget,
+            policy="fit",
+            shuffle_cells=True,
+            **options,
+        )
+
+    try:
+        sorting = reader._sparse_import_preparation_bytes(100_000)
+        # The cells are shuffled as they are read for the scan, which sorts
+        # the entries into rows first, beside the reader's arrays and the
+        # order of the cells and its inverse.
+        with pytest.raises(MemoryBudgetError) as refused:
+            shuffled(destination, sorting)
+        needed = refused.value.needed_bytes
+        # The order of the 3,000 cells and its inverse take 8 bytes a cell each.
+        assert needed == sorting + reader._sparse_import_resident_bytes() + 48_000
+        assert refused.value.item.startswith(
+            "sorting the Matrix Market entries into rows of cells, 100000 lines"
+        )
+        assert not destination.exists()
+        assert list((tmp_path / "rows").iterdir()) == []
+        # A budget one byte short of the bytes it names is refused again.
+        with pytest.raises(MemoryBudgetError) as again:
+            shuffled(destination, needed - 1)
+        assert again.value.needed_bytes == needed
+        # The refusal also names lines_in_mem halved until the sorting fits,
+        # which imports within the refused budget.
+        lines = int(re.search(r"lines_in_mem=(\d+)", str(refused.value))[1])
+        assert lines < 100_000
+        shuffled(tmp_path / "fewer_lines.zarr", sorting, lines_in_mem=lines).dump()
+        # A budget of the bytes it names sorts the entries and imports them.
+        shuffled(destination, needed).dump()
+    finally:
+        _close(reader)
+    for imported in (destination, tmp_path / "fewer_lines.zarr"):
+        root = zarr.open_group(str(imported), mode="r")
+        order = np.asarray(root["cellData/sourceRow"][:])
+        np.testing.assert_array_equal(root["RNA/counts"][:], values[order])
+
+
+def test_a_second_shuffle_of_a_reader_is_refused_a_budget_that_cannot_sort_its_entries(
+    tmp_path,
+):
+    from cytearc.utils.memory_budget import MemoryBudgetError
+
+    reader = _feature_major_reader(tmp_path, _producer_counts()[:, :-4])
+    try:
+        sorting = reader._sparse_import_preparation_bytes(100_000)
+        # The first import shuffles the cells, and its read of them removes
+        # the rows that its sorting made.
+        _writer("mtx", reader, str(tmp_path / "first.zarr"), shuffle_cells=True)
+        first = reader._shuffledRows
+        assert first is not None
+        assert reader._sparse_import_preparation_bytes(100_000) == sorting
+        # Another shuffle sorts the entries again, which the budget of the
+        # sorting alone cannot hold beside the reader's arrays and the cells'
+        # order.
+        with pytest.raises(MemoryBudgetError) as refused:
+            _writer(
+                "mtx",
+                reader,
+                str(tmp_path / "second.zarr"),
+                mem_budget=sorting,
+                shuffle_cells=True,
+                shuffle_seed=1,
+            )
+        assert refused.value.item.startswith(
+            "sorting the Matrix Market entries into rows of cells"
+        )
+        # The refusal came before the second shuffle read any cell, so the
+        # first import's shuffled cells remain.
+        assert reader._shuffledRows is first
+        assert not (tmp_path / "second.zarr").exists()
+    finally:
+        _close(reader)
+
+
+def test_a_matrix_market_import_is_charged_no_more_lines_than_its_file_holds(
+    tmp_path,
+):
+    # 200 cells of 50 genes, a quarter of them nonzero: about 2,500 entries,
+    # fewer than the 100,000 lines parsed at a time by default.
+    values = _producer_counts(200, 50)[:, :-4]
+    reader = _source("mtx", tmp_path, values, "integer")
+    try:
+        entries = reader.matrixEntryCount
+        assert entries < 100_000
+        for batch in (1, 50, 200):
+            charges = {
+                lines: reader.producer_staging_bytes(batch, lines)
+                for lines in (entries - 1, entries, entries + 1, 100_000)
+            }
+            assert charges[entries - 1] < charges[entries]
+            assert charges[entries] == charges[entries + 1] == charges[100_000]
+        # Charged 100,000 lines, the import needed 26.5 MiB; charged its
+        # entries, it needs 2.5 MiB.
+        _writer("mtx", reader, str(tmp_path / "counts.zarr"), mem_budget="4M").dump()
+    finally:
+        _close(reader)
+    root = zarr.open_group(str(tmp_path / "counts.zarr"), mode="r")
+    np.testing.assert_array_equal(root["RNA/counts"][:], values)
 
 
 @pytest.mark.parametrize("writer", ["h5ad", "cellranger"])

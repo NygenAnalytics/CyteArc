@@ -26,12 +26,18 @@ from ..utils.files import is_gzip, open_text
 from ..utils.memory_budget import MemoryBudgetError
 from ._matrix_market import (
     matrix_market_entries,
-    matrix_market_entry_object_bytes,
     matrix_market_header,
+    matrix_market_parse_bytes,
     read_matrix_market_header,
 )
 from .cellranger import CrReader
-from ._row_spill import RowSpillPlan, checked_destinations, row_spill_plan, spill_rows
+from ._row_spill import (
+    RowSpillPlan,
+    checked_destinations,
+    least_admitted_budget,
+    row_spill_plan,
+    spill_rows,
+)
 from ._sparse import encoded_entry_bytes
 from ._text import (
     DuplicateFeatureIds,
@@ -1760,6 +1766,45 @@ class _MtxEngine:
     def max_window_nnz(self, window_rows: int) -> int:
         return max_window_nnz(self._cumulativeRowNnz, window_rows)
 
+    def preparation_bytes(self, lines_in_mem: int) -> int:
+        """Return what :meth:`prepare` holds while it sorts the entries into rows.
+
+        A feature-major matrix, and an unordered one whose rows a release
+        removed, are parsed ``lines_in_mem`` lines at a time beside a map from
+        the file's cells to the kept ones and the next free slot of each kept
+        cell; each line's kept cell, feature and count are copied, ordered and
+        placed through seven 8-byte arrays and a mask. An unordered matrix's
+        rows are then sorted a block of at least its longest row at a time,
+        through twelve 8-byte arrays and two masks a slot, beside the entries,
+        largest count and pointer of each kept cell, a mask that compares the
+        pointers with those that construction found, and the largest count of
+        each feature. A cell-major matrix, and rows already sorted, need none.
+        """
+        if lines_in_mem <= 0:
+            raise ValueError("lines_in_mem must be positive")
+        if self.coordinateOrder == "cellMajor" or self._csrIndptr is not None:
+            return 0
+        index_bytes = np.dtype(np.int64).itemsize
+        mask_bytes = np.dtype(np.bool_).itemsize
+        lines = min(int(lines_in_mem), self.header.n_entries)
+        parsing = (
+            matrix_market_parse_bytes(self.header, lines_in_mem)
+            + lines * (7 * index_bytes + mask_bytes)
+            + (self.rawCellCount + self.nCells) * index_bytes
+        )
+        if self.coordinateOrder == "featureMajor":
+            return int(parsing)
+        assert self._slotPointers is not None
+        slots = int(self._slotPointers[-1])
+        longest = int(np.diff(self._slotPointers).max(initial=0))
+        block = min(slots, max(int(lines_in_mem), longest))
+        sorting = (
+            block * (12 * index_bytes + 2 * mask_bytes)
+            + (3 * self.nCells + 1 + self.nFeatures) * index_bytes
+            + (self.nCells + 1) * mask_bytes
+        )
+        return int(max(parsing, sorting))
+
     def producer_staging_bytes(
         self,
         batch_size: int,
@@ -1769,12 +1814,14 @@ class _MtxEngine:
             raise ValueError("batch_size must be positive")
         if lines_in_mem <= 0:
             raise ValueError("lines_in_mem must be positive")
-        parser_value_bytes = (
-            2 * np.dtype(np.int64).itemsize + np.dtype(np.uint64).itemsize
-        )
         source_nnz = self.max_window_nnz(batch_size)
-        cell_map_bytes = (
-            self.rawCellCount * np.dtype(np.int64).itemsize
+        # A cell-major matrix is parsed as its batches stream, beside the map
+        # from the file's cells to the kept ones. The batches of any other
+        # matrix are copied out of the rows that prepare sorted before the
+        # write, which preparation_bytes charges.
+        parse_bytes = (
+            matrix_market_parse_bytes(self.header, lines_in_mem)
+            + self.rawCellCount * np.dtype(np.int64).itemsize
             if self.coordinateOrder == "cellMajor"
             else 0
         )
@@ -1788,19 +1835,13 @@ class _MtxEngine:
             else 0
         )
         return int(
-            lines_in_mem
-            * (
-                4 * parser_value_bytes
-                + np.dtype(np.bool_).itemsize
-                + matrix_market_entry_object_bytes(self.header)
-            )
+            parse_bytes
             + source_nnz
             * (
                 2 * np.dtype(np.int64).itemsize
                 + self.matrixDtype.itemsize
                 + row_value_bytes
             )
-            + cell_map_bytes
         )
 
     def consume(
@@ -2149,20 +2190,25 @@ class MtxReader(CrReader):
                 engine.producer_staging_bytes(rows, lines)
             )
 
-        try:
-            plan = row_spill_plan(
+        def planned(budget: int) -> RowSpillPlan:
+            return row_spill_plan(
                 destinations,
                 (self.nCells, self.nFeatures),
                 engine.matrixDtype,
                 entries=int(pointers[-1]),
                 longest=longest,
-                maxBytes=available,
+                maxBytes=budget,
                 least=lambda plan: held(plan, 1),
             )
+
+        try:
+            plan = planned(available)
         except MemoryBudgetError as error:
             # The spill runs beside the reader's arrays, so the budget that
-            # passes it holds them too.
-            needed = resident + error.needed_bytes
+            # passes it holds them too, beside the least budget at which the
+            # spill's plan admits it: a larger budget sizes larger buckets,
+            # which need less beside them.
+            needed = resident + least_admitted_budget(planned, error)
             raise MemoryBudgetError(
                 "Shuffling cells exceeds the memory limit. Beside the "
                 f"{resident} bytes of the reader's arrays, reading the rows and "
@@ -2282,6 +2328,13 @@ class MtxReader(CrReader):
         if self._shuffledRows is None:
             self._engine.prepare()
             self.temporaryDiskBytes = self._engine.temporaryDiskBytes
+
+    def _sparse_import_preparation_bytes(self, lines_in_mem: int) -> int:
+        """Return what sorting the entries into rows holds, parsing
+        ``lines_in_mem`` lines at a time, as :meth:`_prepare_sparse_import`
+        and the shuffle of the cells sort them; nothing while sorted rows
+        exist."""
+        return self._engine.preparation_bytes(lines_in_mem)
 
     def _release_sparse_import(self) -> None:
         self._engine.release()

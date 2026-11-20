@@ -739,12 +739,13 @@ CyteArc validates persisted data and public arguments against the following cont
   `DataStoreMerge` from `plan`, instead of from `dump`; `SeuratToZarr` construction also prepares
   every selected source and reads its counts once, so source preparation errors surface there.
   `CrToZarr` and `MtxToZarr` take `lines_in_mem` in the constructor, and `dump` no longer accepts
-  it, so the fit reserves the Matrix Market parse buffer that the write uses and a smaller buffer
-  fits a smaller budget. An explicit `dump(batch_size=...)` reads at most one destination row band
+  it, so the fit reserves the Matrix Market parse buffer that the write of a file sorted by cell
+  uses and a smaller buffer fits a smaller budget; a feature-major file's parse is admitted on its
+  own, before the write, as the contract on Matrix Market parse charges below records. An explicit `dump(batch_size=...)` reads at most one destination row band
   per batch, so it can no longer exceed what the fit admitted. Writers that write their assays one
   at a time (Seurat, subset, repack, and merge) admit each assay on its own. The fitted or named
-  layout depends only on the budget, the data, the dtypes, and for Matrix Market imports
-  `lines_in_mem`, never on the worker count. A resumed merge keeps the layout persisted with its completed counts, so a
+  layout depends only on the budget, the data, the dtypes, and for Matrix Market imports of files
+  sorted by cell `lines_in_mem`, never on the worker count. A resumed merge keeps the layout persisted with its completed counts, so a
   budget change between attempts cannot block it, and fits the layout of the counts it rewrites.
   Sparse imports admit the producer's buffering and the band writes as separate phases, so budgets
   that the summed plan refused now import. `write_counts_t`, `finalize_writer_counts_t`,
@@ -1292,6 +1293,7 @@ CyteArc validates persisted data and public arguments against the following cont
   native Leiden estimate leaves out the per-worker scratch that a hub raises, and the t-SNE one
   the working memory of `sgtsnepi`.
 - The trajectory loaders of a pseudotime and of a fate map's direction score check their graph's load against the memory budget before they read it, beside what their caller holds and the numbering of the graph's components (`trajectory.pseudotime.component_numbering_bytes`), so every trajectory call that loads a pseudotime or a fate map refuses before it reads the graph. `trajectory.membership.membership_bytes` holds the estimate that `lineage_membership` checks against the memory budget once its inputs are loaded, and the curves' loader keeps the fate map's inputs that it validated, so `lineage_membership`, `load_lineage_membership` and `branch_cells` load the graph once.
+- A Matrix Market import charges each parse of its file where the parse runs, at what `readers._matrix_market.matrix_market_parse_bytes` counts: pandas' reader buffers, the floats that pandas before 3.0 keeps for each chunk, and each line of a chunk, never more lines than the file declares. The producer of a file sorted by cell holds its parse beside its batches. A feature-major file, and an unordered file whose sorted rows a release removed, are parsed into rows before the counts write, so their producer copies batches out of those rows and is charged no parse; `CrToZarr` admits that sorting on its own (`MtxReader._sparse_import_preparation_bytes`) before it creates the destination and again before it prepares the rows, and a shuffled import before it reads the cells. The construction of a reader still sorts an unordered file's rows unchecked, before any budget exists.
 - `run_cluster_selection` reads its sampled coordinates under the memory budget and raises
   `MemoryError` before reading when they do not fit.
 - Dotplot size legends draw `SizeScale.areas` exactly, without the 180 pt² cap, and composite size

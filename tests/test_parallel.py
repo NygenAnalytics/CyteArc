@@ -493,6 +493,44 @@ def test_stream_counts_the_consumed_block_toward_its_limit():
     assert maximum == 2
 
 
+@pytest.mark.parametrize("msg", [None, "reading"])
+def test_a_serial_stream_holds_no_earlier_item_or_result_while_its_source_makes_the_next(
+    msg,
+):
+    items: list[weakref.ref] = []
+    results: list[weakref.ref] = []
+    held: list[tuple[int, int]] = []
+
+    def tracked(refs: list[weakref.ref], value: np.ndarray) -> np.ndarray:
+        refs.append(weakref.ref(value))
+        return value
+
+    def source() -> Iterator[np.ndarray]:
+        for index in range(4):
+            # The earlier items and results that are still alive, once the
+            # work is done with each item and the consumer dropped its result.
+            held.append(
+                (
+                    sum(ref() is not None for ref in items),
+                    sum(ref() is not None for ref in results),
+                )
+            )
+            yield tracked(items, np.full(1_000, index))
+
+    stream = stream_shards(
+        source(), lambda item: tracked(results, item + 1), workers=1, msg=msg
+    )
+    # A count by hand: enumerate keeps each result in the tuple it reuses
+    # until the stream has made the next one.
+    index = 0
+    for result in stream:
+        np.testing.assert_array_equal(result, index + 1)
+        del result
+        index += 1
+    assert len(items) == len(results) == 4
+    assert held == [(0, 0)] * 4
+
+
 def test_serial_source_observes_previous_consumption():
     consumed = []
 

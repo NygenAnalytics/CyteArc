@@ -286,10 +286,28 @@ def _dense_count_bands(
                 np.add(part, 0, out=part)
             for band in buffer.add(part):
                 yield assay_name, band
+                # The band's consumer holds it; keeping it here would hold
+                # its values beside the next batch.
+                del band
             del part
         del values
     for buffer in buffers.values():
         buffer.finish()
+
+
+def _dense_band_writes(
+    destinations: Mapping[str, Any], bands: Iterator[tuple[str, Any]]
+) -> Iterator[Any]:
+    """Hand each band of ``bands`` to the write of its assay's destination.
+
+    No band stays here once its write has it, so a written band is freed
+    before the next batch fills the next band.
+    """
+    from ..storage.sharding import DenseWriteBand
+
+    for assay_name, band in bands:
+        yield DenseWriteBand(destinations[assay_name], band)
+        del band
 
 
 def _producer_process_bytes(producers: int, reserveBytes: int) -> int:
@@ -371,6 +389,9 @@ def _worker_messages(
                 active.pop(connection)
                 connection.close()
             yield index, kind, payload
+            # The consumer holds the message's band as long as it needs it;
+            # keeping it here would hold it beside the next one received.
+            del payload
 
 
 def _stop_workers(
@@ -587,6 +608,8 @@ def _read_dense_h5ad_process_window(
             connection.send(("band", item))
             if stop.is_set():
                 return
+            # The band was sent; its copy here would sit beside the next one.
+            del item
         if not stop.is_set():
             connection.send(("done", None))
 
@@ -612,7 +635,7 @@ def _write_dense_h5ad_process_window(
     from ..storage.execution import execution_report_scope
     from ..storage.identity import CountSummary
     from ..storage.schema import load_count_array
-    from ..storage.sharding import DenseBandBuffer, DenseWriteBand, write_dense_bands
+    from ..storage.sharding import DenseBandBuffer, write_dense_bands
     from ..storage.stores import load_zarr
 
     def work(reader: H5adReader) -> None:
@@ -629,11 +652,11 @@ def _write_dense_h5ad_process_window(
             assay_name: CountSummary(destination, rows=(row_start, row_end))
             for assay_name, destination in destinations.items()
         }
-        writes = (
-            DenseWriteBand(destinations[assay_name], band)
-            for assay_name, band in _dense_count_bands(
+        writes = _dense_band_writes(
+            destinations,
+            _dense_count_bands(
                 reader, batch_rows, row_start, row_end, buffers, columns, linear, stop
-            )
+            ),
         )
         with execution_report_scope() as reports:
             write_dense_bands(
@@ -2363,16 +2386,18 @@ class H5adToZarr:
                 assay_name: DenseBandBuffer(destination)
                 for assay_name, destination in destinations.items()
             }
-            for assay_name, band in _dense_count_bands(
-                self.h5ad,
-                batch_rows,
-                0,
-                self.h5ad.nCells,
-                buffers,
-                self._dense_columns(),
-                self._linear,
-            ):
-                yield DenseWriteBand(destinations[assay_name], band)
+            yield from _dense_band_writes(
+                destinations,
+                _dense_count_bands(
+                    self.h5ad,
+                    batch_rows,
+                    0,
+                    self.h5ad.nCells,
+                    buffers,
+                    self._dense_columns(),
+                    self._linear,
+                ),
+            )
             return
         destination_specs = self._destination_specs(destinations)
         with closing(
@@ -2397,6 +2422,9 @@ class H5adToZarr:
                     continue
                 assay_name, band = payload
                 yield DenseWriteBand(destinations[assay_name], band)
+                # The write holds the band it was handed; keeping it here
+                # would hold it beside the next band received.
+                del band, payload
 
     def _write_sparse_counts(
         self,
@@ -2689,6 +2717,9 @@ class H5adToZarr:
                     band,
                     producer_bytes,
                 )
+                # The write holds the band it was handed; keeping it here
+                # would hold it beside the next band received.
+                del band, payload
 
     @staticmethod
     def _destination_specs(destinations: dict[str, Any]) -> dict[str, Any]:

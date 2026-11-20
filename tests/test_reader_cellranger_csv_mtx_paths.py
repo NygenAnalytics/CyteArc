@@ -1839,6 +1839,8 @@ def test_mtx_reader_planning_and_streaming_arguments_must_be_positive(
             reader.producer_staging_bytes(0, 1)
         with pytest.raises(ValueError, match="lines_in_mem must be positive"):
             reader.producer_staging_bytes(1, 0)
+        with pytest.raises(ValueError, match="lines_in_mem must be positive"):
+            reader._sparse_import_preparation_bytes(0)
         with pytest.raises(ValueError, match="window_rows must be positive"):
             reader.max_window_nnz(0)
         assert reader.max_window_nnz(2) == 2

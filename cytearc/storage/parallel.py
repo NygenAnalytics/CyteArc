@@ -215,8 +215,16 @@ def stream_shards(
                     shutdown_checkpoint()
                     with _shard_context():
                         result = work(item)
+                    # Neither the item nor its result stays here while the
+                    # next item is made: the work is done with the item, and
+                    # the consumer holds the result as long as it needs it,
+                    # as the threaded stream lets go of both.
+                    del item
                     shutdown_checkpoint()
-                    yield result
+                    try:
+                        yield result
+                    finally:
+                        del result
 
             yield from _progress(checked(), msg, total)
         finally:

@@ -53,6 +53,7 @@ from cytearc.storage.stores import (
     open_store,
 )
 from cytearc.storage.types import array_metadata_shards
+from tests.memory_helpers import HandedArrays
 from tests.store_probes import RecordingStore
 
 
@@ -785,6 +786,58 @@ def test_dense_row_batches_flush_at_shard_boundaries():
     )
     assert rows == 7
     np.testing.assert_array_equal(destination[:], expected.astype(np.uint16))
+
+
+@pytest.mark.parametrize("writers", [1, 4])
+@pytest.mark.parametrize(
+    "batch_rows",
+    [100, 30, 250],
+    ids=["a band a batch", "bands across batches", "batches across bands"],
+)
+def test_a_dense_write_frees_each_written_band_before_its_source_makes_the_next_batch(
+    monkeypatch, writers, batch_rows
+):
+    from cytearc.storage import sharding
+    from cytearc.storage.execution import execution_report_scope
+
+    root = zarr.open_group(store=MemoryStore(), mode="w")
+    # Six bands of 100 rows.
+    destination = root.create_array(
+        "values", shape=(600, 40), chunks=(50, 40), shards=(100, 40), dtype=np.float64
+    )
+    expected = np.repeat(np.arange(600, dtype=np.float64)[:, None], 40, axis=1)
+    handed = HandedArrays()
+    write = sharding.write_dense_bands
+
+    def watched(item):
+        handed.hand(item.band.values)
+        return item
+
+    def watched_write(writes, **options):
+        # map hands each write on and keeps none of them.
+        return write(map(watched, writes), **options)
+
+    def batches():
+        for start in range(0, 600, batch_rows):
+            # The source makes each batch once the bands handed so far are
+            # freed: a write holds its band until it ends, and with 4 writers
+            # runs beside the source. A band that the producer keeps stays
+            # alive while the source waits.
+            handed.wait_until_freed()
+            yield expected[start : start + batch_rows].copy()
+
+    monkeypatch.setattr(sharding, "write_dense_bands", watched_write)
+    with execution_report_scope() as reports:
+        rows = write_dense_from_row_batches(
+            destination, batches(), resources=ResourceBudget(1024**3, writers)
+        )
+    assert rows == 600
+    np.testing.assert_array_equal(destination[:], expected)
+    (report,) = reports
+    assert report.actualWriteWorkers == writers
+    assert len(handed) == 6
+    # Every band handed to a write was freed before the source made a batch.
+    assert handed.freed == [True] * -(-600 // batch_rows)
 
 
 @pytest.mark.parametrize(

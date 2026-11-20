@@ -952,8 +952,9 @@ def test_feature_major_cleanup_after_planning_and_write_failures(
 
     planning_reader = MtxReader(candidate, temp_dir=str(tmp_path))
     destination = tmp_path / "planning.zarr"
-    # The layout is admitted before the destination or temporary rows exist.
-    with pytest.raises(MemoryError, match="requested count-matrix policy"):
+    # The sorting of the entries into rows, and then the layout, are admitted
+    # before the destination or temporary rows exist.
+    with pytest.raises(MemoryError, match="sorting the Matrix Market entries"):
         MtxToZarr(
             planning_reader,
             str(destination),
@@ -1397,14 +1398,15 @@ def test_mtx_import_fits_the_parse_buffer_that_it_reads(tmp_path):
     reader = MtxReader(inspect_mtx(directory)[0])
     store = MemoryStore()
     try:
-        # The default buffer of 100,000 parsed lines needs about 9.7 MB, so the
-        # import is refused before the destination exists.
+        # The default buffer of 100,000 lines parses the file's 10,000 entries
+        # in one chunk, which needs about 5.8 MiB, so the import is refused
+        # before the destination exists.
         destination = tmp_path / "default.zarr"
         with pytest.raises(MemoryError, match="count shards of one row"):
             MtxToZarr(
                 reader,
                 str(destination),
-                mem_budget="8M",
+                mem_budget="4M",
                 nthreads=1,
                 shuffle_cells=False,
             )
@@ -1420,9 +1422,9 @@ def test_mtx_import_fits_the_parse_buffer_that_it_reads(tmp_path):
         MtxToZarr(
             reader,
             store,
-            mem_budget="8M",
+            mem_budget="4M",
             nthreads=1,
-            lines_in_mem=10_000,
+            lines_in_mem=1_000,
             shuffle_cells=False,
         ).dump()
     finally:
