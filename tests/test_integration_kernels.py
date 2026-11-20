@@ -1,9 +1,14 @@
 """Compiled WNN and SNN integration against the NumPy loops they replaced.
 
 The references below are the per-cell WNN loop and the per-row SNN merge that
-the compiled kernels replaced, kept as they were. The kernels repeat their
-arithmetic and summation order, so every comparison is exact: the same
-columns, the same float32 weights bit for bit, and the same modality weights.
+the compiled kernels replaced, kept as they were except for one change: the
+distance of a prediction is a norm along the last axis, which sums the squares
+in NumPy's pairwise order on every platform, where the norm of the whole
+vector took a BLAS dot product, whose order depends on the BLAS library and,
+with Apple's Accelerate, on where the vector sits in memory. The kernels
+repeat their arithmetic and summation order, so every comparison is exact: the
+same columns, the same float32 weights bit for bit, and the same modality
+weights.
 """
 
 import numpy as np
@@ -27,7 +32,7 @@ def _legacy_kernel_affinity(
 def _legacy_prediction_affinity(
     point: np.ndarray, estimate: np.ndarray, nearest_distance: float, bandwidth: float
 ) -> float:
-    estimate_distance = float(np.linalg.norm(point - estimate))
+    estimate_distance = float(np.linalg.norm(point - estimate, axis=-1))
     return float(
         _legacy_kernel_affinity(
             np.asarray([estimate_distance]), nearest_distance, bandwidth

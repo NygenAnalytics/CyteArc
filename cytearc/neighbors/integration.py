@@ -215,7 +215,11 @@ def _prediction_affinity(
     nearest_distance: float,
     bandwidth: float,
 ) -> float:
-    estimate_distance = float(np.linalg.norm(point - estimate))
+    # A norm along an axis sums the squares in NumPy's pairwise order, as the
+    # candidate distances do. A norm of the whole vector takes a BLAS dot
+    # product instead, whose order depends on the BLAS library and, with
+    # Apple's Accelerate, on where the vector sits in memory.
+    estimate_distance = float(np.linalg.norm(point - estimate, axis=-1))
     return float(
         _kernel_affinity(
             np.asarray([estimate_distance]),
@@ -674,8 +678,10 @@ def _score_block(
             np.empty((rows, scratch_width), dtype=zero.dtype),
             offsets,
         )
-        # np.vecdot takes each dot product as np.linalg.norm takes it.
-        predicted = np.sqrt(np.vecdot(offsets, offsets)).astype(np.float64)
+        # The squares of each offset add along its last axis in NumPy's
+        # pairwise order, as _prediction_affinity adds them, on every platform.
+        np.multiply(offsets, offsets, out=offsets)
+        predicted = np.sqrt(np.add.reduce(offsets, axis=-1)).astype(np.float64)
         del offsets
         predictions = _affinities(
             predicted,
