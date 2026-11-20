@@ -1279,8 +1279,9 @@ def library_size_factor(assay: RNAassay) -> float:
     derives, so that the new assay normalizes as its source does. It is the
     session's ``sf``, or, when the session sets ``sf`` to None, the size
     factor that the assay stores, or 1000 when it stores none: the factor that
-    a new session opens the assay with. A NumPy number is returned as the
-    Python number it holds, as JSON attributes keep it.
+    a new session opens the assay with. A NumPy number, or an array of one
+    number, is returned as the Python number it holds, as JSON attributes keep
+    it.
 
     Args:
         assay: The source assay.
@@ -1292,9 +1293,11 @@ def library_size_factor(assay: RNAassay) -> float:
         ValueError: If the session's ``sf`` is neither None nor a finite
             positive number, since no assay that recorded it could be opened.
     """
-    factor = assay.sf
+    factor: Any = assay.sf
     if factor is None:
         return cast(float, assay.attrs.get("size_factor", DEFAULT_SIZE_FACTOR))
+    if isinstance(factor, np.ndarray | np.generic) and factor.ndim == 0:
+        factor = factor.item()
     if not _is_size_factor(factor):
         raise ValueError(
             f"ds.{assay.name}.sf is {factor!r}, which is not a finite positive "
@@ -1302,4 +1305,4 @@ def library_size_factor(assay: RNAassay) -> float:
             f"1000, or to None to use the size factor that assay {assay.name!r} "
             "stores."
         )
-    return cast(float, np.asarray(factor).item())
+    return factor

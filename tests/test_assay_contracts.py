@@ -226,7 +226,13 @@ def test_a_session_without_a_size_factor_derives_with_the_one_a_new_session_open
 
 @pytest.mark.parametrize(
     ("session", "expected"),
-    [(2000, 2000), (np.int64(2000), 2000), (np.float32(0.5), 0.5), (1e6, 1e6)],
+    [
+        (2000, 2000),
+        (np.int64(2000), 2000),
+        (np.float32(0.5), 0.5),
+        (np.array(2500.5), 2500.5),
+        (1e6, 1e6),
+    ],
 )
 def test_a_session_size_factor_derives_as_the_python_number_it_holds(
     monkeypatch, session, expected
@@ -238,6 +244,21 @@ def test_a_session_size_factor_derives_as_the_python_number_it_holds(
 
     # JSON attributes keep a Python number, so a NumPy number is converted.
     assert factor == expected and type(factor) is type(expected)
+
+
+@pytest.mark.parametrize(
+    "session", [0, -1.0, np.nan, np.inf, True, np.True_, "1000", [1000], np.ones(1)]
+)
+def test_a_session_size_factor_that_no_assay_opens_with_raises(monkeypatch, session):
+    rna = _rna_with_stored_size_factor(monkeypatch, 2500.5)
+    rna.name = "RNA"
+    rna.sf = session
+
+    with pytest.raises(
+        ValueError,
+        match=r"^ds\.RNA\.sf is .*, which is not a finite positive number\. ",
+    ):
+        library_size_factor(rna)
 
 
 @pytest.mark.parametrize("stored", [0, -1.0, float("inf"), True, "1000", None, [1000]])
