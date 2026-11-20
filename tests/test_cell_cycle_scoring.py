@@ -249,6 +249,30 @@ def test_score_features_counts_a_repeated_name_once(current_template, tmp_path):
     np.testing.assert_array_equal(repeated, single)
 
 
+def test_score_features_takes_the_seeds_of_numpys_random_state(
+    current_template, tmp_path
+):
+    store = _copy(current_template, tmp_path)
+    genes = ["MCM5", "PCNA", "TYMS"]
+
+    # The controls are drawn by NumPy's RandomState, which takes seeds from 0
+    # to 2**32 - 1.
+    largest = store.RNA.score_features(genes, "I", 5, 10, 2**32 - 1)
+
+    assert largest.shape == (store.cells.fetch_all("I").sum(),)
+    assert np.isfinite(largest).all()
+    np.testing.assert_array_equal(
+        store.RNA.score_features(genes, "I", 5, 10, np.uint32(2**32 - 1)), largest
+    )
+    for seed, error, message in (
+        (2**32, ValueError, "^rand_seed must be at most 4294967295$"),
+        (-1, ValueError, "^rand_seed must be at least 0$"),
+        (7.0, TypeError, "^rand_seed must be an integer$"),
+    ):
+        with pytest.raises(error, match=message):
+            store.RNA.score_features(genes, "I", 5, 10, seed)
+
+
 def test_repeated_index_predicate_is_total_over_recorded_parameters():
     assert _repeats_cell_cycle_gene("cell_cycle", {"s_gene_indices": [1, 2, 1]}, {})
     assert _repeats_cell_cycle_gene(

@@ -382,6 +382,29 @@ def test_qc_rejects_malformed_dataframes(data, kwargs, error, message):
         splt.qc(data, show=False, **kwargs)
 
 
+def test_qc_samples_its_points_with_any_seed_of_numpy():
+    data = _qc_data()
+
+    # pandas draws the shown points with NumPy's RandomState, which takes
+    # seeds from 0 to 2**32 - 1.
+    result = splt.qc(data, max_points=5, seed=np.uint32(2**32 - 1), show=False)
+
+    assert result.provenance.extras["seed"] == 2**32 - 1
+    assert type(result.provenance.extras["seed"]) is int
+    assert result.provenance.extras["displayed_points"] == {
+        "nCounts": 5,
+        "nFeatures": 5,
+    }
+    result.close()
+    for seed, error, message in (
+        (2**32, ValueError, "^seed must be at most 4294967295$"),
+        (-1, ValueError, "^seed must be at least 0$"),
+        (1.5, TypeError, "^seed must be an integer$"),
+    ):
+        with pytest.raises(error, match=message):
+            splt.qc(data, max_points=5, seed=seed, show=False)
+
+
 def test_qc_vertical_layout_single_group_titles_and_figure_size():
     import matplotlib.pyplot as plt
 

@@ -57,6 +57,19 @@ def test_region_gene_links_match_scipy_and_sklearn():
     assert links.loc[links["gene"] == "C", "importance"].tolist() == [0.0]
 
 
+def test_region_gene_links_take_the_largest_seed_of_scikit_learn():
+    access, expression, candidates = _data()
+    seed = 2**32 - 1
+
+    links = region_gene_links(access, expression, candidates, seed=seed)
+
+    regressor = GradientBoostingRegressor(random_state=seed, **GBM_PARAMETERS)
+    regressor.fit(access[["r0", "r1", "r2", "r5"]].to_numpy(), expression["A"])
+    np.testing.assert_array_equal(
+        links.loc[links["gene"] == "A", "importance"], regressor.feature_importances_
+    )
+
+
 def test_region_gene_links_without_importance():
     access, expression, candidates = _data()
 
@@ -87,6 +100,9 @@ def test_region_gene_links_without_importance():
             "three samples",
         ),
         ({"importance": "rf"}, "'gbm' or 'none'"),
+        # Each gene's regressor takes scikit-learn's random states.
+        ({"seed": 2**32}, "^seed must be at most 4294967295$"),
+        ({"seed": -1}, "^seed must be at least 0$"),
         ({"candidates": pd.DataFrame({"region": ["r0"]})}, "region and gene columns"),
     ],
 )

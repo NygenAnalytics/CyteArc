@@ -19,7 +19,7 @@ from ..storage.types import (
     read_fresh_group,
 )
 from ..storage.virtual_arrays import read_selection
-from ..utils.arguments import bool_argument, integer_argument
+from ..utils.arguments import RANDOM_STATE_MAX, bool_argument, integer_argument
 from ..utils.arrays import array_digest, regex_match_mask
 from ..utils.compute import controlled_compute
 from ..utils.logging import logger
@@ -1013,15 +1013,21 @@ class Assay:
             cell_key: Name of the key (column) from cell attribute table.
             ctrl_size: Number of reference features to be sampled from each bin.
             n_bins: Number of bins for sampling.
-            rand_seed: The seed to use for the random number generation.
+            rand_seed: The seed of NumPy's ``RandomState`` that draws the
+                controls, from 0 to 2**32 - 1.
             log_transform: Score ``log1p`` of the normalized values.
 
         Returns: Numpy array of the calculated scores
 
         Raises:
-            ValueError: If ``log_transform`` is True and the normalizer cannot apply it.
+            TypeError: If ``rand_seed`` is not an integer.
+            ValueError: If ``rand_seed`` is outside 0 to 2**32 - 1, or
+                ``log_transform`` is True and the normalizer cannot apply it.
         """
         log_transform = bool_argument(log_transform, "log_transform")
+        rand_seed = integer_argument(
+            rand_seed, "rand_seed", minimum=0, maximum=RANDOM_STATE_MAX
+        )
 
         from .rna import RNAassay
 
