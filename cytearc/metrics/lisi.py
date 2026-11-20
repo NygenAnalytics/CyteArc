@@ -171,14 +171,15 @@ def compute_lisi(
         return np.empty((n_cells, 0), dtype=np.float64)
 
     effective_perplexity = _effective_perplexity(perplexity, n_neighbors)
-    # Each label column's numbers, as a pandas categorical of it would give them.
-    label_codes: list[tuple[np.ndarray, int]] = []
+    categoricals: list[pd.Categorical] = []
     for label in label_cols:
-        codes, n_categories = categorical_label_codes(metadata[label])
-        if np.any(codes < 0):
+        # pandas keeps the values of an object column as its categories, so
+        # integers above 2**53 beside floats stay apart.
+        categorical = pd.Categorical(metadata[label])
+        if np.any(categorical.codes < 0):
             raise ValueError(f"Label column {label!r} contains missing values")
         require_labels_match_their_text(metadata[label], name=f"Label column {label!r}")
-        label_codes.append((codes, n_categories))
+        categoricals.append(categorical)
         logger.debug(f"Preparing LISI labels from {label}")
 
     chunk_rows = _LISI_BATCH_SIZE
@@ -195,12 +196,12 @@ def compute_lisi(
         probabilities = _neighbor_probabilities(
             distance_block, effective_perplexity, tol=1e-5
         )
-        for label_index, (codes, n_categories) in enumerate(label_codes):
+        for label_index, labels in enumerate(categoricals):
             simpson = _simpson_from_probabilities(
                 probabilities,
                 index_block,
-                codes,
-                n_categories,
+                np.asarray(labels.codes),
+                len(labels.categories),
             )
             lisi_df[start:end, label_index] = 1 / simpson
     return lisi_df

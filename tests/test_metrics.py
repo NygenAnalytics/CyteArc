@@ -971,18 +971,22 @@ def test_lisi_functions_refuse_labels_that_print_otherwise_than_they_compare():
 
 
 def test_lisi_summaries_score_a_categorical_as_its_column_does():
-    rng = np.random.default_rng(5)
-    n_cells = 40
+    rng = np.random.default_rng(0)
+    n_cells = 61
     indices = np.array(
         [
-            rng.choice(np.delete(np.arange(n_cells), cell), 3, replace=False)
+            rng.choice(np.delete(np.arange(n_cells), cell), 6, replace=False)
             for cell in range(n_cells)
         ]
     )
-    distances = rng.uniform(0.5, 2.0, size=(n_cells, 3))
-    # Four declared categories, two of them unused, in an order of their own.
+    distances = rng.uniform(0.1, 3.0, size=(n_cells, 6))
+    # Eight declared categories, five of them unused, in an order of their own:
+    # the Simpson index sums over the categories in their order, and over the
+    # neighbors once there are more categories than neighbors, so the same
+    # labels as values give a median one bit apart.
     labels = pd.Categorical(
-        rng.choice(["b", "a"], n_cells), categories=["d", "b", "c", "a"]
+        rng.choice(["b", "a", "e"], n_cells),
+        categories=["d", "c", "f", "g", "h", "b", "a", "e"],
     )
 
     per_cell = compute_lisi(distances, indices, pd.DataFrame({"x": labels}), ["x"])
