@@ -33,7 +33,7 @@ from collections.abc import (
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import contextmanager, nullcontext, suppress
 from dataclasses import dataclass, field, replace
-from functools import partial
+from functools import cache, partial
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 import numpy as np
@@ -62,6 +62,9 @@ type H5adValues = np.ndarray | pd.Categorical
 _CSR_CHUNK = 65_536
 # The level of h5py's gzip filter, at which the export compresses its chunks.
 _GZIP_LEVEL = 4
+# The gzip level of each file of a compressed Matrix Market export, the level
+# of the other compressed text exports.
+_TEXT_GZIP_LEVEL = 6
 # Value kinds that hold text: strings, bytes, objects, and NumPy strings.
 _TEXT_KINDS = frozenset("USOT")
 # AnnData stores an unnamed dataframe index under this name, which no
@@ -74,6 +77,9 @@ _SOURCE_INDEX = "source_index"
 class H5adMatrix:
     """A cells-by-features matrix that an H5AD export reads in row blocks.
 
+    ``reserve``, when set, counts the values that the blocks store, in a
+    pass of its own: the export allocates the file's arrays for them, and a
+    reorder (:func:`reordered_matrix`) checks the free disk for them.
     ``export_dtype``, when set, is the dtype that the export stores instead
     of ``dtype``: each converted piece is cast to it, and a value that it
     cannot hold raises ``OverflowError``.
@@ -466,6 +472,31 @@ def _append_batch(
     store.append_rows(destinations, joined)
 
 
+def _stored_entries(matrix: H5adMatrix, label: str) -> int:
+    """Return the values that ``matrix`` stores: its own count, or a count over its blocks.
+
+    A dense block stores its nonzero values, and a sparse block its entries.
+    """
+    if matrix.reserve is not None:
+        return int(matrix.reserve())
+    # The stream reports its progress under the name of the write that
+    # follows.
+    logger.info(
+        f"Counting the values of {label[0].lower()}{label[1:]} before sending "
+        "them through temporary files"
+    )
+    stored = 0
+    for block in matrix.blocks():
+        stored += (
+            int(cast(csr_matrix, block).nnz)
+            if issparse(block)
+            else int(np.count_nonzero(block))
+        )
+        # The stream reads the next block while this one is held no longer.
+        del block
+    return stored
+
+
 def _reordered_blocks(
     matrix: H5adMatrix,
     order: np.ndarray,
@@ -476,15 +507,17 @@ def _reordered_blocks(
 ) -> Iterator[csr_matrix]:
     """Yield the rows of ``matrix`` in ``order``, through a row bucket store on local disk.
 
-    The first piece that the stream yields measures what its entries take
-    on disk, and estimates the entries of every row unless ``entries``
-    gives them; these size the buckets and check the free disk. Each
-    bucket's files are deleted once its rows are yielded, and closing the
-    store removes the rest.
+    The values, ``entries`` or else the matrix's count of them, size the
+    buckets and check the free disk with what the first piece that the
+    stream yields takes on disk per value. Each bucket's files are deleted
+    once its rows are yielded, and closing the store removes the rest.
     """
     from ..readers._sparse import SparseRowStore, encoded_entry_bytes
 
     n_rows, n_cols = matrix.shape
+    # Counted before the rows stream, so that the two reads of the matrix do
+    # not hold their blocks at once.
+    n_values = _stored_entries(matrix, label) if entries is None else int(entries)
     destinations = destination_rows(order)
     _held, batch_entries, buffer_bytes = _reorder_shares(
         matrix.shape, matrix.dtype, max_bytes
@@ -495,13 +528,8 @@ def _reordered_blocks(
 
     def created(sample: csr_matrix) -> SparseRowStore:
         nonlocal bucket_rows
-        expected = (
-            math.ceil(sample.nnz * n_rows / max(1, sample.shape[0]))
-            if entries is None
-            else int(entries)
-        )
         bucket_rows = SparseRowStore.whole_row_bucket_rows(
-            n_rows, expected, read_bytes, matrix.dtype.itemsize
+            n_rows, n_values, read_bytes, matrix.dtype.itemsize
         )
         return SparseRowStore(
             matrix.shape,
@@ -512,7 +540,7 @@ def _reordered_blocks(
             buffer_bytes=buffer_bytes,
             bucket_bytes=max(2 * read_bytes, _reorder_bucket_bytes(n_rows, max_bytes)),
             split_bytes=2 * read_bytes,
-            entries=expected,
+            entries=n_values,
             entry_bytes=encoded_entry_bytes(sample) if sample.nnz else None,
             sum_duplicates=False,
             temp_dir=None if temp_dir is None else os.fspath(temp_dir),
@@ -573,10 +601,11 @@ def reordered_matrix(
     to a bucket of output rows as it streams, and the buckets are read back
     in output order. The temporary files take about what the rows take in
     the export, in ``temp_dir``, the system's temporary directory when None,
-    and each bucket's files are deleted once its rows are written.
-    ``entries``, the nonzero values of the matrix when the caller has
-    counted them, sizes the buckets and checks the free disk exactly;
-    otherwise the first rows estimate them.
+    and each bucket's files are deleted once its rows are written. The
+    matrix's stored values size the buckets and check the free disk before
+    any row is written: ``entries`` when the caller has counted them, else
+    the count of the matrix's ``reserve``, else a count in a pass over its
+    blocks.
 
     Raises:
         ValueError: If ``order`` is not a permutation of the matrix's rows.
@@ -2529,11 +2558,12 @@ def live_h5ad_plan(
             cell_rows,
             0 if order is None else reorder_held_bytes(shape, dtype, max_bytes),
         ),
-        # A preliminary pass counts the stored values to allocate.
+        # A preliminary pass counts the stored values to allocate, once for
+        # the writer and a reorder.
         reserve=(
             None
             if skip_recalc_nfeats or cell_rows is not None
-            else partial(_live_count_nonzero, assay, nthreads)
+            else cache(partial(_live_count_nonzero, assay, nthreads))
         ),
     )
     if order is not None:
@@ -2601,8 +2631,11 @@ def to_h5ad(
     ``sourceRow`` is in that order already. Its counts are read in store
     order and sent to their rows of the file through temporary files on
     local disk, in ``temp_dir``, about the size of the counts in the file,
-    each deleted once its rows are written. ``cell_order="stored"`` writes
-    the cells in store order and needs no temporary files.
+    each deleted once its rows are written. The export counts the stored
+    values first, in a pass over the counts, and raises ``OSError`` before
+    it writes a row when ``temp_dir`` lacks the disk that the files take.
+    ``cell_order="stored"`` writes the cells in store order and needs no
+    temporary files.
     Rows that a nullable metadata column's linked missing mask flags are
     written as missing values: NaN in a float64 column for numeric columns, a
     nullable boolean for boolean columns, and a missing category for other
@@ -2625,7 +2658,10 @@ def to_h5ad(
                          (for example UMAP, tSNE). When None, uses
                          ``["UMAP", "tSNE"]``. Pass an empty list to skip
                          embeddings.
-        skip_recalc_nfeats: Skip a preliminary nonzero-count pass. (Default value: True)
+        skip_recalc_nfeats: Skip a preliminary pass that counts the stored
+                            values, for which the file's arrays are then
+                            allocated. An export in source order counts
+                            them either way, once. (Default value: True)
         nthreads: Threads that read the counts and compress them into the
                   file. (Default value: 4)
         run: Completed pipeline run opened from the datastore that owns
@@ -2899,13 +2935,16 @@ def _write_tsv(
 ) -> None:
     """Write the rows of ``frame``, tab-separated, to ``temporary`` as pandas writes them to ``path``.
 
-    With ``compress``, they are compressed as pandas compresses a file whose
-    name ends in ``.gz``, and the gzip header names ``path``, the file that
-    ``temporary`` becomes.
+    With ``compress``, they are compressed at gzip level 6, and the gzip
+    header names ``path``, the file that ``temporary`` becomes.
     """
     with open(temporary, "wb") as raw:
         binary = (
-            gzip.GzipFile(filename=path, mode="wb", fileobj=raw) if compress else raw
+            gzip.GzipFile(
+                filename=path, mode="wb", compresslevel=_TEXT_GZIP_LEVEL, fileobj=raw
+            )
+            if compress
+            else raw
         )
         with io.TextIOWrapper(binary, encoding="utf-8", newline="") as text:
             frame.to_csv(text, sep="\t", header=False, index=False)
@@ -2929,9 +2968,8 @@ def to_mtx(
     feature holds the same value, such as ``Antibody Capture``, else
     ``Gene Expression`` for an RNA assay and the assay name for another, so
     gene biotypes that CELLxGENE keeps in ``feature_type`` do not split the
-    assay on import. With ``compress=True``, the matrix is compressed with
-    gzip level 6, and the barcode and feature files with pandas' default
-    level, 9.
+    assay on import. With ``compress=True``, the three files are compressed
+    with gzip level 6.
 
     Cells are written in the order of the file that the store imported, by
     default, as their ``sourceRow`` records it; a store that holds no
@@ -3044,7 +3082,10 @@ def to_mtx(
                 (
                     # The gzip header names the file that the export writes.
                     gzip.GzipFile(
-                        filename=matrix_path, mode="wb", compresslevel=6, fileobj=raw
+                        filename=matrix_path,
+                        mode="wb",
+                        compresslevel=_TEXT_GZIP_LEVEL,
+                        fileobj=raw,
                     )
                     if compress
                     else nullcontext(raw)

@@ -137,6 +137,76 @@ def test_matrix_market_fractions_keep_the_text_pandas_wrote(tmp_path) -> None:
     )
 
 
+def _gzipped(text: bytes, header: bytes, level: int) -> set[bytes]:
+    """Return ``text`` compressed at ``level`` with the name and time of ``header``.
+
+    Both with and without a flush before the end, which a writer that wraps
+    the compressed file in a text stream makes when it closes.
+    """
+    name_end = header.index(b"\0", 10)
+    compressed = set()
+    for flushed in (False, True):
+        buffer = io.BytesIO()
+        with gzip.GzipFile(
+            filename=header[10:name_end].decode("latin-1"),
+            mode="wb",
+            compresslevel=level,
+            fileobj=buffer,
+            mtime=int.from_bytes(header[4:8], "little"),
+        ) as handle:
+            handle.write(text)
+            if flushed:
+                handle.flush()
+        compressed.add(buffer.getvalue())
+    return compressed
+
+
+def test_a_compressed_matrix_market_export_writes_its_three_files_at_gzip_level_6(
+    tmp_path,
+) -> None:
+    rng = np.random.default_rng(12)
+    counts = rng.poisson(0.5, size=(200, 60))
+    bases = np.asarray(list("ACGT"))
+    letters = np.asarray(list("ABCDEGHIKLMNPRSTUVWY"))
+    location = str(tmp_path / "store.zarr")
+    # Random barcodes, IDs and names, which each gzip level compresses
+    # differently.
+    write_count_store(
+        location,
+        {"RNA": counts},
+        np.uint16,
+        cell_ids=["".join(rng.choice(bases, 16)) + "-1" for _ in range(200)],
+        feature_ids={"RNA": [f"ENSG{rng.integers(10**10):011d}" for _ in range(60)]},
+        feature_names={
+            "RNA": [
+                "".join(rng.choice(letters, rng.integers(3, 7))) + str(rng.integers(30))
+                for _ in range(60)
+            ]
+        },
+    )
+    store = cytearc.DataStore(
+        location, default_assay="RNA", min_features_per_cell=0, nthreads=1
+    )
+
+    to_mtx(store.RNA, str(tmp_path / "plain"))
+    to_mtx(store.RNA, str(tmp_path / "compressed"), compress=True)
+
+    for name, plain in (
+        ("matrix.mtx.gz", "matrix.mtx"),
+        ("barcodes.tsv.gz", "barcodes.tsv"),
+        ("features.tsv.gz", "genes.tsv"),
+    ):
+        data = (tmp_path / "compressed" / name).read_bytes()
+        # RFC 1952 sets the extra-flags byte to 2 for the slowest compression,
+        # level 9, to 4 for the fastest, level 1, and leaves it 0 otherwise.
+        assert data[8] == 0, name
+        text = gzip.decompress(data)
+        assert text == (tmp_path / "plain" / plain).read_bytes(), name
+        # The header names the file, without .gz, and the time of the export.
+        assert data[10:].startswith(name.removesuffix(".gz").encode() + b"\0")
+        assert data in _gzipped(text, data, 6), name
+
+
 def test_integer_lines_write_python_text_of_every_width() -> None:
     from cytearc.writers.export import _integer_lines
 
