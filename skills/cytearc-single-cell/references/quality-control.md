@@ -338,10 +338,7 @@ corrected = ds.pipeline.rna(label="soupx", assay="RNA_soupx", cells=first)  # th
   every set. Without `clusters=`, weakly expressing cells inflate the estimate.
 - A known rate goes in `fraction=` instead of `gene_sets=`.
 - An estimate of exactly 0 (global, gene set, or cluster) gives a `DiagnosticWarning`, each time the estimate is computed or reused: its cells hold no counts of their gene sets although pure soup would give some, so the fraction is only bounded, below about 3 / expected. Correcting with it leaves those cells uncorrected; check the gene sets and profile. `ds.artifacts.inspect(rho).diagnostics` counts such estimates (`zeroEstimates`, up to five in `zeroEstimateExamples`) and holds `largestEstimate`, which warns above `max_contamination`. An estimate saved by an earlier release without these diagnostics is refused by `load_ambient_contamination` and `correct_ambient`: call `qc.ambient_contamination` again.
-- Each gene's removal is rounded at random as in the paper (systematic sampling, one draw per
-  cell from `random_seed`): every gene, even a rare soup gene, loses its share of the soup on
-  average, and each cell loses its share rounded down or up. A seed reproduces the counts; the
-  assay records it as `ambient_random_seed`.
+- Each gene's removal is rounded at random as in the paper (systematic sampling, one draw per cell from `random_seed`): every gene, even a rare soup gene, loses its share of the soup on average, and each cell loses its share, or every count of its genes that the soup holds when they are fewer, rounded down or up. A seed reproduces the counts; the assay records it as `ambient_random_seed`.
 - The corrected assay measures only the estimated cells (`RNA_soupx_I`): run it with
   `assay="RNA_soupx"` and `cells=` the first run or its selection, and pass `from_assay=` with a
   selection of those cells elsewhere. Other cells raise `UnmeasuredCellsError`.

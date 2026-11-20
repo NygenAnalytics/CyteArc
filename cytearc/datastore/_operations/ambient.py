@@ -904,7 +904,8 @@ class _AmbientOperationsMixin(_AmbientOperationsBase):
         each cell. The draws follow systematic sampling with probabilities
         proportional to size (Madow 1949, doi:10.1214/aoms/1177729988), one
         draw per cell, so a cell with fraction ``rho`` and total ``N`` loses
-        ``rho * N`` counts rounded down or up. A cell's draw depends only on
+        ``min(rho * N, S)`` counts rounded down or up, where ``S`` is its count
+        of the genes that the soup holds. A cell's draw depends only on
         ``random_seed`` and the cell's row in the store, so a seed gives the
         same counts in any memory budget, and a cell gets the same counts
         whichever other cells the estimate corrects with it.
