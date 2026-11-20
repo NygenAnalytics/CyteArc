@@ -38,7 +38,7 @@ from cytearc.utils.logging import collect_warnings
 from cytearc.utils.memory_budget import MemoryBudgetError
 
 from .test_fate_mapping import _direct_fate_reference, _ScoredStore, _scored_y_store
-from .test_trajectory_membership import _branching
+from .test_trajectory_membership import _branching, _long_arms
 from .test_trajectory_record_paths import (
     _Y_LABELS,
     _count_calls,
@@ -884,10 +884,10 @@ def test_a_map_directed_by_a_score_is_refused_a_small_budget_before_its_graph_is
     maps = _fate_maps(store)
     reads = _count_calls(monkeypatch, store, "_store_to_sparse")
     # Forming the union of the store's graph of 725 edges holds 63,820 bytes
-    # beside the load's 49,152, more than numbering its components, as the
+    # beside the load's 65,536, more than numbering its components, as the
     # membership tests derive, beside the positions of its 145 cells, 1,160
     # bytes, and up to a float64 score and a missing flag a cell, 1,305.
-    needed = 63_820 + 49_152 + 1_160 + 1_305
+    needed = 63_820 + 65_536 + 1_160 + 1_305
     work = {
         "fate": "Mapping fates",
         "lineage_membership": "Calling lineage membership",
@@ -895,7 +895,10 @@ def test_a_map_directed_by_a_score_is_refused_a_small_budget_before_its_graph_is
     # Mapping the fates holds the union of 1,450 entries, 17,984 bytes, 64
     # bytes for each of the 145 cells and the solver's 2 * 1,450 * 12 + 145 *
     # 280 = 75,400, 102,664 bytes in all, less than the graph's load, which
-    # the refusal of fate names too.
+    # the refusal of fate names too. Calling the membership holds 347,836
+    # bytes, as the membership tests derive, more than the load.
+    if call == "lineage_membership":
+        needed = 347_836
     _set_budget(store, needed - 1)
     with pytest.raises(MemoryBudgetError) as refused:
         calls[call]()
@@ -917,16 +920,17 @@ def test_a_map_directed_by_a_score_is_refused_a_small_budget_before_its_graph_is
 def test_fate_names_what_mapping_its_fates_holds_when_that_outweighs_the_load(
     monkeypatch, direction: str
 ) -> None:
-    # The branching store with each of its 145 cells linked to its 5 nearest
-    # cells, 725 stored edges of uint32 pairs and float32 weights, whose union
-    # holds at most 1,450 entries of an int32 index and a float32 weight
-    # beside 146 int32 row pointers, 12,184 bytes. Mapping the fates of 2
-    # sinks holds it, 64 bytes for each cell and the solver's 2 * 1,450 * 12
-    # + 145 * 280 = 75,400, more than taking the mapped cells' graph would,
-    # two more copies and 24 bytes a cell. Forming the union holds 7 * 725 * 8
-    # + 5 * 584 + 49,152 = 92,672 bytes beside the cells' positions and their
-    # labels' codes or scores, 13 or 17 bytes a cell, less than mapping.
-    branching = _branching(neighbors=5)
+    # The branching store with arms of 100 cells, 265 cells each linked to
+    # its 5 nearest cells, 1,325 stored edges of uint32 pairs and float32
+    # weights, whose union holds at most 2,650 entries of an int32 index and
+    # a float32 weight beside 266 int32 row pointers, 22,264 bytes. Mapping
+    # the fates of 2 sinks holds it, 64 bytes for each cell and the solver's
+    # 2 * 2,650 * 12 + 265 * 280 = 137,800, more than taking the mapped
+    # cells' graph would, two more copies and 24 bytes a cell. Forming the
+    # union holds 7 * 1,325 * 8 + 5 * 1,064 + 65,536 = 145,056 bytes beside
+    # the cells' positions and their labels' codes or scores, 13 or 17 bytes
+    # a cell, less than mapping.
+    branching = _branching(_long_arms(100), neighbors=5)
     store = branching.store
     labels = branching.label_artifact()
     sinks = ["a2", "b2"]
@@ -950,13 +954,13 @@ def test_fate_names_what_mapping_its_fates_holds_when_that_outweighs_the_load(
 
     maps = _fate_maps(store)
     reads = _count_calls(monkeypatch, store, "_store_to_sparse")
-    needed = 12_184 + 64 * 145 + 75_400
+    needed = 22_264 + 64 * 265 + 137_800
     _set_budget(store, needed - 1)
     with pytest.raises(MemoryBudgetError) as refused:
         call()
     assert str(refused.value) == (
-        f"Mapping fates of 145 cells needs about {needed} bytes in memory for a "
-        "graph of 725 edges, but the operation limit is "
+        f"Mapping fates of 265 cells needs about {needed} bytes in memory for a "
+        "graph of 1325 edges, but the operation limit is "
         f"{needed - 1} bytes. Raise mem_budget."
     )
     assert reads == {}

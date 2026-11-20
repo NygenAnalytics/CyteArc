@@ -1827,6 +1827,21 @@ def test_diffusion_is_refused_before_its_graph_is_read(
     assert _diffusion_artifacts(budgeted) == before
 
 
+def test_the_diffusion_write_estimate_pins_its_terms() -> None:
+    from cytearc.trajectory.artifacts import diffusion_write_bytes
+
+    # An operator of 10,000 entries over 4,000 cells: each read of its three
+    # stored arrays holds 8-byte values, two int32 indices and their COO
+    # matrix, 32 bytes an entry, beside a stored chunk of 8-byte values, the
+    # 10,000 entries, and 128 KiB of Zarr's buffers and objects of the
+    # write's two reads.
+    assert diffusion_write_bytes(10_000, 4_000) == (10_000 * 32 + 8 * 10_000 + 131_072)
+    # A chunk holds at most a million entries.
+    assert diffusion_write_bytes(2_000_000, 4_000) == (
+        2_000_000 * 32 + 8 * 1_000_000 + 131_072
+    )
+
+
 @pytest.mark.parametrize("entries", [5_000, 200_000])
 def test_writing_a_diffusion_operator_holds_what_its_estimate_states(
     entries: int,

@@ -578,6 +578,12 @@ def _diffusion_payload_arrays(group: zarr.Group, *, n_cells: int) -> list[zarr.A
 _DIFFUSION_BLOCK_ENTRIES = 1_000_000
 
 
+#: What writing a diffusion operator and checking it hold whatever its size:
+#: Zarr's buffers and the objects of reading the stored arrays back twice,
+#: measured after a full collection has emptied CPython's free lists.
+_DIFFUSION_CHECK_OBJECT_BYTES = 128 * 1024
+
+
 def diffusion_load_bytes(nnz: int, n_cells: int, imputed_features: int = 0) -> int:
     """Return the peak bytes needed to load a persisted diffusion operator.
 
@@ -603,10 +609,13 @@ def diffusion_write_bytes(nnz: int, n_cells: int) -> int:
     :func:`write_diffusion_payload` fingerprints the stored arrays, and the
     check before the operator is published fingerprints them again; each
     reads the arrays back as :func:`diffusion_load_bytes` states, beside a
-    stored chunk of 8-byte values, at most one of ``nnz`` entries.
+    stored chunk of 8-byte values, at most one of ``nnz`` entries, and
+    Zarr's buffers and objects of both reads, whatever the operator's size.
     """
-    return diffusion_load_bytes(nnz, n_cells) + 8 * min(
-        int(nnz), _DIFFUSION_BLOCK_ENTRIES
+    return (
+        diffusion_load_bytes(nnz, n_cells)
+        + 8 * min(int(nnz), _DIFFUSION_BLOCK_ENTRIES)
+        + _DIFFUSION_CHECK_OBJECT_BYTES
     )
 
 

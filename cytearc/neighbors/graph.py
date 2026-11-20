@@ -27,8 +27,9 @@ class GraphLoadMemory:
 
 #: What loading a graph holds beside its arrays, whatever their size:
 #: Zarr's buffers and the objects that reading the stored arrays and checking
-#: the graph's records keep.
-_READ_OBJECT_BYTES = 48 * 1024
+#: the graph's records keep, measured after a full collection has emptied
+#: CPython's free lists, so that each object is allocated anew.
+_READ_OBJECT_BYTES = 64 * 1024
 
 
 def _sparse_index_bytes(n_cells: int, n_entries: int) -> int:
@@ -50,7 +51,7 @@ def graph_load_memory(
 
     A load reads the stored edge pairs and weights, builds a COO matrix whose
     coordinates are copies in SciPy's index dtype, and converts it to CSR,
-    beside 48 KiB of Zarr's buffers and the objects that reading the arrays
+    beside 64 KiB of Zarr's buffers and the objects that reading the arrays
     and checking the graph's records keep.
     ``keep_nearest`` first keeps each cell's nearest edges with
     :func:`take_nearest_per_row`, which holds, beside the stored arrays, each

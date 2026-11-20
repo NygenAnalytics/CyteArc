@@ -1822,41 +1822,47 @@ def test_the_membership_estimate_pins_its_bytes_per_cell() -> None:
     # bytes a cell, the probabilities 2 * 8 = 16, and 40 more, 145 * 104 =
     # 15,080. Calling holds 12 + max(2 * 44, 120) = 132 bytes a cell, 19,140;
     # building the labels 4 * 6 + 18 = 42, 6,090; writing them holds the
-    # labels, 145 * 24 = 3,480, and 2 * 2 + 20 = 24 bytes a cell, 3,480,
-    # beside the check of the written membership, three copies of the labels
-    # and 24 + 2 * 2 = 28 bytes a cell, 10,440 + 4,060 = 14,500, which
-    # outgrows two copies of the labels: 6,960 + 14,500 = 21,460, the most.
-    assert membership_bytes(145, ["a2", "b2"], 2) == 15_080 + 21_460 == 36_540
+    # labels, 145 * 24 = 3,480, 2 * 2 + 20 = 24 bytes a cell, 3,480, and 64
+    # KiB of the write's objects, 65,536, beside the check of the written
+    # membership, three copies of the labels and 24 + 2 * 2 = 28 bytes a
+    # cell, 10,440 + 4,060 = 14,500, and 240 KiB of Zarr's buffers and
+    # objects, 245,760, which outgrows two copies of the labels: 72,496 +
+    # 260,260 = 332,756, the most.
+    assert membership_bytes(145, ["a2", "b2"], 2) == 15_080 + 332_756 == 347_836
     # Loading a saved membership holds its inputs and its check.
-    assert membership_load_bytes(145, ["a2", "b2"], 2) == 15_080 + 14_500
-    assert stored_membership_bytes(145, ["a2", "b2"]) == 14_500
+    assert membership_load_bytes(145, ["a2", "b2"], 2) == 15_080 + 260_260
+    assert stored_membership_bytes(145, ["a2", "b2"]) == 14_500 + 245_760
+    # Whatever the cells, writing and checking a membership hold the write's
+    # and the check's objects, 65,536 + 245,760 = 311,296.
+    fixed = 311_296
     # One cell of one lineage: inputs 24 + 8 + 40, and writing 24 + 22
     # beside the check 72 + 26, more than calling's 132.
-    assert membership_bytes(1, ["a2"], 1) == 72 + 46 + 98 == 216
+    assert membership_bytes(1, ["a2"], 1) == 72 + 46 + 98 + fixed
     # One cell of three lineages: calling 12 + 132 beside writing 24 + 26 and
     # the check 72 + 30.
-    assert membership_bytes(1, ["a2", "b2", "d2"], 3) == 136 + 50 + 102 == 288
+    assert membership_bytes(1, ["a2", "b2", "d2"], 3) == 136 + 50 + 102 + fixed
     # A sink named by 9 characters, or by a number of 9 digits, widens the
     # label to 36 bytes.
-    assert membership_bytes(1, ["lineage_a", "b"], 2) == 104 + 60 + 136
-    assert membership_bytes(1, [123456789, 2], 2) == 104 + 60 + 136
-    assert membership_bytes(0, ["a2", "b2"], 2) == 0
+    assert membership_bytes(1, ["lineage_a", "b"], 2) == 104 + 60 + 136 + fixed
+    assert membership_bytes(1, [123456789, 2], 2) == 104 + 60 + 136 + fixed
+    assert membership_bytes(0, ["a2", "b2"], 2) == fixed
 
 
 def test_a_membership_that_outweighs_its_graph_is_refused_once() -> None:
     # Sinks named by 41 characters on a graph of 4 neighbors: the membership,
     # which holds the labels at 164 bytes a cell, outweighs the graph's load,
     # so the check of the graph names the membership's bytes, before the graph
-    # is read. Inputs 15,080, beside 145 * 164 = 23,780 bytes of labels and
-    # 3,480 more while they are written, and three copies of the labels and
-    # 4,060 while the written membership is checked: 15,080 + 27,260 + 75,400.
+    # is read. Inputs 15,080, beside 145 * 164 = 23,780 bytes of labels, 3,480
+    # more and the write's 65,536 while they are written, and three copies of
+    # the labels, 4,060 and the check's 245,760 while the written membership
+    # is checked: 15,080 + 92,796 + 321,160.
     name = "a" * 40
     layout = (_Arm(name, _UP), _Arm("b" * 40, _DOWN))
     branching = _branching(layout, neighbors=4)
     store = branching.store
     lineages = [f"{name}2", f"{'b' * 40}2"]
     needed = membership_bytes(145, lineages, 2)
-    assert needed == 15_080 + 27_260 + 75_400 == 117_740
+    assert needed == 15_080 + 92_796 + 321_160 == 429_036
     reads: list[str] = []
     original = store._store_to_sparse
     store._store_to_sparse = lambda *args, **kwargs: (
@@ -1924,7 +1930,7 @@ def test_each_membership_call_loads_the_fate_map_and_its_graph_once(
 # union holds the directed matrix, a copy of its transpose for the sum and
 # for the product, a sum and a product sized for 1,450 entries, and a compact
 # copy of the product, 7 * 725 * 12 + 5 * 584 = 63,820 bytes, beside the
-# 48 KiB of Zarr's buffers and the load's objects, 49,152; it keeps the
+# 64 KiB of Zarr's buffers and the load's objects, 65,536; it keeps the
 # union, 1,450 * 12 + 584 = 17,984. Numbering its components is charged
 # what SciPy 1.16 holds for float32 weights, three copies of the union and 4
 # bytes an entry, and 12 bytes a cell, 3 * 17,984 + 4 * 1,450 + 12 * 145 =
@@ -1932,7 +1938,16 @@ def test_each_membership_call_loads_the_fate_map_and_its_graph_once(
 # add 145 * 8 = 1,160 bytes, and what the pseudotime's labels leave held,
 # up to an int32 code of the cell's source or sink label and whether it is a
 # source, 145 * 5 = 725.
-_GRAPH_LOAD_BYTES = 63_820 + 49_152 + 1_160 + 725
+_GRAPH_LOAD_BYTES = 63_820 + 65_536 + 1_160 + 725
+# Calling a membership names what it holds, and loading a saved one or
+# selecting branch cells what checking it holds beside its inputs, as the
+# estimate's pins derive, more than the graph's load.
+_MEMBERSHIP_CHECK_BYTES = {
+    "lineage_membership": 347_836,
+    "reused lineage_membership": 347_836,
+    "load_lineage_membership": 275_340,
+    "branch_cells": 275_340,
+}
 # Each call names itself in the refusal of the graph's load.
 _GRAPH_LOAD_WORK = {
     "lineage_membership": "Calling lineage membership",
@@ -1969,17 +1984,18 @@ def test_a_budget_below_the_graph_load_is_refused_before_the_graph_is_read(
 
     # Mapping the fates of the 2 sinks holds the union, 17,984 bytes, 64
     # bytes for each of the 145 cells and the solver's 2 * 1,450 * 12 + 145 *
-    # 280 = 75,400, less than the graph's load, which every call names.
-    _set_budget(store, _GRAPH_LOAD_BYTES - 1)
+    # 280 = 75,400, less than the graph's load, which the other calls name.
+    needed = _MEMBERSHIP_CHECK_BYTES.get(call, _GRAPH_LOAD_BYTES)
+    _set_budget(store, needed - 1)
     with pytest.raises(MemoryBudgetError) as refused:
         calls[call](branching, ref)
     work = _GRAPH_LOAD_WORK.get(call, "Loading a pseudotime")
     assert str(refused.value) == (
-        f"{work} of 145 cells needs about {_GRAPH_LOAD_BYTES} bytes "
+        f"{work} of 145 cells needs about {needed} bytes "
         "in memory for a graph of 725 edges, but the operation limit is "
-        f"{_GRAPH_LOAD_BYTES - 1} bytes. Raise mem_budget."
+        f"{needed - 1} bytes. Raise mem_budget."
     )
-    assert refused.value.needed_bytes == _GRAPH_LOAD_BYTES
+    assert refused.value.needed_bytes == needed
     assert refused.value.item == "the graph of 725 edges and its work"
     assert reads == {}
     assert _artifacts(store, "lineage_membership") == [ref]
@@ -2191,8 +2207,10 @@ def test_trajectory_and_graph_calls_run_within_the_budget_they_name(
         "graph.load nearest": lambda: store.graph.load(branching.graph, use_k=2),
     }
     peaks = {}
-    # Full collections empty CPython's free lists, after which a call's small
-    # objects are allocated, and traced, anew; the report counts them.
+    # A full collection empties CPython's free lists, after which a call's
+    # small objects are allocated, and traced, anew, so each traced call
+    # follows one and is measured at its most; the report counts the full
+    # collections around a call over its budget.
     full_collections = {}
     last_full = _full_collections()
     for call_name, call in calls.items():
@@ -2206,6 +2224,7 @@ def test_trajectory_and_graph_calls_run_within_the_budget_they_name(
                 break
             except MemoryBudgetError as refused:
                 budget = refused.needed_bytes
+        gc.collect()
         full = _full_collections()
         tracemalloc.start()
         try:
