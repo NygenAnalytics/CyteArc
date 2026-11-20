@@ -723,6 +723,27 @@ def test_require_labels_distinct_as_text_reads_no_typed_array(monkeypatch):
         )
 
 
+def test_require_labels_distinct_as_text_groups_no_labels_of_one_type(monkeypatch):
+    def ungrouped(*args, **kwargs):
+        raise AssertionError("the labels were grouped")
+
+    # Labels of one type of text, bytes, integers or booleans, or Python
+    # floats, cannot group otherwise by value than by text but at 0.0.
+    monkeypatch.setattr(pd, "factorize", ungrouped)
+    for labels in (
+        ["a", np.str_("b")],
+        [b"a", b"b"],
+        [1, np.int64(2)],
+        [True, np.bool_(False)],
+        [0.5, np.float64(1.5)],
+    ):
+        require_labels_distinct_as_text(labels, name="labels", remedy="convert them")
+    with pytest.raises(AssertionError, match="were grouped"):
+        require_labels_distinct_as_text(
+            [np.float32(0.5), 1.5], name="labels", remedy="convert them"
+        )
+
+
 def test_read_only_copy_owns_its_values_and_stays_read_only():
     source = np.arange(6, dtype=np.int32).reshape(2, 3).T
     copied = read_only_copy(source, np.int64)
