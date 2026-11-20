@@ -680,15 +680,18 @@ def test_harmony_stage_returns_supplied_corrections_without_reading() -> None:
     assert stream.calls == 0
 
 
+_NOT_A_SAMPLING_FRACTION = (TypeError, "^kmeans_sampling must be a real number$")
+
+
 @pytest.mark.parametrize(
     ("options", "error", "message"),
     [
-        ({"kmeans_sampling": True}, TypeError, "kmeans_sampling must be a number"),
-        ({"kmeans_sampling": "half"}, TypeError, "kmeans_sampling must be a number"),
-        ({"kmeans_sampling": None}, TypeError, "kmeans_sampling must be a number"),
+        ({"kmeans_sampling": True}, *_NOT_A_SAMPLING_FRACTION),
+        ({"kmeans_sampling": "0.5"}, *_NOT_A_SAMPLING_FRACTION),
+        ({"kmeans_sampling": None}, *_NOT_A_SAMPLING_FRACTION),
         ({"kmeans_sampling": 0.0}, ValueError, "greater than 0 and at most 1"),
         ({"kmeans_sampling": 1.5}, ValueError, "greater than 0 and at most 1"),
-        ({"kmeans_sampling": np.nan}, ValueError, "greater than 0 and at most 1"),
+        ({"kmeans_sampling": np.nan}, ValueError, "^kmeans_sampling must be finite$"),
         ({"kmeans_batch_size": True}, TypeError, "must be a positive integer"),
         ({"kmeans_batch_size": 2.5}, TypeError, "must be a positive integer"),
         ({"kmeans_batch_size": 0}, ValueError, "must be a positive integer"),

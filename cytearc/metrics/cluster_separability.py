@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 
 from ..utils.arguments import (
+    RANDOM_STATE_MAX,
     integer_argument,
     label_array,
     require_labels_match_their_text,
@@ -199,7 +200,10 @@ def evaluate_cluster_separability(
         "max_silhouette_cells",
         minimum=1,
     )
-    random_seed = integer_argument(random_seed, "random_seed", minimum=0)
+    # The folds and the classifier take scikit-learn's random states.
+    random_seed = integer_argument(
+        random_seed, "random_seed", minimum=0, maximum=RANDOM_STATE_MAX
+    )
     svm_max_iter = integer_argument(svm_max_iter, "svm_max_iter", minimum=1)
     if isinstance(svm_c, bool) or not isinstance(
         svm_c,

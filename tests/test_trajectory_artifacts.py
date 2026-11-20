@@ -470,6 +470,12 @@ def test_trajectory_parameter_contracts_reject_ambiguous_or_coerced_values() -> 
         validate_pseudotime_parameters({**pseudotime, "sources": [1], "sinks": [True]})
     with pytest.raises(TypeError, match="n_singular_vals"):
         validate_pseudotime_parameters({**pseudotime, "n_singular_vals": True})
+    # The seed starts the truncated solve from NumPy's RandomState, which
+    # takes 0 to 2**32 - 1.
+    largest = validate_pseudotime_parameters({**pseudotime, "random_seed": 2**32 - 1})
+    assert largest["random_seed"] == 2**32 - 1
+    with pytest.raises(ValueError, match="^random_seed must be at most 4294967295$"):
+        validate_pseudotime_parameters({**pseudotime, "random_seed": 2**32})
     with pytest.raises(ValueError, match="method must be 'untruncated' or 'truncated'"):
         validate_pseudotime_parameters({**untruncated, "method": "exact"})
     # Each method records the parameters of its own potential, and no others.

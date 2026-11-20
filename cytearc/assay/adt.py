@@ -4,7 +4,7 @@ import zarr
 
 from ..metadata import MetaData
 from .base import Assay
-from .normalization import norm_clr
+from .normalization import NormMethod, norm_clr
 
 
 class ADTassay(Assay):
@@ -26,6 +26,11 @@ class ADTassay(Assay):
         "ADT and HTO assays need counts: CLR normalization works across cells, "
         "and hashtag demultiplexing models counts"
     )
+
+    @staticmethod
+    def _default_normalizer() -> NormMethod:
+        """Return the normalizer that ``normMethod`` starts as."""
+        return norm_clr
 
     def __init__(
         self,
@@ -53,4 +58,4 @@ class ADTassay(Assay):
             nthreads=nthreads,
             **kwargs,
         )
-        self.normMethod = norm_clr
+        self.normMethod = self._default_normalizer()

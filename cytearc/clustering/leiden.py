@@ -2,7 +2,7 @@ import math
 import random
 from numbers import Real
 from threading import Lock
-from typing import Literal
+from typing import Literal, cast
 
 import numpy as np
 from scipy.sparse import sparray, spmatrix
@@ -70,6 +70,32 @@ def canonical_random_seed(value: object) -> int:
             "unseeded run is not supported"
         )
     return integer_argument(value, "random_seed", minimum=0)
+
+
+def leiden_settings(
+    *, backend: object, random_seed: object
+) -> tuple[LeidenBackend, int]:
+    """Check the backend and seed of a Leiden clustering.
+
+    ``clusters.leiden`` and the Leiden stage of a pipeline recipe check their
+    settings with this function, so a recipe refuses a setting before its
+    run starts, with the message that ``clusters.leiden`` gives.
+
+    Returns:
+        The backend, and the seed as a Python integer.
+
+    Raises:
+        TypeError: If ``random_seed`` is not an integer.
+        ValueError: If ``backend`` is not ``"cytearc"``, ``"igraph"`` or
+            ``"leidenalg"``, or ``random_seed`` is below 0.
+    """
+    if not isinstance(backend, str) or backend not in {
+        "cytearc",
+        "igraph",
+        "leidenalg",
+    }:
+        raise ValueError("backend must be 'cytearc', 'igraph' or 'leidenalg'")
+    return cast(LeidenBackend, backend), canonical_random_seed(random_seed)
 
 
 def _igraph_membership(

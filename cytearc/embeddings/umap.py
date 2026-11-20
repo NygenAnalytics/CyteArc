@@ -1,11 +1,17 @@
 import locale
+from dataclasses import dataclass
 from functools import cache
 from typing import Any
 
 import numpy as np
 from scipy.sparse import csr_matrix, issparse
 
-from ..utils.arguments import integer_argument
+from ..utils.arguments import (
+    RANDOM_STATE_MAX,
+    bool_argument,
+    float_argument,
+    integer_argument,
+)
 from ..utils.compute import process_thread_limit
 from ..utils.logging import logger
 from ..utils.numba import enable_dispatcher_cache, import_umap, njit, numba_threads
@@ -22,6 +28,100 @@ EQUAL_DENSITY_RADII_WARNING = (
     "densMAP local radii are equal for every cell to float32 resolution, so "
     "densMAP adds no density term and lays the cells out as UMAP does"
 )
+
+
+@dataclass(frozen=True, slots=True)
+class UmapSettings:
+    """The settings of a UMAP layout, as canonical Python values.
+
+    Each attribute is the ``embeddings.umap`` keyword of the same name.
+    """
+
+    umap_dims: int
+    spread: float
+    min_dist: float
+    n_epochs: int
+    repulsion_strength: float
+    initial_alpha: float
+    negative_sample_rate: float
+    use_density_map: bool
+    dens_lambda: float
+    dens_frac: float
+    dens_var_shift: float
+    random_seed: int
+    parallel: bool
+
+
+def umap_settings(
+    *,
+    umap_dims: object,
+    spread: object,
+    min_dist: object,
+    n_epochs: object,
+    repulsion_strength: object,
+    initial_alpha: object,
+    negative_sample_rate: object,
+    use_density_map: object,
+    dens_lambda: object,
+    dens_frac: object,
+    dens_var_shift: object,
+    random_seed: object,
+    parallel: object,
+) -> UmapSettings:
+    """Check the settings of a UMAP layout and return them as canonical Python values.
+
+    ``embeddings.umap`` and the UMAP stage of a pipeline recipe check their
+    settings with this function, so a recipe refuses a setting before its
+    run starts, with the message that ``embeddings.umap`` gives. Numbers are
+    recorded as Python floats and integers, so ``min_dist=1`` and
+    ``min_dist=1.0`` identify the same embedding. The ranges are those that
+    umap-learn's ``UMAP`` class enforces, ``dens_frac`` from 0 to 1 and
+    ``min_dist`` and the rates and weights at least 0, but for its bound of
+    ``min_dist`` by ``spread``: the layout fits its curve for any
+    ``min_dist``, and runs have recorded ``min_dist`` above ``spread``.
+    ``spread`` must be above 0, since it scales the curve that UMAP fits, and
+    ``random_seed`` from 0 to 2**32 - 1, the seeds of NumPy's legacy
+    ``RandomState``, which the layout draws from.
+
+    Raises:
+        TypeError: If a setting has the wrong type.
+        ValueError: If a setting is not finite or out of range.
+    """
+    checked = UmapSettings(
+        umap_dims=integer_argument(umap_dims, "umap_dims", minimum=1),
+        n_epochs=integer_argument(n_epochs, "n_epochs", minimum=1),
+        # The layout's seed seeds NumPy's legacy RandomState.
+        random_seed=integer_argument(
+            random_seed, "random_seed", minimum=0, maximum=RANDOM_STATE_MAX
+        ),
+        spread=float_argument(spread, "spread"),
+        min_dist=float_argument(min_dist, "min_dist"),
+        repulsion_strength=float_argument(repulsion_strength, "repulsion_strength"),
+        initial_alpha=float_argument(initial_alpha, "initial_alpha"),
+        negative_sample_rate=float_argument(
+            negative_sample_rate, "negative_sample_rate"
+        ),
+        dens_lambda=float_argument(dens_lambda, "dens_lambda"),
+        dens_frac=float_argument(dens_frac, "dens_frac"),
+        dens_var_shift=float_argument(dens_var_shift, "dens_var_shift"),
+        use_density_map=bool_argument(use_density_map, "use_density_map"),
+        parallel=bool_argument(parallel, "parallel"),
+    )
+    if checked.spread <= 0:
+        raise ValueError("spread must be greater than 0")
+    for name in (
+        "min_dist",
+        "repulsion_strength",
+        "initial_alpha",
+        "negative_sample_rate",
+        "dens_lambda",
+        "dens_var_shift",
+    ):
+        if getattr(checked, name) < 0:
+            raise ValueError(f"{name} must be at least 0")
+    if not 0 <= checked.dens_frac <= 1:
+        raise ValueError("dens_frac must be from 0 to 1")
+    return checked
 
 
 def equal_density_radii(span: float) -> bool:

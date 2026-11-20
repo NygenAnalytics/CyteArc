@@ -11,6 +11,7 @@ import dataclasses
 import inspect
 import re
 import shutil
+import tarfile
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -41,6 +42,7 @@ from tests.test_pipeline_plan import (
     read_only_plan,
 )
 from tests.test_pipeline_run_foundation import _completed_run, _root
+from tests import full_path
 from tests.storage_helpers import by_cell_id
 
 # Two Leiden candidates, UMAP and markers, kept small: 200 genes and 5 PCs.
@@ -400,26 +402,21 @@ def test_a_failed_run_runs_again_with_the_failing_setting_changed(
 ) -> None:
     datastore = _copy(completed.location, tmp_path)
     base = datastore.pipeline.open(label="baseline")
-    # The Leiden stage checks its backend only when it runs.
+    # Paris refuses more clusters than the graph's cells only when it reads
+    # the graph.
     with pytest.raises(PipelineExecutionError) as caught:
-        datastore.pipeline.rerun(base, label="retry", leiden={"backend": "nope"})
+        datastore.pipeline.rerun(base, label="retry", paris={"n_clusters": 100_000})
     failed = datastore.pipeline.open(run_id=caught.value.run_id)
-    assert (failed.status, caught.value.stage) == ("failed", "leiden")
+    assert (failed.status, caught.value.stage) == ("failed", "paris")
 
-    retried = datastore.pipeline.rerun(
-        failed, label="retry", leiden={"backend": "cytearc"}
-    )
+    retried = datastore.pipeline.rerun(failed, label="retry", paris={"n_clusters": 5})
 
     assert (retried.label, retried.status) == ("retry", "completed")
-    assert retried.settings()["leiden"] == {
-        "backend": "cytearc",
-        "partitions": [0.5, 1.0],
-        "selected": None,
-    }
+    assert retried.settings()["paris"] == {"n_clusters": 5}
     dispositions = _dispositions(retried)
     stages = list(dispositions)
-    before_leiden = stages[: stages.index("leiden")]
-    assert {dispositions[stage] for stage in before_leiden} <= {"reused", "skipped"}
+    before_paris = stages[: stages.index("paris")]
+    assert {dispositions[stage] for stage in before_paris} <= {"reused", "skipped"}
 
 
 def test_a_rerun_is_refused_before_anything_is_written(
@@ -515,6 +512,61 @@ def test_a_run_recorded_before_a_setting_existed_takes_its_default(
     assert plan.config == current.config
     # A call turns the new stage on, and only that stage computes.
     assert datastore.pipeline.plan(earlier, localmap=True).computed == ("localmap",)
+
+
+# The ATAC settings of a small run: 2,000 peaks, 6 LSI dimensions, no UMAP.
+ATAC_SETTINGS: dict[str, Any] = {
+    "prevalent_peaks": {"top_n": 2000},
+    "lsi": {"dims": 6},
+    "neighbors": {"k": 5},
+    "leiden": {"partitions": [1.0]},
+    "umap": False,
+    "markers": False,
+}
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize(
+    ("recipe", "settings"),
+    [
+        # Releases up to 1.4.0 took False for no HVG blacklist, a UMAP spread
+        # below the default min_dist of 1, and any seed of the streaming LSI
+        # solver, which seeds NumPy's default_rng.
+        ("rna", {"hvg": {"top_n": 200, "blacklist": False}}),
+        ("rna", {"umap": {"n_epochs": 30, "spread": 0.5}}),
+        ("atac", {"lsi": {"dims": 6, "rand_state": 2**32 + 7}}),
+    ],
+    ids=["hvg-blacklist-false", "umap-spread-below-min-dist", "lsi-seed-above-2-32"],
+)
+def test_a_run_of_an_earlier_release_replays_the_settings_it_recorded(
+    completed, tmp_path, recipe, settings
+) -> None:
+    location = tmp_path / "data.zarr"
+    if recipe == "rna":
+        shutil.copytree(completed.location, location)
+        keywords = {**SETTINGS, **settings}
+        assay = "RNA"
+    else:
+        with tarfile.open(full_path("500_pbmc_atac.zarr.tar.gz"), "r:gz") as archive:
+            archive.extractall(location, filter="data")
+        keywords = {**ATAC_SETTINGS, **settings}
+        assay = "ATAC"
+    recorded = getattr(DataStore(str(location), default_assay=assay).pipeline, recipe)(
+        label="recorded", **keywords
+    )
+    _record_as_an_earlier_release(location, recorded.run_id, lambda config: None)
+    datastore = DataStore(str(location), default_assay=assay)
+    earlier = datastore.pipeline.open(run_id=recorded.run_id)
+    ((stage, values),) = settings.items()
+    assert earlier.settings()[stage] == values
+
+    # Its plan reuses every stage, and a rerun computes nothing.
+    assert_plan_reuses_run(datastore.pipeline.plan(earlier), earlier)
+    again = datastore.pipeline.rerun(earlier, label="again")
+
+    assert again.status == "completed"
+    assert again.settings()[stage] == values
+    assert set(_dispositions(again).values()) <= {"reused", "skipped"}
 
 
 def test_a_run_that_records_a_keyword_the_recipe_no_longer_takes_is_refused(

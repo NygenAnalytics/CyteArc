@@ -30,7 +30,7 @@ from ...storage.artifacts import (
 )
 from ...storage.diagnostics import DiagnosticRule, warn_diagnostics
 from ...storage.types import as_zarr_array, as_zarr_group
-from ...utils.arguments import bool_argument, float_argument, integer_argument
+from ...utils.arguments import bool_argument, integer_argument
 from ...utils.logging import logger, progress_enabled
 from ...utils.shutdown import shutdown_checkpoint
 
@@ -416,42 +416,13 @@ class _EmbeddingOperationsMixin(_EmbeddingOperationsBase):
             densmap_distance_graph,
             layout_threads,
             umap_peak_bytes,
+            umap_settings,
         )
 
         symmetric_graph, graph_upper_only = umap_graph_flags(
             symmetric_graph, graph_upper_only
         )
-        # Parameters are recorded canonically, so ``min_dist=1`` and
-        # ``min_dist=1.0`` identify the same embedding.
-        umap_dims = integer_argument(umap_dims, "umap_dims", minimum=1)
-        n_epochs = integer_argument(n_epochs, "n_epochs", minimum=1)
-        random_seed = integer_argument(random_seed, "random_seed", minimum=0)
-        spread = float_argument(spread, "spread")
-        min_dist = float_argument(min_dist, "min_dist")
-        repulsion_strength = float_argument(repulsion_strength, "repulsion_strength")
-        initial_alpha = float_argument(initial_alpha, "initial_alpha")
-        negative_sample_rate = float_argument(
-            negative_sample_rate, "negative_sample_rate"
-        )
-        dens_lambda = float_argument(dens_lambda, "dens_lambda")
-        dens_frac = float_argument(dens_frac, "dens_frac")
-        dens_var_shift = float_argument(dens_var_shift, "dens_var_shift")
-        use_density_map = bool_argument(use_density_map, "use_density_map")
-        parallel = bool_argument(parallel, "parallel")
-        # UMAP optimizes its initialization in place and requires C-contiguous
-        # float32 coordinates, so an array initialization becomes a private copy.
-        cell_selection, n_cells, initialization_input, ini_embed = (
-            self._embedding_inputs(graph, initialization, umap_dims, np.float32)
-        )
-        if nthreads is None:
-            nthreads = self.nthreads
-        nthreads = integer_argument(nthreads, "nthreads", minimum=1)
-        effective_density_map = use_density_map and graph.kind != "integrated_graph"
-        arguments = UmapArguments(
-            graph=graph,
-            initialization=initialization_input,
-            symmetric_graph=symmetric_graph,
-            graph_upper_only=graph_upper_only,
+        settings = umap_settings(
             umap_dims=umap_dims,
             spread=spread,
             min_dist=min_dist,
@@ -459,14 +430,46 @@ class _EmbeddingOperationsMixin(_EmbeddingOperationsBase):
             repulsion_strength=repulsion_strength,
             initial_alpha=initial_alpha,
             negative_sample_rate=negative_sample_rate,
-            use_density_map=effective_density_map,
+            use_density_map=use_density_map,
             dens_lambda=dens_lambda,
             dens_frac=dens_frac,
             dens_var_shift=dens_var_shift,
             random_seed=random_seed,
             parallel=parallel,
+        )
+        # UMAP optimizes its initialization in place and requires C-contiguous
+        # float32 coordinates, so an array initialization becomes a private copy.
+        cell_selection, n_cells, initialization_input, ini_embed = (
+            self._embedding_inputs(
+                graph, initialization, settings.umap_dims, np.float32
+            )
+        )
+        if nthreads is None:
+            nthreads = self.nthreads
+        nthreads = integer_argument(nthreads, "nthreads", minimum=1)
+        effective_density_map = (
+            settings.use_density_map and graph.kind != "integrated_graph"
+        )
+        arguments = UmapArguments(
+            graph=graph,
+            initialization=initialization_input,
+            symmetric_graph=symmetric_graph,
+            graph_upper_only=graph_upper_only,
+            umap_dims=settings.umap_dims,
+            spread=settings.spread,
+            min_dist=settings.min_dist,
+            n_epochs=settings.n_epochs,
+            repulsion_strength=settings.repulsion_strength,
+            initial_alpha=settings.initial_alpha,
+            negative_sample_rate=settings.negative_sample_rate,
+            use_density_map=effective_density_map,
+            dens_lambda=settings.dens_lambda,
+            dens_frac=settings.dens_frac,
+            dens_var_shift=settings.dens_var_shift,
+            random_seed=settings.random_seed,
+            parallel=settings.parallel,
             nthreads=nthreads,
-            layout_threads=layout_threads(parallel, nthreads),
+            layout_threads=layout_threads(settings.parallel, nthreads),
             invalidate_cache=invalidate_cache,
         )
         record = arguments.to_record()
@@ -480,16 +483,16 @@ class _EmbeddingOperationsMixin(_EmbeddingOperationsBase):
             inputs=record.inputs,
             execution_options=record.execution_options,
             cell_selection=cell_selection,
-            arrays={"values": ((n_cells, umap_dims), "f")},
+            arrays={"values": ((n_cells, settings.umap_dims), "f")},
             invalidate_cache=invalidate_cache,
         )
-        if use_density_map and graph.kind == "integrated_graph":
+        if settings.use_density_map and graph.kind == "integrated_graph":
             logger.warning(
                 "DensMap is not available for integrated graphs. Running standard UMAP."
             )
         if planned.reused:
             logger.info(
-                f"Reused {umap_dims}-dimensional UMAP embedding for {n_cells} cells"
+                f"Reused {settings.umap_dims}-dimensional UMAP embedding for {n_cells} cells"
             )
             _warn_umap(self.zw, arguments, planned.ref)
             return planned.ref
@@ -508,7 +511,7 @@ class _EmbeddingOperationsMixin(_EmbeddingOperationsBase):
             graph,
             symmetric=symmetric_graph,
             upper_only=graph_upper_only,
-            held_bytes=n_cells * umap_dims * np.dtype(np.float32).itemsize,
+            held_bytes=n_cells * settings.umap_dims * np.dtype(np.float32).itemsize,
             working_bytes=lambda cells, load: umap_peak_bytes(
                 cells,
                 load.maxEntries,
@@ -519,8 +522,8 @@ class _EmbeddingOperationsMixin(_EmbeddingOperationsBase):
         )
         if ini_embed is None:
             assert isinstance(initialization, ArtifactRef)
-            ini_embed = self._get_ini_embed(initialization, graph, umap_dims)
-            _check_initial_shape(ini_embed, n_cells, umap_dims)
+            ini_embed = self._get_ini_embed(initialization, graph, settings.umap_dims)
+            _check_initial_shape(ini_embed, n_cells, settings.umap_dims)
         graph_matrix = self._load_graph_artifact(
             graph,
             symmetric=symmetric_graph,
@@ -538,9 +541,9 @@ class _EmbeddingOperationsMixin(_EmbeddingOperationsBase):
             )
             indices = np.asarray(as_zarr_array(knn_group["indices"], name="indices")[:])
             densmap_kwds = {
-                "lambda": dens_lambda,
-                "frac": dens_frac,
-                "var_shift": dens_var_shift,
+                "lambda": settings.dens_lambda,
+                "frac": settings.dens_frac,
+                "var_shift": settings.dens_var_shift,
                 "n_neighbors": dists.shape[1],
                 "knn_dists": densmap_distance_graph(indices, dists),
             }
@@ -550,15 +553,15 @@ class _EmbeddingOperationsMixin(_EmbeddingOperationsBase):
         t, _a, _b, density_span = _fit_layout(
             graph=graph_matrix.tocoo(),
             ini_embed=ini_embed,
-            spread=spread,
-            min_dist=min_dist,
-            n_epochs=n_epochs,
-            random_seed=random_seed,
-            repulsion_strength=repulsion_strength,
-            initial_alpha=initial_alpha,
-            negative_sample_rate=negative_sample_rate,
+            spread=settings.spread,
+            min_dist=settings.min_dist,
+            n_epochs=settings.n_epochs,
+            random_seed=settings.random_seed,
+            repulsion_strength=settings.repulsion_strength,
+            initial_alpha=settings.initial_alpha,
+            negative_sample_rate=settings.negative_sample_rate,
             densmap_kwds=densmap_kwds,
-            parallel=parallel,
+            parallel=settings.parallel,
             nthreads=nthreads,
             verbose=progress_enabled(),
         )
@@ -570,7 +573,7 @@ class _EmbeddingOperationsMixin(_EmbeddingOperationsBase):
             diagnostics={"densityRadiusSpan": density_span},
         )
         logger.info(
-            f"Stored {umap_dims}-dimensional UMAP embedding for {n_cells} cells"
+            f"Stored {settings.umap_dims}-dimensional UMAP embedding for {n_cells} cells"
         )
         _warn_umap(self.zw, arguments, planned.ref)
         return planned.ref
@@ -628,7 +631,7 @@ class _EmbeddingOperationsMixin(_EmbeddingOperationsBase):
                       Smaller values will result in a more clustered/clumped embedding where nearby points on the
                       manifold are drawn closer together, while larger values will result on a more even dispersal of
                       points. The value should be set relative to the ``spread`` value, which determines the scale at
-                      which embedded points will be spread out. (Default value: 1)
+                      which embedded points will be spread out, from 0 to ``spread``. (Default value: 1)
             n_epochs: Same as n_epochs in UMAP package. The number of epochs to be used in optimizing the
                       low dimensional embedding. Larger values may result in more accurate embeddings.
                       (Default value: 300)
@@ -643,9 +646,10 @@ class _EmbeddingOperationsMixin(_EmbeddingOperationsBase):
                                   slightly more accuracy. (Default value: 5)
             use_density_map: If True, run densMAP (density-preserving UMAP) instead of standard UMAP.
             dens_lambda: densMAP density preservation strength (Default value: 2.0).
-            dens_frac: Fraction of nearest neighbors used for local density estimation (Default value: 0.3).
+            dens_frac: The fraction of the epochs, at the end of the layout, in which densMAP adds its density
+                       term, as umap-learn's ``dens_frac``. (Default value: 0.3)
             dens_var_shift: Variance shift for density correction (Default value: 0.1).
-            random_seed: (Default value: 4444)
+            random_seed: The seed of the layout, from 0 to 2**32 - 1. (Default value: 4444)
             parallel: Whether to run UMAP in parallel mode. Setting value to True will use `nthreads` threads.
                       The results are not reproducible in parallel mode. A serial layout runs on one thread
                       and releases the GIL during each epoch, so the process's other Python threads keep
@@ -658,6 +662,11 @@ class _EmbeddingOperationsMixin(_EmbeddingOperationsBase):
 
         Raises:
             ValueError: If ``symmetric_graph`` or ``graph_upper_only`` is True,
+                if a setting is out of the range that umap-learn's ``UMAP``
+                takes: ``spread`` not above 0, ``min_dist``,
+                ``repulsion_strength``, ``initial_alpha``,
+                ``negative_sample_rate``, ``dens_lambda`` or
+                ``dens_var_shift`` below 0, or ``dens_frac`` outside 0 to 1,
                 if ``initialization`` is a reference to another kind of
                 artifact, or if densMAP finds a cell whose local radius is not
                 finite.

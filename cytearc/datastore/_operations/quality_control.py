@@ -5,18 +5,19 @@ from typing import TYPE_CHECKING, Any, Literal
 import numpy as np
 import pandas as pd
 
-from ...assay import ATACassay, RNAassay
+from ...assay import ATACassay, RNAassay, norm_lib_size
 from ...assay.feature_summary import (
     ensure_feature_summary,
     feature_summary_selected_count,
     feature_summary_values,
 )
 from ...graph.feature_projection import (
+    NativeGraphInputs,
     graph_cell_selection,
     resolve_graph_assay_inputs,
 )
 from ...graph.kinds import require_graph_kind
-from ...quality_control.cell_cycle import assign_cell_cycle_phase
+from ...quality_control.cell_cycle import assign_cell_cycle_phase, cell_cycle_settings
 from ...quality_control.cell_cycle_genes import match_gene_names
 from ...quality_control.filtering import (
     MetricKind,
@@ -33,7 +34,7 @@ from ...quality_control.hto import (
     _hto_clr_diagnostics,
     _hto_demux_method,
     _validated_hto_counts,
-    _validated_positive_quantile,
+    demultiplexing_settings,
     checked_sample_hashtags,
     unseparated_htos_message,
 )
@@ -76,6 +77,7 @@ from ...storage.artifact_writer import (
 from ...storage.artifacts import (
     artifact_group,
     artifact_path,
+    callable_identity,
     fingerprint_array,
     fingerprint_strings,
     inspect_artifact,
@@ -97,7 +99,12 @@ from ...storage.selections import (
     validate_stored_selection_integrity,
 )
 from ...storage.types import as_zarr_array, as_zarr_group
-from ...utils.arguments import bool_argument, integer_argument, optional_bool_argument
+from ...utils.arguments import (
+    bool_argument,
+    integer_argument,
+    optional_bool_argument,
+    quoted_value,
+)
 from ...utils.arrays import within_bounds
 from ...utils.compute import controlled_compute
 from ...utils.memory_budget import MemoryBudgetError, MemoryLedger
@@ -117,26 +124,62 @@ _ONE_CLUSTER_DOUBLET_REMEDY = (
 )
 
 
-def _validated_real(
-    value: object,
-    name: str,
-    *,
-    low: float,
-    high: float = np.inf,
-    include_low: bool = True,
-) -> float:
-    if isinstance(value, bool | np.bool_) or not isinstance(value, Real):
-        raise TypeError(f"{name} must be a real number")
-    resolved = float(value)
-    in_range = (resolved >= low if include_low else resolved > low) and (
-        resolved <= high
+def _normalizer_text(identity: object) -> str:
+    """Name a normalizer by the identity that provenance records for it."""
+    if isinstance(identity, Mapping):
+        text = identity.get("identity")
+        if isinstance(text, str):
+            return text
+        module, qualname = identity.get("module"), identity.get("qualname")
+        if isinstance(module, str) and isinstance(qualname, str):
+            return f"{module}.{qualname}"
+    return quoted_value(identity)
+
+
+def _require_doublet_graph(root: Any, lineage: NativeGraphInputs) -> None:
+    """Refuse a graph whose PCA doublet scoring cannot project its doublets onto.
+
+    Doublet scoring normalizes the counts of its simulated doublets by
+    library size and projects them onto the graph's PCA through a mapping
+    reference, so the PCA must be fitted with feature scaling on values that
+    ``norm_lib_size`` normalized. The normalizer is checked first, since a
+    PCA of Pearson residuals also skips feature scaling by default.
+    """
+    if lineage.reduction is None or lineage.normalized is None:
+        raise ValueError(
+            "Doublet scoring projects its simulated doublets onto the PCA of "
+            "the graph's normalized values, but the graph's lineage names no "
+            "PCA or no normalized values; build the graph on reduction.pca"
+        )
+    identity = (inspect_artifact(root, lineage.normalized).parameters or {}).get(
+        "normalization_method"
     )
-    if not np.isfinite(resolved) or not in_range:
-        bound = f">= {low:g}" if include_low else f"> {low:g}"
-        if np.isfinite(high):
-            bound += f" and <= {high:g}"
-        raise ValueError(f"{name} must be a finite number {bound}")
-    return resolved
+    if isinstance(identity, Mapping):
+        identity = {
+            key: value for key, value in identity.items() if key != "external_hook"
+        }
+    if identity != callable_identity(norm_lib_size):
+        raise ValueError(
+            "The graph was built on values normalized with "
+            f"{_normalizer_text(identity)}, but doublet scoring normalizes its "
+            "simulated doublets by library size and needs a graph of "
+            "norm_lib_size values; normalize with cytearc.assay.norm_lib_size "
+            "and build the PCA and graph again"
+        )
+    reduction = inspect_artifact(root, lineage.reduction)
+    if reduction.operation != "run_pca":
+        raise ValueError(
+            "The graph was built on a reduction other than a PCA, but doublet "
+            "scoring projects its simulated doublets onto the graph's PCA; "
+            "build the graph on reduction.pca"
+        )
+    if (reduction.parameters or {}).get("feat_scaling") is not True:
+        raise ValueError(
+            "The graph was built on a PCA fitted without feature scaling, but "
+            "doublet scoring projects its simulated doublets onto the PCA "
+            "through a mapping reference, which needs feature scaling; fit the "
+            "PCA again with feat_scaling=True and build the graph on it"
+        )
 
 
 def _doublet_sample_columns(sample_column: object) -> tuple[str, ...]:
@@ -285,34 +328,26 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
         """
         from ...assay.normalization import resolve_normalization_params
 
-        if s_genes is None:
-            from ...quality_control.cell_cycle_genes import s_phase_genes
-
-            s_genes = list(s_phase_genes)
-        if g2m_genes is None:
-            from ...quality_control.cell_cycle_genes import g2m_phase_genes
-
-            g2m_genes = list(g2m_phase_genes)
-        for label, genes in (("s_genes", s_genes), ("g2m_genes", g2m_genes)):
-            if isinstance(genes, str) or not all(
-                isinstance(gene, str) for gene in genes
-            ):
-                raise TypeError(f"{label} must be a sequence of gene names")
-        control_size = integer_argument(
-            min(len(s_genes), len(g2m_genes)) if ctrl_size is None else ctrl_size,
-            "ctrl_size",
-            minimum=1,
+        settings = cell_cycle_settings(
+            s_genes=s_genes,
+            g2m_genes=g2m_genes,
+            ctrl_size=ctrl_size,
+            log_transform=log_transform,
+            n_bins=n_bins,
+            rand_seed=rand_seed,
         )
-        log_transform = optional_bool_argument(log_transform, "log_transform")
+        s_genes = list(settings.s_genes)
+        g2m_genes = list(settings.g2m_genes)
+        control_size = settings.ctrl_size
         # Scores are logged by default when the normalizer's defaults log.
         log_transform = resolve_normalization_params(
             assay,
-            {"log_transform": log_transform},
+            {"log_transform": settings.log_transform},
             caller="run_cell_cycle_scoring",
             default=True,
         )["log_transform"]
-        n_bins = integer_argument(n_bins, "n_bins", minimum=2)
-        rand_seed = integer_argument(rand_seed, "rand_seed", minimum=0)
+        n_bins = settings.n_bins
+        rand_seed = settings.rand_seed
         names = np.asarray(
             assay.feats.fetch_all("names") if feature_names is None else feature_names
         )
@@ -1517,7 +1552,8 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
         Args:
             from_assay: HTO assay name (default: ``'HTO'``).
             cell_selection: Explicit cell-selection artifact.
-            random_seed: Seed used for HTO demultiplexing.
+            random_seed: Seed used for HTO demultiplexing, from 0 to
+                2**32 - 1.
             positive_quantile: Quantile of each HTO's background distribution
                 that a count must exceed to be positive, Seurat's
                 ``positive.quantile`` (default 0.99). It must be greater than 0
@@ -1542,8 +1578,9 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
         Raises:
             TypeError: If ``random_seed`` is not an integer or
                 ``positive_quantile`` is not a real number.
-            ValueError: If ``positive_quantile`` is not finite or not between
-                0 and 1, ``sample_column`` is not a cell column or leaves a
+            ValueError: If ``random_seed`` is outside 0 to 2**32 - 1,
+                ``positive_quantile`` is not finite or not between 0 and 1,
+                ``sample_column`` is not a cell column or leaves a
                 selected cell without a label, ``hashtags`` names no hashtag of
                 the assay or maps samples without ``sample_column`` or other
                 than the selected cells', a sample has too few cells or no
@@ -1571,9 +1608,9 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
                 f"{from_assay!r} is declared as {declared_type!r}"
             )
         assay = self._get_assay(from_assay)
-        if isinstance(random_seed, bool) or not isinstance(random_seed, int):
-            raise TypeError("random_seed must be an integer")
-        positive_quantile = _validated_positive_quantile(positive_quantile)
+        random_seed, positive_quantile = demultiplexing_settings(
+            random_seed=random_seed, positive_quantile=positive_quantile
+        )
         if sample_column is not None and (
             not isinstance(sample_column, str) or not sample_column.strip()
         ):
@@ -1854,6 +1891,7 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
         """
         from ...quality_control.doublets import (
             DoubletIndexSettings,
+            doublet_settings,
             minmax_doublet_scores,
             plan_doublet_samples,
             score_synthetic_doublets,
@@ -1863,42 +1901,18 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
 
         require_graph_kind(connectivity)
         # Arguments are checked before any reference, score, or artifact work.
-        fraction = _validated_real(
-            cluster_sample_fraction,
-            "cluster_sample_fraction",
-            low=0.0,
-            high=1.0,
-            include_low=False,
+        settings = doublet_settings(
+            cluster_sample_fraction=cluster_sample_fraction,
+            max_cells_per_cluster=max_cells_per_cluster,
+            simulation_ratio=simulation_ratio,
+            heterotypic_fraction=heterotypic_fraction,
+            save_k=save_k,
+            expected_doublet_rate=expected_doublet_rate,
+            threshold=threshold,
+            smoothing_t=smoothing_t,
+            normalize_scores=normalize_scores,
+            random_seed=random_seed,
         )
-        cap = (
-            None
-            if max_cells_per_cluster is None
-            else integer_argument(
-                max_cells_per_cluster, "max_cells_per_cluster", minimum=1
-            )
-        )
-        ratio = _validated_real(
-            simulation_ratio, "simulation_ratio", low=0.0, include_low=False
-        )
-        heterotypic = _validated_real(
-            heterotypic_fraction, "heterotypic_fraction", low=0.0, high=1.0
-        )
-        neighbors_k = integer_argument(save_k, "save_k", minimum=1)
-        rate = _validated_real(
-            expected_doublet_rate, "expected_doublet_rate", low=0.0, include_low=False
-        )
-        if rate >= 1:
-            raise ValueError(
-                "expected_doublet_rate must be a finite number > 0 and < 1"
-            )
-        cutoff = (
-            None
-            if threshold is None
-            else _validated_real(threshold, "threshold", low=0.0, high=1.0)
-        )
-        smoothing = integer_argument(smoothing_t, "smoothing_t", minimum=0)
-        seed = integer_argument(random_seed, "random_seed", minimum=0)
-        normalize_scores = bool_argument(normalize_scores, "normalize_scores")
         columns = _doublet_sample_columns(sample_column)
         if len(columns) != (0 if sample_labels is None else len(sample_labels)):
             raise ValueError("Pass one array of sample labels per sample column")
@@ -1907,10 +1921,10 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
             raise ValueError("Cluster values must contain one label per selected cell")
         # Forced heterotypic doublets need a partner outside the first
         # parent's cluster, so one cluster fails before any planning.
-        if heterotypic > 0 and len(np.unique(labels)) < 2:
+        if settings.heterotypic_fraction > 0 and len(np.unique(labels)) < 2:
             raise ValueError(
                 "Doublet detection with heterotypic_fraction="
-                f"{heterotypic:g} pairs cells from two different "
+                f"{settings.heterotypic_fraction:g} pairs cells from two different "
                 "clusters, but every selected cell has the same cluster label. "
                 f"{one_cluster_remedy}"
             )
@@ -1946,6 +1960,7 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
                 )
         elif coordinates.kind != "reduction":
             raise ValueError("Doublet detection requires an uncorrected PCA graph")
+        _require_doublet_graph(self.zw, lineage)
         active_idx = read_stored_selection_indices(
             self.zw,
             cell_selection,
@@ -1975,26 +1990,28 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
                 "their capture"
             )
         plans = plan_doublet_samples(
-            sizes, simulation_ratio=ratio, n_neighbors=neighbors_k
+            sizes,
+            simulation_ratio=settings.simulation_ratio,
+            n_neighbors=settings.save_k,
         )
         arguments = DoubletScoreArguments(
             clusters=clusters,
             connectivity_map=connectivity,
             neighbors=neighbors,
             sample_assignments_fingerprint=assignments,
-            cluster_sample_fraction=fraction,
-            max_cells_per_cluster=cap,
+            cluster_sample_fraction=settings.cluster_sample_fraction,
+            max_cells_per_cluster=settings.max_cells_per_cluster,
             sample_columns=columns,
-            simulation_ratio=ratio,
-            heterotypic_fraction=heterotypic,
+            simulation_ratio=settings.simulation_ratio,
+            heterotypic_fraction=settings.heterotypic_fraction,
             # Each sample counts at most its other cells, so the neighbors
             # recorded are the most that any sample uses.
             save_k=max(plan.neighbors for plan in plans),
-            expected_doublet_rate=rate,
-            threshold=cutoff,
-            smoothing_t=smoothing,
-            normalize_scores=normalize_scores,
-            random_seed=seed,
+            expected_doublet_rate=settings.expected_doublet_rate,
+            threshold=settings.threshold,
+            smoothing_t=settings.smoothing_t,
+            normalize_scores=settings.normalize_scores,
+            random_seed=settings.random_seed,
             invalidate_cache=invalidate_cache,
         )
         record = arguments.to_record()
@@ -2081,14 +2098,14 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
             feature_indices,
             totals,
             index=index,
-            cluster_sample_fraction=fraction,
-            max_cells_per_cluster=cap,
-            simulation_ratio=ratio,
-            heterotypic_fraction=heterotypic,
-            n_neighbors=neighbors_k,
-            expected_doublet_rate=rate,
-            threshold=cutoff,
-            random_seed=seed,
+            cluster_sample_fraction=settings.cluster_sample_fraction,
+            max_cells_per_cluster=settings.max_cells_per_cluster,
+            simulation_ratio=settings.simulation_ratio,
+            heterotypic_fraction=settings.heterotypic_fraction,
+            n_neighbors=settings.save_k,
+            expected_doublet_rate=settings.expected_doublet_rate,
+            threshold=settings.threshold,
+            random_seed=settings.random_seed,
             resources=self.resources,
         )
         del reference
@@ -2099,10 +2116,10 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
         one_cluster = [
             _doublet_sample_text(sample)
             for sample, outcome in zip(samples, result.samples, strict=True)
-            if outcome.heterotypic_fraction < heterotypic
+            if outcome.heterotypic_fraction < settings.heterotypic_fraction
         ]
         values = result.scores
-        if smoothing:
+        if settings.smoothing_t:
             graph_group = artifact_group(self.zw, connectivity)
             edges = as_zarr_array(graph_group["edges"], name="edges")
             weights = as_zarr_array(graph_group["weights"], name="weights")
@@ -2135,10 +2152,10 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
             values = smooth_doublet_scores(
                 graph,
                 values,
-                power=smoothing,
-                normalize=normalize_scores,
+                power=settings.smoothing_t,
+                normalize=settings.normalize_scores,
             )
-        elif normalize_scores:
+        elif settings.normalize_scores:
             values = minmax_doublet_scores(values)
         write_cell_data_artifact(
             self.zw,
@@ -2237,8 +2254,11 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
             clusters: Cluster labels over the graph's cell selection. They
                 matter only with ``heterotypic_fraction`` above 0 or a parent
                 pool smaller than every cell.
-            graph: A connectivity map built on a PCA reduction. A map built on
-                a Harmony correction of one needs ``sample_column``.
+            graph: A connectivity map built on a PCA with feature scaling of
+                values that ``norm_lib_size`` normalized, since the simulated
+                doublets are normalized by library size and projected onto
+                that PCA. A map built on a Harmony correction of one needs
+                ``sample_column``.
             from_assay: The RNA assay of the graph; required for an
                 integrated graph.
             cluster_sample_fraction: The fraction of each cluster of a sample
@@ -2276,7 +2296,10 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
             A complete assay-scoped ``doublet_score`` artifact.
 
         Raises:
-            ValueError: If ``heterotypic_fraction`` is above 0 with one
+            ValueError: If ``graph`` was built on values of a normalizer other
+                than ``norm_lib_size``, such as Pearson residuals, or on a PCA
+                without feature scaling, which is checked before anything is
+                planned. Also if ``heterotypic_fraction`` is above 0 with one
                 cluster, a sample has fewer than two cells or a missing
                 label, or an argument is out of range.
             UnmeasuredCellsError: If the assay did not measure a cell of the graph.
@@ -2546,7 +2569,7 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
             log_transform: Apply log1p before binning and scoring. None applies it
                            only for ``norm_lib_size``.
             n_bins: Number of bins into which average expression of genes is divided.
-            rand_seed: A random seed for sampling control genes. (Default value: 4466)
+            rand_seed: A random seed for sampling control genes, from 0 to 2**32 - 1. (Default value: 4466)
         Returns:
             A complete ``cell_cycle`` artifact containing S, G2M, and phase values.
 

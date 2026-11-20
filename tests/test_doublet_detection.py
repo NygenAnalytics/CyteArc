@@ -22,6 +22,7 @@ from sklearn.metrics import roc_auc_score
 
 import cytearc.storage.operation_revisions as operation_revisions
 from cytearc import DataStore, DiagnosticWarning
+from cytearc.assay import norm_lib_size, norm_pearson_residuals
 from cytearc.datastore._pipeline.recipes import rna as rna_recipe
 from cytearc.datastore.pipeline_accessor import PipelineAccessor
 from cytearc.quality_control import doublets
@@ -236,6 +237,85 @@ def test_doublet_index_settings_are_validated():
         doublets.DoubletIndexSettings("l2", 16, 50, 0, False)
     with pytest.raises(TypeError, match="parallel must be a boolean"):
         doublets.DoubletIndexSettings("l2", 16, 50, 50, 1)
+
+
+# The qc.doublets defaults of the settings that doublet_settings checks.
+_DOUBLET_SETTINGS: dict[str, Any] = {
+    "cluster_sample_fraction": 1.0,
+    "max_cells_per_cluster": None,
+    "simulation_ratio": 2.0,
+    "heterotypic_fraction": 0.0,
+    "save_k": 30,
+    "expected_doublet_rate": 0.05,
+    "threshold": None,
+    "smoothing_t": 0,
+    "normalize_scores": False,
+    "random_seed": 4444,
+}
+
+
+def test_doublet_settings_take_their_bounds_as_python_values():
+    settings = doublets.doublet_settings(
+        cluster_sample_fraction=np.float32(1.0),
+        max_cells_per_cluster=np.int64(1),
+        simulation_ratio=1e-9,
+        heterotypic_fraction=1,
+        save_k=np.int32(1),
+        expected_doublet_rate=0.999,
+        threshold=0,
+        smoothing_t=0,
+        normalize_scores=np.True_,
+        random_seed=0,
+    )
+
+    assert settings == doublets.DoubletSettings(
+        1.0, 1, 1e-9, 1.0, 1, 0.999, 0.0, 0, True, 0
+    )
+    numbers = {
+        float: (
+            "cluster_sample_fraction",
+            "simulation_ratio",
+            "heterotypic_fraction",
+            "expected_doublet_rate",
+            "threshold",
+        ),
+        int: ("max_cells_per_cluster", "save_k", "smoothing_t", "random_seed"),
+        bool: ("normalize_scores",),
+    }
+    for kind, names in numbers.items():
+        for name in names:
+            assert type(getattr(settings, name)) is kind, name
+    assert doublets.doublet_settings(**_DOUBLET_SETTINGS) == doublets.DoubletSettings(
+        **_DOUBLET_SETTINGS
+    )
+
+
+@pytest.mark.parametrize(
+    ("name", "value", "error"),
+    [
+        ("cluster_sample_fraction", 0.0, ValueError),
+        ("cluster_sample_fraction", 1.0000001, ValueError),
+        ("max_cells_per_cluster", 0, ValueError),
+        ("simulation_ratio", 0.0, ValueError),
+        ("simulation_ratio", np.inf, ValueError),
+        ("simulation_ratio", np.True_, TypeError),
+        ("heterotypic_fraction", -1e-9, ValueError),
+        ("heterotypic_fraction", 1.0000001, ValueError),
+        ("save_k", True, TypeError),
+        ("expected_doublet_rate", 0.0, ValueError),
+        ("expected_doublet_rate", 1.0, ValueError),
+        ("expected_doublet_rate", np.nan, ValueError),
+        ("threshold", -1e-9, ValueError),
+        ("threshold", 1.0000001, ValueError),
+        ("smoothing_t", -1, ValueError),
+        ("normalize_scores", 0, TypeError),
+        ("random_seed", -1, ValueError),
+        ("random_seed", 1.0, TypeError),
+    ],
+)
+def test_doublet_settings_refuse_values_past_their_bounds(name, value, error):
+    with pytest.raises(error, match=f"^{name} must be"):
+        doublets.doublet_settings(**{**_DOUBLET_SETTINGS, name: value})
 
 
 def test_estimated_doublet_rate_divides_calls_by_detectable_doublets():
@@ -942,6 +1022,160 @@ def test_a_harmony_graph_scores_each_sample_on_the_pca_it_corrected(
         np.testing.assert_array_equal(
             _payload(store, ref)[name][:], _payload(store, uncorrected)[name][:]
         )
+
+
+_LIBRARY_SIZE = {"module": "cytearc.assay", "qualname": "norm_lib_size"}
+
+
+@pytest.mark.parametrize(
+    ("recorded", "named"),
+    [
+        (
+            {
+                "external_hook": True,
+                "module": "cytearc.assay",
+                "qualname": "norm_lib_size_log",
+            },
+            "cytearc.assay.norm_lib_size_log",
+        ),
+        (
+            {
+                "external_hook": True,
+                "module": "lab.norms",
+                "qualname": "half",
+                "code": "0f",
+            },
+            "lab.norms.half",
+        ),
+        (
+            {"identity": "cytearc.assay.pearson_residuals:theta=50.0:clip=sqrt-n"},
+            "cytearc.assay.pearson_residuals:theta=50.0:clip=sqrt-n",
+        ),
+        # Records that name no normalizer are quoted as they are.
+        ({"external_hook": True, "module": 3}, "{'module': 3}"),
+        (None, "None"),
+    ],
+)
+def test_the_doublet_graph_check_names_the_recorded_normalizer(
+    monkeypatch, recorded, named
+):
+    from cytearc.datastore._operations import quality_control
+
+    statuses = {
+        "normalized": SimpleNamespace(
+            parameters=None if recorded is None else {"normalization_method": recorded}
+        ),
+        "reduction": SimpleNamespace(
+            operation="run_pca", parameters={"feat_scaling": True}
+        ),
+    }
+    monkeypatch.setattr(
+        quality_control, "inspect_artifact", lambda _root, ref: statuses[ref]
+    )
+    lineage = SimpleNamespace(normalized="normalized", reduction="reduction")
+
+    with pytest.raises(ValueError) as caught:
+        quality_control._require_doublet_graph(None, lineage)
+
+    assert str(caught.value).startswith(
+        f"The graph was built on values normalized with {named}, but doublet "
+        "scoring normalizes its simulated doublets by library size"
+    )
+    # norm_lib_size passes, recorded with or without its external_hook key.
+    for library_size in (_LIBRARY_SIZE, {"external_hook": True, **_LIBRARY_SIZE}):
+        statuses["normalized"].parameters = {"normalization_method": library_size}
+        quality_control._require_doublet_graph(None, lineage)
+
+
+def test_the_doublet_graph_check_needs_a_pca_of_normalized_values():
+    from cytearc.datastore._operations import quality_control
+
+    message = (
+        "Doublet scoring projects its simulated doublets onto the PCA of the "
+        "graph's normalized values, but the graph's lineage names no PCA or no "
+        "normalized values; build the graph on reduction.pca"
+    )
+    # An explicit error, not an assertion, so it holds under python -O.
+    for lineage in (
+        SimpleNamespace(normalized="normalized", reduction=None),
+        SimpleNamespace(normalized=None, reduction="reduction"),
+    ):
+        with pytest.raises(ValueError) as caught:
+            quality_control._require_doublet_graph(None, lineage)
+        assert str(caught.value) == message
+
+
+@pytest.mark.slow
+def test_doublets_refuse_a_graph_whose_pca_they_cannot_project_onto(
+    small_captures, tmp_path
+):
+    opened = _open_synthetic(small_captures, tmp_path)
+    store = opened.store
+    cells = store.snapshot_cell_selection("I")
+    features = store.features.universe()
+
+    def graph_on(coordinates: ArtifactRef) -> ArtifactRef:
+        ann_index = store.graph.ann_index(coordinates)
+        return store.graph.connectivity(
+            store.graph.neighbors(ann_index, coordinates=coordinates, k=10)
+        )
+
+    def pca(normalized: ArtifactRef, **options: Any) -> ArtifactRef:
+        return store.reduction.pca(normalized, dims=10, local_cache=False, **options)
+
+    library_size = store.features.normalize(cells, features)
+    store.RNA.normMethod = norm_pearson_residuals
+    residuals = store.features.normalize(cells, features)
+    store.RNA.normMethod = norm_lib_size
+    unscaled = pca(library_size, feat_scaling=False)
+    loadings = np.random.default_rng(0).normal(size=(int(store.RNA.feats.N), 10))
+    normalizer = (
+        "The graph was built on values normalized with "
+        "cytearc.assay.pearson_residuals:theta=100.0:clip=sqrt-n, but doublet "
+        "scoring normalizes its simulated doublets by library size and needs a "
+        "graph of norm_lib_size values; normalize with cytearc.assay.norm_lib_size "
+        "and build the PCA and graph again"
+    )
+    scaling = (
+        "The graph was built on a PCA fitted without feature scaling, but doublet "
+        "scoring projects its simulated doublets onto the PCA through a mapping "
+        "reference, which needs feature scaling; fit the PCA again with "
+        "feat_scaling=True and build the graph on it"
+    )
+    cases = [
+        # Residuals are standardized, so their PCA scales no gene; the
+        # normalizer is the cause, so it is named first.
+        (graph_on(pca(residuals, feat_scaling=False)), {}, normalizer),
+        (graph_on(pca(residuals)), {}, normalizer),
+        (graph_on(unscaled), {}, scaling),
+        # A Harmony graph is scored on the PCA that it corrected.
+        (
+            graph_on(store.reduction.harmony(unscaled, ["sample"])),
+            {"sample_column": "sample"},
+            scaling,
+        ),
+        (
+            graph_on(store.reduction.custom(loadings, library_size)),
+            {},
+            "The graph was built on a reduction other than a PCA, but doublet "
+            "scoring projects its simulated doublets onto the graph's PCA; build "
+            "the graph on reduction.pca",
+        ),
+    ]
+    kinds = ("doublet_score", "mapping_reference")
+    before = [store.artifacts.list(kind=kind, from_assay="RNA") for kind in kinds]
+
+    for graph, options, message in cases:
+        with pytest.raises(ValueError) as caught:
+            store.qc.doublets(opened.clusters, graph, **options)
+        assert str(caught.value) == message
+
+    # Nothing was planned or written, and a graph of scaled library-size
+    # values still scores.
+    assert [store.artifacts.list(kind=kind, from_assay="RNA") for kind in kinds] == (
+        before
+    )
+    assert store.qc.doublets(opened.clusters, opened.graph).kind == "doublet_score"
 
 
 @pytest.mark.slow

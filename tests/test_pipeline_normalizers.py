@@ -800,11 +800,11 @@ def test_the_session_normalizer_returns_however_the_run_ends(saved, tmp_path) ->
         )
     ]
     assert store.RNA.normMethod is norm_lib_size
-    # A stage that fails ends the run failed.
+    # A stage that fails ends the run failed: Paris refuses more clusters
+    # than the graph's cells only when it reads the graph.
     with pytest.raises(PipelineExecutionError):
         store.pipeline.rna(
-            normalization=residuals,
-            **{**SETTINGS, "leiden": {"partitions": [0.5], "backend": "nope"}},
+            normalization=residuals, **{**SETTINGS, "paris": {"n_clusters": 100_000}}
         )
     assert store.RNA.normMethod is norm_lib_size
     # A cancellation ends the run interrupted.
@@ -827,8 +827,8 @@ def test_the_session_normalizer_returns_however_the_run_ends(saved, tmp_path) ->
     assert store.RNA.normMethod is norm_lib_size
     # A plan that a stage's check stops, after the stages before it reused
     # their artifacts, leaves it as it was too.
-    with pytest.raises(ValueError, match="backend"):
-        store.pipeline.plan(run, leiden={"backend": "nope"})
+    with pytest.raises(ValueError, match="n_clusters must not exceed the graph size"):
+        store.pipeline.plan(run, paris={"n_clusters": 100_000})
     assert store.RNA.normMethod is norm_lib_size
 
 
@@ -929,6 +929,91 @@ def test_a_normalizer_of_another_assay_class_is_refused_before_the_run(
         store.pipeline.plan(recipe, normalization={"method": method})
 
     assert str(caught.value) == message
+
+
+def _normalize(store: DataStore, assay: str, **flags: Any) -> Any:
+    """Normalize every cell and feature of ``assay`` with the flags."""
+    features = store.features.snapshot(
+        from_assay=assay, feature_indexes=np.arange(store.get_assay(assay).feats.N)
+    )
+    return store.features.normalize(store.snapshot_cell_selection(), features, **flags)
+
+
+@pytest.mark.parametrize(
+    ("recipe", "settings", "stage", "assay", "normalizer", "flag", "call"),
+    [
+        (
+            "rna",
+            {
+                "normalization": {"method": "pearson_residuals", "log_transform": True},
+                "doublets": False,
+            },
+            "normalization",
+            "RNA",
+            norm_pearson_residuals,
+            "log_transform",
+            lambda store: _normalize(store, "RNA", log_transform=True),
+        ),
+        (
+            "rna",
+            {
+                "normalization": {"method": "pearson_residuals"},
+                "cell_cycle": {"log_transform": True},
+                "doublets": False,
+            },
+            "cell_cycle",
+            "RNA",
+            norm_pearson_residuals,
+            "log_transform",
+            lambda store: store.scores.cell_cycle(
+                store.snapshot_cell_selection(), log_transform=True
+            ),
+        ),
+        (
+            "atac",
+            {"normalization": {"log_transform": True}},
+            "normalization",
+            "ATAC",
+            norm_tf_idf,
+            "log_transform",
+            lambda store: _normalize(store, "ATAC", log_transform=True),
+        ),
+        (
+            "adt",
+            {"normalization": {"renormalize_subset": True}},
+            "normalization",
+            "ADT",
+            norm_clr,
+            "renormalize_subset",
+            lambda store: _normalize(store, "ADT", renormalize_subset=True),
+        ),
+    ],
+    ids=["rna-normalization", "rna-cell-cycle", "atac", "adt"],
+)
+def test_a_flag_that_the_run_normalizer_cannot_apply_is_refused_before_the_run(
+    modalities, tmp_path, recipe, settings, stage, assay, normalizer, flag, call
+) -> None:
+    store = open_store(_copy(modalities, tmp_path))
+    before = written(store)
+
+    with pytest.raises(ValueError) as planned:
+        store.pipeline.plan(recipe, **settings)
+    with pytest.raises(ValueError) as ran:
+        getattr(store.pipeline, recipe)(**settings)
+    assert written(store) == before
+    # The stage's method refuses the flag when its assay normalizes so.
+    store.get_assay(assay).normMethod = normalizer
+    with pytest.raises(ValueError) as called:
+        call(store)
+
+    message = str(called.value)
+    # The recipe names the stage, as two stages take log_transform.
+    assert str(planned.value) == str(ran.value) == f"{stage}: {message}"
+    assert message.startswith(
+        f"{type(store.get_assay(assay)).__name__} '{assay}' normalizes with "
+    )
+    assert f"does not support {flag}=True" in message
+    assert message.endswith(f"Pass {flag}=False.")
 
 
 def test_a_custom_rna_normalizer_of_an_adt_assay_is_refused(modalities) -> None:

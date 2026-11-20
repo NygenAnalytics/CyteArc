@@ -7,6 +7,8 @@ from typing import Literal
 import numpy as np
 import pandas as pd
 
+from ..utils.arguments import RANDOM_STATE_MAX, integer_argument
+
 __all__ = ["region_gene_links"]
 
 #: Settings of each gene's gradient boosting regressor, arboreto's ``GBM_KWARGS``.
@@ -60,7 +62,7 @@ def region_gene_links(
         candidates: ``region`` and ``gene`` columns, such as
             ``link_regions_to_genes`` returns.
         importance: ``"gbm"`` fits the regressor; ``"none"`` reports rho only.
-        seed: Random state of each gene's regressor.
+        seed: Random state of each gene's regressor, from 0 to 2**32 - 1.
         nthreads: Genes fitted concurrently.
         progress: Optional ``callback(done, total)`` after each gene.
 
@@ -80,6 +82,7 @@ def region_gene_links(
         raise ValueError("At least three samples are needed")
     if importance not in ("gbm", "none"):
         raise ValueError("importance must be 'gbm' or 'none'")
+    seed = integer_argument(seed, "seed", minimum=0, maximum=RANDOM_STATE_MAX)
     if not {"region", "gene"} <= set(candidates.columns):
         raise ValueError("candidates needs region and gene columns")
     table = candidates.loc[:, ["region", "gene"]].astype(str).drop_duplicates()

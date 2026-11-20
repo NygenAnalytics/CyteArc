@@ -13,6 +13,7 @@ import threading
 from collections.abc import Callable, Iterator, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
+from numbers import Real
 
 import numpy as np
 from numpy.typing import NDArray
@@ -44,7 +45,7 @@ from ..storage.partition import (
     row_read_parts,
 )
 from ..storage.types import as_zarr_array
-from ..utils.arguments import float_argument, integer_argument
+from ..utils.arguments import bool_argument, float_argument, integer_argument
 from ..utils.arrays import sparse_matrix_bytes
 from ..utils.compute import process_thread_limit
 
@@ -53,8 +54,10 @@ __all__ = [
     "DoubletSamplePlan",
     "DoubletSampleResult",
     "DoubletScores",
+    "DoubletSettings",
     "count_simulated_neighbors",
     "doublet_likelihood",
+    "doublet_settings",
     "doublet_threshold",
     "histogram_minimum_threshold",
     "minmax_doublet_scores",
@@ -74,6 +77,115 @@ THRESHOLD_SMOOTHING_STEPS = 10_000
 # A sample scored beside others queries its index for at most this many points
 # at once, so that its query block stays small beside its index.
 _SAMPLE_QUERY_ROWS = 4_096
+
+
+@dataclass(frozen=True, slots=True)
+class DoubletSettings:
+    """The settings of doublet scoring, as canonical Python values.
+
+    Each attribute is the ``qc.doublets`` keyword of the same name.
+    """
+
+    cluster_sample_fraction: float
+    max_cells_per_cluster: int | None
+    simulation_ratio: float
+    heterotypic_fraction: float
+    save_k: int
+    expected_doublet_rate: float
+    threshold: float | None
+    smoothing_t: int
+    normalize_scores: bool
+    random_seed: int
+
+
+def _bounded_real(
+    value: object,
+    name: str,
+    *,
+    low: float,
+    high: float = np.inf,
+    include_low: bool = True,
+) -> float:
+    if isinstance(value, bool | np.bool_) or not isinstance(value, Real):
+        raise TypeError(f"{name} must be a real number")
+    resolved = float(value)
+    in_range = (resolved >= low if include_low else resolved > low) and (
+        resolved <= high
+    )
+    if not np.isfinite(resolved) or not in_range:
+        bound = f">= {low:g}" if include_low else f"> {low:g}"
+        if np.isfinite(high):
+            bound += f" and <= {high:g}"
+        raise ValueError(f"{name} must be a finite number {bound}")
+    return resolved
+
+
+def doublet_settings(
+    *,
+    cluster_sample_fraction: object,
+    max_cells_per_cluster: object,
+    simulation_ratio: object,
+    heterotypic_fraction: object,
+    save_k: object,
+    expected_doublet_rate: object,
+    threshold: object,
+    smoothing_t: object,
+    normalize_scores: object,
+    random_seed: object,
+) -> DoubletSettings:
+    """Check the settings of doublet scoring and return them as canonical Python values.
+
+    ``qc.doublets`` and the doublet stage of a pipeline recipe check their
+    settings with this function, so a recipe refuses a setting before its
+    run starts, with the message that ``qc.doublets`` gives.
+
+    Raises:
+        TypeError: If a setting has the wrong type.
+        ValueError: If a setting is out of range.
+    """
+    fraction = _bounded_real(
+        cluster_sample_fraction,
+        "cluster_sample_fraction",
+        low=0.0,
+        high=1.0,
+        include_low=False,
+    )
+    cap = (
+        None
+        if max_cells_per_cluster is None
+        else integer_argument(max_cells_per_cluster, "max_cells_per_cluster", minimum=1)
+    )
+    ratio = _bounded_real(
+        simulation_ratio, "simulation_ratio", low=0.0, include_low=False
+    )
+    heterotypic = _bounded_real(
+        heterotypic_fraction, "heterotypic_fraction", low=0.0, high=1.0
+    )
+    neighbors = integer_argument(save_k, "save_k", minimum=1)
+    rate = _bounded_real(
+        expected_doublet_rate, "expected_doublet_rate", low=0.0, include_low=False
+    )
+    if rate >= 1:
+        raise ValueError("expected_doublet_rate must be a finite number > 0 and < 1")
+    cutoff = (
+        None
+        if threshold is None
+        else _bounded_real(threshold, "threshold", low=0.0, high=1.0)
+    )
+    smoothing = integer_argument(smoothing_t, "smoothing_t", minimum=0)
+    seed = integer_argument(random_seed, "random_seed", minimum=0)
+    return DoubletSettings(
+        cluster_sample_fraction=fraction,
+        max_cells_per_cluster=cap,
+        simulation_ratio=ratio,
+        heterotypic_fraction=heterotypic,
+        save_k=neighbors,
+        expected_doublet_rate=rate,
+        threshold=cutoff,
+        smoothing_t=smoothing,
+        normalize_scores=bool_argument(normalize_scores, "normalize_scores"),
+        random_seed=seed,
+    )
 
 
 @dataclass(frozen=True, slots=True)

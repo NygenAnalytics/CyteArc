@@ -22,7 +22,7 @@ from .parameters import (
     AGGREGATION_ANN_PARAMETER_NAMES,
     AGGREGATION_ANN_STATIC_PARAMETER_NAMES,
 )
-from ..utils.arguments import bool_argument, integer_argument
+from ..utils.arguments import RANDOM_STATE_MAX, bool_argument, integer_argument
 from ..utils.memory_budget import MemoryBudgetError
 
 PSEUDOTIME_INPUTS = frozenset({"connectivity_map", "source_sink", "cell_selection"})
@@ -301,7 +301,7 @@ def validate_pseudotime_parameters(parameters: Mapping[str, Any]) -> dict[str, A
             parameters["random_seed"],
             "random_seed",
             minimum=0,
-            maximum=2**32 - 1,
+            maximum=RANDOM_STATE_MAX,
         )
         if truncated
         else None,

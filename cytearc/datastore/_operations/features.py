@@ -142,7 +142,12 @@ from ...metadata.rows import (
     read_metadata_missing_rows,
     read_metadata_rows,
 )
-from ...utils.arguments import bool_argument, float_argument, integer_argument
+from ...utils.arguments import (
+    RANDOM_STATE_MAX,
+    bool_argument,
+    float_argument,
+    integer_argument,
+)
 from ...utils.arrays import (
     array_digest,
     has_duplicates,
@@ -671,13 +676,17 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
                 "Use flavor='cytearc', which ranks genes by the variance of their "
                 "normalized values",
             )
-        min_cells, top_n, n_bins, lowess_frac, keep_bounds, bin_strategy = hvg_options(
-            min_cells=min_cells,
-            top_n=top_n,
-            n_bins=n_bins,
-            lowess_frac=lowess_frac,
-            keep_bounds=keep_bounds,
-            bin_strategy=bin_strategy,
+        # The checked blacklist is the given text, which the record keeps.
+        min_cells, top_n, n_bins, lowess_frac, keep_bounds, bin_strategy, _ = (
+            hvg_options(
+                min_cells=min_cells,
+                top_n=top_n,
+                n_bins=n_bins,
+                lowess_frac=lowess_frac,
+                keep_bounds=keep_bounds,
+                bin_strategy=bin_strategy,
+                blacklist=blacklist,
+            )
         )
         options = hvg_flavor_options(
             flavor=flavor,
@@ -1183,6 +1192,7 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
             lowess_frac=lowess_frac,
             keep_bounds=keep_bounds,
             bin_strategy=bin_strategy,
+            blacklist=blacklist,
         )
         hvg_flavor_options(
             flavor=flavor,
@@ -3074,7 +3084,8 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
             null_vals: Primary group values to skip.
             secondary_null_vals: Secondary group values to skip.
                                  These values will be skipped.
-            random_seed: Seed used when assigning cells to pseudo-replicates.
+            random_seed: Seed used when assigning cells to pseudo-replicates,
+                from 0 to 2**32 - 1.
 
         Returns:
             The bulk profiles as
@@ -3085,9 +3096,9 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
             share of each column's cells.
 
         Raises:
-            TypeError: If ``pseudo_reps`` is not an integer.
-            ValueError: If ``aggr_type``, ``feature_label``, or
-                ``pseudo_reps`` is not one of the values above, which is
+            TypeError: If ``pseudo_reps`` or ``random_seed`` is not an integer.
+            ValueError: If ``aggr_type``, ``feature_label``, ``pseudo_reps``,
+                or ``random_seed`` is not one of the values above, which is
                 checked before anything is read.
             UnmeasuredCellsError: If the assay did not measure a cell that is read.
         """
@@ -3161,6 +3172,10 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
 
         pseudo_reps = validate_bulk_options(
             aggr_type=aggr_type, feature_label=feature_label, pseudo_reps=pseudo_reps
+        )
+        # NumPy's RandomState draws the pseudo-replicates.
+        random_seed = integer_argument(
+            random_seed, "random_seed", minimum=0, maximum=RANDOM_STATE_MAX
         )
         if pseudo_reps > 1:
             logger.warning(

@@ -51,7 +51,7 @@ from ..storage.materialize import (
     _write_feature_summaries,
     feature_summary_bytes,
 )
-from ..utils.arguments import bool_argument
+from ..utils.arguments import bool_argument, optional_bool_argument
 from ..utils.compute import controlled_compute
 from ..utils.memory_budget import MemoryBudgetError, refusal_words
 from ..utils.moments import ColumnMoments
@@ -380,12 +380,30 @@ def _library_size_scaled(
 
     With ``log_transform``, the same operation then takes ``log1p`` of the
     scaled values in place.
+
+    Raises:
+        ValueError: If ``assay`` hands no size factor or no cell totals, as
+            every assay but an RNA assay does. The message names the assay's
+            own default normalizer.
     """
-    assert assay.sf is not None and assay.scalar is not None
-    totals = assay.scalar.reshape(-1, 1)
+    size_factor = getattr(assay, "sf", None)
+    cell_totals = getattr(assay, "scalar", None)
+    if size_factor is None or cell_totals is None:
+        default = assay._default_normalizer().__name__
+        others = " or ".join(
+            name for name in ("norm_clr", "norm_dummy") if name != default
+        )
+        raise ValueError(
+            "norm_lib_size and norm_lib_size_log need each cell's total and a "
+            "size factor, which only an RNA assay provides, but "
+            f"{type(assay).__name__} {getattr(assay, 'name', '')!r} did not "
+            f"provide them; normalize it with {default}, its default, or with "
+            f"{others}"
+        )
+    totals = cell_totals.reshape(-1, 1)
     scale = partial(
         library_size_values,
-        size_factor=assay.sf,
+        size_factor=size_factor,
         dtype=np.float64,
         log_transform=log_transform,
     )
@@ -715,6 +733,26 @@ def check_normalization_flags(
             if name not in applicable:
                 raise ValueError(_inapplicable_flag_message(assay, name))
     return flags[_LOG_TRANSFORM], flags[_RENORMALIZE_SUBSET]
+
+
+def normalization_settings(
+    *, log_transform: object, renormalize_subset: object
+) -> tuple[bool | None, bool | None]:
+    """Check the flags of ``features.normalize``, each a boolean or None.
+
+    ``features.normalize`` and the normalization stage of a pipeline recipe
+    check their settings with this function, so a recipe refuses a setting
+    before its run starts, with the message that ``features.normalize``
+    gives. None leaves a flag to the normalizer's default; whether the
+    normalizer applies a flag is checked when the values are normalized.
+
+    Raises:
+        TypeError: If a flag is neither a boolean nor None.
+    """
+    return (
+        optional_bool_argument(log_transform, "log_transform"),
+        optional_bool_argument(renormalize_subset, "renormalize_subset"),
+    )
 
 
 def resolve_normalization_params(

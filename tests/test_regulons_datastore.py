@@ -147,6 +147,11 @@ def test_grn_reuses_identical_requests_and_separates_seeds(store_path):
         ({"tfs": []}, ValueError, "at least one"),
         ({"tfs": ["NOPE"]}, ValueError, "None of tfs"),
         ({"from_assay": "ADT"}, TypeError, "RNAassay"),
+        (
+            {"random_seed": 2**32},
+            ValueError,
+            "^random_seed must be at most 4294967295$",
+        ),
     ],
 )
 def test_grn_rejects_invalid_requests(store_path, changes, error, message):

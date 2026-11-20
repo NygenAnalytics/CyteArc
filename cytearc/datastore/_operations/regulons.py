@@ -22,7 +22,12 @@ from ...storage.selections import (
 )
 from ...storage.types import as_zarr_array, as_zarr_group
 from ...storage.validation_scope import validation_scoped
-from ...utils.arguments import bool_argument, float_argument, integer_argument
+from ...utils.arguments import (
+    RANDOM_STATE_MAX,
+    bool_argument,
+    float_argument,
+    integer_argument,
+)
 from ...utils.arrays import array_digest
 from ...utils.logging import logger
 from ...utils.memory_budget import MemoryBudgetError, MemoryLedger, hash_table_bytes
@@ -264,9 +269,8 @@ class _RegulonOperationsMixin(_RegulonOperationsBase):
             raise TypeError("tfs must be a sequence of names")
         if not tfs:
             raise ValueError("tfs must name at least one transcription factor")
-        # scikit-learn accepts 32-bit unsigned random states only.
         random_seed = integer_argument(
-            random_seed, "random_seed", minimum=0, maximum=2**32 - 1
+            random_seed, "random_seed", minimum=0, maximum=RANDOM_STATE_MAX
         )
         parameters = GrnParameters(
             learningRate=learning_rate,

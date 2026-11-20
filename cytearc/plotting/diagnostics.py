@@ -15,7 +15,7 @@ from ._figure import (
 )
 from ..utils.arrays import sort_categories
 from ._style import apply_figure_chrome, theme_context
-from ..utils.arguments import bool_argument
+from ..utils.arguments import RANDOM_STATE_MAX, bool_argument, integer_argument
 
 
 def _clean_axis(ax: Any, *, tick_size: float = 10.0) -> None:
@@ -49,9 +49,14 @@ def qc(
     show: bool = True,
     theme: str = "notebook",
 ) -> PlotResult:
-    """Plot grouped distributions for cell-level QC metrics."""
+    """Plot grouped distributions for cell-level QC metrics.
+
+    Above ``max_points`` cells, each panel draws the points it shows with
+    ``seed``, a seed of NumPy's ``RandomState`` from 0 to 2**32 - 1.
+    """
     show_on_single_row = bool_argument(show_on_single_row, "show_on_single_row")
     show = bool_argument(show, "show")
+    seed = integer_argument(seed, "seed", minimum=0, maximum=RANDOM_STATE_MAX)
     require_matplotlib()
     sns = require_seaborn()
     if "groups" not in data.columns:

@@ -133,6 +133,8 @@ def test_grn_reports_progress():
         ({"tf_names": ["nope"]}, "None of tf_names"),
         ({"targets": ["missing"]}, "not expression columns"),
         ({"seed": -1}, "seed"),
+        # The regressors take scikit-learn's random states, 0 to 2**32 - 1.
+        ({"seed": 2**32}, "^seed must be at most 4294967295$"),
         ({"nthreads": 0}, "nthreads"),
         ({"gene_names": ["a"] * 8}, "unique"),
         ({"gene_names": ["a", "b"]}, "align"),

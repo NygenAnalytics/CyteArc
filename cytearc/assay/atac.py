@@ -9,6 +9,7 @@ from ..metadata import MetaData
 from ..utils.compute import compute_with_progress
 from .base import Assay
 from .normalization import (
+    NormMethod,
     PearsonResidualNormalizer,
     check_normalization_flags,
     inverse_document_frequency,
@@ -33,6 +34,11 @@ class ATACassay(Assay):
     )
 
     _feature_summary_operation = "summarize_atac_features"
+
+    @staticmethod
+    def _default_normalizer() -> NormMethod:
+        """Return the normalizer that ``normMethod`` starts as."""
+        return norm_tf_idf
 
     def __init__(
         self,
@@ -69,7 +75,7 @@ class ATACassay(Assay):
             nthreads=nthreads,
             **kwargs,
         )
-        self.normMethod = norm_tf_idf
+        self.normMethod = self._default_normalizer()
         self.n_term_per_doc: np.ndarray | None = None
         self.n_docs: int | None = None
         self.n_docs_per_term: np.ndarray | None = None

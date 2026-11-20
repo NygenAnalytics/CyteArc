@@ -8,13 +8,13 @@ import pytest
 import zarr
 from zarr.storage import MemoryStore
 
-from cytearc.datastore._operations.graph import _sampling_fraction
 from cytearc.datastore.datastore import DataStore
 from cytearc.datastore.graph_datastore import GraphDataStore
 from cytearc.graph.feature_projection import (
     resolve_native_graph_inputs,
 )
 from cytearc.embeddings.imported_storage import validate_imported_coordinates_artifact
+from cytearc.embeddings.initialization import _sampling_fraction
 from cytearc.graph.arguments import NeighborQueryArguments
 from cytearc.storage.artifacts import (
     ArtifactRef,
@@ -128,11 +128,16 @@ def _cell_selection(
 def test_sampling_fraction_validates_type_and_range() -> None:
     assert _sampling_fraction(0.5, "frac") == 0.5
     assert _sampling_fraction(1, "frac") == 1.0
-    for value in (True, "x"):
-        with pytest.raises(TypeError, match="must be a number"):
+    assert type(_sampling_fraction(np.float32(0.25), "frac")) is float
+    for value in (True, "0.5", None):
+        with pytest.raises(TypeError, match="^frac must be a real number$"):
             _sampling_fraction(value, "frac")
-    for value in (0.0, 1.1, float("nan")):
-        with pytest.raises(ValueError, match="greater than 0 and at most 1"):
+    with pytest.raises(ValueError, match="^frac must be finite$"):
+        _sampling_fraction(float("nan"), "frac")
+    for value in (0.0, -0.5, 1.1):
+        with pytest.raises(
+            ValueError, match="^frac must be greater than 0 and at most 1$"
+        ):
             _sampling_fraction(value, "frac")
 
 
@@ -433,7 +438,9 @@ def test_embedding_initialization_rejects_detached_and_tiny_sources() -> None:
         )
 
     store._coordinate_source = Mock(return_value=(SimpleNamespace(data=None), 1, 2))
-    with pytest.raises(ValueError, match="at least two cells and centroids"):
+    with pytest.raises(
+        ValueError, match="^Embedding initialization requires at least two cells$"
+    ):
         store.embeddings.initialization(_ref("reduction", "c"), n_centroids=2)
 
 

@@ -88,6 +88,26 @@ def test_sampling_is_deterministic_stratified_and_shared():
     ).all()
 
 
+def test_the_largest_seed_of_scikit_learn_samples_and_scores():
+    rng = np.random.default_rng(12)
+    coordinates = rng.normal(size=(240, 4))
+    finest = np.repeat(np.arange(12), 20)
+    options = {"n_folds": 3, "max_sample_cells": 60, "max_silhouette_cells": 40}
+
+    largest = evaluate_cluster_separability(
+        coordinates, {"finest": finest}, random_seed=2**32 - 1, **options
+    )
+    again = evaluate_cluster_separability(
+        coordinates, {"finest": finest}, random_seed=np.uint32(2**32 - 1), **options
+    )
+
+    np.testing.assert_array_equal(largest.sample_indices, again.sample_indices)
+    np.testing.assert_array_equal(
+        np.bincount(finest[largest.sample_indices], minlength=12), np.full(12, 5)
+    )
+    assert np.isfinite(_score_by_name(largest, "finest")["macro_f1_mean"])
+
+
 def test_stratified_grouping_preserves_first_seen_label_order():
     from cytearc.metrics.cluster_separability import _stratified_sample_indices
 
@@ -428,6 +448,21 @@ def test_silhouette_is_skipped_when_the_cap_starves_clusters(max_silhouette_cell
             {"max_sample_cells": 2},
             ValueError,
             "at least the number of clusters",
+        ),
+        # The folds and the classifier take scikit-learn's random states.
+        (
+            np.ones((4, 2)),
+            {"labels": np.arange(4)},
+            {"random_seed": 2**32},
+            ValueError,
+            "^random_seed must be at most 4294967295$",
+        ),
+        (
+            np.ones((4, 2)),
+            {"labels": np.arange(4)},
+            {"random_seed": -1},
+            ValueError,
+            "^random_seed must be at least 0$",
         ),
     ],
 )

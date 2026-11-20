@@ -549,9 +549,10 @@ def test_hvg_options_take_a_flavor_default_min_cells() -> None:
         lowess_frac=0.2,
         keep_bounds=False,
         bin_strategy="fixed",
+        blacklist=None,
     )
     # None is kept for the flavor to resolve, and the other options as given.
-    assert options == (None, 5, 20, 0.2, False, "fixed")
+    assert options == (None, 5, 20, 0.2, False, "fixed", None)
 
 
 _FLAVOR_DEFAULTS: dict[str, Any] = {

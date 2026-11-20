@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
-from cytearc.utils.arguments import integer_argument
+from cytearc.utils.arguments import RANDOM_STATE_MAX, integer_argument
 
 __all__ = [
     "METRICS",
@@ -50,9 +50,6 @@ __all__ = [
 METRICS = ("correlation", "euclidean")
 #: How HDBSCAN selects clusters from its tree: excess of mass or leaves.
 SELECTIONS = ("eom", "leaf")
-#: The largest seed of the layout: scikit-learn's PCA, which starts it,
-#: accepts 32-bit unsigned random states only.
-MAX_SEED = 2**32 - 1
 
 # The layout's settings, umap-learn's defaults for a few thousand points: the
 # nearest perturbations of each, the spread and smallest distance of the
@@ -123,7 +120,8 @@ def cluster_settings(
     core_size = integer_argument(min_samples, "min_samples", minimum=1)
     if selection not in SELECTIONS:
         raise ValueError(f"selection must be 'eom' or 'leaf', not {selection!r}")
-    resolved_seed = integer_argument(seed, "seed", minimum=0, maximum=MAX_SEED)
+    # scikit-learn's PCA, which starts the layout, seeds NumPy's RandomState.
+    resolved_seed = integer_argument(seed, "seed", minimum=0, maximum=RANDOM_STATE_MAX)
     requested = None if perturbations is None else perturbation_names(perturbations)
     if requested is not None:
         # The clustering takes each named perturbation once.

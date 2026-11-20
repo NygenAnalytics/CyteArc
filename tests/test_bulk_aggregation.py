@@ -554,6 +554,11 @@ def test_bulk_rejects_unknown_aggregation(tmp_path):
         ({"feature_label": "bogus"}, "feature_label must be 'index', 'id', or 'name'"),
         ({"aggr_type": "median"}, "aggr_type"),
         ({"pseudo_reps": 0}, "pseudo_reps must be at least 1"),
+        # NumPy's RandomState draws the pseudo-replicates.
+        (
+            {"pseudo_reps": 2, "random_seed": 2**32},
+            "^random_seed must be at most 4294967295$",
+        ),
     ],
 )
 def test_bulk_checks_its_options_before_reading_any_cell(
@@ -571,6 +576,24 @@ def test_bulk_checks_its_options_before_reading_any_cell(
     # An unknown feature label fell back to positions.
     with pytest.raises(ValueError, match=message):
         store.compare.compute_bulk("group", cell_selection=cells, **options)
+
+
+def test_bulk_pseudo_replicates_take_the_largest_seed_of_numpy(tmp_path):
+    counts = np.arange(1, 13, dtype=np.uint16).reshape(4, 3)
+    store, cells = _bulk_store(tmp_path, counts)
+    store.cells.insert("group", by_cell_id(store.cells, np.array(["a"] * 4)))
+    seed = 2**32 - 1
+
+    bulk = store.compare.compute_bulk(
+        "group", cell_selection=cells, aggr_type="sum", pseudo_reps=2, random_seed=seed
+    )
+
+    # Each replicate sums the cells that NumPy's RandomState(seed) puts in it.
+    shuffled = np.random.RandomState(seed).choice(4, 4, replace=False)
+    for replicate, part in enumerate(np.array_split(shuffled, 2), start=1):
+        np.testing.assert_array_equal(
+            bulk.profiles[("a", replicate)], counts[sorted(part)].sum(axis=0)
+        )
 
 
 @pytest.mark.parametrize("aggregation", ["sum", "mean"])
