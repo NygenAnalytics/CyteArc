@@ -1,5 +1,7 @@
 """Tests for association and estimability helpers."""
 
+import re
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -132,6 +134,120 @@ def test_eta_squared_of_constant_values_is_not_computed() -> None:
         "rowsUsed": 4,
         "rowsMissing": 1,
     }
+
+
+# 1, 1.0 and True compare equal, so pandas would take them for one level.
+_MERGED = np.asarray([1, 1, 1.0, 1.0, True, True, 2, 2], dtype=object)
+_FOUR = np.asarray(list("aabbccdd"), dtype=object)
+_REMEDY = "; convert them to text, or to one type, first"
+_MERGED_FOUND = (
+    "holds values that would form one label but print differently, such as 1, "
+    "1.0 and True" + _REMEDY
+)
+_ALIKE_FOUND = (
+    "holds values that print alike but would form separate labels, such as 1 "
+    "and '1'" + _REMEDY
+)
+
+
+@pytest.mark.parametrize("measure", [cramers_v, directional_mapping])
+def test_categorical_measures_refuse_labels_that_print_otherwise_than_they_compare(
+    measure,
+) -> None:
+    with pytest.raises(ValueError, match=re.escape(f"left {_MERGED_FOUND}")):
+        measure(_MERGED, _FOUR)
+    with pytest.raises(ValueError, match=re.escape(f"right {_MERGED_FOUND}")):
+        measure(_FOUR, _MERGED)
+    # NumPy would read the list's 1 and "1" as one text.
+    alike = [1, 1, "1", "1", 2, 2, 3, 3]
+    for left, right, name in ((alike, _FOUR, "left"), (_FOUR, alike, "right")):
+        with pytest.raises(ValueError, match=re.escape(f"{name} {_ALIKE_FOUND}")):
+            measure(left, right)
+
+
+def test_cramers_v_refuses_a_column_that_would_merge_into_one_level() -> None:
+    # 1, 1.0 and True would make one constant level, which cramers_v reports
+    # as not computed before it maps the columns.
+    merged = [1, 1.0, True, 1, 1.0, True]
+    three = list("xyzxyz")
+
+    with pytest.raises(ValueError, match=re.escape(f"left {_MERGED_FOUND}")):
+        cramers_v(merged, three)
+    with pytest.raises(ValueError, match=re.escape(f"right {_MERGED_FOUND}")):
+        cramers_v(three, merged)
+
+
+def test_eta_squared_refuses_groups_that_print_otherwise_than_they_compare() -> None:
+    values = np.array([0.0, 0.1, 5.0, 5.1, 9.0, 9.1, 3.0, 3.1])
+
+    with pytest.raises(ValueError, match=re.escape(f"categorical {_MERGED_FOUND}")):
+        eta_squared(values, _MERGED)
+
+
+def test_categorical_measures_score_mixed_labels_that_print_apart_as_text() -> None:
+    mixed = np.asarray(["a", "a", 2, 2, 2.5, 2.5, True, True], dtype=object)
+    texts = mixed.astype(str)
+    values = np.array([0.0, 0.1, 5.0, 5.1, 9.0, 9.1, 3.0, 3.1])
+
+    # Each label of the four is a level of its own, as its text is.
+    assert cramers_v(mixed, _FOUR)["nLevelsLeft"] == 4
+    assert cramers_v(mixed, _FOUR) == cramers_v(texts, _FOUR)
+    assert directional_mapping(_FOUR, mixed) == directional_mapping(_FOUR, texts)
+    assert eta_squared(values, mixed) == eta_squared(values, texts)
+    assert eta_squared(values, mixed)["nLevels"] == 4
+
+
+@pytest.mark.parametrize(
+    "labels",
+    [
+        # NumPy would read the first list as one text, a, the second as the
+        # bytes b"1", and the third as two floats, 2**53 and 0.5.
+        [b"a", b"a", "a", "a", "z", "z"],
+        [b"1", b"1", 1, 1, "z", "z"],
+        [2**53, 2**53, 2**53 + 1, 2**53 + 1, 0.5, 0.5],
+    ],
+)
+def test_categorical_measures_keep_apart_the_labels_of_a_list(labels) -> None:
+    # Three levels, each of two rows, matched by three letters.
+    three = ["x", "x", "y", "y", "w", "w"]
+    texts = [str(label) for label in labels]
+    values = np.array([0.0, 0.1, 5.0, 5.1, 9.0, 9.1])
+
+    assert cramers_v(labels, three)["nLevelsLeft"] == 3
+    assert cramers_v(labels, three) == cramers_v(texts, three)
+    assert directional_mapping(three, labels)["nesting"] == "equivalent"
+    assert eta_squared(values, labels)["nLevels"] == 3
+    assert eta_squared(values, labels) == eta_squared(values, texts)
+
+
+def test_coefficient_estimability_refuses_levels_that_print_otherwise() -> None:
+    batch = np.array(["b1", "b1", "b2", "b2", "b3", "b3", "b4", "b4"])
+
+    with pytest.raises(ValueError, match=re.escape(f"coefficient {_MERGED_FOUND}")):
+        coefficient_estimability(
+            _MERGED,
+            coefficientKind="categorical",
+            technicals={"batch": batch},
+            technicalKinds={"batch": "categorical"},
+        )
+    with pytest.raises(
+        ValueError, match=re.escape(f"technicals['batch'] {_ALIKE_FOUND}")
+    ):
+        coefficient_estimability(
+            _FOUR,
+            coefficientKind="categorical",
+            technicals={"batch": [1, 1, "1", "1", 2, 2, 3, 3]},
+            technicalKinds={"batch": "categorical"},
+        )
+    # Continuous columns are numbers, not labels.
+    numbers = np.asarray([1, 1.0, True, 2, 2, 3, 3, 4], dtype=object)
+    result = coefficient_estimability(
+        numbers,
+        coefficientKind="continuous",
+        technicals={"depth": numbers},
+        technicalKinds={"depth": "continuous"},
+    )
+    assert result["status"] == "ok"
 
 
 def test_spearman_rho_perfect_monotone() -> None:

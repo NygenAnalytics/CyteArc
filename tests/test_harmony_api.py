@@ -254,13 +254,70 @@ def test_batch_columns_need_orderable_values_with_distinct_text() -> None:
         fit_harmony(
             values, pd.DataFrame({"batch": pd.Series([1, "a", 1, "a"], dtype=object)})
         )
-    with pytest.raises(ValueError, match="distinct values with the same text '1'"):
+    with pytest.raises(
+        ValueError,
+        match=re.escape(
+            "Batch column 'batch' holds values that print alike but would form "
+            "separate labels, such as 1 and '1'; convert them to text, or to one "
+            "type, first"
+        ),
+    ):
         fit_harmony(
             values,
             pd.DataFrame(
                 {"batch": pd.Categorical([1, "1", 1, "1"], categories=[1, "1"])}
             ),
         )
+
+
+def test_batch_columns_keep_apart_values_that_python_takes_for_one() -> None:
+    values = _values(6)
+    # Python and pandas take 1, 1.0 and True for one value, so the column
+    # would form one level of six cells.
+    with pytest.raises(
+        ValueError,
+        match=re.escape(
+            "Batch column 'batch' holds values that would form one label but print "
+            "differently, such as 1, 1.0 and True; convert them to text, or to one "
+            "type, first"
+        ),
+    ):
+        fit_harmony(
+            values,
+            pd.DataFrame(
+                {"batch": pd.Series([1, 1, 1.0, 1.0, True, True], dtype=object)}
+            ),
+        )
+
+    # NumPy and Python integers are equal values that print alike, and form
+    # the levels of a typed column of the same numbers.
+    scalars = pd.Series([1, np.int64(2), np.int64(1), 2, np.uint8(1), 2], dtype=object)
+    mixed = fit_harmony(values, pd.DataFrame({"batch": scalars}), n_clusters=1)
+    typed = fit_harmony(
+        values, pd.DataFrame({"batch": [1, 2, 1, 2, 1, 2]}), n_clusters=1
+    )
+    assert mixed.batch_levels == typed.batch_levels == (("1", "2"),)
+    np.testing.assert_array_equal(mixed.corrected, typed.corrected)
+    # Numbers of two types that print as they compare form the levels of
+    # their texts, in the same order.
+    numbers = fit_harmony(
+        values,
+        pd.DataFrame({"batch": pd.Series([1, 2.5, 1, 2.5, 1, 2.5], dtype=object)}),
+        n_clusters=1,
+    )
+    texts = fit_harmony(values, pd.DataFrame({"batch": ["1", "2.5"] * 3}), n_clusters=1)
+    assert numbers.batch_levels == texts.batch_levels == (("1", "2.5"),)
+    np.testing.assert_array_equal(numbers.corrected, texts.corrected)
+    # A categorical column keeps the categories it declares, which pandas holds
+    # apart, whatever their types.
+    declared = fit_harmony(
+        values,
+        pd.DataFrame(
+            {"batch": pd.Categorical(["a", 1, "a", 1, "a", 1], categories=["a", 1])}
+        ),
+        n_clusters=1,
+    )
+    assert declared.batch_levels == (("a", "1"),)
 
 
 # validate_harmony_parameters

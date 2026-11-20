@@ -73,7 +73,7 @@ from ...storage.feature_selection import (
     _ordered_feature_ids_fingerprint,
     _write_feature_selection,
 )
-from ...utils.arguments import bool_argument
+from ...utils.arguments import bool_argument, require_labels_match_their_text
 
 if TYPE_CHECKING:
     from ..graph_datastore import GraphDataStore as _MappingOperationsBase
@@ -304,8 +304,11 @@ class _MappingOperationsMixin(_MappingOperationsBase):
                 on cells by position.
             ValueError: If ``feature_key`` is ``"names"`` and reference
                 features share a name, before anything is written, or
-                ``query_batches`` lacks a selected query cell or repeats a
-                cell ID.
+                ``query_batches`` lacks a selected query cell, repeats a
+                cell ID, or holds in a column values that would form one
+                batch but print differently, such as ``1``, ``1.0`` and
+                ``True``, or values that print alike but would form separate
+                batches, such as ``1`` and ``"1"``.
             PermissionError: If the projection or its overlap selection must be
                 written and the query store is not opened with
                 ``zarr_mode='r+'``, before any query cell is projected.
@@ -651,8 +654,15 @@ class _MappingOperationsMixin(_MappingOperationsBase):
         if query_batches.isna().any().any():
             raise ValueError("query_batches cannot contain missing values")
         for name, column in query_batches.items():
-            # The batch fingerprint hashes values by their text, so values
-            # such as 1 and "1" would name different batches with one digest.
+            # pandas takes values that compare equal for one batch, and the
+            # batch fingerprint hashes values by their text, so 1, 1.0 and
+            # True would form one batch, and 1 and "1" two batches with one
+            # digest.
+            require_labels_match_their_text(
+                column, name=f"query_batches column {name!r}"
+            )
+            # The fingerprint also hashes a byte string by the text that it
+            # encodes, which str() does not show.
             values = pd.unique(column.to_numpy(dtype=object))
             texts = {
                 value if isinstance(value, bytes) else str(value).encode()
@@ -660,8 +670,9 @@ class _MappingOperationsMixin(_MappingOperationsBase):
             }
             if len(texts) != len(values):
                 raise ValueError(
-                    f"query_batches column {name!r} has distinct values with the "
-                    "same text, such as 1 and '1'; use one value type per column"
+                    f"query_batches column {name!r} holds a byte string and "
+                    "another value with the same text, such as b'a' and 'a'; "
+                    "convert it to text first"
                 )
         rows = pd.MultiIndex.from_frame(query_batches)
         codes, levels = pd.factorize(rows, sort=False)

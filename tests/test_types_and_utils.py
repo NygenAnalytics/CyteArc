@@ -1,7 +1,10 @@
+import datetime
+import decimal
 import gc
 import weakref
 
 import numpy as np
+import pandas as pd
 import pytest
 import zarr
 from scipy.sparse import coo_matrix, csr_matrix
@@ -32,6 +35,9 @@ from cytearc.utils.arguments import (
     float_argument,
     integer_argument,
     optional_name_argument,
+    categorical_label_codes,
+    label_array,
+    require_labels_match_their_text,
 )
 from cytearc.utils.digest import mix64, mix64_array
 from cytearc.utils.numba import numba_threads
@@ -591,6 +597,233 @@ def test_clip_fraction_argument_requires_a_finite_fraction_below_one_half():
             ValueError, match="tails must be at least 0 and less than 0.5"
         ):
             clip_fraction_argument(value, "tails")
+
+
+@pytest.mark.parametrize(
+    "labels",
+    [
+        [],
+        ["a"],
+        # Labels of any types pass that group as their text reads.
+        ["a", 2, 2.5, True, b"b"],
+        [1, "2"],
+        [1, np.int64(1), np.uint8(2), 2**70],
+        ["a", np.str_("a")],
+        [True, np.bool_(True), False],
+        [np.float32(7.5), 7.5],
+        [b"a", "a"],
+        [pd.Timestamp("2020-01-01"), datetime.datetime(2020, 1, 1)],
+        # Missing labels are no labels.
+        ["a", None, float("nan"), pd.NA, 1],
+        # 0.0 and -0.0 form one label, in any array.
+        np.asarray([1.5, -0.0, 0.0, np.nan]),
+        np.asarray([0.5, np.float64(1.5), -0.0, 0.0, np.nan], dtype=object),
+        ["a", 0.0, -0.0, np.float32(-0.0)],
+        # A typed array, whatever NumPy made of the labels.
+        np.asarray([1, "1"]),
+        np.asarray([b"a", b"b"]),
+        np.asarray(["2020-01-01", "2020-01-02"], dtype="datetime64[D]"),
+        # A categorical's unused categories are no labels.
+        pd.Categorical([1, 1], categories=[1, "1"]),
+        pd.Series(["a", "b"], dtype="category"),
+        pd.Series([1, None, 2], dtype="Int64"),
+    ],
+)
+def test_require_labels_match_their_text_passes_labels_that_group_as_they_read(
+    labels,
+):
+    require_labels_match_their_text(labels, name="labels")
+
+
+@pytest.mark.parametrize(
+    ("labels", "found"),
+    [
+        # Python takes 1, 1.0 and True for one value...
+        (
+            [1, 1.0, True],
+            "values that would form one label but print differently, such as 1, "
+            "1.0 and True",
+        ),
+        # ...and keeps 1 and "1" apart, though they print alike.
+        (
+            [2, 1, "1"],
+            "values that print alike but would form separate labels, such as 1 and '1'",
+        ),
+        # Two values and two texts, but three pairs of them.
+        (
+            [1, 1.0, "1"],
+            "values that would form one label but print differently, such as 1 "
+            "and 1.0, and values that print alike but would form separate "
+            "labels, such as 1 and '1'",
+        ),
+        (
+            [np.float32(0.1), 0.1],
+            "values that print alike but would form separate labels, such as "
+            "np.float32(0.1) and 0.1",
+        ),
+        (
+            [decimal.Decimal("1.0"), decimal.Decimal("1")],
+            "values that would form one label but print differently, such as "
+            "Decimal('1.0') and Decimal('1')",
+        ),
+        # A zero of another type than float stays apart from 0.0 in print.
+        (
+            [0, 0.0, -0.0],
+            "values that would form one label but print differently, such as 0, "
+            "0.0 and -0.0",
+        ),
+        (
+            pd.Categorical(["b", 1, "1"], categories=["b", 1, "1"]),
+            "values that print alike but would form separate labels, such as 1 and '1'",
+        ),
+        # Each conflict is shown by its group that the labels show first.
+        (
+            ["x", "1", 1.0, 1, "y", 1.5, "1.5"],
+            "values that would form one label but print differently, such as 1.0 "
+            "and 1, and values that print alike but would form separate labels, "
+            "such as '1' and 1",
+        ),
+        # A long value is quoted by its start and its end.
+        (
+            ["1" * 200, int("1" * 200)],
+            "values that print alike but would form separate labels, such as '"
+            + "1" * 37
+            + "..."
+            + "1" * 38
+            + "' and "
+            + "1" * 38
+            + "..."
+            + "1" * 39,
+        ),
+    ],
+)
+def test_require_labels_match_their_text_quotes_one_group_of_each_conflict(
+    labels, found
+):
+    with pytest.raises(ValueError) as raised:
+        require_labels_match_their_text(labels, name="labels")
+
+    assert (
+        str(raised.value)
+        == f"labels holds {found}; convert them to text, or to one type, first"
+    )
+
+
+def test_require_labels_match_their_text_refuses_labels_in_two_dimensions():
+    with pytest.raises(ValueError, match="^labels must be one-dimensional$"):
+        require_labels_match_their_text(np.zeros((2, 2)), name="labels")
+
+
+def test_require_labels_match_their_text_reads_no_typed_array(monkeypatch):
+    def unread(*args, **kwargs):
+        raise AssertionError("the labels were read one by one")
+
+    # Ten million integer labels would make as many Python objects to group.
+    monkeypatch.setattr(pd, "factorize", unread)
+    monkeypatch.setattr(pd.api.types, "infer_dtype", unread)
+    for labels in (
+        np.zeros(4, dtype=np.int64),
+        np.zeros(4, dtype=bool),
+        np.asarray(["a", "b"]),
+        np.asarray([b"a", b"b"]),
+        np.asarray(["2020-01-01"], dtype="datetime64[D]"),
+        np.asarray([0.0, -0.0, 1.0], dtype=np.float32),
+        np.asarray([1 + 1j, 2 + 0j, 1 + 1j]),
+    ):
+        require_labels_match_their_text(labels, name="labels")
+    with pytest.raises(AssertionError, match="read one by one"):
+        require_labels_match_their_text(
+            np.asarray(["a", 1], dtype=object), name="labels"
+        )
+
+
+def test_require_labels_match_their_text_groups_no_labels_of_one_type(monkeypatch):
+    def ungrouped(*args, **kwargs):
+        raise AssertionError("the labels were grouped")
+
+    # Labels of one type of text, bytes, integers or booleans, or Python
+    # floats, cannot group otherwise than their text reads.
+    monkeypatch.setattr(pd, "factorize", ungrouped)
+    for labels in (
+        ["a", np.str_("b")],
+        [b"a", b"b"],
+        [1, np.int64(2)],
+        [True, np.bool_(False)],
+        [0.5, np.float64(1.5), 0.0, -0.0],
+    ):
+        require_labels_match_their_text(labels, name="labels")
+    with pytest.raises(AssertionError, match="were grouped"):
+        require_labels_match_their_text([np.float32(0.5), 1.5], name="labels")
+
+
+@pytest.mark.parametrize(
+    ("labels", "expected"),
+    [
+        # NumPy would read these lists as two texts of "a", two bytes of
+        # b"1", and two floats of 2**53.
+        ([b"a", "a"], [b"a", "a"]),
+        ([b"1", 1], [b"1", 1]),
+        ([2**53 + 1, 2**53, 0.5], [2**53 + 1, 2**53, 0.5]),
+    ],
+)
+def test_label_array_keeps_the_type_of_each_label_of_a_list(labels, expected):
+    values = label_array(labels)
+
+    assert values.dtype == object
+    assert values.tolist() == expected
+    assert [type(value) for value in values] == [type(value) for value in expected]
+    # An array, or a pandas Series or Categorical, gives its values as they are.
+    assert label_array(np.asarray([1, 2])).dtype == np.int64
+    assert label_array(pd.Series([1.5, 2.5])).dtype == np.float64
+    assert label_array(pd.Categorical(["a", "b"])).tolist() == ["a", "b"]
+
+
+@pytest.mark.parametrize(
+    ("labels", "codes", "count"),
+    [
+        # A categorical keeps its categories, unused ones included, and their
+        # order.
+        (pd.Categorical(["a", "b", "a"], categories=["b", "a", "c"]), [1, 0, 1], 3),
+        # Other labels are numbered in their sorted order...
+        (["b", "a", "b", None], [1, 0, 1, -1], 2),
+        ([2**53 + 1, 2**53, 0.5], [2, 1, 0], 3),
+        # ...or in order of first appearance where they cannot be sorted.
+        ([b"1", 1, b"1", "z"], [0, 1, 0, 2], 3),
+    ],
+)
+def test_categorical_label_codes_number_labels_as_a_categorical_would(
+    labels, codes, count
+):
+    numbers, n_codes = categorical_label_codes(labels)
+
+    assert numbers.tolist() == codes
+    assert n_codes == count
+
+
+@pytest.mark.parametrize(
+    "pool",
+    [
+        np.asarray(["b", "a", "c", "10", "2"]),
+        np.asarray([3, 1, 2, 10]),
+        np.asarray([0.5, 1.5, -2.0]),
+        np.asarray([True, False]),
+        # pandas sorts integers before text.
+        np.asarray(["a", 2, "c", 1, 2.5], dtype=object),
+    ],
+)
+def test_categorical_label_codes_order_a_contingency_table_as_its_labels_do(pool):
+    rng = np.random.default_rng(len(pool))
+    for _ in range(20):
+        left = pool[rng.integers(0, len(pool), 40)]
+        right = np.asarray(["x", "y", "z"])[rng.integers(0, 3, 40)]
+
+        coded = pd.crosstab(
+            categorical_label_codes(left)[0], categorical_label_codes(right)[0]
+        )
+
+        np.testing.assert_array_equal(
+            coded.to_numpy(), pd.crosstab(left, right).to_numpy()
+        )
 
 
 def test_read_only_copy_owns_its_values_and_stays_read_only():

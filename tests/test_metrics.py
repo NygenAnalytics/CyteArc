@@ -1,3 +1,5 @@
+import re
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -19,11 +21,27 @@ from cytearc.metrics import (
     silhouette_scoring,
 )
 from cytearc.metrics.graph import neighbor_label_agreement
-from cytearc.metrics.lisi import _effective_perplexity, _neighbor_probabilities
+from cytearc.metrics.lisi import (
+    _effective_perplexity,
+    _neighbor_probabilities,
+    _simpson_from_probabilities,
+)
 from cytearc.metadata.artifacts import plan_cell_data_artifact, write_cell_data_artifact
 from cytearc.storage.artifacts import ArtifactRef, ArtifactScope
 from cytearc.storage.selections import resolve_stored_selection_artifact
 from tests.storage_helpers import by_cell_id
+
+_REMEDY = "; convert them to text, or to one type, first"
+# 1, 1.0 and True compare equal, so pandas would take them for one label.
+_MERGED = np.asarray([1, 1, 1.0, 1.0, True, True, 2, 2], dtype=object)
+_MERGED_FOUND = (
+    "holds values that would form one label but print differently, such as 1, "
+    "1.0 and True" + _REMEDY
+)
+_ALIKE_FOUND = (
+    "holds values that print alike but would form separate labels, such as 1 "
+    "and '1'" + _REMEDY
+)
 
 
 def _graph_neighbors(datastore, graph: ArtifactRef) -> ArtifactRef:
@@ -409,6 +427,39 @@ def test_graph_connectivity_validates_inputs():
             np.array([[0, 1]]),
             np.array([0, np.nan]),
         )
+
+
+def test_graph_connectivity_refuses_labels_that_print_otherwise_than_they_compare():
+    # Each pair of cells is joined by an edge, so each label of two cells is
+    # whole; 1, 1.0 and True as one label would leave it in three pieces.
+    edges = np.array([[0, 1], [2, 3], [4, 5], [6, 7]])
+
+    with pytest.raises(ValueError, match=re.escape(f"labels {_MERGED_FOUND}")):
+        graph_connectivity(edges, _MERGED)
+    mixed = np.asarray(["a", "a", 2, 2, 2.5, 2.5, True, True], dtype=object)
+    assert graph_connectivity(edges, mixed) == 1.0
+
+
+def test_cluster_similarity_refuses_true_beside_one():
+    graph = csr_matrix(np.ones((4, 4)) - np.eye(4))
+
+    # NumPy would read the list's True as the integer 1.
+    for similarity in (
+        lambda labels: calculate_weighted_cluster_similarity(graph, labels),
+        lambda labels: calculate_knn_cluster_similarity(
+            np.array([[1, 2], [0, 2], [0, 3], [0, 1]]),
+            np.ones((4, 2)),
+            labels,
+        ),
+    ):
+        with pytest.raises(
+            ValueError,
+            match=re.escape(
+                "cluster_labels holds values that would form one label but print "
+                "differently, such as 1 and True" + _REMEDY
+            ),
+        ):
+            similarity([0, 0, 1, True])
 
 
 def test_cluster_similarity_is_symmetric_with_unit_diagonal():
@@ -837,6 +888,150 @@ def test_label_concordance_partial_agreement(metric, expected):
 def test_label_concordance_requires_exactly_two_partitions():
     with pytest.raises(ValueError, match="Exactly two"):
         label_concordance_score([np.array([0, 1])])
+
+
+def test_label_concordance_refuses_labels_that_print_otherwise_than_they_compare():
+    four = np.asarray(list("aabbccdd"), dtype=object)
+
+    with pytest.raises(ValueError, match=re.escape(f"label_sets[0] {_MERGED_FOUND}")):
+        label_concordance_score([_MERGED, four])
+    # NumPy would read the list's 1 and "1" as one text.
+    with pytest.raises(ValueError, match=re.escape(f"label_sets[1] {_ALIKE_FOUND}")):
+        label_concordance_score([four, [1, 1, "1", "1", 2, 2, 3, 3]])
+
+
+@pytest.mark.parametrize("metric", ["ari", "nmi"])
+@pytest.mark.parametrize(
+    "labels",
+    [
+        # Text beside numbers, which scikit-learn cannot sort.
+        np.asarray(["a", "a", 2, 2, 2.5, 2.5, True, True], dtype=object),
+        # Lists that NumPy would read as fewer labels: two texts of a, the
+        # bytes b"1" twice, and one float for two integers above 2**53.
+        [b"a", b"a", "a", "a", "z", "z", "y", "y"],
+        [b"1", b"1", 1, 1, "z", "z", "y", "y"],
+        [2**53, 2**53, 2**53 + 1, 2**53 + 1, 0.5, 0.5, 3, 3],
+    ],
+)
+def test_label_concordance_scores_four_labels_of_mixed_types(labels, metric):
+    # Each of the four labels holds the two cells of one letter: identical
+    # partitions agree fully.
+    four = np.asarray(list("aabbccdd"), dtype=object)
+
+    assert label_concordance_score([labels, four], metric) == pytest.approx(1.0)
+    assert label_concordance_score([four, labels], metric) == pytest.approx(1.0)
+
+
+@pytest.mark.parametrize(
+    "pool",
+    [
+        np.asarray([3, 1, 2, 10, 7]),
+        np.asarray(["b", "a", "c", "10", "2"]),
+        np.asarray([0.5, 1.5, -2.0, 4.0]),
+        np.asarray([True, False]),
+    ],
+)
+# scikit-learn warns that float labels look continuous.
+@pytest.mark.filterwarnings("ignore:Clustering metrics expects discrete values")
+def test_label_concordance_gives_the_scores_of_the_labels_themselves(pool):
+    from sklearn.metrics import adjusted_rand_score, normalized_mutual_info_score
+
+    # scikit-learn scores labels that sort as they are, as the function did
+    # before it numbered them.
+    rng = np.random.default_rng(len(pool))
+    for _ in range(20):
+        first = pool[rng.integers(0, len(pool), 60)]
+        second = np.asarray([5, 1, 3])[rng.integers(0, 3, 60)]
+
+        assert label_concordance_score([first, second], "nmi") == float(
+            normalized_mutual_info_score(first, second)
+        )
+        assert label_concordance_score([first, second], "ari") == float(
+            adjusted_rand_score(first, second)
+        )
+
+
+def test_lisi_functions_refuse_labels_that_print_otherwise_than_they_compare():
+    distances, indices, _labels = _uniform_self_free_knn()
+    merged = np.asarray([1, 1.0, True, 2], dtype=object)
+    found = (
+        "holds values that would form one label but print differently, such as "
+        "1, 1.0 and True" + _REMEDY
+    )
+
+    with pytest.raises(ValueError, match=re.escape(f"batch_labels {found}")):
+        ilisi_knn(distances, indices, merged)
+    with pytest.raises(ValueError, match=re.escape(f"cell_labels {found}")):
+        clisi_knn(distances, indices, merged)
+    with pytest.raises(ValueError, match=re.escape(f"Label column 'batch' {found}")):
+        compute_lisi(distances, indices, pd.DataFrame({"batch": merged}), ["batch"])
+    with pytest.raises(ValueError, match=re.escape(f"batch_labels {found}")):
+        lisi_batch_mixing_score(np.ones(4), merged)
+    # Four cells in two batches of text beside a number, as the integers 0
+    # and 1 score them.
+    mixed = np.asarray(["a", "a", 2, 2], dtype=object)
+    assert ilisi_knn(distances, indices, mixed) == pytest.approx(0.8)
+    assert lisi_batch_mixing_score(np.full(4, 2.0), mixed) == pytest.approx(1)
+
+
+def test_lisi_summaries_score_a_categorical_as_its_column_does():
+    rng = np.random.default_rng(0)
+    n_cells = 61
+    indices = np.array(
+        [
+            rng.choice(np.delete(np.arange(n_cells), cell), 6, replace=False)
+            for cell in range(n_cells)
+        ]
+    )
+    distances = rng.uniform(0.1, 3.0, size=(n_cells, 6))
+    # Eight declared categories, five of them unused, in an order of their own:
+    # the Simpson index sums over the categories in their order, and over the
+    # neighbors once there are more categories than neighbors, so the same
+    # labels as values give a median one bit apart.
+    labels = pd.Categorical(
+        rng.choice(["b", "a", "e"], n_cells),
+        categories=["d", "c", "f", "g", "h", "b", "a", "e"],
+    )
+
+    per_cell = compute_lisi(distances, indices, pd.DataFrame({"x": labels}), ["x"])
+
+    assert ilisi_knn(distances, indices, labels, scale=False) == float(
+        np.nanmedian(per_cell[:, 0])
+    )
+    # The Simpson index of the categorical's own codes and categories.
+    probabilities = _neighbor_probabilities(
+        distances, _effective_perplexity(None, 6), tol=1e-5
+    )
+    simpson = _simpson_from_probabilities(
+        probabilities, indices, np.asarray(labels.codes), len(labels.categories)
+    )
+    np.testing.assert_array_equal(per_cell[:, 0], 1 / simpson)
+
+
+def test_lisi_and_connectivity_keep_integers_above_2_53_beside_floats_apart():
+    # pandas names a categorical's categories by casting integers beside
+    # floats to floats, which would make 2**53 and 2**53 + 1 one label.
+    distances, indices, _labels = _uniform_self_free_knn()
+    big = [2**53, 2**53 + 1, 0.5, 0.5]
+    numbered = np.asarray([1, 2, 0, 0])
+
+    assert ilisi_knn(distances, indices, big, scale=False) == ilisi_knn(
+        distances, indices, numbered, scale=False
+    )
+    assert clisi_knn(distances, indices, big) == clisi_knn(distances, indices, numbered)
+    # A frame would cast the list itself, so its column holds the objects.
+    column = pd.DataFrame({"b": pd.Series(big, dtype=object)})
+    np.testing.assert_array_equal(
+        compute_lisi(distances, indices, column, ["b"]),
+        compute_lisi(distances, indices, pd.DataFrame({"b": numbered}), ["b"]),
+    )
+    assert lisi_batch_mixing_score(np.full(4, 2.0), big) == lisi_batch_mixing_score(
+        np.full(4, 2.0), numbered
+    )
+    # Each label's cells share an edge, so each label of the four is whole.
+    edges = np.array([[0, 1], [2, 3], [4, 5], [6, 7]])
+    eight = [2**53, 2**53, 2**53 + 1, 2**53 + 1, 0.5, 0.5, 3, 3]
+    assert graph_connectivity(edges, eight) == 1.0
 
 
 def test_lisi_batch_mixing_score():
@@ -1323,6 +1518,16 @@ def test_silhouette_needs_two_clusters():
     assert scores.shape == (1,)
     assert np.isnan(scores).all()
     assert messages == ["Silhouette scoring requires at least two clusters"]
+
+
+def test_silhouette_refuses_clusters_that_print_otherwise_than_they_compare():
+    data = np.random.default_rng(8).normal(size=(24, 3))
+    merged = np.asarray([1] * 6 + [1.0] * 6 + [True] * 6 + [2] * 6, dtype=object)
+
+    with pytest.raises(
+        ValueError, match=re.escape(f"Cluster column 'RNA_cluster' {_MERGED_FOUND}")
+    ):
+        _silhouette(merged, data)
 
 
 def test_cluster_sampling_draws_disjoint_seeded_groups():

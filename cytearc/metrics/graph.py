@@ -1,7 +1,7 @@
 import numpy as np
 from scipy.sparse import csr_matrix
 
-from ..utils.arguments import integer_argument
+from ..utils.arguments import integer_argument, require_labels_match_their_text
 from ._types import NeighborMetric, ZarrArray
 
 _EDGE_BATCH_ROWS = 100_000
@@ -11,6 +11,8 @@ _LABEL_AGREEMENT_BLOCK_EDGES = 1_048_576
 def _validated_cluster_labels(
     cluster_labels: np.ndarray, n_nodes: int
 ) -> tuple[np.ndarray, int]:
+    # NumPy would cast a list's True to the integer 1.
+    require_labels_match_their_text(cluster_labels, name="cluster_labels")
     cluster_labels = np.asarray(cluster_labels)
     if len(cluster_labels) != n_nodes:
         raise ValueError("Cluster labels must have one value per graph node")

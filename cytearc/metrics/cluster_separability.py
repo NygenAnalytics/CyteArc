@@ -4,7 +4,11 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
-from ..utils.arguments import integer_argument
+from ..utils.arguments import (
+    integer_argument,
+    label_array,
+    require_labels_match_their_text,
+)
 from ._rows import read_matrix_rows
 from ._types import MatrixData
 
@@ -70,7 +74,7 @@ def _validated_clusterings(
     for name, labels in clusterings.items():
         if not isinstance(name, str) or not name:
             raise TypeError("clustering names must be non-empty strings")
-        values = np.asarray(labels)
+        values = label_array(labels)
         if values.ndim != 1:
             raise ValueError(f"Clustering {name!r} labels must be one-dimensional")
         if len(values) != n_cells:
@@ -81,6 +85,7 @@ def _validated_clusterings(
             raise ValueError(
                 f"Clustering {name!r} labels must not contain missing values"
             )
+        require_labels_match_their_text(values, name=f"Clustering {name!r}")
         validated[name] = values
     return validated
 

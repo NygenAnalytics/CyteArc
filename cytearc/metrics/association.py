@@ -7,6 +7,12 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 
+from ..utils.arguments import (
+    categorical_label_codes,
+    label_array,
+    require_labels_match_their_text,
+)
+
 __all__ = [
     "association_pair",
     "coefficient_estimability",
@@ -21,10 +27,16 @@ ColumnKind = Literal["categorical", "continuous"]
 
 
 def _as_1d(values: Any) -> np.ndarray:
-    array = np.asarray(values)
+    # A list keeps the type of each value, which NumPy would cast to one.
+    array = label_array(values)
     if array.ndim != 1:
         raise ValueError("values must be one-dimensional")
     return array
+
+
+def _level_codes(values: np.ndarray) -> np.ndarray:
+    """Number labels in their sorted order, as a contingency table orders them, or in order of first appearance where they cannot be sorted, such as bytes beside numbers."""
+    return categorical_label_codes(values)[0]
 
 
 def _to_float(values: np.ndarray) -> np.ndarray | None:
@@ -61,10 +73,20 @@ def directional_mapping(
     left: Any,
     right: Any,
 ) -> dict[str, Any]:
-    """Report exact directional mapping between two categorical columns."""
+    """Report exact directional mapping between two categorical columns.
+
+    Raises:
+        ValueError: If a column is not one-dimensional, the columns differ in
+            length, or a column holds values that would form one label but
+            print differently, such as ``1``, ``1.0`` and ``True``, or values
+            that print alike but would form separate labels, such as ``1`` and
+            ``"1"``.
+    """
     left_values = _as_1d(left)
     right_values = _as_1d(right)
     mask = _pairwise_mask(left_values, right_values)
+    require_labels_match_their_text(left_values, name="left")
+    require_labels_match_their_text(right_values, name="right")
     rows_used = int(mask.sum())
     rows_missing = int((~mask).sum())
     blank = {
@@ -76,7 +98,12 @@ def directional_mapping(
     }
     if rows_used == 0:
         return blank
-    frame = pd.DataFrame({"left": left_values[mask], "right": right_values[mask]})
+    frame = pd.DataFrame(
+        {
+            "left": _level_codes(left_values[mask]),
+            "right": _level_codes(right_values[mask]),
+        }
+    )
     n_left = int(frame["left"].nunique(dropna=False))
     n_right = int(frame["right"].nunique(dropna=False))
     # A constant column is nested inside everything, which is true but useless.
@@ -110,10 +137,19 @@ def cramers_v(left: Any, right: Any) -> dict[str, Any]:
     chi-square under independence. On the small design tables this module
     targets, that correction can shrink even a perfect association to zero, so
     ``valueUncorrected`` and ``directionalMapping`` are reported alongside it.
+
+    Raises:
+        ValueError: If a column is not one-dimensional, the columns differ in
+            length, or a column holds values that would form one label but
+            print differently, such as ``1``, ``1.0`` and ``True``, or values
+            that print alike but would form separate labels, such as ``1`` and
+            ``"1"``.
     """
     left_values = _as_1d(left)
     right_values = _as_1d(right)
     mask = _pairwise_mask(left_values, right_values)
+    require_labels_match_their_text(left_values, name="left")
+    require_labels_match_their_text(right_values, name="right")
     rows_used = int(mask.sum())
     rows_missing = int((~mask).sum())
     if rows_used < 2:
@@ -122,7 +158,9 @@ def cramers_v(left: Any, right: Any) -> dict[str, Any]:
             rowsUsed=rows_used,
             rowsMissing=rows_missing,
         )
-    contingency = pd.crosstab(left_values[mask], right_values[mask])
+    contingency = pd.crosstab(
+        _level_codes(left_values[mask]), _level_codes(right_values[mask])
+    )
     if contingency.shape[0] < 2 or contingency.shape[1] < 2:
         return _not_computed(
             "constantOrSingleLevel",
@@ -158,9 +196,18 @@ def cramers_v(left: Any, right: Any) -> dict[str, Any]:
 
 
 def eta_squared(continuous: Any, categorical: Any) -> dict[str, Any]:
-    """Correlation ratio η² for continuous values grouped by a categorical column."""
+    """Correlation ratio η² for continuous values grouped by a categorical column.
+
+    Raises:
+        ValueError: If a column is not one-dimensional, the columns differ in
+            length, or ``categorical`` holds values that would form one group
+            but print differently, such as ``1``, ``1.0`` and ``True``, or
+            values that print alike but would form separate groups, such as
+            ``1`` and ``"1"``.
+    """
     raw = _as_1d(continuous)
     groups = _as_1d(categorical)
+    require_labels_match_their_text(groups, name="categorical")
     values = _to_float(raw)
     if values is None:
         return _not_computed("nonNumeric", rowsMissing=len(raw))
@@ -173,7 +220,7 @@ def eta_squared(continuous: Any, categorical: Any) -> dict[str, Any]:
             rowsUsed=rows_used,
             rowsMissing=rows_missing,
         )
-    frame = pd.DataFrame({"y": values[mask], "g": groups[mask]})
+    frame = pd.DataFrame({"y": values[mask], "g": _level_codes(groups[mask])})
     n_levels = int(frame["g"].nunique(dropna=False))
     if n_levels < 2:
         return _not_computed(
@@ -288,8 +335,17 @@ def coefficient_estimability(
     The matrix carries an explicit intercept. Without it, treatment-coded
     indicators of two perfectly complementary factors look linearly
     independent and a fully aliased coefficient is reported as estimable.
+
+    Raises:
+        ValueError: If a column is not one-dimensional, or a categorical
+            column holds values that would form one level but print
+            differently, such as ``1``, ``1.0`` and ``True``, or values that
+            print alike but would form separate levels, such as ``1`` and
+            ``"1"``.
     """
     coeff = _as_1d(coefficient)
+    if coefficientKind != "continuous":
+        require_labels_match_their_text(coeff, name="coefficient")
     n = len(coeff)
     if n == 0:
         return _not_computed("emptyInput")
@@ -301,8 +357,11 @@ def coefficient_estimability(
         if coeff_float is None:
             return _not_computed("nonNumeric", rowsMissing=n)
         mask &= np.isfinite(coeff_float)
-    for values in technicals.values():
-        mask &= np.asarray(~pd.isna(_as_1d(values)), dtype=bool)
+    for name, values in technicals.items():
+        technical = _as_1d(values)
+        if technicalKinds[name] != "continuous":
+            require_labels_match_their_text(technical, name=f"technicals[{name!r}]")
+        mask &= np.asarray(~pd.isna(technical), dtype=bool)
     rows_used = int(mask.sum())
     if rows_used < 2:
         return _not_computed(

@@ -1,3 +1,5 @@
+import re
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -229,6 +231,9 @@ def test_regulon_specificity_matches_pyscenic():
     ("values", "labels", "message"),
     [
         ([[1.0], [2.0]], ["T"], "align"),
+        # One label for every cell, or a table of labels, aligns with no row.
+        ([[1.0], [2.0]], "TB", "align"),
+        ([[1.0], [2.0]], [["T"], ["B"]], "align"),
         ([[1.0], [-2.0]], ["T", "B"], "non-negative"),
     ],
 )
@@ -256,6 +261,10 @@ def test_regulon_specificity_rejects_invalid_inputs(values, labels, message):
         ([None] * 5, 5),
         ([np.nan] * 5, 5),
         (pd.Categorical([None] * 5, categories=["a"]), 5),
+        # A missing label is named before labels that print otherwise than
+        # they compare, so NaN among labels is never a label.
+        ([1, 1.0, True, "1", None], 1),
+        ([np.float32(0.1), 0.1, 0.1, np.nan, 2.0], 1),
     ],
 )
 def test_regulon_specificity_refuses_cells_without_a_label(labels, unlabeled):
@@ -286,6 +295,30 @@ def test_regulon_specificity_refuses_cells_without_a_label(labels, unlabeled):
         ([False, False, True, True], [False, True]),
         (["nan", "nan", "None", "None"], ["nan", "None"]),
         (np.asarray([0.0, 0.0, 1.5, 1.5]), [0.0, 1.5]),
+        # A NumPy scalar equals and prints as its Python value, so equal
+        # labels form one group.
+        ([1, np.int64(1), np.uint8(2), 2], [1, 2]),
+        ([np.True_, True, False, np.False_], [True, False]),
+        (["a", np.str_("a"), np.str_("b"), "b"], ["a", "b"]),
+        ([1.5, np.float64(1.5), np.float32(2.0), 2.0], [1.5, 2.0]),
+        # Labels of several types that print as they compare.
+        (["a", "a", 1, 1], ["a", 1]),
+        ([1, 1, 2.5, 2.5], [1, 2.5]),
+        # 0.0 and -0.0 compare equal and form one group.
+        (np.asarray([0.0, -0.0, 1.5, 1.5]), [0.0, 1.5]),
+        (["a", "a", -0.0, 0.0], ["a", -0.0]),
+        ([True, True, 2, 2], [True, 2]),
+        ([b"a", b"a", "a", "a"], [b"a", "a"]),
+        # Nullable and categorical columns.
+        (pd.Series([1, 1, 2, 2], dtype="Int64"), [1, 2]),
+        (pd.Series([True, True, False, False], dtype="boolean"), [True, False]),
+        (pd.Categorical([1, 1, 2, 2]), [1, 2]),
+        (pd.Categorical(["a", "a", 1, 1], categories=["a", 1, "1"]), ["a", 1]),
+        (np.asarray([b"a", b"a", b"b", b"b"]), [b"a", b"b"]),
+        (
+            pd.to_datetime(["2020-01-01", "2020-01-01", "2020-01-02", "2020-01-02"]),
+            [pd.Timestamp("2020-01-01"), pd.Timestamp("2020-01-02")],
+        ),
     ],
 )
 def test_regulon_specificity_scores_every_kind_of_label_alike(labels, groups):
@@ -306,6 +339,91 @@ def test_regulon_specificity_scores_every_kind_of_label_alike(labels, groups):
         rtol=0,
         atol=1e-15,
     )
+
+
+@pytest.mark.parametrize(
+    ("labels", "found"),
+    [
+        # Python takes 1, 1.0 and True for one label...
+        (
+            [1, 1, 1.0, 1.0, True, True],
+            "values that would form one label but print differently, such as 1, "
+            "1.0 and True",
+        ),
+        # ...and keeps 1 and "1" apart, though they print alike.
+        (
+            [1, 1, "1", "1", 2, 2],
+            "values that print alike but would form separate labels, such as 1 and '1'",
+        ),
+        (
+            [np.float32(0.1)] * 2 + [0.1] * 2 + [0.5] * 2,
+            "values that print alike but would form separate labels, such as "
+            "np.float32(0.1) and 0.1",
+        ),
+        (
+            pd.Categorical(["a", "a", 1, 1, "1", "1"], categories=["a", 1, "1"]),
+            "values that print alike but would form separate labels, such as 1 and '1'",
+        ),
+    ],
+)
+def test_regulon_specificity_refuses_labels_that_print_otherwise_than_they_compare(
+    labels, found
+):
+    activity = pd.DataFrame(
+        {"X": [2.0, 2.0, 0.0, 0.0, 1.0, 1.0], "Y": [0.0, 1.0, 3.0, 0.0, 1.0, 2.0]}
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=re.escape(
+            f"labels holds {found}; convert them to text, or to one type, first"
+        ),
+    ):
+        regulon_specificity(activity, labels)
+
+
+@pytest.mark.parametrize(
+    ("labels", "names"),
+    [
+        (["a", "a", -0.0, 0.0], ["a", "-0.0"]),
+        (["a", "a", 0.0, -0.0], ["a", "0.0"]),
+        (np.asarray([-0.0, 0.0, 1.5, 1.5]), ["-0.0", "1.5"]),
+    ],
+)
+def test_regulon_specificity_names_a_group_of_zeros_by_its_first_label(labels, names):
+    activity = pd.DataFrame({"X": [2.0, 2.0, 0.0, 0.0], "Y": [1.0, 1.0, 1.0, 1.0]})
+
+    rss = regulon_specificity(activity, labels)
+
+    # 0.0 and -0.0 compare equal, so only their text tells which names the group.
+    assert [str(group) for group in rss.index] == names
+
+
+def test_numpy_and_python_labels_that_print_alike_score_as_one_group():
+    rng = np.random.default_rng(7)
+    values = rng.uniform(0, 1, size=(60, 3))
+    codes = rng.integers(0, 3, size=60)
+    as_numpy = rng.random(60) < 0.5
+    # The scores of the groups' definition, with each group named by text.
+    expected = rss_by_definition(values, np.asarray(["g7", "g3", "g5"])[codes])
+
+    for names, numpy_type in (
+        ([7, 3, 5], np.int64),
+        ([7.5, 3.5, 5.5], np.float32),
+        (["7", "3", "5"], np.str_),
+    ):
+        labels = [
+            numpy_type(names[code]) if numpy else names[code]
+            for code, numpy in zip(codes, as_numpy, strict=True)
+        ]
+        rss = regulon_specificity(pd.DataFrame(values), labels)
+
+        assert [str(group) for group in rss.index] == [
+            str(names[code]) for code in dict.fromkeys(codes.tolist())
+        ]
+        np.testing.assert_allclose(
+            rss.to_numpy(), expected.to_numpy(), rtol=0, atol=1e-12
+        )
 
 
 def test_connection_specificity_and_modules():

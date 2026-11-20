@@ -13,7 +13,11 @@ import numpy as np
 import pandas as pd
 
 from ..metadata.selection import valid_category_mask
-from ..utils.arguments import float_argument, integer_argument
+from ..utils.arguments import (
+    float_argument,
+    integer_argument,
+    require_labels_match_their_text,
+)
 from ..utils.numba import njit
 
 __all__ = [
@@ -208,21 +212,28 @@ def regulon_specificity(
     Args:
         activity: Cells-by-regulons non-negative activity, such as AUCell AUCs.
         labels: Group of each cell, aligned by position with ``activity``.
-            Every cell needs a label.
+            Every cell needs a label. Labels of any types may mix as long as
+            they group as their text reads, so ``1`` beside ``np.int64(1)``
+            is one group and ``"a"`` beside ``1`` two; ``0.0`` and ``-0.0``
+            are one group.
 
     Returns:
-        A groups-by-regulons DataFrame, groups in order of first appearance.
-        A regulon without activity scores NaN.
+        A groups-by-regulons DataFrame, groups in order of first appearance
+        and named by their first label. A regulon without activity scores
+        NaN.
 
     Raises:
         ValueError: If ``labels`` does not hold one label for each row of
             ``activity``, a label is missing or blank (None, NaN, ``pd.NA``,
             ``pd.NaT``, a missing categorical value, or empty or whitespace
-            text), or a value of activity is negative or not finite.
+            text), the labels hold values that would form one group but print
+            differently, such as ``1``, ``1.0`` and ``True``, or values that
+            print alike but would form separate groups, such as ``1`` and
+            ``"1"``, or a value of activity is negative or not finite.
     """
     values = np.asarray(activity)
     groups = np.asarray(labels, dtype=object)
-    if values.ndim != 2 or len(groups) != values.shape[0]:
+    if values.ndim != 2 or groups.ndim != 1 or len(groups) != values.shape[0]:
         raise ValueError("labels must align with the activity rows")
     unlabeled = int(np.count_nonzero(~valid_category_mask(groups)))
     if unlabeled:
@@ -230,6 +241,9 @@ def regulon_specificity(
             f"labels holds no label for {unlabeled} of the {len(groups)} cells to "
             "score; pass the activity and labels of the labeled cells"
         )
+    # Python takes 1, 1.0 and True for one label, which would score their
+    # cells as one group, and keeps 1 and "1" apart in rows that print alike.
+    require_labels_match_their_text(labels, name="labels")
     order = list(dict.fromkeys(groups.tolist()))
     # A cell whose label equals none of the labels keeps -1, which
     # specificity_scores refuses.

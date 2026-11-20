@@ -15,7 +15,11 @@ from scipy.sparse.linalg import (
 )
 
 from ..neighbors.diffusion import inverse_degree_diagonal
-from ..utils.arguments import float_argument, integer_argument
+from ..utils.arguments import (
+    float_argument,
+    integer_argument,
+    require_labels_match_their_text,
+)
 from ..utils.logging import logger
 from ..utils.progress import tqdmbar
 from .errors import (
@@ -52,10 +56,14 @@ def validate_source_sink_labels(
     the cell counts of the graph's components, largest first.
 
     Raises:
-        ValueError: If a label is both a source and a sink.
+        ValueError: If a label is both a source and a sink, or ``labels``
+            hold values that would form one label but print differently, such
+            as ``1``, ``1.0`` and ``True``, or values that print alike but
+            would form separate labels, such as ``1`` and ``"1"``.
         SourceSinkLabelsError: If no cell holds a source or sink label.
     """
     _check_missing_from(missing_from, component_sizes)
+    require_labels_match_their_text(labels, name="labels")
     overlap = sorted(set(sources) & set(sinks))
     if overlap:
         raise ValueError(f"Source and sink labels overlap in {context}: {overlap}")
@@ -86,6 +94,15 @@ def make_source_sink_vector(
     sources: list[Any],
     sinks: list[Any],
 ) -> np.ndarray:
+    """Mark sink cells 1 and source cells -1, and balance the vector over the other cells.
+
+    Raises:
+        ValueError: If every cell is a source or a sink, or ``labels`` hold
+            values that would form one label but print differently, such as
+            ``1``, ``1.0`` and ``True``, or values that print alike but would
+            form separate labels, such as ``1`` and ``"1"``.
+    """
+    require_labels_match_their_text(labels, name="labels")
     sink_mask = labels.isin(sinks).to_numpy(dtype=bool)
     source_mask = labels.isin(sources).to_numpy(dtype=bool)
     labeled = sink_mask | source_mask

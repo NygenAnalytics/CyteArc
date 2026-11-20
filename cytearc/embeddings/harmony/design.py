@@ -17,6 +17,8 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
+from ...utils.arguments import require_labels_match_their_text
+
 
 @dataclass(frozen=True, slots=True)
 class BatchDesign:
@@ -134,8 +136,11 @@ def _ordered_levels(column: pd.Series, name: object, out: np.ndarray) -> list[ob
 
     A categorical column keeps the declared order of the categories that occur. Any
     other column orders its distinct values with Python's ``sorted``, so numbers
-    sort numerically and text by code point.
+    sort numerically and text by code point. Results name levels by their text,
+    and pandas takes values that compare equal for one level, so a column whose
+    values would group otherwise than their text reads is refused first.
     """
+    require_labels_match_their_text(column, name=f"Batch column {name!r}")
     if isinstance(column.dtype, pd.CategoricalDtype):
         used = column.cat.remove_unused_categories()
         out[...] = used.cat.codes.to_numpy()
@@ -155,24 +160,13 @@ def _ordered_levels(column: pd.Series, name: object, out: np.ndarray) -> list[ob
     return [values[index] for index in order]
 
 
-def _level_texts(levels: list[object], name: object) -> tuple[str, ...]:
-    texts = tuple(str(level) for level in levels)
-    seen: set[str] = set()
-    for text in texts:
-        if text in seen:
-            raise ValueError(
-                f"Batch column {name!r} has distinct values with the same text "
-                f"{text!r}; convert the column to text first"
-            )
-        seen.add(text)
-    return texts
-
-
 def encode_batch_design(metadata: pd.DataFrame) -> BatchDesign:
     """Encode batch columns as global level codes in design order and group cells by level combination.
 
-    Unused categories of a categorical column are not levels. Two levels of one
-    column may not share their text, because results name levels by text.
+    Unused categories of a categorical column are not levels. Results name
+    levels by text, so values that would form one level but print differently,
+    such as ``1``, ``1.0`` and ``True``, and values that print alike but would
+    form separate levels, such as ``1`` and ``"1"``, are refused.
 
     Args:
         metadata: One row per cell and one column per batch variable, already
@@ -182,8 +176,9 @@ def encode_batch_design(metadata: pd.DataFrame) -> BatchDesign:
         The encoded design.
 
     Raises:
-        ValueError: If a column's values cannot be ordered or two of its levels
-            have the same text.
+        ValueError: If a column holds values that would form one level but
+            print differently, values that print alike but would form separate
+            levels, or values that cannot be ordered.
     """
     n_cells = len(metadata)
     n_columns = int(metadata.shape[1])
@@ -194,7 +189,7 @@ def encode_batch_design(metadata: pd.DataFrame) -> BatchDesign:
         ordered = _ordered_levels(
             metadata.iloc[:, position], name, level_codes[position]
         )
-        levels.append(_level_texts(ordered, name))
+        levels.append(tuple(str(level) for level in ordered))
     sizes = [len(column_levels) for column_levels in levels]
     level_offsets = np.zeros(n_columns + 1, dtype=np.int64)
     np.cumsum(sizes, out=level_offsets[1:])
