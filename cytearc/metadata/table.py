@@ -27,6 +27,7 @@ from ..storage.metadata_keys import (
 from ..utils.logging import logger
 from .alignment import align_to_cell_ids, require_keyed
 from .encoding import (
+    CollectionValuesError,
     categorical_codes,
     checked_fill_value,
     is_categorical,
@@ -50,10 +51,11 @@ from ..utils.arrays import sort_categories
 
 _RESERVED_COLUMNS = ("I", "ids", "names")
 _RESERVED_COLUMN_SET = frozenset(_RESERVED_COLUMNS)
-# How an insert refused for a value that is a collection can store it as text.
+# How an insert of lists, tuples or one-dimensional arrays can store them
+# as text instead, keeping every element and the missing rows.
 _STORE_AS_TEXT = (
     "To store such values as text, pass text that keeps every element, such as "
-    'series.map(lambda v: ",".join(map(str, v)))'
+    'values.map(lambda v: ",".join(map(str, v)), na_action="ignore")'
 )
 
 
@@ -559,11 +561,7 @@ class MetaData:
             ValueError: If the values cover neither every row nor the rows
                 that ``key`` selects, or the fill does not fit their dtype.
         """
-        # Text is what an insert stores of values that are collections; the
-        # values of update_key are booleans, which it types before.
-        supplied, supplied_missing = nullable_values(
-            values, name=name, remedy=_STORE_AS_TEXT
-        )
+        supplied, supplied_missing = nullable_values(values, name=name)
         n_values = supplied.shape[0]
         if n_values == self.N:
             return supplied, supplied_missing
@@ -734,8 +732,8 @@ class MetaData:
                 without ``overwrite``, or contains ``/`` or ``\\``, which
                 Zarr reads as path separators, if a Series is labeled by
                 anything other than those ids, if a value or a category is a
-                list, tuple, set, dict or NumPy array, or if two categories of
-                categorical values read alike once stored or the
+                list, tuple, set, dict, array or other collection, or if two
+                categories of categorical values read alike once stored or the
                 ``fill_value`` of categorical values is not a category.
         """
         overwrite = bool_argument(overwrite, "overwrite")
@@ -747,7 +745,13 @@ class MetaData:
                 "expected. The correct dtype may not be assigned to the column"
             )
         aligned = self._label_aligned(values, key, name=column_name, call="insert")
-        self._write_rows(column_name, aligned, fill_value, key)
+        try:
+            self._write_rows(column_name, aligned, fill_value, key)
+        except CollectionValuesError as error:
+            # Text is what an insert may store in their place.
+            if error.joinable:
+                error.args = (f"{error}. {_STORE_AS_TEXT}",)
+            raise
 
     def _insert_in_store_order(
         self, column_name: str, values: np.ndarray, *, overwrite: bool = False
@@ -801,9 +805,7 @@ class MetaData:
         # Categorical values keep their layout, except in the reserved
         # columns, which store their labels.
         if column_name not in _RESERVED_COLUMN_SET and is_categorical(values):
-            codes, categories, ordered = categorical_codes(
-                values, name=column_name, remedy=_STORE_AS_TEXT
-            )
+            codes, categories, ordered = categorical_codes(values, name=column_name)
             self._save_categorical(
                 column_name,
                 self._codes_for_rows(

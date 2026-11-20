@@ -817,9 +817,8 @@ def check_column_text(
             codes, categories = node["codes"], node["categories"]
             if (
                 isinstance(codes, h5py.Dataset)
-                and isinstance(categories, h5py.Dataset)
                 and codes.ndim == 1
-                and categories.ndim == 1
+                and categories_problem(categories) is None
                 and _holds_text(categories.dtype)
             ):
                 _check_text_rows(categories, refuse_category)

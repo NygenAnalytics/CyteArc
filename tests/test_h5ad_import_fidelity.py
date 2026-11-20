@@ -1889,13 +1889,19 @@ def test_categories_apart_from_a_column_apply_only_to_integer_codes(tmp_path) ->
     assert columns["y"].tolist() == [0.0, 1.5, 3.0, 4.5, 6.0, 7.5]
 
 
-def test_a_skipped_column_needs_no_utf8_categories(tmp_path) -> None:
-    path = _cells_with_categories(tmp_path / "cells.h5ad", "AnnData 0.6 rows")
+@pytest.mark.parametrize(
+    ("layout", "categories"),
+    [("rows", "/obs/x/categories"), ("AnnData 0.6 rows", "/uns/x_categories")],
+)
+def test_a_skipped_column_needs_no_utf8_categories(
+    tmp_path, layout, categories
+) -> None:
+    path = _cells_with_categories(tmp_path / "cells.h5ad", layout)
     with h5py.File(path, "a") as h5:
         # Rows of bytes that are not all UTF-8 text, which the text check
         # cannot read one category at a time.
-        del h5["uns/x_categories"]
-        h5["uns/x_categories"] = np.array([[b"a", b"\xff"], [b"c", b"d"], [b"e", b"f"]])
+        del h5[categories]
+        h5[categories] = np.array([[b"a", b"\xff"], [b"c", b"d"], [b"e", b"f"]])
     reader = H5adReader(path)
     try:
         with _warnings() as warned:
@@ -1904,7 +1910,7 @@ def test_a_skipped_column_needs_no_utf8_categories(tmp_path) -> None:
         reader.close()
     assert [text.rstrip("\n") for text in warned] == [
         f"Skipping obs column 'x': Column '/obs/x' {_NOT_ONE_VALUE} "
-        "categories of shape (3, 2) in '/uns/x_categories'"
+        f"categories of shape (3, 2) in {categories!r}"
     ]
     assert sorted(columns) == ["y", "z"]
 

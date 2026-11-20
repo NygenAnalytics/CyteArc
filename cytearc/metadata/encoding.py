@@ -13,8 +13,10 @@ string values take the dtype that their present values share: bool, int64,
 float64 for real numbers, complex128 for other numbers, and otherwise text.
 Numbers that the shared dtype cannot hold, such as an integer outside the
 int64 range, are refused rather than wrapped, and so is a value that is a
-list, tuple, set, dict or NumPy array, which a column cannot hold as one
-value. ``None``, NaN, ``pd.NA``, and ``NaT`` among them are missing.
+list, tuple, set, dict, array or other collection, which a column cannot
+hold as one value. A zero-dimensional array counts as the value it holds.
+``None``, NaN, ``pd.NA``, ``NaT`` and NumPy's masked constant among them are
+missing.
 """
 
 import datetime
@@ -28,6 +30,7 @@ from ..storage.arrays import encode_metadata_values, missing_placeholder, text_a
 from ..utils.arguments import quoted_value
 
 __all__ = [
+    "CollectionValuesError",
     "UnstorableCategoriesError",
     "categorical_codes",
     "checked_fill_value",
@@ -41,6 +44,20 @@ __all__ = [
 ]
 
 
+class CollectionValuesError(ValueError):
+    """Values of which one is a collection, which a column cannot hold as one value.
+
+    Attributes:
+        joinable: Whether every present value is a list, a tuple or an array
+            of one dimension, whose elements text can join in full, so that a
+            caller that stores text may suggest it.
+    """
+
+    def __init__(self, message: str, *, joinable: bool) -> None:
+        super().__init__(message)
+        self.joinable = joinable
+
+
 class UnstorableCategoriesError(ValueError):
     """Categories that a categorical column cannot store.
 
@@ -52,14 +69,20 @@ class UnstorableCategoriesError(ValueError):
 
 
 def missing_rows(values: np.ndarray) -> np.ndarray:
-    """Return which object values are missing: None, NaN, ``pd.NA``, or NaT.
+    """Return which object values are missing: None, NaN, ``pd.NA``, NaT or masked.
 
-    Values of other dtypes are never missing.
+    A zero-dimensional array is missing when the value it holds is, and
+    NumPy's masked constant always. Values of other dtypes are never missing.
     """
     array = np.asarray(values)
     if array.dtype.kind != "O":
         return np.zeros(array.shape, dtype=bool)
-    return np.asarray(pd.isna(array), dtype=bool)
+    if not any(issubclass(kind, np.ndarray) for kind in set(map(type, array.flat))):
+        return np.asarray(pd.isna(array), dtype=bool)
+    held = np.frompyfunc(_held, 1, 1)(array)
+    masked = np.asarray(np.frompyfunc(_is_masked, 1, 1)(held), dtype=bool)
+    missing: np.ndarray = np.asarray(pd.isna(held), dtype=bool) | masked
+    return missing
 
 
 def _text(values: np.ndarray, missing: np.ndarray, *, name: str) -> np.ndarray:
@@ -165,13 +188,39 @@ def _is_collection_type(kind: type) -> bool:
     return issubclass(kind, Iterable) and not issubclass(kind, _TEXT_TYPES)
 
 
+def _held(value: Any) -> Any:
+    """Return the value that a zero-dimensional array holds, or ``value`` itself.
+
+    An array whose ``[()]`` returns itself, as NumPy's masked constant does,
+    is returned as it is.
+    """
+    while isinstance(value, np.ndarray) and value.ndim == 0:
+        inner = value[()]
+        if inner is value:
+            break
+        value = inner
+    return value
+
+
+def _is_masked(value: Any) -> bool:
+    """Return whether ``value`` is NumPy's masked constant, a missing value."""
+    return value is np.ma.masked
+
+
+def _is_joinable(value: Any) -> bool:
+    """Return whether text can join the elements of ``value``, each in full.
+
+    Lists, tuples and arrays of one dimension can. NumPy prints the rows of
+    a deeper array to 8 decimal places, and cannot iterate a
+    zero-dimensional one.
+    """
+    if isinstance(value, np.ndarray):
+        return value.ndim == 1
+    return isinstance(value, (list, tuple))
+
+
 def _held_values(
-    values: np.ndarray,
-    missing: np.ndarray,
-    *,
-    name: str,
-    item: str,
-    remedy: str | None,
+    values: np.ndarray, missing: np.ndarray, *, name: str, item: str
 ) -> np.ndarray:
     """Return object values with each zero-dimensional array as the value it holds.
 
@@ -179,25 +228,24 @@ def _held_values(
     when some value is a collection or an array.
 
     Raises:
-        ValueError: If a present value is a list, tuple, set, dict, array of
-            one dimension or more, or another collection, naming the column,
-            the first ``item`` that holds one, its value and ``remedy``.
+        CollectionValuesError: If a present value is a list, tuple, set,
+            dict, array of one dimension or more, or another collection,
+            naming the column, the first ``item`` that holds one and its value.
     """
     if not any(map(_is_collection_type, set(map(type, values[~missing])))):
         return values
     held = values.copy()
-    for position in np.flatnonzero(~missing).tolist():
-        value = held[position]
-        # A zero-dimensional array holds one value, which may be an array.
-        while isinstance(value, np.ndarray) and value.ndim == 0:
-            value = value[()]
+    present = np.flatnonzero(~missing).tolist()
+    for position in present:
+        value = _held(held[position])
         if _is_collection_type(type(value)):
-            refusal = (
+            joinable = all(_is_joinable(values[row]) for row in present)
+            raise CollectionValuesError(
                 f"Column {name!r} needs one value per {item}, not a list, tuple, "
                 f"set, dict, array or other collection; {item} {position + 1} "
-                f"holds {quoted_value(value)}"
+                f"holds {quoted_value(value)}",
+                joinable=joinable,
             )
-            raise ValueError(refusal if remedy is None else f"{refusal}. {remedy}")
         held[position] = value
     return held
 
@@ -208,7 +256,6 @@ def stored_values(
     *,
     name: str,
     item: str = "row",
-    remedy: str | None = None,
 ) -> np.ndarray:
     """Return a typed column whose masked rows hold a placeholder.
 
@@ -224,17 +271,16 @@ def stored_values(
         name: The column, for errors.
         item: What a position is, for errors, such as ``"row"`` or
             ``"category"``.
-        remedy: What a caller that stores text may do instead, which the
-            refusal of a collection ends with, or None.
 
     Raises:
-        ValueError: If a value is a collection, naming the first ``item``
-            that holds one, if a number does not fit the dtype that the
-            values share, or if text is not valid UTF-8.
+        CollectionValuesError: If a value is a collection, naming the first
+            ``item`` that holds one.
+        ValueError: If a number does not fit the dtype that the values
+            share, or text is not valid UTF-8.
     """
     kind = values.dtype.kind
     if kind == "O":
-        values = _held_values(values, missing, name=name, item=item, remedy=remedy)
+        values = _held_values(values, missing, name=name, item=item)
         present = values[~missing]
         dtype = _shared_dtype(present)
         if dtype is None:
@@ -356,11 +402,7 @@ def stored_categorical_codes(
     labels = np.empty(len(categories), dtype=object)
     labels[:] = categories
     labels = _held_values(
-        labels,
-        np.zeros(len(labels), dtype=bool),
-        name=name,
-        item="category",
-        remedy=None,
+        labels, np.zeros(len(labels), dtype=bool), name=name, item="category"
     )
     dtype = _shared_dtype(labels[used])
     if dtype is not None and _shared_dtype(labels) != dtype:
@@ -402,9 +444,7 @@ def is_categorical(values: Any) -> bool:
     return isinstance(getattr(values, "dtype", None), pd.CategoricalDtype)
 
 
-def categorical_codes(
-    values: Any, *, name: str, remedy: str | None = None
-) -> tuple[np.ndarray, np.ndarray, bool]:
+def categorical_codes(values: Any, *, name: str) -> tuple[np.ndarray, np.ndarray, bool]:
     """Return the codes, categories and order of pandas categorical values.
 
     A ``pd.Categorical``, a ``pd.CategoricalIndex`` and a Series of
@@ -413,12 +453,6 @@ def categorical_codes(
     :func:`stored_values` types the values of a column, every category
     included: text as fixed-width text, and numbers and booleans as int64,
     float64, complex128 or bool.
-
-    Args:
-        values: The categorical values.
-        name: The column, for errors.
-        remedy: What a caller that stores text may do instead, which the
-            refusal of a category that is a collection ends with, or None.
 
     Raises:
         TypeError: If the values are not categorical.
@@ -434,11 +468,7 @@ def categorical_codes(
     labels = np.empty(len(categorical.categories), dtype=object)
     labels[:] = categorical.categories.tolist()
     categories = stored_values(
-        labels,
-        np.zeros(len(labels), dtype=bool),
-        name=name,
-        item="category",
-        remedy=remedy,
+        labels, np.zeros(len(labels), dtype=bool), name=name, item="category"
     )
     if len(np.unique(categories)) != len(categories):
         raise ValueError(
@@ -455,16 +485,8 @@ def _is_pandas_values(values: Any) -> bool:
     ) and not (isinstance(values.dtype, np.dtype) and values.dtype.kind != "O")
 
 
-def nullable_values(
-    values: Any, *, name: str, remedy: str | None = None
-) -> tuple[np.ndarray, np.ndarray]:
+def nullable_values(values: Any, *, name: str) -> tuple[np.ndarray, np.ndarray]:
     """Return supplied column values as a typed array and their missing rows.
-
-    Args:
-        values: The values, one per row.
-        name: The column, for errors.
-        remedy: What a caller that stores text may do instead, which the
-            refusal of a value that is a collection ends with, or None.
 
     Raises:
         ValueError: If the values are not one per row, or as
@@ -486,7 +508,7 @@ def nullable_values(
         array = array.astype(object)
     if array.dtype.kind == "O":
         missing = missing_rows(array)
-        return stored_values(array, missing, name=name, remedy=remedy), missing
+        return stored_values(array, missing, name=name), missing
     if array.dtype.kind == "S":
         array = encode_metadata_values(array, None, name=name)
     return array, np.zeros(array.shape, dtype=bool)
