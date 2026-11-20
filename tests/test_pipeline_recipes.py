@@ -625,7 +625,12 @@ def test_atac_settings_are_checked_before_the_run(atac) -> None:
         ({"n_iter": -1}, ValueError, "n_iter must be at least 0"),
         ({"n_oversamples": -1}, ValueError, "n_oversamples must be at least 0"),
         ({"rand_state": -1}, ValueError, "rand_state must be at least 0"),
-        ({"rand_state": 2**32}, ValueError, "rand_state must be at most 4294967295"),
+        # The materialized solver seeds scikit-learn's TruncatedSVD.
+        (
+            {"rand_state": 2**32, "solver": "materialized"},
+            ValueError,
+            "rand_state must be at most 4294967295",
+        ),
         ({"rand_state": 1.0}, TypeError, "rand_state must be an integer"),
         (
             {"solver": "exact"},

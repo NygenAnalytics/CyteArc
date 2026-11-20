@@ -119,8 +119,9 @@ def lsi_settings(
     Raises:
         TypeError: If a setting has the wrong type.
         ValueError: If ``solver`` is not ``"streaming"`` or
-            ``"materialized"``, or a setting is out of range, such as
-            ``rand_state`` outside 0 to 2**32 - 1.
+            ``"materialized"``, or a setting is out of range, such as a
+            ``rand_state`` below 0, or above 2**32 - 1 for the materialized
+            solver.
     """
     skip = bool_argument(skip_first, "skip_first")
     if solver != "streaming" and solver != "materialized":
@@ -130,9 +131,13 @@ def lsi_settings(
         solver=solver,
         n_iter=integer_argument(n_iter, "n_iter", minimum=0),
         n_oversamples=integer_argument(n_oversamples, "n_oversamples", minimum=0),
-        # The materialized solver seeds scikit-learn's TruncatedSVD.
+        # The materialized solver seeds scikit-learn's TruncatedSVD, and the
+        # streaming solver NumPy's default_rng, which takes any seed.
         rand_state=integer_argument(
-            rand_state, "rand_state", minimum=0, maximum=RANDOM_STATE_MAX
+            rand_state,
+            "rand_state",
+            minimum=0,
+            maximum=RANDOM_STATE_MAX if solver == "materialized" else None,
         ),
         batch_size=(
             None

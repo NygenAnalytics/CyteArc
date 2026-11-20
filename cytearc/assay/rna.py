@@ -33,6 +33,7 @@ from .hvg_statistics import (
 )
 from .normalization import (
     NORMALIZATION_PARAM_NAMES,
+    NormMethod,
     PearsonResidualNormalizer,
     require_counts_for,
     _feature_group_positions,
@@ -227,6 +228,11 @@ class RNAassay(Assay):
 
     _feature_summary_operation = "summarize_rna_features"
 
+    @staticmethod
+    def _default_normalizer() -> NormMethod:
+        """Return the normalizer that ``normMethod`` starts as."""
+        return norm_lib_size
+
     def __init__(
         self,
         z: zarr.Group,
@@ -245,7 +251,7 @@ class RNAassay(Assay):
             nthreads=nthreads,
             **kwargs,
         )
-        self.normMethod = norm_lib_size
+        self.normMethod = self._default_normalizer()
         if "size_factor" in self.attrs:
             # A stored size factor is kept as stored, such as 0.5 or 2500.5.
             stored = self.attrs["size_factor"]

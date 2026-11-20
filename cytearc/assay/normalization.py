@@ -383,17 +383,22 @@ def _library_size_scaled(
 
     Raises:
         ValueError: If ``assay`` hands no size factor or no cell totals, as
-            every assay but an RNA assay's ``normed`` does.
+            every assay but an RNA assay does. The message names the assay's
+            own default normalizer.
     """
     size_factor = getattr(assay, "sf", None)
     cell_totals = getattr(assay, "scalar", None)
     if size_factor is None or cell_totals is None:
+        default = assay._default_normalizer().__name__
+        others = " or ".join(
+            name for name in ("norm_clr", "norm_dummy") if name != default
+        )
         raise ValueError(
             "norm_lib_size and norm_lib_size_log need each cell's total and a "
-            "size factor, which only an RNA assay's normed provides, but "
+            "size factor, which only an RNA assay provides, but "
             f"{type(assay).__name__} {getattr(assay, 'name', '')!r} did not "
-            "provide them; normalize an ATAC assay with norm_tf_idf, its "
-            "default, and any assay with norm_clr or norm_dummy"
+            f"provide them; normalize it with {default}, its default, or with "
+            f"{others}"
         )
     totals = cell_totals.reshape(-1, 1)
     scale = partial(

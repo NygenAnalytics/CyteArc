@@ -145,7 +145,12 @@ def _require_doublet_graph(root: Any, lineage: NativeGraphInputs) -> None:
     ``norm_lib_size`` normalized. The normalizer is checked first, since a
     PCA of Pearson residuals also skips feature scaling by default.
     """
-    assert lineage.reduction is not None and lineage.normalized is not None
+    if lineage.reduction is None or lineage.normalized is None:
+        raise ValueError(
+            "Doublet scoring projects its simulated doublets onto the PCA of "
+            "the graph's normalized values, but the graph's lineage names no "
+            "PCA or no normalized values; build the graph on reduction.pca"
+        )
     identity = (inspect_artifact(root, lineage.normalized).parameters or {}).get(
         "normalization_method"
     )
@@ -1908,16 +1913,6 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
             normalize_scores=normalize_scores,
             random_seed=random_seed,
         )
-        fraction = settings.cluster_sample_fraction
-        cap = settings.max_cells_per_cluster
-        ratio = settings.simulation_ratio
-        heterotypic = settings.heterotypic_fraction
-        neighbors_k = settings.save_k
-        rate = settings.expected_doublet_rate
-        cutoff = settings.threshold
-        smoothing = settings.smoothing_t
-        seed = settings.random_seed
-        normalize_scores = settings.normalize_scores
         columns = _doublet_sample_columns(sample_column)
         if len(columns) != (0 if sample_labels is None else len(sample_labels)):
             raise ValueError("Pass one array of sample labels per sample column")
@@ -1926,10 +1921,10 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
             raise ValueError("Cluster values must contain one label per selected cell")
         # Forced heterotypic doublets need a partner outside the first
         # parent's cluster, so one cluster fails before any planning.
-        if heterotypic > 0 and len(np.unique(labels)) < 2:
+        if settings.heterotypic_fraction > 0 and len(np.unique(labels)) < 2:
             raise ValueError(
                 "Doublet detection with heterotypic_fraction="
-                f"{heterotypic:g} pairs cells from two different "
+                f"{settings.heterotypic_fraction:g} pairs cells from two different "
                 "clusters, but every selected cell has the same cluster label. "
                 f"{one_cluster_remedy}"
             )
@@ -1995,26 +1990,28 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
                 "their capture"
             )
         plans = plan_doublet_samples(
-            sizes, simulation_ratio=ratio, n_neighbors=neighbors_k
+            sizes,
+            simulation_ratio=settings.simulation_ratio,
+            n_neighbors=settings.save_k,
         )
         arguments = DoubletScoreArguments(
             clusters=clusters,
             connectivity_map=connectivity,
             neighbors=neighbors,
             sample_assignments_fingerprint=assignments,
-            cluster_sample_fraction=fraction,
-            max_cells_per_cluster=cap,
+            cluster_sample_fraction=settings.cluster_sample_fraction,
+            max_cells_per_cluster=settings.max_cells_per_cluster,
             sample_columns=columns,
-            simulation_ratio=ratio,
-            heterotypic_fraction=heterotypic,
+            simulation_ratio=settings.simulation_ratio,
+            heterotypic_fraction=settings.heterotypic_fraction,
             # Each sample counts at most its other cells, so the neighbors
             # recorded are the most that any sample uses.
             save_k=max(plan.neighbors for plan in plans),
-            expected_doublet_rate=rate,
-            threshold=cutoff,
-            smoothing_t=smoothing,
-            normalize_scores=normalize_scores,
-            random_seed=seed,
+            expected_doublet_rate=settings.expected_doublet_rate,
+            threshold=settings.threshold,
+            smoothing_t=settings.smoothing_t,
+            normalize_scores=settings.normalize_scores,
+            random_seed=settings.random_seed,
             invalidate_cache=invalidate_cache,
         )
         record = arguments.to_record()
@@ -2101,14 +2098,14 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
             feature_indices,
             totals,
             index=index,
-            cluster_sample_fraction=fraction,
-            max_cells_per_cluster=cap,
-            simulation_ratio=ratio,
-            heterotypic_fraction=heterotypic,
-            n_neighbors=neighbors_k,
-            expected_doublet_rate=rate,
-            threshold=cutoff,
-            random_seed=seed,
+            cluster_sample_fraction=settings.cluster_sample_fraction,
+            max_cells_per_cluster=settings.max_cells_per_cluster,
+            simulation_ratio=settings.simulation_ratio,
+            heterotypic_fraction=settings.heterotypic_fraction,
+            n_neighbors=settings.save_k,
+            expected_doublet_rate=settings.expected_doublet_rate,
+            threshold=settings.threshold,
+            random_seed=settings.random_seed,
             resources=self.resources,
         )
         del reference
@@ -2119,10 +2116,10 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
         one_cluster = [
             _doublet_sample_text(sample)
             for sample, outcome in zip(samples, result.samples, strict=True)
-            if outcome.heterotypic_fraction < heterotypic
+            if outcome.heterotypic_fraction < settings.heterotypic_fraction
         ]
         values = result.scores
-        if smoothing:
+        if settings.smoothing_t:
             graph_group = artifact_group(self.zw, connectivity)
             edges = as_zarr_array(graph_group["edges"], name="edges")
             weights = as_zarr_array(graph_group["weights"], name="weights")
@@ -2155,10 +2152,10 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
             values = smooth_doublet_scores(
                 graph,
                 values,
-                power=smoothing,
-                normalize=normalize_scores,
+                power=settings.smoothing_t,
+                normalize=settings.normalize_scores,
             )
-        elif normalize_scores:
+        elif settings.normalize_scores:
             values = minmax_doublet_scores(values)
         write_cell_data_artifact(
             self.zw,

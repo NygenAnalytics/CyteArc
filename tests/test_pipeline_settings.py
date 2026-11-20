@@ -1551,18 +1551,7 @@ _REFUSED_SETTINGS: list[tuple[str, dict[str, Any], type[Exception], str]] = [
         ValueError,
         "kmeans_batch_size must be at least 1",
     ),
-    (
-        "umap",
-        {"min_dist": -1},
-        ValueError,
-        "min_dist must be from 0 to spread (2.0), got -1.0",
-    ),
-    (
-        "umap",
-        {"spread": 0.5},
-        ValueError,
-        "min_dist must be from 0 to spread (0.5), got 1.0",
-    ),
+    ("umap", {"min_dist": -1}, ValueError, "min_dist must be at least 0"),
     ("umap", {"spread": 0}, ValueError, "spread must be greater than 0"),
     ("umap", {"spread": -1}, ValueError, "spread must be greater than 0"),
     ("umap", {"spread": "2"}, TypeError, "spread must be a real number"),
@@ -1714,26 +1703,22 @@ _RECIPE_CHECKED_SETTINGS: dict[str, frozenset[str]] = {
         {"partitions", "selected", "symmetric_graph", "graph_upper_only"}
     ),
     "normalization": frozenset({"method"}),
+    "tsne": frozenset({"symmetric_graph", "graph_upper_only"}),
+    "guide_calling": frozenset(
+        {"path", "barcode_prefix", "barcode_suffix", "barcode_pattern"}
+    ),
+    "profiles": frozenset({"cells"}),
 }
 
 
 def test_every_setting_of_a_checked_stage_reaches_its_methods_check():
-    from cytearc.assay.normalization import normalization_settings
-    from cytearc.clustering.leiden import leiden_settings
-    from cytearc.datastore._operations.clustering import _ClusteringOperationsMixin
     from cytearc.datastore._operations.embeddings import _EmbeddingOperationsMixin
-    from cytearc.datastore._operations.graph import _GraphOperationsMixin
     from cytearc.datastore._pipeline.settings import _SETTING_CHECKS
     from cytearc.embeddings.umap import umap_settings
 
     checks = {
         **_SETTING_CHECKS,
         "umap": (umap_settings, _EmbeddingOperationsMixin._embeddings_umap),
-        "leiden": (leiden_settings, _ClusteringOperationsMixin._clusters_leiden),
-        "normalization": (
-            normalization_settings,
-            _GraphOperationsMixin._features_normalize,
-        ),
     }
     for stage, (check, method) in checks.items():
         parameters = set(inspect.signature(check).parameters)
@@ -1741,9 +1726,10 @@ def test_every_setting_of_a_checked_stage_reaches_its_methods_check():
         # method, which also gives the default of an omitted setting.
         keywords = _keywords(method)
         assert parameters <= set(keywords), (stage, parameters - set(keywords))
-        assert all(
-            keywords[name] is not inspect.Parameter.empty for name in parameters
-        ), stage
+        # A setting without a default is one that the recipe requires.
+        assert {
+            name for name in parameters if keywords[name] is inspect.Parameter.empty
+        } == _REQUIRED_SETTINGS.get(stage, set()) & parameters, stage
         # Every setting of the stage is checked: by the check, or by the
         # recipe itself.
         recipe = _RECIPE_CHECKED_SETTINGS.get(stage, frozenset())

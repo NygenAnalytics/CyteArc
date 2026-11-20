@@ -43,6 +43,9 @@ _UMAP_SETTINGS = {
         {"min_dist": 0},
         {"min_dist": 2.0},
         {"spread": np.float32(0.5), "min_dist": np.float32(0.5)},
+        # umap-learn refuses min_dist above spread, which runs have recorded.
+        {"spread": 0.5, "min_dist": 1.0},
+        {"min_dist": 2.0000001},
         {"spread": 1e-9, "min_dist": 0},
         {"repulsion_strength": 0},
         {"initial_alpha": 0},
@@ -67,11 +70,7 @@ def test_umap_settings_take_both_ends_of_umap_learns_ranges(changes):
         # A spread of 0 gives UMAP's curve fit no scale.
         ({"spread": 0.0, "min_dist": 0.0}, "spread must be greater than 0"),
         ({"spread": -1.0}, "spread must be greater than 0"),
-        ({"min_dist": -1e-9}, "min_dist must be from 0 to spread (2.0), got -1e-09"),
-        (
-            {"min_dist": 2.0000001},
-            "min_dist must be from 0 to spread (2.0), got 2.0000001",
-        ),
+        ({"min_dist": -1e-9}, "min_dist must be at least 0"),
         ({"repulsion_strength": -1e-9}, "repulsion_strength must be at least 0"),
         ({"initial_alpha": -1e-9}, "initial_alpha must be at least 0"),
         ({"negative_sample_rate": -1}, "negative_sample_rate must be at least 0"),

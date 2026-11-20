@@ -1815,8 +1815,8 @@ class _GraphOperationsMixin(_GraphOperationsBase):
             normalized: Normalized artifact to reduce.
             dims: Requested number of retained LSI dimensions.
             skip_first: Whether to omit the first singular component.
-            rand_state: Seed of the randomized decomposition, from 0 to
-                2**32 - 1.
+            rand_state: Seed of the randomized decomposition, at least 0,
+                and at most 2**32 - 1 for the materialized solver.
             solver: Memory-bounded streaming solver or materialized compatibility
                 solver. The materialized solver holds the whole matrix and raises
                 MemoryError before reading it when that exceeds the memory budget.
@@ -2272,36 +2272,31 @@ class _GraphOperationsMixin(_GraphOperationsBase):
             kmeans_sampling=kmeans_sampling,
             kmeans_batch_size=kmeans_batch_size,
         )
-        resolved_batch_size = settings.batch_size
-        requested_clusters = settings.n_centroids
-        resolved_rand_state = settings.rand_state
-        resolved_kmeans_sampling = settings.kmeans_sampling
-        requested_kmeans_batch_size = settings.kmeans_batch_size
         stream, n_cells, coordinate_dims = self._coordinate_source(
             coordinates,
-            batch_size=resolved_batch_size,
+            batch_size=settings.batch_size,
         )
         effective_batch_size = _requested_block_rows(
             stream,
-            resolved_batch_size,
+            settings.batch_size,
             n_cells,
         )
         if n_cells < 2:
             raise ValueError("Embedding initialization requires at least two cells")
         effective_clusters = min(
-            requested_clusters,
+            settings.n_centroids,
             n_cells,
         )
         effective_kmeans_batch_size = min(
             n_cells,
-            max(requested_kmeans_batch_size, effective_clusters),
+            max(settings.kmeans_batch_size, effective_clusters),
         )
         arguments = EmbeddingInitializationArguments(
             coordinates=coordinates,
             n_centroids=effective_clusters,
-            rand_state=resolved_rand_state,
+            rand_state=settings.rand_state,
             batch_size=effective_batch_size,
-            kmeans_sampling=resolved_kmeans_sampling,
+            kmeans_sampling=settings.kmeans_sampling,
             kmeans_batch_size=effective_kmeans_batch_size,
             invalidate_cache=invalidate_cache,
         )
@@ -2334,7 +2329,7 @@ class _GraphOperationsMixin(_GraphOperationsBase):
                 n_clusters=effective_clusters,
                 block_rows=int(stream.data.chunksize[0]),
                 nthreads=self.nthreads,
-                kmeans_sampling=resolved_kmeans_sampling,
+                kmeans_sampling=settings.kmeans_sampling,
                 kmeans_batch_size=effective_kmeans_batch_size,
             )
             _require_kmeans_fit_budget(
@@ -2353,9 +2348,9 @@ class _GraphOperationsMixin(_GraphOperationsBase):
                 n_rows=n_cells,
                 batch_size=effective_batch_size,
                 n_clusters=effective_clusters,
-                rand_state=resolved_rand_state,
+                rand_state=settings.rand_state,
                 nthreads=self.nthreads,
-                kmeans_sampling=resolved_kmeans_sampling,
+                kmeans_sampling=settings.kmeans_sampling,
                 kmeans_batch_size=effective_kmeans_batch_size,
             )
             with artifact_transaction(self.zw, planned) as group:
@@ -2482,12 +2477,7 @@ class _GraphOperationsMixin(_GraphOperationsBase):
         Raises:
             MemoryError: If the index exceeds the memory budget.
         """
-        ann_parallel = bool_argument(ann_parallel, "ann_parallel")
         invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
-        if not isinstance(coordinates, ArtifactRef):
-            raise TypeError("coordinates must be an ArtifactRef")
-        if coordinates.assay is None:
-            raise ValueError("Coordinate artifact has no assay")
         settings = ann_index_settings(
             ann_metric=ann_metric,
             ann_efc=ann_efc,
@@ -2497,12 +2487,10 @@ class _GraphOperationsMixin(_GraphOperationsBase):
             rand_state=rand_state,
             batch_size=batch_size,
         )
-        ann_metric = settings.ann_metric
-        resolved_ann_efc = settings.ann_efc
-        resolved_ann_ef = settings.ann_ef
-        resolved_ann_m = settings.ann_m
-        resolved_rand_state = settings.rand_state
-        resolved_batch_size = settings.batch_size
+        if not isinstance(coordinates, ArtifactRef):
+            raise TypeError("coordinates must be an ArtifactRef")
+        if coordinates.assay is None:
+            raise ValueError("Coordinate artifact has no assay")
         if coordinates.kind not in NATIVE_COORDINATE_KINDS:
             raise ValueError(
                 "Coordinates must reference reduction, batch_correction, "
@@ -2511,22 +2499,22 @@ class _GraphOperationsMixin(_GraphOperationsBase):
         self._ensure_dataset_fingerprint(coordinates.assay)
         coordinate_source, n_cells, dims = self._coordinate_source(
             coordinates,
-            batch_size=resolved_batch_size,
+            batch_size=settings.batch_size,
         )
         effective_batch_size = _requested_block_rows(
             coordinate_source,
-            resolved_batch_size,
+            settings.batch_size,
             n_cells,
         )
-        index_threads = self.nthreads if ann_parallel else 1
+        index_threads = self.nthreads if settings.ann_parallel else 1
         arguments = AnnIndexArguments(
             coordinates=coordinates,
-            ann_metric=ann_metric,
-            ann_efc=resolved_ann_efc,
-            ann_ef=resolved_ann_ef,
-            ann_m=resolved_ann_m,
-            rand_state=resolved_rand_state,
-            ann_parallel=ann_parallel,
+            ann_metric=settings.ann_metric,
+            ann_efc=settings.ann_efc,
+            ann_ef=settings.ann_ef,
+            ann_m=settings.ann_m,
+            rand_state=settings.rand_state,
+            ann_parallel=settings.ann_parallel,
             nthreads=index_threads,
             batch_size=effective_batch_size,
             invalidate_cache=invalidate_cache,
@@ -2539,7 +2527,7 @@ class _GraphOperationsMixin(_GraphOperationsBase):
             try:
                 validate_ann_index_contract(
                     group,
-                    ann_metric,
+                    settings.ann_metric,
                     dims,
                     expected_count=n_cells,
                 )
@@ -2560,13 +2548,13 @@ class _GraphOperationsMixin(_GraphOperationsBase):
             # last blocks are added and while it is saved through a temporary
             # file, so the reads reserve all of it.
             index_bytes = ann_index_peak_bytes(
-                n_cells, dims, resolved_ann_m, nthreads=index_threads
+                n_cells, dims, settings.ann_m, nthreads=index_threads
             )
             data = coordinate_source.data
             copy_bytes = _float32_copy_bytes(data, dims)
             reading = data._resident_bytes() + data._block_task_bytes() + copy_bytes
             saving = _ann_index_transfer_bytes(
-                ann_index_file_bytes(n_cells, dims, resolved_ann_m)
+                ann_index_file_bytes(n_cells, dims, settings.ann_m)
             )
             _require_ann_index_budget(
                 self.resources,
@@ -2575,7 +2563,7 @@ class _GraphOperationsMixin(_GraphOperationsBase):
                 work=(
                     f"Building the ANN index of {n_cells} cells with {dims} dimensions"
                 ),
-                m=resolved_ann_m,
+                m=settings.ann_m,
                 remedy=(
                     "Lower ann_m, index fewer dimensions, such as a PCA "
                     "reduction instead of normalized values, or raise mem_budget."
@@ -2587,13 +2575,13 @@ class _GraphOperationsMixin(_GraphOperationsBase):
                     self.nthreads,
                     resident_bytes=index_bytes + copy_bytes,
                 ),
-                metric=ann_metric,
+                metric=settings.ann_metric,
                 dims=dims,
                 n_cells=n_cells,
-                ef_construction=resolved_ann_efc,
-                ef=resolved_ann_ef,
-                m=resolved_ann_m,
-                rand_state=resolved_rand_state,
+                ef_construction=settings.ann_efc,
+                ef=settings.ann_ef,
+                m=settings.ann_m,
+                rand_state=settings.rand_state,
                 nthreads=index_threads,
             )
             with artifact_transaction(self.zw, planned) as group:
@@ -2601,7 +2589,7 @@ class _GraphOperationsMixin(_GraphOperationsBase):
                     group,
                     ann_idx,
                     profile=self.storageProfile,
-                    metric=ann_metric,
+                    metric=settings.ann_metric,
                     dimensions=dims,
                     element_count=n_cells,
                 )
@@ -3134,7 +3122,6 @@ class _GraphOperationsMixin(_GraphOperationsBase):
         WNN modality weights remain in the returned immutable artifact.
         """
         invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
-        l2_normalize = bool_argument(l2_normalize, "l2_normalize")
         from ...neighbors.graph import merge_graphs, snn_merge_peak_bytes
         from ...neighbors.integration import (
             _wnn_integration_many,
@@ -3142,14 +3129,14 @@ class _GraphOperationsMixin(_GraphOperationsBase):
             wnn_peak_bytes,
         )
 
+        chunk_size, l2_normalize = integration_settings(
+            chunk_size=chunk_size, l2_normalize=l2_normalize
+        )
         sources = list(sources)
         if method not in {"snn", "wnn"}:
             raise ValueError(
                 f"Method {method} not supported, choose one of these: 'snn', 'wnn'"
             )
-        chunk_size, l2_normalize = integration_settings(
-            chunk_size=chunk_size, l2_normalize=l2_normalize
-        )
         if len(sources) < 2:
             raise ValueError("Assay integration requires at least two assays")
         if not all(isinstance(source, ArtifactRef) for source in sources):

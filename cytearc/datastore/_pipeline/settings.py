@@ -102,22 +102,6 @@ LSI_DIMS_DEFAULT: int = keyword_default(_GraphOperationsMixin._reduction_lsi, "d
 LSI_SKIP_FIRST_DEFAULT: bool = keyword_default(
     _GraphOperationsMixin._reduction_lsi, "skip_first"
 )
-# The numeric embeddings.tsne settings, which sgtsne_settings checks, at the
-# embeddings.tsne defaults that tsne settings omit.
-_TSNE_SETTING_DEFAULTS: Mapping[str, Any] = MappingProxyType(
-    {
-        name: keyword_default(_EmbeddingOperationsMixin._embeddings_tsne, name)
-        for name in inspect.signature(sgtsne.sgtsne_settings).parameters
-    }
-)
-# The embeddings.localmap settings, which localmap_settings checks, at the
-# embeddings.localmap defaults that localmap settings omit.
-_LOCALMAP_SETTING_DEFAULTS: Mapping[str, Any] = MappingProxyType(
-    {
-        name: keyword_default(_EmbeddingOperationsMixin._embeddings_localmap, name)
-        for name in inspect.signature(localmap.localmap_settings).parameters
-    }
-)
 # The graph-loading keywords of embeddings.tsne, embeddings.umap, and
 # clusters.leiden, which graph_load_flags and umap_graph_flags check.
 _GRAPH_FLAGS = ("symmetric_graph", "graph_upper_only")
@@ -489,12 +473,20 @@ _POSITIVE_INTEGER_SETTINGS: Mapping[str, tuple[str, ...]] = MappingProxyType(
         "lsi": ("dims",),
     }
 )
+_EMBEDDINGS = _EmbeddingOperationsMixin
+_GUIDES = _PerturbationGuideOperationsMixin
+_EFFECTS = _PerturbationEffectOperationsMixin
+_MIXSCAPE = _PerturbationMixscapeOperationsMixin
+_ASSOCIATIONS = _PerturbationAssociationOperationsMixin
+_PROFILES = _PerturbationProfileOperationsMixin
 # The check that each of these stages' methods runs on its settings before it
 # reads anything, and the method whose defaults the settings omit. A check
 # takes the settings by the method's keyword names. The PCA and LSI checks
 # leave ``dims`` to the recipe, for which PCA ``dims=0`` builds the graph on
 # the normalized values, and the Harmony check leaves the batch columns,
-# which the recipe checks against the store.
+# which the recipe checks against the store. UMAP's check loads with its
+# module, which sets the process's numeric locale, so a call with UMAP
+# settings runs it apart.
 _SETTING_CHECKS: Mapping[str, tuple[Callable[..., Any], Callable[..., Any]]] = (
     MappingProxyType(
         {
@@ -515,28 +507,11 @@ _SETTING_CHECKS: Mapping[str, tuple[Callable[..., Any], Callable[..., Any]]] = (
                 _GRAPH._embeddings_initialization,
             ),
             "paris": (paris_settings, _ClusteringOperationsMixin._clusters_paris),
+            "leiden": (leiden_settings, _ClusteringOperationsMixin._clusters_leiden),
             "doublets": (doublet_settings, _QC._qc_doublets),
-        }
-    )
-)
-# The qc.call_cells settings at the defaults that cell_calling settings omit.
-_CELL_CALLING_DEFAULTS: Mapping[str, Any] = MappingProxyType(
-    {
-        name: keyword_default(_CellCallingOperationsMixin._qc_call_cells, name)
-        for name in ("lower", "retain", "n_iter", "alpha", "fdr", "random_seed")
-    }
-)
-# Each perturbation stage's check, which its method runs on the same settings,
-# and the method whose defaults the settings omit. A check takes the settings
-# by the method's keyword names.
-_GUIDES = _PerturbationGuideOperationsMixin
-_EFFECTS = _PerturbationEffectOperationsMixin
-_MIXSCAPE = _PerturbationMixscapeOperationsMixin
-_ASSOCIATIONS = _PerturbationAssociationOperationsMixin
-_PROFILES = _PerturbationProfileOperationsMixin
-_PERTURBATION_CHECKS: Mapping[str, tuple[Callable[..., Any], Callable[..., Any]]] = (
-    MappingProxyType(
-        {
+            "normalization": (normalization_settings, _GRAPH._features_normalize),
+            "tsne": (sgtsne.sgtsne_settings, _EMBEDDINGS._embeddings_tsne),
+            "localmap": (localmap.localmap_settings, _EMBEDDINGS._embeddings_localmap),
             "guide_calling": (call_settings, _GUIDES._perturbation_call_guides),
             "labels": (label_settings, _GUIDES._perturbation_labels),
             "efficiency": (efficiency_settings, _EFFECTS._perturbation_efficiency),
@@ -552,6 +527,13 @@ _PERTURBATION_CHECKS: Mapping[str, tuple[Callable[..., Any], Callable[..., Any]]
         }
     )
 )
+# The qc.call_cells settings at the defaults that cell_calling settings omit.
+_CELL_CALLING_DEFAULTS: Mapping[str, Any] = MappingProxyType(
+    {
+        name: keyword_default(_CellCallingOperationsMixin._qc_call_cells, name)
+        for name in ("lower", "retain", "n_iter", "alpha", "fdr", "random_seed")
+    }
+)
 # The dimensions of a perturbation signature whose settings omit them.
 SIGNATURE_DIMS_DEFAULT: int = keyword_default(_MIXSCAPE._perturbation_signature, "dims")
 
@@ -560,7 +542,7 @@ def method_setting(stage: str, settings: Mapping[str, Any], name: str) -> Any:
     """Return a perturbation stage's setting, or its method's default."""
     if name in settings:
         return settings[name]
-    return keyword_default(_PERTURBATION_CHECKS[stage][1], name)
+    return keyword_default(_SETTING_CHECKS[stage][1], name)
 
 
 def _check_keywords(
@@ -573,30 +555,6 @@ def _check_keywords(
         name: settings[name] if name in settings else keyword_default(method, name)
         for name in inspect.signature(check).parameters
     }
-
-
-def _check_perturbation_stage(stage: str, value: Mapping[str, Any]) -> None:
-    """Run a perturbation stage method's own checks on the stage's settings.
-
-    Guide calling either imports Cell Ranger's calls, with ``path``,
-    ``barcode_prefix``, ``barcode_suffix`` and ``barcode_pattern``, or calls
-    guides with the other settings. Labels need ``controls``, which have no
-    default.
-    """
-    if stage == "guide_calling" and "path" in value:
-        if set(value) - GUIDE_IMPORT_SETTINGS:
-            raise ValueError(_GUIDE_CALLING_EITHER)
-        import_settings(
-            value["path"], value.get("barcode_prefix"), value.get("barcode_suffix")
-        )
-        checked_barcode_pattern(value.get("barcode_pattern"))
-        return
-    if stage == "guide_calling" and GUIDE_IMPORT_SETTINGS.intersection(value):
-        raise ValueError(_GUIDE_CALLING_EITHER)
-    if stage == "labels" and "controls" not in value:
-        raise ValueError(LABELS_NEED_CONTROLS)
-    check, method = _PERTURBATION_CHECKS[stage]
-    check(**_check_keywords(check, method, value))
 
 
 @contextmanager
@@ -625,8 +583,14 @@ def _check_stage_values(stage: str, value: Mapping[str, Any]) -> None:
     """Run a stage method's own checks on settings, before a run record exists.
 
     Late stages would otherwise fail only after the stages before them. An
-    omitted setting is checked as the method's default.
+    omitted setting is checked as the method's default. Guide calling either
+    imports Cell Ranger's calls, with ``path``, ``barcode_prefix``,
+    ``barcode_suffix`` and ``barcode_pattern``, or calls guides with the
+    other settings, and labels need ``controls``, which have no default.
     """
+    if stage in {"tsne", "umap", "leiden"}:
+        check_flags = umap_graph_flags if stage == "umap" else graph_load_flags
+        check_flags(*(value.get(flag, False) for flag in _GRAPH_FLAGS))
     if stage == "hvg":
         hvg_options(
             **{
@@ -642,44 +606,11 @@ def _check_stage_values(stage: str, value: Mapping[str, Any]) -> None:
         )
         if not isinstance(value.get("batch"), str | None):
             raise TypeError("hvg['batch'] must be a cell metadata column")
-    elif stage in {"tsne", "umap", "leiden"}:
-        check_flags = umap_graph_flags if stage == "umap" else graph_load_flags
-        check_flags(*(value.get(flag, False) for flag in _GRAPH_FLAGS))
-        if stage == "tsne":
-            sgtsne.sgtsne_settings(
-                **{
-                    name: value.get(name, default)
-                    for name, default in _TSNE_SETTING_DEFAULTS.items()
-                }
-            )
-        elif stage == "umap":
-            # embeddings.umap sets the process's numeric locale when it loads,
-            # so it loads for a call with UMAP settings only.
-            from ...embeddings.umap import umap_settings
+    elif stage == "umap":
+        from ...embeddings.umap import umap_settings
 
-            umap_settings(
-                **_check_keywords(
-                    umap_settings, _EmbeddingOperationsMixin._embeddings_umap, value
-                )
-            )
-        else:
-            leiden_settings(
-                **_check_keywords(
-                    leiden_settings, _ClusteringOperationsMixin._clusters_leiden, value
-                )
-            )
-    elif stage == "localmap":
-        localmap.localmap_settings(
-            **{
-                name: value.get(name, default)
-                for name, default in _LOCALMAP_SETTING_DEFAULTS.items()
-            }
-        )
-    elif stage == "normalization":
-        if "method" in value:
-            check_method_setting(value["method"])
-        normalization_settings(
-            **_check_keywords(normalization_settings, _GRAPH._features_normalize, value)
+        umap_settings(
+            **_check_keywords(umap_settings, _EMBEDDINGS._embeddings_umap, value)
         )
     elif stage == "cell_calling":
         options = {
@@ -688,9 +619,20 @@ def _check_stage_values(stage: str, value: Mapping[str, Any]) -> None:
         }
         validated_fdr(options.pop("fdr"))
         validated_settings(**options)
-    elif stage in _PERTURBATION_CHECKS:
-        _check_perturbation_stage(stage, value)
+    elif stage == "guide_calling" and "path" in value:
+        if set(value) - GUIDE_IMPORT_SETTINGS:
+            raise ValueError(_GUIDE_CALLING_EITHER)
+        import_settings(
+            value["path"], value.get("barcode_prefix"), value.get("barcode_suffix")
+        )
+        checked_barcode_pattern(value.get("barcode_pattern"))
     elif stage in _SETTING_CHECKS:
+        if stage == "guide_calling" and GUIDE_IMPORT_SETTINGS.intersection(value):
+            raise ValueError(_GUIDE_CALLING_EITHER)
+        if stage == "labels" and "controls" not in value:
+            raise ValueError(LABELS_NEED_CONTROLS)
+        if stage == "normalization" and "method" in value:
+            check_method_setting(value["method"])
         check, method = _SETTING_CHECKS[stage]
         check(**_check_keywords(check, method, value))
     # The counts and sizes that these stages take must be positive integers.

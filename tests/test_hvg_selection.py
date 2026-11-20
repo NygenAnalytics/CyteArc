@@ -522,6 +522,9 @@ def test_hvg_options_take_a_blacklist_of_text_or_none() -> None:
         assert hvg_options(**{**defaults, "blacklist": blacklist}).blacklist == (
             blacklist
         )
+    # False also means none, as selections and runs have recorded it.
+    for blacklist in (False, np.False_):
+        assert hvg_options(**{**defaults, "blacklist": blacklist}).blacklist is None
     for blacklist, error, message in (
         (
             "(",
@@ -553,10 +556,34 @@ def test_hvg_options_take_a_blacklist_of_text_or_none() -> None:
             "blacklist must be text, a regular expression of the feature names "
             "that are never selected, or None; got ['^MT-']",
         ),
+        (
+            True,
+            TypeError,
+            "blacklist must be text, a regular expression of the feature names "
+            "that are never selected, or None; got True",
+        ),
     ):
         with pytest.raises(error) as caught:
             hvg_options(**{**defaults, "blacklist": blacklist})
         assert str(caught.value) == message
+
+
+def test_a_blacklist_of_false_selects_as_no_blacklist_does(hvg_store) -> None:
+    from cytearc.storage.feature_selection import read_feature_selection_indices
+
+    store = hvg_store
+    cells = store.snapshot_cell_selection()
+    options = {"min_cells": 0, "top_n": 5, "n_bins": 20, "show_plot": False}
+
+    unlisted = store.features.hvgs(cells, blacklist="", **options)
+    # Releases up to 1.4.0 took False for no blacklist, and records keep it.
+    false = store.features.hvgs(cells, blacklist=False, **options)
+
+    np.testing.assert_array_equal(
+        read_feature_selection_indices(store.zw, "RNA", false),
+        read_feature_selection_indices(store.zw, "RNA", unlisted),
+    )
+    assert inspect_artifact(store.zw, false).parameters["blacklist"] is False
 
 
 def test_select_hvgs_rejects_unknown_keywords_before_saving(

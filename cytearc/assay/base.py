@@ -256,7 +256,7 @@ class Assay:
         self.normalizedValues = read_normalized_values(self.attrs, assay=name)
         if self.requiresCounts and self.normalizedValues is not None:
             raise TypeError(self.normalized_values_refusal(name))
-        self.normMethod: NormMethod = norm_dummy
+        self.normMethod: NormMethod = self._default_normalizer()
         self.sf: float | None = None
         self.scalar: np.ndarray | None = None
         self.n_term_per_doc: np.ndarray | None = None
@@ -293,6 +293,11 @@ class Assay:
     requiresCounts = False
     #: Why the class needs counts, for its refusal.
     countsReason = ""
+
+    @staticmethod
+    def _default_normalizer() -> NormMethod:
+        """Return the normalizer that ``normMethod`` starts as."""
+        return norm_dummy
 
     @classmethod
     def normalized_values_refusal(cls, name: str) -> str:

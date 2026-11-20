@@ -341,8 +341,12 @@ def _lowess_frac(value: object) -> float:
 
 
 def _blacklist(value: object) -> str | None:
-    """Return a checked ``blacklist``: a regular expression as text, or None."""
-    if value is None:
+    """Return a checked ``blacklist``: a regular expression as text, or None.
+
+    False means no blacklist, as None and ``""`` do, since selections and
+    runs have recorded it.
+    """
+    if value is None or (isinstance(value, bool | np.bool_) and not value):
         return None
     if not isinstance(value, str):
         raise TypeError(
@@ -836,7 +840,7 @@ def hvg_options(
     """Return the checked counts, trend options, flag and blacklist of ``select_hvgs``.
 
     ``blacklist`` is a regular expression of the feature names that are never
-    selected, ``""`` or None for none.
+    selected, or ``""``, None or False for none.
     """
     checked_min_cells = (
         None

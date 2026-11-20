@@ -1087,6 +1087,24 @@ def test_the_doublet_graph_check_names_the_recorded_normalizer(
         quality_control._require_doublet_graph(None, lineage)
 
 
+def test_the_doublet_graph_check_needs_a_pca_of_normalized_values():
+    from cytearc.datastore._operations import quality_control
+
+    message = (
+        "Doublet scoring projects its simulated doublets onto the PCA of the "
+        "graph's normalized values, but the graph's lineage names no PCA or no "
+        "normalized values; build the graph on reduction.pca"
+    )
+    # An explicit error, not an assertion, so it holds under python -O.
+    for lineage in (
+        SimpleNamespace(normalized="normalized", reduction=None),
+        SimpleNamespace(normalized=None, reduction="reduction"),
+    ):
+        with pytest.raises(ValueError) as caught:
+            quality_control._require_doublet_graph(None, lineage)
+        assert str(caught.value) == message
+
+
 @pytest.mark.slow
 def test_doublets_refuse_a_graph_whose_pca_they_cannot_project_onto(
     small_captures, tmp_path

@@ -75,8 +75,10 @@ def umap_settings(
     run starts, with the message that ``embeddings.umap`` gives. Numbers are
     recorded as Python floats and integers, so ``min_dist=1`` and
     ``min_dist=1.0`` identify the same embedding. The ranges are those that
-    umap-learn's ``UMAP`` class enforces: ``min_dist`` from 0 to ``spread``,
-    ``dens_frac`` from 0 to 1, and the other rates and weights at least 0.
+    umap-learn's ``UMAP`` class enforces, ``dens_frac`` from 0 to 1 and
+    ``min_dist`` and the rates and weights at least 0, but for its bound of
+    ``min_dist`` by ``spread``: the layout fits its curve for any
+    ``min_dist``, and runs have recorded ``min_dist`` above ``spread``.
     ``spread`` must be above 0, since it scales the curve that UMAP fits, and
     ``random_seed`` from 0 to 2**32 - 1, the seeds of NumPy's legacy
     ``RandomState``, which the layout draws from.
@@ -107,12 +109,8 @@ def umap_settings(
     )
     if checked.spread <= 0:
         raise ValueError("spread must be greater than 0")
-    if not 0 <= checked.min_dist <= checked.spread:
-        raise ValueError(
-            f"min_dist must be from 0 to spread ({checked.spread!r}), got "
-            f"{checked.min_dist!r}"
-        )
     for name in (
+        "min_dist",
         "repulsion_strength",
         "initial_alpha",
         "negative_sample_rate",

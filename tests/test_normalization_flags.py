@@ -275,12 +275,14 @@ def test_library_size_normalizers_refuse_an_assay_without_cell_totals(
     cells = np.arange(N_CELLS)
     features = np.arange(assay.feats.N)
     cell_selection, feature_ref = _selections(store, assay_name, features)
+    remedy = {
+        "ADT": "norm_clr, its default, or with norm_dummy",
+        "ATAC": "norm_tf_idf, its default, or with norm_clr or norm_dummy",
+    }[assay_name]
     message = (
         "norm_lib_size and norm_lib_size_log need each cell's total and a size "
-        "factor, which only an RNA assay's normed provides, but "
-        f"{type(assay).__name__} '{assay_name}' did not provide them; normalize "
-        "an ATAC assay with norm_tf_idf, its default, and any assay with norm_clr "
-        "or norm_dummy"
+        f"factor, which only an RNA assay provides, but {type(assay).__name__} "
+        f"'{assay_name}' did not provide them; normalize it with {remedy}"
     )
     calls: list[Callable[[], Any]] = [
         lambda: assay.normed(cells, features),

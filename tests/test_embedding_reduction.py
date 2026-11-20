@@ -15,6 +15,7 @@ from cytearc.embeddings.reduction import (
     _streaming_lsi_resident_bytes,
     fit_lsi,
     fit_pca,
+    lsi_settings,
     pca_solver,
 )
 from cytearc.matrix import ChunkedArray
@@ -179,6 +180,29 @@ def test_fitted_rows_copy_shared_views_before_shifting(order: str) -> None:
         np.vstack(list(rows.blocks("Fitting PCA"))), original - shift
     )
     assert (rows.n_rows, rows.passes) == (6, 2)
+
+
+def test_lsi_seeds_are_bounded_only_where_scikit_learn_takes_them():
+    defaults = {
+        "skip_first": True,
+        "n_iter": 5,
+        "n_oversamples": 10,
+        "batch_size": None,
+    }
+
+    # The streaming solver seeds NumPy's default_rng, which takes any seed,
+    # and runs have recorded seeds above 2**32 - 1.
+    for seed in (2**32 + 7, 2**64):
+        settings = lsi_settings(**defaults, solver="streaming", rand_state=seed)
+        assert settings.rand_state == seed
+    # The materialized solver seeds scikit-learn's TruncatedSVD.
+    largest = lsi_settings(**defaults, solver="materialized", rand_state=2**32 - 1)
+    assert largest.rand_state == 2**32 - 1
+    with pytest.raises(ValueError, match="^rand_state must be at most 4294967295$"):
+        lsi_settings(**defaults, solver="materialized", rand_state=2**32)
+    for solver in ("streaming", "materialized"):
+        with pytest.raises(ValueError, match="^rand_state must be at least 0$"):
+            lsi_settings(**defaults, solver=solver, rand_state=-1)
 
 
 def test_pca_is_deterministic_across_chunked_input():
