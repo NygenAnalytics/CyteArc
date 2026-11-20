@@ -134,9 +134,7 @@ SAMPLES: dict[type[BaseException], Callable[[], BaseException]] = {
         item="the guide count histograms of 128 distinct counts, while 10 of 20 "
         "rows of counts remain to be read",
         n_distinct=128,
-        rows_read=10,
-        n_rows=20,
-        every_row_bytes=8192,
+        estimated_needed_bytes=8192,
     ),
     MemoryBudgetError: lambda: memory_refusal(
         "Importing contigs for 8 selected cells",

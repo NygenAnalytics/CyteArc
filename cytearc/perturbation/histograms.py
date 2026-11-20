@@ -15,14 +15,18 @@ they join the pairs whenever it fills, so the memory follows the distinct
 counts that the histograms hold, which only the counts tell.
 """
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
 
 from cytearc.perturbation.guide_calls import checked_count_blocks
-from cytearc.utils.memory_budget import MemoryBudgetError, MemoryLedger
+from cytearc.utils.memory_budget import (
+    MemoryBudgetError,
+    MemoryLedger,
+    memory_refusal,
+)
 from cytearc.utils.numba import njit
 
 __all__ = [
@@ -236,6 +240,29 @@ def _merged_size(keys: np.ndarray, run: np.ndarray) -> int:
 
 
 @njit(cache=True, nogil=True)
+def _sample_sizes(
+    keys: np.ndarray, run: np.ndarray, n_guides: int, sizes: np.ndarray
+) -> None:
+    """Add to ``sizes`` the distinct keys of each sample that sorted distinct ``keys`` and a sorted ``run`` hold.
+
+    It walks the keys as :func:`_merged_size` does, and counts each distinct
+    key in its sample.
+    """
+    for index in range(keys.shape[0]):
+        sizes[np.int64(keys[index] >> _COUNT_BITS) // n_guides] += 1
+    held = 0
+    position = 0
+    while position < run.shape[0]:
+        key = run[position]
+        while held < keys.shape[0] and keys[held] < key:
+            held += 1
+        if held == keys.shape[0] or keys[held] != key:
+            sizes[np.int64(key >> _COUNT_BITS) // n_guides] += 1
+        while position < run.shape[0] and run[position] == key:
+            position += 1
+
+
+@njit(cache=True, nogil=True)
 def _merge_run(
     keys: np.ndarray,
     cells: np.ndarray,
@@ -320,11 +347,9 @@ class HistogramMemoryError(MemoryBudgetError):
         item: The histograms, their distinct counts and the rows that remain.
         n_distinct: The distinct counts that they held then, those up to
             :data:`DENSE_COUNTS` included.
-        rows_read: The rows of counts read when they stopped.
-        n_rows: The rows of counts, one per cell.
-        every_row_bytes: When a merge stopped them while rows remained to be
-            read, an estimate of what the call holds with the histograms of
-            every row, at least ``needed_bytes``; None otherwise.
+        estimated_needed_bytes: When a merge stopped them while rows remained
+            to be read, an estimate of what the call holds with the histograms
+            of every row, at least ``needed_bytes``; None otherwise.
     """
 
     def __init__(
@@ -335,22 +360,15 @@ class HistogramMemoryError(MemoryBudgetError):
         budget_bytes: int,
         item: str,
         n_distinct: int,
-        rows_read: int,
-        n_rows: int,
-        every_row_bytes: int | None,
+        estimated_needed_bytes: int | None,
     ) -> None:
         super().__init__(
             message, needed_bytes=needed_bytes, budget_bytes=budget_bytes, item=item
         )
         self.n_distinct = int(n_distinct)
-        self.rows_read = int(rows_read)
-        self.n_rows = int(n_rows)
-        self.every_row_bytes = None if every_row_bytes is None else int(every_row_bytes)
-
-    @property
-    def counts_remain(self) -> bool:
-        """Whether counts remained to be read, so that the histograms may need more."""
-        return self.rows_read < self.n_rows
+        self.estimated_needed_bytes = (
+            None if estimated_needed_bytes is None else int(estimated_needed_bytes)
+        )
 
     def __reduce__(self) -> tuple[Any, tuple[Any, ...], dict[str, Any]]:
         return (
@@ -362,9 +380,7 @@ class HistogramMemoryError(MemoryBudgetError):
                 self.budget_bytes,
                 self.item,
                 self.n_distinct,
-                self.rows_read,
-                self.n_rows,
-                self.every_row_bytes,
+                self.estimated_needed_bytes,
             ),
             self.__dict__,
         )
@@ -377,9 +393,7 @@ def _restore_histogram_memory_error(
     budget_bytes: int,
     item: str,
     n_distinct: int,
-    rows_read: int,
-    n_rows: int,
-    every_row_bytes: int | None,
+    estimated_needed_bytes: int | None,
 ) -> HistogramMemoryError:
     """Rebuild a pickled HistogramMemoryError, whose fields are keywords."""
     return error_type(
@@ -388,9 +402,7 @@ def _restore_histogram_memory_error(
         budget_bytes=budget_bytes,
         item=item,
         n_distinct=n_distinct,
-        rows_read=rows_read,
-        n_rows=n_rows,
-        every_row_bytes=every_row_bytes,
+        estimated_needed_bytes=estimated_needed_bytes,
     )
 
 
@@ -407,17 +419,17 @@ def _histogram_item(n_distinct: int, *, rows_read: int, n_rows: int) -> str:
 def _require_memory(
     needed: int,
     ledger: MemoryLedger | None,
-    n_distinct: int,
+    refusal_details: Callable[[], tuple[int, int | None]],
     *,
     rows_read: int,
     n_rows: int,
-    every_row: int | None = None,
 ) -> None:
     """Charge the ``needed`` bytes of the histograms to ``ledger`` as a peak beside what it holds.
 
-    ``every_row`` estimates what the histograms of every row need, or is
-    None where no estimate is made; a refusal names it beside what the
-    ledger holds.
+    Only when the ledger refuses them does ``refusal_details`` give what the
+    refusal names: the distinct counts that the histograms hold, and their
+    estimate for every row, which it names beside what the ledger holds, or
+    None.
 
     Raises:
         HistogramMemoryError: If the ledger refuses them.
@@ -425,19 +437,24 @@ def _require_memory(
     if ledger is None:
         return
     try:
-        ledger.peak(
-            _histogram_item(n_distinct, rows_read=rows_read, n_rows=n_rows), needed
-        )
+        ledger.peak("the guide count histograms", needed)
     except MemoryBudgetError as refusal:
+        n_distinct, every_row = refusal_details()
+        item = _histogram_item(n_distinct, rows_read=rows_read, n_rows=n_rows)
+        named = memory_refusal(
+            ledger.doing,
+            item,
+            refusal.needed_bytes,
+            refusal.budget_bytes,
+            remedy=ledger.remedy,
+        )
         raise HistogramMemoryError(
-            str(refusal),
+            str(named),
             needed_bytes=refusal.needed_bytes,
             budget_bytes=refusal.budget_bytes,
-            item=refusal.item,
+            item=item,
             n_distinct=n_distinct,
-            rows_read=rows_read,
-            n_rows=n_rows,
-            every_row_bytes=(
+            estimated_needed_bytes=(
                 None if every_row is None else ledger.held_bytes + every_row
             ),
         ) from refusal
@@ -465,24 +482,45 @@ def _every_row_bytes(
     held: int,
     buffer_bytes: int,
     dense: np.ndarray,
-    n_dense: int,
-    n_larger: int,
-    *,
+    keys: np.ndarray,
+    run: np.ndarray,
+    codes: np.ndarray,
     rows_read: int,
-    n_rows: int,
 ) -> int:
-    """Estimate what the histograms of every row need from the ``rows_read`` of ``n_rows`` read.
+    """Estimate what the histograms of every row need from the first ``rows_read`` rows.
 
-    Distinct counts grow about as fast as the rows read, or slower, so the
-    distinct counts of every row are estimated at the rate of the rows read:
-    the ``n_larger`` merged larger counts, and the ``n_dense`` counts that
-    ``dense`` holds, at most :data:`DENSE_COUNTS` for each histogram. At
-    those counts, each later merge holds at most ``held``, the buffer and 32
-    bytes for each larger count, and the assembly holds what
-    :func:`_assembly_bytes` counts. The estimate is the larger of the two.
+    Each sample has its own histograms, whose distinct counts grow about as
+    fast as the sample's cells, or slower, so each sample's distinct counts
+    are estimated at the rate of its own rows read: the larger counts that the
+    merged ``keys`` and the sorted ``run`` hold together, and the counts that
+    ``dense`` holds, at most :data:`DENSE_COUNTS` for each histogram. A sample
+    that no row read yet takes the counts of the sample with the most rows
+    read, scaled up only where it has more cells than those rows. ``codes``
+    gives each row's sample. At those counts, each later merge holds at most
+    ``held``, the buffer and 32 bytes for each larger count, and the assembly
+    holds what :func:`_assembly_bytes` counts. The estimate is the larger of
+    the two.
     """
-    every_larger = -(-n_larger * n_rows // rows_read)
-    every_dense = min(dense.size, -(-n_dense * n_rows // rows_read))
+    n_samples, n_guides = int(dense.shape[0]), int(dense.shape[1])
+    n_cells = np.bincount(codes, minlength=n_samples)
+    read = np.bincount(codes[:rows_read], minlength=n_samples)
+    larger = np.zeros(n_samples, dtype=np.int64)
+    _sample_sizes(keys, run, n_guides, larger)
+    held_dense = np.count_nonzero(dense.reshape(n_samples, -1), axis=1)
+    # The rows that each sample's counts come from: its own, or for a sample
+    # not read yet, those of the most-read sample.
+    basis = np.where(read > 0, np.arange(n_samples), np.argmax(read))
+    rows = read[basis]
+    scale = np.maximum(n_cells, rows)
+    has_cells = n_cells > 0
+    every_larger = int(np.where(has_cells, -(-larger[basis] * scale // rows), 0).sum())
+    every_dense = int(
+        np.where(
+            has_cells,
+            np.minimum(n_guides * DENSE_COUNTS, -(-held_dense[basis] * scale // rows)),
+            0,
+        ).sum()
+    )
     return max(
         held + buffer_bytes + 32 * every_larger,
         _assembly_bytes(held, dense, every_dense, every_larger),
@@ -515,34 +553,29 @@ def _larger_counts(
         run = buffer[:n_keys]
         run.sort()
         size = int(_merged_size(keys, run))
-        # The histograms hold the dense counts beside the merged larger ones.
-        n_dense = int(np.count_nonzero(dense))
         needed = held + buffer.nbytes + keys.nbytes + cells.nbytes + 16 * size
-        every_row = None
         if rows_read == n_rows:
             # The last merge also checks the assembly that follows, so that
             # one refusal names what both need.
-            needed = max(needed, _assembly_bytes(held, dense, n_dense, size))
-        else:
-            # A refusal while rows remain names what every row would need,
-            # so that the budget it names gets past the later merges and
-            # the assembly.
-            every_row = _every_row_bytes(
-                held,
-                buffer.nbytes,
-                dense,
-                n_dense,
-                size,
-                rows_read=rows_read,
-                n_rows=n_rows,
+            needed = max(
+                needed,
+                _assembly_bytes(held, dense, int(np.count_nonzero(dense)), size),
             )
+
+        def refusal_details() -> tuple[int, int | None]:
+            # The histograms hold the dense counts beside the merged larger
+            # ones. While rows remain, the refusal names what every row would
+            # need, so that the budget it names gets past the later merges
+            # and the assembly.
+            n_distinct = int(np.count_nonzero(dense)) + size
+            if rows_read == n_rows:
+                return n_distinct, None
+            return n_distinct, _every_row_bytes(
+                held, buffer.nbytes, dense, keys, run, codes, rows_read
+            )
+
         _require_memory(
-            needed,
-            ledger,
-            n_dense + size,
-            rows_read=rows_read,
-            n_rows=n_rows,
-            every_row=every_row,
+            needed, ledger, refusal_details, rows_read=rows_read, n_rows=n_rows
         )
         merged_keys = np.empty(size, dtype=np.uint64)
         merged_cells = np.empty(size, dtype=np.int64)
@@ -628,8 +661,9 @@ def guide_count_histograms(
             rows than there are cells, or a count exceeds the uint32 range.
         HistogramMemoryError: If the histograms would pass the ledger's
             budget, a MemoryBudgetError that holds the bytes that the call
-            needs at that point and the rows of counts read by then, and
-            when a merge stops it while rows remain, an estimate of what the
+            needs at that point and the distinct counts held then, and says
+            how many rows of counts remained to be read; when a merge stops
+            it while rows remain, it also holds an estimate of what the
             histograms of every row need.
     """
     if n_samples < 1 or n_guides < 1:
@@ -645,7 +679,7 @@ def guide_count_histograms(
     _require_memory(
         copied + histogram_bytes(n_samples, n_guides, len(codes), n_distinct=0),
         ledger,
-        0,
+        lambda: (0, None),
         rows_read=0,
         n_rows=len(codes),
     )
@@ -661,7 +695,7 @@ def guide_count_histograms(
     _require_memory(
         _assembly_bytes(held + dense.nbytes, dense, n_dense, len(keys)),
         ledger,
-        total,
+        lambda: (total, None),
         rows_read=len(codes),
         n_rows=len(codes),
     )

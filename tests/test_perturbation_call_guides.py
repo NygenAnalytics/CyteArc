@@ -868,11 +868,14 @@ def test_call_guides_refuses_a_small_budget_before_it_writes(tmp_path, options) 
     assert written(open_store(path)) == saved
 
 
-def _every_cell_screen(path: Path, counts: np.ndarray, seed: int):
+def _every_cell_screen(path: Path, counts: np.ndarray, seed: int, cell_columns=None):
     """Write a screen of these guide counts and return the selection of every cell."""
     rng = np.random.default_rng(seed)
     store = write_screen(
-        path, rng.poisson(1.0, size=(len(counts), 3)) + 1, counts.astype(np.uint16)
+        path,
+        rng.poisson(1.0, size=(len(counts), 3)) + 1,
+        counts.astype(np.uint16),
+        cell_columns=cell_columns,
     )
     store.cells.insert(
         "every", by_cell_id(store.cells, np.ones(len(counts), dtype=bool))
@@ -883,7 +886,7 @@ def _every_cell_screen(path: Path, counts: np.ndarray, seed: int):
 
 
 def _histograms_refusal(
-    path: Path, cells, budget: int
+    path: Path, cells, budget: int, **options
 ) -> tuple[int, MemoryBudgetError]:
     """Call guides at ``budget``, then at the budget that each refusal names, until the histograms refuse.
 
@@ -891,7 +894,9 @@ def _histograms_refusal(
     """
     for _ in range(20):
         with pytest.raises(MemoryBudgetError) as refused:
-            open_store(path, mem_budget=budget).perturbation.call_guides(cells)
+            open_store(path, mem_budget=budget).perturbation.call_guides(
+                cells, **options
+            )
         if isinstance(refused.value.__cause__, HistogramMemoryError):
             return budget, refused.value
         budget = refused.value.needed_bytes
@@ -907,14 +912,14 @@ def _causes(error: BaseException | None) -> list[BaseException]:
     return chain
 
 
-def _assert_histograms_pass(path: Path, cells, budget: int) -> None:
+def _assert_histograms_pass(path: Path, cells, budget: int, **options) -> None:
     """Check that at ``budget`` the histograms count every row.
 
     A call at that budget saves the calls, or a later step that sizes itself
     from the fits, such as joining the calls, refuses on its own.
     """
     try:
-        open_store(path, mem_budget=budget).perturbation.call_guides(cells)
+        open_store(path, mem_budget=budget).perturbation.call_guides(cells, **options)
     except MemoryBudgetError as later:
         assert not any(
             isinstance(cause, HistogramMemoryError) for cause in _causes(later)
@@ -969,8 +974,7 @@ def test_histograms_that_outgrow_the_budget_name_what_every_row_needs(
     stopped = error.__cause__
     assert isinstance(stopped, HistogramMemoryError)
     assert stopped.n_distinct == n_distinct < distinct
-    assert stopped.rows_read == n_cells - remaining
-    assert 0 < stopped.rows_read < n_cells
+    assert 0 < remaining < n_cells
     # Beside what the call holds, every row needs more than the histograms
     # needed where they stopped, and no more than the histograms of 2,000
     # cells whose every count is one of its own.
@@ -999,10 +1003,9 @@ def test_histograms_refused_after_every_row_name_what_they_need(tmp_path) -> Non
     saved = written(open_store(path))
     budget, error = _histograms_refusal(path, cells, 1)
     stopped = error.__cause__
-    assert stopped.rows_read == stopped.n_rows == n_cells
     # With every row read, the refusal names what the histograms needed, and
     # no estimate.
-    assert stopped.every_row_bytes is None
+    assert stopped.estimated_needed_bytes is None
     assert error.needed_bytes == stopped.needed_bytes > budget
     assert (
         f"holds about {error.needed_bytes} bytes for the guide count histograms "
@@ -1011,6 +1014,48 @@ def test_histograms_refused_after_every_row_name_what_they_need(tmp_path) -> Non
     )
     assert written(open_store(path)) == saved
     _assert_histograms_pass(path, cells, error.needed_bytes)
+
+
+def test_histograms_of_lanes_stored_in_order_name_what_every_row_needs(
+    tmp_path,
+) -> None:
+    # 6,000 cells of 200 guides in lanes of 3,000, 1,200, 900 and 900 cells,
+    # stored lane by lane and fitted per lane. Each cell holds ambient counts
+    # and ten carried guides at about 2**6 UMIs, spread log-normally. Each
+    # lane fills histograms of its own, so a lane read later starts its
+    # distinct counts anew, faster than the rows read before it.
+    n_cells, n_guides = 6_000, 200
+    rng = np.random.default_rng(31)
+    counts = rng.poisson(0.3, size=(n_cells, n_guides))
+    for _ in range(10):
+        guides = rng.integers(0, n_guides, n_cells)
+        counts[np.arange(n_cells), guides] += np.round(
+            2.0 ** rng.normal(6.0, 1.0, n_cells)
+        ).astype(np.int64)
+    lanes = np.repeat(
+        np.asarray(["L1", "L2", "L3", "L4"], dtype=object), [3_000, 1_200, 900, 900]
+    )
+    path = tmp_path / "store.zarr"
+    cells = _every_cell_screen(path, counts, seed=2, cell_columns={"lane": lanes})
+    saved = written(open_store(path))
+    # Following each refusal from a budget of 1 byte stops the histograms at
+    # their first merge. A budget that passes it, as one between the merges
+    # would, stops them at the second, in the first lane, with three lanes
+    # left to read.
+    _, first = _histograms_refusal(path, cells, 1, sample_column="lane")
+    budget, error = _histograms_refusal(
+        path, cells, first.__cause__.needed_bytes, sample_column="lane"
+    )
+    stopped = error.__cause__
+    remaining = re.search(r"while (\d+) of 6000 rows of counts remain", str(error))
+    assert remaining is not None, str(error)
+    assert n_cells - 3_000 < int(remaining.group(1)) < n_cells
+    # The refusal names the estimate, more than the histograms needed where
+    # they stopped, and at that budget the histograms count every row.
+    assert error.needed_bytes == stopped.estimated_needed_bytes
+    assert error.needed_bytes > stopped.needed_bytes > budget
+    assert written(open_store(path)) == saved
+    _assert_histograms_pass(path, cells, error.needed_bytes, sample_column="lane")
 
 
 def test_gaussian_warns_when_most_calls_carry_several_guides(tmp_path) -> None:

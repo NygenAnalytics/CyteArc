@@ -1435,13 +1435,14 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
             )
         except HistogramMemoryError as error:
             # What the call holds with the histograms where they stopped, or
-            # where they stopped at a merge while rows remained, what the
-            # histograms estimate for every row from the rows read: with that
-            # budget, a rerun gets past the histograms when their distinct
-            # counts grow no faster than the rows read.
+            # where a merge stopped them while rows remained, what the
+            # histograms estimate for every row from each sample's rows read:
+            # with that budget, a rerun gets past the histograms unless the
+            # cells read later, such as those of a deeper sample stored after
+            # the others, hold more distinct counts per cell.
             needed, item = error.needed_bytes, error.item
-            if error.every_row_bytes is not None:
-                needed = error.every_row_bytes
+            if error.estimated_needed_bytes is not None:
+                needed = error.estimated_needed_bytes
                 item += (
                     ", and at the rate of the rows read the histograms of every "
                     f"row need about {needed - ledger.held_bytes} bytes"
@@ -1620,10 +1621,13 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
         ``top_guide`` makes at most one call per cell. A refusal names the
         step and the budget that passes it. When the histograms stop while
         counts remain to be read, their refusal says so and names what the
-        histograms of every row need at the rate of the rows read, a budget
-        that gets past them unless their distinct counts grow faster than
-        the rows read; the calling pass after the fits names its own. The
-        fits are saved once the calls that they make have passed their steps.
+        histograms of every row need, estimated from the rows read of each
+        sample, with a sample not read yet taking the counts of the sample
+        read most. That budget gets past the histograms unless the cells
+        read later hold more distinct counts per cell than those read, as a
+        deeper-sequenced sample stored after the others can; the calling
+        pass after the fits names its own. The fits are saved once the calls
+        that they make have passed their steps.
 
         The calls are saved as a ``guide_calls`` artifact, as
         :meth:`~cytearc.datastore.namespaces.PerturbationAccessor.import_guide_calls`
