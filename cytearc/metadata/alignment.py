@@ -154,15 +154,15 @@ def cell_id_alignment_bytes(ids: Any, n_cells: int, n_labels: int) -> int:
     ``ids`` is the stored ID column, of which ``n_cells`` rows are read, as
     :func:`~cytearc.metadata.rows.text_read_bytes` states, at the stored
     width, four bytes a character. :func:`align_to_cell_ids` then makes them
-    a pandas index, which holds a Python string for each ID and, on pandas 3,
-    another copy at the stored width; it hashes the index and the values'
-    ``n_labels`` labels, whose table stays with the values; and it holds
-    each value's position and the values in order.
+    a pandas index, which holds a Python string for each ID beside them; it
+    hashes the index and the values' ``n_labels`` labels, whose table stays
+    with the values; and it holds each value's position and the values in
+    order.
     """
     n_cells, n_labels = int(n_cells), int(n_labels)
     width = text_width(ids)
     aligning = (
-        2 * fixed_text_bytes(n_cells, width)
+        fixed_text_bytes(n_cells, width)
         + n_cells * (STRING_BYTES + 4 * width)
         + object_array_bytes(n_cells)
         + hash_table_bytes(n_cells)

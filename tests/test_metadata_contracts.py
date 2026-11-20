@@ -1160,12 +1160,13 @@ def test_stored_rows_are_fingerprinted_a_chunk_at_a_time_as_read_whole(kind) -> 
     root = zarr.open_group(store=MemoryStore(), mode="w")
     stored = root.create_array("ids", data=values, chunks=(50,))
     rng = np.random.default_rng(4)
-    for rows in (
-        np.arange(400),
-        np.sort(rng.choice(400, 77, replace=False)),
-        np.array([399]),
-        np.array([], dtype=np.int64),
-    ):
+    selections = [np.arange(400), np.array([399]), np.array([], dtype=np.int64)]
+    if kind == "fixed":
+        # NumPy 2.1, the oldest that CyteArc supports, crashes on Zarr's
+        # selection of scattered rows of variable-width text; a store holds
+        # text at a fixed width.
+        selections.append(np.sort(rng.choice(400, 77, replace=False)))
+    for rows in selections:
         assert fingerprint_stored_rows(stored, rows) == fingerprint_strings(
             values[rows]
         )
