@@ -53,9 +53,12 @@ class CollectionValuesError(ValueError):
             caller that stores text may suggest it.
     """
 
-    def __init__(self, message: str, *, joinable: bool) -> None:
+    def __init__(self, message: str, joinable: bool) -> None:
         super().__init__(message)
         self.joinable = joinable
+
+    def __reduce__(self) -> tuple[Any, tuple[str, bool], dict[str, Any]]:
+        return (type(self), (str(self), self.joinable), self.__dict__)
 
 
 class UnstorableCategoriesError(ValueError):
