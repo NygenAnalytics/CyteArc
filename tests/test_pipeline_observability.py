@@ -1947,10 +1947,11 @@ def test_recipes_check_integer_settings_before_writing(
 ) -> None:
     before = {run.run_id for run in observed_store.pipeline.list_runs()}
 
-    # The recipe refuses them with the message of graph.neighbors.
+    # The recipe refuses them with the message of graph.neighbors, after the
+    # stage's name.
     for neighbors, error, message in (
-        ({"k": 0}, ValueError, "^k must be at least 1$"),
-        ({"k": "15"}, TypeError, "^k must be an integer$"),
+        ({"k": 0}, ValueError, "^neighbors: k must be at least 1$"),
+        ({"k": "15"}, TypeError, "^neighbors: k must be an integer$"),
     ):
         with pytest.raises(error, match=message):
             observed_store.pipeline.rna(**{**_OPTIONS, "neighbors": neighbors})

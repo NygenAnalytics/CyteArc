@@ -608,7 +608,7 @@ def test_a_run_and_its_plan_refuse_doublets_without_library_size_before_writing(
         ),
         (
             {"ann_index": {"ann_metric": "ip"}},
-            "ann_metric must be 'l2' or 'cosine', got 'ip'",
+            "ann_index: ann_metric must be 'l2' or 'cosine', got 'ip'",
             # Doublet scoring also scores on a cosine index.
             {"ann_index": {"ann_metric": "cosine"}},
             ("ann_index", "ann_metric"),

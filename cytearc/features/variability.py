@@ -25,12 +25,18 @@ number of batches that rank them among their ``top_n`` and then by their
 median rank, the order of Seurat's ``SelectIntegrationFeatures``.
 """
 
+import re
 from typing import Any, Literal, NamedTuple, cast
 
 import numpy as np
 import pandas as pd
 
-from ..utils.arguments import bool_argument, float_argument, integer_argument
+from ..utils.arguments import (
+    bool_argument,
+    float_argument,
+    integer_argument,
+    quoted_value,
+)
 from ..utils.arrays import regex_match_mask, within_bounds
 from ..utils.compute import process_thread_limit
 from ..utils.logging import logger
@@ -332,6 +338,25 @@ def _lowess_frac(value: object) -> float:
     if not 0 <= resolved <= 1:
         raise ValueError("lowess_frac must be between 0 and 1")
     return resolved
+
+
+def _blacklist(value: object) -> str | None:
+    """Return a checked ``blacklist``: a regular expression as text, or None."""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise TypeError(
+            "blacklist must be text, a regular expression of the feature names "
+            f"that are never selected, or None; got {quoted_value(value)}"
+        )
+    try:
+        re.compile(value, re.IGNORECASE)
+    except re.error as error:
+        raise ValueError(
+            "blacklist must be a regular expression of the feature names that "
+            f"are never selected, but {quoted_value(value)} is not one: {error}"
+        ) from None
+    return str(value)
 
 
 def _bin_strategy(value: object) -> Literal["fixed", "adaptive"]:
@@ -779,6 +804,7 @@ HVG_OPTION_NAMES = (
     "lowess_frac",
     "keep_bounds",
     "bin_strategy",
+    "blacklist",
 )
 
 
@@ -794,6 +820,7 @@ class HvgOptions(NamedTuple):
     lowess_frac: float
     keep_bounds: bool
     bin_strategy: Literal["fixed", "adaptive"]
+    blacklist: str | None
 
 
 def hvg_options(
@@ -804,8 +831,13 @@ def hvg_options(
     lowess_frac: object,
     keep_bounds: object,
     bin_strategy: object,
+    blacklist: object,
 ) -> HvgOptions:
-    """Return the checked counts, trend options, and flag of ``select_hvgs``."""
+    """Return the checked counts, trend options, flag and blacklist of ``select_hvgs``.
+
+    ``blacklist`` is a regular expression of the feature names that are never
+    selected, ``""`` or None for none.
+    """
     checked_min_cells = (
         None
         if min_cells is None
@@ -822,6 +854,7 @@ def hvg_options(
         lowess_frac=cast(float, lowess_frac),
         keep_bounds=bool(keep_bounds),
         bin_strategy=_bin_strategy(bin_strategy),
+        blacklist=_blacklist(blacklist),
     )
 
 

@@ -2404,7 +2404,7 @@ class _GraphOperationsMixin(_GraphOperationsBase):
         Args:
             coordinates: Coordinate artifact to cluster, such as a reduction.
             n_centroids: Requested number of K-means centroids, at least 2.
-            rand_state: Non-negative K-means random seed.
+            rand_state: K-means random seed, from 0 to 2**32 - 1.
             batch_size: Number of cells processed per block.
             kmeans_sampling: Fraction of cells considered during centroid seeding.
             kmeans_batch_size: Number of cells per internal K-means update.
@@ -2414,6 +2414,12 @@ class _GraphOperationsMixin(_GraphOperationsBase):
             Reference to the embedding-initialization artifact.
 
         Raises:
+            TypeError: If ``coordinates`` is not an ``ArtifactRef`` or a
+                setting has the wrong type, such as text for
+                ``kmeans_sampling``.
+            ValueError: If a setting is out of range, such as ``n_centroids``
+                below 2, ``rand_state`` outside 0 to 2**32 - 1, or
+                ``kmeans_sampling`` outside (0, 1].
             MemoryError: If the fit exceeds the memory budget.
         """
         invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")

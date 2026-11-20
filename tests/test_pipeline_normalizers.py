@@ -940,7 +940,7 @@ def _normalize(store: DataStore, assay: str, **flags: Any) -> Any:
 
 
 @pytest.mark.parametrize(
-    ("recipe", "settings", "assay", "normalizer", "flag", "call"),
+    ("recipe", "settings", "stage", "assay", "normalizer", "flag", "call"),
     [
         (
             "rna",
@@ -948,6 +948,7 @@ def _normalize(store: DataStore, assay: str, **flags: Any) -> Any:
                 "normalization": {"method": "pearson_residuals", "log_transform": True},
                 "doublets": False,
             },
+            "normalization",
             "RNA",
             norm_pearson_residuals,
             "log_transform",
@@ -960,6 +961,7 @@ def _normalize(store: DataStore, assay: str, **flags: Any) -> Any:
                 "cell_cycle": {"log_transform": True},
                 "doublets": False,
             },
+            "cell_cycle",
             "RNA",
             norm_pearson_residuals,
             "log_transform",
@@ -970,6 +972,7 @@ def _normalize(store: DataStore, assay: str, **flags: Any) -> Any:
         (
             "atac",
             {"normalization": {"log_transform": True}},
+            "normalization",
             "ATAC",
             norm_tf_idf,
             "log_transform",
@@ -978,6 +981,7 @@ def _normalize(store: DataStore, assay: str, **flags: Any) -> Any:
         (
             "adt",
             {"normalization": {"renormalize_subset": True}},
+            "normalization",
             "ADT",
             norm_clr,
             "renormalize_subset",
@@ -987,7 +991,7 @@ def _normalize(store: DataStore, assay: str, **flags: Any) -> Any:
     ids=["rna-normalization", "rna-cell-cycle", "atac", "adt"],
 )
 def test_a_flag_that_the_run_normalizer_cannot_apply_is_refused_before_the_run(
-    modalities, tmp_path, recipe, settings, assay, normalizer, flag, call
+    modalities, tmp_path, recipe, settings, stage, assay, normalizer, flag, call
 ) -> None:
     store = open_store(_copy(modalities, tmp_path))
     before = written(store)
@@ -1003,7 +1007,8 @@ def test_a_flag_that_the_run_normalizer_cannot_apply_is_refused_before_the_run(
         call(store)
 
     message = str(called.value)
-    assert str(planned.value) == str(ran.value) == message
+    # The recipe names the stage, as two stages take log_transform.
+    assert str(planned.value) == str(ran.value) == f"{stage}: {message}"
     assert message.startswith(
         f"{type(store.get_assay(assay)).__name__} '{assay}' normalizes with "
     )

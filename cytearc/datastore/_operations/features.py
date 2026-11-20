@@ -671,13 +671,17 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
                 "Use flavor='cytearc', which ranks genes by the variance of their "
                 "normalized values",
             )
-        min_cells, top_n, n_bins, lowess_frac, keep_bounds, bin_strategy = hvg_options(
-            min_cells=min_cells,
-            top_n=top_n,
-            n_bins=n_bins,
-            lowess_frac=lowess_frac,
-            keep_bounds=keep_bounds,
-            bin_strategy=bin_strategy,
+        # The checked blacklist is the given text, which the record keeps.
+        min_cells, top_n, n_bins, lowess_frac, keep_bounds, bin_strategy, _ = (
+            hvg_options(
+                min_cells=min_cells,
+                top_n=top_n,
+                n_bins=n_bins,
+                lowess_frac=lowess_frac,
+                keep_bounds=keep_bounds,
+                bin_strategy=bin_strategy,
+                blacklist=blacklist,
+            )
         )
         options = hvg_flavor_options(
             flavor=flavor,
@@ -1183,6 +1187,7 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
             lowess_frac=lowess_frac,
             keep_bounds=keep_bounds,
             bin_strategy=bin_strategy,
+            blacklist=blacklist,
         )
         hvg_flavor_options(
             flavor=flavor,

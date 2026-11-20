@@ -1547,7 +1547,8 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
         Args:
             from_assay: HTO assay name (default: ``'HTO'``).
             cell_selection: Explicit cell-selection artifact.
-            random_seed: Seed used for HTO demultiplexing.
+            random_seed: Seed used for HTO demultiplexing, from 0 to
+                2**32 - 1.
             positive_quantile: Quantile of each HTO's background distribution
                 that a count must exceed to be positive, Seurat's
                 ``positive.quantile`` (default 0.99). It must be greater than 0
@@ -1572,8 +1573,9 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
         Raises:
             TypeError: If ``random_seed`` is not an integer or
                 ``positive_quantile`` is not a real number.
-            ValueError: If ``positive_quantile`` is not finite or not between
-                0 and 1, ``sample_column`` is not a cell column or leaves a
+            ValueError: If ``random_seed`` is outside 0 to 2**32 - 1,
+                ``positive_quantile`` is not finite or not between 0 and 1,
+                ``sample_column`` is not a cell column or leaves a
                 selected cell without a label, ``hashtags`` names no hashtag of
                 the assay or maps samples without ``sample_column`` or other
                 than the selected cells', a sample has too few cells or no
@@ -2570,7 +2572,7 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
             log_transform: Apply log1p before binning and scoring. None applies it
                            only for ``norm_lib_size``.
             n_bins: Number of bins into which average expression of genes is divided.
-            rand_seed: A random seed for sampling control genes. (Default value: 4466)
+            rand_seed: A random seed for sampling control genes, from 0 to 2**32 - 1. (Default value: 4466)
         Returns:
             A complete ``cell_cycle`` artifact containing S, G2M, and phase values.
 

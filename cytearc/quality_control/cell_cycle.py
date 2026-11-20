@@ -4,7 +4,11 @@ from typing import Any
 
 import numpy as np
 
-from ..utils.arguments import integer_argument, optional_bool_argument
+from ..utils.arguments import (
+    RANDOM_STATE_MAX,
+    integer_argument,
+    optional_bool_argument,
+)
 from .cell_cycle_genes import g2m_phase_genes, s_phase_genes
 
 __all__ = ["CellCycleSettings", "assign_cell_cycle_phase", "cell_cycle_settings"]
@@ -49,7 +53,7 @@ def cell_cycle_settings(
         TypeError: If a gene list is not a sequence of gene names, or another
             setting has the wrong type.
         ValueError: If ``ctrl_size`` is below 1, ``n_bins`` below 2, or
-            ``rand_seed`` below 0.
+            ``rand_seed`` outside 0 to 2**32 - 1.
     """
     if s_genes is None:
         s_genes = list(s_phase_genes)
@@ -69,7 +73,10 @@ def cell_cycle_settings(
         ctrl_size=control_size,
         log_transform=optional_bool_argument(log_transform, "log_transform"),
         n_bins=integer_argument(n_bins, "n_bins", minimum=2),
-        rand_seed=integer_argument(rand_seed, "rand_seed", minimum=0),
+        # The seed seeds NumPy's legacy RandomState.
+        rand_seed=integer_argument(
+            rand_seed, "rand_seed", minimum=0, maximum=RANDOM_STATE_MAX
+        ),
     )
 
 

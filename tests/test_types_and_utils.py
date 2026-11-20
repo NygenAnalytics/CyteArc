@@ -8,6 +8,7 @@ import pandas as pd
 import pytest
 import zarr
 from scipy.sparse import coo_matrix, csr_matrix
+from sklearn.cluster import KMeans, MiniBatchKMeans
 from zarr.errors import ContainsArrayError, GroupNotFoundError
 from zarr.storage import MemoryStore
 
@@ -30,6 +31,7 @@ from cytearc.utils import (
     tqdmbar,
 )
 from cytearc.utils.arguments import (
+    RANDOM_STATE_MAX,
     bool_argument,
     clip_fraction_argument,
     float_argument,
@@ -566,6 +568,21 @@ def test_integer_argument_accepts_numpy_integers_and_checks_bounds():
         integer_argument(0, "count", minimum=1)
     with pytest.raises(ValueError, match="count must be at most 4"):
         integer_argument(5, "count", minimum=1, maximum=4)
+
+
+def test_random_state_max_is_the_largest_seed_of_numpy_and_scikit_learn():
+    values = np.arange(8, dtype=np.float64).reshape(4, 2)
+
+    np.random.RandomState(RANDOM_STATE_MAX)
+    for kmeans in (KMeans, MiniBatchKMeans):
+        kmeans(n_clusters=2, n_init=1, random_state=RANDOM_STATE_MAX).fit(values)
+    with pytest.raises(ValueError, match="Seed must be between 0 and 2\\*\\*32 - 1"):
+        np.random.RandomState(RANDOM_STATE_MAX + 1)
+    for kmeans in (KMeans, MiniBatchKMeans):
+        with pytest.raises(ValueError, match="'random_state' parameter"):
+            kmeans(n_clusters=2, n_init=1, random_state=RANDOM_STATE_MAX + 1).fit(
+                values
+            )
 
 
 def test_float_argument_shares_one_value_across_numeric_spellings():

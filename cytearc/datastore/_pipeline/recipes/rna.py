@@ -21,6 +21,7 @@ from ..filtering import default_filter_columns, hashtag_labels, snapshot_column_
 from ..normalizers import normalizer_label
 from ..settings import (
     leiden_config,
+    named_stage,
     resolve_leiden,
     resolve_species,
     stage_settings,
@@ -472,13 +473,14 @@ def resolve_rna(
     )
     if cell_cycle_enabled:
         # Cell cycle scores average values of the run's normalizer.
-        require_applicable_flags(
-            store,
-            assay_name,
-            head.normalization.normalizer,
-            {"log_transform": cell_cycle_settings.get("log_transform")},
-            caller="run_cell_cycle_scoring",
-        )
+        with named_stage("cell_cycle"):
+            require_applicable_flags(
+                store,
+                assay_name,
+                head.normalization.normalizer,
+                {"log_transform": cell_cycle_settings.get("log_transform")},
+                caller="run_cell_cycle_scoring",
+            )
     graph = resolve_graph(
         ann_index=ann_index,
         neighbors=neighbors,

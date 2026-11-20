@@ -11,6 +11,7 @@ import pandas as pd
 from ..embeddings.harmony import HarmonyResult
 from ..embeddings.harmony.fit import _fitted_harmony
 from ..matrix import ChunkedArray
+from ..utils.arguments import float_argument
 from ..utils.compute import process_thread_limit, thread_pool_info
 from ..utils.logging import logger
 from ..utils.process import rss_text
@@ -402,13 +403,8 @@ def _kmeans_sizes(
         raise TypeError("batch_size must be a positive integer") from None
     if resolved_batch_size < 1:
         raise ValueError("batch_size must be a positive integer")
-    if isinstance(kmeans_sampling, bool):
-        raise TypeError("kmeans_sampling must be a number")
-    try:
-        sampling = float(kmeans_sampling)
-    except (TypeError, ValueError):
-        raise TypeError("kmeans_sampling must be a number") from None
-    if not math.isfinite(sampling) or not 0 < sampling <= 1:
+    sampling = float_argument(kmeans_sampling, "kmeans_sampling")
+    if not 0 < sampling <= 1:
         raise ValueError("kmeans_sampling must be greater than 0 and at most 1")
     if isinstance(kmeans_batch_size, bool):
         raise TypeError("kmeans_batch_size must be a positive integer")

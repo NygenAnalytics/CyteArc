@@ -657,7 +657,7 @@ class _EmbeddingOperationsMixin(_EmbeddingOperationsBase):
             dens_lambda: densMAP density preservation strength (Default value: 2.0).
             dens_frac: Fraction of nearest neighbors used for local density estimation (Default value: 0.3).
             dens_var_shift: Variance shift for density correction (Default value: 0.1).
-            random_seed: (Default value: 4444)
+            random_seed: The seed of the layout, from 0 to 2**32 - 1. (Default value: 4444)
             parallel: Whether to run UMAP in parallel mode. Setting value to True will use `nthreads` threads.
                       The results are not reproducible in parallel mode. A serial layout runs on one thread
                       and releases the GIL during each epoch, so the process's other Python threads keep

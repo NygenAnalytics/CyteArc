@@ -2104,12 +2104,12 @@ def test_the_guide_assay_is_the_only_crispr_assay_or_the_named_one(
         (
             {"associations": {"covariates": 3, "sample_column": "missing"}},
             TypeError,
-            "^covariates must be a sequence of column names or None$",
+            "^associations: covariates must be a sequence of column names or None$",
         ),
         (
             {"associations": {"sample_column": 5}},
             TypeError,
-            "^sample_column must be a non-empty string or None$",
+            "^associations: sample_column must be a non-empty string or None$",
         ),
         (
             {"associations": {"sample_column": "missing"}},
@@ -2209,8 +2209,8 @@ def test_the_guide_assay_is_the_only_crispr_assay_or_the_named_one(
         (
             {"clusters": {"perturbations": ["GENE_A", "GENE_B", "GENE_A"]}},
             ValueError,
-            "^Clustering needs at least 3 distinct perturbations, but perturbations "
-            "names 2$",
+            "^clusters: Clustering needs at least 3 distinct perturbations, but "
+            "perturbations names 2$",
         ),
         (
             {
@@ -2220,7 +2220,7 @@ def test_the_guide_assay_is_the_only_crispr_assay_or_the_named_one(
                 }
             },
             ValueError,
-            "^min_samples=4 must be at most the 3 perturbations clustered$",
+            "^clusters: min_samples=4 must be at most the 3 perturbations clustered$",
         ),
         # By target, the profiles hold the targets that are not controls, and
         # by guide the guides with a target.

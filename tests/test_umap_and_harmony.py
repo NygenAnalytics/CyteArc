@@ -81,6 +81,9 @@ def test_umap_settings_take_both_ends_of_umap_learns_ranges(changes):
         ({"dens_var_shift": -1e-9}, "dens_var_shift must be at least 0"),
         ({"min_dist": np.nan}, "min_dist must be finite"),
         ({"n_epochs": 0}, "n_epochs must be at least 1"),
+        # The layout seeds NumPy's legacy RandomState, which takes 0 to 2**32 - 1.
+        ({"random_seed": -1}, "random_seed must be at least 0"),
+        ({"random_seed": 2**32}, "random_seed must be at most 4294967295"),
     ],
 )
 def test_umap_settings_refuse_values_past_umap_learns_ranges(changes, message):
@@ -88,6 +91,14 @@ def test_umap_settings_refuse_values_past_umap_learns_ranges(changes, message):
         umap_settings(**{**_UMAP_SETTINGS, **changes})
 
     assert str(caught.value) == message
+
+
+@pytest.mark.parametrize("seed", [0, 2**32 - 1, np.uint32(2**32 - 1)])
+def test_umap_settings_take_the_seeds_of_numpys_random_state(seed):
+    settings = umap_settings(**{**_UMAP_SETTINGS, "random_seed": seed})
+
+    assert type(settings.random_seed) is int
+    assert settings.random_seed == int(seed)
 
 
 def _ring_graph(n: int) -> coo_matrix:

@@ -438,6 +438,8 @@ def _all_artifacts(store: DataStore) -> set[ArtifactRef]:
         ({"lowess_frac": 1.5}, ValueError, "lowess_frac must be between 0 and 1"),
         ({"keep_bounds": 1}, TypeError, "keep_bounds must be a boolean"),
         ({"bin_strategy": "loess"}, ValueError, "bin_strategy must be either"),
+        ({"blacklist": "^MT-("}, ValueError, "blacklist must be a regular expression"),
+        ({"blacklist": 5}, TypeError, "blacklist must be text"),
     ],
     ids=[
         "min_cells",
@@ -447,6 +449,8 @@ def _all_artifacts(store: DataStore) -> set[ArtifactRef]:
         "lowess_frac",
         "keep_bounds",
         "bin_strategy",
+        "blacklist_pattern",
+        "blacklist_type",
     ],
 )
 def test_select_hvgs_checks_counts_and_trend_options_before_writing(
@@ -478,6 +482,7 @@ def test_hvg_options_return_the_values_selections_record() -> None:
         "lowess_frac": 0.1,
         "keep_bounds": False,
         "bin_strategy": "adaptive",
+        "blacklist": "^MT-",
     }
     assert tuple(defaults) == HVG_OPTION_NAMES
     assert hvg_options(**defaults) == HvgOptions(**defaults)
@@ -488,12 +493,70 @@ def test_hvg_options_return_the_values_selections_record() -> None:
         lowess_frac=1,
         keep_bounds=np.bool_(True),
         bin_strategy=np.str_("fixed"),
+        blacklist=np.str_("^MT-|^RPL"),
     )
-    assert checked == (0, 5, 20, 1, True, "fixed")
+    assert checked == (0, 5, 20, 1, True, "fixed", "^MT-|^RPL")
     # lowess_frac keeps its type, so 1 and 1.0 keep their own identities.
-    assert [type(value) for value in checked] == [int, int, int, int, bool, str]
+    assert [type(value) for value in checked] == [int, int, int, int, bool, str, str]
     # Zero gives each trend its smallest window.
     assert hvg_options(**{**defaults, "lowess_frac": 0}).lowess_frac == 0
+
+
+def _pattern_error(pattern: str) -> str:
+    """The error of ``re`` for text that is no regular expression."""
+    try:
+        re.compile(pattern)
+    except re.error as error:
+        return str(error)
+    raise AssertionError(f"{pattern!r} is a regular expression")
+
+
+def test_hvg_options_take_a_blacklist_of_text_or_none() -> None:
+    defaults = dict(
+        zip(
+            HVG_OPTION_NAMES, (None, 1000, 200, 0.1, False, "adaptive", ""), strict=True
+        )
+    )
+    # Empty text and None select from every feature; the record keeps which.
+    for blacklist in ("", None, "^MT-", "(?i)^hb[ab]"):
+        assert hvg_options(**{**defaults, "blacklist": blacklist}).blacklist == (
+            blacklist
+        )
+    for blacklist, error, message in (
+        (
+            "(",
+            ValueError,
+            "blacklist must be a regular expression of the feature names that "
+            f"are never selected, but '(' is not one: {_pattern_error('(')}",
+        ),
+        (
+            "^MT-[",
+            ValueError,
+            "blacklist must be a regular expression of the feature names that "
+            f"are never selected, but '^MT-[' is not one: {_pattern_error('^MT-[')}",
+        ),
+        (
+            5,
+            TypeError,
+            "blacklist must be text, a regular expression of the feature names "
+            "that are never selected, or None; got 5",
+        ),
+        (
+            b"^MT-",
+            TypeError,
+            "blacklist must be text, a regular expression of the feature names "
+            "that are never selected, or None; got b'^MT-'",
+        ),
+        (
+            ["^MT-"],
+            TypeError,
+            "blacklist must be text, a regular expression of the feature names "
+            "that are never selected, or None; got ['^MT-']",
+        ),
+    ):
+        with pytest.raises(error) as caught:
+            hvg_options(**{**defaults, "blacklist": blacklist})
+        assert str(caught.value) == message
 
 
 def test_select_hvgs_rejects_unknown_keywords_before_saving(

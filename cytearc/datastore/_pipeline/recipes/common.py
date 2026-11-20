@@ -35,6 +35,7 @@ from ..settings import (
     TSNE_DIMS_DEFAULT,
     UMAP_DIMS_DEFAULT,
     column_sequence,
+    named_stage,
     require_columns,
     stage_settings,
     warn_without_sgtsnepi,
@@ -265,9 +266,10 @@ def resolve_normalization(
     """
     _enabled, settings = stage_settings("normalization", normalization, optional=False)
     normalizer, method = resolve_normalizer(store, assay, settings.pop("method", None))
-    require_applicable_flags(
-        store, assay, normalizer, settings, caller="run_normalization"
-    )
+    with named_stage("normalization"):
+        require_applicable_flags(
+            store, assay, normalizer, settings, caller="run_normalization"
+        )
     return NormalizationSettings(method=method, normalizer=normalizer, flags=settings)
 
 

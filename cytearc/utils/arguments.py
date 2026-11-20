@@ -67,6 +67,10 @@ def optional_bool_argument(value: object, name: str) -> bool | None:
 #: The most characters of a value that an error message quotes.
 QUOTED_LIMIT = 80
 
+#: The largest seed that NumPy's legacy ``RandomState``, and so scikit-learn,
+#: takes: 2**32 - 1.
+RANDOM_STATE_MAX = 2**32 - 1
+
 
 def quoted_value(value: object) -> str:
     """Return ``repr(value)`` for an error message, cut to ``QUOTED_LIMIT``.

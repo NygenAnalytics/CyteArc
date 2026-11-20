@@ -1,5 +1,6 @@
 import inspect
 import json
+import re
 import shutil
 import sys
 from collections.abc import Callable, Iterator
@@ -24,6 +25,7 @@ from cytearc.datastore._pipeline.recipes.rna import resolve_rna
 from cytearc.datastore._pipeline.settings import (
     DEFAULT_LEIDEN_PARTITIONS,
     STAGE_SETTINGS,
+    named_stage,
     parameter_value,
 )
 from cytearc.datastore.namespaces import (
@@ -1264,7 +1266,7 @@ def test_recipe_refuses_doublets_on_a_pca_without_feature_scaling(readonly_store
 def test_recipes_refuse_an_ann_metric_that_the_index_does_not_take(
     readonly_store, adt_store, metric
 ):
-    message = f"ann_metric must be 'l2' or 'cosine', got {metric!r}"
+    message = f"ann_index: ann_metric must be 'l2' or 'cosine', got {metric!r}"
 
     # The ANN index refuses the metric whether or not doublet scoring builds
     # a mapping reference on it, so every recipe with a graph refuses it.
@@ -1324,6 +1326,9 @@ def method_inputs(settings_base: str, tmp_path_factory) -> SimpleNamespace:
 
 # The public method of each stage, called on method_inputs with settings.
 _STAGE_CALLS: dict[str, Callable[..., Any]] = {
+    "hvg": lambda inputs, **settings: inputs.store.features.hvgs(
+        inputs.cells, **settings
+    ),
     "hashing": lambda inputs, **settings: inputs.store.qc.hto_demultiplexing(
         inputs.cells, from_assay="assay2", **settings
     ),
@@ -1364,10 +1369,43 @@ _STAGE_CALLS: dict[str, Callable[..., Any]] = {
         inputs.clusters, inputs.graph, **settings
     ),
 }
+
+
+def _pattern_error(pattern: str) -> str:
+    """The error of ``re`` for text that is no regular expression."""
+    try:
+        re.compile(pattern)
+    except re.error as error:
+        return str(error)
+    raise AssertionError(f"{pattern!r} is a regular expression")
+
+
 # Settings that each stage's method refuses, with the method's error and
-# message, which the recipe and its plan raise before a run starts.
+# message, which the recipe and its plan raise before a run starts after the
+# stage's name.
 _REFUSED_SETTINGS: list[tuple[str, dict[str, Any], type[Exception], str]] = [
+    (
+        "hvg",
+        {"top_n": 50, "blacklist": "("},
+        ValueError,
+        "blacklist must be a regular expression of the feature names that are "
+        f"never selected, but '(' is not one: {_pattern_error('(')}",
+    ),
+    (
+        "hvg",
+        {"top_n": 50, "blacklist": 5},
+        TypeError,
+        "blacklist must be text, a regular expression of the feature names that "
+        "are never selected, or None; got 5",
+    ),
     ("hashing", {"random_seed": "1"}, TypeError, "random_seed must be an integer"),
+    ("hashing", {"random_seed": -1}, ValueError, "random_seed must be at least 0"),
+    (
+        "hashing",
+        {"random_seed": 2**32},
+        ValueError,
+        "random_seed must be at most 4294967295",
+    ),
     (
         "hashing",
         {"positive_quantile": 1},
@@ -1377,6 +1415,12 @@ _REFUSED_SETTINGS: list[tuple[str, dict[str, Any], type[Exception], str]] = [
     ("cell_cycle", {"n_bins": 1}, ValueError, "n_bins must be at least 2"),
     ("cell_cycle", {"ctrl_size": 0}, ValueError, "ctrl_size must be at least 1"),
     ("cell_cycle", {"rand_seed": -1}, ValueError, "rand_seed must be at least 0"),
+    (
+        "cell_cycle",
+        {"rand_seed": 2**32},
+        ValueError,
+        "rand_seed must be at most 4294967295",
+    ),
     (
         "cell_cycle",
         {"log_transform": 1},
@@ -1491,9 +1535,15 @@ _REFUSED_SETTINGS: list[tuple[str, dict[str, Any], type[Exception], str]] = [
     ),
     (
         "embedding_initialization",
-        {"kmeans_sampling": "half"},
+        {"rand_state": 2**32},
+        ValueError,
+        "rand_state must be at most 4294967295",
+    ),
+    (
+        "embedding_initialization",
+        {"kmeans_sampling": "0.5"},
         TypeError,
-        "kmeans_sampling must be a number",
+        "kmeans_sampling must be a real number",
     ),
     (
         "embedding_initialization",
@@ -1517,6 +1567,8 @@ _REFUSED_SETTINGS: list[tuple[str, dict[str, Any], type[Exception], str]] = [
     ("umap", {"spread": -1}, ValueError, "spread must be greater than 0"),
     ("umap", {"spread": "2"}, TypeError, "spread must be a real number"),
     ("umap", {"n_epochs": 0}, ValueError, "n_epochs must be at least 1"),
+    # The setting's name starts with the stage's, which the recipe still names.
+    ("umap", {"umap_dims": 0}, ValueError, "umap_dims must be at least 1"),
     (
         "umap",
         {"repulsion_strength": -1},
@@ -1541,6 +1593,12 @@ _REFUSED_SETTINGS: list[tuple[str, dict[str, Any], type[Exception], str]] = [
     ),
     ("umap", {"parallel": "no"}, TypeError, "parallel must be a boolean"),
     ("umap", {"random_seed": -1}, ValueError, "random_seed must be at least 0"),
+    (
+        "umap",
+        {"random_seed": 2**32},
+        ValueError,
+        "random_seed must be at most 4294967295",
+    ),
     (
         "leiden",
         {"backend": "louvain"},
@@ -1696,7 +1754,7 @@ def test_settings_at_the_bounds_of_their_methods_pass_a_recipe(readonly_store):
     # Each value is the least or the most that the stage's method takes, and
     # NumPy scalars are the same settings as Python numbers.
     stages: dict[str, dict[str, Any]] = {
-        "cell_cycle": {"ctrl_size": 1, "n_bins": 2, "rand_seed": 0},
+        "cell_cycle": {"ctrl_size": 1, "n_bins": 2, "rand_seed": 2**32 - 1},
         "normalization": {"log_transform": None, "renormalize_subset": True},
         "pca": {"dims": 10, "feat_scaling": np.True_, "batch_size": 1},
         "ann_index": {
@@ -1711,7 +1769,7 @@ def test_settings_at_the_bounds_of_their_methods_pass_a_recipe(readonly_store):
         "connectivity": {"local_connectivity": 0, "bandwidth": 1e-9},
         "embedding_initialization": {
             "n_centroids": 2,
-            "rand_state": 0,
+            "rand_state": 2**32 - 1,
             "batch_size": 1,
             "kmeans_sampling": 1,
             "kmeans_batch_size": 1,
@@ -1726,8 +1784,9 @@ def test_settings_at_the_bounds_of_their_methods_pass_a_recipe(readonly_store):
             "dens_lambda": 0,
             "dens_frac": 1,
             "dens_var_shift": 0,
-            "random_seed": 0,
+            "random_seed": 2**32 - 1,
         },
+        "hvg": {"top_n": 50, "blacklist": ""},
         "leiden": {"partitions": [1.0], "backend": "leidenalg", "random_seed": 0},
         "paris": {"n_clusters": 1},
         "doublets": {
@@ -1781,11 +1840,48 @@ def test_a_recipe_and_its_plan_refuse_a_setting_that_the_stage_method_refuses(
     with pytest.raises(error) as called:
         _STAGE_CALLS[stage](method_inputs, **settings)
 
-    assert str(planned.value) == message
-    assert str(ran.value) == message
+    # A recipe names the stage, as several stages take settings of one name.
+    assert str(planned.value) == f"{stage}: {message}"
+    assert str(ran.value) == f"{stage}: {message}"
     assert str(called.value) == message
     # Neither the plan nor the recipe wrote a run record or an artifact.
     assert _written(store) == before
+
+
+class _NamedRefusal(ValueError):
+    """A refusal that carries a field, as some of CyteArc's errors do."""
+
+    def __init__(self, message: str, field: str) -> None:
+        super().__init__(message)
+        self.field = field
+
+
+def test_named_stage_names_the_stage_of_a_refusal_once():
+    with pytest.raises(ValueError) as named, named_stage("pca"):
+        raise ValueError("batch_size must be at least 1")
+    assert type(named.value) is ValueError
+    assert str(named.value) == "pca: batch_size must be at least 1"
+    assert str(named.value.__cause__) == "batch_size must be at least 1"
+    # A message that names the stage after its start is still named.
+    message = "k must be below the number of cells that neighbors searches"
+    with pytest.raises(TypeError) as named, named_stage("neighbors"):
+        raise TypeError(message)
+    assert str(named.value) == f"neighbors: {message}"
+    # A message that starts with the stage's name already names it.
+    for message in (
+        "hvg['batch'] must be a cell metadata column",
+        "hvg must be a mapping or bool",
+    ):
+        with pytest.raises(TypeError) as kept, named_stage("hvg"):
+            raise TypeError(message)
+        assert str(kept.value) == message
+    # A subclass is raised as it is, since its fields would be lost.
+    with pytest.raises(_NamedRefusal) as subclass, named_stage("pca"):
+        raise _NamedRefusal("batch_size must be at least 1", "batch_size")
+    assert str(subclass.value) == "batch_size must be at least 1"
+    assert subclass.value.field == "batch_size"
+    with pytest.raises(KeyError, match="'batch'"), named_stage("pca"):
+        raise KeyError("batch")
 
 
 def test_pca_dims_zero_builds_the_graph_on_normalized_values(

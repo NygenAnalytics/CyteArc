@@ -1,6 +1,8 @@
 import inspect
 import math
-from collections.abc import Callable, Mapping, Sequence
+import re
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from numbers import Real
 from types import MappingProxyType
 from typing import Any
@@ -597,6 +599,27 @@ def _check_perturbation_stage(stage: str, value: Mapping[str, Any]) -> None:
     check(**_check_keywords(check, method, value))
 
 
+@contextmanager
+def named_stage(stage: str) -> Iterator[None]:
+    """Name ``stage`` in a ``TypeError`` or ``ValueError`` that checks its settings.
+
+    Several stages take settings of one name, such as ``batch_size``, so a
+    recipe names the stage before the message of the stage's method, as in
+    ``pca: batch_size must be at least 1``. A message that already starts
+    with the stage's name, such as ``hvg['batch'] must be a cell metadata
+    column``, is raised as it is.
+    """
+    try:
+        yield
+    except (TypeError, ValueError) as error:
+        message = str(error)
+        if type(error) not in (TypeError, ValueError) or re.match(
+            rf"{re.escape(stage)}\b", message
+        ):
+            raise
+        raise type(error)(f"{stage}: {message}") from error
+
+
 def _check_stage_values(stage: str, value: Mapping[str, Any]) -> None:
     """Run a stage method's own checks on settings, before a run record exists.
 
@@ -702,7 +725,8 @@ def stage_settings(
         raise ValueError(
             f"Unknown {stage} settings {unknown!r}; allowed: {sorted(allowed)!r}"
         )
-    _check_stage_values(stage, value)
+    with named_stage(stage):
+        _check_stage_values(stage, value)
     return True, {
         key: parameter_value(item, f"{stage}[{key!r}]") for key, item in value.items()
     }

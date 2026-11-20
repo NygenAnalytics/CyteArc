@@ -128,11 +128,16 @@ def _cell_selection(
 def test_sampling_fraction_validates_type_and_range() -> None:
     assert _sampling_fraction(0.5, "frac") == 0.5
     assert _sampling_fraction(1, "frac") == 1.0
-    for value in (True, "x"):
-        with pytest.raises(TypeError, match="must be a number"):
+    assert type(_sampling_fraction(np.float32(0.25), "frac")) is float
+    for value in (True, "0.5", None):
+        with pytest.raises(TypeError, match="^frac must be a real number$"):
             _sampling_fraction(value, "frac")
-    for value in (0.0, 1.1, float("nan")):
-        with pytest.raises(ValueError, match="greater than 0 and at most 1"):
+    with pytest.raises(ValueError, match="^frac must be finite$"):
+        _sampling_fraction(float("nan"), "frac")
+    for value in (0.0, -0.5, 1.1):
+        with pytest.raises(
+            ValueError, match="^frac must be greater than 0 and at most 1$"
+        ):
             _sampling_fraction(value, "frac")
 
 

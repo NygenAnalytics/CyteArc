@@ -6,7 +6,12 @@ from typing import Any
 import numpy as np
 from scipy.sparse import csr_matrix, issparse
 
-from ..utils.arguments import bool_argument, float_argument, integer_argument
+from ..utils.arguments import (
+    RANDOM_STATE_MAX,
+    bool_argument,
+    float_argument,
+    integer_argument,
+)
 from ..utils.compute import process_thread_limit
 from ..utils.logging import logger
 from ..utils.numba import enable_dispatcher_cache, import_umap, njit, numba_threads
@@ -72,7 +77,9 @@ def umap_settings(
     ``min_dist=1.0`` identify the same embedding. The ranges are those that
     umap-learn's ``UMAP`` class enforces: ``min_dist`` from 0 to ``spread``,
     ``dens_frac`` from 0 to 1, and the other rates and weights at least 0.
-    ``spread`` must be above 0, since it scales the curve that UMAP fits.
+    ``spread`` must be above 0, since it scales the curve that UMAP fits, and
+    ``random_seed`` from 0 to 2**32 - 1, the seeds of NumPy's legacy
+    ``RandomState``, which the layout draws from.
 
     Raises:
         TypeError: If a setting has the wrong type.
@@ -81,7 +88,10 @@ def umap_settings(
     checked = UmapSettings(
         umap_dims=integer_argument(umap_dims, "umap_dims", minimum=1),
         n_epochs=integer_argument(n_epochs, "n_epochs", minimum=1),
-        random_seed=integer_argument(random_seed, "random_seed", minimum=0),
+        # The layout's seed seeds NumPy's legacy RandomState.
+        random_seed=integer_argument(
+            random_seed, "random_seed", minimum=0, maximum=RANDOM_STATE_MAX
+        ),
         spread=float_argument(spread, "spread"),
         min_dist=float_argument(min_dist, "min_dist"),
         repulsion_strength=float_argument(repulsion_strength, "repulsion_strength"),

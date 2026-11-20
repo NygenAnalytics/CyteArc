@@ -36,6 +36,7 @@ from cytearc.quality_control.hto import (
     UnseparatedHto,
     checked_hashtags,
     checked_sample_hashtags,
+    demultiplexing_settings,
     hto_demux,
 )
 from cytearc.storage.artifacts import (
@@ -713,12 +714,49 @@ def test_hto_demux_rejects_invalid_input(hto_counts, error, message):
         hto_demux(hto_counts)
 
 
-@pytest.mark.parametrize("random_seed", [True, 1.5, "0", None])
+@pytest.mark.parametrize("random_seed", [True, np.True_, 1.5, "0", None])
 def test_hto_demux_requires_an_integer_seed(random_seed):
     counts, _ = planted_hto_counts()
 
     with pytest.raises(TypeError, match="^random_seed must be an integer$"):
         hto_demux(counts, random_seed=random_seed)
+
+
+@pytest.mark.parametrize(
+    ("random_seed", "message"),
+    [
+        (-1, "random_seed must be at least 0"),
+        (np.int64(-1), "random_seed must be at least 0"),
+        (2**32, "random_seed must be at most 4294967295"),
+    ],
+)
+def test_hto_demux_requires_a_seed_that_k_means_takes(random_seed, message):
+    counts, _ = planted_hto_counts()
+
+    with pytest.raises(ValueError, match=f"^{message}$"):
+        hto_demux(counts, random_seed=random_seed)
+
+
+def test_demultiplexing_settings_are_python_values_that_a_record_keeps():
+    for seed, quantile in ((np.int64(7), np.float32(0.5)), (np.uint32(7), 0.5)):
+        checked = demultiplexing_settings(random_seed=seed, positive_quantile=quantile)
+
+        assert checked == (7, 0.5)
+        assert [type(value) for value in checked] == [int, float]
+
+
+def test_a_numpy_seed_demultiplexes_as_the_same_python_seed():
+    counts, truth = planted_hto_counts(seed=1)
+
+    identities = hto_demux(counts, random_seed=1)
+
+    np.testing.assert_array_equal(identities.to_numpy(), truth)
+    for seed in (np.int64(1), np.uint32(1)):
+        pd.testing.assert_series_equal(hto_demux(counts, random_seed=seed), identities)
+    # The largest seed k-means takes is accepted.
+    np.testing.assert_array_equal(
+        hto_demux(counts, random_seed=2**32 - 1).to_numpy(), truth
+    )
 
 
 _NOT_REAL = (TypeError, "positive_quantile must be a real number")
@@ -1369,6 +1407,10 @@ def test_each_positive_quantile_has_its_own_hto_identity_artifact(tmp_path: Path
                 store.qc.hto_demultiplexing(selection, positive_quantile=spelling)
                 == stricter
             )
+        # A NumPy seed reuses the artifact of the equal Python seed.
+        assert store.qc.hto_demultiplexing(selection, random_seed=np.int64(0)) == (
+            default
+        )
     assert len(store.artifacts.list(kind="hto_identity", from_assay="HTO")) == 2
 
 

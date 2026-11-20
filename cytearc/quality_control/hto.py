@@ -7,7 +7,7 @@ import pandas as pd
 from pandas.api.types import is_numeric_dtype
 
 from ..assay.normalization import clr_values
-from ..utils.arguments import float_argument
+from ..utils.arguments import RANDOM_STATE_MAX, float_argument, integer_argument
 from ..utils.warnings import warn
 
 __all__ = ["hto_demux"]
@@ -61,15 +61,18 @@ def demultiplexing_settings(
     gives. The recipe checks the hashtags and the sample column against the
     store itself.
 
+    The seed seeds scikit-learn's k-means, which takes 0 to 2**32 - 1.
+
     Raises:
-        TypeError: If ``random_seed`` is not a Python integer or
+        TypeError: If ``random_seed`` is not an integer or
             ``positive_quantile`` is not a real number.
-        ValueError: If ``positive_quantile`` is not finite or not between 0
-            and 1.
+        ValueError: If ``random_seed`` is outside 0 to 2**32 - 1, or
+            ``positive_quantile`` is not finite or not between 0 and 1.
     """
-    if isinstance(random_seed, bool) or not isinstance(random_seed, int):
-        raise TypeError("random_seed must be an integer")
-    return random_seed, _validated_positive_quantile(positive_quantile)
+    seed = integer_argument(
+        random_seed, "random_seed", minimum=0, maximum=RANDOM_STATE_MAX
+    )
+    return seed, _validated_positive_quantile(positive_quantile)
 
 
 def _hto_demux_method(positive_quantile: float) -> dict[str, object]:
@@ -714,7 +717,7 @@ def hto_demux(
 
     Args:
         hto_counts: A dataframe containing the raw HTO counts for each cell.
-        random_seed: Seed of the k-means clustering.
+        random_seed: Seed of the k-means clustering, from 0 to 2**32 - 1.
         positive_quantile: Quantile of each HTO's background distribution that
             a count must exceed to be positive, Seurat's ``positive.quantile``.
             It must be greater than 0 and less than 1. A higher quantile, such
@@ -727,12 +730,13 @@ def hto_demux(
     Raises:
         TypeError: If ``random_seed`` is not an integer or ``positive_quantile``
             is not a real number.
-        ValueError: If ``positive_quantile`` is not finite or not between 0 and
-            1, or if the counts cannot be demultiplexed.
+        ValueError: If ``random_seed`` is outside 0 to 2**32 - 1,
+            ``positive_quantile`` is not finite or not between 0 and 1, or the
+            counts cannot be demultiplexed.
     """
-    if isinstance(random_seed, bool) or not isinstance(random_seed, int):
-        raise TypeError("random_seed must be an integer")
-    quantile = _validated_positive_quantile(positive_quantile)
+    random_seed, quantile = demultiplexing_settings(
+        random_seed=random_seed, positive_quantile=positive_quantile
+    )
     identities, _cutoffs, unseparated = _hto_calls(
         _validated_hto_counts(hto_counts),
         random_seed=random_seed,
