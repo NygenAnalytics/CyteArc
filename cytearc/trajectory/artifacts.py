@@ -494,8 +494,9 @@ def listed_labels(
 
     A label matches a listed one as pandas matches values, by value, so the
     categorical compares with a label as the labels do; labels outside the
-    list and missing labels become missing. The categorical holds a code for
-    each cell rather than its label. Text is compared as stored, a listed
+    list and missing labels become missing, and a missing value is never a
+    listed label. The categorical holds a code for each cell rather than its
+    label. Text is compared as stored, a listed
     label at a time, which matches as pandas does without a Python string
     for each label; other labels are matched by pandas. ``label`` names the
     labels in the refusal of values that are not one-dimensional.
@@ -503,7 +504,10 @@ def listed_labels(
     labels = np.asarray(values)
     if labels.ndim != 1:
         raise ValueError(f"{label} must be one-dimensional")
-    categories = pd.Index(list(dict.fromkeys(listed)), dtype=object)
+    categories = pd.Index(
+        [value for value in dict.fromkeys(listed) if not pd.isna(value)],
+        dtype=object,
+    )
     small = np.int8 if len(categories) <= np.iinfo(np.int8).max else np.int32
     if labels.dtype.kind == "U":
         codes = np.full(len(labels), -1, dtype=small)
@@ -520,17 +524,14 @@ def listed_labels_bytes(n_values: int, dtype: Any) -> int:
     """Return the most bytes that :func:`listed_labels` holds beside the labels.
 
     Text holds the codes and the cells that match one listed label at a
-    time, up to five bytes a label. pandas matches other objects in place,
-    with an int64 code and about 34 bytes more for each label, and numbers
-    as they are.
+    time, up to five bytes a label. pandas matches other labels as Python
+    objects, a number as a new object, with an int64 code and up to 48 bytes
+    more for each label while it finds them.
     """
-    resolved = np.dtype(dtype)
     n_values = int(n_values)
-    if resolved.kind == "U":
+    if np.dtype(dtype).kind == "U":
         return 5 * n_values
-    if resolved.hasobject:
-        return 50 * n_values
-    return 16 * n_values
+    return 56 * n_values
 
 
 def payload_fingerprint_matches(group: Any, names: Sequence[str]) -> bool:

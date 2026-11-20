@@ -449,3 +449,36 @@ def test_require_keyed_refuses_positional_and_other_containers(values, frame, go
     )
     assert got in message
     assert f"pandas.{container}(values, index=adata.obs_names)" in message
+
+
+@pytest.mark.parametrize("width", [6, 40])
+def test_reading_ids_and_aligning_keyed_values_hold_what_their_estimate_states(
+    width: int,
+) -> None:
+    import tracemalloc
+
+    from cytearc.metadata.alignment import align_to_cell_ids, cell_id_alignment_bytes
+    from cytearc.metadata.rows import read_array_rows_chunkwise
+
+    n_cells = 20_000
+    root = zarr.open_group(store=MemoryStore(), mode="w")
+    stored = root.create_array(
+        "ids",
+        data=np.asarray([f"{index:0{width}d}" for index in range(n_cells)]),
+        chunks=(5_000,),
+    )
+    # Values keyed by every ID in reverse order, beside 100 other labels.
+    labels = [f"{index:0{width}d}" for index in range(n_cells + 100)][::-1]
+    values = pd.Series(np.arange(n_cells + 100, dtype=np.float64), index=labels)
+    rows = np.arange(n_cells)
+    read_array_rows_chunkwise(stored, rows)
+    tracemalloc.start()
+    before, _ = tracemalloc.get_traced_memory()
+    ids = read_array_rows_chunkwise(stored, rows)
+    aligned = align_to_cell_ids(
+        values, ids, name="x", cells="c", remedy="r", leave_out_others=True
+    )
+    _, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+    assert aligned.to_numpy()[0] == n_cells + 99
+    assert peak - before <= cell_id_alignment_bytes(stored, n_cells, len(values))

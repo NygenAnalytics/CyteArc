@@ -1,4 +1,5 @@
 import numpy as np
+import pandas as pd
 import pytest
 import zarr
 from zarr.storage import MemoryStore
@@ -26,6 +27,7 @@ from cytearc.trajectory.artifacts import (
     aggregation_payload_is_valid,
     fate_payload_is_valid,
     listed_labels,
+    listed_labels_bytes,
     load_cell_artifact_values,
     marker_payload_is_valid,
     pseudotime_payload_is_valid,
@@ -550,3 +552,62 @@ def test_trajectory_parameter_contracts_reject_ambiguous_or_coerced_values() -> 
         resolve_aggregation_ann_params({"dim": 9}, dim=10)
     with pytest.raises(TypeError, match="mapping or None"):
         resolve_aggregation_ann_params([("M", 20)], dim=10)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    "labels",
+    [
+        np.array(["a2", "1", "True", "", "b2", "a2"]),
+        np.array(["a2", "1", None, "b2", 3, "a2"], dtype=object),
+        np.array([2, 1, 0, 3, 1, 2]),
+        np.array([2.0, 1.0, np.nan, 3.5, 1.0, 2.0]),
+    ],
+    ids=["text", "objects", "integers", "floats"],
+)
+def test_listed_labels_match_as_pandas_matches_them(labels: np.ndarray) -> None:
+    # Each listed label, of any type, holds the cells that pandas finds for
+    # it, and every other cell holds none of them.
+    listed = ["a2", 1, True, 2.0, "", "b2"]
+    codes = listed_labels(labels, None, listed, "labels")
+    series = pd.Series(labels, dtype=object)
+    for label in dict.fromkeys(listed):
+        np.testing.assert_array_equal(
+            np.asarray(codes == label), series.isin([label]).to_numpy()
+        )
+    assert codes.codes.dtype == np.int8
+    # A missing label holds none of them.
+    missing = np.zeros(len(labels), dtype=bool)
+    missing[0] = True
+    assert listed_labels(labels, missing, listed, "labels").codes[0] == -1
+
+
+def test_listed_labels_keep_wide_codes_and_refuse_other_shapes() -> None:
+    labels = np.array([f"c{index}" for index in range(300)])
+    listed = list(labels[::-1])
+    codes = listed_labels(labels, None, listed, "labels")
+    # More than 127 listed labels need wider codes.
+    assert codes.codes.dtype.itemsize > 1
+    assert np.asarray(codes == "c0").nonzero()[0].tolist() == [0]
+    with pytest.raises(ValueError, match="^Sink labels must be one-dimensional$"):
+        listed_labels(np.ones((2, 2)), None, [1.0], "Sink labels")
+
+
+@pytest.mark.parametrize(
+    "labels",
+    [
+        np.array([("a2" if index % 3 else "t1") + "x" * 24 for index in range(5_000)]),
+        np.array(["a2", "b2", None] * 2_000, dtype=object),
+        np.arange(5_000) % 4,
+        np.arange(5_000) * 1_000_003 + 0.5,
+    ],
+    ids=["text", "objects", "integers", "floats"],
+)
+def test_listed_labels_hold_what_their_estimate_states(labels: np.ndarray) -> None:
+    import tracemalloc
+
+    tracemalloc.start()
+    before, _ = tracemalloc.get_traced_memory()
+    listed_labels(labels, None, ["a2" + "x" * 24, "t1" + "x" * 24, 1, 2], "labels")
+    _, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+    assert peak - before <= listed_labels_bytes(len(labels), labels.dtype)

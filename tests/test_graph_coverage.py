@@ -1799,3 +1799,67 @@ def test_normalized_local_cache_removes_a_failed_staging_copy(
 
     assert normalized not in store._normalizedArtifactCache
     assert not cache_base.exists()
+
+
+def test_diffusion_is_refused_before_its_graph_is_read(
+    datastore, connectivity_graph, monkeypatch
+) -> None:
+    from cytearc.storage.budget import ResourceBudget
+    from cytearc.utils.memory_budget import MemoryBudgetError
+
+    budgeted = DataStore(datastore.zarr_loc, default_assay="RNA")
+    before = _diffusion_artifacts(budgeted)
+    reads: list[str] = []
+    load = budgeted._load_graph_artifact
+    monkeypatch.setattr(
+        budgeted,
+        "_load_graph_artifact",
+        lambda *args, **kwargs: (reads.append("graph"), load(*args, **kwargs))[1],
+    )
+    budgeted.memoryBytes = 1
+    budgeted.resources = ResourceBudget(1, 1)
+    with pytest.raises(MemoryBudgetError) as refused:
+        budgeted.imputation.diffusion(connectivity_graph, t=2, invalidate_cache=True)
+    assert str(refused.value).startswith("Computing a diffusion operator of ")
+    assert reads == []
+    assert _diffusion_artifacts(budgeted) == before
+
+
+@pytest.mark.parametrize("entries", [5_000, 200_000])
+def test_writing_a_diffusion_operator_holds_what_its_estimate_states(
+    entries: int,
+) -> None:
+    import tracemalloc
+
+    import scipy.sparse as sparse
+
+    from cytearc.storage.artifacts import fingerprint_stored_arrays
+    from cytearc.trajectory.artifacts import (
+        DIFFUSION_PAYLOAD,
+        diffusion_write_bytes,
+        write_diffusion_payload,
+    )
+
+    n_cells = 4_000
+    operator = sparse.random(
+        n_cells,
+        n_cells,
+        density=entries / n_cells**2,
+        format="csr",
+        dtype=np.float32,
+        random_state=np.random.default_rng(1),
+    )
+    root = zarr.open_group(store=zarr.storage.MemoryStore(), mode="w")
+    # Writing fingerprints the stored arrays, and the check before the
+    # operator is published fingerprints them again.
+    tracemalloc.start()
+    before, _ = tracemalloc.get_traced_memory()
+    group = root.create_group("operator")
+    write_diffusion_payload(group, operator)
+    fingerprint_stored_arrays(group, DIFFUSION_PAYLOAD)
+    _, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+    # The stored arrays themselves stay in the store in memory, which a store
+    # on disk does not hold.
+    stored = sum(group[name].nbytes_stored() for name in DIFFUSION_PAYLOAD)
+    assert peak - before - stored <= diffusion_write_bytes(operator.nnz, n_cells)

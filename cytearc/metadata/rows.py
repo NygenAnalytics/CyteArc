@@ -127,17 +127,20 @@ def fingerprint_stored_rows(array: Any, rows: np.ndarray) -> str:
     indices = np.asarray(rows, dtype=np.int64)
     if indices.ndim != 1:
         raise ValueError("Metadata row indices must be one-dimensional")
-    if indices.size > 1 and bool(np.any(np.diff(indices) <= 0)):
+    if indices.size > 1 and not bool(np.all(indices[1:] > indices[:-1])):
         raise ValueError("Rows to fingerprint must be distinct and ascending")
-    geometry = array_geometry(array)
+    band = row_band(
+        array_geometry(array), unit="chunk", fallback=max(1, int(array.shape[0]))
+    )
+    # Where the rows of each stored chunk end among the rows, in order.
+    ends = np.searchsorted(indices, np.arange(band, int(array.shape[0]), band))
 
     def blocks() -> Iterator[np.ndarray]:
-        if geometry is None:
-            if indices.size:
-                yield _read_array_rows(array, indices)
-            return
-        for block in partition_indices(geometry, 0, indices):
-            yield _read_array_rows(array, block.indices)
+        start = 0
+        for stop in [*ends.tolist(), int(indices.size)]:
+            if stop > start:
+                yield _read_array_rows(array, indices[start:stop])
+            start = stop
 
     return fingerprint_text_blocks(int(indices.size), array.dtype, blocks)
 

@@ -1884,3 +1884,40 @@ def test_aggregation_payload_rejects_each_tampered_record(tamper: str) -> None:
 
     _AGGREGATION_PAYLOAD_TAMPERS[tamper](group)
     assert not is_valid()
+
+
+@pytest.mark.parametrize("reused", [False, True], ids=["computed", "reused"])
+def test_scoring_a_pseudotime_is_refused_before_its_graph_is_read(
+    monkeypatch, reused: bool
+) -> None:
+    # A pseudotime finds its graph's components before it knows whether a
+    # saved one matches, so a call that reuses one reads the graph too, and
+    # both check the graph's load and the solve before they read it.
+    trajectory = _trajectory_store(np.eye(40, k=1) + np.eye(40, k=2))
+    store = trajectory.store
+    source_sink = pd.Series(np.r_[-1.0, np.zeros(38), 1.0], index=trajectory.cell_ids)
+    saved = store.trajectory.pseudotime(trajectory.graph, ss_vec=source_sink)
+    reads = _count_calls(monkeypatch, store, "_store_to_sparse")
+    options = {} if reused else {"invalidate_cache": True}
+    _set_budget(store, 1)
+    with pytest.raises(MemoryBudgetError) as refused:
+        store.trajectory.pseudotime(trajectory.graph, ss_vec=source_sink, **options)
+    assert str(refused.value).startswith(
+        "Calculating a pseudotime of 40 cells needs about"
+    )
+    assert reads == {}
+    assert trajectory.artifacts("pseudotime") == [saved]
+    # The budgets that the refusals name run the call, which reads the graph
+    # once.
+    budget = refused.value.needed_bytes
+    for _ in range(3):
+        _set_budget(store, budget)
+        try:
+            ref = store.trajectory.pseudotime(
+                trajectory.graph, ss_vec=source_sink, **options
+            )
+            break
+        except MemoryBudgetError as larger:
+            budget = larger.needed_bytes
+    assert reads == {"_store_to_sparse": 1}
+    assert (ref == saved) is reused
