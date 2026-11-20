@@ -418,6 +418,39 @@ class _SetResultPause:
         self._armed.on = True
 
 
+class _LoopWakePause:
+    """Pause the pool thread of an armed call just after it wakes an event loop.
+
+    The thread waits once its write to the loop's wake-up socket has
+    returned, as a thread that the OS deschedules after that write would,
+    which releases the GIL: it is still inside the callback that handed the
+    loop its result. A call arms the pause of the thread that runs it.
+    """
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import asyncio.selector_events as selector_events
+
+        self._armed = threading.local()
+        self.paused = threading.Event()
+        self.release = threading.Event()
+        write = selector_events.BaseSelectorEventLoop._write_to_self
+        pause = self
+
+        def paused_write(loop):  # type: ignore[no-untyped-def]
+            write(loop)
+            if getattr(pause._armed, "on", False):
+                pause._armed.on = False
+                pause.paused.set()
+                assert pause.release.wait(timeout=20)
+
+        monkeypatch.setattr(
+            selector_events.BaseSelectorEventLoop, "_write_to_self", paused_write
+        )
+
+    def arm(self) -> None:
+        self._armed.on = True
+
+
 @pytest.fixture
 def without_cyclic_collection() -> Iterator[None]:
     """Free objects by their references alone, so that one a cycle holds stays alive."""
@@ -437,24 +470,31 @@ class _Chunk:
 
 
 def _chunk_outlives_its_reader(
-    pool: ThreadPoolExecutor, pause: _SetResultPause
+    pool: ThreadPoolExecutor, pause: _SetResultPause | _LoopWakePause
 ) -> bool:
     """Whether a pool thread that pauses after returning a chunk keeps it once its reader let go."""
     import asyncio
     import weakref
 
     returned: list[weakref.ref[_Chunk]] = []
+    awaited = threading.Event()
 
     def decode() -> _Chunk:
+        # The call ends once its reader awaits it, so that the pool thread,
+        # not the loop, hands the chunk over.
+        assert awaited.wait(timeout=20)
         pause.arm()
         chunk = _Chunk()
         returned.append(weakref.ref(chunk))
         return chunk
 
     async def read() -> bool:
-        chunk = await asyncio.get_running_loop().run_in_executor(pool, decode)
+        reading = asyncio.get_running_loop().run_in_executor(pool, decode)
+        awaited.set()
+        chunk = await reading
         assert isinstance(chunk, _Chunk)
-        del chunk
+        # The reader lets go of the chunk and of the future that holds it.
+        del chunk, reading
         # The loop lets go of the callback that resumed this read, and its
         # future, once the read yields.
         await asyncio.sleep(0)
@@ -469,6 +509,11 @@ def _chunk_outlives_its_reader(
 
 
 @pytest.mark.parametrize(
+    "pause_kind",
+    [_SetResultPause, _LoopWakePause],
+    ids=["after setting the result", "after waking the loop"],
+)
+@pytest.mark.parametrize(
     ("pool", "keeps"),
     [
         (lambda: ThreadPoolExecutor(2), True),
@@ -479,13 +524,15 @@ def _chunk_outlives_its_reader(
     ids=["a plain pool", "a releasing pool", "the host threads", "a counted pool"],
 )
 def test_a_pool_thread_paused_after_its_result_keeps_no_chunk_its_reader_dropped(
-    monkeypatch, without_cyclic_collection, pool, keeps
+    monkeypatch, without_cyclic_collection, pool, keeps, pause_kind
 ) -> None:
     # A plain pool's thread keeps the chunk that it returned until it runs
     # again; CyteArc's pools hand the chunk to the reader's loop, so the
-    # paused thread holds nothing that reaches it. The decoding pools of
-    # three threads decode within zarr_decoding_threads(2) on a pool of two.
-    pause = _SetResultPause(monkeypatch)
+    # paused thread holds nothing that reaches it, whether it pauses once it
+    # has set the call's result or while it wakes the loop. The decoding
+    # pools of three threads decode within zarr_decoding_threads(2) on a pool
+    # of two.
+    pause = pause_kind(monkeypatch)
     executor = pool()
     try:
         with zarr_decoding_threads(2):
@@ -545,7 +592,8 @@ def test_a_read_leaves_no_decoded_chunk_with_a_paused_pool_thread(
     # The thread of the first decode pauses after it returns the chunk, as
     # a busy machine can deschedule it; the read decodes its other chunks on
     # other threads and copies every chunk into its result. Once the read has
-    # returned, no decoded chunk is left, though that thread has not run again.
+    # returned, no decoded chunk is left, nor the stored bytes it was decoded
+    # from, though that thread has not run again.
     import weakref
 
     values = np.arange(8_000, dtype=np.int64).reshape(80, 100)
@@ -554,6 +602,7 @@ def test_a_read_leaves_no_decoded_chunk_with_a_paused_pool_thread(
     )
     pause = _SetResultPause(monkeypatch)
     decoded: list[weakref.ref[Any]] = []
+    stored: list[weakref.ref[Any]] = []
     lock = threading.Lock()
     decode = ZstdCodec._decode_sync
 
@@ -563,6 +612,7 @@ def test_a_read_leaves_no_decoded_chunk_with_a_paused_pool_thread(
             if not decoded:
                 pause.arm()
             decoded.append(weakref.ref(chunk))
+            stored.append(weakref.ref(chunk_bytes))
         return chunk
 
     monkeypatch.setattr(ZstdCodec, "_decode_sync", recording)
@@ -574,6 +624,8 @@ def test_a_read_leaves_no_decoded_chunk_with_a_paused_pool_thread(
             assert pause.paused.wait(timeout=20)
             assert len(decoded) == 8
             assert [chunk() for chunk in decoded] == [None] * 8
+            # Nor are the stored bytes that each decode read.
+            assert [chunk() for chunk in stored] == [None] * 8
             checked.append(True)
         finally:
             pause.release.set()
@@ -583,6 +635,79 @@ def test_a_read_leaves_no_decoded_chunk_with_a_paused_pool_thread(
     finally:
         pause.release.set()
     assert checked == [True]
+
+
+def test_a_stopped_read_leaves_its_last_chunk_with_no_paused_pool_thread(
+    monkeypatch, without_cyclic_collection
+) -> None:
+    # A block stream stops a read on its own loop while a decode runs. The
+    # read waits for the decode to end and closes its loop, which never runs
+    # the call's hand-back; the decode's thread pauses after it returns the
+    # chunk, as a busy machine can deschedule it. Once the read has ended,
+    # the chunk is gone, though that thread has not run again.
+    import asyncio
+    import weakref
+
+    from cytearc.storage.async_execution import (
+        ReadStop,
+        ReadStopped,
+        read_stop_scope,
+        run_read,
+    )
+
+    pause = _SetResultPause(monkeypatch)
+    started = threading.Event()
+    release = threading.Event()
+    waiting = threading.Event()
+    returned: list[weakref.ref[_Chunk]] = []
+
+    def decode() -> _Chunk:
+        started.set()
+        assert release.wait(timeout=20)
+        pause.arm()
+        chunk = _Chunk()
+        returned.append(weakref.ref(chunk))
+        return chunk
+
+    wait_for_calls = async_execution._LentPool.wait_for_calls
+
+    def waiting_for_calls(lent: Any) -> None:
+        waiting.set()
+        wait_for_calls(lent)
+
+    monkeypatch.setattr(async_execution._LentPool, "wait_for_calls", waiting_for_calls)
+
+    async def read() -> _Chunk:
+        return await asyncio.to_thread(decode)
+
+    stop = ReadStop()
+    outcome: list[str] = []
+
+    def reader() -> None:
+        with read_stop_scope(stop):
+            try:
+                run_read(read())
+            except ReadStopped:
+                outcome.append("stopped")
+
+    thread = threading.Thread(target=reader)
+    thread.start()
+    try:
+        assert started.wait(timeout=20)
+        stop.stop()
+        # The stopped read waits for its decode, which then ends.
+        assert waiting.wait(timeout=20)
+        release.set()
+        thread.join(timeout=20)
+        assert not thread.is_alive()
+        assert pause.paused.wait(timeout=20)
+        assert outcome == ["stopped"]
+        assert len(returned) == 1
+        assert returned[0]() is None
+    finally:
+        release.set()
+        pause.release.set()
+        thread.join(timeout=20)
 
 
 def _held_call(started: threading.Event, release: threading.Event):  # type: ignore[no-untyped-def]

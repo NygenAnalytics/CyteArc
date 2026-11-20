@@ -88,7 +88,9 @@ class ArrayGeometry:
         on a busy machine can be after the read has moved on. CyteArc's codec
         pools hand each decoded chunk back to the read's event loop instead,
         so their threads keep none once the read has it, and this reserve is
-        headroom for a read that decodes on a pool that is not CyteArc's.
+        headroom. By default no read decodes on another pool: only Zarr's
+        opt-in ``FusedCodecPipeline``, with ``codec_pipeline.max_workers``
+        above 1, decodes on a pool of its own.
         """
         touched = max(1, int(chunks))
         decoding = min(touched, max(1, int(decodes)))

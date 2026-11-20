@@ -305,10 +305,11 @@ class _ReleasingPool(ThreadPoolExecutor):
     chunk that Zarr decoded, or the stored bytes it decoded from, would
     outlive the read that charged it. A call submitted from a running event
     loop, as Zarr submits each fetch and decode, therefore leaves its result
-    in a parcel and returns None, and the loop moves the result into the
-    future that it awaits; once the loop has the result, nothing that the
-    thread holds reaches it. A call from outside an event loop runs as on
-    any pool.
+    in a parcel and returns None, and passes the parcel to the loop as it
+    ends, which moves the result into the future that the loop awaits. Once
+    the call has ended, nothing that the thread holds reaches the parcel,
+    even where the loop never runs again, as when a stopped read closes it.
+    A call from outside an event loop runs as on any pool.
     """
 
     def submit[**P, R](
@@ -319,22 +320,25 @@ class _ReleasingPool(ThreadPoolExecutor):
         except RuntimeError:
             return super().submit(fn, *args, **kwargs)
         future = _HandedBackFuture()
-        parcel: list[Any] = [future]
+        # The call's closures reach the parcel through ``held``, which the
+        # call empties as it passes the parcel on.
+        held: list[list[Any]] = [[future]]
         calls = [functools.partial(fn, *args, **kwargs)]
-        del fn, args, kwargs
 
         def call() -> None:
             try:
-                parcel.append(calls.pop()())
+                held[0].append(calls.pop()())
             except BaseException as error:
-                parcel.append(_Raised(error))
+                held[0].append(_Raised(error))
 
         def ended(_call: Future[None]) -> None:
+            parcel = held.pop()
             try:
                 loop.call_soon_threadsafe(_hand_back, parcel)
             except RuntimeError:
-                # The loop has closed, so nothing awaits the outcome.
-                parcel.clear()
+                # The loop has closed, so nothing awaits the outcome, which
+                # goes with the parcel.
+                pass
 
         started = super().submit(call)
         future.call = weakref.ref(started)
