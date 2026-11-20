@@ -1,4 +1,3 @@
-import math
 import os
 import tempfile
 from collections.abc import Callable, Iterator, Mapping
@@ -16,11 +15,18 @@ from ...embeddings.harmony.fit import (
     stopped_before_convergence,
     unconverged_message,
 )
-from ...embeddings.harmony.parameters import HARMONY_DEFAULTS, check_harmony_options
+from ...embeddings.harmony.parameters import (
+    HARMONY_DEFAULTS,
+    check_harmony_options,
+    harmony_settings,
+)
+from ...embeddings.initialization import initialization_settings
 from ...embeddings.reduction import (
     _streaming_lsi_accumulator_bytes,
     pca_fit_resident_bytes,
     pca_pass_limit_message,
+    lsi_settings,
+    pca_settings,
     pca_solver,
     require_materialized_lsi_budget,
 )
@@ -60,7 +66,9 @@ from ...neighbors.graph import (
 from ...neighbors.index import (
     ann_index_file_bytes,
     ann_index_peak_bytes,
+    ann_index_settings,
     ann_query_block_bytes,
+    neighbor_settings,
     query_search_depth,
 )
 from ...neighbors.stages import (
@@ -486,38 +494,19 @@ _HARMONY_FIT_ARRAYS = (
 )
 
 
-def _sampling_fraction(value: Any, name: str) -> float:
-    if isinstance(value, bool):
-        raise TypeError(f"{name} must be a number")
-    try:
-        resolved = float(value)
-    except (TypeError, ValueError):
-        raise TypeError(f"{name} must be a number") from None
-    if not math.isfinite(resolved) or not 0 < resolved <= 1:
-        raise ValueError(f"{name} must be greater than 0 and at most 1")
-    return resolved
-
-
 def _validated_harmony_request(
     batch_columns: Any,
     harmony_params: dict[str, Any] | None,
     batch_size: int | None,
 ) -> tuple[dict[str, Any], int | None]:
     """Return resolved Harmony parameters and the optional block size."""
-    from ...embeddings.harmony import validate_harmony_parameters
-
     if not isinstance(batch_columns, list) or not batch_columns:
         raise ValueError("batch_columns must be a non-empty list")
     if any(not isinstance(column, str) or not column for column in batch_columns):
         raise ValueError("batch_columns must contain non-empty strings")
     if len(set(batch_columns)) != len(batch_columns):
         raise ValueError("batch_columns must be unique")
-    requested_batch_size = (
-        None
-        if batch_size is None
-        else integer_argument(batch_size, "batch_size", minimum=1)
-    )
-    return validate_harmony_parameters(harmony_params), requested_batch_size
+    return harmony_settings(harmony_params=harmony_params, batch_size=batch_size)
 
 
 def _require_kmeans_fit_budget(
@@ -1126,9 +1115,10 @@ class _GraphOperationsMixin(_GraphOperationsBase):
         Raises:
             UnmeasuredCellsError: If the assay did not measure a selected cell.
         """
-        log_transform = optional_bool_argument(log_transform, "log_transform")
-        renormalize_subset = optional_bool_argument(
-            renormalize_subset, "renormalize_subset"
+        from ...assay.normalization import normalization_settings
+
+        log_transform, renormalize_subset = normalization_settings(
+            log_transform=log_transform, renormalize_subset=renormalize_subset
         )
         invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         if not isinstance(cell_selection, ArtifactRef):
@@ -1783,7 +1773,9 @@ class _GraphOperationsMixin(_GraphOperationsBase):
             MemoryError: When the fit needs more than the datastore memory
                 budget, before the fit or the feature scaling starts.
         """
-        feat_scaling = bool_argument(feat_scaling, "feat_scaling")
+        feat_scaling, batch_size = pca_settings(
+            feat_scaling=feat_scaling, batch_size=batch_size
+        )
         show_elbow_plot = bool_argument(show_elbow_plot, "show_elbow_plot")
         invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         local_cache = _local_cache_argument(local_cache)
@@ -1839,30 +1831,32 @@ class _GraphOperationsMixin(_GraphOperationsBase):
         Returns:
             Reference to the LSI reduction artifact.
         """
-        skip_first = bool_argument(skip_first, "skip_first")
+        settings = lsi_settings(
+            skip_first=skip_first,
+            rand_state=rand_state,
+            solver=solver,
+            n_iter=n_iter,
+            n_oversamples=n_oversamples,
+            batch_size=batch_size,
+        )
         invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         local_cache = _local_cache_argument(local_cache)
-        if solver not in {"streaming", "materialized"}:
-            raise ValueError("solver must be 'streaming' or 'materialized'")
-        n_iter = integer_argument(n_iter, "n_iter", minimum=0)
-        n_oversamples = integer_argument(n_oversamples, "n_oversamples", minimum=0)
-        rand_state = integer_argument(rand_state, "rand_state", minimum=0)
         return self._run_reduction_artifact(
             method="lsi",
             normalized=normalized,
             dims=dims,
             pca_cell_selection=None,
             feat_scaling=False,
-            lsi_skip_first=bool(skip_first),
+            lsi_skip_first=settings.skip_first,
             custom_loadings=None,
-            rand_state=rand_state,
-            batch_size=batch_size,
+            rand_state=settings.rand_state,
+            batch_size=settings.batch_size,
             local_cache=local_cache,
             show_elbow_plot=False,
             invalidate_cache=invalidate_cache,
-            lsi_solver=solver,
-            lsi_n_iter=n_iter,
-            lsi_n_oversamples=n_oversamples,
+            lsi_solver=settings.solver,
+            lsi_n_iter=settings.n_iter,
+            lsi_n_oversamples=settings.n_oversamples,
         )
 
     @validation_scoped
@@ -2271,20 +2265,18 @@ class _GraphOperationsMixin(_GraphOperationsBase):
     ) -> ArtifactRef:
         if coordinates.assay is None:
             raise ValueError("Coordinate artifact has no assay")
-        resolved_batch_size = (
-            None
-            if batch_size is None
-            else integer_argument(batch_size, "batch_size", minimum=1)
+        settings = initialization_settings(
+            n_centroids=n_centroids,
+            rand_state=rand_state,
+            batch_size=batch_size,
+            kmeans_sampling=kmeans_sampling,
+            kmeans_batch_size=kmeans_batch_size,
         )
-        requested_clusters = integer_argument(n_centroids, "n_centroids", minimum=1)
-        resolved_rand_state = integer_argument(rand_state, "rand_state", minimum=0)
-        resolved_kmeans_sampling = _sampling_fraction(
-            kmeans_sampling,
-            "kmeans_sampling",
-        )
-        requested_kmeans_batch_size = integer_argument(
-            kmeans_batch_size, "kmeans_batch_size", minimum=1
-        )
+        resolved_batch_size = settings.batch_size
+        requested_clusters = settings.n_centroids
+        resolved_rand_state = settings.rand_state
+        resolved_kmeans_sampling = settings.kmeans_sampling
+        requested_kmeans_batch_size = settings.kmeans_batch_size
         stream, n_cells, coordinate_dims = self._coordinate_source(
             coordinates,
             batch_size=resolved_batch_size,
@@ -2294,10 +2286,8 @@ class _GraphOperationsMixin(_GraphOperationsBase):
             resolved_batch_size,
             n_cells,
         )
-        if requested_clusters < 2 or n_cells < 2:
-            raise ValueError(
-                "Embedding initialization requires at least two cells and centroids"
-            )
+        if n_cells < 2:
+            raise ValueError("Embedding initialization requires at least two cells")
         effective_clusters = min(
             requested_clusters,
             n_cells,
@@ -2413,7 +2403,7 @@ class _GraphOperationsMixin(_GraphOperationsBase):
 
         Args:
             coordinates: Coordinate artifact to cluster, such as a reduction.
-            n_centroids: Requested number of K-means centroids.
+            n_centroids: Requested number of K-means centroids, at least 2.
             rand_state: Non-negative K-means random seed.
             batch_size: Number of cells processed per block.
             kmeans_sampling: Fraction of cells considered during centroid seeding.
@@ -2492,19 +2482,21 @@ class _GraphOperationsMixin(_GraphOperationsBase):
             raise TypeError("coordinates must be an ArtifactRef")
         if coordinates.assay is None:
             raise ValueError("Coordinate artifact has no assay")
-        if ann_metric not in {"l2", "cosine"}:
-            raise ValueError("ann_metric must be one of: l2, cosine")
-        resolved_ann_efc = integer_argument(ann_efc, "ann_efc", minimum=1)
-        resolved_ann_ef = integer_argument(ann_ef, "ann_ef", minimum=1)
-        resolved_ann_m = integer_argument(ann_m, "ann_m", minimum=1)
-        resolved_rand_state = integer_argument(rand_state, "rand_state", minimum=0)
-        if resolved_ann_m < 2:
-            raise ValueError("ann_m must be at least two")
-        resolved_batch_size = (
-            None
-            if batch_size is None
-            else integer_argument(batch_size, "batch_size", minimum=1)
+        settings = ann_index_settings(
+            ann_metric=ann_metric,
+            ann_efc=ann_efc,
+            ann_ef=ann_ef,
+            ann_m=ann_m,
+            ann_parallel=ann_parallel,
+            rand_state=rand_state,
+            batch_size=batch_size,
         )
+        ann_metric = settings.ann_metric
+        resolved_ann_efc = settings.ann_efc
+        resolved_ann_ef = settings.ann_ef
+        resolved_ann_m = settings.ann_m
+        resolved_rand_state = settings.rand_state
+        resolved_batch_size = settings.batch_size
         if coordinates.kind not in NATIVE_COORDINATE_KINDS:
             raise ValueError(
                 "Coordinates must reference reduction, batch_correction, "
@@ -2674,14 +2666,8 @@ class _GraphOperationsMixin(_GraphOperationsBase):
         stored_coordinates = self._artifact_input_ref(ann_ref, "coordinates", None)
         if coordinates is not None and coordinates != stored_coordinates:
             raise ValueError("coordinates do not match the ANN artifact input")
-        requested_k = integer_argument(k, "k", minimum=1)
-        requested_ef = (
-            None if ann_ef is None else integer_argument(ann_ef, "ann_ef", minimum=1)
-        )
-        resolved_batch_size = (
-            None
-            if batch_size is None
-            else integer_argument(batch_size, "batch_size", minimum=1)
+        requested_k, requested_ef, resolved_batch_size = neighbor_settings(
+            k=k, ann_ef=ann_ef, batch_size=batch_size
         )
         coordinate_source, n_cells, dims = self._coordinate_source(
             stored_coordinates,
@@ -3144,14 +3130,20 @@ class _GraphOperationsMixin(_GraphOperationsBase):
         invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         l2_normalize = bool_argument(l2_normalize, "l2_normalize")
         from ...neighbors.graph import merge_graphs, snn_merge_peak_bytes
-        from ...neighbors.integration import _wnn_integration_many, wnn_peak_bytes
+        from ...neighbors.integration import (
+            _wnn_integration_many,
+            integration_settings,
+            wnn_peak_bytes,
+        )
 
         sources = list(sources)
         if method not in {"snn", "wnn"}:
             raise ValueError(
                 f"Method {method} not supported, choose one of these: 'snn', 'wnn'"
             )
-        chunk_size = integer_argument(chunk_size, "chunk_size", minimum=1)
+        chunk_size, l2_normalize = integration_settings(
+            chunk_size=chunk_size, l2_normalize=l2_normalize
+        )
         if len(sources) < 2:
             raise ValueError("Assay integration requires at least two assays")
         if not all(isinstance(source, ArtifactRef) for source in sources):

@@ -614,11 +614,33 @@ def test_atac_settings_are_checked_before_the_run(atac) -> None:
             "lsi dims, with the first component that skip_first leaves out, need "
             "7 of the prevalent peaks, but prevalent_peaks top_n is 6",
         ),
-        ({"lsi": {"skip_first": 1}}, TypeError, "lsi skip_first must be a boolean"),
+        ({"lsi": {"skip_first": 1}}, TypeError, "skip_first must be a boolean"),
     ):
         with pytest.raises(error) as caught:
             pipeline.atac(**settings)
         assert str(caught.value) == message
+    # The other LSI settings are checked as reduction.lsi checks them, so the
+    # plan, the recipe and the method raise the same message.
+    for lsi, error, message in (
+        ({"n_iter": -1}, ValueError, "n_iter must be at least 0"),
+        ({"n_oversamples": -1}, ValueError, "n_oversamples must be at least 0"),
+        ({"rand_state": -1}, ValueError, "rand_state must be at least 0"),
+        ({"rand_state": 1.0}, TypeError, "rand_state must be an integer"),
+        (
+            {"solver": "exact"},
+            ValueError,
+            "solver must be 'streaming' or 'materialized'",
+        ),
+        ({"batch_size": 0}, ValueError, "batch_size must be at least 1"),
+    ):
+        for call in (
+            lambda: pipeline.plan("atac", lsi=lsi),
+            lambda: pipeline.atac(lsi=lsi),
+            lambda: atac.datastore.reduction.lsi(atac.run["normalized"], **lsi),
+        ):
+            with pytest.raises(error) as caught:
+                call()
+            assert str(caught.value) == message
     assert _run_ids(atac.datastore) == before
 
     # At the limits, the settings resolve.
@@ -1393,6 +1415,24 @@ def test_multimodal_checks_its_method_runs_and_settings(cite) -> None:
             ),
         ):
             datastore.pipeline.multimodal(runs, leiden=False, **settings)
+    # The integration settings are checked as integration.modalities checks
+    # them, so the plan, the recipe and the method raise the same message.
+    neighbors = [cite.rna["neighbors"], cite.adt["neighbors"]]
+    for integration, error, message in (
+        ({"chunk_size": 0}, ValueError, "chunk_size must be at least 1"),
+        ({"chunk_size": 2.5}, TypeError, "chunk_size must be an integer"),
+        ({"l2_normalize": 1}, TypeError, "l2_normalize must be a boolean"),
+    ):
+        for call in (
+            lambda: datastore.pipeline.plan(
+                "multimodal", runs, integration=integration
+            ),
+            lambda: datastore.pipeline.multimodal(runs, integration=integration),
+            lambda: datastore.integration.modalities(neighbors, **integration),
+        ):
+            with pytest.raises(error) as caught:
+                call()
+            assert str(caught.value) == message
     assert _run_ids(datastore) == before
 
 

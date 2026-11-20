@@ -775,10 +775,14 @@ def test_ann_index_rejects_invalid_runtime_parameters(graph_store) -> None:
     reduction = datastore.reduction.pca(refs["normalized"], dims=4)
 
     for values, error, match in (
-        ({"ann_metric": "ip"}, ValueError, "l2, cosine"),
+        (
+            {"ann_metric": "ip"},
+            ValueError,
+            "^ann_metric must be 'l2' or 'cosine', got 'ip'$",
+        ),
         ({"ann_efc": 1.5}, TypeError, "ann_efc must be an integer"),
         ({"ann_ef": True}, TypeError, "ann_ef must be an integer"),
-        ({"ann_m": 1}, ValueError, "at least two"),
+        ({"ann_m": 1}, ValueError, "^ann_m must be at least 2$"),
         # Seed 0 is valid, as for Leiden, UMAP, and LSI.
         ({"rand_state": -1}, ValueError, "rand_state must be at least 0"),
         ({"batch_size": 0}, ValueError, "batch_size must be at least 1"),

@@ -5,7 +5,7 @@ from typing import Any, Literal
 import numpy as np
 
 from ..matrix import ChunkedArray
-from ..utils.arguments import integer_argument
+from ..utils.arguments import bool_argument, integer_argument
 from ..utils.compute import process_thread_limit
 from ..utils.logging import logger
 from ..utils.memory_budget import MemoryBudgetError
@@ -54,6 +54,88 @@ class _PcaModel:
     solver_: PcaSolver
     n_passes_: int
     component_shift_: float | None
+
+
+def pca_settings(
+    *, feat_scaling: object, batch_size: object
+) -> tuple[bool, int | None]:
+    """Check the PCA settings besides ``dims`` and return them as Python values.
+
+    ``reduction.pca`` and the PCA stage of a pipeline recipe check their
+    settings with this function, so a recipe refuses a setting before its
+    run starts, with the message that ``reduction.pca`` gives. A recipe
+    checks ``dims`` itself, since ``dims=0`` builds its graph on the
+    normalized values.
+
+    Returns:
+        ``feat_scaling``, and ``batch_size``, None when not given.
+
+    Raises:
+        TypeError: If ``feat_scaling`` is not a boolean or ``batch_size`` is
+            not an integer.
+        ValueError: If ``batch_size`` is below 1.
+    """
+    return (
+        bool_argument(feat_scaling, "feat_scaling"),
+        (
+            None
+            if batch_size is None
+            else integer_argument(batch_size, "batch_size", minimum=1)
+        ),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class LsiSettings:
+    """The LSI settings besides ``dims``, as canonical Python values.
+
+    Each attribute is the ``reduction.lsi`` keyword of the same name.
+    """
+
+    skip_first: bool
+    rand_state: int
+    solver: Literal["streaming", "materialized"]
+    n_iter: int
+    n_oversamples: int
+    batch_size: int | None
+
+
+def lsi_settings(
+    *,
+    skip_first: object,
+    rand_state: object,
+    solver: object,
+    n_iter: object,
+    n_oversamples: object,
+    batch_size: object,
+) -> LsiSettings:
+    """Check the LSI settings besides ``dims`` and return them as Python values.
+
+    ``reduction.lsi`` and the LSI stage of a pipeline recipe check their
+    settings with this function, so a recipe refuses a setting before its
+    run starts, with the message that ``reduction.lsi`` gives. The recipe
+    checks ``dims`` against its prevalent peaks itself.
+
+    Raises:
+        TypeError: If a setting has the wrong type.
+        ValueError: If ``solver`` is not ``"streaming"`` or
+            ``"materialized"``, or a setting is out of range.
+    """
+    skip = bool_argument(skip_first, "skip_first")
+    if solver != "streaming" and solver != "materialized":
+        raise ValueError("solver must be 'streaming' or 'materialized'")
+    return LsiSettings(
+        skip_first=skip,
+        solver=solver,
+        n_iter=integer_argument(n_iter, "n_iter", minimum=0),
+        n_oversamples=integer_argument(n_oversamples, "n_oversamples", minimum=0),
+        rand_state=integer_argument(rand_state, "rand_state", minimum=0),
+        batch_size=(
+            None
+            if batch_size is None
+            else integer_argument(batch_size, "batch_size", minimum=1)
+        ),
+    )
 
 
 def pca_solver(n_features: int) -> PcaSolver:

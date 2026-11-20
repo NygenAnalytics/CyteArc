@@ -30,6 +30,25 @@ _TOLERANCE_SCALE = 8.0 * np.finfo(np.float64).eps
 _TINY_WEIGHT = float(np.finfo(np.float32).tiny)
 
 
+def integration_settings(
+    *, chunk_size: object, l2_normalize: object
+) -> tuple[int, bool]:
+    """Check the settings of an assay integration and return them as Python values.
+
+    ``integration.modalities`` and the integration stage of the multimodal
+    recipe check their settings with this function, so a recipe refuses a
+    setting before its run starts, with the message that
+    ``integration.modalities`` gives.
+
+    Raises:
+        TypeError: If ``chunk_size`` is not an integer or ``l2_normalize`` is
+            not a boolean.
+        ValueError: If ``chunk_size`` is below 1.
+    """
+    checked_chunk_size = integer_argument(chunk_size, "chunk_size", minimum=1)
+    return checked_chunk_size, bool_argument(l2_normalize, "l2_normalize")
+
+
 def wnn_peak_bytes(
     n_cells: int,
     neighbor_counts: Sequence[int],

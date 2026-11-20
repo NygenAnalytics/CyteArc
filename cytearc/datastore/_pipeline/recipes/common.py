@@ -7,6 +7,7 @@ from typing import Any
 import numpy as np
 
 from ....assay import NormMethod
+from ....assay.normalization import resolve_normalization_params
 from ....metadata.membership import require_measured_cells
 from ....metadata.selection import valid_category_mask
 from ....storage.artifacts import ArtifactRef
@@ -21,7 +22,12 @@ from ..filtering import (
     resolve_filtering,
     snapshot_column_values,
 )
-from ..normalizers import MethodSetting, feat_scaling_default, resolve_normalizer
+from ..normalizers import (
+    MethodSetting,
+    applied_normalizers,
+    feat_scaling_default,
+    resolve_normalizer,
+)
 from ..settings import (
     HVG_TOP_N_DEFAULT,
     LOCALMAP_DIMS_DEFAULT,
@@ -218,6 +224,28 @@ class NormalizationSettings:
         return {"method": self.method, **self.flags}
 
 
+def require_applicable_flags(
+    store: Any,
+    assay: str,
+    normalizer: NormMethod,
+    flags: Mapping[str, Any],
+    *,
+    caller: str,
+) -> None:
+    """Refuse normalization flags that a run's normalizer cannot apply.
+
+    A run makes ``normalizer`` the assay's ``normMethod`` while its stages
+    run, and the stage that reads the flags refuses one that the normalizer
+    cannot apply, such as ``log_transform=True`` with Pearson residuals, so
+    the recipe checks them the same way before the run starts. ``caller``
+    names the operation of the stage, as its method names it.
+    """
+    with applied_normalizers(store, {assay: normalizer}):
+        resolve_normalization_params(
+            store._get_assay(assay), flags, caller=caller, default=True
+        )
+
+
 def resolve_normalization(
     store: Any, assay: str, normalization: object
 ) -> NormalizationSettings:
@@ -230,10 +258,13 @@ def resolve_normalization(
         TypeError: If a setting has the wrong type.
         ValueError: If ``method`` names no normalizer, a normalizer of another
             assay class, or a custom normalizer that is not the assay's
-            ``normMethod``.
+            ``normMethod``, or the normalizer cannot apply a flag.
     """
     _enabled, settings = stage_settings("normalization", normalization, optional=False)
     normalizer, method = resolve_normalizer(store, assay, settings.pop("method", None))
+    require_applicable_flags(
+        store, assay, normalizer, settings, caller="run_normalization"
+    )
     return NormalizationSettings(method=method, normalizer=normalizer, flags=settings)
 
 

@@ -2,8 +2,9 @@ import inspect
 import json
 import shutil
 import sys
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
@@ -1263,7 +1264,7 @@ def test_recipe_refuses_doublets_on_a_pca_without_feature_scaling(readonly_store
 def test_recipes_refuse_an_ann_metric_that_the_index_does_not_take(
     readonly_store, adt_store, metric
 ):
-    message = f"ann_index['ann_metric'] must be 'l2' or 'cosine', got {metric!r}"
+    message = f"ann_metric must be 'l2' or 'cosine', got {metric!r}"
 
     # The ANN index refuses the metric whether or not doublet scoring builds
     # a mapping reference on it, so every recipe with a graph refuses it.
@@ -1287,6 +1288,434 @@ def test_doublet_scoring_takes_either_metric_of_the_index(readonly_store, metric
 
     assert plan.config["stages"]["ann_index"] == {"ann_metric": metric, "ann_m": 8}
     assert _doublet_action(plan) is not None
+
+
+@pytest.fixture(scope="module")
+def method_inputs(settings_base: str, tmp_path_factory) -> SimpleNamespace:
+    """A read-only copy of the base with the inputs of each stage's method.
+
+    It holds the run's artifacts, Leiden clusters of its graph and an
+    embedding initialization, so each method can be called with the settings
+    that a recipe passes it.
+    """
+    location = tmp_path_factory.mktemp("settings_methods") / "data.zarr"
+    shutil.copytree(settings_base, location)
+    # The antibody assay stands in for hashtags, whose demultiplexing checks
+    # its settings before it reads them.
+    writable = DataStore(
+        str(location), default_assay="RNA", assay_types={"assay2": "HTO"}
+    )
+    (run,) = writable.pipeline.list_runs()
+    clusters = writable.clusters.leiden(run["connectivity_map"])
+    initialization = writable.embeddings.initialization(run["pca"], n_centroids=20)
+    return SimpleNamespace(
+        store=DataStore(str(location), default_assay="RNA", zarr_mode="r"),
+        cells=run["analysis_cell_selection"],
+        features=run["highly_variable_features"],
+        normalized=run["normalized"],
+        pca=run["pca"],
+        ann_index=run["ann_index"],
+        neighbors=run["neighbors"],
+        graph=run["connectivity_map"],
+        clusters=clusters,
+        initialization=initialization,
+    )
+
+
+# The public method of each stage, called on method_inputs with settings.
+_STAGE_CALLS: dict[str, Callable[..., Any]] = {
+    "hashing": lambda inputs, **settings: inputs.store.qc.hto_demultiplexing(
+        inputs.cells, from_assay="assay2", **settings
+    ),
+    "cell_cycle": lambda inputs, **settings: inputs.store.scores.cell_cycle(
+        inputs.cells, **settings
+    ),
+    "normalization": lambda inputs, **settings: inputs.store.features.normalize(
+        inputs.cells, inputs.features, **settings
+    ),
+    "pca": lambda inputs, **settings: inputs.store.reduction.pca(
+        inputs.normalized, **settings
+    ),
+    "harmony": lambda inputs, **settings: inputs.store.reduction.harmony(
+        inputs.pca, **settings
+    ),
+    "ann_index": lambda inputs, **settings: inputs.store.graph.ann_index(
+        inputs.pca, **settings
+    ),
+    "neighbors": lambda inputs, **settings: inputs.store.graph.neighbors(
+        inputs.ann_index, **settings
+    ),
+    "connectivity": lambda inputs, **settings: inputs.store.graph.connectivity(
+        inputs.neighbors, **settings
+    ),
+    "embedding_initialization": lambda inputs, **settings: (
+        inputs.store.embeddings.initialization(inputs.pca, **settings)
+    ),
+    "umap": lambda inputs, **settings: inputs.store.embeddings.umap(
+        inputs.graph, inputs.initialization, **settings
+    ),
+    "leiden": lambda inputs, **settings: inputs.store.clusters.leiden(
+        inputs.graph, **settings
+    ),
+    "paris": lambda inputs, **settings: inputs.store.clusters.paris(
+        inputs.graph, **settings
+    ),
+    "doublets": lambda inputs, **settings: inputs.store.qc.doublets(
+        inputs.clusters, inputs.graph, **settings
+    ),
+}
+# Settings that each stage's method refuses, with the method's error and
+# message, which the recipe and its plan raise before a run starts.
+_REFUSED_SETTINGS: list[tuple[str, dict[str, Any], type[Exception], str]] = [
+    ("hashing", {"random_seed": "1"}, TypeError, "random_seed must be an integer"),
+    (
+        "hashing",
+        {"positive_quantile": 1},
+        ValueError,
+        "positive_quantile must be greater than 0 and less than 1",
+    ),
+    ("cell_cycle", {"n_bins": 1}, ValueError, "n_bins must be at least 2"),
+    ("cell_cycle", {"ctrl_size": 0}, ValueError, "ctrl_size must be at least 1"),
+    ("cell_cycle", {"rand_seed": -1}, ValueError, "rand_seed must be at least 0"),
+    (
+        "cell_cycle",
+        {"log_transform": 1},
+        TypeError,
+        "log_transform must be a boolean or None",
+    ),
+    (
+        "cell_cycle",
+        {"s_genes": "MCM5"},
+        TypeError,
+        "s_genes must be a sequence of gene names",
+    ),
+    (
+        "normalization",
+        {"log_transform": 1},
+        TypeError,
+        "log_transform must be a boolean or None",
+    ),
+    (
+        "normalization",
+        {"renormalize_subset": "yes"},
+        TypeError,
+        "renormalize_subset must be a boolean or None",
+    ),
+    (
+        "pca",
+        {"dims": 3, "feat_scaling": 0},
+        TypeError,
+        "feat_scaling must be a boolean",
+    ),
+    (
+        "pca",
+        {"dims": 3, "feat_scaling": "no"},
+        TypeError,
+        "feat_scaling must be a boolean",
+    ),
+    ("pca", {"dims": 3, "batch_size": 0}, ValueError, "batch_size must be at least 1"),
+    (
+        "harmony",
+        {"batch_columns": ["ids"], "batch_size": 0},
+        ValueError,
+        "batch_size must be at least 1",
+    ),
+    (
+        "ann_index",
+        {"ann_metric": "ip"},
+        ValueError,
+        "ann_metric must be 'l2' or 'cosine', got 'ip'",
+    ),
+    ("ann_index", {"ann_efc": 0}, ValueError, "ann_efc must be at least 1"),
+    ("ann_index", {"ann_ef": 0}, ValueError, "ann_ef must be at least 1"),
+    ("ann_index", {"ann_m": 1}, ValueError, "ann_m must be at least 2"),
+    ("ann_index", {"ann_m": 24.0}, TypeError, "ann_m must be an integer"),
+    ("ann_index", {"ann_parallel": 1}, TypeError, "ann_parallel must be a boolean"),
+    ("ann_index", {"rand_state": -1}, ValueError, "rand_state must be at least 0"),
+    ("ann_index", {"batch_size": 0}, ValueError, "batch_size must be at least 1"),
+    ("neighbors", {"k": 0}, ValueError, "k must be at least 1"),
+    ("neighbors", {"k": 3, "ann_ef": 0}, ValueError, "ann_ef must be at least 1"),
+    (
+        "neighbors",
+        {"k": 3, "batch_size": 0},
+        ValueError,
+        "batch_size must be at least 1",
+    ),
+    (
+        "connectivity",
+        {"bandwidth": 0},
+        ValueError,
+        "bandwidth must be finite and greater than zero",
+    ),
+    (
+        "connectivity",
+        {"local_connectivity": -1},
+        ValueError,
+        "local_connectivity must be finite and non-negative",
+    ),
+    (
+        "embedding_initialization",
+        {"n_centroids": 0},
+        ValueError,
+        "n_centroids must be at least 2",
+    ),
+    (
+        "embedding_initialization",
+        {"n_centroids": 1},
+        ValueError,
+        "n_centroids must be at least 2",
+    ),
+    (
+        "embedding_initialization",
+        {"rand_state": -1},
+        ValueError,
+        "rand_state must be at least 0",
+    ),
+    (
+        "embedding_initialization",
+        {"batch_size": 0},
+        ValueError,
+        "batch_size must be at least 1",
+    ),
+    (
+        "embedding_initialization",
+        {"kmeans_sampling": 0},
+        ValueError,
+        "kmeans_sampling must be greater than 0 and at most 1",
+    ),
+    (
+        "embedding_initialization",
+        {"kmeans_sampling": "half"},
+        TypeError,
+        "kmeans_sampling must be a number",
+    ),
+    (
+        "embedding_initialization",
+        {"kmeans_batch_size": 0},
+        ValueError,
+        "kmeans_batch_size must be at least 1",
+    ),
+    (
+        "umap",
+        {"min_dist": -1},
+        ValueError,
+        "min_dist must be from 0 to spread (2.0), got -1.0",
+    ),
+    (
+        "umap",
+        {"spread": 0.5},
+        ValueError,
+        "min_dist must be from 0 to spread (0.5), got 1.0",
+    ),
+    ("umap", {"spread": 0}, ValueError, "spread must be greater than 0"),
+    ("umap", {"spread": -1}, ValueError, "spread must be greater than 0"),
+    ("umap", {"spread": "2"}, TypeError, "spread must be a real number"),
+    ("umap", {"n_epochs": 0}, ValueError, "n_epochs must be at least 1"),
+    (
+        "umap",
+        {"repulsion_strength": -1},
+        ValueError,
+        "repulsion_strength must be at least 0",
+    ),
+    ("umap", {"initial_alpha": -1}, ValueError, "initial_alpha must be at least 0"),
+    (
+        "umap",
+        {"negative_sample_rate": -1},
+        ValueError,
+        "negative_sample_rate must be at least 0",
+    ),
+    ("umap", {"dens_lambda": -1}, ValueError, "dens_lambda must be at least 0"),
+    ("umap", {"dens_frac": 1.5}, ValueError, "dens_frac must be from 0 to 1"),
+    ("umap", {"dens_var_shift": -1}, ValueError, "dens_var_shift must be at least 0"),
+    (
+        "umap",
+        {"use_density_map": 1},
+        TypeError,
+        "use_density_map must be a boolean",
+    ),
+    ("umap", {"parallel": "no"}, TypeError, "parallel must be a boolean"),
+    ("umap", {"random_seed": -1}, ValueError, "random_seed must be at least 0"),
+    (
+        "leiden",
+        {"backend": "louvain"},
+        ValueError,
+        "backend must be 'cytearc', 'igraph' or 'leidenalg'",
+    ),
+    ("leiden", {"random_seed": -1}, ValueError, "random_seed must be at least 0"),
+    ("paris", {"n_clusters": 0}, ValueError, "n_clusters must be positive"),
+    (
+        "paris",
+        {"n_clusters": "many"},
+        ValueError,
+        "n_clusters must be an integer or 'auto'",
+    ),
+    (
+        "paris",
+        {"n_clusters": 3, "min_cluster_size": 5},
+        ValueError,
+        "min_cluster_size is only valid when n_clusters='auto'",
+    ),
+    (
+        "paris",
+        {"min_cluster_size": 1},
+        ValueError,
+        "min_cluster_size must be at least 2",
+    ),
+    (
+        "doublets",
+        {"cluster_sample_fraction": 0},
+        ValueError,
+        "cluster_sample_fraction must be a finite number > 0 and <= 1",
+    ),
+    (
+        "doublets",
+        {"max_cells_per_cluster": 0},
+        ValueError,
+        "max_cells_per_cluster must be at least 1",
+    ),
+    (
+        "doublets",
+        {"simulation_ratio": 0},
+        ValueError,
+        "simulation_ratio must be a finite number > 0",
+    ),
+    (
+        "doublets",
+        {"simulation_ratio": "2"},
+        TypeError,
+        "simulation_ratio must be a real number",
+    ),
+    (
+        "doublets",
+        {"heterotypic_fraction": 2},
+        ValueError,
+        "heterotypic_fraction must be a finite number >= 0 and <= 1",
+    ),
+    ("doublets", {"save_k": 0}, ValueError, "save_k must be at least 1"),
+    ("doublets", {"save_k": 30.0}, TypeError, "save_k must be an integer"),
+    (
+        "doublets",
+        {"expected_doublet_rate": 1.5},
+        ValueError,
+        "expected_doublet_rate must be a finite number > 0 and < 1",
+    ),
+    (
+        "doublets",
+        {"expected_doublet_rate": 1},
+        ValueError,
+        "expected_doublet_rate must be a finite number > 0 and < 1",
+    ),
+    (
+        "doublets",
+        {"threshold": 2},
+        ValueError,
+        "threshold must be a finite number >= 0 and <= 1",
+    ),
+    ("doublets", {"smoothing_t": -1}, ValueError, "smoothing_t must be at least 0"),
+    (
+        "doublets",
+        {"normalize_scores": 1},
+        TypeError,
+        "normalize_scores must be a boolean",
+    ),
+    ("doublets", {"random_seed": -1}, ValueError, "random_seed must be at least 0"),
+]
+
+
+def test_settings_at_the_bounds_of_their_methods_pass_a_recipe(readonly_store):
+    # Each value is the least or the most that the stage's method takes, and
+    # NumPy scalars are the same settings as Python numbers.
+    stages: dict[str, dict[str, Any]] = {
+        "cell_cycle": {"ctrl_size": 1, "n_bins": 2, "rand_seed": 0},
+        "normalization": {"log_transform": None, "renormalize_subset": True},
+        "pca": {"dims": 10, "feat_scaling": np.True_, "batch_size": 1},
+        "ann_index": {
+            "ann_efc": 1,
+            "ann_ef": 1,
+            "ann_m": np.int64(2),
+            "ann_parallel": True,
+            "rand_state": 0,
+            "batch_size": 1,
+        },
+        "neighbors": {"k": 1, "ann_ef": 1, "batch_size": 1},
+        "connectivity": {"local_connectivity": 0, "bandwidth": 1e-9},
+        "embedding_initialization": {
+            "n_centroids": 2,
+            "rand_state": 0,
+            "batch_size": 1,
+            "kmeans_sampling": 1,
+            "kmeans_batch_size": 1,
+        },
+        "umap": {
+            "spread": 2,
+            "min_dist": 2,
+            "n_epochs": 1,
+            "repulsion_strength": 0,
+            "initial_alpha": 0,
+            "negative_sample_rate": 0,
+            "dens_lambda": 0,
+            "dens_frac": 1,
+            "dens_var_shift": 0,
+            "random_seed": 0,
+        },
+        "leiden": {"partitions": [1.0], "backend": "leidenalg", "random_seed": 0},
+        "paris": {"n_clusters": 1},
+        "doublets": {
+            "cluster_sample_fraction": 1,
+            "max_cells_per_cluster": 1,
+            "simulation_ratio": 1e-9,
+            "heterotypic_fraction": 1,
+            "save_k": 1,
+            "expected_doublet_rate": 0.999,
+            "threshold": 0,
+            "smoothing_t": 0,
+            "normalize_scores": True,
+            "random_seed": 0,
+        },
+    }
+
+    recorded = _resolve(readonly_store, **stages).config["stages"]
+
+    for stage, settings in stages.items():
+        given = {key: parameter_value(value, key) for key, value in settings.items()}
+        assert {key: recorded[stage][key] for key in settings} == given, stage
+    # The other end of the ranges that include both ends.
+    recorded = _resolve(
+        readonly_store,
+        umap={"min_dist": 0, "dens_frac": 0},
+        paris={"min_cluster_size": 2},
+        doublets={"heterotypic_fraction": 0, "threshold": 1},
+    ).config["stages"]
+    assert recorded["umap"] == {"min_dist": 0, "dens_frac": 0}
+    assert recorded["paris"] == {"min_cluster_size": 2}
+    assert recorded["doublets"] == {"heterotypic_fraction": 0, "threshold": 1}
+
+
+@pytest.mark.parametrize(
+    ("stage", "settings", "error", "message"),
+    _REFUSED_SETTINGS,
+    ids=[f"{stage}-{'-'.join(settings)}" for stage, settings, *_ in _REFUSED_SETTINGS],
+)
+def test_a_recipe_and_its_plan_refuse_a_setting_that_the_stage_method_refuses(
+    rejection_store, method_inputs, stage, settings, error, message
+):
+    store = rejection_store
+    # Doublet scoring needs a Leiden candidate; a Leiden case sets its own.
+    keywords = _fast(**{"leiden": {"partitions": [1.0]}, stage: settings})
+    before = _written(store)
+
+    with pytest.raises(error) as planned:
+        store.pipeline.plan("rna", **keywords)
+    with pytest.raises(error) as ran:
+        store.pipeline.rna(**keywords)
+    with pytest.raises(error) as called:
+        _STAGE_CALLS[stage](method_inputs, **settings)
+
+    assert str(planned.value) == message
+    assert str(ran.value) == message
+    assert str(called.value) == message
+    # Neither the plan nor the recipe wrote a run record or an artifact.
+    assert _written(store) == before
 
 
 def test_pca_dims_zero_builds_the_graph_on_normalized_values(

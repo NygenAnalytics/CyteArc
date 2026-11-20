@@ -8,13 +8,13 @@ import pytest
 import zarr
 from zarr.storage import MemoryStore
 
-from cytearc.datastore._operations.graph import _sampling_fraction
 from cytearc.datastore.datastore import DataStore
 from cytearc.datastore.graph_datastore import GraphDataStore
 from cytearc.graph.feature_projection import (
     resolve_native_graph_inputs,
 )
 from cytearc.embeddings.imported_storage import validate_imported_coordinates_artifact
+from cytearc.embeddings.initialization import _sampling_fraction
 from cytearc.graph.arguments import NeighborQueryArguments
 from cytearc.storage.artifacts import (
     ArtifactRef,
@@ -433,7 +433,9 @@ def test_embedding_initialization_rejects_detached_and_tiny_sources() -> None:
         )
 
     store._coordinate_source = Mock(return_value=(SimpleNamespace(data=None), 1, 2))
-    with pytest.raises(ValueError, match="at least two cells and centroids"):
+    with pytest.raises(
+        ValueError, match="^Embedding initialization requires at least two cells$"
+    ):
         store.embeddings.initialization(_ref("reduction", "c"), n_centroids=2)
 
 

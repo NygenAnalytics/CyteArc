@@ -1,11 +1,13 @@
 import math
 import platform
 import sys
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
 
-from ..utils.arguments import integer_argument
+from ..graph.distances import NEIGHBOR_DISTANCE_METRICS
+from ..utils.arguments import bool_argument, integer_argument, quoted_value
 
 # Bytes of malloc's header and rounding at most, per upper-level link list.
 _ALLOCATION_OVERHEAD_BYTES = 24
@@ -107,6 +109,89 @@ def ann_index_file_bytes(n_cells: int, dims: int, m: int) -> int:
     upper = 4 * (links + 1) / (links - 1)
     return _ANN_INDEX_HEADER_BYTES + math.ceil(
         cells * (_level0_bytes(width, links) + 4 + upper)
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class AnnIndexSettings:
+    """The settings of an ANN index, as canonical Python values.
+
+    Each attribute is the ``graph.ann_index`` keyword of the same name.
+    """
+
+    ann_metric: str
+    ann_efc: int
+    ann_ef: int
+    ann_m: int
+    ann_parallel: bool
+    rand_state: int
+    batch_size: int | None
+
+
+def ann_index_settings(
+    *,
+    ann_metric: object,
+    ann_efc: object,
+    ann_ef: object,
+    ann_m: object,
+    ann_parallel: object,
+    rand_state: object,
+    batch_size: object,
+) -> AnnIndexSettings:
+    """Check the settings of an ANN index and return them as canonical Python values.
+
+    ``graph.ann_index`` and the ANN index stage of a pipeline recipe check
+    their settings with this function, so a recipe refuses a setting before
+    its run starts, with the message that ``graph.ann_index`` gives.
+
+    Raises:
+        TypeError: If a setting has the wrong type.
+        ValueError: If ``ann_metric`` is not ``"l2"`` or ``"cosine"``, or a
+            setting is out of range.
+    """
+    if not isinstance(ann_metric, str) or ann_metric not in NEIGHBOR_DISTANCE_METRICS:
+        raise ValueError(
+            f"ann_metric must be 'l2' or 'cosine', got {quoted_value(ann_metric)}"
+        )
+    return AnnIndexSettings(
+        ann_metric=ann_metric,
+        ann_efc=integer_argument(ann_efc, "ann_efc", minimum=1),
+        ann_ef=integer_argument(ann_ef, "ann_ef", minimum=1),
+        ann_m=integer_argument(ann_m, "ann_m", minimum=2),
+        ann_parallel=bool_argument(ann_parallel, "ann_parallel"),
+        rand_state=integer_argument(rand_state, "rand_state", minimum=0),
+        batch_size=(
+            None
+            if batch_size is None
+            else integer_argument(batch_size, "batch_size", minimum=1)
+        ),
+    )
+
+
+def neighbor_settings(
+    *, k: object, ann_ef: object, batch_size: object
+) -> tuple[int, int | None, int | None]:
+    """Check the settings of a neighbor query and return them as Python integers.
+
+    ``graph.neighbors`` and the neighbors stage of a pipeline recipe check
+    their settings with this function, so a recipe refuses a setting before
+    its run starts, with the message that ``graph.neighbors`` gives.
+
+    Returns:
+        ``k``, and ``ann_ef`` and ``batch_size``, each None when not given.
+
+    Raises:
+        TypeError: If a setting is not an integer.
+        ValueError: If a setting is below 1.
+    """
+    return (
+        integer_argument(k, "k", minimum=1),
+        None if ann_ef is None else integer_argument(ann_ef, "ann_ef", minimum=1),
+        (
+            None
+            if batch_size is None
+            else integer_argument(batch_size, "batch_size", minimum=1)
+        ),
     )
 
 

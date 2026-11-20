@@ -1,6 +1,73 @@
+import math
+from dataclasses import dataclass
+from typing import Any
+
 import numpy as np
 
+from ..utils.arguments import integer_argument
 from ..utils.arrays import rescale_array
+
+
+@dataclass(frozen=True, slots=True)
+class InitializationSettings:
+    """The settings of an embedding initialization, as canonical Python values.
+
+    Each attribute is the ``embeddings.initialization`` keyword of the same
+    name.
+    """
+
+    n_centroids: int
+    rand_state: int
+    batch_size: int | None
+    kmeans_sampling: float
+    kmeans_batch_size: int
+
+
+def _sampling_fraction(value: Any, name: str) -> float:
+    if isinstance(value, bool):
+        raise TypeError(f"{name} must be a number")
+    try:
+        resolved = float(value)
+    except (TypeError, ValueError):
+        raise TypeError(f"{name} must be a number") from None
+    if not math.isfinite(resolved) or not 0 < resolved <= 1:
+        raise ValueError(f"{name} must be greater than 0 and at most 1")
+    return resolved
+
+
+def initialization_settings(
+    *,
+    n_centroids: object,
+    rand_state: object,
+    batch_size: object,
+    kmeans_sampling: object,
+    kmeans_batch_size: object,
+) -> InitializationSettings:
+    """Check the settings of an embedding initialization and return them as Python values.
+
+    ``embeddings.initialization`` and the embedding initialization stage of
+    a pipeline recipe check their settings with this function, so a recipe
+    refuses a setting before its run starts, with the message that
+    ``embeddings.initialization`` gives. K-means needs at least two
+    centroids.
+
+    Raises:
+        TypeError: If a setting has the wrong type.
+        ValueError: If a setting is out of range.
+    """
+    return InitializationSettings(
+        batch_size=(
+            None
+            if batch_size is None
+            else integer_argument(batch_size, "batch_size", minimum=1)
+        ),
+        n_centroids=integer_argument(n_centroids, "n_centroids", minimum=2),
+        rand_state=integer_argument(rand_state, "rand_state", minimum=0),
+        kmeans_sampling=_sampling_fraction(kmeans_sampling, "kmeans_sampling"),
+        kmeans_batch_size=integer_argument(
+            kmeans_batch_size, "kmeans_batch_size", minimum=1
+        ),
+    )
 
 
 def initial_embedding(

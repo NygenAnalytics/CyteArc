@@ -266,10 +266,12 @@ class PipelineAccessor:
 
         The plan writes nothing and works on a read-only store. It reads run
         records, cell and feature metadata, and the stored artifacts that
-        reuse checks read, never a count matrix. A stage's method checks some
-        settings only when the stage runs: when every stage before it would
-        be reused, the plan reaches that check and raises its error, as the
-        run would.
+        reuse checks read, never a count matrix. It refuses a setting that a
+        stage's method refuses, with the method's message, as the recipe
+        does before it writes. A stage's method checks the limits that depend
+        on the data only when the stage runs: when every stage before it
+        would be reused, the plan reaches that check and raises its error,
+        as the run would.
 
         Args:
             recipe: ``"rna"``, ``"atac"``, ``"adt"``, ``"multimodal"``, or
@@ -282,7 +284,8 @@ class PipelineAccessor:
 
         Raises:
             ValueError: If ``recipe`` names no recipe, or the call fails the
-                recipe's checks.
+                recipe's checks, such as a setting out of the range that the
+                stage's method takes.
             TypeError: If the call passes ``callback`` or ``cancel``, a
                 keyword that the recipe lacks, or fails the recipe's checks.
             KeyError: If the call names a missing column.

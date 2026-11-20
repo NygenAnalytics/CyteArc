@@ -126,9 +126,9 @@ def resolve_atac(
             f"{n_peaks} peaks of assay {assay_name!r}"
         )
     normalization_settings = resolve_normalization(store, assay_name, normalization)
+    # stage_settings checked the settings, so skip_first is a bool.
     _lsi, lsi_settings = stage_settings("lsi", lsi, optional=False)
     skip_first = lsi_settings.get("skip_first", LSI_SKIP_FIRST_DEFAULT)
-    skip_first = bool_argument(skip_first, "lsi skip_first")
     lsi_rank = lsi_settings.get("dims", LSI_DIMS_DEFAULT) + int(skip_first)
     if lsi_rank > top_n:
         raise ValueError(

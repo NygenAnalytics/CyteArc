@@ -50,6 +50,28 @@ def _validated_positive_quantile(value: object) -> float:
     return quantile
 
 
+def demultiplexing_settings(
+    *, random_seed: object, positive_quantile: object
+) -> tuple[int, float]:
+    """Check the seed and background quantile of HTO demultiplexing.
+
+    ``qc.hto_demultiplexing`` and the hashing stage of the ``rna`` recipe
+    check their settings with this function, so the recipe refuses a setting
+    before its run starts, with the message that ``qc.hto_demultiplexing``
+    gives. The recipe checks the hashtags and the sample column against the
+    store itself.
+
+    Raises:
+        TypeError: If ``random_seed`` is not a Python integer or
+            ``positive_quantile`` is not a real number.
+        ValueError: If ``positive_quantile`` is not finite or not between 0
+            and 1.
+    """
+    if isinstance(random_seed, bool) or not isinstance(random_seed, int):
+        raise TypeError("random_seed must be an integer")
+    return random_seed, _validated_positive_quantile(positive_quantile)
+
+
 def _hto_demux_method(positive_quantile: float) -> dict[str, object]:
     return {
         "normalization": _NORMALIZATION_METHOD,

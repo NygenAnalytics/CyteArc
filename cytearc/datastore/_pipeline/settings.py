@@ -7,8 +7,13 @@ from typing import Any
 
 import numpy as np
 
-from ...clustering.leiden import canonical_resolution
+from ...assay.normalization import normalization_settings
+from ...clustering.leiden import canonical_resolution, leiden_settings
+from ...clustering.paris_multiscale import paris_settings
 from ...embeddings import localmap, sgtsne
+from ...embeddings.harmony.parameters import harmony_settings
+from ...embeddings.initialization import initialization_settings
+from ...embeddings.reduction import lsi_settings, pca_settings
 from ...features.gene_reference import species_registry
 from ...features.variability import (
     HVG_FLAVOR_OPTION_NAMES,
@@ -17,7 +22,9 @@ from ...features.variability import (
     hvg_options,
 )
 from ...graph.arguments import graph_load_flags, umap_graph_flags
-from ...graph.distances import NEIGHBOR_DISTANCE_METRICS
+from ...neighbors.graph import validate_connectivity_parameters
+from ...neighbors.index import ann_index_settings, neighbor_settings
+from ...neighbors.integration import integration_settings
 from ...perturbation.associations import association_settings
 from ...perturbation.clusters import cluster_settings
 from ...perturbation.edistance import edistance_settings
@@ -29,7 +36,9 @@ from ...perturbation.mixscape import mixscape_settings
 from ...perturbation.profiles import profile_settings
 from ...perturbation.signature import signature_settings
 from ...quality_control.cell_calling import validated_fdr, validated_settings
-from ...quality_control.hto import _validated_positive_quantile
+from ...quality_control.cell_cycle import cell_cycle_settings
+from ...quality_control.doublets import doublet_settings
+from ...quality_control.hto import demultiplexing_settings
 from ...utils.arguments import bool_argument, integer_argument
 from ...utils.logging import logger
 from .._operations.cell_barcodes import barcode_pattern as checked_barcode_pattern
@@ -470,13 +479,43 @@ def finite_real(value: Any, name: str) -> float:
     return resolved
 
 
-# The integer settings that a recipe checks before a run record exists.
+# The integer settings that the ATAC recipe checks itself before a run record
+# exists, since it compares them with each other and with the assay's peaks.
 _POSITIVE_INTEGER_SETTINGS: Mapping[str, tuple[str, ...]] = MappingProxyType(
     {
-        "neighbors": ("k",),
         "prevalent_peaks": ("top_n",),
         "lsi": ("dims",),
     }
+)
+# The check that each of these stages' methods runs on its settings before it
+# reads anything, and the method whose defaults the settings omit. A check
+# takes the settings by the method's keyword names. The PCA and LSI checks
+# leave ``dims`` to the recipe, for which PCA ``dims=0`` builds the graph on
+# the normalized values, and the Harmony check leaves the batch columns,
+# which the recipe checks against the store.
+_SETTING_CHECKS: Mapping[str, tuple[Callable[..., Any], Callable[..., Any]]] = (
+    MappingProxyType(
+        {
+            "hashing": (demultiplexing_settings, _QC._qc_hto_demultiplexing),
+            "cell_cycle": (cell_cycle_settings, _QC._scores_cell_cycle),
+            "pca": (pca_settings, _GRAPH._reduction_pca),
+            "lsi": (lsi_settings, _GRAPH._reduction_lsi),
+            "harmony": (harmony_settings, _GRAPH._reduction_harmony),
+            "ann_index": (ann_index_settings, _GRAPH._graph_ann_index),
+            "neighbors": (neighbor_settings, _GRAPH._graph_neighbors),
+            "connectivity": (
+                validate_connectivity_parameters,
+                _GRAPH._graph_connectivity,
+            ),
+            "integration": (integration_settings, _GRAPH._integration_modalities),
+            "embedding_initialization": (
+                initialization_settings,
+                _GRAPH._embeddings_initialization,
+            ),
+            "paris": (paris_settings, _ClusteringOperationsMixin._clusters_paris),
+            "doublets": (doublet_settings, _QC._qc_doublets),
+        }
+    )
 )
 # The qc.call_cells settings at the defaults that cell_calling settings omit.
 _CELL_CALLING_DEFAULTS: Mapping[str, Any] = MappingProxyType(
@@ -522,6 +561,18 @@ def method_setting(stage: str, settings: Mapping[str, Any], name: str) -> Any:
     return keyword_default(_PERTURBATION_CHECKS[stage][1], name)
 
 
+def _check_keywords(
+    check: Callable[..., Any],
+    method: Callable[..., Any],
+    settings: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Return the keywords of a stage's check: each setting, or its method's default."""
+    return {
+        name: settings[name] if name in settings else keyword_default(method, name)
+        for name in inspect.signature(check).parameters
+    }
+
+
 def _check_perturbation_stage(stage: str, value: Mapping[str, Any]) -> None:
     """Run a perturbation stage method's own checks on the stage's settings.
 
@@ -542,19 +593,15 @@ def _check_perturbation_stage(stage: str, value: Mapping[str, Any]) -> None:
         raise ValueError(_GUIDE_CALLING_EITHER)
     if stage == "labels" and "controls" not in value:
         raise ValueError(LABELS_NEED_CONTROLS)
-    check, _method = _PERTURBATION_CHECKS[stage]
-    check(
-        **{
-            name: method_setting(stage, value, name)
-            for name in inspect.signature(check).parameters
-        }
-    )
+    check, method = _PERTURBATION_CHECKS[stage]
+    check(**_check_keywords(check, method, value))
 
 
 def _check_stage_values(stage: str, value: Mapping[str, Any]) -> None:
     """Run a stage method's own checks on settings, before a run record exists.
 
-    Late stages would otherwise fail only after the stages before them.
+    Late stages would otherwise fail only after the stages before them. An
+    omitted setting is checked as the method's default.
     """
     if stage == "hvg":
         hvg_options(
@@ -581,6 +628,22 @@ def _check_stage_values(stage: str, value: Mapping[str, Any]) -> None:
                     for name, default in _TSNE_SETTING_DEFAULTS.items()
                 }
             )
+        elif stage == "umap":
+            # embeddings.umap sets the process's numeric locale when it loads,
+            # so it loads for a call with UMAP settings only.
+            from ...embeddings.umap import umap_settings
+
+            umap_settings(
+                **_check_keywords(
+                    umap_settings, _EmbeddingOperationsMixin._embeddings_umap, value
+                )
+            )
+        else:
+            leiden_settings(
+                **_check_keywords(
+                    leiden_settings, _ClusteringOperationsMixin._clusters_leiden, value
+                )
+            )
     elif stage == "localmap":
         localmap.localmap_settings(
             **{
@@ -588,12 +651,12 @@ def _check_stage_values(stage: str, value: Mapping[str, Any]) -> None:
                 for name, default in _LOCALMAP_SETTING_DEFAULTS.items()
             }
         )
-    elif stage == "normalization" and "method" in value:
-        check_method_setting(value["method"])
-    elif stage == "harmony" and "harmony_params" in value:
-        from ...embeddings.harmony import validate_harmony_parameters
-
-        validate_harmony_parameters(value["harmony_params"])
+    elif stage == "normalization":
+        if "method" in value:
+            check_method_setting(value["method"])
+        normalization_settings(
+            **_check_keywords(normalization_settings, _GRAPH._features_normalize, value)
+        )
     elif stage == "cell_calling":
         options = {
             name: value.get(name, default)
@@ -601,19 +664,11 @@ def _check_stage_values(stage: str, value: Mapping[str, Any]) -> None:
         }
         validated_fdr(options.pop("fdr"))
         validated_settings(**options)
-    elif stage == "hashing" and "positive_quantile" in value:
-        _validated_positive_quantile(value["positive_quantile"])
-    elif stage == "ann_index" and "ann_metric" in value:
-        # The index, and the mapping reference that doublet scoring builds on
-        # it, take these metrics only; the stage would refuse another one
-        # only after the stages before it ran.
-        metric = value["ann_metric"]
-        if not isinstance(metric, str) or metric not in NEIGHBOR_DISTANCE_METRICS:
-            raise ValueError(
-                f"ann_index['ann_metric'] must be 'l2' or 'cosine', got {metric!r}"
-            )
     elif stage in _PERTURBATION_CHECKS:
         _check_perturbation_stage(stage, value)
+    elif stage in _SETTING_CHECKS:
+        check, method = _SETTING_CHECKS[stage]
+        check(**_check_keywords(check, method, value))
     # The counts and sizes that these stages take must be positive integers.
     for key in _POSITIVE_INTEGER_SETTINGS.get(stage, ()):
         if key in value:

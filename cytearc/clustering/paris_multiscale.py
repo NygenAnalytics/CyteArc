@@ -15,6 +15,49 @@ _SPLIT = np.uint8(3)
 _FORCED_ROOT = np.uint8(4)
 
 
+def paris_settings(
+    *, n_clusters: object, min_cluster_size: object
+) -> tuple[int | None, int | None]:
+    """Check the settings of a Paris cut and return them as Python integers.
+
+    ``clusters.paris`` and the Paris stage of a pipeline recipe check their
+    settings with this function, so a recipe refuses a setting before its
+    run starts, with the message that ``clusters.paris`` gives. A fixed cut
+    takes no ``min_cluster_size``; the adaptive cut of ``n_clusters='auto'``
+    takes one of at least 2, or None for one more cell than the graph's
+    neighbors.
+
+    Returns:
+        The fixed number of clusters, or None for ``n_clusters='auto'``, and
+        ``min_cluster_size``, None when not given.
+
+    Raises:
+        TypeError: If ``n_clusters`` is neither an integer nor text, or
+            ``min_cluster_size`` is not an integer.
+        ValueError: If ``n_clusters`` is text other than ``'auto'`` or below
+            1, or ``min_cluster_size`` is given with a fixed count or is
+            below 2.
+    """
+    if isinstance(n_clusters, bool | np.bool_):
+        raise TypeError("n_clusters must be an integer or 'auto'")
+    fixed: int | None
+    if isinstance(n_clusters, str):
+        if n_clusters != "auto":
+            raise ValueError("n_clusters must be an integer or 'auto'")
+        fixed = None
+    elif isinstance(n_clusters, int | np.integer):
+        if n_clusters < 1:
+            raise ValueError("n_clusters must be positive")
+        fixed = int(n_clusters)
+    else:
+        raise TypeError("n_clusters must be an integer or 'auto'")
+    if min_cluster_size is None:
+        return fixed, None
+    if fixed is not None:
+        raise ValueError("min_cluster_size is only valid when n_clusters='auto'")
+    return fixed, integer_argument(min_cluster_size, "min_cluster_size", minimum=2)
+
+
 @dataclass(frozen=True)
 class ParisClusterDiagnostic:
     """Structural diagnostic for one selected Paris cluster."""

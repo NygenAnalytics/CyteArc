@@ -30,7 +30,7 @@ from ...storage.artifacts import (
 )
 from ...storage.diagnostics import DiagnosticRule, warn_diagnostics
 from ...storage.types import as_zarr_array, as_zarr_group
-from ...utils.arguments import bool_argument, float_argument, integer_argument
+from ...utils.arguments import bool_argument, integer_argument
 from ...utils.logging import logger, progress_enabled
 from ...utils.shutdown import shutdown_checkpoint
 
@@ -416,28 +416,40 @@ class _EmbeddingOperationsMixin(_EmbeddingOperationsBase):
             densmap_distance_graph,
             layout_threads,
             umap_peak_bytes,
+            umap_settings,
         )
 
         symmetric_graph, graph_upper_only = umap_graph_flags(
             symmetric_graph, graph_upper_only
         )
-        # Parameters are recorded canonically, so ``min_dist=1`` and
-        # ``min_dist=1.0`` identify the same embedding.
-        umap_dims = integer_argument(umap_dims, "umap_dims", minimum=1)
-        n_epochs = integer_argument(n_epochs, "n_epochs", minimum=1)
-        random_seed = integer_argument(random_seed, "random_seed", minimum=0)
-        spread = float_argument(spread, "spread")
-        min_dist = float_argument(min_dist, "min_dist")
-        repulsion_strength = float_argument(repulsion_strength, "repulsion_strength")
-        initial_alpha = float_argument(initial_alpha, "initial_alpha")
-        negative_sample_rate = float_argument(
-            negative_sample_rate, "negative_sample_rate"
+        settings = umap_settings(
+            umap_dims=umap_dims,
+            spread=spread,
+            min_dist=min_dist,
+            n_epochs=n_epochs,
+            repulsion_strength=repulsion_strength,
+            initial_alpha=initial_alpha,
+            negative_sample_rate=negative_sample_rate,
+            use_density_map=use_density_map,
+            dens_lambda=dens_lambda,
+            dens_frac=dens_frac,
+            dens_var_shift=dens_var_shift,
+            random_seed=random_seed,
+            parallel=parallel,
         )
-        dens_lambda = float_argument(dens_lambda, "dens_lambda")
-        dens_frac = float_argument(dens_frac, "dens_frac")
-        dens_var_shift = float_argument(dens_var_shift, "dens_var_shift")
-        use_density_map = bool_argument(use_density_map, "use_density_map")
-        parallel = bool_argument(parallel, "parallel")
+        umap_dims = settings.umap_dims
+        n_epochs = settings.n_epochs
+        random_seed = settings.random_seed
+        spread = settings.spread
+        min_dist = settings.min_dist
+        repulsion_strength = settings.repulsion_strength
+        initial_alpha = settings.initial_alpha
+        negative_sample_rate = settings.negative_sample_rate
+        dens_lambda = settings.dens_lambda
+        dens_frac = settings.dens_frac
+        dens_var_shift = settings.dens_var_shift
+        use_density_map = settings.use_density_map
+        parallel = settings.parallel
         # UMAP optimizes its initialization in place and requires C-contiguous
         # float32 coordinates, so an array initialization becomes a private copy.
         cell_selection, n_cells, initialization_input, ini_embed = (
@@ -628,7 +640,7 @@ class _EmbeddingOperationsMixin(_EmbeddingOperationsBase):
                       Smaller values will result in a more clustered/clumped embedding where nearby points on the
                       manifold are drawn closer together, while larger values will result on a more even dispersal of
                       points. The value should be set relative to the ``spread`` value, which determines the scale at
-                      which embedded points will be spread out. (Default value: 1)
+                      which embedded points will be spread out, from 0 to ``spread``. (Default value: 1)
             n_epochs: Same as n_epochs in UMAP package. The number of epochs to be used in optimizing the
                       low dimensional embedding. Larger values may result in more accurate embeddings.
                       (Default value: 300)
@@ -658,6 +670,11 @@ class _EmbeddingOperationsMixin(_EmbeddingOperationsBase):
 
         Raises:
             ValueError: If ``symmetric_graph`` or ``graph_upper_only`` is True,
+                if a setting is out of the range that umap-learn's ``UMAP``
+                takes: ``min_dist`` outside 0 to ``spread``, ``spread`` not
+                above 0, ``repulsion_strength``, ``initial_alpha``,
+                ``negative_sample_rate``, ``dens_lambda`` or
+                ``dens_var_shift`` below 0, or ``dens_frac`` outside 0 to 1,
                 if ``initialization`` is a reference to another kind of
                 artifact, or if densMAP finds a cell whose local radius is not
                 finite.

@@ -28,7 +28,7 @@ from ...storage.artifact_writer import (
 from ...storage.arrays import create_zarr_dataset
 from ...storage.types import as_zarr_array, as_zarr_group
 from ...storage.errors import ArtifactResolutionError
-from ...utils.arguments import bool_argument, integer_argument
+from ...utils.arguments import bool_argument
 from ...utils.logging import logger
 from ...utils.shutdown import shutdown_checkpoint
 
@@ -338,12 +338,10 @@ class _ClusteringOperationsMixin(_ClusteringOperationsBase):
         random_seed: int = 4444,
         invalidate_cache: bool = False,
     ) -> _PreparedLeidenClustering:
-        from ...clustering.leiden import canonical_random_seed, canonical_resolution
+        from ...clustering.leiden import canonical_resolution, leiden_settings
 
-        if backend not in {"cytearc", "igraph", "leidenalg"}:
-            raise ValueError("backend must be 'cytearc', 'igraph' or 'leidenalg'")
+        backend, random_seed = leiden_settings(backend=backend, random_seed=random_seed)
         resolution = canonical_resolution(resolution)
-        random_seed = canonical_random_seed(random_seed)
         symmetric_graph, graph_upper_only = graph_load_flags(
             symmetric_graph, graph_upper_only
         )
@@ -549,31 +547,21 @@ class _ClusteringOperationsMixin(_ClusteringOperationsBase):
         graph. The returned reference identifies the immutable cut artifact;
         ``clusters.load_paris`` reconstructs labels and diagnostics.
         """
-        if isinstance(n_clusters, (bool, np.bool_)):
-            raise TypeError("n_clusters must be an integer or 'auto'")
-        if isinstance(n_clusters, str):
-            if n_clusters != "auto":
-                raise ValueError("n_clusters must be an integer or 'auto'")
-            fixed_cluster_count = None
-        elif isinstance(n_clusters, (int, np.integer)):
-            if n_clusters < 1:
-                raise ValueError("n_clusters must be positive")
-            fixed_cluster_count = int(n_clusters)
-        else:
-            raise TypeError("n_clusters must be an integer or 'auto'")
-        if fixed_cluster_count is not None and min_cluster_size is not None:
-            raise ValueError("min_cluster_size is only valid when n_clusters='auto'")
+        from ...clustering.paris_multiscale import paris_settings
+
+        fixed_cluster_count, checked_min_cluster_size = paris_settings(
+            n_clusters=n_clusters, min_cluster_size=min_cluster_size
+        )
         graph_loc, n_cells, effective_k = self._clustering_graph(graph)
         if fixed_cluster_count is not None and fixed_cluster_count > n_cells:
             raise ValueError(f"n_clusters must not exceed the graph size ({n_cells})")
 
         if fixed_cluster_count is None:
-            if min_cluster_size is None:
-                effective_min_cluster_size = effective_k + 1
-            else:
-                effective_min_cluster_size = integer_argument(
-                    min_cluster_size, "min_cluster_size", minimum=2
-                )
+            effective_min_cluster_size = (
+                effective_k + 1
+                if checked_min_cluster_size is None
+                else checked_min_cluster_size
+            )
         else:
             effective_min_cluster_size = None
 

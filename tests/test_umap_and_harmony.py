@@ -13,9 +13,81 @@ from cytearc.embeddings.umap import (
     fuzzy_simplicial_set,
     layout_threads,
     simplicial_set_embedding,
+    umap_settings,
 )
 from cytearc.embeddings.harmony import fit_harmony
 from cytearc.utils.logging import logger
+
+
+# The embeddings.umap defaults of the settings that umap_settings checks.
+_UMAP_SETTINGS = {
+    "umap_dims": 2,
+    "spread": 2.0,
+    "min_dist": 1.0,
+    "n_epochs": 300,
+    "repulsion_strength": 1.0,
+    "initial_alpha": 1.0,
+    "negative_sample_rate": 5.0,
+    "use_density_map": False,
+    "dens_lambda": 2.0,
+    "dens_frac": 0.3,
+    "dens_var_shift": 0.1,
+    "random_seed": 4444,
+    "parallel": False,
+}
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"min_dist": 0},
+        {"min_dist": 2.0},
+        {"spread": np.float32(0.5), "min_dist": np.float32(0.5)},
+        {"spread": 1e-9, "min_dist": 0},
+        {"repulsion_strength": 0},
+        {"initial_alpha": 0},
+        {"negative_sample_rate": np.int64(0)},
+        {"dens_lambda": 0},
+        {"dens_frac": 0},
+        {"dens_frac": 1},
+        {"dens_var_shift": 0},
+    ],
+)
+def test_umap_settings_take_both_ends_of_umap_learns_ranges(changes):
+    settings = umap_settings(**{**_UMAP_SETTINGS, **changes})
+
+    for name, value in changes.items():
+        assert type(getattr(settings, name)) is float
+        assert getattr(settings, name) == float(value)
+
+
+@pytest.mark.parametrize(
+    ("changes", "message"),
+    [
+        # A spread of 0 gives UMAP's curve fit no scale.
+        ({"spread": 0.0, "min_dist": 0.0}, "spread must be greater than 0"),
+        ({"spread": -1.0}, "spread must be greater than 0"),
+        ({"min_dist": -1e-9}, "min_dist must be from 0 to spread (2.0), got -1e-09"),
+        (
+            {"min_dist": 2.0000001},
+            "min_dist must be from 0 to spread (2.0), got 2.0000001",
+        ),
+        ({"repulsion_strength": -1e-9}, "repulsion_strength must be at least 0"),
+        ({"initial_alpha": -1e-9}, "initial_alpha must be at least 0"),
+        ({"negative_sample_rate": -1}, "negative_sample_rate must be at least 0"),
+        ({"dens_lambda": -1e-9}, "dens_lambda must be at least 0"),
+        ({"dens_frac": -1e-9}, "dens_frac must be from 0 to 1"),
+        ({"dens_frac": 1.0000001}, "dens_frac must be from 0 to 1"),
+        ({"dens_var_shift": -1e-9}, "dens_var_shift must be at least 0"),
+        ({"min_dist": np.nan}, "min_dist must be finite"),
+        ({"n_epochs": 0}, "n_epochs must be at least 1"),
+    ],
+)
+def test_umap_settings_refuse_values_past_umap_learns_ranges(changes, message):
+    with pytest.raises(ValueError) as caught:
+        umap_settings(**{**_UMAP_SETTINGS, **changes})
+
+    assert str(caught.value) == message
 
 
 def _ring_graph(n: int) -> coo_matrix:

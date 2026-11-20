@@ -128,6 +128,34 @@ def validate_harmony_parameters(parameters: Mapping[str, Any] | None) -> dict[st
     return dict(parameters)
 
 
+def harmony_settings(
+    *, harmony_params: Any, batch_size: object
+) -> tuple[dict[str, Any], int | None]:
+    """Check Harmony's options and block size before any data is read.
+
+    ``reduction.harmony`` and the Harmony stage of a pipeline recipe check
+    their settings with this function, so a recipe refuses a setting before
+    its run starts, with the message that ``reduction.harmony`` gives. The
+    recipe checks its batch columns against the store itself.
+
+    Returns:
+        A new dict equal to ``harmony_params``, ``{}`` for None, and
+        ``batch_size``, None when not given.
+
+    Raises:
+        TypeError: If an option has the wrong type, or ``batch_size`` is not
+            an integer.
+        ValueError: If an option is unknown, renamed, removed or out of
+            range, or ``batch_size`` is below 1.
+    """
+    checked_batch_size = (
+        None
+        if batch_size is None
+        else integer_argument(batch_size, "batch_size", minimum=1)
+    )
+    return validate_harmony_parameters(harmony_params), checked_batch_size
+
+
 def _require_known(options: Mapping[str, Any]) -> None:
     unknown = set(options) - HARMONY_PARAMETER_NAMES
     if unknown:

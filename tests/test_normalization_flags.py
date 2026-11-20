@@ -24,6 +24,7 @@ import pytest
 from cytearc.assay.normalization import (
     norm_clr,
     norm_dummy,
+    norm_lib_size,
     norm_lib_size_log,
 )
 from cytearc.datastore.datastore import DataStore
@@ -260,6 +261,44 @@ _SUBSET_ERROR = (
     r"does not support renormalize_subset=True: renormalize_subset hands totals "
     r"over the selected features.*\. Pass renormalize_subset=False\.$"
 )
+
+
+@pytest.mark.parametrize("assay_name", ["ADT", "ATAC"])
+@pytest.mark.parametrize(
+    "normalizer", [norm_lib_size, norm_lib_size_log], ids=["lib-size", "lib-size-log"]
+)
+def test_library_size_normalizers_refuse_an_assay_without_cell_totals(
+    store, monkeypatch, assay_name, normalizer
+) -> None:
+    assay = store.get_assay(assay_name)
+    monkeypatch.setattr(assay, "normMethod", normalizer)
+    cells = np.arange(N_CELLS)
+    features = np.arange(assay.feats.N)
+    cell_selection, feature_ref = _selections(store, assay_name, features)
+    message = (
+        "norm_lib_size and norm_lib_size_log need each cell's total and a size "
+        "factor, which only an RNA assay's normed provides, but "
+        f"{type(assay).__name__} '{assay_name}' did not provide them; normalize "
+        "an ATAC assay with norm_tf_idf, its default, and any assay with norm_clr "
+        "or norm_dummy"
+    )
+    calls: list[Callable[[], Any]] = [
+        lambda: assay.normed(cells, features),
+        lambda: store.features.normalize(cell_selection, feature_ref),
+    ]
+    if assay_name == "ATAC":
+        calls.append(
+            lambda: store.features.prevalent_peaks(
+                cell_selection, from_assay="ATAC", top_n=3
+            )
+        )
+
+    for call in calls:
+        # A ValueError, not an assertion, so it holds under python -O.
+        with pytest.raises(ValueError) as caught:
+            call()
+        assert str(caught.value) == message
+    assert _normalized_refs(store, assay_name) == []
 
 
 @pytest.mark.parametrize(
