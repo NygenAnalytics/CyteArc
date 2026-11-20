@@ -232,6 +232,9 @@ def test_regulon_specificity_matches_pyscenic():
     ("values", "labels", "message"),
     [
         ([[1.0], [2.0]], ["T"], "align"),
+        # One label for every cell, or a table of labels, aligns with no row.
+        ([[1.0], [2.0]], "TB", "align"),
+        ([[1.0], [2.0]], [["T"], ["B"]], "align"),
         ([[1.0], [-2.0]], ["T", "B"], "non-negative"),
     ],
 )

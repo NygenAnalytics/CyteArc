@@ -228,7 +228,7 @@ def regulon_specificity(
     """
     values = np.asarray(activity)
     groups = np.asarray(labels, dtype=object)
-    if values.ndim != 2 or len(groups) != values.shape[0]:
+    if values.ndim != 2 or groups.ndim != 1 or len(groups) != values.shape[0]:
         raise ValueError("labels must align with the activity rows")
     unlabeled = int(np.count_nonzero(~valid_category_mask(groups)))
     if unlabeled:
