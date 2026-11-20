@@ -542,13 +542,21 @@ def _feature_alignment(
     )
     if selected.size == 0:
         raise ValueError("The composite feature space is empty")
+    positions = np.full(union.nFeats, -1, dtype=np.int64)
+    positions[selected] = np.arange(selected.size)
+    mappings = [positions[mapping] for mapping in union.featOrderMap]
+    frame = union.mergedFeatsMap.iloc[selected].copy().reset_index(drop=True)
+    frame["idx"] = np.arange(selected.size)
+    alignment = FeatureAlignment(
+        frame, mappings, selected.size, union.overlapFraction, union.sourceHoldsAssay
+    )
     # A union reads zero counts where a source lacks a feature, as a merge
     # writes them, and warns as a merge does. An intersection leaves those
     # features out, and warns when it keeps under a tenth of the union.
     warning = None
     if features == "union":
         warning = unshared_features_warning(
-            assay, union, names, combination="composite"
+            assay, alignment, names, combination="composite"
         )
     elif selected.size * 10 < union.nFeats:
         warning = (
@@ -559,12 +567,6 @@ def _feature_alignment(
         )
     if warning is not None:
         logger.warning(warning)
-    positions = np.full(union.nFeats, -1, dtype=np.int64)
-    positions[selected] = np.arange(selected.size)
-    mappings = [positions[mapping] for mapping in union.featOrderMap]
-    frame = union.mergedFeatsMap.iloc[selected].copy().reset_index(drop=True)
-    frame["idx"] = np.arange(selected.size)
-    alignment = FeatureAlignment(frame, mappings, selected.size, union.overlapFraction)
     columns = np.full((len(assays), selected.size), -1, dtype=np.int64)
     for index, mapping in enumerate(mappings):
         source_columns = np.flatnonzero(mapping >= 0)

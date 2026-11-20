@@ -1101,6 +1101,27 @@ def test_union_composite_gives_one_warning_for_sources_that_share_few_features(
     assert joint.RNA.feats.N == 21
 
 
+def test_union_composite_names_a_source_whose_assay_holds_no_features(tmp_path):
+    panels = {"p1": ["CD3", "CD4"], "p2": ["CD4", "CD3"], "empty": []}
+    sources = _panel_sources(tmp_path, panels, assay="ADT")
+
+    with _feature_warnings() as messages:
+        joint = create_composite(
+            sources, at=tmp_path / "joint.zarr", assay="ADT", features="union"
+        )
+
+    assert messages == [
+        "Assay 'ADT': 2 of the 2 composite features were not measured by every "
+        "source that holds the assay. Source 'empty' holds no features of the "
+        "assay, so it lacks all 2: 'CD3', 'CD4'." + _ZEROS_READ_AS_COUNTS
+    ]
+    # The cells of the source of no antibodies read a zero of each.
+    counts = joint.ADT.matrixGroup["counts"][:]
+    rows = dict(zip(joint.cells.fetch_all("ids").tolist(), counts.tolist()))
+    assert [rows[f"empty__c{cell}"] for cell in range(3)] == [[0, 0]] * 3
+    assert rows["p2__c0"] == [2, 1]
+
+
 @pytest.mark.parametrize(
     "panels",
     [
@@ -1139,6 +1160,7 @@ def test_unshared_features_warning_names_its_combinations():
         [np.array([0, 1]), np.array([1])],
         2,
         0.5,
+        (True, True),
     )
     shared = (
         "Assay 'RNA': 1 of the 2 {} features was not measured by every source "

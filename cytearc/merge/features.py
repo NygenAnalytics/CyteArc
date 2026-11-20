@@ -14,12 +14,18 @@ UNSHARED_FEATURE_EXAMPLES = 5
 
 @dataclass(frozen=True, slots=True)
 class FeatureAlignment:
-    """Resolved feature union and per-source remapping for one assay."""
+    """Resolved feature union and per-source remapping for one assay.
+
+    ``sourceHoldsAssay`` tells, in source order, whether each source holds the
+    assay, since a source without it and a source whose assay holds no
+    features both map no features.
+    """
 
     mergedFeatsMap: pd.DataFrame
     featOrderMap: list[np.ndarray]
     nFeats: int
     overlapFraction: float
+    sourceHoldsAssay: tuple[bool, ...]
 
     def resident_bytes(self) -> int:
         frame_bytes = int(self.mergedFeatsMap.memory_usage(index=True, deep=True).sum())
@@ -68,6 +74,7 @@ def _merge_order_feats(
     key: FeatureKey,
     *,
     require_overlap: bool,
+    holders: int,
 ) -> tuple[pd.DataFrame, float]:
     union: dict[Any, Any] = {}
     source_presence: Counter[Any] = Counter()
@@ -98,9 +105,10 @@ def _merge_order_feats(
         raise ValueError(message + (_NAME_HINT if key == "ids" else ""))
     # The overlap fraction is the share of merged features that every source
     # holding the assay measured. The merge fills each other feature with
-    # zeros in the cells of the sources that lack it. A source without the
-    # assay is left out, so an assay that one source holds reports 1.0.
-    measured_by_all = sum(count == non_empty for count in source_presence.values())
+    # zeros in the cells of the sources that lack it, and a source whose assay
+    # holds no features lacks them all. A source without the assay is left
+    # out, so an assay that one source holds reports 1.0.
+    measured_by_all = sum(count == holders for count in source_presence.values())
     return ret_val, measured_by_all / len(union)
 
 
@@ -117,6 +125,7 @@ def align_features(
     name, uses each name as the merged ID, and sums features that share a name
     within one source. A missing source is ``None`` and maps no features.
     """
+    holds_assay = tuple(assay is not None for assay in assays)
     present = [
         assay for assay in assays if assay is not None and int(assay.feats.N) > 0
     ]
@@ -127,11 +136,12 @@ def align_features(
             featOrderMap=[np.asarray([], dtype=np.int64) for _ in assays],
             nFeats=0,
             overlapFraction=0.0,
+            sourceHoldsAssay=holds_assay,
         )
 
     keyed = _source_keys(assays, names, key)
     merged_feats, overlap = _merge_order_feats(
-        keyed, key, require_overlap=require_overlap
+        keyed, key, require_overlap=require_overlap, holders=sum(holds_assay)
     )
     positions = pd.Index(merged_feats["ids"])
     return FeatureAlignment(
@@ -142,6 +152,7 @@ def align_features(
         ],
         nFeats=int(merged_feats.shape[0]),
         overlapFraction=overlap,
+        sourceHoldsAssay=holds_assay,
     )
 
 
@@ -159,8 +170,10 @@ def unshared_features_warning(
     measured counts. The warning counts the merged features of ``assay_name``
     that not every source holding the assay measured, then gives each such
     source's number of missing features and names the first
-    ``UNSHARED_FEATURE_EXAMPLES`` of them in merged order. A source without
-    the assay is left out, since a merge marks its cells as not measured.
+    ``UNSHARED_FEATURE_EXAMPLES`` of them in merged order. A source whose
+    assay holds no features lacks every merged feature, and the warning says
+    that it holds none. A source without the assay is left out, since a merge
+    marks its cells as not measured.
 
     Args:
         assay_name: The merged assay, named in the warning.
@@ -189,8 +202,10 @@ def unshared_features_warning(
         )
     holding = [
         (source_name, order_map)
-        for source_name, order_map in zip(names, alignment.featOrderMap, strict=True)
-        if order_map.size
+        for source_name, order_map, holds in zip(
+            names, alignment.featOrderMap, alignment.sourceHoldsAssay, strict=True
+        )
+        if holds
     ]
     if len(holding) < 2:
         return None
@@ -209,8 +224,13 @@ def unshared_features_warning(
             for name in feature_names[missing[:UNSHARED_FEATURE_EXAMPLES]].tolist()
         )
         more = missing.size - UNSHARED_FEATURE_EXAMPLES
+        lacks = (
+            "holds no features of the assay, so it lacks all"
+            if order_map.size == 0
+            else "lacks"
+        )
         lacking.append(
-            f"Source {source_name!r} lacks {missing.size:,}: {listed}"
+            f"Source {source_name!r} {lacks} {missing.size:,}: {listed}"
             + (f" and {more:,} more." if more > 0 else ".")
         )
     if not lacking:

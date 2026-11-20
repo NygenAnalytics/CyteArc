@@ -16,8 +16,10 @@ class AssayMergePlan:
     ``feature_key="names"``. The merge writes zero counts for the other
     features in the cells of each source that lacks them, so ``1.0`` means
     that no cell reads a zero count for a feature its source never measured. A
-    source without the assay is left out, since the merge marks its cells as
-    not measured, so an assay that only one source holds reports ``1.0``.
+    source whose assay holds no features measured none of them, so the assay
+    then reports ``0.0``. A source without the assay is left out, since the
+    merge marks its cells as not measured, so an assay that only one source
+    holds reports ``1.0``.
     """
 
     assayName: str

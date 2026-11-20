@@ -1154,6 +1154,61 @@ def test_merge_of_sources_that_measured_one_panel_names_no_feature(
     assert {item.featureOverlapFraction for item in plan.assays} == {1.0}
 
 
+_NO_ANTIBODIES = (
+    "Assay 'ADT': 2 of the 2 merged features were not measured by every source "
+    "that holds the assay. Source 'c' holds no features of the assay, so it "
+    "lacks all 2: 'CD3', 'CD4'." + _ZEROS_READ_AS_COUNTS
+)
+
+
+@pytest.mark.parametrize(
+    ("panels", "expected"),
+    [
+        pytest.param(
+            [
+                {"RNA": _GENES, "ADT": ["CD3", "CD4"]},
+                {"RNA": _GENES, "ADT": ["CD4", "CD3"]},
+                {"RNA": _GENES, "ADT": []},
+            ],
+            [_NO_ANTIBODIES],
+            id="beside two panels",
+        ),
+        pytest.param(
+            [
+                {"RNA": _GENES, "ADT": ["CD3", "CD4"]},
+                {"RNA": _GENES},
+                {"RNA": _GENES, "ADT": []},
+            ],
+            [_MISSING_ADT.format("b"), _NO_ANTIBODIES],
+            id="beside a panel and a source without the assay",
+        ),
+        pytest.param(
+            [{"RNA": _GENES, "ADT": []}, {"RNA": _GENES, "ADT": []}],
+            [],
+            id="beside another source of no antibodies",
+        ),
+    ],
+)
+def test_merge_names_a_source_whose_assay_holds_no_features(tmp_path, panels, expected):
+    names = ["a", "b", "c"][: len(panels)]
+    sources = [_panel_source(panel) for panel in panels]
+    destination = str(tmp_path / "merged.zarr")
+
+    with _captured_warnings() as messages:
+        merger = DataStoreMerge(sources, destination, names, nthreads=1)
+        plan = merger.plan()
+        merger.dump()
+    assert messages == expected
+    # The last source measured no antibody, so no antibody was measured by
+    # every source that holds the assay, and its cells read a zero of each.
+    adt = next(item for item in plan.assays if item.assayName == "ADT")
+    assert adt.featureOverlapFraction == 0.0
+    rows = _rows_by_cell(destination, "ADT/counts")
+    assert [rows[f"{names[-1]}__c{cell}"] for cell in range(3)] == [
+        [0] * adt.nFeatures
+    ] * 3
+
+
 def test_merge_by_name_sums_signed_counts_in_a_wider_dtype(tmp_path):
     sources = _named_sources(np.array([[3, -2, 1], [0, 4, 2]]), "int16")
     destination = str(tmp_path / "merged.zarr")
