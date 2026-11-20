@@ -891,17 +891,17 @@ def test_merge_seed_orders_the_blocks_and_not_the_cells_within_them(
 
 
 @contextmanager
-def _unshared_feature_warnings():
-    """Capture the warnings about features that not every source measured.
+def _feature_warnings():
+    """Capture the warnings of creating and opening a composite.
 
-    Opening a composite also warns of other things, such as an assay without
-    mitochondrial genes.
+    The warnings that an assay lacks mitochondrial or ribosomal genes, which
+    opening a store without them gives, are left out.
     """
     messages = []
     sink = logger.add(
         lambda message: messages.append(message.record["message"]),
         level="WARNING",
-        filter=lambda record: "not measured by every source" in record["message"],
+        filter=lambda record: "Percentage feature" not in record["message"],
     )
     try:
         yield messages
@@ -917,12 +917,26 @@ _ZEROS_READ_AS_COUNTS = (
 )
 
 
+def _panel_sources(tmp_path, panels, assay="RNA"):
+    """Open a source of three cells for each panel of features, by name."""
+    return {
+        name: _write_source(
+            tmp_path / f"{name}.zarr",
+            np.arange(1, 3 * len(panel) + 1, dtype=np.uint16).reshape(3, len(panel)),
+            panel,
+            policy=CountMatrixPolicy(128, 32),
+            assay=assay,
+        )
+        for name, panel in panels.items()
+    }
+
+
 def test_union_composite_warns_of_the_features_that_each_source_lacks(
     sources, composite_sources, tmp_path
 ):
     path = tmp_path / "joint.zarr"
 
-    with _unshared_feature_warnings() as messages:
+    with _feature_warnings() as messages:
         joint = create_composite(sources, at=path, features="union", nthreads=1)
         # Reopening the composite reads the features it kept, without a warning.
         DataStore(str(path), nthreads=1, mem_budget="64M")
@@ -953,18 +967,9 @@ def test_union_composite_warns_of_an_antibody_that_one_of_three_panels_lacks(
         "p2": ["CD8", "CD3", "CD4"],
         "p3": ["CD3", "CD4"],
     }
-    sources = {
-        name: _write_source(
-            tmp_path / f"{name}.zarr",
-            np.arange(1, 3 * len(panel) + 1, dtype=np.uint16).reshape(3, len(panel)),
-            panel,
-            policy=CountMatrixPolicy(128, 32),
-            assay="ADT",
-        )
-        for name, panel in panels.items()
-    }
+    sources = _panel_sources(tmp_path, panels, assay="ADT")
 
-    with _unshared_feature_warnings() as messages:
+    with _feature_warnings() as messages:
         joint = create_composite(
             sources, at=tmp_path / "joint.zarr", assay="ADT", features="union"
         )
@@ -985,7 +990,7 @@ def test_union_composite_warns_of_an_antibody_that_one_of_three_panels_lacks(
 
 
 def test_intersection_composite_does_not_warn(sources, tmp_path):
-    with _unshared_feature_warnings() as messages:
+    with _feature_warnings() as messages:
         joint = create_composite(
             sources, at=tmp_path / "joint.zarr", features="intersection", nthreads=1
         )
@@ -1001,6 +1006,99 @@ def test_intersection_composite_does_not_warn(sources, tmp_path):
         "g3",
         "g5",
     ]
+
+
+# Two sources that share 1 of their 21 genes.
+_FEW_SHARED_GENES = {
+    "left": [f"x{index}" for index in range(11)],
+    "right": ["x0", *(f"y{index}" for index in range(1, 11))],
+}
+_KEPT_BY_THE_INTERSECTION = (
+    " features of its sources, since features='intersection' keeps only the "
+    "features that every source measured."
+)
+
+
+@pytest.mark.parametrize(
+    ("panels", "assay", "kept", "warning"),
+    [
+        pytest.param(
+            _FEW_SHARED_GENES,
+            "RNA",
+            ["x0"],
+            "Assay 'RNA': the composite keeps 1 of the 21",
+            id="two sources share 1 of 21 genes",
+        ),
+        pytest.param(
+            {
+                "p1": [f"a{index}" for index in range(10)],
+                "p2": [f"a{index}" for index in reversed(range(10))],
+                "p3": ["a0", *(f"c{index}" for index in range(1, 10))],
+            },
+            "ADT",
+            ["a0"],
+            "Assay 'ADT': the composite keeps 1 of the 19",
+            id="three panels share 1 of 19 antibodies and two of them 10",
+        ),
+        pytest.param(
+            {
+                "left": ["g0", "g1", *(f"x{index}" for index in range(9))],
+                "right": ["g0", "g1", *(f"y{index}" for index in range(10))],
+            },
+            "RNA",
+            ["g0", "g1"],
+            "Assay 'RNA': the composite keeps 2 of the 21",
+            id="2 of 21 genes, under a tenth",
+        ),
+        pytest.param(
+            {
+                "left": ["g0", "g1", *(f"x{index}" for index in range(9))],
+                "right": ["g0", "g1", *(f"y{index}" for index in range(9))],
+            },
+            "RNA",
+            ["g0", "g1"],
+            None,
+            id="2 of 20 genes, a tenth",
+        ),
+    ],
+)
+def test_intersection_composite_warns_when_it_keeps_under_a_tenth_of_the_features(
+    tmp_path, panels, assay, kept, warning
+):
+    sources = _panel_sources(tmp_path, panels, assay)
+
+    with _feature_warnings() as messages:
+        joint = create_composite(
+            sources,
+            at=tmp_path / "joint.zarr",
+            assay=assay,
+            features="intersection",
+            nthreads=1,
+        )
+
+    assert messages == (
+        [] if warning is None else [warning + _KEPT_BY_THE_INTERSECTION]
+    )
+    assert joint.get_assay(assay).feats.fetch_all("ids").tolist() == kept
+
+
+def test_union_composite_gives_one_warning_for_sources_that_share_few_features(
+    tmp_path,
+):
+    sources = _panel_sources(tmp_path, _FEW_SHARED_GENES)
+
+    with _feature_warnings() as messages:
+        joint = create_composite(
+            sources, at=tmp_path / "joint.zarr", features="union", nthreads=1
+        )
+
+    assert messages == [
+        "Assay 'RNA': 20 of the 21 composite features were not measured by every "
+        "source that holds the assay. Source 'left' lacks 10: 'y1', 'y2', 'y3', "
+        "'y4', 'y5' and 5 more. Source 'right' lacks 10: 'x1', 'x2', 'x3', 'x4', "
+        "'x5' and 5 more." + _ZEROS_READ_AS_COUNTS
+    ]
+    assert joint.RNA.feats.N == 21
 
 
 @pytest.mark.parametrize(
@@ -1026,7 +1124,7 @@ def test_union_composite_of_sources_that_measured_one_panel_does_not_warn(
         for name, panel in panels.items()
     }
 
-    with _unshared_feature_warnings() as messages:
+    with _feature_warnings() as messages:
         joint = create_composite(sources, at=tmp_path / "joint.zarr", features="union")
 
     assert messages == []

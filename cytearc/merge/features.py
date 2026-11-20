@@ -7,7 +7,6 @@ import numpy as np
 import pandas as pd
 
 from ..utils.arguments import quoted_value
-from ..utils.logging import logger
 
 #: The most features that the warning about unshared features names per source.
 UNSHARED_FEATURE_EXAMPLES = 5
@@ -88,19 +87,21 @@ def _merge_order_feats(
         }
     )
     non_empty = sum(1 for keys, _names in keyed if keys.size)
-    if non_empty < 2:
-        # A modality present in only one source is zero-filled elsewhere; every
-        # feature is unique by construction rather than a failed overlap check.
-        overlap = 1.0 if union else 0.0
-    else:
-        shared = sum(count > 1 for count in source_presence.values())
-        overlap = 0.0 if not union else shared / len(union)
-        if overlap == 0 and require_overlap:
-            message = _NO_OVERLAP.format(kind="IDs" if key == "ids" else "names")
-            raise ValueError(message + (_NAME_HINT if key == "ids" else ""))
-        if overlap < 0.1:
-            logger.warning("Fewer than 10% of features overlap across the assays")
-    return ret_val, float(overlap)
+    # Sources overlap when two of them share a feature, so three sources of
+    # which two overlap still merge.
+    if (
+        require_overlap
+        and non_empty > 1
+        and not any(count > 1 for count in source_presence.values())
+    ):
+        message = _NO_OVERLAP.format(kind="IDs" if key == "ids" else "names")
+        raise ValueError(message + (_NAME_HINT if key == "ids" else ""))
+    # The overlap fraction is the share of merged features that every source
+    # holding the assay measured. The merge fills each other feature with
+    # zeros in the cells of the sources that lack it. A source without the
+    # assay is left out, so an assay that one source holds reports 1.0.
+    measured_by_all = sum(count == non_empty for count in source_presence.values())
+    return ret_val, measured_by_all / len(union)
 
 
 def align_features(
