@@ -890,7 +890,7 @@ def test_assay_features_are_the_text_that_a_split_import_stores(tmp_path) -> Non
             },
             {},
             "cell_ids",
-            "Column '/obs/_index' needs one text, number or boolean per category; "
+            "Column '/obs/_index' needs one text value, number or boolean per category; "
             "found categories of shape (4, 2) in '/obs/_index/categories'",
             id="categorical-index-of-pairs",
         ),
@@ -1053,7 +1053,7 @@ def test_reader_refuses_the_ids_and_names_that_an_import_refuses(
                 }
             },
             {},
-            "Column '/var/feature_types' needs one text, number or boolean per "
+            "Column '/var/feature_types' needs one text value, number or boolean per "
             "category; found categories of shape (2, 2) in "
             "'/var/feature_types/categories'",
             id="feature-types-of-pairs",
@@ -1608,7 +1608,7 @@ def test_categories_read_as_text_and_python_numbers(tmp_path) -> None:
 
 # How every refusal of categories that are not one value each goes on after
 # the name of the column.
-_NOT_ONE_VALUE = "needs one text, number or boolean per category; found"
+_NOT_ONE_VALUE = "needs one text value, number or boolean per category; found"
 # Two arrays of 1,500 integers that differ at one position, which NumPy
 # prints alike, as their first and last three values.
 _LONG_ARRAYS = [
@@ -1910,11 +1910,13 @@ def test_a_skipped_column_needs_no_utf8_categories(tmp_path) -> None:
 
 
 def _cells_with_sequences(path: Path) -> str:
-    """Write the six cells of _cells_with_categories with columns of arrays.
+    """Write the six cells of _cells_with_categories with columns of several values.
 
     In place of the column 'x', obs holds 'n', a nullable column of
-    variable-length float64 arrays, and 'v', a column of variable-length
-    int64 arrays, beside the numbers 'y' and the categorical 'z'.
+    variable-length float64 arrays, 'records', a column of records of two
+    fields, 'refs', a column of HDF5 object references, and 'v', a column of
+    variable-length int64 arrays, beside the numbers 'y' and the categorical
+    'z'.
     """
     written = _cells_with_categories(path, "arrays")
     with h5py.File(written, "a") as h5:
@@ -1926,19 +1928,31 @@ def _cells_with_sequences(path: Path) -> str:
         for row, values in enumerate([[0.5], [1.5, 2.5], [], [3.5], [4.5], []]):
             stored[row] = values
         nullable.create_dataset("mask", data=np.array([0, 0, 0, 0, 0, 1], dtype=bool))
+        records = np.zeros(6, dtype=[("a", "<i8"), ("b", "<f8")])
+        records["a"] = np.arange(6)
+        obs.create_dataset("records", data=records)
+        references = obs.create_dataset("refs", (6,), dtype=h5py.ref_dtype)
+        for row in range(6):
+            references[row] = h5["X"].ref if row % 2 else obs.ref
     return written
 
 
 # What an import and a cluster key say of the columns of _cells_with_sequences.
 _NOT_ONE_PER_ROW = {
-    "n": "needs one text, number or boolean per row; found a variable-length "
+    "n": "needs one text value, number or boolean per row; found a variable-length "
     "array of float64 per row",
-    "v": "needs one text, number or boolean per row; found a variable-length "
+    # Records used to import as a structured array, which tables cannot read.
+    "records": "needs one text value, number or boolean per row; found a record of "
+    "the fields 'a', 'b' per row",
+    # References used to import as '<HDF5 object reference>' in every row.
+    "refs": "needs one text value, number or boolean per row; found an HDF5 "
+    "reference per row",
+    "v": "needs one text value, number or boolean per row; found a variable-length "
     "array of int64 per row",
 }
 
 
-def test_an_import_skips_columns_of_variable_length_arrays(tmp_path) -> None:
+def test_an_import_skips_columns_of_several_values_per_row(tmp_path) -> None:
     path = _cells_with_sequences(tmp_path / "cells.h5ad")
     destination = tmp_path / "cells.zarr"
     reader = H5adReader(path)
@@ -1976,7 +1990,7 @@ def test_an_import_skips_columns_of_variable_length_arrays(tmp_path) -> None:
 
 
 @pytest.mark.parametrize("key", sorted(_NOT_ONE_PER_ROW))
-def test_a_cluster_key_of_variable_length_arrays_is_refused_first(
+def test_a_cluster_key_of_several_values_per_row_is_refused_first(
     tmp_path, key
 ) -> None:
     path = _cells_with_sequences(tmp_path / "cells.h5ad")

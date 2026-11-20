@@ -521,7 +521,7 @@ def test_treedata_reads_a_long_text_state_whole(tmp_path):
                     "i1-a": {"codes": [0, 1], "categories": [["a", "b"], ["c", "d"]]}
                 },
             ),
-            "holds a column 'i1-a' that needs one text, number or boolean per "
+            "holds a column 'i1-a' that needs one text value, number or boolean per "
             r"category; found categories of shape \(2, 2\) in "
             "'/obsm/characters/i1-a/categories'",
         ),
@@ -536,6 +536,47 @@ def test_treedata_refuses_states_and_columns_it_cannot_read(tmp_path, build, mes
     build(path)
     with pytest.raises(ValueError, match=message):
         _states(path)
+
+
+def test_treedata_refuses_columns_of_several_values_per_cell(tmp_path):
+    import re
+
+    pairs = np.array([(1, 0.5), (2, 1.5)], dtype=[("a", "<i8"), ("b", "<f8")])
+    records = tmp_path / "records.zarr"
+    _store(records, characters={"i1-a": pairs})
+    nullable = tmp_path / "nullable.zarr"
+    _store(nullable, characters={"i1-a": {"values": pairs, "mask": [False, True]}})
+    # An HDF5 store holds arrays of variable length, which Zarr does not.
+    arrays = tmp_path / "arrays.h5td"
+    with h5py.File(arrays, "w") as h5:
+        h5.attrs.update({"encoding-type": "treedata", "encoding-version": "0.1.0"})
+        frame = h5.create_group("obsm").create_group("characters")
+        frame.attrs.update(
+            {
+                "encoding-type": "dataframe",
+                "encoding-version": "0.2.0",
+                "_index": "_index",
+                "column-order": ["i1-a"],
+            }
+        )
+        frame.create_dataset(
+            "_index", data=np.array(["c1", "c2"], dtype=h5py.string_dtype())
+        )
+        states = frame.create_dataset("i1-a", (2,), dtype=h5py.vlen_dtype(np.int64))
+        states[0] = [1, 2]
+        states[1] = [3]
+    # The states used to be the text of each record or array, such as '[1 2]'.
+    for store, found in (
+        (records, "a record of the fields 'a', 'b'"),
+        (nullable, "a record of the fields 'a', 'b'"),
+        (arrays, "a variable-length array of int64"),
+    ):
+        message = (
+            "holds a column 'i1-a' that needs one text value, number or boolean per "
+            f"row; found {found} per row"
+        )
+        with pytest.raises(ValueError, match=re.escape(message) + "$"):
+            _states(store)
 
 
 def test_treedata_refuses_frames_without_names_or_columns(tmp_path):

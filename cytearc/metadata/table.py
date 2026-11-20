@@ -50,6 +50,11 @@ from ..utils.arrays import sort_categories
 
 _RESERVED_COLUMNS = ("I", "ids", "names")
 _RESERVED_COLUMN_SET = frozenset(_RESERVED_COLUMNS)
+# How an insert refused for a value that is a collection can store it as text.
+_STORE_AS_TEXT = (
+    "To store such values as text, pass text that keeps every element, such as "
+    'series.map(lambda v: ",".join(map(str, v)))'
+)
 
 
 def _keyed_by_cell_id_remedy(key: str) -> str:
@@ -554,7 +559,11 @@ class MetaData:
             ValueError: If the values cover neither every row nor the rows
                 that ``key`` selects, or the fill does not fit their dtype.
         """
-        supplied, supplied_missing = nullable_values(values, name=name)
+        # Text is what an insert stores of values that are collections; the
+        # values of update_key are booleans, which it types before.
+        supplied, supplied_missing = nullable_values(
+            values, name=name, remedy=_STORE_AS_TEXT
+        )
         n_values = supplied.shape[0]
         if n_values == self.N:
             return supplied, supplied_missing
@@ -792,7 +801,9 @@ class MetaData:
         # Categorical values keep their layout, except in the reserved
         # columns, which store their labels.
         if column_name not in _RESERVED_COLUMN_SET and is_categorical(values):
-            codes, categories, ordered = categorical_codes(values, name=column_name)
+            codes, categories, ordered = categorical_codes(
+                values, name=column_name, remedy=_STORE_AS_TEXT
+            )
             self._save_categorical(
                 column_name,
                 self._codes_for_rows(

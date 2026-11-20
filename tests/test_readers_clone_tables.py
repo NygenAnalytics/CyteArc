@@ -964,7 +964,7 @@ def test_a_categorical_index_needs_one_name_per_category(tmp_path) -> None:
     # The cells used to be named '1', '2' and '3', the first values of the
     # categories read as one flat array.
     message = (
-        f"The index of the obs of {path} needs one text, number or boolean per "
+        f"The index of the obs of {path} needs one text value, number or boolean per "
         "category; found categories of shape (3, 2) in '/obs/pairs/categories'"
     )
     with h5py.File(path, "r") as handle:
@@ -978,6 +978,40 @@ def test_a_categorical_index_needs_one_name_per_category(tmp_path) -> None:
     with pytest.raises(ValueError) as refused:
         _rows(path, columns={"clone": "named"})
     assert str(refused.value) == message
+
+
+def test_an_index_needs_one_name_per_row(tmp_path) -> None:
+    from cytearc.readers._h5ad_columns import obs_names
+
+    path = _h5ad(tmp_path / "a.h5ad")
+    with h5py.File(path, "a") as handle:
+        obs = handle["obs"]
+        references = obs.create_dataset("references", (3,), dtype=h5py.ref_dtype)
+        arrays = obs.create_dataset("arrays", (3,), dtype=h5py.vlen_dtype(np.int64))
+        nullable = obs.create_group("nullable")
+        values = nullable.create_dataset(
+            "values", (3,), dtype=h5py.vlen_dtype(np.int64)
+        )
+        nullable.create_dataset("mask", data=np.zeros(3, dtype=bool))
+        for row, held in enumerate([[1], [2, 3], []]):
+            references[row] = obs.ref
+            arrays[row] = held
+            values[row] = held
+    # The cells used to be named by the text of each, such as
+    # '<HDF5 object reference>' for all of them.
+    for index, found in (
+        ("references", "an HDF5 reference"),
+        ("arrays", "a variable-length array of int64"),
+        ("nullable", "a variable-length array of int64"),
+    ):
+        with h5py.File(path, "a") as handle:
+            handle["obs"].attrs["_index"] = index
+        with h5py.File(path, "r") as handle, pytest.raises(ValueError) as refused:
+            obs_names(handle, path=str(path))
+        assert str(refused.value) == (
+            f"The index of the obs of {path} needs one text value, number or "
+            f"boolean per row; found {found} per row"
+        )
 
 
 def test_a_categorical_index_of_a_zarr_store_reads_its_text(tmp_path) -> None:
@@ -1000,6 +1034,6 @@ def test_a_categorical_index_of_a_zarr_store_reads_its_text(tmp_path) -> None:
     with pytest.raises(ValueError) as refused:
         index_names(root["obs"], path="cells.zarr", what="cell")
     assert str(refused.value) == (
-        "The index of the obs of cells.zarr needs one text, number or boolean per "
+        "The index of the obs of cells.zarr needs one text value, number or boolean per "
         "category; found categories of shape (2, 1) in '/obs/names/categories'"
     )

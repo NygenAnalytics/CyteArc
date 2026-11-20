@@ -303,20 +303,45 @@ def index_key(table: Any) -> str | None:
     return None if value is None else _name_text(value, refusal)
 
 
+def _element_problem(dtype: np.dtype[Any]) -> str | None:
+    """Return what each value of ``dtype`` holds in place of one value, or None.
+
+    The dtype is that of an HDF5 dataset or a Zarr array, whose values must
+    each be one text value, number or boolean. h5py reads each value of an
+    array dtype as a further dimension, of a compound dtype as a record, of
+    an opaque dtype as raw bytes, of a reference dtype as an HDF5 reference,
+    and of a variable-length dtype as an array, unless it is text, for which
+    ``check_vlen_dtype`` names str or bytes. A dtype of no variable length,
+    NumPy's ``StringDType`` among them before h5py 3.16, gives None.
+    """
+    if dtype.subdtype is not None:
+        base, shape = dtype.subdtype
+        return f"an array of shape {shape} of {base}"
+    if dtype.names is not None:
+        fields = ", ".join(map(repr, dtype.names))
+        return f"a record of the fields {fields}"
+    if dtype.kind == "V":
+        return f"{dtype.itemsize} opaque bytes"
+    if h5py.check_ref_dtype(dtype) is not None:
+        return "an HDF5 reference"
+    sequence = h5py.check_vlen_dtype(dtype)
+    if sequence is None or sequence is str or sequence is bytes:
+        return None
+    return f"a variable-length array of {np.dtype(sequence)}"
+
+
 def categories_problem(categories: Any) -> str | None:
     """Return why a categorical's categories are not one value each, or None.
 
-    CyteArc reads one text, number or boolean per category. Only the shape
-    and dtype of the categories are read, of an HDF5 dataset or a Zarr array:
-    h5py reads each element of an array dtype as a further dimension, of a
-    compound dtype as a record, of an opaque dtype as raw bytes, of a
-    reference dtype as an HDF5 reference, and of a variable-length dtype
-    other than text as an array.
+    Only the shape and the dtype of the categories are read, of an HDF5
+    dataset or a Zarr array: they must form one dimension of values that
+    are each one text value, number or boolean, as
+    :func:`_element_problem` checks the dtype.
 
     Returns:
         The reason, which reads after the name of the column, such as
-        ``needs one text, number or boolean per category; found categories
-        of shape (3, 2) in '/obs/x/categories'``.
+        ``needs one text value, number or boolean per category; found
+        categories of shape (3, 2) in '/obs/x/categories'``.
     """
     if not _is_array(categories):
         found = "a group"
@@ -325,85 +350,41 @@ def categories_problem(categories: Any) -> str | None:
         found = "an empty dataset with no shape"
     elif len(categories.shape) != 1:
         found = f"categories of shape {categories.shape}"
-    elif categories.dtype.subdtype is not None:
-        base, shape = categories.dtype.subdtype
-        found = f"an array of shape {shape} of {base} per category"
-    elif categories.dtype.names is not None:
-        fields = ", ".join(map(repr, categories.dtype.names))
-        found = f"a record of the fields {fields} per category"
-    elif categories.dtype.kind == "V":
-        found = f"{categories.dtype.itemsize} opaque bytes per category"
-    elif h5py.check_ref_dtype(categories.dtype) is not None:
-        found = "an HDF5 reference per category"
-    elif (sequence := _sequence_dtype(categories.dtype)) is not None:
-        found = f"a variable-length array of {sequence} per category"
+    elif (element := _element_problem(categories.dtype)) is not None:
+        found = f"{element} per category"
     else:
         return None
     return (
-        "needs one text, number or boolean per category; found "
+        "needs one text value, number or boolean per category; found "
         f"{found} in {categories.name!r}"
     )
-
-
-def _sequence_dtype(dtype: np.dtype[Any]) -> np.dtype[Any] | None:
-    """Return the dtype of the elements of a variable-length dtype other than text, or None.
-
-    h5py names the type of the elements of a variable-length dtype, str or
-    bytes for text, and reads each value of any other as an array.
-    """
-    sequence = h5py.check_vlen_dtype(dtype)
-    if sequence is None or sequence is str or sequence is bytes:
-        return None
-    elements: np.dtype[Any] = np.dtype(sequence)
-    return elements
 
 
 def values_problem(dtype: np.dtype[Any]) -> str | None:
     """Return why a column of values of ``dtype`` holds no one value per row, or None.
 
-    h5py reads each value of a variable-length dtype other than text as an
-    array, which a metadata column cannot hold as one value.
+    Each value must be one text value, number or boolean, as
+    :func:`_element_problem` checks the dtype.
 
     Returns:
         The reason, which reads after the name of the column, such as
-        ``needs one text, number or boolean per row; found a variable-length
-        array of int64 per row``.
+        ``needs one text value, number or boolean per row; found a
+        variable-length array of int64 per row``.
     """
-    sequence = _sequence_dtype(dtype)
-    if sequence is None:
+    element = _element_problem(dtype)
+    if element is None:
         return None
-    return (
-        "needs one text, number or boolean per row; found a variable-length "
-        f"array of {sequence} per row"
-    )
+    return f"needs one text value, number or boolean per row; found {element} per row"
 
 
-def _check_values(dtype: np.dtype[Any], column: str) -> None:
-    """Refuse a column of values of ``dtype`` that holds no one value per row.
+def _refuse(problem: str | None, column: str) -> None:
+    """Refuse ``column`` for ``problem``, which the two checks above find.
 
     Raises:
-        ValueError: As :func:`values_problem` finds, naming ``column``.
+        ValueError: If there is a problem, naming the column.
     """
-    problem = values_problem(dtype)
     if problem is not None:
         raise ValueError(f"Column {column!r} {problem}")
-
-
-def checked_categories(categories: Any, column: str) -> Any:
-    """Return a categorical's categories, refusing those that are not one value each.
-
-    Args:
-        categories: The node that holds the categories.
-        column: The column, as the refusal names it, such as ``'/obs/x'``.
-
-    Raises:
-        ValueError: If the categories are not one text, number or boolean
-            each, as :func:`categories_problem` finds.
-    """
-    problem = categories_problem(categories)
-    if problem is not None:
-        raise ValueError(f"Column {column!r} {problem}")
-    return categories
 
 
 def decode_categories(
@@ -456,22 +437,22 @@ def _node_column(node: H5adNode, selection: slice) -> TableColumn:
     Raises:
         TypeError: If the node uses an encoding that cannot be decoded.
         ValueError: If a nullable column's mask does not align with its
-            values, the values are variable-length arrays other than text,
-            as :func:`values_problem` finds, or a categorical's categories
-            are not one text, number or boolean each, as
-            :func:`checked_categories` refuses them.
+            values, the values are not one value per row, as
+            :func:`values_problem` finds, or a categorical's categories are
+            not one value each, as :func:`categories_problem` finds.
     """
     if isinstance(node, h5py.Dataset):
-        _check_values(node.dtype, node.name)
+        _refuse(values_problem(node.dtype), node.name)
         values = np.asarray(node[selection])
         return values, np.zeros(values.shape, dtype=bool)
     if is_categorical(node):
-        categories = checked_categories(node["categories"], node.name)
+        categories = node["categories"]
+        _refuse(categories_problem(categories), node.name)
         return CategoryCodes(
             np.asarray(node["codes"][selection]), np.asarray(categories[:])
         )
     if is_nullable(node):
-        _check_values(node["values"].dtype, node.name)
+        _refuse(values_problem(node["values"].dtype), node.name)
         values = np.asarray(node["values"][selection])
         missing = np.asarray(node["mask"][selection], dtype=bool)
         if missing.shape != values.shape:
@@ -500,9 +481,8 @@ def read_column(
     Raises:
         TypeError: If the node uses an encoding that cannot be decoded.
         ValueError: If a nullable column's mask does not align with its
-            values, the values are variable-length arrays other than text, or
-            a categorical's categories are not one text, number or boolean
-            each.
+            values, or the values or a categorical's categories are not one
+            value each.
     """
     return decoded_column(_node_column(node, slice(start, stop)))
 
@@ -529,27 +509,6 @@ def _legacy_categories_node(
     return None
 
 
-def legacy_categories(
-    h5: h5py.File,
-    table: H5adNode,
-    key: str,
-    category_groups: tuple[str, ...],
-) -> np.ndarray | None:
-    """Return categories that old AnnData files store apart from their codes.
-
-    AnnData 0.7 kept them in a ``__categories`` group beside the columns and
-    AnnData 0.6 in ``uns/<key>_categories``.
-
-    Raises:
-        ValueError: If the categories are not one text, number or boolean
-            each, as :func:`checked_categories` refuses them.
-    """
-    node = _legacy_categories_node(h5, table, key, category_groups)
-    if node is None:
-        return None
-    return np.asarray(checked_categories(node, f"{table.name}/{key}")[:])
-
-
 def categories_node(
     h5: h5py.File,
     table: H5adNode,
@@ -560,7 +519,7 @@ def categories_node(
 
     A group-encoded categorical keeps its categories beside its codes, and
     old AnnData files keep those of integer codes apart from them, as
-    :func:`legacy_categories` finds them. Any other column has none. Only
+    :func:`_legacy_categories_node` finds them. Any other column has none. Only
     names and dtypes are read, never values.
 
     Args:
@@ -605,16 +564,15 @@ def table_column(
     it, apart from them; any other column as its values and missing rows.
 
     Raises:
-        ValueError: If the values are variable-length arrays other than
-            text, as :func:`values_problem` finds, or a categorical's
-            categories are not one text, number or boolean each, as
-            :func:`checked_categories` refuses them.
+        ValueError: If the values are not one value per row, as
+            :func:`values_problem` finds, or a categorical's categories are
+            not one value each, as :func:`categories_problem` finds.
     """
     if isinstance(table, h5py.Dataset):
         fields = table.dtype.fields
         if fields is None or key not in fields:
             raise KeyError(f"Column {key!r} was not found in {table.name!r}")
-        _check_values(np.dtype(fields[key][0]), f"{table.name}/{key}")
+        _refuse(values_problem(np.dtype(fields[key][0])), f"{table.name}/{key}")
         values = np.asarray(table.fields(key)[start:stop])
         missing = np.zeros(values.shape, dtype=bool)
     else:
@@ -624,9 +582,10 @@ def table_column(
             return column
         values, missing = column
     if values.dtype.kind in "iu":
-        categories = legacy_categories(h5, table, key, category_groups)
+        categories = _legacy_categories_node(h5, table, key, category_groups)
         if categories is not None:
-            return CategoryCodes(values, categories)
+            _refuse(categories_problem(categories), f"{table.name}/{key}")
+            return CategoryCodes(values, np.asarray(categories[:]))
     return values, missing
 
 
@@ -684,7 +643,7 @@ def _category_values(
 ) -> tuple[Any, ...]:
     """Return categories with byte strings as text and NumPy scalars as Python scalars.
 
-    The categories are those that :func:`checked_categories` passes, so h5py
+    The categories are those that :func:`categories_problem` passes, so h5py
     reads each as a byte string or a NumPy scalar.
 
     Raises:
@@ -715,18 +674,17 @@ def column_categories(
 ) -> H5adCategories | None:
     """Return the categories of a categorical column, or None for another column.
 
-    A group-encoded categorical keeps its categories beside its codes and
-    records ``ordered`` as an attribute. AnnData 0.7 and 0.6 kept the
-    categories of integer codes apart from them, as
-    :func:`legacy_categories` finds them, and such categories are unordered
-    unless their dataset records ``ordered``.
+    The categories are those that :func:`categories_node` finds. A
+    group-encoded categorical records ``ordered`` as an attribute of its
+    group, and old AnnData versions on the dataset of the categories, which
+    are unordered when it records none.
 
     Args:
         h5: The file.
         table: The dataframe group, or an old compound dataset.
         key: The column.
         category_groups: Groups beside the columns that may hold the
-            categories of integer codes, as :func:`legacy_categories` reads.
+            categories of integer codes.
         expectation: What the column must hold, which a refusal starts
             with, such as ``"H5AD cell metadata must be UTF-8 text"``.
         place: Where the column is, as :func:`column_place` names it.
@@ -734,35 +692,18 @@ def column_categories(
     Raises:
         ValueError: If a category is bytes that are not UTF-8 text, as
             :func:`category_refusal` refuses it, or the categories are not
-            one text, number or boolean each, as :func:`checked_categories`
-            refuses them.
+            one value each, as :func:`categories_problem` finds.
     """
-    if isinstance(table, h5py.Group):
-        node = table[key]
-        if is_categorical(node):
-            categories = checked_categories(node["categories"], node.name)
-            return H5adCategories(
-                _category_values(categories[:], expectation, place),
-                bool(node.attrs.get("ordered", False)),
-            )
-        if not isinstance(node, h5py.Dataset):
-            return None
-        stored = node.dtype
-    else:
-        stored = np.dtype(table.dtype.fields[key][0])
-    if stored.kind not in "iu":
-        return None
-    categories = legacy_categories(h5, table, key, category_groups)
+    categories = categories_node(h5, table, key, category_groups)
     if categories is None:
         return None
-    ordered = False
-    if isinstance(table, h5py.Group):
-        for name in category_groups:
-            group = table.get(name)
-            if isinstance(group, h5py.Group) and key in group:
-                ordered = bool(group[key].attrs.get("ordered", False))
-                break
-    return H5adCategories(_category_values(categories, expectation, place), ordered)
+    _refuse(categories_problem(categories), f"{table.name}/{key}")
+    column = table[key] if isinstance(table, h5py.Group) else None
+    recorded = column if column is not None and is_categorical(column) else categories
+    return H5adCategories(
+        _category_values(categories[:], expectation, place),
+        bool(recorded.attrs.get("ordered", False)),
+    )
 
 
 def _holds_text(dtype: np.dtype[Any]) -> bool:
@@ -845,7 +786,7 @@ def check_column_text(
         table: The dataframe group, or an old compound dataset.
         key: The column, which ``table`` holds.
         category_groups: Groups beside the columns that may hold the
-            categories of integer codes, as :func:`legacy_categories` reads.
+            categories of integer codes, as :func:`categories_node` reads.
         expectation: What the column must hold, which a refusal starts
             with, such as ``"H5AD cell metadata must be UTF-8 text"``.
         place: Where the column is, as :func:`column_place` names it.
@@ -976,13 +917,14 @@ def table_column_dtype(
 
     Raises:
         KeyError: If ``table`` is a compound dataset without the field ``key``.
-        ValueError: If a categorical's categories are not one text, number
-            or boolean each, as :func:`checked_categories` refuses them.
+        ValueError: If a categorical's categories are not one value each, as
+            :func:`categories_problem` finds.
     """
     source: np.dtype[Any]
     categories = categories_node(h5, table, key, category_groups)
     if categories is not None:
-        source = np.dtype(checked_categories(categories, f"{table.name}/{key}").dtype)
+        _refuse(categories_problem(categories), f"{table.name}/{key}")
+        source = np.dtype(categories.dtype)
     elif isinstance(table, h5py.Dataset):
         source = np.dtype(table.dtype.fields[key][0])
     else:
@@ -1050,9 +992,9 @@ def _index_node(table: Any, path: str) -> tuple[Any, str]:
 
     Raises:
         ValueError: If the dataframe names no index, stores it in a form
-            CyteArc cannot read, or stores it as a categorical whose
-            categories are not one value each, as :func:`categories_problem`
-            finds.
+            CyteArc cannot read, or stores names that are not one value
+            each, as :func:`values_problem` and :func:`categories_problem`
+            find.
     """
     where = str(getattr(table, "name", "")).strip("/") or "dataframe"
     raw = None if _is_array(table) else table.attrs.get("_index")
@@ -1066,16 +1008,18 @@ def _index_node(table: Any, path: str) -> tuple[Any, str]:
     if _is_array(node):
         if len(node.shape) != 1:
             raise unreadable
-        return node, "array"
-    members = set(node.keys())
-    if CATEGORICAL_KEYS <= members:
-        problem = categories_problem(node["categories"])
-        if problem is not None:
-            raise ValueError(f"The index of the {where} of {path} {problem}")
-        return node, "categorical"
-    if NULLABLE_KEYS <= members:
-        return node, "nullable"
-    raise unreadable
+        form, problem = "array", values_problem(node.dtype)
+    else:
+        members = set(node.keys())
+        if CATEGORICAL_KEYS <= members:
+            form, problem = "categorical", categories_problem(node["categories"])
+        elif NULLABLE_KEYS <= members:
+            form, problem = "nullable", values_problem(node["values"].dtype)
+        else:
+            raise unreadable
+    if problem is not None:
+        raise ValueError(f"The index of the {where} of {path} {problem}")
+    return node, form
 
 
 def index_length(table: Any, path: str) -> int:

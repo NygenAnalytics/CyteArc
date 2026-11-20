@@ -167,13 +167,13 @@ def test_create_zarr_obj_array_writes_metadata_columns_from_the_writers_facade()
 @pytest.mark.parametrize(
     ("data", "shape"),
     [
-        (np.asarray(5), "()"),
-        (5, "()"),
-        ("abc", "()"),
-        (b"abc", "()"),
-        (np.ones((2, 2)), "(2, 2)"),
-        ([[1, 2], [3, 4]], "(2, 2)"),
-        (np.zeros((3, 1, 2)), "(3, 1, 2)"),
+        pytest.param(np.asarray(5), "()", id="zero-dimensional-array"),
+        pytest.param(5, "()", id="integer"),
+        pytest.param("abc", "()", id="text"),
+        pytest.param(b"abc", "()", id="bytes"),
+        pytest.param(np.ones((2, 2)), "(2, 2)", id="grid"),
+        pytest.param([[1, 2], [3, 4]], "(2, 2)", id="nested-lists"),
+        pytest.param(np.zeros((3, 1, 2)), "(3, 1, 2)", id="three-dimensions"),
     ],
 )
 def test_metadata_column_writers_refuse_values_that_are_not_one_per_row(

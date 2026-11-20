@@ -40,7 +40,12 @@ import pandas as pd
 from ..utils.arrays import sort_categories
 from ..utils.files import HDF5_SIGNATURE
 from ..utils.numba import njit
-from ._h5ad_columns import categories_problem, index_length, index_names
+from ._h5ad_columns import (
+    categories_problem,
+    index_length,
+    index_names,
+    values_problem,
+)
 from ._text import as_text
 from ..utils.arguments import quoted_value
 
@@ -182,25 +187,37 @@ class _Column:
 
 
 def _column(name: str, node: Any, what: str) -> _Column:
+    """Return how to read the column ``name`` of a character matrix.
+
+    Raises:
+        ValueError: If the column holds no one state per cell: a group of
+            another encoding, values of more than one dimension, or values or
+            categories that are not one value each, as
+            :func:`~cytearc.readers._h5ad_columns.values_problem` and
+            :func:`~cytearc.readers._h5ad_columns.categories_problem` find.
+    """
     if _is_group(node):
         keys = set(node.keys())
         if {"codes", "categories"} <= keys:
+            column = _Column(name, node, "categorical")
             problem = categories_problem(node["categories"])
-            if problem is not None:
-                raise ValueError(
-                    f"{what} holds a column {quoted_value(name)} that {problem}"
-                )
-            return _Column(name, node, "categorical")
-        if {"values", "mask"} <= keys:
-            return _Column(name, node, "nullable")
-        raise ValueError(
-            f"{what} holds a column {quoted_value(name)} that CyteArc cannot read"
-        )
-    if len(node.shape) != 1:
+        elif {"values", "mask"} <= keys:
+            column = _Column(name, node, "nullable")
+            problem = values_problem(node["values"].dtype)
+        else:
+            raise ValueError(
+                f"{what} holds a column {quoted_value(name)} that CyteArc cannot read"
+            )
+    elif len(node.shape) != 1:
         raise ValueError(
             f"{what} holds a column {quoted_value(name)} of more than one dimension"
         )
-    return _Column(name, node, "array")
+    else:
+        column = _Column(name, node, "array")
+        problem = values_problem(node.dtype)
+    if problem is not None:
+        raise ValueError(f"{what} holds a column {quoted_value(name)} that {problem}")
+    return column
 
 
 @dataclass(frozen=True, slots=True)

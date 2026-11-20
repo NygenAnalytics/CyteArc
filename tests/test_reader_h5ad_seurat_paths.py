@@ -334,10 +334,11 @@ def test_h5ad_reader_refuses_a_matrix_that_is_a_named_type(tmp_path) -> None:
         del h5["X"]
         # A named datatype is a node that is neither a dataset nor a group.
         h5["X"] = np.dtype("<f4")
+    # It used to say that X "is neither Dataset or Group type".
     with pytest.raises(ValueError) as refused:
         H5adReader(str(path))
     assert str(refused.value) == (
-        "ERROR: X is neither Dataset or Group type. Will not consume data"
+        f"ERROR: Matrix `X` is a named datatype, which holds no values. {_MATRIX_EXPECTED}"
     )
 
 
@@ -354,8 +355,10 @@ def test_h5ad_reader_refuses_a_sparse_group_that_declares_no_layout(
     assert str(refused.value) == (
         "ERROR: Matrix `X` is a group holding `data`, `indices`, `indptr` without "
         "an `encoding-type` or `h5sparse_format` attribute, so H5adReader cannot "
-        "tell CSR from CSC. Set its `encoding-type` attribute to `csr_matrix` or "
-        "`csc_matrix`, as AnnData writes it."
+        "tell CSR from CSC. Set its `encoding-type` attribute to `csr_matrix` when "
+        "the matrix is stored by rows, the cells, so that `indptr` holds one entry "
+        "per cell plus one, or to `csc_matrix` when it is stored by columns, the "
+        "features."
     )
     # Either attribute declares the layout, and the matrix then reads.
     for attribute, layout in (

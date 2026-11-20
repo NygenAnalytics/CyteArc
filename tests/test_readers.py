@@ -1315,7 +1315,7 @@ def test_h5ad_reader_streams_compound_obs_cluster_fields(tmp_path):
             cluster_keys=("arrays",),
         )
     assert str(refused.value) == (
-        "Cluster key 'arrays' needs one text, number or boolean per row; found a "
+        "Cluster key 'arrays' needs one text value, number or boolean per row; found a "
         "variable-length array of int64 per row"
     )
 

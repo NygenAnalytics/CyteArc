@@ -1,6 +1,7 @@
 """Partial and nullable inserts flag missing rows under the linked mask."""
 
 import datetime
+from collections import deque
 
 import numpy as np
 import pandas as pd
@@ -390,7 +391,11 @@ def test_imports_flag_every_kind_of_missing_object_value():
 # alike, as their first and last three values.
 _LONG = np.arange(1_500)
 _CHANGED = np.where(_LONG == 700, -1, _LONG)
-_REMEDY = "Pass text, such as series.map(str), to store the values as text"
+# How the refusal of an insert ends, as written by hand.
+_STORE_AS_TEXT = (
+    "To store such values as text, pass text that keeps every element, such as "
+    'series.map(lambda v: ",".join(map(str, v)))'
+)
 
 
 def _collections_store(tmp_path):
@@ -401,39 +406,75 @@ def _collections_store(tmp_path):
     return open_store(path)
 
 
-def _refused(value: str, row: int, *, item: str = "row", name: str = "column") -> str:
-    """The refusal of a column whose ``row`` holds ``value``, as written by hand."""
-    return (
-        f"Column {name!r} needs one value per {item}, not a list, tuple, set, dict "
-        f"or array; {item} {row} holds {value}. {_REMEDY}"
+def _refused(
+    value: str,
+    position: int,
+    *,
+    item: str = "row",
+    name: str = "column",
+    remedy: str | None = _STORE_AS_TEXT,
+) -> str:
+    """The refusal of a column whose ``position`` holds ``value``, as written by hand."""
+    refusal = (
+        f"Column {name!r} needs one value per {item}, not a list, tuple, set, dict, "
+        f"array or other collection; {item} {position} holds {value}"
     )
+    return refusal if remedy is None else f"{refusal}. {remedy}"
+
+
+def _objects(*values: object) -> np.ndarray:
+    """Hold each value as one object, as an object column holds it."""
+    held = np.empty(len(values), dtype=object)
+    for position, value in enumerate(values):
+        held[position] = value
+    return held
+
+
+_SERIES = pd.Series([1, 2])
+_GENERATOR = (value for value in range(2))
 
 
 @pytest.mark.parametrize(
     ("values", "row", "held"),
     [
-        pytest.param([[1, 2], [3], [1, 2, 3], [4]], 1, "[1, 2]", id="lists"),
+        pytest.param(_objects([1, 2], [3], [1, 2, 3], [4]), 1, "[1, 2]", id="lists"),
         pytest.param(
-            [(1, 0.5), (2, 1.5), (3, 2.5), (4, 3.5)], 1, "(1, 0.5)", id="tuples"
+            _objects((1, 0.5), (2, 1.5), (3, 2.5), (4, 3.5)), 1, "(1, 0.5)", id="tuples"
         ),
         pytest.param(
-            [_LONG, _CHANGED, _LONG, _CHANGED],
-            1,
-            "array([   0,    1,    2, ..., 1497, 1498, 1499], shape=(1500,))",
-            id="long-arrays",
-        ),
-        pytest.param(["a", {"b"}, "c", None], 2, "{'b'}", id="a-set-among-text"),
-        pytest.param(
-            [1, 2.5, None, {"d": 4}], 4, "{'d': 4}", id="a-dict-among-numbers"
+            _objects(_LONG, _CHANGED, _LONG, _CHANGED), 1, repr(_LONG), id="long-arrays"
         ),
         pytest.param(
-            ["a", "b", frozenset({3}), "d"], 3, "frozenset({3})", id="a-frozenset"
+            _objects("a", {"b"}, "c", None), 2, "{'b'}", id="a-set-among-text"
+        ),
+        pytest.param(
+            _objects(1, 2.5, None, {"d": 4}), 4, "{'d': 4}", id="a-dict-among-numbers"
+        ),
+        pytest.param(
+            _objects("a", "b", frozenset({3}), "d"),
+            3,
+            "frozenset({3})",
+            id="a-frozenset",
+        ),
+        pytest.param(_objects("a", range(3), "c", "d"), 2, "range(0, 3)", id="a-range"),
+        pytest.param(
+            _objects("a", "b", deque([1]), "d"), 3, "deque([1])", id="a-deque"
+        ),
+        pytest.param(
+            _objects(_SERIES, "b", "c", "d"), 1, repr(_SERIES), id="a-series-per-row"
+        ),
+        pytest.param(
+            _objects("a", {"k": 1}.keys(), "c", "d"),
+            2,
+            "dict_keys(['k'])",
+            id="a-dict-view",
+        ),
+        pytest.param(
+            _objects("a", "b", "c", _GENERATOR), 4, repr(_GENERATOR), id="a-generator"
         ),
     ],
 )
-def test_inserts_refuse_lists_tuples_sets_dicts_and_arrays_and_write_nothing(
-    tmp_path, values, row, held
-):
+def test_inserts_refuse_collections_and_write_nothing(tmp_path, values, row, held):
     store = _collections_store(tmp_path)
     ids = store.cells.fetch_all("ids")
     store.cells.insert("column", pd.Series(["w", "x", "y", "z"], index=ids))
@@ -489,6 +530,59 @@ def test_inserts_refuse_lists_of_unequal_lengths_and_categories_of_collections(
     assert "pairs" not in store.cells.columns
 
 
+def test_update_key_refuses_collections_with_no_remedy_of_text(tmp_path):
+    store = _collections_store(tmp_path)
+    ids = store.cells.fetch_all("ids")
+    selected = store.cells.fetch_all("I").tolist()
+    with pytest.raises(ValueError) as refused:
+        store.cells.update_key(
+            pd.Series(_objects([True], [False], [True], [True]), index=ids), "I"
+        )
+    # A key holds booleans, so text would be no remedy.
+    assert str(refused.value) == _refused("[True]", 1, name="I", remedy=None)
+    assert store.cells.fetch_all("I").tolist() == selected
+
+
+def test_the_remedy_keeps_every_element_of_each_value(tmp_path):
+    store = _collections_store(tmp_path)
+    values = pd.Series(
+        _objects(_LONG, _CHANGED, [0.1 + 0.2, 2.5], [3]),
+        index=store.cells.fetch_all("ids"),
+    )
+    store.cells.insert("joined", values.map(lambda v: ",".join(map(str, v))))
+    first, second, floats, single = store.cells.fetch_all("joined").tolist()
+    # The two long arrays stay apart, and floats keep every digit.
+    assert first.split(",") == [str(value) for value in range(1_500)]
+    assert second.split(",")[699:702] == ["699", "-1", "701"]
+    assert floats == "0.30000000000000004,2.5"
+    assert single == "3"
+
+
+def test_a_zero_dimensional_array_is_stored_as_the_value_it_holds(tmp_path):
+    store = _collections_store(tmp_path)
+    ids = store.cells.fetch_all("ids")
+    nested = np.empty((), dtype=object)
+    nested[()] = np.array(4)
+    store.cells.insert(
+        "numbers", pd.Series(_objects(np.array(1.5), 2.5, None, nested), index=ids)
+    )
+    store.cells.insert(
+        "labels",
+        pd.Series(_objects(np.array("a"), "b", np.array("cc"), "d"), index=ids),
+    )
+    # Each used to be stored as its printed text, such as "1.5".
+    np.testing.assert_array_equal(
+        store.cells.fetch_all("numbers"), [1.5, 2.5, np.nan, 4.0]
+    )
+    assert store.cells.fetch_all("labels").tolist() == ["a", "b", "cc", "d"]
+    # A list that a zero-dimensional array holds is refused as a list.
+    held = np.empty((), dtype=object)
+    held[()] = [1, 2]
+    with pytest.raises(ValueError) as refused:
+        store.cells.insert("lists", pd.Series(_objects("a", held, "c", "d"), index=ids))
+    assert str(refused.value) == _refused("[1, 2]", 2, name="lists")
+
+
 @pytest.mark.parametrize(
     ("values", "stored"),
     [
@@ -496,6 +590,8 @@ def test_inserts_refuse_lists_of_unequal_lengths_and_categories_of_collections(
         (["[1, 2]", "(3,)", None, "{}"], ["[1, 2]", "(3,)", "", "{}"]),
         (["a", 1, 2.5, None], ["a", "1", "2.5", ""]),
         ([b"a", "b", None, "c"], ["a", "b", "", "c"]),
+        # Python iterates text, which is no collection, bytearray included.
+        ([bytearray(b"a"), "b", None, "c"], ["a", "b", "", "c"]),
         ([None, None, None, None], ["", "", "", ""]),
     ],
 )
@@ -506,10 +602,28 @@ def test_text_and_mixed_scalars_are_still_stored_as_text(values, stored):
 
 
 def test_imports_refuse_collections_before_they_write_the_column():
+    from cytearc.writers._store import write_categorical_column
+
     group = zarr.open_group(store=MemoryStore(), mode="w")
-    values = np.empty(3, dtype=object)
-    values[:] = [np.arange(2), np.arange(3), np.arange(2)]
     with pytest.raises(ValueError) as refused:
-        write_metadata_column(group, "column", values)
-    assert str(refused.value) == _refused("array([0, 1])", 1)
+        write_metadata_column(
+            group, "column", _objects(np.arange(2), np.arange(3), np.arange(2))
+        )
+    assert str(refused.value) == _refused("array([0, 1])", 1, remedy=None)
+    # Either layout of a categorical names its category, as the default
+    # import of categoricals used to store tuples as text.
+    categories = _objects((1, 2), (3, 4))
+    for write in (
+        lambda: write_categorical_column(
+            group, "pairs", np.array([0, 1, 0]), categories, ordered=False
+        ),
+        lambda: write_metadata_column(
+            group, "pairs", np.array([0, 1, 0]), categories=categories
+        ),
+    ):
+        with pytest.raises(ValueError) as refused:
+            write()
+        assert str(refused.value) == _refused(
+            "(1, 2)", 1, item="category", name="pairs", remedy=None
+        )
     assert list(group.keys()) == []
