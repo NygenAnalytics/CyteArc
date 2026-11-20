@@ -70,7 +70,8 @@ class PseudotimeScoreResult:
 
     ``component`` gives each cell's connected component of the graph,
     numbered by decreasing size, and ``component_sizes`` the components' cell
-    counts, largest first. The ``valid`` cells form the scored component.
+    counts, largest first; each component holds a cell. The ``valid`` cells
+    form the scored component.
     """
 
     ref: ArtifactRef
@@ -94,9 +95,11 @@ class PseudotimeScoreResult:
         ):
             raise ValueError("Pseudotime components must be non-negative integers")
         sizes = tuple(int(size) for size in self.component_sizes)
+        if any(size < 1 for size in sizes):
+            raise ValueError("Pseudotime component sizes must be positive")
         if list(sizes) != sorted(sizes, reverse=True):
             raise ValueError("Pseudotime component sizes must be largest first")
-        if np.bincount(component, minlength=len(sizes)).tolist() != list(sizes):
+        if np.bincount(component).tolist() != list(sizes):
             raise ValueError("Pseudotime component sizes must count the components")
         valid = np.asarray(self.valid, dtype=bool)
         if valid.any() and not np.array_equal(

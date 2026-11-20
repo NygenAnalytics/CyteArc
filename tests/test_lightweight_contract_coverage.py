@@ -202,6 +202,26 @@ def _pseudotime_of_components(
             (3, 1, 1),
             "Pseudotime component sizes must count the components",
         ),
+        # A component of no cells, which the counts of the components with
+        # padding up to the sizes' length would match, does not exist.
+        (
+            [True, True, True, False],
+            [0, 0, 0, 1],
+            (3, 1, 0),
+            "Pseudotime component sizes must be positive",
+        ),
+        (
+            [],
+            np.zeros(0, dtype=np.int64),
+            (0,),
+            "Pseudotime component sizes must be positive",
+        ),
+        (
+            [True, True, True, False],
+            [0, 0, 0, 1],
+            (3, 1, -1),
+            "Pseudotime component sizes must be positive",
+        ),
         # The valid cells leave out a cell of the scored component.
         (
             [True, True, False, False],

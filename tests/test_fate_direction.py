@@ -35,16 +35,19 @@ from cytearc.trajectory import FateMappingResult, SourceSinkLabelsError
 from cytearc.trajectory.artifacts import FATE_PAYLOAD
 from cytearc.trajectory.fate import direction_scores, fate_map_cells
 from cytearc.utils.logging import collect_warnings
+from cytearc.utils.memory_budget import MemoryBudgetError
 
 from .test_fate_mapping import _direct_fate_reference, _ScoredStore, _scored_y_store
 from .test_trajectory_membership import _branching
 from .test_trajectory_record_paths import (
     _Y_LABELS,
+    _count_calls,
     _empty_graph_payload,
     _path,
     _resize_graph,
     _rewrite_inputs,
     _rewrite_parameters,
+    _set_budget,
     _trajectory_store,
     _y_graph,
 )
@@ -848,6 +851,125 @@ def test_lineage_membership_of_a_map_directed_by_a_score_parts_lineages_on_it() 
     assert selected.sum() == math.ceil(0.25 * pair.sum())
     assert not np.any(selected & ~pair)
     assert nearest[selected].max() <= nearest[pair & ~selected].min()
+
+
+@pytest.mark.parametrize("call", ["fate", "load_fate", "lineage_membership"])
+def test_a_map_directed_by_a_score_is_refused_a_small_budget_before_its_graph_is_read(
+    monkeypatch, call: str
+) -> None:
+    # The branching store of the membership tests, its fate map directed by
+    # three times its pseudotime plus seven.
+    branching = _branching()
+    store = branching.store
+    score = by_cell_id(
+        store.cells,
+        3.0 * store.trajectory.load_pseudotime(branching.pseudotime).values + 7.0,
+    )
+    labels = branching.label_artifact()
+    fate = store.trajectory.fate(
+        sink_labels=labels, graph=branching.graph, direction=score, sinks=["a2", "b2"]
+    )
+    curves = store.trajectory.curves(fate, n_points=40, df=6.0)
+    calls = {
+        "fate": lambda: store.trajectory.fate(
+            sink_labels=labels,
+            graph=branching.graph,
+            direction=score,
+            sinks=["a2", "b2"],
+            beta=5.0,
+        ),
+        "load_fate": lambda: store.trajectory.load_fate(fate),
+        "lineage_membership": lambda: store.trajectory.lineage_membership(curves),
+    }
+    maps = _fate_maps(store)
+    reads = _count_calls(monkeypatch, store, "_store_to_sparse")
+    # Loading the store's graph of 725 edges and numbering its components
+    # needs 17,984 + 61,492 bytes, as the membership tests derive, beside the
+    # positions of its 145 cells and their float64 scores, 1,160 bytes each.
+    needed = 17_984 + 61_492 + 1_160 + 1_160
+    _set_budget(store, needed - 1)
+    with pytest.raises(MemoryBudgetError) as refused:
+        calls[call]()
+    assert str(refused.value) == (
+        f"Loading a direction score of 145 cells needs about {needed} bytes in "
+        "memory for a graph of 725 edges, but the operation limit is "
+        f"{needed - 1} bytes. Raise mem_budget."
+    )
+    assert reads == {}
+    assert _fate_maps(store) == maps
+    # The budget that the refusal names runs the call, which reads the graph
+    # once.
+    _set_budget(store, needed)
+    calls[call]()
+    assert reads == {"_store_to_sparse": 1}
+
+
+def test_a_masked_score_charges_its_mask_beside_the_graph_load() -> None:
+    scored, pseudotime = _y_with_island()
+    store = scored.store
+    island = ~pseudotime.valid
+    values = pseudotime.values.copy()
+    values[island] = 0.5
+    masked = _cell_artifact(scored, "quality_metric", values, island)
+    unscored = np.where(island, np.nan, values)
+
+    def needed(direction: Any) -> int:
+        _set_budget(store, 1)
+        with pytest.raises(MemoryBudgetError) as refused:
+            _direct(scored, direction)
+        return refused.value.needed_bytes
+
+    # The mask of the stored score holds a byte for each of the 7 cells,
+    # beside what the same scores as NaN hold.
+    assert needed(masked) == needed(unscored) + 7
+    assert _fate_maps(store) == []
+
+
+def test_a_map_directed_by_a_score_counts_what_its_caller_holds() -> None:
+    # The lineage feature analyses load a fate map while they hold their
+    # features' positions, which its loader counts beside the graph.
+    scored, ref = _directed_map()
+    store = scored.store
+    _set_budget(store, 1)
+    needed = {}
+    for held in (0, 4_096):
+        with pytest.raises(MemoryBudgetError) as refused:
+            store._load_fate_inputs(ref, held_bytes=held)
+        needed[held] = refused.value.needed_bytes
+    assert needed[4_096] == needed[0] + 4_096
+
+
+def test_a_score_keyed_by_cell_id_lets_the_ids_go_before_the_graph_is_read(
+    monkeypatch,
+) -> None:
+    import weakref
+
+    from cytearc.datastore._operations import trajectory as operations
+
+    # The check counts what the loader holds when it reads the graph: the
+    # score's values, not the cells' IDs that aligned them or the aligned
+    # Series, which are let go first.
+    scored, pseudotime = _y_with_island()
+    store = scored.store
+    kept: list[weakref.ref[Any]] = []
+    align = operations.align_to_cell_ids
+
+    def aligned(values: Any, ids: Any, **options: Any) -> Any:
+        result = align(values, ids, **options)
+        kept.extend((weakref.ref(ids), weakref.ref(result)))
+        return result
+
+    alive_at_read: list[list[bool]] = []
+    load = store._load_graph_artifact
+
+    def read(*args: Any, **kwargs: Any) -> Any:
+        alive_at_read.append([ref() is not None for ref in kept])
+        return load(*args, **kwargs)
+
+    monkeypatch.setattr(operations, "align_to_cell_ids", aligned)
+    monkeypatch.setattr(store, "_load_graph_artifact", read)
+    _direct(scored, np.where(pseudotime.valid, pseudotime.values, 0.25))
+    assert alive_at_read == [[False, False]]
 
 
 def test_direction_scores_keep_the_finite_values_of_whole_components() -> None:

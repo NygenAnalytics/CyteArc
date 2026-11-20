@@ -1,8 +1,8 @@
 """Checks that graph consumers run before they load a graph or compute.
 
 Leiden, Paris, UMAP, and t-SNE refuse a read-only store before they read the
-graph when they cannot reuse a saved result, and they, with the connectivity
-conversion, admit their memory before the graph is read. The graph-loading
+graph when they cannot reuse a saved result, and they, with LocalMAP and the
+connectivity conversion, admit their memory before the graph is read. The graph-loading
 flags and initialization references are checked first too, and SNN
 integration refuses graphs of different k before loading any of them.
 """
@@ -23,6 +23,7 @@ from cytearc.datastore._operations.graph import _GraphOperationsMixin
 from cytearc.datastore._pipeline.executor import RecipePlan
 from cytearc.datastore._pipeline.recipes.rna import resolve_rna
 from cytearc.datastore.pipeline_accessor import PipelineAccessor
+from cytearc.embeddings.localmap import localmap_peak_bytes
 from cytearc.embeddings.sgtsne import sgtsne_input_bytes
 from cytearc.embeddings.umap import fuzzy_simplicial_set, umap_peak_bytes
 from cytearc.graph.arguments import graph_load_flags, umap_graph_flags
@@ -314,6 +315,26 @@ def test_consumers_admit_their_graph_memory_before_reading_it(
             ),
             "t-SNE",
             _required(upper, N_CELLS * 3 * 8, sgtsne_input_bytes(N_CELLS, edges, 3)),
+        ),
+        # LocalMAP holds the graph's 4 PCA coordinates and its 2-dimensional
+        # layout in float32 for each cell.
+        (
+            lambda: store.embeddings.localmap(
+                graph,
+                initialization,
+                localmap_dims=2,
+                n_mid_near=5,
+                n_further=20,
+                nthreads=1,
+            ),
+            "LocalMAP",
+            _required(
+                directed,
+                N_CELLS * (4 + 2) * 4,
+                localmap_peak_bytes(
+                    N_CELLS, edges, dims=2, n_mid_near=5, n_further=20, nthreads=1
+                ),
+            ),
         ),
     ]
     monkeypatch.setattr(

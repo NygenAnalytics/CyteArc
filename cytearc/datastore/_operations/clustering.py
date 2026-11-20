@@ -455,8 +455,8 @@ class _ClusteringOperationsMixin(_ClusteringOperationsBase):
             symmetric=prepared.symmetric_graph,
             upper_only=prepared.graph_upper_only,
             held_bytes=0,
-            working_bytes=lambda cells, entries: (
-                native_leiden_peak_bytes(cells, union_factor * entries)
+            working_bytes=lambda cells, load: (
+                native_leiden_peak_bytes(cells, union_factor * load.maxEntries)
                 if prepared.backend == "cytearc"
                 else 0
             ),

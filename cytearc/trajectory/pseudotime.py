@@ -222,6 +222,28 @@ def pseudotime_components(
     return component, component_sizes, scored
 
 
+def component_numbering_bytes(
+    n_cells: int, graph_bytes: int, n_entries: int, *, subgraph: bool = False
+) -> int:
+    """Return the most bytes that numbering a graph's components holds beside the graph.
+
+    The graph is a SciPy CSR matrix of ``n_cells`` cells, with at most
+    ``n_entries`` stored entries of float32 or float64 weights, that takes
+    ``graph_bytes``. :func:`pseudotime_components` passes it to SciPy's
+    ``connected_components``. SciPy 1.16, the oldest release that CyteArc
+    supports, casts float32 weights to float64, copies the cast graph's
+    transpose and its index arrays, and labels each cell with an int32: three
+    copies of the graph and 4 bytes more for each entry. Later releases copy
+    less. The numbering then keeps an int64 for each cell. ``subgraph``
+    numbers the components of the subgraph that some of the graph's cells
+    induce, which is taken from the graph in two steps, its rows and then
+    their columns, each a copy of at most the graph, with up to 24 bytes for
+    each cell beside them.
+    """
+    numbering = 3 * graph_bytes + 4 * n_entries + 12 * n_cells
+    return numbering + 12 * n_cells if subgraph else numbering
+
+
 def select_pseudotime_component(
     graph: csr_matrix,
     selected_cell_indices: np.ndarray,

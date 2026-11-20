@@ -810,15 +810,15 @@ class _GraphOperationsMixin(_GraphOperationsBase):
         symmetric: bool,
         upper_only: bool,
         held_bytes: int,
-        working_bytes: Callable[[int, int], int],
+        working_bytes: Callable[[int, GraphLoadMemory], int],
         work: str,
     ) -> None:
         """Raise MemoryError before a consumer of ``graph`` loads it, over budget.
 
         The estimate reads only the shapes of the stored arrays. The consumer
         holds ``held_bytes`` throughout and needs ``working_bytes(n_cells,
-        max_entries)`` beside the loaded graph, given the graph's cells and
-        the most entries of the loaded matrix.
+        load)`` beside the loaded graph, given the graph's cells and the
+        load's :class:`~cytearc.neighbors.graph.GraphLoadMemory`.
         """
         graph_loc = self._graph_location(graph)
         group = as_zarr_group(self.zw[graph_loc], name=graph_loc)
@@ -834,7 +834,7 @@ class _GraphOperationsMixin(_GraphOperationsBase):
             edge_itemsize=np.dtype(edges.dtype).itemsize,
             weight_itemsize=np.dtype(weights.dtype).itemsize,
         )
-        working = working_bytes(n_cells, load.maxEntries)
+        working = working_bytes(n_cells, load)
         _require_graph_budget(
             self.resources,
             required=held_bytes + max(load.peakBytes, load.heldBytes + working),

@@ -1290,6 +1290,7 @@ CyteArc validates persisted data and public arguments against the following cont
   `clustering.leiden.native_leiden_peak_bytes`, `embeddings.sgtsne.sgtsne_input_bytes`); the
   native Leiden estimate leaves out the per-worker scratch that a hub raises, and the t-SNE one
   the working memory of `sgtsnepi`.
+- The trajectory loaders of a pseudotime and of a fate map's direction score check their graph's load against the memory budget before they read it, beside what their caller holds and the numbering of the graph's components (`trajectory.pseudotime.component_numbering_bytes`), so every trajectory call that loads a pseudotime or a fate map refuses before it reads the graph. `trajectory.membership.membership_bytes` holds the estimate that `lineage_membership` checks against the memory budget once its inputs are loaded, and the curves' loader keeps the fate map's inputs that it validated, so `lineage_membership`, `load_lineage_membership` and `branch_cells` load the graph once.
 - `run_cluster_selection` reads its sampled coordinates under the memory budget and raises
   `MemoryError` before reading when they do not fit.
 - Dotplot size legends draw `SizeScale.areas` exactly, without the 180 pt² cap, and composite size
