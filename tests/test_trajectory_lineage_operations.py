@@ -29,6 +29,7 @@ from cytearc.storage.artifacts import (
     inspect_artifact,
     new_artifact_id,
 )
+from cytearc.storage.budget import ResourceBudget
 from cytearc.storage.feature_selection import read_feature_selection_indices
 from cytearc.storage.selections import (
     read_stored_selection_indices,
@@ -66,6 +67,8 @@ from cytearc.trajectory.lineages import (
     finalize_lineage_profiles,
     lineage_profiles,
 )
+
+from cytearc.utils.memory_budget import MemoryBudgetError
 
 from .fixtures_lineages import LINEAGE_SINKS
 from tests.storage_helpers import by_cell_id
@@ -249,6 +252,70 @@ def test_lineage_markers_match_fate_weighted_correlations(
             rtol=1e-6,
             atol=1e-300,
         )
+
+
+def test_feature_analyses_charge_their_features_beside_the_graph_load(
+    datastore,
+    monkeypatch,
+    pseudotime_scoring,
+    pseudotime_markers,
+    pseudotime_aggregation,
+    detected_features,
+    lineage_fate,
+    lineage_markers,
+    lineage_drivers,
+    lineage_aggregation,
+    mark_hvgs,
+) -> None:
+    def needed(call: Any) -> int:
+        """The budget that a refusal of the call under a budget of one byte names."""
+        monkeypatch.setattr(datastore, "memoryBytes", 1)
+        monkeypatch.setattr(datastore, "resources", ResourceBudget(1, 1))
+        with pytest.raises(MemoryBudgetError) as refused:
+            call()
+        return refused.value.needed_bytes
+
+    trajectory = datastore.trajectory
+    pseudotime = needed(lambda: trajectory.load_pseudotime(pseudotime_scoring))
+    fate = needed(lambda: trajectory.load_fate(lineage_fate))
+    # Each feature analysis holds the int64 positions of its features while
+    # the graph of its pseudotime or fate map loads.
+    detected = 8 * len(_feature_indices(datastore, detected_features))
+    hvgs = 8 * len(_feature_indices(datastore, mark_hvgs))
+    calls = {
+        "markers": lambda: trajectory.markers(
+            pseudotime_scoring, features=detected_features, invalidate_cache=True
+        ),
+        "load_markers": lambda: trajectory.load_markers(pseudotime_markers),
+        "load_aggregation": lambda: trajectory.load_aggregation(pseudotime_aggregation),
+        "lineage_markers": lambda: trajectory.lineage_markers(
+            lineage_fate, features=mark_hvgs, invalidate_cache=True
+        ),
+        "load_lineage_markers": lambda: trajectory.load_lineage_markers(
+            lineage_markers
+        ),
+        "drivers": lambda: trajectory.drivers(
+            lineage_fate, features=mark_hvgs, invalidate_cache=True
+        ),
+        "load_drivers": lambda: trajectory.load_drivers(lineage_drivers),
+        "lineage_aggregation": lambda: trajectory.lineage_aggregation(
+            lineage_fate, features=mark_hvgs, invalidate_cache=True
+        ),
+        "load_lineage_aggregation": lambda: trajectory.load_lineage_aggregation(
+            lineage_aggregation
+        ),
+    }
+    assert {name: needed(call) for name, call in calls.items()} == {
+        "markers": pseudotime + detected,
+        "load_markers": pseudotime + detected,
+        "load_aggregation": pseudotime + detected,
+        "lineage_markers": fate + hvgs,
+        "load_lineage_markers": fate + hvgs,
+        "drivers": fate + hvgs,
+        "load_drivers": fate + hvgs,
+        "lineage_aggregation": fate + hvgs,
+        "load_lineage_aggregation": fate + hvgs,
+    }
 
 
 def test_lineage_markers_reuse_and_recompute_identically(
@@ -780,12 +847,21 @@ def test_curves_reuse_ranks_no_cells(
 def test_curves_validate_the_pseudotime_like_other_lineage_operations(
     datastore, lineage_fate, monkeypatch
 ):
-    fate = datastore.trajectory.load_fate(lineage_fate)
-    pseudotime = datastore.trajectory.load_pseudotime(fate.pseudotime)
-    flat = dataclasses.replace(
-        pseudotime, values=np.where(pseudotime.valid, 0.5, np.nan)
-    )
-    monkeypatch.setattr(datastore, "_trajectory_load_pseudotime", lambda ref: flat)
+    # The fate map's pseudotime, loaded with its graph, gives every scored cell
+    # the same value.
+    load = datastore._load_pseudotime_scoring_with_graph
+
+    def flat(ref: ArtifactRef, **options: Any) -> Any:
+        scored = load(ref, **options)
+        pseudotime = scored.pseudotime
+        return dataclasses.replace(
+            scored,
+            pseudotime=dataclasses.replace(
+                pseudotime, values=np.where(pseudotime.valid, 0.5, np.nan)
+            ),
+        )
+
+    monkeypatch.setattr(datastore, "_load_pseudotime_scoring_with_graph", flat)
 
     with pytest.raises(ValueError, match="at least two distinct values"):
         datastore.trajectory.curves(lineage_fate, n_points=35)
@@ -794,12 +870,6 @@ def test_curves_validate_the_pseudotime_like_other_lineage_operations(
 def test_curves_check_the_memory_budget_before_reading(
     datastore, lineage_fate, monkeypatch
 ):
-    fate = datastore.trajectory.load_fate(lineage_fate)
-    pseudotime = datastore.trajectory.load_pseudotime(fate.pseudotime)
-    monkeypatch.setattr(datastore, "_trajectory_load_fate", lambda ref: fate)
-    monkeypatch.setattr(
-        datastore, "_trajectory_load_pseudotime", lambda ref: pseudotime
-    )
     monkeypatch.setattr(datastore, "memoryBytes", 4096)
     with pytest.raises(MemoryError, match="Lineage curves need about"):
         datastore.trajectory.curves(lineage_fate, n_points=33)

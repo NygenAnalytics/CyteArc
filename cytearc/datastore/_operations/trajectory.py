@@ -200,6 +200,7 @@ from ...trajectory.membership import (
     branch_window as _branch_window_impl,
     distance_limits as _distance_limits_impl,
     lineage_members as _lineage_members_impl,
+    membership_bytes as _membership_bytes_impl,
     membership_labels as _membership_labels_impl,
     trunk_probabilities as _trunk_probabilities_impl,
 )
@@ -215,6 +216,7 @@ from ...trajectory.potency import (
     unit_ranks as _unit_ranks_impl,
 )
 from ...trajectory.pseudotime import (
+    component_numbering_bytes as _component_numbering_bytes_impl,
     make_source_sink_vector as _make_source_sink_vector_impl,
     pba_potential as _pba_potential_impl,
     pseudotime_components as _pseudotime_components_impl,
@@ -1556,15 +1558,54 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         """
         return self._load_pseudotime_scoring_with_graph(ref).pseudotime
 
+    def _require_component_numbering_budget(
+        self,
+        graph: ArtifactRef,
+        *,
+        held_bytes: int,
+        subgraph: bool,
+        work: str,
+    ) -> None:
+        """Refuse, before ``graph`` is read, a load to number its components that does not fit.
+
+        The call holds ``held_bytes`` throughout. Loading the graph forms its
+        fuzzy union, and numbering the components of the union, or of the
+        subgraph that some of its cells induce, copies it.
+        """
+        location = self._graph_location(graph)
+        if self._get_graph_ncells_k(location)[0] == 0:
+            # A graph of no cells holds nothing to load, and the loaders
+            # refuse it in their own words.
+            return
+        weights = as_zarr_array(
+            as_zarr_group(self.zw[location], name=location)["weights"],
+            name="weights",
+        )
+        weight_itemsize = np.dtype(weights.dtype).itemsize
+        self._require_graph_load_budget(
+            graph,
+            symmetric=True,
+            upper_only=False,
+            held_bytes=held_bytes,
+            working_bytes=lambda cells, entries: _component_numbering_bytes_impl(
+                cells, entries, weight_itemsize, subgraph=subgraph
+            ),
+            work=work,
+        )
+
     def _load_pseudotime_scoring_with_graph(
         self,
         ref: ArtifactRef,
+        *,
+        held_bytes: int = 0,
     ) -> _ScoredGraph:
         """Load pseudotime values and the symmetric graph used to validate them.
 
         The graph is the subgraph of the pseudotime's cells when it scores
         some of its graph's cells. Validation numbers the graph's connected
-        components, which the result returns with the values.
+        components, which the result returns with the values. The load of
+        the graph is checked against the memory budget before the graph is
+        read, beside the ``held_bytes`` that the caller holds.
         """
         if not isinstance(ref, ArtifactRef):
             raise TypeError("ref must be an ArtifactRef")
@@ -1622,6 +1663,14 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         component_policy = cast(
             Literal["largest", "sources", "error"],
             validated_parameters["component_policy"],
+        )
+        self._require_component_numbering_budget(
+            graph,
+            held_bytes=held_bytes
+            + graph_indices.nbytes
+            + (0 if places is None else selected_indices.nbytes + places.nbytes),
+            subgraph=places is not None,
+            work="Loading a pseudotime",
         )
         graph_matrix = self._load_graph_artifact(
             graph,
@@ -1764,11 +1813,15 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         self,
         graph: ArtifactRef,
         direction: ArtifactRef | pd.Series,
+        *,
+        held_bytes: int = 0,
     ) -> tuple[_FateDirection, csr_matrix]:
         """Read a direction score of a graph's cells, with the symmetric graph.
 
         Numbering the graph's components checks that the score covers whole
         components; the fate solve needs the same graph, so it is loaded once.
+        The load is checked against the memory budget before the graph is
+        read, beside the ``held_bytes`` that the caller holds.
         """
         require_graph_kind(graph)
         selection = graph_cell_selection(self.zw, graph)
@@ -1819,6 +1872,17 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
                 else aligned.to_numpy()
             )
             missing = None
+            # The cells' IDs go before the graph is read.
+            del graph_ids, aligned
+        self._require_component_numbering_budget(
+            graph,
+            held_bytes=held_bytes
+            + selected_cell_indices.nbytes
+            + np.asarray(values).nbytes
+            + (0 if missing is None else np.asarray(missing).nbytes),
+            subgraph=False,
+            work="Loading a direction score",
+        )
         graph_matrix = self._load_graph_artifact(
             graph,
             symmetric=True,
@@ -2190,11 +2254,15 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         return self._load_fate_inputs(ref).fate
 
     @validation_scoped
-    def _load_fate_inputs(self, ref: ArtifactRef) -> _FateInputs:
+    def _load_fate_inputs(
+        self, ref: ArtifactRef, *, held_bytes: int = 0
+    ) -> _FateInputs:
         """Load a fate map with the direction and sink labels that validate it.
 
         The direction is the fate map's pseudotime or direction score.
         Lineage operations need both again, so they keep what validation read.
+        Loading the direction loads the graph, beside the ``held_bytes`` that
+        the caller holds.
         """
         if not isinstance(ref, ArtifactRef):
             raise TypeError("ref must be an ArtifactRef")
@@ -2239,7 +2307,9 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
                 inputs.get("direction"),
                 "Fate-map direction input",
             )
-            directed, _ = self._load_fate_direction(graph, direction)
+            directed, _ = self._load_fate_direction(
+                graph, direction, held_bytes=held_bytes
+            )
             if directed.cell_selection != selection:
                 raise ValueError("Fate-map graph and cell selection do not match")
         else:
@@ -2247,7 +2317,9 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
                 inputs.get("pseudotime"),
                 "Fate-map pseudotime input",
             )
-            pseudotime_result = self._trajectory_load_pseudotime(pseudotime)
+            pseudotime_result = self._load_pseudotime_scoring_with_graph(
+                pseudotime, held_bytes=held_bytes
+            ).pseudotime
             if (
                 pseudotime_result.graph != graph
                 or pseudotime_result.cell_selection != selection
@@ -2723,6 +2795,17 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         ref: ArtifactRef,
     ) -> LineageCurvesResult:
         """Load lineage curves and cell positions from an explicit artifact."""
+        return self._load_curves_with_fate_inputs(ref)[0]
+
+    def _load_curves_with_fate_inputs(
+        self, ref: ArtifactRef
+    ) -> tuple[LineageCurvesResult, _FateInputs]:
+        """Load lineage curves with the fate map, direction and sink labels that validated them.
+
+        The direction is the pseudotime of the curves' cells, or for curves
+        of a fate map that a score directs, the score. Lineage membership
+        needs them again, so it keeps what validation loaded.
+        """
         if not isinstance(ref, ArtifactRef):
             raise TypeError("ref must be an ArtifactRef")
         if ref.kind != "lineage_curves":
@@ -2749,7 +2832,8 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         selection = parse_artifact_ref(
             inputs.get("cell_selection"), "Lineage-curve cell selection input"
         )
-        fate_result = self._trajectory_load_fate(fate)
+        fate_inputs = self._load_fate_inputs(fate)
+        fate_result = fate_inputs.fate
         if fate_result.cell_selection != selection:
             raise ValueError("Lineage curves do not use their fate map's cells")
         if ref.scope != fate.scope or ref.assay != fate.assay:
@@ -2780,7 +2864,7 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
             expected_valid=fate_result.valid,
         ):
             raise ValueError("Lineage-curve artifact payload is invalid")
-        return LineageCurvesResult(
+        loaded = LineageCurvesResult(
             ref=ref,
             fate=fate,
             coordinates=coordinates,
@@ -2795,6 +2879,7 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
             weights=np.asarray(fate_result.values[:, columns], dtype=np.float64),
             valid=np.asarray(_stored_values(group, "valid"), dtype=bool),
         )
+        return loaded, fate_inputs
 
     @validation_scoped
     def _trajectory_curves_in_layout(
@@ -3236,17 +3321,6 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
             lineages=tree.lineages,
         )
 
-    def _membership_inputs(
-        self, curves: ArtifactRef
-    ) -> tuple[LineageCurvesResult, _FateInputs]:
-        """Load lineage curves with the fate map's direction and sink labels.
-
-        The direction is the pseudotime of the curves' cells, or for curves
-        of a fate map that a score directs, the score.
-        """
-        loaded = self._trajectory_load_curves(curves)
-        return loaded, self._load_fate_inputs(loaded.fate)
-
     @validation_scoped
     def _trajectory_lineage_membership(
         self,
@@ -3334,6 +3408,9 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
             ``select_cells`` reads.
 
         Raises:
+            MemoryBudgetError: If loading the graph of the curves' fate map,
+                or calling the membership, needs more than ``mem_budget``;
+                the graph is checked before it is read.
             ValueError: If a lineage's sink label reads ``"shared"`` or
                 ``"none"``, ``band``, ``distance_score`` or ``n_bins`` is
                 out of range, or the earliest cells outside the sinks in the
@@ -3347,7 +3424,7 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         validated = _validate_lineage_membership_parameters(
             {"band": band, "distance_score": distance_score, "n_bins": n_bins}
         )
-        loaded, inputs = self._membership_inputs(curves)
+        loaded, inputs = self._load_curves_with_fate_inputs(curves)
         pseudotime = np.asarray(inputs.direction.scores, dtype=np.float64)
         lineages = loaded.lineages
         # A lineage cannot share its name with the labels of shared cells and
@@ -3404,16 +3481,7 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         if planned.reused:
             return planned.ref
         self._require_writable("call_lineage_membership")
-        # The curves' positions, distances and weights, the pseudotime, the
-        # sinks' cells and the cells a trunk may hold, beside each cell's
-        # bins, limits, probabilities, divided probabilities, sink labels and
-        # members for every lineage, its label, and the sorted cells of a pair.
-        label_width = max(len(name) for name in (*names, "shared", "none"))
-        needed = (
-            3 * n_cells * n_lineages * 8
-            + n_cells * 12
-            + n_cells * (44 * n_lineages + 4 * label_width + 120)
-        )
+        needed = _membership_bytes_impl(n_cells, lineages)
         if needed >= self.memoryBytes:
             raise MemoryBudgetError(
                 f"Lineage membership needs about {needed} bytes of working "
@@ -3539,7 +3607,7 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         selection = parse_artifact_ref(
             inputs.get("cell_selection"), "Lineage-membership cell selection input"
         )
-        loaded, fate_inputs = self._membership_inputs(curves)
+        loaded, fate_inputs = self._load_curves_with_fate_inputs(curves)
         pseudotime = np.asarray(fate_inputs.direction.scores, dtype=np.float64)
         if loaded.cell_selection != selection:
             raise ValueError("Lineage membership does not use its curves' cells")
@@ -3645,6 +3713,8 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
             of the membership's cells.
 
         Raises:
+            MemoryBudgetError: If loading the graph of the membership's fate
+                map needs more than ``mem_budget``, before the graph is read.
             ValueError: If ``lineages`` does not name two lineages of the
                 membership, or the two have no branch point: they never share
                 a cell, never part, or their shared cells do not come before
@@ -4197,7 +4267,9 @@ class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
             features,
         )
         dataset_fingerprint = self._ensure_dataset_fingerprint(assay.name)
-        ptime_result = self._trajectory_load_pseudotime(pseudotime)
+        ptime_result = self._load_pseudotime_scoring_with_graph(
+            pseudotime, held_bytes=feature_indices.nbytes
+        ).pseudotime
         selected_cell_indices = read_stored_selection_indices(
             self.zw,
             ptime_result.cell_selection,
@@ -4322,7 +4394,9 @@ class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
             validate_parameters=validate_parameters,
             upstream="pseudotime",
         )
-        ptime_result = self._trajectory_load_pseudotime(head.upstream)
+        ptime_result = self._load_pseudotime_scoring_with_graph(
+            head.upstream, held_bytes=head.feature_indices.nbytes
+        ).pseudotime
         if ptime_result.cell_selection != head.cell_selection:
             raise ValueError(f"{label} cell selection does not match pseudotime")
         return _PseudotimeFeatureRecord(
@@ -5113,7 +5187,9 @@ class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
             self, assay, features
         )
         dataset_fingerprint = self._ensure_dataset_fingerprint(assay.name)
-        axes = self._lineage_axes(self._load_fate_inputs(fate), lineages)
+        axes = self._lineage_axes(
+            self._load_fate_inputs(fate, held_bytes=feature_indices.nbytes), lineages
+        )
         validated = _validate_lineage_marker_parameters(
             {
                 "normalization": _default_normalization(
@@ -5249,7 +5325,9 @@ class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
             validate_parameters=validate_parameters,
             upstream="fate",
         )
-        fate_inputs = self._load_fate_inputs(head.upstream)
+        fate_inputs = self._load_fate_inputs(
+            head.upstream, held_bytes=head.feature_indices.nbytes
+        )
         if fate_inputs.fate.cell_selection != head.cell_selection:
             raise ValueError(f"{label} cell selection does not match its fate map")
         lineages = list(head.parameters["lineages"])
@@ -5422,7 +5500,9 @@ class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
             self, assay, features
         )
         dataset_fingerprint = self._ensure_dataset_fingerprint(assay.name)
-        axes = self._lineage_axes(self._load_fate_inputs(fate), lineages)
+        axes = self._lineage_axes(
+            self._load_fate_inputs(fate, held_bytes=feature_indices.nbytes), lineages
+        )
         validated = _validate_lineage_driver_parameters(
             {
                 "normalization": _default_normalization(
@@ -5681,7 +5761,9 @@ class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
             self, assay, features
         )
         dataset_fingerprint = self._ensure_dataset_fingerprint(assay.name)
-        axes = self._lineage_axes(self._load_fate_inputs(fate), lineages)
+        axes = self._lineage_axes(
+            self._load_fate_inputs(fate, held_bytes=feature_indices.nbytes), lineages
+        )
         validated = _validate_lineage_aggregation_parameters(
             {
                 "normalization": _default_normalization(

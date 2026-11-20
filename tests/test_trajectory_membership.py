@@ -22,9 +22,14 @@ with a fate map that a score directs, check that each lineage takes its trunk
 from the components of its own sink cells. A slow test runs the lineage
 tutorials' analysis of the pancreas fixture, whose trunk gives Delta 0.04
 against 0.45 for Beta.
+
+The membership calls load their fate map and its graph once, and refuse a memory budget that cannot hold the graph before they read it. Copies of the store with arms of thousands of cells and a graph of 11 neighbors, stored as the pipeline stores a graph, check that each call runs within the budget that its refusal names.
 """
 
 import math
+import tracemalloc
+from collections import Counter
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from functools import cache
 from typing import Any
@@ -32,10 +37,12 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import pytest
+from scipy.spatial import cKDTree
 
 from cytearc.metadata import MetaData
 from cytearc.metadata.selection import cell_selection_indices
 from cytearc.storage.artifacts import ArtifactRef, artifact_group, list_artifacts
+from cytearc.storage.budget import ResourceBudget
 from cytearc.storage.selections import (
     resolve_metadata_snapshot,
     resolve_stored_selection_artifact,
@@ -50,6 +57,7 @@ from cytearc.trajectory.membership import (
     distance_limits,
     TRUNK_SHARE,
     lineage_members,
+    membership_bytes,
     membership_labels,
     progress_bins,
     trunk_probabilities,
@@ -204,10 +212,40 @@ class _Branching:
         )
 
 
+def _write_neighbor_graph(
+    store: Any, graph: ArtifactRef, points: np.ndarray, k: int
+) -> None:
+    """Store each cell's ``k`` nearest cells, weighted exp(-(d/0.15)^2).
+
+    The edges are uint32 pairs and the weights float32, as the pipeline
+    stores a graph.
+    """
+    distances, nearest = cKDTree(points).query(points, k=k + 1)
+    group = artifact_group(store.zw, graph)
+    pairs = np.column_stack(
+        (np.repeat(np.arange(len(points)), k), nearest[:, 1:].ravel())
+    )
+    group.create_array("edges", data=pairs.astype(np.uint32))
+    group.create_array(
+        "weights",
+        data=np.exp(-((distances[:, 1:].ravel() / 0.15) ** 2)).astype(np.float32),
+    )
+    group.attrs.update({"n_cells": len(points), "n_neighbors": k})
+
+
 def _graph_of(
-    arms: np.ndarray, positions: np.ndarray, labels: np.ndarray, points: np.ndarray
+    arms: np.ndarray,
+    positions: np.ndarray,
+    labels: np.ndarray,
+    points: np.ndarray,
+    neighbors: int | None = None,
 ) -> _Branching:
-    """Store cells and the graph of their five nearest neighbors, in a shuffled order."""
+    """Store cells and the graph of their nearest neighbors, in a shuffled order.
+
+    Without ``neighbors``, each cell links to its five nearest cells, stored
+    as uint64 pairs and float64 weights; with it, to that many, stored as
+    the pipeline stores a graph.
+    """
     order = np.random.default_rng(10).permutation(len(arms))
     arms, positions, labels, points = (
         arms[order],
@@ -234,7 +272,10 @@ def _graph_of(
     graph, _neighbors, coordinates = _native_chain(
         store.zw, "RNA", cell_selection=selection
     )
-    _write_graph_payload(store, graph, _knn_adjacency(points))
+    if neighbors is None:
+        _write_graph_payload(store, graph, _knn_adjacency(points))
+    else:
+        _write_neighbor_graph(store, graph, points, neighbors)
     artifact_group(store.zw, coordinates)["data"][:] = points
     return _Branching(
         store=store,
@@ -251,8 +292,10 @@ def _graph_of(
 
 
 @cache
-def _template(layout: tuple[_Arm, ...] = _TWO_ARMS) -> _Branching:
-    labeled = _graph_of(*_trajectory_cells(layout))
+def _template(
+    layout: tuple[_Arm, ...] = _TWO_ARMS, neighbors: int | None = None
+) -> _Branching:
+    labeled = _graph_of(*_trajectory_cells(layout), neighbors=neighbors)
     store = labeled.store
     clusters = labeled.label_artifact()
     sinks = [f"{arm.name}2" for arm in layout]
@@ -264,10 +307,22 @@ def _template(layout: tuple[_Arm, ...] = _TWO_ARMS) -> _Branching:
     return replace(labeled, pseudotime=pseudotime, fate=fate, curves=curves)
 
 
-def _branching(layout: tuple[_Arm, ...] = _TWO_ARMS) -> _Branching:
+def _branching(
+    layout: tuple[_Arm, ...] = _TWO_ARMS, neighbors: int | None = None
+) -> _Branching:
     """Return a private copy of the store of a layout, built once."""
-    template = _template(layout)
+    template = _template(layout, neighbors)
     return replace(template, store=_copy_store(template.store))
+
+
+def _long_arms(n_cells: int) -> tuple[_Arm, ...]:
+    """Arms A and B of ``n_cells`` cells each, half of them their sink, as long as the default arms."""
+    return tuple(
+        _Arm(
+            name, heading, n_cells=n_cells, sink_cells=n_cells // 2, step=3.0 / n_cells
+        )
+        for name, heading in (("a", _UP), ("b", _DOWN))
+    )
 
 
 def _artifacts(store: Any, kind: str) -> list[ArtifactRef]:
@@ -1737,7 +1792,8 @@ def test_membership_refuses_a_small_budget_before_it_writes() -> None:
     branching, ref = _membership_copy()
     store = branching.store
     # A budget of the curves' three arrays of each cell and lineage, which
-    # hold 8 bytes a value, leaves no room to work in.
+    # hold 8 bytes a value, leaves no room to work in. The store's resources
+    # keep 64 MiB, so the graph's load, which checks them, passes.
     n_cells = len(branching.arms)
     store.memoryBytes = 3 * n_cells * 2 * 8
     with pytest.raises(MemoryBudgetError) as refused:
@@ -1759,6 +1815,204 @@ def test_membership_refuses_a_small_budget_before_it_writes() -> None:
         store.trajectory.load_lineage_membership(again).members,
         store.trajectory.load_lineage_membership(ref).members,
     )
+
+
+def test_the_membership_estimate_pins_its_bytes_per_cell() -> None:
+    # The two-armed store's 145 cells on lineages a2 and b2, whose longest
+    # label is "shared", 6 characters: the curves' positions, distances and
+    # weights, 3 * 145 * 2 * 8 = 6,960 bytes; the pseudotime, the sinks'
+    # cells and the cells a trunk may hold, 145 * 12 = 1,740; and for each
+    # cell 44 bytes a lineage, 4 a label character and 120 for the sorted
+    # cells of a pair, 145 * (88 + 24 + 120) = 33,640.
+    assert membership_bytes(145, ["a2", "b2"]) == 6_960 + 1_740 + 33_640 == 42_340
+    # One cell of one lineage, and of three: 24 + 12 + 44 + 24 + 120 bytes,
+    # and 72 + 12 + 132 + 24 + 120.
+    assert membership_bytes(1, ["a2"]) == 224
+    assert membership_bytes(1, ["a2", "b2", "d2"]) == 360
+    # A sink named by 9 characters, or by a number of 9 digits, widens the
+    # label to 36 bytes.
+    assert membership_bytes(1, ["lineage_a", "b"]) == 48 + 12 + 88 + 36 + 120
+    assert membership_bytes(1, [123456789, 2]) == 48 + 12 + 88 + 36 + 120
+    assert membership_bytes(0, ["a2", "b2"]) == 0
+
+    # The call charges the estimate: a budget of the estimate is refused,
+    # naming one byte more, which runs it.
+    branching, _ = _membership_copy()
+    store = branching.store
+    store.memoryBytes = 42_340
+    with pytest.raises(MemoryBudgetError) as refused:
+        store.trajectory.lineage_membership(branching.curves, invalidate_cache=True)
+    assert refused.value.needed_bytes == 42_341
+    store.memoryBytes = 42_341
+    store.trajectory.lineage_membership(branching.curves, invalidate_cache=True)
+
+
+def _set_budget(store: Any, budget: int) -> None:
+    """Give a store the memory budget that DataStore(mem_budget=budget) gives."""
+    store.memoryBytes = budget
+    store.resources = ResourceBudget(budget, 1)
+
+
+def _count_calls(
+    monkeypatch: pytest.MonkeyPatch, store: Any, *names: str
+) -> Counter[str]:
+    """Count the calls of the store's methods ``names`` from now on."""
+    calls: Counter[str] = Counter()
+    for name in names:
+        original = getattr(store, name)
+
+        def counted(
+            *args: Any, _name: str = name, _original: Any = original, **kwargs: Any
+        ) -> Any:
+            calls[_name] += 1
+            return _original(*args, **kwargs)
+
+        monkeypatch.setattr(store, name, counted)
+    return calls
+
+
+# The calls whose loaders load the curves, their fate map and its
+# pseudotime, which reads the graph to number its components.
+_MEMBERSHIP_CALLS: dict[str, Callable[[_Branching, ArtifactRef], Any]] = {
+    "lineage_membership": lambda branching, _ref: (
+        branching.store.trajectory.lineage_membership(
+            branching.curves, invalidate_cache=True
+        )
+    ),
+    "reused lineage_membership": lambda branching, _ref: (
+        branching.store.trajectory.lineage_membership(branching.curves)
+    ),
+    "load_lineage_membership": lambda branching, ref: (
+        branching.store.trajectory.load_lineage_membership(ref)
+    ),
+    "branch_cells": lambda branching, ref: branching.store.trajectory.branch_cells(
+        ref, ["a2", "b2"]
+    ),
+    "load_curves": lambda branching, _ref: branching.store.trajectory.load_curves(
+        branching.curves
+    ),
+}
+
+
+def test_each_membership_call_loads_the_fate_map_and_its_graph_once(
+    monkeypatch,
+) -> None:
+    branching, ref = _membership_copy()
+    calls = _count_calls(
+        monkeypatch, branching.store, "_load_fate_inputs", "_load_graph_artifact"
+    )
+    loads = {}
+    for name, call in _MEMBERSHIP_CALLS.items():
+        calls.clear()
+        call(branching, ref)
+        loads[name] = dict(calls)
+    assert loads == {
+        name: {"_load_fate_inputs": 1, "_load_graph_artifact": 1}
+        for name in _MEMBERSHIP_CALLS
+    }
+
+
+# The store's graph links each of its 145 cells to its 5 nearest cells, 725
+# entries, which SciPy loads as int32 indices and float64 weights, 12 bytes
+# an entry, beside 146 int32 row pointers of 584 bytes. Forming the fuzzy
+# union holds the directed matrix, a copy of its transpose for the sum and
+# for the product, a sum and a product sized for 1,450 entries, and a compact
+# copy of the product, 7 * 725 * 12 + 5 * 584 = 63,820 bytes, beside the
+# positions of the graph's cells, 145 * 8 = 1,160 bytes. Numbering the
+# union's components holds less: the union and a copy of it, 17,984 bytes
+# each, and 12 bytes a cell.
+_GRAPH_LOAD_BYTES = 63_820 + 1_160
+
+
+@pytest.mark.parametrize("call", [*_MEMBERSHIP_CALLS, "load_fate", "load_pseudotime"])
+def test_a_budget_below_the_graph_load_is_refused_before_the_graph_is_read(
+    monkeypatch, call: str
+) -> None:
+    branching, ref = _membership_copy()
+    store = branching.store
+    calls = {
+        **_MEMBERSHIP_CALLS,
+        "load_fate": lambda branching, _ref: branching.store.trajectory.load_fate(
+            branching.fate
+        ),
+        "load_pseudotime": lambda branching, _ref: (
+            branching.store.trajectory.load_pseudotime(branching.pseudotime)
+        ),
+    }
+    selections = list_artifacts(store.zw, scope="datastore", kind="cell_selection")
+    reads = _count_calls(monkeypatch, store, "_store_to_sparse")
+
+    _set_budget(store, _GRAPH_LOAD_BYTES - 1)
+    with pytest.raises(MemoryBudgetError) as refused:
+        calls[call](branching, ref)
+    assert str(refused.value) == (
+        f"Loading a pseudotime of 145 cells needs about {_GRAPH_LOAD_BYTES} bytes "
+        "in memory for a graph of 725 edges, but the operation limit is "
+        f"{_GRAPH_LOAD_BYTES - 1} bytes. Raise mem_budget."
+    )
+    assert refused.value.needed_bytes == _GRAPH_LOAD_BYTES
+    assert refused.value.item == "the graph of 725 edges and its work"
+    assert reads == {}
+    assert _artifacts(store, "lineage_membership") == [ref]
+    assert (
+        list_artifacts(store.zw, scope="datastore", kind="cell_selection") == selections
+    )
+    # The budget that the refusal names reads the graph once and runs the call.
+    _set_budget(store, refused.value.needed_bytes)
+    calls[call](branching, ref)
+    assert reads == {"_store_to_sparse": 1}
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("n_cells", [3_000, 6_000])
+def test_membership_calls_run_within_the_budget_they_name(n_cells: int) -> None:
+    # Arms of 3,000 and 6,000 cells beside the trunk and the side branch, 6,065
+    # and 12,065 cells, whose graph of 11 neighbors outweighs the tens of
+    # kilobytes that the interpreter and Zarr hold for a call.
+    branching = _branching(_long_arms(n_cells), neighbors=11)
+    store = branching.store
+    computed = store.trajectory.lineage_membership(branching.curves)
+    members = store.trajectory.load_lineage_membership(computed).members
+    window = cell_selection_indices(
+        store.zw, store.trajectory.branch_cells(computed, ["a2", "b2"])
+    )
+    unbounded = store.memoryBytes
+    calls = {
+        "membership": lambda: store.trajectory.lineage_membership(
+            branching.curves, invalidate_cache=True
+        ),
+        "branch_cells": lambda: store.trajectory.branch_cells(
+            computed, ["a2", "b2"], invalidate_cache=True
+        ),
+    }
+    peaks = {}
+    for name, call in calls.items():
+        # Each refusal names a budget, which runs the call or a later step
+        # refuses and names more.
+        budget = 1
+        for _ in range(3):
+            _set_budget(store, budget)
+            try:
+                call()
+                break
+            except MemoryBudgetError as refused:
+                budget = refused.needed_bytes
+        tracemalloc.start()
+        try:
+            before, _ = tracemalloc.get_traced_memory()
+            ref = call()
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        peaks[name] = (peak - before, budget)
+        _set_budget(store, unbounded)
+        if name == "membership":
+            np.testing.assert_array_equal(
+                store.trajectory.load_lineage_membership(ref).members, members
+            )
+        else:
+            np.testing.assert_array_equal(cell_selection_indices(store.zw, ref), window)
+    assert all(peak <= budget for peak, budget in peaks.values()), peaks
 
 
 def test_a_sink_named_like_a_membership_label_is_refused() -> None:

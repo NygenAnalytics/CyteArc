@@ -58,6 +58,7 @@ __all__ = [
     "branch_window",
     "distance_limits",
     "lineage_members",
+    "membership_bytes",
     "membership_labels",
     "progress_bins",
     "trunk_probabilities",
@@ -393,6 +394,29 @@ def membership_labels(members: np.ndarray, lineages: Sequence[Any]) -> np.ndarra
     single = counts == 1
     labels[single] = np.asarray(names, dtype=object)[members[single].argmax(axis=1)]
     return labels.astype(str)
+
+
+def membership_bytes(n_cells: int, lineages: Sequence[Any]) -> int:
+    """Return the bytes that calling the membership of ``n_cells`` cells holds.
+
+    The call holds the curves' positions, distances and weights, three
+    float64 values for each cell and lineage, and 12 bytes a cell for the
+    pseudotime, the sinks' cells and the cells a trunk may hold. Beside
+    them, each cell takes 44 bytes for each lineage, for its bin, limit,
+    probability, divided probability, sink label and membership; 4 bytes
+    for each character of the longest label that :func:`membership_labels`
+    can give it, a lineage's name, ``"shared"`` or ``"none"``; and 120
+    bytes for the sorted cells of a pair while its branch point is found.
+    """
+    n_lineages = len(lineages)
+    label_width = max(
+        len(str(name)) for name in (*lineages, MEMBERSHIP_SHARED, MEMBERSHIP_NONE)
+    )
+    return (
+        3 * n_cells * n_lineages * 8
+        + n_cells * 12
+        + n_cells * (44 * n_lineages + 4 * label_width + 120)
+    )
 
 
 def branch_point(

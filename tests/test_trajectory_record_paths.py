@@ -29,6 +29,7 @@ from cytearc.storage.artifacts import (
     list_artifacts,
     new_artifact_id,
 )
+from cytearc.storage.budget import ResourceBudget
 from cytearc.storage.selections import (
     resolve_metadata_snapshot,
     resolve_stored_selection_artifact,
@@ -48,6 +49,7 @@ from cytearc.trajectory.artifacts import (
     validate_marker_parameters,
 )
 from cytearc.trajectory.parameters import resolve_aggregation_ann_params
+from cytearc.utils.memory_budget import MemoryBudgetError
 
 from .test_graph_coverage import _memory_graph_store
 from .test_graph_feature_projection import _native_chain
@@ -674,6 +676,58 @@ def test_pseudotime_scoring_refuses_a_graph_larger_than_its_selection() -> None:
             ss_vec=by_cell_id(trajectory.store.cells, _Y_SOURCE_SINK),
         )
     assert trajectory.artifacts("pseudotime") == []
+
+
+def test_a_pseudotime_of_some_cells_charges_the_subgraph_before_reading_the_graph(
+    monkeypatch,
+) -> None:
+    # A path of 12 cells stored one edge a pair, 11 entries of uint64 pairs
+    # and float32 weights, as the pipeline stores weights, and pseudotimes of
+    # all its cells and of the first ten.
+    trajectory = _trajectory_store(np.eye(12, k=1))
+    store = trajectory.store
+    group = artifact_group(store.zw, trajectory.graph)
+    _replace_array(group, "weights", np.asarray(group["weights"][:], np.float32))
+    ids = trajectory.cell_ids
+    whole = store.trajectory.pseudotime(
+        trajectory.graph,
+        ss_vec=pd.Series(np.r_[-1.0, np.zeros(10), 1.0], index=ids),
+    )
+    some = store.trajectory.pseudotime(
+        trajectory.graph,
+        cells=_selection_of(trajectory, list(range(10))),
+        ss_vec=pd.Series(np.r_[-1.0, np.zeros(8), 1.0], index=ids[:10]),
+    )
+    reads: list[str] = []
+    original = store._store_to_sparse
+
+    def read(location: str, *args: Any, **kwargs: Any) -> Any:
+        reads.append(location)
+        return original(location, *args, **kwargs)
+
+    monkeypatch.setattr(store, "_store_to_sparse", read)
+    # SciPy loads an entry as an int32 index and a float32 weight, 8 bytes,
+    # beside 13 int32 row pointers, 52 bytes. Forming the fuzzy union holds
+    # 7 * 11 * 8 + 5 * 52 = 876 bytes and keeps 2 * 11 * 8 + 52 = 228. The
+    # pseudotime of all cells holds the positions of the graph's 12 cells
+    # beside, 96 bytes, and numbering the union's components holds less than
+    # forming it: a copy of the union and 12 bytes a cell, 228 + 144.
+    # The pseudotime of ten cells also holds their positions and their places
+    # among the graph's, 80 bytes each, and taking their subgraph copies the
+    # union twice, with 24 bytes a cell, 2 * 228 + 288 = 744 beside the
+    # union, which outgrows forming it.
+    for ref, needed in ((whole, 96 + 876), (some, 96 + 160 + 228 + 744)):
+        store.memoryBytes = needed - 1
+        store.resources = ResourceBudget(needed - 1, 1)
+        with pytest.raises(MemoryBudgetError) as refused:
+            store.trajectory.load_pseudotime(ref)
+        assert refused.value.needed_bytes == needed
+        assert reads == []
+        store.memoryBytes = needed
+        store.resources = ResourceBudget(needed, 1)
+        store.trajectory.load_pseudotime(ref)
+        assert len(reads) == 1
+        reads.clear()
 
 
 @pytest.mark.parametrize("method", ["untruncated", "truncated"])

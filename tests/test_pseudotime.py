@@ -1917,6 +1917,73 @@ def test_component_selection_refuses_unusable_source_cells(
         )
 
 
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+@pytest.mark.parametrize("subgraph", [False, True], ids=["graph", "subgraph"])
+def test_component_numbering_bytes_cover_what_numbering_holds(dtype, subgraph):
+    import tracemalloc
+
+    from scipy.sparse import random as sparse_random
+
+    from cytearc.trajectory.pseudotime import (
+        component_numbering_bytes,
+        pseudotime_components,
+    )
+
+    # The fuzzy union of a random graph of 20,000 cells with about ten entries
+    # a cell, and the subgraph of every cell but the first, which copies the
+    # most that a subgraph can.
+    n_cells = 20_000
+    directed = sparse_random(
+        n_cells,
+        n_cells,
+        density=5 / n_cells,
+        format="csr",
+        random_state=np.random.default_rng(0),
+        dtype=dtype,
+    )
+    graph = ((directed + directed.T) - directed.multiply(directed.T)).tocsr()
+    kept = np.arange(1, n_cells)
+    # The cells' positions, which a caller holds before it numbers them.
+    positions = kept if subgraph else np.arange(n_cells)
+
+    def number() -> None:
+        scored = graph[kept][:, kept].tocsr() if subgraph else graph
+        pseudotime_components(scored, positions, "largest")
+
+    # A first call imports what numbering imports lazily, which would count.
+    number()
+    tracemalloc.start()
+    try:
+        before, _ = tracemalloc.get_traced_memory()
+        number()
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    # The estimate covers what numbering holds beside the graph, and is not
+    # far above it.
+    estimate = component_numbering_bytes(
+        n_cells, graph.nnz, np.dtype(dtype).itemsize, subgraph=subgraph
+    )
+    assert peak - before <= estimate <= 1.2 * (peak - before)
+
+
+def test_component_numbering_bytes_pin_the_copies_that_numbering_holds():
+    from cytearc.trajectory.pseudotime import component_numbering_bytes
+
+    # A graph of 10 cells and 30 entries, of int32 indices and float32
+    # weights: SciPy's copy holds 30 * 8 + 11 * 4 = 284 bytes, and the labels
+    # and numbers 10 * (4 + 8) = 120.
+    assert component_numbering_bytes(10, 30, 4) == 284 + 120
+    # float64 weights take 4 bytes more an entry.
+    assert component_numbering_bytes(10, 30, 8) == 30 * 12 + 44 + 120
+    # A subgraph is copied twice, and its columns' step holds 24 bytes a cell.
+    assert component_numbering_bytes(10, 30, 4, subgraph=True) == 2 * 284 + 240
+    # SciPy indexes with int64 once the entries exceed the int32 range.
+    assert component_numbering_bytes(10, 2**31 - 1, 4) == (2**31 - 1) * 8 + 44 + 120
+    assert component_numbering_bytes(10, 2**31, 4) == 2**31 * 12 + 88 + 120
+
+
 def test_missing_source_and_sink_labels_raise_a_typed_error():
     from cytearc.trajectory import SourceSinkLabelsError
 
