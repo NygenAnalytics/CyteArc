@@ -31,7 +31,13 @@ from ._matrix_market import (
     read_matrix_market_header,
 )
 from .cellranger import CrReader
-from ._row_spill import RowSpillPlan, checked_destinations, row_spill_plan, spill_rows
+from ._row_spill import (
+    RowSpillPlan,
+    checked_destinations,
+    least_admitted_budget,
+    row_spill_plan,
+    spill_rows,
+)
 from ._sparse import encoded_entry_bytes
 from ._text import (
     DuplicateFeatureIds,
@@ -2181,7 +2187,7 @@ class MtxReader(CrReader):
         # The batches of a feature-major matrix are read from rows that its
         # entries are sorted into first, alone beside the reader's arrays.
         preparation = engine.preparation_bytes(lines)
-        if preparation > available:
+        if preparation and preparation > available:
             raise MemoryBudgetError(
                 "Shuffling cells exceeds the memory limit. Beside the "
                 f"{resident} bytes of the reader's arrays, sorting the Matrix "
@@ -2197,20 +2203,25 @@ class MtxReader(CrReader):
                 engine.producer_staging_bytes(rows, lines)
             )
 
-        try:
-            plan = row_spill_plan(
+        def planned(budget: int) -> RowSpillPlan:
+            return row_spill_plan(
                 destinations,
                 (self.nCells, self.nFeatures),
                 engine.matrixDtype,
                 entries=int(pointers[-1]),
                 longest=longest,
-                maxBytes=available,
+                maxBytes=budget,
                 least=lambda plan: held(plan, 1),
             )
+
+        try:
+            plan = planned(available)
         except MemoryBudgetError as error:
             # The spill runs beside the reader's arrays, so the budget that
-            # passes it holds them too.
-            needed = resident + error.needed_bytes
+            # passes it holds them too, beside the least budget at which the
+            # spill's plan admits it: a larger budget sizes larger buckets,
+            # which need less beside them.
+            needed = resident + least_admitted_budget(planned, error)
             raise MemoryBudgetError(
                 "Shuffling cells exceeds the memory limit. Beside the "
                 f"{resident} bytes of the reader's arrays, reading the rows and "
