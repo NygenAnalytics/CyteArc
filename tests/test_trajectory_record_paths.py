@@ -1932,6 +1932,8 @@ def test_a_graph_of_no_cells_is_read_without_a_budget_check() -> None:
     store = emptied.store
     _set_budget(store, 1)
     assert store.graph.load(emptied.graph).shape == (0, 0)
+    # Potency checks its smoothing before it reads the counts.
+    store._require_potency_smoothing_budget(emptied.graph, held_bytes=0)
     assert store._smoothed_potency(emptied.graph, np.zeros(0), 0.9).shape == (0,)
     with pytest.raises(ValueError, match="Graph cell count does not match"):
         store.imputation.diffusion(emptied.graph, t=1, invalidate_cache=True)
