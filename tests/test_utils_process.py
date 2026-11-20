@@ -29,6 +29,7 @@ from cytearc.utils.process import (
     sample_process_resources,
     suppress_native_output,
 )
+from tests.memory_helpers import needs_proc_resident_memory
 
 
 def _scripted(
@@ -82,7 +83,7 @@ def test_process_rss_mb_is_none_without_proc_vmrss(tmp_path, monkeypatch, status
     assert rss_text() == "n/a"
 
 
-@pytest.mark.skipif(sys.platform != "linux", reason="Linux reports VmRSS in /proc")
+@needs_proc_resident_memory
 def test_process_rss_mb_reports_current_resident_memory_on_linux():
     rss = process_rss_mb()
     assert rss is not None and rss > 0

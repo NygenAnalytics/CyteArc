@@ -570,9 +570,8 @@ def _integrate_blocks(
 
     Each block computes what the per-cell loop of ``_integrate_cells``
     computes, value for value: the kernels repeat NumPy's arithmetic and
-    summation order, and the exponentials and the dot products of the
-    predictions are NumPy's own, which the CPU's instruction set may change
-    in the last bit.
+    summation order, and only the exponentials are NumPy's own, which the
+    CPU's instruction set may change in the last bit.
     """
     n_cells = indices[0].shape[0]
     for start in iter_progress(

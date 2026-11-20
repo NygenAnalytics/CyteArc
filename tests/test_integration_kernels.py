@@ -263,10 +263,11 @@ def test_kernel_affinity_of_a_bandwidth_within_rounding_keeps_the_nearest():
 )
 def test_wnn_matches_the_loop_where_every_bandwidth_is_degenerate(dtype, l2_normalize):
     rng = np.random.default_rng(5)
-    modalities = _modalities(rng, 40, (6, 6), (3, 2), dtype)
+    modalities = _modalities(rng, 40, (6, 6), (9, 2), dtype)
     # Every cell of the second modality has the same coordinates, so all its
     # neighbor distances and bandwidths are zero. Big-endian coordinates are
-    # scored one cell at a time.
+    # scored one cell at a time; nine coordinates are enough for a BLAS dot
+    # product to sum them in another order.
     modalities[1][2][:] = 1.0
 
     _assert_matches_legacy(modalities, l2_normalize=l2_normalize)
@@ -343,10 +344,15 @@ def test_snn_merges_blocks_of_rows_without_a_per_row_sort(monkeypatch):
 
 
 @pytest.mark.parametrize("l2_normalize", [True, False])
-@pytest.mark.parametrize("dtype", [np.float16, np.dtype(">f8")], ids=str)
+@pytest.mark.parametrize(
+    "dtype", [np.float16, np.dtype(">f4"), np.dtype(">f8")], ids=str
+)
 def test_wnn_scores_other_float_types_in_their_own_precision(dtype, l2_normalize):
     rng = np.random.default_rng(21)
-    modalities = _modalities(rng, 30, (5, 5), (4, 3), np.float64)
+    # Nine coordinates or more are enough for a BLAS dot product to sum them
+    # in another order, which big-endian float32 coordinates show in their
+    # float32 weights.
+    modalities = _modalities(rng, 30, (5, 5), (9, 10), np.float64)
     modalities[0] = (
         modalities[0][0],
         modalities[0][1],
