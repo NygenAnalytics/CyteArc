@@ -13,9 +13,11 @@ from cytearc.storage.budget import ResourceBudget, resolve_budget
 from cytearc.storage.cell_order import CELL_ORDER_ATTR
 from cytearc.storage.copy import (
     _copy_metadata_array,
+    copy_zarr_array,
     copy_zarr_group_tree,
     validate_metadata_dependencies,
 )
+from cytearc.storage.geometry import array_geometry
 from cytearc.storage.identity import (
     GENERATED_FEATURE_COLUMNS,
     CountSummary,
@@ -33,10 +35,12 @@ from cytearc.storage.destinations import refuse_pending_assays
 from cytearc.storage.layout import (
     ZarrArraySpec,
     array_info,
+    array_shard_rows,
     column_chunk_rows,
     get_compressors,
     normalize_chunks,
 )
+from cytearc.storage.partition import row_read_parts
 from cytearc.storage.pipeline_runs import _copy_pipeline_label_claims
 from cytearc.storage.profiles import StorageProfile
 from cytearc.storage.sharding import (
@@ -104,6 +108,21 @@ def _row_block_producer(source: zarr.Array) -> Callable[[int, int], np.ndarray]:
     return produce
 
 
+def _band_read_bytes(source: zarr.Array) -> Callable[[int], int]:
+    """Return what reading a band of ``rows`` rows of every column of ``source`` holds beside the band.
+
+    That is the charge of :func:`~cytearc.storage.copy.copy_zarr_array`, as
+    :func:`~cytearc.storage.partition.row_read_parts` prices the read: the
+    source chunk it decodes at a time, as stored and decoded, and for a
+    sharded source also the shard-level copy of the band's rows and the
+    compressed bytes of the inner chunks it touches in a shard.
+    """
+    fixed, per_row = row_read_parts(
+        array_geometry(source), np.arange(int(source.shape[1])), rows_contiguous=True
+    )
+    return lambda rows: fixed + int(rows) * per_row
+
+
 def _fit_counts_layout(
     source: zarr.Array,
     *,
@@ -113,10 +132,10 @@ def _fit_counts_layout(
 ) -> CountMatrixPolicy:
     """Return the layout whose rebuilt counts and ``countsT`` fit the budget.
 
-    The rebuilt counts keep the dtype of the source counts.
+    The rebuilt counts keep the dtype of the source counts. Each band of a
+    layout is read from ``source`` as :func:`_band_read_bytes` charges it.
     """
     n_cells, n_features = (int(value) for value in source.shape)
-    producer = int(np.prod(source.chunks)) * source.dtype.itemsize
     return fit_count_layout(
         {"counts": (n_features, source.dtype)},
         nCells=n_cells,
@@ -124,7 +143,7 @@ def _fit_counts_layout(
         memoryBytes=resources.memoryBytes,
         transposed=("counts",) if transposed else (),
         admitCounts=dense_counts_admission(
-            CountSummary.nbytes_for(n_cells, n_features), lambda _rows: producer
+            CountSummary.nbytes_for(n_cells, n_features), _band_read_bytes(source)
         ),
     )
 
@@ -197,13 +216,7 @@ def _copy_numeric_2d(
         fillValue=array.fill_value,
     )
     dst_array = create_numeric_array(dst, key, spec)
-    write_dense_in_shard_rows(
-        dst_array,
-        _row_block_producer(array),
-        msg=f"Repacking {path}",
-        resources=resources,
-        producerBytes=int(np.prod(array.chunks)) * array.dtype.itemsize,
-    )
+    copy_zarr_array(array, dst_array, f"Repacking {path}", resources)
     return dst_array
 
 
@@ -518,8 +531,7 @@ def repack_store(
                 _row_block_producer(source_counts),
                 resources=resources,
                 msg=f"Repacking {path}",
-                producerBytes=int(np.prod(source_counts.chunks))
-                * source_counts.dtype.itemsize,
+                producerBytes=_band_read_bytes(source_counts)(array_shard_rows(counts)),
                 residentBytes=summary.nbytes,
                 countSummary=summary,
             )

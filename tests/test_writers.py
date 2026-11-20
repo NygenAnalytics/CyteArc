@@ -1854,6 +1854,189 @@ def test_subset_assay_zarr_selects_ordered_rows_and_columns():
     )
 
 
+@pytest.mark.parametrize(
+    ("cells", "features", "stored_chunks"),
+    [
+        (np.arange(100, 433), np.arange(400), 10),
+        (np.arange(1, 1_000, 3), np.arange(400), 10),
+        (np.arange(1, 1_000, 3), np.array([5, 397, 41, 42, 200, 120, 0, 300]), 1),
+    ],
+    ids=[
+        "a run of cells, every gene",
+        "scattered cells, every gene",
+        "scattered cells, scattered genes",
+    ],
+)
+def test_subset_assay_zarr_reserves_what_reading_its_selection_of_sharded_counts_holds(
+    tmp_path, monkeypatch, cells, features, stored_chunks
+):
+    import tracemalloc
+
+    import cytearc.writers.subset as subset_module
+    from cytearc.storage.async_execution import zarr_io_concurrency
+    from cytearc.storage.count_matrix import create_product_counts_array
+    from cytearc.storage.virtual_arrays import read_selection
+
+    # A store on disk, whose reads copy the stored chunks into memory.
+    store = str(tmp_path / "store.zarr")
+    root = zarr.open_group(store, mode="w")
+    source = create_product_counts_array(
+        root.require_group("RNA"),
+        2_000,
+        400,
+        np.uint32,
+        profile="fast_local",
+        policy=CountMatrixPolicy(unitBytes=1_600_000, chunkBytes=160_000),
+    )
+    assert (source.chunks, source.shards) == ((1_000, 40), (1_000, 400))
+    # Random bits do not compress, so each chunk is stored at the size that
+    # the charge takes for it.
+    values = np.random.default_rng(6).integers(
+        0, 1 << 32, size=(2_000, 400), dtype=np.uint32
+    )
+    source[:] = values
+    recorded: list[int] = []
+    write = subset_module.write_dense_in_shard_rows
+
+    def recording(destination, produce, **kwargs):
+        recorded.append(kwargs["producerBytes"])
+        return write(destination, produce, **kwargs)
+
+    monkeypatch.setattr(subset_module, "write_dense_in_shard_rows", recording)
+    subset_assay_zarr(
+        store, "RNA/counts", "selected", cells, features, mem_budget="64M", nthreads=1
+    )
+    # The cells fit one count shard, which one read of the first source shard
+    # fills.
+    (producer,) = recorded
+    np.testing.assert_array_equal(root["selected"][:], values[np.ix_(cells, features)])
+
+    # The read decodes one chunk at a time, as the charge prices it, after a
+    # read that warms Zarr's own buffers.
+    with zarr_io_concurrency(1):
+        read_selection(source, cells, features)
+        tracemalloc.start()
+        try:
+            base, _ = tracemalloc.get_traced_memory()
+            block = read_selection(source, cells, features)
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+    held = peak - base - block.nbytes
+    # Every gene is read from the ten stored 160,000-byte chunks of the shard
+    # at once; scattered genes a chunk at a time, each stored chunk beside its
+    # decoded copy. One decoded chunk, the charge before, leaves both out.
+    assert held > stored_chunks * 160_000 + 160_000
+    assert held <= producer
+
+
+def test_subset_assay_zarr_reserves_the_indices_of_scattered_cells(
+    tmp_path, monkeypatch
+):
+    import tracemalloc
+
+    import cytearc.writers.subset as subset_module
+    from cytearc.storage.async_execution import zarr_io_concurrency
+    from cytearc.storage.count_matrix import create_product_counts_array
+    from cytearc.storage.virtual_arrays import read_selection
+
+    # Four genes of 200,000 cells in one shard of one-gene chunks: a read of
+    # every other cell holds Zarr's indices of each cell it selects beside
+    # the few bytes of its counts, which a read of a run of cells does not.
+    store = str(tmp_path / "store.zarr")
+    root = zarr.open_group(store, mode="w")
+    source = create_product_counts_array(
+        root.require_group("RNA"),
+        200_000,
+        4,
+        np.uint32,
+        profile="fast_local",
+        policy=CountMatrixPolicy(unitBytes=3_200_000, chunkBytes=800_000),
+    )
+    assert (source.chunks, source.shards) == ((200_000, 1), (200_000, 4))
+    values = np.random.default_rng(7).integers(
+        0, 1 << 32, size=(200_000, 4), dtype=np.uint32
+    )
+    source[:] = values
+    recorded: list[int] = []
+    write = subset_module.write_dense_in_shard_rows
+
+    def recording(destination, produce, **kwargs):  # type: ignore[no-untyped-def]
+        recorded.append(kwargs["producerBytes"])
+        return write(destination, produce, **kwargs)
+
+    monkeypatch.setattr(subset_module, "write_dense_in_shard_rows", recording)
+    held: dict[str, int] = {}
+    planned: dict[str, int] = {}
+    for name, cells in (
+        ("scattered", np.arange(0, 200_000, 2)),
+        ("run", np.arange(50_000, 150_000)),
+    ):
+        recorded.clear()
+        root.create_group(name)
+        subset_assay_zarr(
+            store,
+            "RNA/counts",
+            f"{name}/counts",
+            cells,
+            np.arange(4),
+            mem_budget="1G",
+            nthreads=1,
+        )
+        # The cells fit one count shard, which one read fills.
+        (producer,) = recorded
+        np.testing.assert_array_equal(root[f"{name}/counts"][:], values[cells])
+        with zarr_io_concurrency(1):
+            read_selection(source, cells, np.arange(4))
+            tracemalloc.start()
+            try:
+                base, _ = tracemalloc.get_traced_memory()
+                block = read_selection(source, cells, np.arange(4))
+                _, peak = tracemalloc.get_traced_memory()
+            finally:
+                tracemalloc.stop()
+        held[name] = peak - base - block.nbytes
+        planned[name] = producer
+        assert held[name] <= producer
+    # The indices of 100,000 scattered cells, at least two int64 values each,
+    # come beside what a run of as many cells holds, and a run is planned
+    # near what it holds rather than as scattered cells.
+    assert held["scattered"] > held["run"] + 100_000 * 2 * 8
+    assert planned["run"] < 2 * held["run"]
+
+
+def test_subset_assay_zarr_that_cannot_hold_its_read_fails_before_writing(tmp_path):
+    from cytearc.storage.count_matrix import create_product_counts_array
+    from cytearc.utils.memory_budget import MemoryBudgetError
+
+    store = str(tmp_path / "store.zarr")
+    root = zarr.open_group(store, mode="w")
+    source = create_product_counts_array(
+        root.require_group("RNA"),
+        2_000,
+        400,
+        np.uint32,
+        profile="fast_local",
+        policy=CountMatrixPolicy(unitBytes=1_600_000, chunkBytes=160_000),
+    )
+    source[:] = np.arange(2_000 * 400, dtype=np.uint32).reshape(2_000, 400)
+    # Whatever count shards the subset writes, reading its first cells over
+    # every gene holds the ten stored chunks of a source shard, at up to
+    # 161,274 bytes each, which 1 MiB cannot.
+    with pytest.raises(MemoryBudgetError, match="count shards of one row") as refused:
+        subset_assay_zarr(
+            store,
+            "RNA/counts",
+            "selected",
+            np.arange(0, 2_000, 2),
+            np.arange(400),
+            mem_budget=1024**2,
+            nthreads=1,
+        )
+    assert refused.value.needed_bytes > 10 * 160_000
+    assert "selected" not in zarr.open_group(store, mode="r")
+
+
 def test_subset_assay_zarr_counts_carry_the_count_matrix_layout():
     from cytearc.storage.counts_t_contract import validate_count_matrix
 

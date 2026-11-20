@@ -18,6 +18,7 @@ from ..storage.count_matrix import (
 )
 from ..storage.copy import copy_zarr_group_tree
 from ..storage.destinations import create_destination, refuse_pending_assays
+from ..storage.geometry import array_geometry
 from ..storage.identity import (
     GENERATED_FEATURE_COLUMNS,
     CountSummary,
@@ -27,7 +28,7 @@ from ..storage.identity import (
 from ..storage.io_policy import StorageIoPolicy
 from ..storage.layout import array_shard_rows, column_chunk_rows
 from ..storage.metadata_keys import assay_membership_column
-from ..storage.partition import checked_indices
+from ..storage.partition import checked_indices, is_contiguous, row_read_parts
 from ..storage.profiles import (
     StorageProfile,
     ZarrLocation,
@@ -143,14 +144,23 @@ def subset_assay_zarr(
         + feat_idx.nbytes
         + CountSummary.nbytes_for(len(cells_idx), len(feat_idx))
     )
-    producer = int(np.prod(ig.chunks)) * ig.dtype.itemsize
+    # Each band reads its cells' rows over the selected features, which a
+    # sharded source holds in a shard-level copy beside the compressed bytes
+    # of the inner chunks that the read touches.
+    fixed, per_row = row_read_parts(
+        array_geometry(ig), feat_idx, rows_contiguous=is_contiguous(cells_idx)
+    )
+
+    def producer(rows: int) -> int:
+        return fixed + int(rows) * per_row
+
     layout = fit_count_layout(
         {out_grp: (len(feat_idx), ig.dtype)},
         nCells=len(cells_idx),
         profile=resolved_profile,
         memoryBytes=resources.memoryBytes,
         transposed=(),
-        admitCounts=dense_counts_admission(resident, lambda _rows: producer),
+        admitCounts=dense_counts_admission(resident, producer),
         requested=policy,
     )
     plan = plan_count_matrix_pair(
@@ -175,7 +185,7 @@ def subset_assay_zarr(
         msg="Subsetting assay",
         resources=resources,
         io=io,
-        producerBytes=producer,
+        producerBytes=producer(array_shard_rows(og)),
         residentBytes=resident,
         countSummary=summary,
     )
