@@ -1,5 +1,4 @@
 import math
-import numbers
 from collections.abc import Generator, Iterator, Mapping, Sequence
 from typing import Any, Literal, TypeIs, cast
 
@@ -65,10 +64,12 @@ DEFAULT_SIZE_FACTOR = 1000
 
 def _is_size_factor(value: object) -> TypeIs[float]:
     """Return whether ``value`` is a finite positive number, as a size factor is."""
-    if isinstance(value, bool) or not isinstance(value, numbers.Real):
-        return False
-    number = float(value)
-    return math.isfinite(number) and number > 0
+    return (
+        isinstance(value, int | float)
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+        and value > 0
+    )
 
 
 def _read_facade_block(
@@ -1279,9 +1280,9 @@ def library_size_factor(assay: RNAassay) -> float:
     derives, so that the new assay normalizes as its source does. It is the
     session's ``sf``, or, when the session sets ``sf`` to None, the size
     factor that the assay stores, or 1000 when it stores none: the factor that
-    a new session opens the assay with. A NumPy number, or an array of one
-    number, is returned as the Python number it holds, as JSON attributes keep
-    it.
+    a new session opens the assay with. A NumPy number, or a zero-dimensional
+    NumPy array, is returned as the Python number it holds, as JSON attributes
+    keep it.
 
     Args:
         assay: The source assay.

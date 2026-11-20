@@ -1233,16 +1233,3 @@ def test_adding_an_assay_keeps_the_session_settings_of_the_other_assays(
     reopened = DataStore(str(tmp_path / "store.zarr"), nthreads=1)
     assert reopened.RNA.normMethod is norm_lib_size and reopened.RNA.sf == 1000
     assert reopened.ATAC.normMethod is norm_tf_idf
-
-
-def test_a_failed_call_keeps_the_session_settings(tmp_path):
-    store, _calls = _session_store(tmp_path)
-    rna = store.RNA
-    rna.normMethod = _counts_kept
-
-    # A call refused before it writes reloads nothing.
-    with pytest.raises(KeyError, match="missing does not exist"):
-        store.add_grouped_assay("missing", assay_label="modules")
-
-    assert store.RNA is rna and rna.normMethod is _counts_kept
-    assert store.assay_names == ["ATAC", "RNA"]

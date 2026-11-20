@@ -147,11 +147,14 @@ def shared_normalization(assay_name: str, sources: Mapping[str, Any]) -> dict[st
             number, two sources normalize with different size factors, or
             some hold melded TF-IDF values and others do not.
     """
-    factors = {
-        name: library_size_factor(source)
-        for name, source in sources.items()
-        if isinstance(source, RNAassay)
-    }
+    factors: dict[str, float] = {}
+    for name, source in sources.items():
+        if not isinstance(source, RNAassay):
+            continue
+        try:
+            factors[name] = library_size_factor(source)
+        except ValueError as error:
+            raise ValueError(f"Source {name!r}: {error}") from error
     if len(set(factors.values())) > 1:
         listed = ", ".join(f"{name!r} {factor!r}" for name, factor in factors.items())
         raise ValueError(

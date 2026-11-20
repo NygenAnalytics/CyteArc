@@ -807,7 +807,8 @@ def test_a_session_size_factor_that_no_assay_opens_with_is_refused(tmp_path, com
     # Before, the combined assay recorded -1000, and no open of it succeeded.
     with pytest.raises(
         ValueError,
-        match=r"^ds\.RNA\.sf is -1000, which is not a finite positive number\. ",
+        match=r"^Source 'a': ds\.RNA\.sf is -1000, which is not a finite positive "
+        r"number\. ",
     ):
         _combine({"a": first, "b": second}, destination, combine)
     assert not destination.exists()

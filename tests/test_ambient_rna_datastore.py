@@ -1124,12 +1124,17 @@ def test_a_session_without_a_size_factor_corrects_with_the_stored_one(path):
     "factor", [0, -5, np.float64(np.nan), np.inf, True, np.bool_(True), "1000"]
 )
 def test_a_size_factor_that_no_assay_opens_with_is_refused_before_a_write(
-    store, path, factor
+    store, path, factor, monkeypatch
 ):
     cells, _clusters = _cells_and_clusters(store)
     profile = store.qc.ambient_profile(total_counts=(2, 10))
     estimate = store.qc.ambient_contamination(cells, profile, fraction=0.1)
     store.RNA.sf = factor
+
+    def removal(*_arguments, **_keywords):
+        pytest.fail("the correction removed counts before it refused the factor")
+
+    monkeypatch.setattr(ambient_operations, "remove_ambient_counts", removal)
 
     # Before, the corrected assay recorded the factor, which every later open
     # of the store refused, so the store could no longer be opened.

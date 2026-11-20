@@ -1,4 +1,5 @@
 import inspect
+from fractions import Fraction
 from types import SimpleNamespace
 from typing import get_type_hints
 
@@ -247,7 +248,19 @@ def test_a_session_size_factor_derives_as_the_python_number_it_holds(
 
 
 @pytest.mark.parametrize(
-    "session", [0, -1.0, np.nan, np.inf, True, np.True_, "1000", [1000], np.ones(1)]
+    "session",
+    [
+        0,
+        -1.0,
+        np.nan,
+        np.inf,
+        True,
+        np.True_,
+        "1000",
+        [1000],
+        np.ones(1),
+        Fraction(1, 2),
+    ],
 )
 def test_a_session_size_factor_that_no_assay_opens_with_raises(monkeypatch, session):
     rna = _rna_with_stored_size_factor(monkeypatch, 2500.5)

@@ -321,19 +321,24 @@ def test_a_derived_assay_declares_the_type_it_was_registered_with(tmp_path) -> N
     ] == {"ATAC": "ATAC", "GENES": "GeneActivity", "MODULES": "Assay"}
 
 
+@pytest.mark.parametrize(
+    ("declared", "opened_as"), [(None, Assay), ("ADT", ADTassay)], ids=["Assay", "ADT"]
+)
 def test_adding_an_assay_opens_again_an_assay_whose_type_another_session_changed(
-    tmp_path,
+    tmp_path, declared, opened_as
 ) -> None:
     location = _write_store(
         tmp_path / "data.zarr", {"RNA": _RNA, "hashtags": _TAGS}, workspace="ws"
     )
-    datastore = _open(location, workspace="ws")
+    types = None if declared is None else {"hashtags": declared}
+    datastore = _open(location, workspace="ws", assay_types=types)
     rna = datastore.RNA
     rna.sf = 2000
-    assert type(datastore.get_assay("hashtags")) is Assay
+    held = datastore.get_assay("hashtags")
+    assert type(held) is opened_as
     datastore.RNA.feats.insert("module", np.array([1, 1, 2, 2, 3]), overwrite=True)
-    # Another session declares the hashtags as HTO, which a workspace store
-    # records in the workspace group that registering a derived assay reads.
+    # Another session declares the hashtags as HTO, which opens as the class
+    # that ADT opens as.
     _open(location, workspace="ws", assay_types={"hashtags": "HTO"})
 
     datastore.add_grouped_assay("module", assay_label="MODULES")
@@ -341,6 +346,7 @@ def test_adding_an_assay_opens_again_an_assay_whose_type_another_session_changed
     # The assay whose stored type changed is opened again with that type, as
     # a new session opens it, and the RNA assay keeps the session's object.
     hashtags = datastore.get_assay("hashtags")
+    assert hashtags is not held
     assert type(hashtags) is ADTassay
     assert declared_assay_type(hashtags) == "HTO"
     assert datastore.RNA is rna and rna.sf == 2000
