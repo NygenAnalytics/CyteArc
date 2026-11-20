@@ -1817,27 +1817,27 @@ def test_the_membership_estimate_pins_its_bytes_per_cell() -> None:
     # The two-armed store's 145 cells on lineages a2 and b2 of a fate map of
     # those two sinks, whose longest label is "shared", 6 characters. The
     # inputs: the curves' progress, distances and weights, 3 * 2 * 8 = 48
-    # bytes a cell, the probabilities 2 * 8 = 16, and 32 more, 145 * 96 =
-    # 13,920. Calling holds 12 + max(2 * 44, 120) = 132 bytes a cell, 19,140;
+    # bytes a cell, the probabilities 2 * 8 = 16, and 40 more, 145 * 104 =
+    # 15,080. Calling holds 12 + max(2 * 44, 120) = 132 bytes a cell, 19,140;
     # building the labels 4 * 6 + 18 = 42, 6,090; writing them holds the
     # labels, 145 * 24 = 3,480, and 2 * 2 + 20 = 24 bytes a cell, 3,480,
     # beside the check of the written membership, three copies of the labels
-    # and 20 + 2 * 2 = 24 bytes a cell, 10,440 + 3,480 = 13,920, which
-    # outgrows two copies of the labels: 6,960 + 13,920 = 20,880, the most.
-    assert membership_bytes(145, ["a2", "b2"], 2) == 13_920 + 20_880 == 34_800
+    # and 24 + 2 * 2 = 28 bytes a cell, 10,440 + 4,060 = 14,500, which
+    # outgrows two copies of the labels: 6,960 + 14,500 = 21,460, the most.
+    assert membership_bytes(145, ["a2", "b2"], 2) == 15_080 + 21_460 == 36_540
     # Loading a saved membership holds its inputs and its check.
-    assert membership_load_bytes(145, ["a2", "b2"], 2) == 13_920 + 13_920
-    assert stored_membership_bytes(145, ["a2", "b2"]) == 13_920
-    # One cell of one lineage: inputs 24 + 8 + 32, and writing 24 + 22
-    # beside the check 72 + 22, more than calling's 132.
-    assert membership_bytes(1, ["a2"], 1) == 64 + 46 + 94 == 204
+    assert membership_load_bytes(145, ["a2", "b2"], 2) == 15_080 + 14_500
+    assert stored_membership_bytes(145, ["a2", "b2"]) == 14_500
+    # One cell of one lineage: inputs 24 + 8 + 40, and writing 24 + 22
+    # beside the check 72 + 26, more than calling's 132.
+    assert membership_bytes(1, ["a2"], 1) == 72 + 46 + 98 == 216
     # One cell of three lineages: calling 12 + 132 beside writing 24 + 26 and
-    # the check 72 + 26.
-    assert membership_bytes(1, ["a2", "b2", "d2"], 3) == 128 + 50 + 98 == 276
+    # the check 72 + 30.
+    assert membership_bytes(1, ["a2", "b2", "d2"], 3) == 136 + 50 + 102 == 288
     # A sink named by 9 characters, or by a number of 9 digits, widens the
     # label to 36 bytes.
-    assert membership_bytes(1, ["lineage_a", "b"], 2) == 96 + 60 + 132
-    assert membership_bytes(1, [123456789, 2], 2) == 96 + 60 + 132
+    assert membership_bytes(1, ["lineage_a", "b"], 2) == 104 + 60 + 136
+    assert membership_bytes(1, [123456789, 2], 2) == 104 + 60 + 136
     assert membership_bytes(0, ["a2", "b2"], 2) == 0
 
 
@@ -1845,16 +1845,16 @@ def test_a_membership_that_outweighs_its_graph_is_refused_once() -> None:
     # Sinks named by 41 characters on a graph of 4 neighbors: the membership,
     # which holds the labels at 164 bytes a cell, outweighs the graph's load,
     # so the check of the graph names the membership's bytes, before the graph
-    # is read. Inputs 13,920, beside 145 * 164 = 23,780 bytes of labels and
+    # is read. Inputs 15,080, beside 145 * 164 = 23,780 bytes of labels and
     # 3,480 more while they are written, and three copies of the labels and
-    # 3,480 while the written membership is checked: 13,920 + 27,260 + 74,820.
+    # 4,060 while the written membership is checked: 15,080 + 27,260 + 75,400.
     name = "a" * 40
     layout = (_Arm(name, _UP), _Arm("b" * 40, _DOWN))
     branching = _branching(layout, neighbors=4)
     store = branching.store
     lineages = [f"{name}2", f"{'b' * 40}2"]
     needed = membership_bytes(145, lineages, 2)
-    assert needed == 13_920 + 27_260 + 74_820 == 116_000
+    assert needed == 15_080 + 27_260 + 75_400 == 117_740
     reads: list[str] = []
     original = store._store_to_sparse
     store._store_to_sparse = lambda *args, **kwargs: (
@@ -1983,8 +1983,20 @@ def test_a_budget_below_the_graph_load_is_refused_before_the_graph_is_read(
 @pytest.mark.slow
 @pytest.mark.parametrize(
     "n_cells, neighbors, name",
-    [(3_000, 11, ""), (6_000, 11, ""), (3_000, 4, "_" + "x" * 23)],
-    ids=["6065-cells", "12065-cells", "long-labels-few-neighbors"],
+    [
+        (3_000, 11, ""),
+        (6_000, 11, ""),
+        (3_000, 4, "_" + "x" * 23),
+        (3_000, 5, ""),
+        (1_000, 5, "_" + "x" * 13),
+    ],
+    ids=[
+        "6065-cells",
+        "12065-cells",
+        "long-labels-few-neighbors",
+        "5-neighbors",
+        "2065-cells-5-neighbors-16-character-sinks",
+    ],
 )
 def test_trajectory_and_graph_calls_run_within_the_budget_they_name(
     n_cells: int, neighbors: int, name: str
@@ -2014,6 +2026,11 @@ def test_trajectory_and_graph_calls_run_within_the_budget_they_name(
     )
     unbounded = store.memoryBytes
     again = {"invalidate_cache": True}
+    # A score keyed by cell ID, which directs a fate map of its own.
+    score = by_cell_id(
+        store.cells,
+        3.0 * store.trajectory.load_pseudotime(branching.pseudotime).values + 7.0,
+    )
     calls = {
         "membership": lambda: store.trajectory.lineage_membership(
             branching.curves, **again
@@ -2034,6 +2051,13 @@ def test_trajectory_and_graph_calls_run_within_the_budget_they_name(
         ),
         "fate": lambda: store.trajectory.fate(
             branching.pseudotime, clusters, sinks=sinks, **again
+        ),
+        "fate by a score": lambda: store.trajectory.fate(
+            sink_labels=clusters,
+            graph=branching.graph,
+            direction=score,
+            sinks=sinks,
+            **again,
         ),
         "curves": lambda: store.trajectory.curves(
             branching.fate, n_points=40, df=6.0, **again

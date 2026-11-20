@@ -28,6 +28,7 @@ from ...graph.feature_projection import (
     resolve_native_graph_inputs,
 )
 from ...graph.kinds import require_graph_kind
+from ...neighbors.graph import GraphLoadMemory
 from ...matrix import ChunkedArray
 from ...metadata.alignment import (
     align_to_cell_ids,
@@ -173,7 +174,7 @@ from ...trajectory.fate import (
     compute_fate_probabilities as _compute_fate_probabilities_impl,
     direction_scores as _direction_scores_impl,
     fate_map_cells as _fate_map_cells_impl,
-    fate_solver_bytes,
+    fate_mapping_bytes as _fate_mapping_bytes_impl,
 )
 from ...trajectory.lineage_tree import (
     cluster_codes as _cluster_codes_impl,
@@ -249,7 +250,6 @@ from ...utils.arguments import (
     bool_argument,
     float_argument,
     integer_argument,
-    require_labels_match_their_text,
 )
 from ...utils.arrays import array_digest, sorted_places
 from ...utils.logging import logger
@@ -859,14 +859,13 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         )
         if needed > self.memoryBytes:
             raise MemoryBudgetError(
-                f"The diffusion operator has {nnz} entries, which writing and "
-                "checking as a load reads them needs about "
-                f"{needed} bytes, beyond the memory budget of {self.memoryBytes} "
-                "bytes; increase the memory budget or use a smaller diffusion "
-                "power t.",
+                f"Writing and checking a diffusion operator of {nnz} entries "
+                f"needs about {needed} bytes, more than the memory budget of "
+                f"{self.memoryBytes} bytes; increase the memory budget or use a "
+                "smaller diffusion power t.",
                 needed_bytes=needed,
                 budget_bytes=int(self.memoryBytes),
-                item="loading the diffusion operator",
+                item=f"writing a diffusion operator of {nnz} entries",
             )
         with artifact_transaction(self.zw, planned) as store:
             write_diffusion_payload(store, diff_op)
@@ -1138,7 +1137,6 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         refusal: str,
         shape_refusal: str,
         name: str,
-        check_text: bool,
     ) -> pd.Categorical:
         """Read cell labels and keep which of the ``listed`` labels each cell holds.
 
@@ -1147,9 +1145,8 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         labels that are not one value a cell raise ``shape_refusal``. The read
         is charged to ``ledger`` beside what it holds, and so is matching the
         labels against ``listed``. The labels go once matched, and their
-        codes stay charged. ``check_text`` refuses labels that would group
-        otherwise than their text reads, as source and sink labels must not;
-        ``name`` names the labels.
+        codes stay charged; ``name`` names the labels. Stored labels hold one
+        type, which groups as its text reads.
         """
         if not isinstance(labels, ArtifactRef):
             raise TypeError("cell data input must be an ArtifactRef")
@@ -1173,15 +1170,6 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
                 len(places) * (values.itemsize + (0 if missing is None else 1)),
             )
             values, missing = _rows_of_cells(values, missing, places)
-        if check_text:
-            # Labels of one type are checked as they are; objects without
-            # the missing ones.
-            require_labels_match_their_text(
-                values
-                if missing is None or values.dtype.kind != "O"
-                else values[~missing],
-                name="labels",
-            )
         ledger.peak(
             f"matching the {name}", listed_labels_bytes(len(values), values.dtype)
         )
@@ -1497,7 +1485,6 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
                     refusal="Source/sink labels do not match the graph selection or cells",
                     shape_refusal="Source/sink labels do not align with graph rows",
                     name="source and sink labels",
-                    check_text=True,
                 )
             )
             _validate_source_sink_labels_impl(
@@ -1727,15 +1714,16 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         held_bytes: int,
         subgraph: bool,
         work: str,
-        later_bytes: int = 0,
+        later_bytes: Callable[[int, GraphLoadMemory], int] | None = None,
     ) -> None:
         """Refuse, before ``graph`` is read, a load to number its components that does not fit.
 
         The call holds ``held_bytes`` throughout. Loading the graph forms its
         fuzzy union, and numbering the components of the union, or of the
-        subgraph that some of its cells induce, copies it. ``later_bytes`` is
-        what the call needs after the load, which the check names when it is
-        more, so that one refusal names a budget that runs the call.
+        subgraph that some of its cells induce, copies it.
+        ``later_bytes(n_cells, load)`` is what the call needs in a later step,
+        which the check names when it is more, so that one refusal names a
+        budget that runs the call.
         """
         if self._get_graph_ncells_k(self._graph_location(graph))[0] == 0:
             # A graph of no cells holds nothing to load, and the loaders
@@ -1758,7 +1746,7 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         ref: ArtifactRef,
         *,
         held_bytes: int = 0,
-        later_bytes: int = 0,
+        later_bytes: Callable[[int, GraphLoadMemory], int] | None = None,
         work: str = "Loading a pseudotime",
     ) -> _ScoredGraph:
         """Load pseudotime values and the symmetric graph used to validate them.
@@ -1921,7 +1909,6 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
                     refusal="Pseudotime source/sink input uses a different selection",
                     shape_refusal="Pseudotime source/sink labels must be one-dimensional",
                     name="pseudotime's source and sink labels",
-                    check_text=True,
                 )
             )
             _validate_source_sink_labels_impl(
@@ -2006,7 +1993,7 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         direction: ArtifactRef | pd.Series,
         *,
         held_bytes: int = 0,
-        later_bytes: int = 0,
+        later_bytes: Callable[[int, GraphLoadMemory], int] | None = None,
         work: str = "Loading a direction score",
     ) -> tuple[_FateDirection, csr_matrix]:
         """Read a direction score of a graph's cells, with the symmetric graph.
@@ -2259,9 +2246,21 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         # the same graph the fate solve needs, so it is loaded only once. Sink
         # labels may hold the cells that the map covers or the graph's cells,
         # which are the same cells for a direction score.
+        # The solve, beside the graph of the mapped cells, is sized from the
+        # graph's load and checked with it, so that one refusal names a
+        # budget that maps the fates.
+        n_sinks = len(requested_sink_labels)
+
+        def solving(cells: int, load: GraphLoadMemory) -> int:
+            return _fate_mapping_bytes_impl(
+                cells, load.heldBytes, load.maxEntries, n_sinks
+            )
+
         if direction is None:
             assert pseudotime is not None
-            scored = self._load_pseudotime_scoring_with_graph(pseudotime)
+            scored = self._load_pseudotime_scoring_with_graph(
+                pseudotime, later_bytes=solving, work="Mapping fates"
+            )
             directed = _FateDirection.of_pseudotime(scored.pseudotime)
             graph_matrix = scored.graph
             graph_selection = scored.graph_selection
@@ -2272,7 +2271,9 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
             )
         else:
             assert graph is not None
-            directed, graph_matrix = self._load_fate_direction(graph, direction)
+            directed, graph_matrix = self._load_fate_direction(
+                graph, direction, later_bytes=solving, work="Mapping fates"
+            )
             graph_selection = directed.cell_selection
             places = None
             selection_refusal = "Sink labels do not match the graph's cell selection"
@@ -2304,7 +2305,6 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
             refusal=selection_refusal,
             shape_refusal="Sink labels must be one-dimensional",
             name="sink labels",
-            check_text=False,
         )
         # The solve runs on the scored cells alone, so each sink needs some.
         ordered_sinks, sink_groups = _validate_sink_groups(
@@ -2424,16 +2424,21 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
             graph_matrix if mapped.all() else graph_matrix[mapped][:, mapped]
         ).tocsr()
         del graph_matrix
-        solver_bytes = fate_solver_bytes(
-            retained_graph.shape[0], retained_graph.nnz, len(requested_sink_labels)
+        needed = _fate_mapping_bytes_impl(
+            retained_graph.shape[0],
+            retained_graph.data.nbytes
+            + retained_graph.indices.nbytes
+            + retained_graph.indptr.nbytes,
+            retained_graph.nnz,
+            n_sinks,
         )
-        if solver_bytes >= self.memoryBytes:
+        if needed > self.memoryBytes:
             raise MemoryBudgetError(
-                f"Fate mapping needs about {solver_bytes} bytes of working memory, "
-                f"which exceeds the memory budget of {self.memoryBytes} bytes. "
-                "Increase the memory budget, or compute the pseudotime or the "
-                "direction score on fewer cells.",
-                needed_bytes=solver_bytes + 1,
+                f"Fate mapping needs about {needed} bytes of memory with the graph "
+                "of its mapped cells, which exceeds the memory budget of "
+                f"{self.memoryBytes} bytes. Increase the memory budget, or compute "
+                "the pseudotime or the direction score on fewer cells.",
+                needed_bytes=needed,
                 budget_bytes=int(self.memoryBytes),
                 item="the fate solver",
             )
@@ -2542,8 +2547,9 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         self,
         ref: ArtifactRef,
         *,
+        record: _FateMapRecord | None = None,
         held_bytes: int = 0,
-        later_bytes: int = 0,
+        later_bytes: Callable[[int, GraphLoadMemory], int] | None = None,
         work: str | None = None,
     ) -> _FateInputs:
         """Load a fate map with the direction and sink labels that validate it.
@@ -2554,9 +2560,11 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         loads the graph, beside the ``held_bytes`` that the caller holds, and
         the sink labels are read once the graph is let go. ``later_bytes`` goes
         to the graph's check, and ``work`` names the call in refusals, which
-        otherwise name the load that refuses.
+        otherwise name the load that refuses. ``record`` is the fate map's
+        record, when the caller has read it.
         """
-        record = self._fate_map_record(ref)
+        if record is None:
+            record = self._fate_map_record(ref)
         graph = record.graph
         sink_labels = record.sink_labels
         selection = record.selection
@@ -2564,13 +2572,14 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         pseudotime = record.pseudotime
         direction = record.direction
         if direction is not None:
-            directed, _ = self._load_fate_direction(
+            # The graph goes before the sink labels are read.
+            directed = self._load_fate_direction(
                 graph,
                 direction,
                 held_bytes=held_bytes,
                 later_bytes=later_bytes,
                 work=work or "Loading a direction score",
-            )
+            )[0]
             if directed.cell_selection != selection:
                 raise ValueError("Fate-map graph and cell selection do not match")
             # A map directed by a score covers its graph's cells.
@@ -2619,7 +2628,6 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
             refusal="Fate-map sink labels use a different cell selection",
             shape_refusal="Fate-map sink labels must be one-dimensional",
             name="fate map's sink labels",
-            check_text=False,
         )
         scored = ~np.isnan(directed.scores)
         sink_cells = np.zeros(scored.shape, dtype=bool)
@@ -3102,22 +3110,29 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         self,
         ref: ArtifactRef,
         *,
-        later_bytes: int = 0,
+        record: _LineageCurvesRecord | None = None,
+        fate_record: _FateMapRecord | None = None,
+        later_bytes: Callable[[int, GraphLoadMemory], int] | None = None,
         work: str | None = None,
     ) -> tuple[LineageCurvesResult, _FateInputs]:
         """Load lineage curves with the fate map, direction and sink labels that validated them.
 
         The direction is the pseudotime of the curves' cells, or for curves
         of a fate map that a score directs, the score. Lineage membership
-        needs them again, so it keeps what validation loaded. ``later_bytes``
-        and ``work`` go to the fate map's loader.
+        needs them again, so it keeps what validation loaded. ``record`` and
+        ``fate_record`` are the records of the curves and their fate map,
+        when the caller has read them; ``later_bytes`` and ``work`` go to the
+        fate map's loader.
         """
-        record = self._lineage_curves_record(ref)
+        if record is None:
+            record = self._lineage_curves_record(ref)
         parameters = record.parameters
         fate = record.fate
         coordinates = record.coordinates
         selection = record.selection
-        fate_inputs = self._load_fate_inputs(fate, later_bytes=later_bytes, work=work)
+        fate_inputs = self._load_fate_inputs(
+            fate, record=fate_record, later_bytes=later_bytes, work=work
+        )
         fate_result = fate_inputs.fate
         if fate_result.cell_selection != selection:
             raise ValueError("Lineage curves do not use their fate map's cells")
@@ -3717,13 +3732,16 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         # A lineage cannot share its name with the labels of shared cells and
         # of cells that follow none.
         _membership_labels_impl(np.zeros((0, len(lineages)), dtype=bool), lineages)
+        fate_record = self._fate_map_record(record.fate)
         needed = _membership_bytes_impl(
-            _selection_size(self.zw, record.selection),
-            lineages,
-            len(self._fate_map_record(record.fate).sinks),
+            _selection_size(self.zw, record.selection), lineages, len(fate_record.sinks)
         )
         loaded, inputs = self._load_curves_with_fate_inputs(
-            curves, later_bytes=needed, work="Calling lineage membership"
+            curves,
+            record=record,
+            fate_record=fate_record,
+            later_bytes=lambda _cells, _load: needed,
+            work="Calling lineage membership",
         )
         pseudotime = np.asarray(inputs.direction.scores, dtype=np.float64)
         names = [str(lineage) for lineage in lineages]
@@ -3909,13 +3927,17 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
             inputs.get("cell_selection"), "Lineage-membership cell selection input"
         )
         record = self._lineage_curves_record(curves)
+        fate_record = self._fate_map_record(record.fate)
+        needed = _membership_load_bytes_impl(
+            _selection_size(self.zw, record.selection),
+            tuple(record.parameters["lineages"]),
+            len(fate_record.sinks),
+        )
         loaded, fate_inputs = self._load_curves_with_fate_inputs(
             curves,
-            later_bytes=_membership_load_bytes_impl(
-                _selection_size(self.zw, record.selection),
-                tuple(record.parameters["lineages"]),
-                len(self._fate_map_record(record.fate).sinks),
-            ),
+            record=record,
+            fate_record=fate_record,
+            later_bytes=lambda _cells, _load: needed,
             work=work,
         )
         pseudotime = np.asarray(fate_inputs.direction.scores, dtype=np.float64)
@@ -4352,9 +4374,7 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         entropy, correlation = self._potency_measures(assay, cell_idx, matched)
         raw = entropy if measure == "signaling_entropy" else correlation
         if graph is not None:
-            raw = self._smoothed_potency(
-                graph, raw, smoothing, held_bytes=held - raw.nbytes
-            )
+            raw = self._smoothed_potency(graph, raw, smoothing)
         potency = _unit_ranks_impl(raw)
         write_cell_data_artifact(
             self.zw,
@@ -4468,22 +4488,13 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         )
 
     def _smoothed_potency(
-        self,
-        graph: ArtifactRef,
-        values: np.ndarray,
-        smoothing: float,
-        *,
-        held_bytes: int = 0,
+        self, graph: ArtifactRef, values: np.ndarray, smoothing: float
     ) -> np.ndarray:
-        """Smooth the cells' values over their graph within the memory budget.
+        """Smooth the cells' values over their graph.
 
-        The graph's load and the smoothing are checked against the budget
-        before the graph is read, beside the values and the ``held_bytes``
-        that the caller holds.
+        The caller checks the graph's load and the smoothing against the
+        memory budget before it reads the counts.
         """
-        self._require_potency_smoothing_budget(
-            graph, held_bytes=held_bytes + np.asarray(values).nbytes
-        )
         graph_matrix = self._load_graph_artifact(
             graph, symmetric=True, upper_only=False, use_k=None
         )

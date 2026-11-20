@@ -521,6 +521,24 @@ def fate_solver_bytes(n_cells: int, n_edges: int, n_sinks: int) -> int:
     return sparse + int(n_cells) * (krylov + work + preconditioner + output)
 
 
+def fate_mapping_bytes(
+    n_cells: int, graph_bytes: int, n_entries: int, n_sinks: int
+) -> int:
+    """Return the most bytes that mapping fates holds while it solves.
+
+    The call holds the graph of ``graph_bytes``, and takes the mapped cells'
+    graph from it, at most a copy of it, beside 64 bytes a cell: the cells'
+    scores, components, sink labels' codes and groups, whether each is
+    mapped, and the mapped cells' scores and codes. The solve holds what
+    :func:`fate_solver_bytes` states beside them.
+    """
+    return (
+        2 * int(graph_bytes)
+        + 64 * int(n_cells)
+        + fate_solver_bytes(n_cells, n_entries, n_sinks)
+    )
+
+
 def _residual_limit(solver_tol: float, n_sinks: int) -> float:
     """Return the Bellman residual limit that validated probabilities meet."""
     validation_scale = 10.0 * solver_tol * max(1, n_sinks - 1)

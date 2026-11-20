@@ -888,11 +888,15 @@ def test_a_map_directed_by_a_score_is_refused_a_small_budget_before_its_graph_is
     # membership tests derive, beside the positions of its 145 cells, 1,160
     # bytes, and up to a float64 score and a missing flag a cell, 1,305.
     needed = 63_820 + 49_152 + 1_160 + 1_305
-    work = (
-        "Calling lineage membership"
-        if call == "lineage_membership"
-        else "Loading a direction score"
-    )
+    work = {
+        "fate": "Mapping fates",
+        "lineage_membership": "Calling lineage membership",
+    }.get(call, "Loading a direction score")
+    if call == "fate":
+        # Mapping the fates holds two copies of the union of 1,450 entries,
+        # 2 * 17,984, 64 bytes for each of the 145 cells, and the solver's
+        # 2 * 1,450 * 12 + 145 * 280 = 75,400, more than the graph's load.
+        needed = 2 * 17_984 + 64 * 145 + 75_400
     _set_budget(store, needed - 1)
     with pytest.raises(MemoryBudgetError) as refused:
         calls[call]()
@@ -1052,3 +1056,41 @@ def test_a_fate_map_covers_the_scored_components_that_hold_a_sink() -> None:
             component,
             np.array([True] + [False] * 5),
         )
+
+
+@pytest.mark.parametrize("directed_by", ["pseudotime", "score"])
+def test_a_fate_maps_graph_goes_before_its_sink_labels_are_read(
+    monkeypatch, directed_by: str
+) -> None:
+    import weakref
+
+    # Loading what directs a fate map loads the symmetric graph, which the
+    # map's loader lets go before it reads the sink labels, whether a
+    # pseudotime or a score directs the map.
+    if directed_by == "pseudotime":
+        branching = _branching()
+        store, ref = branching.store, branching.fate
+    else:
+        scored, ref = _directed_map()
+        store = scored.store
+    graphs: list[weakref.ref[Any]] = []
+    load = store._load_graph_artifact
+
+    def loaded(*args: Any, **kwargs: Any) -> Any:
+        matrix = load(*args, **kwargs)
+        graphs.append(weakref.ref(matrix))
+        return matrix
+
+    alive_at_labels: list[list[bool]] = []
+    read = store._read_listed_labels
+
+    def labels(*args: Any, **kwargs: Any) -> Any:
+        alive_at_labels.append([graph() is not None for graph in graphs])
+        return read(*args, **kwargs)
+
+    monkeypatch.setattr(store, "_load_graph_artifact", loaded)
+    monkeypatch.setattr(store, "_read_listed_labels", labels)
+    store._load_fate_inputs(ref)
+    # The sink labels are read last, with no graph left.
+    assert len(graphs) == 1
+    assert alive_at_labels[-1] == [False]

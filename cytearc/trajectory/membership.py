@@ -408,11 +408,11 @@ def _membership_input_bytes(n_cells: int, n_lineages: int, n_sinks: int) -> int:
 
     The curves' progress, distances and weights are three float64 values
     for each cell and lineage, and the fate map's probabilities a float64
-    value for each cell and sink. Beside them, 32 bytes a cell hold the
+    value for each cell and sink. Beside them, up to 40 bytes a cell hold the
     pseudotime or score, the cells' components, which sink each cell holds,
     whether it holds one, and whether the curves and the fate map score it.
     """
-    return int(n_cells) * (24 * int(n_lineages) + 8 * int(n_sinks) + 32)
+    return int(n_cells) * (24 * int(n_lineages) + 8 * int(n_sinks) + 40)
 
 
 def stored_membership_bytes(n_cells: int, lineages: Sequence[Any]) -> int:
@@ -422,12 +422,12 @@ def stored_membership_bytes(n_cells: int, lineages: Sequence[Any]) -> int:
     held as text at the width of the longest label, four bytes a character,
     with a copy of them and of the labels of cells that follow one lineage,
     beside each cell's lineages, their count and whether the cell follows
-    one: three copies of the text and up to 20 bytes a cell and 2 a lineage.
+    one: three copies of the text and up to 24 bytes a cell and 2 a lineage.
     Loading the membership keeps the labels and the lineages of each cell.
     """
     n_cells = int(n_cells)
     text = 4 * _membership_label_width(lineages) * n_cells
-    return 3 * text + n_cells * (20 + 2 * len(lineages))
+    return 3 * text + n_cells * (24 + 2 * len(lineages))
 
 
 def membership_bytes(n_cells: int, lineages: Sequence[Any], n_sinks: int) -> int:

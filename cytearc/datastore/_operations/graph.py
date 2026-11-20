@@ -802,7 +802,7 @@ class _GraphOperationsMixin(_GraphOperationsBase):
         working_bytes: Callable[[int, GraphLoadMemory], int],
         work: str,
         keep_nearest: bool = False,
-        later_bytes: int = 0,
+        later_bytes: Callable[[int, GraphLoadMemory], int] | None = None,
     ) -> None:
         """Raise MemoryError before a consumer of ``graph`` loads it, over budget.
 
@@ -811,9 +811,9 @@ class _GraphOperationsMixin(_GraphOperationsBase):
         load)`` beside the loaded graph, given the graph's cells and the
         load's :class:`~cytearc.neighbors.graph.GraphLoadMemory`.
         ``keep_nearest`` loads fewer than each cell's stored edges.
-        ``later_bytes`` is what the consumer needs once the graph is let go;
-        the check names it when it is more than the load needs, so one
-        refusal names a budget that runs the consumer.
+        ``later_bytes(n_cells, load)`` is what the consumer needs in a later
+        step, as a whole; the check names it when it is more than the load
+        needs, so one refusal names a budget that runs the consumer.
         """
         graph_loc = self._graph_location(graph)
         group = as_zarr_group(self.zw[graph_loc], name=graph_loc)
@@ -834,7 +834,7 @@ class _GraphOperationsMixin(_GraphOperationsBase):
         _require_graph_budget(
             self.resources,
             required=max(
-                later_bytes,
+                0 if later_bytes is None else later_bytes(n_cells, load),
                 held_bytes + max(load.peakBytes, load.heldBytes + working),
             ),
             work=work,

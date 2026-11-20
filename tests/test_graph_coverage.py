@@ -687,9 +687,11 @@ def test_diffusion_operator_budget_is_checked_before_persisting(
     # Eight steps make the operator nearly dense. It can be formed within
     # 16 MiB but not written and checked beside it, so nothing may be
     # persisted.
-    with pytest.raises(MemoryError, match="writing and checking") as refused:
+    with pytest.raises(
+        MemoryError, match="^Writing and checking a diffusion operator of "
+    ) as refused:
         budgeted.imputation.diffusion(connectivity_graph, t=8, invalidate_cache=True)
-    assert refused.value.item == "loading the diffusion operator"
+    assert refused.value.item.startswith("writing a diffusion operator of ")
     assert _diffusion_artifacts(budgeted) == before
 
     # The graph fits the budget, but its first product does not fit a tiny one.

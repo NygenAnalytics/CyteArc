@@ -907,7 +907,7 @@ def test_smoothing_refuses_a_graph_of_other_cells_or_beyond_the_budget(
         datastore._smoothed_potency(connectivity_graph, np.zeros(n_cells + 1), 0.9)
     # Smoothing holds the union's float64 copy and its row-normalized
     # product, 20 bytes an entry, and 49 bytes a cell, beside the union and
-    # the cells' values: a budget of the union and the values alone is
+    # the cells' three scores: a budget of the union and the scores alone is
     # refused before the graph is read.
     reads: list[str] = []
     load = datastore._load_graph_artifact
@@ -917,11 +917,13 @@ def test_smoothing_refuses_a_graph_of_other_cells_or_beyond_the_budget(
         lambda *args, **kwargs: (reads.append("graph"), load(*args, **kwargs))[1],
     )
     budget = union.data.nbytes + union.indices.nbytes + union.indptr.nbytes
-    budget += 8 * n_cells
+    budget += 3 * 8 * n_cells
     monkeypatch.setattr(datastore, "memoryBytes", budget)
     monkeypatch.setattr(datastore, "resources", ResourceBudget(budget, 1))
     with pytest.raises(MemoryBudgetError) as refused:
-        datastore._smoothed_potency(connectivity_graph, np.zeros(n_cells), 0.9)
+        datastore._require_potency_smoothing_budget(
+            connectivity_graph, held_bytes=3 * 8 * n_cells
+        )
     assert str(refused.value).startswith(
         f"Smoothing potency over the graph of {n_cells} cells needs about"
     )

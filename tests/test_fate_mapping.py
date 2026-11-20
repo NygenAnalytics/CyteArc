@@ -1319,16 +1319,19 @@ def test_fate_mapping_checks_solver_memory_before_solving(
     # Two sinks on the five-cell Y graph, with eight directed edges, need
     # 2 * 8 * 12 bytes for the transition and its coarse product, and per cell
     # 22 Krylov and 8 work float64 vectors, 4 int64 index arrays and two
-    # float32 probabilities: 192 + 5 * 280 = 1592 bytes.
-    monkeypatch.setattr(store, "memoryBytes", 1592)
+    # float32 probabilities: 192 + 5 * 280 = 1592 bytes. Beside the solve the
+    # call holds the graph of its mapped cells, eight float64 weights with
+    # int32 indices and six int32 row pointers, 120 bytes, at most twice,
+    # and 64 bytes for each of the 5 cells: 240 + 320 + 1592 = 2152.
+    monkeypatch.setattr(store, "memoryBytes", 2151)
     monkeypatch.setattr(
         trajectory_operations, "_compute_fate_probabilities_impl", forbidden
     )
-    with pytest.raises(MemoryError, match="Fate mapping needs about 1592 bytes"):
+    with pytest.raises(MemoryError, match="Fate mapping needs about 2152 bytes"):
         store.trajectory.fate(*arguments, sinks=["A", "B"])
     assert _fate_maps(store) == []
 
     monkeypatch.undo()
-    monkeypatch.setattr(store, "memoryBytes", 1593)
+    monkeypatch.setattr(store, "memoryBytes", 2152)
     ref = store.trajectory.fate(*arguments, sinks=["A", "B"])
     assert store.trajectory.load_fate(ref).valid.all()
