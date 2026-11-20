@@ -284,8 +284,7 @@ class PipelineAccessor:
 
         Raises:
             ValueError: If ``recipe`` names no recipe, or the call fails the
-                recipe's checks, such as a setting out of the range that the
-                stage's method takes.
+                recipe's checks.
             TypeError: If the call passes ``callback`` or ``cancel``, a
                 keyword that the recipe lacks, or fails the recipe's checks.
             KeyError: If the call names a missing column.
