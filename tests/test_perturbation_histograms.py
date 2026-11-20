@@ -308,6 +308,8 @@ def test_histograms_refuse_memory_below_their_least_before_reading() -> None:
     assert "for the guide count histograms of 0 distinct counts, while 4 of 4" in str(
         refused.value
     )
+    # Before any row is read, there is no rate to estimate every row from.
+    assert refused.value.every_row_bytes is None
     # Codes that are not int64 are held as an int64 copy, 8 bytes per cell.
     with pytest.raises(MemoryError) as refused:
         guide_count_histograms(
@@ -368,8 +370,10 @@ def test_a_refusal_after_every_row_names_memory_that_finishes() -> None:
         except HistogramMemoryError as error:
             if error.counts_remain:
                 continue
-            # With every row read, the last merge names what the assembly
-            # after it needs too, so the memory it names finishes the count.
+            # With every row read, nothing remains to estimate, and the last
+            # merge names what the assembly after it needs too, so the memory
+            # it names finishes the count.
+            assert error.every_row_bytes is None
             found = guide_count_histograms(
                 [counts],
                 samples,
@@ -380,6 +384,193 @@ def test_a_refusal_after_every_row_names_memory_that_finishes() -> None:
             assert int(found.cells.sum()) == int(np.count_nonzero(counts))
             finished += 1
     assert finished
+
+
+def _counts_of_their_own(n_cells: int, n_guides: int, per_cell: int) -> np.ndarray:
+    """``per_cell`` counts above the dense range in each cell, each a count that no other cell holds.
+
+    Each cell adds as many distinct counts, so the distinct counts grow
+    exactly with the rows read.
+    """
+    counts = np.zeros((n_cells, n_guides), dtype=np.uint32)
+    cells = np.arange(n_cells)
+    for carried in range(per_cell):
+        guides = (cells * per_cell + carried) % n_guides
+        counts[cells, guides] = DENSE_COUNTS + 1 + cells * per_cell + carried
+    return counts
+
+
+def _dense_counts_first() -> tuple[np.ndarray, np.ndarray, int]:
+    """Four samples whose first 32 cells each fill every dense count of 40 guides.
+
+    Each of 2,000 cells also holds a count of its own of each of 10 other
+    guides, so the larger counts grow exactly with the rows read while the
+    dense ones stop after 128 rows.
+    """
+    n_cells, n_samples = 2_000, 4
+    counts = np.hstack(
+        [
+            _counts_of_their_own(n_cells, 10, 10),
+            np.zeros((n_cells, 40), dtype=np.uint32),
+        ]
+    )
+    first = np.arange(DENSE_COUNTS * n_samples)
+    counts[first, 10:] = (first // n_samples + 1)[:, None]
+    return counts, np.arange(n_cells) % n_samples, n_samples
+
+
+def _dense_counts_grow() -> tuple[np.ndarray, np.ndarray, int]:
+    """Fifty samples of 100 guides whose dense counts outweigh the buffer.
+
+    Each of 10,000 cells holds counts drawn from a million values above the
+    dense range in 30 guides and dense counts in 20 others, so that 5,000
+    histograms fill their dense counts as rows are read.
+    """
+    n_cells, n_guides, n_samples = 10_000, 100, 50
+    rng = np.random.default_rng(12)
+    guides = rng.random((n_cells, n_guides)).argsort(axis=1)
+    rows = np.arange(n_cells)[:, None]
+    counts = np.zeros((n_cells, n_guides), dtype=np.uint32)
+    counts[rows, guides[:, :30]] = (
+        DENSE_COUNTS + 1 + rng.integers(0, 10**6, (n_cells, 30))
+    )
+    counts[rows, guides[:, 30:50]] = rng.integers(1, DENSE_COUNTS + 1, (n_cells, 20))
+    return counts, np.arange(n_cells) % n_samples, n_samples
+
+
+def _one_sample(counts: np.ndarray) -> tuple[np.ndarray, np.ndarray, int]:
+    return counts, np.zeros(len(counts), dtype=np.int64), 1
+
+
+# Screens whose histograms stop at several merges while rows remain.
+_STOPPING_SCREENS = {
+    # Every count is one of its own, so the distinct counts grow with the rows.
+    "counts_grow_with_the_rows": lambda: _one_sample(
+        _counts_of_their_own(2_000, 20, 20)
+    ),
+    # The buffer merges after every 33 cells, and the last merge holds the 20
+    # counts of one cell, so that merge, not the assembly, needs the most,
+    # and the estimate of every row has no cell to spare.
+    "one_row_in_the_last_merge": lambda: _one_sample(_counts_of_their_own(298, 20, 20)),
+    # Counts drawn from 100 values repeat, so the distinct counts stop growing.
+    "counts_repeat": lambda: _one_sample(
+        (
+            DENSE_COUNTS
+            + 1
+            + np.random.default_rng(1).integers(0, 100, size=(3_000, 20))
+        ).astype(np.uint32)
+    ),
+    "dense_counts_first": _dense_counts_first,
+    "dense_counts_grow": _dense_counts_grow,
+}
+
+
+def _stops(
+    counts: np.ndarray, samples: np.ndarray, n_samples: int
+) -> list[HistogramMemoryError]:
+    """Return the refusals of the histograms at each merge that needs more than those before it.
+
+    From the histograms' least, each budget is what the refusal before it
+    needed, which passes that merge and stops at the next that needs more.
+    """
+    n_guides = counts.shape[1]
+    budget = histogram_bytes(n_samples, n_guides, len(counts), n_distinct=0)
+    refusals = []
+    while True:
+        try:
+            guide_count_histograms(
+                [counts],
+                samples,
+                n_samples=n_samples,
+                n_guides=n_guides,
+                ledger=_ledger(budget),
+            )
+        except HistogramMemoryError as error:
+            assert error.needed_bytes > budget
+            refusals.append(error)
+            budget = error.needed_bytes
+        else:
+            return [error for error in refusals if error.counts_remain]
+
+
+@pytest.mark.parametrize("screen", list(_STOPPING_SCREENS))
+def test_a_refusal_while_rows_remain_names_memory_that_counts_every_row(
+    screen,
+) -> None:
+    counts, samples, n_samples = _STOPPING_SCREENS[screen]()
+    n_guides = counts.shape[1]
+    expected = guide_count_histograms(
+        [counts], samples, n_samples=n_samples, n_guides=n_guides
+    )
+    stops = _stops(counts, samples, n_samples)
+    assert len(stops) >= 3
+    for error in stops:
+        # A merge stopped the histograms after some rows were read.
+        assert 0 < error.rows_read < error.n_rows
+        assert error.every_row_bytes is not None
+        assert error.every_row_bytes >= error.needed_bytes
+        # The estimate gets past every later merge and the assembly.
+        found = guide_count_histograms(
+            [counts],
+            samples,
+            n_samples=n_samples,
+            n_guides=n_guides,
+            ledger=_ledger(error.every_row_bytes),
+        )
+        for name in ("offsets", "counts", "cells", "n_cells"):
+            np.testing.assert_array_equal(getattr(found, name), getattr(expected, name))
+
+
+@pytest.mark.parametrize(
+    "screen",
+    ["counts_grow_with_the_rows", "one_row_in_the_last_merge", "dense_counts_first"],
+)
+def test_counts_that_grow_with_the_rows_are_estimated_within_their_plan(
+    screen,
+) -> None:
+    # Where the larger counts grow exactly with the rows read, the estimate
+    # of every row holds no more than the histograms of the screen's distinct
+    # counts, as histogram_bytes plans them; the dense counts of a histogram
+    # count at most once each, however early they fill.
+    counts, samples, n_samples = _STOPPING_SCREENS[screen]()
+    planned = histogram_bytes(
+        n_samples,
+        counts.shape[1],
+        len(counts),
+        n_distinct=_distinct_counts(counts, samples),
+    )
+    stops = _stops(counts, samples, n_samples)
+    assert stops
+    for error in stops:
+        assert error.every_row_bytes is not None
+        assert error.every_row_bytes <= planned
+
+
+@pytest.mark.parametrize(
+    ("filled", "n_larger", "rows_read", "buffer_bytes", "expected"),
+    [
+        # With 3 of 4 rows read, 10 larger counts become 14 and 5 dense ones
+        # 7, rounded up. A later merge holds 1,000 + 800 + 32 x 14 = 2,248
+        # bytes, more than the assembly's 1,000 + 16 x 14 for the merged
+        # counts + 16 for the offsets + 16 for the sample's cells + 16 x 21
+        # for the histograms' counts and cells = 1,592.
+        (5, 10, 3, 800, 2_248),
+        # With 1 of 4 rows read, 30 dense counts would become 120, but one
+        # histogram holds at most 32, and 2 larger counts become 8. The
+        # assembly's 1,000 + 16 x 8 + 16 + 16 + 16 x 40 = 1,800 bytes exceed
+        # the 1,000 + 32 x 8 = 1,256 of a later merge without a buffer.
+        (30, 2, 1, 0, 1_800),
+    ],
+)
+def test_the_estimate_of_every_row_scales_counts_up_to_what_a_histogram_holds(
+    filled, n_larger, rows_read, buffer_bytes, expected
+) -> None:
+    dense = np.zeros((1, 1, DENSE_COUNTS), dtype=np.uint32)
+    dense[0, 0, :filled] = 1
+    found = histograms._every_row_bytes(
+        1_000, buffer_bytes, dense, n_larger, rows_read=rows_read, n_rows=4
+    )
+    assert found == expected
 
 
 @pytest.mark.parametrize("compiled", [True, False])

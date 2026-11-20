@@ -321,6 +321,9 @@ class HistogramMemoryError(MemoryBudgetError):
         n_distinct: The distinct counts that they held then.
         rows_read: The rows of counts read when they stopped.
         n_rows: The rows of counts, one per cell.
+        every_row_bytes: When a merge stopped them while rows remained to be
+            read, an estimate of what the call holds with the histograms of
+            every row, at least ``needed_bytes``; None otherwise.
     """
 
     def __init__(
@@ -333,6 +336,7 @@ class HistogramMemoryError(MemoryBudgetError):
         n_distinct: int,
         rows_read: int,
         n_rows: int,
+        every_row_bytes: int | None,
     ) -> None:
         super().__init__(
             message, needed_bytes=needed_bytes, budget_bytes=budget_bytes, item=item
@@ -340,6 +344,7 @@ class HistogramMemoryError(MemoryBudgetError):
         self.n_distinct = int(n_distinct)
         self.rows_read = int(rows_read)
         self.n_rows = int(n_rows)
+        self.every_row_bytes = None if every_row_bytes is None else int(every_row_bytes)
 
     @property
     def counts_remain(self) -> bool:
@@ -358,6 +363,7 @@ class HistogramMemoryError(MemoryBudgetError):
                 self.n_distinct,
                 self.rows_read,
                 self.n_rows,
+                self.every_row_bytes,
             ),
             self.__dict__,
         )
@@ -372,6 +378,7 @@ def _restore_histogram_memory_error(
     n_distinct: int,
     rows_read: int,
     n_rows: int,
+    every_row_bytes: int | None,
 ) -> HistogramMemoryError:
     """Rebuild a pickled HistogramMemoryError, whose fields are keywords."""
     return error_type(
@@ -382,6 +389,7 @@ def _restore_histogram_memory_error(
         n_distinct=n_distinct,
         rows_read=rows_read,
         n_rows=n_rows,
+        every_row_bytes=every_row_bytes,
     )
 
 
@@ -402,8 +410,13 @@ def _require_memory(
     *,
     rows_read: int,
     n_rows: int,
+    every_row: int | None = None,
 ) -> None:
     """Charge the ``needed`` bytes of the histograms to ``ledger`` as a peak beside what it holds.
+
+    ``every_row`` estimates what the histograms of every row need, or is
+    None where no estimate is made; a refusal names it beside what the
+    ledger holds.
 
     Raises:
         HistogramMemoryError: If the ledger refuses them.
@@ -423,24 +436,56 @@ def _require_memory(
             n_distinct=n_distinct,
             rows_read=rows_read,
             n_rows=n_rows,
+            every_row_bytes=(
+                None if every_row is None else ledger.held_bytes + every_row
+            ),
         ) from refusal
 
 
-def _assembly_bytes(held: int, dense: np.ndarray, n_larger: int) -> int:
+def _assembly_bytes(held: int, dense: np.ndarray, n_dense: int, n_larger: int) -> int:
     """Return what assembling the histograms holds.
 
-    ``held`` covers what the caller holds and the dense array; beside it,
+    ``held`` covers what the caller holds and the ``dense`` array; beside it,
     the ``n_larger`` merged larger counts and their cells, the offsets, the
-    cells of each sample, and the counts and cells of the histograms.
+    cells of each sample, and the counts and cells of the histograms: the
+    ``n_dense`` counts of the dense array and the larger ones.
     """
     n_samples, n_guides = int(dense.shape[0]), int(dense.shape[1])
-    total = int(np.count_nonzero(dense)) + n_larger
     return (
         held
         + 16 * n_larger
         + 8 * (n_samples * n_guides + 1)
         + 16 * n_samples
-        + 16 * total
+        + 16 * (n_dense + n_larger)
+    )
+
+
+def _every_row_bytes(
+    held: int,
+    buffer_bytes: int,
+    dense: np.ndarray,
+    n_larger: int,
+    *,
+    rows_read: int,
+    n_rows: int,
+) -> int:
+    """Estimate what the histograms of every row need from the ``rows_read`` of ``n_rows`` read.
+
+    Distinct counts grow about as fast as the rows read, or slower, so the
+    distinct counts of every row are estimated at the rate of the rows read:
+    the ``n_larger`` merged larger counts, and the counts that ``dense``
+    holds, at most :data:`DENSE_COUNTS` for each histogram. At those counts,
+    each later merge holds at most ``held``, the buffer and 32 bytes for each
+    larger count, and the assembly holds what :func:`_assembly_bytes` counts.
+    The estimate is the larger of the two.
+    """
+    every_larger = -(-n_larger * n_rows // rows_read)
+    every_dense = min(
+        dense.size, -(-int(np.count_nonzero(dense)) * n_rows // rows_read)
+    )
+    return max(
+        held + buffer_bytes + 32 * every_larger,
+        _assembly_bytes(held, dense, every_dense, every_larger),
     )
 
 
@@ -471,11 +516,29 @@ def _larger_counts(
         run.sort()
         size = int(_merged_size(keys, run))
         needed = held + buffer.nbytes + keys.nbytes + cells.nbytes + 16 * size
+        every_row = None
         if rows_read == n_rows:
             # The last merge also checks the assembly that follows, so that
             # one refusal names what both need.
-            needed = max(needed, _assembly_bytes(held, dense, size))
-        _require_memory(needed, ledger, size, rows_read=rows_read, n_rows=n_rows)
+            needed = max(
+                needed,
+                _assembly_bytes(held, dense, int(np.count_nonzero(dense)), size),
+            )
+        else:
+            # A refusal while rows remain names what every row would need,
+            # so that the budget it names gets past the later merges and
+            # the assembly.
+            every_row = _every_row_bytes(
+                held, buffer.nbytes, dense, size, rows_read=rows_read, n_rows=n_rows
+            )
+        _require_memory(
+            needed,
+            ledger,
+            size,
+            rows_read=rows_read,
+            n_rows=n_rows,
+            every_row=every_row,
+        )
         merged_keys = np.empty(size, dtype=np.uint64)
         merged_cells = np.empty(size, dtype=np.int64)
         _merge_run(keys, cells, run, merged_keys, merged_cells)
@@ -560,7 +623,9 @@ def guide_count_histograms(
             rows than there are cells, or a count exceeds the uint32 range.
         HistogramMemoryError: If the histograms would pass the ledger's
             budget, a MemoryBudgetError that holds the bytes that the call
-            needs at that point and the rows of counts read by then.
+            needs at that point and the rows of counts read by then, and
+            when a merge stops it while rows remain, an estimate of what the
+            histograms of every row need.
     """
     if n_samples < 1 or n_guides < 1:
         raise ValueError("Histograms need at least one sample and one guide")
@@ -586,9 +651,10 @@ def guide_count_histograms(
     )
 
     flat = dense.reshape(n_entries, DENSE_COUNTS)
-    total = int(np.count_nonzero(flat)) + len(keys)
+    n_dense = int(np.count_nonzero(flat))
+    total = n_dense + len(keys)
     _require_memory(
-        _assembly_bytes(held + dense.nbytes, dense, len(keys)),
+        _assembly_bytes(held + dense.nbytes, dense, n_dense, len(keys)),
         ledger,
         total,
         rows_read=len(codes),

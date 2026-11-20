@@ -868,31 +868,90 @@ def test_call_guides_refuses_a_small_budget_before_it_writes(tmp_path, options) 
     assert written(open_store(path)) == saved
 
 
-def test_histograms_that_outgrow_the_budget_name_what_every_row_needs(
-    tmp_path,
-) -> None:
-    # Each of 2,000 cells holds a count of each of 20 guides above the dense
-    # range, drawn from 60,000 values, so that the histograms keep almost
-    # every count apart. Half of what the histograms of every distinct count
-    # hold passes their least beside a block of counts, but not the counts.
-    n_cells, n_guides = 2_000, 20
-    rng = np.random.default_rng(23)
-    counts = DENSE_COUNTS + 1 + rng.integers(0, 60_000, size=(n_cells, n_guides))
-    path = tmp_path / "store.zarr"
+def _every_cell_screen(path: Path, counts: np.ndarray, seed: int):
+    """Write a screen of these guide counts and return the selection of every cell."""
+    rng = np.random.default_rng(seed)
     store = write_screen(
-        path, rng.poisson(1.0, size=(n_cells, 3)) + 1, counts.astype(np.uint16)
+        path, rng.poisson(1.0, size=(len(counts), 3)) + 1, counts.astype(np.uint16)
     )
-    store.cells.insert("every", by_cell_id(store.cells, np.ones(n_cells, dtype=bool)))
+    store.cells.insert(
+        "every", by_cell_id(store.cells, np.ones(len(counts), dtype=bool))
+    )
     cells = store.snapshot_cell_selection("every")
     rechunk_feature_tables(path)
-    distinct = len(np.unique(np.arange(n_guides) * 2**32 + counts))
-    budget = histogram_bytes(1, n_guides, n_cells, n_distinct=distinct) // 2
-    small = open_store(path, mem_budget=budget)
-    saved = written(small)
+    return cells
 
-    with pytest.raises(MemoryBudgetError) as refused:
-        small.perturbation.call_guides(cells)
-    error = refused.value
+
+def _histograms_refusal(
+    path: Path, cells, budget: int
+) -> tuple[int, MemoryBudgetError]:
+    """Call guides at ``budget``, then at the budget that each refusal names, until the histograms refuse.
+
+    Returns the budget that the histograms refused and the refusal.
+    """
+    for _ in range(20):
+        with pytest.raises(MemoryBudgetError) as refused:
+            open_store(path, mem_budget=budget).perturbation.call_guides(cells)
+        if isinstance(refused.value.__cause__, HistogramMemoryError):
+            return budget, refused.value
+        budget = refused.value.needed_bytes
+    pytest.fail(f"The histograms refused no budget up to {budget} bytes")
+
+
+def _causes(error: BaseException | None) -> list[BaseException]:
+    """Return ``error`` and each exception that it was raised from."""
+    chain = []
+    while error is not None:
+        chain.append(error)
+        error = error.__cause__
+    return chain
+
+
+def _assert_histograms_pass(path: Path, cells, budget: int) -> None:
+    """Check that at ``budget`` the histograms count every row.
+
+    A call at that budget saves the calls, or a later step that sizes itself
+    from the fits, such as joining the calls, refuses on its own.
+    """
+    try:
+        open_store(path, mem_budget=budget).perturbation.call_guides(cells)
+    except MemoryBudgetError as later:
+        assert not any(
+            isinstance(cause, HistogramMemoryError) for cause in _causes(later)
+        ), str(later)
+
+
+@pytest.mark.parametrize(
+    ("n_values", "budget_of"),
+    [
+        # Half of what the histograms of every distinct count hold passes
+        # their least beside a block of counts, but not the counts.
+        (
+            60_000,
+            lambda distinct: histogram_bytes(1, 20, 2_000, n_distinct=distinct) // 2,
+        ),
+        # The call holds more than such histograms, so the budget comes from
+        # following each refusal, from a budget of 1 byte, to the histograms.
+        (100, lambda _distinct: 1),
+    ],
+    ids=["distinct_counts_grow_with_the_rows", "counts_repeat"],
+)
+def test_histograms_that_outgrow_the_budget_name_what_every_row_needs(
+    tmp_path, n_values, budget_of
+) -> None:
+    # Each of 2,000 cells holds a count of each of 20 guides above the dense
+    # range, drawn from n_values values. Drawn from 60,000, almost every
+    # count is one of its own, so the histograms' distinct counts grow with
+    # the rows read; drawn from 100, the counts repeat, and the distinct
+    # counts stop growing after a few hundred rows.
+    n_cells, n_guides = 2_000, 20
+    rng = np.random.default_rng(23)
+    counts = DENSE_COUNTS + 1 + rng.integers(0, n_values, size=(n_cells, n_guides))
+    path = tmp_path / "store.zarr"
+    cells = _every_cell_screen(path, counts, seed=23)
+    distinct = len(np.unique(np.arange(n_guides) * 2**32 + counts))
+    saved = written(open_store(path))
+    budget, error = _histograms_refusal(path, cells, budget_of(distinct))
     # The refusal names the distinct counts and the rows that remained, and
     # what the histograms of every row need at the rate of the rows read.
     found = re.fullmatch(
@@ -913,18 +972,45 @@ def test_histograms_that_outgrow_the_budget_name_what_every_row_needs(
     assert stopped.rows_read == n_cells - remaining
     assert 0 < stopped.rows_read < n_cells
     # Beside what the call holds, every row needs more than the histograms
-    # needed where they stopped, and no more than they needed for each row
-    # read, times the rows.
+    # needed where they stopped, and no more than the histograms of 2,000
+    # cells whose every count is one of its own.
     held = needed - every_row
     at_stop = stopped.needed_bytes - held
-    assert at_stop < every_row <= -(-at_stop * n_cells // stopped.rows_read)
+    assert (
+        at_stop
+        < every_row
+        <= histogram_bytes(1, n_guides, n_cells, n_distinct=n_cells * n_guides)
+    )
     assert written(open_store(path)) == saved
-    # The budget named gets past the point where the histograms stopped.
-    try:
-        open_store(path, mem_budget=needed).perturbation.call_guides(cells)
-    except MemoryBudgetError as later:
-        left = re.search(r"while (\d+) of 2000 rows", str(later))
-        assert left is None or int(left.group(1)) < remaining, str(later)
+    _assert_histograms_pass(path, cells, needed)
+
+
+def test_histograms_refused_after_every_row_name_what_they_need(tmp_path) -> None:
+    # 600 cells hold counts from 1 to 32 of each of 40 guides, which fill
+    # every dense count of every guide, and no larger count, so that only
+    # assembling the histograms once every row is read needs more than their
+    # least.
+    n_cells, n_guides = 600, 40
+    counts = np.random.default_rng(29).integers(
+        1, DENSE_COUNTS + 1, size=(n_cells, n_guides)
+    )
+    path = tmp_path / "store.zarr"
+    cells = _every_cell_screen(path, counts, seed=29)
+    saved = written(open_store(path))
+    budget, error = _histograms_refusal(path, cells, 1)
+    stopped = error.__cause__
+    assert stopped.rows_read == stopped.n_rows == n_cells
+    # With every row read, the refusal names what the histograms needed, and
+    # no estimate.
+    assert stopped.every_row_bytes is None
+    assert error.needed_bytes == stopped.needed_bytes > budget
+    assert (
+        f"holds about {error.needed_bytes} bytes for the guide count histograms "
+        f"of {n_guides * DENSE_COUNTS} distinct counts, more than the memory "
+        f"budget of {budget} bytes." in str(error)
+    )
+    assert written(open_store(path)) == saved
+    _assert_histograms_pass(path, cells, error.needed_bytes)
 
 
 def test_gaussian_warns_when_most_calls_carry_several_guides(tmp_path) -> None:

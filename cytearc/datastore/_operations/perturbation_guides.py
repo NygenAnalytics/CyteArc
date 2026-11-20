@@ -1434,26 +1434,22 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
                 blocks, codes, n_samples=n_samples, n_guides=n_guides, ledger=ledger
             )
         except HistogramMemoryError as error:
-            # What the histograms needed where they stopped, beside what the
-            # call holds with the streamed counts. Distinct counts grow about
-            # as fast as the rows read, or slower, so while rows remain the
-            # histograms of every row are estimated from those read; with the
-            # budget named, the histograms get at least what they needed where
-            # they stopped.
-            needed = error.needed_bytes - ledger.held_bytes
-            item = error.item
-            if error.counts_remain:
-                needed = max(
-                    needed, -(-needed * error.n_rows // max(error.rows_read, 1))
-                )
+            # What the call holds with the histograms where they stopped, or
+            # where they stopped at a merge while rows remained, what the
+            # histograms estimate for every row from the rows read: with that
+            # budget, a rerun gets past the histograms when their distinct
+            # counts grow no faster than the rows read.
+            needed, item = error.needed_bytes, error.item
+            if error.every_row_bytes is not None:
+                needed = error.every_row_bytes
                 item += (
                     ", and at the rate of the rows read the histograms of every "
-                    f"row need about {needed} bytes"
+                    f"row need about {needed - ledger.held_bytes} bytes"
                 )
             raise memory_refusal(
                 ledger.doing,
                 item,
-                ledger.held_bytes + needed,
+                needed,
                 int(error.budget_bytes),
                 remedy="pass a smaller cell_selection or fewer samples",
             ) from error
@@ -1622,10 +1618,12 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
         cell's detected guides bound its calls under ``fixed`` and the
         fitted methods, whose fits give the number of calls, and
         ``top_guide`` makes at most one call per cell. A refusal names the
-        step and the budget that passes it; the histograms' refusal names a
-        budget that gets past the point where they stopped, and says when
-        more counts remained to be read. The fits are saved once the calls
-        that they make have passed their steps.
+        step and the budget that passes it. When the histograms stop while
+        counts remain to be read, their refusal says so and names what the
+        histograms of every row need at the rate of the rows read, a budget
+        that gets past them unless their distinct counts grow faster than
+        the rows read; the calling pass after the fits names its own. The
+        fits are saved once the calls that they make have passed their steps.
 
         The calls are saved as a ``guide_calls`` artifact, as
         :meth:`~cytearc.datastore.namespaces.PerturbationAccessor.import_guide_calls`

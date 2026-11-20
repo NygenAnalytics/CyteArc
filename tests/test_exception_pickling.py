@@ -136,6 +136,7 @@ SAMPLES: dict[type[BaseException], Callable[[], BaseException]] = {
         n_distinct=128,
         rows_read=10,
         n_rows=20,
+        every_row_bytes=8192,
     ),
     MemoryBudgetError: lambda: memory_refusal(
         "Importing contigs for 8 selected cells",
