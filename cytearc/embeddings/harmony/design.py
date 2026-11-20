@@ -17,6 +17,8 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
+from ...utils.arguments import require_one_value_kind
+
 
 @dataclass(frozen=True, slots=True)
 class BatchDesign:
@@ -133,20 +135,26 @@ def _ordered_levels(column: pd.Series, name: object, out: np.ndarray) -> list[ob
     """Write a column's local level codes into ``out`` and return its levels in order.
 
     A categorical column keeps the declared order of the categories that occur. Any
-    other column orders its distinct values with Python's ``sorted``, so numbers
-    sort numerically and text by code point.
+    other column must hold values of one kind, as ``require_one_value_kind``
+    defines them, and orders its distinct values with Python's ``sorted``, so
+    numbers sort numerically and text by code point.
     """
     if isinstance(column.dtype, pd.CategoricalDtype):
         used = column.cat.remove_unused_categories()
         out[...] = used.cat.codes.to_numpy()
         return list(used.cat.categories.tolist())
+    require_one_value_kind(
+        column.to_numpy(),
+        name=f"Batch column {name!r}",
+        remedy="convert it to one kind, such as text, first",
+    )
     codes, uniques = pd.factorize(column, sort=False)
     values = list(uniques.tolist())
     try:
         order = sorted(range(len(values)), key=values.__getitem__)
     except TypeError as error:
         raise ValueError(
-            f"Batch column {name!r} mixes values that cannot be ordered; convert it "
+            f"Batch column {name!r} holds values that cannot be ordered; convert it "
             "to text or to an ordered categorical"
         ) from error
     rank = np.empty(len(order), dtype=np.int32)
@@ -172,7 +180,9 @@ def encode_batch_design(metadata: pd.DataFrame) -> BatchDesign:
     """Encode batch columns as global level codes in design order and group cells by level combination.
 
     Unused categories of a categorical column are not levels. Two levels of one
-    column may not share their text, because results name levels by text.
+    column may not share their text, because results name levels by text, and
+    the values of a column other than a categorical must be of one kind, because
+    pandas takes ``1``, ``1.0`` and ``True`` for one level.
 
     Args:
         metadata: One row per cell and one column per batch variable, already
@@ -182,8 +192,8 @@ def encode_batch_design(metadata: pd.DataFrame) -> BatchDesign:
         The encoded design.
 
     Raises:
-        ValueError: If a column's values cannot be ordered or two of its levels
-            have the same text.
+        ValueError: If a column's values are of more than one kind or cannot be
+            ordered, or two of its levels have the same text.
     """
     n_cells = len(metadata)
     n_columns = int(metadata.shape[1])

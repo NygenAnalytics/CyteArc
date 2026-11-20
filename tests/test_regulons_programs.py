@@ -1,3 +1,6 @@
+import datetime
+import re
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -256,6 +259,10 @@ def test_regulon_specificity_rejects_invalid_inputs(values, labels, message):
         ([None] * 5, 5),
         ([np.nan] * 5, 5),
         (pd.Categorical([None] * 5, categories=["a"]), 5),
+        # A missing label is named before labels of more than one kind, so
+        # NaN among numbers or text is never a float label.
+        (["a", "a", 1, 1, None], 1),
+        ([1, 1, 2.5, np.nan, 2.5], 1),
     ],
 )
 def test_regulon_specificity_refuses_cells_without_a_label(labels, unlabeled):
@@ -286,6 +293,22 @@ def test_regulon_specificity_refuses_cells_without_a_label(labels, unlabeled):
         ([False, False, True, True], [False, True]),
         (["nan", "nan", "None", "None"], ["nan", "None"]),
         (np.asarray([0.0, 0.0, 1.5, 1.5]), [0.0, 1.5]),
+        # A NumPy scalar is a label of its Python type's kind, so equal
+        # labels form one group.
+        ([1, np.int64(1), np.uint8(2), 2], [1, 2]),
+        ([np.True_, True, False, np.False_], [True, False]),
+        (["a", np.str_("a"), np.str_("b"), "b"], ["a", "b"]),
+        ([1.5, np.float64(1.5), np.float32(2.0), 2.0], [1.5, 2.0]),
+        # Nullable and categorical columns hold labels of one kind.
+        (pd.Series([1, 1, 2, 2], dtype="Int64"), [1, 2]),
+        (pd.Series([True, True, False, False], dtype="boolean"), [True, False]),
+        (pd.Categorical([1, 1, 2, 2]), [1, 2]),
+        # Labels of one other type are of one kind.
+        (np.asarray([b"a", b"a", b"b", b"b"]), [b"a", b"b"]),
+        (
+            pd.to_datetime(["2020-01-01", "2020-01-01", "2020-01-02", "2020-01-02"]),
+            [pd.Timestamp("2020-01-01"), pd.Timestamp("2020-01-02")],
+        ),
     ],
 )
 def test_regulon_specificity_scores_every_kind_of_label_alike(labels, groups):
@@ -306,6 +329,101 @@ def test_regulon_specificity_scores_every_kind_of_label_alike(labels, groups):
         rtol=0,
         atol=1e-15,
     )
+
+
+@pytest.mark.parametrize(
+    ("labels", "kinds"),
+    [
+        # Python takes 1, 1.0 and True for one label...
+        (
+            [1, 1, 1.0, 1.0, True, True],
+            "integer values such as 1, float values such as 1.0 and boolean "
+            "values such as True",
+        ),
+        # ...and keeps 1 and "1" apart, though they print alike.
+        (
+            [1, 1, "1", "1", 2, 2],
+            "integer values such as 1 and text values such as '1'",
+        ),
+        (
+            ["a", "a", "b", "b", 1, 1],
+            "text values such as 'a' and integer values such as 1",
+        ),
+        (
+            pd.Categorical(["a", "a", 1, 1, "b", "b"]),
+            "text values such as 'a' and integer values such as 1",
+        ),
+        # Numbers of two kinds are refused even where no two are equal.
+        (
+            [1, 1, 2.5, 2.5, 3, 3],
+            "integer values such as 1 and float values such as 2.5",
+        ),
+        # A NumPy scalar is of its Python type's kind, and each kind is shown
+        # by its first value.
+        (
+            [np.int64(1), 1, np.float32(1.5), 1.5, np.True_, True],
+            "integer values such as np.int64(1), float values such as "
+            "np.float32(1.5) and boolean values such as np.True_",
+        ),
+        # A value of another type is of the kind its type names.
+        (
+            [b"a", b"a", "a", "a", "b", "b"],
+            "bytes values such as b'a' and text values such as 'a'",
+        ),
+        (
+            [pd.Timestamp("2020-01-01")] * 2
+            + [datetime.datetime(2020, 1, 1)] * 2
+            + [pd.Timestamp("2020-01-02")] * 2,
+            "Timestamp values such as Timestamp('2020-01-01 00:00:00') and "
+            "datetime values such as datetime.datetime(2020, 1, 1, 0, 0)",
+        ),
+        # NumPy derives timedelta64 from its integers, and it equals them.
+        (
+            [np.timedelta64(1, "s")] * 2 + [1, 1, 2, 2],
+            "timedelta64 values such as np.timedelta64(1,'s') and integer "
+            "values such as 1",
+        ),
+    ],
+)
+def test_regulon_specificity_refuses_labels_of_more_than_one_kind(labels, kinds):
+    activity = pd.DataFrame(
+        {"X": [2.0, 2.0, 0.0, 0.0, 1.0, 1.0], "Y": [0.0, 1.0, 3.0, 0.0, 1.0, 2.0]}
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=re.escape(
+            f"labels mixes {kinds}; convert the labels to one kind, such as text, first"
+        ),
+    ):
+        regulon_specificity(activity, labels)
+
+
+def test_numpy_and_python_labels_of_one_kind_score_as_one_group():
+    rng = np.random.default_rng(7)
+    values = rng.uniform(0, 1, size=(60, 3))
+    codes = rng.integers(0, 3, size=60)
+    as_numpy = rng.random(60) < 0.5
+    # The scores of the groups' definition, with each group named by text.
+    expected = rss_by_definition(values, np.asarray(["g7", "g3", "g5"])[codes])
+
+    for names, numpy_type in (
+        ([7, 3, 5], np.int64),
+        ([7.5, 3.5, 5.5], np.float32),
+        (["7", "3", "5"], np.str_),
+    ):
+        labels = [
+            numpy_type(names[code]) if numpy else names[code]
+            for code, numpy in zip(codes, as_numpy, strict=True)
+        ]
+        rss = regulon_specificity(pd.DataFrame(values), labels)
+
+        assert [str(group) for group in rss.index] == [
+            str(names[code]) for code in dict.fromkeys(codes.tolist())
+        ]
+        np.testing.assert_allclose(
+            rss.to_numpy(), expected.to_numpy(), rtol=0, atol=1e-12
+        )
 
 
 def test_connection_specificity_and_modules():

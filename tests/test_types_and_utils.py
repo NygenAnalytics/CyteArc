@@ -32,6 +32,7 @@ from cytearc.utils.arguments import (
     float_argument,
     integer_argument,
     optional_name_argument,
+    require_one_value_kind,
 )
 from cytearc.utils.digest import mix64, mix64_array
 from cytearc.utils.numba import numba_threads
@@ -591,6 +592,71 @@ def test_clip_fraction_argument_requires_a_finite_fraction_below_one_half():
             ValueError, match="tails must be at least 0 and less than 0.5"
         ):
             clip_fraction_argument(value, "tails")
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        [],
+        ["a"],
+        # A NumPy scalar is of its Python type's kind.
+        ["a", np.str_("b")],
+        [1, np.int64(2), np.uint8(3), np.int8(-1), 2**70],
+        [1.0, np.float32(2.5), np.float16(3), float("inf")],
+        [True, np.bool_(False)],
+        # A value of another type is of the kind its type names.
+        [b"a", b"b"],
+        [np.timedelta64(1, "s"), np.timedelta64(2, "s")],
+        np.asarray(["a", np.str_("b"), "c"], dtype=object),
+        # A typed array holds one kind, whatever NumPy made of its values.
+        np.asarray([1, "a"]),
+        np.asarray([1.0, np.nan]),
+    ],
+)
+def test_require_one_value_kind_takes_values_of_one_kind(values):
+    require_one_value_kind(values, name="labels", remedy="convert them")
+
+
+@pytest.mark.parametrize(
+    ("values", "kinds"),
+    [
+        ([1, "1"], "integer values such as 1 and text values such as '1'"),
+        (
+            np.asarray([1.0, True, 1], dtype=object),
+            "float values such as 1.0, boolean values such as True and integer "
+            "values such as 1",
+        ),
+        # The kinds follow their first value, which each kind shows.
+        (
+            ["b", np.int64(2), "a", 1.5, 3, np.True_, False],
+            "text values such as 'b', integer values such as np.int64(2), float "
+            "values such as 1.5 and boolean values such as np.True_",
+        ),
+        # NumPy derives timedelta64 from its integers, yet a timedelta is no
+        # integer, and its bool from no Python type, yet it is a boolean.
+        (
+            [np.timedelta64(1, "s"), 1],
+            "timedelta64 values such as np.timedelta64(1,'s') and integer values "
+            "such as 1",
+        ),
+        (
+            [np.bool_(True), 1],
+            "boolean values such as np.True_ and integer values such as 1",
+        ),
+        ([b"a", "a"], "bytes values such as b'a' and text values such as 'a'"),
+        # A long value is quoted by its start and its end.
+        (
+            ["x" * 200, 1],
+            "text values such as '" + "x" * 37 + "..." + "x" * 38 + "' and integer "
+            "values such as 1",
+        ),
+    ],
+)
+def test_require_one_value_kind_names_each_kind_by_its_first_value(values, kinds):
+    with pytest.raises(ValueError) as raised:
+        require_one_value_kind(values, name="labels", remedy="convert them")
+
+    assert str(raised.value) == f"labels mixes {kinds}; convert them"
 
 
 def test_read_only_copy_owns_its_values_and_stays_read_only():

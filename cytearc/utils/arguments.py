@@ -1,4 +1,5 @@
 import math
+from collections.abc import Sequence
 from numbers import Real
 
 import numpy as np
@@ -79,6 +80,62 @@ def quoted_value(value: object) -> str:
         return text
     head = (QUOTED_LIMIT - 3) // 2
     return text[:head] + "..." + text[head + 3 - QUOTED_LIMIT :]
+
+
+def _value_kind(value_type: type) -> str:
+    """Return the kind of a type's values: text, boolean, integer, float, or the type's name."""
+    if issubclass(value_type, bool | np.bool_):
+        return "boolean"
+    # NumPy derives timedelta64 from its signed integers.
+    if issubclass(value_type, int | np.integer) and not issubclass(
+        value_type, np.timedelta64
+    ):
+        return "integer"
+    if issubclass(value_type, float | np.floating):
+        return "float"
+    if issubclass(value_type, str):
+        return "text"
+    return value_type.__name__
+
+
+def require_one_value_kind(
+    values: Sequence[object] | np.ndarray, *, name: str, remedy: str
+) -> None:
+    """Refuse values of more than one kind, such as the integer 1 beside the text "1".
+
+    Python compares and hashes numbers by their value, so a dict or a pandas
+    factorization takes ``1``, ``1.0`` and ``True`` for one value, while it
+    keeps ``1`` and ``"1"`` apart, though they print alike. The kinds are
+    text, boolean, integer and float, where a NumPy scalar counts as its
+    Python type, so ``1`` and ``np.int64(1)`` are one kind; a value of any
+    other type is of the kind its type names, such as ``bytes``. A typed
+    NumPy array holds one kind.
+
+    Args:
+        values: The values, such as the labels of cells.
+        name: What holds them, as the error names it.
+        remedy: What to pass instead, as the error says it.
+
+    Raises:
+        ValueError: If the values are of more than one kind; the message
+            names each kind by its first value.
+    """
+    if isinstance(values, np.ndarray) and values.dtype != object:
+        return
+    kinds = {
+        value_type: _value_kind(value_type) for value_type in set(map(type, values))
+    }
+    if len(set(kinds.values())) < 2:
+        return
+    first: dict[str, object] = {}
+    for value in values:
+        first.setdefault(kinds[type(value)], value)
+    described = [
+        f"{kind} values such as {quoted_value(value)}" for kind, value in first.items()
+    ]
+    raise ValueError(
+        f"{name} mixes {', '.join(described[:-1])} and {described[-1]}; {remedy}"
+    )
 
 
 def optional_name_argument(
