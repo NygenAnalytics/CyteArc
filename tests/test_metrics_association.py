@@ -165,6 +165,18 @@ def test_categorical_measures_refuse_labels_that_print_otherwise_than_they_compa
             measure(left, right)
 
 
+def test_cramers_v_refuses_a_column_that_would_merge_into_one_level() -> None:
+    # 1, 1.0 and True would make one constant level, which cramers_v reports
+    # as not computed before it maps the columns.
+    merged = [1, 1.0, True, 1, 1.0, True]
+    three = list("xyzxyz")
+
+    with pytest.raises(ValueError, match=re.escape(f"left {_MERGED_FOUND}")):
+        cramers_v(merged, three)
+    with pytest.raises(ValueError, match=re.escape(f"right {_MERGED_FOUND}")):
+        cramers_v(three, merged)
+
+
 def test_eta_squared_refuses_groups_that_print_otherwise_than_they_compare() -> None:
     values = np.array([0.0, 0.1, 5.0, 5.1, 9.0, 9.1, 3.0, 3.1])
 

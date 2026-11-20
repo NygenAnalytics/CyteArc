@@ -970,6 +970,28 @@ def test_lisi_functions_refuse_labels_that_print_otherwise_than_they_compare():
     assert lisi_batch_mixing_score(np.full(4, 2.0), mixed) == pytest.approx(1)
 
 
+def test_lisi_summaries_score_a_categorical_as_its_column_does():
+    rng = np.random.default_rng(5)
+    n_cells = 40
+    indices = np.array(
+        [
+            rng.choice(np.delete(np.arange(n_cells), cell), 3, replace=False)
+            for cell in range(n_cells)
+        ]
+    )
+    distances = rng.uniform(0.5, 2.0, size=(n_cells, 3))
+    # Four declared categories, two of them unused, in an order of their own.
+    labels = pd.Categorical(
+        rng.choice(["b", "a"], n_cells), categories=["d", "b", "c", "a"]
+    )
+
+    per_cell = compute_lisi(distances, indices, pd.DataFrame({"x": labels}), ["x"])
+
+    assert ilisi_knn(distances, indices, labels, scale=False) == float(
+        np.nanmedian(per_cell[:, 0])
+    )
+
+
 def test_lisi_and_connectivity_keep_integers_above_2_53_beside_floats_apart():
     # pandas names a categorical's categories by casting integers beside
     # floats to floats, which would make 2**53 and 2**53 + 1 one label.
