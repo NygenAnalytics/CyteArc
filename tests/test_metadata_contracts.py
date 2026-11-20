@@ -1174,6 +1174,8 @@ def test_stored_rows_are_fingerprinted_a_chunk_at_a_time_as_read_whole(kind) -> 
     for rows in (np.array([3, 1]), np.array([2, 2])):
         with pytest.raises(ValueError, match="distinct and ascending"):
             fingerprint_stored_rows(stored, rows)
+    with pytest.raises(ValueError, match="must be one-dimensional"):
+        fingerprint_stored_rows(stored, np.zeros((2, 2), dtype=np.int64))
     # One chunk of 1,000 of 40,000 rows is held at a time: well below the
     # rows read whole, 4 bytes for each of the widest value's 15 characters.
     many = np.asarray([f"cell{index:011d}" for index in range(40_000)])

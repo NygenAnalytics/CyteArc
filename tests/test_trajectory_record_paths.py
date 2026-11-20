@@ -1921,3 +1921,22 @@ def test_scoring_a_pseudotime_is_refused_before_its_graph_is_read(
             budget = larger.needed_bytes
     assert reads == {"_store_to_sparse": 1}
     assert (ref == saved) is reused
+
+
+def test_a_graph_of_no_cells_is_read_without_a_budget_check() -> None:
+    # A graph payload emptied after its lineage was written holds nothing to
+    # load, so its readers skip the graph's check, under a budget of one
+    # byte, and refuse it in their own words or read an empty graph.
+    emptied = _trajectory_store(_y_graph())
+    _empty_graph_payload(emptied)
+    store = emptied.store
+    _set_budget(store, 1)
+    assert store.graph.load(emptied.graph).shape == (0, 0)
+    assert store._smoothed_potency(emptied.graph, np.zeros(0), 0.9).shape == (0,)
+    with pytest.raises(ValueError, match="Graph cell count does not match"):
+        store.imputation.diffusion(emptied.graph, t=1, invalidate_cache=True)
+    # A graph of cells checks its use_k against its k before it is read.
+    trajectory = _trajectory_store(_y_graph())
+    for use_k in (0, 3):
+        with pytest.raises(ValueError, match="use_k must be between 1 and"):
+            trajectory.store.graph.load(trajectory.graph, use_k=use_k)

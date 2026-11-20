@@ -822,20 +822,19 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
             return planned.ref
         self._require_writable("run_diffusion_operator")
 
-        if n_cells > 0:
-            # The first step, the row-normalized graph, holds a float64 copy
-            # of its entries and the reciprocal degrees beside the graph;
-            # each later step checks its own product.
-            self._require_graph_load_budget(
-                graph_ref,
-                symmetric=True,
-                upper_only=False,
-                held_bytes=0,
-                working_bytes=lambda cells, load: _transition_bytes_impl(
-                    cells, load.maxEntries
-                ),
-                work="Computing a diffusion operator",
-            )
+        # The first step, the row-normalized graph, holds a float64 copy of
+        # its entries and the reciprocal degrees beside the graph; each later
+        # step checks its own product.
+        self._require_graph_load_budget(
+            graph_ref,
+            symmetric=True,
+            upper_only=False,
+            held_bytes=0,
+            working_bytes=lambda cells, load: _transition_bytes_impl(
+                cells, load.maxEntries
+            ),
+            work="Computing a diffusion operator",
+        )
         graph_matrix = self._load_graph_artifact(
             graph_ref,
             symmetric=True,
@@ -1879,19 +1878,10 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
             resolved = resolve_cell_aligned_artifact(
                 self.zw, source_sink, ndim=None, ledger=ledger
             )
+            # The record names the pseudotime's cells as the vector's.
             source_values = resolved.values
             source_missing = resolved.missing_mask
-            source_selection = resolved.source_cell_selection
             del resolved
-            if source_selection not in (selection, graph_selection):
-                raise ValueError(
-                    "Pseudotime source/sink input uses a different selection"
-                )
-            if source_selection != selection:
-                assert places is not None
-                source_values, source_missing = _rows_of_cells(
-                    source_values, source_missing, places
-                )
             source_vector = np.array(
                 _validate_source_sink_vector_impl(
                     source_values,
