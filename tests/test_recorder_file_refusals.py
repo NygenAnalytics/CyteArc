@@ -514,6 +514,18 @@ def test_treedata_reads_a_long_text_state_whole(tmp_path):
             "of more than one dimension",
         ),
         (
+            # The states used to be NumPy's text of each row, such as "['a' 'b']".
+            lambda path: _store(
+                path,
+                characters={
+                    "i1-a": {"codes": [0, 1], "categories": [["a", "b"], ["c", "d"]]}
+                },
+            ),
+            "holds a column 'i1-a' that needs one text, number or boolean per "
+            r"category; found categories of shape \(2, 2\) in "
+            "'/obsm/characters/i1-a/categories'",
+        ),
+        (
             lambda path: _store(path, characters={"i1-a": [1, 2, 3]}),
             "holds 3 values for 2 cells",
         ),

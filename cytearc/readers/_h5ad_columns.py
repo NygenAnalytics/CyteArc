@@ -304,13 +304,14 @@ def index_key(table: Any) -> str | None:
 
 
 def categories_problem(categories: Any) -> str | None:
-    """Return why a categorical's categories cannot import, or None when they can.
+    """Return why a categorical's categories are not one value each, or None.
 
-    An import needs one text, number or boolean per category. Only the shape
+    CyteArc reads one text, number or boolean per category. Only the shape
     and dtype of the categories are read, of an HDF5 dataset or a Zarr array:
     h5py reads each element of an array dtype as a further dimension, of a
-    compound dtype as a record, of a reference dtype as an HDF5 reference,
-    and of a variable-length dtype other than text as an array.
+    compound dtype as a record, of an opaque dtype as raw bytes, of a
+    reference dtype as an HDF5 reference, and of a variable-length dtype
+    other than text as an array.
 
     Returns:
         The reason, which reads after the name of the column, such as
@@ -319,6 +320,9 @@ def categories_problem(categories: Any) -> str | None:
     """
     if not _is_array(categories):
         found = "a group"
+    elif categories.shape is None:
+        # An HDF5 dataset of a null dataspace, which h5py reads as h5py.Empty.
+        found = "an empty dataset with no shape"
     elif len(categories.shape) != 1:
         found = f"categories of shape {categories.shape}"
     elif categories.dtype.subdtype is not None:
@@ -327,6 +331,8 @@ def categories_problem(categories: Any) -> str | None:
     elif categories.dtype.names is not None:
         fields = ", ".join(map(repr, categories.dtype.names))
         found = f"a record of the fields {fields} per category"
+    elif categories.dtype.kind == "V":
+        found = f"{categories.dtype.itemsize} opaque bytes per category"
     elif h5py.check_ref_dtype(categories.dtype) is not None:
         found = "an HDF5 reference per category"
     else:
@@ -343,7 +349,7 @@ def categories_problem(categories: Any) -> str | None:
 
 
 def checked_categories(categories: Any, column: str) -> Any:
-    """Return a categorical's categories, refusing them when they cannot import.
+    """Return a categorical's categories, refusing those that are not one value each.
 
     Args:
         categories: The node that holds the categories.

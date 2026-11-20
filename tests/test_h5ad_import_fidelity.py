@@ -1628,6 +1628,8 @@ _FOUND_CATEGORIES = {
     ),
     "records": "a record of the fields 'a', 'b' per category in '/obs/x/categories'",
     "scalar": "categories of shape () in '/obs/x/categories'",
+    "empty": "an empty dataset with no shape in '/obs/x/categories'",
+    "opaque": "2 opaque bytes per category in '/obs/x/categories'",
     "references": "an HDF5 reference per category in '/obs/x/categories'",
     "group": "a group in '/obs/x/categories'",
     "AnnData 0.7 arrays": (
@@ -1666,6 +1668,12 @@ def _store_categories(holder: h5py.Group, name: str, layout: str) -> None:
         holder.create_dataset(name, data=records)
     elif layout == "scalar":
         holder.create_dataset(name, data=5)
+    elif layout == "empty":
+        holder.create_dataset(name, data=h5py.Empty("i8"))
+    elif layout == "opaque":
+        # Raw bytes, which used to import as their text and, when they are not
+        # UTF-8, to fail after the import had created its destination.
+        holder.create_dataset(name, data=np.array([b"a\xff", b"cd", b"ef"], dtype="V2"))
     elif layout == "references":
         # Each of which used to import as the text '<HDF5 object reference>'.
         stored = holder.create_dataset(name, (3,), dtype=h5py.ref_dtype)

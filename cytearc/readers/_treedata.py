@@ -40,7 +40,7 @@ import pandas as pd
 from ..utils.arrays import sort_categories
 from ..utils.files import HDF5_SIGNATURE
 from ..utils.numba import njit
-from ._h5ad_columns import index_length, index_names
+from ._h5ad_columns import categories_problem, index_length, index_names
 from ._text import as_text
 from ..utils.arguments import quoted_value
 
@@ -185,6 +185,11 @@ def _column(name: str, node: Any, what: str) -> _Column:
     if _is_group(node):
         keys = set(node.keys())
         if {"codes", "categories"} <= keys:
+            problem = categories_problem(node["categories"])
+            if problem is not None:
+                raise ValueError(
+                    f"{what} holds a column {quoted_value(name)} that {problem}"
+                )
             return _Column(name, node, "categorical")
         if {"values", "mask"} <= keys:
             return _Column(name, node, "nullable")
