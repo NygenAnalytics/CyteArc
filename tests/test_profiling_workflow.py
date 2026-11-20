@@ -18,6 +18,7 @@ from profiling.metrics import ResourceMeasurement
 from profiling.r2 import ObjectDownload
 from profiling.stages import StageRunResult
 from cytearc.storage import ArtifactRef
+from tests.memory_helpers import needs_proc_resident_memory
 
 _EXAMPLE_CONFIG = Path(__file__).parents[1] / "profiling" / "config.example.toml"
 _HVG_REF = ArtifactRef(
@@ -649,6 +650,7 @@ def test_stage_zarr_runtime_preserves_active_process_ceiling():
     assert ensure_zarr_host_ceiling() == before
 
 
+@needs_proc_resident_memory
 def test_shared_session_counts_store_operations_per_stage(tmp_path: Path) -> None:
     from profiling.config import StageResources, WorkflowParameters
     from profiling.datasets import write_fixture_h5ad

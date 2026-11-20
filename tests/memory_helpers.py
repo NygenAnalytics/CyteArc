@@ -1,8 +1,21 @@
-"""Read the budget that a memory refusal names, follow refusals to a budget that runs, and give a domain function a ledger of a budget."""
+"""Read the budget that a memory refusal names, follow refusals to a budget that runs, give a domain function a ledger of a budget, and skip tests that need the resident memory of the test process."""
 
 import re
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
+
+import pytest
+
+# CyteArc reads the resident memory of a process from Linux's /proc filesystem
+# and reports none where /proc is missing, as on macOS.
+needs_proc_resident_memory = pytest.mark.skipif(
+    not Path("/proc/self/status").is_file(),
+    reason=(
+        "needs the resident memory of the test process, which CyteArc reads "
+        "from Linux's /proc filesystem"
+    ),
+)
 
 
 def named_budget(refusal: BaseException) -> int:

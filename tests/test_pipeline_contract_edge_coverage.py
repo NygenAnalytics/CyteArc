@@ -46,6 +46,7 @@ from cytearc.storage.pipeline_runs import (
 )
 from cytearc.storage.refs import ArtifactRef
 from cytearc.utils.process import ProcessResourceMeasurement, ResourceTrace
+from tests.memory_helpers import needs_proc_resident_memory
 
 
 def _ref(value: str = "a") -> ArtifactRef:
@@ -962,6 +963,13 @@ def test_run_ledger_records_and_interruption_helpers(
     assert [(event.kind, event.stage, event.ordinal) for event in events] == [
         ("run_interrupted", "stage", 0)
     ]
+
+
+@needs_proc_resident_memory
+def test_run_ledger_fallback_metrics_sample_resident_memory() -> None:
+    ledger = RunLedger(object(), "run", _events(), workers=1, memory_budget_bytes=2**30)
+
+    # A stage that ends before it measures itself still samples the process.
     assert ledger._fallback_metrics(0).sample_count >= 1
 
 

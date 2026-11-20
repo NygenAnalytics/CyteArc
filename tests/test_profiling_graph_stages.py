@@ -13,6 +13,7 @@ from profiling.config import (
 from profiling.stages import _run_analysis, profile_stage_inputs, run_stage
 from cytearc import DataStore
 from cytearc.storage import ArtifactRef
+from tests.memory_helpers import needs_proc_resident_memory
 
 
 _FEATURE_REF = ArtifactRef(
@@ -628,6 +629,7 @@ def test_consume_details_use_only_the_stage_reports() -> None:
     assert details["consume"] == {"workers": 3, "cytearcMemoryBudget": 2 * 1024**3}
 
 
+@needs_proc_resident_memory
 def test_rerun_stage_that_reuses_its_artifact_fails_unless_allowed(
     tmp_path: Path,
 ) -> None:

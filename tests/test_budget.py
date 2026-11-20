@@ -462,7 +462,9 @@ def test_cpu_quota_keeps_its_fraction_where_workers_round_down(monkeypatch):
         },
     )
     monkeypatch.setattr("os.cpu_count", lambda: 16)
-    monkeypatch.setattr("os.sched_getaffinity", lambda pid: set(range(16)))
+    monkeypatch.setattr(
+        "os.sched_getaffinity", lambda pid: set(range(16)), raising=False
+    )
 
     assert budget_module.detect_cpu_quota_cores() == 1.5
     assert detect_workers() == 1
