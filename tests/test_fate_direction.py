@@ -892,11 +892,10 @@ def test_a_map_directed_by_a_score_is_refused_a_small_budget_before_its_graph_is
         "fate": "Mapping fates",
         "lineage_membership": "Calling lineage membership",
     }.get(call, "Loading a direction score")
-    if call == "fate":
-        # Mapping the fates holds two copies of the union of 1,450 entries,
-        # 2 * 17,984, 64 bytes for each of the 145 cells, and the solver's
-        # 2 * 1,450 * 12 + 145 * 280 = 75,400, more than the graph's load.
-        needed = 2 * 17_984 + 64 * 145 + 75_400
+    # Mapping the fates holds the union of 1,450 entries, 17,984 bytes, 64
+    # bytes for each of the 145 cells and the solver's 2 * 1,450 * 12 + 145 *
+    # 280 = 75,400, 102,664 bytes in all, less than the graph's load, which
+    # the refusal of fate names too.
     _set_budget(store, needed - 1)
     with pytest.raises(MemoryBudgetError) as refused:
         calls[call]()
@@ -911,6 +910,60 @@ def test_a_map_directed_by_a_score_is_refused_a_small_budget_before_its_graph_is
     # once.
     _set_budget(store, needed)
     calls[call]()
+    assert reads == {"_store_to_sparse": 1}
+
+
+@pytest.mark.parametrize("direction", ["pseudotime", "score"])
+def test_fate_names_what_mapping_its_fates_holds_when_that_outweighs_the_load(
+    monkeypatch, direction: str
+) -> None:
+    # The branching store with each of its 145 cells linked to its 5 nearest
+    # cells, 725 stored edges of uint32 pairs and float32 weights, whose union
+    # holds at most 1,450 entries of an int32 index and a float32 weight
+    # beside 146 int32 row pointers, 12,184 bytes. Mapping the fates of 2
+    # sinks holds it, 64 bytes for each cell and the solver's 2 * 1,450 * 12
+    # + 145 * 280 = 75,400, more than taking the mapped cells' graph would,
+    # two more copies and 24 bytes a cell. Forming the union holds 7 * 725 * 8
+    # + 5 * 584 + 49,152 = 92,672 bytes beside the cells' positions and their
+    # labels' codes or scores, 13 or 17 bytes a cell, less than mapping.
+    branching = _branching(neighbors=5)
+    store = branching.store
+    labels = branching.label_artifact()
+    sinks = ["a2", "b2"]
+    score = by_cell_id(
+        store.cells,
+        3.0 * store.trajectory.load_pseudotime(branching.pseudotime).values + 7.0,
+    )
+
+    def call() -> ArtifactRef:
+        if direction == "pseudotime":
+            return store.trajectory.fate(
+                branching.pseudotime, labels, sinks=sinks, invalidate_cache=True
+            )
+        return store.trajectory.fate(
+            sink_labels=labels,
+            graph=branching.graph,
+            direction=score,
+            sinks=sinks,
+            invalidate_cache=True,
+        )
+
+    maps = _fate_maps(store)
+    reads = _count_calls(monkeypatch, store, "_store_to_sparse")
+    needed = 12_184 + 64 * 145 + 75_400
+    _set_budget(store, needed - 1)
+    with pytest.raises(MemoryBudgetError) as refused:
+        call()
+    assert str(refused.value) == (
+        f"Mapping fates of 145 cells needs about {needed} bytes in memory for a "
+        "graph of 725 edges, but the operation limit is "
+        f"{needed - 1} bytes. Raise mem_budget."
+    )
+    assert reads == {}
+    assert _fate_maps(store) == maps
+    # The budget that the refusal names maps the fates, reading the graph once.
+    _set_budget(store, needed)
+    call()
     assert reads == {"_store_to_sparse": 1}
 
 

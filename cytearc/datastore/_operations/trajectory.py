@@ -175,6 +175,7 @@ from ...trajectory.fate import (
     direction_scores as _direction_scores_impl,
     fate_map_cells as _fate_map_cells_impl,
     fate_mapping_bytes as _fate_mapping_bytes_impl,
+    mapped_cells_graph as _mapped_cells_graph_impl,
 )
 from ...trajectory.lineage_tree import (
     cluster_codes as _cluster_codes_impl,
@@ -2420,9 +2421,7 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
             return planned.ref
         self._require_writable("run_fate_mapping")
         logger.info(f"Fate mapping: solving on graph {graph_ref.artifact_id}")
-        retained_graph = (
-            graph_matrix if mapped.all() else graph_matrix[mapped][:, mapped]
-        ).tocsr()
+        retained_graph = _mapped_cells_graph_impl(graph_matrix, mapped)
         del graph_matrix
         needed = _fate_mapping_bytes_impl(
             retained_graph.shape[0],

@@ -1931,11 +1931,6 @@ def test_each_membership_call_loads_the_fate_map_and_its_graph_once(
 # up to an int32 code of the cell's source or sink label and whether it is a
 # source, 145 * 5 = 725.
 _GRAPH_LOAD_BYTES = 63_820 + 49_152 + 1_160 + 725
-# Mapping the fates of the 2 sinks holds two copies of the union, 2 *
-# 17,984, 64 bytes for each of the 145 cells, and the solver's 2 * 1,450 *
-# 12 + 145 * 280 = 75,400, more than the graph's load, which the graph's
-# check names in its place.
-_FATE_MAPPING_BYTES = 2 * 17_984 + 64 * 145 + 75_400
 # Each call names itself in the refusal of the graph's load.
 _GRAPH_LOAD_WORK = {
     "lineage_membership": "Calling lineage membership",
@@ -1969,18 +1964,20 @@ def test_a_budget_below_the_graph_load_is_refused_before_the_graph_is_read(
     }
     selections = list_artifacts(store.zw, scope="datastore", kind="cell_selection")
     reads = _count_calls(monkeypatch, store, "_store_to_sparse")
-    needed = _FATE_MAPPING_BYTES if call == "fate" else _GRAPH_LOAD_BYTES
 
-    _set_budget(store, needed - 1)
+    # Mapping the fates of the 2 sinks holds the union, 17,984 bytes, 64
+    # bytes for each of the 145 cells and the solver's 2 * 1,450 * 12 + 145 *
+    # 280 = 75,400, less than the graph's load, which every call names.
+    _set_budget(store, _GRAPH_LOAD_BYTES - 1)
     with pytest.raises(MemoryBudgetError) as refused:
         calls[call](branching, ref)
     work = _GRAPH_LOAD_WORK.get(call, "Loading a pseudotime")
     assert str(refused.value) == (
-        f"{work} of 145 cells needs about {needed} bytes "
+        f"{work} of 145 cells needs about {_GRAPH_LOAD_BYTES} bytes "
         "in memory for a graph of 725 edges, but the operation limit is "
-        f"{needed - 1} bytes. Raise mem_budget."
+        f"{_GRAPH_LOAD_BYTES - 1} bytes. Raise mem_budget."
     )
-    assert refused.value.needed_bytes == needed
+    assert refused.value.needed_bytes == _GRAPH_LOAD_BYTES
     assert refused.value.item == "the graph of 725 edges and its work"
     assert reads == {}
     assert _artifacts(store, "lineage_membership") == [ref]
