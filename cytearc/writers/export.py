@@ -2633,7 +2633,9 @@ def to_h5ad(
              Consecutive frozen UMAP fields are in ``obsm['X_umap']`` and
              the run's PCA in ``obsm['X_pca']``, as in
              ``to_anndata(run=...)``; cluster labels, such as ``clusters``
-             and ``paris``, are categoricals in ``obs``. Live
+             and ``paris``, are categoricals in ``obs``, and so are the
+             ``snapshot_columns`` whose order and colors the run records,
+             in that order, with those colors. Live
              embedding columns, a cell selection, and feature-count
              recalculation options do not apply to run export, which reads
              and compresses on the threads of the run's datastore.

@@ -68,6 +68,11 @@ _CHUNK_ROWS = 100_000
 # The pass that finds the widest value of a text array converts this many
 # values to text at a time.
 _MEASURED_ROWS = 4_096
+# The most categories that CyteArc keeps with a column or a label array. A
+# categorical with more is kept as its labels alone: AnnData makes a
+# categorical of any text that repeats a value, so a column of nearly unique
+# text can hold about one category per row.
+MAX_STORED_CATEGORIES = 10_000
 
 
 def validate_display_metadata(
@@ -224,6 +229,7 @@ def write_cell_data_artifact(
     *,
     fingerprint_payload: bool = False,
     attributes: Mapping[str, Any] | None = None,
+    array_attributes: Mapping[str, Mapping[str, Any]] | None = None,
     diagnostics: Mapping[str, Any] | None = None,
     chunk_lengths: Mapping[str, int] | None = None,
 ) -> zarr.Group:
@@ -241,6 +247,10 @@ def write_cell_data_artifact(
     :func:`~cytearc.storage.layout.column_chunk_rows` chunks cell columns,
     and is written a chunk at a time, so a write holds what
     :func:`cell_data_write_bytes` states rather than copies of whole arrays.
+
+    ``array_attributes`` maps the name of an array of ``arrays`` to JSON
+    values stored on that array before the artifact is published, such as
+    the categories that a label array keeps.
     """
     if planned.reused:
         return reused_artifact_group(root, planned)
@@ -285,6 +295,8 @@ def write_cell_data_artifact(
                     write_finite_array(output, values, operation=operation)
                 else:
                     output[...] = values
+        for name, recorded in (array_attributes or {}).items():
+            as_zarr_array(group[name], name=name).attrs.update(recorded)
         if fingerprint_payload:
             group.attrs["payload_fingerprint"] = fingerprint_stored_arrays(
                 group,
@@ -475,7 +487,13 @@ def snapshot_cluster_labels(
     stored as int64, and integer and boolean labels keep their dtype. The
     identity holds the source column name or source artifact, the cell
     selection, and a fingerprint of the stored labels, and a match is
-    reused only while its payload is exactly those labels.
+    reused only while its payload is exactly those labels. A new snapshot
+    keeps the categories that its source records when it is made
+    (:func:`label_categories`), as attributes of its array
+    (:func:`_snapshot_categories`), so plots and exports read them as they
+    read the source's. They are no part of the identity, so a match keeps
+    the categories that it was made with, and one made without any, as
+    earlier releases made them, is reused as it is.
 
     Raises:
         TypeError: If ``labels`` or ``cell_selection`` has the wrong type, or
@@ -558,7 +576,17 @@ def snapshot_cluster_labels(
         arrays={"values": (values.shape, values.dtype.kind)},
         reuse_validator=payload_matches,
     )
-    write_cell_data_artifact(root, planned, {"values": values})
+    if planned.reused:
+        return planned.ref
+    categories = _snapshot_categories(
+        label_categories(root, labels), as_int64=kind == "f"
+    )
+    write_cell_data_artifact(
+        root,
+        planned,
+        {"values": values},
+        array_attributes={"values": categories} if categories else None,
+    )
     return planned.ref
 
 
@@ -653,6 +681,94 @@ def artifact_categories(root: zarr.Group, ref: ArtifactRef) -> RecordedCategorie
     name = cell_value_spec(ref.kind).name
     group = artifact_group(root, ref)
     return recorded_categories(as_zarr_array(group[name], name=name).attrs)
+
+
+def label_categories(root: zarr.Group, labels: str | ArtifactRef) -> RecordedCategories:
+    """Return the categories that a cell column or a cell-label artifact records.
+
+    A label artifact records them on its value array
+    (:func:`artifact_categories`). A column of labels records the
+    ``levels``, ``ordered``, and ``display`` attributes that an import keeps
+    with it (:func:`recorded_categories`), and a categorical column records
+    its categories in their stored order, unused ones included, whether
+    they are ordered, and the ``display`` of its codes. A column that the
+    cell table does not hold records none.
+
+    Raises:
+        TypeError: If the column or the artifact records ``levels`` that are
+            not a list, or a ``display`` that is not a mapping.
+        ValueError: If ``labels`` references an artifact of a kind without
+            cell values, the ``display`` is not a valid display contract, or
+            a categorical column links its categories in a malformed way.
+    """
+    if isinstance(labels, ArtifactRef):
+        return artifact_categories(root, labels)
+    cell_data = as_zarr_group(root["cellData"], name="cellData")
+    if labels not in cell_data:
+        return RecordedCategories(levels=None, ordered=False, display=None)
+    array = as_zarr_array(cell_data[labels], name=labels)
+    recorded = recorded_categories(array.attrs)
+    categorical = CategoricalColumn.open(cell_data, labels, values=array)
+    if categorical is None:
+        return recorded
+    return RecordedCategories(
+        levels=tuple(categorical.categories.tolist()),
+        ordered=categorical.ordered,
+        display=recorded.display,
+    )
+
+
+def _snapshot_categories(
+    recorded: RecordedCategories, *, as_int64: bool
+) -> dict[str, Any]:
+    """Return the attributes that keep a source's categories with a snapshot of its labels.
+
+    They are the ``levels``, ``ordered``, and ``display`` attributes that
+    :func:`recorded_categories` reads, as the source records them. When the
+    snapshot stores whole-number float labels as int64, ``as_int64``, each
+    category is stored so too, and a category that int64 cannot hold, such
+    as 1.5, is left out with its display entry, since no label of the
+    snapshot can name it. A source that records none gives none, and so
+    does a source of more than :data:`MAX_STORED_CATEGORIES` categories, as
+    an import keeps none for such a column.
+    """
+    display = recorded.display
+    if display is not None and display["kind"] == "categorical":
+        displayed = len(display["categories"])
+    else:
+        displayed = 0
+    if max(len(recorded.levels or ()), displayed) > MAX_STORED_CATEGORIES:
+        return {}
+
+    def stored(value: Any) -> Any:
+        return _int64_label(value) if as_int64 else value
+
+    attributes: dict[str, Any] = {}
+    if recorded.levels is not None:
+        levels = (stored(level) for level in recorded.levels)
+        attributes["levels"] = [level for level in levels if level is not None]
+        attributes["ordered"] = recorded.ordered
+    if display is not None and display["kind"] == "categorical":
+        entries = (
+            {**category, "value": stored(category["value"])}
+            for category in display["categories"]
+        )
+        display = {
+            **display,
+            "categories": [entry for entry in entries if entry["value"] is not None],
+        }
+    if display is not None:
+        attributes["display"] = display
+    return attributes
+
+
+def _int64_label(value: Any) -> int | None:
+    """Return a whole number within the int64 range as an int, and None for any other value."""
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    if not -_INT64_BOUND <= value < _INT64_BOUND or value != math.trunc(value):
+        return None
+    return int(value)
 
 
 def column_display(

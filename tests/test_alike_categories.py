@@ -461,6 +461,81 @@ def test_cluster_labels_export_one_category_per_label(imports) -> None:
     assert exported.uns["labels_colors"].tolist() == _CLUSTERS["level_colors"]
 
 
+def _snapshot_categories(store: Any, labels: Any) -> dict[str, Any]:
+    """Snapshot ``labels`` over the cells but the last two, which miss some labels.
+
+    Returns the attributes that the snapshot keeps.
+    """
+    from tests.storage_helpers import by_cell_id
+
+    labeled = np.arange(_N_CELLS) < _N_CELLS - 2
+    store.cells.insert("labeled", by_cell_id(store.cells, labeled), overwrite=True)
+    snapshot = store.snapshot_cluster_labels(
+        labels, cell_selection=store.snapshot_cell_selection("labeled")
+    )
+    return dict(store.artifacts.load(snapshot)["values"].attrs)
+
+
+def test_snapshots_keep_one_level_per_label_from_either_layout(
+    source: Path, tmp_path: Path
+) -> None:
+    # The twins name each label once, so the default import stores them as
+    # categorical columns, and an import of label columns as labels with
+    # their levels.
+    names = ["cell_type", "stage", "count", "flag"]
+    found: dict[str, dict[str, dict[str, Any]]] = {}
+    for layout, options in (
+        ("labels", {"categorical_columns": False}),
+        ("categorical", {}),
+    ):
+        store = _import(source, tmp_path / f"{layout}.zarr", **options)["store"]
+        found[layout] = {
+            name: _snapshot_categories(store, _twin(name)) for name in names
+        }
+        if layout == "labels":
+            displays = {
+                name: store.zw["cellData"][_twin(name)].attrs["display"]
+                for name in names
+            }
+        else:
+            assert all(
+                isinstance(store.cells._get_array(_twin(name)), CategoricalColumn)
+                for name in names
+            )
+
+    for name in names:
+        spec = _ALIKE[name]
+        assert found["labels"][name] == {
+            "levels": spec["levels"],
+            "ordered": spec["ordered"],
+            "display": displays[name],
+        }, name
+        assert found["categorical"][name] == found["labels"][name], name
+
+
+def test_snapshots_of_an_earlier_store_keep_one_level_per_label(
+    source: Path, tmp_path: Path
+) -> None:
+    imported = _import(source, tmp_path / "earlier.zarr", categorical_columns=False)
+    root = zarr.open_group(str(tmp_path / "earlier.zarr"), mode="r+")
+    root["cellData"]["stage"].attrs.put(_EARLIER_CELL_ATTRIBUTES["stage"])
+    artifact_group(root, imported["clusters"])["values"].attrs.put(
+        _EARLIER_CLUSTER_ATTRIBUTES
+    )
+    store = open_store(tmp_path / "earlier.zarr")
+
+    assert _snapshot_categories(store, "stage") == {
+        "levels": ["early", "mid", "late", "unused"],
+        "ordered": True,
+    }
+    # The snapshot keeps the levels but not the link of the clusters' missing
+    # mask, since each of its cells has a label.
+    assert _snapshot_categories(store, imported["clusters"]) == {
+        "levels": ["c1", "c2"],
+        "ordered": True,
+    }
+
+
 def test_the_earlier_store_holds_the_attributes_of_cytearc_1_4_0(earlier) -> None:
     root = earlier["store"].zw
     for name, attributes in _EARLIER_CELL_ATTRIBUTES.items():

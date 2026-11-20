@@ -175,6 +175,12 @@ def test_snapshot_on_a_mount_finds_disease_markers_within_one_cell_type(
         "cell_selection": t_cells.to_dict(),
         "values_fingerprint": fingerprint_array(t_disease),
     }
+    # The imported categorical records its categories, which the snapshot
+    # keeps.
+    recorded = dict(ds.cells._get_array("disease").attrs)
+    kept = dict(ds.artifacts.load(labels)["values"].attrs)
+    assert kept == {key: recorded[key] for key in ("levels", "ordered", "display")}
+    assert kept["levels"] == ["covid", "normal"]
     np.testing.assert_array_equal(_labels(ds, labels), t_disease)
     assert _marker_groups(ds, markers) == {"covid", "normal"}
     covid = ds.markers.load(
@@ -328,6 +334,162 @@ def test_snapshot_identity_ignores_the_text_encoding(store_path, encode):
 
     assert ds.snapshot_cluster_labels("condition", cell_selection=t_cells) == encoded
     assert _labels(ds, encoded).dtype == np.dtype("<U6")
+
+
+def test_snapshot_keeps_the_categories_its_source_records_when_it_is_made(
+    store_path,
+):
+    ds = _open(store_path)
+    t_cells = _selection(ds, "is_t_cell", CELL_TYPES == "T")
+    t_disease = DISEASE[CELL_TYPES == "T"]
+    inputs = {
+        "cell_selection": t_cells.to_dict(),
+        "values_fingerprint": fingerprint_array(t_disease),
+    }
+    categories = ["normal", "covid", "unknown"]
+    ds.cells.insert(
+        "condition",
+        by_cell_id(ds.cells, pd.Categorical(DISEASE, categories=categories)),
+        overwrite=True,
+    )
+    kept = ds.snapshot_cluster_labels("condition", cell_selection=t_cells)
+    # The identity holds what earlier releases recorded; the array keeps the
+    # categories, unused ones included.
+    assert ds.artifacts.inspect(kept).inputs == inputs
+    np.testing.assert_array_equal(_labels(ds, kept), t_disease)
+    assert dict(ds.artifacts.load(kept)["values"].attrs) == {
+        "levels": categories,
+        "ordered": False,
+    }
+
+    # Other categories of the same labels reuse it with the categories it was
+    # made with, also from a read-only store.
+    reordered = pd.Categorical(DISEASE, categories=["covid", "normal"], ordered=True)
+    ds.cells.insert("condition", by_cell_id(ds.cells, reordered), overwrite=True)
+    read_only = _open(store_path, zarr_mode="r")
+    assert ds.snapshot_cluster_labels("condition", cell_selection=t_cells) == kept
+    assert read_only.snapshot_cluster_labels("condition", cell_selection=t_cells) == (
+        kept
+    )
+    assert dict(ds.artifacts.load(kept)["values"].attrs) == {
+        "levels": categories,
+        "ordered": False,
+    }
+
+    # A snapshot made without categories, as earlier releases made each one,
+    # is reused as it is, also from a read-only store.
+    ds.cells.insert("treatment", by_cell_id(ds.cells, DISEASE), overwrite=True)
+    plain = ds.snapshot_cluster_labels("treatment", cell_selection=t_cells)
+    assert dict(ds.artifacts.load(plain)["values"].attrs) == {}
+    ds.cells.insert(
+        "treatment",
+        by_cell_id(ds.cells, pd.Categorical(DISEASE, categories=categories)),
+        overwrite=True,
+    )
+    assert ds.snapshot_cluster_labels("treatment", cell_selection=t_cells) == plain
+    assert read_only.snapshot_cluster_labels("treatment", cell_selection=t_cells) == (
+        plain
+    )
+    assert dict(ds.artifacts.load(plain)["values"].attrs) == {}
+    assert set(_snapshots(ds)) == {kept, plain}
+
+
+def test_snapshot_keeps_no_categories_of_a_source_of_more_than_10000(store_path):
+    ds = _open(store_path)
+    all_cells = ds.snapshot_cell_selection()
+    cell_data = as_zarr_group(ds.zw["cellData"], name="cellData")
+    for name, count in (("most", 10_000), ("more", 10_001)):
+        categories = [
+            "normal",
+            "covid",
+            *(f"unused_{index}" for index in range(count - 2)),
+        ]
+        values = pd.Categorical(DISEASE, categories=categories)
+        ds.cells.insert(name, by_cell_id(ds.cells, values), overwrite=True)
+        # A column of labels whose display alone lists that many categories.
+        shown = cell_data.create_array(f"{name}_shown", data=DISEASE)
+        shown.attrs["display"] = {
+            "kind": "categorical",
+            "categories": [
+                {"value": category, "label": category, "color": "#112233"}
+                for category in categories
+            ],
+        }
+
+    kept = {
+        column: dict(
+            ds.artifacts.load(
+                ds.snapshot_cluster_labels(column, cell_selection=all_cells)
+            )["values"].attrs
+        )
+        for column in ("most", "more", "most_shown", "more_shown")
+    }
+
+    assert len(kept["most"]["levels"]) == 10_000
+    assert len(kept["most_shown"]["display"]["categories"]) == 10_000
+    # As an H5AD import keeps none for such a column.
+    assert kept["more"] == {}
+    assert kept["more_shown"] == {}
+
+
+def test_snapshot_keeps_whole_number_float_categories_as_int64_and_leaves_out_others(
+    store_path,
+):
+    pytest.importorskip("anndata")
+    from cytearc.plotting._display import stored_artifact_scale
+
+    ds = _open(store_path)
+    all_cells = ds.snapshot_cell_selection()
+    # Float labels whose categories an import keeps beside them. No cell holds
+    # the others, and int64 labels cannot hold 0.5, text, or 2**63, while they
+    # hold -2**63.
+    display = {
+        "kind": "categorical",
+        "categories": [
+            {"value": 2.0, "label": "2.0", "color": "#ff0000"},
+            {"value": 0.5, "label": "0.5", "color": "#00ff00"},
+            {"value": 1.0, "label": "1.0", "color": "#0000ff"},
+            {"value": -(2.0**63), "label": "lowest", "color": "#000000"},
+        ],
+    }
+    cell_data = as_zarr_group(ds.zw["cellData"], name="cellData")
+    level = cell_data.create_array(
+        "level", data=(np.arange(N_CELLS) % 2 + 1).astype(np.float64)
+    )
+    levels = [2.0, 0.5, "two", 1.0, 2.0**63, -(2.0**63)]
+    level.attrs.update({"levels": levels, "ordered": True, "display": display})
+
+    snapshot = ds.snapshot_cluster_labels("level", cell_selection=all_cells)
+
+    kept = dict(ds.artifacts.load(snapshot)["values"].attrs)
+    assert kept == {
+        "levels": [2, 1, -(2**63)],
+        "ordered": True,
+        "display": {
+            "kind": "categorical",
+            "categories": [
+                {"value": 2, "label": "2.0", "color": "#ff0000"},
+                {"value": 1, "label": "1.0", "color": "#0000ff"},
+                {"value": -(2**63), "label": "lowest", "color": "#000000"},
+            ],
+        },
+    }
+    values = [
+        *kept["levels"],
+        *(entry["value"] for entry in kept["display"]["categories"]),
+    ]
+    assert [type(value) for value in values] == [int] * 6
+    scale = stored_artifact_scale(ds, snapshot)
+    assert scale.order == (2, 1, -(2**63))
+    assert scale.labels == {2: "2.0", 1: "1.0", -(2**63): "lowest"}
+    exported = ds.to_anndata(obs={"level_snapshot": snapshot})
+    assert exported.obs["level_snapshot"].cat.categories.tolist() == [2, 1, -(2**63)]
+    assert exported.obs["level_snapshot"].cat.ordered
+    assert list(exported.uns["level_snapshot_colors"]) == [
+        "#ff0000",
+        "#0000ff",
+        "#000000",
+    ]
 
 
 @pytest.mark.parametrize("key", ["leiden", "leiden_float"])

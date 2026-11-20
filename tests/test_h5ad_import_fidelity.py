@@ -287,7 +287,7 @@ def test_imported_analyses_name_the_sha256_of_the_source_file(tmp_path) -> None:
 def test_categoricals_with_many_categories_keep_no_levels(tmp_path, monkeypatch):
     import cytearc.writers.h5ad as h5ad_writer
 
-    monkeypatch.setattr(h5ad_writer, "_MAX_STORED_CATEGORIES", 3)
+    monkeypatch.setattr(h5ad_writer, "MAX_STORED_CATEGORIES", 3)
     source = _categorical_adata()
     store, _ = _import(_write(tmp_path / "many.h5ad", source), tmp_path / "s.zarr")
     cells = zarr.open_group(store.zw.store, mode="r")["cellData"]

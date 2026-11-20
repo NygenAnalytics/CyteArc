@@ -1350,13 +1350,25 @@ class BaseDataStore:
         ids that pandas writes for integer ids with missing values, are
         stored as int64, and other floating-point labels are rejected.
 
+        A new snapshot keeps the categories that its source records when it
+        is made: the categories of a categorical column or of a column
+        imported from a categorical, in their order, unused ones included,
+        whether they are ordered, and the colors and labels that an H5AD
+        import keeps, or those that a label artifact records. Plots and
+        exports of the snapshot therefore draw and write its categories as
+        those of its source. Whole-number float categories are stored as
+        int64, as the labels are, and other float categories are left out. A
+        source of more than 10,000 categories keeps none, as an H5AD import
+        keeps none for such a column.
+
         The result is a datastore-scoped ``cluster_labels`` artifact over
         ``cell_selection``. Its identity holds the source column name or the
         source artifact, the cell selection, and a fingerprint of the stored
         labels. The same labels reuse one artifact, also from a store opened
-        with ``zarr_mode='r'``, and changed labels create a new one while
-        earlier snapshots keep their values. A mounted store writes the
-        artifact to its target, never to the matrix source.
+        with ``zarr_mode='r'``, with the categories that it was made with, and
+        changed labels create a new one while earlier snapshots keep their
+        values. A mounted store writes the artifact to its target, never to
+        the matrix source.
 
         Args:
             labels: Cell metadata column name, or a cell-label artifact.

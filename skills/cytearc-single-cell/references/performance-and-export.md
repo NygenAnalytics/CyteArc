@@ -157,18 +157,7 @@ so it never reports the job as gone. On macOS, `timeout` is `gtimeout` from GNU 
 
 ### Export a completed run to AnnData or H5AD
 
-Run export uses the frozen cells and feature universe. `to_anndata(run=run)` holds `X` in memory;
-`cytearc.to_h5ad(..., run=run)` writes the same object, streams `X`, and needs no `anndata` package.
-Label fields (`clusters`, `paris`, `cell_cycle_phase`) are categoricals of string labels
-in natural order with the run's colors in `uns["<field>_colors"]`, so `sc.tl.rank_genes_groups`
-and categorical plots work directly; other frozen text that repeats or has missing values is a
-categorical in natural order (`d2` before `d10`) too. The run's PCA is `obsm["X_pca"]` with its
-loadings in `varm["PCs"]` (Harmony: `obsm["X_pca_harmony"]`). An ATAC run exports `obsm["X_lsi"]`
-(Harmony: `X_lsi_harmony`) and flags its peaks in `var["prevalent_peaks"]`; an ADT run flags its
-panel in `var["panel"]`. A multimodal run exports the first run's raw counts with the joint
-`X_umap`, its clusters and `weight_<assay>` fields, and has no normalized matrix.
-`cell_type` below and in later recipes is a placeholder for your own label column, not held-out
-author labels.
+Run export uses the frozen cells and feature universe. `to_anndata(run=run)` holds `X` in memory; `cytearc.to_h5ad(..., run=run)` writes the same object, streams `X`, and needs no `anndata` package. Label fields (`clusters`, `paris`, `cell_cycle_phase`) are categoricals of string labels in natural order with the run's colors in `uns["<field>_colors"]`, so `sc.tl.rank_genes_groups` and categorical plots work directly; other frozen text that repeats or has missing values is a categorical in natural order (`d2` before `d10`) too. A `snapshot_columns` field with a stored display (an H5AD import's colors) or stored as ordered instead exports its categories in that order, unused ones included, with its colors in `uns`, as an unordered categorical. The run's PCA is `obsm["X_pca"]` with its loadings in `varm["PCs"]` (Harmony: `obsm["X_pca_harmony"]`). An ATAC run exports `obsm["X_lsi"]` (Harmony: `X_lsi_harmony`) and flags its peaks in `var["prevalent_peaks"]`; an ADT run flags its panel in `var["panel"]`. A multimodal run exports the first run's raw counts with the joint `X_umap`, its clusters and `weight_<assay>` fields, and has no normalized matrix. `cell_type` below and in later recipes is a placeholder for your own label column, not held-out author labels.
 
 ```python
 # obs: frozen fields; obsm: X_umap, X_pca; varm: PCs; obsp + uns["neighbors"]: the graph
