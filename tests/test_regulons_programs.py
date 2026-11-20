@@ -382,6 +382,23 @@ def test_regulon_specificity_refuses_labels_that_print_otherwise_than_they_compa
         regulon_specificity(activity, labels)
 
 
+@pytest.mark.parametrize(
+    ("labels", "names"),
+    [
+        (["a", "a", -0.0, 0.0], ["a", "-0.0"]),
+        (["a", "a", 0.0, -0.0], ["a", "0.0"]),
+        (np.asarray([-0.0, 0.0, 1.5, 1.5]), ["-0.0", "1.5"]),
+    ],
+)
+def test_regulon_specificity_names_a_group_of_zeros_by_its_first_label(labels, names):
+    activity = pd.DataFrame({"X": [2.0, 2.0, 0.0, 0.0], "Y": [1.0, 1.0, 1.0, 1.0]})
+
+    rss = regulon_specificity(activity, labels)
+
+    # 0.0 and -0.0 compare equal, so only their text tells which names the group.
+    assert [str(group) for group in rss.index] == names
+
+
 def test_numpy_and_python_labels_that_print_alike_score_as_one_group():
     rng = np.random.default_rng(7)
     values = rng.uniform(0, 1, size=(60, 3))

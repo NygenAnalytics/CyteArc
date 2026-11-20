@@ -7,7 +7,11 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 
-from ..utils.arguments import label_array, require_labels_match_their_text
+from ..utils.arguments import (
+    categorical_label_codes,
+    label_array,
+    require_labels_match_their_text,
+)
 
 __all__ = [
     "association_pair",
@@ -31,12 +35,8 @@ def _as_1d(values: Any) -> np.ndarray:
 
 
 def _level_codes(values: np.ndarray) -> np.ndarray:
-    """Number each level of labels in their sorted order, or in order of first appearance where they cannot be sorted, such as bytes beside numbers."""
-    try:
-        codes, _ = pd.factorize(values, sort=True)
-    except TypeError:
-        codes, _ = pd.factorize(values, sort=False)
-    return np.asarray(codes)
+    """Number labels in their sorted order, as a contingency table orders them, or in order of first appearance where they cannot be sorted, such as bytes beside numbers."""
+    return categorical_label_codes(values)[0]
 
 
 def _to_float(values: np.ndarray) -> np.ndarray | None:
@@ -87,16 +87,8 @@ def directional_mapping(
     mask = _pairwise_mask(left_values, right_values)
     require_labels_match_their_text(left_values, name="left")
     require_labels_match_their_text(right_values, name="right")
-    return _directional_mapping(
-        left_values[mask], right_values[mask], rows_missing=int((~mask).sum())
-    )
-
-
-def _directional_mapping(
-    left_values: np.ndarray, right_values: np.ndarray, *, rows_missing: int
-) -> dict[str, Any]:
-    """Report the directional mapping of two columns of present labels, checked."""
-    rows_used = len(left_values)
+    rows_used = int(mask.sum())
+    rows_missing = int((~mask).sum())
     blank = {
         "leftMapsToRight": False,
         "rightMapsToLeft": False,
@@ -107,7 +99,10 @@ def _directional_mapping(
     if rows_used == 0:
         return blank
     frame = pd.DataFrame(
-        {"left": _level_codes(left_values), "right": _level_codes(right_values)}
+        {
+            "left": _level_codes(left_values[mask]),
+            "right": _level_codes(right_values[mask]),
+        }
     )
     n_left = int(frame["left"].nunique(dropna=False))
     n_right = int(frame["right"].nunique(dropna=False))
@@ -180,9 +175,7 @@ def cramers_v(left: Any, right: Any) -> dict[str, Any]:
     r_corr = r - (r - 1) ** 2 / (n - 1)
     k_corr = k - (k - 1) ** 2 / (n - 1)
     denominator = min(r_corr - 1.0, k_corr - 1.0)
-    mapping = _directional_mapping(
-        left_values[mask], right_values[mask], rows_missing=0
-    )
+    mapping = directional_mapping(left_values[mask], right_values[mask])
     common = {
         "rowsUsed": rows_used,
         "rowsMissing": rows_missing,

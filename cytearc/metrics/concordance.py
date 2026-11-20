@@ -4,7 +4,11 @@ from typing import Literal
 import numpy as np
 import pandas as pd
 
-from ..utils.arguments import label_array, require_labels_match_their_text
+from ..utils.arguments import (
+    categorical_label_codes,
+    label_array,
+    require_labels_match_their_text,
+)
 
 
 def label_concordance_score(
@@ -44,9 +48,10 @@ def label_concordance_score(
     require_labels_match_their_text(first, name="label_sets[0]")
     require_labels_match_their_text(second, name="label_sets[1]")
     # scikit-learn sorts the labels it is given, which fails for text beside
-    # numbers; the scores depend only on which cells share a label.
-    first_codes = pd.factorize(first)[0]
-    second_codes = pd.factorize(second)[0]
+    # numbers. Codes in the labels' sorted order, where they sort, give the
+    # scores that the labels themselves give.
+    first_codes = categorical_label_codes(first)[0]
+    second_codes = categorical_label_codes(second)[0]
 
     if metric == "ari":
         return float(adjusted_rand_score(first_codes, second_codes))

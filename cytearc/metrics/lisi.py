@@ -4,7 +4,11 @@ import numpy as np
 import pandas as pd
 import zarr
 
-from ..utils.arguments import label_array, require_labels_match_their_text
+from ..utils.arguments import (
+    categorical_label_codes,
+    label_array,
+    require_labels_match_their_text,
+)
 from ..utils.logging import logger
 from ..utils.progress import iter_progress
 from ._types import ZarrArray
@@ -166,27 +170,17 @@ def compute_lisi(
     if n_labels == 0:
         return np.empty((n_cells, 0), dtype=np.float64)
 
-    categoricals: list[pd.Categorical] = []
+    effective_perplexity = _effective_perplexity(perplexity, n_neighbors)
+    # Each label column's numbers, as a pandas categorical of it would give them.
+    label_codes: list[tuple[np.ndarray, int]] = []
     for label in label_cols:
-        categorical = pd.Categorical(metadata[label])
-        if np.any(categorical.codes < 0):
+        codes, n_categories = categorical_label_codes(metadata[label])
+        if np.any(codes < 0):
             raise ValueError(f"Label column {label!r} contains missing values")
         require_labels_match_their_text(metadata[label], name=f"Label column {label!r}")
-        categoricals.append(categorical)
+        label_codes.append((codes, n_categories))
         logger.debug(f"Preparing LISI labels from {label}")
-    return _lisi_scores(distances, indices, categoricals, perplexity)
 
-
-def _lisi_scores(
-    distances: np.ndarray | ZarrArray,
-    indices: np.ndarray | ZarrArray,
-    categoricals: Sequence[pd.Categorical],
-    perplexity: float | None,
-) -> np.ndarray:
-    """Return the LISI of each cell for each set of checked labels, as :func:`compute_lisi` does."""
-    n_cells, n_neighbors = distances.shape
-    n_labels = len(categoricals)
-    effective_perplexity = _effective_perplexity(perplexity, n_neighbors)
     chunk_rows = _LISI_BATCH_SIZE
     if isinstance(distances, zarr.Array):
         chunk_rows = min(chunk_rows, int(distances.chunks[0]))
@@ -201,12 +195,12 @@ def _lisi_scores(
         probabilities = _neighbor_probabilities(
             distance_block, effective_perplexity, tol=1e-5
         )
-        for label_index, labels in enumerate(categoricals):
+        for label_index, (codes, n_categories) in enumerate(label_codes):
             simpson = _simpson_from_probabilities(
                 probabilities,
                 index_block,
-                np.asarray(labels.codes),
-                len(labels.categories),
+                codes,
+                n_categories,
             )
             lisi_df[start:end, label_index] = 1 / simpson
     return lisi_df
@@ -231,19 +225,31 @@ def _lisi_knn_summary(
     if n_neighbors < 3:
         raise ValueError("LISI requires at least three neighbors per cell")
 
-    values = label_array(labels)
-    categorical = pd.Categorical(values)
-    if len(categorical) != n_cells:
+    codes, _ = categorical_label_codes(labels)
+    if len(codes) != n_cells:
         raise ValueError(f"{label_name} labels must match the number of cells")
-    if np.any(categorical.codes < 0):
+    if np.any(codes < 0):
         raise ValueError(f"{label_name} labels must not contain missing values")
-    require_labels_match_their_text(values, name=f"{label_name.lower()}_labels")
+    require_labels_match_their_text(labels, name=f"{label_name.lower()}_labels")
 
-    n_categories = int(np.unique(categorical.codes).size)
+    n_categories = int(np.unique(codes).size)
     if n_categories < 2:
         raise ValueError(f"{label_name} LISI requires at least two categories")
 
-    per_cell = _lisi_scores(distances, indices, [categorical], perplexity)[:, 0]
+    # A categorical keeps its categories, and a list each label's type.
+    column = (
+        labels
+        if isinstance(getattr(labels, "dtype", None), pd.CategoricalDtype)
+        else label_array(labels)
+    )
+    metadata = pd.DataFrame({"labels": column})
+    per_cell = compute_lisi(
+        distances,
+        indices,
+        metadata,
+        ["labels"],
+        perplexity=perplexity,
+    )[:, 0]
     summary = float(np.nanmedian(per_cell))
     if not scale:
         return summary
@@ -346,20 +352,20 @@ def lisi_batch_mixing_score(
             ``"1"``.
     """
     scores = np.asarray(lisi_scores, dtype=np.float64)
-    values = label_array(batch_labels)
-    # A declared category without cells is not a batch.
-    labels = pd.Categorical(values).remove_unused_categories()
-    if scores.ndim != 1 or len(scores) != len(labels):
+    codes, _ = categorical_label_codes(batch_labels)
+    if scores.ndim != 1 or len(scores) != len(codes):
         raise ValueError("LISI scores and batch labels must be aligned vectors")
     if not np.all(np.isfinite(scores)):
         raise ValueError("LISI scores must contain finite values")
-    if np.any(labels.codes < 0):
+    if np.any(codes < 0):
         raise ValueError("Batch labels must not contain missing values")
-    if len(labels.categories) < 2:
+    # A declared category without cells is not a batch.
+    batches, codes = np.unique(codes, return_inverse=True)
+    if len(batches) < 2:
         raise ValueError("Batch mixing requires at least two batches")
-    require_labels_match_their_text(values, name="batch_labels")
+    require_labels_match_their_text(batch_labels, name="batch_labels")
 
-    counts = np.bincount(labels.codes, minlength=len(labels.categories))
+    counts = np.bincount(codes, minlength=len(batches))
     proportions = counts / counts.sum()
     ideal_lisi = 1 / np.square(proportions).sum()
     normalized = (scores.mean() - 1) / (ideal_lisi - 1)

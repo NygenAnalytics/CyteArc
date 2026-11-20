@@ -1,10 +1,9 @@
 from collections.abc import Sequence
 
 import numpy as np
-import pandas as pd
 import zarr
 
-from ..utils.arguments import label_array, require_labels_match_their_text
+from ..utils.arguments import categorical_label_codes, require_labels_match_their_text
 from ..utils.numba import njit
 from ..utils.progress import iter_progress
 from ._types import ZarrArray
@@ -86,16 +85,15 @@ def graph_connectivity(
         if weights.dtype.kind not in "fiu":
             raise TypeError("Graph weights must be real numbers")
 
-    values = label_array(labels)
-    categorical = pd.Categorical(values)
-    n_cells = len(categorical)
+    codes, _ = categorical_label_codes(labels)
+    n_cells = len(codes)
     if n_cells == 0:
         raise ValueError("Graph connectivity requires at least one cell")
-    if np.any(categorical.codes < 0):
+    if np.any(codes < 0):
         raise ValueError("Graph connectivity labels must not contain missing values")
-    require_labels_match_their_text(values, name="labels")
+    require_labels_match_their_text(labels, name="labels")
 
-    _, label_codes = np.unique(categorical.codes, return_inverse=True)
+    _, label_codes = np.unique(codes, return_inverse=True)
     label_codes = np.asarray(label_codes, dtype=np.int64)
     n_labels = int(label_codes.max()) + 1
 

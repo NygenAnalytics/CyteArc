@@ -35,6 +35,7 @@ from cytearc.utils.arguments import (
     float_argument,
     integer_argument,
     optional_name_argument,
+    categorical_label_codes,
     label_array,
     require_labels_match_their_text,
 )
@@ -622,8 +623,6 @@ def test_clip_fraction_argument_requires_a_finite_fraction_below_one_half():
         np.asarray([1, "1"]),
         np.asarray([b"a", b"b"]),
         np.asarray(["2020-01-01", "2020-01-02"], dtype="datetime64[D]"),
-        # Complex numbers are grouped value by value.
-        np.asarray([1 + 1j, 2 + 0j, 1 + 1j]),
         # A categorical's unused categories are no labels.
         pd.Categorical([1, 1], categories=[1, "1"]),
         pd.Series(["a", "b"], dtype="category"),
@@ -729,6 +728,7 @@ def test_require_labels_match_their_text_reads_no_typed_array(monkeypatch):
         np.asarray([b"a", b"b"]),
         np.asarray(["2020-01-01"], dtype="datetime64[D]"),
         np.asarray([0.0, -0.0, 1.0], dtype=np.float32),
+        np.asarray([1 + 1j, 2 + 0j, 1 + 1j]),
     ):
         require_labels_match_their_text(labels, name="labels")
     with pytest.raises(AssertionError, match="read one by one"):
@@ -776,6 +776,54 @@ def test_label_array_keeps_the_type_of_each_label_of_a_list(labels, expected):
     assert label_array(np.asarray([1, 2])).dtype == np.int64
     assert label_array(pd.Series([1.5, 2.5])).dtype == np.float64
     assert label_array(pd.Categorical(["a", "b"])).tolist() == ["a", "b"]
+
+
+@pytest.mark.parametrize(
+    ("labels", "codes", "count"),
+    [
+        # A categorical keeps its categories, unused ones included, and their
+        # order.
+        (pd.Categorical(["a", "b", "a"], categories=["b", "a", "c"]), [1, 0, 1], 3),
+        # Other labels are numbered in their sorted order...
+        (["b", "a", "b", None], [1, 0, 1, -1], 2),
+        ([2**53 + 1, 2**53, 0.5], [2, 1, 0], 3),
+        # ...or in order of first appearance where they cannot be sorted.
+        ([b"1", 1, b"1", "z"], [0, 1, 0, 2], 3),
+    ],
+)
+def test_categorical_label_codes_number_labels_as_a_categorical_would(
+    labels, codes, count
+):
+    numbers, n_codes = categorical_label_codes(labels)
+
+    assert numbers.tolist() == codes
+    assert n_codes == count
+
+
+@pytest.mark.parametrize(
+    "pool",
+    [
+        np.asarray(["b", "a", "c", "10", "2"]),
+        np.asarray([3, 1, 2, 10]),
+        np.asarray([0.5, 1.5, -2.0]),
+        np.asarray([True, False]),
+        # pandas sorts integers before text.
+        np.asarray(["a", 2, "c", 1, 2.5], dtype=object),
+    ],
+)
+def test_categorical_label_codes_order_a_contingency_table_as_its_labels_do(pool):
+    rng = np.random.default_rng(len(pool))
+    for _ in range(20):
+        left = pool[rng.integers(0, len(pool), 40)]
+        right = np.asarray(["x", "y", "z"])[rng.integers(0, 3, 40)]
+
+        coded = pd.crosstab(
+            categorical_label_codes(left)[0], categorical_label_codes(right)[0]
+        )
+
+        np.testing.assert_array_equal(
+            coded.to_numpy(), pd.crosstab(left, right).to_numpy()
+        )
 
 
 def test_read_only_copy_owns_its_values_and_stays_read_only():

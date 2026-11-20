@@ -103,6 +103,34 @@ def label_array(labels: object) -> np.ndarray:
     return np.asarray(labels, dtype=object)
 
 
+def categorical_label_codes(labels: object) -> tuple[np.ndarray, int]:
+    """Number labels as a pandas categorical of them would, without its cast of the labels.
+
+    A categorical keeps its categories, unused ones included, and their
+    order. Other labels, a list's labels each of its own type, are numbered
+    in their sorted order, or in order of first appearance where they cannot
+    be sorted, such as bytes beside numbers; pandas, which numbers them so,
+    would cast integers above 2**53 beside floats to floats to name the
+    categories. Missing labels are numbered -1.
+
+    Returns:
+        The number of each label, and how many numbers there are.
+    """
+    import pandas as pd
+
+    if isinstance(getattr(labels, "dtype", None), pd.CategoricalDtype):
+        categorical = pd.Categorical(labels)
+        return np.asarray(categorical.codes, dtype=np.int64), len(
+            categorical.categories
+        )
+    values = label_array(labels)
+    try:
+        codes, distinct = pd.factorize(values, sort=True)
+    except TypeError:
+        codes, distinct = pd.factorize(values, sort=False)
+    return np.asarray(codes, dtype=np.int64), len(distinct)
+
+
 def _listed(values: Sequence[object]) -> str:
     """Quote two values or more as a sentence lists them: ``a and b``, ``a, b and c``."""
     quoted = [quoted_value(value) for value in values]
@@ -173,8 +201,9 @@ def require_labels_match_their_text(labels: object, *, name: str) -> None:
     form one label, while ``1`` and ``"1"``, or ``np.float32(0.1)`` and
     ``0.1``, would form separate labels that print alike. Labels pass whose
     grouping by value is their grouping by text, ``str(label)``, whatever
-    their types, such as ``"a"`` beside ``1``; ``0.0`` and ``-0.0`` form one
-    label, which reads ``0.0``, and missing labels are left out.
+    their types, such as ``"a"`` beside ``1``; ``0.0`` and ``-0.0``, which
+    compare equal, form one label, which the first of them names, and missing
+    labels are left out.
 
     Args:
         labels: One-dimensional labels, such as a list, an array, or a pandas
@@ -192,18 +221,17 @@ def require_labels_match_their_text(labels: object, *, name: str) -> None:
     values = label_array(labels)
     if values.ndim != 1:
         raise ValueError(f"{name} must be one-dimensional")
-    # Typed arrays of booleans, numbers, text, bytes or times print as they
-    # compare, but for 0.0 beside -0.0, and are not read.
-    if values.dtype.kind in "biufSUTMm":
+    # A typed array holds values of one type, which print as they compare but
+    # for 0.0 beside -0.0, and is not read.
+    if values.dtype.kind != "O":
         return
-    if values.dtype.kind == "O":
-        inferred = pd.api.types.infer_dtype(values, skipna=True)
-        if inferred in _ONE_TEXT_PER_VALUE or (
-            inferred == "floating"
-            and set(map(type, values.tolist())) <= {float, np.float64}
-        ):
-            return
-    equal, alike = _label_conflicts(values.astype(object))
+    inferred = pd.api.types.infer_dtype(values, skipna=True)
+    if inferred in _ONE_TEXT_PER_VALUE or (
+        inferred == "floating"
+        and set(map(type, values.tolist())) <= {float, np.float64}
+    ):
+        return
+    equal, alike = _label_conflicts(values)
     found = [
         f"{what}, such as {_listed(group)}"
         for what, group in (

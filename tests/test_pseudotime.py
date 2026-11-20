@@ -98,8 +98,9 @@ def test_source_sink_labels_reject_missing_and_overlap():
 
 
 def test_source_sink_labels_refuse_labels_that_print_otherwise_than_they_compare():
-    # 1, 1.0 and True compare equal, so a sink of 1 would take all six cells.
-    merged = pd.Series([1, 1, 1.0, 1.0, True, True, 2, 2], dtype=object)
+    # 1, 1.0 and True compare equal, so a sink of 1 would take all six of
+    # their cells, and balance the vector over the two cells of u alone.
+    merged = pd.Series([1, 1, 1.0, 1.0, True, True, 2, 2, "u", "u"], dtype=object)
     found = (
         "labels holds values that would form one label but print differently, such "
         "as 1, 1.0 and True; convert them to text, or to one type, first"

@@ -918,6 +918,35 @@ def test_label_concordance_scores_four_labels_of_mixed_types(labels, metric):
     assert label_concordance_score([four, labels], metric) == pytest.approx(1.0)
 
 
+@pytest.mark.parametrize(
+    "pool",
+    [
+        np.asarray([3, 1, 2, 10, 7]),
+        np.asarray(["b", "a", "c", "10", "2"]),
+        np.asarray([0.5, 1.5, -2.0, 4.0]),
+        np.asarray([True, False]),
+    ],
+)
+# scikit-learn warns that float labels look continuous.
+@pytest.mark.filterwarnings("ignore:Clustering metrics expects discrete values")
+def test_label_concordance_gives_the_scores_of_the_labels_themselves(pool):
+    from sklearn.metrics import adjusted_rand_score, normalized_mutual_info_score
+
+    # scikit-learn scores labels that sort as they are, as the function did
+    # before it numbered them.
+    rng = np.random.default_rng(len(pool))
+    for _ in range(20):
+        first = pool[rng.integers(0, len(pool), 60)]
+        second = np.asarray([5, 1, 3])[rng.integers(0, 3, 60)]
+
+        assert label_concordance_score([first, second], "nmi") == float(
+            normalized_mutual_info_score(first, second)
+        )
+        assert label_concordance_score([first, second], "ari") == float(
+            adjusted_rand_score(first, second)
+        )
+
+
 def test_lisi_functions_refuse_labels_that_print_otherwise_than_they_compare():
     distances, indices, _labels = _uniform_self_free_knn()
     merged = np.asarray([1, 1.0, True, 2], dtype=object)
@@ -939,6 +968,32 @@ def test_lisi_functions_refuse_labels_that_print_otherwise_than_they_compare():
     mixed = np.asarray(["a", "a", 2, 2], dtype=object)
     assert ilisi_knn(distances, indices, mixed) == pytest.approx(0.8)
     assert lisi_batch_mixing_score(np.full(4, 2.0), mixed) == pytest.approx(1)
+
+
+def test_lisi_and_connectivity_keep_integers_above_2_53_beside_floats_apart():
+    # pandas names a categorical's categories by casting integers beside
+    # floats to floats, which would make 2**53 and 2**53 + 1 one label.
+    distances, indices, _labels = _uniform_self_free_knn()
+    big = [2**53, 2**53 + 1, 0.5, 0.5]
+    numbered = np.asarray([1, 2, 0, 0])
+
+    assert ilisi_knn(distances, indices, big, scale=False) == ilisi_knn(
+        distances, indices, numbered, scale=False
+    )
+    assert clisi_knn(distances, indices, big) == clisi_knn(distances, indices, numbered)
+    # A frame would cast the list itself, so its column holds the objects.
+    column = pd.DataFrame({"b": pd.Series(big, dtype=object)})
+    np.testing.assert_array_equal(
+        compute_lisi(distances, indices, column, ["b"]),
+        compute_lisi(distances, indices, pd.DataFrame({"b": numbered}), ["b"]),
+    )
+    assert lisi_batch_mixing_score(np.full(4, 2.0), big) == lisi_batch_mixing_score(
+        np.full(4, 2.0), numbered
+    )
+    # Each label's cells share an edge, so each label of the four is whole.
+    edges = np.array([[0, 1], [2, 3], [4, 5], [6, 7]])
+    eight = [2**53, 2**53, 2**53 + 1, 2**53 + 1, 0.5, 0.5, 3, 3]
+    assert graph_connectivity(edges, eight) == 1.0
 
 
 def test_lisi_batch_mixing_score():
