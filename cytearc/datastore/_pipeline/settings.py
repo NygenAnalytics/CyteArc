@@ -607,7 +607,8 @@ def named_stage(stage: str) -> Iterator[None]:
     recipe names the stage before the message of the stage's method, as in
     ``pca: batch_size must be at least 1``. A message that already starts
     with the stage's name, such as ``hvg['batch'] must be a cell metadata
-    column``, is raised as it is.
+    column``, is raised as it is, and so is an error of a subclass, whose
+    fields a rebuilt error would lose.
     """
     try:
         yield

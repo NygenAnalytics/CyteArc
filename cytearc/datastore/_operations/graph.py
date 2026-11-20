@@ -1815,8 +1815,8 @@ class _GraphOperationsMixin(_GraphOperationsBase):
             normalized: Normalized artifact to reduce.
             dims: Requested number of retained LSI dimensions.
             skip_first: Whether to omit the first singular component.
-            rand_state: Non-negative integer seed used by the randomized
-                decomposition.
+            rand_state: Seed of the randomized decomposition, from 0 to
+                2**32 - 1.
             solver: Memory-bounded streaming solver or materialized compatibility
                 solver. The materialized solver holds the whole matrix and raises
                 MemoryError before reading it when that exceeds the memory budget.

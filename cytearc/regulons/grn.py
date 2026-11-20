@@ -10,7 +10,7 @@ from typing import Any, Literal
 import numpy as np
 import pandas as pd
 
-from ..utils.arguments import integer_argument
+from ..utils.arguments import RANDOM_STATE_MAX, integer_argument
 from ..utils.shutdown import shutdown_checkpoint
 
 __all__ = [
@@ -244,8 +244,7 @@ def infer_grn(
         raise ValueError("gene_names must align with the expression columns")
     if len(set(names)) != len(names):
         raise ValueError("gene_names must be unique")
-    # scikit-learn accepts 32-bit unsigned random states only.
-    seed = integer_argument(seed, "seed", minimum=0, maximum=2**32 - 1)
+    seed = integer_argument(seed, "seed", minimum=0, maximum=RANDOM_STATE_MAX)
     nthreads = integer_argument(nthreads, "nthreads", minimum=1)
     if matrix.shape[0] < 2:
         raise ValueError("At least two cells are required")

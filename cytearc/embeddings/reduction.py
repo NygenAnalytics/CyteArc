@@ -5,7 +5,7 @@ from typing import Any, Literal
 import numpy as np
 
 from ..matrix import ChunkedArray
-from ..utils.arguments import bool_argument, integer_argument
+from ..utils.arguments import RANDOM_STATE_MAX, bool_argument, integer_argument
 from ..utils.compute import process_thread_limit
 from ..utils.logging import logger
 from ..utils.memory_budget import MemoryBudgetError
@@ -119,7 +119,8 @@ def lsi_settings(
     Raises:
         TypeError: If a setting has the wrong type.
         ValueError: If ``solver`` is not ``"streaming"`` or
-            ``"materialized"``, or a setting is out of range.
+            ``"materialized"``, or a setting is out of range, such as
+            ``rand_state`` outside 0 to 2**32 - 1.
     """
     skip = bool_argument(skip_first, "skip_first")
     if solver != "streaming" and solver != "materialized":
@@ -129,7 +130,10 @@ def lsi_settings(
         solver=solver,
         n_iter=integer_argument(n_iter, "n_iter", minimum=0),
         n_oversamples=integer_argument(n_oversamples, "n_oversamples", minimum=0),
-        rand_state=integer_argument(rand_state, "rand_state", minimum=0),
+        # The materialized solver seeds scikit-learn's TruncatedSVD.
+        rand_state=integer_argument(
+            rand_state, "rand_state", minimum=0, maximum=RANDOM_STATE_MAX
+        ),
         batch_size=(
             None
             if batch_size is None

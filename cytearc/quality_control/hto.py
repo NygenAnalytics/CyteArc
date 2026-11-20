@@ -61,7 +61,8 @@ def demultiplexing_settings(
     gives. The recipe checks the hashtags and the sample column against the
     store itself.
 
-    The seed seeds scikit-learn's k-means, which takes 0 to 2**32 - 1.
+    The seed is the random state of scikit-learn's k-means, which takes 0 to
+    2**32 - 1.
 
     Raises:
         TypeError: If ``random_seed`` is not an integer or
