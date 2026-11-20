@@ -1434,26 +1434,23 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
                 blocks, codes, n_samples=n_samples, n_guides=n_guides, ledger=ledger
             )
         except HistogramMemoryError as error:
-            # What the histograms needed where they stopped, beside what the
-            # call holds with the streamed counts. Distinct counts grow about
-            # as fast as the rows read, or slower, so while rows remain the
-            # histograms of every row are estimated from those read; with the
-            # budget named, the histograms get at least what they needed where
-            # they stopped.
-            needed = error.needed_bytes - ledger.held_bytes
-            item = error.item
-            if error.counts_remain:
-                needed = max(
-                    needed, -(-needed * error.n_rows // max(error.rows_read, 1))
-                )
+            # What the call holds with the histograms where they stopped, or
+            # where a merge stopped them while rows remained, what the
+            # histograms estimate for every row from each sample's rows read:
+            # with that budget, a rerun gets past the histograms unless the
+            # cells read later, such as those of a deeper sample stored after
+            # the others, hold more distinct counts per cell.
+            needed, item = error.needed_bytes, error.item
+            if error.estimated_needed_bytes is not None:
+                needed = error.estimated_needed_bytes
                 item += (
                     ", and at the rate of the rows read the histograms of every "
-                    f"row need about {needed} bytes"
+                    f"row need about {needed - ledger.held_bytes} bytes"
                 )
             raise memory_refusal(
                 ledger.doing,
                 item,
-                ledger.held_bytes + needed,
+                needed,
                 int(error.budget_bytes),
                 remedy="pass a smaller cell_selection or fewer samples",
             ) from error
@@ -1622,9 +1619,14 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
         cell's detected guides bound its calls under ``fixed`` and the
         fitted methods, whose fits give the number of calls, and
         ``top_guide`` makes at most one call per cell. A refusal names the
-        step and the budget that passes it; the histograms' refusal names a
-        budget that gets past the point where they stopped, and says when
-        more counts remained to be read. The fits are saved once the calls
+        step and the budget that passes it. When the histograms stop while
+        counts remain to be read, their refusal says so and names what the
+        histograms of every row need, estimated from the rows read of each
+        sample, with a sample not read yet taking the counts of the sample
+        read most. That budget gets past the histograms unless the cells
+        read later hold more distinct counts per cell than those read, as a
+        deeper-sequenced sample stored after the others can; the calling
+        pass after the fits names its own. The fits are saved once the calls
         that they make have passed their steps.
 
         The calls are saved as a ``guide_calls`` artifact, as
