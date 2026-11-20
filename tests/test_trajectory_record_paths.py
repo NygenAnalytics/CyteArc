@@ -6,6 +6,7 @@ validator it relies on, refuses it instead of loading, reusing or writing it.
 The others pin the record and payload forms that validation must accept.
 """
 
+from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from functools import cache
@@ -234,6 +235,30 @@ def _rewrite_record(store: Any, ref: ArtifactRef, **fields: Any) -> None:
 def _rewrite_parameters(store: Any, ref: ArtifactRef, **parameters: Any) -> None:
     recorded = artifact_group(store.zw, ref).attrs["provenance"]["parameters"]
     _rewrite_record(store, ref, parameters={**recorded, **parameters})
+
+
+def _set_budget(store: Any, budget: int) -> None:
+    """Give a store the memory budget that DataStore(mem_budget=budget) gives."""
+    store.memoryBytes = budget
+    store.resources = ResourceBudget(budget, 1)
+
+
+def _count_calls(
+    monkeypatch: pytest.MonkeyPatch, store: Any, *names: str
+) -> Counter[str]:
+    """Count the calls of the store's methods ``names`` from now on."""
+    calls: Counter[str] = Counter()
+    for name in names:
+        original = getattr(store, name)
+
+        def counted(
+            *args: Any, _name: str = name, _original: Any = original, **kwargs: Any
+        ) -> Any:
+            calls[_name] += 1
+            return _original(*args, **kwargs)
+
+        monkeypatch.setattr(store, name, counted)
+    return calls
 
 
 def _rewrite_inputs(store: Any, ref: ArtifactRef, **inputs: ArtifactRef) -> None:
@@ -698,35 +723,29 @@ def test_a_pseudotime_of_some_cells_charges_the_subgraph_before_reading_the_grap
         cells=_selection_of(trajectory, list(range(10))),
         ss_vec=pd.Series(np.r_[-1.0, np.zeros(8), 1.0], index=ids[:10]),
     )
-    reads: list[str] = []
-    original = store._store_to_sparse
-
-    def read(location: str, *args: Any, **kwargs: Any) -> Any:
-        reads.append(location)
-        return original(location, *args, **kwargs)
-
-    monkeypatch.setattr(store, "_store_to_sparse", read)
+    reads = _count_calls(monkeypatch, store, "_store_to_sparse")
     # SciPy loads an entry as an int32 index and a float32 weight, 8 bytes,
-    # beside 13 int32 row pointers, 52 bytes. Forming the fuzzy union holds
-    # 7 * 11 * 8 + 5 * 52 = 876 bytes and keeps 2 * 11 * 8 + 52 = 228. The
-    # pseudotime of all cells holds the positions of the graph's 12 cells
-    # beside, 96 bytes, and numbering the union's components holds less than
-    # forming it: a copy of the union and 12 bytes a cell, 228 + 144.
-    # The pseudotime of ten cells also holds their positions and their places
-    # among the graph's, 80 bytes each, and taking their subgraph copies the
-    # union twice, with 24 bytes a cell, 2 * 228 + 288 = 744 beside the
-    # union, which outgrows forming it.
-    for ref, needed in ((whole, 96 + 876), (some, 96 + 160 + 228 + 744)):
-        store.memoryBytes = needed - 1
-        store.resources = ResourceBudget(needed - 1, 1)
+    # beside 13 int32 row pointers, 52 bytes, so the union keeps
+    # 2 * 11 * 8 + 52 = 228 bytes, and forming it holds 7 * 11 * 8 + 5 * 52 =
+    # 876. Numbering the union's components is charged three copies of it, 4
+    # bytes an entry and 12 a cell, 684 + 88 + 144 = 916 beside it, which
+    # outgrows forming it, and the pseudotime of all cells holds the
+    # positions of the graph's 12 cells beside both, 96 bytes. The
+    # pseudotime of ten cells also holds their positions and their places
+    # among the graph's, 80 bytes each, and taking their subgraph adds 12
+    # bytes a cell, 144.
+    for ref, needed in (
+        (whole, 96 + 228 + 916),
+        (some, 96 + 160 + 228 + 916 + 144),
+    ):
+        _set_budget(store, needed - 1)
         with pytest.raises(MemoryBudgetError) as refused:
             store.trajectory.load_pseudotime(ref)
         assert refused.value.needed_bytes == needed
-        assert reads == []
-        store.memoryBytes = needed
-        store.resources = ResourceBudget(needed, 1)
+        assert reads == {}
+        _set_budget(store, needed)
         store.trajectory.load_pseudotime(ref)
-        assert len(reads) == 1
+        assert reads == {"_store_to_sparse": 1}
         reads.clear()
 
 

@@ -223,26 +223,25 @@ def pseudotime_components(
 
 
 def component_numbering_bytes(
-    n_cells: int, n_entries: int, weight_itemsize: int, *, subgraph: bool = False
+    n_cells: int, graph_bytes: int, n_entries: int, *, subgraph: bool = False
 ) -> int:
     """Return the most bytes that numbering a graph's components holds beside the graph.
 
-    The graph is a SciPy CSR matrix of ``n_cells`` cells and at most
-    ``n_entries`` stored entries, each an index of SciPy's type and a weight
-    of ``weight_itemsize`` bytes, with a row pointer per cell.
-    :func:`pseudotime_components` passes it to SciPy's ``connected_components``,
-    which copies it and labels each cell with an int32, and then numbers
-    each cell's component with an int64. ``subgraph`` numbers the
-    components of the subgraph that some of the graph's cells induce, which
-    is taken from the graph in two steps, its rows and then their columns:
-    each copies up to the graph's entries, and the column step holds up to
-    24 bytes for each cell beside them.
+    The graph is a SciPy CSR matrix of ``n_cells`` cells, with at most
+    ``n_entries`` stored entries of float32 or float64 weights, that takes
+    ``graph_bytes``. :func:`pseudotime_components` passes it to SciPy's
+    ``connected_components``. SciPy 1.16, the oldest release that CyteArc
+    supports, casts float32 weights to float64, copies the cast graph's
+    transpose and its index arrays, and labels each cell with an int32: three
+    copies of the graph and 4 bytes more for each entry. Later releases copy
+    less. The numbering then keeps an int64 for each cell. ``subgraph``
+    numbers the components of the subgraph that some of the graph's cells
+    induce, which is taken from the graph in two steps, its rows and then
+    their columns, each a copy of at most the graph, with up to 24 bytes for
+    each cell beside them.
     """
-    index_bytes = 4 if max(n_cells, n_entries) <= np.iinfo(np.int32).max else 8
-    graph = n_entries * (index_bytes + weight_itemsize) + (n_cells + 1) * index_bytes
-    if subgraph:
-        return 2 * graph + 24 * n_cells
-    return graph + 12 * n_cells
+    numbering = 3 * graph_bytes + 4 * n_entries + 12 * n_cells
+    return numbering + 12 * n_cells if subgraph else numbering
 
 
 def select_pseudotime_component(

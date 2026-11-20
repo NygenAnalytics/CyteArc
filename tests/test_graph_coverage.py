@@ -15,6 +15,7 @@ import cytearc.embeddings.sgtsne as sgtsne_module
 from cytearc.datastore.datastore import DataStore
 from cytearc.datastore.graph_datastore import GraphDataStore
 from cytearc.embeddings.imported import write_imported_coordinates
+from cytearc.neighbors.graph import GraphLoadMemory
 from cytearc.metadata import MetaData
 from cytearc.storage.artifacts import (
     ArtifactRef,
@@ -896,7 +897,9 @@ def test_run_tsne_orchestration_and_error_paths(
         "held_bytes": 3 * 2 * 4,
         "work": "t-SNE",
     }
-    assert working_bytes(3, 6) == sgtsne_module.sgtsne_input_bytes(3, 6, 2)
+    # The check hands the work estimate the load of the graph, here of 6 entries.
+    load = GraphLoadMemory(peakBytes=0, heldBytes=0, maxEntries=6)
+    assert working_bytes(3, load) == sgtsne_module.sgtsne_input_bytes(3, 6, 2)
     first_call = runner.call_args
     assert first_call.args[0] is graph
     np.testing.assert_array_equal(first_call.args[1], initial)

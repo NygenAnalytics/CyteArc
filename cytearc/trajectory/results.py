@@ -99,7 +99,7 @@ class PseudotimeScoreResult:
             raise ValueError("Pseudotime component sizes must be positive")
         if list(sizes) != sorted(sizes, reverse=True):
             raise ValueError("Pseudotime component sizes must be largest first")
-        if np.bincount(component, minlength=len(sizes)).tolist() != list(sizes):
+        if np.bincount(component).tolist() != list(sizes):
             raise ValueError("Pseudotime component sizes must count the components")
         valid = np.asarray(self.valid, dtype=bool)
         if valid.any() and not np.array_equal(

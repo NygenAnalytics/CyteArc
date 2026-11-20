@@ -27,7 +27,6 @@ from cytearc.storage.artifacts import (
     list_artifacts,
 )
 from cytearc.storage.arrays import MISSING_MASK_PREFIX
-from cytearc.storage.budget import ResourceBudget
 from cytearc.storage.selections import (
     resolve_metadata_snapshot,
     resolve_stored_selection_artifact,
@@ -42,11 +41,13 @@ from .test_fate_mapping import _direct_fate_reference, _ScoredStore, _scored_y_s
 from .test_trajectory_membership import _branching
 from .test_trajectory_record_paths import (
     _Y_LABELS,
+    _count_calls,
     _empty_graph_payload,
     _path,
     _resize_graph,
     _rewrite_inputs,
     _rewrite_parameters,
+    _set_budget,
     _trajectory_store,
     _y_graph,
 )
@@ -881,20 +882,12 @@ def test_a_map_directed_by_a_score_is_refused_a_small_budget_before_its_graph_is
         "lineage_membership": lambda: store.trajectory.lineage_membership(curves),
     }
     maps = _fate_maps(store)
-    reads: list[str] = []
-    original = store._store_to_sparse
-
-    def read(location: str, *args: Any, **kwargs: Any) -> Any:
-        reads.append(location)
-        return original(location, *args, **kwargs)
-
-    monkeypatch.setattr(store, "_store_to_sparse", read)
-    # Forming the fuzzy union of the 725 edges of the store's graph holds
-    # 63,820 bytes, as the membership tests derive, beside the positions of
-    # its 145 cells and their float64 scores, 1,160 bytes each.
-    needed = 63_820 + 1_160 + 1_160
-    store.memoryBytes = needed - 1
-    store.resources = ResourceBudget(needed - 1, 1)
+    reads = _count_calls(monkeypatch, store, "_store_to_sparse")
+    # Loading the store's graph of 725 edges and numbering its components
+    # needs 17,984 + 61,492 bytes, as the membership tests derive, beside the
+    # positions of its 145 cells and their float64 scores, 1,160 bytes each.
+    needed = 17_984 + 61_492 + 1_160 + 1_160
+    _set_budget(store, needed - 1)
     with pytest.raises(MemoryBudgetError) as refused:
         calls[call]()
     assert str(refused.value) == (
@@ -902,14 +895,13 @@ def test_a_map_directed_by_a_score_is_refused_a_small_budget_before_its_graph_is
         "memory for a graph of 725 edges, but the operation limit is "
         f"{needed - 1} bytes. Raise mem_budget."
     )
-    assert reads == []
+    assert reads == {}
     assert _fate_maps(store) == maps
     # The budget that the refusal names runs the call, which reads the graph
     # once.
-    store.memoryBytes = needed
-    store.resources = ResourceBudget(needed, 1)
+    _set_budget(store, needed)
     calls[call]()
-    assert len(reads) == 1
+    assert reads == {"_store_to_sparse": 1}
 
 
 def test_a_masked_score_charges_its_mask_beside_the_graph_load() -> None:
@@ -922,8 +914,7 @@ def test_a_masked_score_charges_its_mask_beside_the_graph_load() -> None:
     unscored = np.where(island, np.nan, values)
 
     def needed(direction: Any) -> int:
-        store.memoryBytes = 1
-        store.resources = ResourceBudget(1, 1)
+        _set_budget(store, 1)
         with pytest.raises(MemoryBudgetError) as refused:
             _direct(scored, direction)
         return refused.value.needed_bytes
@@ -939,14 +930,46 @@ def test_a_map_directed_by_a_score_counts_what_its_caller_holds() -> None:
     # features' positions, which its loader counts beside the graph.
     scored, ref = _directed_map()
     store = scored.store
-    store.memoryBytes = 1
-    store.resources = ResourceBudget(1, 1)
+    _set_budget(store, 1)
     needed = {}
     for held in (0, 4_096):
         with pytest.raises(MemoryBudgetError) as refused:
             store._load_fate_inputs(ref, held_bytes=held)
         needed[held] = refused.value.needed_bytes
     assert needed[4_096] == needed[0] + 4_096
+
+
+def test_a_score_keyed_by_cell_id_lets_the_ids_go_before_the_graph_is_read(
+    monkeypatch,
+) -> None:
+    import weakref
+
+    from cytearc.datastore._operations import trajectory as operations
+
+    # The check counts what the loader holds when it reads the graph: the
+    # score's values, not the cells' IDs that aligned them or the aligned
+    # Series, which are let go first.
+    scored, pseudotime = _y_with_island()
+    store = scored.store
+    kept: list[weakref.ref[Any]] = []
+    align = operations.align_to_cell_ids
+
+    def aligned(values: Any, ids: Any, **options: Any) -> Any:
+        result = align(values, ids, **options)
+        kept.extend((weakref.ref(ids), weakref.ref(result)))
+        return result
+
+    alive_at_read: list[list[bool]] = []
+    load = store._load_graph_artifact
+
+    def read(*args: Any, **kwargs: Any) -> Any:
+        alive_at_read.append([ref() is not None for ref in kept])
+        return load(*args, **kwargs)
+
+    monkeypatch.setattr(operations, "align_to_cell_ids", aligned)
+    monkeypatch.setattr(store, "_load_graph_artifact", read)
+    _direct(scored, np.where(pseudotime.valid, pseudotime.values, 0.25))
+    assert alive_at_read == [[False, False]]
 
 
 def test_direction_scores_keep_the_finite_values_of_whole_components() -> None:

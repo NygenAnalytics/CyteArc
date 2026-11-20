@@ -28,7 +28,6 @@ The membership calls load their fate map and its graph once, and refuse a memory
 
 import math
 import tracemalloc
-from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from functools import cache
@@ -42,7 +41,6 @@ from scipy.spatial import cKDTree
 from cytearc.metadata import MetaData
 from cytearc.metadata.selection import cell_selection_indices
 from cytearc.storage.artifacts import ArtifactRef, artifact_group, list_artifacts
-from cytearc.storage.budget import ResourceBudget
 from cytearc.storage.selections import (
     resolve_metadata_snapshot,
     resolve_stored_selection_artifact,
@@ -69,10 +67,12 @@ from .test_graph_coverage import _memory_graph_store
 from .test_graph_feature_projection import _native_chain
 from .test_trajectory_record_paths import (
     _copy_store,
+    _count_calls,
     _refresh_fingerprint,
     _rewrite_inputs,
     _rewrite_parameters,
     _rewrite_record,
+    _set_budget,
     _write_graph_payload,
 )
 from tests.storage_helpers import by_cell_id
@@ -1847,30 +1847,6 @@ def test_the_membership_estimate_pins_its_bytes_per_cell() -> None:
     store.trajectory.lineage_membership(branching.curves, invalidate_cache=True)
 
 
-def _set_budget(store: Any, budget: int) -> None:
-    """Give a store the memory budget that DataStore(mem_budget=budget) gives."""
-    store.memoryBytes = budget
-    store.resources = ResourceBudget(budget, 1)
-
-
-def _count_calls(
-    monkeypatch: pytest.MonkeyPatch, store: Any, *names: str
-) -> Counter[str]:
-    """Count the calls of the store's methods ``names`` from now on."""
-    calls: Counter[str] = Counter()
-    for name in names:
-        original = getattr(store, name)
-
-        def counted(
-            *args: Any, _name: str = name, _original: Any = original, **kwargs: Any
-        ) -> Any:
-            calls[_name] += 1
-            return _original(*args, **kwargs)
-
-        monkeypatch.setattr(store, name, counted)
-    return calls
-
-
 # The calls whose loaders load the curves, their fate map and its
 # pseudotime, which reads the graph to number its components.
 _MEMBERSHIP_CALLS: dict[str, Callable[[_Branching, ArtifactRef], Any]] = {
@@ -1917,11 +1893,13 @@ def test_each_membership_call_loads_the_fate_map_and_its_graph_once(
 # an entry, beside 146 int32 row pointers of 584 bytes. Forming the fuzzy
 # union holds the directed matrix, a copy of its transpose for the sum and
 # for the product, a sum and a product sized for 1,450 entries, and a compact
-# copy of the product, 7 * 725 * 12 + 5 * 584 = 63,820 bytes, beside the
-# positions of the graph's cells, 145 * 8 = 1,160 bytes. Numbering the
-# union's components holds less: the union and a copy of it, 17,984 bytes
-# each, and 12 bytes a cell.
-_GRAPH_LOAD_BYTES = 63_820 + 1_160
+# copy of the product, 7 * 725 * 12 + 5 * 584 = 63,820 bytes, and keeps the
+# union, 1,450 * 12 + 584 = 17,984. Numbering its components is charged
+# what SciPy 1.16 holds for float32 weights, three copies of the union and 4
+# bytes an entry, and 12 bytes a cell, 3 * 17,984 + 4 * 1,450 + 12 * 145 =
+# 61,492, which outgrows forming the union. The positions of the graph's
+# cells add 145 * 8 = 1,160 bytes.
+_GRAPH_LOAD_BYTES = 17_984 + 61_492 + 1_160
 
 
 @pytest.mark.parametrize("call", [*_MEMBERSHIP_CALLS, "load_fate", "load_pseudotime"])

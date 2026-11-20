@@ -342,8 +342,8 @@ class _EmbeddingOperationsMixin(_EmbeddingOperationsBase):
             symmetric=symmetric_graph,
             upper_only=graph_upper_only,
             held_bytes=n_cells * settings.tsne_dims * initialization_itemsize,
-            working_bytes=lambda cells, entries: sgtsne_input_bytes(
-                cells, entries, settings.tsne_dims
+            working_bytes=lambda cells, load: sgtsne_input_bytes(
+                cells, load.maxEntries, settings.tsne_dims
             ),
             work="t-SNE",
         )
@@ -509,8 +509,11 @@ class _EmbeddingOperationsMixin(_EmbeddingOperationsBase):
             symmetric=symmetric_graph,
             upper_only=graph_upper_only,
             held_bytes=n_cells * umap_dims * np.dtype(np.float32).itemsize,
-            working_bytes=lambda cells, entries: umap_peak_bytes(
-                cells, entries, 2 * entries, densmap_edges=densmap_edges
+            working_bytes=lambda cells, load: umap_peak_bytes(
+                cells,
+                load.maxEntries,
+                2 * load.maxEntries,
+                densmap_edges=densmap_edges,
             ),
             work="UMAP",
         )
@@ -840,9 +843,9 @@ class _EmbeddingOperationsMixin(_EmbeddingOperationsBase):
             symmetric=False,
             upper_only=False,
             held_bytes=4 * n_cells * (coordinates.shape[1] + settings.localmap_dims),
-            working_bytes=lambda cells, entries: localmap_peak_bytes(
+            working_bytes=lambda cells, load: localmap_peak_bytes(
                 cells,
-                entries,
+                load.maxEntries,
                 dims=settings.localmap_dims,
                 n_mid_near=settings.n_mid_near,
                 n_further=settings.n_further,

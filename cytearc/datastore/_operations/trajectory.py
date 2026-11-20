@@ -1572,23 +1572,17 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         fuzzy union, and numbering the components of the union, or of the
         subgraph that some of its cells induce, copies it.
         """
-        location = self._graph_location(graph)
-        if self._get_graph_ncells_k(location)[0] == 0:
+        if self._get_graph_ncells_k(self._graph_location(graph))[0] == 0:
             # A graph of no cells holds nothing to load, and the loaders
             # refuse it in their own words.
             return
-        weights = as_zarr_array(
-            as_zarr_group(self.zw[location], name=location)["weights"],
-            name="weights",
-        )
-        weight_itemsize = np.dtype(weights.dtype).itemsize
         self._require_graph_load_budget(
             graph,
             symmetric=True,
             upper_only=False,
             held_bytes=held_bytes,
-            working_bytes=lambda cells, entries: _component_numbering_bytes_impl(
-                cells, entries, weight_itemsize, subgraph=subgraph
+            working_bytes=lambda cells, load: _component_numbering_bytes_impl(
+                cells, load.heldBytes, load.maxEntries, subgraph=subgraph
             ),
             work=work,
         )

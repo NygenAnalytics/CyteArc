@@ -397,16 +397,17 @@ def membership_labels(members: np.ndarray, lineages: Sequence[Any]) -> np.ndarra
 
 
 def membership_bytes(n_cells: int, lineages: Sequence[Any]) -> int:
-    """Return the bytes that calling the membership of ``n_cells`` cells holds.
+    """Return the estimate that lineage membership checks against the memory budget.
 
-    The call holds the curves' positions, distances and weights, three
+    The estimate counts the curves' positions, distances and weights, three
     float64 values for each cell and lineage, and 12 bytes a cell for the
     pseudotime, the sinks' cells and the cells a trunk may hold. Beside
-    them, each cell takes 44 bytes for each lineage, for its bin, limit,
+    them, it counts 44 bytes a cell for each lineage, for its bin, limit,
     probability, divided probability, sink label and membership; 4 bytes
     for each character of the longest label that :func:`membership_labels`
-    can give it, a lineage's name, ``"shared"`` or ``"none"``; and 120
-    bytes for the sorted cells of a pair while its branch point is found.
+    can give a cell, a lineage's name, ``"shared"`` or ``"none"``, once; and
+    120 bytes a cell for the sorted cells of a pair while its branch point is
+    found.
     """
     n_lineages = len(lineages)
     label_width = max(
