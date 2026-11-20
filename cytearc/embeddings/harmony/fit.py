@@ -74,9 +74,9 @@ def fit_harmony(
             components, one column per cell.
         metadata: One row per cell and one column per batch variable. A
             categorical column keeps the declared order of its used categories;
-            any other column must hold values of one kind, such as text or
-            integers, where a NumPy scalar counts as its Python type, and
-            orders them with Python's ``sorted``.
+            any other column orders its values with Python's ``sorted``. A
+            column's values may mix types, as long as equal values print alike
+            and different values print apart.
         n_clusters: Number of soft clusters. Default: the cell count over 30,
             rounded half to even, kept between 1 and 100.
         theta: Diversity penalty, non-negative: a scalar, one value per batch
@@ -140,11 +140,12 @@ def fit_harmony(
         TypeError: If ``values`` does not hold real numbers, ``metadata`` is
             not a DataFrame, or an option has the wrong type.
         ValueError: If an argument is out of range, the metadata does not
-            describe the cells, a batch column other than a categorical mixes
-            kinds of value, such as the integer ``1`` and the float ``1.0``,
-            which pandas would take for one batch, the values are not finite,
-            a fixed ``ridge_penalty`` is too small for several batch columns,
-            or the fit produces non-finite values or clusters without cells.
+            describe the cells, a batch column holds equal values that print
+            differently, such as ``1``, ``1.0`` and ``True``, which pandas
+            would take for one batch, or different values that print alike,
+            such as ``1`` and ``"1"``, the values are not finite, a fixed
+            ``ridge_penalty`` is too small for several batch columns, or the
+            fit produces non-finite values or clusters without cells.
         numpy.linalg.LinAlgError: If a regression system is not positive
             definite.
 

@@ -248,26 +248,19 @@ def test_fit_harmony_has_no_retired_keywords(keyword: str) -> None:
         fit_harmony(_values(), _labels(), **{keyword: 5})
 
 
-def test_batch_columns_need_orderable_values_of_one_kind_with_distinct_text() -> None:
+def test_batch_columns_need_orderable_values_with_distinct_text() -> None:
     values = _values(4)
-    with pytest.raises(
-        ValueError,
-        match=re.escape(
-            "Batch column 'batch' mixes integer values such as 1 and text values "
-            "such as 'a'; convert it to one kind, such as text, first"
-        ),
-    ):
+    with pytest.raises(ValueError, match="mixes values that cannot be ordered"):
         fit_harmony(
             values, pd.DataFrame({"batch": pd.Series([1, "a", 1, "a"], dtype=object)})
         )
-    # Complex numbers are of one kind, which Python cannot order.
     with pytest.raises(
-        ValueError, match="Batch column 'batch' holds values that cannot be ordered"
+        ValueError,
+        match=re.escape(
+            "Batch column 'batch' holds different values that print alike, such as "
+            "1 and '1'; convert it to text, or to one type, first"
+        ),
     ):
-        fit_harmony(
-            values, pd.DataFrame({"batch": pd.Series([1j, 2j, 1j, 2j], dtype=object)})
-        )
-    with pytest.raises(ValueError, match="distinct values with the same text '1'"):
         fit_harmony(
             values,
             pd.DataFrame(
@@ -283,9 +276,8 @@ def test_batch_columns_keep_apart_values_that_python_takes_for_one() -> None:
     with pytest.raises(
         ValueError,
         match=re.escape(
-            "Batch column 'batch' mixes integer values such as 1, float values such "
-            "as 1.0 and boolean values such as True; convert it to one kind, such as "
-            "text, first"
+            "Batch column 'batch' holds equal values that print differently, such "
+            "as 1, 1.0 and True; convert it to text, or to one type, first"
         ),
     ):
         fit_harmony(
@@ -295,8 +287,8 @@ def test_batch_columns_keep_apart_values_that_python_takes_for_one() -> None:
             ),
         )
 
-    # NumPy and Python integers are one kind, and form the levels of a typed
-    # column of the same numbers.
+    # NumPy and Python integers are equal values that print alike, and form
+    # the levels of a typed column of the same numbers.
     scalars = pd.Series([1, np.int64(2), np.int64(1), 2, np.uint8(1), 2], dtype=object)
     mixed = fit_harmony(values, pd.DataFrame({"batch": scalars}), n_clusters=1)
     typed = fit_harmony(
@@ -304,8 +296,18 @@ def test_batch_columns_keep_apart_values_that_python_takes_for_one() -> None:
     )
     assert mixed.batch_levels == typed.batch_levels == (("1", "2"),)
     np.testing.assert_array_equal(mixed.corrected, typed.corrected)
+    # Numbers of two types that print as they compare form the levels of
+    # their texts, in the same order.
+    numbers = fit_harmony(
+        values,
+        pd.DataFrame({"batch": pd.Series([1, 2.5, 1, 2.5, 1, 2.5], dtype=object)}),
+        n_clusters=1,
+    )
+    texts = fit_harmony(values, pd.DataFrame({"batch": ["1", "2.5"] * 3}), n_clusters=1)
+    assert numbers.batch_levels == texts.batch_levels == (("1", "2.5"),)
+    np.testing.assert_array_equal(numbers.corrected, texts.corrected)
     # A categorical column keeps the categories it declares, which pandas holds
-    # apart, whatever their kinds.
+    # apart, whatever their types.
     declared = fit_harmony(
         values,
         pd.DataFrame(

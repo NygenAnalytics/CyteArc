@@ -7,6 +7,8 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 
+from ..utils.arguments import require_labels_distinct_as_text
+
 __all__ = [
     "association_pair",
     "coefficient_estimability",
@@ -18,6 +20,9 @@ __all__ = [
 ]
 
 ColumnKind = Literal["categorical", "continuous"]
+
+#: What each refusal of labels that group otherwise by value than by text asks for.
+_LABEL_REMEDY = "convert the labels to text, or to one type, first"
 
 
 def _as_1d(values: Any) -> np.ndarray:
@@ -61,10 +66,19 @@ def directional_mapping(
     left: Any,
     right: Any,
 ) -> dict[str, Any]:
-    """Report exact directional mapping between two categorical columns."""
+    """Report exact directional mapping between two categorical columns.
+
+    Raises:
+        ValueError: If a column is not one-dimensional, the columns differ in
+            length, or a column holds equal values that print differently,
+            such as ``1``, ``1.0`` and ``True``, or different values that
+            print alike, such as ``1`` and ``"1"``.
+    """
     left_values = _as_1d(left)
     right_values = _as_1d(right)
     mask = _pairwise_mask(left_values, right_values)
+    require_labels_distinct_as_text(left, name="left", remedy=_LABEL_REMEDY)
+    require_labels_distinct_as_text(right, name="right", remedy=_LABEL_REMEDY)
     rows_used = int(mask.sum())
     rows_missing = int((~mask).sum())
     blank = {
@@ -110,10 +124,18 @@ def cramers_v(left: Any, right: Any) -> dict[str, Any]:
     chi-square under independence. On the small design tables this module
     targets, that correction can shrink even a perfect association to zero, so
     ``valueUncorrected`` and ``directionalMapping`` are reported alongside it.
+
+    Raises:
+        ValueError: If a column is not one-dimensional, the columns differ in
+            length, or a column holds equal values that print differently,
+            such as ``1``, ``1.0`` and ``True``, or different values that
+            print alike, such as ``1`` and ``"1"``.
     """
     left_values = _as_1d(left)
     right_values = _as_1d(right)
     mask = _pairwise_mask(left_values, right_values)
+    require_labels_distinct_as_text(left, name="left", remedy=_LABEL_REMEDY)
+    require_labels_distinct_as_text(right, name="right", remedy=_LABEL_REMEDY)
     rows_used = int(mask.sum())
     rows_missing = int((~mask).sum())
     if rows_used < 2:
@@ -158,9 +180,19 @@ def cramers_v(left: Any, right: Any) -> dict[str, Any]:
 
 
 def eta_squared(continuous: Any, categorical: Any) -> dict[str, Any]:
-    """Correlation ratio η² for continuous values grouped by a categorical column."""
+    """Correlation ratio η² for continuous values grouped by a categorical column.
+
+    Raises:
+        ValueError: If a column is not one-dimensional, the columns differ in
+            length, or ``categorical`` holds equal values that print
+            differently, such as ``1``, ``1.0`` and ``True``, or different
+            values that print alike, such as ``1`` and ``"1"``.
+    """
     raw = _as_1d(continuous)
     groups = _as_1d(categorical)
+    require_labels_distinct_as_text(
+        categorical, name="categorical", remedy=_LABEL_REMEDY
+    )
     values = _to_float(raw)
     if values is None:
         return _not_computed("nonNumeric", rowsMissing=len(raw))

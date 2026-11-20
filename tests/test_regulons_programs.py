@@ -1,4 +1,3 @@
-import datetime
 import re
 
 import numpy as np
@@ -262,10 +261,10 @@ def test_regulon_specificity_rejects_invalid_inputs(values, labels, message):
         ([None] * 5, 5),
         ([np.nan] * 5, 5),
         (pd.Categorical([None] * 5, categories=["a"]), 5),
-        # A missing label is named before labels of more than one kind, so
-        # NaN among numbers or text is never a float label.
-        (["a", "a", 1, 1, None], 1),
-        ([1, 1, 2.5, np.nan, 2.5], 1),
+        # A missing label is named before labels that print otherwise than
+        # they compare, so NaN among labels is never a label.
+        ([1, 1.0, True, "1", None], 1),
+        ([np.float32(0.1), 0.1, 0.1, np.nan, 2.0], 1),
     ],
 )
 def test_regulon_specificity_refuses_cells_without_a_label(labels, unlabeled):
@@ -296,17 +295,22 @@ def test_regulon_specificity_refuses_cells_without_a_label(labels, unlabeled):
         ([False, False, True, True], [False, True]),
         (["nan", "nan", "None", "None"], ["nan", "None"]),
         (np.asarray([0.0, 0.0, 1.5, 1.5]), [0.0, 1.5]),
-        # A NumPy scalar is a label of its Python type's kind, so equal
+        # A NumPy scalar equals and prints as its Python value, so equal
         # labels form one group.
         ([1, np.int64(1), np.uint8(2), 2], [1, 2]),
         ([np.True_, True, False, np.False_], [True, False]),
         (["a", np.str_("a"), np.str_("b"), "b"], ["a", "b"]),
         ([1.5, np.float64(1.5), np.float32(2.0), 2.0], [1.5, 2.0]),
-        # Nullable and categorical columns hold labels of one kind.
+        # Labels of several types that print as they compare.
+        (["a", "a", 1, 1], ["a", 1]),
+        ([1, 1, 2.5, 2.5], [1, 2.5]),
+        ([True, True, 2, 2], [True, 2]),
+        ([b"a", b"a", "a", "a"], [b"a", "a"]),
+        # Nullable and categorical columns.
         (pd.Series([1, 1, 2, 2], dtype="Int64"), [1, 2]),
         (pd.Series([True, True, False, False], dtype="boolean"), [True, False]),
         (pd.Categorical([1, 1, 2, 2]), [1, 2]),
-        # Labels of one other type are of one kind.
+        (pd.Categorical(["a", "a", 1, 1], categories=["a", 1, "1"]), ["a", 1]),
         (np.asarray([b"a", b"a", b"b", b"b"]), [b"a", b"b"]),
         (
             pd.to_datetime(["2020-01-01", "2020-01-01", "2020-01-02", "2020-01-02"]),
@@ -335,60 +339,36 @@ def test_regulon_specificity_scores_every_kind_of_label_alike(labels, groups):
 
 
 @pytest.mark.parametrize(
-    ("labels", "kinds"),
+    ("labels", "found"),
     [
         # Python takes 1, 1.0 and True for one label...
         (
             [1, 1, 1.0, 1.0, True, True],
-            "integer values such as 1, float values such as 1.0 and boolean "
-            "values such as True",
+            "equal values that print differently, such as 1, 1.0 and True",
         ),
         # ...and keeps 1 and "1" apart, though they print alike.
         (
             [1, 1, "1", "1", 2, 2],
-            "integer values such as 1 and text values such as '1'",
+            "different values that print alike, such as 1 and '1'",
         ),
         (
-            ["a", "a", "b", "b", 1, 1],
-            "text values such as 'a' and integer values such as 1",
+            [np.float32(0.1)] * 2 + [0.1] * 2 + [0.5] * 2,
+            "different values that print alike, such as np.float32(0.1) and 0.1",
         ),
         (
-            pd.Categorical(["a", "a", 1, 1, "b", "b"]),
-            "text values such as 'a' and integer values such as 1",
-        ),
-        # Numbers of two kinds are refused even where no two are equal.
-        (
-            [1, 1, 2.5, 2.5, 3, 3],
-            "integer values such as 1 and float values such as 2.5",
-        ),
-        # A NumPy scalar is of its Python type's kind, and each kind is shown
-        # by its first value.
-        (
-            [np.int64(1), 1, np.float32(1.5), 1.5, np.True_, True],
-            "integer values such as np.int64(1), float values such as "
-            "np.float32(1.5) and boolean values such as np.True_",
-        ),
-        # A value of another type is of the kind its type names.
-        (
-            [b"a", b"a", "a", "a", "b", "b"],
-            "bytes values such as b'a' and text values such as 'a'",
+            np.asarray([0.0, 0.0, -0.0, -0.0, 1.0, 1.0]),
+            "equal values that print differently, such as np.float64(0.0) and "
+            "np.float64(-0.0)",
         ),
         (
-            [pd.Timestamp("2020-01-01")] * 2
-            + [datetime.datetime(2020, 1, 1)] * 2
-            + [pd.Timestamp("2020-01-02")] * 2,
-            "Timestamp values such as Timestamp('2020-01-01 00:00:00') and "
-            "datetime values such as datetime.datetime(2020, 1, 1, 0, 0)",
-        ),
-        # NumPy derives timedelta64 from its integers, and it equals them.
-        (
-            [np.timedelta64(1, "s")] * 2 + [1, 1, 2, 2],
-            "timedelta64 values such as np.timedelta64(1,'s') and integer "
-            "values such as 1",
+            pd.Categorical(["a", "a", 1, 1, "1", "1"], categories=["a", 1, "1"]),
+            "different values that print alike, such as 1 and '1'",
         ),
     ],
 )
-def test_regulon_specificity_refuses_labels_of_more_than_one_kind(labels, kinds):
+def test_regulon_specificity_refuses_labels_that_print_otherwise_than_they_compare(
+    labels, found
+):
     activity = pd.DataFrame(
         {"X": [2.0, 2.0, 0.0, 0.0, 1.0, 1.0], "Y": [0.0, 1.0, 3.0, 0.0, 1.0, 2.0]}
     )
@@ -396,13 +376,13 @@ def test_regulon_specificity_refuses_labels_of_more_than_one_kind(labels, kinds)
     with pytest.raises(
         ValueError,
         match=re.escape(
-            f"labels mixes {kinds}; convert the labels to one kind, such as text, first"
+            f"labels holds {found}; convert the labels to text, or to one type, first"
         ),
     ):
         regulon_specificity(activity, labels)
 
 
-def test_numpy_and_python_labels_of_one_kind_score_as_one_group():
+def test_numpy_and_python_labels_that_print_alike_score_as_one_group():
     rng = np.random.default_rng(7)
     values = rng.uniform(0, 1, size=(60, 3))
     codes = rng.integers(0, 3, size=60)

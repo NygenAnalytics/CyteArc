@@ -1,7 +1,10 @@
+import datetime
+import decimal
 import gc
 import weakref
 
 import numpy as np
+import pandas as pd
 import pytest
 import zarr
 from scipy.sparse import coo_matrix, csr_matrix
@@ -32,7 +35,7 @@ from cytearc.utils.arguments import (
     float_argument,
     integer_argument,
     optional_name_argument,
-    require_one_value_kind,
+    require_labels_distinct_as_text,
 )
 from cytearc.utils.digest import mix64, mix64_array
 from cytearc.utils.numba import numba_threads
@@ -595,84 +598,129 @@ def test_clip_fraction_argument_requires_a_finite_fraction_below_one_half():
 
 
 @pytest.mark.parametrize(
-    "values",
+    "labels",
     [
         [],
         ["a"],
-        # A NumPy scalar is of its Python type's kind.
-        ["a", np.str_("b")],
-        [1, np.int64(2), np.uint8(3), np.int8(-1), 2**70],
-        [1.0, np.float32(2.5), np.float16(3), float("inf")],
-        [True, np.bool_(False)],
-        # A value of another type is of the kind its type names.
-        [b"a", b"b"],
-        [np.timedelta64(1, "s"), np.timedelta64(2, "s")],
-        np.asarray(["a", np.str_("b"), "c"], dtype=object),
-        # A typed array holds one kind, whatever NumPy made of its values.
-        np.asarray([1, "a"]),
-        np.asarray([1.0, np.nan]),
+        # Labels of any types pass where equal labels print alike and
+        # different labels print apart.
+        ["a", 2, 2.5, True, b"b"],
+        [1, "2"],
+        [1, np.int64(1), np.uint8(2), 2**70],
+        ["a", np.str_("a")],
+        [True, np.bool_(True), False],
+        [np.float32(7.5), 7.5],
+        [b"a", "a"],
+        [pd.Timestamp("2020-01-01"), datetime.datetime(2020, 1, 1)],
+        # Missing labels are no labels.
+        ["a", None, float("nan"), pd.NA, 1],
+        # Floats without 0.0 beside -0.0.
+        np.asarray([0.5, np.float64(1.5), -0.0, np.nan], dtype=object),
+        np.asarray([0.0, 0.0, 1.5, np.nan]),
+        # A typed array, whatever NumPy made of the labels.
+        np.asarray([1, "1"]),
+        np.asarray([b"a", b"b"]),
+        np.asarray(["2020-01-01", "2020-01-02"], dtype="datetime64[D]"),
+        # A categorical's unused categories are no labels.
+        pd.Categorical([1, 1], categories=[1, "1"]),
+        pd.Series(["a", "b"], dtype="category"),
+        pd.Series([1, None, 2], dtype="Int64"),
     ],
 )
-def test_require_one_value_kind_takes_values_of_one_kind(values):
-    require_one_value_kind(values, name="labels", remedy="convert them")
-
-
-def test_require_one_value_kind_reads_no_value_of_a_typed_array():
-    class Unread(np.ndarray):
-        def __iter__(self):
-            raise AssertionError("a typed array was read value by value")
-
-    # A batch column of ten million integers would make as many NumPy
-    # scalars to find their one kind.
-    for dtype in (np.int64, np.float32, np.bool_, np.str_):
-        values = np.zeros(4, dtype=dtype).view(Unread)
-        require_one_value_kind(values, name="labels", remedy="convert them")
-    with pytest.raises(AssertionError, match="read value by value"):
-        require_one_value_kind(
-            np.zeros(4, dtype=object).view(Unread), name="labels", remedy="convert them"
-        )
+def test_require_labels_distinct_as_text_passes_labels_that_print_as_they_compare(
+    labels,
+):
+    require_labels_distinct_as_text(labels, name="labels", remedy="convert them")
 
 
 @pytest.mark.parametrize(
-    ("values", "kinds"),
+    ("labels", "found"),
     [
-        ([1, "1"], "integer values such as 1 and text values such as '1'"),
+        # Python takes 1, 1.0 and True for one value...
         (
-            np.asarray([1.0, True, 1], dtype=object),
-            "float values such as 1.0, boolean values such as True and integer "
-            "values such as 1",
+            [1, 1.0, True],
+            "equal values that print differently, such as 1, 1.0 and True",
         ),
-        # The kinds follow their first value, which each kind shows.
+        # ...and keeps 1 and "1" apart, though they print alike.
+        ([2, 1, "1"], "different values that print alike, such as 1 and '1'"),
         (
-            ["b", np.int64(2), "a", 1.5, 3, np.True_, False],
-            "text values such as 'b', integer values such as np.int64(2), float "
-            "values such as 1.5 and boolean values such as np.True_",
-        ),
-        # NumPy derives timedelta64 from its integers, yet a timedelta is no
-        # integer, and its bool from no Python type, yet it is a boolean.
-        (
-            [np.timedelta64(1, "s"), 1],
-            "timedelta64 values such as np.timedelta64(1,'s') and integer values "
-            "such as 1",
+            [np.float32(0.1), 0.1],
+            "different values that print alike, such as np.float32(0.1) and 0.1",
         ),
         (
-            [np.bool_(True), 1],
-            "boolean values such as np.True_ and integer values such as 1",
+            [decimal.Decimal("1.0"), decimal.Decimal("1")],
+            "equal values that print differently, such as Decimal('1.0') and "
+            "Decimal('1')",
         ),
-        ([b"a", "a"], "bytes values such as b'a' and text values such as 'a'"),
+        (
+            np.asarray([1.5, -0.0, 0.0]),
+            "equal values that print differently, such as np.float64(-0.0) and "
+            "np.float64(0.0)",
+        ),
+        (
+            np.asarray([0.0, -0.0], dtype=object),
+            "equal values that print differently, such as 0.0 and -0.0",
+        ),
+        (
+            pd.Categorical(["b", 1, "1"], categories=["b", 1, "1"]),
+            "different values that print alike, such as 1 and '1'",
+        ),
+        # Each conflict is shown by its group that the labels show first.
+        (
+            ["x", "1", 1.0, 1, "y", 1.5, "1.5"],
+            "equal values that print differently, such as 1.0 and 1, and different "
+            "values that print alike, such as '1' and 1",
+        ),
         # A long value is quoted by its start and its end.
         (
-            ["x" * 200, 1],
-            "text values such as '" + "x" * 37 + "..." + "x" * 38 + "' and integer "
-            "values such as 1",
+            ["1" * 200, int("1" * 200)],
+            "different values that print alike, such as '"
+            + "1" * 37
+            + "..."
+            + "1" * 38
+            + "' and "
+            + "1" * 38
+            + "..."
+            + "1" * 39,
         ),
     ],
 )
-def test_require_one_value_kind_names_each_kind_by_its_first_value(values, kinds):
+def test_require_labels_distinct_as_text_quotes_one_group_of_each_conflict(
+    labels, found
+):
     with pytest.raises(ValueError) as raised:
-        require_one_value_kind(values, name="labels", remedy="convert them")
+        require_labels_distinct_as_text(labels, name="labels", remedy="convert them")
 
-    assert str(raised.value) == f"labels mixes {kinds}; convert them"
+    assert str(raised.value) == f"labels holds {found}; convert them"
+
+
+def test_require_labels_distinct_as_text_refuses_labels_in_two_dimensions():
+    with pytest.raises(ValueError, match="^labels must be one-dimensional$"):
+        require_labels_distinct_as_text(
+            np.zeros((2, 2)), name="labels", remedy="convert them"
+        )
+
+
+def test_require_labels_distinct_as_text_reads_no_typed_array(monkeypatch):
+    def unread(*args, **kwargs):
+        raise AssertionError("the labels were read one by one")
+
+    # Ten million integer labels would make as many Python objects to group.
+    monkeypatch.setattr(pd, "factorize", unread)
+    monkeypatch.setattr(pd.api.types, "infer_dtype", unread)
+    for labels in (
+        np.zeros(4, dtype=np.int64),
+        np.zeros(4, dtype=bool),
+        np.asarray(["a", "b"]),
+        np.asarray([b"a", b"b"]),
+        np.asarray(["2020-01-01"], dtype="datetime64[D]"),
+        np.asarray([0.0, -0.0, 1.0], dtype=np.float32)[[0, 2]],
+    ):
+        require_labels_distinct_as_text(labels, name="labels", remedy="convert them")
+    with pytest.raises(AssertionError, match="read one by one"):
+        require_labels_distinct_as_text(
+            np.asarray(["a", 1], dtype=object), name="labels", remedy="convert them"
+        )
 
 
 def test_read_only_copy_owns_its_values_and_stays_read_only():

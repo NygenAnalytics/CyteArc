@@ -13,7 +13,11 @@ import numpy as np
 import pandas as pd
 
 from ..metadata.selection import valid_category_mask
-from ..utils.arguments import float_argument, integer_argument, require_one_value_kind
+from ..utils.arguments import (
+    float_argument,
+    integer_argument,
+    require_labels_distinct_as_text,
+)
 from ..utils.numba import njit
 
 __all__ = [
@@ -208,10 +212,10 @@ def regulon_specificity(
     Args:
         activity: Cells-by-regulons non-negative activity, such as AUCell AUCs.
         labels: Group of each cell, aligned by position with ``activity``.
-            Every cell needs a label, and the labels must be of one kind:
-            text, boolean, integer or float, where a NumPy scalar counts as
-            its Python type, or one other type. Equal labels, such as ``1``
-            and ``np.int64(1)``, form one group.
+            Every cell needs a label. Labels of any types may mix, as long as
+            equal labels print alike and different labels print apart, so
+            ``1`` beside ``np.int64(1)`` is one group and ``"a"`` beside
+            ``1`` two.
 
     Returns:
         A groups-by-regulons DataFrame, groups in order of first appearance
@@ -222,9 +226,9 @@ def regulon_specificity(
         ValueError: If ``labels`` does not hold one label for each row of
             ``activity``, a label is missing or blank (None, NaN, ``pd.NA``,
             ``pd.NaT``, a missing categorical value, or empty or whitespace
-            text), the labels are of more than one kind, such as the integer
-            ``1`` beside the float ``1.0`` or the text ``"1"``, or a value of
-            activity is negative or not finite.
+            text), equal labels print differently, such as ``1``, ``1.0`` and
+            ``True``, or different labels print alike, such as ``1`` and
+            ``"1"``, or a value of activity is negative or not finite.
     """
     values = np.asarray(activity)
     groups = np.asarray(labels, dtype=object)
@@ -236,15 +240,14 @@ def regulon_specificity(
             f"labels holds no label for {unlabeled} of the {len(groups)} cells to "
             "score; pass the activity and labels of the labeled cells"
         )
-    group_labels = groups.tolist()
     # Python takes 1, 1.0 and True for one label, which would score their
     # cells as one group, and keeps 1 and "1" apart in rows that print alike.
-    require_one_value_kind(
-        group_labels,
+    require_labels_distinct_as_text(
+        labels,
         name="labels",
-        remedy="convert the labels to one kind, such as text, first",
+        remedy="convert the labels to text, or to one type, first",
     )
-    order = list(dict.fromkeys(group_labels))
+    order = list(dict.fromkeys(groups.tolist()))
     # A cell whose label equals none of the labels keeps -1, which
     # specificity_scores refuses.
     codes = np.full(len(groups), -1, dtype=np.int64)

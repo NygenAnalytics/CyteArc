@@ -1,3 +1,5 @@
+import re
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -409,6 +411,24 @@ def test_graph_connectivity_validates_inputs():
             np.array([[0, 1]]),
             np.array([0, np.nan]),
         )
+
+
+def test_graph_connectivity_refuses_labels_that_print_otherwise_than_they_compare():
+    # Each pair of cells is joined by an edge, so each label of two cells is
+    # whole; 1, 1.0 and True as one label would leave it in three pieces.
+    edges = np.array([[0, 1], [2, 3], [4, 5], [6, 7]])
+    merged = np.asarray([1, 1, 1.0, 1.0, True, True, 2, 2], dtype=object)
+
+    with pytest.raises(
+        ValueError,
+        match=re.escape(
+            "labels holds equal values that print differently, such as 1, 1.0 and "
+            "True; convert the labels to text, or to one type, first"
+        ),
+    ):
+        graph_connectivity(edges, merged)
+    mixed = np.asarray(["a", "a", 2, 2, 2.5, 2.5, True, True], dtype=object)
+    assert graph_connectivity(edges, mixed) == 1.0
 
 
 def test_cluster_similarity_is_symmetric_with_unit_diagonal():
@@ -837,6 +857,32 @@ def test_label_concordance_partial_agreement(metric, expected):
 def test_label_concordance_requires_exactly_two_partitions():
     with pytest.raises(ValueError, match="Exactly two"):
         label_concordance_score([np.array([0, 1])])
+
+
+def test_label_concordance_refuses_labels_that_print_otherwise_than_they_compare():
+    four = np.asarray(list("aabbccdd"), dtype=object)
+    merged = np.asarray([1, 1, 1.0, 1.0, True, True, 2, 2], dtype=object)
+
+    with pytest.raises(
+        ValueError,
+        match=re.escape(
+            "label_sets[0] holds equal values that print differently, such as 1, "
+            "1.0 and True; convert the labels to text, or to one type, first"
+        ),
+    ):
+        label_concordance_score([merged, four])
+    # NumPy would read the list's 1 and "1" as one text.
+    with pytest.raises(
+        ValueError,
+        match=re.escape(
+            "label_sets[1] holds different values that print alike, such as 1 and '1'"
+        ),
+    ):
+        label_concordance_score([four, [1, 1, "1", "1", 2, 2, 3, 3]])
+    # Numbers of several types that print apart are four labels, which match
+    # the four letters exactly.
+    numbers = np.asarray([2, 2, 2.5, 2.5, True, True, 3, 3], dtype=object)
+    assert label_concordance_score([numbers, four]) == 1.0
 
 
 def test_lisi_batch_mixing_score():

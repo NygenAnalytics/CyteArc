@@ -1,5 +1,7 @@
 """Tests for association and estimability helpers."""
 
+import re
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -132,6 +134,51 @@ def test_eta_squared_of_constant_values_is_not_computed() -> None:
         "rowsUsed": 4,
         "rowsMissing": 1,
     }
+
+
+# 1, 1.0 and True compare equal, so pandas would take them for one level.
+_MERGED = np.asarray([1, 1, 1.0, 1.0, True, True, 2, 2], dtype=object)
+_FOUR = np.asarray(list("aabbccdd"), dtype=object)
+_MERGED_FOUND = (
+    "holds equal values that print differently, such as 1, 1.0 and True; convert "
+    "the labels to text, or to one type, first"
+)
+
+
+@pytest.mark.parametrize("measure", [cramers_v, directional_mapping])
+def test_categorical_measures_refuse_labels_that_print_otherwise_than_they_compare(
+    measure,
+) -> None:
+    with pytest.raises(ValueError, match=re.escape(f"left {_MERGED_FOUND}")):
+        measure(_MERGED, _FOUR)
+    with pytest.raises(ValueError, match=re.escape(f"right {_MERGED_FOUND}")):
+        measure(_FOUR, _MERGED)
+    # NumPy would read the list's 1 and "1" as one text.
+    with pytest.raises(
+        ValueError,
+        match=re.escape("left holds different values that print alike, such as 1"),
+    ):
+        measure([1, 1, "1", "1", 2, 2, 3, 3], _FOUR)
+
+
+def test_eta_squared_refuses_groups_that_print_otherwise_than_they_compare() -> None:
+    values = np.array([0.0, 0.1, 5.0, 5.1, 9.0, 9.1, 3.0, 3.1])
+
+    with pytest.raises(ValueError, match=re.escape(f"categorical {_MERGED_FOUND}")):
+        eta_squared(values, _MERGED)
+
+
+def test_categorical_measures_score_mixed_labels_that_print_apart_as_text() -> None:
+    mixed = np.asarray(["a", "a", 2, 2, 2.5, 2.5, True, True], dtype=object)
+    texts = mixed.astype(str)
+    values = np.array([0.0, 0.1, 5.0, 5.1, 9.0, 9.1, 3.0, 3.1])
+
+    # Each label of the four is a level of its own, as its text is.
+    assert cramers_v(mixed, _FOUR)["nLevelsLeft"] == 4
+    assert cramers_v(mixed, _FOUR) == cramers_v(texts, _FOUR)
+    assert directional_mapping(_FOUR, mixed) == directional_mapping(_FOUR, texts)
+    assert eta_squared(values, mixed) == eta_squared(values, texts)
+    assert eta_squared(values, mixed)["nLevels"] == 4
 
 
 def test_spearman_rho_perfect_monotone() -> None:

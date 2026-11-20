@@ -17,7 +17,7 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
-from ...utils.arguments import require_one_value_kind
+from ...utils.arguments import require_labels_distinct_as_text
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,26 +135,27 @@ def _ordered_levels(column: pd.Series, name: object, out: np.ndarray) -> list[ob
     """Write a column's local level codes into ``out`` and return its levels in order.
 
     A categorical column keeps the declared order of the categories that occur. Any
-    other column must hold values of one kind, as ``require_one_value_kind``
-    defines them, and orders its distinct values with Python's ``sorted``, so
-    numbers sort numerically and text by code point.
+    other column orders its distinct values with Python's ``sorted``, so numbers
+    sort numerically and text by code point. Results name levels by their text,
+    and pandas takes values that compare equal for one level, so a column whose
+    values group otherwise by value than by text is refused first.
     """
+    require_labels_distinct_as_text(
+        column,
+        name=f"Batch column {name!r}",
+        remedy="convert it to text, or to one type, first",
+    )
     if isinstance(column.dtype, pd.CategoricalDtype):
         used = column.cat.remove_unused_categories()
         out[...] = used.cat.codes.to_numpy()
         return list(used.cat.categories.tolist())
-    require_one_value_kind(
-        column.to_numpy(),
-        name=f"Batch column {name!r}",
-        remedy="convert it to one kind, such as text, first",
-    )
     codes, uniques = pd.factorize(column, sort=False)
     values = list(uniques.tolist())
     try:
         order = sorted(range(len(values)), key=values.__getitem__)
     except TypeError as error:
         raise ValueError(
-            f"Batch column {name!r} holds values that cannot be ordered; convert it "
+            f"Batch column {name!r} mixes values that cannot be ordered; convert it "
             "to text or to an ordered categorical"
         ) from error
     rank = np.empty(len(order), dtype=np.int32)
@@ -163,26 +164,14 @@ def _ordered_levels(column: pd.Series, name: object, out: np.ndarray) -> list[ob
     return [values[index] for index in order]
 
 
-def _level_texts(levels: list[object], name: object) -> tuple[str, ...]:
-    texts = tuple(str(level) for level in levels)
-    seen: set[str] = set()
-    for text in texts:
-        if text in seen:
-            raise ValueError(
-                f"Batch column {name!r} has distinct values with the same text "
-                f"{text!r}; convert the column to text first"
-            )
-        seen.add(text)
-    return texts
-
-
 def encode_batch_design(metadata: pd.DataFrame) -> BatchDesign:
     """Encode batch columns as global level codes in design order and group cells by level combination.
 
-    Unused categories of a categorical column are not levels. Two levels of one
-    column may not share their text, because results name levels by text, and
-    the values of a column other than a categorical must be of one kind, because
-    pandas takes ``1``, ``1.0`` and ``True`` for one level.
+    Unused categories of a categorical column are not levels. A column's
+    values must group alike by value and by text, since results name levels by
+    text: equal values that print differently, such as ``1``, ``1.0`` and
+    ``True``, which pandas would take for one level, and different values that
+    print alike, such as ``1`` and ``"1"``, are refused.
 
     Args:
         metadata: One row per cell and one column per batch variable, already
@@ -192,8 +181,9 @@ def encode_batch_design(metadata: pd.DataFrame) -> BatchDesign:
         The encoded design.
 
     Raises:
-        ValueError: If a column's values are of more than one kind or cannot be
-            ordered, or two of its levels have the same text.
+        ValueError: If a column holds equal values that print differently or
+            different values that print alike, or values that cannot be
+            ordered.
     """
     n_cells = len(metadata)
     n_columns = int(metadata.shape[1])
@@ -204,7 +194,7 @@ def encode_batch_design(metadata: pd.DataFrame) -> BatchDesign:
         ordered = _ordered_levels(
             metadata.iloc[:, position], name, level_codes[position]
         )
-        levels.append(_level_texts(ordered, name))
+        levels.append(tuple(str(level) for level in ordered))
     sizes = [len(column_levels) for column_levels in levels]
     level_offsets = np.zeros(n_columns + 1, dtype=np.int64)
     np.cumsum(sizes, out=level_offsets[1:])

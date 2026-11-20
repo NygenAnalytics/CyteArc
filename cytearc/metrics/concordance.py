@@ -4,6 +4,8 @@ from typing import Literal
 import numpy as np
 import pandas as pd
 
+from ..utils.arguments import require_labels_distinct_as_text
+
 
 def label_concordance_score(
     label_sets: Sequence[np.ndarray],
@@ -17,6 +19,13 @@ def label_concordance_score(
 
     Returns:
         Label agreement. ARI ranges from -1 to 1 and NMI from 0 to 1.
+
+    Raises:
+        ValueError: If ``label_sets`` does not hold two one-dimensional
+            arrays of one length without missing values, an array holds equal
+            labels that print differently, such as ``1``, ``1.0`` and
+            ``True``, or different labels that print alike, such as ``1`` and
+            ``"1"``, or ``metric`` is neither ``"ari"`` nor ``"nmi"``.
     """
     from sklearn.metrics import adjusted_rand_score, normalized_mutual_info_score
 
@@ -31,6 +40,12 @@ def label_concordance_score(
         raise ValueError("Label arrays must have matching lengths")
     if pd.isna(first).any() or pd.isna(second).any():
         raise ValueError("Label arrays must not contain missing values")
+    for index, labels in enumerate(label_sets):
+        require_labels_distinct_as_text(
+            labels,
+            name=f"label_sets[{index}]",
+            remedy="convert the labels to text, or to one type, first",
+        )
 
     if metric == "ari":
         return float(adjusted_rand_score(first, second))

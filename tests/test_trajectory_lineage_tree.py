@@ -1,3 +1,5 @@
+import re
+
 import numpy as np
 import pytest
 
@@ -596,3 +598,37 @@ def test_build_cluster_tree_refuses_what_lineage_tree_refuses():
     # far apart, so no tree joins them.
     with pytest.raises(ValueError, match="only across an infinite distance"):
         build_cluster_tree([[0.0], [1.0]], ["a", "b"])
+
+
+def test_build_cluster_tree_refuses_labels_that_print_otherwise_than_they_compare():
+    # Two cells about each of four centers.
+    coordinates = np.asarray(
+        [[0.0], [1.0], [10.0], [11.0], [20.0], [21.0], [30.0], [31.0]]
+    )
+    remedy = "; convert the labels to text, or to one type, first"
+
+    # NumPy would read the list as the floats 1.0 and 2.0, two clusters.
+    with pytest.raises(
+        ValueError,
+        match=re.escape(
+            "labels holds equal values that print differently, such as 1, 1.0 and "
+            "True" + remedy
+        ),
+    ):
+        build_cluster_tree(coordinates, [1, 1, 1.0, 1.0, True, True, 2, 2])
+    # NumPy would read the list's 1 and "1" as one text.
+    with pytest.raises(
+        ValueError,
+        match=re.escape(
+            "labels holds different values that print alike, such as 1 and '1'" + remedy
+        ),
+    ):
+        build_cluster_tree(coordinates, [1, 1, "1", "1", 2, 2, 3, 3])
+
+    # Labels of several types that print apart are four clusters of two cells,
+    # in their natural order.
+    mixed = np.asarray(["a", "a", 2, 2, 2.5, 2.5, True, True], dtype=object)
+    tree = build_cluster_tree(coordinates, mixed)
+    assert tree.clusters == (2, 2.5, "a", True)
+    np.testing.assert_array_equal(tree.sizes, [2, 2, 2, 2])
+    np.testing.assert_allclose(tree.means, [[10.5], [20.5], [0.5], [30.5]])

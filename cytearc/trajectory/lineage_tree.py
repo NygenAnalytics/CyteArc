@@ -16,6 +16,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from ..utils.arguments import require_labels_distinct_as_text
 from ..utils.arrays import sort_categories
 from .results import ClusterTree
 
@@ -407,7 +408,9 @@ def build_cluster_tree(
             list, or the root or an end is not a scalar label.
         ValueError: If ``coordinates`` are not finite cells by dimensions,
             ``labels`` does not hold one label for each of their rows, a
-            label is missing, fewer than two clusters remain, the root or an
+            label is missing, equal labels print differently, such as ``1``,
+            ``1.0`` and ``True``, or different labels print alike, such as
+            ``1`` and ``"1"``, fewer than two clusters remain, the root or an
             end is not a cluster label or repeats, the root is also an end,
             every cluster is an end, or the tree can join two clusters only
             across an infinite distance.
@@ -435,6 +438,11 @@ def build_cluster_tree(
             "Every cell needs a label; leave out the cells without one, from "
             "both coordinates and labels"
         )
+    require_labels_distinct_as_text(
+        labels,
+        name="labels",
+        remedy="convert the labels to text, or to one type, first",
+    )
     clusters, codes = cluster_codes(cell_labels)
     if len(clusters) < 2:
         raise ValueError("A lineage tree needs at least two clusters")

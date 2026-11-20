@@ -1,4 +1,5 @@
 import json
+import re
 from dataclasses import replace
 from pathlib import Path
 
@@ -665,15 +666,42 @@ def test_symphony_r_0_1_3_static_golden_fixture():
 
 
 @pytest.mark.parametrize(
-    "values",
-    [[1, "1", "1", 1], [b"a", "a", "a", b"a"], [1.5, "1.5", 1.5, "1.5"]],
+    ("values", "message"),
+    [
+        # The query batch fingerprint hashes values by their text...
+        (
+            [1, "1", "1", 1],
+            "holds different values that print alike, such as 1 and '1'",
+        ),
+        (
+            [1.5, "1.5", 1.5, "1.5"],
+            "holds different values that print alike, such as 1.5 and '1.5'",
+        ),
+        (
+            [np.float32(0.1), 0.1, 0.1, np.float32(0.1)],
+            "holds different values that print alike, such as np.float32(0.1) and 0.1",
+        ),
+        # ...and pandas takes 1, 1.0 and True for one batch...
+        (
+            [1, 1.0, True, 1],
+            "holds equal values that print differently, such as 1, 1.0 and True",
+        ),
+        # ...and the fingerprint hashes a byte string by the text it encodes.
+        (
+            [b"a", "a", "a", b"a"],
+            "holds a byte string and another value with the same text",
+        ),
+        (
+            [b"1", 1, 1, b"1"],
+            "holds a byte string and another value with the same text",
+        ),
+    ],
 )
-def test_query_batch_design_rejects_values_that_share_their_text(values):
+def test_query_batch_design_rejects_values_that_share_their_text(values, message):
     from cytearc.datastore._operations.mapping import _MappingOperationsMixin
 
-    # The query batch fingerprint hashes values by their text.
     batches = pd.DataFrame({"batch": pd.Series(values, dtype=object)})
-    with pytest.raises(ValueError, match="same text"):
+    with pytest.raises(ValueError, match=re.escape(f"column 'batch' {message}")):
         _MappingOperationsMixin._query_batch_design(batches)
 
 
