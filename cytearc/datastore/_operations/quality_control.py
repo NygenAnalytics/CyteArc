@@ -2414,7 +2414,8 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
         """Feature selection method for ATACassay type assays.
 
         This method first calculates prevalence of each peak by computing sum of TF-IDF normalized values for each peak
-        and then marks `top_n` peaks with the highest prevalence as prevalent peaks.
+        and then marks `top_n` peaks with the highest prevalence as prevalent peaks. Peaks whose prevalence ties at the
+        cutoff are kept in feature order, so every platform selects the same peaks.
 
         Args:
             from_assay: Assay to use for peak selection. If no value is provided

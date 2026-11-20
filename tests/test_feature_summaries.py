@@ -132,27 +132,64 @@ def test_prevalent_peak_kernel_is_compute_only() -> None:
     assert not hasattr(ATACassay, "mark_prevalent_peaks")
 
 
-def test_prevalent_peak_kernel_pins_descending_and_tie_order() -> None:
+def _peak_assay(n_peaks: int) -> ATACassay:
+    """Return an ATAC assay of ``n_peaks`` features, all that the mask reads."""
     root = zarr.open_group(store=MemoryStore(), mode="w")
     features = root.create_group("featureData")
-    names = np.asarray(["a", "b", "c", "d", "e"])
-    features.create_array("I", data=np.ones(len(names), dtype=bool))
+    names = np.asarray([f"peak_{index}" for index in range(n_peaks)])
+    features.create_array("I", data=np.ones(n_peaks, dtype=bool))
     features.create_array("ids", data=names)
     features.create_array("names", data=names)
     assay = ATACassay.__new__(ATACassay)
     assay.feats = MetaData(features)
+    return assay
 
-    values = assay._prevalent_peak_mask(
-        np.array([1.0, 2.0, 2.0, 2.0, 0.0]),
-        2,
+
+@pytest.mark.parametrize(
+    ("prevalence", "top_n", "expected"),
+    [
+        # Peaks 1, 2 and 3 tie above the rest; the first two are kept.
+        ([1.0, 2.0, 2.0, 2.0, 0.0], 2, [False, True, True, False, False]),
+        # Every peak ties, so the first ones are kept.
+        ([0.5] * 6, 4, [True, True, True, True, False, False]),
+        # Zeros of either sign tie with each other.
+        ([0.0, 3.0, -0.0, 0.0, 3.0, -0.0], 4, [True, True, True, False, True, False]),
+        # NaN sorts below every number, its peaks in feature order.
+        ([np.nan, 1.0, np.nan, 2.0, 1.0], 3, [False, True, False, True, True]),
+        ([np.nan, 1.0, np.nan, 2.0, 1.0], 4, [True, True, False, True, True]),
+    ],
+)
+def test_prevalent_peak_kernel_keeps_tied_peaks_in_feature_order(
+    prevalence: list[float], top_n: int, expected: list[bool]
+) -> None:
+    values = _peak_assay(len(prevalence))._prevalent_peak_mask(
+        np.asarray(prevalence), top_n
     )
 
-    # Preserve the pandas descending-sort tie order: indices 1 and 3
-    # are selected before the third equal-valued peak at index 2.
-    np.testing.assert_array_equal(
-        values,
-        np.array([False, True, False, True, False]),
+    np.testing.assert_array_equal(values, expected)
+
+
+@pytest.mark.parametrize("top_n", [1, 7, 500, 1999])
+@pytest.mark.parametrize("seed", range(3))
+def test_prevalent_peaks_tied_at_the_cutoff_are_kept_in_feature_order(
+    seed: int, top_n: int
+) -> None:
+    # Six levels tie across every cutoff, in an array long enough that an
+    # unstable sort reorders ties on ARM and x86 alike.
+    prevalence = (
+        np.random.default_rng(seed).integers(0, 6, size=2000).astype(np.float64)
     )
+
+    kept = _peak_assay(prevalence.size)._prevalent_peak_mask(prevalence, top_n)
+
+    assert kept.sum() == top_n
+    cutoff = prevalence[kept].min()
+    assert cutoff >= prevalence[~kept].max()
+    # The cutoff splits a tie, and the tied peaks kept come before the
+    # tied peaks left out.
+    tied = kept[prevalence == cutoff]
+    assert tied.any() and not tied.all()
+    assert np.all(tied[: tied.sum()])
 
 
 def test_corrupt_feature_summary_is_never_reused(datastore_ephemeral) -> None:
