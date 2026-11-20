@@ -688,8 +688,9 @@ def test_a_reorder_counts_its_values_before_it_writes_a_row(
     finally:
         logger.remove(handler)
     (peak,) = peaks
-    # The buckets and the disk check take every value, and a count of the
-    # reorder's own reads the rows once more, which it says.
+    # The buckets and the disk check take the number of values that the
+    # files hold, and the reorder reads the rows a second time only to count
+    # them, which it says.
     assert expected == [n_values]
     by_reorder = counted.startswith("by the reorder")
     assert len(streams) == (2 if by_reorder else 1)

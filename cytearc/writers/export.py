@@ -473,7 +473,7 @@ def _append_batch(
 
 
 def _stored_entries(matrix: H5adMatrix, label: str) -> int:
-    """Return the values that ``matrix`` stores: its own count, or a count over its blocks.
+    """Return the number of values that ``matrix`` stores: its own count, or a count of its blocks.
 
     A dense block stores its nonzero values, and a sparse block its entries.
     """
@@ -507,9 +507,9 @@ def _reordered_blocks(
 ) -> Iterator[csr_matrix]:
     """Yield the rows of ``matrix`` in ``order``, through a row bucket store on local disk.
 
-    The values, ``entries`` or else the matrix's count of them, size the
-    buckets and check the free disk with what the first piece that the
-    stream yields takes on disk per value. Each bucket's files are deleted
+    The number of values, ``entries`` or else the matrix's count of them,
+    sizes the buckets and checks the free disk, at the bytes per value of
+    the first piece that the stream yields. Each bucket's files are deleted
     once its rows are yielded, and closing the store removes the rest.
     """
     from ..readers._sparse import SparseRowStore, encoded_entry_bytes
@@ -602,10 +602,10 @@ def reordered_matrix(
     in output order. The temporary files take about what the rows take in
     the export, in ``temp_dir``, the system's temporary directory when None,
     and each bucket's files are deleted once its rows are written. The
-    matrix's stored values size the buckets and check the free disk before
-    any row is written: ``entries`` when the caller has counted them, else
-    the count of the matrix's ``reserve``, else a count in a pass over its
-    blocks.
+    number of stored values sizes the buckets and checks the free disk
+    before any row is written: ``entries`` when the caller has counted
+    them, else the count of the matrix's ``reserve``, else a count in a
+    read of its blocks.
 
     Raises:
         ValueError: If ``order`` is not a permutation of the matrix's rows.
@@ -2659,9 +2659,9 @@ def to_h5ad(
                          ``["UMAP", "tSNE"]``. Pass an empty list to skip
                          embeddings.
         skip_recalc_nfeats: Skip a preliminary pass that counts the stored
-                            values, for which the file's arrays are then
-                            allocated. An export in source order counts
-                            them either way, once. (Default value: True)
+                            values to allocate the file's arrays. An
+                            export in source order counts them either way,
+                            once. (Default value: True)
         nthreads: Threads that read the counts and compress them into the
                   file. (Default value: 4)
         run: Completed pipeline run opened from the datastore that owns
