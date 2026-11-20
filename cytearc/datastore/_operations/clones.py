@@ -2900,9 +2900,9 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             TypeError: If an argument has the wrong type.
             ValueError: If ``clones`` is not a clone artifact, ``early`` or
                 ``late`` is not a cell selection or selects no cell, a cell is
-                both early and late, the clones give no late cell a clone, no
-                late cell with a clone has a fate, fewer than two fates hold a
-                late cell, a column of
+                both early and late, the clones give no early cell or no late
+                cell a clone, no late cell with a clone has a fate, fewer than
+                two fates hold a late cell, a column of
                 the fates is missing or named twice, two key columns share a
                 name, or two fates get one name.
             KeyError: If the store holds no such ``clones`` artifact, or not the
@@ -2956,6 +2956,18 @@ class _CloneOperationsMixin(_CloneOperationsBase):
                 "that no cell is in both, such as two time points"
             )
         del shared
+        # The early cells' clones alone: their labels kept apart are their
+        # clones'. Early cells of which none has a clone are refused here,
+        # before the late cells are grouped and the result is planned.
+        _early, early_codes, _none = self._measured_clone_cells(
+            source, early, ledger, with_kept=False
+        )
+        if not (early_codes >= 0).any():
+            raise ValueError(
+                f"None of the {n_early} cells of early has a clone; pass early "
+                "cells that the clones give a clone, or clones imported on the "
+                "early cells too"
+            )
         _late, late_codes, late_kept = self._measured_clone_cells(source, late, ledger)
         # The labels that the clones keep apart belong to the clones, so a late
         # cell without a clone has none, and no fate, whatever label its
@@ -2967,14 +2979,9 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             _cleared_label_bytes(len(late_codes), len(late_kept)),
         )
         late_kept = _cleared_labels(late_codes, late_kept)
-        # The clones' codes and their late cells' are held while the late
-        # cells are grouped into fates; a late selection of the clones' own
-        # cells shares their codes.
-        if late_codes is source.codes:
-            ledger.hold(
-                "the labels that the late cells' clones keep apart",
-                8 * len(late_codes) * len(late_kept),
-            )
+        # The late cells' clones and labels are copies that the ledger holds:
+        # late cells that are the clones' own cells would leave the early
+        # cells, which share none of them, without a clone.
         # Every late cell may join a fate, a flag each while they are grouped.
         rows = ledger.hold("the late cells to group", len(late_codes))
         grouped = cell_groups(
@@ -3102,11 +3109,6 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         del grouped, late_codes, late_kept, counted
         n_tested = len(sorted_unique(pair_codes))
         n_late_counted = int(pair_cells.sum())
-        # The early cells' clones alone: their labels kept apart are their
-        # clones'.
-        _early, early_codes, _none = self._measured_clone_cells(
-            source, early, ledger, with_kept=False
-        )
         width = max(len(str(name)) for name in names.tolist())
         ledger.peak(
             f"measuring the fate bias of {n_early} early cells and {n_tested} "
