@@ -750,6 +750,95 @@ def test_sources_of_different_size_factors_are_refused_before_a_write(
     assert joint.RNA.sf == 2500.5 and type(joint.RNA.sf) is float
 
 
+def _combine(sources: dict[str, DataStore], destination: Path, combine: str):
+    """Merge the sources, or compose twenty cells of each, at ``destination``."""
+    if combine == "merge":
+        DataStoreMerge(
+            list(sources.values()), str(destination), list(sources), nthreads=1
+        ).dump()
+        return _open(destination)
+    return create_composite(
+        sources,
+        at=str(destination),
+        features="intersection",
+        rows={name: np.arange(20) + 20 * i for i, name in enumerate(sources)},
+        nthreads=1,
+    )
+
+
+@pytest.mark.parametrize("combine", ["merge", "composite"])
+def test_a_source_without_a_session_size_factor_combines_with_its_stored_one(
+    tmp_path, combine
+):
+    first = _counts_with_size_factor(tmp_path / "a", 2500.5)
+    second = _counts_with_size_factor(tmp_path / "b", 2500.5)
+    # Sessions that normalize with a custom normalizer may set no factor.
+    first.RNA.sf = None
+    second.RNA.sf = None
+
+    joint = _combine({"a": first, "b": second}, tmp_path / "joint.zarr", combine)
+
+    # Before, the combined assay recorded no factor and took 1000.
+    assert joint.RNA.sf == 2500.5
+    assert joint.RNA.attrs["size_factor"] == 2500.5
+    # A source that stores 1000 normalizes with 1000 in a new session, so it
+    # is refused beside a source of 2500.5; before, the combined assay
+    # recorded 2500.5 for its cells too.
+    third = _counts_with_size_factor(tmp_path / "c", 1000)
+    third.RNA.sf = None
+    destination = tmp_path / "refused.zarr"
+    with pytest.raises(
+        ValueError,
+        match=r"^Sources normalize assay 'RNA' with different size factors: 'c' "
+        r"1000, 'b' 2500\.5\. ",
+    ):
+        _combine({"c": third, "b": second}, destination, combine)
+    assert not destination.exists()
+
+
+@pytest.mark.parametrize("combine", ["merge", "composite"])
+def test_a_session_size_factor_that_no_assay_opens_with_is_refused(tmp_path, combine):
+    first = _counts_with_size_factor(tmp_path / "a", 1000)
+    second = _counts_with_size_factor(tmp_path / "b", 1000)
+    first.RNA.sf = -1000
+    second.RNA.sf = -1000
+    destination = tmp_path / "refused.zarr"
+
+    # Before, the combined assay recorded -1000, and no open of it succeeded.
+    with pytest.raises(
+        ValueError,
+        match=r"^Source 'a': ds\.RNA\.sf is -1000, which is not a finite positive "
+        r"number\. ",
+    ):
+        _combine({"a": first, "b": second}, destination, combine)
+    assert not destination.exists()
+
+
+def test_assays_of_a_class_without_a_size_factor_combine_without_one(tmp_path):
+    rng = np.random.default_rng(11)
+    for name in ("a", "b"):
+        (tmp_path / name).mkdir()
+        write_count_store(
+            str(tmp_path / name / "store.zarr"),
+            {
+                "RNA": rng.poisson(2.0, size=(20, 6)) + 1,
+                "ADT": rng.poisson(9.0, size=(20, 4)) + 1,
+            },
+            "uint16",
+            cell_ids=[f"{name}{i}" for i in range(20)],
+        )
+    first, second = (_open(tmp_path / name / "store.zarr") for name in ("a", "b"))
+    # CLR has no size factor, and the ADT class reads none when it opens, so
+    # factors that the sessions set are neither compared nor recorded.
+    first.ADT.sf = 5
+    second.ADT.sf = 7
+
+    joint = _combine({"a": first, "b": second}, tmp_path / "joint.zarr", "merge")
+
+    assert "size_factor" not in joint.ADT.attrs
+    assert joint.RNA.attrs["size_factor"] == 1000
+
+
 def test_a_merge_with_counts_holds_normalized_values_of_no_single_import(
     normalized_source, tmp_path
 ):

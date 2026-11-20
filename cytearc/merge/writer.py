@@ -6,6 +6,7 @@ import numpy as np
 import zarr
 from scipy.sparse import coo_matrix
 
+from ..assay.rna import RNAassay, library_size_factor
 from ..storage.budget import ResourceBudget
 from ..storage.identity import CountSummary, finalize_counts, load_count_summaries
 from ..storage.count_matrix import CountMatrixPolicy
@@ -130,23 +131,30 @@ def shared_normalization(assay_name: str, sources: Mapping[str, Any]) -> dict[st
     """Return the attributes that tell how a combined assay normalizes, as its sources do.
 
     A combined assay keeps the size factor that its sources normalize with,
+    the session's ``sf`` of each source or, when a session sets none, the one
+    that the source stores (:func:`~cytearc.assay.rna.library_size_factor`),
     and the ``tfDenominator`` of melded TF-IDF values, which an RNA class
     passes through, so that it normalizes their values as they do. Sources
-    whose class has no size factor, such as ADT assays, give none.
+    whose class normalizes without a size factor, such as ADT assays, give
+    none, whatever their sessions set.
 
     Args:
         assay_name: The combined assay, which the errors name.
         sources: Each source's assay, by the source's name.
 
     Raises:
-        ValueError: If two sources normalize with different size factors, or
+        ValueError: If a session's ``sf`` of a source is not a finite positive
+            number, two sources normalize with different size factors, or
             some hold melded TF-IDF values and others do not.
     """
-    factors = {
-        name: source.sf
-        for name, source in sources.items()
-        if getattr(source, "sf", None) is not None
-    }
+    factors: dict[str, float] = {}
+    for name, source in sources.items():
+        if not isinstance(source, RNAassay):
+            continue
+        try:
+            factors[name] = library_size_factor(source)
+        except ValueError as error:
+            raise ValueError(f"Source {name!r}: {error}") from error
     if len(set(factors.values())) > 1:
         listed = ", ".join(f"{name!r} {factor!r}" for name, factor in factors.items())
         raise ValueError(
@@ -169,8 +177,7 @@ def shared_normalization(assay_name: str, sources: Mapping[str, Any]) -> dict[st
         )
     kept: dict[str, Any] = {}
     if factors:
-        # Attributes are JSON, so a NumPy number is kept as the number it holds.
-        kept["size_factor"] = np.asarray(next(iter(factors.values()))).item()
+        kept["size_factor"] = next(iter(factors.values()))
     denominator = next(iter(denominators.values()), None)
     if denominator is not None:
         kept[TF_DENOMINATOR_ATTR] = denominator

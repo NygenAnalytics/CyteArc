@@ -347,16 +347,7 @@ store once with `zarr_mode="r+"` to record it. An `assayTypes` attribute that is
 mapping raises the same remedy instead of being read as empty: a writable open whose
 `assay_types` names a preset for every assay replaces it.
 
-Each open assay carries the type that its `DataStore` resolved, `Assay.assayType`, which
-`cytearc.assay.classification.declared_assay_type` returns. Merge, subset, and
-`qc.hto_demultiplexing` read that type rather than the attribute, so a workspace store opened
-with `assay_types={"tags": "HTO"}` declares `HTO` everywhere in the session that recorded it, and
-a type written to the attribute behind an open `DataStore` takes effect at its next open. Derived
-assays carry the type they were registered with. Subset, repack, and mount copy the declarations,
-and `DataStoreMerge` records the one type that every source holding an assay declares, rejecting
-sources that declare different types. A mount opens each target assay as its `assay_types` entry,
-or else as the source declares it, and requires the source's `countsT` for exactly the assays that
-open as RNA.
+Each open assay carries the type that its `DataStore` resolved, `Assay.assayType`, which `cytearc.assay.classification.declared_assay_type` returns. Merge, subset, and `qc.hto_demultiplexing` read that type rather than the attribute, so a workspace store opened with `assay_types={"tags": "HTO"}` declares `HTO` everywhere in the session that recorded it, and a type written to the attribute behind an open `DataStore` takes effect at its next open, or when it adds an assay: `add_grouped_assay`, `add_melded_assay` and `qc.correct_ambient` read `assayTypes` from the store again and write their assay's type beside the attributes that the group then holds, such as another session's `defaultAssay`. Derived assays carry the type they were registered with. Subset, repack, and mount copy the declarations, and `DataStoreMerge` records the one type that every source holding an assay declares, rejecting sources that declare different types. A mount opens each target assay as its `assay_types` entry, or else as the source declares it, and requires the source's `countsT` for exactly the assays that open as RNA.
 
 (normalized_values_attribute)=
 
@@ -364,9 +355,11 @@ open as RNA.
 
 An assay group with the attribute `normalizedValues` holds values that were normalized before import, and one without it holds counts. The record is `{"importedAs": ..., "cellTotal": ...}`: `importedAs` is `normalized`, `log_normalized`, or `log2_normalized` for an import, and null for an assay derived or combined from other values; `cellTotal` is the total that every sampled cell's values share, or null. The stored values are always linear, since imports undo a log before they write. Import writers pass the record to `create_zarr_count_assay`, which validates it, and `Assay.__init__` reads it; a record of another shape raises `ValueError`. Mount copies it with the assay attributes, a full repack copies every attribute and a data-only repack keeps it, `SubsetZarr` passes it on, `DataStoreMerge` and `create_composite` record the import kind that every source shares and no cell total, and grouped and melded assays record a null import. The dataset fingerprint does not cover it, since no operation changes it after import. ADT and ATAC classes refuse an assay that has it.
 
+(library_size_normalization)=
+
 ## Library-size normalization
 
-An RNA class normalizes by library size to the size factor in the assay group's `size_factor` attribute, a finite positive number that it reads as stored, so that 2500.5 stays 2500.5; any other value raises `ValueError` when the assay opens. An assay without one takes 1000, which a writable store records. A melded assay records `tfDenominator`, what the term frequencies of its TF-IDF values divide each cell's counts by, and an RNA class that opens such an assay passes its values through with `norm_dummy` instead of dividing them by their own totals again. Mount, both repacks and `SubsetZarr` copy both attributes, and ambient correction keeps its source's size factor. `DataStoreMerge` and `create_composite` keep both when their sources share them, and refuse sources of different size factors, or of melded and other values, before anything is written.
+An RNA class normalizes by library size to the size factor in the assay group's `size_factor` attribute, a finite positive number that it reads as stored, so that 2500.5 stays 2500.5; any other value raises `ValueError` when the assay opens. An assay without one takes 1000, which a writable store records. A melded assay records `tfDenominator`, what the term frequencies of its TF-IDF values divide each cell's counts by, and an RNA class that opens such an assay passes its values through with `norm_dummy` instead of dividing them by their own totals again. Mount, both repacks and `SubsetZarr` copy both attributes. Ambient correction records the size factor that its source normalizes with, and `DataStoreMerge` and `create_composite` keep both attributes when their sources share them. The size factor of a source is the session's `sf`, or, when the session sets `sf` to None, the factor that a new session opens the source with: the one it stores, or 1000; a source of a class without a size factor, such as ADT, gives none. Before anything is written, all three refuse a session `sf` that is not a finite positive number, and merges and composites refuse sources of different size factors, or of melded and other values.
 
 ## Pending derived assays
 

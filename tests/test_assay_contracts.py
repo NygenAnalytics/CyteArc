@@ -1,4 +1,5 @@
 import inspect
+from fractions import Fraction
 from types import SimpleNamespace
 from typing import get_type_hints
 
@@ -21,6 +22,7 @@ from cytearc.assay import (
     norm_tf_idf,
 )
 from cytearc.assay.base import raw_csr
+from cytearc.assay.rna import library_size_factor
 from cytearc.storage.artifacts import ArtifactRef, artifact_group
 from cytearc.matrix import ChunkedArray
 from cytearc.datastore.datastore import DataStore
@@ -205,6 +207,71 @@ def test_rna_without_a_size_factor_takes_1000(monkeypatch, read_only):
     assert rna.sf == 1000
     # A writable store records the default; a read-only one is left as it is.
     assert rna.attrs.get("size_factor") == (None if read_only else 1000)
+
+
+@pytest.mark.parametrize(
+    ("stored", "read_only", "expected"),
+    [(2500.5, False, 2500.5), (None, False, 1000), (None, True, 1000)],
+)
+def test_a_session_without_a_size_factor_derives_with_the_one_a_new_session_opens(
+    monkeypatch, stored, read_only, expected
+):
+    rna = _rna_with_stored_size_factor(monkeypatch, stored, read_only=read_only)
+    rna.sf = None
+
+    # The factor that the assay opens with, stored or the default of 1000,
+    # which a read-only store does not record.
+    assert library_size_factor(rna) == expected
+    assert rna.attrs.get("size_factor") == (None if read_only else expected)
+
+
+@pytest.mark.parametrize(
+    ("session", "expected"),
+    [
+        (2000, 2000),
+        (np.int64(2000), 2000),
+        (np.float32(0.5), 0.5),
+        (np.array(2500.5), 2500.5),
+        (1e6, 1e6),
+    ],
+)
+def test_a_session_size_factor_derives_as_the_python_number_it_holds(
+    monkeypatch, session, expected
+):
+    rna = _rna_with_stored_size_factor(monkeypatch, 2500.5)
+    rna.sf = session
+
+    factor = library_size_factor(rna)
+
+    # JSON attributes keep a Python number, so a NumPy number is converted.
+    assert factor == expected and type(factor) is type(expected)
+
+
+@pytest.mark.parametrize(
+    "session",
+    [
+        0,
+        -1.0,
+        np.nan,
+        np.inf,
+        True,
+        np.True_,
+        "1000",
+        [1000],
+        np.ones(1),
+        Fraction(1, 2),
+    ],
+)
+def test_a_session_size_factor_that_no_assay_opens_with_raises(monkeypatch, session):
+    rna = _rna_with_stored_size_factor(monkeypatch, 2500.5)
+    rna.name = "RNA"
+    rna.sf = session
+
+    with pytest.raises(
+        ValueError,
+        match=r"^ds\.RNA\.sf is .*, which is not a finite positive number\. ",
+    ):
+        library_size_factor(rna)
 
 
 @pytest.mark.parametrize("stored", [0, -1.0, float("inf"), True, "1000", None, [1000]])

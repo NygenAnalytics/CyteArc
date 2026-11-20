@@ -143,7 +143,16 @@ class DataStoreMerge:
                        the legacy layout without a workspace group.
         overwrite: If True, replace a merge-owned destination whose assays have
                    not been prepared by opening it as a DataStore.
-        prepend_text: Prefix added to colliding metadata column names.
+        prepend_text: Prefix joined with ``_`` to the name of every cell
+                      metadata column copied from the sources, so ``donor``
+                      becomes ``orig_donor`` with the default, and a column
+                      that several sources share is still merged into one
+                      column. ``ids``, ``names``, ``I`` and ``sourceRow`` keep
+                      their names, and the columns derived from a source's
+                      assays, such as ``RNA_nCounts`` and the membership
+                      column ``RNA_I``, are computed for the merged store
+                      rather than copied. None or ``""`` keeps the source
+                      names.
         reset_cell_filter: If True, mark every merged cell as selected.
         seed: RNG seed for interleaving source cell blocks. None draws a fresh,
               unseeded interleaving, so the merged row order can differ between runs.

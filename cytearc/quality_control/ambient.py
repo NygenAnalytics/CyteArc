@@ -23,7 +23,8 @@ gene ``g`` contributes.
   cluster that holds such a cell is excluded too. The contamination fraction
   is the ratio of the observed counts of the gene sets to the counts that pure
   soup would give, summed over the remaining cells (equations S2 and S4).
-- Correction removes ``rho_c N_c`` counts from each cell. The most likely
+- Correction removes ``rho_c N_c`` counts from each cell, or all of its
+  counts of the genes that the soup holds when they are fewer. The most likely
   removal under a multinomial model with the soup probabilities, subject to
   removing no more of a gene than the cell holds, empties genes in order of
   ``n_gc / b_g`` and takes the rest from the other genes in proportion to
@@ -114,7 +115,9 @@ class AmbientContamination:
 
     Attributes:
         fractions: The contamination fraction of each cell, indexed by cell
-            ``ids``. Correction removes this fraction of each cell's counts.
+            ``ids``. Correction removes this fraction of each cell's counts,
+            or all of the cell's counts of the genes that the soup holds when
+            they are fewer.
         estimate: The global estimate over every gene set and cell used, or
             the fraction that was supplied.
         method: ``"gene_sets"`` for an estimate from gene sets, ``"fixed"``
@@ -234,7 +237,8 @@ def soup_fractions(counts: Any) -> np.ndarray:
         The float64 fraction of each gene; the fractions sum to 1.
 
     Raises:
-        ValueError: If a count is negative or not finite, or the counts sum to 0.
+        ValueError: If the counts are not one-dimensional, a count is negative
+            or not finite, or the counts sum to 0.
     """
     values = np.asarray(counts, dtype=np.float64)
     if values.ndim != 1:
@@ -277,6 +281,7 @@ def gene_set_evidence(
         The expected counts and the p-values, both cells by sets.
 
     Raises:
+        TypeError: If ``max_contamination`` is not a real number.
         ValueError: If an argument has the wrong shape or an invalid value.
     """
     counts = np.asarray(observed, dtype=np.float64)
