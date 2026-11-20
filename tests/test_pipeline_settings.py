@@ -1390,6 +1390,12 @@ _REFUSED_SETTINGS: list[tuple[str, dict[str, Any], type[Exception], str]] = [
         "s_genes must be a sequence of gene names",
     ),
     (
+        "cell_cycle",
+        {"g2m_genes": ["TOP2A", 1]},
+        TypeError,
+        "g2m_genes must be a sequence of gene names",
+    ),
+    (
         "normalization",
         {"log_transform": 1},
         TypeError,
@@ -1543,6 +1549,18 @@ _REFUSED_SETTINGS: list[tuple[str, dict[str, Any], type[Exception], str]] = [
     ),
     ("leiden", {"random_seed": -1}, ValueError, "random_seed must be at least 0"),
     ("paris", {"n_clusters": 0}, ValueError, "n_clusters must be positive"),
+    (
+        "paris",
+        {"n_clusters": True},
+        TypeError,
+        "n_clusters must be an integer or 'auto'",
+    ),
+    (
+        "paris",
+        {"n_clusters": 2.5},
+        TypeError,
+        "n_clusters must be an integer or 'auto'",
+    ),
     (
         "paris",
         {"n_clusters": "many"},

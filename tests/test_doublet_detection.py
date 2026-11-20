@@ -1024,6 +1024,69 @@ def test_a_harmony_graph_scores_each_sample_on_the_pca_it_corrected(
         )
 
 
+_LIBRARY_SIZE = {"module": "cytearc.assay", "qualname": "norm_lib_size"}
+
+
+@pytest.mark.parametrize(
+    ("recorded", "named"),
+    [
+        (
+            {
+                "external_hook": True,
+                "module": "cytearc.assay",
+                "qualname": "norm_lib_size_log",
+            },
+            "cytearc.assay.norm_lib_size_log",
+        ),
+        (
+            {
+                "external_hook": True,
+                "module": "lab.norms",
+                "qualname": "half",
+                "code": "0f",
+            },
+            "lab.norms.half",
+        ),
+        (
+            {"identity": "cytearc.assay.pearson_residuals:theta=50.0:clip=sqrt-n"},
+            "cytearc.assay.pearson_residuals:theta=50.0:clip=sqrt-n",
+        ),
+        # Records that name no normalizer are quoted as they are.
+        ({"external_hook": True, "module": 3}, "{'module': 3}"),
+        (None, "None"),
+    ],
+)
+def test_the_doublet_graph_check_names_the_recorded_normalizer(
+    monkeypatch, recorded, named
+):
+    from cytearc.datastore._operations import quality_control
+
+    statuses = {
+        "normalized": SimpleNamespace(
+            parameters=None if recorded is None else {"normalization_method": recorded}
+        ),
+        "reduction": SimpleNamespace(
+            operation="run_pca", parameters={"feat_scaling": True}
+        ),
+    }
+    monkeypatch.setattr(
+        quality_control, "inspect_artifact", lambda _root, ref: statuses[ref]
+    )
+    lineage = SimpleNamespace(normalized="normalized", reduction="reduction")
+
+    with pytest.raises(ValueError) as caught:
+        quality_control._require_doublet_graph(None, lineage)
+
+    assert str(caught.value).startswith(
+        f"The graph was built on values normalized with {named}, but doublet "
+        "scoring normalizes its simulated doublets by library size"
+    )
+    # norm_lib_size passes, recorded with or without its external_hook key.
+    for library_size in (_LIBRARY_SIZE, {"external_hook": True, **_LIBRARY_SIZE}):
+        statuses["normalized"].parameters = {"normalization_method": library_size}
+        quality_control._require_doublet_graph(None, lineage)
+
+
 @pytest.mark.slow
 def test_doublets_refuse_a_graph_whose_pca_they_cannot_project_onto(
     small_captures, tmp_path
