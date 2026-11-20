@@ -416,7 +416,7 @@ def create_zarr_obj_array(
     Args:
         g: Parent Zarr group.
         name: Array name within the group.
-        data: Values to write, or None to create an empty array.
+        data: Values to write, one per row, or None to create an empty array.
         dtype: Optional dtype. Inferred from ``data`` when omitted.
         overwrite: If True, replace an existing array of the same name.
         chunk_size: Chunk length along the first axis.
@@ -424,6 +424,10 @@ def create_zarr_obj_array(
 
     Returns:
         A Zarr Array.
+
+    Raises:
+        ValueError: If ``data`` is not one value per row, such as a single
+            value or a two-dimensional array, before anything is written.
     """
     overwrite = bool_argument(overwrite, "overwrite")
     return _create_zarr_obj_array(

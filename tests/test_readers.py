@@ -727,7 +727,9 @@ def test_h5ad_sparse_groups_need_an_encoding_and_a_shape(tmp_path):
 
         with pytest.raises(ValueError, match="No sparse or numeric 2D matrix"):
             inspect_h5ad(str(file_name))
-    with pytest.raises(ValueError, match="encoding `None` of `X` is not supported"):
+    with pytest.raises(
+        ValueError, match="without an `encoding-type` or `h5sparse_format` attribute"
+    ):
         H5adReader(str(tmp_path / "without_encoding-type.h5ad"))
 
 
@@ -1755,6 +1757,8 @@ def test_h5ad_column_helpers_decode_legacy_layouts(tmp_path) -> None:
         assert values.tolist() == [b"b", b"a"]
         assert not missing.any()
         assert table_column_dtype(h5, obs, "batch", ()) == np.dtype("S1")
+        # A field without categories decodes to its own values.
+        assert table_column_dtype(h5, obs, "index", ()) == np.dtype("S2")
         for read in (read_table_column, table_column_dtype):
             with pytest.raises(KeyError, match="Column 'absent' was not found"):
                 read(h5, obs, "absent", ())

@@ -1160,6 +1160,24 @@ def test_a_failed_replacement_restores_the_categorical_column(monkeypatch) -> No
     assert table.fetch_all("labels").tolist() == STORED
 
 
+def test_values_that_are_not_one_per_row_are_refused_before_writing() -> None:
+    table = _table()
+    table.insert("labels", pd.Categorical(LABELS, categories=CATEGORIES, ordered=True))
+    # A single value used to fail on len(), and a grid in Zarr once the
+    # column had been deleted, to be restored.
+    for values, shape in ((np.asarray("x"), "()"), (np.zeros((N, 2)), f"({N}, 2)")):
+        with pytest.raises(ValueError) as refused:
+            replace_metadata_column(table._group, "labels", values)
+        assert str(refused.value) == (
+            f"Column 'labels' needs one value per row; found values of shape {shape}"
+        )
+    group = table._group
+    assert group["labels"][:].tolist() == CODES
+    assert group["__cytearc_categories__labels"][:].tolist() == CATEGORIES
+    assert group["__cytearc_missing__labels"][:].tolist() == MISSING
+    assert table.fetch_all("labels").tolist() == STORED
+
+
 def test_codes_that_name_no_category_are_refused_before_writing() -> None:
     table = _table()
 

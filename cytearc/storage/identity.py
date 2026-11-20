@@ -787,12 +787,13 @@ def _categorical_column(
             f"Categorical column {name!r} needs one integer code per row, not "
             f"{codes.dtype} values of shape {codes.shape}"
         )
-    labels = encode_metadata_values(categories, np.asarray(categories).dtype, name=name)
-    if labels.ndim != 1:
+    categories = np.asarray(categories)
+    if categories.ndim != 1:
         raise ValueError(
             f"Categorical column {name!r} needs one-dimensional categories, not "
-            f"categories of shape {labels.shape}"
+            f"categories of shape {categories.shape}"
         )
+    labels = encode_metadata_values(categories, categories.dtype, name=name)
     n_categories = len(labels)
     if labels.dtype.kind in "fc" and bool(np.isnan(labels).any()):
         raise ValueError(

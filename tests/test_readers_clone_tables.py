@@ -950,3 +950,56 @@ def test_a_missing_cell_name_is_named_by_its_row_in_the_index(tmp_path) -> None:
         pytest.raises(ValueError, match="stores its index of names in a form CyteArc"),
     ):
         obs_names(handle, path=str(path))
+
+
+def test_a_categorical_index_needs_one_name_per_category(tmp_path) -> None:
+    from cytearc.readers._h5ad_columns import index_length, obs_names
+
+    path = _h5ad(tmp_path / "a.h5ad")
+    with h5py.File(path, "a") as handle:
+        handle["obs"].attrs["_index"] = "pairs"
+        pairs = handle["obs"].create_group("pairs")
+        pairs.create_dataset("codes", data=np.array([0, 1, 2], dtype=np.int8))
+        pairs.create_dataset("categories", data=np.array([[1, 2], [3, 4], [5, 6]]))
+    # The cells used to be named '1', '2' and '3', the first values of the
+    # categories read as one flat array.
+    message = (
+        f"The index of the obs of {path} needs one text, number or boolean per "
+        "category; found categories of shape (3, 2) in '/obs/pairs/categories'"
+    )
+    with h5py.File(path, "r") as handle:
+        for read in (
+            lambda: index_length(handle["obs"], str(path)),
+            lambda: obs_names(handle, path=str(path)),
+        ):
+            with pytest.raises(ValueError) as refused:
+                read()
+            assert str(refused.value) == message
+    with pytest.raises(ValueError) as refused:
+        _rows(path, columns={"clone": "named"})
+    assert str(refused.value) == message
+
+
+def test_a_categorical_index_of_a_zarr_store_reads_its_text(tmp_path) -> None:
+    import zarr
+
+    from cytearc.readers._h5ad_columns import index_names
+
+    root = zarr.open_group(str(tmp_path / "cells.zarr"), mode="w")
+    index = root.create_group("obs").create_group("names")
+    root["obs"].attrs["_index"] = "names"
+    index.create_array("codes", data=np.array([1, 0, 1], dtype=np.int8))
+    for categories in (
+        np.array(["A", "BB"]),
+        np.array(["A", "BB"], dtype=np.dtypes.StringDType()),
+    ):
+        index.create_array("categories", data=categories, overwrite=True)
+        names = index_names(root["obs"], path="cells.zarr", what="cell")
+        assert names.tolist() == ["BB", "A", "BB"]
+    index.create_array("categories", data=np.array([["A"], ["B"]]), overwrite=True)
+    with pytest.raises(ValueError) as refused:
+        index_names(root["obs"], path="cells.zarr", what="cell")
+    assert str(refused.value) == (
+        "The index of the obs of cells.zarr needs one text, number or boolean per "
+        "category; found categories of shape (2, 1) in '/obs/names/categories'"
+    )
