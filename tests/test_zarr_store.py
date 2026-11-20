@@ -53,6 +53,7 @@ from cytearc.storage.stores import (
     open_store,
 )
 from cytearc.storage.types import array_metadata_shards
+from tests.memory_helpers import HandedArrays
 from tests.store_probes import RecordingStore
 
 
@@ -796,14 +797,8 @@ def test_dense_row_batches_flush_at_shard_boundaries():
 def test_a_dense_write_frees_each_written_band_before_its_source_makes_the_next_batch(
     monkeypatch, writers, batch_rows
 ):
-    import threading
-    import weakref
-
     from cytearc.storage import sharding
     from cytearc.storage.execution import execution_report_scope
-
-    class WatchedWrite(sharding.DenseWriteBand):
-        """A band write whose end a weak reference can watch."""
 
     root = zarr.open_group(store=MemoryStore(), mode="w")
     # Six bands of 100 rows.
@@ -811,29 +806,12 @@ def test_a_dense_write_frees_each_written_band_before_its_source_makes_the_next_
         "values", shape=(600, 40), chunks=(50, 40), shards=(100, 40), dtype=np.float64
     )
     expected = np.repeat(np.arange(600, dtype=np.float64)[:, None], 40, axis=1)
-    handed: list[weakref.ref] = []
-    alive: list[int] = []
-    released = 0
-    release = threading.Condition()
-    add = sharding.DenseBandBuffer.add
+    handed = HandedArrays()
     write = sharding.write_dense_bands
 
-    def counting_add(self, values):
-        # The bands handed to the writes that are alive as a batch is buffered.
-        alive.append(sum(band() is not None for band in handed))
-        yield from add(self, values)
-
-    def on_release() -> None:
-        nonlocal released
-        with release:
-            released += 1
-            release.notify_all()
-
     def watched(item):
-        handed.append(weakref.ref(item.band.values))
-        copy = WatchedWrite(item.destination, item.band)
-        weakref.finalize(copy, on_release)
-        return copy
+        handed.hand(item.band.values)
+        return item
 
     def watched_write(writes, **options):
         # map hands each write on and keeps none of them.
@@ -841,15 +819,13 @@ def test_a_dense_write_frees_each_written_band_before_its_source_makes_the_next_
 
     def batches():
         for start in range(0, 600, batch_rows):
-            if writers > 1:
-                # Writes run beside the source, so it waits until the writes
-                # of the bands handed so far have let go of them; a write that
-                # has not finished holds its band as it should.
-                with release:
-                    assert release.wait_for(lambda: released == len(handed), 30)
+            # The source makes each batch once the bands handed so far are
+            # freed: a write holds its band until it ends, and with 4 writers
+            # runs beside the source. A band that the producer keeps stays
+            # alive while the source waits.
+            handed.wait_until_freed()
             yield expected[start : start + batch_rows].copy()
 
-    monkeypatch.setattr(sharding.DenseBandBuffer, "add", counting_add)
     monkeypatch.setattr(sharding, "write_dense_bands", watched_write)
     with execution_report_scope() as reports:
         rows = write_dense_from_row_batches(
@@ -860,9 +836,8 @@ def test_a_dense_write_frees_each_written_band_before_its_source_makes_the_next_
     (report,) = reports
     assert report.actualWriteWorkers == writers
     assert len(handed) == 6
-    # No band whose write ended was alive as the source made a batch.
-    assert len(alive) == -(-600 // batch_rows)
-    assert alive == [0] * len(alive)
+    # Every band handed to a write was freed before the source made a batch.
+    assert handed.freed == [True] * -(-600 // batch_rows)
 
 
 @pytest.mark.parametrize(

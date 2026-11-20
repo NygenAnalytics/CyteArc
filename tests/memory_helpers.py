@@ -1,6 +1,8 @@
-"""Read the budget that a memory refusal names, follow refusals to a budget that runs, give a domain function a ledger of a budget, and skip tests that need the resident memory of the test process."""
+"""Read the budget that a memory refusal names, follow refusals to a budget that runs, give a domain function a ledger of a budget, wait until the arrays handed to writes are freed, and skip tests that need the resident memory of the test process."""
 
 import re
+import threading
+import weakref
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -99,3 +101,50 @@ def recording_ledger(doing: str = "Recording charges") -> Any:
             self.most = max(self.most, self.held_bytes + int(nbytes))
 
     return RecordingLedger()
+
+
+class HandedArrays:
+    """Arrays handed to writes, and whether each wait saw them all freed.
+
+    A write's values can outlive the call that writes them by a moment: Zarr
+    encodes and stores chunks on pool threads, which let go of their views of
+    the values after they have handed back their results, and a write that
+    ends runs its weak-reference callbacks before it lets go of its
+    attributes. A count of the arrays alive at one instant can catch one of
+    them on its way out, so ``wait_until_freed`` waits for their release
+    instead, which comes as soon as those threads go on. An array that the
+    code under test keeps stays alive while the test waits, and the wait ends
+    without it after ``seconds``.
+    """
+
+    def __init__(self, seconds: float = 10.0) -> None:
+        self._arrays: list[weakref.ref] = []
+        self._released = threading.Condition()
+        self._seconds = seconds
+        self.freed: list[bool] = []
+
+    def __len__(self) -> int:
+        return len(self._arrays)
+
+    def hand(self, values: Any) -> None:
+        """Watch ``values``, which a write was handed, until it is freed."""
+        self._arrays.append(weakref.ref(values, self._on_release))
+
+    def _on_release(self, _array: weakref.ref) -> None:
+        with self._released:
+            self._released.notify_all()
+
+    def wait_until_freed(self) -> None:
+        """Record in ``freed`` whether every array handed so far is freed.
+
+        The first wait that ends with an array alive records False, and the
+        waits after it record without waiting, so a test that keeps an array
+        fails after one wait.
+        """
+        with self._released:
+            self.freed.append(
+                self._released.wait_for(
+                    lambda: all(array() is None for array in self._arrays),
+                    self._seconds if all(self.freed) else 0,
+                )
+            )

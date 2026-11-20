@@ -30,6 +30,7 @@ from cytearc.writers import (
     SparseToZarr,
     SubsetZarr,
 )
+from tests.memory_helpers import HandedArrays
 from tests.test_seurat_reader import _Wire, _legacy_assay
 from tests.test_writers import _write_h5ad
 from tests.storage_helpers import by_cell_id
@@ -398,31 +399,28 @@ def test_dense_h5ad_writer_reports_done_only_when_the_parent_did_not_stop(
         reader.close()
 
 
-def _watch_dense_bands(monkeypatch) -> tuple[list[Any], list[int]]:
-    """Watch the bands that dense band buffers hand over.
+def _watch_dense_bands(monkeypatch) -> HandedArrays:
+    """Watch the values of the bands that dense band buffers hand over.
 
-    Returns weak references to the values of each band handed over, and the
-    number of them alive whenever a buffer takes another batch.
+    Whenever a buffer takes another batch, it first waits until the bands
+    handed over so far are freed.
     """
-    import weakref
-
     from cytearc.storage import sharding
 
-    handed: list[weakref.ref] = []
-    alive: list[int] = []
+    handed = HandedArrays()
     add = sharding.DenseBandBuffer.add
 
     def hand(band: Any) -> Any:
-        handed.append(weakref.ref(band.values))
+        handed.hand(band.values)
         return band
 
-    def counting_add(self, values):
-        alive.append(sum(band() is not None for band in handed))
+    def watching_add(self, values):
+        handed.wait_until_freed()
         # map hands each band on and keeps none of them.
         yield from map(hand, add(self, values))
 
-    monkeypatch.setattr(sharding.DenseBandBuffer, "add", counting_add)
-    return handed, alive
+    monkeypatch.setattr(sharding.DenseBandBuffer, "add", watching_add)
+    return handed
 
 
 def test_a_dense_h5ad_import_frees_each_band_it_wrote_before_it_reads_more(
@@ -435,7 +433,7 @@ def test_a_dense_h5ad_import_frees_each_band_it_wrote_before_it_reads_more(
         encoding="dense",
         feature_types=[b"Gene Expression", b"Antibody Capture"] * 2,
     )
-    handed, alive = _watch_dense_bands(monkeypatch)
+    handed = _watch_dense_bands(monkeypatch)
     reader = H5adReader(str(source), feature_name_key="feature_name")
     try:
         # 4 bytes of uint8 counts of two features make bands of two cells in
@@ -456,8 +454,8 @@ def test_a_dense_h5ad_import_frees_each_band_it_wrote_before_it_reads_more(
     assert len(handed) == 8
     # Each band was written, and freed, before the next part of a batch was
     # buffered, in the other assay or in the next batch.
-    assert len(alive) >= len(handed)
-    assert alive == [0] * len(alive)
+    assert len(handed.freed) >= len(handed)
+    assert handed.freed == [True] * len(handed.freed)
 
 
 class _PicklingConnection(_Connection):
@@ -491,7 +489,7 @@ def test_a_dense_h5ad_producer_process_frees_each_band_before_its_next_batch(
             shuffle_cells=False,
             policy=CountMatrixPolicy(unitBytes=12, chunkBytes=12),
         ).z["RNA/counts"]
-        handed, alive = _watch_dense_bands(monkeypatch)
+        handed = _watch_dense_bands(monkeypatch)
         connection = _PicklingConnection()
         # Each process runs here, reading the window's batches of four cells.
         if window == "writes its bands":
@@ -533,14 +531,13 @@ def test_a_dense_h5ad_producer_process_frees_each_band_before_its_next_batch(
         reader.close()
     assert [kind for kind, _payload in connection.messages][-1] == "done"
     assert len(handed) == 2
-    assert alive == [0, 0]
+    assert handed.freed == [True, True]
 
 
 @pytest.mark.parametrize("encoding", ["dense", "csr"])
 def test_an_h5ad_import_frees_each_band_it_received_once_its_write_has_it(
     tmp_path, monkeypatch, encoding
 ) -> None:
-    import weakref
     from multiprocessing import connection as pipes
 
     from cytearc.storage import sharding
@@ -549,8 +546,7 @@ def test_an_h5ad_import_frees_each_band_it_received_once_its_write_has_it(
     values = np.arange(1, 4_001, dtype=np.float32).reshape(1_000, 4)
     source = _write_h5ad(tmp_path / "counts.h5ad", values, encoding=encoding)
     dense = encoding == "dense"
-    handed: list[weakref.ref] = []
-    alive: list[int] = []
+    handed = HandedArrays()
     name = "write_dense_bands" if dense else "write_sparse_bands"
     write = getattr(sharding, name)
 
@@ -565,21 +561,21 @@ def test_an_h5ad_import_frees_each_band_it_received_once_its_write_has_it(
 
         def __next__(self) -> Any:
             item = next(self.writes)
-            handed.append(weakref.ref(item.band.values if dense else item.band.row))
+            handed.hand(item.band.values if dense else item.band.row)
             return item
 
     receive = pipes.Connection.recv
 
-    def counting_receive(self):
-        # The bands handed to the writes that are alive as the import
-        # receives the next message from a producer process.
-        alive.append(sum(band() is not None for band in handed))
+    def watching_receive(self):
+        # The import receives the next message from a producer process once
+        # the bands handed to the writes so far are freed.
+        handed.wait_until_freed()
         return receive(self)
 
     monkeypatch.setattr(
         sharding, name, lambda writes, **options: write(Handing(writes), **options)
     )
-    monkeypatch.setattr(pipes.Connection, "recv", counting_receive)
+    monkeypatch.setattr(pipes.Connection, "recv", watching_receive)
     reader = H5adReader(str(source), feature_name_key="feature_name")
     store = MemoryStore()
     try:
@@ -604,8 +600,8 @@ def test_an_h5ad_import_frees_each_band_it_received_once_its_write_has_it(
         zarr.open_group(store=store, mode="r")["RNA/counts"][:], values
     )
     assert len(handed) == 20
-    assert len(alive) > len(handed)
-    assert max(alive) == 0
+    assert len(handed.freed) > len(handed)
+    assert handed.freed == [True] * len(handed.freed)
 
 
 def _complex_matrix(wire: _Wire, values: list[float]) -> bytes:
