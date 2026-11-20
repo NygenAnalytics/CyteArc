@@ -1035,7 +1035,7 @@ class BaseDataStore:
         return assay_name
 
     def _load_assays(self, custom_assay_types: Mapping[str, Any] | None = None) -> None:
-        """Create the assay object of every assay in the store.
+        """Create the assay object of every assay in the store that has none.
 
         Each assay takes its type from ``custom_assay_types``, then from the
         persisted ``assayTypes`` attribute, then from its own name when that
@@ -1043,6 +1043,13 @@ class BaseDataStore:
         assay with none of these opens as the generic ``Assay`` with a warning.
         A writable store records the resolved types in ``assayTypes``. Each
         assay carries its resolved type as ``assayType``.
+
+        An assay that this datastore has loaded keeps its object while it
+        resolves to the type of that object, so the session's settings of the
+        assay, such as ``normMethod`` and ``sf``, and every reference to it
+        stay as they are when a call adds an assay. Such calls change no
+        stored attribute of the assays they keep; a call that did would have
+        to open that assay again.
 
         A read-only open cannot record a type, so an explicit type must equal
         the type that the store declares. A record that is not a mapping is
@@ -1115,8 +1122,14 @@ class BaseDataStore:
                     logger.warning(caution_statement % name)
                 resolved[name] = stored_type(name)
             logger.debug(f"Setting assay {name} to assay type: {resolved[name]}")
-        assays: dict[str, Assay] = {
-            name: presets[type_name](
+        loaded: dict[str, Assay] = self.__dict__.get("_assays", {})
+        assays: dict[str, Assay] = {}
+        for name, type_name in resolved.items():
+            held = loaded.get(name)
+            if held is not None and held.assayType == type_name:
+                assays[name] = held
+                continue
+            assays[name] = presets[type_name](
                 z=self.z,
                 workspace=self.workspace,
                 name=name,
@@ -1127,8 +1140,6 @@ class BaseDataStore:
                 storageIo=self.storageIo,
                 assay_type=type_name,
             )
-            for name, type_name in resolved.items()
-        }
         # Assays are kept apart from the datastore's own attributes, so no
         # assay name can replace one.
         self._assays = assays
@@ -1383,7 +1394,9 @@ class BaseDataStore:
         filters it, with its ``min_features_per_cell``, through ``_filter_cells``.
         """
         for from_assay in self._assayNames:
-            # _load_assays opened every assay group, so its attributes are current.
+            # _load_assays opened the group of every assay it built, and a kept
+            # assay read its group again when it was prepared, so ``prepared``
+            # is current.
             assay = self._get_assay(from_assay)
             prepared = assay.z.attrs.get("prepared") is True
             patterns: dict[str, str | None] = {}

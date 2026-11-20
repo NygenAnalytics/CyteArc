@@ -4,6 +4,7 @@ import shutil
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -12,12 +13,13 @@ import zarr
 from scipy.sparse import csr_matrix
 from zarr.storage import MemoryStore
 
+from cytearc.assay import norm_lib_size, norm_tf_idf
 from cytearc.assay.classification import declared_assay_type
 from cytearc.assay.normalization import iter_feature_group_means
 from cytearc.datastore.datastore import DataStore
 from cytearc.metadata.membership import membership_attributes
 from cytearc.storage.count_matrix import CountMatrixPolicy
-from tests.storage_helpers import by_cell_id, finalize_test_counts
+from tests.storage_helpers import by_cell_id, finalize_test_counts, write_count_store
 from cytearc.storage.schema import (
     PENDING_ASSAY_ATTR,
     create_cell_data,
@@ -841,7 +843,7 @@ def test_derived_assays_of_a_workspace_publish_their_matrices(tmp_path):
     store.add_grouped_assay("module", from_assay="ATAC", assay_label="MODULES")
 
     # Every assay of the session carries its type, including the gene scores
-    # that were rebuilt when the grouped assay was registered.
+    # that the session kept when the grouped assay was registered.
     types = {"ATAC": "ATAC", "MODULES": "Assay", "GeneScores": "GeneActivity"}
     assert {
         name: declared_assay_type(store.get_assay(name)) for name in store.assay_names
@@ -1124,3 +1126,123 @@ def test_add_grouped_assay_fits_the_count_layout_to_the_budget(tmp_path):
         store.RNA.sf,
     )
     np.testing.assert_allclose(grouped[:], expected)
+
+
+def _counts_kept(_assay, counts):
+    """A custom normalizer that keeps the counts, as a session may set one."""
+    return counts * 1.0
+
+
+# Two cells of 60 RNA counts and six empty droplets of 3, which the ambient
+# correction needs, beside three ATAC peaks, which melding needs.
+_SESSION_CELLS = [f"d{index}" for index in range(8)]
+_SESSION_RNA = np.array([[30, 20, 10, 0]] * 2 + [[2, 1, 0, 0]] * 6)
+_SESSION_ATAC = np.array([[2, 0, 1], [0, 3, 0], [1, 0, 4], [1, 1, 1]] * 2)
+_SESSION_PEAKS = ["chr1:100-200", "chr1:250-350", "chr2:100-200"]
+
+
+def _session_store(path: Path) -> tuple[DataStore, dict[str, Any]]:
+    """Open a store of RNA and ATAC counts, and each call that adds an assay to it."""
+    write_count_store(
+        str(path / "store.zarr"),
+        {"RNA": _SESSION_RNA, "ATAC": _SESSION_ATAC},
+        "uint32",
+        cell_ids=_SESSION_CELLS,
+        feature_ids={"RNA": ["g0", "g1", "g2", "g3"], "ATAC": _SESSION_PEAKS},
+    )
+    store = DataStore(
+        str(path / "store.zarr"),
+        default_assay="RNA",
+        min_features_per_cell=-1,
+        nthreads=1,
+    )
+    store.RNA.feats.insert("module", np.array([0, 0, 1, 1]))
+    store.cells.insert(
+        "is_cell", pd.Series([True, True] + [False] * 6, index=_SESSION_CELLS)
+    )
+    profile = store.qc.ambient_profile(total_counts=(2, 10))
+    estimate = store.qc.ambient_contamination(
+        store.snapshot_cell_selection("is_cell"), profile, fraction=0.1
+    )
+    pd.DataFrame(
+        [
+            ("chr1", 120, 300, "gene_a", "GENE_A", "+"),
+            ("chr2", 120, 180, "gene_b", "GENE_B", "+"),
+        ]
+    ).to_csv(path / "genes.bed", sep="\t", header=False, index=False)
+    calls = {
+        "add_grouped_assay": lambda: store.add_grouped_assay(
+            "module", assay_label="modules"
+        ),
+        "add_melded_assay": lambda: store.add_melded_assay(
+            from_assay="ATAC",
+            external_bed_fn=str(path / "genes.bed"),
+            assay_label="GeneScores",
+        ),
+        "correct_ambient": lambda: store.qc.correct_ambient(
+            estimate, assay_label="RNA_soup"
+        ),
+    }
+    return store, calls
+
+
+@pytest.mark.parametrize(
+    ("call", "label"),
+    [
+        ("add_grouped_assay", "modules"),
+        ("add_melded_assay", "GeneScores"),
+        ("correct_ambient", "RNA_soup"),
+    ],
+)
+def test_adding_an_assay_keeps_the_session_settings_of_the_other_assays(
+    tmp_path, call, label
+):
+    store, calls = _session_store(tmp_path)
+    rna, atac = store.RNA, store.ATAC
+    rna.sf = 2000
+    rna.normMethod = _counts_kept
+    atac.normMethod = _counts_kept
+    root = zarr.open_group(str(tmp_path / "store.zarr"), mode="r")
+    stored = {name: dict(root[name].attrs) for name in ("RNA", "ATAC")}
+
+    calls[call]()
+
+    # Before, every assay was built again: RNA took norm_lib_size and its
+    # stored 1000, ATAC norm_tf_idf, and a reference held from before the
+    # call kept settings that ds.RNA no longer had.
+    assert store.RNA is rna and store.ATAC is atac
+    assert rna.sf == 2000
+    assert rna.normMethod is _counts_kept and atac.normMethod is _counts_kept
+    # The custom normalizer keeps each cell's counts; library-size values
+    # would sum to 2000 in each cell, and TF-IDF values would not be counts.
+    np.testing.assert_array_equal(
+        np.asarray(store.RNA.normed(cell_idx=np.array([0])).compute()),
+        _SESSION_RNA[[0]],
+    )
+    np.testing.assert_array_equal(
+        np.asarray(store.ATAC.normed(cell_idx=np.array([2])).compute()),
+        _SESSION_ATAC[[2]],
+    )
+    assert store.assay_names == sorted(["ATAC", "RNA", label])
+    assert f"{label}_nCounts" in store.cells.columns
+    # The calls change no stored attribute of the assays the session keeps,
+    # so a kept object holds what a new session reads.
+    root = zarr.open_group(str(tmp_path / "store.zarr"), mode="r")
+    assert {name: dict(root[name].attrs) for name in ("RNA", "ATAC")} == stored
+    # The settings belong to the session: a new one opens the class defaults.
+    reopened = DataStore(str(tmp_path / "store.zarr"), nthreads=1)
+    assert reopened.RNA.normMethod is norm_lib_size and reopened.RNA.sf == 1000
+    assert reopened.ATAC.normMethod is norm_tf_idf
+
+
+def test_a_failed_call_keeps_the_session_settings(tmp_path):
+    store, _calls = _session_store(tmp_path)
+    rna = store.RNA
+    rna.normMethod = _counts_kept
+
+    # A call refused before it writes reloads nothing.
+    with pytest.raises(KeyError, match="missing does not exist"):
+        store.add_grouped_assay("missing", assay_label="modules")
+
+    assert store.RNA is rna and rna.normMethod is _counts_kept
+    assert store.assay_names == ["ATAC", "RNA"]
