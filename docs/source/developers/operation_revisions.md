@@ -70,8 +70,7 @@ An operation that no release has shipped takes no revisions: until a release rec
 
 Decide with this ladder, in order:
 
-1. The change only moves results by last-bit or reassociation noise, and old results stay equally
-   valid: add no revision. Record the change under {ref}`stable_identity_result_changes`.
+1. The change only moves results by last-bit or reassociation noise, or breaks exact ties in a stated order where the earlier code left their order unspecified, and old results stay equally valid: add no revision. Each earlier result of a tie-breaking change was one of the equally valid outputs, so it stays valid and is reused. Record the change under {ref}`stable_identity_result_changes`.
 2. Results become materially different, or were wrong, for an identifiable subset of artifacts:
    add a scoped revision whose `applies` selects that subset from recorded provenance.
 3. Otherwise: add a whole-operation revision with `applies=None`.
@@ -113,9 +112,7 @@ The registry refuses a scoped revision that adds diagnostics, and `declare_diagn
 (stable_identity_result_changes)=
 ## Results that change while identities stay the same
 
-A change that moves results only by rounding or reassociation noise needs no operation revision
-when existing results remain valid. Record the affected operations, the release, and the reason
-reuse remains valid here. A user can request recomputation with `invalidate_cache=True`.
+A change that moves results only by rounding or reassociation noise, or that breaks exact ties in a stated order where the earlier code left their order unspecified, needs no operation revision when existing results remain valid: an earlier result of a tie-breaking change is one of the equally valid outputs, so it is reused. Record the affected operations, the release, and the reason reuse remains valid here. A user can request recomputation with `invalidate_cache=True`.
 
 - `run_feature_percentage`, 1.3.0: the denominator is the cell total that preparation stored as
   `<assay>_nCounts`, a sequential float64 sum of the cell's counts, instead of a pairwise float64
@@ -136,3 +133,5 @@ reuse remains valid here. A user can request recomputation with `invalidate_cach
   block of stored rows at a time. Integer counts, including integer-valued floating-point counts,
   sum exactly either way, and expressing fractions are unchanged; fractional floating-point counts
   can differ in the last bits. Neither operation stores its result, so no stored result is reused.
+- `select_prevalent_peaks` and `integrate_assays` with `method="snn"`, 1.5.0: ties are broken in a stated order, with a stable sort, where the default sort left their order to the platform's sort routine. Peaks whose prevalence ties at the `top_n` cutoff are kept in feature order, and SNN candidates whose ranks tie are taken from the last candidate of a cell's row back, the last graph's first. Each earlier selection and integration broke such ties one of the equally valid ways, so it stays valid and is reused, and a new computation, which breaks ties the same way on every platform, can keep other peaks or neighbors among tied values than one saved before. A tie needs equal values: prevalences computed on different platforms can still differ in the last bit, since TF-IDF takes logarithms, so near-ties can still be ranked differently.
+- `integrate_assays` with `method="wnn"`, 1.5.0: the distance of a cell from each modality's prediction sums its squared offsets in NumPy's pairwise order, as its distances to its candidates do, instead of taking a BLAS dot product, whose summation order depends on the BLAS library and, with Apple's Accelerate, on where each vector sits in memory. The two sums differ only by rounding, since a BLAS library may fuse each multiplication into its addition and float16 coordinates took NumPy's own float16 dot product, so modality and graph weights move by rounding, and candidates whose affinities nearly tie can trade places; stored integrations remain equally valid. The distances no longer depend on the BLAS library or on memory addresses.

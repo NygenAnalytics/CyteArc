@@ -723,6 +723,23 @@ def test_weight_sort_indices_keeps_top_neighbors():
     np.testing.assert_allclose(kept_w, [0.6, 0.4, 0.2])
 
 
+def test_weight_sort_indices_takes_tied_neighbors_from_the_last_back():
+    # Forty candidates ranked 0.25, 0.5, 0.75, 0.5 in turn, a row long enough
+    # that an unstable sort reorders ties on ARM and x86 alike.
+    ranks = np.tile([0.25, 0.5, 0.75, 0.5], 10)
+    indices = np.arange(100, 140)
+
+    kept_idx, kept_w = weight_sort_indices(indices, ranks / 2, ranks, n=15)
+
+    # The ten candidates ranked 0.75 sit at positions 2, 6, ..., 38 and the
+    # twenty ranked 0.5 at the odd positions; each rank is taken from its
+    # last candidate back.
+    expected = [100 + position for position in range(38, 0, -4)]
+    expected += [139, 137, 135, 133, 131]
+    np.testing.assert_array_equal(kept_idx, expected)
+    np.testing.assert_array_equal(kept_w, [0.375] * 10 + [0.25] * 5)
+
+
 def test_merging_a_graph_with_itself_returns_the_graph():
     graph = _simple_knn_graph(8, k=3)
 

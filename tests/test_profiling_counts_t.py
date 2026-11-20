@@ -17,6 +17,10 @@ from cytearc.storage.count_matrix import (
     persist_count_matrix_plan,
     plan_count_matrix_pair,
 )
+from tests.memory_helpers import needs_proc_resident_memory
+
+# Every test budgets its stage above the resident memory of the test process.
+pytestmark = needs_proc_resident_memory
 
 
 def _resources() -> StageResources:

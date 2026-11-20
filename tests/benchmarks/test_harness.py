@@ -185,11 +185,17 @@ def test_measure_rebuilds_inputs_before_each_fresh_repeat() -> None:
         built.append(size)
         return lambda: None
 
-    result = harness.measure("fresh", make, LADDER, fresh=True, min_repeats=2)
+    # A real clock can time an empty call at 0 ns, which no fit accepts, so
+    # each read of this one advances 1 µs and every call takes 1 µs.
+    ticks = iter(range(0, 1_000_000_000, 1_000))
+    result = harness.measure(
+        "fresh", make, LADDER, fresh=True, min_repeats=2, clock=lambda: next(ticks)
+    )
 
     # After the warm-up, rounds alternate direction across the ladder.
     assert built == [1_000, 1_000, 2_000, 4_000, 8_000, 8_000, 4_000, 2_000, 1_000]
     assert [timing.repeats for timing in result.timings] == [2, 2, 2, 2]
+    assert [timing.best for timing in result.timings] == [1e-6] * 4
 
 
 def test_measure_projects_a_fixed_cost_as_a_constant() -> None:

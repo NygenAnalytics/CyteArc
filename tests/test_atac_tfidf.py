@@ -502,5 +502,39 @@ def test_prevalent_peak_provenance_has_no_version_token(atac_tfidf_store):
     assert status.parameters == {"top_n": 2}
     assert set(status.inputs or {}) == {"feature_summary"}
     assert "algorithm_version" not in status.parameters
+    # Keeping tied peaks in feature order left identities alone, so a
+    # selection saved before that change is current and is reused.
+    assert status.revision == 1 and status.is_current
     assert store.features.resolve("ATAC", ref) == ref
     assert set(store.ATAC.feats.columns) == columns_before
+
+
+def test_prevalent_peaks_tied_at_the_cutoff_keep_their_feature_order(tmp_path):
+    # Peak j holds the counts of pattern j % 3, so the ten peaks of a
+    # pattern tie in prevalence.
+    patterns = np.array([[3, 0, 0, 0], [1, 1, 0, 0], [1, 1, 1, 1]], dtype=np.uint32)
+    peak_patterns = np.arange(30) % 3
+    counts = patterns[peak_patterns].T
+    store = _build_store(tmp_path / "atac_ties.zarr", counts)
+    store.cells.insert(
+        "all_cells", by_cell_id(store.cells, np.ones(4, dtype=bool)), overwrite=True
+    )
+    expected_values, _ = _reference_tfidf(counts, np.arange(4), np.arange(30))
+    levels = expected_values.sum(axis=0)[:3]
+    first, second, third = np.argsort(-levels)
+    assert levels[first] > levels[second] > levels[third]
+
+    selection = store.features.prevalent_peaks(
+        store.snapshot_cell_selection("all_cells"), from_assay="ATAC", top_n=15
+    )
+
+    summary = store.artifacts.load(_feature_summary_ref(store, selection))
+    assert np.unique(summary["prevalence"][:]).size == 3
+    # The ten peaks of the most prevalent pattern, and the first five of the
+    # second, in feature order: peak j is the (j // 3)-th of its pattern.
+    expected = (peak_patterns == first) | (
+        (peak_patterns == second) & (np.arange(30) // 3 < 5)
+    )
+    np.testing.assert_array_equal(
+        store.artifacts.load(selection)["values"][:], expected
+    )

@@ -355,9 +355,9 @@ def _merge_ranked_rows(
     """Keep the best distinct candidates of each row, as ``weight_sort_indices``.
 
     ``order`` sorts the ranks of each row's candidates in ascending order, as
-    ``np.argsort`` does, so each row is read from its end, and a candidate is
-    kept at its first and best-ranked copy until the row of ``kept_columns``
-    is full. ``kept_counts`` receives how many candidates each row kept, fewer
+    a stable ``np.argsort`` does, so each row is read from its end, ties from
+    the last candidate back, and a candidate is kept at its first and
+    best-ranked copy until the row of ``kept_columns`` is full. ``kept_counts`` receives how many candidates each row kept, fewer
     than the width of ``kept_columns`` when a row has fewer distinct ones.
     """
     n_rows, width = candidates.shape
@@ -557,8 +557,12 @@ def weight_sort_indices(
     wn: np.ndarray,
     n: int,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Sort neighbors by adjusted weight and remove duplicates."""
-    idx = np.argsort(wn)[::-1]
+    """Sort neighbors by adjusted weight and remove duplicates.
+
+    A stable sort read from its end takes candidates whose adjusted weights
+    tie from the last back, on every platform.
+    """
+    idx = np.argsort(wn, kind="stable")[::-1]
     i = i[idx]
     w = w[idx]
     _, unique_idx = np.unique(i, return_index=True)
@@ -611,8 +615,8 @@ def merge_graphs(csr_mats: list[csr_matrix]) -> coo_matrix:
         stop = min(start + _MERGE_BLOCK_ROWS, n_cells)
         # Each row's candidates are its edges in every graph, in graph order.
         # A candidate ranks by its weight plus its shared-neighbor fraction,
-        # and np.argsort sorts each row of a block as it sorts the row alone,
-        # so tied candidates keep the order that weight_sort_indices gives them.
+        # and a stable sort of each row, read from its end, takes tied
+        # candidates from the last back, as weight_sort_indices does.
         ranks = np.concatenate(
             [
                 graph_weights[start:stop] + fractions[start:stop]
@@ -620,7 +624,7 @@ def merge_graphs(csr_mats: list[csr_matrix]) -> coo_matrix:
             ],
             axis=1,
         )
-        order = np.argsort(ranks, axis=1)
+        order = np.argsort(ranks, axis=1, kind="stable")
         del ranks
         counts = kept_counts[: stop - start]
         _merge_ranked_rows(
