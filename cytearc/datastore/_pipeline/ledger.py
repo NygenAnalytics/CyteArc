@@ -1,4 +1,5 @@
 import asyncio
+import concurrent.futures
 import os
 import threading
 import time
@@ -152,7 +153,9 @@ def interruption_record(
             message=bounded_record_text(str(error) or "keyboard interrupt"),
             requested_at_ns=time.time_ns(),
         )
-    if isinstance(error, asyncio.CancelledError):
+    # Zarr's synchronous API reports a cancelled operation with the
+    # CancelledError of concurrent.futures, which derives from Exception.
+    if isinstance(error, (asyncio.CancelledError, concurrent.futures.CancelledError)):
         return PipelineInterruptionRecord(
             kind="asyncio_cancelled",
             message=bounded_record_text(str(error) or "async operation cancelled"),
@@ -165,8 +168,9 @@ def _as_interruption(error: BaseException) -> BaseException:
     """Return the interruption that an exception group holds, else ``error``.
 
     Workers that fail together raise an exception group. A group that holds a
-    handled interruption leaf (``ShutdownRequested``, ``KeyboardInterrupt``, or
-    ``asyncio.CancelledError``) ends its stage as the first such leaf.
+    handled interruption leaf (``ShutdownRequested``, ``KeyboardInterrupt``,
+    ``asyncio.CancelledError``, or ``concurrent.futures.CancelledError``) ends
+    its stage as the first such leaf.
     """
     if isinstance(error, BaseExceptionGroup):
         for inner in error.exceptions:
@@ -393,6 +397,9 @@ class RunLedger:
             assert isinstance(converted, dict)
             return converted
         except Exception as error:
+            if interruption_record(error) is not None:
+                # A cancelled Zarr call passes, as asyncio's CancelledError does.
+                raise
             logger.warning(f"Could not summarize pipeline stage {stage}: {error}")
             return None
 
@@ -611,6 +618,10 @@ class RunLedger:
                 stage=stage,
             )
         except Exception as error:
+            if interruption_record(error) is not None:
+                # A cancelled Zarr call passes, as asyncio's CancelledError does,
+                # and the executor ends the run interrupted.
+                raise
             self.terminate(error)
             raise PipelineExecutionError(self.run_id, stage, error) from error
         self.ordinal += 1
@@ -634,12 +645,14 @@ class RunLedger:
     ) -> tuple[tuple[str, ArtifactRef | tuple[ArtifactRef, ...]], ...]:
         """Record a stage's outcome and return its outputs.
 
-        An ``Exception`` from the stage fails the stage and the run and raises
-        ``PipelineExecutionError``. A handled interruption, or the first one
-        that an exception group holds, ends the run as interrupted and is
-        raised; the stage is recorded completed if its action returned, else
-        interrupted. Any other ``BaseException``, such as ``SystemExit``, is
-        raised without recording the stage or ending the run.
+        A handled interruption, or the first one that an exception group
+        holds, ends the run as interrupted and is raised; the stage is recorded
+        completed if its action returned, else interrupted. The handled
+        interruptions include ``concurrent.futures.CancelledError``, an
+        ``Exception``; any other ``Exception`` from the stage fails the stage
+        and the run and raises ``PipelineExecutionError``. Any other
+        ``BaseException``, such as ``SystemExit``, is raised without recording
+        the stage or ending the run.
         """
         plan_records = self._plans(outcome.plans)
         caught = None if outcome.error is None else _as_interruption(outcome.error)
@@ -686,6 +699,10 @@ class RunLedger:
                     warnings=outcome.warnings,
                 )
             except Exception as error:
+                if interruption_record(error) is not None:
+                    # A cancelled Zarr call passes, as asyncio's CancelledError
+                    # does, and the executor ends the run interrupted.
+                    raise
                 self._finish_failed(
                     stage=stage,
                     ordinal=ordinal,

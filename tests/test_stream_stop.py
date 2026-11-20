@@ -20,6 +20,7 @@ when the deadline passes, after which the gate opens so nothing hangs.
 """
 
 import asyncio
+import concurrent.futures
 import contextvars
 import threading
 from collections.abc import Callable, Coroutine, Iterator
@@ -308,10 +309,20 @@ def test_a_cancellation_that_no_stop_made_keeps_its_meaning(path, scope):
     assert record is not None and record.kind == "asyncio_cancelled"
 
 
+@pytest.mark.parametrize(
+    ("kind", "message"),
+    [
+        (ValueError, "the read failed"),
+        (concurrent.futures.CancelledError, "the store gave up"),
+    ],
+    ids=["ValueError", "concurrent.futures.CancelledError"],
+)
 @pytest.mark.parametrize("scope", ["under a stream stop", "outside a stream"])
 @pytest.mark.parametrize("path", READ_PATHS)
-def test_an_ordinary_error_of_a_read_is_raised_as_it_is(path, scope):
-    error = ValueError("the read failed")
+def test_an_ordinary_error_of_a_read_is_raised_as_it_is(path, scope, kind, message):
+    # A read that raises the CancelledError of concurrent.futures itself was
+    # not cancelled, so its error keeps its class on every path.
+    error = kind(message)
 
     async def failing() -> None:
         raise error
@@ -319,81 +330,152 @@ def test_an_ordinary_error_of_a_read_is_raised_as_it_is(path, scope):
     stop = ReadStop() if scope == "under a stream stop" else None
     with (
         nullcontext() if stop is None else read_stop_scope(stop),
-        pytest.raises(ValueError) as caught,
+        pytest.raises(kind) as caught,
     ):
         _read_through(path, failing())
     assert caught.value is error
 
 
-def _cancel_chunk_reads(monkeypatch, store: Any) -> None:
-    """Cancel every chunk read from ``store``, as a cancellation that no stop made would."""
-    original = type(store).get
-
-    async def get(self, key, prototype, byte_range=None):  # type: ignore[no-untyped-def]
-        if self is store and "/c/" in key:
-            raise asyncio.CancelledError
-        return await original(self, key, prototype, byte_range)
-
-    monkeypatch.setattr(type(store), "get", get)
-
-
-def _cancelled_counts(path: str, tmp_path, monkeypatch) -> zarr.Array:
-    """Return counts whose chunk reads are cancelled, read on the loop that ``path`` names."""
-    array = _zip_counts(tmp_path) if path == "Zarr's loop" else _memory_counts()
-    _cancel_chunk_reads(monkeypatch, array.store)
-    return array
-
-
-@pytest.mark.parametrize("path", ["own loop", "Zarr's loop"])
-def test_an_artifact_whose_read_was_cancelled_is_kept_marked_incomplete(
-    path, tmp_path, monkeypatch
+def test_a_read_whose_task_never_started_raises_zarrs_cancellation_as_it_is(
+    monkeypatch,
 ):
-    array = _cancelled_counts(path, tmp_path, monkeypatch)
+    def cancelled_before_it_started(read: Coroutine[Any, Any, Any]) -> Any:
+        # Zarr's loop cancelled the read's task before its first step.
+        read.close()
+        raise concurrent.futures.CancelledError
+
+    monkeypatch.setattr(zarr_sync, "sync", cancelled_before_it_started)
+
+    async def value() -> int:
+        return 1
+
+    read = value()
+    raised: list[BaseException] = []
+
+    def reader() -> None:
+        try:
+            run_on_zarr_loop(read)
+        except BaseException as error:
+            raised.append(error)
+
+    thread = threading.Thread(target=reader, daemon=True)
+    thread.start()
+    thread.join(timeout=5)
+    read.close()
+    assert not thread.is_alive(), "the read waited for a task that never started"
+    [error] = raised
+    assert type(error) is concurrent.futures.CancelledError
+
+
+# Zarr calls that run on Zarr's loop and that a cancellation can stop: a read
+# through CyteArc's runner, two reads through Zarr's own synchronous API, and
+# a write through it.
+ZARR_CALLS = ["read_selection", "array[...]", "get_orthogonal_selection", "a write"]
+
+
+def _cancel_chunk_calls(
+    monkeypatch, store: Any, method: str, threads: list[str]
+) -> None:
+    """Cancel each chunk ``get`` or ``set`` of ``store``, and record the threads that ran them."""
+    original = getattr(type(store), method)
+
+    async def call(self, key, *args, **kwargs):  # type: ignore[no-untyped-def]
+        if self is store and "/c/" in key:
+            threads.append(threading.current_thread().name)
+            raise asyncio.CancelledError
+        return await original(self, key, *args, **kwargs)
+
+    monkeypatch.setattr(type(store), method, call)
+
+
+def _cancel(
+    call: str, monkeypatch, source: zarr.Array, target: Any, threads: list[str]
+) -> type[BaseException]:
+    """Cancel ``call``, and return the class that the cancellation raises.
+
+    A read's chunk reads of ``source`` are cancelled, and a write's chunk
+    writes into the store ``target``.
+    """
+    if call == "a write":
+        _cancel_chunk_calls(monkeypatch, target, "set", threads)
+    else:
+        _cancel_chunk_calls(monkeypatch, source.store, "get", threads)
+    # CyteArc's runner raises asyncio's class for a cancelled read, and Zarr's
+    # own synchronous API the class of concurrent.futures.
+    if call == "read_selection":
+        return asyncio.CancelledError
+    return concurrent.futures.CancelledError
+
+
+def _read(call: str, source: zarr.Array, rows: int, columns: int) -> np.ndarray:
+    """Read the first ``rows`` by ``columns`` of ``source`` through ``call``."""
+    if call == "array[...]":
+        return source[0:rows, 0:columns]
+    if call == "get_orthogonal_selection":
+        return source.get_orthogonal_selection((np.arange(rows), np.arange(columns)))
+    return read_selection(source, slice(0, rows), slice(0, columns))
+
+
+@pytest.mark.parametrize("call", ZARR_CALLS)
+def test_an_artifact_whose_zarr_call_was_cancelled_is_kept_marked_incomplete(
+    call, tmp_path, monkeypatch
+):
+    source = _zip_counts(tmp_path)
     root = zarr.open_group(store=MemoryStore(), mode="w")
     planned = _plan(root, "a")
+    threads: list[str] = []
+    raised = _cancel(call, monkeypatch, source, root.store, threads)
 
-    with pytest.raises(asyncio.CancelledError):
+    with pytest.raises(raised):
         with artifact_transaction(root, planned) as group:
-            values = read_selection(array, slice(0, ROWS), slice(None))
+            values = _read(call, source, ROWS, VALUES.shape[1])
             group.create_array("values", data=values)
 
+    assert threads and set(threads) == {"zarr_io"}
     # As after any interruption, the artifact is kept, marked incomplete,
     # instead of being deleted.
     status = inspect_artifact(root, planned.ref)
     assert status.exists and not status.complete
 
 
-@pytest.mark.parametrize("path", ["own loop", "Zarr's loop"])
-def test_a_derived_assay_whose_read_was_cancelled_stays_pending(
-    path, tmp_path, monkeypatch
+@pytest.mark.parametrize("call", ZARR_CALLS)
+def test_a_derived_assay_whose_zarr_call_was_cancelled_stays_pending(
+    call, tmp_path, monkeypatch
 ):
-    array = _cancelled_counts(path, tmp_path, monkeypatch)
+    source = _zip_counts(tmp_path)
     root = _memory_root("ws")
+    threads: list[str] = []
+    raised = _cancel(call, monkeypatch, source, root.store, threads)
 
-    with pytest.raises(asyncio.CancelledError):
+    with pytest.raises(raised):
         with derived_assay_transaction(
             root, "SCORES", "ws", operation="add_melded_assay"
         ) as transaction:
             counts = transaction.create_counts(3, ["f0"], ["f0"], np.float64)
-            counts[:] = read_selection(array, slice(0, 3), slice(0, 1))
+            counts[:] = _read(call, source, 3, 1)
 
+    assert threads and set(threads) == {"zarr_io"}
     assert pending_assays(root) == [("SCORES", "ws", "add_melded_assay")]
 
 
-@pytest.mark.parametrize("path", ["own loop", "Zarr's loop"])
-def test_a_pipeline_stage_whose_read_was_cancelled_ends_its_run_interrupted(
-    path, tmp_path, monkeypatch
+@pytest.mark.parametrize("call", ZARR_CALLS)
+def test_a_pipeline_stage_whose_zarr_call_was_cancelled_ends_its_run_interrupted(
+    call, tmp_path, monkeypatch
 ):
-    array = _cancelled_counts(path, tmp_path, monkeypatch)
+    source = _zip_counts(tmp_path)
+    target = zarr.open_group(store=MemoryStore(), mode="w")
     root, ledger, events = _ledger("first", "second")
+    threads: list[str] = []
+    raised = _cancel(call, monkeypatch, source, target.store, threads)
 
     def first_stage() -> tuple[()]:
-        read_selection(array, slice(0, ROWS), slice(None))
+        target.create_array("values", data=_read(call, source, ROWS, VALUES.shape[1]))
         return ()
 
-    with pytest.raises(asyncio.CancelledError):
+    with pytest.raises(raised):
         ledger.run("first", first_stage)
 
+    assert threads and set(threads) == {"zarr_io"}
     run = load_pipeline_run_record(root, ledger.run_id)
     assert (run.status, run.complete) == ("interrupted", True)
     assert run.interruption is not None
