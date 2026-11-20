@@ -77,8 +77,8 @@ _SOURCE_INDEX = "source_index"
 class H5adMatrix:
     """A cells-by-features matrix that an H5AD export reads in row blocks.
 
-    ``reserve``, when set, counts the values that the blocks store, in a
-    pass of its own: the export allocates the file's arrays for them, and a
+    ``reserve``, when set, counts the values that the blocks store apart
+    from them: the export allocates the file's arrays for them, and a
     reorder (:func:`reordered_matrix`) checks the free disk for them.
     ``export_dtype``, when set, is the dtype that the export stores instead
     of ``dtype``: each converted piece is cast to it, and a value that it
@@ -2440,8 +2440,29 @@ def _live_count_blocks(
     return blocks
 
 
+def _summarized_nonzero(assay: Any, rows: np.ndarray | None = None) -> int | None:
+    """Return the nonzero raw counts of an assay's cells from its count summaries, or None.
+
+    The summaries count the positive counts of each cell, which are all of
+    its nonzero counts when the counts are unsigned, as every import stores
+    whole non-negative counts. Counts of another dtype may hold negative
+    values, so they return None. ``rows`` are increasing store rows, every
+    cell by default.
+    """
+    from ..storage.identity import positive_value_count
+    from ..storage.types import as_zarr_array
+
+    counts = as_zarr_array(assay.matrixGroup["counts"], name="counts")
+    if counts.dtype.kind != "u":
+        return None
+    return positive_value_count(assay.matrixGroup, counts, rows)
+
+
 def _live_count_nonzero(assay: Any, nthreads: int) -> int:
-    """Count the nonzero raw counts of an assay."""
+    """Count the nonzero raw counts of an assay, from its summaries when they can."""
+    summarized = _summarized_nonzero(assay)
+    if summarized is not None:
+        return summarized
     return int(
         compute_with_progress(
             assay.rawData.count_nonzero(),
@@ -2567,7 +2588,14 @@ def live_h5ad_plan(
         ),
     )
     if order is not None:
-        x = reordered_matrix(x, order, max_bytes=max_bytes, temp_dir=temp_dir)
+        # Unsigned counts give the reorder their number without a read.
+        x = reordered_matrix(
+            x,
+            order,
+            max_bytes=max_bytes,
+            temp_dir=temp_dir,
+            entries=_summarized_nonzero(assay, cell_rows),
+        )
     return H5adExportPlan(
         x=x,
         obs_index=H5adColumn(
@@ -2631,9 +2659,11 @@ def to_h5ad(
     ``sourceRow`` is in that order already. Its counts are read in store
     order and sent to their rows of the file through temporary files on
     local disk, in ``temp_dir``, about the size of the counts in the file,
-    each deleted once its rows are written. The export counts the stored
-    values first, in a pass over the counts, and raises ``OSError`` before
-    it writes a row when ``temp_dir`` lacks the disk that the files take.
+    each deleted once its rows are written. The export takes the number of
+    stored values first, from the store's count summaries when the counts
+    are unsigned, as every import stores whole counts, and otherwise in a
+    pass over them, and raises ``OSError`` before it writes a row when
+    ``temp_dir`` lacks the disk that the files take.
     ``cell_order="stored"`` writes the cells in store order and needs no
     temporary files.
     Rows that a nullable metadata column's linked missing mask flags are
@@ -2658,8 +2688,10 @@ def to_h5ad(
                          (for example UMAP, tSNE). When None, uses
                          ``["UMAP", "tSNE"]``. Pass an empty list to skip
                          embeddings.
-        skip_recalc_nfeats: Skip a preliminary pass that counts the stored
-                            values to allocate the file's arrays. An
+        skip_recalc_nfeats: Skip a preliminary count of the stored values,
+                            for which the file's arrays are allocated:
+                            from the store's count summaries for unsigned
+                            counts, otherwise in a pass over them. An
                             export in source order counts them either way,
                             once. (Default value: True)
         nthreads: Threads that read the counts and compress them into the
@@ -3026,13 +3058,7 @@ def to_mtx(
     order = exported_cell_order(
         assay.cells._group, np.arange(n_cells, dtype=np.int64), cell_order
     )
-    tot_counts = int(
-        compute_with_progress(
-            assay.rawData.count_nonzero(),
-            msg="Counting nonzero entries",
-            nthreads=assay.nthreads,
-        )
-    )
+    tot_counts = _live_count_nonzero(assay, assay.nthreads)
     shape = (n_cells, int(assay.feats.N))
     dtype = np.dtype(assay.rawData.dtype)
     max_bytes = int(assay.resources.memoryBytes)
