@@ -724,7 +724,8 @@ class MetaData:
             ValueError: If ``column_name`` is protected, already exists
                 without ``overwrite``, or contains ``/`` or ``\\``, which
                 Zarr reads as path separators, if a Series is labeled by
-                anything other than those ids, or if two categories of
+                anything other than those ids, if a value or a category is a
+                list, tuple, set, dict or NumPy array, or if two categories of
                 categorical values read alike once stored or the
                 ``fill_value`` of categorical values is not a category.
         """

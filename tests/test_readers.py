@@ -1256,10 +1256,13 @@ def test_h5ad_reader_streams_compound_obs_cluster_fields(tmp_path):
             ("state", np.int8),
             ("batch", "S1"),
             ("vector", np.float32, (2,)),
+            ("arrays", h5py.vlen_dtype(np.int64)),
         ]
     )
     obs_values = np.zeros(values.shape[0], dtype=obs_dtype)
     obs_values["_index"] = [b"cell_0", b"cell_1", b"cell_2", b"cell_3"]
+    for row, arrays in enumerate([[1, 2], [3], [], [4, 5, 6]]):
+        obs_values["arrays"][row] = np.array(arrays, dtype=np.int64)
     obs_values["state"] = [0, -1, 1, 9]
     obs_values["batch"] = [b"A", b"B", b"A", b"B"]
     obs_values["vector"] = np.arange(8, dtype=np.float32).reshape(4, 2)
@@ -1290,7 +1293,8 @@ def test_h5ad_reader_streams_compound_obs_cluster_fields(tmp_path):
         np.testing.assert_array_equal(
             reader._cell_ids_block(1, 3), ["cell_1", "cell_2"]
         )
-        # A vector field does not fit one metadata value per cell.
+        # Neither a vector field nor a field of arrays fits one metadata value
+        # per cell.
         assert set(dict(reader.get_cell_columns())) == {"batch"}
     finally:
         reader.h5.close()
@@ -1304,6 +1308,16 @@ def test_h5ad_reader_streams_compound_obs_cluster_fields(tmp_path):
             feature_name_key="feature_name",
             cluster_keys=("vector",),
         )
+    with pytest.raises(TypeError) as refused:
+        H5adReader(
+            str(file_name),
+            feature_name_key="feature_name",
+            cluster_keys=("arrays",),
+        )
+    assert str(refused.value) == (
+        "Cluster key 'arrays' needs one text, number or boolean per row; found a "
+        "variable-length array of int64 per row"
+    )
 
 
 def test_h5ad_reader_sizes_axes_from_nullable_columns(tmp_path):

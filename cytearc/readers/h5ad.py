@@ -54,6 +54,7 @@ from ._h5ad_columns import (
     table_column_dtype,
     table_column_names,
     table_members,
+    values_problem,
 )
 from ._h5ad_inspect import H5adInspectResult, inspect_h5ad as inspect_h5ad
 from ._h5ad_values import (
@@ -674,6 +675,7 @@ class H5adReader:
                         f"Cluster key {key!r} must contain one scalar value per cell; "
                         f"found vector dtype {field_dtype}"
                     )
+                values_dtype = field_dtype
                 length = int(cell_attrs.shape[0])
             else:
                 node = cell_attrs[key]
@@ -695,13 +697,19 @@ class H5adReader:
                     raise ValueError(
                         f"Cluster key {key!r} has a misaligned missingness mask"
                     )
+                values_dtype = value_node.dtype
                 length = int(value_node.shape[0])
             if length != self.nCells:
                 raise ValueError(
                     f"Cluster key {key!r} has {length} rows; expected {self.nCells}"
                 )
-            categories = categories_node(self.h5, cell_attrs, key, self._categoryGroups)
-            problem = None if categories is None else categories_problem(categories)
+            # A categorical's codes are integers, and its categories are checked.
+            problem = values_problem(values_dtype)
+            if problem is None:
+                categories = categories_node(
+                    self.h5, cell_attrs, key, self._categoryGroups
+                )
+                problem = None if categories is None else categories_problem(categories)
             if problem is not None:
                 raise TypeError(f"Cluster key {key!r} {problem}")
             dtype = self._cell_column_value_dtype(key)

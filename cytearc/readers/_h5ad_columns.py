@@ -335,17 +335,58 @@ def categories_problem(categories: Any) -> str | None:
         found = f"{categories.dtype.itemsize} opaque bytes per category"
     elif h5py.check_ref_dtype(categories.dtype) is not None:
         found = "an HDF5 reference per category"
+    elif (sequence := _sequence_dtype(categories.dtype)) is not None:
+        found = f"a variable-length array of {sequence} per category"
     else:
-        # h5py names the type of the elements of a variable-length dtype,
-        # str or bytes for text.
-        sequence = h5py.check_vlen_dtype(categories.dtype)
-        if sequence is None or sequence is str or sequence is bytes:
-            return None
-        found = f"a variable-length array of {np.dtype(sequence)} per category"
+        return None
     return (
         "needs one text, number or boolean per category; found "
         f"{found} in {categories.name!r}"
     )
+
+
+def _sequence_dtype(dtype: np.dtype[Any]) -> np.dtype[Any] | None:
+    """Return the dtype of the elements of a variable-length dtype other than text, or None.
+
+    h5py names the type of the elements of a variable-length dtype, str or
+    bytes for text, and reads each value of any other as an array.
+    """
+    sequence = h5py.check_vlen_dtype(dtype)
+    if sequence is None or sequence is str or sequence is bytes:
+        return None
+    elements: np.dtype[Any] = np.dtype(sequence)
+    return elements
+
+
+def values_problem(dtype: np.dtype[Any]) -> str | None:
+    """Return why a column of values of ``dtype`` holds no one value per row, or None.
+
+    h5py reads each value of a variable-length dtype other than text as an
+    array, which a metadata column cannot hold as one value.
+
+    Returns:
+        The reason, which reads after the name of the column, such as
+        ``needs one text, number or boolean per row; found a variable-length
+        array of int64 per row``.
+    """
+    sequence = _sequence_dtype(dtype)
+    if sequence is None:
+        return None
+    return (
+        "needs one text, number or boolean per row; found a variable-length "
+        f"array of {sequence} per row"
+    )
+
+
+def _check_values(dtype: np.dtype[Any], column: str) -> None:
+    """Refuse a column of values of ``dtype`` that holds no one value per row.
+
+    Raises:
+        ValueError: As :func:`values_problem` finds, naming ``column``.
+    """
+    problem = values_problem(dtype)
+    if problem is not None:
+        raise ValueError(f"Column {column!r} {problem}")
 
 
 def checked_categories(categories: Any, column: str) -> Any:
@@ -415,10 +456,13 @@ def _node_column(node: H5adNode, selection: slice) -> TableColumn:
     Raises:
         TypeError: If the node uses an encoding that cannot be decoded.
         ValueError: If a nullable column's mask does not align with its
-            values, or a categorical's categories are not one text, number
-            or boolean each, as :func:`checked_categories` refuses them.
+            values, the values are variable-length arrays other than text,
+            as :func:`values_problem` finds, or a categorical's categories
+            are not one text, number or boolean each, as
+            :func:`checked_categories` refuses them.
     """
     if isinstance(node, h5py.Dataset):
+        _check_values(node.dtype, node.name)
         values = np.asarray(node[selection])
         return values, np.zeros(values.shape, dtype=bool)
     if is_categorical(node):
@@ -427,6 +471,7 @@ def _node_column(node: H5adNode, selection: slice) -> TableColumn:
             np.asarray(node["codes"][selection]), np.asarray(categories[:])
         )
     if is_nullable(node):
+        _check_values(node["values"].dtype, node.name)
         values = np.asarray(node["values"][selection])
         missing = np.asarray(node["mask"][selection], dtype=bool)
         if missing.shape != values.shape:
@@ -455,8 +500,9 @@ def read_column(
     Raises:
         TypeError: If the node uses an encoding that cannot be decoded.
         ValueError: If a nullable column's mask does not align with its
-            values, or a categorical's categories are not one text, number
-            or boolean each.
+            values, the values are variable-length arrays other than text, or
+            a categorical's categories are not one text, number or boolean
+            each.
     """
     return decoded_column(_node_column(node, slice(start, stop)))
 
@@ -559,13 +605,16 @@ def table_column(
     it, apart from them; any other column as its values and missing rows.
 
     Raises:
-        ValueError: If a categorical's categories are not one text, number
-            or boolean each, as :func:`checked_categories` refuses them.
+        ValueError: If the values are variable-length arrays other than
+            text, as :func:`values_problem` finds, or a categorical's
+            categories are not one text, number or boolean each, as
+            :func:`checked_categories` refuses them.
     """
     if isinstance(table, h5py.Dataset):
         fields = table.dtype.fields
         if fields is None or key not in fields:
             raise KeyError(f"Column {key!r} was not found in {table.name!r}")
+        _check_values(np.dtype(fields[key][0]), f"{table.name}/{key}")
         values = np.asarray(table.fields(key)[start:stop])
         missing = np.zeros(values.shape, dtype=bool)
     else:
@@ -787,8 +836,9 @@ def check_column_text(
     text, except those of its missing rows, or every category of a
     categorical, used or not, which an import stores with the column. A
     column without text passes, and so does one that an import skips, such
-    as one of more than one dimension, whose missing-value mask does not
-    align with its values, or whose categories are not one value each.
+    as one of more than one dimension or of variable-length arrays, whose
+    missing-value mask does not align with its values, or whose categories
+    are not one value each.
 
     Args:
         h5: The file.

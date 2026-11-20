@@ -1909,6 +1909,93 @@ def test_a_skipped_column_needs_no_utf8_categories(tmp_path) -> None:
     assert sorted(columns) == ["y", "z"]
 
 
+def _cells_with_sequences(path: Path) -> str:
+    """Write the six cells of _cells_with_categories with columns of arrays.
+
+    In place of the column 'x', obs holds 'n', a nullable column of
+    variable-length float64 arrays, and 'v', a column of variable-length
+    int64 arrays, beside the numbers 'y' and the categorical 'z'.
+    """
+    written = _cells_with_categories(path, "arrays")
+    with h5py.File(written, "a") as h5:
+        obs = h5["obs"]
+        del obs["x"]
+        _variable_length(obs, "v", [[1, 2], [3], [1, 2, 3], [4], [5, 6], []])
+        nullable = obs.create_group("n")
+        stored = nullable.create_dataset("values", (6,), dtype=h5py.vlen_dtype(float))
+        for row, values in enumerate([[0.5], [1.5, 2.5], [], [3.5], [4.5], []]):
+            stored[row] = values
+        nullable.create_dataset("mask", data=np.array([0, 0, 0, 0, 0, 1], dtype=bool))
+    return written
+
+
+# What an import and a cluster key say of the columns of _cells_with_sequences.
+_NOT_ONE_PER_ROW = {
+    "n": "needs one text, number or boolean per row; found a variable-length "
+    "array of float64 per row",
+    "v": "needs one text, number or boolean per row; found a variable-length "
+    "array of int64 per row",
+}
+
+
+def test_an_import_skips_columns_of_variable_length_arrays(tmp_path) -> None:
+    path = _cells_with_sequences(tmp_path / "cells.h5ad")
+    destination = tmp_path / "cells.zarr"
+    reader = H5adReader(path)
+    try:
+        with _warnings() as warned:
+            columns = {
+                name: values.tolist() for name, values in reader.get_cell_columns()
+            }
+            H5adToZarr(reader, str(destination), nthreads=1, shuffle_cells=False).dump()
+    finally:
+        reader.close()
+
+    # Each array used to be stored as NumPy's text of it, such as '[1 2]'.
+    skipped = [
+        f"Skipping obs column {name!r}: Column '/obs/{name}' {problem}"
+        for name, problem in _NOT_ONE_PER_ROW.items()
+    ]
+    assert [
+        text.rstrip("\n") for text in warned if text.startswith("Skipping")
+    ] == skipped * 2
+    assert columns == {
+        "y": [0.0, 1.5, 3.0, 4.5, 6.0, 7.5],
+        "z": ["a", "b", "a", "b", "a", "b"],
+    }
+    root = zarr.open_group(str(destination), mode="r")
+    assert sorted(root["cellData"].array_keys()) == [
+        "I",
+        "__cytearc_categories__z",
+        "ids",
+        "names",
+        "y",
+        "z",
+    ]
+    np.testing.assert_array_equal(root["RNA/counts"][:], _SIX_COUNTS)
+
+
+@pytest.mark.parametrize("key", sorted(_NOT_ONE_PER_ROW))
+def test_a_cluster_key_of_variable_length_arrays_is_refused_first(
+    tmp_path, key
+) -> None:
+    path = _cells_with_sequences(tmp_path / "cells.h5ad")
+    destination = tmp_path / "cells.zarr"
+
+    def import_clusters() -> None:
+        reader = H5adReader(path, cluster_keys=[key])
+        try:
+            H5adToZarr(reader, str(destination), nthreads=1, shuffle_cells=False).dump()
+        finally:
+            reader.close()
+
+    with pytest.raises(TypeError) as refused:
+        import_clusters()
+    # The import used to fail as it typed the labels, after it wrote the counts.
+    assert str(refused.value) == f"Cluster key {key!r} {_NOT_ONE_PER_ROW[key]}"
+    assert not destination.exists()
+
+
 @pytest.mark.parametrize("shuffle_cells", [False, True], ids=["file", "shuffled"])
 @pytest.mark.parametrize(
     ("types", "message"),

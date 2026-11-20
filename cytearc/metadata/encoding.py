@@ -12,8 +12,9 @@ list that mixes types or holds ``None``, and pandas categorical, nullable, and
 string values take the dtype that their present values share: bool, int64,
 float64 for real numbers, complex128 for other numbers, and otherwise text.
 Numbers that the shared dtype cannot hold, such as an integer outside the
-int64 range, are refused rather than wrapped. ``None``, NaN, ``pd.NA``, and
-``NaT`` among them are missing.
+int64 range, are refused rather than wrapped, and so is a value that is a
+list, tuple, set, dict or NumPy array, which a column cannot hold as one
+value. ``None``, NaN, ``pd.NA``, and ``NaT`` among them are missing.
 """
 
 import datetime
@@ -23,6 +24,7 @@ import numpy as np
 import pandas as pd
 
 from ..storage.arrays import encode_metadata_values, missing_placeholder, text_array
+from ..utils.arguments import quoted_value
 
 __all__ = [
     "UnstorableCategoriesError",
@@ -149,18 +151,79 @@ def _typed_numbers(
     return typed
 
 
+# Values that a column cannot hold as one value each.
+_COLLECTIONS = (list, tuple, set, frozenset, dict, np.ndarray)
+# What pandas infers for object values that are all text, which need no check
+# one at a time.
+_TEXT_KINDS = frozenset({"string", "bytes", "empty"})
+
+
+def _refuse_collections(
+    values: np.ndarray,
+    present: np.ndarray,
+    missing: np.ndarray,
+    *,
+    name: str,
+    item: str,
+) -> None:
+    """Refuse object values of which one is a list, tuple, set, dict or array.
+
+    Values that pandas infers to be text are not checked one at a time, and
+    other values are checked by their distinct types.
+
+    Raises:
+        ValueError: Naming the column, the first ``item`` that holds such a
+            value, and the value.
+    """
+    if pd.api.types.infer_dtype(present, skipna=True) in _TEXT_KINDS:
+        return
+    if not any(issubclass(kind, _COLLECTIONS) for kind in set(map(type, present))):
+        return
+    position = next(
+        int(position)
+        for position in np.flatnonzero(~missing)
+        if isinstance(values[position], _COLLECTIONS)
+    )
+    raise ValueError(
+        f"Column {name!r} needs one value per {item}, not a list, tuple, set, "
+        f"dict or array; {item} {position + 1} holds "
+        f"{quoted_value(values[position])}. Pass text, such as series.map(str), "
+        "to store the values as text"
+    )
+
+
 def stored_values(
     values: np.ndarray,
     missing: np.ndarray,
     *,
     name: str,
+    item: str = "row",
 ) -> np.ndarray:
-    """Return a typed column whose masked rows hold a placeholder."""
+    """Return a typed column whose masked rows hold a placeholder.
+
+    Object values that share no number or boolean dtype are stored as text,
+    unless one is a list, tuple, set, dict or NumPy array, which a column
+    cannot hold as one value.
+
+    Args:
+        values: One value per position.
+        missing: The positions whose values are missing.
+        name: The column, for errors.
+        item: What a position is, for errors, such as ``"row"`` or
+            ``"category"``.
+
+    Raises:
+        ValueError: If a value is a list, tuple, set, dict or NumPy array,
+            naming the first ``item`` that holds one, if a number does not
+            fit the dtype that the values share, or if text is not valid
+            UTF-8.
+    """
     kind = values.dtype.kind
     if kind == "O":
         present = values[~missing]
         dtype = _shared_dtype(present)
         if dtype is None:
+            _refuse_collections(values, present, missing, name=name, item=item)
             return _text(values, missing, name=name)
         stored = np.full(values.shape, missing_placeholder(dtype), dtype=dtype)
         stored[~missing] = _typed_numbers(present, dtype, name=name)
@@ -343,7 +406,9 @@ def categorical_codes(values: Any, *, name: str) -> tuple[np.ndarray, np.ndarray
     categorical = pd.Categorical(values)
     labels = np.empty(len(categorical.categories), dtype=object)
     labels[:] = categorical.categories.tolist()
-    categories = stored_values(labels, np.zeros(len(labels), dtype=bool), name=name)
+    categories = stored_values(
+        labels, np.zeros(len(labels), dtype=bool), name=name, item="category"
+    )
     if len(np.unique(categories)) != len(categories):
         raise ValueError(
             f"Column {name!r} has categories that read alike once stored, as "
@@ -360,9 +425,19 @@ def _is_pandas_values(values: Any) -> bool:
 
 
 def nullable_values(values: Any, *, name: str) -> tuple[np.ndarray, np.ndarray]:
-    """Return supplied column values as a typed array and their missing rows."""
+    """Return supplied column values as a typed array and their missing rows.
+
+    Raises:
+        ValueError: If the values are not one per row, or as
+            :func:`stored_values` refuses them.
+    """
     array = np.asarray(values, dtype=object) if _is_pandas_values(values) else values
-    array = np.asarray(array)
+    try:
+        array = np.asarray(array)
+    except ValueError:
+        # Sequences of unequal lengths, which NumPy cannot shape, are held as
+        # objects, so that stored_values names the first of them.
+        array = np.fromiter(array, dtype=object, count=len(array))
     if array.ndim != 1:
         raise ValueError(
             f"Column {name!r} needs one value per row; found values of shape "
