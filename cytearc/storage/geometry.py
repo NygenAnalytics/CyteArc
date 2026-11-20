@@ -79,14 +79,16 @@ class ArrayGeometry:
         )
 
     def heldDecodeBytes(self, chunks: int, decodes: int) -> int:
-        """Return the decoded chunks that a read holds from its earlier decodes.
+        """Return the decoded chunks that a read reserves beside those it decodes at once.
 
-        Zarr decodes a chunk in a thread of its pool, and that thread keeps
-        the chunk it decoded until it is scheduled again. A read that decodes
-        ``chunks`` chunks ``decodes`` at a time can therefore hold one
-        previous decoded chunk for each decode under way beside it, which a
-        busy machine makes likely: one chunk per decode, and no more than the
-        decodes that follow the first ones.
+        A read that decodes ``chunks`` chunks ``decodes`` at a time reserves
+        one previous decoded chunk for each decode under way, and no more
+        than the decodes that follow the first ones. A thread of a plain
+        thread pool keeps the last chunk it decoded until it runs again, which
+        on a busy machine can be after the read has moved on. CyteArc's codec
+        pools hand each decoded chunk back to the read's event loop instead,
+        so their threads keep none once the read has it, and this reserve is
+        headroom for a read that decodes on a pool that is not CyteArc's.
         """
         touched = max(1, int(chunks))
         decoding = min(touched, max(1, int(decodes)))

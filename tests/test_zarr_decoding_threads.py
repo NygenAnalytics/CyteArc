@@ -2,7 +2,8 @@
 
 import contextvars
 import threading
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
+from typing import Any
 from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
@@ -371,3 +372,405 @@ def test_shutting_the_pools_down_shuts_down_the_pool_of_every_count() -> None:
                 pools.submit(threading.current_thread)
         finally:
             async_execution._DECODING_THREADS.reset(token)
+
+
+# A pool thread that has reported a call's result.
+
+
+class _SetResultPause:
+    """Pause the pool thread of an armed call just after it sets the call's result.
+
+    The thread waits inside ``set_result``, once the future's callbacks have
+    told the event loop, until the test releases it, as a thread that the OS
+    deschedules there would: it still holds the call, its future and the
+    result it returned. A call arms the pause of the thread that runs it.
+    """
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import concurrent.futures.thread as pool_thread
+
+        self._armed = threading.local()
+        self.paused = threading.Event()
+        self.release = threading.Event()
+        run = pool_thread._WorkItem.run
+        pause = self
+
+        def paused_run(item, *args):  # type: ignore[no-untyped-def]
+            future = item.future
+            set_result = future.set_result
+
+            def set_result_then_pause(result):  # type: ignore[no-untyped-def]
+                set_result(result)
+                if getattr(pause._armed, "on", False):
+                    pause._armed.on = False
+                    pause.paused.set()
+                    assert pause.release.wait(timeout=20)
+
+            future.set_result = set_result_then_pause
+            try:
+                run(item, *args)
+            finally:
+                del future.set_result
+
+        monkeypatch.setattr(pool_thread._WorkItem, "run", paused_run)
+
+    def arm(self) -> None:
+        self._armed.on = True
+
+
+@pytest.fixture
+def without_cyclic_collection() -> Iterator[None]:
+    """Free objects by their references alone, so that one a cycle holds stays alive."""
+    import gc
+
+    enabled = gc.isenabled()
+    gc.disable()
+    try:
+        yield
+    finally:
+        if enabled:
+            gc.enable()
+
+
+class _Chunk:
+    """Stands in for a decoded chunk: an object that a weak reference can follow."""
+
+
+def _chunk_outlives_its_reader(
+    pool: ThreadPoolExecutor, pause: _SetResultPause
+) -> bool:
+    """Whether a pool thread that pauses after returning a chunk keeps it once its reader let go."""
+    import asyncio
+    import weakref
+
+    returned: list[weakref.ref[_Chunk]] = []
+
+    def decode() -> _Chunk:
+        pause.arm()
+        chunk = _Chunk()
+        returned.append(weakref.ref(chunk))
+        return chunk
+
+    async def read() -> bool:
+        chunk = await asyncio.get_running_loop().run_in_executor(pool, decode)
+        assert isinstance(chunk, _Chunk)
+        del chunk
+        # The loop lets go of the callback that resumed this read, and its
+        # future, once the read yields.
+        await asyncio.sleep(0)
+        # The thread that returned the chunk still waits in set_result.
+        assert pause.paused.wait(timeout=20)
+        return returned[0]() is not None
+
+    try:
+        return asyncio.run(read())
+    finally:
+        pause.release.set()
+
+
+@pytest.mark.parametrize(
+    ("pool", "keeps"),
+    [
+        (lambda: ThreadPoolExecutor(2), True),
+        (lambda: async_execution._ReleasingPool(2), False),
+        (lambda: async_execution._DecodingPools(2), False),
+        (lambda: async_execution._DecodingPools(3), False),
+    ],
+    ids=["a plain pool", "a releasing pool", "the host threads", "a counted pool"],
+)
+def test_a_pool_thread_paused_after_its_result_keeps_no_chunk_its_reader_dropped(
+    monkeypatch, without_cyclic_collection, pool, keeps
+) -> None:
+    # A plain pool's thread keeps the chunk that it returned until it runs
+    # again; CyteArc's pools hand the chunk to the reader's loop, so the
+    # paused thread holds nothing that reaches it. The decoding pools of
+    # three threads decode within zarr_decoding_threads(2) on a pool of two.
+    pause = _SetResultPause(monkeypatch)
+    executor = pool()
+    try:
+        with zarr_decoding_threads(2):
+            assert _chunk_outlives_its_reader(executor, pause) is keeps
+    finally:
+        executor.shutdown(wait=True)
+
+
+def _read_through_run_read(
+    array: zarr.Array, check: Callable[[np.ndarray], None]
+) -> None:
+    from cytearc.storage.virtual_arrays import read_selection
+
+    with zarr_decoding_threads(2):
+        values = read_selection(array, slice(None), slice(None))
+    check(values)
+
+
+def _read_through_zarrs_loop(
+    array: zarr.Array, check: Callable[[np.ndarray], None]
+) -> None:
+    check(np.asarray(array[...]))
+
+
+def _read_through_a_storage_runner(
+    array: zarr.Array, check: Callable[[np.ndarray], None]
+) -> None:
+    from dataclasses import replace
+
+    from cytearc.storage.async_execution import AsyncStorageRunner
+    from cytearc.storage.budget import ResourceBudget
+    from cytearc.storage.execution import WorkShape, plan_operation
+
+    # Two codec threads on any machine, so that one can pause.
+    plan = plan_operation(
+        ResourceBudget(64 * 1024**2, 2), WorkShape(nUnits=2, unitBytes=1)
+    )
+    runner = AsyncStorageRunner(operation=replace(plan, codecWorkers=2))
+
+    async def operation(active: AsyncStorageRunner) -> None:
+        values = await active.io(array.async_array.getitem((slice(None), slice(None))))
+        # The runner waits for its codec threads as it ends, so the read is
+        # checked before then.
+        check(np.asarray(values))
+
+    runner.run(operation)
+
+
+@pytest.mark.parametrize(
+    "read",
+    [_read_through_run_read, _read_through_zarrs_loop, _read_through_a_storage_runner],
+    ids=["a read on its own loop", "Zarr's loop", "a storage runner"],
+)
+def test_a_read_leaves_no_decoded_chunk_with_a_paused_pool_thread(
+    tmp_path, monkeypatch, without_cyclic_collection, read
+) -> None:
+    # The thread of the first decode pauses after it returns the chunk, as
+    # a busy machine can deschedule it; the read decodes its other chunks on
+    # other threads and copies every chunk into its result. Once the read has
+    # returned, no decoded chunk is left, though that thread has not run again.
+    import weakref
+
+    values = np.arange(8_000, dtype=np.int64).reshape(80, 100)
+    array = zarr.open_group(tmp_path / "store.zarr", mode="w").create_array(
+        "values", data=values, chunks=(10, 100), compressors=ZstdCodec(level=1)
+    )
+    pause = _SetResultPause(monkeypatch)
+    decoded: list[weakref.ref[Any]] = []
+    lock = threading.Lock()
+    decode = ZstdCodec._decode_sync
+
+    def recording(codec, chunk_bytes, chunk_spec):  # type: ignore[no-untyped-def]
+        chunk = decode(codec, chunk_bytes, chunk_spec)
+        with lock:
+            if not decoded:
+                pause.arm()
+            decoded.append(weakref.ref(chunk))
+        return chunk
+
+    monkeypatch.setattr(ZstdCodec, "_decode_sync", recording)
+    checked: list[bool] = []
+
+    def check(result: np.ndarray) -> None:
+        try:
+            np.testing.assert_array_equal(result, values)
+            assert pause.paused.wait(timeout=20)
+            assert len(decoded) == 8
+            assert [chunk() for chunk in decoded] == [None] * 8
+            checked.append(True)
+        finally:
+            pause.release.set()
+
+    try:
+        read(array, check)
+    finally:
+        pause.release.set()
+    assert checked == [True]
+
+
+def _held_call(started: threading.Event, release: threading.Event):  # type: ignore[no-untyped-def]
+    """A call that holds its pool thread until ``release`` is set."""
+
+    def call() -> str:
+        started.set()
+        assert release.wait(timeout=20)
+        return "held"
+
+    return call
+
+
+def test_a_call_that_raises_reaches_its_reader_through_a_releasing_pool() -> None:
+    import asyncio
+
+    def failing() -> None:
+        raise KeyError("no chunk at 3")
+
+    async def read() -> None:
+        loop = asyncio.get_running_loop()
+        with pytest.raises(KeyError, match="no chunk at 3"):
+            await loop.run_in_executor(pool, failing)
+        assert await loop.run_in_executor(pool, lambda: "next") == "next"
+
+    with async_execution._ReleasingPool(1) as pool:
+        asyncio.run(read())
+
+
+def test_a_queued_call_whose_reader_was_cancelled_never_runs() -> None:
+    import asyncio
+
+    started = threading.Event()
+    release = threading.Event()
+    ran: list[str] = []
+
+    async def read() -> None:
+        loop = asyncio.get_running_loop()
+        holding = loop.run_in_executor(pool, _held_call(started, release))
+        queued = asyncio.ensure_future(
+            loop.run_in_executor(pool, lambda: ran.append("queued"))
+        )
+        assert started.wait(timeout=20)
+        queued.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await queued
+        # The loop cancels the call as it runs the cancelled future's
+        # callbacks, before the held call ends.
+        await asyncio.sleep(0)
+        release.set()
+        assert await holding == "held"
+        # The pool runs another call after the one it held, not the cancelled one.
+        await loop.run_in_executor(pool, lambda: ran.append("later"))
+
+    with async_execution._ReleasingPool(1) as pool:
+        try:
+            asyncio.run(read())
+        finally:
+            release.set()
+    assert ran == ["later"]
+
+
+def test_a_started_call_whose_reader_was_cancelled_runs_on_and_keeps_nothing(
+    without_cyclic_collection,
+) -> None:
+    import asyncio
+    import weakref
+
+    started = threading.Event()
+    release = threading.Event()
+    returned: list[weakref.ref[_Chunk]] = []
+
+    def decode() -> _Chunk:
+        started.set()
+        assert release.wait(timeout=20)
+        chunk = _Chunk()
+        returned.append(weakref.ref(chunk))
+        return chunk
+
+    async def read() -> None:
+        loop = asyncio.get_running_loop()
+        reading = asyncio.ensure_future(loop.run_in_executor(pool, decode))
+        assert started.wait(timeout=20)
+        reading.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await reading
+        # The call has started, so it runs to its end, and the loop drops the
+        # chunk it hands back.
+        release.set()
+        assert await loop.run_in_executor(pool, lambda: "next") == "next"
+        await asyncio.sleep(0)
+
+    with async_execution._ReleasingPool(1) as pool:
+        try:
+            asyncio.run(read())
+        finally:
+            release.set()
+    assert len(returned) == 1
+    assert returned[0]() is None
+
+
+def test_a_pool_that_shuts_down_cancels_the_reader_of_a_queued_call() -> None:
+    import asyncio
+
+    started = threading.Event()
+    release = threading.Event()
+
+    async def read() -> None:
+        loop = asyncio.get_running_loop()
+        holding = loop.run_in_executor(pool, _held_call(started, release))
+        queued = loop.run_in_executor(pool, lambda: "queued")
+        assert started.wait(timeout=20)
+        pool.shutdown(wait=False, cancel_futures=True)
+        with pytest.raises(asyncio.CancelledError):
+            await queued
+        release.set()
+        assert await holding == "held"
+
+    pool = async_execution._ReleasingPool(1)
+    try:
+        asyncio.run(read())
+    finally:
+        release.set()
+        pool.shutdown(wait=True)
+
+
+def test_a_call_whose_loop_closed_keeps_nothing_once_it_ends(
+    monkeypatch, without_cyclic_collection
+) -> None:
+    import asyncio
+    import weakref
+
+    started = threading.Event()
+    release = threading.Event()
+    returned: list[weakref.ref[_Chunk]] = []
+    pause = _SetResultPause(monkeypatch)
+
+    def decode() -> _Chunk:
+        started.set()
+        assert release.wait(timeout=20)
+        pause.arm()
+        chunk = _Chunk()
+        returned.append(weakref.ref(chunk))
+        return chunk
+
+    async def submit() -> Any:
+        return pool.submit(decode)
+
+    with async_execution._ReleasingPool(1) as pool:
+        loop = asyncio.new_event_loop()
+        try:
+            future = loop.run_until_complete(submit())
+            assert started.wait(timeout=20)
+        finally:
+            loop.close()
+        release.set()
+        try:
+            # Nothing awaits the call once its loop has closed, so its chunk
+            # goes as the call ends, while its thread waits in set_result.
+            assert pause.paused.wait(timeout=20)
+            assert len(returned) == 1
+            assert returned[0]() is None
+        finally:
+            pause.release.set()
+    assert not future.done()
+
+
+def test_a_read_does_not_wait_for_a_call_that_ended_before_it_looked() -> None:
+    import asyncio
+    import time
+
+    class EndingPool(async_execution._ReleasingPool):
+        """Return each future of an event loop's call once the call has ended and gone."""
+
+        def submit(self, fn, /, *args, **kwargs):  # type: ignore[no-untyped-def]
+            future = super().submit(fn, *args, **kwargs)
+            deadline = time.monotonic() + 20
+            while future.call() is not None:
+                assert time.monotonic() < deadline
+                time.sleep(0.001)
+            return future
+
+    async def read() -> int:
+        value = await asyncio.get_running_loop().run_in_executor(lent, lambda: 42)
+        assert lent._calls == set()
+        lent.wait_for_calls()
+        return value
+
+    with EndingPool(1) as pool:
+        lent = async_execution._LentPool(pool)
+        assert asyncio.run(read()) == 42

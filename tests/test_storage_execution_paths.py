@@ -207,12 +207,17 @@ def test_runner_setup_failure_leaves_nothing_to_clean_up(
 
 
 def test_runner_reports_every_cleanup_failure(monkeypatch: pytest.MonkeyPatch) -> None:
-    class FailingShutdownPool(ThreadPoolExecutor):
-        def shutdown(self, wait: bool = True, *, cancel_futures: bool = False) -> None:
-            super().shutdown(wait, cancel_futures=cancel_futures)
-            # Only the runner's own shutdown fails, not the event loop's.
-            if cancel_futures:
-                raise RuntimeError(f"{self._thread_name_prefix} shutdown failed")
+    def failing_shutdown(pool: type[ThreadPoolExecutor]) -> type[ThreadPoolExecutor]:
+        class FailingShutdownPool(pool):  # type: ignore[valid-type,misc]
+            def shutdown(
+                self, wait: bool = True, *, cancel_futures: bool = False
+            ) -> None:
+                super().shutdown(wait, cancel_futures=cancel_futures)
+                # Only the runner's own shutdown fails, not the event loop's.
+                if cancel_futures:
+                    raise RuntimeError(f"{self._thread_name_prefix} shutdown failed")
+
+        return FailingShutdownPool
 
     close = async_execution._IoLoops.close
 
@@ -228,7 +233,15 @@ def test_runner_reports_every_cleanup_failure(monkeypatch: pytest.MonkeyPatch) -
             yield
         raise RuntimeError("Numba thread restore failed")
 
-    monkeypatch.setattr(async_execution, "ThreadPoolExecutor", FailingShutdownPool)
+    # The compute pool is a plain pool, and the codec pool hands results back.
+    monkeypatch.setattr(
+        async_execution, "ThreadPoolExecutor", failing_shutdown(ThreadPoolExecutor)
+    )
+    monkeypatch.setattr(
+        async_execution,
+        "_ReleasingPool",
+        failing_shutdown(async_execution._ReleasingPool),
+    )
     monkeypatch.setattr(async_execution._IoLoops, "close", failing_close)
     monkeypatch.setattr(async_execution, "numba_threads", failing_numba_restore)
 
