@@ -1,6 +1,7 @@
 import math
+import numbers
 from collections.abc import Generator, Iterator, Mapping, Sequence
-from typing import Any, Literal, cast
+from typing import Any, Literal, TypeIs, cast
 
 import numpy as np
 import pandas as pd
@@ -57,6 +58,17 @@ from .normalization import (
 _BAND_PARTIAL_BYTES = 640
 # Four int64 index arrays and one mask over the feature rows of a band.
 _BAND_ROW_INDEX_BYTES = 4 * 8 + 1
+#: The size factor of an RNA assay that stores none: library-size
+#: normalization then scales each cell to 1,000 counts.
+DEFAULT_SIZE_FACTOR = 1000
+
+
+def _is_size_factor(value: object) -> TypeIs[float]:
+    """Return whether ``value`` is a finite positive number, as a size factor is."""
+    if isinstance(value, bool) or not isinstance(value, numbers.Real):
+        return False
+    number = float(value)
+    return math.isfinite(number) and number > 0
 
 
 def _read_facade_block(
@@ -236,19 +248,14 @@ class RNAassay(Assay):
         if "size_factor" in self.attrs:
             # A stored size factor is kept as stored, such as 0.5 or 2500.5.
             stored = self.attrs["size_factor"]
-            if (
-                isinstance(stored, bool)
-                or not isinstance(stored, int | float)
-                or not math.isfinite(stored)
-                or stored <= 0
-            ):
+            if not _is_size_factor(stored):
                 raise ValueError(
                     f"Assay {name!r} has the size_factor attribute {stored!r}, "
                     "which is not a finite positive number"
                 )
             self.sf = stored
         else:
-            self.sf = 1000
+            self.sf = DEFAULT_SIZE_FACTOR
             if not self.z.read_only:
                 self.attrs["size_factor"] = self.sf
         if TF_DENOMINATOR_ATTR in self.attrs:
@@ -1263,3 +1270,36 @@ class RNAassay(Assay):
             show=True,
             **plot_kwargs,
         )
+
+
+def library_size_factor(assay: RNAassay) -> float:
+    """Return the size factor that an RNA assay normalizes library sizes with.
+
+    An ambient correction, merge or composite records it on the assay that it
+    derives, so that the new assay normalizes as its source does. It is the
+    session's ``sf``, or, when the session sets ``sf`` to None, the size
+    factor that the assay stores, or 1000 when it stores none: the factor that
+    a new session opens the assay with. A NumPy number is returned as the
+    Python number it holds, as JSON attributes keep it.
+
+    Args:
+        assay: The source assay.
+
+    Returns:
+        The size factor, a finite positive number.
+
+    Raises:
+        ValueError: If the session's ``sf`` is neither None nor a finite
+            positive number, since no assay that recorded it could be opened.
+    """
+    factor = assay.sf
+    if factor is None:
+        return cast(float, assay.attrs.get("size_factor", DEFAULT_SIZE_FACTOR))
+    if not _is_size_factor(factor):
+        raise ValueError(
+            f"ds.{assay.name}.sf is {factor!r}, which is not a finite positive "
+            f"number. Set ds.{assay.name}.sf to a finite positive number, such as "
+            f"1000, or to None to use the size factor that assay {assay.name!r} "
+            "stores."
+        )
+    return cast(float, np.asarray(factor).item())

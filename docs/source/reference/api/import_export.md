@@ -603,7 +603,7 @@ Each merged assay keeps the type that its sources declare in `assayTypes`, such 
 demultiplexed. Sources that declare different types for one assay are rejected before anything is
 written; reopen the source whose declaration is wrong with `zarr_mode="r+"` and a matching
 `assay_types`.
-A merged RNA assay keeps the size factor `sf` that its sources normalize with, and sources of different size factors are rejected before anything is written; set one on each source, such as `ds.RNA.sf = 1000`, and merge again. `create_composite` keeps and checks it alike.
+A merged RNA assay keeps the size factor that its sources normalize with, each session's `sf` or, where a session sets none, the factor that the source stores ([Library-size normalization](../developers/zarr-internals#library-size-normalization)), and sources of different size factors are rejected before anything is written; set one on each source, such as `ds.RNA.sf = 1000`, and merge again. `create_composite` keeps and checks it alike.
 RNA assays write both `counts` and a gene-major `countsT` copy, which roughly doubles stored counts for those assays.
 Non-RNA assays never write `countsT`.
 Every merged assay gets the membership column `<assay>_I` described in [Assay membership](../developers/zarr-internals#assay-membership). A

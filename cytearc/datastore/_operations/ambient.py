@@ -13,6 +13,7 @@ import pandas as pd
 import zarr
 
 from ...assay import RNAassay
+from ...assay.rna import library_size_factor
 from ...features.values import spread_measured_rows
 from ...metadata.artifacts import plan_cell_data_artifact
 from ...metadata.membership import measured_rows, resolve_assay_membership
@@ -915,9 +916,12 @@ class _AmbientOperationsMixin(_AmbientOperationsBase):
         other rows hold no counts. Its counts are written in bounded row bands
         with ``countsT``, so every operation can use it by name, and its
         attributes record the ``contamination`` and ``profile`` artifacts, the
-        ``random_seed``, and the counts removed. The assay becomes visible only
-        after its counts are complete. If the write fails or is interrupted,
-        the partial assay is removed or left pending until
+        ``random_seed``, and the counts removed. It normalizes by library size
+        with its source's size factor: the session's ``sf`` of the source, or
+        the factor that the source stores when the session sets ``sf`` to
+        None. The assay becomes visible only after its counts are complete. If
+        the write fails or is interrupted, the partial assay is removed or
+        left pending until
         :meth:`~cytearc.datastore.datastore.DataStore.discard_interrupted_assay`
         removes it.
 
@@ -934,8 +938,9 @@ class _AmbientOperationsMixin(_AmbientOperationsBase):
             TypeError: If an argument has the wrong type.
             ValueError: If ``contamination`` is not an ``ambient_contamination``
                 artifact or was saved without its diagnostics, as earlier
-                releases saved them, ``assay_label`` is taken or invalid, or
-                ``random_seed`` is negative.
+                releases saved them, ``assay_label`` is taken or invalid,
+                ``random_seed`` is negative, or the session's ``sf`` of the
+                source is not a finite positive number.
             PermissionError: If the store is not opened with ``zarr_mode='r+'``.
             MemoryError: If one row band of the new assay and its correction do
                 not fit the datastore memory budget.
@@ -959,6 +964,8 @@ class _AmbientOperationsMixin(_AmbientOperationsBase):
         profile = status.input_ref("profile")
         assay, _group, soup = self._ambient_profile_fractions(profile, operation)
         self._require_writable(operation)
+        # The corrected counts normalize as their source's do.
+        size_factor = library_size_factor(assay)
         resolved = resolve_cell_aligned_artifact(
             self.zw,
             contamination,
@@ -1094,12 +1101,9 @@ class _AmbientOperationsMixin(_AmbientOperationsBase):
                 assay_type="RNA",
                 resources=self.resources,
             )
-            if assay.sf is not None:
-                # The corrected counts normalize as their source's do; JSON
-                # keeps a NumPy number as the number it holds.
-                transaction.group.attrs["size_factor"] = np.asarray(assay.sf).item()
             transaction.group.attrs.update(
                 {
+                    "size_factor": size_factor,
                     "ambient_source_assay": assay.name,
                     "ambient_contamination": contamination.to_dict(),
                     "ambient_profile": profile.to_dict(),

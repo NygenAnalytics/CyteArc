@@ -1095,6 +1095,56 @@ def test_corrected_counts_keep_the_size_factor_of_their_source(path):
     assert _open(path).get_assay("RNA_numpy").sf == 2000
 
 
+def test_a_session_without_a_size_factor_corrects_with_the_stored_one(path):
+    zarr.open_group(str(path / "RNA"), mode="r+").attrs["size_factor"] = 2500.5
+    store = _open(path)
+    cells, _clusters = _cells_and_clusters(store)
+    profile = store.qc.ambient_profile(total_counts=(2, 10))
+    estimate = store.qc.ambient_contamination(cells, profile, fraction=0.1)
+    # A session that normalizes with a custom normalizer may set no factor.
+    store.RNA.sf = None
+
+    store.qc.correct_ambient(estimate, assay_label="RNA_soup")
+
+    # Before, the corrected assay recorded no factor and took 1000, so its
+    # library-size values were 0.4 times those of its source.
+    group = zarr.open_group(str(path / "RNA_soup"), mode="r")
+    assert group.attrs["size_factor"] == 2500.5
+    assert _open(path).get_assay("RNA_soup").sf == 2500.5
+    # The session keeps its own setting of the source.
+    assert store.RNA.sf is None
+    corrected = _stored_counts(store, "RNA_soup")[:3].astype(np.float64)
+    normed = store.get_assay("RNA_soup").normed(cell_idx=np.arange(3)).compute()
+    np.testing.assert_allclose(
+        normed, 2500.5 * corrected / corrected.sum(axis=1, keepdims=True)
+    )
+
+
+@pytest.mark.parametrize(
+    "factor", [0, -5, np.float64(np.nan), np.inf, True, np.bool_(True), "1000"]
+)
+def test_a_size_factor_that_no_assay_opens_with_is_refused_before_a_write(
+    store, path, factor
+):
+    cells, _clusters = _cells_and_clusters(store)
+    profile = store.qc.ambient_profile(total_counts=(2, 10))
+    estimate = store.qc.ambient_contamination(cells, profile, fraction=0.1)
+    store.RNA.sf = factor
+
+    # Before, the corrected assay recorded the factor, which every later open
+    # of the store refused, so the store could no longer be opened.
+    with pytest.raises(
+        ValueError,
+        match=r"^ds\.RNA\.sf is .*, which is not a finite positive number\. Set "
+        r"ds\.RNA\.sf to a finite positive number, such as 1000, or to None to "
+        r"use the size factor that assay 'RNA' stores\.$",
+    ):
+        store.qc.correct_ambient(estimate, assay_label="RNA_soup")
+    assert "RNA_soup" not in zarr.open_group(str(path), mode="r")
+    assert store.assay_names == ["RNA"]
+    assert _open(path).assay_names == ["RNA"]
+
+
 def test_correction_is_deterministic_in_any_memory_budget(store, path, monkeypatch):
     cells, clusters = _cells_and_clusters(store)
     profile = store.qc.ambient_profile(total_counts=(2, 10))
