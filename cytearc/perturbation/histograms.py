@@ -318,7 +318,8 @@ class HistogramMemoryError(MemoryBudgetError):
             point where they stopped.
         budget_bytes: The ledger's budget.
         item: The histograms, their distinct counts and the rows that remain.
-        n_distinct: The distinct counts that they held then.
+        n_distinct: The distinct counts that they held then, those up to
+            :data:`DENSE_COUNTS` included.
         rows_read: The rows of counts read when they stopped.
         n_rows: The rows of counts, one per cell.
         every_row_bytes: When a merge stopped them while rows remained to be
@@ -464,6 +465,7 @@ def _every_row_bytes(
     held: int,
     buffer_bytes: int,
     dense: np.ndarray,
+    n_dense: int,
     n_larger: int,
     *,
     rows_read: int,
@@ -473,16 +475,14 @@ def _every_row_bytes(
 
     Distinct counts grow about as fast as the rows read, or slower, so the
     distinct counts of every row are estimated at the rate of the rows read:
-    the ``n_larger`` merged larger counts, and the counts that ``dense``
-    holds, at most :data:`DENSE_COUNTS` for each histogram. At those counts,
-    each later merge holds at most ``held``, the buffer and 32 bytes for each
-    larger count, and the assembly holds what :func:`_assembly_bytes` counts.
-    The estimate is the larger of the two.
+    the ``n_larger`` merged larger counts, and the ``n_dense`` counts that
+    ``dense`` holds, at most :data:`DENSE_COUNTS` for each histogram. At
+    those counts, each later merge holds at most ``held``, the buffer and 32
+    bytes for each larger count, and the assembly holds what
+    :func:`_assembly_bytes` counts. The estimate is the larger of the two.
     """
     every_larger = -(-n_larger * n_rows // rows_read)
-    every_dense = min(
-        dense.size, -(-int(np.count_nonzero(dense)) * n_rows // rows_read)
-    )
+    every_dense = min(dense.size, -(-n_dense * n_rows // rows_read))
     return max(
         held + buffer_bytes + 32 * every_larger,
         _assembly_bytes(held, dense, every_dense, every_larger),
@@ -515,26 +515,31 @@ def _larger_counts(
         run = buffer[:n_keys]
         run.sort()
         size = int(_merged_size(keys, run))
+        # The histograms hold the dense counts beside the merged larger ones.
+        n_dense = int(np.count_nonzero(dense))
         needed = held + buffer.nbytes + keys.nbytes + cells.nbytes + 16 * size
         every_row = None
         if rows_read == n_rows:
             # The last merge also checks the assembly that follows, so that
             # one refusal names what both need.
-            needed = max(
-                needed,
-                _assembly_bytes(held, dense, int(np.count_nonzero(dense)), size),
-            )
+            needed = max(needed, _assembly_bytes(held, dense, n_dense, size))
         else:
             # A refusal while rows remain names what every row would need,
             # so that the budget it names gets past the later merges and
             # the assembly.
             every_row = _every_row_bytes(
-                held, buffer.nbytes, dense, size, rows_read=rows_read, n_rows=n_rows
+                held,
+                buffer.nbytes,
+                dense,
+                n_dense,
+                size,
+                rows_read=rows_read,
+                n_rows=n_rows,
             )
         _require_memory(
             needed,
             ledger,
-            size,
+            n_dense + size,
             rows_read=rows_read,
             n_rows=n_rows,
             every_row=every_row,

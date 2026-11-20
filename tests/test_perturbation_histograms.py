@@ -352,6 +352,33 @@ def test_a_refusal_says_how_many_rows_remain_to_be_read() -> None:
     assert named_budget(error) == error.needed_bytes
 
 
+def test_a_merge_refusal_names_the_dense_and_larger_counts_of_the_rows_read() -> None:
+    # Ambient counts fill dense bins and ten carried guides per cell add
+    # larger counts, so the histograms hold both when a merge stops them.
+    n_cells, n_guides = 6_000, 100
+    counts = _carried_counts(n_cells, n_guides, 10, seed=5)
+    samples = np.zeros(n_cells, dtype=np.int64)
+    least = histogram_bytes(1, n_guides, n_cells, n_distinct=0)
+    with pytest.raises(HistogramMemoryError) as refused:
+        guide_count_histograms(
+            [counts], samples, n_samples=1, n_guides=n_guides, ledger=_ledger(least)
+        )
+    error = refused.value
+    read = error.rows_read
+    assert 0 < read < n_cells
+    held = _distinct_counts(counts[:read], samples[:read])
+    dense = _distinct_counts(
+        np.where(counts[:read] <= DENSE_COUNTS, counts[:read], 0), samples[:read]
+    )
+    assert 0 < dense < held
+    assert error.n_distinct == held
+    assert (
+        f"for the guide count histograms of {held} distinct counts, while "
+        f"{n_cells - read} of {n_cells} rows of counts remain to be read, "
+        in str(error)
+    )
+
+
 def test_a_refusal_after_every_row_names_memory_that_finishes() -> None:
     n_cells, n_guides = 3_000, 100
     counts = _carried_counts(n_cells, n_guides, 5, seed=9)
@@ -568,7 +595,7 @@ def test_the_estimate_of_every_row_scales_counts_up_to_what_a_histogram_holds(
     dense = np.zeros((1, 1, DENSE_COUNTS), dtype=np.uint32)
     dense[0, 0, :filled] = 1
     found = histograms._every_row_bytes(
-        1_000, buffer_bytes, dense, n_larger, rows_read=rows_read, n_rows=4
+        1_000, buffer_bytes, dense, filled, n_larger, rows_read=rows_read, n_rows=4
     )
     assert found == expected
 
