@@ -19,7 +19,7 @@ import zarr
 
 import cytearc.datastore._operations.record_tables as record_tables
 import cytearc.datastore._operations.repertoire as repertoire_operations
-from cytearc import plotting
+from cytearc import DiagnosticWarning, plotting
 from cytearc.repertoire import SLOTS, GeneUsage, Spectratype
 from cytearc.storage.artifacts import artifact_group, inspect_artifact
 from cytearc.storage.refs import ArtifactRef
@@ -286,22 +286,24 @@ def test_usage_refuses_other_sources_and_missing_fields(tmp_path) -> None:
         match="^sequence='nt' reads each chain's junction, which these receptors",
     ):
         store.repertoire.spectratype(sparse, sequence="nt")
-    # A file of a header alone imports receptors that store no field, so
-    # neither count has a locus to group the chains by.
+    # A file of a header alone imports receptors without a contig, which store
+    # no field; both counts name the import rather than the missing locus.
     header_only = write_lines(
         tmp_path,
         "header.tsv",
         "cell_id\tsequence_id\tlocus\tjunction_aa\tproductive",
         [],
     )
-    empty = store.repertoire.import_receptors(
-        header_only, cell_selection=store.snapshot_cell_selection()
-    )
+    with pytest.warns(DiagnosticWarning, match="read no contig"):
+        empty = store.repertoire.import_receptors(
+            header_only, cell_selection=store.snapshot_cell_selection()
+        )
     assert artifact_group(store.zw, empty).attrs["fields"] == []
     saved = store.artifacts.list(scope="datastore")
-    with pytest.raises(ValueError, match="^The receptors store no locus$"):
+    refusal = "^The receptors hold no contig: their import read no contig from its"
+    with pytest.raises(ValueError, match=refusal):
         store.repertoire.gene_usage(empty)
-    with pytest.raises(ValueError, match="^The receptors store no locus$"):
+    with pytest.raises(ValueError, match=refusal):
         store.repertoire.spectratype(empty, sequence="aa")
     assert store.artifacts.list(scope="datastore") == saved
 

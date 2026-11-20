@@ -14,7 +14,7 @@ import pandas as pd
 import pytest
 from matplotlib.colors import to_hex
 
-from cytearc import plotting
+from cytearc import DiagnosticWarning, plotting
 from cytearc.datastore.datastore import DataStore
 from tests.clone_helpers import N_RECEPTOR_CELLS, bcr_file, receptor_store, tcr_file
 from tests.storage_helpers import by_cell_id, insert_nullable_cell_column
@@ -89,6 +89,31 @@ def test_receptor_qc_counts_cells_by_category(receptors) -> None:
         assert result.axes["receptor_type"].get_xlabel() == "Cells"
         assert result.provenance.n_cells == N_CELLS
         assert result.provenance.extras["grouping"] is None
+    finally:
+        result.close()
+
+
+def test_receptor_qc_draws_receptors_whose_import_read_no_contig(tmp_path) -> None:
+    store = receptor_store(tmp_path)
+    path = tmp_path / "header.tsv"
+    path.write_text("cell_id\tsequence_id\tlocus\tjunction_aa\tproductive\n")
+    with pytest.warns(DiagnosticWarning, match="read no contig"):
+        ref = store.repertoire.import_receptors(
+            path, cell_selection=store.snapshot_cell_selection()
+        )
+    # The calls that read contigs refuse such receptors; the plot of their
+    # cells draws every cell without a receptor.
+    result = store.plots.receptor_qc(ref, show=False)
+    try:
+        assert result.tables["receptor_type"].to_dict("list") == {
+            "group": ["all cells"] * 5,
+            "receptor_type": ["TCR", "BCR", "ambiguous", "multichain", "no IR"],
+            "n_cells": [0, 0, 0, 0, N_CELLS],
+        }
+        chains = result.tables["chains_per_cell"]
+        assert chains["VJ"].tolist() == [N_CELLS, 0, 0, 0]
+        assert chains["VDJ"].tolist() == [N_CELLS, 0, 0, 0]
+        assert len(result.axes["receptor_type"].patches) == 1
     finally:
         result.close()
 
