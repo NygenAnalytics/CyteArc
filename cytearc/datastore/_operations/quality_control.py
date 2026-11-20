@@ -2415,7 +2415,7 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
 
         This method first calculates prevalence of each peak by computing sum of TF-IDF normalized values for each peak
         and then marks `top_n` peaks with the highest prevalence as prevalent peaks. Peaks whose prevalence ties at the
-        cutoff are kept in feature order, so every platform selects the same peaks.
+        cutoff are kept in feature order, on every platform.
 
         Args:
             from_assay: Assay to use for peak selection. If no value is provided

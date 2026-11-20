@@ -277,8 +277,9 @@ class ATACassay(Assay):
         ``select_prevalent_peaks`` passes the full-axis prevalence of a
         feature summary and a ``top_n`` from 1 to one fewer than the peaks.
         Peaks whose prevalence ties at the cutoff are kept in feature order,
-        so every platform keeps the same peaks: the default sort leaves the
-        order of ties to the platform's sort implementation.
+        with a stable sort, so ties are broken the same way on every
+        platform; the default sort leaves their order to the platform's sort
+        implementation.
         """
         prevalence = np.asarray(prevalence, dtype=np.float64)
         idx = (
