@@ -881,6 +881,20 @@ def test_assay_features_are_the_text_that_a_split_import_stores(tmp_path) -> Non
             id="latin-1-category-of-a-categorical-index",
         ),
         pytest.param(
+            # Reading the IDs used to fail on NumPy's TypeError.
+            {
+                "obs/_index": {
+                    "codes": np.array([0, 1, 2, 3], dtype=np.int8),
+                    "categories": np.array([[1, 2], [3, 4], [5, 6], [7, 8]]),
+                }
+            },
+            {},
+            "cell_ids",
+            "Column '/obs/_index' needs one text value, number or boolean per category; "
+            "found categories of shape (4, 2) in '/obs/_index/categories'",
+            id="categorical-index-of-pairs",
+        ),
+        pytest.param(
             {"var/_index": np.array([b"g\xe9", b"g1", b"g2"])},
             {},
             "feat_ids",
@@ -1029,6 +1043,20 @@ def test_reader_refuses_the_ids_and_names_that_an_import_refuses(
             "H5AD feature metadata must be UTF-8 text; row 2 of the var column "
             "'description' of 'split.h5ad' holds b'an antib\\xf6dy'",
             id="feature-metadata",
+        ),
+        pytest.param(
+            # Reading the feature types used to fail on NumPy's TypeError.
+            {
+                "var/feature_types": {
+                    "codes": np.array([0, 1, 0], dtype=np.int8),
+                    "categories": np.array([[1, 2], [3, 4]]),
+                }
+            },
+            {},
+            "Column '/var/feature_types' needs one text value, number or boolean per "
+            "category; found categories of shape (2, 2) in "
+            "'/var/feature_types/categories'",
+            id="feature-types-of-pairs",
         ),
     ],
 )
@@ -1550,9 +1578,7 @@ def test_categories_that_are_not_utf8_are_refused_by_position(tmp_path) -> None:
             assert str(refused.value) == (f"Categories must be UTF-8 text; {location}")
 
 
-def test_categories_read_as_text_and_python_numbers_and_other_values_as_read(
-    tmp_path,
-) -> None:
+def test_categories_read_as_text_and_python_numbers(tmp_path) -> None:
     path = tmp_path / "categories.h5"
     with h5py.File(path, "w") as h5:
         obs = h5.create_group("obs")
@@ -1563,14 +1589,6 @@ def test_categories_read_as_text_and_python_numbers_and_other_values_as_read(
             group = obs.create_group(key)
             group.create_dataset("codes", data=np.array([0, 1], dtype=np.int8))
             group.create_dataset("categories", data=categories)
-        # h5py reads each value of a variable-length sequence as an array.
-        sequences = obs.create_group("sequence")
-        sequences.create_dataset("codes", data=np.array([0, 1], dtype=np.int8))
-        stored = sequences.create_dataset(
-            "categories", (2,), dtype=h5py.vlen_dtype(np.int64)
-        )
-        stored[0] = np.array([1, 2])
-        stored[1] = np.array([3])
     with h5py.File(path, "r") as h5:
         found = {
             key: column_categories(
@@ -1581,14 +1599,421 @@ def test_categories_read_as_text_and_python_numbers_and_other_values_as_read(
                 expectation="Categories must be UTF-8 text",
                 place=f"the column {key!r}",
             )
-            for key in ("text", "number", "sequence")
+            for key in ("text", "number")
         }
     assert found["text"] == H5adCategories(("T cell", "B cell"), False)
     assert found["number"] == H5adCategories((7, 3), False)
     assert [type(value) for value in found["number"].values] == [int, int]
-    first, second = found["sequence"].values
-    assert isinstance(first, np.ndarray) and first.tolist() == [1, 2]
-    assert isinstance(second, np.ndarray) and second.tolist() == [3]
+
+
+# How every refusal of categories that are not one value each goes on after
+# the name of the column.
+_NOT_ONE_VALUE = "needs one text value, number or boolean per category; found"
+# Two arrays of 1,500 integers that differ at one position, which NumPy
+# prints alike, as their first and last three values.
+_LONG_ARRAYS = [
+    np.arange(1_500),
+    np.where(np.arange(1_500) == 700, -1, np.arange(1_500)),
+]
+# What each refusal finds, by the layout of the categories of the column 'x'
+# that _cells_with_categories writes.
+_FOUND_CATEGORIES = {
+    "arrays": "a variable-length array of int64 per category in '/obs/x/categories'",
+    "long arrays": (
+        "a variable-length array of int64 per category in '/obs/x/categories'"
+    ),
+    "rows": "categories of shape (3, 2) in '/obs/x/categories'",
+    "element arrays": (
+        "an array of shape (2,) of int64 per category in '/obs/x/categories'"
+    ),
+    "records": "a record of the fields 'a', 'b' per category in '/obs/x/categories'",
+    "scalar": "categories of shape () in '/obs/x/categories'",
+    "empty": "an empty dataset with no shape in '/obs/x/categories'",
+    "opaque": "2 opaque bytes per category in '/obs/x/categories'",
+    "references": "an HDF5 reference per category in '/obs/x/categories'",
+    "group": "a group in '/obs/x/categories'",
+    "AnnData 0.7 arrays": (
+        "a variable-length array of int64 per category in '/obs/__categories/x'"
+    ),
+    "AnnData 0.6 rows": "categories of shape (3, 2) in '/uns/x_categories'",
+}
+_SIX_COUNTS = np.arange(1, 25, dtype=np.float32).reshape(6, 4)
+
+
+def _variable_length(holder: h5py.Group, name: str, arrays: list) -> None:
+    """Store one variable-length array of integers per category."""
+    stored = holder.create_dataset(
+        name, (len(arrays),), dtype=h5py.vlen_dtype(np.int64)
+    )
+    for position, values in enumerate(arrays):
+        stored[position] = values
+
+
+def _store_categories(holder: h5py.Group, name: str, layout: str) -> None:
+    """Store categories of a layout of _FOUND_CATEGORIES under ``name``."""
+    if layout in {"arrays", "AnnData 0.7 arrays"}:
+        _variable_length(holder, name, [[1, 2], [3], [1, 2, 3]])
+    elif layout == "long arrays":
+        _variable_length(holder, name, _LONG_ARRAYS)
+    elif layout in {"rows", "AnnData 0.6 rows"}:
+        holder.create_dataset(name, data=np.array([[1, 2], [3, 4], [5, 6]]))
+    elif layout == "element arrays":
+        # A dtype of two integers, which h5py reads as a second dimension.
+        stored = holder.create_dataset(name, (3,), dtype=np.dtype(("<i8", (2,))))
+        stored[...] = np.array([[1, 2], [3, 4], [5, 6]])
+    elif layout == "records":
+        records = np.array(
+            [(1, 0.5), (2, 1.5), (3, 2.5)], dtype=[("a", "<i8"), ("b", "<f8")]
+        )
+        holder.create_dataset(name, data=records)
+    elif layout == "scalar":
+        holder.create_dataset(name, data=5)
+    elif layout == "empty":
+        holder.create_dataset(name, data=h5py.Empty("i8"))
+    elif layout == "opaque":
+        # Raw bytes, which used to import as their text and, when they are not
+        # UTF-8, to fail after the import had created its destination.
+        holder.create_dataset(name, data=np.array([b"a\xff", b"cd", b"ef"], dtype="V2"))
+    elif layout == "references":
+        # Each of which used to import as the text '<HDF5 object reference>'.
+        stored = holder.create_dataset(name, (3,), dtype=h5py.ref_dtype)
+        for position in range(3):
+            stored[position] = holder.file.ref
+    else:
+        holder.create_group(name).create_dataset("values", data=np.arange(3))
+
+
+def _cells_with_categories(path: Path, layout: str) -> str:
+    """Write six cells whose obs column 'x' is a categorical of the layout's categories.
+
+    Beside it, obs holds the numbers 'y' and the categorical 'z' of text, and
+    X holds the counts 1 to 24. AnnData 0.7 kept the categories of integer
+    codes in obs/__categories, and AnnData 0.6 in uns.
+    """
+    with h5py.File(path, "w") as h5:
+        counts = csr_matrix(_SIX_COUNTS)
+        matrix = h5.create_group("X")
+        matrix.attrs["encoding-type"] = "csr_matrix"
+        matrix.attrs["shape"] = counts.shape
+        for key in ("data", "indices", "indptr"):
+            matrix.create_dataset(key, data=getattr(counts, key))
+        obs = h5.create_group("obs")
+        obs.attrs["_index"] = "_index"
+        obs.create_dataset(
+            "_index", data=_text(*(b"cell-%d" % row for row in range(6)))
+        )
+        obs.create_dataset("y", data=np.arange(6) * 1.5)
+        z = obs.create_group("z")
+        z.create_dataset("codes", data=np.array([0, 1, 0, 1, 0, 1], dtype=np.int8))
+        z.create_dataset("categories", data=_text(b"a", b"b"))
+        codes = np.array(
+            [0, 1, 0, 1, 0, 1] if layout == "long arrays" else [0, 1, 2, 0, 1, -1],
+            dtype=np.int8,
+        )
+        if layout == "AnnData 0.7 arrays":
+            obs.create_dataset("x", data=codes)
+            _store_categories(obs.create_group("__categories"), "x", layout)
+        elif layout == "AnnData 0.6 rows":
+            obs.create_dataset("x", data=codes)
+            _store_categories(h5.create_group("uns"), "x_categories", layout)
+        else:
+            column = obs.create_group("x")
+            column.create_dataset("codes", data=codes)
+            _store_categories(column, "categories", layout)
+        var = h5.create_group("var")
+        var.attrs["_index"] = "_index"
+        var.create_dataset("_index", data=_text(b"g0", b"g1", b"g2", b"g3"))
+    return str(path)
+
+
+@pytest.mark.parametrize("layout", list(_FOUND_CATEGORIES))
+def test_an_import_skips_a_categorical_whose_categories_are_not_one_value_each(
+    tmp_path, layout
+) -> None:
+    path = _cells_with_categories(tmp_path / "cells.h5ad", layout)
+    skipped = (
+        f"Skipping obs column 'x': Column '/obs/x' {_NOT_ONE_VALUE} "
+        f"{_FOUND_CATEGORIES[layout]}"
+    )
+    destination = tmp_path / "cells.zarr"
+    reader = H5adReader(path)
+    try:
+        with _warnings() as read_warnings:
+            columns = {
+                name: values.tolist() for name, values in reader.get_cell_columns()
+            }
+        with _warnings() as import_warnings:
+            H5adToZarr(reader, str(destination), nthreads=1, shuffle_cells=False).dump()
+    finally:
+        reader.close()
+
+    # An array category used to import as NumPy's text of it, such as
+    # '[1 2]', and the two long arrays as one label.
+    assert [text.rstrip("\n") for text in read_warnings] == [skipped]
+    assert [
+        text.rstrip("\n") for text in import_warnings if text.startswith("Skipping")
+    ] == [skipped]
+    labels = ["a", "b", "a", "b", "a", "b"]
+    numbers = [0.0, 1.5, 3.0, 4.5, 6.0, 7.5]
+    assert columns == {"y": numbers, "z": labels}
+    root = zarr.open_group(str(destination), mode="r")
+    assert sorted(root["cellData"].array_keys()) == [
+        "I",
+        "__cytearc_categories__z",
+        "ids",
+        "names",
+        "y",
+        "z",
+    ]
+    np.testing.assert_array_equal(root["RNA/counts"][:], _SIX_COUNTS)
+    store = cytearc.DataStore(str(destination), min_features_per_cell=0, nthreads=1)
+    assert store.cells.fetch_all("z").tolist() == labels
+    assert store.cells.fetch_all("y").tolist() == numbers
+
+
+@pytest.mark.parametrize("layout", list(_FOUND_CATEGORIES))
+def test_a_cluster_key_of_categories_that_are_not_one_value_each_is_refused_first(
+    tmp_path, layout
+) -> None:
+    path = _cells_with_categories(tmp_path / "cells.h5ad", layout)
+    destination = tmp_path / "cells.zarr"
+
+    def import_clusters() -> None:
+        reader = H5adReader(path, cluster_keys=["x"])
+        try:
+            H5adToZarr(reader, str(destination), nthreads=1, shuffle_cells=False).dump()
+        finally:
+            reader.close()
+
+    with pytest.raises(TypeError) as refused:
+        import_clusters()
+    # The import used to fail as it typed the labels, after it wrote the counts.
+    assert str(refused.value) == (
+        f"Cluster key 'x' {_NOT_ONE_VALUE} {_FOUND_CATEGORIES[layout]}"
+    )
+    assert not destination.exists()
+
+
+def test_every_reader_of_categories_refuses_those_that_are_not_one_value_each(
+    tmp_path,
+) -> None:
+    from cytearc.readers._h5ad_columns import (
+        read_column,
+        read_table_column,
+        table_column_dtype,
+    )
+
+    path = _cells_with_categories(tmp_path / "cells.h5ad", "arrays")
+    message = f"Column '/obs/x' {_NOT_ONE_VALUE} {_FOUND_CATEGORIES['arrays']}"
+    with h5py.File(path, "r") as h5:
+        obs = h5["obs"]
+        for read in (
+            lambda: read_column(obs["x"]),
+            lambda: read_table_column(h5, obs, "x", ()),
+            lambda: table_column_dtype(h5, obs, "x", ()),
+            lambda: column_categories(
+                h5, obs, "x", (), expectation="unused", place="unused"
+            ),
+        ):
+            with pytest.raises(ValueError) as refused:
+                read()
+            assert str(refused.value) == message
+
+
+@pytest.mark.parametrize(
+    ("categories", "codes", "labels"),
+    [
+        pytest.param(
+            # h5py reads text as a variable-length sequence of str or bytes.
+            np.array([b"a", b"b"], dtype=h5py.string_dtype("ascii")),
+            [1, 0, 1, 0, 1, 0],
+            ["b", "a", "b", "a", "b", "a"],
+            id="ascii-text",
+        ),
+        pytest.param(
+            _text(b"T cell", "γδ T cell".encode()),
+            [0, 1, 0, 1, -1, 1],
+            ["T cell", "γδ T cell", "T cell", "γδ T cell", None, "γδ T cell"],
+            id="utf8-text",
+        ),
+        pytest.param(
+            np.array([True]),
+            [0, -1, 0, -1, 0, -1],
+            [True, None] * 3,
+            id="one-boolean",
+        ),
+        pytest.param(
+            np.array([], dtype=np.int64), [-1] * 6, [None] * 6, id="no-categories"
+        ),
+    ],
+)
+def test_categories_of_one_value_each_still_import(
+    tmp_path, categories, codes, labels
+) -> None:
+    path = _cells_with_categories(tmp_path / "cells.h5ad", "arrays")
+    with h5py.File(path, "a") as h5:
+        del h5["obs/x/categories"]
+        h5["obs/x/categories"] = categories
+        h5["obs/x/codes"][...] = np.array(codes, dtype=np.int8)
+    # The cluster key check takes them too.
+    H5adReader(path, cluster_keys=["x"]).close()
+    reader = H5adReader(path)
+    try:
+        with _warnings() as warned:
+            columns = dict(reader.get_cell_columns())
+    finally:
+        reader.close()
+    assert warned == []
+    assert columns["x"].tolist() == labels
+
+
+def test_categories_apart_from_a_column_apply_only_to_integer_codes(tmp_path) -> None:
+    path = _cells_with_categories(tmp_path / "cells.h5ad", "AnnData 0.6 rows")
+    with h5py.File(path, "a") as h5:
+        # Categories that would be refused, beside a column of floating-point
+        # numbers, which no categories decode.
+        h5["uns"].create_dataset("y_categories", data=np.ones((2, 2)))
+        del h5["obs/x"]
+    reader = H5adReader(path, cluster_keys=["y"])
+    try:
+        assert reader._cell_column_value_dtype("y") == np.dtype(np.float64)
+    finally:
+        reader.close()
+    reader = H5adReader(path)
+    try:
+        with _warnings() as warned:
+            columns = dict(reader.get_cell_columns())
+    finally:
+        reader.close()
+    assert warned == []
+    assert columns["y"].tolist() == [0.0, 1.5, 3.0, 4.5, 6.0, 7.5]
+
+
+@pytest.mark.parametrize(
+    ("layout", "categories"),
+    [("rows", "/obs/x/categories"), ("AnnData 0.6 rows", "/uns/x_categories")],
+)
+def test_a_skipped_column_needs_no_utf8_categories(
+    tmp_path, layout, categories
+) -> None:
+    path = _cells_with_categories(tmp_path / "cells.h5ad", layout)
+    with h5py.File(path, "a") as h5:
+        # Rows of bytes that are not all UTF-8 text, which the text check
+        # cannot read one category at a time.
+        del h5[categories]
+        h5[categories] = np.array([[b"a", b"\xff"], [b"c", b"d"], [b"e", b"f"]])
+    reader = H5adReader(path)
+    try:
+        with _warnings() as warned:
+            columns = dict(reader.get_cell_columns())
+    finally:
+        reader.close()
+    assert [text.rstrip("\n") for text in warned] == [
+        f"Skipping obs column 'x': Column '/obs/x' {_NOT_ONE_VALUE} "
+        f"categories of shape (3, 2) in {categories!r}"
+    ]
+    assert sorted(columns) == ["y", "z"]
+
+
+def _cells_with_sequences(path: Path) -> str:
+    """Write the six cells of _cells_with_categories with columns of several values.
+
+    In place of the column 'x', obs holds 'n', a nullable column of
+    variable-length float64 arrays, 'records', a column of records of two
+    fields, 'refs', a column of HDF5 object references, and 'v', a column of
+    variable-length int64 arrays, beside the numbers 'y' and the categorical
+    'z'.
+    """
+    written = _cells_with_categories(path, "arrays")
+    with h5py.File(written, "a") as h5:
+        obs = h5["obs"]
+        del obs["x"]
+        _variable_length(obs, "v", [[1, 2], [3], [1, 2, 3], [4], [5, 6], []])
+        nullable = obs.create_group("n")
+        stored = nullable.create_dataset("values", (6,), dtype=h5py.vlen_dtype(float))
+        for row, values in enumerate([[0.5], [1.5, 2.5], [], [3.5], [4.5], []]):
+            stored[row] = values
+        nullable.create_dataset("mask", data=np.array([0, 0, 0, 0, 0, 1], dtype=bool))
+        records = np.zeros(6, dtype=[("a", "<i8"), ("b", "<f8")])
+        records["a"] = np.arange(6)
+        obs.create_dataset("records", data=records)
+        references = obs.create_dataset("refs", (6,), dtype=h5py.ref_dtype)
+        for row in range(6):
+            references[row] = h5["X"].ref if row % 2 else obs.ref
+    return written
+
+
+# What an import and a cluster key say of the columns of _cells_with_sequences.
+_NOT_ONE_PER_ROW = {
+    "n": "needs one text value, number or boolean per row; found a variable-length "
+    "array of float64 per row",
+    # Records used to import as a structured array, which tables cannot read.
+    "records": "needs one text value, number or boolean per row; found a record of "
+    "the fields 'a', 'b' per row",
+    # References used to import as '<HDF5 object reference>' in every row.
+    "refs": "needs one text value, number or boolean per row; found an HDF5 "
+    "reference per row",
+    "v": "needs one text value, number or boolean per row; found a variable-length "
+    "array of int64 per row",
+}
+
+
+def test_an_import_skips_columns_of_several_values_per_row(tmp_path) -> None:
+    path = _cells_with_sequences(tmp_path / "cells.h5ad")
+    destination = tmp_path / "cells.zarr"
+    reader = H5adReader(path)
+    try:
+        with _warnings() as warned:
+            columns = {
+                name: values.tolist() for name, values in reader.get_cell_columns()
+            }
+            H5adToZarr(reader, str(destination), nthreads=1, shuffle_cells=False).dump()
+    finally:
+        reader.close()
+
+    # Each array used to be stored as NumPy's text of it, such as '[1 2]'.
+    skipped = [
+        f"Skipping obs column {name!r}: Column '/obs/{name}' {problem}"
+        for name, problem in _NOT_ONE_PER_ROW.items()
+    ]
+    assert [
+        text.rstrip("\n") for text in warned if text.startswith("Skipping")
+    ] == skipped * 2
+    assert columns == {
+        "y": [0.0, 1.5, 3.0, 4.5, 6.0, 7.5],
+        "z": ["a", "b", "a", "b", "a", "b"],
+    }
+    root = zarr.open_group(str(destination), mode="r")
+    assert sorted(root["cellData"].array_keys()) == [
+        "I",
+        "__cytearc_categories__z",
+        "ids",
+        "names",
+        "y",
+        "z",
+    ]
+    np.testing.assert_array_equal(root["RNA/counts"][:], _SIX_COUNTS)
+
+
+@pytest.mark.parametrize("key", sorted(_NOT_ONE_PER_ROW))
+def test_a_cluster_key_of_several_values_per_row_is_refused_first(
+    tmp_path, key
+) -> None:
+    path = _cells_with_sequences(tmp_path / "cells.h5ad")
+    destination = tmp_path / "cells.zarr"
+
+    def import_clusters() -> None:
+        reader = H5adReader(path, cluster_keys=[key])
+        try:
+            H5adToZarr(reader, str(destination), nthreads=1, shuffle_cells=False).dump()
+        finally:
+            reader.close()
+
+    with pytest.raises(TypeError) as refused:
+        import_clusters()
+    # The import used to fail as it typed the labels, after it wrote the counts.
+    assert str(refused.value) == f"Cluster key {key!r} {_NOT_ONE_PER_ROW[key]}"
+    assert not destination.exists()
 
 
 @pytest.mark.parametrize("shuffle_cells", [False, True], ids=["file", "shuffled"])

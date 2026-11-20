@@ -272,8 +272,18 @@ def encode_metadata_values(
     *,
     name: str,
 ) -> np.ndarray:
-    """Return metadata values in the form that a metadata column stores."""
+    """Return metadata values in the form that a metadata column stores.
+
+    Raises:
+        ValueError: If the values are not one-dimensional, one per row, or
+            hold text that is not valid UTF-8, naming the column.
+    """
     raw = np.asarray(data)
+    if raw.ndim != 1:
+        raise ValueError(
+            f"Column {name!r} needs one value per row; found values of shape "
+            f"{raw.shape}"
+        )
     try:
         values = _decode_metadata_values(raw)
     except UnicodeDecodeError as exc:

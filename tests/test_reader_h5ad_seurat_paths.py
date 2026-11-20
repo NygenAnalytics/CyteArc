@@ -206,7 +206,7 @@ def test_h5ad_reader_rejects_unusable_matrix_and_table_slots(tmp_path) -> None:
     without_matrix = _write_h5ad(tmp_path / "without_matrix.h5ad")
     with h5py.File(without_matrix, "a") as h5:
         del h5["X"]
-    with pytest.raises(ValueError, match="X is neither Dataset or Group type"):
+    with pytest.raises(ValueError, match="The file has no matrix `X`"):
         H5adReader(str(without_matrix))
 
     unsized = _write_h5ad(tmp_path / "unsized.h5ad")
@@ -293,6 +293,101 @@ def test_h5ad_reader_refuses_a_layer_group_that_holds_no_matrix(tmp_path) -> Non
     )
     with pytest.raises(ValueError, match=re.escape(message)):
         H5adReader(str(path), matrix_key="layers")
+
+
+_NO_MATRIX = (
+    "ERROR: The file has no matrix `{key}`. Pass `matrix_key` to read another of "
+    "its matrices, which `inspect_h5ad` lists."
+)
+
+
+def test_h5ad_reader_names_a_matrix_that_the_file_lacks(tmp_path) -> None:
+    path = _write_h5ad(tmp_path / "counts.h5ad")
+    with h5py.File(path, "a") as h5:
+        h5.create_group("layers").create_dataset("spliced", data=_COUNTS)
+        # Links to nothing hold no matrix either; h5py used to raise a
+        # KeyError of its own for them.
+        h5["unlinked"] = h5py.SoftLink("/nowhere")
+        h5["elsewhere"] = h5py.ExternalLink("absent.h5", "/X")
+    for matrix_key in ("layers/counts", "raw/X", "unlinked", "elsewhere"):
+        with pytest.raises(ValueError) as refused:
+            H5adReader(str(path), matrix_key=matrix_key)
+        assert str(refused.value) == _NO_MATRIX.format(key=matrix_key)
+    with h5py.File(path, "a") as h5:
+        del h5["X"]
+    # It used to say that X "is neither Dataset or Group type".
+    with pytest.raises(ValueError) as refused:
+        H5adReader(str(path))
+    assert str(refused.value) == _NO_MATRIX.format(key="X")
+    # Another of the file's matrices reads, as the refusal says.
+    reader = H5adReader(str(path), matrix_key="layers/spliced")
+    try:
+        rows = np.vstack([batch.toarray() for batch in reader.consume(3)])
+    finally:
+        reader.close()
+    np.testing.assert_array_equal(rows, _COUNTS)
+
+
+def test_h5ad_reader_refuses_a_matrix_that_is_a_named_type(tmp_path) -> None:
+    path = _write_h5ad(tmp_path / "counts.h5ad")
+    with h5py.File(path, "a") as h5:
+        del h5["X"]
+        # A named datatype is a node that is neither a dataset nor a group.
+        h5["X"] = np.dtype("<f4")
+    # It used to say that X "is neither Dataset or Group type".
+    with pytest.raises(ValueError) as refused:
+        H5adReader(str(path))
+    assert str(refused.value) == (
+        f"ERROR: Matrix `X` is a named datatype, which holds no values. {_MATRIX_EXPECTED}"
+    )
+
+
+@pytest.mark.parametrize("encoding", ["csr", "csc"])
+def test_h5ad_reader_refuses_a_sparse_group_that_declares_no_layout(
+    tmp_path, encoding
+) -> None:
+    path = _write_h5ad(tmp_path / "counts.h5ad", encoding=encoding)
+    with h5py.File(path, "a") as h5:
+        del h5["X"].attrs["encoding-type"]
+    # It used to name an encoding `None` that the file does not declare.
+    with pytest.raises(ValueError) as refused:
+        H5adReader(str(path))
+    assert str(refused.value) == (
+        "ERROR: Matrix `X` is a group holding `data`, `indices`, `indptr` without "
+        "an `encoding-type` or `h5sparse_format` attribute, so H5adReader cannot "
+        "tell CSR from CSC. Set its `encoding-type` attribute to `csr_matrix` when "
+        "the matrix is stored by rows, the cells, so that `indptr` holds one entry "
+        "per cell plus one, or to `csc_matrix` when it is stored by columns, the "
+        "features."
+    )
+    # Either attribute declares the layout, and the matrix then reads.
+    for attribute, layout in (
+        ("encoding-type", f"{encoding}_matrix"),
+        ("h5sparse_format", encoding),
+    ):
+        with h5py.File(path, "a") as h5:
+            h5["X"].attrs[attribute] = layout
+        reader = H5adReader(str(path), temp_dir=tmp_path)
+        try:
+            assert reader.matrixOrientation == encoding
+            rows = np.vstack([batch.toarray() for batch in reader.consume(3)])
+        finally:
+            reader.close()
+        np.testing.assert_array_equal(rows, _COUNTS)
+        with h5py.File(path, "a") as h5:
+            del h5["X"].attrs[attribute]
+
+
+def test_h5ad_reader_refuses_a_sparse_layout_that_it_does_not_read(tmp_path) -> None:
+    path = _write_h5ad(tmp_path / "counts.h5ad")
+    with h5py.File(path, "a") as h5:
+        h5["X"].attrs["encoding-type"] = "coo_matrix"
+    with pytest.raises(ValueError) as refused:
+        H5adReader(str(path))
+    assert str(refused.value) == (
+        "ERROR: Sparse matrix encoding `coo_matrix` of `X` is not supported. "
+        "H5adReader supports CSR and CSC encoding."
+    )
 
 
 @pytest.mark.parametrize(

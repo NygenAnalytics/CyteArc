@@ -23,7 +23,7 @@ from cytearc.clones.recorders import RefusedTokens
 from cytearc.datasets import _StoreAppeared
 from cytearc.datastore.pipeline_run import PipelineCancelled, PipelineExecutionError
 from cytearc.merge.metadata import _SourceConflict
-from cytearc.metadata.encoding import UnstorableCategoriesError
+from cytearc.metadata.encoding import CollectionValuesError, UnstorableCategoriesError
 from cytearc.metadata.membership import UnmeasuredCellsError
 from cytearc.readers._rds._types import (
     RdsClosedError,
@@ -93,6 +93,11 @@ SAMPLES: dict[type[BaseException], Callable[[], BaseException]] = {
         context={"kind": "cell_selection"},
     ),
     NonFiniteArtifactError: lambda: NonFiniteArtifactError("run_pca", "data", 7),
+    CollectionValuesError: lambda: CollectionValuesError(
+        "Column 'genes' needs one value per row, not a list, tuple, set, dict, "
+        "array or other collection; row 1 holds ['CD3E', 'CD4']",
+        joinable=True,
+    ),
     UnstorableCategoriesError: lambda: UnstorableCategoriesError(
         "Column 'tissue' has NaN among its categories"
     ),

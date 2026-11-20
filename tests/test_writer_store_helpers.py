@@ -162,3 +162,41 @@ def test_create_zarr_obj_array_writes_metadata_columns_from_the_writers_facade()
     np.testing.assert_array_equal(group["labels"][:], ["a", "bbb", "cc"])
     create_zarr_obj_array(group, "labels", np.asarray(["x"]))
     np.testing.assert_array_equal(group["labels"][:], ["x"])
+
+
+@pytest.mark.parametrize(
+    ("data", "shape"),
+    [
+        pytest.param(np.asarray(5), "()", id="zero-dimensional-array"),
+        pytest.param(5, "()", id="integer"),
+        pytest.param("abc", "()", id="text"),
+        pytest.param(b"abc", "()", id="bytes"),
+        pytest.param(np.ones((2, 2)), "(2, 2)", id="grid"),
+        pytest.param([[1, 2], [3, 4]], "(2, 2)", id="nested-lists"),
+        pytest.param(np.zeros((3, 1, 2)), "(3, 1, 2)", id="three-dimensions"),
+    ],
+)
+def test_metadata_column_writers_refuse_values_that_are_not_one_per_row(
+    data, shape
+) -> None:
+    import cytearc
+    from cytearc.storage.arrays import create_metadata_column
+
+    group = _group()
+    cytearc.create_zarr_obj_array(group, "kept", np.asarray(["a", "b", "c"]))
+    for write in (
+        lambda name: cytearc.create_zarr_obj_array(group, name, data),
+        lambda name: create_metadata_column(group, name, data=data),
+    ):
+        # A new column, and one that the write would replace, which is left
+        # as it was. Zarr used to refuse them, saying only that the chunks
+        # have 1 dimension and the shape has another number.
+        for name in ("column", "kept"):
+            with pytest.raises(ValueError) as refused:
+                write(name)
+            assert str(refused.value) == (
+                f"Column {name!r} needs one value per row; found values of shape "
+                f"{shape}"
+            )
+            assert sorted(group.keys()) == ["kept"]
+            np.testing.assert_array_equal(group["kept"][:], ["a", "b", "c"])

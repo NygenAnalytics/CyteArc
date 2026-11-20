@@ -1,6 +1,10 @@
 """Partial and nullable inserts flag missing rows under the linked mask."""
 
 import datetime
+import threading
+from collections import deque
+from collections.abc import Callable
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -384,3 +388,399 @@ def test_imports_flag_every_kind_of_missing_object_value():
     assert group["__cytearc_missing__label"][:].tolist() == [False, True, True, True]
     assert np.isnat(group["when"][:]).tolist() == [False, True]
     assert group["when"][0] == _DATES[0]
+
+
+# Two arrays of 1,500 integers that differ at one position, which NumPy prints
+# alike, as their first and last three values.
+_LONG = np.arange(1_500)
+_CHANGED = np.where(_LONG == 700, -1, _LONG)
+# How the refusal of an insert of lists, tuples or arrays ends, as written by
+# hand.
+_STORE_AS_TEXT = (
+    "To store such values as text, pass text that keeps every element, such as "
+    'values.map(lambda v: ",".join(map(str, v)), na_action="ignore")'
+)
+
+
+def _collections_store(tmp_path):
+    from tests.storage_helpers import open_store, write_count_store
+
+    path = tmp_path / "store.zarr"
+    write_count_store(str(path), {"RNA": np.ones((4, 4))}, "uint16")
+    return open_store(path)
+
+
+def _refused(
+    value: str,
+    position: int,
+    *,
+    item: str = "row",
+    name: str = "column",
+    suggestion: str | None = None,
+) -> str:
+    """The refusal of a column whose ``position`` holds ``value``, as written by hand."""
+    refusal = (
+        f"Column {name!r} needs one value per {item}, not a list, tuple, set, dict, "
+        f"array or other collection; {item} {position} holds {value}"
+    )
+    return refusal if suggestion is None else f"{refusal}. {suggestion}"
+
+
+def _objects(*values: object) -> np.ndarray:
+    """Hold each value as one object, as an object column holds it."""
+    held = np.empty(len(values), dtype=object)
+    for position, value in enumerate(values):
+        held[position] = value
+    return held
+
+
+def _zero_dimensional(value: object) -> np.ndarray:
+    """Hold ``value`` in an array of no dimension."""
+    held = np.empty((), dtype=object)
+    held[()] = value
+    return held
+
+
+def _within_a_minute(call: Callable[[], Any]) -> Any:
+    """Return what ``call`` returns, and fail the test if it runs for a minute."""
+    outcome: list = []
+
+    def run() -> None:
+        try:
+            outcome.append((True, call()))
+        except BaseException as error:
+            outcome.append((False, error))
+
+    # The [()] of NumPy's masked constant returns itself, so an unwrapping
+    # of zero-dimensional arrays that does not stop there never ends.
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    worker.join(timeout=60)
+    assert not worker.is_alive(), "the call never ended"
+    returned, result = outcome[0]
+    if not returned:
+        raise result
+    return result
+
+
+_SERIES = pd.Series([1, 2])
+_GENERATOR = (value for value in range(2))
+_SQUARE = np.full((2, 2), 0.1 + 0.2)
+
+
+@pytest.mark.parametrize(
+    ("values", "row", "held", "suggestion"),
+    [
+        # Text can join the elements of lists, tuples and arrays.
+        pytest.param(
+            _objects([1, 2], [3], [1, 2, 3], [4]),
+            1,
+            "[1, 2]",
+            _STORE_AS_TEXT,
+            id="lists",
+        ),
+        pytest.param(
+            _objects((1, 0.5), (2, 1.5), None, (4, 3.5)),
+            1,
+            "(1, 0.5)",
+            _STORE_AS_TEXT,
+            id="tuples-and-a-missing-row",
+        ),
+        pytest.param(
+            _objects(_LONG, _CHANGED, _LONG, _CHANGED),
+            1,
+            repr(_LONG),
+            _STORE_AS_TEXT,
+            id="long-arrays",
+        ),
+        # NumPy prints the rows of a deeper array rounded, and cannot iterate
+        # a zero-dimensional one.
+        pytest.param(
+            _objects(_SQUARE, _SQUARE, None, _SQUARE),
+            1,
+            repr(_SQUARE),
+            None,
+            id="arrays-of-two-dimensions",
+        ),
+        pytest.param(
+            _objects(*[_zero_dimensional([1, 2])] * 3, None),
+            1,
+            "[1, 2]",
+            None,
+            id="lists-in-zero-dimensional-arrays",
+        ),
+        # Joining would split text, or keep only the keys of a dict.
+        pytest.param(
+            _objects("a", {"b"}, "c", None), 2, "{'b'}", None, id="a-set-among-text"
+        ),
+        pytest.param(
+            _objects(1, 2.5, None, {"d": 4}),
+            4,
+            "{'d': 4}",
+            None,
+            id="a-dict-among-numbers",
+        ),
+        # The first list is refused, and the dict withholds the suggestion.
+        pytest.param(
+            _objects([1], [2], {"k": 1}, [3]),
+            1,
+            "[1]",
+            None,
+            id="a-dict-among-lists",
+        ),
+        pytest.param(
+            _objects("a", "b", frozenset({3}), "d"),
+            3,
+            "frozenset({3})",
+            None,
+            id="a-frozenset",
+        ),
+        pytest.param(
+            _objects("a", range(3), "c", "d"), 2, "range(0, 3)", None, id="a-range"
+        ),
+        pytest.param(
+            _objects("a", "b", deque([1]), "d"), 3, "deque([1])", None, id="a-deque"
+        ),
+        pytest.param(
+            _objects(_SERIES, "b", "c", "d"),
+            1,
+            repr(_SERIES),
+            None,
+            id="a-series-per-row",
+        ),
+        pytest.param(
+            _objects("a", {"k": 1}.keys(), "c", "d"),
+            2,
+            "dict_keys(['k'])",
+            None,
+            id="a-dict-view",
+        ),
+        pytest.param(
+            _objects("a", "b", "c", _GENERATOR),
+            4,
+            repr(_GENERATOR),
+            None,
+            id="a-generator",
+        ),
+    ],
+)
+def test_inserts_refuse_collections_and_write_nothing(
+    tmp_path, values, row, held, suggestion
+):
+    store = _collections_store(tmp_path)
+    ids = store.cells.fetch_all("ids")
+    store.cells.insert("column", pd.Series(["w", "x", "y", "z"], index=ids))
+    store.RNA.feats.insert("column", np.array(["w", "x", "y", "z"]))
+    cells, features = sorted(store.cells.columns), sorted(store.RNA.feats.columns)
+    supplied = pd.Series(values, dtype=object)
+    for insert in (
+        lambda name, **options: store.cells.insert(
+            name, supplied.set_axis(ids), **options
+        ),
+        lambda name, **options: store.RNA.feats.insert(name, supplied, **options),
+    ):
+        # A new column, and one that the insert would replace.
+        for name, options in (("new", {}), ("column", {"overwrite": True})):
+            with pytest.raises(ValueError) as refused:
+                insert(name, **options)
+            # Each value used to be stored as its printed text, and the two
+            # long arrays as one text.
+            assert str(refused.value) == _refused(
+                held, row, name=name, suggestion=suggestion
+            )
+    assert sorted(store.cells.columns) == cells
+    assert sorted(store.RNA.feats.columns) == features
+    assert store.cells.fetch_all("column").tolist() == ["w", "x", "y", "z"]
+    assert store.RNA.feats.fetch_all("column").tolist() == ["w", "x", "y", "z"]
+
+
+def test_inserts_refuse_lists_of_unequal_lengths_and_categories_of_collections(
+    tmp_path,
+):
+    store = _collections_store(tmp_path)
+    # NumPy cannot shape lists of unequal lengths, and used to refuse them
+    # with a message of its own.
+    with pytest.raises(ValueError) as refused:
+        store.RNA.feats.insert("lists", [[1, 2], [3], [1, 2, 3], [4]])
+    assert str(refused.value) == _refused(
+        "[1, 2]", 1, name="lists", suggestion=_STORE_AS_TEXT
+    )
+    # Categories are typed as values are, and used to be stored as text.
+    for insert, values in (
+        (store.RNA.feats.insert, pd.Categorical([(1, 2), (3, 4), (1, 2), (3, 4)])),
+        (
+            store.cells.insert,
+            pd.Series(
+                pd.Categorical([(1, 2), (3, 4), (1, 2), (3, 4)]),
+                index=store.cells.fetch_all("ids"),
+            ),
+        ),
+    ):
+        with pytest.raises(ValueError) as refused:
+            insert("pairs", values)
+        assert str(refused.value) == _refused(
+            "(1, 2)", 1, item="category", name="pairs", suggestion=_STORE_AS_TEXT
+        )
+    assert "lists" not in store.RNA.feats.columns
+    assert "pairs" not in store.RNA.feats.columns
+    assert "pairs" not in store.cells.columns
+
+
+def test_update_key_refuses_collections_with_no_suggestion_of_text(tmp_path):
+    store = _collections_store(tmp_path)
+    ids = store.cells.fetch_all("ids")
+    selected = store.cells.fetch_all("I").tolist()
+    with pytest.raises(ValueError) as refused:
+        store.cells.update_key(
+            pd.Series(_objects([True], [False], [True], [True]), index=ids), "I"
+        )
+    # A key holds booleans, so text would be no remedy.
+    assert str(refused.value) == _refused("[True]", 1, name="I")
+    assert store.cells.fetch_all("I").tolist() == selected
+
+
+@pytest.mark.parametrize(
+    "categorical", [False, True], ids=["values", "categorical-values"]
+)
+def test_the_suggestion_of_a_refused_insert_keeps_every_element(tmp_path, categorical):
+    store = _collections_store(tmp_path)
+    values = pd.Series(
+        _objects(_LONG, _CHANGED, [0.1 + 0.2, 2.5], None),
+        index=store.cells.fetch_all("ids"),
+    )
+    if categorical:
+        values = pd.Series(
+            pd.Categorical([(1, 2), (3, 4), None, (1, 2)]), index=values.index
+        )
+    with pytest.raises(ValueError) as refused:
+        store.cells.insert("joined", values)
+    # The code that the refusal suggests, run as it reads.
+    suggestion = str(refused.value).rsplit("such as ", 1)[1]
+    store.cells.insert("joined", eval(suggestion, {}, {"values": values}))
+    stored = store.cells.fetch_all("joined").tolist()
+    if categorical:
+        assert stored == ["1,2", "3,4", "", "1,2"]
+    else:
+        # The two long arrays stay apart, and floats keep every digit.
+        assert stored[0].split(",") == [str(value) for value in range(1_500)]
+        assert stored[1].split(",")[699:702] == ["699", "-1", "701"]
+        assert stored[2] == "0.30000000000000004,2.5"
+    # A missing row stays missing.
+    missing = (
+        [False, False, True, False] if categorical else [False, False, False, True]
+    )
+    assert _mask(store.cells, "joined") == missing
+
+
+def test_a_zero_dimensional_array_is_stored_as_the_value_it_holds(tmp_path):
+    store = _collections_store(tmp_path)
+    ids = store.cells.fetch_all("ids")
+    nested = _zero_dimensional(np.array(4))
+    store.cells.insert(
+        "numbers", pd.Series(_objects(np.array(1.5), 2.5, None, nested), index=ids)
+    )
+    store.cells.insert(
+        "labels",
+        pd.Series(_objects(np.array("a"), "b", np.array("cc"), "d"), index=ids),
+    )
+    # Each used to be stored as its printed text, such as "1.5".
+    np.testing.assert_array_equal(
+        store.cells.fetch_all("numbers"), [1.5, 2.5, np.nan, 4.0]
+    )
+    assert store.cells.fetch_all("labels").tolist() == ["a", "b", "cc", "d"]
+    # A list that a zero-dimensional array holds is refused as a list.
+    held = _zero_dimensional([1, 2])
+    with pytest.raises(ValueError) as refused:
+        store.cells.insert("lists", pd.Series(_objects("a", held, "c", "d"), index=ids))
+    assert str(refused.value) == _refused("[1, 2]", 2, name="lists")
+
+
+@pytest.mark.parametrize(
+    ("values", "stored", "missing"),
+    [
+        # A zero-dimensional NaN used to be stored as the text 'nan', and the
+        # numbers beside it as text too.
+        (
+            _objects(np.array(np.nan), 1.0, 2.0),
+            [np.nan, 1.0, 2.0],
+            [True, False, False],
+        ),
+        # A zero-dimensional None used to be stored as the text 'None'.
+        (
+            _objects(np.array(None, dtype=object), "a", "b"),
+            ["", "a", "b"],
+            [True, False, False],
+        ),
+        # NumPy's masked constant used to be stored as the text '--'.
+        (_objects(np.ma.masked, 1.0, 2.0), [np.nan, 1.0, 2.0], [True, False, False]),
+    ],
+    ids=["nan", "none", "masked"],
+)
+def test_missing_values_in_zero_dimensions_are_missing(values, stored, missing):
+    typed, flagged = _within_a_minute(lambda: nullable_values(values, name="x"))
+    np.testing.assert_array_equal(typed, stored)
+    assert flagged.tolist() == missing
+    assert _within_a_minute(lambda: missing_rows(values)).tolist() == missing
+
+
+def test_an_insert_of_a_masked_arrays_values_ends_with_its_masked_rows_missing(
+    tmp_path,
+):
+    store = _collections_store(tmp_path)
+    ids = store.cells.fetch_all("ids")
+    masked = np.ma.masked_array([1.5, 2.5, 3.5, 4.5], mask=[False, True, False, False])
+    # Its second value is the masked constant, which used to be stored as
+    # the text '--', and the column as text.
+    _within_a_minute(
+        lambda: store.cells.insert("scores", pd.Series(list(masked), index=ids))
+    )
+    np.testing.assert_array_equal(
+        store.cells.fetch_all("scores"), [1.5, np.nan, 3.5, 4.5]
+    )
+    assert _mask(store.cells, "scores") == [False, True, False, False]
+
+
+@pytest.mark.parametrize(
+    ("values", "stored"),
+    [
+        # Text that reads like a list stays text, and so do mixed values.
+        (["[1, 2]", "(3,)", None, "{}"], ["[1, 2]", "(3,)", "", "{}"]),
+        (["a", 1, 2.5, None], ["a", "1", "2.5", ""]),
+        ([b"a", "b", None, "c"], ["a", "b", "", "c"]),
+        # Python iterates text, which is no collection, bytearray included.
+        ([bytearray(b"a"), "b", None, "c"], ["a", "b", "", "c"]),
+        ([None, None, None, None], ["", "", "", ""]),
+    ],
+)
+def test_text_and_mixed_scalars_are_still_stored_as_text(values, stored):
+    array, missing = nullable_values(np.array(values, dtype=object), name="x")
+    assert array.tolist() == stored
+    assert missing.tolist() == [value is None for value in values]
+
+
+def test_imports_refuse_collections_before_they_write_the_column():
+    from cytearc.writers._store import write_categorical_column
+
+    group = zarr.open_group(store=MemoryStore(), mode="w")
+    with pytest.raises(ValueError) as refused:
+        write_metadata_column(
+            group, "column", _objects(np.arange(2), np.arange(3), np.arange(2))
+        )
+    assert str(refused.value) == _refused("array([0, 1])", 1)
+    # Either layout of a categorical names its category, as the default
+    # import of categoricals used to store tuples as text.
+    categories = _objects((1, 2), (3, 4))
+    for write in (
+        lambda: write_categorical_column(
+            group, "pairs", np.array([0, 1, 0]), categories, ordered=False
+        ),
+        lambda: write_metadata_column(
+            group, "pairs", np.array([0, 1, 0]), categories=categories
+        ),
+    ):
+        with pytest.raises(ValueError) as refused:
+            write()
+        assert str(refused.value) == _refused(
+            "(1, 2)", 1, item="category", name="pairs"
+        )
+    assert list(group.keys()) == []

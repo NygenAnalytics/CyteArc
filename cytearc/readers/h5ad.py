@@ -34,6 +34,8 @@ from ._h5ad_columns import (
     CategoryCodes,
     H5adCategories,
     TableColumn,
+    categories_node,
+    categories_problem,
     category_colors,
     check_column_text,
     column_categories,
@@ -52,6 +54,7 @@ from ._h5ad_columns import (
     table_column_dtype,
     table_column_names,
     table_members,
+    values_problem,
 )
 from ._h5ad_inspect import H5adInspectResult, inspect_h5ad as inspect_h5ad
 from ._h5ad_values import (
@@ -157,6 +160,13 @@ def _array_bytes(values: np.ndarray) -> int:
     if values.dtype.kind == "O":
         held += sum(map(sys.getsizeof, values))
     return held
+
+
+# What H5adReader reads a matrix from, as its refusals of a matrix say.
+_MATRIX_LAYOUTS = (
+    "H5adReader reads a matrix from a two-dimensional dense dataset, or from a "
+    "CSR or CSC group holding `data`, `indices` and `indptr`."
+)
 
 
 def _matrix_group_contents(group: h5py.Group) -> str:
@@ -423,9 +433,7 @@ class H5adReader:
                 lacking = ", ".join(f"`{key}`" for key in sorted(missing))
                 contents += f" but not {lacking}"
             raise ValueError(
-                f"ERROR: Matrix `{self.matrixKey}` is {contents}. H5adReader reads "
-                "a matrix from a two-dimensional dense dataset, or from a CSR or "
-                "CSC group holding `data`, `indices` and `indptr`."
+                f"ERROR: Matrix `{self.matrixKey}` is {contents}. {_MATRIX_LAYOUTS}"
             )
 
         encoding = sparse_encoding(group)
@@ -433,6 +441,18 @@ class H5adReader:
             declared = group.attrs.get(
                 "encoding-type", group.attrs.get("h5sparse_format")
             )
+            if declared is None:
+                # A square matrix fits either layout, so the indptr's length
+                # cannot tell them apart.
+                raise ValueError(
+                    f"ERROR: Matrix `{self.matrixKey}` is "
+                    f"{_matrix_group_contents(group)} without an `encoding-type` "
+                    "or `h5sparse_format` attribute, so H5adReader cannot tell CSR "
+                    "from CSC. Set its `encoding-type` attribute to `csr_matrix` "
+                    "when the matrix is stored by rows, the cells, so that `indptr` "
+                    "holds one entry per cell plus one, or to `csc_matrix` when it "
+                    "is stored by columns, the features."
+                )
             raise ValueError(
                 f"ERROR: Sparse matrix encoding `{declared}` of `{self.matrixKey}` "
                 "is not supported. H5adReader supports CSR and CSC encoding."
@@ -444,12 +464,28 @@ class H5adReader:
 
         An empty table group stands for an absent table, but an empty matrix
         group holds no matrix, so any group keeps code 2 for
-        :meth:`_validate_sparse_matrix` to check. A missing slot, a dataset,
-        or another kind of node takes the code of :meth:`_validate_group`.
+        :meth:`_validate_sparse_matrix` to check, and a dataset takes code 1.
+
+        Raises:
+            ValueError: If the file has nothing at ``matrix_key``, or a named
+                datatype, the third kind of HDF5 object, which holds no
+                values.
         """
-        if isinstance(self.h5.get(self.matrixKey), h5py.Group):
+        node = self.h5.get(self.matrixKey)
+        if node is None:
+            raise ValueError(
+                f"ERROR: The file has no matrix `{self.matrixKey}`. Pass "
+                "`matrix_key` to read another of its matrices, which "
+                "`inspect_h5ad` lists."
+            )
+        if isinstance(node, h5py.Group):
             return 2
-        return self._validate_group(self.matrixKey)
+        if isinstance(node, h5py.Dataset):
+            return 1
+        raise ValueError(
+            f"ERROR: Matrix `{self.matrixKey}` is a named datatype, which holds no "
+            f"values. {_MATRIX_LAYOUTS}"
+        )
 
     def _validate_group(self, group: str) -> int:
         if group not in self.h5:
@@ -496,14 +532,10 @@ class H5adReader:
         float16 is not a count storage dtype, so the reader yields matrix
         values in this dtype.
         """
-        if self.groupCodes[self.matrixKey] == 1:
-            dtype = self.h5[self.matrixKey].dtype
-        elif self.groupCodes[self.matrixKey] == 2:
-            dtype = self.h5[self.matrixKey]["data"].dtype
-        else:
-            raise ValueError(
-                f"ERROR: {self.matrixKey} is neither Dataset or Group type. Will not consume data"
-            )
+        matrix = self.h5[self.matrixKey]
+        dtype = (
+            matrix if self.groupCodes[self.matrixKey] == 1 else matrix["data"]
+        ).dtype
         dtype = dtype.newbyteorder("=")
         return np.dtype(np.float32) if dtype == np.float16 else dtype
 
@@ -652,6 +684,7 @@ class H5adReader:
                         f"Cluster key {key!r} must contain one scalar value per cell; "
                         f"found vector dtype {field_dtype}"
                     )
+                values_dtype = field_dtype
                 length = int(cell_attrs.shape[0])
             else:
                 node = cell_attrs[key]
@@ -673,11 +706,21 @@ class H5adReader:
                     raise ValueError(
                         f"Cluster key {key!r} has a misaligned missingness mask"
                     )
+                values_dtype = value_node.dtype
                 length = int(value_node.shape[0])
             if length != self.nCells:
                 raise ValueError(
                     f"Cluster key {key!r} has {length} rows; expected {self.nCells}"
                 )
+            # A categorical's codes are integers, and its categories are checked.
+            problem = values_problem(values_dtype)
+            if problem is None:
+                categories = categories_node(
+                    self.h5, cell_attrs, key, self._categoryGroups
+                )
+                problem = None if categories is None else categories_problem(categories)
+            if problem is not None:
+                raise TypeError(f"Cluster key {key!r} {problem}")
             dtype = self._cell_column_value_dtype(key)
             if dtype.kind not in "biufOSU":
                 raise TypeError(f"Cluster key {key!r} uses unsupported dtype {dtype}")
@@ -1232,9 +1275,10 @@ class H5adReader:
 
         Raises:
             KeyError: If the column is absent.
-            ValueError: If it does not hold one value per feature, or a
-                value is bytes that are not UTF-8 text, naming the file, the
-                table, the column and the row.
+            ValueError: If it does not hold one value per feature, it is a
+                categorical whose categories are not one text value, number or
+                boolean each, or a value is bytes that are not UTF-8 text,
+                naming the file, the table, the column and the row.
         """
         if not self._check_exists(self.featureAttrsKey, key):
             raise KeyError(
