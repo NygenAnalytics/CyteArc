@@ -536,6 +536,78 @@ def test_a_dense_h5ad_producer_process_frees_each_band_before_its_next_batch(
     assert alive == [0, 0]
 
 
+@pytest.mark.parametrize("encoding", ["dense", "csr"])
+def test_an_h5ad_import_frees_each_band_it_received_once_its_write_has_it(
+    tmp_path, monkeypatch, encoding
+) -> None:
+    import weakref
+    from multiprocessing import connection as pipes
+
+    from cytearc.storage import sharding
+    from cytearc.storage.io_policy import StorageIoPolicy
+
+    values = np.arange(1, 4_001, dtype=np.float32).reshape(1_000, 4)
+    source = _write_h5ad(tmp_path / "counts.h5ad", values, encoding=encoding)
+    dense = encoding == "dense"
+    handed: list[weakref.ref] = []
+    alive: list[int] = []
+    name = "write_dense_bands" if dense else "write_sparse_bands"
+    write = getattr(sharding, name)
+
+    class Handing:
+        """Hands each band that the import received to the writes, keeping none."""
+
+        def __init__(self, writes: Any) -> None:
+            self.writes = iter(writes)
+
+        def __iter__(self) -> "Handing":
+            return self
+
+        def __next__(self) -> Any:
+            item = next(self.writes)
+            handed.append(weakref.ref(item.band.values if dense else item.band.row))
+            return item
+
+    receive = pipes.Connection.recv
+
+    def counting_receive(self):
+        # The bands handed to the writes that are alive as the import
+        # receives the next message from a producer process.
+        alive.append(sum(band() is not None for band in handed))
+        return receive(self)
+
+    monkeypatch.setattr(
+        sharding, name, lambda writes, **options: write(Handing(writes), **options)
+    )
+    monkeypatch.setattr(pipes.Connection, "recv", counting_receive)
+    reader = H5adReader(str(source), feature_name_key="feature_name")
+    store = MemoryStore()
+    try:
+        # A destination in memory has producer processes send their bands to
+        # this process; of three workers two read and one writes, each band
+        # before the next is pulled. 400 bytes of the uint16 counts of four
+        # features make bands of 50 cells, one for each batch.
+        writer = H5adToZarr(
+            reader,
+            store,
+            mem_budget="1G",
+            nthreads=3,
+            io=StorageIoPolicy(readWorkers=2),
+            shuffle_cells=False,
+            policy=CountMatrixPolicy(unitBytes=400, chunkBytes=400),
+        )
+        writer.dump(batch_size=50)
+    finally:
+        reader.close()
+    assert (writer._lastImportProducerCount, writer._lastImportWriteWorkers) == (2, 1)
+    np.testing.assert_array_equal(
+        zarr.open_group(store=store, mode="r")["RNA/counts"][:], values
+    )
+    assert len(handed) == 20
+    assert len(alive) > len(handed)
+    assert max(alive) == 0
+
+
 def _complex_matrix(wire: _Wire, values: list[float]) -> bytes:
     """Encode an R complex matrix of two genes and the three test cells."""
     return (

@@ -389,6 +389,9 @@ def _worker_messages(
                 active.pop(connection)
                 connection.close()
             yield index, kind, payload
+            # The consumer holds the message's band as long as it needs it;
+            # keeping it here would hold it beside the next one received.
+            del payload
 
 
 def _stop_workers(
@@ -2419,6 +2422,9 @@ class H5adToZarr:
                     continue
                 assay_name, band = payload
                 yield DenseWriteBand(destinations[assay_name], band)
+                # The write holds the band it was handed; keeping it here
+                # would hold it beside the next band received.
+                del band, payload
 
     def _write_sparse_counts(
         self,
@@ -2711,6 +2717,9 @@ class H5adToZarr:
                     band,
                     producer_bytes,
                 )
+                # The write holds the band it was handed; keeping it here
+                # would hold it beside the next band received.
+                del band, payload
 
     @staticmethod
     def _destination_specs(destinations: dict[str, Any]) -> dict[str, Any]:
