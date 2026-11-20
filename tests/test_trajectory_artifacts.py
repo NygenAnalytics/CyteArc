@@ -25,7 +25,7 @@ from cytearc.trajectory.artifacts import (
     PSEUDOTIME_PAYLOAD,
     aggregation_payload_is_valid,
     fate_payload_is_valid,
-    labels_with_missing_mask,
+    listed_labels,
     load_cell_artifact_values,
     marker_payload_is_valid,
     pseudotime_payload_is_valid,
@@ -432,7 +432,7 @@ def test_nullable_zero_label_is_not_treated_as_an_endpoint() -> None:
     loaded, loaded_selection, missing = load_cell_artifact_values(root, planned.ref)
     assert loaded_selection == selection
     assert missing is not None
-    masked = labels_with_missing_mask(loaded, missing, "labels")
+    masked = listed_labels(loaded, missing, [0, 1], "labels")
     np.testing.assert_array_equal(masked == 0, np.array([False, False]))
     np.testing.assert_array_equal(masked == 1, np.array([False, True]))
 

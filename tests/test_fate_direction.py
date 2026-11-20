@@ -883,15 +883,21 @@ def test_a_map_directed_by_a_score_is_refused_a_small_budget_before_its_graph_is
     }
     maps = _fate_maps(store)
     reads = _count_calls(monkeypatch, store, "_store_to_sparse")
-    # Loading the store's graph of 725 edges and numbering its components
-    # needs 17,984 + 61,492 bytes, as the membership tests derive, beside the
-    # positions of its 145 cells and their float64 scores, 1,160 bytes each.
-    needed = 17_984 + 61_492 + 1_160 + 1_160
+    # Forming the union of the store's graph of 725 edges holds 63,820 bytes
+    # beside the load's 49,152, more than numbering its components, as the
+    # membership tests derive, beside the positions of its 145 cells, 1,160
+    # bytes, and up to a float64 score and a missing flag a cell, 1,305.
+    needed = 63_820 + 49_152 + 1_160 + 1_305
+    work = (
+        "Calling lineage membership"
+        if call == "lineage_membership"
+        else "Loading a direction score"
+    )
     _set_budget(store, needed - 1)
     with pytest.raises(MemoryBudgetError) as refused:
         calls[call]()
     assert str(refused.value) == (
-        f"Loading a direction score of 145 cells needs about {needed} bytes in "
+        f"{work} of 145 cells needs about {needed} bytes in "
         "memory for a graph of 725 edges, but the operation limit is "
         f"{needed - 1} bytes. Raise mem_budget."
     )
@@ -904,7 +910,9 @@ def test_a_map_directed_by_a_score_is_refused_a_small_budget_before_its_graph_is
     assert reads == {"_store_to_sparse": 1}
 
 
-def test_a_masked_score_charges_its_mask_beside_the_graph_load() -> None:
+def test_a_score_is_charged_a_value_and_a_missing_flag_a_cell_before_its_graph() -> (
+    None
+):
     scored, pseudotime = _y_with_island()
     store = scored.store
     island = ~pseudotime.valid
@@ -919,9 +927,15 @@ def test_a_masked_score_charges_its_mask_beside_the_graph_load() -> None:
             _direct(scored, direction)
         return refused.value.needed_bytes
 
-    # The mask of the stored score holds a byte for each of the 7 cells,
-    # beside what the same scores as NaN hold.
-    assert needed(masked) == needed(unscored) + 7
+    # The graph's check comes before the score is read, so it counts a
+    # float64 value and a missing flag for each of the 7 cells, beside the
+    # cells' positions, whether the score holds a mask or NaN.
+    _set_budget(store, 1)
+    with pytest.raises(MemoryBudgetError) as graph_alone:
+        store._require_component_numbering_budget(
+            scored.graph, held_bytes=7 * 8, subgraph=False, work="Loading"
+        )
+    assert needed(masked) == needed(unscored) == graph_alone.value.needed_bytes + 63
     assert _fate_maps(store) == []
 
 

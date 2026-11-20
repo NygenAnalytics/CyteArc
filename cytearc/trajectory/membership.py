@@ -396,28 +396,78 @@ def membership_labels(members: np.ndarray, lineages: Sequence[Any]) -> np.ndarra
     return labels.astype(str)
 
 
-def membership_bytes(n_cells: int, lineages: Sequence[Any]) -> int:
-    """Return the estimate that lineage membership checks against the memory budget.
-
-    The estimate counts the curves' positions, distances and weights, three
-    float64 values for each cell and lineage, and 12 bytes a cell for the
-    pseudotime, the sinks' cells and the cells a trunk may hold. Beside
-    them, it counts 44 bytes a cell for each lineage, for its bin, limit,
-    probability, divided probability, sink label and membership; 4 bytes
-    for each character of the longest label that :func:`membership_labels`
-    can give a cell, a lineage's name, ``"shared"`` or ``"none"``, once; and
-    120 bytes a cell for the sorted cells of a pair while its branch point is
-    found.
-    """
-    n_lineages = len(lineages)
-    label_width = max(
+def _membership_label_width(lineages: Sequence[Any]) -> int:
+    """The characters of the longest label that :func:`membership_labels` can give a cell."""
+    return max(
         len(str(name)) for name in (*lineages, MEMBERSHIP_SHARED, MEMBERSHIP_NONE)
     )
-    return (
-        3 * n_cells * n_lineages * 8
-        + n_cells * 12
-        + n_cells * (44 * n_lineages + 4 * label_width + 120)
-    )
+
+
+def _membership_input_bytes(n_cells: int, n_lineages: int, n_sinks: int) -> int:
+    """The bytes of a membership's loaded inputs.
+
+    The curves' progress, distances and weights are three float64 values
+    for each cell and lineage, and the fate map's probabilities a float64
+    value for each cell and sink. Beside them, 32 bytes a cell hold the
+    pseudotime or score, the cells' components, which sink each cell holds,
+    whether it holds one, and whether the curves and the fate map score it.
+    """
+    return int(n_cells) * (24 * int(n_lineages) + 8 * int(n_sinks) + 32)
+
+
+def stored_membership_bytes(n_cells: int, lineages: Sequence[Any]) -> int:
+    """Return the most bytes that checking a stored membership holds beside its inputs.
+
+    The check fingerprints the stored arrays, and then reads the labels,
+    held as text at the width of the longest label, four bytes a character,
+    with a copy of them and of the labels of cells that follow one lineage,
+    beside each cell's lineages, their count and whether the cell follows
+    one: three copies of the text and up to 20 bytes a cell and 2 a lineage.
+    Loading the membership keeps the labels and the lineages of each cell.
+    """
+    n_cells = int(n_cells)
+    text = 4 * _membership_label_width(lineages) * n_cells
+    return 3 * text + n_cells * (20 + 2 * len(lineages))
+
+
+def membership_bytes(n_cells: int, lineages: Sequence[Any], n_sinks: int) -> int:
+    """Return the most bytes that calling lineage membership holds once its inputs are loaded, with them.
+
+    The inputs are the curves of ``lineages`` over ``n_cells`` cells and a
+    fate map of ``n_sinks`` sinks. Calling the membership holds 12 bytes a
+    cell for the pseudotime, the sinks' cells and the cells a trunk may
+    hold, and 44 bytes a cell for each lineage, for its bin, limit,
+    probability, divided probability, sink label and membership, or 120
+    bytes a cell for the sorted cells of a pair while its branch point is
+    found. Each cell's label, a lineage's name, ``"shared"`` or ``"none"``,
+    is built as an object and then held as text at the width of the longest
+    label, four bytes a character. The labels and the lineages of each cell
+    are then written, beside each lineage's sink cells and the payload's
+    other arrays, up to 20 bytes a cell and 2 a lineage, which holds two
+    copies of the text, and checked before the membership is published, as
+    :func:`stored_membership_bytes` states.
+    """
+    n_cells = int(n_cells)
+    n_lineages = len(lineages)
+    inputs = _membership_input_bytes(n_cells, n_lineages, n_sinks)
+    calling = n_cells * (12 + max(44 * n_lineages, 120))
+    labels = 4 * _membership_label_width(lineages) * n_cells
+    building = labels + 18 * n_cells
+    written = labels + n_cells * (2 * n_lineages + 20)
+    checking = max(2 * labels, stored_membership_bytes(n_cells, lineages))
+    return inputs + max(calling, building, written + checking)
+
+
+def membership_load_bytes(n_cells: int, lineages: Sequence[Any], n_sinks: int) -> int:
+    """Return the most bytes that loading a stored lineage membership holds, with its inputs.
+
+    The inputs are those of :func:`membership_bytes`, beside which the
+    stored membership is checked and read, as
+    :func:`stored_membership_bytes` states.
+    """
+    return _membership_input_bytes(
+        n_cells, len(lineages), n_sinks
+    ) + stored_membership_bytes(n_cells, lineages)
 
 
 def branch_point(

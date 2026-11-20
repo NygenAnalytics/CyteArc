@@ -13,6 +13,12 @@ import numpy as np
 import pandas as pd
 
 from ..utils.logging import logger
+from ..utils.memory_budget import (
+    fixed_text_bytes,
+    hash_table_bytes,
+    object_array_bytes,
+)
+from .rows import STRING_BYTES, text_read_bytes, text_width
 
 
 def positional_kind(values: Any) -> str:
@@ -140,3 +146,27 @@ def align_to_cell_ids(
         f"{name} takes the values of a pandas {container.__name__} by ID: its "
         f"index must hold the ids of {cells}, each once; {problem}. {remedy}"
     )
+
+
+def cell_id_alignment_bytes(ids: Any, n_cells: int, n_labels: int) -> int:
+    """Return the most bytes that reading cell IDs and aligning keyed values to them holds.
+
+    ``ids`` is the stored ID column, of which ``n_cells`` rows are read, as
+    :func:`~cytearc.metadata.rows.text_read_bytes` states, at the stored
+    width, four bytes a character. :func:`align_to_cell_ids` then makes them
+    a pandas index, which holds a Python string for each ID and, on pandas 3,
+    another copy at the stored width; it hashes the index and the values'
+    ``n_labels`` labels, whose table stays with the values; and it holds
+    each value's position and the values in order.
+    """
+    n_cells, n_labels = int(n_cells), int(n_labels)
+    width = text_width(ids)
+    aligning = (
+        2 * fixed_text_bytes(n_cells, width)
+        + n_cells * (STRING_BYTES + 4 * width)
+        + object_array_bytes(n_cells)
+        + hash_table_bytes(n_cells)
+        + hash_table_bytes(n_labels)
+        + 16 * n_cells
+    )
+    return max(text_read_bytes(ids, n_cells), aligning)

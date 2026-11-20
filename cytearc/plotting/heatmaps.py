@@ -659,10 +659,11 @@ def _prepare_pseudotime_heatmap(
 ) -> dict[str, Any]:
     if not isinstance(aggregation, ArtifactRef):
         raise TypeError("aggregation must be an ArtifactRef")
-    loaded = store.trajectory.load_aggregation(aggregation)
+    # The aggregation's loader validates it against its pseudotime, which it
+    # hands back, so the pseudotime and its graph are loaded once.
+    loaded, pseudotime_result = store._load_aggregation_with_pseudotime(aggregation)
     if loaded.ref != aggregation:
         raise ValueError("Loaded pseudotime aggregation does not match the request")
-    pseudotime_result = store.trajectory.load_pseudotime(loaded.pseudotime)
     if pseudotime_result.cell_selection != loaded.cell_selection:
         raise ValueError(
             "Pseudotime aggregation and scoring use different cell selections"

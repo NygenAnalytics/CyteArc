@@ -244,6 +244,65 @@ def component_numbering_bytes(
     return numbering + 12 * n_cells if subgraph else numbering
 
 
+def pseudotime_solve_bytes(
+    n_cells: int, n_entries: int, *, method: str, n_modes: int
+) -> int:
+    """Return the most bytes that solving for a pseudotime holds beside its graph.
+
+    The graph has ``n_cells`` cells and at most ``n_entries`` stored entries.
+    :func:`pba_potential`, ``method="untruncated"``, copies the graph with
+    float64 weights, as a graph stored with float32 weights needs, numbers
+    its components, which SciPy 1.16 does on a copy of its transpose and its
+    index arrays, and then holds MINRES's vectors and the products of each
+    step. ``method="truncated"`` builds the transposed random-walk Laplacian,
+    a float64 copy of the graph and its difference from the identity, and
+    ARPACK's Lanczos basis of ``max(2 * n_modes + 1, 20)`` vectors, at most
+    one a cell, beside its own vectors, then the ``n_modes`` singular vectors
+    on each side, which the potential copies once more.
+    """
+    cells, entries = int(n_cells), int(n_entries)
+    weights = 12 * entries + 4 * (cells + 1)
+    if method == "untruncated":
+        return weights + max(weights + 4 * entries + 20 * cells, 25 * 8 * cells)
+    if method != "truncated":
+        raise ValueError("method must be 'untruncated' or 'truncated'")
+    basis = min(cells, max(2 * int(n_modes) + 1, 20))
+    laplacian = 2 * weights + 12 * cells
+    return laplacian + 8 * cells * (basis + 8) + 4 * 8 * cells * int(n_modes)
+
+
+def pseudotime_working_bytes(
+    n_cells: int,
+    graph_bytes: int,
+    n_entries: int,
+    *,
+    subgraph: bool,
+    method: str,
+    n_modes: int,
+    snapshot_bytes: int,
+) -> int:
+    """Return the most bytes that scoring a pseudotime holds beside its loaded graph.
+
+    The graph takes ``graph_bytes`` for ``n_cells`` cells and at most
+    ``n_entries`` entries. Scoring numbers the components of the graph, or of
+    the subgraph of some of its cells, as :func:`component_numbering_bytes`
+    states, and keeps each cell's component and whether it is scored, 9
+    bytes a cell. It takes the scored component's graph in two steps, each a
+    copy of at most the graph, and keeps it beside the graph while it
+    resolves the ``snapshot_bytes`` of an ``ss_vec`` snapshot and while it
+    solves, as :func:`pseudotime_solve_bytes` states.
+    """
+    numbering = component_numbering_bytes(
+        n_cells, graph_bytes, n_entries, subgraph=subgraph
+    )
+    solve = pseudotime_solve_bytes(n_cells, n_entries, method=method, n_modes=n_modes)
+    return 9 * int(n_cells) + max(
+        numbering,
+        2 * int(graph_bytes),
+        int(graph_bytes) + max(int(snapshot_bytes), solve),
+    )
+
+
 def select_pseudotime_component(
     graph: csr_matrix,
     selected_cell_indices: np.ndarray,

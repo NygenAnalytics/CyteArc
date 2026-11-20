@@ -724,27 +724,40 @@ def test_a_pseudotime_of_some_cells_charges_the_subgraph_before_reading_the_grap
         ss_vec=pd.Series(np.r_[-1.0, np.zeros(8), 1.0], index=ids[:10]),
     )
     reads = _count_calls(monkeypatch, store, "_store_to_sparse")
+    # The 48 KiB of Zarr's buffers and the load's objects, which outweigh
+    # so small a graph, are set aside, so the bytes that grow with it decide.
+    monkeypatch.setattr("cytearc.neighbors.graph._READ_OBJECT_BYTES", 0)
     # SciPy loads an entry as an int32 index and a float32 weight, 8 bytes,
     # beside 13 int32 row pointers, 52 bytes, so the union keeps
     # 2 * 11 * 8 + 52 = 228 bytes, and forming it holds 7 * 11 * 8 + 5 * 52 =
     # 876. Numbering the union's components is charged three copies of it, 4
     # bytes an entry and 12 a cell, 684 + 88 + 144 = 916 beside it, which
     # outgrows forming it, and the pseudotime of all cells holds the
-    # positions of the graph's 12 cells beside both, 96 bytes. The
-    # pseudotime of ten cells also holds their positions and their places
-    # among the graph's, 80 bytes each, and taking their subgraph adds 12
-    # bytes a cell, 144.
+    # positions of the graph's 12 cells beside both, 96 bytes, and its stored
+    # source/sink vector and source cells, 12 * 9 = 108. The pseudotime of ten
+    # cells also holds their positions and their places among the graph's,
+    # 80 bytes each, its vector and sources for ten cells, 90, and taking
+    # their subgraph adds 12 bytes a cell, 144.
     for ref, needed in (
-        (whole, 96 + 228 + 916),
-        (some, 96 + 160 + 228 + 916 + 144),
+        (whole, 96 + 108 + 228 + 916),
+        (some, 96 + 160 + 90 + 228 + 916 + 144),
     ):
         _set_budget(store, needed - 1)
         with pytest.raises(MemoryBudgetError) as refused:
             store.trajectory.load_pseudotime(ref)
         assert refused.value.needed_bytes == needed
+        assert refused.value.item == "the graph of 11 edges and its work"
         assert reads == {}
-        _set_budget(store, needed)
-        store.trajectory.load_pseudotime(ref)
+        # Reading the stored vector refuses on its own when it needs more.
+        budget = needed
+        for _ in range(3):
+            _set_budget(store, budget)
+            try:
+                store.trajectory.load_pseudotime(ref)
+                break
+            except MemoryBudgetError as larger:
+                assert larger.needed_bytes > budget
+                budget = larger.needed_bytes
         assert reads == {"_store_to_sparse": 1}
         reads.clear()
 

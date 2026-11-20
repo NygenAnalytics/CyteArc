@@ -22,6 +22,7 @@ from ..storage.partition import (
     partition_indices,
     row_band,
 )
+from ..storage.artifacts import fingerprint_text_blocks
 from ..storage.content_stamps import stored_content_stamp, stored_content_stamp_bytes
 from ..storage.layout import column_chunk_rows
 from ..storage.types import as_zarr_array, read_array
@@ -35,7 +36,7 @@ from ..utils.memory_budget import (
 _SELECTION_INDEX_ARRAYS = 16
 # A Python string's header and its slot in an object array, beside up to four
 # bytes for each character.
-_STRING_BYTES = 64
+STRING_BYTES = 64
 
 
 class _RowReadableMetaData(Protocol):
@@ -106,13 +107,39 @@ def text_row_selection_parts(array: Any) -> tuple[int, int]:
     string of up to four bytes per character.
     """
     fixed, per_row = array_row_selection_parts(array)
-    return fixed, per_row + _STRING_BYTES + 4 * text_width(array)
+    return fixed, per_row + STRING_BYTES + 4 * text_width(array)
 
 
 def text_read_bytes(array: Any, n_rows: int) -> int:
     """Return the bytes of reading ``n_rows`` stored rows as Python strings."""
     fixed, per_row = text_row_selection_parts(array)
     return fixed + int(n_rows) * per_row
+
+
+def fingerprint_stored_rows(array: Any, rows: np.ndarray) -> str:
+    """Fingerprint a stored text column at ascending ``rows``, one stored chunk at a time.
+
+    The fingerprint is :func:`~cytearc.storage.artifacts.fingerprint_strings`
+    of the values at those rows read whole, but the check holds the rows of
+    one chunk at a time; values of variable width are read twice, once to
+    measure the widest.
+    """
+    indices = np.asarray(rows, dtype=np.int64)
+    if indices.ndim != 1:
+        raise ValueError("Metadata row indices must be one-dimensional")
+    if indices.size > 1 and bool(np.any(np.diff(indices) <= 0)):
+        raise ValueError("Rows to fingerprint must be distinct and ascending")
+    geometry = array_geometry(array)
+
+    def blocks() -> Iterator[np.ndarray]:
+        if geometry is None:
+            if indices.size:
+                yield _read_array_rows(array, indices)
+            return
+        for block in partition_indices(geometry, 0, indices):
+            yield _read_array_rows(array, block.indices)
+
+    return fingerprint_text_blocks(int(indices.size), array.dtype, blocks)
 
 
 def read_array_rows_chunkwise(array: Any, rows: np.ndarray) -> np.ndarray:

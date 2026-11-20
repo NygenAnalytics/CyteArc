@@ -33,6 +33,7 @@ from .artifacts import (
     open_artifact,
 )
 from .categorical import CATEGORIES_PREFIX, CategoricalColumn
+from .content_stamps import cached_for_content
 from .errors import ArtifactErrorContextValue, ArtifactResolutionError
 from .geometry import array_geometry
 from .metadata_keys import (
@@ -835,6 +836,40 @@ def _fingerprint_snapshot_column(
     missing: zarr.Array | None,
     *,
     dtype: np.dtype[Any] | None = None,
+) -> str:
+    """Fingerprint a snapshot column's values, as text for a categorical, and its missing mask.
+
+    The fingerprint is reused while the stored bytes of the values, or of a
+    categorical's codes and categories, and of the mask are unchanged
+    (:func:`~cytearc.storage.content_stamps.cached_for_content`), so checking
+    a snapshot again reads their encoded bytes instead of decoding and
+    hashing every value.
+    """
+    stored = (
+        [values.codes, values.categories_array]
+        if isinstance(values, CategoricalColumn)
+        else [values]
+    )
+    if missing is not None:
+        stored.append(missing)
+    purpose = (
+        "snapshot_column_fingerprint",
+        isinstance(values, CategoricalColumn),
+        missing is not None,
+        None if dtype is None else np.dtype(dtype).str,
+    )
+    return cached_for_content(
+        purpose,
+        stored,
+        lambda: _computed_snapshot_column_fingerprint(values, missing, dtype=dtype),
+    )
+
+
+def _computed_snapshot_column_fingerprint(
+    values: zarr.Array | CategoricalColumn,
+    missing: zarr.Array | None,
+    *,
+    dtype: np.dtype[Any] | None,
 ) -> str:
     values_dtype = _snapshot_values_dtype(values) if dtype is None else np.dtype(dtype)
     builder = ValueFingerprintBuilder()

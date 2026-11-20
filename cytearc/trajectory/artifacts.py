@@ -2,6 +2,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 import numpy as np
+import pandas as pd
 import zarr
 from scipy.sparse import coo_matrix, csr_matrix
 from scipy.sparse.csgraph import connected_components
@@ -125,7 +126,6 @@ _AGGREGATION_ATTRIBUTES = _RESULT_ATTRIBUTES | {
     "effective_bins",
 }
 
-_MISSING_LABEL = object()
 
 _MARKER_METHODS = {
     "association_method": "pearson",
@@ -484,19 +484,53 @@ def load_cell_artifact_values(
     return resolved.values, resolved.source_cell_selection, resolved.missing_mask
 
 
-def labels_with_missing_mask(
+def listed_labels(
     values: np.ndarray,
     missing: np.ndarray | None,
+    listed: Sequence[Any],
     label: str,
-) -> np.ndarray:
+) -> pd.Categorical:
+    """Keep each cell's label where it is one of ``listed``, as a categorical of those labels.
+
+    A label matches a listed one as pandas matches values, by value, so the
+    categorical compares with a label as the labels do; labels outside the
+    list and missing labels become missing. The categorical holds a code for
+    each cell rather than its label. Text is compared as stored, a listed
+    label at a time, which matches as pandas does without a Python string
+    for each label; other labels are matched by pandas. ``label`` names the
+    labels in the refusal of values that are not one-dimensional.
+    """
     labels = np.asarray(values)
     if labels.ndim != 1:
         raise ValueError(f"{label} must be one-dimensional")
-    if missing is None:
-        return labels
-    masked = labels.astype(object)
-    masked[missing] = _MISSING_LABEL
-    return masked
+    categories = pd.Index(list(dict.fromkeys(listed)), dtype=object)
+    small = np.int8 if len(categories) <= np.iinfo(np.int8).max else np.int32
+    if labels.dtype.kind == "U":
+        codes = np.full(len(labels), -1, dtype=small)
+        for code, category in enumerate(categories):
+            codes[labels == category] = code
+    else:
+        codes = categories.get_indexer(labels).astype(small)
+    if missing is not None:
+        codes[np.asarray(missing, dtype=bool)] = -1
+    return pd.Categorical.from_codes(codes, categories=categories)
+
+
+def listed_labels_bytes(n_values: int, dtype: Any) -> int:
+    """Return the most bytes that :func:`listed_labels` holds beside the labels.
+
+    Text holds the codes and the cells that match one listed label at a
+    time, up to five bytes a label. pandas matches other objects in place,
+    with an int64 code and about 34 bytes more for each label, and numbers
+    as they are.
+    """
+    resolved = np.dtype(dtype)
+    n_values = int(n_values)
+    if resolved.kind == "U":
+        return 5 * n_values
+    if resolved.hasobject:
+        return 50 * n_values
+    return 16 * n_values
 
 
 def payload_fingerprint_matches(group: Any, names: Sequence[str]) -> bool:
@@ -560,6 +594,19 @@ def diffusion_load_bytes(nnz: int, n_cells: int, imputed_features: int = 0) -> i
             load_bytes, coo_bytes + 2 * csc_bytes, 3 * output_bytes + 2 * csc_bytes
         )
     return load_bytes
+
+
+def diffusion_write_bytes(nnz: int, n_cells: int) -> int:
+    """Return the most bytes that writing a diffusion operator and checking it hold beside it.
+
+    :func:`write_diffusion_payload` fingerprints the stored arrays, and the
+    check before the operator is published fingerprints them again; each
+    reads the arrays back as :func:`diffusion_load_bytes` states, beside a
+    stored chunk of 8-byte values, at most one of ``nnz`` entries.
+    """
+    return diffusion_load_bytes(nnz, n_cells) + 8 * min(
+        int(nnz), _DIFFUSION_BLOCK_ENTRIES
+    )
 
 
 def write_diffusion_payload(group: zarr.Group, diffusion: csr_matrix) -> None:

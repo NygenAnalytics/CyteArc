@@ -16,7 +16,7 @@ import hashlib
 import math
 import threading
 from collections import OrderedDict
-from collections.abc import Callable, Hashable
+from collections.abc import Callable, Hashable, Sequence
 from itertools import product
 
 import numpy as np
@@ -144,23 +144,30 @@ def stored_content_stamp(array: zarr.Array) -> bytes:
 
 def cached_for_content[T](
     purpose: Hashable,
-    array: zarr.Array,
+    array: zarr.Array | Sequence[zarr.Array],
     compute: Callable[[], T],
 ) -> T:
     """Return ``compute()``, reused while the stored contents of ``array`` hold.
 
-    ``compute`` must depend only on what ``array`` holds, and ``purpose`` names
-    what it computes. A value is cached only when the array's stamp after
-    ``compute`` equals the stamp before it, so a value that a concurrent write
-    could have changed is returned but never reused.
+    ``array`` is one array, or the arrays in order whose contents ``compute``
+    reads together. ``compute`` must depend only on what they hold, and
+    ``purpose`` names what it computes. A value is cached only when the
+    arrays' stamps after ``compute`` equal their stamps before it, so a value
+    that a concurrent write could have changed is returned but never reused.
     """
-    key = (purpose, stored_content_stamp(array))
+    arrays = (array,) if isinstance(array, zarr.Array) else tuple(array)
+
+    def stamps() -> bytes:
+        # Each stamp has the same length, so their concatenation is unambiguous.
+        return b"".join(stored_content_stamp(each) for each in arrays)
+
+    key = (purpose, stamps())
     with _LOCK:
         if key in _CACHE:
             _CACHE.move_to_end(key)
             return _CACHE[key]  # type: ignore[return-value]
     value = compute()
-    if stored_content_stamp(array) == key[1]:
+    if stamps() == key[1]:
         with _LOCK:
             _CACHE[key] = value
             while len(_CACHE) > _CACHE_ENTRIES:

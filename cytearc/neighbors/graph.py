@@ -25,6 +25,12 @@ class GraphLoadMemory:
     maxEntries: int
 
 
+#: What loading a graph holds beside its arrays, whatever their size:
+#: Zarr's buffers and the objects that reading the stored arrays and checking
+#: the graph's records keep.
+_READ_OBJECT_BYTES = 48 * 1024
+
+
 def _sparse_index_bytes(n_cells: int, n_entries: int) -> int:
     """Return the itemsize of SciPy's index dtype for such a sparse matrix."""
     return 4 if max(n_cells, n_entries) <= np.iinfo(np.int32).max else 8
@@ -38,11 +44,19 @@ def graph_load_memory(
     upper_only: bool = False,
     edge_itemsize: int = 4,
     weight_itemsize: int = 4,
+    keep_nearest: bool = False,
 ) -> GraphLoadMemory:
     """Estimate the bytes of loading a stored graph of ``n_edges`` directed edges.
 
     A load reads the stored edge pairs and weights, builds a COO matrix whose
-    coordinates are copies in SciPy's index dtype, and converts it to CSR.
+    coordinates are copies in SciPy's index dtype, and converts it to CSR,
+    beside 48 KiB of Zarr's buffers and the objects that reading the arrays
+    and checking the graph's records keep.
+    ``keep_nearest`` first keeps each cell's nearest edges with
+    :func:`take_nearest_per_row`, which holds, beside the stored arrays, each
+    edge's source cell, its row's start and its rank in the row as ``intp``,
+    whether it is kept, the kept pairs and weights, and two ``intp`` values a
+    cell; the matrix is then at most the matrix of every edge.
     ``symmetric`` then forms the fuzzy union ``A + A^T - A * A^T``. SciPy sizes
     a sum or an elementwise product for the entries of both operands, so the
     union holds the directed matrix, a CSR copy of its transpose for each
@@ -58,6 +72,8 @@ def graph_load_memory(
         upper_only: Whether it then keeps the upper triangle.
         edge_itemsize: Bytes of one stored edge endpoint.
         weight_itemsize: Bytes of one stored weight.
+        keep_nearest: Whether the load keeps fewer than each cell's stored
+            edges.
 
     Returns:
         The estimated peak, the bytes of the loaded matrix, and its most
@@ -75,15 +91,28 @@ def graph_load_memory(
     entry_bytes = index_bytes + weight_bytes
     pointer_bytes = (cells + 1) * index_bytes
     directed_bytes = edges * entry_bytes + pointer_bytes
-    # The stored pairs and weights, the COO coordinates, and the CSR matrix.
+    # The stored pairs and weights, the COO coordinates, and the CSR matrix,
+    # beside Zarr's buffers and the objects of the load.
     loading = edges * (2 * edge_bytes + weight_bytes + 2 * index_bytes) + directed_bytes
+    if keep_nearest:
+        stored = edges * (2 * edge_bytes + weight_bytes)
+        intp = np.dtype(np.intp).itemsize
+        # The ranks are found beside the sources, the row starts and a range
+        # of the edges, and the kept edges are copied beside the sources, the
+        # row starts, the ranks and the mask of those kept.
+        loading = max(
+            loading,
+            stored + 4 * intp * edges + 2 * intp * cells,
+            2 * stored + (3 * intp + 1) * edges + 2 * intp * cells,
+        )
+    loading += _READ_OBJECT_BYTES
     if not symmetric:
         return GraphLoadMemory(
             peakBytes=loading,
             heldBytes=directed_bytes,
             maxEntries=edges,
         )
-    union = 7 * edges * entry_bytes + 5 * pointer_bytes
+    union = 7 * edges * entry_bytes + 5 * pointer_bytes + _READ_OBJECT_BYTES
     union_bytes = 2 * edges * entry_bytes + pointer_bytes
     if not upper_only:
         return GraphLoadMemory(

@@ -899,12 +899,34 @@ def test_a_stream_that_loses_cells_is_refused(
 def test_smoothing_refuses_a_graph_of_other_cells_or_beyond_the_budget(
     datastore, connectivity_graph, monkeypatch
 ):
-    n_cells = datastore.graph.load(connectivity_graph, symmetric=True).shape[0]
+    from cytearc.storage.budget import ResourceBudget
+
+    union = datastore.graph.load(connectivity_graph, symmetric=True)
+    n_cells = union.shape[0]
     with pytest.raises(ValueError, match="Graph cell count does not match"):
         datastore._smoothed_potency(connectivity_graph, np.zeros(n_cells + 1), 0.9)
-    monkeypatch.setattr(datastore, "memoryBytes", 3 * 8 * n_cells)
-    with pytest.raises(MemoryBudgetError, match="leave graph out"):
+    # Smoothing holds the union's float64 copy and its row-normalized
+    # product, 20 bytes an entry, and 49 bytes a cell, beside the union and
+    # the cells' values: a budget of the union and the values alone is
+    # refused before the graph is read.
+    reads: list[str] = []
+    load = datastore._load_graph_artifact
+    monkeypatch.setattr(
+        datastore,
+        "_load_graph_artifact",
+        lambda *args, **kwargs: (reads.append("graph"), load(*args, **kwargs))[1],
+    )
+    budget = union.data.nbytes + union.indices.nbytes + union.indptr.nbytes
+    budget += 8 * n_cells
+    monkeypatch.setattr(datastore, "memoryBytes", budget)
+    monkeypatch.setattr(datastore, "resources", ResourceBudget(budget, 1))
+    with pytest.raises(MemoryBudgetError) as refused:
         datastore._smoothed_potency(connectivity_graph, np.zeros(n_cells), 0.9)
+    assert str(refused.value).startswith(
+        f"Smoothing potency over the graph of {n_cells} cells needs about"
+    )
+    assert refused.value.needed_bytes >= budget + 20 * union.nnz + 49 * n_cells
+    assert reads == []
 
 
 def test_a_read_only_store_returns_saved_scores_and_refuses_new_ones(
