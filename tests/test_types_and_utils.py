@@ -617,6 +617,22 @@ def test_require_one_value_kind_takes_values_of_one_kind(values):
     require_one_value_kind(values, name="labels", remedy="convert them")
 
 
+def test_require_one_value_kind_reads_no_value_of_a_typed_array():
+    class Unread(np.ndarray):
+        def __iter__(self):
+            raise AssertionError("a typed array was read value by value")
+
+    # A batch column of ten million integers would make as many NumPy
+    # scalars to find their one kind.
+    for dtype in (np.int64, np.float32, np.bool_, np.str_):
+        values = np.zeros(4, dtype=dtype).view(Unread)
+        require_one_value_kind(values, name="labels", remedy="convert them")
+    with pytest.raises(AssertionError, match="read value by value"):
+        require_one_value_kind(
+            np.zeros(4, dtype=object).view(Unread), name="labels", remedy="convert them"
+        )
+
+
 @pytest.mark.parametrize(
     ("values", "kinds"),
     [
