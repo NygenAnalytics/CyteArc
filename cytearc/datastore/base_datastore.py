@@ -11,7 +11,7 @@ from ..storage.artifacts import (
     inspect_artifact,
     list_artifacts as list_artifact_refs,
 )
-from ..storage.types import ZarrMode, as_zarr_group
+from ..storage.types import ZarrMode, as_zarr_group, read_fresh_group
 from ..storage.validation_scope import validation_scoped
 from ..storage.budget import ResourceBudget
 from ..features.gene_families import DEFAULT_PERCENT_PATTERNS
@@ -1051,6 +1051,13 @@ class BaseDataStore:
         stored attribute of the assays they keep; a call that did would have
         to open that assay again.
 
+        The first load reads ``assayTypes`` from the group that the open just
+        read. A later load reads the record from the root or workspace group
+        opened again, and writes it through that group: another session may
+        have recorded types, or another attribute such as ``defaultAssay``,
+        since this datastore opened the group, and an attribute write replaces
+        every attribute of the group from the copy that it was opened with.
+
         A read-only open cannot record a type, so an explicit type must equal
         the type that the store declares. A record that is not a mapping is
         replaced only by a writable open that declares every assay explicitly.
@@ -1075,7 +1082,9 @@ class BaseDataStore:
         explicit = validate_assay_types(custom_assay_types, self._assayNames)
         writable = not self.zw.read_only
         presets = preset_assay_types()
-        raw_types = self.zw.attrs.get("assayTypes")
+        loaded: dict[str, Assay] = self.__dict__.get("_assays", {})
+        record = read_fresh_group(self.zw) if loaded else self.zw
+        raw_types = record.attrs.get("assayTypes")
         if (
             writable
             and raw_types is not None
@@ -1122,7 +1131,6 @@ class BaseDataStore:
                     logger.warning(caution_statement % name)
                 resolved[name] = stored_type(name)
             logger.debug(f"Setting assay {name} to assay type: {resolved[name]}")
-        loaded: dict[str, Assay] = self.__dict__.get("_assays", {})
         assays: dict[str, Assay] = {}
         for name, type_name in resolved.items():
             held = loaded.get(name)
@@ -1145,9 +1153,15 @@ class BaseDataStore:
         self._assays = assays
         z_attrs = {name: str(value) for name, value in recorded.items()}
         z_attrs.update(resolved)
-        if writable and self.zw.attrs.get("assayTypes") != z_attrs:
-            self.zw.attrs["assayTypes"] = z_attrs
+        if writable and record.attrs.get("assayTypes") != z_attrs:
+            record.attrs["assayTypes"] = z_attrs
         return None
+
+    def _register_derived_assay(self, assay_label: str, assay_type: str) -> None:
+        """Load a newly published derived assay and its cell properties."""
+        self._assayNames = tuple(self._scan_assays())
+        self._load_assays(custom_assay_types={assay_label: assay_type})
+        self._ini_cell_props(mito_pattern=None, ribo_pattern=None)
 
     def _get_assay(
         self,

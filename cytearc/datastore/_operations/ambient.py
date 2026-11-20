@@ -1113,10 +1113,7 @@ class _AmbientOperationsMixin(_AmbientOperationsBase):
                     "ambient_removed_counts": int(removed_total),
                 }
             )
-        # Registered as add_grouped_assay and add_melded_assay register theirs.
-        self._assayNames = tuple(self._scan_assays())
-        self._load_assays(custom_assay_types={assay_label: "RNA"})
-        self._ini_cell_props(mito_pattern=None, ribo_pattern=None)
+        self._register_derived_assay(assay_label, "RNA")
         logger.info(
             f"Removed {removed_total} ambient RNA counts from {len(cell_idx)} cells "
             f"of {assay.name} into assay {assay_label!r}"

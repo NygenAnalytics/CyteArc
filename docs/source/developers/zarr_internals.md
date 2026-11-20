@@ -347,16 +347,7 @@ store once with `zarr_mode="r+"` to record it. An `assayTypes` attribute that is
 mapping raises the same remedy instead of being read as empty: a writable open whose
 `assay_types` names a preset for every assay replaces it.
 
-Each open assay carries the type that its `DataStore` resolved, `Assay.assayType`, which
-`cytearc.assay.classification.declared_assay_type` returns. Merge, subset, and
-`qc.hto_demultiplexing` read that type rather than the attribute, so a workspace store opened
-with `assay_types={"tags": "HTO"}` declares `HTO` everywhere in the session that recorded it, and
-a type written to the attribute behind an open `DataStore` takes effect at its next open. Derived
-assays carry the type they were registered with. Subset, repack, and mount copy the declarations,
-and `DataStoreMerge` records the one type that every source holding an assay declares, rejecting
-sources that declare different types. A mount opens each target assay as its `assay_types` entry,
-or else as the source declares it, and requires the source's `countsT` for exactly the assays that
-open as RNA.
+Each open assay carries the type that its `DataStore` resolved, `Assay.assayType`, which `cytearc.assay.classification.declared_assay_type` returns. Merge, subset, and `qc.hto_demultiplexing` read that type rather than the attribute, so a workspace store opened with `assay_types={"tags": "HTO"}` declares `HTO` everywhere in the session that recorded it, and a type written to the attribute behind an open `DataStore` takes effect at its next open, or when it adds an assay: `add_grouped_assay`, `add_melded_assay` and `qc.correct_ambient` read `assayTypes` from the store again and write their assay's type beside the attributes that the group then holds, such as another session's `defaultAssay`. Derived assays carry the type they were registered with. Subset, repack, and mount copy the declarations, and `DataStoreMerge` records the one type that every source holding an assay declares, rejecting sources that declare different types. A mount opens each target assay as its `assay_types` entry, or else as the source declares it, and requires the source's `countsT` for exactly the assays that open as RNA.
 
 (normalized_values_attribute)=
 

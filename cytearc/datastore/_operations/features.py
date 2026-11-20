@@ -2845,14 +2845,6 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
             )
         self._register_derived_assay(assay_label, "Assay")
 
-    def _register_derived_assay(self, assay_label: str, assay_type: str) -> None:
-        """Load a newly published derived assay and its cell properties."""
-        # Publication recorded the assay's type through another handle.
-        self._refresh_workspace_group()
-        self._assayNames = tuple(self._scan_assays())
-        self._load_assays(custom_assay_types={assay_label: assay_type})
-        self._ini_cell_props(mito_pattern=None, ribo_pattern=None)
-
     def add_melded_assay(
         self,
         from_assay: str | None = None,

@@ -34,23 +34,30 @@ def _write_store(
     counts: Mapping[str, np.ndarray],
     *,
     workspace: str | None = None,
+    feature_ids: Mapping[str, list[str]] | None = None,
 ) -> str:
-    """Write a fresh import whose assays share one set of cells."""
+    """Write a fresh import whose assays share one set of cells.
+
+    A feature is named ``f"{assay}{index}"`` unless ``feature_ids`` names the
+    features of its assay.
+    """
     root = load_zarr(zarr_loc=str(path), mode="w")
     (n_cells,) = {len(values) for values in counts.values()}
     cell_ids = np.asarray([f"cell{index}" for index in range(n_cells)])
     create_cell_data(root, workspace, ids=cell_ids, names=cell_ids)
     for assay, values in counts.items():
-        feature_ids = np.asarray(
-            [f"{assay}{index}" for index in range(values.shape[1])]
+        feature_ids_of_assay = np.asarray(
+            (feature_ids or {}).get(
+                assay, [f"{assay}{index}" for index in range(values.shape[1])]
+            )
         )
         array = create_zarr_count_assay(
             root,
             assay,
             workspace,
             n_cells,
-            feat_ids=feature_ids,
-            feat_names=feature_ids,
+            feat_ids=feature_ids_of_assay,
+            feat_names=feature_ids_of_assay,
             dtype="uint32",
         )
         array[:] = values
@@ -355,3 +362,80 @@ def test_adding_an_assay_opens_again_an_assay_whose_type_another_session_changed
         "hashtags": "HTO",
         "MODULES": "Assay",
     }
+
+
+_PEAKS = ["chr1:100-200", "chr1:250-350", "chr2:100-200"]
+_PEAK_COUNTS = np.random.default_rng(5).poisson(3.0, size=(12, 3)).astype(np.uint32)
+
+
+@pytest.mark.parametrize(
+    ("call", "label", "label_type"),
+    [
+        ("add_grouped_assay", "MODULES", "Assay"),
+        ("add_melded_assay", "GeneScores", "Assay"),
+        ("correct_ambient", "RNA_soup", "RNA"),
+    ],
+)
+@pytest.mark.parametrize("workspace", [None, "ws"], ids=["root", "workspace"])
+def test_adding_an_assay_keeps_what_another_session_recorded(
+    tmp_path, workspace, call, label, label_type
+) -> None:
+    location = _write_store(
+        tmp_path / "data.zarr",
+        {"RNA": _RNA, "ATAC": _PEAK_COUNTS, "hashtags": _TAGS},
+        workspace=workspace,
+        feature_ids={"ATAC": _PEAKS},
+    )
+    datastore = _open(location, workspace=workspace)
+    datastore.RNA.feats.insert("module", np.array([1, 1, 2, 2, 3]), overwrite=True)
+    ids = datastore.cells.fetch_all("ids")
+    datastore.cells.insert("is_cell", pd.Series(np.arange(12) < 6, index=ids))
+    datastore.cells.insert("is_empty", pd.Series(np.arange(12) >= 6, index=ids))
+    profile = datastore.qc.ambient_profile(
+        empty_droplets=datastore.snapshot_cell_selection("is_empty")
+    )
+    estimate = datastore.qc.ambient_contamination(
+        datastore.snapshot_cell_selection("is_cell"), profile, fraction=0.1
+    )
+    pd.DataFrame([("chr1", 120, 300, "gene_a", "GENE_A", "+")]).to_csv(
+        tmp_path / "genes.bed", sep="\t", header=False, index=False
+    )
+    calls = {
+        "add_grouped_assay": lambda: datastore.add_grouped_assay(
+            "module", assay_label=label
+        ),
+        "add_melded_assay": lambda: datastore.add_melded_assay(
+            from_assay="ATAC",
+            external_bed_fn=str(tmp_path / "genes.bed"),
+            assay_label=label,
+        ),
+        "correct_ambient": lambda: datastore.qc.correct_ambient(
+            estimate, assay_label=label
+        ),
+    }
+    # Another session declares the hashtags as HTO and makes them the store's
+    # default assay.
+    DataStore(
+        location,
+        workspace=workspace,
+        default_assay="hashtags",
+        assay_types={"hashtags": "HTO"},
+        nthreads=1,
+    )
+
+    calls[call]()
+
+    # Before, the call wrote back every attribute that this session read when
+    # it opened the group: the hashtags became Assay again and the default
+    # assay RNA, except where a workspace store's grouped or melded assay read
+    # the workspace group again.
+    attributes = _attribute_root(location, workspace).attrs
+    assert attributes["defaultAssay"] == "hashtags"
+    assert attributes["assayTypes"] == {
+        "RNA": "RNA",
+        "ATAC": "ATAC",
+        "hashtags": "HTO",
+        label: label_type,
+    }
+    # This session reads the record again, so it opens the hashtags as HTO.
+    assert declared_assay_type(datastore.get_assay("hashtags")) == "HTO"
