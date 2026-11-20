@@ -2992,3 +2992,123 @@ def test_the_pseudotime_revision_applies_to_pseudotimes_without_the_truncated_me
     )
     (revision,) = OPERATION_REVISIONS["run_pseudotime_scoring"]
     assert (revision.revision, revision.release) == (2, "1.4.0")
+
+
+def _two_arm_union(n_arm: int, dtype: type) -> csr_matrix:
+    """The fuzzy union of 11 nearest neighbors on the two-armed layout, its largest component."""
+    from scipy.sparse.csgraph import connected_components
+    from scipy.spatial import cKDTree
+
+    from tests.test_trajectory_membership import _DOWN, _UP, _Arm, _trajectory_cells
+
+    layout = tuple(
+        _Arm(name, heading, n_cells=n_arm, sink_cells=n_arm // 2, step=3.0 / n_arm)
+        for name, heading in (("a", _UP), ("b", _DOWN))
+    )
+    points = _trajectory_cells(layout)[3]
+    distances, neighbors = cKDTree(points).query(points, k=12)
+    weights = (np.exp(-((distances[:, 1:].ravel() / 0.15) ** 2)) + 1e-6).astype(dtype)
+    rows = np.repeat(np.arange(len(points)), 11)
+    directed = csr_matrix(
+        (weights, (rows, neighbors[:, 1:].ravel())), shape=(len(points),) * 2
+    )
+    union = ((directed + directed.T) - directed.multiply(directed.T)).tocsr()
+    labels = connected_components(union, directed=False)[1]
+    keep = labels == np.bincount(labels).argmax()
+    return union[keep][:, keep].tocsr()
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+@pytest.mark.parametrize("method", ["untruncated", "truncated"])
+def test_pseudotime_solve_bytes_cover_what_the_solves_hold(method, dtype):
+    import tracemalloc
+
+    from cytearc.trajectory.pseudotime import pba_potential, pseudotime_solve_bytes
+
+    # 1,065 cells of the two-armed layout, whose truncated solve converges,
+    # scored from the trunk to the arms' ends.
+    graph = _two_arm_union(500, dtype)
+    n_cells = graph.shape[0]
+    vector = np.zeros(n_cells)
+    vector[:100] = -1 / 100
+    vector[-100:] = 1 / 100
+
+    def solve() -> None:
+        if method == "untruncated":
+            pba_potential(graph, vector)
+        else:
+            laplacian = _random_walk_laplacian_transpose(graph)
+            _truncated_pba_potential(laplacian, 10, 4444, vector)
+
+    # A first solve makes what a process makes once, such as the progress
+    # bar's machinery, which a solve of any size holds alike.
+    solve()
+    tracemalloc.start()
+    before, _ = tracemalloc.get_traced_memory()
+    solve()
+    _, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+    assert peak - before <= pseudotime_solve_bytes(
+        n_cells, graph.nnz, method=method, n_modes=10
+    )
+
+
+def test_pseudotime_solve_and_scoring_bytes_pin_their_terms() -> None:
+    from cytearc.trajectory.pseudotime import (
+        pseudotime_solve_bytes,
+        pseudotime_working_bytes,
+    )
+
+    # 100 cells and 1,000 entries: a float64 copy of the graph, 12 bytes an
+    # entry and 4 a row pointer, 12,404 bytes. MINRES numbers the copy's
+    # components beside it, a copy of its transpose, 4 bytes an entry and 20
+    # a cell, 18,404, and then holds 200 bytes of vectors a cell, 20,000.
+    assert pseudotime_solve_bytes(100, 1_000, method="untruncated", n_modes=0) == (
+        12_404 + 20_000
+    )
+    # With 10,000 entries, the copy outgrows the vectors.
+    assert pseudotime_solve_bytes(100, 10_000, method="untruncated", n_modes=0) == (
+        2 * 120_404 + 40_000 + 2_000
+    )
+    # The truncated solve of 30 modes: the Laplacian, two float64 copies of
+    # the graph and 12 bytes a cell, a basis of 61 vectors and 8 of ARPACK's
+    # own, and four sets of 30 singular vectors, all of 8 bytes a cell.
+    assert pseudotime_solve_bytes(100, 1_000, method="truncated", n_modes=30) == (
+        2 * 12_404 + 1_200 + 8 * 100 * (61 + 8) + 4 * 8 * 100 * 30
+    )
+    # A basis holds a vector a cell at most.
+    assert pseudotime_solve_bytes(10, 50, method="truncated", n_modes=30) == (
+        2 * 644 + 120 + 8 * 10 * (10 + 8) + 4 * 8 * 10 * 30
+    )
+    with pytest.raises(ValueError, match="method must be"):
+        pseudotime_solve_bytes(10, 50, method="exact", n_modes=1)
+    # Scoring a float32 union of 8,404 bytes: numbering its components, three
+    # copies and 4 bytes an entry and 12 a cell, 30,412, or taking the scored
+    # component's graph, two copies, or keeping it beside the solve, which
+    # is the most: 9 bytes a cell beside 8,404 + 32,404.
+    assert (
+        pseudotime_working_bytes(
+            100,
+            8_404,
+            1_000,
+            subgraph=False,
+            method="untruncated",
+            n_modes=0,
+            snapshot_bytes=0,
+        )
+        == 900 + 8_404 + 32_404
+    )
+    # An ss_vec snapshot of more bytes than the solve takes its place.
+    assert (
+        pseudotime_working_bytes(
+            100,
+            8_404,
+            1_000,
+            subgraph=True,
+            method="untruncated",
+            n_modes=0,
+            snapshot_bytes=50_000,
+        )
+        == 900 + 8_404 + 50_000
+    )

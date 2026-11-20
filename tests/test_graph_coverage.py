@@ -685,9 +685,13 @@ def test_diffusion_operator_budget_is_checked_before_persisting(
     before = _diffusion_artifacts(budgeted)
 
     # Eight steps make the operator nearly dense. It can be formed within
-    # 16 MiB but not loaded again, so nothing may be persisted.
-    with pytest.raises(MemoryError, match="could not be loaded"):
+    # 16 MiB but not written and checked beside it, so nothing may be
+    # persisted.
+    with pytest.raises(
+        MemoryError, match="^Writing and checking a diffusion operator of "
+    ) as refused:
         budgeted.imputation.diffusion(connectivity_graph, t=8, invalidate_cache=True)
+    assert refused.value.item.startswith("writing a diffusion operator of ")
     assert _diffusion_artifacts(budgeted) == before
 
     # The graph fits the budget, but its first product does not fit a tiny one.
@@ -1797,3 +1801,82 @@ def test_normalized_local_cache_removes_a_failed_staging_copy(
 
     assert normalized not in store._normalizedArtifactCache
     assert not cache_base.exists()
+
+
+def test_diffusion_is_refused_before_its_graph_is_read(
+    datastore, connectivity_graph, monkeypatch
+) -> None:
+    from cytearc.storage.budget import ResourceBudget
+    from cytearc.utils.memory_budget import MemoryBudgetError
+
+    budgeted = DataStore(datastore.zarr_loc, default_assay="RNA")
+    before = _diffusion_artifacts(budgeted)
+    reads: list[str] = []
+    load = budgeted._load_graph_artifact
+    monkeypatch.setattr(
+        budgeted,
+        "_load_graph_artifact",
+        lambda *args, **kwargs: (reads.append("graph"), load(*args, **kwargs))[1],
+    )
+    budgeted.memoryBytes = 1
+    budgeted.resources = ResourceBudget(1, 1)
+    with pytest.raises(MemoryBudgetError) as refused:
+        budgeted.imputation.diffusion(connectivity_graph, t=2, invalidate_cache=True)
+    assert str(refused.value).startswith("Computing a diffusion operator of ")
+    assert reads == []
+    assert _diffusion_artifacts(budgeted) == before
+
+
+def test_the_diffusion_write_estimate_pins_its_terms() -> None:
+    from cytearc.trajectory.artifacts import diffusion_write_bytes
+
+    # An operator of 10,000 entries over 4,000 cells: each read of its three
+    # stored arrays holds 8-byte values, two int32 indices and their COO
+    # matrix, 32 bytes an entry, beside a stored chunk of 8-byte values, the
+    # 10,000 entries, and 128 KiB of Zarr's buffers and objects of the
+    # write's two reads.
+    assert diffusion_write_bytes(10_000, 4_000) == (10_000 * 32 + 8 * 10_000 + 131_072)
+    # A chunk holds at most a million entries.
+    assert diffusion_write_bytes(2_000_000, 4_000) == (
+        2_000_000 * 32 + 8 * 1_000_000 + 131_072
+    )
+
+
+@pytest.mark.parametrize("entries", [5_000, 200_000])
+def test_writing_a_diffusion_operator_holds_what_its_estimate_states(
+    entries: int,
+) -> None:
+    import tracemalloc
+
+    import scipy.sparse as sparse
+
+    from cytearc.storage.artifacts import fingerprint_stored_arrays
+    from cytearc.trajectory.artifacts import (
+        DIFFUSION_PAYLOAD,
+        diffusion_write_bytes,
+        write_diffusion_payload,
+    )
+
+    n_cells = 4_000
+    operator = sparse.random(
+        n_cells,
+        n_cells,
+        density=entries / n_cells**2,
+        format="csr",
+        dtype=np.float32,
+        random_state=np.random.default_rng(1),
+    )
+    root = zarr.open_group(store=zarr.storage.MemoryStore(), mode="w")
+    # Writing fingerprints the stored arrays, and the check before the
+    # operator is published fingerprints them again.
+    tracemalloc.start()
+    before, _ = tracemalloc.get_traced_memory()
+    group = root.create_group("operator")
+    write_diffusion_payload(group, operator)
+    fingerprint_stored_arrays(group, DIFFUSION_PAYLOAD)
+    _, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+    # The stored arrays themselves stay in the store in memory, which a store
+    # on disk does not hold.
+    stored = sum(group[name].nbytes_stored() for name in DIFFUSION_PAYLOAD)
+    assert peak - before - stored <= diffusion_write_bytes(operator.nnz, n_cells)

@@ -1,3 +1,4 @@
+import tracemalloc
 from dataclasses import dataclass
 from typing import Any
 
@@ -17,6 +18,8 @@ from cytearc.trajectory.fate import (
     _make_transition,
     _normalize_pseudotime,
     compute_fate_probabilities,
+    fate_mapping_bytes,
+    mapped_cells_graph,
 )
 from cytearc.trajectory.results import FateMappingResult
 from cytearc.utils.logging import collect_warnings
@@ -1319,16 +1322,78 @@ def test_fate_mapping_checks_solver_memory_before_solving(
     # Two sinks on the five-cell Y graph, with eight directed edges, need
     # 2 * 8 * 12 bytes for the transition and its coarse product, and per cell
     # 22 Krylov and 8 work float64 vectors, 4 int64 index arrays and two
-    # float32 probabilities: 192 + 5 * 280 = 1592 bytes.
-    monkeypatch.setattr(store, "memoryBytes", 1592)
+    # float32 probabilities: 192 + 5 * 280 = 1592 bytes. Beside the solve the
+    # call holds the graph of its mapped cells, eight float64 weights with
+    # int32 indices and six int32 row pointers, 120 bytes, and 64 bytes for
+    # each of the 5 cells: 120 + 320 + 1592 = 2032. Taking the mapped cells'
+    # graph would hold two more copies and 24 bytes a cell, 360 bytes, less
+    # than the solve.
+    monkeypatch.setattr(store, "memoryBytes", 2031)
     monkeypatch.setattr(
         trajectory_operations, "_compute_fate_probabilities_impl", forbidden
     )
-    with pytest.raises(MemoryError, match="Fate mapping needs about 1592 bytes"):
+    with pytest.raises(MemoryError, match="Fate mapping needs about 2032 bytes"):
         store.trajectory.fate(*arguments, sinks=["A", "B"])
     assert _fate_maps(store) == []
 
     monkeypatch.undo()
-    monkeypatch.setattr(store, "memoryBytes", 1593)
+    monkeypatch.setattr(store, "memoryBytes", 2032)
     ref = store.trajectory.fate(*arguments, sinks=["A", "B"])
     assert store.trajectory.load_fate(ref).valid.all()
+
+
+def test_fate_mapping_bytes_count_the_larger_of_taking_the_mapped_graph_and_the_solve() -> (
+    None
+):
+    # 145 cells with a graph of 1,450 entries, 12,184 bytes, and 2 sinks: the
+    # solve, 2 * 1,450 * 12 + 145 * 280 = 75,400 bytes, outweighs taking the
+    # mapped cells' graph, two more copies of it and 24 bytes a cell, 27,848.
+    assert fate_mapping_bytes(145, 12_184, 1_450, 2) == 12_184 + 64 * 145 + 75_400
+    # 1,000 cells with a graph of 2**31 entries, which takes int64 indices
+    # beside float64 weights, 16 bytes an entry and 8 a row pointer, and 3
+    # sinks: taking the mapped cells' graph, two more copies of it and
+    # 8 + 4 * 8 = 40 bytes a cell, outweighs the solve, 2**31 * 24 + 1,000 *
+    # 284 bytes.
+    entries = 2**31
+    graph_bytes = 16 * entries + 8 * 1_001
+    assert fate_mapping_bytes(1_000, graph_bytes, entries, 3) == (
+        graph_bytes + 64 * 1_000 + 2 * graph_bytes + 40 * 1_000
+    )
+
+
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+def test_taking_the_mapped_cells_graph_holds_what_its_estimate_states(
+    dtype: type,
+) -> None:
+    # With all but three of 3,000 cells mapped, the mapped rows and their
+    # mapped columns are each nearly a copy of the graph, beside SciPy's
+    # positions of the mapped cells and row pointers.
+    rng = np.random.default_rng(3)
+    n_cells, neighbors = 3_000, 11
+    directed = csr_matrix(
+        (
+            rng.random(n_cells * neighbors).astype(dtype),
+            (
+                np.repeat(np.arange(n_cells), neighbors),
+                rng.integers(0, n_cells, n_cells * neighbors),
+            ),
+        ),
+        shape=(n_cells, n_cells),
+    )
+    graph = (directed + directed.T).tocsr()
+    graph_bytes = graph.data.nbytes + graph.indices.nbytes + graph.indptr.nbytes
+    mapped = np.ones(n_cells, dtype=bool)
+    mapped[[5, 1_000, 2_999]] = False
+    tracemalloc.start()
+    try:
+        before, _ = tracemalloc.get_traced_memory()
+        retained = mapped_cells_graph(graph, mapped)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    np.testing.assert_array_equal(
+        retained.toarray(), graph.toarray()[mapped][:, mapped]
+    )
+    assert 1.9 * graph_bytes < peak - before <= 2 * graph_bytes + 24 * n_cells
+    # A graph that maps every cell is kept as it is.
+    assert mapped_cells_graph(graph, np.ones(n_cells, dtype=bool)) is graph

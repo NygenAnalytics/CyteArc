@@ -724,27 +724,40 @@ def test_a_pseudotime_of_some_cells_charges_the_subgraph_before_reading_the_grap
         ss_vec=pd.Series(np.r_[-1.0, np.zeros(8), 1.0], index=ids[:10]),
     )
     reads = _count_calls(monkeypatch, store, "_store_to_sparse")
+    # The 48 KiB of Zarr's buffers and the load's objects, which outweigh
+    # so small a graph, are set aside, so the bytes that grow with it decide.
+    monkeypatch.setattr("cytearc.neighbors.graph._READ_OBJECT_BYTES", 0)
     # SciPy loads an entry as an int32 index and a float32 weight, 8 bytes,
     # beside 13 int32 row pointers, 52 bytes, so the union keeps
     # 2 * 11 * 8 + 52 = 228 bytes, and forming it holds 7 * 11 * 8 + 5 * 52 =
     # 876. Numbering the union's components is charged three copies of it, 4
     # bytes an entry and 12 a cell, 684 + 88 + 144 = 916 beside it, which
     # outgrows forming it, and the pseudotime of all cells holds the
-    # positions of the graph's 12 cells beside both, 96 bytes. The
-    # pseudotime of ten cells also holds their positions and their places
-    # among the graph's, 80 bytes each, and taking their subgraph adds 12
-    # bytes a cell, 144.
+    # positions of the graph's 12 cells beside both, 96 bytes, and its stored
+    # source/sink vector and source cells, 12 * 9 = 108. The pseudotime of ten
+    # cells also holds their positions and their places among the graph's,
+    # 80 bytes each, its vector and sources for ten cells, 90, and taking
+    # their subgraph adds 12 bytes a cell, 144.
     for ref, needed in (
-        (whole, 96 + 228 + 916),
-        (some, 96 + 160 + 228 + 916 + 144),
+        (whole, 96 + 108 + 228 + 916),
+        (some, 96 + 160 + 90 + 228 + 916 + 144),
     ):
         _set_budget(store, needed - 1)
         with pytest.raises(MemoryBudgetError) as refused:
             store.trajectory.load_pseudotime(ref)
         assert refused.value.needed_bytes == needed
+        assert refused.value.item == "the graph of 11 edges and its work"
         assert reads == {}
-        _set_budget(store, needed)
-        store.trajectory.load_pseudotime(ref)
+        # Reading the stored vector refuses on its own when it needs more.
+        budget = needed
+        for _ in range(3):
+            _set_budget(store, budget)
+            try:
+                store.trajectory.load_pseudotime(ref)
+                break
+            except MemoryBudgetError as larger:
+                assert larger.needed_bytes > budget
+                budget = larger.needed_bytes
         assert reads == {"_store_to_sparse": 1}
         reads.clear()
 
@@ -1871,3 +1884,61 @@ def test_aggregation_payload_rejects_each_tampered_record(tamper: str) -> None:
 
     _AGGREGATION_PAYLOAD_TAMPERS[tamper](group)
     assert not is_valid()
+
+
+@pytest.mark.parametrize("reused", [False, True], ids=["computed", "reused"])
+def test_scoring_a_pseudotime_is_refused_before_its_graph_is_read(
+    monkeypatch, reused: bool
+) -> None:
+    # A pseudotime finds its graph's components before it knows whether a
+    # saved one matches, so a call that reuses one reads the graph too, and
+    # both check the graph's load and the solve before they read it.
+    trajectory = _trajectory_store(np.eye(40, k=1) + np.eye(40, k=2))
+    store = trajectory.store
+    source_sink = pd.Series(np.r_[-1.0, np.zeros(38), 1.0], index=trajectory.cell_ids)
+    saved = store.trajectory.pseudotime(trajectory.graph, ss_vec=source_sink)
+    reads = _count_calls(monkeypatch, store, "_store_to_sparse")
+    options = {} if reused else {"invalidate_cache": True}
+    _set_budget(store, 1)
+    with pytest.raises(MemoryBudgetError) as refused:
+        store.trajectory.pseudotime(trajectory.graph, ss_vec=source_sink, **options)
+    assert str(refused.value).startswith(
+        "Calculating a pseudotime of 40 cells needs about"
+    )
+    assert reads == {}
+    assert trajectory.artifacts("pseudotime") == [saved]
+    # The budgets that the refusals name run the call, which reads the graph
+    # once.
+    budget = refused.value.needed_bytes
+    for _ in range(3):
+        _set_budget(store, budget)
+        try:
+            ref = store.trajectory.pseudotime(
+                trajectory.graph, ss_vec=source_sink, **options
+            )
+            break
+        except MemoryBudgetError as larger:
+            budget = larger.needed_bytes
+    assert reads == {"_store_to_sparse": 1}
+    assert (ref == saved) is reused
+
+
+def test_a_graph_of_no_cells_is_read_without_a_budget_check() -> None:
+    # A graph payload emptied after its lineage was written holds nothing to
+    # load, so its readers skip the graph's check, under a budget of one
+    # byte, and refuse it in their own words or read an empty graph.
+    emptied = _trajectory_store(_y_graph())
+    _empty_graph_payload(emptied)
+    store = emptied.store
+    _set_budget(store, 1)
+    assert store.graph.load(emptied.graph).shape == (0, 0)
+    # Potency checks its smoothing before it reads the counts.
+    store._require_potency_smoothing_budget(emptied.graph, held_bytes=0)
+    assert store._smoothed_potency(emptied.graph, np.zeros(0), 0.9).shape == (0,)
+    with pytest.raises(ValueError, match="Graph cell count does not match"):
+        store.imputation.diffusion(emptied.graph, t=1, invalidate_cache=True)
+    # A graph of cells checks its use_k against its k before it is read.
+    trajectory = _trajectory_store(_y_graph())
+    for use_k in (0, 3):
+        with pytest.raises(ValueError, match="use_k must be between 1 and"):
+            trajectory.store.graph.load(trajectory.graph, use_k=use_k)

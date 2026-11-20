@@ -6,7 +6,7 @@ from scipy.sparse import csr_matrix, diags
 from scipy.sparse.csgraph import connected_components
 from scipy.sparse.linalg import LinearOperator, gmres, splu
 
-from ..neighbors.graph import csr_symmetry_error
+from ..neighbors.graph import _sparse_index_bytes, csr_symmetry_error
 from ..utils.logging import logger
 from ..utils.numba import njit
 from .errors import SourceSinkLabelsError
@@ -250,6 +250,15 @@ def fate_map_cells(
             "values in the graph components that hold a sink"
         )
     return covered
+
+
+def mapped_cells_graph(graph: csr_matrix, mapped: np.ndarray) -> csr_matrix:
+    """Return the graph of the ``mapped`` cells, the graph itself when it maps them all.
+
+    Taking the graph of some cells holds what :func:`fate_mapping_bytes`
+    counts for that step.
+    """
+    return (graph if mapped.all() else graph[mapped][:, mapped]).tocsr()
 
 
 def _validate_graph(
@@ -519,6 +528,31 @@ def fate_solver_bytes(n_cells: int, n_edges: int, n_sinks: int) -> int:
     preconditioner = 4 * 8
     output = int(n_sinks) * 4
     return sparse + int(n_cells) * (krylov + work + preconditioner + output)
+
+
+def fate_mapping_bytes(
+    n_cells: int, graph_bytes: int, n_entries: int, n_sinks: int
+) -> int:
+    """Return the most bytes that mapping fates holds, in the larger of its two steps.
+
+    The call holds a graph of at most ``graph_bytes`` throughout, beside 64
+    bytes a cell: the cells' scores, components, sink labels' codes and
+    groups, whether each is mapped, and the mapped cells' scores and codes.
+    Taking the mapped cells' graph holds the graph, its mapped rows and their
+    mapped columns, at most two copies beside it, and for each cell SciPy's
+    int64 position of a mapped cell and four values of the graph's index
+    type: the mapped cells in that type, their order, the column offsets and
+    the row pointers, 24 bytes a cell for int32 indices. The graph then goes,
+    and the solve holds the mapped cells' graph, at most the graph, beside
+    what :func:`fate_solver_bytes` states. The two steps never hold their
+    work together.
+    """
+    n_cells = int(n_cells)
+    graph_bytes = int(graph_bytes)
+    index_bytes = _sparse_index_bytes(n_cells, int(n_entries))
+    taking = 2 * graph_bytes + (8 + 4 * index_bytes) * n_cells
+    solving = fate_solver_bytes(n_cells, n_entries, n_sinks)
+    return graph_bytes + 64 * n_cells + max(taking, solving)
 
 
 def _residual_limit(solver_tol: float, n_sinks: int) -> float:

@@ -236,6 +236,7 @@ def _load(store: DataStore, graph: ArtifactRef, **flags) -> GraphLoadMemory:
         int(group["edges"].shape[0]),
         symmetric=flags.get("symmetric", False),
         upper_only=flags.get("upper_only", False),
+        keep_nearest=flags.get("keep_nearest", False),
     )
 
 
@@ -316,6 +317,22 @@ def test_consumers_admit_their_graph_memory_before_reading_it(
             "t-SNE",
             _required(upper, N_CELLS * 3 * 8, sgtsne_input_bytes(N_CELLS, edges, 3)),
         ),
+        # Loading the graph holds the load and nothing beside it.
+        (
+            lambda: store.graph.load(graph),
+            "Loading the graph",
+            _required(directed, 0, 0),
+        ),
+        (
+            lambda: store.graph.load(graph, symmetric=True),
+            "Loading the graph",
+            _required(symmetric, 0, 0),
+        ),
+        (
+            lambda: store.graph.load(graph, use_k=K - 2),
+            "Loading the graph",
+            _required(_load(store, graph, keep_nearest=True), 0, 0),
+        ),
         # LocalMAP holds the graph's 4 PCA coordinates and its 2-dimensional
         # layout in float32 for each cell.
         (
@@ -385,6 +402,31 @@ def test_consumers_run_within_the_admitted_budget(writable) -> None:
 
     for ref in (labels, layout, connectivity):
         assert store.artifacts.inspect(ref).complete
+
+
+def test_the_graph_load_estimate_pins_its_terms() -> None:
+    # 500 stored edges of 100 cells, int32 pairs and float32 weights: SciPy
+    # loads an entry as an int32 index and a float32 weight, 8 bytes, beside
+    # 101 int32 row pointers, 404 bytes, so the directed matrix takes 4,404.
+    # Loading holds the stored arrays, 12 bytes an edge, and the COO
+    # coordinates, 8, beside it and 64 KiB of Zarr's buffers and objects.
+    directed = graph_load_memory(100, 500, symmetric=False)
+    assert directed == GraphLoadMemory(
+        peakBytes=500 * 20 + 4_404 + 65_536, heldBytes=4_404, maxEntries=500
+    )
+    # The fuzzy union holds seven matrices' entries and five sets of
+    # pointers while it forms, beside the same 64 KiB, and keeps 1,000
+    # entries.
+    union = graph_load_memory(100, 500, symmetric=True)
+    assert union == GraphLoadMemory(
+        peakBytes=7 * 500 * 8 + 5 * 404 + 65_536,
+        heldBytes=1_000 * 8 + 404,
+        maxEntries=1_000,
+    )
+    # Keeping each cell's nearest edges first holds the stored arrays twice,
+    # three int64 values and a flag an edge, and two int64 values a cell.
+    nearest = graph_load_memory(100, 500, symmetric=False, keep_nearest=True)
+    assert nearest.peakBytes == 2 * 6_000 + 25 * 500 + 16 * 100 + 65_536
 
 
 # Graph-loading flags and initialization references

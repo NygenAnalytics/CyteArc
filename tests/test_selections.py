@@ -586,6 +586,78 @@ def _snapshot_table() -> tuple[zarr.Group, ArtifactRef]:
     return root, ref
 
 
+def test_a_run_snapshot_is_checked_again_without_decoding_its_columns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import tracemalloc
+
+    import cytearc.storage.selections as selections_module
+    from cytearc.storage.content_stamps import clear_content_cache
+
+    # 20,000 names of 60 characters, which a check that decodes them holds as
+    # text of 240 bytes each: 4.8 MB.
+    n_rows = 20_000
+    names = np.asarray([f"{row:060d}" for row in range(n_rows)])
+    root = zarr.open_group(store=MemoryStore(), mode="w")
+    table = root.create_group("cellData")
+    create_metadata_column(
+        table, "ids", data=np.asarray([f"c{row}" for row in range(n_rows)]), dtype=str
+    )
+    create_metadata_column(table, "names", data=names, dtype=str)
+    score = create_metadata_column(
+        table, "score", data=np.zeros(n_rows), dtype=np.float64
+    )
+    create_metadata_column(
+        table, "__cytearc_missing__score", data=np.zeros(n_rows, bool), dtype=bool
+    )
+    score.attrs["missing_mask"] = "__cytearc_missing__score"
+    ref = snapshot_run_metadata(
+        root,
+        table_path="cellData",
+        id_column="ids",
+        columns=["names", "score"],
+        axis="cell",
+    )
+    decoded: list[int] = []
+    original = selections_module._snapshot_values_block
+
+    def counting(values, start, stop, dtype):  # type: ignore[no-untyped-def]
+        decoded.append(stop - start)
+        return original(values, start, stop, dtype)
+
+    monkeypatch.setattr(selections_module, "_snapshot_values_block", counting)
+
+    def check() -> None:
+        validate_run_metadata_snapshot(
+            root, ref, axis="cell", assay=None, table_path="cellData"
+        )
+
+    # A new process decodes each column once, and checks again without decoding.
+    clear_content_cache()
+    check()
+    assert sum(decoded) == 2 * n_rows
+    decoded.clear()
+    tracemalloc.start()
+    check()
+    _, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+    assert decoded == []
+    assert peak < 4 * 60 * n_rows // 4
+
+    # Each edit of the stored payload is fingerprinted afresh and refused.
+    group = artifact_group(root, ref)
+    for edit in (
+        lambda: group["__cytearc_missing__score"].__setitem__(5, True),
+        lambda: group["names"].__setitem__(n_rows - 1, "x" * 60),
+    ):
+        edit()
+        with pytest.raises(ArtifactResolutionError) as changed:
+            check()
+        assert changed.value.code == "snapshot_values_changed"
+        assert decoded != []
+        decoded.clear()
+
+
 def _tamper_extra_array(group: zarr.Group) -> None:
     group.create_array("extra", data=np.arange(3))
 

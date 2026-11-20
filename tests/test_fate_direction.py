@@ -38,7 +38,7 @@ from cytearc.utils.logging import collect_warnings
 from cytearc.utils.memory_budget import MemoryBudgetError
 
 from .test_fate_mapping import _direct_fate_reference, _ScoredStore, _scored_y_store
-from .test_trajectory_membership import _branching
+from .test_trajectory_membership import _branching, _long_arms
 from .test_trajectory_record_paths import (
     _Y_LABELS,
     _count_calls,
@@ -883,15 +883,27 @@ def test_a_map_directed_by_a_score_is_refused_a_small_budget_before_its_graph_is
     }
     maps = _fate_maps(store)
     reads = _count_calls(monkeypatch, store, "_store_to_sparse")
-    # Loading the store's graph of 725 edges and numbering its components
-    # needs 17,984 + 61,492 bytes, as the membership tests derive, beside the
-    # positions of its 145 cells and their float64 scores, 1,160 bytes each.
-    needed = 17_984 + 61_492 + 1_160 + 1_160
+    # Forming the union of the store's graph of 725 edges holds 63,820 bytes
+    # beside the load's 65,536, more than numbering its components, as the
+    # membership tests derive, beside the positions of its 145 cells, 1,160
+    # bytes, and up to a float64 score and a missing flag a cell, 1,305.
+    needed = 63_820 + 65_536 + 1_160 + 1_305
+    work = {
+        "fate": "Mapping fates",
+        "lineage_membership": "Calling lineage membership",
+    }.get(call, "Loading a direction score")
+    # Mapping the fates holds the union of 1,450 entries, 17,984 bytes, 64
+    # bytes for each of the 145 cells and the solver's 2 * 1,450 * 12 + 145 *
+    # 280 = 75,400, 102,664 bytes in all, less than the graph's load, which
+    # the refusal of fate names too. Calling the membership holds 347,836
+    # bytes, as the membership tests derive, more than the load.
+    if call == "lineage_membership":
+        needed = 347_836
     _set_budget(store, needed - 1)
     with pytest.raises(MemoryBudgetError) as refused:
         calls[call]()
     assert str(refused.value) == (
-        f"Loading a direction score of 145 cells needs about {needed} bytes in "
+        f"{work} of 145 cells needs about {needed} bytes in "
         "memory for a graph of 725 edges, but the operation limit is "
         f"{needed - 1} bytes. Raise mem_budget."
     )
@@ -904,7 +916,64 @@ def test_a_map_directed_by_a_score_is_refused_a_small_budget_before_its_graph_is
     assert reads == {"_store_to_sparse": 1}
 
 
-def test_a_masked_score_charges_its_mask_beside_the_graph_load() -> None:
+@pytest.mark.parametrize("direction", ["pseudotime", "score"])
+def test_fate_names_what_mapping_its_fates_holds_when_that_outweighs_the_load(
+    monkeypatch, direction: str
+) -> None:
+    # The branching store with arms of 100 cells, 265 cells each linked to
+    # its 5 nearest cells, 1,325 stored edges of uint32 pairs and float32
+    # weights, whose union holds at most 2,650 entries of an int32 index and
+    # a float32 weight beside 266 int32 row pointers, 22,264 bytes. Mapping
+    # the fates of 2 sinks holds it, 64 bytes for each cell and the solver's
+    # 2 * 2,650 * 12 + 265 * 280 = 137,800, more than taking the mapped
+    # cells' graph would, two more copies and 24 bytes a cell. Forming the
+    # union holds 7 * 1,325 * 8 + 5 * 1,064 + 65,536 = 145,056 bytes beside
+    # the cells' positions and their labels' codes or scores, 13 or 17 bytes
+    # a cell, less than mapping.
+    branching = _branching(_long_arms(100), neighbors=5)
+    store = branching.store
+    labels = branching.label_artifact()
+    sinks = ["a2", "b2"]
+    score = by_cell_id(
+        store.cells,
+        3.0 * store.trajectory.load_pseudotime(branching.pseudotime).values + 7.0,
+    )
+
+    def call() -> ArtifactRef:
+        if direction == "pseudotime":
+            return store.trajectory.fate(
+                branching.pseudotime, labels, sinks=sinks, invalidate_cache=True
+            )
+        return store.trajectory.fate(
+            sink_labels=labels,
+            graph=branching.graph,
+            direction=score,
+            sinks=sinks,
+            invalidate_cache=True,
+        )
+
+    maps = _fate_maps(store)
+    reads = _count_calls(monkeypatch, store, "_store_to_sparse")
+    needed = 22_264 + 64 * 265 + 137_800
+    _set_budget(store, needed - 1)
+    with pytest.raises(MemoryBudgetError) as refused:
+        call()
+    assert str(refused.value) == (
+        f"Mapping fates of 265 cells needs about {needed} bytes in memory for a "
+        "graph of 1325 edges, but the operation limit is "
+        f"{needed - 1} bytes. Raise mem_budget."
+    )
+    assert reads == {}
+    assert _fate_maps(store) == maps
+    # The budget that the refusal names maps the fates, reading the graph once.
+    _set_budget(store, needed)
+    call()
+    assert reads == {"_store_to_sparse": 1}
+
+
+def test_a_score_is_charged_a_value_and_a_missing_flag_a_cell_before_its_graph() -> (
+    None
+):
     scored, pseudotime = _y_with_island()
     store = scored.store
     island = ~pseudotime.valid
@@ -919,9 +988,15 @@ def test_a_masked_score_charges_its_mask_beside_the_graph_load() -> None:
             _direct(scored, direction)
         return refused.value.needed_bytes
 
-    # The mask of the stored score holds a byte for each of the 7 cells,
-    # beside what the same scores as NaN hold.
-    assert needed(masked) == needed(unscored) + 7
+    # The graph's check comes before the score is read, so it counts a
+    # float64 value and a missing flag for each of the 7 cells, beside the
+    # cells' positions, whether the score holds a mask or NaN.
+    _set_budget(store, 1)
+    with pytest.raises(MemoryBudgetError) as graph_alone:
+        store._require_component_numbering_budget(
+            scored.graph, held_bytes=7 * 8, subgraph=False, work="Loading"
+        )
+    assert needed(masked) == needed(unscored) == graph_alone.value.needed_bytes + 63
     assert _fate_maps(store) == []
 
 
@@ -1038,3 +1113,41 @@ def test_a_fate_map_covers_the_scored_components_that_hold_a_sink() -> None:
             component,
             np.array([True] + [False] * 5),
         )
+
+
+@pytest.mark.parametrize("directed_by", ["pseudotime", "score"])
+def test_a_fate_maps_graph_goes_before_its_sink_labels_are_read(
+    monkeypatch, directed_by: str
+) -> None:
+    import weakref
+
+    # Loading what directs a fate map loads the symmetric graph, which the
+    # map's loader lets go before it reads the sink labels, whether a
+    # pseudotime or a score directs the map.
+    if directed_by == "pseudotime":
+        branching = _branching()
+        store, ref = branching.store, branching.fate
+    else:
+        scored, ref = _directed_map()
+        store = scored.store
+    graphs: list[weakref.ref[Any]] = []
+    load = store._load_graph_artifact
+
+    def loaded(*args: Any, **kwargs: Any) -> Any:
+        matrix = load(*args, **kwargs)
+        graphs.append(weakref.ref(matrix))
+        return matrix
+
+    alive_at_labels: list[list[bool]] = []
+    read = store._read_listed_labels
+
+    def labels(*args: Any, **kwargs: Any) -> Any:
+        alive_at_labels.append([graph() is not None for graph in graphs])
+        return read(*args, **kwargs)
+
+    monkeypatch.setattr(store, "_load_graph_artifact", loaded)
+    monkeypatch.setattr(store, "_read_listed_labels", labels)
+    store._load_fate_inputs(ref)
+    # The sink labels are read last, with no graph left.
+    assert len(graphs) == 1
+    assert alive_at_labels[-1] == [False]

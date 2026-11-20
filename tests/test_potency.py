@@ -899,12 +899,36 @@ def test_a_stream_that_loses_cells_is_refused(
 def test_smoothing_refuses_a_graph_of_other_cells_or_beyond_the_budget(
     datastore, connectivity_graph, monkeypatch
 ):
-    n_cells = datastore.graph.load(connectivity_graph, symmetric=True).shape[0]
+    from cytearc.storage.budget import ResourceBudget
+
+    union = datastore.graph.load(connectivity_graph, symmetric=True)
+    n_cells = union.shape[0]
     with pytest.raises(ValueError, match="Graph cell count does not match"):
         datastore._smoothed_potency(connectivity_graph, np.zeros(n_cells + 1), 0.9)
-    monkeypatch.setattr(datastore, "memoryBytes", 3 * 8 * n_cells)
-    with pytest.raises(MemoryBudgetError, match="leave graph out"):
-        datastore._smoothed_potency(connectivity_graph, np.zeros(n_cells), 0.9)
+    # Smoothing holds the union's float64 copy and its row-normalized
+    # product, 20 bytes an entry, and 49 bytes a cell, beside the union and
+    # the cells' three scores: a budget of the union and the scores alone is
+    # refused before the graph is read.
+    reads: list[str] = []
+    load = datastore._load_graph_artifact
+    monkeypatch.setattr(
+        datastore,
+        "_load_graph_artifact",
+        lambda *args, **kwargs: (reads.append("graph"), load(*args, **kwargs))[1],
+    )
+    budget = union.data.nbytes + union.indices.nbytes + union.indptr.nbytes
+    budget += 3 * 8 * n_cells
+    monkeypatch.setattr(datastore, "memoryBytes", budget)
+    monkeypatch.setattr(datastore, "resources", ResourceBudget(budget, 1))
+    with pytest.raises(MemoryBudgetError) as refused:
+        datastore._require_potency_smoothing_budget(
+            connectivity_graph, held_bytes=3 * 8 * n_cells
+        )
+    assert str(refused.value).startswith(
+        f"Smoothing potency over the graph of {n_cells} cells needs about"
+    )
+    assert refused.value.needed_bytes >= budget + 20 * union.nnz + 49 * n_cells
+    assert reads == []
 
 
 def test_a_read_only_store_returns_saved_scores_and_refuses_new_ones(
@@ -1020,3 +1044,72 @@ def test_both_measures_order_every_pancreas_lineage(
         assert result.genes_used > 13_000
         correlations = lineage_correlations(result.differentiation, labels)
         assert min(correlations.values()) >= floor, (measure, correlations)
+
+
+@pytest.mark.parametrize("neighbors", [4, 11])
+def test_smoothing_holds_what_its_estimate_states(neighbors):
+    import tracemalloc
+
+    from scipy.spatial import cKDTree
+
+    from cytearc.neighbors.diffusion import transition_bytes, transition_matrix
+
+    # The fuzzy union of a graph of 6,000 cells, stored with float32 weights.
+    points = np.random.default_rng(5).normal(size=(6_000, 2))
+    distances, nearest = cKDTree(points).query(points, k=neighbors + 1)
+    weights = np.exp(-distances[:, 1:].ravel()).astype(np.float32)
+    rows = np.repeat(np.arange(6_000), neighbors)
+    directed = sparse.csr_matrix(
+        (weights, (rows, nearest[:, 1:].ravel())), shape=(6_000, 6_000)
+    )
+    union = ((directed + directed.T) - directed.multiply(directed.T)).tocsr()
+    values = np.random.default_rng(6).random(6_000)
+    for step, estimate in (
+        (
+            lambda: potency.smooth_on_graph(values, union, 0.9),
+            potency.smoothing_bytes(6_000, union.nnz),
+        ),
+        (lambda: transition_matrix(union), transition_bytes(6_000, union.nnz)),
+    ):
+        step()
+        tracemalloc.start()
+        before, _ = tracemalloc.get_traced_memory()
+        step()
+        _, peak = tracemalloc.get_traced_memory()
+        tracemalloc.stop()
+        assert peak - before <= estimate
+
+
+def test_smoothing_and_transition_bytes_pin_their_terms():
+    from cytearc.neighbors.diffusion import transition_bytes
+
+    # 1,000 entries and 100 cells: the float64 copy and its row-normalized
+    # product, 20 bytes an entry, and 49 bytes a cell.
+    assert potency.smoothing_bytes(100, 1_000) == 20_000 + 4_900
+    # The product's values and indices, 12 bytes an entry, and the
+    # reciprocal degrees, the row pointers and the scratch, 36 bytes a cell.
+    assert transition_bytes(100, 1_000) == 12_000 + 3_600 + 8
+
+
+def test_smoothing_is_refused_before_the_counts_and_the_graph_are_read(
+    datastore, auto_filter_cells, connectivity_graph, recorded, monkeypatch
+):
+    from cytearc.storage.budget import ResourceBudget
+
+    # The smoothing's check comes before the counts are streamed, so a budget
+    # that cannot smooth the scores reads neither the counts nor the graph.
+    def forbidden(*args, **kwargs):
+        raise AssertionError("read before the smoothing was checked")
+
+    monkeypatch.setattr(trajectory_operations, "feature_value_blocks", forbidden)
+    monkeypatch.setattr(datastore, "_load_graph_artifact", forbidden)
+    monkeypatch.setattr(datastore, "memoryBytes", 1)
+    monkeypatch.setattr(datastore, "resources", ResourceBudget(1, 1))
+    with pytest.raises(MemoryBudgetError) as refused:
+        datastore.scores.potency(
+            auto_filter_cells,
+            graph=connectivity_graph,
+            network=recorded[0],
+            invalidate_cache=True,
+        )
+    assert str(refused.value).startswith("Smoothing potency over the graph of ")

@@ -402,20 +402,26 @@ def smooth_on_graph(
             f"A graph of {graph.shape[0]} cells cannot smooth {len(values)} values"
         )
     step = transition_matrix(graph).tocsr()
+    # A cell without edges walks to itself.
     lonely = np.flatnonzero(np.diff(step.indptr) == 0)
-    if lonely.size:
-        # A cell without edges walks to itself.
-        step = (
-            step
-            + sparse.csr_matrix(
-                (np.ones(lonely.size), (lonely, lonely)), shape=step.shape
-            )
-        ).tocsr()
     smoothed = values.copy()
     restart = (1.0 - smoothing) * values
     for _ in range(smoothing_steps(smoothing)):
-        smoothed = smoothing * (step @ smoothed) + restart
+        walked = step @ smoothed
+        walked[lonely] = smoothed[lonely]
+        smoothed = smoothing * walked + restart
     return np.asarray(smoothed)
+
+
+def smoothing_bytes(n_cells: int, n_entries: int) -> int:
+    """Return the most bytes that :func:`smooth_on_graph` holds beside its graph.
+
+    The graph of ``n_entries`` entries is copied with float64 weights and
+    row-normalized, which holds the copy and the product, 20 bytes an entry;
+    the reciprocal degrees, the walk's vectors and the product's scratch
+    hold 49 bytes a cell.
+    """
+    return 20 * int(n_entries) + 49 * int(n_cells)
 
 
 def unit_ranks(values: np.ndarray) -> np.ndarray:

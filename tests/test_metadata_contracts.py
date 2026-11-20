@@ -1143,3 +1143,48 @@ def test_category_codes_name_labels_by_text_in_natural_order():
 def test_complete_labels_require_an_artifact_ref():
     with pytest.raises(TypeError, match="^clusters must be an ArtifactRef$"):
         resolve_complete_labels(None, "clusters", name="clusters")
+
+
+@pytest.mark.parametrize("kind", ["fixed", "variable"])
+def test_stored_rows_are_fingerprinted_a_chunk_at_a_time_as_read_whole(kind) -> None:
+    import tracemalloc
+
+    from cytearc.metadata.rows import fingerprint_stored_rows
+    from cytearc.storage.artifacts import fingerprint_strings
+
+    values = np.asarray(
+        [f"cell{index:05d}" + "x" * (index % 9) for index in range(400)]
+    )
+    if kind == "variable":
+        values = values.astype(np.dtypes.StringDType())
+    root = zarr.open_group(store=MemoryStore(), mode="w")
+    stored = root.create_array("ids", data=values, chunks=(50,))
+    rng = np.random.default_rng(4)
+    selections = [np.arange(400), np.array([399]), np.array([], dtype=np.int64)]
+    if kind == "fixed":
+        # NumPy 2.1, the oldest that CyteArc supports, crashes on Zarr's
+        # selection of scattered rows of variable-width text; a store holds
+        # text at a fixed width.
+        selections.append(np.sort(rng.choice(400, 77, replace=False)))
+    for rows in selections:
+        assert fingerprint_stored_rows(stored, rows) == fingerprint_strings(
+            values[rows]
+        )
+    # Rows out of order or repeated would fingerprint other text.
+    for rows in (np.array([3, 1]), np.array([2, 2])):
+        with pytest.raises(ValueError, match="distinct and ascending"):
+            fingerprint_stored_rows(stored, rows)
+    with pytest.raises(ValueError, match="must be one-dimensional"):
+        fingerprint_stored_rows(stored, np.zeros((2, 2), dtype=np.int64))
+    # One chunk of 1,000 of 40,000 rows is held at a time: well below the
+    # rows read whole, 4 bytes for each of the widest value's 15 characters.
+    many = np.asarray([f"cell{index:011d}" for index in range(40_000)])
+    if kind == "variable":
+        many = many.astype(np.dtypes.StringDType())
+    stored = root.create_array("many", data=many, chunks=(1_000,))
+    tracemalloc.start()
+    before, _ = tracemalloc.get_traced_memory()
+    fingerprint_stored_rows(stored, np.arange(40_000))
+    _, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+    assert peak - before < 40_000 * 15 * 4 // 4

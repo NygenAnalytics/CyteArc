@@ -28,6 +28,18 @@ def _row_degree_diagonal(graph: csr_matrix) -> csr_matrix:
     return inverse_degree_diagonal(np.ravel(graph.sum(axis=1)))
 
 
+def transition_bytes(n_cells: int, n_entries: int) -> int:
+    """Return the most bytes that :func:`transition_matrix` holds beside the graph.
+
+    The reciprocal degrees are a diagonal CSR matrix, a float64 value and two
+    int32 indices a cell, and the product holds its float64 values and int32
+    indices for each of the graph's ``n_entries`` entries, its row pointers,
+    and a float64 value and two int32 links a cell while it is formed.
+    """
+    cells, entries = int(n_cells), int(n_entries)
+    return 12 * entries + 36 * cells + 8
+
+
 def transition_matrix(graph: csr_matrix) -> csr_matrix:
     """Return the row-normalized graph, one step of graph diffusion.
 
@@ -157,17 +169,24 @@ def bounded_diffusion_operator(
     del diagonal
     transition = transition_matrix(graph)
 
-    def raised(exponent: int) -> csr_matrix:
-        # Mirror scipy.sparse.linalg.matrix_power so values match exactly.
-        if exponent == 1:
-            return transition
-        half = raised(exponent // 2)
+    # The products of scipy.sparse.linalg.matrix_power, in its order, so that
+    # values match exactly: from the smallest power up, each squares the one
+    # below it, after one more step for an odd power.
+    exponents = []
+    exponent = int(power)
+    while exponent > 1:
+        exponents.append(exponent)
+        exponent //= 2
+    current = transition
+    for exponent in reversed(exponents):
+        half = current
         if exponent % 2:
             reserve(transition, half, (transition, half))
             partial = transition @ half
             reserve(partial, half, (transition, half, partial))
-            return partial @ half
-        reserve(half, half, (transition, half))
-        return half @ half
-
-    return csr_matrix(raised(int(power)))
+            current = partial @ half
+            del partial
+        else:
+            reserve(half, half, (transition, half))
+            current = half @ half
+    return csr_matrix(current)

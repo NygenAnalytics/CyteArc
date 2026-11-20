@@ -877,6 +877,31 @@ def test_pseudotime_heatmap_returns_aligned_tables(
     result.close()
 
 
+def test_pseudotime_heatmap_reads_the_pseudotime_graph_once(
+    pseudotime_aggregation,
+    datastore,
+    monkeypatch,
+):
+    # Validating the aggregation loads its pseudotime and reads its graph;
+    # the plot takes the pseudotime from that load instead of loading it again.
+    reads: list[str] = []
+    original = datastore._store_to_sparse
+
+    def counting(location, *args, **kwargs):  # type: ignore[no-untyped-def]
+        reads.append(location)
+        return original(location, *args, **kwargs)
+
+    monkeypatch.setattr(datastore, "_store_to_sparse", counting)
+    result = splt.pseudotime_heatmap(
+        datastore, aggregation=pseudotime_aggregation, show=False
+    )
+    result.close()
+
+    assert len(reads) == 1
+    _, scores = _saved_pseudotime(datastore, pseudotime_aggregation)
+    np.testing.assert_array_equal(result.tables["pseudotime"]["pseudotime"], scores)
+
+
 def test_pseudotime_heatmap_accepts_composable_target(
     pseudotime_aggregation,
     datastore,
@@ -1798,10 +1823,11 @@ def _pseudotime_store(*, scoring=None, **aggregation):
         "valid": np.array([True, False, True, True, True]),
         **(scoring or {}),
     }
+    # The aggregation's loader hands back the pseudotime that validated it.
     return SimpleNamespace(
-        trajectory=SimpleNamespace(
-            load_aggregation=lambda ref: SimpleNamespace(**loaded),
-            load_pseudotime=lambda ref: SimpleNamespace(**scored),
+        _load_aggregation_with_pseudotime=lambda ref: (
+            SimpleNamespace(**loaded),
+            SimpleNamespace(**scored),
         ),
     )
 

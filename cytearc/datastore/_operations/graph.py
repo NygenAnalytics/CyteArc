@@ -801,6 +801,8 @@ class _GraphOperationsMixin(_GraphOperationsBase):
         held_bytes: int,
         working_bytes: Callable[[int, GraphLoadMemory], int],
         work: str,
+        keep_nearest: bool = False,
+        later_bytes: Callable[[int, GraphLoadMemory], int] | None = None,
     ) -> None:
         """Raise MemoryError before a consumer of ``graph`` loads it, over budget.
 
@@ -808,6 +810,10 @@ class _GraphOperationsMixin(_GraphOperationsBase):
         holds ``held_bytes`` throughout and needs ``working_bytes(n_cells,
         load)`` beside the loaded graph, given the graph's cells and the
         load's :class:`~cytearc.neighbors.graph.GraphLoadMemory`.
+        ``keep_nearest`` loads fewer than each cell's stored edges.
+        ``later_bytes(n_cells, load)`` is what the consumer needs in a later
+        step, as a whole; the check names it when it is more than the load
+        needs, so one refusal names a budget that runs the consumer.
         """
         graph_loc = self._graph_location(graph)
         group = as_zarr_group(self.zw[graph_loc], name=graph_loc)
@@ -822,11 +828,15 @@ class _GraphOperationsMixin(_GraphOperationsBase):
             upper_only=upper_only,
             edge_itemsize=np.dtype(edges.dtype).itemsize,
             weight_itemsize=np.dtype(weights.dtype).itemsize,
+            keep_nearest=keep_nearest,
         )
         working = working_bytes(n_cells, load)
         _require_graph_budget(
             self.resources,
-            required=held_bytes + max(load.peakBytes, load.heldBytes + working),
+            required=max(
+                0 if later_bytes is None else later_bytes(n_cells, load),
+                held_bytes + max(load.peakBytes, load.heldBytes + working),
+            ),
             work=work,
             n_cells=n_cells,
             n_edges=n_edges,
@@ -3064,13 +3074,22 @@ class _GraphOperationsMixin(_GraphOperationsBase):
         ):
             raise TypeError("use_k must be an integer or None")
         graph_cell_selection(self.zw, graph)
-        if use_k is not None:
-            k = self._get_graph_ncells_k(self._graph_location(graph))[1]
-            if not 1 <= use_k <= k:
-                raise ValueError(
-                    f"use_k must be between 1 and the graph's k ({k}), "
-                    "or None to use every neighbor"
-                )
+        n_cells, k = self._get_graph_ncells_k(self._graph_location(graph))
+        if use_k is not None and not 1 <= use_k <= k:
+            raise ValueError(
+                f"use_k must be between 1 and the graph's k ({k}), "
+                "or None to use every neighbor"
+            )
+        if n_cells > 0:
+            self._require_graph_load_budget(
+                graph,
+                symmetric=bool(symmetric),
+                upper_only=bool(upper_only),
+                held_bytes=0,
+                working_bytes=lambda cells, load: 0,
+                work="Loading the graph",
+                keep_nearest=use_k is not None and use_k != k,
+            )
         return self._load_graph_artifact(
             graph,
             symmetric=bool(symmetric),
