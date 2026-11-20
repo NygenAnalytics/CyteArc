@@ -133,7 +133,10 @@ def test_fit_stops_at_count_shards_of_one_row():
         seen.append(specs[0].shards[0])
         raise _refusal("does not fit", resources)
 
-    with pytest.raises(MemoryError, match="count shards of one row") as refused:
+    with pytest.raises(
+        MemoryError,
+        match="^Count import does not fit mem_budget even with count shards",
+    ) as refused:
         _fit(refuse)
     assert type(refused.value) is MemoryBudgetError
     assert seen[-1] == 1

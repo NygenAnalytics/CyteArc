@@ -3185,7 +3185,9 @@ def test_dataset_merge_rejects_insufficient_counts_budget(tmp_path, budget, reas
     )
     # These budgets hold the cell metadata, but not the counts of one row.
     with pytest.raises(
-        MemoryError, match=f"count shards of one row. Increase mem_budget. {reason}"
+        MemoryError,
+        match=f"^The merge does not fit mem_budget even with count shards of one "
+        f"row. Increase mem_budget. {reason}",
     ):
         merger.plan()
     assert not (tmp_path / "counts_budget.zarr").exists()

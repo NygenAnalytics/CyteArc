@@ -1273,7 +1273,10 @@ def test_correction_needs_a_budget_for_one_row(store, path):
     estimate = store.qc.ambient_contamination(cells, profile, fraction=0.1)
 
     tiny = _open(path, mem_budget="256K")
-    with pytest.raises(MemoryError, match="count shards of one row"):
+    with pytest.raises(
+        MemoryError,
+        match="^Ambient correction does not fit mem_budget even with count shards",
+    ):
         tiny.qc.correct_ambient(estimate, assay_label="tiny")
     assert "tiny" not in zarr.open_group(str(path), mode="r")
 

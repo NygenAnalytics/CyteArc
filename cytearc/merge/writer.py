@@ -393,6 +393,7 @@ def fit_assay_counts_layout(
         ),
         requested=requested,
         countsTResidentBytes=countsTResidentBytes,
+        subject="The merge",
     )
 
 

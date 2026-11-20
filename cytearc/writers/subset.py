@@ -146,9 +146,14 @@ def subset_assay_zarr(
     )
     # Each band reads its cells' rows over the selected features, which a
     # sharded source holds in a shard-level copy beside the compressed bytes
-    # of the inner chunks that the read touches.
-    fixed, per_row = row_read_parts(
-        array_geometry(ig), feat_idx, rows_contiguous=is_contiguous(cells_idx)
+    # of the inner chunks that the read touches. A subset of no cells reads
+    # nothing.
+    fixed, per_row = (
+        row_read_parts(
+            array_geometry(ig), feat_idx, rows_contiguous=is_contiguous(cells_idx)
+        )
+        if cells_idx.size
+        else (0, 0)
     )
 
     def producer(rows: int) -> int:
@@ -162,6 +167,7 @@ def subset_assay_zarr(
         transposed=(),
         admitCounts=dense_counts_admission(resident, producer),
         requested=policy,
+        subject="The subset",
     )
     plan = plan_count_matrix_pair(
         len(cells_idx),
@@ -353,6 +359,7 @@ class SubsetZarr:
                 lambda rows: raw_data._with_block_size(rows)._block_task_bytes(),
             ),
             requested=requested,
+            subject="The subset",
         )
 
     @staticmethod

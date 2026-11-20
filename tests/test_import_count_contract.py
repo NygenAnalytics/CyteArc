@@ -1506,7 +1506,13 @@ def test_every_writer_below_one_row_shards_fails_before_the_destination_exists(
     tmp_path, large_store, writer
 ):
     _encoding, _shape, _budget, tiny = _LAYOUT_CASES[writer]
-    with pytest.raises(MemoryError, match="count shards of one row"):
+    # An import refuses the default policy that it requests; a subset or a
+    # repack, which fit their layout, refuse naming what does not fit.
+    refusal = {
+        "subset": "^The subset does not fit mem_budget even with",
+        "repack": "^The repack does not fit mem_budget even with",
+    }.get(writer, "even")
+    with pytest.raises(MemoryError, match=f"{refusal} count shards of one row"):
         _layout_import(writer, tmp_path, large_store, mem_budget=tiny)
     assert not (tmp_path / "counts.zarr").exists()
 

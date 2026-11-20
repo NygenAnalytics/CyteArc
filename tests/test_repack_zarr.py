@@ -803,8 +803,11 @@ def test_a_repack_reserves_what_reading_a_band_of_sharded_counts_holds(
     # of the copy reads part of one source shard.
     assert band_rows < 1_000
 
-    # A band read decodes one chunk at a time, as the charge prices it,
-    # after a read that warms Zarr's own buffers.
+    # The read runs at zarr_io_concurrency(1), one decode at a time, as the
+    # charge prices it, after a read that warms Zarr's own buffers. At a dense
+    # write's I/O concurrency, up to 10, a read of random bits decodes several
+    # chunks at once and holds more than this charge, which is left to an
+    # issue of its own.
     produce = repack_module._row_block_producer(source)
     with zarr_io_concurrency(1):
         produce(0, band_rows)
@@ -835,6 +838,10 @@ def test_a_repack_at_a_tight_budget_reads_each_band_within_its_reserve(
 
     # At 4 MiB the copy writes count shards shorter than the source's, and a
     # band of them still reads whole source chunks, compressed and decoded.
+    # The reads run at the write's own I/O concurrency on counts, which
+    # compress well below the bound that the charge takes for stored chunks;
+    # a repack of random bits held up to twice its reserve at that
+    # concurrency, which is left to an issue of its own.
     reads: list[tuple[int, int]] = []
     write = repack_module.write_dense_in_shard_rows
 
@@ -889,7 +896,10 @@ def test_a_repack_that_cannot_hold_a_band_read_fails_before_the_destination_exis
     # Whatever count shards the copy writes, a band read holds the ten
     # stored chunks of a source shard, over 1.6 MB, which 1 MiB cannot.
     output = tmp_path / "output.zarr"
-    with pytest.raises(MemoryBudgetError, match="count shards of one row") as refused:
+    with pytest.raises(
+        MemoryBudgetError,
+        match="^The repack does not fit mem_budget even with count shards of one row",
+    ) as refused:
         repack_store(
             str(sharded_counts_store),
             str(output),

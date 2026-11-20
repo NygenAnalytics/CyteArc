@@ -2798,6 +2798,7 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
                     CountSummary.nbytes_for(assay.cells.N, len(module_ids)),
                     lambda rows: 2 * rows * len(module_ids) * 8,
                 ),
+                subject="The grouped assay",
             )
             g = transaction.create_counts(
                 assay.cells.N,

@@ -1911,8 +1911,9 @@ def test_subset_assay_zarr_reserves_what_reading_its_selection_of_sharded_counts
     (producer,) = recorded
     np.testing.assert_array_equal(root["selected"][:], values[np.ix_(cells, features)])
 
-    # The read decodes one chunk at a time, as the charge prices it, after a
-    # read that warms Zarr's own buffers.
+    # The read runs at zarr_io_concurrency(1), one decode at a time, as the
+    # charge prices it, after a read that warms Zarr's own buffers; a dense
+    # write's higher I/O concurrency is left to an issue of its own.
     with zarr_io_concurrency(1):
         read_selection(source, cells, features)
         tracemalloc.start()
@@ -2005,7 +2006,9 @@ def test_subset_assay_zarr_reserves_the_indices_of_scattered_cells(
     assert planned["run"] < 2 * held["run"]
 
 
-def test_subset_assay_zarr_that_cannot_hold_its_read_fails_before_writing(tmp_path):
+def test_subset_assay_zarr_that_cannot_hold_its_read_fails_before_writing(
+    tmp_path,
+):
     from cytearc.storage.count_matrix import create_product_counts_array
     from cytearc.utils.memory_budget import MemoryBudgetError
 
@@ -2023,7 +2026,10 @@ def test_subset_assay_zarr_that_cannot_hold_its_read_fails_before_writing(tmp_pa
     # Whatever count shards the subset writes, reading its first cells over
     # every gene holds the ten stored chunks of a source shard, at up to
     # 161,274 bytes each, which 1 MiB cannot.
-    with pytest.raises(MemoryBudgetError, match="count shards of one row") as refused:
+    with pytest.raises(
+        MemoryBudgetError,
+        match="^The subset does not fit mem_budget even with count shards of one row",
+    ) as refused:
         subset_assay_zarr(
             store,
             "RNA/counts",
@@ -2035,6 +2041,18 @@ def test_subset_assay_zarr_that_cannot_hold_its_read_fails_before_writing(tmp_pa
         )
     assert refused.value.needed_bytes > 10 * 160_000
     assert "selected" not in zarr.open_group(store, mode="r")
+
+    # A subset of no cells reads nothing from the source, so it fits.
+    subset_assay_zarr(
+        store,
+        "RNA/counts",
+        "selected",
+        np.array([], dtype=np.int64),
+        np.arange(400),
+        mem_budget=1024**2,
+        nthreads=1,
+    )
+    assert zarr.open_group(store, mode="r")["selected"].shape == (0, 400)
 
 
 def test_subset_assay_zarr_counts_carry_the_count_matrix_layout():

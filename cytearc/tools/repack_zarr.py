@@ -13,11 +13,11 @@ from cytearc.storage.budget import ResourceBudget, resolve_budget
 from cytearc.storage.cell_order import CELL_ORDER_ATTR
 from cytearc.storage.copy import (
     _copy_metadata_array,
+    band_read_bytes,
     copy_zarr_array,
     copy_zarr_group_tree,
     validate_metadata_dependencies,
 )
-from cytearc.storage.geometry import array_geometry
 from cytearc.storage.identity import (
     GENERATED_FEATURE_COLUMNS,
     CountSummary,
@@ -40,7 +40,6 @@ from cytearc.storage.layout import (
     get_compressors,
     normalize_chunks,
 )
-from cytearc.storage.partition import row_read_parts
 from cytearc.storage.pipeline_runs import _copy_pipeline_label_claims
 from cytearc.storage.profiles import StorageProfile
 from cytearc.storage.sharding import (
@@ -108,21 +107,6 @@ def _row_block_producer(source: zarr.Array) -> Callable[[int, int], np.ndarray]:
     return produce
 
 
-def _band_read_bytes(source: zarr.Array) -> Callable[[int], int]:
-    """Return what reading a band of ``rows`` rows of every column of ``source`` holds beside the band.
-
-    That is the charge of :func:`~cytearc.storage.copy.copy_zarr_array`, as
-    :func:`~cytearc.storage.partition.row_read_parts` prices the read: the
-    source chunk it decodes at a time, as stored and decoded, and for a
-    sharded source also the shard-level copy of the band's rows and the
-    compressed bytes of the inner chunks it touches in a shard.
-    """
-    fixed, per_row = row_read_parts(
-        array_geometry(source), np.arange(int(source.shape[1])), rows_contiguous=True
-    )
-    return lambda rows: fixed + int(rows) * per_row
-
-
 def _fit_counts_layout(
     source: zarr.Array,
     *,
@@ -133,7 +117,8 @@ def _fit_counts_layout(
     """Return the layout whose rebuilt counts and ``countsT`` fit the budget.
 
     The rebuilt counts keep the dtype of the source counts. Each band of a
-    layout is read from ``source`` as :func:`_band_read_bytes` charges it.
+    layout is read from ``source`` as
+    :func:`~cytearc.storage.copy.band_read_bytes` charges it.
     """
     n_cells, n_features = (int(value) for value in source.shape)
     return fit_count_layout(
@@ -143,8 +128,9 @@ def _fit_counts_layout(
         memoryBytes=resources.memoryBytes,
         transposed=("counts",) if transposed else (),
         admitCounts=dense_counts_admission(
-            CountSummary.nbytes_for(n_cells, n_features), _band_read_bytes(source)
+            CountSummary.nbytes_for(n_cells, n_features), band_read_bytes(source)
         ),
+        subject="The repack",
     )
 
 
@@ -531,7 +517,7 @@ def repack_store(
                 _row_block_producer(source_counts),
                 resources=resources,
                 msg=f"Repacking {path}",
-                producerBytes=_band_read_bytes(source_counts)(array_shard_rows(counts)),
+                producerBytes=band_read_bytes(source_counts)(array_shard_rows(counts)),
                 residentBytes=summary.nbytes,
                 countSummary=summary,
             )
