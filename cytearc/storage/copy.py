@@ -1,4 +1,4 @@
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from functools import partial
 from pathlib import Path
 
@@ -50,6 +50,21 @@ COLUMN_METADATA_ATTRIBUTES = (
 )
 
 
+def band_read_bytes(src: zarr.Array) -> Callable[[int], int]:
+    """Return what reading a band of ``rows`` rows of every column of ``src`` holds beside the band.
+
+    :func:`~cytearc.storage.partition.row_read_parts` prices the read of a
+    band that decodes one chunk at a time: the source chunk it decodes, as
+    stored and decoded, and for a sharded source also the shard-level copy
+    of the band's rows and the compressed bytes of the inner chunks it
+    touches in a shard.
+    """
+    fixed, per_row = row_read_parts(
+        array_geometry(src), np.arange(int(src.shape[1])), rows_contiguous=True
+    )
+    return lambda rows: fixed + int(rows) * per_row
+
+
 def copy_zarr_array(
     src: zarr.Array,
     dst: zarr.Array,
@@ -60,25 +75,19 @@ def copy_zarr_array(
 
     Each block is one row band of ``dst``, read from ``src`` whole. Its plan
     charges what that read holds beside the block, as
-    :func:`~cytearc.storage.partition.row_read_parts` prices a block of every
-    column: the source chunk it decodes at a time, as stored and decoded, and
-    for a sharded source also the shard-level copy of its rows and the
-    compressed bytes of the inner chunks it touches.
+    :func:`band_read_bytes` states.
     """
     if src.shape != dst.shape:
         raise ValueError(f"Shape mismatch: src {src.shape} vs dst {dst.shape}")
     if len(src.shape) != 2:
         raise ValueError("copy_zarr_array only supports 2D arrays")
-    fixed, per_row = row_read_parts(
-        array_geometry(src), np.arange(int(src.shape[1])), rows_contiguous=True
-    )
     band_rows = min(array_shard_rows(dst), int(src.shape[0]))
     write_dense_in_shard_rows(
         dst,
         lambda start, end: np.asarray(src[start:end, :]),
         msg=msg or "Copying Zarr array",
         resources=resources,
-        producerBytes=fixed + band_rows * per_row,
+        producerBytes=band_read_bytes(src)(band_rows),
     )
 
 

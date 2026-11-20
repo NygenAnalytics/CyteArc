@@ -1705,6 +1705,7 @@ def fit_count_layout(
     admitCounts: Callable[[tuple[ZarrArraySpec, ...], ResourceBudget], object],
     requested: CountMatrixPolicy | None = None,
     countsTResidentBytes: int = 0,
+    subject: str = "Count import",
 ) -> CountMatrixPolicy:
     """Return the count-matrix layout an import writes within its budget.
 
@@ -1733,6 +1734,8 @@ def fit_count_layout(
         requested: Explicit policy, or None to fit the default policy.
         countsTResidentBytes: Bytes the writer holds while it writes
             ``countsT``.
+        subject: What the refusal says does not fit, such as ``"The
+            subset"``.
 
     Raises:
         CountLayoutMemoryError: If ``requested`` does not fit.
@@ -1770,7 +1773,7 @@ def fit_count_layout(
             except MemoryBudgetError as error:
                 if policy.unitBytes < 2 * row_bytes:
                     raise MemoryBudgetError(
-                        "Count import does not fit mem_budget even with count "
+                        f"{subject} does not fit mem_budget even with count "
                         f"shards of one row. Increase mem_budget. "
                         f"{refusal_words(error).rstrip('.')}. It needs at least "
                         f"{error.needed_bytes} bytes.",

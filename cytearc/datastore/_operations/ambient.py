@@ -1025,6 +1025,7 @@ class _AmbientOperationsMixin(_AmbientOperationsBase):
                 memoryBytes=self.memoryBytes,
                 transposed=(assay_label,),
                 admitCounts=dense_counts_admission(resident_bytes, producer_bytes),
+                subject="Ambient correction",
             )
             counts = transaction.create_counts(
                 n_cells,

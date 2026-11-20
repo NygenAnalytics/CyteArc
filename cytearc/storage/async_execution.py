@@ -2,10 +2,12 @@
 
 import asyncio
 import contextvars
+import functools
 import importlib
 import itertools
 import threading
 import time
+import weakref
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Iterator
 from concurrent.futures import CancelledError, Future, ThreadPoolExecutor
 from concurrent.futures import wait as wait_for_futures
@@ -247,14 +249,113 @@ def _active_zarr_workers() -> int | None:
     return None if pool is None else int(pool._max_workers)
 
 
-class _DecodingPools(ThreadPoolExecutor):
+class _Raised:
+    """An exception that a pool call raised, carried to its event loop in place of a result."""
+
+    __slots__ = ("error",)
+
+    def __init__(self, error: BaseException) -> None:
+        self.error = error
+
+
+class _HandedBackFuture(Future[Any]):
+    """The future of a pool call, whose result the event loop that submitted the call sets.
+
+    Cancelling it cancels the call too while the call has not started, as
+    cancelling the pool's own future of the call would; a call that has
+    started runs to its end. ``call`` refers weakly to the pool's future of
+    the call, so that the call's references to this future make no cycle.
+    """
+
+    call: "weakref.ref[Future[None]]"
+
+    def cancel(self) -> bool:
+        call = self.call()
+        if call is None or not call.cancel():
+            return False
+        return super().cancel()
+
+
+def _hand_back(parcel: list[Any]) -> None:
+    """Empty ``parcel`` and set the outcome it carries on its future, on the loop that submitted the call.
+
+    ``parcel`` holds the future and, once the call has run, its result or
+    the exception it raised. A call that never ran, as one that its reader
+    or a pool's shutdown cancelled, leaves only the future, which is
+    cancelled if it is not already.
+    """
+    future, *outcome = parcel
+    parcel.clear()
+    if not outcome:
+        # The future's own cancel asks the call's future, which may be gone.
+        Future.cancel(future)
+    elif isinstance(outcome[0], _Raised):
+        future.set_exception(outcome[0].error)
+    else:
+        future.set_result(outcome[0])
+
+
+class _ReleasingPool(ThreadPoolExecutor):
+    """A thread pool whose threads keep nothing of an event loop's call once the loop has its result.
+
+    A pool thread holds the call it ran, the call's future and so its result
+    until the thread runs again, and that future reaches the asyncio future
+    that ``run_in_executor`` returns, which holds the result too. On a busy
+    machine a thread can wait long after the loop took its result, so a
+    chunk that Zarr decoded, or the stored bytes it decoded from, would
+    outlive the read that charged it. A call submitted from a running event
+    loop, as Zarr submits each fetch and decode, therefore leaves its result
+    in a parcel and returns None, and passes the parcel to the loop as it
+    ends, which moves the result into the future that the loop awaits. Once
+    the call has ended, nothing that the thread holds reaches the parcel,
+    even where the loop never runs again, as when a stopped read closes it.
+    A call from outside an event loop runs as on any pool.
+    """
+
+    def submit[**P, R](
+        self, fn: Callable[P, R], /, *args: P.args, **kwargs: P.kwargs
+    ) -> "Future[R]":
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return super().submit(fn, *args, **kwargs)
+        future = _HandedBackFuture()
+        # The call's closures reach the parcel through ``held``, which the
+        # call empties as it passes the parcel on.
+        held: list[list[Any]] = [[future]]
+        calls = [functools.partial(fn, *args, **kwargs)]
+
+        def call() -> None:
+            try:
+                held[0].append(calls.pop()())
+            except BaseException as error:
+                held[0].append(_Raised(error))
+
+        def ended(_call: Future[None]) -> None:
+            parcel = held.pop()
+            try:
+                loop.call_soon_threadsafe(_hand_back, parcel)
+            except RuntimeError:
+                # The loop has closed, so nothing awaits the outcome, which
+                # goes with the parcel.
+                pass
+
+        started = super().submit(call)
+        future.call = weakref.ref(started)
+        started.add_done_callback(ended)
+        return cast("Future[R]", future)
+
+
+class _DecodingPools(_ReleasingPool):
     """Zarr's codec pool: the host's threads, and a pool of each other count of threads that reads decode on.
 
     Zarr's event loop runs each fetch and decode of a read on its default
     executor, in the context of the call that made the read. A call within
     :func:`zarr_decoding_threads` runs them on a pool of exactly that many
     threads, which the reads of every call of that count share; any other
-    call runs them on the host's threads.
+    call runs them on the host's threads. Every pool hands each result back
+    to the read's event loop, as :class:`_ReleasingPool` does, so that no
+    pool thread keeps a decoded chunk after the read has it.
     """
 
     def __init__(self, workers: int) -> None:
@@ -275,7 +376,7 @@ class _DecodingPools(ThreadPoolExecutor):
             if pool is None:
                 if self._closing:
                     raise RuntimeError("cannot schedule new futures after shutdown")
-                pool = ThreadPoolExecutor(
+                pool = _ReleasingPool(
                     max_workers=threads, thread_name_prefix=f"zarr_pool_of_{threads}"
                 )
                 self._sized[threads] = pool
@@ -376,9 +477,17 @@ class _LentPool(ThreadPoolExecutor):
         self, fn: Callable[P, R], /, *args: P.args, **kwargs: P.kwargs
     ) -> "Future[R]":
         future = self._pool.submit(fn, *args, **kwargs)
-        with self._calls_lock:
-            self._calls.add(future)
-        future.add_done_callback(self._call_ended)
+        # The read's loop sets the result of a call that the pool hands back,
+        # and the loop does not run while the read waits for its calls, so
+        # the read waits for the call itself; a call whose future is gone has
+        # ended.
+        call: Future[Any] | None = (
+            future.call() if isinstance(future, _HandedBackFuture) else future
+        )
+        if call is not None:
+            with self._calls_lock:
+                self._calls.add(call)
+            call.add_done_callback(self._call_ended)
         return future
 
     def _call_ended(self, future: Future[Any]) -> None:
@@ -754,7 +863,7 @@ class AsyncStorageRunner:
         numba_entered = False
         try:
             ensure_zarr_host_ceiling()
-            self._codec_pool = ThreadPoolExecutor(
+            self._codec_pool = _ReleasingPool(
                 max_workers=self.plan.codecWorkers,
                 thread_name_prefix="cytearc-zarr-codec",
             )

@@ -29,6 +29,7 @@ from cytearc.storage.schema import (
     validate_new_assay,
 )
 from cytearc.tools.repack_zarr import repack_store
+from cytearc.utils.memory_budget import MemoryBudgetError
 from cytearc.writers import SparseToZarr, create_zarr_count_assay
 from cytearc.writers._store import write_membership_column
 
@@ -1126,6 +1127,18 @@ def test_add_grouped_assay_fits_the_count_layout_to_the_budget(tmp_path):
         store.RNA.sf,
     )
     np.testing.assert_allclose(grouped[:], expected)
+
+    # A budget below the write of one row of group means beside the count
+    # summary refuses before the assay exists, naming the grouped assay.
+    tiny = DataStore(
+        str(path), default_assay="RNA", min_features_per_cell=0, mem_budget="128K"
+    )
+    with pytest.raises(
+        MemoryBudgetError,
+        match="^The grouped assay does not fit mem_budget even with count shards",
+    ):
+        tiny.add_grouped_assay("module", assay_label="TINY")
+    assert "TINY" not in zarr.open_group(str(path), mode="r")
 
 
 def _counts_kept(_assay, counts):

@@ -412,6 +412,34 @@ def test_rows_of_an_array_in_memory_are_planned_without_a_chunk_to_decode() -> N
 
 
 @pytest.mark.parametrize(
+    ("values", "row_bytes"),
+    [
+        (np.arange(1_000, dtype=np.float64).reshape(10, 100), 800),
+        (np.array([f"{index:032d}" for index in range(10)]), 128),
+        (np.arange(10, dtype=np.int8), 1),
+    ],
+    ids=["100 float64 values", "32 characters", "one int8"],
+)
+def test_rows_of_an_array_in_memory_are_planned_with_the_rows_they_return(
+    values, row_bytes
+) -> None:
+    # A row of 100 float64 values holds 800 bytes and one of 32 characters
+    # 128, both wider than the index that ordering a row holds; the plan
+    # counts the rows that read_rows returns and charges, beside an int64
+    # index for each, so a read that the plan admits is not refused partway.
+    rows = np.array([7, 2, 5])
+    ledger = _RecordingLedger()
+    read = read_rows(ledger, values, rows, item="values")
+    np.testing.assert_array_equal(read, values[rows])
+    assert read.nbytes == len(rows) * row_bytes
+
+    planned = read_rows_bytes(values, len(rows))
+    assert ledger.most <= planned
+    assert planned >= len(rows) * (row_bytes + np.dtype(np.int64).itemsize)
+    assert read_rows_bytes(values, 0) == 0
+
+
+@pytest.mark.parametrize(
     ("categories", "codes_dtype"),
     [
         ([f"c{index}" for index in range(126)], np.int8),

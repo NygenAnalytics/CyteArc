@@ -219,8 +219,9 @@ def row_read_bytes(geometry: ArrayGeometry | None, n_rows: int) -> int:
     ``storage.geometry.ROW_INDEX_BYTES`` counts them. Reading the bands then
     holds each row in the result and the indices it keeps, one band's
     selected rows as Zarr returns them and what reading the band holds, as
-    ``ArrayGeometry.bandReadBytes`` counts. An array without chunks is
-    counted by its rows' indices alone.
+    ``ArrayGeometry.bandReadBytes`` counts. Without a geometry, as for an
+    array in memory, a row's bytes are not known, so only the rows' indices
+    are counted; :func:`read_rows_bytes` adds the rows from the array.
     """
     n_rows = int(n_rows)
     ordering = n_rows * ROW_INDEX_BYTES
@@ -237,13 +238,20 @@ def row_read_bytes(geometry: ArrayGeometry | None, n_rows: int) -> int:
 def read_rows_bytes(array: Any, n_rows: int) -> int:
     """What :func:`read_rows` holds to read ``n_rows`` distinct rows of ``array``, with the rows.
 
-    A stored array holds what :func:`row_read_bytes` states. A categorical
-    column holds the read of its codes, then its codes beside the categories,
-    the lookup that decoding builds and the labels returned.
+    A stored array holds what :func:`row_read_bytes` states. An array
+    without chunks, such as a NumPy array, holds the rows it returns beside
+    their indices. A categorical column holds the read of its codes, then its
+    codes beside the categories, the lookup that decoding builds and the
+    labels returned.
     """
-    if not isinstance(array, CategoricalColumn):
-        return row_read_bytes(array_geometry(array), n_rows)
     n_rows = int(n_rows)
+    if not isinstance(array, CategoricalColumn):
+        geometry = array_geometry(array)
+        if geometry is not None:
+            return row_read_bytes(geometry, n_rows)
+        row_values = int(np.prod(array.shape[1:], dtype=np.int64))
+        row_bytes = row_values * int(np.dtype(array.dtype).itemsize)
+        return row_read_bytes(None, n_rows) + n_rows * row_bytes
     codes = row_read_bytes(array_geometry(array.codes), n_rows)
     decoding = (
         n_rows * int(np.dtype(array.codes.dtype).itemsize)
