@@ -20,10 +20,15 @@ from ..storage.partition import (
     checked_indices,
     is_contiguous,
     partition_indices,
+    read_variable_text_rows,
     row_band,
 )
 from ..storage.artifacts import fingerprint_text_blocks
-from ..storage.content_stamps import stored_content_stamp, stored_content_stamp_bytes
+from ..storage.content_stamps import (
+    cached_for_content,
+    stored_content_stamp,
+    stored_content_stamp_bytes,
+)
 from ..storage.layout import column_chunk_rows
 from ..storage.types import as_zarr_array, read_array
 from ..utils.memory_budget import (
@@ -61,6 +66,8 @@ def _read_array_rows(array: Any, rows: np.ndarray) -> np.ndarray:
         raise IndexError("Metadata row indices are out of bounds")
     if is_contiguous(indices):
         return np.asarray(array[int(indices[0]) : int(indices[-1]) + 1])
+    if getattr(getattr(array, "dtype", None), "kind", None) == "T":
+        return read_variable_text_rows(array, indices)
 
     orthogonal_selection = getattr(array, "get_orthogonal_selection", None)
     if callable(orthogonal_selection):
@@ -78,24 +85,63 @@ def _read_array_rows(array: Any, rows: np.ndarray) -> np.ndarray:
 
 
 def array_row_selection_parts(array: Any) -> tuple[int, int]:
-    """Return fixed and per-row bytes for one chunk-serial selection."""
+    """Return fixed and per-row bytes for one chunk-serial selection.
+
+    Variable-width text is counted at the characters of its longest value,
+    as :func:`text_width` measures them: a value that NumPy holds takes its
+    16-byte element and its characters, up to four bytes each in UTF-8, in
+    an arena that NumPy can grow to twice them, and decoding a chunk holds
+    for each of its values, beside that, its encoded bytes as read and as
+    handed to the codec, and the Python string that the codec makes of it.
+    """
     row_values = int(np.prod(tuple(array.shape)[1:], dtype=np.int64))
-    row_bytes = max(1, int(np.dtype(array.dtype).itemsize) * row_values)
+    variable = np.dtype(array.dtype).kind == "T"
+    width = text_width(array) if variable else 0
+    value_bytes = 16 + 8 * width if variable else int(np.dtype(array.dtype).itemsize)
+    row_bytes = max(1, value_bytes * row_values)
     index_bytes = np.dtype(np.int64).itemsize
     per_row = 3 * row_bytes + _SELECTION_INDEX_ARRAYS * index_bytes
     geometry = array_geometry(array)
     if geometry is None:
         return 0, int(per_row)
-    return geometry.storedChunkBytes(), int(per_row)
+    if not variable:
+        return geometry.storedChunkBytes(), int(per_row)
+    chunk_values = geometry.nominalChunkBytes() // geometry.itemsize
+    decoding = value_bytes + 2 * (4 + 4 * width) + STRING_BYTES + 4 * width
+    return chunk_values * decoding, int(per_row)
 
 
 def text_width(array: Any) -> int:
     """Return the characters of each value of a stored text array, 0 for other values.
 
     The store writes text as fixed-width unicode, four bytes per character.
+    Text of variable width, which another tool can write, such as Zarr's
+    ``dtype=str``, takes the characters of its longest value, measured a
+    stored chunk at a time; a Zarr array's measure is reused while its stored
+    bytes are unchanged.
     """
     dtype = np.dtype(array.dtype)
-    return int(dtype.itemsize) // 4 if dtype.kind == "U" else 0
+    if dtype.kind == "U":
+        return int(dtype.itemsize) // 4
+    if dtype.kind != "T":
+        return 0
+    if isinstance(array, zarr.Array):
+        return cached_for_content(
+            "longest_text", array, lambda: _longest_text_characters(array)
+        )
+    return _longest_text_characters(array)
+
+
+def _longest_text_characters(array: Any) -> int:
+    """The characters of the longest value of a variable-width text array, read a stored chunk at a time."""
+    n_rows = int(array.shape[0])
+    rows = row_band(array_geometry(array), unit="chunk", fallback=max(1, n_rows))
+    longest = 0
+    for start in range(0, n_rows, rows):
+        block = np.asarray(array[start : start + rows])
+        longest = max(longest, int(np.strings.str_len(block).max(initial=0)))
+        del block
+    return longest
 
 
 def text_row_selection_parts(array: Any) -> tuple[int, int]:

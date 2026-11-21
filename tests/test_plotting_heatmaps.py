@@ -1928,13 +1928,16 @@ def _pseudotime_store(*, scoring=None, **aggregation):
         "valid": np.array([True, False, True, True, True]),
         **(scoring or {}),
     }
-    # The aggregation's loader hands back the pseudotime that validated it.
-    return SimpleNamespace(
-        _load_aggregation_with_pseudotime=lambda ref: (
-            SimpleNamespace(**loaded),
-            SimpleNamespace(**scored),
-        ),
-    )
+    # The aggregation's loader hands back the pseudotime that validated it,
+    # and takes what drawing holds, which its check of the graph counts.
+    from cytearc.plotting.heatmaps import pseudotime_heatmap_bytes
+
+    def load(ref: object, *, drawing_bytes: object, work: str) -> tuple:
+        assert drawing_bytes is pseudotime_heatmap_bytes
+        assert work == "Drawing a pseudotime heatmap"
+        return SimpleNamespace(**loaded), SimpleNamespace(**scored)
+
+    return SimpleNamespace(_load_aggregation_with_pseudotime=load)
 
 
 def test_pseudotime_heatmap_draws_saved_rows_clusters_and_bins():

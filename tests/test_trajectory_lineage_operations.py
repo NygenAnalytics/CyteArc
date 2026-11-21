@@ -267,55 +267,265 @@ def test_feature_analyses_charge_their_features_beside_the_graph_load(
     lineage_aggregation,
     mark_hvgs,
 ) -> None:
-    def needed(call: Any) -> int:
-        """The budget that a refusal of the call under a budget of one byte names."""
+    reads: list[str] = []
+    read_graph = datastore._store_to_sparse
+    monkeypatch.setattr(
+        datastore,
+        "_store_to_sparse",
+        lambda *args, **kwargs: reads.append("graph") or read_graph(*args, **kwargs),
+    )
+
+    def refused(call: Any) -> MemoryBudgetError:
+        """The refusal of the call under a budget of one byte."""
         monkeypatch.setattr(datastore, "memoryBytes", 1)
         monkeypatch.setattr(datastore, "resources", ResourceBudget(1, 1))
-        with pytest.raises(MemoryBudgetError) as refused:
+        with pytest.raises(MemoryBudgetError) as refusal:
             call()
-        return refused.value.needed_bytes
+        return refusal.value
 
     trajectory = datastore.trajectory
-    pseudotime = needed(lambda: trajectory.load_pseudotime(pseudotime_scoring))
-    fate = needed(lambda: trajectory.load_fate(lineage_fate))
+    pseudotime = refused(lambda: trajectory.load_pseudotime(pseudotime_scoring))
+    fate = refused(lambda: trajectory.load_fate(lineage_fate))
     # Each feature analysis holds the int64 positions of its features while
     # the graph of its pseudotime or fate map loads.
     detected = 8 * len(_feature_indices(datastore, detected_features))
     hvgs = 8 * len(_feature_indices(datastore, mark_hvgs))
-    calls = {
+    computing = {
         "markers": lambda: trajectory.markers(
             pseudotime_scoring, features=detected_features, invalidate_cache=True
         ),
-        "load_markers": lambda: trajectory.load_markers(pseudotime_markers),
-        "load_aggregation": lambda: trajectory.load_aggregation(pseudotime_aggregation),
         "lineage_markers": lambda: trajectory.lineage_markers(
             lineage_fate, features=mark_hvgs, invalidate_cache=True
-        ),
-        "load_lineage_markers": lambda: trajectory.load_lineage_markers(
-            lineage_markers
         ),
         "drivers": lambda: trajectory.drivers(
             lineage_fate, features=mark_hvgs, invalidate_cache=True
         ),
-        "load_drivers": lambda: trajectory.load_drivers(lineage_drivers),
         "lineage_aggregation": lambda: trajectory.lineage_aggregation(
             lineage_fate, features=mark_hvgs, invalidate_cache=True
         ),
+    }
+    assert {name: refused(call).needed_bytes for name, call in computing.items()} == {
+        "markers": pseudotime.needed_bytes + detected,
+        "lineage_markers": fate.needed_bytes + hvgs,
+        "drivers": fate.needed_bytes + hvgs,
+        "lineage_aggregation": fate.needed_bytes + hvgs,
+    }
+    loaders = {
+        "Loading pseudotime markers": (
+            lambda: trajectory.load_markers(pseudotime_markers),
+            pseudotime_markers,
+            pseudotime.needed_bytes + detected,
+        ),
+        "Loading a pseudotime aggregation": (
+            lambda: trajectory.load_aggregation(pseudotime_aggregation),
+            pseudotime_aggregation,
+            pseudotime.needed_bytes + detected,
+        ),
+        "Loading lineage markers": (
+            lambda: trajectory.load_lineage_markers(lineage_markers),
+            lineage_markers,
+            fate.needed_bytes + hvgs,
+        ),
+        "Loading lineage drivers": (
+            lambda: trajectory.load_drivers(lineage_drivers),
+            lineage_drivers,
+            fate.needed_bytes + hvgs,
+        ),
+        "Loading a lineage aggregation": (
+            lambda: trajectory.load_lineage_aggregation(lineage_aggregation),
+            lineage_aggregation,
+            fate.needed_bytes + hvgs,
+        ),
+    }
+    for work, (call, ref, graph_only) in loaders.items():
+        reads.clear()
+        refusal = refused(call)
+        # The loader's refusal names the check of its saved table of every
+        # feature, which reads the frozen feature names whole, beside a
+        # stored chunk of them as decoded, before the graph is read.
+        names = artifact_group(datastore.zw, ref)["feature_names"]
+        whole = names.nbytes + names.chunks[0] * names.dtype.itemsize
+        assert refusal.needed_bytes > graph_only
+        assert refusal.needed_bytes > whole
+        assert str(refusal).startswith(f"{work} of ")
+        assert reads == []
+        # The budget that the refusal names loads the analysis, reading the
+        # graph once.
+        monkeypatch.setattr(datastore, "memoryBytes", refusal.needed_bytes)
+        monkeypatch.setattr(
+            datastore, "resources", ResourceBudget(refusal.needed_bytes, 1)
+        )
+        assert call().ref == ref
+        assert reads == ["graph"]
+
+
+def test_a_saved_feature_analysis_is_checked_against_the_budget_before_it_is_reused(
+    datastore,
+    monkeypatch,
+    pseudotime_scoring,
+    pseudotime_markers,
+    detected_features,
+    lineage_fate,
+    lineage_aggregation,
+    mark_hvgs,
+) -> None:
+    from cytearc.datastore._operations import trajectory as operations
+
+    checked: list[str] = []
+    for name in ("_marker_payload_is_valid", "_lineage_aggregation_payload_is_valid"):
+        check = getattr(operations, name)
+        monkeypatch.setattr(
+            operations,
+            name,
+            lambda *args, _check=check, _name=name, **kwargs: (
+                checked.append(_name) or _check(*args, **kwargs)
+            ),
+        )
+
+    def run_at(budget: int, call: Any) -> Any:
+        monkeypatch.setattr(datastore, "memoryBytes", budget)
+        monkeypatch.setattr(datastore, "resources", ResourceBudget(budget, 1))
+        return call()
+
+    calls = {
+        "Pseudotime marker search": (
+            lambda: datastore.trajectory.markers(
+                pseudotime_scoring, features=detected_features
+            ),
+            pseudotime_markers,
+        ),
+        "Lineage aggregation": (
+            lambda: datastore.trajectory.lineage_aggregation(
+                lineage_fate, features=mark_hvgs, n_bins=12, n_clusters=5
+            ),
+            lineage_aggregation,
+        ),
+    }
+    for work, (call, ref) in calls.items():
+        saved = _artifacts_of(datastore, ref.kind)
+        with pytest.raises(MemoryBudgetError) as graph:
+            run_at(1, call)
+        # At the budget of its graph's load, the call refuses to check the
+        # saved result it would reuse, naming the budget that checks it,
+        # before it reads the result.
+        checked.clear()
+        with pytest.raises(MemoryBudgetError) as reuse:
+            run_at(graph.value.needed_bytes, call)
+        needed = reuse.value.needed_bytes
+        assert needed > graph.value.needed_bytes
+        assert reuse.value.item == "checking a saved result before reusing it"
+        assert str(reuse.value).startswith(
+            f"{work} holds about {needed} bytes for checking a saved result"
+        )
+        assert checked == []
+        assert run_at(needed, call).kind == ref.kind
+        assert checked
+        assert _artifacts_of(datastore, ref.kind) == saved
+
+
+def _artifacts_of(datastore: Any, kind: str) -> list[ArtifactRef]:
+    from cytearc.storage.artifacts import list_artifacts
+
+    return list_artifacts(datastore.zw, scope="assay", assay="RNA", kind=kind)
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize(
+    "identity_rows",
+    [None, 100_000],
+    ids=["identities-in-a-chunk-of-their-own", "identities-in-chunks-of-100000"],
+)
+def test_feature_analysis_loaders_run_within_the_budget_they_name(
+    tmp_path,
+    datastore,
+    pseudotime_scoring,
+    pseudotime_markers,
+    pseudotime_aggregation,
+    detected_features,
+    lineage_fate,
+    lineage_markers,
+    lineage_drivers,
+    lineage_aggregation,
+    mark_hvgs,
+    identity_rows,
+) -> None:
+    import shutil
+
+    from cytearc.datastore.datastore import DataStore
+    from tests.storage_helpers import rechunk_column
+
+    from .test_trajectory_membership import (
+        _assert_calls_run_within_the_budget_they_name,
+    )
+
+    # A copy of the session store, whose saved analyses freeze the names and
+    # IDs of every one of the assay's features. Analyses saved before those
+    # were chunked as a feature table's columns hold them in chunks of
+    # 100,000 rows, which a check decodes whole.
+    shutil.copytree(datastore.zarr_loc, tmp_path / "store.zarr")
+    store = DataStore(str(tmp_path / "store.zarr"), default_assay="RNA")
+    saved = (
+        pseudotime_markers,
+        pseudotime_aggregation,
+        lineage_markers,
+        lineage_drivers,
+        lineage_aggregation,
+    )
+    if identity_rows is not None:
+        for ref in saved:
+            for name in ("feature_names", "feature_ids"):
+                rechunk_column(artifact_group(store.zw, ref), name, rows=identity_rows)
+    trajectory = store.trajectory
+    trend_features = [
+        str(name)
+        for name in trajectory.load_lineage_aggregation(
+            lineage_aggregation
+        ).feature_names[:3]
+    ]
+    calls = {
+        "load_markers": lambda: trajectory.load_markers(pseudotime_markers),
+        "load_aggregation": lambda: trajectory.load_aggregation(pseudotime_aggregation),
+        "pseudotime_heatmap": lambda: store.plots.pseudotime_heatmap(
+            aggregation=pseudotime_aggregation, show=False
+        ).close(),
+        "load_lineage_markers": lambda: trajectory.load_lineage_markers(
+            lineage_markers
+        ),
+        "load_drivers": lambda: trajectory.load_drivers(lineage_drivers),
         "load_lineage_aggregation": lambda: trajectory.load_lineage_aggregation(
             lineage_aggregation
         ),
+        "lineage_heatmap": lambda: store.plots.lineage_heatmap(
+            aggregation=lineage_aggregation, show=False
+        ).close(),
+        "lineage_trends": lambda: store.plots.lineage_trends(
+            aggregation=lineage_aggregation, features=trend_features, show=False
+        ).close(),
+        "reused markers": lambda: trajectory.markers(
+            pseudotime_scoring, features=detected_features
+        ),
+        "reused aggregation": lambda: trajectory.aggregation(
+            pseudotime_scoring,
+            features=detected_features,
+            n_clusters=15,
+            window_size=50,
+            chunk_size=10,
+        ),
+        "reused lineage_markers": lambda: trajectory.lineage_markers(
+            lineage_fate, features=mark_hvgs
+        ),
+        "reused drivers": lambda: trajectory.drivers(lineage_fate, features=mark_hvgs),
+        "reused lineage_aggregation": lambda: trajectory.lineage_aggregation(
+            lineage_fate, features=mark_hvgs, n_bins=12, n_clusters=5
+        ),
     }
-    assert {name: needed(call) for name, call in calls.items()} == {
-        "markers": pseudotime + detected,
-        "load_markers": pseudotime + detected,
-        "load_aggregation": pseudotime + detected,
-        "lineage_markers": fate + hvgs,
-        "load_lineage_markers": fate + hvgs,
-        "drivers": fate + hvgs,
-        "load_drivers": fate + hvgs,
-        "lineage_aggregation": fate + hvgs,
-        "load_lineage_aggregation": fate + hvgs,
-    }
+
+    def check(name: str, result: Any) -> None:
+        # A call that reuses a saved analysis returns it.
+        if name.startswith("reused"):
+            assert result in saved
+
+    _assert_calls_run_within_the_budget_they_name(store, calls, check=check)
 
 
 def test_lineage_markers_reuse_and_recompute_identically(

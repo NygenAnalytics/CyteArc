@@ -827,6 +827,29 @@ def test_stored_array_fingerprint_matches_ordered_in_memory_values() -> None:
     assert fingerprint_stored_arrays(root, tuple(values)) == expected.hexdigest()
 
 
+def test_stored_arrays_are_fingerprinted_one_band_at_a_time(tmp_path) -> None:
+    import gc
+    import tracemalloc
+
+    # Two arrays of 4 MB, each one stored chunk. Reading one holds its values,
+    # its decoded chunk and its stored bytes, which random values leave about
+    # as large: three times the values. Holding the first array's values
+    # while the second is read would make it four.
+    values = np.random.default_rng(1).normal(size=500_000)
+    root = zarr.open_group(str(tmp_path / "store.zarr"), mode="w")
+    for name in ("first", "second"):
+        root.create_array(name, data=values, chunks=(500_000,))
+    gc.collect()
+    tracemalloc.start()
+    try:
+        before, _ = tracemalloc.get_traced_memory()
+        fingerprint_stored_arrays(root, ("first", "second"))
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak - before < 3.5 * values.nbytes
+
+
 def test_stored_string_fingerprint_normalizes_fixed_string_dtypes() -> None:
     root = zarr.open_group(store=MemoryStore(), mode="w", zarr_format=2)
     unicode_values = np.array(["a", "xy"], dtype="U4")

@@ -22,13 +22,25 @@ from cytearc.storage.selections import (
 from cytearc.trajectory.artifacts import (
     AGGREGATION_PAYLOAD,
     FATE_PAYLOAD,
+    LINEAGE_AGGREGATION_PAYLOAD,
+    LINEAGE_DRIVER_PAYLOAD,
+    LINEAGE_MARKER_PAYLOAD,
     MARKER_PAYLOAD,
     PSEUDOTIME_PAYLOAD,
+    aggregation_check_bytes,
     aggregation_payload_is_valid,
     fate_payload_is_valid,
+    lineage_aggregation_check_bytes,
+    lineage_aggregation_payload_is_valid,
+    lineage_driver_payload_is_valid,
+    lineage_marker_payload_is_valid,
+    lineage_statistics_check_bytes,
+    lineage_statistics_load_bytes,
     listed_labels,
     listed_labels_bytes,
     load_cell_artifact_values,
+    marker_check_bytes,
+    marker_load_bytes,
     marker_payload_is_valid,
     pseudotime_payload_is_valid,
     validate_aggregation_parameters,
@@ -611,3 +623,390 @@ def test_listed_labels_hold_what_their_estimate_states(labels: np.ndarray) -> No
     _, peak = tracemalloc.get_traced_memory()
     tracemalloc.stop()
     assert peak - before <= listed_labels_bytes(len(labels), labels.dtype)
+
+
+# What checking a saved feature analysis holds
+
+
+def _feature_payload(
+    root: zarr.Group,
+    kind: str,
+    *,
+    n_features: int,
+    identity_rows: int,
+    n_lineages: int = 3,
+    n_bins: int = 20,
+    width: int = 15,
+) -> tuple[zarr.Group, dict[str, object]]:
+    """Store a valid payload of a feature analysis of ``n_features`` features and the arguments that check it.
+
+    Every tenth feature is selected, and every seventh selected one has no
+    profile. The statistics are chunked as the analyses write them, at most
+    100,000 features to a chunk, and the frozen names and IDs of ``width``
+    characters in chunks of ``identity_rows``, as analyses saved before
+    their chunks followed a feature table's did with 100,000.
+    """
+    rng = np.random.default_rng(3)
+    selected = np.arange(0, n_features, 10)
+    n_selected = len(selected)
+    rows = min(n_features, 100_000)
+    group = root.create_group(kind)
+    names = np.asarray([f"{index:0{width}d}" for index in range(n_features)])
+    for name, values in (
+        ("feature_names", names),
+        ("feature_ids", np.char.upper(names)),
+    ):
+        group.create_array(name, data=values, chunks=(identity_rows,))
+    arguments: dict[str, object] = {
+        "n_features": n_features,
+        "selected_features": selected,
+        "expected_feature_ids_fingerprint": fingerprint_stored_strings(
+            group["feature_ids"]
+        ),
+        "expected_feature_names_fingerprint": fingerprint_stored_strings(
+            group["feature_names"]
+        ),
+    }
+
+    def statistics(columns: int | None, *names: str) -> None:
+        shape = (n_features,) if columns is None else (n_features, columns)
+        for name in names:
+            values = np.full(shape, np.nan)
+            values[selected] = rng.uniform(0.0, 1.0, size=values[selected].shape)
+            group.create_array(name, data=values, chunks=(rows, *shape[1:]))
+
+    valid = np.arange(n_selected) % 7 != 0
+    clusters = np.where(valid, 1 + np.arange(n_selected) % 4, -1)
+    cluster_values = np.full(n_features, -1, dtype=np.int64)
+    cluster_values[selected[valid]] = clusters[valid]
+
+    def modules(data_shape: tuple[int, ...]) -> None:
+        data = rng.normal(size=data_shape)
+        data[~valid] = 0.0
+        group.create_array("data", data=data, chunks=data_shape)
+        group.create_array("feature_indices", data=selected.astype(np.uint64))
+        group.create_array("valid_features", data=valid)
+        group.create_array("feature_clusters", data=clusters.astype(np.int64))
+        group.create_array("cluster_values", data=cluster_values, chunks=(rows,))
+        arguments.update(
+            n_clusters=4, n_neighbors=3, nan_cluster_value=-1, n_bins=data_shape[-1]
+        )
+
+    if kind == "markers":
+        statistics(None, "r_value", "p_value", "p_value_adjusted")
+        names_stored = MARKER_PAYLOAD
+    elif kind == "lineage_markers":
+        statistics(n_lineages, "r_value", "p_value", "p_value_adjusted")
+        group.create_array("effective_cells", data=np.full(n_lineages, 12.5))
+        arguments["n_lineages"] = n_lineages
+        names_stored = LINEAGE_MARKER_PAYLOAD
+    elif kind == "drivers":
+        statistics(n_lineages, *LINEAGE_DRIVER_PAYLOAD[:5])
+        group.attrs["n_cells"] = 40
+        arguments.update(n_lineages=n_lineages, n_cells=40)
+        names_stored = LINEAGE_DRIVER_PAYLOAD
+    elif kind == "aggregation":
+        modules((n_selected, n_bins))
+        fingerprints = ["cells", "features", "ordering"]
+        group.attrs.update(
+            input_fingerprints=fingerprints,
+            nan_cluster_value=-1,
+            effective_window=20,
+            effective_bins=n_bins,
+        )
+        arguments.update(
+            ann_params=resolve_aggregation_ann_params(None, dim=n_bins),
+            expected_input_fingerprints=fingerprints,
+            effective_window=20,
+        )
+        names_stored = AGGREGATION_PAYLOAD
+    else:
+        modules((n_selected, n_lineages, n_bins))
+        group.create_array(
+            "bin_pseudotime",
+            data=np.tile(np.linspace(0.0, 1.0, n_bins), (n_lineages, 1)),
+        )
+        group.create_array("lineage_weight", data=np.full(n_lineages, 2.0 * n_bins))
+        fingerprints = ["cells", "features", "ordering", "weights"]
+        group.attrs["input_fingerprints"] = fingerprints
+        arguments.update(
+            n_lineages=n_lineages, expected_input_fingerprints=fingerprints
+        )
+        names_stored = LINEAGE_AGGREGATION_PAYLOAD
+    group.attrs.update(
+        {
+            "artifact_id": "a" * 64,
+            "kind": kind,
+            "provenance": {},
+            "execution_options": {},
+            "created_at_ns": 1,
+            "cytearc_version": "test",
+            "complete": True,
+            "payload_fingerprint": fingerprint_stored_arrays(group, names_stored),
+        }
+    )
+    return group, arguments
+
+
+_FEATURE_CHECKS = {
+    "markers": (marker_payload_is_valid, marker_check_bytes),
+    "aggregation": (aggregation_payload_is_valid, aggregation_check_bytes),
+    "lineage_markers": (
+        lineage_marker_payload_is_valid,
+        lambda group, n_selected: lineage_statistics_check_bytes(
+            group, LINEAGE_MARKER_PAYLOAD, n_selected=n_selected
+        ),
+    ),
+    "drivers": (
+        lineage_driver_payload_is_valid,
+        lambda group, n_selected: lineage_statistics_check_bytes(
+            group, LINEAGE_DRIVER_PAYLOAD, n_selected=n_selected
+        ),
+    ),
+    "lineage_aggregation": (
+        lineage_aggregation_payload_is_valid,
+        lineage_aggregation_check_bytes,
+    ),
+}
+
+
+@pytest.mark.parametrize("kind", list(_FEATURE_CHECKS))
+@pytest.mark.parametrize(
+    "n_features, identity_rows, wide",
+    [
+        (30_000, 100_000, False),
+        (30_000, 30_000, False),
+        (400, 100_000, False),
+        (150_000, 150_000, False),
+        (10_000, 10_000, True),
+    ],
+    ids=[
+        "identities-in-chunks-of-100000",
+        "identities-in-a-chunk-of-their-own",
+        "few-features",
+        "two-chunks-of-statistics",
+        "short-names-beside-statistics-of-40-lineages-and-wide-profiles",
+    ],
+)
+def test_checking_a_saved_feature_analysis_holds_what_its_estimate_states(
+    tmp_path, kind: str, n_features: int, identity_rows: int, wide: bool
+) -> None:
+    import gc
+    import tracemalloc
+
+    from cytearc.storage.content_stamps import clear_content_cache
+
+    root = zarr.open_group(str(tmp_path / "store.zarr"), mode="w")
+    group, arguments = _feature_payload(
+        root,
+        kind,
+        n_features=n_features,
+        identity_rows=identity_rows,
+        n_lineages=40 if wide else 3,
+        n_bins=200 if wide and kind == "aggregation" else 20,
+        width=5 if wide else 15,
+    )
+    check, estimate = _FEATURE_CHECKS[kind]
+    n_selected = len(arguments["selected_features"])
+    # The first check of a process fingerprints the frozen names and IDs,
+    # and a full collection empties CPython's free lists, so the check
+    # allocates, and is traced at, its most.
+    clear_content_cache()
+    gc.collect()
+    tracemalloc.start()
+    try:
+        before, _ = tracemalloc.get_traced_memory()
+        assert check(group, **arguments)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    held = peak - before
+    expected = estimate(group, n_selected=n_selected)
+    assert held <= expected
+    # Charged at the bound of their compressed bytes, the reads err high, by
+    # no more than the decoded chunks they count once more.
+    assert expected < 3 * held
+
+
+def test_reading_scattered_rows_counts_zarr_copy_of_a_chunks_rows(tmp_path) -> None:
+    import gc
+    import tracemalloc
+
+    from cytearc.metadata.rows import read_array_rows_chunkwise, row_read_bytes
+    from cytearc.storage.geometry import array_geometry
+    from cytearc.trajectory.artifacts import _read_rows_bytes, _Steps
+
+    # Every other profile of 2,000 features by 4 lineages by 50 bins, 3.2 MB
+    # in one stored chunk, as a lineage aggregation stores them. Zarr copies
+    # the rows that the decoded chunk holds before it places them in its
+    # result, which the charge of a read of selected rows leaves out.
+    profiles = np.random.default_rng(2).normal(size=(2_000, 4, 50))
+    root = zarr.open_group(str(tmp_path / "store.zarr"), mode="w")
+    stored = root.create_array("data", data=profiles, chunks=profiles.shape)
+    rows = np.arange(0, 2_000, 2)
+    gc.collect()
+    tracemalloc.start()
+    try:
+        before, _ = tracemalloc.get_traced_memory()
+        np.testing.assert_array_equal(
+            read_array_rows_chunkwise(stored, rows), profiles[rows]
+        )
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    steps = _Steps()
+    _read_rows_bytes(steps, stored, len(rows))
+    assert row_read_bytes(array_geometry(stored), len(rows)) < peak - before
+    assert peak - before <= steps.most
+    assert steps.held == len(rows) * 4 * 50 * 8
+
+
+def test_steps_count_what_they_build_beside_what_earlier_steps_keep() -> None:
+    from cytearc.trajectory.artifacts import _Steps
+
+    steps = _Steps()
+    steps.step(100)
+    steps.step(10, keeping=30)
+    steps.step(60)
+    steps.step(0, keeping=5)
+    # The most is the 60 built beside the 30 kept, 90, short of 100 at first.
+    assert (steps.most, steps.held) == (100, 35)
+    steps.step(70)
+    assert (steps.most, steps.held) == (105, 35)
+
+
+def test_a_pseudotime_heatmap_counts_its_profiles_labels_cells_and_figure() -> None:
+    from cytearc.plotting.heatmaps import pseudotime_heatmap_bytes
+    from cytearc.trajectory.artifacts import stored_profile_sizes
+
+    # 10 features of 4 bins, names and IDs of 15 characters, 120 bytes a
+    # feature, and 7 cells. The loaded aggregation keeps 24 bytes and the
+    # labels for each feature; the drawing holds five copies of the 8-byte
+    # profiles, three copies of the labels and two Python strings of 64
+    # bytes and the labels' bytes, 32 bytes for each cell, and 1.5 MiB of
+    # matplotlib's objects.
+    assert pseudotime_heatmap_bytes(10, 4, 120, 7) == (
+        10 * (24 + 120)
+        + 5 * 8 * 10 * 4
+        + 10 * (3 * 120 + 2 * (64 + 120))
+        + 32 * 7
+        + 1536 * 1024
+    )
+    group = zarr.open_group(store=MemoryStore(), mode="w")
+    assert stored_profile_sizes(group) == (0, 0)
+    group.create_array("data", data=np.zeros((3, 4)))
+    group.create_array("feature_names", data=np.array(["a" * 15, "b", "c"]))
+    group.create_array("feature_ids", data=np.array(["x" * 12, "y", "z"]))
+    assert stored_profile_sizes(group) == (4, 4 * 15 + 4 * 12)
+
+
+def _statistics_payload(width: int, n_lineages: int | None) -> zarr.Group:
+    """1,000 features whose statistics and frozen names and IDs of ``width`` characters are each one stored chunk.
+
+    The arrays are declared, not written: the estimates read only their
+    shapes, dtypes and chunks.
+    """
+    group = zarr.open_group(store=MemoryStore(), mode="w")
+    shape = (1_000,) if n_lineages is None else (1_000, n_lineages)
+    for name in ("r_value", "p_value", "p_value_adjusted"):
+        group.create_array(name, shape=shape, dtype="f8", chunks=shape)
+    if n_lineages is not None:
+        group.create_array("effective_cells", shape=(n_lineages,), dtype="f8")
+    for name in ("feature_names", "feature_ids"):
+        group.create_array(name, shape=(1_000,), dtype=f"U{width}", chunks=(1_000,))
+    return group
+
+
+def test_the_estimates_of_saved_statistics_pin_their_terms() -> None:
+    # A read of a stored chunk of b bytes holds the rows it returns, the
+    # chunk decoded and the bound of its stored bytes, b + b // 128 + 1,024:
+    # 61,180 bytes for names of 5 characters (20,000 bytes), 602,586 for
+    # names of 50 (200,000), and 25,086 for 1,000 float64 values.
+    # Checking saved markers of names of 5 characters, 100 features selected:
+    # the statistics, read together a block of 1,000 rows at a time, hold
+    # four blocks of 8,000 bytes beside a read, and 32 bytes for each of the
+    # block's 1,000 features and the 100 selected; beside 192 KiB of objects.
+    short = _statistics_payload(5, None)
+    assert marker_check_bytes(short, n_selected=100) == 196_608 + (
+        4 * 8_000 + 25_086 + 32 * 1_100
+    )
+    # Loading them reads 100 rows of each array, at most the check.
+    assert marker_load_bytes(short, n_selected=100) == 196_608 + 92_286
+    # Names of 50 characters, every feature selected: the names' read leads
+    # the check, and loading builds the table beside the rows read, 424,000
+    # bytes: two copies of the names and IDs as text and their Python
+    # strings, 2 * 400 + 2 * 64 bytes a feature, and 32 bytes of copies.
+    wide = _statistics_payload(50, None)
+    assert marker_check_bytes(wide, n_selected=1_000) == 196_608 + 602_586
+    assert marker_load_bytes(wide, n_selected=1_000) == 424_000 + 1_000 * (
+        2 * 400 + 2 * 64 + 32
+    )
+    # Lineage markers over 10 lineages: the table's 10 frames hold a Python
+    # string of each name and ID, their text, and 8 bytes for each of the
+    # positions, the lineage and the 3 statistics, and their join a copy of
+    # every column, 56 bytes a row, beside the rows read: 200,000 bytes of
+    # names and of IDs and 80,000 of each statistic.
+    lineages = _statistics_payload(50, 10)
+    assert lineage_statistics_check_bytes(
+        lineages, LINEAGE_MARKER_PAYLOAD, n_selected=1_000
+    ) == 196_608 + max(602_586, 3 * 80_000 + 241_649 + 32 * 2_000)
+    assert (
+        lineage_statistics_load_bytes(
+            lineages, LINEAGE_MARKER_PAYLOAD, n_selected=1_000, n_lineages=10
+        )
+        == 640_000 + 10 * 1_000 * (2 * 64 + 400 + 40) + 10 * 1_000 * 56
+    )
+
+
+def test_the_fingerprint_of_names_in_several_chunks_leads_a_check() -> None:
+    # Saved markers of 250,000 features, every tenth selected, whose frozen
+    # names and IDs of 5 characters keep chunks of 100,000 rows, as analyses
+    # saved before kept them: fingerprinting the names reads all three of
+    # their chunks at once, beside the 5,000,000 bytes of names, each chunk
+    # of 2,000,000 bytes as decoded and at the bound of its stored bytes,
+    # 4,016,649, more than any other step of the check.
+    group = zarr.open_group(store=MemoryStore(), mode="w")
+    for name in ("r_value", "p_value", "p_value_adjusted"):
+        group.create_array(name, shape=(250_000,), dtype="f8", chunks=(100_000,))
+    for name in ("feature_names", "feature_ids"):
+        group.create_array(name, shape=(250_000,), dtype="U5", chunks=(100_000,))
+    names = 5_000_000 + 3 * 4_016_649
+    # The statistics hold four blocks of 800,000 bytes beside a read of one
+    # chunk, and 32 bytes for each of its 100,000 features and the 25,000
+    # selected, less than the names.
+    statistics = 4 * 800_000 + (800_000 + 1_607_274) + 32 * 125_000
+    assert statistics < names
+    assert marker_check_bytes(group, n_selected=25_000) == 196_608 + names
+
+
+def test_the_estimates_of_a_payload_without_its_arrays_count_only_its_check() -> None:
+    from cytearc.trajectory.artifacts import (
+        aggregation_load_bytes,
+        lineage_aggregation_load_bytes,
+        stored_profile_sizes,
+    )
+
+    # A saved analysis whose arrays are gone: its estimates count the check's
+    # 192 KiB of objects and the tables built from no rows, and leave the
+    # check to refuse the payload in its own words.
+    group = zarr.open_group(store=MemoryStore(), mode="w")
+    estimates = {
+        "marker check": marker_check_bytes(group, n_selected=10),
+        "marker load": marker_load_bytes(group, n_selected=10),
+        "aggregation check": aggregation_check_bytes(group, n_selected=10),
+        "aggregation load": aggregation_load_bytes(group, n_selected=10),
+        "lineage check": lineage_statistics_check_bytes(
+            group, LINEAGE_MARKER_PAYLOAD, n_selected=10
+        ),
+        "lineage load": lineage_statistics_load_bytes(
+            group, LINEAGE_MARKER_PAYLOAD, n_selected=10, n_lineages=2
+        ),
+        "lineage aggregation check": lineage_aggregation_check_bytes(
+            group, n_selected=10
+        ),
+        "lineage aggregation load": lineage_aggregation_load_bytes(
+            group, n_selected=10
+        ),
+    }
+    assert estimates == dict.fromkeys(estimates, 192 * 1024)
+    assert stored_profile_sizes(group) == (0, 0)

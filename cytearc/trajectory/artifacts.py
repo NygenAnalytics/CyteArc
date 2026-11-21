@@ -1,4 +1,5 @@
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
@@ -7,6 +8,7 @@ import zarr
 from scipy.sparse import coo_matrix, csr_matrix
 from scipy.sparse.csgraph import connected_components
 
+from ..metadata.rows import STRING_BYTES, operation_concurrency, row_read_bytes
 from ..metadata.selection import resolve_cell_aligned_artifact
 from ..storage.arrays import create_zarr_dataset
 from ..storage.artifacts import (
@@ -15,8 +17,9 @@ from ..storage.artifacts import (
     fingerprint_stored_arrays,
     fingerprint_stored_strings,
 )
+from ..storage.content_stamps import stored_content_stamp_bytes
 from ..storage.geometry import array_geometry
-from ..storage.partition import row_band
+from ..storage.partition import row_band, scan_band
 from ..storage.selections import validate_cell_selection
 from ..storage.types import as_zarr_array
 from .parameters import (
@@ -1717,6 +1720,405 @@ def lineage_aggregation_payload_is_valid(
         np.asarray(cluster_values_array[:], dtype=np.int64),
         expected_clusters,
     )
+
+
+# What checking and loading a saved feature analysis holds
+
+#: What checking a saved feature analysis holds whatever its size: Zarr's
+#: buffers and the objects of opening its arrays, fingerprinting them and
+#: checking its record, measured after a full collection has emptied
+#: CPython's free lists.
+_FEATURE_CHECK_OBJECT_BYTES = 192 * 1024
+
+
+@dataclass
+class _Steps:
+    """The most bytes that steps run in turn hold.
+
+    Each step builds what it lets go beside what the steps before it keep,
+    and keeps what it adds to them.
+    """
+
+    held: int = 0
+    most: int = 0
+
+    def step(self, building: int, keeping: int = 0) -> None:
+        self.most = max(self.most, self.held + int(building) + int(keeping))
+        self.held += int(keeping)
+
+
+def _payload_arrays(group: Any, names: Sequence[str]) -> dict[str, zarr.Array]:
+    """The stored arrays among ``names`` of a payload; its check refuses one that is missing."""
+    arrays = {}
+    for name in names:
+        try:
+            arrays[name] = as_zarr_array(group[name], name=name)
+        except (KeyError, TypeError):
+            continue
+    return arrays
+
+
+def _read_bytes(array: zarr.Array, rows: int) -> int:
+    """What reading ``rows`` rows of a stored array from a chunk's first row holds, with them.
+
+    The read holds the rows and the chunks that Zarr decodes at once, each
+    as stored, at the bound of its compressed bytes, and decoded, as the
+    memory budget charges a read.
+    """
+    geometry = array_geometry(array)
+    assert geometry is not None
+    rows = min(max(0, int(rows)), geometry.shape[0])
+    touched = max(1, -(-rows // geometry.axisChunk(0))) * geometry.bandChunks()
+    return geometry.readBytes(
+        rows * geometry.rowBytes(), chunks=touched, decodes=operation_concurrency()
+    )
+
+
+def _chunk_rows(array: zarr.Array) -> int:
+    return row_band(array_geometry(array), unit="chunk", fallback=1)
+
+
+def _row_bytes(array: zarr.Array) -> int:
+    """The bytes of one row of a stored array, every value of its later axes."""
+    return int(np.prod(array.shape[1:], dtype=np.int64)) * array.dtype.itemsize
+
+
+def _fingerprint_bytes(arrays: Mapping[str, zarr.Array]) -> int:
+    """What fingerprinting a payload holds: one array's scan band as read, as ``fingerprint_stored_arrays`` reads it."""
+    return max(
+        (
+            _read_bytes(
+                array,
+                scan_band(array_geometry(array), fallback=max(1, array.shape[0])),
+            )
+            for array in arrays.values()
+        ),
+        default=0,
+    )
+
+
+def _identity_bytes(arrays: Mapping[str, zarr.Array]) -> int:
+    """What checking the frozen feature names and IDs holds: a stamp of one, then a stored chunk of it as read, in turn."""
+    return max(
+        (
+            max(
+                stored_content_stamp_bytes(array),
+                _read_bytes(array, _chunk_rows(array)),
+            )
+            for name, array in arrays.items()
+            if name in ("feature_names", "feature_ids")
+        ),
+        default=0,
+    )
+
+
+def _statistics_bytes(
+    arrays: Sequence[zarr.Array], n_selected: int, *, together: int
+) -> int:
+    """What checking per-feature statistics holds, a block of their shortest stored chunks at a time.
+
+    ``together`` of the arrays' blocks are held at once, one of them as read,
+    beside two copies of a block that the checks take and the positions of
+    the block's features among the ``n_selected`` selected ones, which
+    ``np.isin`` sorts with them.
+    """
+    if not arrays:
+        return 0
+    rows = min(_chunk_rows(array) for array in arrays)
+    block = max(rows * _row_bytes(array) for array in arrays)
+    reading = max(_read_bytes(array, rows) for array in arrays)
+    return (together + 1) * block + reading + 32 * (rows + int(n_selected))
+
+
+def _check_bytes(*steps: int) -> int:
+    """What a check of a saved feature analysis holds: the most of its steps, which it takes in turn, beside its objects."""
+    return _FEATURE_CHECK_OBJECT_BYTES + max(steps)
+
+
+def _read_rows_bytes(steps: _Steps, array: zarr.Array | None, n_rows: int) -> None:
+    """Add the read of ``n_rows`` scattered rows of ``array``, which stay, a band of chunks at a time.
+
+    The read holds what ``metadata.rows.row_read_bytes`` charges, beside
+    Zarr's copy of the rows that a decoded chunk holds before it places
+    them, which that charge leaves out.
+    """
+    if array is None:
+        return
+    geometry = array_geometry(array)
+    assert geometry is not None
+    kept = int(n_rows) * _row_bytes(array)
+    read = row_read_bytes(geometry, int(n_rows)) + min(
+        int(n_rows), geometry.axisChunk(0)
+    ) * _row_bytes(array)
+    steps.step(max(0, read - kept), keeping=kept)
+
+
+def marker_check_bytes(group: Any, *, n_selected: int) -> int:
+    """Return the most bytes that :func:`marker_payload_is_valid` holds.
+
+    The check fingerprints each payload array, a scan band at a time, then
+    the frozen feature names and IDs, a stored chunk at a time, then reads
+    the correlations, p-values and adjusted p-values of the features
+    together, a block of stored chunk rows at a time.
+    """
+    arrays = _payload_arrays(group, MARKER_PAYLOAD)
+    statistics = [arrays[name] for name in MARKER_PAYLOAD[:3] if name in arrays]
+    return _check_bytes(
+        _fingerprint_bytes(arrays),
+        _identity_bytes(arrays),
+        _statistics_bytes(statistics, n_selected, together=3),
+    )
+
+
+def marker_load_bytes(group: Any, *, n_selected: int) -> int:
+    """Return the most bytes that loading a saved pseudotime-marker table holds, beside its pseudotime.
+
+    The payload is checked as :func:`marker_check_bytes` states, then the
+    names, IDs and statistics of the ``n_selected`` selected features are
+    read and kept, and the table copies the names and IDs as text, makes a
+    Python string of each, and copies the statistics and the features'
+    positions.
+    """
+    arrays = _payload_arrays(group, MARKER_PAYLOAD)
+    steps = _Steps()
+    steps.step(marker_check_bytes(group, n_selected=n_selected))
+    for name in ("feature_names", "feature_ids", *MARKER_PAYLOAD[:3]):
+        _read_rows_bytes(steps, arrays.get(name), n_selected)
+    text = sum(
+        _row_bytes(arrays[name])
+        for name in ("feature_names", "feature_ids")
+        if name in arrays
+    )
+    steps.step(int(n_selected) * (2 * text + 2 * STRING_BYTES + 32))
+    return steps.most
+
+
+def aggregation_check_bytes(group: Any, *, n_selected: int) -> int:
+    """Return the most bytes that :func:`aggregation_payload_is_valid` holds.
+
+    Beside fingerprinting the payload and checking the frozen feature names
+    and IDs, the check reads the ``n_selected`` selected features a block of
+    stored chunk rows at a time, their positions and clusters as int64,
+    whether each is valid, and their profiles, of which it takes two copies,
+    and then every feature's cluster a stored chunk at a time, as int64,
+    beside the expected clusters and the selected features' validity and
+    clusters within it.
+    """
+    arrays = _payload_arrays(group, AGGREGATION_PAYLOAD)
+    n_selected = int(n_selected)
+    selected_steps = 0
+    blockwise = [
+        arrays[name]
+        for name in ("data", "feature_indices", "valid_features", "feature_clusters")
+        if name in arrays
+    ]
+    if blockwise:
+        rows = min(_chunk_rows(array) for array in blockwise)
+        profiles = arrays.get("data")
+        profile_block = 0 if profiles is None else rows * _row_bytes(profiles)
+        selected_steps = (
+            33 * rows
+            + (0 if profiles is None else _read_bytes(profiles, rows))
+            + 2 * profile_block
+        )
+    cluster_steps = 0
+    cluster_values = arrays.get("cluster_values")
+    if cluster_values is not None:
+        rows = _chunk_rows(cluster_values)
+        within = sum(
+            _read_bytes(arrays[name], n_selected)
+            for name in ("valid_features", "feature_clusters")
+            if name in arrays
+        )
+        cluster_steps = (
+            16 * rows + _read_bytes(cluster_values, rows) + within + 24 * n_selected
+        )
+    return _check_bytes(
+        _fingerprint_bytes(arrays),
+        _identity_bytes(arrays),
+        selected_steps,
+        cluster_steps,
+    )
+
+
+def aggregation_load_bytes(group: Any, *, n_selected: int) -> int:
+    """Return the most bytes that loading a saved pseudotime aggregation holds, beside its pseudotime.
+
+    The payload is checked as :func:`aggregation_check_bytes` states, then
+    the positions of the valid features among the ``n_selected`` selected
+    ones are found, and their positions, clusters, names and IDs read and
+    kept, the clusters as int64 and the names and IDs copied as text. The
+    profiles stay on disk until they are read.
+    """
+    arrays = _payload_arrays(group, AGGREGATION_PAYLOAD)
+    n_selected = int(n_selected)
+    steps = _Steps()
+    steps.step(aggregation_check_bytes(group, n_selected=n_selected))
+    valid = arrays.get("valid_features")
+    steps.step(
+        0 if valid is None else _read_bytes(valid, _chunk_rows(valid)) + 8 * n_selected,
+        keeping=8 * n_selected,
+    )
+    for name in ("feature_indices", "feature_clusters", "feature_names", "feature_ids"):
+        array = arrays.get(name)
+        _read_rows_bytes(steps, array, n_selected)
+        if array is not None and name != "feature_indices":
+            # The rows are copied, and the copy kept in their place.
+            steps.step(n_selected * max(8, _row_bytes(array)))
+    return steps.most
+
+
+def stored_profile_sizes(group: Any) -> tuple[int, int]:
+    """Return the bins of a saved pseudotime aggregation's profiles and the bytes of each feature's stored name and ID.
+
+    Each is 0 where the payload lacks the arrays, which its check refuses.
+    """
+    arrays = _payload_arrays(group, ("data", "feature_names", "feature_ids"))
+    profiles = arrays.get("data")
+    n_bins = int(profiles.shape[-1]) if profiles is not None and profiles.ndim else 0
+    return n_bins, sum(
+        _row_bytes(arrays[name])
+        for name in ("feature_names", "feature_ids")
+        if name in arrays
+    )
+
+
+def lineage_statistics_check_bytes(
+    group: Any, names: Sequence[str], *, n_selected: int
+) -> int:
+    """Return the most bytes that checking saved lineage markers or drivers holds.
+
+    ``names`` are the payload's arrays. Beside fingerprinting them and
+    checking the frozen feature names and IDs, the check reads each array of
+    statistics, features by lineages, a block of stored chunk rows at a
+    time, holding the block before it while it reads one.
+    """
+    arrays = _payload_arrays(group, names)
+    statistics = [
+        array
+        for name, array in arrays.items()
+        if name not in ("feature_names", "feature_ids", "effective_cells")
+    ]
+    return _check_bytes(
+        _fingerprint_bytes(arrays),
+        _identity_bytes(arrays),
+        _statistics_bytes(statistics, n_selected, together=2),
+    )
+
+
+def lineage_statistics_load_bytes(
+    group: Any, names: Sequence[str], *, n_selected: int, n_lineages: int
+) -> int:
+    """Return the most bytes that loading saved lineage markers or drivers holds, beside its fate map's cells.
+
+    The payload is checked as :func:`lineage_statistics_check_bytes` states.
+    Then the names and IDs of the ``n_selected`` selected features are read
+    and copied as text, and each array of statistics read at them. The long
+    table takes a frame for each of the ``n_lineages`` lineages, which makes
+    a Python string of each name and ID and copies the positions, the
+    lineage's label and statistics, and then joins the frames into a copy of
+    every column, whose text it shares.
+    """
+    arrays = _payload_arrays(group, names)
+    n_selected = int(n_selected)
+    n_lineages = int(n_lineages)
+    steps = _Steps()
+    steps.step(lineage_statistics_check_bytes(group, names, n_selected=n_selected))
+    text = 0
+    for name in ("feature_names", "feature_ids"):
+        array = arrays.get(name)
+        _read_rows_bytes(steps, array, n_selected)
+        if array is not None:
+            # The rows are copied as text, and the copy kept in their place.
+            text += _row_bytes(array)
+            steps.step(n_selected * _row_bytes(array))
+    statistics = [
+        name
+        for name in names
+        if name not in ("feature_names", "feature_ids", "effective_cells")
+    ]
+    for name in statistics:
+        _read_rows_bytes(steps, arrays.get(name), n_selected)
+    columns = 8 * (len(statistics) + 2)
+    frames = n_lineages * n_selected * (2 * STRING_BYTES + text + columns)
+    joined = n_lineages * n_selected * (columns + 16)
+    steps.step(frames + joined)
+    return steps.most
+
+
+def lineage_aggregation_check_bytes(group: Any, *, n_selected: int) -> int:
+    """Return the most bytes that :func:`lineage_aggregation_payload_is_valid` holds.
+
+    Beside fingerprinting the payload and checking the frozen feature names
+    and IDs, the check reads the positions, validity and clusters of the
+    ``n_selected`` selected features whole, the positions and clusters as
+    int64, and keeps them while it reads the profiles a block of stored
+    chunk rows at a time, of which it takes a copy, and then every
+    feature's cluster whole, as int64, beside the expected clusters.
+    """
+    arrays = _payload_arrays(group, LINEAGE_AGGREGATION_PAYLOAD)
+    n_selected = int(n_selected)
+    steps = _Steps()
+    for name in ("bin_pseudotime", "lineage_weight"):
+        if name in arrays:
+            steps.step(_read_bytes(arrays[name], arrays[name].shape[0]))
+    for name, kept in (
+        ("feature_indices", 8),
+        ("valid_features", 1),
+        ("feature_clusters", 8),
+    ):
+        if name in arrays:
+            steps.step(_read_bytes(arrays[name], n_selected), keeping=kept * n_selected)
+    profiles = arrays.get("data")
+    if profiles is not None:
+        rows = _chunk_rows(profiles)
+        steps.step(_read_bytes(profiles, rows) + 2 * rows * _row_bytes(profiles))
+    cluster_values = arrays.get("cluster_values")
+    if cluster_values is not None:
+        n_features = int(cluster_values.shape[0])
+        steps.step(
+            _read_bytes(cluster_values, n_features) + 17 * n_features + 16 * n_selected
+        )
+    return _check_bytes(_fingerprint_bytes(arrays), _identity_bytes(arrays), steps.most)
+
+
+def lineage_aggregation_load_bytes(group: Any, *, n_selected: int) -> int:
+    """Return the most bytes that loading a saved lineage aggregation holds, beside its fate map's cells.
+
+    The payload is checked as :func:`lineage_aggregation_check_bytes`
+    states, then the positions of the valid features among the
+    ``n_selected`` selected ones are found, and their positions, profiles
+    and clusters read and copied, as int64 and float64, and their names and
+    IDs read and copied as text.
+    """
+    arrays = _payload_arrays(group, LINEAGE_AGGREGATION_PAYLOAD)
+    n_selected = int(n_selected)
+    steps = _Steps()
+    steps.step(lineage_aggregation_check_bytes(group, n_selected=n_selected))
+    valid = arrays.get("valid_features")
+    steps.step(
+        0 if valid is None else _read_bytes(valid, _chunk_rows(valid)) + 8 * n_selected,
+        keeping=8 * n_selected,
+    )
+    for name in (
+        "feature_indices",
+        "data",
+        "feature_clusters",
+        "feature_names",
+        "feature_ids",
+    ):
+        array = arrays.get(name)
+        _read_rows_bytes(steps, array, n_selected)
+        if array is not None:
+            # The rows are copied, and the copy kept in their place.
+            steps.step(n_selected * max(8, _row_bytes(array)))
+    for name in ("bin_pseudotime", "lineage_weight"):
+        if name in arrays:
+            steps.step(
+                _read_bytes(arrays[name], arrays[name].shape[0]),
+                keeping=2 * arrays[name].nbytes,
+            )
+    return steps.most
 
 
 def lineage_curve_payload_is_valid(

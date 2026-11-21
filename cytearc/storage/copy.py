@@ -30,10 +30,17 @@ from .geometry import array_geometry
 from .layout import (
     PROFILE_METADATA_CHUNK,
     ChunkRows,
+    column_chunk_rows,
     array_shard_rows,
     normed_array_spec,
 )
-from .partition import affordable_width, row_band, row_read_parts, scan_band
+from .partition import (
+    affordable_width,
+    read_variable_text_rows,
+    row_band,
+    row_read_parts,
+    scan_band,
+)
 from .profiles import StorageProfile
 from .sharding import write_dense_in_shard_rows
 from ..utils.memory_budget import MemoryBudgetError
@@ -188,6 +195,13 @@ def _copy_metadata_array(
         ),
     )
     n_rows = n_source if row_indices is None else len(row_indices)
+    # Zarr's selection of scattered rows of variable-width text fails on some
+    # NumPy releases, which read_variable_text_rows names.
+    select = (
+        read_variable_text_rows
+        if np.dtype(src.dtype).kind == "T"
+        else lambda array, rows: array.oindex[rows]
+    )
 
     def blocks() -> Iterator[MetadataBlock]:
         for start in range(0, n_rows, block_rows):
@@ -195,7 +209,7 @@ def _copy_metadata_array(
             rows = (
                 slice(start, stop) if row_indices is None else row_indices[start:stop]
             )
-            values = src[rows] if isinstance(rows, slice) else src.oindex[rows]
+            values = src[rows] if isinstance(rows, slice) else select(src, rows)
             mask = (
                 None
                 if missing is None
@@ -258,7 +272,13 @@ def copy_metadata_array(
     overwrite: bool = True,
     profile: StorageProfile | None = None,
 ) -> zarr.Array:
-    """Stream-copy one metadata vector without carrying presentation attrs."""
+    """Stream-copy one metadata vector without carrying presentation attrs.
+
+    The copy is chunked as a column of a cell or feature table, by its rows
+    and the bytes of each value as stored
+    (:func:`~cytearc.storage.layout.column_chunk_rows`), so a short column is
+    one chunk of its own rows.
+    """
     _copy_metadata_array(
         src,
         dst,
@@ -266,6 +286,7 @@ def copy_metadata_array(
         overwrite=overwrite,
         profile=profile,
         copy_attributes=False,
+        chunk_rows=column_chunk_rows,
     )
     return as_zarr_array(dst[name], name=name)
 
