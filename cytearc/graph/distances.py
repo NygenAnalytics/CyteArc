@@ -12,6 +12,7 @@ from ..storage.errors import ArtifactResolutionError
 from ..storage.geometry import array_geometry
 from ..storage.partition import row_band
 from ..storage.types import as_zarr_array
+from ..utils.shutdown import is_interruption
 
 NEIGHBOR_DISTANCE_METRICS = frozenset({"l2", "cosine"})
 
@@ -47,6 +48,9 @@ def _payload_arrays(
         first = as_zarr_array(group[names[0]], name=names[0])
         second = as_zarr_array(group[names[1]], name=names[1])
     except Exception as error:
+        if is_interruption(error):
+            # A cancelled Zarr read says nothing about the payload.
+            raise
         raise payload_error(
             ref, f"{ref.kind} artifact payload is unreadable"
         ) from error
@@ -96,6 +100,9 @@ def _payload_blocks(
             first_block = np.asarray(first[start:stop])
             second_block = np.asarray(second[start:stop])
         except Exception as error:
+            if is_interruption(error):
+                # A cancelled Zarr read says nothing about the payload.
+                raise
             raise payload_error(ref, f"{ref.kind} arrays are unreadable") from error
         yield start, stop, first_block, second_block
 

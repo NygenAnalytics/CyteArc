@@ -1,6 +1,7 @@
 """Interrupted artifact writes keep their slot, and prune_incomplete removes residue."""
 
 import asyncio
+import concurrent.futures
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -71,10 +72,12 @@ def _interrupted(root: zarr.Group, label: str, *, assay: str | None = None) -> s
     [
         KeyboardInterrupt(),
         asyncio.CancelledError(),
+        # Zarr's synchronous API reports a cancelled call with this class.
+        concurrent.futures.CancelledError(),
         SystemExit(1),
         ShutdownRequested(ShutdownRequest(requested_at_ns=1, reason="SIGTERM")),
     ],
-    ids=["keyboard", "cancelled", "exit", "shutdown"],
+    ids=["keyboard", "cancelled", "zarr_cancelled", "exit", "shutdown"],
 )
 def test_an_interrupted_write_keeps_its_slot_marked_incomplete(interruption):
     root = zarr.open_group(store=MemoryStore(), mode="w")

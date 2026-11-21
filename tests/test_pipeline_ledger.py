@@ -1,6 +1,7 @@
 """Pipeline stages run one at a time and end with exactly one durable outcome."""
 
 import asyncio
+import concurrent.futures
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
@@ -233,6 +234,43 @@ def test_a_summary_failure_only_warns_and_the_stage_completes() -> None:
 
 
 @pytest.mark.parametrize(
+    "cancellation",
+    # Zarr's synchronous API reports a cancelled read with the CancelledError
+    # of concurrent.futures, an Exception, which must end the run as asyncio's
+    # does rather than be logged as a failed summary.
+    [asyncio.CancelledError, concurrent.futures.CancelledError],
+    ids=["asyncio", "zarr"],
+)
+def test_a_cancelled_summary_ends_the_run_after_its_completed_stage(
+    cancellation: type[BaseException],
+) -> None:
+    error = cancellation()
+
+    def summarize(
+        _stage: str,
+        _outputs: Sequence[tuple[str, ArtifactRef]],
+    ) -> Mapping[str, Any] | None:
+        raise error
+
+    root, ledger, events = _ledger("first", "second", summarize=summarize)
+
+    with pytest.raises(cancellation) as caught:
+        ledger.run("first", lambda: ())
+
+    assert caught.value is error
+    assert _statuses(root, ledger) == {"first": "completed"}
+    run = load_pipeline_run_record(root, ledger.run_id)
+    assert (run.status, run.complete) == ("interrupted", True)
+    assert run.interruption is not None
+    assert run.interruption.kind == "asyncio_cancelled"
+    assert [(event.kind, event.stage) for event in events] == [
+        ("stage_started", "first"),
+        ("stage_completed", "first"),
+        ("run_interrupted", None),
+    ]
+
+
+@pytest.mark.parametrize(
     ("error", "raised", "status", "kind"),
     [
         (
@@ -349,6 +387,58 @@ def test_failure_while_recording_a_stage_fails_the_stage_and_run(
     assert [event.kind for event in events] == kinds
     if kinds:
         assert events[-1].error is expected
+
+
+@pytest.mark.parametrize("failing", ["start", "completion after an interruption"])
+@pytest.mark.parametrize(
+    "interruption",
+    # A keyboard interrupt never enters the ledger's handlers of ordinary
+    # errors, so it shows how a cancelled record write must pass them.
+    [KeyboardInterrupt, concurrent.futures.CancelledError],
+    ids=["keyboard", "zarr_cancelled"],
+)
+def test_a_cancelled_record_write_passes_as_a_keyboard_interrupt_does(
+    monkeypatch: pytest.MonkeyPatch,
+    failing: str,
+    interruption: type[BaseException],
+) -> None:
+    error = interruption("the record write was cancelled")
+    summarize: StageSummarizer | None = None
+    if failing == "start":
+
+        def start(*_args: Any, **_kwargs: Any) -> Any:
+            raise error
+
+        monkeypatch.setattr(ledger_module, "start_pipeline_stage_record", start)
+    else:
+        record = ledger_module.finish_pipeline_stage_record
+
+        def finish(*args: Any, **kwargs: Any) -> Any:
+            if kwargs["status"] == "completed":
+                raise error
+            return record(*args, **kwargs)
+
+        monkeypatch.setattr(ledger_module, "finish_pipeline_stage_record", finish)
+
+        def summarize(
+            _stage: str,
+            _outputs: Sequence[tuple[str, ArtifactRef]],
+        ) -> Mapping[str, Any] | None:
+            # An interruption after the stage's work, which the ledger then
+            # records as a completed stage.
+            raise asyncio.CancelledError
+
+    root, ledger, events = _ledger("first", "second", summarize=summarize)
+
+    with pytest.raises(interruption) as caught:
+        ledger.run("first", lambda: ())
+
+    # The error passes unwrapped, and the executor that owns the run ends it.
+    assert caught.value is error
+    assert load_pipeline_run_record(root, ledger.run_id).status == "running"
+    started = failing != "start"
+    assert _statuses(root, ledger) == ({"first": "running"} if started else {})
+    assert [event.kind for event in events] == (["stage_started"] if started else [])
 
 
 def _interruptions() -> list[tuple[BaseException, str]]:
@@ -611,6 +701,8 @@ def _long_interruptions() -> list[tuple[BaseException, str]]:
         ),
         (KeyboardInterrupt(_LONG_TEXT), "keyboard_interrupt"),
         (asyncio.CancelledError(_LONG_TEXT), "asyncio_cancelled"),
+        # Zarr's synchronous API reports a cancelled call with this class.
+        (concurrent.futures.CancelledError(_LONG_TEXT), "asyncio_cancelled"),
     ]
 
 
@@ -623,6 +715,7 @@ def _long_interruptions() -> list[tuple[BaseException, str]]:
         "shutdown_request",
         "keyboard_interrupt",
         "asyncio_cancelled",
+        "zarr_cancelled",
     ],
 )
 def test_long_interruption_messages_are_truncated_and_recorded(

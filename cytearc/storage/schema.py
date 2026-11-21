@@ -25,6 +25,7 @@ from .metadata_keys import (
 from .profiles import StorageProfile, resolve_storage_profile
 from ..utils.logging import logger
 from ..utils.matrix_values import MATRIX_VALUES, MatrixValues
+from ..utils.shutdown import is_interruption
 
 _ASSAY_NAME_OWNERS = {
     "artifacts": "datastore artifact storage",
@@ -407,7 +408,7 @@ class DerivedAssayTransaction:
         if not self._created_group:
             # This call created nothing, so it deletes nothing.
             return
-        if not isinstance(error, Exception):
+        if is_interruption(error):
             # An interrupted write may still land, so the pending assay stays.
             logger.warning(
                 pending_assay_message(self.assay_name, self.workspace, self.operation)
@@ -443,7 +444,8 @@ def derived_assay_transaction(
     writes and finalizes them, and records provenance on ``group``. A normal
     exit publishes the ``is_assay`` marker last. An exception before that
     deletes the groups this call created; an interruption, such as
-    ``KeyboardInterrupt``, keeps the pending assay and logs how to remove it.
+    ``KeyboardInterrupt`` or the cancellation of a Zarr call, keeps the pending
+    assay and logs how to remove it.
 
     Args:
         root: Root Zarr group of the store.
