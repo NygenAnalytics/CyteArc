@@ -20,6 +20,7 @@ from ..merge.features import (
     FeatureAlignment,
     align_features,
     resolve_merge_dtype,
+    shared_features_warning,
     unshared_features_warning,
 )
 from ..merge.metadata import (
@@ -527,7 +528,10 @@ def _source_location(source: Any) -> str:
 
 
 def _feature_alignment(
-    assays: list[Any], names: list[str], features: Literal["union", "intersection"]
+    assay: str,
+    assays: list[Any],
+    names: list[str],
+    features: Literal["union", "intersection"],
 ) -> tuple[FeatureAlignment, np.ndarray, str]:
     union = align_features(assays, names, require_overlap=False)
     dtype = resolve_merge_dtype(assays, union.featOrderMap)
@@ -544,7 +548,22 @@ def _feature_alignment(
     mappings = [positions[mapping] for mapping in union.featOrderMap]
     frame = union.mergedFeatsMap.iloc[selected].copy().reset_index(drop=True)
     frame["idx"] = np.arange(selected.size)
-    alignment = FeatureAlignment(frame, mappings, selected.size, union.overlapFraction)
+    alignment = FeatureAlignment(
+        frame, mappings, selected.size, union.overlapFraction, union.sourcePresent
+    )
+    # A union reads zero counts where a source lacks a feature, as a merge
+    # writes them, and warns as a merge does. An intersection leaves those
+    # features out, and warns when it keeps under a tenth of the union.
+    if features == "union":
+        unshared = unshared_features_warning(
+            assay, alignment, names, combination="composite"
+        )
+        if unshared is not None:
+            logger.warning(unshared)
+    else:
+        shared = shared_features_warning(assay, union, names)
+        if shared is not None:
+            logger.warning(shared)
     columns = np.full((len(assays), selected.size), -1, dtype=np.int64)
     for index, mapping in enumerate(mappings):
         source_columns = np.flatnonzero(mapping >= 0)
@@ -791,7 +810,9 @@ def create_composite(
                   where a source lacks one, and logs a warning that gives
                   the number of features each such source lacks and names up
                   to five of them. ``"intersection"`` keeps the features that
-                  every source holds.
+                  every source holds, and logs a warning that gives their
+                  number, the union's, and how many each source's absence
+                  would keep, when they are fewer than a tenth of the union.
         assay: Assay to combine, which every source holds as one type.
         rows: Positions of the cells to include, by source name. The
               positions select cells and don't order them. A source left
@@ -925,16 +946,9 @@ def create_composite(
     for source, source_assay in zip(datasets, assays, strict=True):
         prefetch_metadata_listing(source.cells._group)
         prefetch_metadata_listing(source_assay.feats._group)
-    alignment, feature_columns, dtype = _feature_alignment(assays, names, features)
-    # A union composite reads zero counts where a source lacks a feature, as
-    # a merge writes them. An intersection keeps only the shared features, and
-    # its alignment leaves the others without a position.
-    if features == "union":
-        unshared = unshared_features_warning(
-            assay, alignment, names, combination="composite"
-        )
-        if unshared is not None:
-            logger.warning(unshared)
+    alignment, feature_columns, dtype = _feature_alignment(
+        assay, assays, names, features
+    )
     row_plan = build_row_plan(
         [source.cells.N for source in datasets],
         [int(source.rawData.chunksize[0]) for source in assays],

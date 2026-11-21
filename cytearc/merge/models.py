@@ -11,9 +11,16 @@ type ComponentAction = Literal["write", "resume", "skip", "blocked"]
 class AssayMergePlan:
     """Resolved plan for one assay in a DataStoreMerge.
 
-    ``featureOverlapFraction`` is the share of union feature keys (IDs, or names
-    when merging by name) present in at least two sources with that assay. A modality present in only one source
-    reports ``1.0`` because zero-fill is intentional for the missing sources.
+    ``featureOverlapFraction`` is the share of the merged features that every
+    source holding the assay measured. Features match by ID, or by name with
+    ``feature_key="names"``. The merge writes zero counts for the other
+    features in the cells of each source that lacks them, so ``1.0`` means
+    that no cell reads a zero count for a feature its source never measured. A
+    source whose assay holds no features measured none of the others'
+    features, so the assay then reports ``0.0``, while an assay of no features
+    in any source reports ``1.0``. A source without the assay is left out,
+    since the merge marks its cells as not measured, so an assay that only one
+    source holds reports ``1.0``.
     """
 
     assayName: str
