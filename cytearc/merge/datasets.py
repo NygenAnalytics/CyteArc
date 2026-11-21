@@ -999,7 +999,7 @@ class DataStoreMerge:
         for assay_name in self.uniqueAssays:
             sources = self._assaySources[assay_name]
             alignment = self._alignments[assay_name]
-            present = tuple(source is not None for source in sources)
+            present = alignment.sourcePresent
             missing = tuple(
                 name
                 for name, is_present in zip(self.names, present, strict=True)

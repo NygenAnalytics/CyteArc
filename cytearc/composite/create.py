@@ -20,6 +20,7 @@ from ..merge.features import (
     FeatureAlignment,
     align_features,
     resolve_merge_dtype,
+    shared_features_warning,
     unshared_features_warning,
 )
 from ..merge.metadata import (
@@ -548,25 +549,21 @@ def _feature_alignment(
     frame = union.mergedFeatsMap.iloc[selected].copy().reset_index(drop=True)
     frame["idx"] = np.arange(selected.size)
     alignment = FeatureAlignment(
-        frame, mappings, selected.size, union.overlapFraction, union.sourceHoldsAssay
+        frame, mappings, selected.size, union.overlapFraction, union.sourcePresent
     )
     # A union reads zero counts where a source lacks a feature, as a merge
     # writes them, and warns as a merge does. An intersection leaves those
     # features out, and warns when it keeps under a tenth of the union.
-    warning = None
     if features == "union":
-        warning = unshared_features_warning(
+        unshared = unshared_features_warning(
             assay, alignment, names, combination="composite"
         )
-    elif selected.size * 10 < union.nFeats:
-        warning = (
-            f"Assay {assay!r}: the composite keeps {selected.size:,} of the "
-            f"{union.nFeats:,} features of its sources, since "
-            "features='intersection' keeps only the features that every source "
-            "measured."
-        )
-    if warning is not None:
-        logger.warning(warning)
+        if unshared is not None:
+            logger.warning(unshared)
+    else:
+        shared = shared_features_warning(assay, union, names)
+        if shared is not None:
+            logger.warning(shared)
     columns = np.full((len(assays), selected.size), -1, dtype=np.int64)
     for index, mapping in enumerate(mappings):
         source_columns = np.flatnonzero(mapping >= 0)
@@ -814,8 +811,8 @@ def create_composite(
                   the number of features each such source lacks and names up
                   to five of them. ``"intersection"`` keeps the features that
                   every source holds, and logs a warning that gives their
-                  number and the union's when they are fewer than a tenth of
-                  the union.
+                  number, the union's, and how many each source's absence
+                  would keep, when they are fewer than a tenth of the union.
         assay: Assay to combine, which every source holds as one type.
         rows: Positions of the cells to include, by source name. The
               positions select cells and don't order them. A source left
