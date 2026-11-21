@@ -18,13 +18,16 @@ from ..utils.arrays import sort_categories
 from ._style import (
     apply_figure_chrome,
     colormap_argument,
-    colormap_name,
     theme_context,
 )
 from ..utils.arguments import RANDOM_STATE_MAX, bool_argument, integer_argument
 
 if TYPE_CHECKING:
     from matplotlib.colors import Colormap
+else:
+    # Matplotlib is optional, so the hints name Colormap only for type
+    # checkers and resolve without it.
+    Colormap = Any
 
 
 def _clean_axis(ax: Any, *, tick_size: float = 10.0) -> None:
@@ -467,7 +470,10 @@ def highly_variable_features(
     label_size: float = 12,
     figsize: tuple[float, float] = (4.5, 4.0),
     point_sizes: tuple[float, float] = (3, 30),
-    colormaps: "tuple[str | Colormap, str | Colormap]" = ("winter", "magma_r"),
+    colormaps: "tuple[str | Colormap | None, str | Colormap | None]" = (
+        "winter",
+        "magma_r",
+    ),
     theme: str = "notebook",
     show: bool = True,
 ) -> PlotResult:
@@ -475,7 +481,7 @@ def highly_variable_features(
 
     ``colormaps`` colors the features not selected and the selected ones by
     the number of cells that express them, each a Matplotlib colormap name
-    or a ``Colormap``.
+    or a registered ``Colormap``, or None for Matplotlib's default.
     """
     show = bool_argument(show, "show")
     if isinstance(colormaps, str) or not isinstance(colormaps, Sequence):
@@ -486,8 +492,8 @@ def highly_variable_features(
     if len(colormaps) != 2:
         raise ValueError("colormaps must contain two values")
     colormaps = (
-        colormap_argument(colormaps[0], "colormaps[0]"),
-        colormap_argument(colormaps[1], "colormaps[1]"),
+        colormap_argument(colormaps[0], "colormaps[0]", optional=True),
+        colormap_argument(colormaps[1], "colormaps[1]", optional=True),
     )
     require_matplotlib()
     means = np.asarray(mean_nonzero, dtype=np.float64)
@@ -573,7 +579,7 @@ def highly_variable_features(
                     float(np.nanmax(cell_counts)) if len(cell_counts) else 0.0
                 ),
                 "point_sizes": list(point_sizes),
-                "colormaps": [colormap_name(colormap) for colormap in colormaps],
+                "colormaps": list(colormaps),
             },
         ),
         owns_figure=owns_figure,

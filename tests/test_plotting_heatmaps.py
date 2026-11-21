@@ -9,6 +9,7 @@ import pytest
 
 matplotlib.use("Agg")
 
+from matplotlib import colormaps
 from matplotlib.colors import ListedColormap
 
 import cytearc.plotting as splt
@@ -1546,20 +1547,9 @@ def test_marker_heatmap_categorical_legend_serializes_and_preserves_target(
     plt.close(figure)
 
 
-@pytest.mark.parametrize("on_caller_axes", [False, True])
-@pytest.mark.parametrize(
-    ("cmap", "colors", "name"),
-    [
-        # seaborn's heatmap reads a list of colors as their colormap.
-        (["#000000", "#ffffff"], ["#000000", "#ffffff"], "from_list"),
-        (ListedColormap(["#ff0000", "#0000ff"], name="red_blue"), None, "red_blue"),
-    ],
-)
-def test_marker_heatmap_draws_a_list_of_colors_or_a_colormap(
-    monkeypatch: pytest.MonkeyPatch, on_caller_axes, cmap, colors, name
-):
+def _marker_heatmap(monkeypatch, *, on_caller_axes, **options):
+    """Draw marker_heatmap of a saved two-gene matrix, on its own figure or on caller axes."""
     import matplotlib.pyplot as plt
-    from matplotlib.colors import to_hex
 
     import cytearc.plotting.heatmaps as heatmap_plotting
 
@@ -1581,27 +1571,80 @@ def test_marker_heatmap_draws_a_list_of_colors_or_a_colormap(
             "unmeasured_cells": {},
         },
     )
-    figure, ax = plt.subplots() if on_caller_axes else (None, None)
+    target = plt.subplots()[1] if on_caller_axes else None
+    return heatmap_plotting.marker_heatmap(
+        object(),
+        marker=_plot_ref("marker_table", "3"),
+        cluster_rows=False,
+        cluster_columns=False,
+        target=target,
+        show=False,
+        **options,
+    )
+
+
+def _drawn_colormap(result):
+    heatmap = result.axes["heatmap"]
+    return (heatmap.images or heatmap.collections)[0].get_cmap()
+
+
+@pytest.mark.parametrize("on_caller_axes", [False, True])
+def test_marker_heatmap_draws_a_list_of_colors_or_a_held_colormap(
+    monkeypatch: pytest.MonkeyPatch, registered_colormap, on_caller_axes
+):
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import to_hex
+
+    red_blue = registered_colormap(
+        ListedColormap(["#ff0000", "#0000ff"], name="cytearc_red_blue")
+    )
     try:
-        result = heatmap_plotting.marker_heatmap(
-            object(),
-            marker=_plot_ref("marker_table", "3"),
-            cmap=cmap,
-            cluster_rows=False,
-            cluster_columns=False,
-            target=ax,
-            show=False,
+        # seaborn's heatmap reads a list of colors as their colormap, which
+        # names no colormap for the result to record.
+        listed = _marker_heatmap(
+            monkeypatch, on_caller_axes=on_caller_axes, cmap=["#000000", "#ffffff"]
         )
-        heatmap = result.axes["heatmap"]
-        drawn = (heatmap.images or heatmap.collections)[0].get_cmap()
-        if colors is None:
-            assert drawn is cmap
-        else:
-            assert [to_hex(color) for color in drawn.colors] == colors
-        assert result.scales[0].cmap == name
-        result.close()
+        assert [to_hex(color) for color in _drawn_colormap(listed).colors] == [
+            "#000000",
+            "#ffffff",
+        ]
+        assert listed.scales[0].cmap is None
+        held = _marker_heatmap(
+            monkeypatch, on_caller_axes=on_caller_axes, cmap=red_blue
+        )
+        assert _drawn_colormap(held) == red_blue
+        assert held.scales[0].cmap == "cytearc_red_blue"
+        # None draws the default of seaborn's heatmap or of Matplotlib, as
+        # before, and the result records no colormap.
+        default = _marker_heatmap(monkeypatch, on_caller_axes=on_caller_axes, cmap=None)
+        assert _drawn_colormap(default).name == (
+            "viridis" if on_caller_axes else "rocket"
+        )
+        assert default.scales[0].cmap is None
     finally:
-        plt.close(figure)
+        plt.close("all")
+
+
+@pytest.mark.parametrize(
+    ("cmap", "message"),
+    [
+        (
+            ["#ff0000", "not_a_color"],
+            "cmap must list colors, but ['#ff0000', 'not_a_color'] holds a value "
+            "that is no color",
+        ),
+        ([], "cmap must list at least one color"),
+    ],
+)
+def test_marker_heatmap_refuses_a_list_without_colors_before_reading_the_store(
+    cmap, message
+):
+    with pytest.raises(ValueError) as raised:
+        splt.marker_heatmap(
+            _UnreadableStore(), marker=_plot_ref("marker_table", "3"), cmap=cmap
+        )
+
+    assert raised.value.args == (message,)
 
 
 def test_marker_heatmap_validates_cluster_kwargs_and_target_layout(
@@ -1949,11 +1992,8 @@ def test_pseudotime_heatmap_draws_saved_rows_clusters_and_bins():
         ({}, ["#0072B2", "#E69F00"], "colorblind"),
         # A colormap is sampled at 0 and 1.
         ({"clusterbar_cmap": "viridis"}, ["#440154", "#fde725"], None),
-        (
-            {"clusterbar_cmap": ListedColormap(["#123456", "#abcdef"], name="pair")},
-            ["#123456", "#abcdef"],
-            None,
-        ),
+        # So is a Colormap that Matplotlib holds: Set1's first and last colors.
+        ({"clusterbar_cmap": colormaps["Set1"]}, ["#e41a1c", "#999999"], None),
     ],
 )
 def test_pseudotime_heatmap_colors_modules(options, colors, palette_name):
@@ -1975,9 +2015,13 @@ def test_pseudotime_heatmap_colors_modules(options, colors, palette_name):
         result.close()
 
 
-def test_pseudotime_heatmap_draws_with_colormaps_it_is_given():
-    profiles = ListedColormap(["#000000", "#ffffff"], name="profiles")
-    strip = ListedColormap(["#ff0000", "#0000ff"], name="strip")
+def test_pseudotime_heatmap_draws_with_colormaps_it_is_given(registered_colormap):
+    profiles = registered_colormap(
+        ListedColormap(["#000000", "#ffffff"], name="cytearc_profiles")
+    )
+    strip = registered_colormap(
+        ListedColormap(["#ff0000", "#0000ff"], name="cytearc_strip")
+    )
 
     result = splt.pseudotime_heatmap(
         _pseudotime_store(),
@@ -1994,10 +2038,13 @@ def test_pseudotime_heatmap_draws_with_colormaps_it_is_given():
         show=False,
     )
     try:
-        assert result.axes["heatmap"].images[0].get_cmap() is profiles
-        assert result.axes["pseudotime"].images[0].get_cmap() is strip
+        assert result.axes["heatmap"].images[0].get_cmap() == profiles
+        assert result.axes["pseudotime"].images[0].get_cmap() == strip
         # The result records each colormap by its name.
-        assert (result.scales[0].cmap, result.scales[2].cmap) == ("profiles", "strip")
+        assert (result.scales[0].cmap, result.scales[2].cmap) == (
+            "cytearc_profiles",
+            "cytearc_strip",
+        )
         # A color scale that names a colormap replaces heatmap_cmap.
         assert scaled.axes["heatmap"].images[0].get_cmap().name == "magma"
         assert scaled.scales[0].cmap == "magma"

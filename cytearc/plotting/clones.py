@@ -34,7 +34,7 @@ from ._style import (
     foreground_color,
     item_inches,
     palette_for_n,
-    scale_colormap_argument,
+    scale_argument,
     theme_context,
 )
 
@@ -144,13 +144,6 @@ def _follows_a_panel(ax: Any, panels: Sequence[Any]) -> bool:
         ):
             return True
     return False
-
-
-def _color_scale(color_scale: Any) -> ColorScale | None:
-    if color_scale is not None and not isinstance(color_scale, ColorScale):
-        raise TypeError("color_scale must be a ColorScale or None")
-    scale_colormap_argument(color_scale, "color_scale")
-    return color_scale
 
 
 def _small_multiples(n_panels: int, height: float | None = None) -> tuple[float, float]:
@@ -947,7 +940,7 @@ def clone_overlap(
     """
     show_legend = bool_argument(show_legend, "show_legend")
     show = bool_argument(show, "show")
-    color_scale = _color_scale(color_scale)
+    color_scale = scale_argument(color_scale, "color_scale", ColorScale)
     if not isinstance(overlap, CloneOverlap):
         raise TypeError("overlap must be the CloneOverlap of ds.clones.overlap")
     if index not in OVERLAP_INDICES:
@@ -1205,7 +1198,7 @@ def clone_coupling(
     """
     show_legend = bool_argument(show_legend, "show_legend")
     show = bool_argument(show, "show")
-    color_scale = _color_scale(color_scale)
+    color_scale = scale_argument(color_scale, "color_scale", ColorScale)
     if not isinstance(coupling, CloneCoupling):
         raise TypeError("coupling must be the CloneCoupling of ds.clones.coupling")
     if value not in _COUPLING_VALUES:

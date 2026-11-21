@@ -42,6 +42,10 @@ if TYPE_CHECKING:
     from matplotlib.colors import Colormap
 
     from .datastore import DataStore
+else:
+    # Matplotlib is optional, so the hints name Colormap only for type
+    # checkers and resolve without it.
+    Colormap = Any
 
 
 class _FrozenRunPlotCells:
@@ -1344,8 +1348,8 @@ class DataStorePlotAccessor:
         figsize: tuple[float, float] | None = None,
         vmin: float | None = None,
         vmax: float | None = None,
-        heatmap_cmap: "str | Colormap" = "coolwarm",
-        pseudotime_cmap: "str | Colormap" = "viridis",
+        heatmap_cmap: "str | Colormap | None" = "coolwarm",
+        pseudotime_cmap: "str | Colormap | None" = "viridis",
         clusterbar_cmap: "str | Colormap | None" = None,
         tick_fontsize: int = 10,
         axis_fontsize: int = 12,

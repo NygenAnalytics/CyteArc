@@ -263,7 +263,7 @@ plt.close(fig)
 | `color_scale` | auto per feature | `quantiles=(0.0, 0.99)` to stop outliers washing out a gene. |
 | `categorical_scale` | stored display or stored order, else natural order and default palette | Fix `order` or `palette` (dict) to keep colors identical; set only the fields to change, as `labels` alone keeps the stored order and colors; `palette_name` is only `"default"` or `"colorblind"` and replaces stored colors. |
 | `sort_values` | `None` (genes high on top) | `True` also sorts metadata colors; `False` shuffles gene colors too. |
-| `cmap`, `lineage_cmap`, `clusterbar_cmap` | colorblind palette for lineages and gene modules; a `cluster_tree` colors clusters and fill columns as embeddings do | Pass a Matplotlib colormap name or `Colormap` to color by it, categories by evenly spaced samples; any other value raises before the store is read. |
+| `cmap`, `lineage_cmap`, `clusterbar_cmap` | colorblind palette for lineages and gene modules; `cluster_tree` colors categories as embeddings do and numbers in viridis; `marker_heatmap` magma_r; `modality_weights` viridis | Pass a Matplotlib colormap name, or a `Colormap` registered under its name, to color by it, categories by evenly spaced samples; any other value raises before the store is read. |
 | `seed` (embedding) | `0` | `None` draws cells in stored order, so the last sample covers the others. |
 | `legend_loc` | `"auto"` | `"right"`, `"on_data"` or `"none"` to force placement. |
 | `max_points` (distribution) | `10000` | `0` for no points; `None` gives no points for stacked violins. |

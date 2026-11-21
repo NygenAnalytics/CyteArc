@@ -603,7 +603,8 @@ def test_highly_variable_features_rejects_malformed_adapters(
         (
             ("winter", 3),
             TypeError,
-            "colormaps[1] must be a Matplotlib colormap name or a Colormap, not int",
+            "colormaps[1] must be None, a Matplotlib colormap name or a registered "
+            "Colormap, not int",
         ),
         (
             ("not_a_colormap", "magma_r"),
@@ -637,20 +638,33 @@ def test_highly_variable_features_name_the_colormap_they_refuse(
     assert raised.value.args == (message,)
 
 
-def test_highly_variable_features_draw_with_colormaps_they_are_given():
+def test_highly_variable_features_draw_with_colormaps_they_are_given(
+    registered_colormap,
+):
     from matplotlib.colors import ListedColormap
 
-    not_selected = ListedColormap(["#000000", "#ffffff"], name="black_white")
+    not_selected = registered_colormap(
+        ListedColormap(["#000000", "#ffffff"], name="cytearc_black_white")
+    )
     result = splt.highly_variable_features(
         *_hvg_arguments(), colormaps=(not_selected, "plasma"), show=False
     )
+    # None draws Matplotlib's default colormap, viridis, as it always has.
+    default = splt.highly_variable_features(
+        *_hvg_arguments(), colormaps=(None, "plasma"), show=False
+    )
 
     unselected, selected = result.axes["highly_variable_features"].collections
-    assert unselected.get_cmap() is not_selected
+    assert unselected.get_cmap() == not_selected
     assert selected.get_cmap().name == "plasma"
-    # The result records each colormap by its name.
-    assert result.provenance.extras["colormaps"] == ["black_white", "plasma"]
+    assert default.axes["highly_variable_features"].collections[0].get_cmap().name == (
+        "viridis"
+    )
+    # The results record each colormap by its name, and None as None.
+    assert result.provenance.extras["colormaps"] == ["cytearc_black_white", "plasma"]
+    assert default.provenance.extras["colormaps"] == [None, "plasma"]
     result.close()
+    default.close()
 
 
 @pytest.mark.parametrize(

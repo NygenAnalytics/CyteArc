@@ -177,7 +177,7 @@ def test_modality_weights_respects_columns_colormap_and_rasterization(
 
 
 def test_modality_weights_draw_with_a_colormap_it_is_given(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, registered_colormap
 ) -> None:
     weights = np.asarray([[0.0, 1.0], [1.0, 0.0], [0.5, 0.5]], dtype=np.float64)
     store, graph, layout, selection = _wnn_store(weights)
@@ -186,7 +186,9 @@ def test_modality_weights_draw_with_a_colormap_it_is_given(
         "_resolve_layout",
         lambda *_args: _resolved_layout(selection),
     )
-    two_colors = ListedColormap(["#000000", "#ff0000"], name="black_red")
+    two_colors = registered_colormap(
+        ListedColormap(["#000000", "#ff0000"], name="cytearc_black_red")
+    )
 
     result = modality_weights(
         store, graph=graph, layout=layout, cmap=two_colors, show=False
@@ -203,7 +205,7 @@ def test_modality_weights_draw_with_a_colormap_it_is_given(
         ]
         np.testing.assert_allclose(points.get_facecolors(), expected)
     # The result records the colormap by its name.
-    assert result.scales[0].cmap == "black_red"
+    assert result.scales[0].cmap == "cytearc_black_red"
     result.close()
 
 
@@ -270,7 +272,7 @@ def test_modality_weights_shows_owned_results_by_default(
         (
             {"cmap": 3},
             TypeError,
-            "cmap must be a Matplotlib colormap name or a Colormap, not int",
+            "cmap must be a Matplotlib colormap name or a registered Colormap, not int",
         ),
         (
             {"rasterize_threshold": True},

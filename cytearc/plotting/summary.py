@@ -55,7 +55,7 @@ from ._style import (
     continuous_norm,
     foreground_color,
     resolve_color_limits,
-    scale_colormap_argument,
+    scale_argument,
     scatter_edgecolor,
     size_legend_layout,
     theme_context,
@@ -431,7 +431,7 @@ def dotplot(
     italicize_features = bool_argument(italicize_features, "italicize_features")
     show_legend = bool_argument(show_legend, "show_legend")
     show = bool_argument(show, "show")
-    scale_colormap_argument(color_scale, "color_scale")
+    color_scale = scale_argument(color_scale, "color_scale", ColorScale)
     _, mpl = require_matplotlib()
     color_scale = color_scale or ColorScale(cmap="viridis")
     if color_scale.scale != "linear":
@@ -875,7 +875,7 @@ def matrixplot(
     cluster_groups = bool_argument(cluster_groups, "cluster_groups")
     show_legend = bool_argument(show_legend, "show_legend")
     show = bool_argument(show, "show")
-    scale_colormap_argument(color_scale, "color_scale")
+    color_scale = scale_argument(color_scale, "color_scale", ColorScale)
     _, mpl = require_matplotlib()
     if value not in ("mean", "fraction"):
         raise ValueError("value must be 'mean' or 'fraction'")

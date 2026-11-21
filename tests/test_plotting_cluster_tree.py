@@ -13,7 +13,8 @@ import networkx as nx
 import numpy as np
 import pytest
 import zarr
-from matplotlib.colors import ListedColormap, to_hex, to_rgb
+from matplotlib import colormaps
+from matplotlib.colors import to_hex, to_rgb
 from zarr.storage import MemoryStore
 
 import cytearc.plotting as splt
@@ -370,9 +371,7 @@ def test_cluster_tree_colors_categories_over_every_label_of_the_column():
         result.close()
 
 
-@pytest.mark.parametrize(
-    "cmap", ["viridis", ListedColormap(["#440154", "#fde725"], name="ends")]
-)
+@pytest.mark.parametrize("cmap", ["viridis", colormaps["viridis"]])
 def test_cluster_tree_samples_a_colormap_over_the_categories_in_order(cmap):
     result = splt.cluster_tree(
         _tree_store(["B", "B", "A", "A", "B", "B"]),
@@ -395,12 +394,8 @@ def test_cluster_tree_samples_a_colormap_over_the_categories_in_order(cmap):
     [
         # viridis at 0 and 1.
         (None, "#440154", "#fde725", "viridis"),
-        (
-            ListedColormap(["#ff0000", "#0000ff"], name="red_blue"),
-            "#ff0000",
-            "#0000ff",
-            "red_blue",
-        ),
+        # bwr, which Matplotlib holds, at 0 and 1.
+        (colormaps["bwr"], "#0000ff", "#ff0000", "bwr"),
     ],
 )
 def test_cluster_tree_fills_numbers_from_a_colormap(cmap, low, high, name):
@@ -420,6 +415,49 @@ def test_cluster_tree_fills_numbers_from_a_colormap(cmap, low, high, name):
         assert result.scales[0] == splt.ColorScale(cmap=name, vmin=1.0, vmax=3.0)
     finally:
         result.close()
+
+
+def test_cluster_tree_samples_a_colormap_in_the_stored_order_of_its_column():
+    # The column stores the order T, B, NK and colors of its own, as an H5AD
+    # import keeps them.
+    root = zarr.open_group(store=MemoryStore(), mode="w")
+    column = root.create_group("cellData").create_array(
+        "cell_type", data=np.array(["T", "B", "NK", "T", "B", "NK"])
+    )
+    column.attrs["display"] = {
+        "kind": "categorical",
+        "categories": [
+            {"value": "T", "label": "T", "color": "#ff0000"},
+            {"value": "B", "label": "B", "color": "#00aa00"},
+            {"value": "NK", "label": "NK", "color": "#0000ff"},
+        ],
+    }
+    store = _tree_store(["B", "T", "NK", "T", "B", "NK"])
+    store.zw = root
+
+    def palette(**options):
+        result = splt.cluster_tree(
+            store,
+            graph=_GRAPH,
+            clusters=_CLUSTERS,
+            fill_by_value="cell_type",
+            show_labels=False,
+            show=False,
+            **options,
+        )
+        try:
+            return list(result.scales[0].palette.items())
+        finally:
+            result.close()
+
+    assert palette() == [("T", "#ff0000"), ("B", "#00aa00"), ("NK", "#0000ff")]
+    # viridis at 0, 0.5 and 1 over T, B and NK, the stored order, rather than
+    # over B, NK and T, the natural one.
+    assert palette(cmap="viridis") == [
+        ("T", "#440154"),
+        ("B", "#21918c"),
+        ("NK", "#fde725"),
+    ]
 
 
 def test_cluster_tree_keeps_a_single_category_categorical():

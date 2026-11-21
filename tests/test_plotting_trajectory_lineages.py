@@ -18,6 +18,7 @@ import numpy as np
 import pandas as pd
 import pytest
 from loguru import logger
+from matplotlib import colormaps
 from matplotlib.colors import LinearSegmentedColormap, ListedColormap, to_hex
 from matplotlib.markers import MarkerStyle
 
@@ -710,7 +711,9 @@ def test_lineage_heatmap_orders_features_by_module_and_peak(
 
     assert result.scales == (
         splt.ColorScale(cmap="coolwarm", vmin=-2.0, vmax=2.0),
-        splt.CategoricalScale(order=tuple(modules), palette=palette),
+        splt.CategoricalScale(
+            order=tuple(modules), palette=palette, palette_name="colorblind"
+        ),
     )
     assert result.legends == (
         splt.LegendSpec(
@@ -962,34 +965,52 @@ def test_lineage_heatmap_without_colorbar_in_a_custom_style(
 
 
 def test_lineage_heatmap_draws_with_colormaps_it_is_given(
-    closing, datastore, lineage_aggregation
+    closing, datastore, lineage_aggregation, registered_colormap
 ):
-    profiles = LinearSegmentedColormap.from_list("white_red", ["#ffffff", "#ff0000"])
-    strips = ListedColormap(["#000000", "#ffffff"], name="black_white")
-    modules = ListedColormap(
-        ["#111111", "#222222", "#333333", "#444444", "#555555"], name="grays"
+    # Colormaps of one's own, which Matplotlib holds once they are registered.
+    profiles = registered_colormap(
+        LinearSegmentedColormap.from_list("cytearc_white_red", ["#ffffff", "#ff0000"])
     )
+    strips = registered_colormap(
+        ListedColormap(["#000000", "#ffffff"], name="cytearc_black_white")
+    )
+    grays = ["#111111", "#222222", "#333333", "#444444", "#555555"]
+    modules = registered_colormap(ListedColormap(grays, name="cytearc_grays"))
 
     result = closing(
         datastore.plots.lineage_heatmap(
             aggregation=lineage_aggregation,
             heatmap_cmap=profiles,
-            pseudotime_cmap=strips,
+            pseudotime_cmap="cytearc_black_white",
             clusterbar_cmap=modules,
+            show=False,
+        )
+    )
+    defaults = closing(
+        datastore.plots.lineage_heatmap(
+            aggregation=lineage_aggregation,
+            heatmap_cmap=None,
+            pseudotime_cmap=None,
             show=False,
         )
     )
 
     for name in LINEAGES:
-        assert result.axes[("heatmap", name)].images[0].get_cmap() is profiles
-        assert result.axes[("pseudotime", name)].images[0].get_cmap() is strips
+        assert result.axes[("heatmap", name)].images[0].get_cmap() == profiles
+        assert result.axes[("pseudotime", name)].images[0].get_cmap() == strips
+        # None draws Matplotlib's default colormap, viridis.
+        for panel in ("heatmap", "pseudotime"):
+            assert defaults.axes[(panel, name)].images[0].get_cmap().name == "viridis"
     # The five modules sample the five colors at 0, 0.25, 0.5, 0.75 and 1.
-    grays = ["#111111", "#222222", "#333333", "#444444", "#555555"]
     cluster_ax = result.axes["feature_clusters"]
     assert [to_hex(color) for color in cluster_ax.images[0].get_cmap().colors] == grays
-    # The result records the profiles' colormap by its name.
-    assert result.scales[0] == splt.ColorScale(cmap="white_red", vmin=-2.0, vmax=2.0)
+    # The results record each colormap by its name, and None as None.
+    assert result.scales[0] == splt.ColorScale(
+        cmap="cytearc_white_red", vmin=-2.0, vmax=2.0
+    )
     assert list(result.scales[1].palette.values()) == grays
+    assert result.scales[1].palette_name is None
+    assert defaults.scales[0] == splt.ColorScale(cmap=None, vmin=-2.0, vmax=2.0)
 
 
 def test_lineage_plots_refuse_a_colormap_before_they_read_the_store(
@@ -1015,9 +1036,9 @@ def test_lineage_plots_refuse_a_colormap_before_they_read_the_store(
             lineage_cmap="not_a_colormap",
             show=False,
         )
-    with pytest.raises(TypeError) as missing:
+    with pytest.raises(TypeError) as wrong_type:
         datastore.plots.lineage_heatmap(
-            aggregation=lineage_aggregation, heatmap_cmap=None, show=False
+            aggregation=lineage_aggregation, heatmap_cmap=3, show=False
         )
     # A colormap that the plot takes reaches the store.
     with pytest.raises(AssertionError, match="The plot read the store"):
@@ -1029,14 +1050,16 @@ def test_lineage_plots_refuse_a_colormap_before_they_read_the_store(
         )
 
     assert listed.value.args == (
-        "lineage_cmap must be None, a Matplotlib colormap name or a Colormap, not list",
+        "lineage_cmap must be None, a Matplotlib colormap name or a registered "
+        "Colormap, not list",
     )
     assert unknown.value.args == (
         "lineage_cmap must name a Matplotlib colormap, such as 'viridis'; "
         "'not_a_colormap' is not one",
     )
-    assert missing.value.args == (
-        "heatmap_cmap must be a Matplotlib colormap name or a Colormap, not NoneType",
+    assert wrong_type.value.args == (
+        "heatmap_cmap must be None, a Matplotlib colormap name or a registered "
+        "Colormap, not int",
     )
 
 
@@ -1426,8 +1449,8 @@ def test_lineage_trends_draw_chosen_lineages_in_a_custom_style(
         (None, "#0072B2"),
         # viridis at 0.
         ("viridis", "#440154"),
-        # A Colormap's first color.
-        (ListedColormap(["#123456", "#abcdef"], name="custom"), "#123456"),
+        # The first color of a Colormap that Matplotlib holds.
+        (colormaps["Dark2"], "#1b9e77"),
     ],
 )
 def test_lineage_trends_color_a_single_lineage(

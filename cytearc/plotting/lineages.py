@@ -25,7 +25,6 @@ from ._style import (
     DEFAULT_PANEL_INCHES,
     apply_figure_chrome,
     colormap_argument,
-    colormap_name,
     colormap_palette,
     continuous_norm,
     default_point_size,
@@ -36,6 +35,10 @@ from ._style import (
 
 if TYPE_CHECKING:
     from matplotlib.colors import Colormap
+else:
+    # Matplotlib is optional, so the hints name Colormap only for type
+    # checkers and resolve without it.
+    Colormap = Any
 
 __all__ = ["lineage_curves", "lineage_heatmap", "lineage_trends", "lineage_tree"]
 
@@ -79,8 +82,8 @@ def lineage_heatmap(
     figsize: tuple[float, float] | None = None,
     vmin: float | None = None,
     vmax: float | None = None,
-    heatmap_cmap: "str | Colormap" = "coolwarm",
-    pseudotime_cmap: "str | Colormap" = "viridis",
+    heatmap_cmap: "str | Colormap | None" = "coolwarm",
+    pseudotime_cmap: "str | Colormap | None" = "viridis",
     clusterbar_cmap: "str | Colormap | None" = None,
     tick_fontsize: int = 10,
     axis_fontsize: int = 12,
@@ -113,12 +116,14 @@ def lineage_heatmap(
     ``clusterbar_cmap`` is sampled at evenly spaced positions instead.
     ``heatmap_cmap`` and ``pseudotime_cmap`` color the profiles and the
     pseudotime strips. Each colormap argument takes a Matplotlib colormap
-    name or a ``Colormap``.
+    name or a registered ``Colormap``.
     """
     show_legend = bool_argument(show_legend, "show_legend")
     show = bool_argument(show, "show")
-    heatmap_cmap = colormap_argument(heatmap_cmap, "heatmap_cmap")
-    pseudotime_cmap = colormap_argument(pseudotime_cmap, "pseudotime_cmap")
+    heatmap_cmap = colormap_argument(heatmap_cmap, "heatmap_cmap", optional=True)
+    pseudotime_cmap = colormap_argument(
+        pseudotime_cmap, "pseudotime_cmap", optional=True
+    )
     clusterbar_cmap = colormap_argument(
         clusterbar_cmap, "clusterbar_cmap", optional=True
     )
@@ -294,8 +299,12 @@ def lineage_heatmap(
             LegendSpec(kind="categorical", label="feature modules"),
         ),
         scales=(
-            ColorScale(cmap=colormap_name(heatmap_cmap), vmin=vmin, vmax=vmax),
-            CategoricalScale(order=tuple(cluster_order), palette=palette),
+            ColorScale(cmap=heatmap_cmap, vmin=vmin, vmax=vmax),
+            CategoricalScale(
+                order=tuple(cluster_order),
+                palette=palette,
+                palette_name="colorblind" if clusterbar_cmap is None else None,
+            ),
         ),
         provenance=PlotProvenance(
             assay=loaded.assay,
@@ -358,9 +367,9 @@ def lineage_trends(
     order, as ``CategoricalScale(palette_name="colorblind")`` assigns them.
     More than 12 lineages take evenly spaced hues instead, with a warning
     that they may not be colorblind safe. ``lineage_cmap`` takes a
-    Matplotlib colormap, by name or as a ``Colormap``, to sample at evenly
-    spaced positions from 0 to 1, and a single lineage then takes the
-    colormap's first color.
+    Matplotlib colormap, by name or as a registered ``Colormap``, to sample
+    at evenly spaced positions from 0 to 1, and a single lineage then takes
+    the colormap's first color.
     """
     show_legend = bool_argument(show_legend, "show_legend")
     show = bool_argument(show, "show")

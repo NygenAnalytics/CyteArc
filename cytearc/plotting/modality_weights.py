@@ -29,7 +29,6 @@ from ._style import (
     FrameStyle,
     apply_figure_chrome,
     colormap_argument,
-    colormap_name,
     default_point_edgewidth,
     default_point_size,
     finish_embedding_axes,
@@ -41,6 +40,10 @@ from ..utils.arguments import bool_argument
 
 if TYPE_CHECKING:
     from matplotlib.colors import Colormap
+else:
+    # Matplotlib is optional, so the hints name Colormap only for type
+    # checkers and resolve without it.
+    Colormap = Any
 
 
 def _wnn_assays(
@@ -158,14 +161,14 @@ def modality_weights(
 
     ``layout`` must hold the graph's cells, whichever operation made its cell
     selection; a layout of other cells raises ``ValueError``. ``cmap`` takes
-    a Matplotlib colormap name or a ``Colormap``.
+    a Matplotlib colormap name or a registered ``Colormap``.
     """
     show = bool_argument(show, "show")
     if point_size is not None and (not np.isfinite(point_size) or point_size <= 0):
         raise ValueError("point_size must be positive and finite")
     if not np.isfinite(point_alpha) or not 0 <= point_alpha <= 1:
         raise ValueError("point_alpha must be between zero and one")
-    cmap = colormap_argument(cmap, "cmap")
+    colormap = colormap_argument(cmap, "cmap")
     if (
         isinstance(rasterize_threshold, bool)
         or not isinstance(rasterize_threshold, int)
@@ -232,7 +235,7 @@ def modality_weights(
                 x,
                 y,
                 c=weights[:, index],
-                cmap=plt.get_cmap(cmap),
+                cmap=plt.get_cmap(colormap),
                 vmin=0.0,
                 vmax=1.0,
                 s=resolved_size,
@@ -276,9 +279,7 @@ def modality_weights(
                 extras={"assays": assays},
             ),
         ),
-        scales=(
-            ColorScale(cmap=colormap_name(cmap), vmin=0.0, vmax=1.0, scope="shared"),
-        ),
+        scales=(ColorScale(cmap=colormap, vmin=0.0, vmax=1.0, scope="shared"),),
         provenance=PlotProvenance(
             n_cells=len(cell_indices),
             renderer="matplotlib",

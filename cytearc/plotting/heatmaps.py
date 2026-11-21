@@ -37,17 +37,20 @@ from ..utils.arrays import sort_categories
 from ._style import (
     apply_figure_chrome,
     colormap_argument,
-    colormap_name,
     colormap_palette,
     continuous_norm,
     resolve_category_scale,
     resolve_color_limits,
-    scale_colormap_argument,
+    scale_argument,
     theme_context,
 )
 
 if TYPE_CHECKING:
     from matplotlib.colors import Colormap
+else:
+    # Matplotlib is optional, so the hints name Colormap only for type
+    # checkers and resolve without it.
+    Colormap = Any
 
 
 def _marker_log_transform(assay: Any, value: bool | None) -> bool:
@@ -334,15 +337,26 @@ def marker_heatmap(
 ) -> PlotResult:
     """Plot standardized expression of the top marker features.
 
-    ``cmap`` takes a Matplotlib colormap name, a ``Colormap`` or a list of
-    colors, and a ``color_scale`` that names a colormap replaces it.
+    ``cmap`` takes a Matplotlib colormap name, a registered ``Colormap`` or a
+    list of colors, and a ``color_scale`` that names a colormap replaces it.
     """
+    listed_colors = None
     if isinstance(cmap, list):
-        # A list of colors is their colormap, as seaborn's heatmap reads it.
+        # A list of colors draws as their colormap, as seaborn's heatmap reads
+        # it, and the result records no colormap name for it.
+        if not cmap:
+            raise ValueError("cmap must list at least one color")
         _, mpl = require_matplotlib()
-        cmap = mpl.colors.ListedColormap(cmap, name="from_list")
-    cmap = colormap_argument(cmap, "cmap")
-    scale_colormap_argument(color_scale, "color_scale")
+        try:
+            listed_colors = mpl.colors.ListedColormap(mpl.colors.to_rgba_array(cmap))
+        except (TypeError, ValueError) as error:
+            raise ValueError(
+                f"cmap must list colors, but {cmap!r} holds a value that is no color"
+            ) from error
+        cmap = None
+    else:
+        cmap = colormap_argument(cmap, "cmap", optional=True)
+    color_scale = scale_argument(color_scale, "color_scale", ColorScale)
     log_transform = optional_bool_argument(log_transform, "log_transform")
     cluster_rows = bool_argument(cluster_rows, "cluster_rows")
     cluster_columns = bool_argument(cluster_columns, "cluster_columns")
@@ -373,7 +387,8 @@ def marker_heatmap(
         if resolved_color_scale.vmax is not None
         else float(vmax)
     )
-    resolved_cmap = resolved_color_scale.cmap or cmap
+    recorded_cmap = resolved_color_scale.cmap or cmap
+    resolved_cmap = resolved_color_scale.cmap or listed_colors or cmap
     if resolved_vmax <= resolved_vmin:
         raise ValueError("vmax must be greater than vmin")
     prepared = _prepare_marker_heatmap(
@@ -573,7 +588,7 @@ def marker_heatmap(
             )
 
     resolved_scale = ColorScale(
-        cmap=colormap_name(resolved_cmap),
+        cmap=recorded_cmap,
         vmin=resolved_vmin,
         vmax=resolved_vmax,
         vcenter=resolved_color_scale.vcenter,
@@ -756,7 +771,7 @@ def pseudotime_heatmap(
     default, and ``pseudotime_cmap`` the pseudotime strip, viridis by
     default, unless ``color_scale`` or ``pseudotime_scale`` names a
     colormap. Each colormap argument takes a Matplotlib colormap name or a
-    ``Colormap``.
+    registered ``Colormap``.
     """
     show_legend = bool_argument(show_legend, "show_legend")
     show = bool_argument(show, "show")
@@ -767,8 +782,8 @@ def pseudotime_heatmap(
     clusterbar_cmap = colormap_argument(
         clusterbar_cmap, "clusterbar_cmap", optional=True
     )
-    scale_colormap_argument(color_scale, "color_scale")
-    scale_colormap_argument(pseudotime_scale, "pseudotime_scale")
+    color_scale = scale_argument(color_scale, "color_scale", ColorScale)
+    pseudotime_scale = scale_argument(pseudotime_scale, "pseudotime_scale", ColorScale)
     resolved_color_scale = color_scale or ColorScale(vmin=vmin, vmax=vmax)
     if resolved_color_scale.scale != "linear":
         raise NotImplementedError("pseudotime_heatmap supports linear scales")
@@ -1062,14 +1077,14 @@ def pseudotime_heatmap(
         ),
         scales=(
             ColorScale(
-                cmap=colormap_name(resolved_heatmap_cmap),
+                cmap=resolved_heatmap_cmap,
                 vmin=resolved_vmin,
                 vmax=resolved_vmax,
                 vcenter=resolved_color_scale.vcenter,
             ),
             resolved_feature_cluster_scale,
             ColorScale(
-                cmap=colormap_name(resolved_pseudotime_cmap),
+                cmap=resolved_pseudotime_cmap,
                 vmin=pseudotime_vmin,
                 vmax=pseudotime_vmax,
             ),

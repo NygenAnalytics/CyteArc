@@ -1,10 +1,11 @@
 """Themes and categorical palettes for cytearc.plotting."""
 
+import contextlib
 import functools
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from dataclasses import dataclass, replace
+from typing import Any
 from weakref import WeakKeyDictionary
 
 import numpy as np
@@ -14,13 +15,11 @@ from ..utils.arrays import sort_categories
 from ._contracts import (
     CategoricalScale,
     ColorScale,
+    DensityOverlay,
     FrameStyle,
     LegendLoc,
     SizeScale,
 )
-
-if TYPE_CHECKING:
-    from matplotlib.colors import Colormap
 
 # Shared CyteArc figure defaults used by embedding-like plots.
 DEFAULT_RASTERIZE_THRESHOLD = 50_000
@@ -803,17 +802,39 @@ def categorical_color_map(
     return dict(zip(cats, colors))
 
 
-def colormap_argument(value: object, name: str, *, optional: bool = False) -> Any:
-    """Check an argument that takes a Matplotlib colormap, and return it.
+def _held_colormap(mpl: Any, name: str) -> Any:
+    """Return the colormap that ``matplotlib.colormaps`` holds under ``name``, or None.
+
+    seaborn adds its colormaps, such as ``"rocket"`` and ``"vlag"``, to the
+    registry when it is imported, so a name that the registry does not hold
+    is looked up again once seaborn is imported, as a plot that draws with
+    seaborn would find it.
+    """
+    if name not in mpl.colormaps:
+        with contextlib.suppress(ImportError):
+            import seaborn  # noqa: F401
+    return mpl.colormaps.get(name)
+
+
+def colormap_argument(
+    value: object, name: str, *, optional: bool = False
+) -> str | None:
+    """Check an argument that takes a Matplotlib colormap, and return its name.
 
     The argument takes the name of a colormap that ``matplotlib.colormaps``
-    holds, such as ``"viridis"``, or a ``matplotlib.colors.Colormap``, and
-    None where ``optional`` allows it. Plots check each colormap argument
-    before they read the store.
+    holds, such as ``"viridis"`` or seaborn's ``"rocket"``, or a ``Colormap``
+    that it holds under that ``Colormap``'s own name, and None where
+    ``optional`` allows it. Plots draw, record and compose a colormap by its
+    name, so a ``Colormap`` of one's own, or one changed from another, such
+    as ``viridis.with_extremes(bad="gray")``, is used once
+    ``matplotlib.colormaps.register`` holds it under a name of its own. Plots
+    check each colormap argument before they read the store.
 
     Raises:
         TypeError: If ``value`` is of another type.
-        ValueError: If ``value`` names no colormap that Matplotlib holds.
+        ValueError: If ``value`` names no colormap that Matplotlib holds, or
+            is a ``Colormap`` that it does not hold under the ``Colormap``'s
+            name.
     """
     from ._deps import require_matplotlib
 
@@ -821,14 +842,21 @@ def colormap_argument(value: object, name: str, *, optional: bool = False) -> An
     if value is None and optional:
         return None
     if isinstance(value, mpl.colors.Colormap):
-        return value
+        if _held_colormap(mpl, value.name) != value:
+            raise ValueError(
+                f"{name} is a Colormap that matplotlib.colormaps does not hold "
+                f"under its name {value.name!r}; register it with "
+                "matplotlib.colormaps.register under a name of its own, and "
+                "pass it or that name"
+            )
+        return str(value.name)
     if not isinstance(value, str):
         allowed = "None, a" if optional else "a"
         raise TypeError(
-            f"{name} must be {allowed} Matplotlib colormap name or a Colormap, "
-            f"not {type(value).__name__}"
+            f"{name} must be {allowed} Matplotlib colormap name or a registered "
+            f"Colormap, not {type(value).__name__}"
         )
-    if value not in mpl.colormaps:
+    if _held_colormap(mpl, value) is None:
         raise ValueError(
             f"{name} must name a Matplotlib colormap, such as 'viridis'; "
             f"{value!r} is not one"
@@ -836,40 +864,33 @@ def colormap_argument(value: object, name: str, *, optional: bool = False) -> An
     return value
 
 
-def scale_colormap_argument(scale: Any, name: str) -> None:
-    """Check the colormap that a ``ColorScale`` or ``DensityOverlay`` argument names.
+def scale_argument[Scale: (ColorScale, DensityOverlay)](
+    value: object, name: str, kind: type[Scale]
+) -> Scale | None:
+    """Check an argument that takes a ``ColorScale`` or ``DensityOverlay``, and return it.
 
-    A scale names its colormap, or leaves it None for the plot's default:
-    plot results record their scales, and ``compose_results`` and provenance
-    files read the name, so a ``Colormap`` registered with
-    ``matplotlib.colormaps.register`` is passed by its name. Plots check each
-    scale argument before they read the store.
+    The scale's colormap follows :func:`colormap_argument`, None included,
+    and the returned scale names it, as results record it and
+    ``compose_results`` and provenance files read it. Plots check each scale
+    argument before they read the store.
 
     Raises:
-        TypeError: If the scale's colormap is neither None nor text.
-        ValueError: If it names no colormap that Matplotlib holds.
+        TypeError: If ``value`` is neither None nor a ``kind``, or its
+            colormap is of another type.
+        ValueError: If its colormap is not one that :func:`colormap_argument`
+            takes.
     """
-    cmap = None if scale is None else scale.cmap
-    if cmap is not None and not isinstance(cmap, str):
+    if value is None:
+        return None
+    if not isinstance(value, kind):
         raise TypeError(
-            f"{name}.cmap must be None or a Matplotlib colormap name, "
-            f"not {type(cmap).__name__}"
+            f"{name} must be a {kind.__name__} or None, not {type(value).__name__}"
         )
-    colormap_argument(cmap, f"{name}.cmap", optional=True)
+    cmap = colormap_argument(value.cmap, f"{name}.cmap", optional=True)
+    return value if cmap == value.cmap else replace(value, cmap=cmap)
 
 
-def colormap_name(cmap: "str | Colormap") -> str:
-    """Return the name of a colormap that :func:`colormap_argument` accepts.
-
-    Plot results record a colormap by its name, as a ``Colormap`` names
-    itself.
-    """
-    return cmap if isinstance(cmap, str) else str(cmap.name)
-
-
-def colormap_palette(
-    categories: Sequence[Any], cmap: "str | Colormap | None"
-) -> dict[Any, str]:
+def colormap_palette(categories: Sequence[Any], cmap: str | None) -> dict[Any, str]:
     """Color categories in their order, from a colormap or the colorblind palette.
 
     A colormap is sampled at evenly spaced positions from 0 to 1, so a single

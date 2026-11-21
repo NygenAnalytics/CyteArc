@@ -3,6 +3,7 @@
 import os
 import subprocess
 import sys
+import textwrap
 
 import matplotlib
 import numpy as np
@@ -15,9 +16,9 @@ from cytearc.plotting._deps import require_matplotlib
 from cytearc.plotting._style import (
     categorical_color_map,
     colormap_argument,
-    colormap_name,
     continuous_norm,
     palette_for_n,
+    scale_argument,
     theme_context,
 )
 from cytearc.storage.refs import ArtifactRef
@@ -355,18 +356,56 @@ def test_padded_square_limits_and_colormap_palette():
     }
 
 
-def test_colormap_argument_takes_a_colormap_name_or_a_colormap():
+# The refusals of a colormap argument, here of one named cmap.
+_NOT_A_COLORMAP = (
+    "{} must name a Matplotlib colormap, such as 'viridis'; {!r} is not one"
+)
+_UNHELD_COLORMAP = (
+    "{} is a Colormap that matplotlib.colormaps does not hold under its name "
+    "{!r}; register it with matplotlib.colormaps.register under a name of its "
+    "own, and pass it or that name"
+)
+
+
+def test_colormap_argument_returns_the_name_of_the_colormap_it_takes(
+    registered_colormap,
+):
+    from matplotlib import colormaps
     from matplotlib.colors import ListedColormap
 
-    custom = ListedColormap(["#ff0000", "#0000ff"], name="red_blue")
-
+    # A name, and a Colormap that Matplotlib holds under its own name, the
+    # reverse of a held map included, give that name.
     assert colormap_argument("viridis", "cmap") == "viridis"
     assert colormap_argument(np.str_("magma_r"), "cmap") == "magma_r"
-    assert colormap_argument(custom, "cmap") is custom
+    assert colormap_argument(colormaps["Set1"], "cmap") == "Set1"
+    assert colormap_argument(colormaps["viridis"].reversed(), "cmap") == "viridis_r"
     assert colormap_argument(None, "cmap", optional=True) is None
-    # Results record a colormap by its name, a Colormap by the name it gives.
-    assert colormap_name("magma_r") == "magma_r"
-    assert colormap_name(custom) == "red_blue"
+    # A Colormap of one's own counts once Matplotlib holds it.
+    red_blue = ListedColormap(["#ff0000", "#0000ff"], name="cytearc_red_blue")
+    with pytest.raises(ValueError) as unheld:
+        colormap_argument(red_blue, "cmap")
+    registered_colormap(red_blue)
+    assert colormap_argument(red_blue, "cmap") == "cytearc_red_blue"
+    assert colormap_argument("cytearc_red_blue", "cmap") == "cytearc_red_blue"
+
+    assert unheld.value.args == (_UNHELD_COLORMAP.format("cmap", "cytearc_red_blue"),)
+
+
+def test_colormap_argument_refuses_a_colormap_changed_from_a_held_one():
+    from matplotlib import colormaps
+
+    # A changed map keeps the name of the map it was changed from, so drawing
+    # or composing it by that name would draw the other map.
+    for changed in (
+        colormaps["viridis"].with_extremes(bad="#808080"),
+        colormaps["viridis"].resampled(8),
+    ):
+        with pytest.raises(ValueError) as raised:
+            colormap_argument(changed, "lineage_cmap", optional=True)
+
+        assert raised.value.args == (
+            _UNHELD_COLORMAP.format("lineage_cmap", "viridis"),
+        )
 
 
 @pytest.mark.parametrize(
@@ -376,48 +415,39 @@ def test_colormap_argument_takes_a_colormap_name_or_a_colormap():
             3,
             False,
             TypeError,
-            "cmap must be a Matplotlib colormap name or a Colormap, not int",
+            "cmap must be a Matplotlib colormap name or a registered Colormap, not int",
         ),
         (
             None,
             False,
             TypeError,
-            "cmap must be a Matplotlib colormap name or a Colormap, not NoneType",
+            "cmap must be a Matplotlib colormap name or a registered Colormap, "
+            "not NoneType",
         ),
         (
             True,
             True,
             TypeError,
-            "cmap must be None, a Matplotlib colormap name or a Colormap, not bool",
+            "cmap must be None, a Matplotlib colormap name or a registered "
+            "Colormap, not bool",
         ),
         # A list of colors is no colormap.
         (
             ["#ff0000", "#0000ff"],
             True,
             TypeError,
-            "cmap must be None, a Matplotlib colormap name or a Colormap, not list",
+            "cmap must be None, a Matplotlib colormap name or a registered "
+            "Colormap, not list",
         ),
         (
             "not_a_colormap",
             True,
             ValueError,
-            "cmap must name a Matplotlib colormap, such as 'viridis'; "
-            "'not_a_colormap' is not one",
+            _NOT_A_COLORMAP.format("cmap", "not_a_colormap"),
         ),
         # Matplotlib's names are case-sensitive, and no colormap is unnamed.
-        (
-            "Viridis",
-            False,
-            ValueError,
-            "cmap must name a Matplotlib colormap, such as 'viridis'; "
-            "'Viridis' is not one",
-        ),
-        (
-            "",
-            False,
-            ValueError,
-            "cmap must name a Matplotlib colormap, such as 'viridis'; '' is not one",
-        ),
+        ("Viridis", False, ValueError, _NOT_A_COLORMAP.format("cmap", "Viridis")),
+        ("", False, ValueError, _NOT_A_COLORMAP.format("cmap", "")),
     ],
 )
 def test_colormap_argument_names_the_argument_and_the_value_it_refuses(
@@ -427,6 +457,56 @@ def test_colormap_argument_names_the_argument_and_the_value_it_refuses(
         colormap_argument(value, "cmap", optional=optional)
 
     assert raised.value.args == (message,)
+
+
+def test_colormap_arguments_find_seaborn_colormaps_in_a_fresh_interpreter():
+    # seaborn adds rocket, mako, flare, crest, vlag and icefire to Matplotlib's
+    # colormaps only when it is imported, which a plot may not have done when
+    # it checks its arguments.
+    code = textwrap.dedent(
+        """
+        import sys
+
+        import matplotlib
+
+        from cytearc.plotting._contracts import ColorScale
+        from cytearc.plotting._style import colormap_argument, scale_argument
+
+        assert "seaborn" not in sys.modules
+        assert "vlag" not in matplotlib.colormaps
+        print(colormap_argument("vlag", "cmap"))
+        print(scale_argument(ColorScale(cmap="icefire"), "color_scale", ColorScale).cmap)
+        print(colormap_argument("rocket_r", "cmap"))
+        """
+    )
+
+    completed = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, check=False
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.split() == ["vlag", "icefire", "rocket_r"]
+
+
+def test_scale_argument_names_the_colormap_of_the_scale_it_returns():
+    from matplotlib import colormaps
+
+    named = splt.ColorScale(cmap="magma", vmin=0.0)
+
+    # A scale that names its colormap is returned as it is, and one that
+    # holds a held Colormap is returned naming it.
+    assert scale_argument(named, "color_scale", splt.ColorScale) is named
+    assert scale_argument(
+        splt.ColorScale(cmap=colormaps["magma"], vmin=0.0),
+        "color_scale",
+        splt.ColorScale,
+    ) == splt.ColorScale(cmap="magma", vmin=0.0)
+    assert scale_argument(
+        splt.DensityOverlay(cmap=colormaps["Greys"]),
+        "density_overlay",
+        splt.DensityOverlay,
+    ) == splt.DensityOverlay(cmap="Greys")
+    assert scale_argument(None, "color_scale", splt.ColorScale) is None
 
 
 class _UnreadableStore:
@@ -441,6 +521,9 @@ def _ref(kind: str, *, scope: str = "assay") -> ArtifactRef:
     return ArtifactRef(scope=scope, assay=assay, kind=kind, artifact_id="1" * 64)
 
 
+_TAKES = "a Matplotlib colormap name or a registered Colormap"
+_TAKES_NONE = "None, a Matplotlib colormap name or a registered Colormap"
+
 # Each colormap argument of a plot that reads the store, the arguments that
 # the plot needs besides it, and what the argument takes.
 _COLORMAP_ARGUMENTS = [
@@ -448,33 +531,29 @@ _COLORMAP_ARGUMENTS = [
         "lineage_trends",
         "lineage_cmap",
         {"aggregation": _ref("lineage_aggregation"), "features": ["CD3E"]},
-        "None, a Matplotlib colormap name or a Colormap",
+        _TAKES_NONE,
     ),
     (
         "lineage_curves",
         "lineage_cmap",
         {"curves": _ref("lineage_curves"), "layout": _ref("embedding")},
-        "None, a Matplotlib colormap name or a Colormap",
+        _TAKES_NONE,
     ),
     *(
         (
             "lineage_heatmap",
             argument,
             {"aggregation": _ref("lineage_aggregation")},
-            takes,
+            _TAKES_NONE,
         )
-        for argument, takes in (
-            ("heatmap_cmap", "a Matplotlib colormap name or a Colormap"),
-            ("pseudotime_cmap", "a Matplotlib colormap name or a Colormap"),
-            ("clusterbar_cmap", "None, a Matplotlib colormap name or a Colormap"),
-        )
+        for argument in ("heatmap_cmap", "pseudotime_cmap", "clusterbar_cmap")
     ),
     *(
         (
             "pseudotime_heatmap",
             argument,
             {"aggregation": _ref("pseudotime_aggregation")},
-            "None, a Matplotlib colormap name or a Colormap",
+            _TAKES_NONE,
         )
         for argument in ("heatmap_cmap", "pseudotime_cmap", "clusterbar_cmap")
     ),
@@ -482,14 +561,9 @@ _COLORMAP_ARGUMENTS = [
         "cluster_tree",
         "cmap",
         {"graph": _ref("connectivity_map"), "clusters": _ref("cluster_cut")},
-        "None, a Matplotlib colormap name or a Colormap",
+        _TAKES_NONE,
     ),
-    (
-        "marker_heatmap",
-        "cmap",
-        {"marker": _ref("marker_table")},
-        "a Matplotlib colormap name or a Colormap",
-    ),
+    ("marker_heatmap", "cmap", {"marker": _ref("marker_table")}, _TAKES_NONE),
     (
         "modality_weights",
         "cmap",
@@ -497,7 +571,7 @@ _COLORMAP_ARGUMENTS = [
             "graph": _ref("integrated_graph", scope="datastore"),
             "layout": _ref("embedding"),
         },
-        "a Matplotlib colormap name or a Colormap",
+        _TAKES,
     ),
 ]
 
@@ -510,22 +584,27 @@ _COLORMAP_ARGUMENTS = [
 def test_plots_check_each_colormap_argument_before_they_read_the_store(
     plot, argument, required, takes
 ):
+    from matplotlib import colormaps
+    from matplotlib.colors import ListedColormap
+
     draw = getattr(splt, plot)
+    unheld = ListedColormap(["#000000", "#ffffff"], name="cytearc_unheld")
 
     with pytest.raises(TypeError) as wrong_type:
         draw(_UnreadableStore(), **required, **{argument: 3}, show=False)
     with pytest.raises(ValueError) as unknown:
         draw(_UnreadableStore(), **required, **{argument: "not_a_colormap"}, show=False)
+    with pytest.raises(ValueError) as not_held:
+        draw(_UnreadableStore(), **required, **{argument: unheld}, show=False)
     # A colormap that the argument takes passes the check, and the plot goes
     # on to read the store, which the store double refuses.
-    with pytest.raises(AssertionError, match="The plot read store"):
-        draw(_UnreadableStore(), **required, **{argument: "magma"}, show=False)
+    for colormap in ("magma", colormaps["magma"]):
+        with pytest.raises(AssertionError, match="The plot read store"):
+            draw(_UnreadableStore(), **required, **{argument: colormap}, show=False)
 
     assert wrong_type.value.args == (f"{argument} must be {takes}, not int",)
-    assert unknown.value.args == (
-        f"{argument} must name a Matplotlib colormap, such as 'viridis'; "
-        "'not_a_colormap' is not one",
-    )
+    assert unknown.value.args == (_NOT_A_COLORMAP.format(argument, "not_a_colormap"),)
+    assert not_held.value.args == (_UNHELD_COLORMAP.format(argument, "cytearc_unheld"),)
 
 
 # Each ColorScale or DensityOverlay argument of a plot, and the arguments that
@@ -582,44 +661,39 @@ _SCALE_ARGUMENTS = [
 def test_plots_check_each_scale_colormap_before_they_read_the_store(
     plot, argument, required
 ):
+    from matplotlib import colormaps
     from matplotlib.colors import ListedColormap
 
     draw = getattr(splt, plot)
     scale = splt.DensityOverlay if argument == "density_overlay" else splt.ColorScale
 
-    def refusal(cmap):
+    def refusal(value):
         with pytest.raises((TypeError, ValueError)) as raised:
-            draw(
-                _UnreadableStore(),
-                **required,
-                **{argument: scale(cmap=cmap)},
-                show=False,
-            )
+            draw(_UnreadableStore(), **required, **{argument: value}, show=False)
         return type(raised.value), raised.value.args
 
-    # A scale names its colormap, so a Colormap object is refused like a
-    # number, and so is a name that Matplotlib does not hold.
-    assert refusal(3) == (
+    # Scales follow the rule of colormap arguments, and the argument must be
+    # a scale of its kind.
+    assert refusal(scale(cmap=3)) == (
         TypeError,
-        (f"{argument}.cmap must be None or a Matplotlib colormap name, not int",),
+        (f"{argument}.cmap must be {_TAKES_NONE}, not int",),
     )
-    assert refusal(ListedColormap(["#000000", "#ffffff"])) == (
-        TypeError,
-        (
-            f"{argument}.cmap must be None or a Matplotlib colormap name, "
-            "not ListedColormap",
-        ),
-    )
-    assert refusal("not_a_colormap") == (
+    assert refusal(scale(cmap="not_a_colormap")) == (
         ValueError,
-        (
-            f"{argument}.cmap must name a Matplotlib colormap, such as 'viridis'; "
-            "'not_a_colormap' is not one",
-        ),
+        (_NOT_A_COLORMAP.format(f"{argument}.cmap", "not_a_colormap"),),
     )
-    # A scale that names a colormap, or none, passes the check: the plot reads
-    # the store, which the store double refuses, or refuses another argument.
-    for cmap in ("magma", None):
+    assert refusal(scale(cmap=ListedColormap(["#000000"], name="cytearc_unheld"))) == (
+        ValueError,
+        (_UNHELD_COLORMAP.format(f"{argument}.cmap", "cytearc_unheld"),),
+    )
+    assert refusal("magma") == (
+        TypeError,
+        (f"{argument} must be a {scale.__name__} or None, not str",),
+    )
+    # A scale that names a colormap, holds a held one or names none passes
+    # the check: the plot reads the store, which the store double refuses, or
+    # refuses another argument.
+    for cmap in ("magma", colormaps["magma"], None):
         with pytest.raises((AssertionError, TypeError, ValueError)) as passed:
             draw(
                 _UnreadableStore(),
@@ -627,7 +701,7 @@ def test_plots_check_each_scale_colormap_before_they_read_the_store(
                 **{argument: scale(cmap=cmap)},
                 show=False,
             )
-        assert f"{argument}.cmap" not in str(passed.value)
+        assert argument not in str(passed.value)
 
 
 @pytest.mark.parametrize(

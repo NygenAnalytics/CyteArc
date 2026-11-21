@@ -31,6 +31,10 @@ from ..utils.arguments import bool_argument
 
 if TYPE_CHECKING:
     from matplotlib.colors import Colormap
+else:
+    # Matplotlib is optional, so the hints name Colormap only for type
+    # checkers and resolve without it.
+    Colormap = Any
 
 
 def _hierarchy_positions(
@@ -168,7 +172,7 @@ def _tree_color_series(
 def _tree_palette(
     scale: CategoricalScale,
     *,
-    cmap: "str | Colormap | None",
+    cmap: str | None,
     color_key: dict[Any, str] | None,
 ) -> dict[Any, str]:
     """The colors of the categories of a resolved scale.
@@ -286,8 +290,8 @@ def cluster_tree(
     ``uns`` colors that an H5AD import keeps, or else default colors
     assigned over every label of the column in natural order. ``color_key``
     names a color for each category, and ``cmap``, a Matplotlib colormap
-    name or a ``Colormap``, is sampled at evenly spaced positions over the
-    categories instead. A numeric fill takes ``cmap``, viridis by default.
+    name or a registered ``Colormap``, is sampled at evenly spaced positions
+    over the categories instead. A numeric fill takes ``cmap``, viridis by default.
     """
     force_ints_as_cats = bool_argument(force_ints_as_cats, "force_ints_as_cats")
     show_labels = bool_argument(show_labels, "show_labels")

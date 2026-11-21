@@ -40,9 +40,10 @@ class ColorScale:
     ``vcenter`` is for diverging maps such as scaled fold changes.
     ``scope`` controls whether limits are computed per feature (default), per
     panel, or shared across every continuous panel in the figure.
-    ``cmap`` names a Matplotlib colormap, or leaves the plot's default; a
-    ``Colormap`` of your own is named once ``matplotlib.colormaps.register``
-    holds it. A plot refuses any other ``cmap`` before it reads the store.
+    ``cmap`` names a colormap that ``matplotlib.colormaps`` holds, or leaves
+    the plot's default; a ``Colormap`` of your own serves once
+    ``matplotlib.colormaps.register`` holds it under a name of its own. A
+    plot refuses any other ``cmap`` before it reads the store.
     """
 
     cmap: str | None = None

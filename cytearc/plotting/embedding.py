@@ -98,7 +98,7 @@ from ._style import (
     resolve_color_limits,
     resolve_legend_loc,
     scalable_values,
-    scale_colormap_argument,
+    scale_argument,
     scatter_edgecolor,
     scatter_edges,
     theme_context,
@@ -1536,8 +1536,8 @@ def embedding(
     show_titles = bool_argument(show_titles, "show_titles")
     show = bool_argument(show, "show")
     clip_fraction = clip_fraction_argument(clip_fraction)
-    scale_colormap_argument(color_scale, "color_scale")
-    scale_colormap_argument(density_overlay, "density_overlay")
+    color_scale = scale_argument(color_scale, "color_scale", ColorScale)
+    density_overlay = scale_argument(density_overlay, "density_overlay", DensityOverlay)
     if point_sizes is not None:
         require_keyed(
             point_sizes,
