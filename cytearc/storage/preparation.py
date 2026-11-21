@@ -26,6 +26,7 @@ from zarr.core.buffer import Buffer, default_buffer_prototype
 from zarr.core.sync import sync
 
 from ..utils.logging import logger
+from ..utils.shutdown import is_interruption
 
 PREPARATION_CLAIM = ".cytearc-preparation"
 """Name of the claim group below the root or workspace group being prepared."""
@@ -89,7 +90,8 @@ def preparation_claim(group: zarr.Group) -> Iterator[None]:
 
     A store that cannot make the conditional write, such as an object store
     without conditional puts, is prepared without the claim, as before claims
-    existed, with a warning.
+    existed, with a warning. A cancelled write raises its cancellation, and
+    nothing is prepared.
 
     Raises:
         RuntimeError: If another process holds the claim; nothing is written.
@@ -103,6 +105,10 @@ def preparation_claim(group: zarr.Group) -> Iterator[None]:
         try:
             sync(document.set_if_not_exists(_claim_document(token)))
         except Exception as error:
+            if is_interruption(error):
+                # A cancelled write stops the open rather than preparing the
+                # store without the claim.
+                raise
             logger.warning(
                 f"Could not claim the preparation of this store ({error}); it is "
                 "prepared without a guard against another process that opens it "

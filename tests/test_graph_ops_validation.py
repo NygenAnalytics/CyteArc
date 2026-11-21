@@ -1,5 +1,6 @@
 """Early-exit validation tests for explicit-reference graph operations."""
 
+import concurrent.futures
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -28,6 +29,7 @@ from cytearc.storage.artifacts import (
 )
 from cytearc.storage.errors import ArtifactResolutionError
 from cytearc.storage.selections import validate_stored_selection_integrity
+from tests.test_stream_stop import _cancel_chunk_calls
 
 
 class _BareGraphStore(GraphDataStore):
@@ -611,3 +613,29 @@ def test_neighbor_payload_validation_rejects_invalid_indices_or_distances(
     ) as caught:
         validate_neighbors_payload(store.zw, neighbors)
     assert caught.value.code == "corrupt_payload"
+
+
+@pytest.mark.parametrize(
+    "key_part",
+    ["/c/", "indices/zarr.json"],
+    ids=["chunk_reads", "array_metadata"],
+)
+def test_a_cancelled_read_of_a_neighbors_payload_is_no_corrupt_payload(
+    key_part: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from cytearc.graph.distances import validate_neighbors_payload
+
+    store = _bare_store()
+    neighbors = _neighbors_payload(store)
+    threads: list[str] = []
+    _cancel_chunk_calls(monkeypatch, store.z.store, "get", threads, key_part)
+
+    # Zarr's synchronous reads report a cancellation with the CancelledError
+    # of concurrent.futures, which the check passes on instead of blaming the
+    # payload, so an integration or mapping run ends interrupted.
+    with pytest.raises(concurrent.futures.CancelledError):
+        validate_neighbors_payload(store.zw, neighbors)
+    assert threads and set(threads) == {"zarr_io"}
+    # Once the reads run, the same payload validates.
+    monkeypatch.undo()
+    assert validate_neighbors_payload(store.zw, neighbors).n_cells == 4
