@@ -17,12 +17,14 @@ import time
 from pathlib import Path
 from typing import Any
 
+import numba
 import numpy as np
 import pytest
 import zarr
 from zarr.codecs import ZstdCodec
 from zarr.storage import MemoryStore
 
+import cytearc.clustering._leiden_native as leiden_native
 import cytearc.utils.process as process_module
 from cytearc import DataStore
 from cytearc.datastore._pipeline import ledger as ledger_module
@@ -553,12 +555,19 @@ def test_a_store_of_one_worker_records_it_and_stays_on_one_core(
 
 
 @pytest.mark.slow
-def test_a_one_worker_stage_encodes_and_decodes_on_one_thread(
+def test_a_one_worker_run_codes_and_clusters_on_one_thread(
     datastore_zarr_root: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     store = _store(datastore_zarr_root, tmp_path, nthreads=1)
     stage_run = RunLedger.run
+    build_graph = leiden_native.build_leiden_graph
+    leiden_threads: list[int] = []
 
+    def counted(*args: Any, **kwargs: Any) -> Any:
+        leiden_threads.append(numba.get_num_threads())
+        return build_graph(*args, **kwargs)
+
+    monkeypatch.setattr(leiden_native, "build_leiden_graph", counted)
     with recorded_codec_pools(host_threads=4) as pools:
 
         def labeled(ledger: RunLedger, stage: str, action: Any) -> Any:
@@ -580,6 +589,8 @@ def test_a_one_worker_stage_encodes_and_decodes_on_one_thread(
     assert {"filtering", "pca", "neighbors", "leiden"} <= {
         stage for stage, _threads in in_stages
     }
+    # Both resolutions cluster on one of Numba's threads.
+    assert leiden_threads == [1, 1]
 
 
 @pytest.mark.parametrize("workers", [1, 3])
