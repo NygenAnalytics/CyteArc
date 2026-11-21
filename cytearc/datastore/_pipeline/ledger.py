@@ -37,7 +37,11 @@ from ...utils.process import (
     sample_process_resources,
 )
 from ...utils.progress import observe_progress
-from ...utils.shutdown import ShutdownRequested, shutdown_checkpoint
+from ...utils.shutdown import (
+    ShutdownRequested,
+    is_interruption,
+    shutdown_checkpoint,
+)
 from ..pipeline_run import PipelineExecutionError
 from .events import PipelineEventEmitter
 from .settings import parameter_value
@@ -397,8 +401,8 @@ class RunLedger:
             assert isinstance(converted, dict)
             return converted
         except Exception as error:
-            if interruption_record(error) is not None:
-                # A cancelled Zarr call passes, as asyncio's CancelledError does.
+            if is_interruption(error):
+                # A cancelled Zarr call is an interruption, not a failed summary.
                 raise
             logger.warning(f"Could not summarize pipeline stage {stage}: {error}")
             return None
@@ -618,9 +622,8 @@ class RunLedger:
                 stage=stage,
             )
         except Exception as error:
-            if interruption_record(error) is not None:
-                # A cancelled Zarr call passes, as asyncio's CancelledError does,
-                # and the executor ends the run interrupted.
+            if is_interruption(error):
+                # A cancelled Zarr call; the executor ends the run interrupted.
                 raise
             self.terminate(error)
             raise PipelineExecutionError(self.run_id, stage, error) from error
@@ -699,9 +702,8 @@ class RunLedger:
                     warnings=outcome.warnings,
                 )
             except Exception as error:
-                if interruption_record(error) is not None:
-                    # A cancelled Zarr call passes, as asyncio's CancelledError
-                    # does, and the executor ends the run interrupted.
+                if is_interruption(error):
+                    # A cancelled Zarr call; the executor ends the run interrupted.
                     raise
                 self._finish_failed(
                     stage=stage,

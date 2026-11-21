@@ -1,5 +1,7 @@
 """The first writable open prepares a store once: one process, one cell filter."""
 
+import asyncio
+import concurrent.futures
 import os
 import select
 import shutil
@@ -269,6 +271,27 @@ def test_a_store_without_conditional_writes_is_prepared_without_a_claim(
         with preparation_claim(root):
             raise RuntimeError("preparation failed")
     assert failed.value.__context__ is None
+
+
+def test_a_cancelled_claim_write_stops_the_preparation(monkeypatch):
+    from zarr.storage._common import StorePath
+
+    root = zarr.open_group(store=MemoryStore(), mode="w")
+
+    async def cancelled(self, value) -> None:
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(StorePath, "set_if_not_exists", cancelled)
+    ran = []
+    # Zarr's synchronous API reports the cancelled write with the
+    # CancelledError of concurrent.futures, which stops the open instead of
+    # preparing the store without a claim.
+    with _messages("WARNING") as warnings:
+        with pytest.raises(concurrent.futures.CancelledError):
+            with preparation_claim(root):
+                ran.append(True)
+    assert (ran, warnings) == ([], [])
+    assert f"{PREPARATION_CLAIM}/zarr.json" not in root.store._store_dict
 
 
 def test_a_claim_that_cannot_be_removed_is_reported(monkeypatch):

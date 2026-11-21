@@ -707,13 +707,18 @@ def run_on_zarr_loop(coroutine: Coroutine[Any, Any, T]) -> T:
         read.close()
         raise
     except CancelledError:
+        if not started.done():
+            # Zarr's loop cancelled the read's task before its first step, so
+            # neither the wrapper nor the read ever ran.
+            read.close()
+            coroutine.close()
         if stopped:
             raise ReadStopped("The block stream closed while this read ran") from None
         # Zarr's sync() reports a read whose task was cancelled with the
         # CancelledError of concurrent.futures, an Exception, and re-raises one
         # that the read raised itself. Only the first is a cancellation, which
         # raises asyncio's class, a BaseException, as on the read's own loop.
-        if started.done() and started.result().cancelled():
+        if not started.done() or started.result().cancelled():
             raise asyncio.CancelledError from None
         raise
 

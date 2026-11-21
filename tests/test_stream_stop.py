@@ -22,7 +22,10 @@ when the deadline passes, after which the gate opens so nothing hangs.
 import asyncio
 import concurrent.futures
 import contextvars
+import gc
+import inspect
 import threading
+import warnings
 from collections.abc import Callable, Coroutine, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
@@ -336,15 +339,34 @@ def test_an_ordinary_error_of_a_read_is_raised_as_it_is(path, scope, kind, messa
     assert caught.value is error
 
 
-def test_a_read_whose_task_never_started_raises_zarrs_cancellation_as_it_is(
+def test_a_read_whose_task_was_cancelled_before_it_started_raises_asyncio_cancelled(
     monkeypatch,
 ):
-    def cancelled_before_it_started(read: Coroutine[Any, Any, Any]) -> Any:
-        # Zarr's loop cancelled the read's task before its first step.
-        read.close()
-        raise concurrent.futures.CancelledError
+    loop = zarr_sync._get_loop()
+    held = threading.Event()
+    release = threading.Event()
+    submitted = threading.Event()
+    existing: set[asyncio.Task[Any]] = set()
 
-    monkeypatch.setattr(zarr_sync, "sync", cancelled_before_it_started)
+    def hold() -> None:
+        # Zarr's loop waits here, so the read's task is created behind it.
+        existing.update(asyncio.all_tasks(loop))
+        held.set()
+        release.wait(timeout=20)
+
+    def cancel_new_tasks() -> None:
+        # Runs after sync() created the read's task and before its first step.
+        for task in asyncio.all_tasks(loop) - existing:
+            task.cancel()
+
+    original = asyncio.run_coroutine_threadsafe
+
+    def run_coroutine_threadsafe(coroutine: Any, target: Any) -> Any:
+        future = original(coroutine, target)
+        submitted.set()
+        return future
+
+    monkeypatch.setattr(asyncio, "run_coroutine_threadsafe", run_coroutine_threadsafe)
 
     async def value() -> int:
         return 1
@@ -359,12 +381,28 @@ def test_a_read_whose_task_never_started_raises_zarrs_cancellation_as_it_is(
             raised.append(error)
 
     thread = threading.Thread(target=reader, daemon=True)
-    thread.start()
+    loop.call_soon_threadsafe(hold)
+    try:
+        assert held.wait(timeout=5)
+        thread.start()
+        assert submitted.wait(timeout=5)
+        loop.call_soon_threadsafe(cancel_new_tasks)
+    finally:
+        release.set()
     thread.join(timeout=5)
-    read.close()
     assert not thread.is_alive(), "the read waited for a task that never started"
     [error] = raised
-    assert type(error) is concurrent.futures.CancelledError
+    # The read never ran, so its task's cancellation is the only outcome.
+    assert type(error) is asyncio.CancelledError
+    assert inspect.getcoroutinestate(read) == inspect.CORO_CLOSED
+    # Neither the read nor the wrapper that would have run it leaves a warning
+    # that it was never awaited once the error, which holds them, is gone.
+    with warnings.catch_warnings(record=True) as recorded:
+        warnings.simplefilter("always")
+        del error
+        raised.clear()
+        gc.collect()
+    assert [str(item.message) for item in recorded] == []
 
 
 # Zarr calls that run on Zarr's loop and that a cancellation can stop: a read
@@ -374,13 +412,13 @@ ZARR_CALLS = ["read_selection", "array[...]", "get_orthogonal_selection", "a wri
 
 
 def _cancel_chunk_calls(
-    monkeypatch, store: Any, method: str, threads: list[str]
+    monkeypatch, store: Any, method: str, threads: list[str], key_part: str = "/c/"
 ) -> None:
-    """Cancel each chunk ``get`` or ``set`` of ``store``, and record the threads that ran them."""
+    """Cancel each ``get`` or ``set`` of ``store`` whose key holds ``key_part``, by default every chunk's, and record the threads that ran them."""
     original = getattr(type(store), method)
 
     async def call(self, key, *args, **kwargs):  # type: ignore[no-untyped-def]
-        if self is store and "/c/" in key:
+        if self is store and key_part in key:
             threads.append(threading.current_thread().name)
             raise asyncio.CancelledError
         return await original(self, key, *args, **kwargs)
