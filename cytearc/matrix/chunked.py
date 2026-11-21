@@ -321,6 +321,21 @@ class ChunkedArray:
             + block_rows * max(0, int(scratch_bytes_per_row))
         )
 
+    def chunk_columns(self) -> int:
+        """Return how many columns one stored inner chunk of this matrix holds.
+
+        A stream of whole blocks of a run of whole chunk columns, such as
+        ``matrix[:, :matrix.chunk_columns()]``, decodes each chunk of those
+        columns once, and holds less than a stream of every column
+        (:meth:`stream_bytes`). A matrix that selects its columns, or that is
+        not stored in chunks, such as an array in memory, gives all of its
+        columns.
+        """
+        geometry = self._geometry()
+        if geometry is None or self._cols is not None:
+            return self._n_cols
+        return min(self._n_cols, int(geometry.axisChunk(1)))
+
     def _block_results[T](
         self,
         fn: BlockFn[T],
@@ -718,6 +733,26 @@ class ChunkedArray:
                 block_size=block_size,
                 nthreads=self._nthreads,
                 resources=self._resources,
+                is_numpy=self._is_numpy,
+            )
+        )
+
+    def _with_resources(self, resources: ResourceBudget) -> "ChunkedArray":
+        """Return this matrix with reads and streams planned within ``resources``.
+
+        An operation that reads another store's counts, as a merge reads its
+        sources, plans them within its own budget and workers rather than the
+        other store's. The matrix keeps its storage context.
+        """
+        return self._derived(
+            ChunkedArray(
+                self._backing,
+                rows=self._rows,
+                cols=self._cols,
+                ops=self._ops,
+                block_size=self._block_size,
+                nthreads=resources.workers,
+                resources=resources,
                 is_numpy=self._is_numpy,
             )
         )

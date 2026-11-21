@@ -485,12 +485,7 @@ Every group is read from its own `zarr.json`. CyteArc never reads consolidated m
 tool such as `zarr.consolidate_metadata` writes and which writes to the store do not update, so a
 consolidated store opens, lists, and plans with its current contents.
 
-Writers compute the raw-count identity while they write `counts`, so no second pass reads the
-matrix back. `counts` records it as `content_fingerprint`. The sibling `countSummaries` group holds
-per-cell totals (`rowSums`), per-cell detected-feature counts (`rowPositive`), and per-feature
-detected-cell counts (`columnPositive`), and its `source_fingerprint` attribute names the counts
-it describes. Preparation reads these summaries instead of streaming the matrix. Summaries that are
-missing, malformed, or bound to other counts are an error; rebuild the store with `--data-only`.
+Writers compute the raw-count identity while they write `counts`, so no second pass reads the matrix back. `counts` records it as `content_fingerprint`. The sibling `countSummaries` group holds per-cell totals (`rowSums`), per-cell detected-feature counts (`rowPositive`), and per-feature detected-cell counts (`columnPositive`), and its `source_fingerprint` attribute names the counts it describes. Preparation reads these summaries instead of streaming the matrix. Summaries that are missing, malformed, or bound to other counts are an error; rebuild the store with `--data-only`. `rowPositive` counts the positive values of each cell, so it counts every nonzero value whenever the counts hold no negative value, which unsigned counts guarantee: the count dtype policy below stores a matrix unsigned exactly when its values are whole non-negative counts, while signed and float counts can hold negative values (`storage.identity.summaries_count_every_value`). Exports and merges therefore take each cell's number of values from `rowPositive` for unsigned counts and count the values of other counts in a read. A merge plans that read within its own `mem_budget` and reads a stored band of the widest run of whole chunk columns that fits at a time, so that it decodes each chunk once.
 
 ### Count dtype
 

@@ -750,6 +750,52 @@ def test_positive_values_are_summed_from_the_stored_summaries(tmp_path) -> None:
         positive_value_count(matrix, counts)
 
 
+@pytest.mark.parametrize(
+    "dtype",
+    ["uint8", "uint16", "uint32", "uint64", "int8", "int16", "int64", "float32"],
+)
+def test_summaries_count_every_value_only_of_unsigned_counts(tmp_path, dtype) -> None:
+    from cytearc.storage.identity import (
+        positive_value_count,
+        summaries_count_every_value,
+    )
+    from tests.storage_helpers import write_count_store
+
+    # The least integer that the dtype holds, beside counts and zeros.
+    least = int(np.iinfo(dtype).min) if np.dtype(dtype).kind in "iu" else -1
+    values = np.array([[least, 0, 3], [0, 0, 0], [1, least, 2]])
+    write_count_store(str(tmp_path / "store.zarr"), {"RNA": values}, dtype)
+    matrix = zarr.open_group(str(tmp_path / "store.zarr"), mode="r")["RNA"]
+    counts = matrix["counts"]
+
+    # The summaries count each nonzero value exactly when the rule says so.
+    assert summaries_count_every_value(counts) == (dtype.startswith("u"))
+    assert summaries_count_every_value(counts) == (
+        positive_value_count(matrix, counts) == np.count_nonzero(values)
+    )
+
+
+@pytest.mark.parametrize(
+    "values",
+    [[0, 3, 70_000], [0.0, 2.0], [-1, 2], [0.5, 2.0], [-0.25], [0, 2**40]],
+)
+def test_counts_stored_unsigned_hold_no_negative_value(values) -> None:
+    from cytearc.storage.identity import summaries_count_every_value
+
+    array = np.asarray(values)
+    value_range = CountValueRange()
+    value_range.update(array)
+    stored = zarr.zeros(
+        (1, 1), dtype=count_storage_dtype(array.dtype, value_range), zarr_format=3
+    )
+
+    # The count dtype policy stores whole non-negative counts unsigned, so
+    # counts that can hold a negative value are never counted from their
+    # summaries.
+    whole = bool((array >= 0).all() and (array == np.round(array)).all())
+    assert summaries_count_every_value(stored) == whole
+
+
 _VALUES = np.array(
     [
         [0, 3, 0, 1, 0],

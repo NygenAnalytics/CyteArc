@@ -623,6 +623,44 @@ class TestTransposedReads:
         derived = (matrix[:, [1, 2]] * 2)[[0, 4], :]._with_block_size(1)
         assert derived._transposed is counts_t
 
+    def test_a_copy_with_other_resources_plans_within_them(self, counts_pair):
+        from cytearc.storage.budget import ResourceBudget
+        from cytearc.storage.io_policy import StorageIoPolicy
+        from cytearc.utils.memory_budget import MemoryBudgetError
+
+        counts, counts_t, dense = counts_pair
+        matrix = ChunkedArray(
+            counts, resources=ResourceBudget(1_000, 1)
+        ).with_transposed(counts_t)
+        matrix._io = StorageIoPolicy(readWorkers=1)
+        with pytest.raises(MemoryBudgetError):
+            next(matrix.stream_blocks())
+        larger = ResourceBudget(2**30, 2)
+        copy = matrix._with_resources(larger)
+        np.testing.assert_array_equal(np.concatenate(list(copy.stream_blocks())), dense)
+        # The copy keeps the storage context and blocks of the matrix.
+        assert copy._resources == larger and copy._nthreads == 2
+        assert copy._io is matrix._io and copy._transposed is counts_t
+        assert copy.chunksize == matrix.chunksize
+
+    def test_chunk_columns_give_the_columns_of_one_stored_chunk(self, counts_pair):
+        counts, _counts_t, dense = counts_pair
+        matrix = ChunkedArray(counts)
+        assert matrix.chunk_columns() == 50
+        # A run of whole chunk columns decodes one chunk of each band, so its
+        # stream holds less than a stream of every column, and reads them.
+        run = matrix[:, 50:100]
+        assert run.stream_bytes() < matrix.stream_bytes()
+        np.testing.assert_array_equal(run.compute(), dense[:, 50:100])
+        # A selection of columns, a matrix in memory and one narrower than a
+        # chunk give all of their columns.
+        assert run.chunk_columns() == 50
+        assert matrix[:, 20:140].chunk_columns() == 120
+        assert matrix[:, [3, 1, 7]].chunk_columns() == 3
+        assert ChunkedArray.from_numpy(dense).chunk_columns() == 401
+        narrow = zarr.array(dense[:, :3], chunks=(4, 10))
+        assert ChunkedArray(narrow).chunk_columns() == 3
+
     @pytest.mark.parametrize("missing", ["counts", "counts_t"])
     def test_unavailable_geometry_keeps_row_reads(
         self, counts_pair, monkeypatch, missing

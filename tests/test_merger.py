@@ -3126,6 +3126,50 @@ def test_dataset_merge_producer_reserve_uses_source_feature_width():
         )
 
 
+def test_dataset_merge_charges_a_source_it_reads_its_counts_and_smallest_read():
+    import cytearc.merge.writer as merge_writer
+    from cytearc.storage.budget import ResourceBudget
+
+    cell_ids = ["c0", "c1", "c2", "c3"]
+    features = [f"g{index}" for index in range(3_000)]
+
+    def assay(counts):
+        return _MergeAssay("RNA", counts, cell_ids, features, features, block_size=4)
+
+    # Four cells of 3,000 int16 features, which the merge reads to count.
+    signed = assay(np.full((4, 3_000), -1, dtype=np.int16))
+    reader = signed.rawData._with_resources(ResourceBudget(10**9, 1))
+    # 8 bytes for each cell's count, the matrix that the stream keeps in
+    # memory (24,000 bytes), one block of its 4 rows (24,000 bytes), nothing
+    # decoded, and the boolean copy and the count that count_nonzero makes of
+    # each row (3,000 + 8 bytes).
+    expected = 4 * 8 + 24_000 + 24_000 + 4 * (3_000 + 8)
+    assert merge_writer._row_nnz_load_bytes(signed, reader) == expected
+    # Unsigned counts load their row sums, row and column positive counts,
+    # and the decoded and encoded copies of the longest of them, 8 bytes each.
+    unsigned = assay(np.ones((4, 3_000), dtype=np.uint16))
+    expected = 8 * (4 + 4 + 3_000 + 2 * 3_000)
+    assert merge_writer._row_nnz_load_bytes(unsigned, None) == expected
+    # Counts without features or without cells hold no value to read: each
+    # cell's count of 0 is all that they hold, within a budget of just it.
+    for n_cells, n_features in ((5, 0), (0, 4)):
+        empty = _MergeAssay(
+            "RNA",
+            np.zeros((n_cells, n_features), dtype=np.int16),
+            [f"c{index}" for index in range(n_cells)],
+            features[:n_features],
+            features[:n_features],
+            block_size=max(1, n_cells),
+        )
+        resources = ResourceBudget(max(1, 8 * n_cells), 1)
+        reader = empty.rawData._with_resources(resources)
+        assert merge_writer._row_nnz_load_bytes(empty, reader) == 8 * n_cells
+        counted = merge_writer._counted_row_values(
+            empty, "left", reader, resources, held_bytes=0
+        )
+        np.testing.assert_array_equal(counted, np.zeros(n_cells, dtype=np.int64))
+
+
 def test_dataset_merge_rejects_insufficient_metadata_budget(tmp_path):
     path = str(tmp_path / "meta_budget.zarr")
     merger = _merge_two_rna(
