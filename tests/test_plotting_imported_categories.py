@@ -519,7 +519,7 @@ def test_label_artifacts_refuse_display_fields_that_the_display_kind_does_not_ho
     values = artifact_group(imported.store.zw, imported.clusters)["values"]
     display = dict(values.attrs["display"])
     try:
-        values.attrs["display"] = {**display, "ordered": True}
+        values.attrs["display"] = {**display, "addedFlag": True}
         with pytest.raises(ValueError, match="has unknown fields"):
             stored_artifact_scale(imported.store, imported.clusters)
     finally:
@@ -560,12 +560,12 @@ def test_run_plots_and_exports_ignore_display_fields_that_a_later_release_adds(
     recorded = group.attrs["fields"]
 
     def with_later_fields(display):
-        # A later release could record whether a column is ordered and its
-        # stored order, here the reverse of the display's order.
+        # Keys that this release does not know, as a later release could add
+        # them, one of them a list of the display's values in reverse order.
         if display["kind"] == "continuous":
-            return {**display, "unit": "counts"}
+            return {**display, "addedText": "counts"}
         values = [category["value"] for category in display["categories"]]
-        return {**display, "ordered": True, "levels": values[::-1]}
+        return {**display, "addedFlag": True, "addedList": values[::-1]}
 
     before = _what_run_plots_and_exports_show(store, run)
     try:
@@ -576,8 +576,8 @@ def test_run_plots_and_exports_ignore_display_fields_that_a_later_release_adds(
             for field in recorded
         ]
         later = store.pipeline.open(label="frozen")
-        assert later.cells._field_display("stage")["ordered"] is True
-        assert later.cells._field_display("umap_1")["unit"] == "counts"
+        assert later.cells._field_display("stage")["addedFlag"] is True
+        assert later.cells._field_display("umap_1")["addedText"] == "counts"
         after = _what_run_plots_and_exports_show(store, later)
     finally:
         group.attrs["fields"] = recorded

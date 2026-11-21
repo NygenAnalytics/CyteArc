@@ -103,7 +103,7 @@ def validate_display_metadata(
     """
     value = dict(display)
     kind = value.get("kind")
-    if ignore_unknown_fields and kind in _DISPLAY_FIELDS:
+    if ignore_unknown_fields and isinstance(kind, str) and kind in _DISPLAY_FIELDS:
         value = {
             field: item
             for field, item in value.items()

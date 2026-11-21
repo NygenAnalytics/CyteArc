@@ -1042,8 +1042,8 @@ def test_only_a_live_store_reads_a_column_stored_as_ordered():
     assert stored_categorical_scale(SimpleNamespace(), "grade") is None
 
 
-# A field display of a run, and fields that a later release could add to it:
-# whether the column is ordered, and its stored order.
+# A field display of a run, and keys that this release does not know, as a
+# later release could add them.
 RUN_STAGE_DISPLAY = {
     "kind": "categorical",
     "categories": [
@@ -1060,7 +1060,7 @@ RUN_SCORE_DISPLAY = {
     "maximum": 4.0,
     "scale": "log",
 }
-LATER_FIELDS = {"ordered": True, "levels": ["late", "early", "unused"]}
+ADDED_FIELDS = {"addedFlag": True, "addedList": ["late", "early", "unused"]}
 
 
 def _run_plot_store(**displays):
@@ -1075,8 +1075,8 @@ def test_run_plots_ignore_display_fields_that_a_later_release_adds():
     )
 
     store = _run_plot_store(
-        stage={**RUN_STAGE_DISPLAY, **LATER_FIELDS},
-        score={**RUN_SCORE_DISPLAY, "unit": "counts"},
+        stage={**RUN_STAGE_DISPLAY, **ADDED_FIELDS},
+        score={**RUN_SCORE_DISPLAY, "addedText": "counts"},
     )
     # The display's order, colors, labels and missing cells, as a run without
     # the added fields draws them.
@@ -1093,7 +1093,7 @@ def test_run_plots_ignore_display_fields_that_a_later_release_adds():
         stored_display_metadata(store, "score")
     ) == splt.ColorScale(cmap="magma", vmin=1.0, vmax=4.0, scale="log")
     # The record keeps the added fields; readers leave them out of their copy.
-    assert store._stored_display_metadata("stage")["ordered"] is True
+    assert store._stored_display_metadata("stage")["addedFlag"] is True
 
 
 @pytest.mark.parametrize(
@@ -1103,25 +1103,36 @@ def test_run_plots_ignore_display_fields_that_a_later_release_adds():
             {
                 **RUN_STAGE_DISPLAY,
                 "categories": [{"value": "a", "label": "a", "color": "red"}],
-                **LATER_FIELDS,
+                **ADDED_FIELDS,
             },
             ValueError,
             "color must be a hex color",
         ),
-        ({"kind": "categorical", **LATER_FIELDS}, ValueError, "is incomplete"),
+        ({"kind": "categorical", **ADDED_FIELDS}, ValueError, "is incomplete"),
         (
-            {**RUN_SCORE_DISPLAY, "scale": "sqrt", "unit": "counts"},
+            {**RUN_SCORE_DISPLAY, "scale": "sqrt", "addedText": "counts"},
             ValueError,
             "scale is invalid",
         ),
         (
             {key: value for key, value in RUN_SCORE_DISPLAY.items() if key != "scale"}
-            | {"unit": "counts"},
+            | {"addedText": "counts"},
             ValueError,
             "is incomplete",
         ),
         (
-            {**RUN_STAGE_DISPLAY, "kind": "ordinal"},
+            {**RUN_STAGE_DISPLAY, "kind": "ordinal", **ADDED_FIELDS},
+            ValueError,
+            "continuous or categorical",
+        ),
+        # A kind that JSON holds as a list or an object names no kind.
+        (
+            {**RUN_STAGE_DISPLAY, "kind": ["categorical"], **ADDED_FIELDS},
+            ValueError,
+            "continuous or categorical",
+        ),
+        (
+            {**RUN_STAGE_DISPLAY, "kind": {"name": "categorical"}, **ADDED_FIELDS},
             ValueError,
             "continuous or categorical",
         ),
@@ -1132,6 +1143,7 @@ def test_run_plots_ignore_display_fields_that_a_later_release_adds():
                 "categories": [
                     {"value": "a", "label": "a", "color": "#112233", "rank": 1}
                 ],
+                **ADDED_FIELDS,
             },
             ValueError,
             "requires value, label, and color",
@@ -1143,6 +1155,8 @@ def test_run_plots_ignore_display_fields_that_a_later_release_adds():
         "continuous_scale",
         "continuous_field_missing",
         "unknown_kind",
+        "list_kind",
+        "object_kind",
         "category_field",
     ],
 )
@@ -1170,6 +1184,6 @@ def test_live_column_displays_refuse_fields_that_the_display_kind_does_not_hold(
         "late",
         "early",
     )
-    stage.attrs["display"] = {**RUN_STAGE_DISPLAY, **LATER_FIELDS}
+    stage.attrs["display"] = {**RUN_STAGE_DISPLAY, **ADDED_FIELDS}
     with pytest.raises(ValueError, match="has unknown fields"):
         stored_categorical_scale(SimpleNamespace(zw=root), "stage")

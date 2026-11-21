@@ -1260,8 +1260,8 @@ def test_display_validation_refuses_exactly_the_values_that_compare_equal() -> N
     # Each value is compared with every earlier one, as a mapping compares its
     # keys: a repeat of a value of the same type is refused as a repeat, and an
     # equal value of another type as a collision. Values that only print
-    # alike, such as 1 and "1", are kept.
-    pool = [0, 1, 2, 0.0, 1.0, -0.0, 2.5, True, False, "0", "1", "a", "True"]
+    # alike, such as 1 and "1", or only hash alike, such as -1 and -2, are kept.
+    pool = [0, 1, 2, -1, -2, 0.0, 1.0, -0.0, -1.0, 2.5, True, False, "0", "1", "a"]
     rng = np.random.default_rng(0)
     refused = {"must be unique": 0, "collide as mapping keys": 0}
     kept = 0
@@ -1288,8 +1288,9 @@ def test_display_validation_refuses_exactly_the_values_that_compare_equal() -> N
     assert kept and all(refused.values())
 
 
-def test_display_validation_keeps_categories_that_only_print_alike() -> None:
-    values = [1, "1", 2.5, "2.5", False, "False", "a"]
+def test_display_validation_keeps_values_that_print_or_hash_alike() -> None:
+    # hash(-1) == hash(-2) in CPython, though -1 != -2.
+    values = [1, "1", 2.5, "2.5", False, "False", "a", -1, -2]
     assert validate_display_metadata(_categorical_display(values)) == (
         _categorical_display(values)
     )
