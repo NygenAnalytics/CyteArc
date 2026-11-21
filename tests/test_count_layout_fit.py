@@ -764,11 +764,17 @@ def _counts_mismatch(
         for name, path in locations.items()
     }
     values = dict(read)
+    if source is not None:
+        values["source"] = source
+    shapes = {name: np.shape(value) for name, value in values.items()}
+    if len(set(shapes.values())) > 1:
+        return f"The {assay} counts differ in shape: " + ", ".join(
+            f"{name} {shape}" for name, shape in shapes.items()
+        )
     fingerprints = {
         name: array.attrs["content_fingerprint"] for name, array in counts.items()
     }
     if source is not None:
-        values["source"] = source
         summary = CountSummary(counts["fit"])
         summary.update(0, source)
         fingerprints["source"] = summary.hexdigest()
@@ -1019,6 +1025,16 @@ def test_without_a_source_both_stores_read_their_mismatched_count_again(
         "- fit, cell 4, gene 2: a fresh open reads 65537",
         "- explicit, cell 4, gene 2: a fresh open reads 1",
     ]
+
+
+def test_counts_of_another_shape_are_reported_by_their_shapes(flip_stores):
+    locations, values = flip_stores
+
+    report = _counts_mismatch("RNA", locations, _read_counts(locations), values[:, :7])
+
+    assert report == (
+        "The RNA counts differ in shape: fit (30, 8), explicit (30, 8), source (30, 7)"
+    )
 
 
 def test_float_counts_that_differ_are_reported_without_bits(tmp_path, monkeypatch):
