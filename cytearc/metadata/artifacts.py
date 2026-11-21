@@ -149,7 +149,10 @@ def validate_display_metadata(
         if not isinstance(categories, list):
             raise TypeError("Categorical display categories must be a list")
         seen_values: set[tuple[str, Any]] = set()
-        mapping_values: list[Any] = []
+        # Values that compare equal hash alike, so this set finds the values
+        # that collide as mapping keys, such as 1, 1.0 and True, in one
+        # lookup each.
+        mapping_values: set[Any] = set()
         for category in categories:
             if not isinstance(category, dict):
                 raise TypeError("Each display category must be a mapping")
@@ -175,10 +178,10 @@ def validate_display_metadata(
             )
             if typed_value in seen_values:
                 raise ValueError("Display category values must be unique")
-            if any(category_value == existing for existing in mapping_values):
+            if category_value in mapping_values:
                 raise ValueError("Display category values collide as mapping keys")
             seen_values.add(typed_value)
-            mapping_values.append(category_value)
+            mapping_values.add(category_value)
             if not isinstance(category.get("label"), str):
                 raise TypeError("Display category label must be a string")
             color = category.get("color")
