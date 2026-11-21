@@ -9,13 +9,18 @@ import hashlib
 import json
 import os
 import shutil
+import subprocess
+import sys
+import textwrap
 import threading
 import time
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pytest
 import zarr
+from zarr.codecs import ZstdCodec
 from zarr.storage import MemoryStore
 
 import cytearc.utils.process as process_module
@@ -28,9 +33,11 @@ from cytearc.storage.pipeline_runs import (
     PipelineStageResources,
     PipelineStageTrace,
     create_pipeline_run_record,
+    list_pipeline_run_records,
     load_pipeline_stage_records,
     pipeline_stage_path,
 )
+from tests.storage_helpers import recorded_codec_pools
 
 # The metric fields that this release added, as a record of an earlier
 # release lacks them.
@@ -442,13 +449,90 @@ def _store(source: str, tmp_path: Path, nthreads: int) -> DataStore:
     return DataStore(str(location), default_assay="RNA", nthreads=nthreads)
 
 
+# The RNA recipe on a store of one worker, with the settings given as its last
+# argument.
+_ONE_WORKER_RUN = textwrap.dedent(
+    """
+    import json
+    import sys
+
+    from cytearc import DataStore
+
+    store = DataStore(sys.argv[1], default_assay="RNA", nthreads=1)
+    store.pipeline.rna(**json.loads(sys.argv[2]))
+    """
+)
+
+
+def _cpu_trace(stage: str, metrics: PipelineStageMetrics) -> str:
+    """The stage's CPU time and threads, and the cores it kept busy between samples.
+
+    A record that holds CPU time also holds its resources and trace.
+    """
+    assert metrics.resources is not None and metrics.trace is not None
+    trace = metrics.trace
+    lines = [
+        f"{stage}: {metrics.cpu_seconds} CPU seconds in {metrics.wall_seconds} "
+        f"wall seconds, at most {metrics.threads_peak} threads, "
+        f"{metrics.resources.cpus_available} CPUs available"
+    ]
+    threads = trace.threads or (None,) * len(trace.seconds)
+    seconds = cpu = 0.0
+    for at, used, sampled in zip(
+        trace.seconds, trace.cpu_seconds, threads, strict=True
+    ):
+        cores = (used - cpu) / (at - seconds) if at > seconds else None
+        busy = "" if cores is None else f", {cores:.2f} cores since the last"
+        lines.append(f"  {at:.3f} s: {used:.3f} CPU seconds{busy}, {sampled} threads")
+        seconds, cpu = at, used
+    return "\n".join(lines)
+
+
+def test_the_one_core_check_reports_the_cores_and_threads_of_each_sample() -> None:
+    report = _cpu_trace("work", _metrics())
+
+    # 1.0 and 1.25 CPU seconds in each 0.7 s between the hand-built samples.
+    assert report.splitlines() == [
+        "work: 2.25 CPU seconds in 1.5 wall seconds, at most 9 threads, "
+        "8 CPUs available",
+        "  0.000 s: 0.000 CPU seconds, 4 threads",
+        "  0.700 s: 1.000 CPU seconds, 1.43 cores since the last, 9 threads",
+        "  1.400 s: 2.250 CPU seconds, 1.79 cores since the last, 6 threads",
+    ]
+    # Without /proc, as on macOS, the samples count no threads.
+    unsampled = _metrics(
+        trace=_trace(threads=None),
+        threads_peak=None,
+        unavailable={
+            "threadsPeak": "OS thread counts require the Linux /proc filesystem"
+        },
+    )
+    assert _cpu_trace("work", unsampled).splitlines()[2:] == [
+        "  0.700 s: 1.000 CPU seconds, 1.43 cores since the last, None threads",
+        "  1.400 s: 2.250 CPU seconds, 1.79 cores since the last, None threads",
+    ]
+
+
+@pytest.mark.slow
 def test_a_store_of_one_worker_records_it_and_stays_on_one_core(
     datastore_zarr_root: str, tmp_path: Path
 ) -> None:
-    store = _store(datastore_zarr_root, tmp_path, nthreads=1)
+    location = tmp_path / "workers_1.zarr"
+    shutil.copytree(datastore_zarr_root, location)
 
-    run = store.pipeline.rna(**_SMALL)
+    # A process of its own counts only the run's threads and children, none
+    # that earlier tests in the same process left running.
+    completed = subprocess.run(
+        [sys.executable, "-c", _ONE_WORKER_RUN, str(location), json.dumps(_SMALL)],
+        capture_output=True,
+        text=True,
+        timeout=600,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr[-4000:]
 
+    store = DataStore(str(location), default_assay="RNA", nthreads=1)
+    (run,) = list_pipeline_run_records(store.zw)
     records = {
         record.stage: record
         for record in load_pipeline_stage_records(store.zw, run.run_id)
@@ -463,7 +547,68 @@ def test_a_store_of_one_worker_records_it_and_stays_on_one_core(
         metrics = records[stage].metrics
         assert metrics is not None and metrics.cpu_seconds is not None
         # A busy machine can only lower CPU time against wall time.
-        assert metrics.cpu_seconds <= 1.1 * metrics.wall_seconds + 0.05, stage
+        assert metrics.cpu_seconds <= 1.1 * metrics.wall_seconds + 0.05, _cpu_trace(
+            stage, metrics
+        )
+
+
+@pytest.mark.slow
+def test_a_one_worker_stage_encodes_and_decodes_on_one_thread(
+    datastore_zarr_root: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _store(datastore_zarr_root, tmp_path, nthreads=1)
+    stage_run = RunLedger.run
+
+    with recorded_codec_pools(host_threads=4) as pools:
+
+        def labeled(ledger: RunLedger, stage: str, action: Any) -> Any:
+            pools.label = stage
+            try:
+                return stage_run(ledger, stage, action)
+            finally:
+                pools.label = None
+
+        monkeypatch.setattr(RunLedger, "run", labeled)
+        store.pipeline.rna(**_SMALL)
+
+    in_stages = [(stage, threads) for stage, threads in pools.calls if stage]
+    # The encodes and decodes of each stage, the graph load of Leiden among
+    # them, run on a pool of one thread, not on the four host threads.
+    assert {threads for _stage, threads in in_stages} == {1}, sorted(
+        set(in_stages), key=str
+    )
+    assert {"filtering", "pca", "neighbors", "leiden"} <= {
+        stage for stage, _threads in in_stages
+    }
+
+
+@pytest.mark.parametrize("workers", [1, 3])
+def test_a_stage_encodes_and_decodes_on_a_pool_of_its_workers_threads(
+    tmp_path: Path, workers: int
+) -> None:
+    _root, ledger = _ledger("store", workers=workers)
+    group = zarr.open_group(str(tmp_path / "values.zarr"), mode="w")
+    values = np.arange(48_000, dtype=np.int64)
+
+    with recorded_codec_pools(host_threads=7) as pools:
+
+        def store_and_read() -> tuple[()]:
+            pools.label = "stage"
+            group.create_array(
+                "values", data=values, chunks=(1_000,), compressors=ZstdCodec()
+            )
+            np.testing.assert_array_equal(group["values"][:], values)
+            pools.label = None
+            return ()
+
+        ledger.run("store", store_and_read)
+        pools.label = "after"
+        np.testing.assert_array_equal(group["values"][:], values)
+
+    # Forty-eight chunks encode and decode on the stage's workers, and the same
+    # read after the stage decodes on the host's seven threads.
+    assert pools.threads("stage") == [workers] * 96
+    assert pools.threads("after") == [7] * 48
 
 
 def test_a_store_of_four_workers_records_them_and_the_report_shows_resource_use(

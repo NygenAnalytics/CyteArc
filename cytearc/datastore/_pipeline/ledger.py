@@ -10,6 +10,7 @@ from typing import Any
 
 from ...storage.artifact_writer import ArtifactPlanReceipt, artifact_plan_scope
 from ...storage.artifacts import ArtifactRef
+from ...storage.async_execution import zarr_decoding_threads
 from ...storage.budget import detect_cpu_quota_cores, detect_memory_limit_bytes
 from ...storage.pipeline_runs import (
     STAGE_WARNING_LIMIT,
@@ -220,7 +221,10 @@ class RunLedger:
     describe that stage alone. Each record also holds the store's ``workers``
     and memory budget and what the process could use as the stage started.
     While a stage runs, CyteArc's log records carry the run and stage, its
-    warnings are collected, and its progress bars become progress events.
+    warnings are collected, its progress bars become progress events, and the
+    Zarr reads and writes made in its context decode and encode on a pool of
+    exactly ``workers`` threads, so a stage of a one-worker store decodes on
+    one thread whatever the machine.
     """
 
     __slots__ = (
@@ -283,6 +287,7 @@ class RunLedger:
                         **{RUN_ID_EXTRA: self.run_id, STAGE_EXTRA: stage}
                     )
                 )
+                context.enter_context(zarr_decoding_threads(self.workers))
                 collected = context.enter_context(collect_warnings())
                 if self.events.active:
                     # The compute pool's workers share the stage's context, but
