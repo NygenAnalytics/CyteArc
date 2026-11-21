@@ -1222,6 +1222,80 @@ def test_display_validation_rejects_nonfinite_duplicates_and_collisions() -> Non
         )
 
 
+def _categorical_display(values: list[object]) -> dict[str, object]:
+    return {
+        "kind": "categorical",
+        "categories": [
+            {"value": value, "label": str(value), "color": "#123456"}
+            for value in values
+        ],
+    }
+
+
+@pytest.mark.parametrize(
+    ("values", "message"),
+    [
+        (["a", "b", "a"], "must be unique"),
+        ([1, 2, 3, 1], "must be unique"),
+        ([0.0, 1.5, -0.0], "must be unique"),
+        # Values of other types that a mapping takes for the same key.
+        ([1, 2, 1.0], "collide as mapping keys"),
+        ([True, "x", 1], "collide as mapping keys"),
+        ([0, 2, False], "collide as mapping keys"),
+        ([1.0, 2, True], "collide as mapping keys"),
+        ([-0.0, 3, 0], "collide as mapping keys"),
+        # The first and the last of 10,000 categories.
+        ([*(f"c{index}" for index in range(9_999)), "c0"], "must be unique"),
+        ([7, *(f"c{index}" for index in range(9_998)), 7.0], "collide as mapping keys"),
+    ],
+)
+def test_display_validation_refuses_categories_that_repeat_or_collide_anywhere(
+    values: list[object], message: str
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        validate_display_metadata(_categorical_display(values))
+
+
+def test_display_validation_refuses_exactly_the_values_that_compare_equal() -> None:
+    # Each value is compared with every earlier one, as a mapping compares its
+    # keys: a repeat of a value of the same type is refused as a repeat, and an
+    # equal value of another type as a collision. Values that only print
+    # alike, such as 1 and "1", or only hash alike, such as -1 and -2, are kept.
+    pool = [0, 1, 2, -1, -2, 0.0, 1.0, -0.0, -1.0, 2.5, True, False, "0", "1", "a"]
+    rng = np.random.default_rng(0)
+    refused = {"must be unique": 0, "collide as mapping keys": 0}
+    kept = 0
+    for _ in range(500):
+        values = [pool[index] for index in rng.integers(0, len(pool), size=6)]
+        expected = None
+        for position, value in enumerate(values):
+            earlier = values[:position]
+            if any(type(item) is type(value) and item == value for item in earlier):
+                expected = "must be unique"
+            elif any(item == value for item in earlier):
+                expected = "collide as mapping keys"
+            if expected is not None:
+                break
+        display = _categorical_display(values)
+        if expected is None:
+            kept += 1
+            assert validate_display_metadata(display) == display
+        else:
+            refused[expected] += 1
+            with pytest.raises(ValueError, match=expected):
+                validate_display_metadata(display)
+    # The draws reach every outcome.
+    assert kept and all(refused.values())
+
+
+def test_display_validation_keeps_values_that_print_or_hash_alike() -> None:
+    # hash(-1) == hash(-2) in CPython, though -1 != -2.
+    values = [1, "1", 2.5, "2.5", False, "False", "a", -1, -2]
+    assert validate_display_metadata(_categorical_display(values)) == (
+        _categorical_display(values)
+    )
+
+
 def test_display_metadata_builders_are_deterministic() -> None:
     assert continuous_display(np.asarray([0.25, np.nan, 0.75])) == {
         "kind": "continuous",
