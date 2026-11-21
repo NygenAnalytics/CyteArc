@@ -694,6 +694,134 @@ def test_dataset_publication_requires_matching_archive_and_manifest(
         publisher._plan_dataset(dataset, tmp_path)
 
 
+def _publication_build_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    manifests: tuple[str, ...],
+    archives: tuple[str, ...],
+) -> Path:
+    from scripts import publish_docs_datasets as publisher
+
+    # Planning a dataset whose unpacked store is published lists the bucket.
+    assert not {*manifests, *archives} & publisher.UNPACKED_DATASETS
+    manifest_dir = tmp_path / "manifests"
+    manifest_dir.mkdir()
+    for dataset in manifests:
+        digest = hashlib.sha256(f"{dataset} archive".encode()).hexdigest()
+        manifest = manifest_dir / f"{dataset}_manifest.json"
+        manifest.write_text(json.dumps({"archiveSha256": digest}))
+    build_root = tmp_path / "build"
+    for dataset in archives:
+        (build_root / dataset).mkdir(parents=True)
+        (build_root / dataset / publisher.ARCHIVE_NAME).write_text(f"{dataset} archive")
+    monkeypatch.setattr(publisher, "MANIFEST_DIR", manifest_dir)
+    return build_root
+
+
+def test_publication_without_names_plans_only_the_rebuilt_datasets(
+    tmp_path, monkeypatch, capsys
+):
+    from scripts import publish_docs_datasets as publisher
+
+    build_root = _publication_build_root(
+        tmp_path, monkeypatch, manifests=("rebuilt", "unbuilt"), archives=("rebuilt",)
+    )
+    # A store without its archive does not count as rebuilt.
+    (build_root / "unbuilt" / publisher.STORE_NAME).mkdir(parents=True)
+
+    assert publisher.main(["--build-root", str(build_root)]) == 0
+
+    out = capsys.readouterr().out
+    assert "upload   cytearc_docs/rebuilt/data.zarr.tar.gz" in out
+    assert "cytearc_docs/unbuilt/" not in out
+    archive_layout = build_root / "<dataset>" / publisher.ARCHIVE_NAME
+    assert (
+        f"Leaving out the datasets with no archive at {archive_layout}:\n  unbuilt\n\n"
+    ) in out
+
+
+@pytest.mark.parametrize(
+    "archives", [(), ("unlisted",)], ids=["no-build-root", "archive-without-manifest"]
+)
+def test_publication_without_names_needs_an_archive_in_the_build_root(
+    tmp_path, monkeypatch, capsys, archives
+):
+    from scripts import publish_docs_datasets as publisher
+
+    build_root = _publication_build_root(
+        tmp_path, monkeypatch, manifests=("unbuilt", "unbuilt_too"), archives=archives
+    )
+
+    with pytest.raises(SystemExit) as exited:
+        publisher.main(["--build-root", str(build_root)])
+
+    assert exited.value.code == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    archive_layout = build_root / "<dataset>" / publisher.ARCHIVE_NAME
+    assert (
+        f"no dataset has an archive at {archive_layout}, "
+        "rebuild a dataset first or pass --build-root"
+    ) in captured.err
+
+
+def test_publication_without_names_needs_a_manifest(tmp_path, monkeypatch, capsys):
+    from scripts import publish_docs_datasets as publisher
+
+    build_root = _publication_build_root(
+        tmp_path, monkeypatch, manifests=(), archives=("unlisted",)
+    )
+
+    with pytest.raises(SystemExit) as exited:
+        publisher.main(["--build-root", str(build_root)])
+
+    assert exited.value.code == 2
+    assert "no manifests found, rebuild a dataset first" in capsys.readouterr().err
+
+
+def test_publication_without_names_checks_each_archive_against_its_manifest(
+    tmp_path, monkeypatch, capsys
+):
+    from scripts import publish_docs_datasets as publisher
+
+    build_root = _publication_build_root(
+        tmp_path,
+        monkeypatch,
+        manifests=("changed", "rebuilt", "unbuilt"),
+        archives=("changed", "rebuilt"),
+    )
+    (build_root / "changed" / publisher.ARCHIVE_NAME).write_text("rebuilt again")
+
+    with pytest.raises(RuntimeError, match="checksum. Rebuild changed so"):
+        publisher.main(["--build-root", str(build_root)])
+
+    # The run prints nothing until every plan passes its checks.
+    assert capsys.readouterr().out == ""
+
+
+def test_publication_of_named_datasets_plans_only_those_datasets(
+    tmp_path, monkeypatch, capsys
+):
+    from scripts import publish_docs_datasets as publisher
+
+    build_root = _publication_build_root(
+        tmp_path,
+        monkeypatch,
+        manifests=("rebuilt", "rebuilt_too", "unbuilt"),
+        archives=("rebuilt", "rebuilt_too"),
+    )
+
+    assert publisher.main(["rebuilt", "--build-root", str(build_root)]) == 0
+
+    out = capsys.readouterr().out
+    assert "upload   cytearc_docs/rebuilt/data.zarr.tar.gz" in out
+    assert "rebuilt_too" not in out
+    assert "unbuilt" not in out
+    with pytest.raises(FileNotFoundError, match="rebuild unbuilt first"):
+        publisher.main(["unbuilt", "--build-root", str(build_root)])
+
+
 def test_all_cannot_silently_ignore_named_external_dataset(capsys):
     with pytest.raises(SystemExit) as exited:
         generator.main(["--all", generator.TEASEQ_DATASET])

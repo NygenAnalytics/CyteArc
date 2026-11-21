@@ -146,7 +146,10 @@ def main(argv: list[str] | None = None) -> int:
         "datasets",
         nargs="*",
         choices=[*available, []],
-        help="Datasets to publish, defaults to every rebuilt dataset",
+        help=(
+            "Datasets to publish, defaults to every dataset with an archive in the "
+            "build root"
+        ),
     )
     parser.add_argument(
         "--apply",
@@ -161,11 +164,30 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    selected = list(args.datasets) or available
+    archive_layout = args.build_root / "<dataset>" / ARCHIVE_NAME
+    selected = list(args.datasets)
+    left_out: list[str] = []
     if not selected:
-        parser.error("no manifests found, rebuild a dataset first")
+        if not available:
+            parser.error("no manifests found, rebuild a dataset first")
+        selected = [
+            dataset
+            for dataset in available
+            if (args.build_root / dataset / ARCHIVE_NAME).is_file()
+        ]
+        left_out = [dataset for dataset in available if dataset not in selected]
+        if not selected:
+            parser.error(
+                f"no dataset has an archive at {archive_layout}, "
+                "rebuild a dataset first or pass --build-root"
+            )
 
     plans = [_plan_dataset(dataset, args.build_root) for dataset in selected]
+    if left_out:
+        print(f"Leaving out the datasets with no archive at {archive_layout}:")
+        for dataset in left_out:
+            print(f"  {dataset}")
+        print()
     for plan in plans:
         _describe(plan)
         if args.apply and not plan.empty:
