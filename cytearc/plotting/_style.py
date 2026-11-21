@@ -836,6 +836,28 @@ def colormap_argument(value: object, name: str, *, optional: bool = False) -> An
     return value
 
 
+def scale_colormap_argument(scale: Any, name: str) -> None:
+    """Check the colormap that a ``ColorScale`` or ``DensityOverlay`` argument names.
+
+    A scale names its colormap, or leaves it None for the plot's default:
+    plot results record their scales, and ``compose_results`` and provenance
+    files read the name, so a ``Colormap`` registered with
+    ``matplotlib.colormaps.register`` is passed by its name. Plots check each
+    scale argument before they read the store.
+
+    Raises:
+        TypeError: If the scale's colormap is neither None nor text.
+        ValueError: If it names no colormap that Matplotlib holds.
+    """
+    cmap = None if scale is None else scale.cmap
+    if cmap is not None and not isinstance(cmap, str):
+        raise TypeError(
+            f"{name}.cmap must be None or a Matplotlib colormap name, "
+            f"not {type(cmap).__name__}"
+        )
+    colormap_argument(cmap, f"{name}.cmap", optional=True)
+
+
 def colormap_name(cmap: "str | Colormap") -> str:
     """Return the name of a colormap that :func:`colormap_argument` accepts.
 

@@ -528,6 +528,108 @@ def test_plots_check_each_colormap_argument_before_they_read_the_store(
     )
 
 
+# Each ColorScale or DensityOverlay argument of a plot, and the arguments that
+# the plot needs besides it.
+_SCALE_ARGUMENTS = [
+    ("embedding", "color_scale", {"layout": _ref("embedding")}),
+    ("embedding", "density_overlay", {"layout": _ref("embedding")}),
+    ("embedding_raster", "color_scale", {"layout": _ref("embedding")}),
+    ("dotplot", "color_scale", {"features": ["CD3E"], "group_by": "cell_type"}),
+    ("matrixplot", "color_scale", {"features": ["CD3E"], "group_by": "cell_type"}),
+    (
+        "distribution",
+        "color_scale",
+        {
+            "keys": ["CD3E", "MS4A1"],
+            "kind": "stacked_violin",
+            "color_by": "mean",
+            "grouping": splt.CellField("cell_type"),
+        },
+    ),
+    ("marker_heatmap", "color_scale", {"marker": _ref("marker_table")}),
+    (
+        "pseudotime_heatmap",
+        "color_scale",
+        {"aggregation": _ref("pseudotime_aggregation")},
+    ),
+    (
+        "pseudotime_heatmap",
+        "pseudotime_scale",
+        {"aggregation": _ref("pseudotime_aggregation")},
+    ),
+    (
+        "mapping_score",
+        "color_scale",
+        {"result": _ref("label_transfer"), "reference": object(), "kind": "histogram"},
+    ),
+    (
+        "mapping_confusion",
+        "color_scale",
+        {"transfer": _ref("label_transfer"), "known_labels": "cell_type"},
+    ),
+    # A clone figure takes the summary that its call returns; this one is no
+    # summary, which the figure refuses once the scale passes.
+    ("clone_overlap", "color_scale", {"overlap": object()}),
+    ("clone_coupling", "color_scale", {"coupling": object()}),
+]
+
+
+@pytest.mark.parametrize(
+    ("plot", "argument", "required"),
+    _SCALE_ARGUMENTS,
+    ids=[f"{plot}-{argument}" for plot, argument, _ in _SCALE_ARGUMENTS],
+)
+def test_plots_check_each_scale_colormap_before_they_read_the_store(
+    plot, argument, required
+):
+    from matplotlib.colors import ListedColormap
+
+    draw = getattr(splt, plot)
+    scale = splt.DensityOverlay if argument == "density_overlay" else splt.ColorScale
+
+    def refusal(cmap):
+        with pytest.raises((TypeError, ValueError)) as raised:
+            draw(
+                _UnreadableStore(),
+                **required,
+                **{argument: scale(cmap=cmap)},
+                show=False,
+            )
+        return type(raised.value), raised.value.args
+
+    # A scale names its colormap, so a Colormap object is refused like a
+    # number, and so is a name that Matplotlib does not hold.
+    assert refusal(3) == (
+        TypeError,
+        (f"{argument}.cmap must be None or a Matplotlib colormap name, not int",),
+    )
+    assert refusal(ListedColormap(["#000000", "#ffffff"])) == (
+        TypeError,
+        (
+            f"{argument}.cmap must be None or a Matplotlib colormap name, "
+            "not ListedColormap",
+        ),
+    )
+    assert refusal("not_a_colormap") == (
+        ValueError,
+        (
+            f"{argument}.cmap must name a Matplotlib colormap, such as 'viridis'; "
+            "'not_a_colormap' is not one",
+        ),
+    )
+    # A scale that names a colormap, or none, passes the check: the plot reads
+    # the store, which the store double refuses, or refuses another argument.
+    for cmap in ("magma", None):
+        with pytest.raises((AssertionError, TypeError, ValueError)) as passed:
+            draw(
+                _UnreadableStore(),
+                **required,
+                **{argument: scale(cmap=cmap)},
+                show=False,
+            )
+        assert f"{argument}.cmap" not in str(passed.value)
+
+
 @pytest.mark.parametrize(
     ("frame", "expected_xlabel", "expected_ylabel"),
     [

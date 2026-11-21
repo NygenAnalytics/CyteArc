@@ -42,6 +42,7 @@ from ._style import (
     continuous_norm,
     resolve_category_scale,
     resolve_color_limits,
+    scale_colormap_argument,
     theme_context,
 )
 
@@ -341,6 +342,7 @@ def marker_heatmap(
         _, mpl = require_matplotlib()
         cmap = mpl.colors.ListedColormap(cmap, name="from_list")
     cmap = colormap_argument(cmap, "cmap")
+    scale_colormap_argument(color_scale, "color_scale")
     log_transform = optional_bool_argument(log_transform, "log_transform")
     cluster_rows = bool_argument(cluster_rows, "cluster_rows")
     cluster_columns = bool_argument(cluster_columns, "cluster_columns")
@@ -765,6 +767,8 @@ def pseudotime_heatmap(
     clusterbar_cmap = colormap_argument(
         clusterbar_cmap, "clusterbar_cmap", optional=True
     )
+    scale_colormap_argument(color_scale, "color_scale")
+    scale_colormap_argument(pseudotime_scale, "pseudotime_scale")
     resolved_color_scale = color_scale or ColorScale(vmin=vmin, vmax=vmax)
     if resolved_color_scale.scale != "linear":
         raise NotImplementedError("pseudotime_heatmap supports linear scales")

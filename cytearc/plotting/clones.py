@@ -34,6 +34,7 @@ from ._style import (
     foreground_color,
     item_inches,
     palette_for_n,
+    scale_colormap_argument,
     theme_context,
 )
 
@@ -148,6 +149,7 @@ def _follows_a_panel(ax: Any, panels: Sequence[Any]) -> bool:
 def _color_scale(color_scale: Any) -> ColorScale | None:
     if color_scale is not None and not isinstance(color_scale, ColorScale):
         raise TypeError("color_scale must be a ColorScale or None")
+    scale_colormap_argument(color_scale, "color_scale")
     return color_scale
 
 
@@ -945,11 +947,11 @@ def clone_overlap(
     """
     show_legend = bool_argument(show_legend, "show_legend")
     show = bool_argument(show, "show")
+    color_scale = _color_scale(color_scale)
     if not isinstance(overlap, CloneOverlap):
         raise TypeError("overlap must be the CloneOverlap of ds.clones.overlap")
     if index not in OVERLAP_INDICES:
         raise ValueError(f"index must be one of {', '.join(OVERLAP_INDICES)}")
-    color_scale = _color_scale(color_scale)
     if overlap.pairs.empty:
         raise ValueError(
             "The overlap compares no pair of groups, so there is nothing to plot"
@@ -1203,11 +1205,11 @@ def clone_coupling(
     """
     show_legend = bool_argument(show_legend, "show_legend")
     show = bool_argument(show, "show")
+    color_scale = _color_scale(color_scale)
     if not isinstance(coupling, CloneCoupling):
         raise TypeError("coupling must be the CloneCoupling of ds.clones.coupling")
     if value not in _COUPLING_VALUES:
         raise ValueError(f"value must be one of {', '.join(_COUPLING_VALUES)}")
-    color_scale = _color_scale(color_scale)
     if value == "z_score" and not coupling.n_permutations:
         raise ValueError(
             "The coupling was measured without permutations, so it has no "

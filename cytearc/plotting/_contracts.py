@@ -40,6 +40,9 @@ class ColorScale:
     ``vcenter`` is for diverging maps such as scaled fold changes.
     ``scope`` controls whether limits are computed per feature (default), per
     panel, or shared across every continuous panel in the figure.
+    ``cmap`` names a Matplotlib colormap, or leaves the plot's default; a
+    ``Colormap`` of your own is named once ``matplotlib.colormaps.register``
+    holds it. A plot refuses any other ``cmap`` before it reads the store.
     """
 
     cmap: str | None = None
@@ -137,7 +140,9 @@ class DensityOverlay:
     ``statistic="mean"`` contours a smoothed local mean of the continuous
     panel values and attenuates pixels with less than ``min_support`` effective
     support. ``max_hotspots`` can retain only the strongest connected regions
-    at the lowest contour level.
+    at the lowest contour level. ``cmap`` names a Matplotlib colormap that
+    colors the contour levels, as a ``ColorScale`` names one; without it
+    every level takes ``color``.
     """
 
     kind: ContourKind = "line"

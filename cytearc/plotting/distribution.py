@@ -72,6 +72,7 @@ from ._style import (
     continuous_norm,
     resolve_category_scale,
     resolve_color_limits,
+    scale_colormap_argument,
     theme_context,
 )
 from ..utils.arguments import bool_argument, optional_bool_argument
@@ -1091,6 +1092,7 @@ def distribution(
     show_legend = bool_argument(show_legend, "show_legend")
     stats_show_p = bool_argument(stats_show_p, "stats_show_p")
     show = bool_argument(show, "show")
+    scale_colormap_argument(color_scale, "color_scale")
     plt, mpl = require_matplotlib()
     value_artifact = keys if isinstance(keys, ArtifactRef) else None
     if value_artifact is not None:
