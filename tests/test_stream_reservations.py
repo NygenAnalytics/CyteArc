@@ -121,6 +121,19 @@ def test_a_read_on_cytearcs_pools_holds_its_objects_where_a_plain_pool_keeps_a_c
     # result and the two chunks under way, each as stored and decoded, beside
     # the read's objects, where a plain pool also keeps one earlier chunk for
     # each decode under way.
+    # A whole read of the sharded array, four decodes at a time, reads a band
+    # of 1,000 rows at a time: the 160,000,000-byte result, the band's
+    # 40,000,000 bytes twice over, each of its ten chunks as stored and
+    # decoded, and the four chunks under way, beside the objects of that
+    # read; the ten chunks cover any chunk that a plain pool keeps.
+    whole = (
+        160_000_000
+        + 2 * 40_000_000
+        + 10 * (encoded + decoded)
+        + 4 * decoded
+        + (32_768 + 10 * 4_096 + 4 * 16_384)
+    )
+    assert sharded.wholeReadBytes(4) == own_pool.wholeReadBytes(4) == whole
     unsharded = replace(sharded, shards=None, chunks=(1_000, 10_000))
     stored = 40_000_000 + 40_000_000 + 40_000_000 // 128 + 1_024
     read_objects = 32_768 + 4 * 4_096 + 2 * 16_384

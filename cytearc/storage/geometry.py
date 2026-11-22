@@ -140,10 +140,10 @@ class ArrayGeometry:
         """Return what reading the whole array at ``concurrency`` holds while it runs, with the result.
 
         An unsharded array is read in one call, which decodes up to
-        ``concurrency`` chunks at once, each as stored and decoded, beside any
-        previous chunks that :meth:`heldDecodeBytes` counts. A sharded array
-        is read a band of inner chunks at a time, as :meth:`bandReadBytes`
-        counts, so that no fetch takes more than one band of a shard.
+        ``concurrency`` chunks at once, each as stored and decoded, beside
+        what :meth:`heldDecodeBytes` counts. A sharded array is read a band of
+        inner chunks at a time, as :meth:`bandReadBytes` counts, so that no
+        fetch takes more than one band of a shard.
         """
         result = self.shape[0] * self.rowBytes()
         if self.shards is not None:

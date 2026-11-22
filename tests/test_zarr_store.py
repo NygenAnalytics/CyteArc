@@ -1638,8 +1638,10 @@ def test_copying_an_unsharded_array_reserves_its_chunk_as_stored_and_decoded(
     copy_zarr_array(source, target, resources=ResourceBudget(1024**2, 1))
 
     # Each read decodes one 512-byte chunk beside its compressed bytes, at
-    # most 512 + 512 // 128 + 1,024 bytes.
-    assert recorded == [512 + 512 + 4 + 1_024]
+    # most 512 + 512 // 128 + 1,024 bytes, and the objects of Zarr's read of
+    # the band's four chunks: 32 KiB, 4 KiB for each chunk and 16 KiB for the
+    # decode.
+    assert recorded == [512 + 512 + 4 + 1_024 + 32_768 + 4 * 4_096 + 16_384]
     np.testing.assert_array_equal(target[:], expected)
 
 
@@ -1668,8 +1670,11 @@ def test_copying_a_sharded_array_reserves_its_shard_read(tmp_path, monkeypatch):
     # A band of all 64 rows fills Zarr's 2,048-byte shard-level copy of them,
     # holds the compressed bytes of the four 256-byte chunks of a shard, each
     # at most 256 + 256 // 128 + 1,024 bytes, and decodes one chunk at a time
-    # beside what the read's objects take, at most the chunk decoded before.
-    assert recorded == [2_048 + 4 * (256 + 2 + 1_024) + 256 + 256]
+    # beside the objects of Zarr's read: 32 KiB, 4 KiB for each of the four
+    # chunks and 16 KiB for the decode.
+    assert recorded == [
+        2_048 + 4 * (256 + 2 + 1_024) + 256 + 32_768 + 4 * 4_096 + 16_384
+    ]
     np.testing.assert_array_equal(target[:], expected)
 
 

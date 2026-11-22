@@ -815,9 +815,10 @@ def test_profiles_read_bands_of_features_that_fit_the_budget(
     monkeypatch.setattr(normalization, "feature_value_blocks", counting)
     with pytest.raises(MemoryError, match="2 targets in 30 features"):
         run(open_store(shared.path, nthreads=2, mem_budget=1000))
-    # 80 kB gives bands of several features: below about 56 kB one feature
-    # does not fit, and from about 140 kB one band holds all 30.
-    banded = run(open_store(shared.path, nthreads=2, mem_budget=80_000))
+    # 135 kB gives bands of several features: below about 111 kB one feature
+    # and the objects of Zarr's reads of its counts do not fit, and from
+    # about 190 kB one band holds all 30.
+    banded = run(open_store(shared.path, nthreads=2, mem_budget=135_000))
 
     # Each band reads the control cells, then the profiled cells, and holds
     # several features but not all of them.

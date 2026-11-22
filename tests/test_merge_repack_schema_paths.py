@@ -1144,7 +1144,7 @@ def test_merge_counts_signed_values_within_its_budget_or_names_the_budget_it_nee
     # columns up to every column, each of which fits beside what is held;
     # steps shorter than the 1,584 bytes held reach every run that fits only
     # when what is held is left out.
-    for budget in range(needed, 64_000, 1_499):
+    for budget in range(needed, 136_000, 1_499):
         np.testing.assert_array_equal(np.diff(profile(budget)), expected)
     assert sorted(recorded_blocks) == sorted([(0, 12, 0, 600), (12, 24, 0, 600)] * 2)
     # What the merge holds beside the read adds to what the read needs, and
