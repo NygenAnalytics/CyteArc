@@ -1,9 +1,11 @@
+import asyncio
 import copy
 import hashlib
 import json
 import re
 import shutil
 from contextlib import contextmanager
+from contextvars import ContextVar
 
 import numpy as np
 import pandas as pd
@@ -12,7 +14,7 @@ import zarr
 from zarr.abc.store import OffsetByteRequest, RangeByteRequest, SuffixByteRequest
 from zarr.core.buffer import default_buffer_prototype
 from zarr.core.sync import sync
-from zarr.storage import FsspecStore, LocalStore, MemoryStore
+from zarr.storage import FsspecStore, LocalStore, MemoryStore, WrapperStore
 
 from cytearc import DataStore
 from cytearc.composite import create_composite
@@ -2441,6 +2443,49 @@ def test_pipeline_matches_materialized_counts_and_reopens(tmp_path, monkeypatch)
     assert dict(saved_run) == dict(actual_run)
 
 
+@pytest.mark.slow
+def test_a_labeled_run_on_a_composite_completes_and_reopens_by_label(tmp_path):
+    # The composite tutorial's labeled run, with Harmony correction for the
+    # source dataset, on a small composite.
+    rng = np.random.default_rng(484)
+    features = np.array([f"g{column}" for column in range(48)])
+    sources = {
+        name: _write_source(
+            tmp_path / f"{name}.zarr",
+            rng.poisson(rng.uniform(0.5, 4, len(features)), size=(48, 48)).astype(
+                np.uint16
+            ),
+            features[rng.permutation(len(features))],
+            policy=CountMatrixPolicy(4096, 1024),
+        )
+        for name in ("a", "b")
+    }
+    path = tmp_path / "joint.zarr"
+    joint = create_composite(sources, at=path, features="intersection", nthreads=1)
+    stages = {
+        "filtering": False,
+        "cell_cycle": False,
+        "hvg": {"top_n": 30},
+        "pca": {"dims": 3},
+        "neighbors": {"k": 5},
+        "umap": False,
+        "leiden": False,
+        "paris": False,
+        "doublets": False,
+        "markers": False,
+    }
+    corrected = joint.pipeline.rna(
+        label="joint_harmony", harmony={"batch_columns": ["dataset"]}, **stages
+    )
+    assert (corrected.status, corrected.label) == ("completed", "joint_harmony")
+    with pytest.raises(ValueError, match="'joint_harmony' is already committed"):
+        joint.pipeline.rna(label="joint_harmony", **stages)
+    reopened = DataStore(str(path), nthreads=1)
+    saved = reopened.pipeline.open(label="joint_harmony")
+    assert saved.run_id == corrected.run_id
+    assert dict(saved) == dict(corrected)
+
+
 def test_composite_store_inventory_matches_readable_objects(composite_adapter):
     from itertools import product
     from math import ceil
@@ -2634,6 +2679,190 @@ def test_composite_store_mutations_preserve_bindings_and_sources(
         assert await store.is_empty("result")
 
     sync(check())
+    assert _tree_digest(store.root) == before
+    assert {
+        name: _tree_digest(source.z.store.root) for name, source in sources.items()
+    } == source_digests
+
+
+_CLAIMANT: ContextVar[str | None] = ContextVar("claimant", default=None)
+
+
+class _HeldClaim(WrapperStore):
+    """Make two claimants of one key both act on it before either reads it back.
+
+    After its first call on ``key``, whatever the call, the first claimant waits
+    until the second has made its first call, and the second then waits until
+    the first has read the key back. A store that looks the key up and then
+    writes it lets both claimants find the key missing and read back their own
+    writes. ``_CLAIMANT`` names the claimant of each call.
+    """
+
+    def __init__(self, store, key):
+        super().__init__(store)
+        self.key = key
+        self.claimants = []
+        self.second_called = asyncio.Event()
+        self.first_read_back = asyncio.Event()
+
+    async def _hold(self, key):
+        claimant = _CLAIMANT.get()
+        if key != self.key or claimant is None or claimant in self.claimants:
+            return
+        self.claimants.append(claimant)
+        async with asyncio.timeout(10):
+            if len(self.claimants) == 1:
+                await self.second_called.wait()
+            else:
+                self.second_called.set()
+                await self.first_read_back.wait()
+
+    async def exists(self, key):
+        found = await self._store.exists(key)
+        await self._hold(key)
+        return found
+
+    async def get(self, key, prototype, byte_range=None):
+        value = await self._store.get(key, prototype, byte_range)
+        if key == self.key and self.second_called.is_set():
+            if self.claimants[0] == _CLAIMANT.get():
+                self.first_read_back.set()
+        await self._hold(key)
+        return value
+
+    async def set(self, key, value):
+        await self._store.set(key, value)
+        await self._hold(key)
+
+    async def set_if_not_exists(self, key, value):
+        await self._store.set_if_not_exists(key, value)
+        await self._hold(key)
+
+
+def test_one_of_two_runs_finalizing_one_label_on_a_composite_takes_it(
+    composite_adapter, monkeypatch
+):
+    from concurrent.futures import ThreadPoolExecutor
+
+    from cytearc.storage import pipeline_runs
+    from tests.test_pipeline_run_foundation import _ready_labeled_runs
+
+    root = composite_adapter.z
+    label = "joint_harmony"
+    artifact, runs = _ready_labeled_runs(root, label)
+    run_ids = [run.run_id for run in runs]
+    pipeline_runs._ensure_pipeline_label_claim_container(root)
+    claim = pipeline_runs._pipeline_label_claim_path(root, label, "head").path
+    held = _HeldClaim(root.store._store, claim)
+    monkeypatch.setattr(root.store, "_store", held)
+
+    def finalize(run_id):
+        _CLAIMANT.set(run_id)
+        try:
+            pipeline_runs.complete_pipeline_run_record(
+                root,
+                run_id=run_id,
+                outputs=(pipeline_runs.PipelineOutputRecord("selection", artifact),),
+                fields=(),
+            )
+        except ValueError as error:
+            return str(error)
+        return "completed"
+
+    with ThreadPoolExecutor(2) as pool:
+        outcomes = dict(zip(run_ids, pool.map(finalize, run_ids), strict=True))
+    # Both runs wrote or looked up the claim before either read it back.
+    assert sorted(held.claimants) == sorted(run_ids)
+    winner = pipeline_runs.open_pipeline_run_record(root, label=label).run_id
+    loser = next(run_id for run_id in run_ids if run_id != winner)
+    assert outcomes == {
+        winner: "completed",
+        loser: f"Pipeline label {label!r} is currently being finalized by run {winner}",
+    }
+    assert pipeline_runs.load_pipeline_run_record(root, loser).status == "failed"
+
+
+def test_zarr_creates_nodes_on_a_composite_beside_its_record(composite_adapter):
+    joint = composite_adapter
+    folder = joint.z.store.root
+    record = (folder / "zarr.json").read_bytes()
+    joint.z.create_group("results", attributes={"kept": True})
+    # Zarr also sends an empty group document for the root and for "results",
+    # to be written only where none exists.
+    joint.z.create_array("results/a/values", data=np.arange(3, dtype=np.int8))
+    assert (folder / "zarr.json").read_bytes() == record
+    results = json.loads((folder / "results" / "zarr.json").read_bytes())
+    assert results["attributes"] == {"kept": True}
+    parent = json.loads((folder / "results" / "a" / "zarr.json").read_bytes())
+    assert parent["node_type"] == "group"
+    np.testing.assert_array_equal(joint.z["results/a/values"][:], [0, 1, 2])
+
+
+def test_composite_conditional_writes_keep_existing_keys_and_refuse_protected_ones(
+    composite_adapter, sources
+):
+    joint = composite_adapter
+    store = joint.z.store
+    prototype = default_buffer_prototype()
+    before = _tree_digest(store.root)
+    source_digests = {
+        name: _tree_digest(source.z.store.root) for name, source in sources.items()
+    }
+    group = {"zarr_format": 3, "node_type": "group", "attributes": {}}
+    unbound = json.loads((store.root / "zarr.json").read_bytes())
+    del unbound["attributes"]["composite"]
+    consolidated = {
+        **group,
+        "consolidated_metadata": {
+            "kind": "inline",
+            "must_understand": False,
+            "metadata": {},
+        },
+    }
+    readonly = store.with_read_only(True)
+    cases = {
+        "the root, as Zarr sends it for a new node": (store, "zarr.json", group),
+        "the root without its record": (store, "zarr.json", unbound),
+        "an existing group, consolidated": (store, "cellData/zarr.json", consolidated),
+        "a new group, consolidated": (store, "results/zarr.json", consolidated),
+        "the count metadata": (store, "RNA/counts/zarr.json", group),
+        "a computed shard": (store, "RNA/counts/c/0/0", b"stray"),
+        "a shard outside the counts": (store, "RNA/counts/c/999/0", b"stray"),
+        "an existing mapping": (store, "_composite/sourceRows/zarr.json", group),
+        "a new mapping": (store, "_composite/extra/zarr.json", group),
+        "an existing key, read-only": (readonly, "cellData/zarr.json", group),
+        "a new key, read-only": (readonly, "results/value", b"new"),
+    }
+
+    def error(target, key, value):
+        raw = value if isinstance(value, bytes) else json.dumps(value).encode()
+        try:
+            sync(target.set_if_not_exists(key, prototype.buffer.from_bytes(raw)))
+        except Exception as raised:
+            return f"{type(raised).__name__}: {raised}"
+        return None
+
+    try:
+        errors = {case: error(*arguments) for case, arguments in cases.items()}
+    finally:
+        readonly.close()
+    assert errors == {
+        "the root, as Zarr sends it for a new node": None,
+        "the root without its record": None,
+        "an existing group, consolidated": None,
+        "a new group, consolidated": (
+            "PermissionError: Composite array metadata cannot be consolidated"
+        ),
+        "the count metadata": None,
+        "a computed shard": None,
+        "a shard outside the counts": "PermissionError: Composite counts are immutable",
+        "an existing mapping": None,
+        "a new mapping": "PermissionError: Composite mappings are immutable",
+        "an existing key, read-only": None,
+        "a new key, read-only": "PermissionError: Composite store is read-only",
+    }
+    # Nothing was written: an existing key keeps its bytes, and the computed
+    # counts and the mappings stay out of the folder.
     assert _tree_digest(store.root) == before
     assert {
         name: _tree_digest(source.z.store.root) for name, source in sources.items()

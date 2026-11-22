@@ -519,6 +519,16 @@ class CompositeStore(WrapperStore[Store], VirtualArrayStore):
             or key.startswith("_composite/")
         )
 
+    def _refuse_document(self, key: str, value: Buffer) -> None:
+        """Refuse a document that consolidates metadata or changes the record."""
+        if key.endswith("zarr.json"):
+            document = json.loads(value.to_bytes())
+            if document.get("consolidated_metadata") is not None:
+                raise PermissionError("Composite array metadata cannot be consolidated")
+            if key == "zarr.json" and not self.constructing:
+                if document.get("attributes", {}).get(COMPOSITE_ATTR) != self.record:
+                    raise PermissionError("Composite bindings are immutable")
+
     async def set(self, key: str, value: Buffer) -> None:
         if self.read_only:
             raise PermissionError("Composite store is read-only")
@@ -531,18 +541,29 @@ class CompositeStore(WrapperStore[Store], VirtualArrayStore):
             return
         if not self.constructing and self._protected(key):
             raise PermissionError("Composite mappings are immutable")
-        if key.endswith("zarr.json"):
-            document = json.loads(value.to_bytes())
-            if document.get("consolidated_metadata") is not None:
-                raise PermissionError("Composite array metadata cannot be consolidated")
-            if key == "zarr.json" and not self.constructing:
-                if document.get("attributes", {}).get(COMPOSITE_ATTR) != self.record:
-                    raise PermissionError("Composite bindings are immutable")
+        self._refuse_document(key, value)
         await self._store.set(key, value)
 
     async def set_if_not_exists(self, key: str, value: Buffer) -> None:
-        if not await self.exists(key):
-            await self.set(key, value)
+        if self.read_only or self._protected(key):
+            # The wrapped store does not hold the computed counts, and set
+            # refuses the mappings once the composite is created and every
+            # write to a read-only one, so these keys keep the lookup.
+            if not await self.exists(key):
+                await self.set(key, value)
+            return
+        try:
+            self._refuse_document(key, value)
+        except PermissionError:
+            # Zarr sends an empty group document for every parent of a node it
+            # creates, the root included, to be written only where none
+            # exists, so a refused document is refused only for a missing key.
+            if await self.exists(key):
+                return
+            raise
+        # Pipeline label claims need this write to be atomic, as the wrapped
+        # store's is on the stores that has_atomic_conditional_writes names.
+        await self._store.set_if_not_exists(key, value)
 
     async def _set_many(self, values: Iterable[tuple[str, Buffer]]) -> None:
         for key, value in values:
