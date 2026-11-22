@@ -1010,6 +1010,9 @@ def test_a_rebuild_stopped_during_its_analysis_leaves_nothing_to_publish(
     monkeypatch.setattr(publisher, "UNPACKED_DATASETS", frozenset({"unpacked"}))
     monkeypatch.setattr(publisher, "batch_bucket_files", batch_bucket_files)
     monkeypatch.setattr(publisher, "list_bucket_tree", _refuse_bucket_access)
+    # The rebuild's log lines reach the captured output when an earlier test
+    # has turned CyteArc's output on, so the checks below read only main's.
+    capsys.readouterr()
 
     archive_layout = build_root / "<dataset>" / publisher.ARCHIVE_NAME
     for apply in ([], ["--apply"]):
