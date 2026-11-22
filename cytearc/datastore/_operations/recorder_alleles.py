@@ -317,12 +317,13 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
         named in a warning, which a reused import gives again. Beside the
         join's counts, the diagnostics that
         ``ds.artifacts.inspect(ref).diagnostics`` returns hold ``fileRows``,
-        the files' rows, ``unmatchedRows``, those of no selected cell,
+        the files' rows, ``rowsPerFile``, those of each file in the canonical
+        order of the files, ``unmatchedRows``, those of no selected cell,
         ``slotsBeyondLength``, the slots beyond their integration's length
         that hold an insertion, and ``rowsWithoutIntegration``, the rows
-        that name none; each of the last two above 0 gives a warning too,
-        and a ``fileRows`` of 0, as files of a header alone give, gives one
-        that names the files. A file is identified by the SHA-256 of its
+        that name none; each of the last two above 0 gives a warning too, and
+        so does a file that holds no row, such as a table of a header alone,
+        which the warning names. A file is identified by the SHA-256 of its
         bytes and of the files read beside it, so the order of the files does
         not matter.
 
@@ -411,11 +412,11 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
         warnings = (
             *_allele_import_rules(files_text("allele", len(files))),
             empty_files_rule(
-                "fileRows",
+                "rowsPerFile",
                 "row",
                 files,
                 kind="allele",
-                outcome="no selected cell has an allele",
+                item="an allele",
                 remedy=(
                     "Pass a file that lists the cells' recorder alleles.",
                     "Pass files that list the cells' recorder alleles.",
@@ -627,6 +628,7 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
         diagnostics = {
             **join.diagnostics(),
             "fileRows": join.n_rows,
+            "rowsPerFile": join.file_rows(files),
             "unmatchedRows": join.n_unmatched_rows,
             "slotsBeyondLength": sum(counts["beyond"] for counts in counted),
             "rowsWithoutIntegration": sum(

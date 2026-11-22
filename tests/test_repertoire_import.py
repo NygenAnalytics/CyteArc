@@ -20,11 +20,14 @@ import pytest
 
 from cytearc import DiagnosticWarning
 from cytearc.repertoire import ImmuneReceptors
+from cytearc.utils.digest import file_sha256
 from cytearc.utils.logging import collect_warnings
 from tests.clone_helpers import (
     AIRR_HEADER,
     CELLRANGER_HEADER,
     assert_joined,
+    imported_anew,
+    rewrite_as_saved_by_1_4,
     N_RECEPTOR_CELLS,
     TCR_ROWS,
     airr_file,
@@ -503,8 +506,8 @@ def test_a_file_without_contig_rows_leaves_every_cell_without_a_receptor(
         )
         assert (warning.operation, warning.diagnostic, warning.value) == (
             "import_immune_receptors",
-            "fileContigs",
-            0,
+            "contigsPerFile",
+            [0],
         )
     assert refs[0] == refs[1]
     loaded = store.repertoire.load_receptors(refs[0])
@@ -534,17 +537,50 @@ def test_only_an_import_that_reads_no_contig_warns_of_its_files(tmp_path) -> Non
     )
     assert named is not None
     assert {Path(path).name for path in named.groups()} == {"empty.csv", "empty.tsv"}
-    # One contig of a selected cell beside an empty file is enough, and a
-    # contig of no cell of the store is named only by the barcodes' warning.
+    # An empty file beside one contig of a selected cell is named alone, and
+    # a contig of no cell of the store is named only by the barcodes' warning.
     one = write_lines(tmp_path, "one.tsv", BARE_AIRR, ["cell0\tc1\tTRB\tCASS\tT"])
     stray = write_lines(tmp_path, "stray.tsv", BARE_AIRR, ["stray\tc1\tTRB\tCASS\tT"])
-    with collect_warnings() as messages:
-        store.repertoire.import_receptors([empty_csv, one], cell_selection=cells)
-    assert messages == []
+    with pytest.warns(DiagnosticWarning) as caught:
+        beside = store.repertoire.import_receptors(
+            [empty_csv, one], cell_selection=cells
+        )
+    assert len(caught) == 1
+    assert re.fullmatch(
+        r"The import read no contig from the contig file '[^']*empty\.csv', 1 of "
+        r"its 2 contig files, so that file gives no cell a receptor\. Pass the file "
+        r"you meant in its place, or leave it out\.",
+        str(caught[0].message),
+    )
+    # Its contigs, file by file in the order of the recorded files.
+    contigs = {file_sha256(empty_csv): 0, file_sha256(one): 1}
+    sources = store.artifacts.inspect(beside).inputs["sources"]
+    assert store.artifacts.inspect(beside).diagnostics["contigsPerFile"] == [
+        contigs[source["sha256"]] for source in sources
+    ]
     with collect_warnings() as messages:
         store.repertoire.import_receptors(stray, cell_selection=cells)
     assert len(messages) == 1
     assert messages[0].startswith("1 of 1 barcodes of the contig file match no cell")
+
+
+def test_a_receptor_import_saved_before_its_contigs_per_file_is_imported_anew(
+    tmp_path,
+) -> None:
+    store = receptor_store(tmp_path)
+    cells = store.snapshot_cell_selection()
+    path = write_lines(tmp_path, "one.tsv", BARE_AIRR, ["cell0\tc1\tTRB\tCASS\tT"])
+    saved = store.repertoire.import_receptors(path, cell_selection=cells)
+    rewrite_as_saved_by_1_4(store, saved, "contigsPerFile")
+    # It still serves the calls that pass it.
+    assert len(store.repertoire.load_receptors(saved).chains) == 1
+
+    again = imported_anew(
+        store,
+        saved,
+        lambda: store.repertoire.import_receptors(path, cell_selection=cells),
+    )
+    assert store.artifacts.inspect(again).diagnostics["contigsPerFile"] == [1]
 
 
 def _contig_reads(store, receptors, folder: Path) -> dict:

@@ -22,11 +22,14 @@ import pytest
 
 from cytearc import DiagnosticWarning
 from cytearc.clones.barcodes import LineageBarcodes
+from cytearc.utils.digest import file_sha256
 from cytearc.utils.logging import collect_warnings
 from tests.clone_helpers import (
     assert_joined,
     every_cell,
     example_ids,
+    imported_anew,
+    rewrite_as_saved_by_1_4,
     write_truth_store,
 )
 from tests.clone_truth import (
@@ -845,8 +848,8 @@ def test_a_file_without_rows_saves_no_barcode_and_warns_naming_it(
         )
         assert (warning.operation, warning.diagnostic, warning.value) == (
             "import_lineage_barcodes",
-            "fileRows",
-            0,
+            "rowsPerFile",
+            [0],
         )
     assert refs[0] == refs[1]
     ref = refs[0]
@@ -896,12 +899,25 @@ def test_only_files_that_hold_no_row_are_warned_of(tmp_path) -> None:
     )
     assert named is not None
     assert {Path(name).name for name in named.groups()} == {"current.txt", "early.txt"}
-    # One row of a selected cell beside a file without rows is enough.
+    # A file without rows beside one row of a selected cell is named alone.
     one = tmp_path / "one.txt"
     one.write_text(f"#cell_id\tumi\tclone_id\n{TRUTH.cell_ids[0]}\tAAAA\tACGT\n")
-    with collect_warnings() as messages:
-        store.clones.import_barcodes([early, one], cell_selection=cells)
-    assert messages == []
+    with pytest.warns(DiagnosticWarning) as caught:
+        beside = store.clones.import_barcodes([early, one], cell_selection=cells)
+    assert len(caught) == 1
+    assert re.fullmatch(
+        r"The import read no row from the barcode file '[^']*early\.txt', 1 of its "
+        r"2 barcode files, so that file gives no cell a barcode\. Pass the file you "
+        r"meant in its place, or leave it out\.",
+        str(caught[0].message),
+    )
+    # Its rows, file by file in the order of the recorded files.
+    rows = {file_sha256(early): 0, file_sha256(one): 1}
+    sources = store.artifacts.inspect(beside).inputs["sources"]
+    assert store.artifacts.inspect(beside).diagnostics["rowsPerFile"] == [
+        rows[source["sha256"]] for source in sources
+    ]
+    assert len(store.clones.load_barcodes(beside).records) == 1
     # An assay's counts are no file: an assay without a count reads no row
     # and names no file.
     with collect_warnings() as messages:
@@ -909,7 +925,25 @@ def test_only_files_that_hold_no_row_are_warned_of(tmp_path) -> None:
             cell_selection=cells, from_assay="LINEAGE"
         )
     assert messages == []
-    assert store.artifacts.inspect(counted).diagnostics["fileRows"] == 0
+    diagnostics = store.artifacts.inspect(counted).diagnostics
+    assert (diagnostics["fileRows"], diagnostics["rowsPerFile"]) == (0, [])
+
+
+def test_an_import_saved_before_its_rows_per_file_is_imported_anew(
+    store, tmp_path
+) -> None:
+    path = tmp_path / "one.txt"
+    path.write_text(f"#cell_id\tumi\tclone_id\n{TRUTH.cell_ids[0]}\tAAAA\tACGT\n")
+    cells = every_cell(store)
+    saved = store.clones.import_barcodes(path, cell_selection=cells)
+    rewrite_as_saved_by_1_4(store, saved, "rowsPerFile")
+    # It still serves the calls that pass it.
+    assert len(store.clones.load_barcodes(saved).records) == 1
+
+    again = imported_anew(
+        store, saved, lambda: store.clones.import_barcodes(path, cell_selection=cells)
+    )
+    assert store.artifacts.inspect(again).diagnostics["rowsPerFile"] == [1]
 
 
 def test_rows_without_a_barcode_or_counted_zero_hold_none(shared, tmp_path) -> None:

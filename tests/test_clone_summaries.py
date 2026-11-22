@@ -411,7 +411,7 @@ def test_every_source_records_the_clone_writers_diagnostics(source) -> None:
     # Each source's own keys follow the writer's, the join's before them.
     joined = ["import_clones"]
     own = {
-        "import_clones": ["fileRows", "cellsInSeveralClones"],
+        "import_clones": ["fileRows", "rowsPerFile", "cellsInSeveralClones"],
         "call_barcode_clones": list(BARCODE_DIAGNOSTICS),
         "call_allele_clones": list(ALLELE_DIAGNOSTICS),
         "call_frequency_clones": [

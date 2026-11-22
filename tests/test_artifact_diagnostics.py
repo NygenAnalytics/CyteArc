@@ -39,12 +39,14 @@ from cytearc.storage.artifact_writer import (
 )
 from cytearc.storage.artifacts import artifact_group, require_complete_artifact
 from cytearc.storage.diagnostics import (
+    DIAGNOSTICS_ATTRIBUTE,
     EXAMPLES,
     DiagnosticRule,
     checked_diagnostics,
     declare_diagnostics,
     declared_diagnostics,
     export_summary,
+    read_diagnostics,
     warn_diagnostics,
 )
 from cytearc.storage.operation_revisions import OperationRevision
@@ -104,6 +106,7 @@ _KEYS_OF_EVERY_KIND = (
     "label",
     "unmeasured",
     "barcodeExamples",
+    "rowsPerFile",
 )
 
 
@@ -117,6 +120,7 @@ _KEYS_OF_EVERY_KIND = (
                 "label": "x",
                 "unmeasured": None,
                 "barcodeExamples": ("a -> s1__a",),
+                "rowsPerFile": (np.int64(3), 0),
             },
             {
                 "count": 3,
@@ -124,6 +128,7 @@ _KEYS_OF_EVERY_KIND = (
                 "label": "x",
                 "unmeasured": None,
                 "barcodeExamples": ["a -> s1__a"],
+                "rowsPerFile": [3, 0],
             },
         ),
         (
@@ -133,6 +138,8 @@ _KEYS_OF_EVERY_KIND = (
                 "label": "",
                 "unmeasured": 7,
                 "barcodeExamples": ["1", "2", "3", "4", "5"],
+                # An earlier revision, which counted no file, reads as None.
+                "rowsPerFile": None,
             },
             {
                 "count": 0,
@@ -140,6 +147,7 @@ _KEYS_OF_EVERY_KIND = (
                 "label": "",
                 "unmeasured": 7,
                 "barcodeExamples": ["1", "2", "3", "4", "5"],
+                "rowsPerFile": None,
             },
         ),
     ],
@@ -154,6 +162,8 @@ def test_diagnostics_are_numbers_texts_none_or_a_few_example_texts(
         type(value) for value in saved.values()
     ]
     assert list(checked) == list(_KEYS_OF_EVERY_KIND)
+    counts = checked["rowsPerFile"]
+    assert counts is None or all(type(count) is int for count in counts)
 
 
 @pytest.mark.parametrize(
@@ -169,6 +179,13 @@ def test_diagnostics_are_numbers_texts_none_or_a_few_example_texts(
         ("barcodeExamples", "a", "must be a list of texts"),
         ("barcodeExamples", [1], "must be a list of texts"),
         ("barcodeExamples", [str(n) for n in range(EXAMPLES + 1)], "at most 5"),
+        ("rowsPerFile", 3, "must be a list of counts, one for each file"),
+        ("rowsPerFile", "3", "must be a list of counts, one for each file"),
+        ("rowsPerFile", [3, -1], "must be a list of counts, one for each file"),
+        ("rowsPerFile", [True], "must be a list of counts, one for each file"),
+        ("rowsPerFile", [np.bool_(True)], "must be a list of counts"),
+        ("rowsPerFile", [1.0], "must be a list of counts, one for each file"),
+        ("rowsPerFile", ["1"], "must be a list of counts, one for each file"),
     ],
 )
 def test_other_values_are_refused(key, value, message) -> None:
@@ -178,6 +195,7 @@ def test_other_values_are_refused(key, value, message) -> None:
         "label": "x",
         "unmeasured": None,
         "barcodeExamples": [],
+        "rowsPerFile": [],
     }
     values[key] = value
     with pytest.raises(ValueError, match=message):
@@ -217,22 +235,28 @@ def test_an_operation_declares_camel_case_keys_once() -> None:
 _OWN_KEYS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     "CloneImportArguments": (
         (*JOIN_DIAGNOSTICS, *CLONE_DIAGNOSTICS),
-        ("fileRows", "cellsInSeveralClones"),
+        ("fileRows", "rowsPerFile", "cellsInSeveralClones"),
     ),
     "CloneColumnArguments": (CLONE_DIAGNOSTICS, ()),
     "ImmuneReceptorImportArguments": (
         JOIN_DIAGNOSTICS,
-        ("fileContigs", "unmatchedContigs", "cellsWithChain"),
+        ("fileContigs", "contigsPerFile", "unmatchedContigs", "cellsWithChain"),
     ),
     "ClonotypeArguments": (CLONE_DIAGNOSTICS, ()),
     "LineageBarcodeImportArguments": (
         JOIN_DIAGNOSTICS,
-        ("fileRows", "unmatchedRows", "emptyRows"),
+        ("fileRows", "rowsPerFile", "unmatchedRows", "emptyRows"),
     ),
     "BarcodeCloneArguments": (CLONE_DIAGNOSTICS, BARCODE_DIAGNOSTICS),
     "RecorderAlleleImportArguments": (
         JOIN_DIAGNOSTICS,
-        ("fileRows", "unmatchedRows", "slotsBeyondLength", "rowsWithoutIntegration"),
+        (
+            "fileRows",
+            "rowsPerFile",
+            "unmatchedRows",
+            "slotsBeyondLength",
+            "rowsWithoutIntegration",
+        ),
     ),
     "AlleleCloneArguments": (CLONE_DIAGNOSTICS, ALLELE_DIAGNOSTICS),
     "PhylogenyImportArguments": (
@@ -614,6 +638,37 @@ def test_an_artifact_is_refused_for_diagnostics_that_no_revision_explains(
         store.artifacts.inspect(ref).diagnostics
     with pytest.raises(ValueError, match=expected):
         require_complete_artifact(store.zw, ref)
+
+
+@pytest.mark.parametrize(
+    ("operation", "key"),
+    [
+        ("import_clones", "rowsPerFile"),
+        ("import_immune_receptors", "contigsPerFile"),
+        ("import_lineage_barcodes", "rowsPerFile"),
+        ("import_recorder_alleles", "rowsPerFile"),
+    ],
+)
+def test_imports_saved_before_their_counts_per_file_read_them_as_not_measured(
+    operation, key
+) -> None:
+    keys = declared_diagnostics(operation)
+    assert key in keys
+    # What an import of revision 1 saved: every other key, of its kind.
+    saved = {
+        name: ([] if name.endswith("Examples") else 0) for name in keys if name != key
+    }
+    read = read_diagnostics(
+        {DIAGNOSTICS_ATTRIBUTE: saved}, operation, path="imported", revision=1
+    )
+    assert read[key] is None
+    assert list(read) == list(keys)
+    # An import of the revision that added the key saved it, so losing it is
+    # refused.
+    with pytest.raises(ValueError, match=f"missing {key}"):
+        read_diagnostics(
+            {DIAGNOSTICS_ATTRIBUTE: saved}, operation, path="imported", revision=2
+        )
 
 
 def test_a_declaration_holds_every_diagnostic_that_a_revision_adds(

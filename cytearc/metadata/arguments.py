@@ -601,6 +601,7 @@ class CloneImportArguments(OperationArguments):
         *JOIN_DIAGNOSTICS,
         *CLONE_DIAGNOSTICS,
         "fileRows",
+        "rowsPerFile",
         "cellsInSeveralClones",
     )
     call: ClassVar[str | None] = "ds.clones.import_clones"
@@ -681,6 +682,7 @@ class ImmuneReceptorImportArguments(OperationArguments):
     diagnostics: ClassVar[tuple[str, ...]] = (
         *JOIN_DIAGNOSTICS,
         "fileContigs",
+        "contigsPerFile",
         "unmatchedContigs",
         "cellsWithChain",
     )
@@ -725,6 +727,7 @@ class LineageBarcodeImportArguments(OperationArguments):
     diagnostics: ClassVar[tuple[str, ...]] = (
         *JOIN_DIAGNOSTICS,
         "fileRows",
+        "rowsPerFile",
         "unmatchedRows",
         "emptyRows",
     )
@@ -985,6 +988,7 @@ class RecorderAlleleImportArguments(OperationArguments):
     diagnostics: ClassVar[tuple[str, ...]] = (
         *JOIN_DIAGNOSTICS,
         "fileRows",
+        "rowsPerFile",
         "unmatchedRows",
         "slotsBeyondLength",
         "rowsWithoutIntegration",

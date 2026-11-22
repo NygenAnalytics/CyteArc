@@ -1167,6 +1167,27 @@ def _plain(path: str = "f", **options) -> BarcodeFile:
     )
 
 
+def test_the_join_counts_the_rows_of_each_file_apart() -> None:
+    join = _join(np.asarray(["s1__a-1", "s1__b-1"]), MemoryLedger(None, "J"))
+    first = _plain("first", prefix="s1__", suffix="-1")
+    second = _plain("second", prefix="s1__", suffix="-1")
+    # The same path under another prefix is another listing of the import.
+    again = _plain("first", prefix="s2__", suffix="-1")
+    never = _plain("never", prefix="s1__", suffix="-1")
+    # Rows of every kind count, those of no cell of the store and those that
+    # repeat a barcode among them, over the chunks of each file.
+    join.cells(first, np.asarray(["a", "b"], dtype=object))
+    join.cells(second, np.asarray(["b"], dtype=object))
+    join.cells(first, np.asarray(["z"], dtype=object))
+    join.cells(again, np.asarray(["a", "a", "q"], dtype=object))
+
+    assert join.file_rows([first, second, again, never]) == [3, 1, 3, 0]
+    # The counts follow the order of the files asked for.
+    assert join.file_rows([never, again]) == [0, 3]
+    assert join.file_rows([]) == []
+    assert join.n_rows == 7
+
+
 def test_a_pattern_is_text_with_a_barcode_group() -> None:
     assert barcode_pattern(None) is None
     assert barcode_pattern("(?P<barcode>.+)-1") == "(?P<barcode>.+)-1"
