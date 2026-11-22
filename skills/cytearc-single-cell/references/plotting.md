@@ -239,6 +239,8 @@ With `target=` the caller owns the figure: child `close()` does nothing, so clos
 ref-mode embedding with many long category labels and `legend_loc="right"` shrinks its axes to a
 thumbnail; draw it on a wide figure you own instead.
 
+Each `target=` call below passes `show=False` because in Jupyter the default `show=True` displays the figure as it stands when the call returns and closes it in pyplot, so panels and lines drawn after the call would not show.
+
 ```python
 fig, axes = plt.subplots(1, 2, figsize=(9, 4), layout="constrained")
 ds.plots.embedding(run=run, color_by="clusters", target=axes[0], show=False)

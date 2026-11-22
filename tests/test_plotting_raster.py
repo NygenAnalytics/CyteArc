@@ -965,6 +965,44 @@ def test_embedding_raster_shows_owned_results_by_default(monkeypatch):
     assert "rendered=False" in repr(result)
 
 
+def test_embedding_raster_into_a_caller_figure_shows_it_as_it_stands_by_default(
+    monkeypatch,
+):
+    import matplotlib.pyplot as plt
+
+    # In IPython, a target= call with the default show=True displays the
+    # caller's figure as it stands when the call returns and closes it in
+    # pyplot, as the plotting reference says, so the image of the first panel
+    # holds no second panel and pyplot no longer shows the figure.
+    figure, (left, right) = plt.subplots(1, 2)
+    shown = []
+    monkeypatch.setattr("IPython.get_ipython", lambda: object())
+    monkeypatch.setattr(
+        "IPython.display.display",
+        lambda displayed: shown.append(
+            (displayed, [len(axis.get_images()) for axis in (left, right)])
+        ),
+    )
+    store = _layout_store(_layout_columns())
+
+    splt.embedding_raster(store, layout_key="U", pixels=16, target=left)
+
+    assert shown == [(figure, [1, 0])]
+    assert not plt.fignum_exists(figure.number)
+
+    splt.embedding_raster(store, layout_key="U", pixels=16, target=right)
+
+    assert shown == [(figure, [1, 0]), (figure, [1, 1])]
+
+    # With show=False the call displays nothing and leaves the figure open.
+    open_figure, axis = plt.subplots()
+    splt.embedding_raster(store, layout_key="U", pixels=16, target=axis, show=False)
+
+    assert len(shown) == 2
+    assert plt.fignum_exists(open_figure.number)
+    plt.close(open_figure)
+
+
 def test_raster_validates_quantiles_pixels_and_subset_column():
     from cytearc.plotting._raster import raster_from_metadata
 

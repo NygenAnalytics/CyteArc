@@ -180,11 +180,9 @@ to the number of plotted cells that it did not measure, when that number is not 
 
 WNN is the default for `DataStore.integration.modalities`. Its integrated graph stores one weight per input assay and cell. Use `ds.plots.modality_weights(graph=wnn_graph, layout=embedding)` or {py:func}`cytearc.plotting.modality_weights` to show those weights over an explicit embedding of the graph's cells. Explicit SNN graphs do not contain modality weights.
 
-Store-backed plotters and diagnostics generally return a `PlotResult` and render by default with `show=True`.
-Pass `show=False` before accessing, saving, or reusing an owned figure.
-In Jupyter, `PlotResult.show()` displays the figure and then closes it in pyplot, as `plt.show()` does, so the cell draws it once; this includes a figure passed with `target=` or composed with `compose_results`, which can still be saved or drawn on.
-`run_recipe` returns a `PlotRecipeResult` and defaults to `show=False`.
-Helpers differ: `label_panels` returns `None`, `theme_context` is an iterator, and `compose_results` returns a `PlotResult` without a `show` parameter.
+Store-backed plotters and diagnostics generally return a `PlotResult` and render by default with `show=True`. `run_recipe` returns a `PlotRecipeResult` and defaults to `show=False`. Helpers differ: `label_panels` returns `None`, `theme_context` is an iterator, and `compose_results` returns a `PlotResult` without a `show` parameter.
+
+Pass `show=False` to every call that draws on a figure you will change or add panels to, such as each `target=` call that fills a panel of your own figure, then show the complete figure once with `plt.show()`, which Jupyter also calls at the end of each cell. A call with the default `show=True` shows the figure as it stands when the call returns. In Jupyter, `PlotResult.show()` displays any figure, one passed with `target=` or composed with `compose_results` included, and then closes it in pyplot, as `plt.show()` does, so that the end of the cell does not show it a second time. Neither `plt.show()` nor the end of the cell shows a figure that pyplot has closed, so a line or panel drawn on it after the call does not appear, and two panels filled by calls with the default `show=True` give two images, the first with one panel empty. A closed figure can still be saved or drawn on, and `display(fig)` or `result.show()` shows it with everything drawn on it.
 
 ```{eval-rst}
 .. automodule:: cytearc.plotting

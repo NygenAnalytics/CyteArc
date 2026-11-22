@@ -107,13 +107,7 @@ class PlotResult:
     is True when CyteArc created the figure. ``close()`` closes an owned
     figure in pyplot and keeps the result metadata.
 
-    In IPython, ``show()`` displays the figure and then closes it in pyplot,
-    as ``plt.show()`` does in Jupyter, so the end of the cell does not draw it
-    a second time. This holds for every figure, a figure passed with
-    ``target=`` or composed with :func:`compose_results` included. Outside
-    IPython, ``show()`` hands an interactive canvas to ``plt.show()`` and
-    closes only an owned figure. A closed figure can still be saved or drawn
-    on.
+    In IPython, ``show()`` displays the figure and then closes it in pyplot, as ``plt.show()`` does in Jupyter, so the end of the cell does not draw it a second time. This holds for every figure, a figure passed with ``target=`` or composed with :func:`compose_results` included. Outside IPython, ``show()`` hands an interactive canvas to ``plt.show()`` and closes only an owned figure. A closed figure can still be saved or drawn on. In Jupyter, ``display(result.figure)`` and ``result.show()`` show it with everything drawn on it, and ``plt.show()`` does not.
     """
 
     figure: Any
