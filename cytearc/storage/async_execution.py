@@ -671,13 +671,13 @@ def run_on_zarr_loop(coroutine: Coroutine[Any, Any, T]) -> T:
 
     The stop of the block stream that runs the read cancels the read's task
     on Zarr's loop, and this raises ``ReadStopped`` once the task has ended.
+    A read whose task is cancelled otherwise raises ``asyncio.CancelledError``,
+    as a read on its own loop does, and an error that the read raises itself,
+    ``concurrent.futures.CancelledError`` among them, is raised as it is.
     Every read on Zarr's loop shares Zarr's codec pool, so a store call or
     decode that a stopped read had started there can end after this returns.
     """
     sync_module = importlib.import_module("zarr.core.sync")
-    stop = _READ_STOP.get()
-    if stop is None:
-        return cast(T, sync_module.sync(coroutine))
     started: Future[asyncio.Task[T]] = Future()
 
     async def tracked() -> T:
@@ -700,15 +700,26 @@ def run_on_zarr_loop(coroutine: Coroutine[Any, Any, T]) -> T:
 
     read = tracked()
     try:
-        with stop.cancelling(cancel):
+        with _stoppable(_READ_STOP.get(), cancel):
             return cast(T, sync_module.sync(read))
     except sync_module.SyncError:
         # Zarr refuses a read from its own loop thread before the read starts.
         read.close()
         raise
-    except (CancelledError, asyncio.CancelledError):
+    except CancelledError:
+        if not started.done():
+            # Zarr's loop cancelled the read's task before its first step, so
+            # neither the wrapper nor the read ever ran.
+            read.close()
+            coroutine.close()
         if stopped:
             raise ReadStopped("The block stream closed while this read ran") from None
+        # Zarr's sync() reports a read whose task was cancelled with the
+        # CancelledError of concurrent.futures, an Exception, and re-raises one
+        # that the read raised itself. Only the first is a cancellation, which
+        # raises asyncio's class, a BaseException, as on the read's own loop.
+        if not started.done() or started.result().cancelled():
+            raise asyncio.CancelledError from None
         raise
 
 

@@ -19,7 +19,7 @@ from huggingface_hub.errors import HfHubHTTPError
 from zarr.abc.store import OffsetByteRequest, RangeByteRequest, SuffixByteRequest
 from zarr.core.buffer import default_buffer_prototype
 from zarr.core.group import GroupMetadata
-from zarr.core.sync import sync
+from zarr.core.sync import _get_loop, sync
 from zarr.storage import FsspecStore
 
 from cytearc.storage import huggingface
@@ -877,6 +877,14 @@ def test_read_store_retries_a_refused_connection(monkeypatch):
         read_only=True,
     )
     sleeps = _record_sleeps(monkeypatch)
+    # The retries' deadline reads the clock of Zarr's loop, which the recorded
+    # sleeps do not advance. Holding the clock still makes the outcome depend on
+    # the recorded delays alone, not on how long the refused connections take:
+    # on a loaded machine the first two took more than the 1 s that the second
+    # delay leaves of the 5 s, and the request gave up after one delay.
+    loop = _get_loop()
+    held = loop.time()
+    monkeypatch.setattr(loop, "time", lambda: held)
     try:
         with pytest.raises(TimeoutError) as raised:
             sync(store.get("zarr.json", _PROTOTYPE), timeout=GUARD_SECONDS)

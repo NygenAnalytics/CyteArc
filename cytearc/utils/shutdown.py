@@ -1,3 +1,4 @@
+import concurrent.futures
 import signal
 import threading
 import time
@@ -27,6 +28,20 @@ class ShutdownRequested(BaseException):
 
     def __reduce__(self) -> tuple[Any, tuple[Any, ...], dict[str, Any]]:
         return (type(self), (self.request,), self.__dict__)
+
+
+def is_interruption(error: BaseException) -> bool:
+    """Return whether ``error`` interrupts the work it ends rather than failing it.
+
+    Errors outside ``Exception``, such as ``KeyboardInterrupt``,
+    ``asyncio.CancelledError`` and ``ShutdownRequested``, interrupt. So does
+    ``concurrent.futures.CancelledError``, which Zarr's synchronous API raises
+    for an operation that was cancelled on Zarr's event loop, although it
+    derives from ``Exception``.
+    """
+    return not isinstance(error, Exception) or isinstance(
+        error, concurrent.futures.CancelledError
+    )
 
 
 @dataclass(frozen=True, slots=True)

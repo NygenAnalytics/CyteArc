@@ -1,5 +1,6 @@
 """Derived-assay creation: atomic publication, rollback, and grouped means."""
 
+import concurrent.futures
 import shutil
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -467,11 +468,20 @@ def _memory_root(workspace: str | None = None) -> zarr.Group:
     return root
 
 
-def test_derived_assay_transaction_keeps_the_pending_assay_on_keyboard_interrupt():
+@pytest.mark.parametrize(
+    "interruption",
+    # Zarr's synchronous API reports a cancelled call with the CancelledError
+    # of concurrent.futures, an Exception.
+    [KeyboardInterrupt, concurrent.futures.CancelledError],
+    ids=["keyboard", "zarr_cancelled"],
+)
+def test_derived_assay_transaction_keeps_the_pending_assay_on_an_interruption(
+    interruption: type[BaseException],
+):
     root = _memory_root("ws")
     root["ws"].attrs["assayTypes"] = {"OTHER": "RNA"}
 
-    with _warnings() as warnings, pytest.raises(KeyboardInterrupt):
+    with _warnings() as warnings, pytest.raises(interruption):
         with derived_assay_transaction(
             root, "SCORES", "ws", operation="add_melded_assay"
         ) as transaction:
@@ -480,7 +490,7 @@ def test_derived_assay_transaction_keeps_the_pending_assay_on_keyboard_interrupt
             assert pending_assays(root) == [("SCORES", "ws", "add_melded_assay")]
             root["ws"].attrs["assayTypes"] = {"OTHER": "RNA", "SCORES": "RNA"}
             counts[:] = 1.0
-            raise KeyboardInterrupt
+            raise interruption
 
     # An interrupted write may still land, so the pending assay stays.
     assert pending_assays(root) == [("SCORES", "ws", "add_melded_assay")]
