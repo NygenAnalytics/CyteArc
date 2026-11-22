@@ -1,7 +1,6 @@
 """An interrupted caller in a running event loop stops its storage operation."""
 
 import asyncio
-import os
 import signal
 import threading
 import time
@@ -29,12 +28,16 @@ def _runner() -> AsyncStorageRunner:
     return AsyncStorageRunner(operation=plan)
 
 
-@pytest.mark.skipif(not hasattr(signal, "SIGINT"), reason="needs SIGINT")
+@pytest.mark.skipif(not hasattr(signal, "pthread_kill"), reason="needs pthread_kill")
 def test_an_interrupted_notebook_cell_stops_its_operation_before_it_returns():
     # Only the main thread receives KeyboardInterrupt. Elsewhere, the SIGINT
     # below would interrupt whatever the main thread runs, such as the test
     # runner, instead of this cell.
     assert threading.current_thread() is threading.main_thread()
+    # Python's own handler turns the SIGINT into a KeyboardInterrupt.
+    assert signal.getsignal(signal.SIGINT) is signal.default_int_handler
+    main = threading.main_thread().ident
+    assert main is not None
     events: list[str] = []
     first_unit = threading.Event()
 
@@ -57,8 +60,11 @@ def test_an_interrupted_notebook_cell_stops_its_operation_before_it_returns():
         first_unit.wait()
         time.sleep(0.05)
         # Ctrl-C in a notebook: the default handler raises KeyboardInterrupt
-        # in the main thread, which is waiting for the helper thread.
-        os.kill(os.getpid(), signal.SIGINT)
+        # in the main thread, which is waiting for the helper thread. The
+        # signal goes to the main thread itself: a signal sent to the process
+        # can reach any of its threads, and the main thread's wait ends early
+        # only when the signal interrupts that wait.
+        signal.pthread_kill(main, signal.SIGINT)
 
     threading.Thread(target=interrupt, daemon=True).start()
     loop = asyncio.new_event_loop()
