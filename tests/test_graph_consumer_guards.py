@@ -591,6 +591,8 @@ def test_load_symmetric_returns_the_fuzzy_union() -> None:
 
         def __init__(self) -> None:
             self.zw = root
+            # The graph's arrays decode on a store's threads.
+            self.nthreads = 1
 
         def _graph_location(self, _graph):
             return "graph"
