@@ -69,6 +69,24 @@ def test_hvgs_without_matplotlib_warn_and_return_the_selection(
         assert _hvgs(store) == ref
 
 
+def test_hvgs_without_matplotlib_check_their_plot_options_by_name(
+    tmp_path, without_matplotlib
+):
+    store = _store(tmp_path)
+
+    # Without matplotlib, which looks up the colormaps, no plot is drawn and
+    # the options are recorded as given.
+    with pytest.warns(UserWarning, match="returns the selection without the plot"):
+        ref = _hvgs(store, colormaps=("winter", "magma_r"), label_size=9)
+    assert store.artifacts.inspect(ref).execution_options["plot_kwargs"] == {
+        "colormaps": ["winter", "magma_r"],
+        "label_size": 9,
+    }
+    # A keyword that the plot does not take is still refused.
+    with pytest.raises(TypeError, match="'top_N'"):
+        _hvgs(store, top_N=5, show_plot=False)
+
+
 def test_hvgs_without_matplotlib_and_without_a_plot_do_not_warn(
     tmp_path, without_matplotlib
 ):

@@ -19,6 +19,7 @@ from cytearc.plotting._style import (
     continuous_norm,
     palette_for_n,
     scale_argument,
+    theme_argument,
     theme_context,
 )
 from cytearc.storage.refs import ArtifactRef
@@ -918,6 +919,26 @@ def test_theme_context_restores_state_after_error_and_rejects_unknown_theme():
     with pytest.raises(KeyError, match="Unknown theme"):
         with theme_context("missing-theme"):
             pass
+
+
+def test_theme_argument_returns_a_theme_and_names_the_themes_to_choose_from():
+    for name in ("dark", "minimal", "notebook", "paper"):
+        assert theme_argument(name) == name
+    for name in ("missing-theme", "Paper", 3, None):
+        with pytest.raises(KeyError) as raised:
+            theme_argument(name)
+        assert raised.value.args == (
+            f"Unknown theme {name!r}. Choose from: ['dark', 'minimal', 'notebook', "
+            "'paper']",
+        )
+    # theme_context refuses a theme with the same error.
+    with pytest.raises(KeyError) as entered:
+        with theme_context("missing-theme"):
+            pass
+    assert entered.value.args == (
+        "Unknown theme 'missing-theme'. Choose from: ['dark', 'minimal', "
+        "'notebook', 'paper']",
+    )
 
 
 def _rc_params_except_interactive(mpl):

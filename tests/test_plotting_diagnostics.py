@@ -1,3 +1,6 @@
+import inspect
+import warnings
+
 import matplotlib
 
 matplotlib.use("Agg")
@@ -8,7 +11,9 @@ import pytest
 from scipy import sparse
 
 import cytearc.plotting as splt
+import cytearc.plotting.diagnostics as diagnostics
 from cytearc.plotting._figure import PlotResult
+from cytearc.plotting.diagnostics import hvg_plot_options
 
 
 # A steep drop followed by a slow tail has its only corner at the third PC, 1.0.
@@ -510,6 +515,135 @@ def test_elbow_rejects_malformed_variance_arrays(values):
         splt.elbow(values, show=False)
 
 
+@pytest.mark.parametrize(
+    ("values", "width"),
+    [
+        pytest.param([5.0], 2.0, id="one-pc"),
+        pytest.param([5.0, 1.0], 2.0, id="two-pcs"),
+        pytest.param([3.0, 3.0, 3.0], 2.0, id="equal-values"),
+        # Twelve PCs take their quarter inch each, above the floor.
+        pytest.param([0.0] * 12, 3.0, id="twelve-zeros"),
+    ],
+)
+def test_elbow_without_a_curve_marks_no_elbow_and_warns_nothing(
+    values, width, monkeypatch
+):
+    def unreachable():
+        raise AssertionError("an elbow plot without a curve searched for a knee")
+
+    # kneed divides by the range of the values and needs a point between the
+    # curve's ends, so these values are not searched, and draw without kneed.
+    monkeypatch.setattr(diagnostics, "require_kneed", unreachable)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        result = splt.elbow(values, show=False)
+
+    assert result.provenance.extras["elbow_pc"] is None
+    assert result.legends == ()
+    ax = result.axes["elbow"]
+    assert len(ax.lines) == 1
+    assert ax.get_legend() is None
+    table = result.tables["variance_explained"]
+    assert not table["is_elbow"].any()
+    np.testing.assert_array_equal(table["pc"], np.arange(1, len(values) + 1))
+    np.testing.assert_array_equal(table["variance_explained"], values)
+    assert result.figure.get_size_inches() == pytest.approx((width, 2.0))
+    result.close()
+
+
+def test_elbow_searches_every_curve_of_three_values_or_more(monkeypatch):
+    searched = []
+    locator = diagnostics.require_kneed()
+
+    def counted():
+        searched.append(True)
+        return locator
+
+    monkeypatch.setattr(diagnostics, "require_kneed", counted)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        # Three PCs hold one PC between the curve's ends, and one value
+        # that differs from the others makes a curve.
+        for values in ([5.0, 2.0, 1.0], [3.0, 3.0, 2.9]):
+            splt.elbow(values, show=False).close()
+        assert len(searched) == 2
+        splt.elbow([5.0, 1.0], show=False).close()
+    assert len(searched) == 2
+
+
+def test_elbow_keeps_only_kneeds_warning_of_no_knee_from_its_caller(monkeypatch):
+    real = diagnostics.require_kneed()
+
+    def warning_as_kneed_081(message, category):
+        class Locator(real):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                warnings.warn(message, category)
+
+        return Locator
+
+    # kneed 0.8.1, the oldest supported, warns that it found no knee, which
+    # elbow_pc already says; the plot leaves that warning out.
+    monkeypatch.setattr(
+        diagnostics,
+        "require_kneed",
+        lambda: warning_as_kneed_081("No knee/elbow found", UserWarning),
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        result = splt.elbow([5.0, 2.0, 1.0], show=False)
+    assert result.provenance.extras["elbow_pc"] is None
+    result.close()
+
+    # Any other warning of the search reaches the caller.
+    for message, category in (
+        ("invalid value encountered in divide", RuntimeWarning),
+        ("No knee/elbow found in the first pass", UserWarning),
+    ):
+        monkeypatch.setattr(
+            diagnostics,
+            "require_kneed",
+            lambda m=message, c=category: warning_as_kneed_081(m, c),
+        )
+        with pytest.warns(category) as caught:
+            splt.elbow([5.0, 2.0, 1.0], show=False).close()
+        assert [str(warning.message) for warning in caught] == [message]
+
+
+@pytest.mark.parametrize(
+    ("n_pcs", "width"),
+    [(1, 2.0), (4, 2.0), (7, 2.0), (8, 2.0), (9, 2.25), (30, 7.5)],
+)
+def test_elbow_is_a_quarter_inch_wide_per_pc_and_at_least_two_inches(n_pcs, width):
+    values = np.linspace(10.0, 1.0, n_pcs) ** 2
+    result = splt.elbow(values, show=False)
+
+    assert result.figure.get_size_inches() == pytest.approx((width, 2.0))
+    result.close()
+
+
+@pytest.mark.parametrize("theme", ["notebook", "paper"])
+def test_elbow_of_one_pc_is_wide_enough_for_its_axis_label(theme):
+    result = splt.elbow([5.0], theme=theme, show=False)
+    figure = result.figure
+    figure.canvas.draw()
+
+    label = result.axes["elbow"].xaxis.label
+    extent = label.get_window_extent(figure.canvas.get_renderer())
+    # "Principal components" lies within the figure, not cut at either side.
+    assert label.get_text() == "Principal components"
+    assert extent.x0 >= figure.bbox.x0
+    assert extent.x1 <= figure.bbox.x1
+    result.close()
+
+
+def test_elbow_keeps_the_width_that_figsize_gives():
+    result = splt.elbow([5.0, 1.0], figsize=(0.5, 3.0), show=False)
+
+    assert result.figure.get_size_inches() == pytest.approx((0.5, 3.0))
+    result.close()
+
+
 def test_graph_qc_clips_single_degree_outlier_and_records_limit():
     node_count = 1001
     leaves = np.arange(1, node_count, dtype=np.int64)
@@ -663,8 +797,215 @@ def test_highly_variable_features_draw_with_colormaps_they_are_given(
     # The results record each colormap by its name, and None as None.
     assert result.provenance.extras["colormaps"] == ["cytearc_black_white", "plasma"]
     assert default.provenance.extras["colormaps"] == [None, "plasma"]
+    # The legend takes the middle color of the colormaps drawn: white of the
+    # two-color map, plasma's #cc4778, and viridis's #21918c for None.
+    assert _legend_colors(result) == {
+        "Not selected": "#ffffff",
+        "Selected": "#cc4778",
+    }
+    assert _legend_colors(default) == {
+        "Not selected": "#21918c",
+        "Selected": "#cc4778",
+    }
     result.close()
     default.close()
+
+
+def _legend_markers(result: PlotResult) -> dict[str, object]:
+    legend = result.axes["highly_variable_features"].get_legend()
+    return {
+        text.get_text(): handle
+        for text, handle in zip(legend.get_texts(), legend.legend_handles, strict=True)
+    }
+
+
+def _legend_colors(result: PlotResult) -> dict[str, str]:
+    from matplotlib.colors import to_hex
+
+    return {
+        label: to_hex(marker.get_markerfacecolor())
+        for label, marker in _legend_markers(result).items()
+    }
+
+
+@pytest.mark.parametrize("order", ["undetected-first", "reversed"])
+def test_highly_variable_features_legend_draws_each_group_whatever_comes_first(
+    order,
+):
+    from matplotlib.colors import to_hex, to_rgba
+
+    # The first feature is not selected and no cell detects it: the log2 of
+    # its mean is -inf, so its point takes the colormap's transparent color
+    # for values that are not finite, which the legend copied.
+    arrays = (
+        np.array([0.0, 2.0, 4.0, 8.0, 1.0, 16.0]),
+        np.array([1.0, 3.0, 8.0, 12.0, 2.0, 20.0]),
+        np.array([0, 20, 30, 40, 5, 900]),
+        np.array([False, True, False, True, False, True]),
+    )
+    if order == "reversed":
+        # Now the first features are a selected one, detected in 900 cells,
+        # and a feature not selected, in 5.
+        arrays = tuple(array[::-1] for array in arrays)
+    result = splt.highly_variable_features(*arrays, show=False)
+
+    markers = _legend_markers(result)
+    assert list(markers) == ["Not selected", "Selected"]
+    not_selected, selected = markers["Not selected"], markers["Selected"]
+    # Both markers have one readable size, where the points take 3 and 30
+    # square points.
+    assert not_selected.get_markersize() == selected.get_markersize() == 6
+    # Each marker takes the middle color of its group's colormap, winter's
+    # #0080bf and magma_r's #b5367a, at the alpha of the group's points.
+    assert to_hex(not_selected.get_markerfacecolor()) == "#0080bf"
+    assert to_hex(selected.get_markerfacecolor()) == "#b5367a"
+    assert to_rgba(not_selected.get_markerfacecolor())[3] == 1.0
+    assert to_rgba(selected.get_markerfacecolor())[3] == 1.0
+    assert not_selected.get_alpha() == 0.6
+    assert selected.get_alpha() == 0.8
+    # The selected points' black edge marks the selected marker alone.
+    assert to_rgba(selected.get_markeredgecolor()) == to_rgba("black")
+    assert selected.get_markeredgewidth() == 0.5
+    assert not_selected.get_markeredgecolor() == "none"
+    assert not_selected.get_marker() == selected.get_marker() == "o"
+    # The points keep their sizes, and the undetected one its transparent
+    # color, which the legend no longer shows.
+    result.figure.canvas.draw()
+    unselected_points, selected_points = result.axes[
+        "highly_variable_features"
+    ].collections
+    assert unselected_points.get_sizes().tolist() == [3.0]
+    assert selected_points.get_sizes().tolist() == [30.0]
+    undetected = 0 if order == "undetected-first" else 2
+    assert to_rgba(unselected_points.get_facecolors()[undetected]) == (0, 0, 0, 0)
+    result.close()
+
+
+def test_hvg_plot_options_return_the_options_as_the_plot_draws_them(
+    registered_colormap,
+):
+    from matplotlib.colors import ListedColormap
+
+    grays = registered_colormap(
+        ListedColormap(["#444444", "#bbbbbb"], name="cytearc_grays")
+    )
+    checked = hvg_plot_options(
+        label_size=np.float32(9),
+        figsize=np.array([5, 3]),
+        point_sizes=[0, 2.5],
+        colormaps=(grays, None),
+        theme="paper",
+    )
+
+    assert checked == {
+        "label_size": 9.0,
+        "figsize": (5.0, 3.0),
+        "point_sizes": (0.0, 2.5),
+        "colormaps": ("cytearc_grays", None),
+        "theme": "paper",
+    }
+    sizes = (checked["label_size"], *checked["figsize"], *checked["point_sizes"])
+    assert all(type(size) is float for size in sizes)
+    # Options left out stay out, as features.hvgs passes only those given.
+    assert hvg_plot_options(label_size=9) == {"label_size": 9.0}
+    assert hvg_plot_options() == {}
+
+
+def test_hvg_plot_options_check_every_option_of_the_plot():
+    options = {
+        name: parameter.default
+        for name, parameter in inspect.signature(
+            splt.highly_variable_features
+        ).parameters.items()
+        if parameter.kind is inspect.Parameter.KEYWORD_ONLY and name != "show"
+    }
+
+    # features.hvgs forwards each of these keywords to the plot.
+    assert set(options) == {
+        "label_size",
+        "figsize",
+        "point_sizes",
+        "colormaps",
+        "theme",
+    }
+    assert hvg_plot_options(**options) == {
+        "label_size": 12.0,
+        "figsize": (4.5, 4.0),
+        "point_sizes": (3.0, 30.0),
+        "colormaps": ("winter", "magma_r"),
+        "theme": "notebook",
+    }
+    with pytest.raises(TypeError) as raised:
+        hvg_plot_options(title="HVGs", show=False)
+    assert raised.value.args == (
+        "highly_variable_features() got unexpected keyword arguments: 'show', 'title'",
+    )
+
+
+_PAIR_OF_SIZES = (
+    "point_sizes must be a pair of marker areas in points squared, for the "
+    "features not selected and the selected ones"
+)
+_PAIR_OF_LENGTHS = "figsize must be a pair of numbers, the width and height in inches"
+
+
+@pytest.mark.parametrize(
+    ("option", "value", "error", "message"),
+    [
+        ("label_size", "big", TypeError, "label_size must be a real number"),
+        ("label_size", True, TypeError, "label_size must be a real number"),
+        ("label_size", np.nan, ValueError, "label_size must be finite"),
+        ("label_size", 0, ValueError, "label_size must be positive"),
+        ("figsize", "wide", TypeError, _PAIR_OF_LENGTHS),
+        ("figsize", np.array(4.0), TypeError, _PAIR_OF_LENGTHS),
+        ("figsize", (4.0,), ValueError, "figsize must contain two values"),
+        ("figsize", (10, 8, "cm"), ValueError, "figsize must contain two values"),
+        ("figsize", ("4", 3), TypeError, "figsize[0] must be a real number"),
+        ("figsize", (0, 4), ValueError, "figsize[0] must be positive"),
+        ("figsize", (4, -1e-9), ValueError, "figsize[1] must be positive"),
+        ("figsize", (4, np.inf), ValueError, "figsize[1] must be finite"),
+        ("point_sizes", 3, TypeError, _PAIR_OF_SIZES),
+        ("point_sizes", (3,), ValueError, "point_sizes must contain two values"),
+        ("point_sizes", ("a", "b"), TypeError, "point_sizes[0] must be a real number"),
+        ("point_sizes", (-1, 30), ValueError, "point_sizes[0] must be at least 0"),
+        ("point_sizes", (3, np.nan), ValueError, "point_sizes[1] must be finite"),
+        (
+            "theme",
+            "sepia",
+            KeyError,
+            "Unknown theme 'sepia'. Choose from: ['dark', 'minimal', 'notebook', "
+            "'paper']",
+        ),
+    ],
+)
+def test_hvg_plot_options_name_the_value_they_refuse(option, value, error, message):
+    import matplotlib.pyplot as plt
+
+    with pytest.raises(error) as raised:
+        hvg_plot_options(**{option: value})
+    assert raised.value.args == (message,)
+
+    # The plot refuses the value with the same error before it opens a figure.
+    figures = set(plt.get_fignums())
+    with pytest.raises(error) as drawn:
+        splt.highly_variable_features(*_hvg_arguments(), show=False, **{option: value})
+    assert drawn.value.args == (message,)
+    assert set(plt.get_fignums()) == figures
+
+
+def test_highly_variable_features_hide_points_of_no_area_and_take_the_default_panel():
+    result = splt.highly_variable_features(
+        *_hvg_arguments(), point_sizes=(0, 0), figsize=None, show=False
+    )
+
+    # A marker area of 0 hides a group's points; the legend still names it.
+    unselected, selected = result.axes["highly_variable_features"].collections
+    assert unselected.get_sizes().tolist() == selected.get_sizes().tolist() == [0.0]
+    assert list(_legend_markers(result)) == ["Not selected", "Selected"]
+    # None takes CyteArc's default panel of 3.2 inches, 0.4 wider for its
+    # labels.
+    assert result.figure.get_size_inches() == pytest.approx((3.6, 3.2))
+    result.close()
 
 
 @pytest.mark.parametrize(

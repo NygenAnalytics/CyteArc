@@ -622,6 +622,102 @@ def test_select_hvgs_rejects_unknown_keywords_before_saving(
     }
 
 
+# The plot's own messages, which features.hvgs raises for the values it passes.
+@pytest.mark.parametrize(
+    ("option", "error", "message"),
+    [
+        (
+            {"colormaps": ("winter", 3)},
+            TypeError,
+            "colormaps[1] must be None, a Matplotlib colormap name or a registered "
+            "Colormap, not int",
+        ),
+        ({"point_sizes": (-1, 30)}, ValueError, "point_sizes[0] must be at least 0"),
+        ({"label_size": "big"}, TypeError, "label_size must be a real number"),
+        ({"figsize": (0, 4)}, ValueError, "figsize[0] must be positive"),
+        (
+            {"theme": "sepia"},
+            KeyError,
+            "Unknown theme 'sepia'. Choose from: ['dark', 'minimal', 'notebook', "
+            "'paper']",
+        ),
+    ],
+    ids=["colormaps", "point_sizes", "label_size", "figsize", "theme"],
+)
+@pytest.mark.parametrize(
+    ("flavor", "show_plot"),
+    [("cytearc", True), ("seurat_v3", True), ("cytearc", False)],
+    ids=["summary-plot", "count-model-plot", "no-plot"],
+)
+def test_select_hvgs_refuses_a_plot_option_value_before_writing(
+    hvg_store, option, error, message, flavor, show_plot
+) -> None:
+    store = hvg_store
+    active = np.asarray(store.cells.fetch_all("I"), dtype=bool)
+    subset = active.copy()
+    subset[np.flatnonzero(active)[::2]] = False
+    store.cells.insert("hvg_subset", by_cell_id(store.cells, subset))
+    # New feature names and cells without a feature summary, whose snapshot,
+    # summary and selection a late check would write, as #470 reports.
+    names = np.asarray([f"GENE_{index}" for index in range(store.RNA.feats.N)])
+    store.RNA.feats.insert("names", names, overwrite=True)
+    cells = store.snapshot_cell_selection("hvg_subset")
+    before = _all_artifacts(store)
+
+    with pytest.raises(error) as raised:
+        store.features.hvgs(
+            cells, top_n=50, flavor=flavor, show_plot=show_plot, **option
+        )
+
+    assert raised.value.args == (message,)
+    assert _all_artifacts(store) == before
+
+
+@pytest.mark.parametrize("flavor", ["cytearc", "seurat_v3"])
+def test_select_hvgs_records_and_draws_a_registered_colormap_by_its_name(
+    hvg_store, registered_colormap, monkeypatch, flavor
+) -> None:
+    from matplotlib.colors import ListedColormap
+
+    from cytearc.plotting._figure import PlotResult
+
+    shown: list[PlotResult] = []
+
+    def keep(result: PlotResult) -> None:
+        shown.append(result)
+
+    # The plot is drawn as hvgs draws it; only its display is kept for the test.
+    monkeypatch.setattr(PlotResult, "show", keep)
+    grays = registered_colormap(
+        ListedColormap(["#444444", "#bbbbbb"], name="cytearc_hvg_grays")
+    )
+    store = hvg_store
+
+    ref = store.features.hvgs(
+        store.snapshot_cell_selection(),
+        top_n=50,
+        flavor=flavor,
+        colormaps=(grays, "magma_r"),
+        label_size=np.float32(9),
+    )
+
+    # The selection records the options as the plot draws them, a colormap
+    # by its name, which a Colormap itself could not be recorded as.
+    assert inspect_artifact(store.zw, ref).execution_options["plot_kwargs"] == {
+        "colormaps": ["cytearc_hvg_grays", "magma_r"],
+        "label_size": 9.0,
+    }
+    (result,) = shown
+    unselected, selected = result.axes["highly_variable_features"].collections
+    assert unselected.get_cmap() == grays
+    assert selected.get_cmap().name == "magma_r"
+    assert result.axes["highly_variable_features"].get_xlabel() == (
+        "Log mean non-zero expression"
+    )
+    assert result.axes["highly_variable_features"].xaxis.label.get_size() == 9.0
+    result.close()
+
+
 def test_select_hvgs_rejects_non_rna_assay(hvg_store) -> None:
     cell_selection = hvg_store.snapshot_cell_selection()
     with pytest.raises(TypeError, match="RNAassay"):

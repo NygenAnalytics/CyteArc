@@ -787,6 +787,40 @@ def test_reused_pca_shows_the_stored_elbow_plot_or_warns_without_one(monkeypatch
     ]
 
 
+@pytest.mark.parametrize("dims", [1, 2])
+def test_pca_of_one_or_two_components_shows_an_elbow_plot_without_warnings(
+    dims, monkeypatch
+):
+    from cytearc.plotting._figure import PlotResult
+
+    dataset, _, normalized = _normalized_qc_dataset()
+    pca = dataset.reduction.pca(normalized, dims=dims, local_cache=False)
+    shown: list[PlotResult] = []
+
+    def keep(result: PlotResult) -> None:
+        shown.append(result)
+
+    # The plot is drawn as PCA draws it; only its display is kept for the test.
+    monkeypatch.setattr(PlotResult, "show", keep)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        reused = dataset.reduction.pca(
+            normalized, dims=dims, local_cache=False, show_elbow_plot=True
+        )
+
+    assert reused == pca
+    (result,) = shown
+    # One or two components hold no elbow, and their plot is wide enough to
+    # read its axis labels.
+    np.testing.assert_array_equal(
+        result.tables["variance_explained"]["variance_explained"],
+        100 * dataset.artifacts.load(pca)["variance_ratio"][:],
+    )
+    assert result.provenance.extras["elbow_pc"] is None
+    assert result.figure.get_size_inches() == pytest.approx((2.0, 2.0))
+    result.close()
+
+
 def test_pca_streams_scaling_statistics_when_normalized_sums_are_absent():
     dataset, _, normalized = _normalized_qc_dataset()
     expected = dataset.artifacts.load(
