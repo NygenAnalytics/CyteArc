@@ -36,6 +36,7 @@ from .layout import (
 )
 from .partition import (
     affordable_width,
+    band_shards,
     read_variable_text_rows,
     row_band,
     row_read_parts,
@@ -57,19 +58,33 @@ COLUMN_METADATA_ATTRIBUTES = (
 )
 
 
-def band_read_bytes(src: zarr.Array) -> Callable[[int], int]:
-    """Return what reading a band of ``rows`` rows of every column of ``src`` holds beside the band.
+def band_read_bytes(src: zarr.Array, rows: int) -> Callable[[int], int]:
+    """Return what reading a band of ``rows`` rows of every column of ``src`` holds beside the band, at each Zarr I/O concurrency.
 
-    :func:`~cytearc.storage.partition.row_read_parts` prices the read of a
-    band that decodes one chunk at a time: the source chunk it decodes, as
-    stored and decoded, and for a sharded source also the shard-level copy
-    of the band's rows and the compressed bytes of the inner chunks it
-    touches in a shard.
+    The bands are the runs of ``rows`` rows from the first, as a dense write
+    of row bands of that many rows reads them, and each is read at the
+    write's I/O concurrency, as
+    :func:`~cytearc.storage.partition.row_read_parts` prices it: for a
+    sharded source, the shard-level copy of the band's rows, and, for up to
+    that many of the shards it touches at once, the compressed bytes of the
+    inner chunks it touches and up to that many decoded chunks; for an
+    unsharded source, up to that many chunks as stored and decoded.
     """
-    fixed, per_row = row_read_parts(
-        array_geometry(src), np.arange(int(src.shape[1])), rows_contiguous=True
-    )
-    return lambda rows: fixed + int(rows) * per_row
+    geometry = array_geometry(src)
+    columns = np.arange(int(src.shape[1]))
+    shards = band_shards(geometry, range(int(src.shape[0])), rows)
+
+    def held(concurrency: int) -> int:
+        fixed, per_row = row_read_parts(
+            geometry,
+            columns,
+            rows_contiguous=True,
+            concurrency=concurrency,
+            shards=shards,
+        )
+        return fixed + int(rows) * per_row
+
+    return held
 
 
 def copy_zarr_array(
@@ -80,9 +95,9 @@ def copy_zarr_array(
 ) -> None:
     """Stream-copy a 2D Zarr array in row blocks.
 
-    Each block is one row band of ``dst``, read from ``src`` whole. Its plan
-    charges what that read holds beside the block, as
-    :func:`band_read_bytes` states.
+    Each block is one row band of ``dst``, read from ``src`` whole at the
+    write's I/O concurrency. Its plan charges what that read holds beside the
+    block, as :func:`band_read_bytes` states.
     """
     if src.shape != dst.shape:
         raise ValueError(f"Shape mismatch: src {src.shape} vs dst {dst.shape}")
@@ -94,7 +109,7 @@ def copy_zarr_array(
         lambda start, end: np.asarray(src[start:end, :]),
         msg=msg or "Copying Zarr array",
         resources=resources,
-        producerBytes=band_read_bytes(src)(band_rows),
+        producerBytes=band_read_bytes(src, band_rows),
     )
 
 

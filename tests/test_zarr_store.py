@@ -1,5 +1,7 @@
 import types
 
+from typing import Any
+
 import numpy as np
 import pytest
 import zarr
@@ -1600,14 +1602,18 @@ def test_copy_array_and_metadata_tree(tmp_path):
 
 
 def _recorded_producer_bytes(monkeypatch):
-    """Record the producer bytes that each copy plans with."""
+    """Record the producer bytes that each copy plans with at one read at a time.
+
+    The copies below write unsharded destinations, one chunk a band, so the
+    write and its producer read one chunk at a time.
+    """
     import cytearc.storage.copy as copy_module
 
     recorded = []
     write = copy_module.write_dense_in_shard_rows
 
     def recording(*args, **kwargs):
-        recorded.append(kwargs["producerBytes"])
+        recorded.append(kwargs["producerBytes"](1))
         return write(*args, **kwargs)
 
     monkeypatch.setattr(copy_module, "write_dense_in_shard_rows", recording)
@@ -1662,7 +1668,7 @@ def test_copying_a_sharded_array_reserves_its_shard_read(tmp_path, monkeypatch):
     # A band of all 64 rows fills Zarr's 2,048-byte shard-level copy of them,
     # holds the compressed bytes of the four 256-byte chunks of a shard, each
     # at most 256 + 256 // 128 + 1,024 bytes, and decodes one chunk at a time
-    # beside the chunk decoded before it.
+    # beside what the read's objects take, at most the chunk decoded before.
     assert recorded == [2_048 + 4 * (256 + 2 + 1_024) + 256 + 256]
     np.testing.assert_array_equal(target[:], expected)
 
@@ -1870,6 +1876,90 @@ def test_dense_writer_reserves_encoding_and_retained_memory_before_production(
     )
     assert plan.reservedBytes >= 240_000 + resident + producer + 2 * result
     assert not np.any(destination[:])
+
+
+def test_a_dense_write_prices_its_producers_read_at_each_concurrency_it_may_run_at():
+    from cytearc.storage.sharding import plan_dense_band_writes, plan_dense_write
+
+    root = zarr.open_group(store=MemoryStore(), mode="w")
+    destination = root.create_array(
+        "dense", shape=(100, 100), chunks=(10, 100), shards=(100, 100), dtype="f8"
+    )
+    narrow = root.create_array(
+        "narrow", shape=(100, 10), chunks=(10, 10), shards=(100, 10), dtype="f8"
+    )
+    # A band of 80,000 bytes in ten chunks of 8,000: the write holds the band,
+    # its encoded chunks and the shard assembled from them, each chunk at most
+    # 8,000 + 62 + 1,024 bytes, the shard's index of 1,184 bytes, and a
+    # decoded chunk for each of its inner reads.
+    writing = 80_000 + 2 * 10 * 9_086 + 1_184
+    budget = ResourceBudget(600_000, 1)
+    # A producer of 100,000 bytes at every concurrency plans as that number of
+    # bytes does: one task beside ten inner reads.
+    fixed = plan_dense_write(destination, budget, 1, producerBytes=100_000)
+    assert (fixed.ioConcurrency, fixed.reservedBytes) == (
+        10,
+        100_000 + writing + 10 * 8_000,
+    )
+    assert (
+        plan_dense_write(
+            destination, budget, 1, producerBytes=lambda _concurrency: 100_000
+        )
+        == fixed
+    )
+
+    # A producer that reads Zarr in the task holds 100,000 bytes for each read
+    # it runs at once. At ten, its read beside the band, 1,080,000 bytes, does
+    # not fit; at four, 480,000 bytes beside four inner reads do, as its read
+    # takes the place of what the write holds once the read has ended. The
+    # plan before priced it at one read and ran ten.
+    def growing(concurrency: int) -> int:
+        return 100_000 * concurrency
+
+    planned = plan_dense_write(destination, budget, 1, producerBytes=growing)
+    assert (planned.ioConcurrency, planned.reservedBytes) == (
+        4,
+        80_000 + growing(4) + 4 * 8_000,
+    )
+    roomy = plan_dense_write(
+        destination, ResourceBudget(2_000_000, 1), 1, producerBytes=growing
+    )
+    assert (roomy.ioConcurrency, roomy.reservedBytes) == (
+        10,
+        80_000 + growing(10) + 10 * 8_000,
+    )
+    # A plan of several destinations prices it the same way.
+    together = plan_dense_band_writes(
+        (destination, narrow), budget, 1, producerBytes=growing
+    )
+    assert (together.ioConcurrency, together.reservedBytes) == (
+        planned.ioConcurrency,
+        planned.reservedBytes,
+    )
+
+    # Of two plans that run as many reads at once, the one with more tasks:
+    # two tasks of four reads, 2 x 512,000 bytes, rather than one of eight.
+    rows = root.create_array(
+        "rows", shape=(200, 100), chunks=(10, 100), shards=(100, 100), dtype="f8"
+    )
+    shared = plan_dense_write(
+        rows, ResourceBudget(1_030_000, 2), 2, producerBytes=growing
+    )
+    assert (
+        shared.ioConcurrency,
+        min(shared.computeWorkers, shared.writeWorkers),
+        shared.reservedBytes,
+    ) == (4, 2, 2 * (80_000 + growing(4) + 4 * 8_000))
+
+    # A budget that holds no task at one read refuses as the number does.
+    def needed(producer: Any) -> int:
+        with pytest.raises(MemoryError) as refused:
+            plan_dense_write(
+                destination, ResourceBudget(370_000, 1), 1, producerBytes=producer
+            )
+        return refused.value.needed_bytes
+
+    assert needed(growing) == needed(100_000) == 100_000 + writing + 8_000
 
 
 def test_dense_write_plan_from_a_specification_matches_the_created_array():

@@ -323,6 +323,109 @@ def test_a_read_of_part_of_a_shard_of_several_rows_of_chunks_is_bounded_in_any_o
     assert coalesced_gap_bytes(geometry, np.arange(32), chunks=8) == 0
 
 
+def test_band_shards_count_the_rows_of_shards_that_a_band_touches() -> None:
+    from cytearc.storage.partition import band_shards
+
+    geometry = ArrayGeometry((8_000, 400), (1_000, 40), (1_000, 400), 4)
+    # Bands of a run of rows: aligned with the shards, inside them, across
+    # one boundary at most, and from a run that starts inside a shard.
+    assert band_shards(geometry, range(8_000), 1_000) == 1
+    assert band_shards(geometry, range(8_000), 250) == 1
+    assert band_shards(geometry, range(8_000), 1_500) == 2
+    assert band_shards(geometry, range(8_000), 2_000) == 2
+    assert band_shards(geometry, range(500, 7_500), 1_000) == 2
+    assert band_shards(geometry, range(8_000), 10_000) == 8
+    # Every fourth row: a band of 1,000 rows spans 4,000 rows, four shards.
+    assert band_shards(geometry, np.arange(0, 8_000, 4), 1_000) == 4
+    # A band of selected rows that starts inside the shard where the band
+    # before it ends counts that shard too: rows 600 to 1,199 touch two.
+    assert band_shards(geometry, np.arange(3_000), 600) == 2
+    assert band_shards(geometry, range(0, 8_000, 4), 1_000) == 4
+    # Rows that come back to a shard count it again, never fewer than it has.
+    assert band_shards(geometry, np.array([0, 5_000, 1, 5_001]), 4) == 4
+    assert band_shards(geometry, np.array([0, 1, 5_000, 5_001]), 4) == 2
+    # No rows, or no geometry, touch one row of shards at most.
+    assert band_shards(geometry, np.array([], dtype=np.int64), 4) == 1
+    assert band_shards(None, range(10), 4) == 1
+
+
+def test_row_reads_at_a_concurrency_hold_the_shards_and_decodes_they_run_at_once() -> (
+    None
+):
+    from dataclasses import replace
+
+    geometry = ArrayGeometry((8_000, 400), (1_000, 40), (1_000, 400), 4)
+    every_gene = np.arange(400)
+    decoded = 160_000
+    encoded = decoded + decoded // 128 + 1_024
+    # One read at a time: the ten compressed chunks of a shard, one decoded
+    # chunk, and the read's objects, up to one more decoded chunk.
+    one, per_row = row_read_parts(geometry, every_gene, rows_contiguous=True)
+    assert one == 10 * encoded + decoded + (65_536 + 10 * 4_096 + 16_384)
+    assert per_row == 400 * 4
+    # Ten at once over a band of one shard decode its ten chunks at once,
+    # beside the objects of ten decodes.
+    ten, ten_per_row = row_read_parts(
+        geometry, every_gene, rows_contiguous=True, concurrency=10
+    )
+    shard = 10 * encoded + 10 * decoded + 65_536 + 10 * 4_096 + 10 * 16_384
+    assert (ten, ten_per_row) == (shard, per_row)
+    # Over a band of four shards, ten at once read all four together; two at
+    # once read two shards, each decoding two chunks at once.
+    assert row_read_parts(
+        geometry, every_gene, rows_contiguous=True, concurrency=10, shards=4
+    ) == (4 * shard, per_row)
+    two = 10 * encoded + 2 * decoded + 65_536 + 10 * 4_096 + 2 * 16_384
+    assert row_read_parts(
+        geometry, every_gene, rows_contiguous=True, concurrency=2, shards=4
+    ) == (2 * two, per_row)
+    # At one read at a time the shards that a band touches are read in turn.
+    assert row_read_parts(geometry, every_gene, rows_contiguous=True, shards=4) == (
+        one,
+        per_row,
+    )
+    # Shards of half the genes are read side by side, ten at once.
+    halves = replace(geometry, shards=(1_000, 200))
+    half = 5 * encoded + 5 * decoded + 65_536 + 5 * 4_096 + 5 * 16_384
+    assert row_read_parts(halves, every_gene, rows_contiguous=True, concurrency=10) == (
+        2 * half,
+        per_row,
+    )
+    # On Zarr's own pool, whose threads keep the chunk they decoded, two
+    # decodes at once also hold the two chunks decoded before them.
+    own_pool = replace(geometry, poolKeepsDecodedChunk=True)
+    assert row_read_parts(
+        own_pool, every_gene, rows_contiguous=True, concurrency=2
+    ) == (
+        10 * encoded + 2 * decoded + 2 * decoded + 65_536 + 10 * 4_096 + 2 * 16_384,
+        per_row,
+    )
+    # Scattered rows over genes of wide spans in two chunks are read a row
+    # chunk at a time, a band of their 4 x 1,000 values twice over beside the
+    # chunks of up to two of the four shards at once, each decoding its two
+    # chunks at once, and Zarr's indices of the 9 shards and 4 genes, and of
+    # each row.
+    wide = np.array([0, 39, 40, 79])
+    shard_read = 2 * encoded + 2 * decoded + 65_536 + 2 * 4_096 + 2 * 16_384
+    assert row_read_parts(
+        geometry, wide, rows_contiguous=False, concurrency=4, shards=2
+    ) == (2 * 4 * 1_000 * 4 + 2 * shard_read + 128 * (9 + 4), 4 * 4 + 128)
+    assert indexed_read_parts(
+        geometry, wide, block_rows=1_000, concurrency=4, shards=2
+    ) == (2 * 4 * 1_000 * 4 + 2 * shard_read, 0)
+    # An unsharded array's chunks are each read on their own, so a band over
+    # three of them holds up to the concurrency of them at once.
+    unsharded = ArrayGeometry((8_000, 400), (1_000, 400), None, 4)
+    stored = 2 * 1_600_000 + 1_600_000 // 128 + 1_024
+    assert row_read_parts(unsharded, every_gene, rows_contiguous=True, shards=3) == (
+        stored,
+        0,
+    )
+    assert row_read_parts(
+        unsharded, every_gene, rows_contiguous=True, concurrency=8, shards=3
+    ) == (3 * stored + 65_536 + 3 * 4_096 + 3 * 16_384, 0)
+
+
 def test_band_costs_are_zero_for_empty_selections() -> None:
     geometry = ArrayGeometry((4096, 4096), (1024, 1024), (4096, 4096), 2)
     empty = np.array([], dtype=np.int64)

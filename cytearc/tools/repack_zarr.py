@@ -128,7 +128,8 @@ def _fit_counts_layout(
         memoryBytes=resources.memoryBytes,
         transposed=("counts",) if transposed else (),
         admitCounts=dense_counts_admission(
-            CountSummary.nbytes_for(n_cells, n_features), band_read_bytes(source)
+            CountSummary.nbytes_for(n_cells, n_features),
+            lambda rows: band_read_bytes(source, rows),
         ),
         subject="The repack",
     )
@@ -517,7 +518,7 @@ def repack_store(
                 _row_block_producer(source_counts),
                 resources=resources,
                 msg=f"Repacking {path}",
-                producerBytes=band_read_bytes(source_counts)(array_shard_rows(counts)),
+                producerBytes=band_read_bytes(source_counts, array_shard_rows(counts)),
                 residentBytes=summary.nbytes,
                 countSummary=summary,
             )

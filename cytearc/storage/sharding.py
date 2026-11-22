@@ -800,6 +800,67 @@ def _row_band_task_peak(
     )
 
 
+type ProducerBytes = int | Callable[[int], int]
+"""What the producer of a dense band write holds beside its band.
+
+A number of bytes, or, for a producer that reads Zarr inside the band's task,
+and so at the write's I/O concurrency, the bytes it holds when it reads at a
+given concurrency.
+"""
+
+
+def _producer_concurrencies(limit: int) -> list[int]:
+    """Return the I/O concurrencies at which a producer's read is priced: powers of two below ``limit``, and ``limit``."""
+    caps = {max(1, int(limit))}
+    cap = 1
+    while cap < limit:
+        caps.add(cap)
+        cap *= 2
+    return sorted(caps)
+
+
+def _band_parallelism(plan: OperationPlan) -> tuple[int, int]:
+    """Return the reads and writes that a plan of dense band writes runs at once, and its tasks at once."""
+    tasks = min(plan.computeWorkers, plan.writeWorkers)
+    return tasks * plan.ioConcurrency, tasks
+
+
+def _plan_with_producer(
+    plan: Callable[[int, int], OperationPlan],
+    unitBytes: Callable[[int], int],
+    producerBytes: ProducerBytes,
+    *,
+    readBytes: Callable[[int], int],
+    concurrency: int,
+) -> OperationPlan:
+    """Return the plan of dense band writes whose producer holds ``producerBytes``.
+
+    ``plan(unit, cap)`` plans tasks of ``unit`` bytes with up to ``cap`` inner
+    reads, the I/O concurrency of the write and of a producer that reads Zarr
+    in the task; ``unitBytes`` gives a task beside a producer of so many
+    bytes, and ``readBytes`` what a task holds while its producer reads. A
+    callable ``producerBytes`` is priced at up to ``concurrency`` reads at
+    once. A producer's read ends before the task writes its band, so at each
+    concurrency a task holds the larger of the task beside the producer's
+    read at one read at a time and what the task holds while its producer
+    reads at that concurrency. The plan that runs the most reads and writes
+    at once is kept, and among those the one with the most tasks at once.
+    """
+    if not callable(producerBytes):
+        return plan(unitBytes(int(producerBytes)), max(1, int(concurrency)))
+    single = unitBytes(int(producerBytes(1)))
+    best = plan(single, 1)
+    for cap in _producer_concurrencies(concurrency)[1:]:
+        try:
+            candidate = plan(max(single, readBytes(int(producerBytes(cap)))), cap)
+        except MemoryBudgetError:
+            # A producer holds at least as much at more concurrent reads.
+            break
+        if _band_parallelism(candidate) > _band_parallelism(best):
+            best = candidate
+    return best
+
+
 def plan_dense_write(
     destination: zarr.Array | ZarrArraySpec,
     resources: ResourceBudget,
@@ -807,10 +868,20 @@ def plan_dense_write(
     io: StorageIoPolicy | None = None,
     *,
     residentBytes: int = 0,
-    producerBytes: int = 0,
+    producerBytes: ProducerBytes = 0,
     resultBytes: int = 0,
     mirror: zarr.Array | None = None,
 ) -> OperationPlan:
+    """Plan writing the dense row bands of ``destination``, one band a task.
+
+    A task holds its band, ``producerBytes`` beside it, ``resultBytes``, and
+    the write's encoded chunks and shard, and each of the write's inner reads
+    a decoded chunk of the destination. A producer that reads Zarr inside the
+    task, as ``write_dense_in_shard_rows`` runs it, reads at the plan's I/O
+    concurrency; a callable ``producerBytes`` states what it holds at each,
+    and the plan prices the concurrencies that it may run at, as
+    :func:`_plan_with_producer` does.
+    """
     # A specification lets a producer check its budget before it creates the
     # destination or starts expensive work.
     dense_bytes, inner_bytes, n_chunks = _band_geometry(
@@ -818,45 +889,50 @@ def plan_dense_write(
         if isinstance(destination, ZarrArraySpec)
         else destination
     )
-    # Keep encoded chunks and the assembled shard alongside each dense band.
-    unit_bytes = (
-        _row_band_task_peak(
-            sourceBytes=producerBytes + resultBytes,
-            denseBytes=dense_bytes,
-            innerChunkBytes=inner_bytes,
-            nChunks=n_chunks,
-            innerConcurrency=1,
-        )
-        - inner_bytes
-    )
+    writes = [(inner_bytes, n_chunks, 0)]
     if mirror is not None:
         mirror_dense, mirror_inner, mirror_chunks = _band_geometry(mirror)
         conversion = mirror_dense if mirror.dtype != destination.dtype else 0
-        unit_bytes = max(
-            unit_bytes,
+        writes.append((mirror_inner, mirror_chunks, conversion))
+
+    def unit_bytes(producer: int) -> int:
+        # Keep encoded chunks and the assembled shard alongside each dense band.
+        return max(
             _row_band_task_peak(
-                sourceBytes=producerBytes + resultBytes + conversion,
+                sourceBytes=producer + resultBytes + conversion,
                 denseBytes=dense_bytes,
-                innerChunkBytes=mirror_inner,
-                nChunks=mirror_chunks,
+                innerChunkBytes=inner,
+                nChunks=chunks,
                 innerConcurrency=1,
             )
-            - mirror_inner,
+            - inner
+            for inner, chunks, conversion in writes
         )
-        inner_bytes = max(inner_bytes, mirror_inner)
-        n_chunks = max(n_chunks, mirror_chunks)
-    return plan_operation(
-        resources,
-        WorkShape(
-            nUnits=max(1, int(nTasks)),
-            unitBytes=unit_bytes,
-            residentBytes=residentBytes + resultBytes,
-            innerReadBytes=inner_bytes,
-            maxInnerReads=n_chunks,
-            writes=True,
-            chunksPerShard=max(1, n_chunks),
-        ),
-        policy=io,
+
+    widest_inner = max(inner for inner, _chunks, _conversion in writes)
+    most_chunks = max(chunks for _inner, chunks, _conversion in writes)
+
+    def plan(unit: int, cap: int) -> OperationPlan:
+        return plan_operation(
+            resources,
+            WorkShape(
+                nUnits=max(1, int(nTasks)),
+                unitBytes=unit,
+                residentBytes=residentBytes + resultBytes,
+                innerReadBytes=widest_inner,
+                maxInnerReads=cap,
+                writes=True,
+                chunksPerShard=max(1, most_chunks),
+            ),
+            policy=io,
+        )
+
+    return _plan_with_producer(
+        plan,
+        unit_bytes,
+        producerBytes,
+        readBytes=lambda producer: resultBytes + dense_bytes + producer,
+        concurrency=most_chunks,
     )
 
 
@@ -867,7 +943,7 @@ def plan_dense_band_writes(
     io: StorageIoPolicy | None = None,
     *,
     residentBytes: int = 0,
-    producerBytes: int = 0,
+    producerBytes: ProducerBytes = 0,
 ) -> OperationPlan:
     """Plan writing the dense row bands of several destinations together.
 
@@ -895,31 +971,45 @@ def plan_dense_band_writes(
             producerBytes=producerBytes,
         )
     geometries = [_band_geometry(_destination_geometry(spec)[0]) for spec in specs]
-    unit_bytes = max(
-        _row_band_task_peak(
-            sourceBytes=producerBytes,
-            denseBytes=dense_bytes,
-            innerChunkBytes=inner_bytes,
-            nChunks=n_chunks,
-            innerConcurrency=1,
+
+    def unit_bytes(producer: int) -> int:
+        return max(
+            _row_band_task_peak(
+                sourceBytes=producer,
+                denseBytes=dense_bytes,
+                innerChunkBytes=inner_bytes,
+                nChunks=n_chunks,
+                innerConcurrency=1,
+            )
+            - inner_bytes
+            for dense_bytes, inner_bytes, n_chunks in geometries
         )
-        - inner_bytes
-        for dense_bytes, inner_bytes, n_chunks in geometries
-    )
+
     inner_bytes = max(inner for _dense, inner, _chunks in geometries)
     n_chunks = max(chunks for _dense, _inner, chunks in geometries)
-    return plan_operation(
-        resources,
-        WorkShape(
-            nUnits=max(1, int(nTasks)),
-            unitBytes=unit_bytes,
-            residentBytes=residentBytes,
-            innerReadBytes=inner_bytes,
-            maxInnerReads=n_chunks,
-            writes=True,
-            chunksPerShard=max(1, n_chunks),
-        ),
-        policy=io,
+
+    def plan(unit: int, cap: int) -> OperationPlan:
+        return plan_operation(
+            resources,
+            WorkShape(
+                nUnits=max(1, int(nTasks)),
+                unitBytes=unit,
+                residentBytes=residentBytes,
+                innerReadBytes=inner_bytes,
+                maxInnerReads=cap,
+                writes=True,
+                chunksPerShard=max(1, n_chunks),
+            ),
+            policy=io,
+        )
+
+    widest_band = max(dense for dense, _inner, _chunks in geometries)
+    return _plan_with_producer(
+        plan,
+        unit_bytes,
+        producerBytes,
+        readBytes=lambda producer: widest_band + producer,
+        concurrency=n_chunks,
     )
 
 
@@ -1345,7 +1435,7 @@ def write_dense_in_shard_rows(
     merge_summary: Callable[[Any, Any], Any] | None = None,
     io: StorageIoPolicy | None = None,
     residentBytes: int = 0,
-    producerBytes: int = 0,
+    producerBytes: ProducerBytes = 0,
     resultBytes: int = 0,
     countSummary: "CountSummary | None" = None,
     requireFinite: bool = False,
@@ -1353,7 +1443,10 @@ def write_dense_in_shard_rows(
 ) -> Any | None:
     """Produce and write complete destination row bands in the same worker.
 
-    With ``requireFinite``, a NaN or infinite value raises NonFiniteArtifactError.
+    The producer runs in the band's task, under the plan's I/O concurrency,
+    so a producer that reads Zarr passes ``producerBytes`` as what it holds
+    at each concurrency, as :func:`plan_dense_write` takes it. With
+    ``requireFinite``, a NaN or infinite value raises NonFiniteArtifactError.
     """
     if (summarize is None) != (merge_summary is None):
         raise ValueError("summarize and merge_summary must be provided together")
@@ -1645,15 +1738,17 @@ def sparse_counts_admission(
 
 def dense_counts_admission(
     residentBytes: int,
-    producerBytes: Callable[[int], int] = lambda _rows: 0,
+    producerBytes: Callable[[int], ProducerBytes] = lambda _rows: 0,
 ) -> Callable[[tuple[ZarrArraySpec, ...], ResourceBudget], object]:
     """Return the ``admitCounts`` of a dense write for :func:`fit_count_layout`.
 
     A layout is admitted when one worker writes one destination row band
     beside ``residentBytes``, while its producer holds ``producerBytes`` of
-    the rows of the shortest band. Several counts arrays are written in one
-    pass over the rows, as :func:`plan_dense_band_writes` plans them, so the
-    producer also holds the bands that :func:`filling_band_bytes` counts.
+    the rows of the shortest band, which, for a producer that reads Zarr in
+    the band's task, gives what it holds at each I/O concurrency. Several
+    counts arrays are written in one pass over the rows, as
+    :func:`plan_dense_band_writes` plans them, so the producer also holds the
+    bands that :func:`filling_band_bytes` counts.
     """
 
     def admit(specs: tuple[ZarrArraySpec, ...], resources: ResourceBudget) -> object:

@@ -28,7 +28,12 @@ from ..storage.identity import (
 from ..storage.io_policy import StorageIoPolicy
 from ..storage.layout import array_shard_rows, column_chunk_rows
 from ..storage.metadata_keys import assay_membership_column
-from ..storage.partition import checked_indices, is_contiguous, row_read_parts
+from ..storage.partition import (
+    band_shards,
+    checked_indices,
+    is_contiguous,
+    row_read_parts,
+)
 from ..storage.profiles import (
     StorageProfile,
     ZarrLocation,
@@ -36,6 +41,7 @@ from ..storage.profiles import (
 )
 from ..storage.schema import create_zarr_count_assay, validate_workspace_name
 from ..storage.sharding import (
+    ProducerBytes,
     dense_counts_admission,
     fit_count_layout,
     write_dense_in_shard_rows,
@@ -144,20 +150,31 @@ def subset_assay_zarr(
         + feat_idx.nbytes
         + CountSummary.nbytes_for(len(cells_idx), len(feat_idx))
     )
-    # Each band reads its cells' rows over the selected features, which a
-    # sharded source holds in a shard-level copy beside the compressed bytes
-    # of the inner chunks that the read touches. A subset of no cells reads
+    # Each band reads its cells' rows over the selected features, at the
+    # write's I/O concurrency: a sharded source holds a shard-level copy of
+    # them beside, for the shards that the band's cells fall in and that Zarr
+    # reads at once, the compressed bytes of the inner chunks that the read
+    # touches and the chunks it decodes at once. A subset of no cells reads
     # nothing.
-    fixed, per_row = (
-        row_read_parts(
-            array_geometry(ig), feat_idx, rows_contiguous=is_contiguous(cells_idx)
-        )
-        if cells_idx.size
-        else (0, 0)
-    )
+    geometry = array_geometry(ig)
+    contiguous = is_contiguous(cells_idx)
 
-    def producer(rows: int) -> int:
-        return fixed + int(rows) * per_row
+    def producer(rows: int) -> ProducerBytes:
+        if not cells_idx.size:
+            return 0
+        shards = band_shards(geometry, cells_idx, rows)
+
+        def held(concurrency: int) -> int:
+            fixed, per_row = row_read_parts(
+                geometry,
+                feat_idx,
+                rows_contiguous=contiguous,
+                concurrency=concurrency,
+                shards=shards,
+            )
+            return fixed + int(rows) * per_row
+
+        return held
 
     layout = fit_count_layout(
         {out_grp: (len(feat_idx), ig.dtype)},

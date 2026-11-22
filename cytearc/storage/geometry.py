@@ -142,9 +142,9 @@ class ArrayGeometry:
 
         An unsharded array is read in one call, which decodes up to
         ``concurrency`` chunks at once, each as stored and decoded, beside any
-        previous chunks that :meth:`heldDecodeBytes` counts. A sharded array is read a
-        band of inner chunks at a time, as :meth:`bandReadBytes` counts, so
-        that no fetch takes more than one band of a shard.
+        previous chunks that :meth:`heldDecodeBytes` counts. A sharded array
+        is read a band of inner chunks at a time, as :meth:`bandReadBytes`
+        counts, so that no fetch takes more than one band of a shard.
         """
         result = self.shape[0] * self.rowBytes()
         if self.shards is not None:
@@ -162,9 +162,9 @@ class ArrayGeometry:
 
         The read holds those rows as Zarr returns them and the band's chunks
         that it decodes at once, each as stored and decoded, beside any
-        previous chunks that :meth:`heldDecodeBytes` counts; a sharded array also fills a
-        shard-level copy of the rows and holds the stored bytes of every chunk
-        of the band it fetched, which covers those.
+        previous chunks that :meth:`heldDecodeBytes` counts; a sharded array
+        also fills a shard-level copy of the rows and holds the stored bytes
+        of every chunk of the band it fetched, which covers those.
         """
         rows_bytes = max(0, int(rows)) * self.rowBytes()
         touched = self.bandChunks()
@@ -187,7 +187,9 @@ class ArrayGeometry:
         chunks: int = 1,
         decodes: int | None = None,
         *,
+        shards: int = 1,
         gapBytes: int = 0,
+        objects: bool = False,
     ) -> int:
         """Return the bytes one Zarr read holds while it runs.
 
@@ -209,11 +211,24 @@ class ArrayGeometry:
         ``gapBytes`` are the stored bytes that a sharded read of part of a
         shard also fetches between the chunks it touches, as
         :func:`~cytearc.storage.partition.coalesced_gap_bytes` counts them.
+        ``shards`` counts the shards that a sharded read reads at once, as
+        Zarr reads up to its async concurrency of the shards a selection
+        touches together: each holds the compressed bytes of the chunks it
+        touches, its decodes, scratch and gap, while their shard-level copies
+        together hold the selection once. With ``objects``, the read is
+        charged the objects of Zarr's read in full, as :meth:`objectBytes`
+        counts them, for each shard it reads, beside any chunks that a plain
+        pool keeps; without it, it is charged them only up to the previous
+        decoded chunks that :meth:`heldDecodeBytes` reserves, as plans of
+        reads at one decode at a time were before.
         """
         touched = max(1, int(chunks))
         decoding = touched if decodes is None else min(touched, max(1, int(decodes)))
         result = max(0, int(resultBytes))
         held = self.heldDecodeBytes(touched, decoding)
+        if objects:
+            kept = held if self.poolKeepsDecodedChunk else 0
+            held = kept + self.objectBytes(touched, decoding)
         if self.shards is None:
             return (
                 result
@@ -221,14 +236,14 @@ class ArrayGeometry:
                 + held
             )
         decoded = self.nominalChunkBytes()
-        return (
-            2 * result
-            + touched * (self.storedChunkBytes() - decoded)
+        shard = (
+            touched * (self.storedChunkBytes() - decoded)
             + decoding * decoded
             + held
             + self.readScratchBytes
             + max(0, int(gapBytes))
         )
+        return 2 * result + max(1, int(shards)) * shard
 
     def binOf(self, axis: int, indices: np.ndarray) -> np.ndarray:
         """Map indices along one axis to the chunk they live in."""
