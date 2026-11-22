@@ -457,6 +457,21 @@ def zarr_decoding_threads(threads: int) -> Iterator[None]:
         _DECODING_THREADS.reset(token)
 
 
+@contextmanager
+def zarr_host_threads() -> Iterator[None]:
+    """Run the calls that Zarr's codec pool takes in this context on the host's threads, whatever ``zarr_decoding_threads`` holds.
+
+    A store's network requests, which wait on the network rather than
+    compute, run within this, so that a read that decodes on one thread still
+    fetches as many objects at once as Zarr's concurrency allows.
+    """
+    token = _DECODING_THREADS.set(None)
+    try:
+        yield
+    finally:
+        _DECODING_THREADS.reset(token)
+
+
 class _LentPool(ThreadPoolExecutor):
     """Zarr's codec pool, as the default executor of one read's event loop.
 

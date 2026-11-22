@@ -1,3 +1,4 @@
+import contextvars
 import threading
 from collections import deque
 from collections.abc import Callable, Generator, Iterable, Iterator
@@ -83,7 +84,10 @@ def _imap_ordered(
             item = next(iterator)
         except StopIteration:
             return False
-        pending.append(executor.submit(worker, item))
+        # Each read runs in a copy of the consumer's context, so the decoding
+        # threads, log context and collected warnings of a pipeline stage
+        # reach it, as they reach Zarr's codec calls.
+        pending.append(executor.submit(contextvars.copy_context().run, worker, item))
         return True
 
     # The error that ends the stream is caught by name rather than read in a

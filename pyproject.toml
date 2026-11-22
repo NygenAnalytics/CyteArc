@@ -78,7 +78,7 @@ tsne = [
     "sgtsnepi>=0.7",
 ]
 test = [
-    "pytest>=7.0",
+    "pytest>=7.3",
     "pytest-cov>=4",
     # Workers run every test in their main thread from 3.6 on. Earlier
     # releases can start a worker's session in another thread, where the
@@ -134,6 +134,9 @@ version_file = "cytearc/_version.py"
 [tool.pytest.ini_options]
 minversion = "6.0"
 addopts = "-ra -v -n logical --dist loadfile"
+# Remove the temporary directory of each test that passes as it ends, so a run
+# keeps only the files of its failed tests, about 6 GiB fewer for the suite.
+tmp_path_retention_policy = "failed"
 markers = [
     "integration: live network tests",
     "slow: tests that build graphs, run iterative numerical workflows, or build large inputs",

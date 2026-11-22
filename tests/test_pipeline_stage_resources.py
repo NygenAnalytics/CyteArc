@@ -14,10 +14,14 @@ import time
 from pathlib import Path
 from typing import Any
 
+import numba
+import numpy as np
 import pytest
 import zarr
+from zarr.codecs import ZstdCodec
 from zarr.storage import MemoryStore
 
+import cytearc.clustering._leiden_native as leiden_native
 import cytearc.utils.process as process_module
 from cytearc import DataStore
 from cytearc.datastore._pipeline import ledger as ledger_module
@@ -31,6 +35,8 @@ from cytearc.storage.pipeline_runs import (
     load_pipeline_stage_records,
     pipeline_stage_path,
 )
+from cytearc.storage.parallel import stream_shards
+from tests.storage_helpers import recorded_codec_pools
 
 # The metric fields that this release added, as a record of an earlier
 # release lacks them.
@@ -442,28 +448,108 @@ def _store(source: str, tmp_path: Path, nthreads: int) -> DataStore:
     return DataStore(str(location), default_assay="RNA", nthreads=nthreads)
 
 
-def test_a_store_of_one_worker_records_it_and_stays_on_one_core(
-    datastore_zarr_root: str, tmp_path: Path
+@pytest.mark.slow
+def test_a_one_worker_run_codes_and_clusters_on_one_thread(
+    datastore_zarr_root: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     store = _store(datastore_zarr_root, tmp_path, nthreads=1)
+    stage_run = RunLedger.run
+    build_graph = leiden_native.build_leiden_graph
+    leiden_threads: list[int] = []
 
-    run = store.pipeline.rna(**_SMALL)
+    def counted(*args: Any, **kwargs: Any) -> Any:
+        leiden_threads.append(numba.get_num_threads())
+        return build_graph(*args, **kwargs)
 
-    records = {
-        record.stage: record
-        for record in load_pipeline_stage_records(store.zw, run.run_id)
-    }
-    workers = {
-        stage: record.metrics.resources.workers
-        for stage, record in records.items()
+    monkeypatch.setattr(leiden_native, "build_leiden_graph", counted)
+    with recorded_codec_pools(host_threads=4) as pools:
+
+        def labeled(ledger: RunLedger, stage: str, action: Any) -> Any:
+            pools.label = stage
+            try:
+                return stage_run(ledger, stage, action)
+            finally:
+                pools.label = None
+
+        monkeypatch.setattr(RunLedger, "run", labeled)
+        run = store.pipeline.rna(**_SMALL)
+
+    records = load_pipeline_stage_records(store.zw, run.run_id)
+    assert {
+        record.stage: record.metrics.resources.workers
+        for record in records
         if record.metrics is not None and record.metrics.resources is not None
+    } == {record.stage: 1 for record in records}
+    in_stages = [(stage, threads) for stage, threads in pools.calls if stage]
+    # The encodes and decodes of each stage, the graph load of Leiden among
+    # them, run on a pool of one thread, not on the four host threads.
+    assert {threads for _stage, threads in in_stages} == {1}, sorted(
+        set(in_stages), key=str
+    )
+    assert {"filtering", "pca", "neighbors", "leiden"} <= {
+        stage for stage, _threads in in_stages
     }
-    assert workers == dict.fromkeys(records, 1)
-    for stage in ("leiden",):
-        metrics = records[stage].metrics
-        assert metrics is not None and metrics.cpu_seconds is not None
-        # A busy machine can only lower CPU time against wall time.
-        assert metrics.cpu_seconds <= 1.1 * metrics.wall_seconds + 0.05, stage
+    # Both resolutions cluster on one of Numba's threads.
+    assert leiden_threads == [1, 1]
+
+
+@pytest.mark.parametrize("workers", [1, 3])
+def test_a_stage_encodes_and_decodes_on_a_pool_of_its_workers_threads(
+    tmp_path: Path, workers: int
+) -> None:
+    _root, ledger = _ledger("store", workers=workers)
+    group = zarr.open_group(str(tmp_path / "values.zarr"), mode="w")
+    values = np.arange(48_000, dtype=np.int64)
+
+    with recorded_codec_pools(host_threads=7) as pools:
+
+        def store_and_read() -> tuple[()]:
+            pools.label = "stage"
+            group.create_array(
+                "values", data=values, chunks=(1_000,), compressors=ZstdCodec()
+            )
+            np.testing.assert_array_equal(group["values"][:], values)
+            pools.label = None
+            return ()
+
+        ledger.run("store", store_and_read)
+        pools.label = "after"
+        np.testing.assert_array_equal(group["values"][:], values)
+
+    # Forty-eight chunks encode and decode on the stage's workers, and the same
+    # read after the stage decodes on the host's seven threads.
+    assert pools.threads("stage") == [workers] * 96
+    assert pools.threads("after") == [7] * 48
+
+
+def test_a_three_worker_stage_streams_its_blocks_on_three_threads(
+    tmp_path: Path,
+) -> None:
+    _root, ledger = _ledger("stream", workers=3)
+    group = zarr.open_group(str(tmp_path / "values.zarr"), mode="w")
+    values = np.arange(8_000, dtype=np.int64)
+    array = group.create_array(
+        "values", data=values, chunks=(1_000,), compressors=ZstdCodec()
+    )
+    blocks: list[np.ndarray] = []
+
+    def read(index: int) -> np.ndarray:
+        return array[index * 1_000 : (index + 1) * 1_000]
+
+    with recorded_codec_pools(host_threads=7) as pools:
+
+        def stream() -> tuple[()]:
+            pools.label = "stage"
+            blocks.extend(stream_shards(range(8), read, workers=3))
+            pools.label = None
+            return ()
+
+        ledger.run("stream", stream)
+
+    np.testing.assert_array_equal(np.concatenate(blocks), values)
+    # The stream's three workers read in the stage's context, so every block
+    # decodes on the stage's three threads, not on the host's seven.
+    assert pools.threads("stage") == [3] * 8
 
 
 def test_a_store_of_four_workers_records_them_and_the_report_shows_resource_use(

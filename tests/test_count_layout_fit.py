@@ -1,7 +1,10 @@
 """Fitting or naming the count-matrix layout for a memory budget."""
 
+import itertools
 import pickle
 import re
+import shutil
+import tempfile
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,9 +25,11 @@ from cytearc.storage.count_matrix import (
     load_count_matrix_plan,
     policy_from_payload,
 )
+from cytearc.storage.identity import CountSummary
 from cytearc.storage.sharding import CountLayoutMemoryError, fit_count_layout
 from cytearc.utils.memory_budget import MemoryBudgetError
 from cytearc.writers import H5adToZarr, SparseToZarr
+from tests.storage_helpers import write_count_store
 
 
 def _refusal(message: str, resources: ResourceBudget) -> MemoryBudgetError:
@@ -725,6 +730,116 @@ def _count_assays(root: zarr.Group) -> list[str]:
     return sorted(name for name in root.group_keys() if "counts" in root[name])
 
 
+def _bits_apart(first: Any, second: Any, dtype: np.dtype) -> str:
+    """The bits in which two integer counts of ``dtype`` differ, or nothing for floats."""
+    if dtype.kind not in "iu":
+        return ""
+    unsigned = np.dtype(f"u{dtype.itemsize}")
+    left, right = (
+        int(np.array(value, dtype=dtype).view(unsigned)) for value in (first, second)
+    )
+    return f" (bits {left ^ right:#x} differ)"
+
+
+def _counts_mismatch(
+    assay: str,
+    locations: Mapping[str, Path],
+    read: Mapping[str, np.ndarray],
+    source: np.ndarray | None,
+) -> str | None:
+    """Return None when the "fit" and "explicit" stores hold the same counts and content fingerprint as each other and the source, else where a count changed.
+
+    ``read`` holds the counts read from each store at ``locations``. The
+    report names each pair that differs with the cell, gene and values of
+    its first mismatches, and each store's content fingerprint beside one
+    computed from the source. It reads each store's first wrong count again
+    from a fresh open and keeps both stores in a folder it names. A
+    fingerprint unlike the source's means the import summarized a wrong
+    count, so the count changed before Zarr encoded it. With the source's
+    fingerprint, a count still wrong on a fresh read changed in encoding or
+    storage, and one that a fresh read finds right is right in storage, so the
+    first read returned it wrong.
+    """
+    counts = {
+        name: zarr.open_group(str(path), mode="r")[f"{assay}/counts"]
+        for name, path in locations.items()
+    }
+    values = dict(read)
+    if source is not None:
+        values["source"] = source
+    shapes = {name: np.shape(value) for name, value in values.items()}
+    if len(set(shapes.values())) > 1:
+        return f"The {assay} counts differ in shape: " + ", ".join(
+            f"{name} {shape}" for name, shape in shapes.items()
+        )
+    fingerprints = {
+        name: array.attrs["content_fingerprint"] for name, array in counts.items()
+    }
+    if source is not None:
+        summary = CountSummary(counts["fit"])
+        summary.update(0, source)
+        fingerprints["source"] = summary.hexdigest()
+    pairs = list(itertools.combinations(values, 2))
+    if len(set(fingerprints.values())) == 1 and all(
+        np.array_equal(values[first], values[second]) for first, second in pairs
+    ):
+        return None
+    dtype = np.dtype(counts["fit"].dtype)
+    lines = [f"The {assay} counts of the fit and explicit imports differ:"]
+    for first, second in pairs:
+        where = np.argwhere(values[first] != values[second])
+        found = "; ".join(
+            f"cell {cell}, gene {gene}: {first} {values[first][cell, gene]}, "
+            f"{second} {values[second][cell, gene]}"
+            + _bits_apart(values[first][cell, gene], values[second][cell, gene], dtype)
+            for cell, gene in where[:3]
+        )
+        lines.append(
+            f"- {first} and {second} differ in {len(where):,} of "
+            f"{values[first].size:,} counts: {found}"
+            if len(where)
+            else f"- {first} and {second} hold the same counts"
+        )
+    lines.append(
+        "- content fingerprints: "
+        + ", ".join(f"{name} {value}" for name, value in fingerprints.items())
+    )
+    for name in locations:
+        reference = (
+            "source"
+            if source is not None
+            else next(other for other in locations if other != name)
+        )
+        where = np.argwhere(values[name] != values[reference])
+        if not len(where):
+            continue
+        cell, gene = (int(index) for index in where[0])
+        fresh = zarr.open_group(str(locations[name]), mode="r")[f"{assay}/counts"]
+        again = fresh[cell, gene]
+        line = f"- {name}, cell {cell}, gene {gene}: a fresh open reads {again}"
+        if source is not None and fingerprints[name] != fingerprints["source"]:
+            line += (
+                ", and its fingerprint is not the source's, so the count changed "
+                "before Zarr encoded it"
+            )
+        elif source is not None and again != source[cell, gene]:
+            line += (
+                ", and its fingerprint is the source's, so the count changed in "
+                "encoding or storage"
+            )
+        elif source is not None:
+            line += (
+                ", and its fingerprint is the source's, so the count is right in "
+                "storage and the first read returned it wrong"
+            )
+        lines.append(line)
+    kept = Path(tempfile.mkdtemp(prefix="cytearc-count-mismatch-"))
+    for path in locations.values():
+        shutil.copytree(path, kept / path.name)
+    lines.append(f"Both stores are kept in {kept}")
+    return "\n".join(lines)
+
+
 @pytest.mark.parametrize("name", _IMPORT_NAMES)
 def test_policy_fit_writes_the_layout_that_the_default_refusal_names(
     name, imports, tmp_path
@@ -750,16 +865,220 @@ def test_policy_fit_writes_the_layout_that_the_default_refusal_names(
     assert assays and assays == _count_assays(roots[1])
     for assay in assays:
         stored = [root[f"{assay}/counts"] for root in roots]
-        # The same counts, identity and layout record as the explicit import.
+        # The same layout record as the explicit import.
         assert {_policy(root, assay) for root in roots} == {fitting}
         assert load_count_matrix_plan(stored[0]) == load_count_matrix_plan(stored[1])
-        np.testing.assert_array_equal(stored[0][:], stored[1][:])
-        assert (
-            stored[0].attrs["content_fingerprint"]
-            == stored[1].attrs["content_fingerprint"]
+        # The same counts and identity as the explicit import and the source.
+        mismatch = _counts_mismatch(
+            assay,
+            {"fit": tmp_path / "fit.zarr", "explicit": tmp_path / "explicit.zarr"},
+            {"fit": stored[0][:], "explicit": stored[1][:]},
+            None if case.counts is None else case.counts[assay],
         )
-        if case.counts is not None:
-            np.testing.assert_array_equal(stored[0][:], case.counts[assay])
+        assert mismatch is None, mismatch
+
+
+@pytest.fixture
+def flip_stores(tmp_path, monkeypatch) -> tuple[dict[str, Path], np.ndarray]:
+    """Two stores of the same counts, with a 1 at cell 4, gene 2, and the counts.
+
+    A mismatch report keeps its stores under ``tmp_path``.
+    """
+    values = np.random.default_rng(3).poisson(0.3, size=(30, 8))
+    values[0, 0] = 70_000
+    values[4, 2] = 1
+    locations = {name: tmp_path / f"{name}.zarr" for name in ("fit", "explicit")}
+    for path in locations.values():
+        write_count_store(str(path), {"RNA": values}, "uint32")
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    return locations, values
+
+
+def _read_counts(locations: Mapping[str, Path]) -> dict[str, np.ndarray]:
+    return {
+        name: zarr.open_group(str(path), mode="r")["RNA/counts"][:]
+        for name, path in locations.items()
+    }
+
+
+def _set_count(path: Path, value: int) -> None:
+    """Store ``value`` at cell 4, gene 2, leaving the content fingerprint as it was."""
+    zarr.open_group(str(path), mode="r+")["RNA/counts"][4, 2] = value
+
+
+def _kept(report: str) -> Path:
+    (kept,) = re.findall(r"Both stores are kept in (\S+)$", report)
+    return Path(kept)
+
+
+def test_counts_that_match_their_source_report_nothing(flip_stores, tmp_path):
+    locations, values = flip_stores
+
+    assert _counts_mismatch("RNA", locations, _read_counts(locations), values) is None
+    assert _counts_mismatch("RNA", locations, _read_counts(locations), None) is None
+    assert not list(tmp_path.glob("cytearc-count-mismatch-*"))
+
+
+def test_a_count_changed_in_storage_is_reported_with_its_bit_and_kept(flip_stores):
+    locations, values = flip_stores
+    # A count of 1 whose bit 16 flipped after the import summarized it.
+    _set_count(locations["fit"], 65_537)
+
+    report = _counts_mismatch("RNA", locations, _read_counts(locations), values)
+
+    assert report is not None
+    fingerprint = zarr.open_group(str(locations["explicit"]))["RNA/counts"].attrs[
+        "content_fingerprint"
+    ]
+    assert report.splitlines()[:-1] == [
+        "The RNA counts of the fit and explicit imports differ:",
+        "- fit and explicit differ in 1 of 240 counts: cell 4, gene 2: fit 65537, "
+        "explicit 1 (bits 0x10000 differ)",
+        "- fit and source differ in 1 of 240 counts: cell 4, gene 2: fit 65537, "
+        "source 1 (bits 0x10000 differ)",
+        "- explicit and source hold the same counts",
+        f"- content fingerprints: fit {fingerprint}, explicit {fingerprint}, "
+        f"source {fingerprint}",
+        "- fit, cell 4, gene 2: a fresh open reads 65537, and its fingerprint is "
+        "the source's, so the count changed in encoding or storage",
+    ]
+    kept = _kept(report)
+    assert sorted(path.name for path in kept.iterdir()) == ["explicit.zarr", "fit.zarr"]
+    assert _read_counts({"fit": kept / "fit.zarr"})["fit"][4, 2] == 65_537
+
+
+def test_a_count_changed_before_its_write_is_reported_by_its_fingerprint(flip_stores):
+    locations, values = flip_stores
+    flipped = values.copy()
+    flipped[4, 2] = 65_537
+    # The import summarized and stored the flipped count.
+    write_count_store(str(locations["fit"]), {"RNA": flipped}, "uint32")
+
+    report = _counts_mismatch("RNA", locations, _read_counts(locations), values)
+
+    assert report is not None
+    lines = report.splitlines()
+    fingerprints = dict(
+        re.findall(
+            r"(\w+) ([0-9a-f]{64})", lines[4].removeprefix("- content fingerprints: ")
+        )
+    )
+    assert fingerprints["explicit"] == fingerprints["source"] != fingerprints["fit"]
+    assert lines[5] == (
+        "- fit, cell 4, gene 2: a fresh open reads 65537, and its fingerprint is not "
+        "the source's, so the count changed before Zarr encoded it"
+    )
+
+
+def test_a_count_changed_by_its_read_is_reported_as_right_in_storage(flip_stores):
+    locations, values = flip_stores
+    read = _read_counts(locations)
+    # The stored counts are right, and the first read returned a flipped one.
+    read["explicit"][4, 2] = 65_537
+
+    report = _counts_mismatch("RNA", locations, read, values)
+
+    assert report is not None
+    assert report.splitlines()[5] == (
+        "- explicit, cell 4, gene 2: a fresh open reads 1, and its fingerprint is "
+        "the source's, so the count is right in storage and the first read "
+        "returned it wrong"
+    )
+
+
+def test_a_fingerprint_alone_that_differs_is_a_mismatch(flip_stores):
+    locations, values = flip_stores
+    counts = zarr.open_group(str(locations["fit"]), mode="r+")["RNA/counts"]
+    counts.attrs["content_fingerprint"] = "0" * 64
+
+    report = _counts_mismatch("RNA", locations, _read_counts(locations), values)
+
+    assert report is not None
+    lines = report.splitlines()
+    assert lines[1:4] == [
+        "- fit and explicit hold the same counts",
+        "- fit and source hold the same counts",
+        "- explicit and source hold the same counts",
+    ]
+    assert lines[4].startswith(f"- content fingerprints: fit {'0' * 64}, explicit ")
+    # No count is wrong, so none is read again.
+    assert lines[5].startswith("Both stores are kept in ")
+
+
+def test_two_stores_that_agree_on_a_fingerprint_unlike_the_sources_are_a_mismatch(
+    flip_stores,
+):
+    locations, values = flip_stores
+    source = zarr.open_group(str(locations["fit"]))["RNA/counts"].attrs[
+        "content_fingerprint"
+    ]
+    # Both imports summarized the same counts, which are not the source's.
+    for path in locations.values():
+        counts = zarr.open_group(str(path), mode="r+")["RNA/counts"]
+        counts.attrs["content_fingerprint"] = "0" * 64
+
+    report = _counts_mismatch("RNA", locations, _read_counts(locations), values)
+
+    assert report is not None
+    lines = report.splitlines()
+    assert lines[1:5] == [
+        "- fit and explicit hold the same counts",
+        "- fit and source hold the same counts",
+        "- explicit and source hold the same counts",
+        f"- content fingerprints: fit {'0' * 64}, explicit {'0' * 64}, source {source}",
+    ]
+
+
+def test_without_a_source_both_stores_read_their_mismatched_count_again(
+    flip_stores,
+):
+    locations, _values = flip_stores
+    _set_count(locations["fit"], 65_537)
+
+    report = _counts_mismatch("RNA", locations, _read_counts(locations), None)
+
+    assert report is not None
+    lines = report.splitlines()
+    assert lines[1] == (
+        "- fit and explicit differ in 1 of 240 counts: cell 4, gene 2: fit 65537, "
+        "explicit 1 (bits 0x10000 differ)"
+    )
+    # Without a source, no fingerprint is computed and no verdict is drawn.
+    assert re.fullmatch(
+        r"- content fingerprints: fit ([0-9a-f]{64}), explicit \1", lines[2]
+    )
+    assert lines[3:5] == [
+        "- fit, cell 4, gene 2: a fresh open reads 65537",
+        "- explicit, cell 4, gene 2: a fresh open reads 1",
+    ]
+
+
+def test_counts_of_another_shape_are_reported_by_their_shapes(flip_stores):
+    locations, values = flip_stores
+
+    report = _counts_mismatch("RNA", locations, _read_counts(locations), values[:, :7])
+
+    assert report == (
+        "The RNA counts differ in shape: fit (30, 8), explicit (30, 8), source (30, 7)"
+    )
+
+
+def test_float_counts_that_differ_are_reported_without_bits(tmp_path, monkeypatch):
+    values = np.arange(12, dtype=np.float32).reshape(4, 3)
+    locations = {name: tmp_path / f"{name}.zarr" for name in ("fit", "explicit")}
+    for path in locations.values():
+        write_count_store(str(path), {"RNA": values}, "float32")
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    read = _read_counts(locations)
+    read["fit"][1, 2] = 7.5
+
+    report = _counts_mismatch("RNA", locations, read, values)
+
+    assert report is not None
+    assert report.splitlines()[1] == (
+        "- fit and explicit differ in 1 of 12 counts: cell 1, gene 2: fit 7.5, "
+        "explicit 5.0"
+    )
 
 
 @pytest.mark.parametrize("name", _IMPORT_NAMES)

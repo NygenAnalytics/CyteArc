@@ -73,6 +73,20 @@ CI splits the suite into four jobs per configuration; `uv run pytest --shard 2/4
 pandas stores text with pyarrow whenever pyarrow is installed, which the lock file does not do, so four more jobs layer pyarrow on the locked environment and split the quick suite into shards.
 `uv run --with pyarrow pytest -m "not slow and not integration"` runs it locally without changing the project environment.
 
+Under a memory limit, such as a cgroup cap of 8 GiB, run the four shards one after another, with four workers each; the last command fails if any shard failed:
+
+    failed=0
+    for shard in 1 2 3 4; do uv run pytest --shard "$shard/4" -n 4 || failed=1; done
+    test "$failed" -eq 0
+
+pytest-xdist starts its workers once for a run, and each worker runs file after file until the run ends ([how xdist works](https://pytest-xdist.readthedocs.io/en/stable/how-it-works.html)), so the workers' memory grows over a run: on an 8-core Mac with an empty Numba cache, a shard's workers and controller together held at most 1.5 to 3.0 GiB of physical memory in its first tenth and 5.3 to 6.8 GiB near its end, although each shard runs its longest files first. Each shard starts new workers, which hold only what their quarter of the suite leaves. The four shards took 14 minutes there, without the tests that need the network.
+
+Measure the coverage of a change with the directory of its package:
+
+    uv run pytest -n 0 --cov=cytearc/metadata --cov-branch --cov-report=term-missing tests/test_metadata_column_encoding.py
+
+A dotted name such as `--cov=cytearc.metadata.encoding` makes coverage.py import and unload the parent package, leaving two copies of pandas, so unrelated tests fail with `TypeError: the dtype str is not supported for parsing` ([coveragepy#2324](https://github.com/coveragepy/coveragepy/issues/2324)).
+
 New code charges its memory budget with the arrays and blocks that grow with its data, and does not model the runtime's own memory, such as Python's and Zarr's objects, file buffers or NumPy's temporaries. A memory test checks behavior at a fixed budget derived from its data's size: a budget too small for the data raises `MemoryBudgetError` before anything is written, naming the step and what to change, and a small budget that streams in several blocks gives the result of a large one. A memory test traces no memory and searches for no smallest budget, since on toy data the runtime's own memory is as large as the data; memory at scale is checked with notebooks and benchmarks on large data.
 
 Several dependencies publish no Python 3.15 wheels, so the 3.15 jobs compile them from source. The test jobs cache the wheels uv builds, keyed by Python version, resolution, and runner image; a changed `uv.lock` restores the previous cache, so only new or changed packages compile. The 3.15 jobs also cache the Ubuntu packages they compile against, keyed by those packages' versions, because a slow Ubuntu mirror took up to 11 minutes to download them; a changed version downloads only the changed packages.

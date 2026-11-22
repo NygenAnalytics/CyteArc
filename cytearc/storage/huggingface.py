@@ -31,6 +31,7 @@ from zarr.storage import FsspecStore
 from zarr.storage._fsspec import ALLOWED_EXCEPTIONS
 from zarr.storage._utils import _dereference_path
 
+from .async_execution import zarr_host_threads
 from .stores import REMOTE_RETRY_TIMEOUT, byte_request_span
 
 # huggingface_hub sets no timeout on a bucket's lookup or its tree listings, so
@@ -399,8 +400,11 @@ class HfReadStore(FsspecStore):
             allowed = min(self.request_timeout, deadline - loop.time())
             timer = asyncio.timeout(allowed)
             try:
+                # A request waits on the network, so it runs on the host's
+                # threads even where the store's reads decode on fewer.
                 async with timer:
-                    return await call()
+                    with zarr_host_threads():
+                        return await call()
             except HfHubHTTPError as error:
                 status = error.response.status_code
                 if status == 429:

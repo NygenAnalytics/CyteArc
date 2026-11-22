@@ -6,6 +6,7 @@ from collections import Counter
 import numpy as np
 import pytest
 import zarr
+from zarr.codecs import ZstdCodec
 from zarr.storage import LocalStore, MemoryStore
 
 import cytearc.storage.stores as stores
@@ -23,6 +24,8 @@ from cytearc.storage.stores import (
     metadata_workers,
     run_concurrently,
 )
+from cytearc.storage.async_execution import zarr_decoding_threads
+from tests.storage_helpers import recorded_codec_pools
 from tests.store_probes import StoreProbe, wrap_recording_store
 
 
@@ -60,6 +63,28 @@ def test_run_concurrently_keeps_task_order_and_overlaps_tasks() -> None:
 
     with pytest.raises(ValueError, match="unreadable node"):
         run_concurrently([lambda: 1, failing], workers=2)
+
+
+def test_run_concurrently_decodes_on_its_callers_decoding_threads(tmp_path) -> None:
+    group = zarr.open_group(str(tmp_path / "values.zarr"), mode="w")
+    values = np.arange(4_000, dtype=np.int64)
+    array = group.create_array(
+        "values", data=values, chunks=(1_000,), compressors=ZstdCodec()
+    )
+
+    def read(index: int):
+        return lambda: array[index * 1_000 : (index + 1) * 1_000]
+
+    with recorded_codec_pools(host_threads=7) as pools:
+        pools.label = "tasks"
+        with zarr_decoding_threads(2):
+            blocks = run_concurrently([read(index) for index in range(4)], workers=4)
+        pools.label = None
+
+    np.testing.assert_array_equal(np.concatenate(blocks), values)
+    # Each task runs in the caller's context, so its read decodes on the
+    # caller's two threads, not on the host's seven.
+    assert pools.threads("tasks") == [2] * 4
 
 
 def test_metadata_workers_overlap_only_remote_stores(monkeypatch) -> None:

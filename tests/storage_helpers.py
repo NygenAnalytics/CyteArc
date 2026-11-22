@@ -1,12 +1,16 @@
 """Storage helpers for tests that build CyteArc stores directly."""
 
 import shutil
-from collections.abc import Mapping, Sequence
+import threading
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pandas as pd
+import pytest
 import zarr
 from numpy.typing import DTypeLike
 
@@ -228,6 +232,80 @@ def reset_zarr_runtime() -> None:
     zarr.config.set({"threading.max_workers": None, "async.concurrency": 10})
     async_execution._HOST_THREAD_CEILING = None
     clear_content_cache()
+
+
+@dataclass
+class CodecPools:
+    """The threads of the pool that ran each Zarr encode and decode, under the label set when it ran.
+
+    A call that ran on no CyteArc codec pool records None.
+    """
+
+    label: str | None = None
+    calls: list[tuple[str | None, int | None]] = field(default_factory=list)
+    running: threading.local = field(default_factory=threading.local)
+
+    def threads(self, label: str | None) -> list[int | None]:
+        """The pool threads of each call under ``label``, in order."""
+        return [threads for of, threads in self.calls if of == label]
+
+    def current_threads(self) -> int | None:
+        """The threads of the pool that runs the calling thread's call, or None outside one."""
+        return getattr(self.running, "threads", None)
+
+
+@contextmanager
+def recorded_codec_pools(host_threads: int) -> Iterator[CodecPools]:
+    """Record the threads of the pool that runs each Blosc, Zstd or gzip encode and decode, on host pools of ``host_threads`` threads.
+
+    Zarr runs those calls on its event loop's default executor: the decoding
+    pools that ``storage.async_execution`` installs on Zarr's loop, which a
+    read on a loop of its own borrows, or an ``AsyncStorageRunner``'s codec
+    pool. Each pool hands the call to ``_ReleasingPool.submit``, which is
+    wrapped here to mark the thread that runs it with the pool's size. Fresh
+    decoding pools of ``host_threads`` threads replace Zarr's for the block,
+    so a call that ignores a store's threads runs on a pool of a count that
+    the test's stores do not ask for.
+    """
+    import zarr.core.sync as zarr_sync
+    from zarr.codecs import BloscCodec, GzipCodec, ZstdCodec
+    from zarr.codecs._v2 import V2Codec
+
+    recorded = CodecPools()
+    running = recorded.running
+    submit = async_execution._ReleasingPool.submit
+
+    def submitting(pool: Any, call: Any, /, *args: Any, **kwargs: Any) -> Any:
+        threads = pool._max_workers
+
+        def run(*call_args: Any, **call_kwargs: Any) -> Any:
+            running.threads = threads
+            try:
+                return call(*call_args, **call_kwargs)
+            finally:
+                running.threads = None
+
+        return submit(pool, run, *args, **kwargs)
+
+    def recording(codec_call: Any) -> Any:
+        def run(codec: Any, *args: Any, **kwargs: Any) -> Any:
+            recorded.calls.append((recorded.label, recorded.current_threads()))
+            return codec_call(codec, *args, **kwargs)
+
+        return run
+
+    pools = async_execution._DecodingPools(host_threads)
+    try:
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(zarr_sync._get_loop(), "_default_executor", pools)
+            patch.setattr(zarr_sync, "_executor", pools)
+            patch.setattr(async_execution._ReleasingPool, "submit", submitting)
+            for codec in (BloscCodec, GzipCodec, ZstdCodec, V2Codec):
+                for name in ("_decode_sync", "_encode_sync"):
+                    patch.setattr(codec, name, recording(getattr(codec, name)))
+            yield recorded
+    finally:
+        pools.shutdown(wait=False)
 
 
 def record_normalized_values(
