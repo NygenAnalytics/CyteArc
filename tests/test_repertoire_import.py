@@ -521,13 +521,15 @@ def test_only_an_import_that_reads_no_contig_warns_of_its_files(tmp_path) -> Non
     cells = store.snapshot_cell_selection()
     empty_csv = write_lines(tmp_path, "empty.csv", CELLRANGER_HEADER, [])
     empty_tsv = write_lines(tmp_path, "empty.tsv", BARE_AIRR, [])
-    # The warning names every file of the import.
+    # The warning names every file of the import, and its remedy speaks of
+    # files.
     with pytest.warns(DiagnosticWarning) as caught:
         store.repertoire.import_receptors([empty_csv, empty_tsv], cell_selection=cells)
     assert len(caught) == 1
     named = re.fullmatch(
         "The import read no contig from the contig files '([^']*)', '([^']*)', so "
-        "no selected cell has a receptor. .*",
+        r"no selected cell has a receptor\. Pass files that hold the V\(D\)J "
+        r"library's contigs, such as Cell Ranger's filtered_contig_annotations\.csv\.",
         str(caught[0].message),
     )
     assert named is not None

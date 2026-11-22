@@ -92,12 +92,7 @@ from ...storage.artifacts import (
 from ...storage.async_execution import zarr_decoding_threads, zarr_io_concurrency
 from ...storage.categorical import CategoricalColumn
 from ...storage.cell_order import CellOrder, cell_order_argument, destination_rows
-from ...storage.diagnostics import (
-    DiagnosticRule,
-    ExportSummary,
-    export_summary,
-    warn_diagnostics,
-)
+from ...storage.diagnostics import ExportSummary, export_summary, warn_diagnostics
 from ...storage.geometry import ROW_INDEX_BYTES, array_geometry
 from ...storage.types import as_zarr_array, read_array
 from ...storage.validation_scope import validation_scoped
@@ -114,6 +109,7 @@ from .cell_barcodes import (
     BarcodeFile,
     CellBarcodeJoin,
     barcode_files,
+    empty_files_rule,
     unmatched_barcode_rules,
 )
 from .cell_groups import cell_groups, group_columns, grouping_artifact, within_groups
@@ -302,21 +298,6 @@ def _contig_sources(
             _ContigSource(file=file, format=file_format, n_columns=len(header))
         )
     return tuple(sources)
-
-
-def _no_contig_rule(sources: Sequence[_ContigSource]) -> DiagnosticRule:
-    """Return the import's warning when its files hold no contig, naming them."""
-    files = files_text("contig", len(sources))
-    names = ", ".join(quoted_value(os.fspath(source.file.path)) for source in sources)
-    return DiagnosticRule(
-        "fileContigs",
-        applies=lambda diagnostics: int(diagnostics["fileContigs"]) == 0,
-        message=lambda _diagnostics: (
-            f"The import read no contig from {files} {names}, so no selected cell "
-            "has a receptor. Pass a file that holds the V(D)J library's contigs, "
-            "such as Cell Ranger's filtered_contig_annotations.csv."
-        ),
-    )
 
 
 def _iter_source(
@@ -936,7 +917,19 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         )
         warnings = (
             *unmatched_barcode_rules(files_text("contig", len(sources))),
-            _no_contig_rule(sources),
+            empty_files_rule(
+                "fileContigs",
+                "contig",
+                [source.file for source in sources],
+                kind="contig",
+                outcome="no selected cell has a receptor",
+                remedy=(
+                    "Pass a file that holds the V(D)J library's contigs, such as "
+                    "Cell Ranger's filtered_contig_annotations.csv.",
+                    "Pass files that hold the V(D)J library's contigs, such as "
+                    "Cell Ranger's filtered_contig_annotations.csv.",
+                ),
+            ),
         )
         if planned.reused:
             # Saved receptors warn as they did when they were imported.

@@ -57,6 +57,7 @@ from .cell_barcodes import (
     BarcodeFile,
     CellBarcodeJoin,
     barcode_files,
+    empty_files_rule,
     texts_per_file,
     unmatched_barcode_rules,
 )
@@ -191,12 +192,13 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
         selected cell, which count each item of a list field and each nonzero
         count of a merged table or a matrix. Barcodes of no cell of the
         store, such as droplets that cell calling rejected, are named in a
-        warning, which a reused import gives again. A file is identified by
-        the SHA-256 of its bytes and by its library, the file's name unless
-        ``library`` names it, so a file moved to another folder reuses the
-        saved barcodes, as does a renamed one whose library is named, an
-        edited one gives new ones, and the order of the files does not
-        matter.
+        warning; when the files hold no row, such as a table of a header
+        alone, another warning names them. A reused import gives both again.
+        A file is identified by the SHA-256 of its bytes and by its library,
+        the file's name unless ``library`` names it, so a file moved to
+        another folder reuses the saved barcodes, as does a renamed one whose
+        library is named, an edited one gives new ones, and the order of the
+        files does not matter.
 
         The artifact's canonical ``n_barcodes`` holds each cell's distinct
         barcodes, and ``n_umis``, ``n_reads`` and ``n_records`` its UMIs,
@@ -303,6 +305,21 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
                 assay.name, cell_selection, operation=arguments.operation
             )
         warnings = unmatched_barcode_rules(files_text("barcode", len(files)))
+        if assay is None:
+            warnings = (
+                *warnings,
+                empty_files_rule(
+                    "fileRows",
+                    "row",
+                    files,
+                    kind="barcode",
+                    outcome="no selected cell has a barcode",
+                    remedy=(
+                        "Pass a file that lists the cells' lineage barcodes.",
+                        "Pass files that list the cells' lineage barcodes.",
+                    ),
+                ),
+            )
         planned = self._plan_barcodes(arguments, cell_selection, n_cells)
         if planned.reused:
             # Saved barcodes warn as they did when they were imported.
