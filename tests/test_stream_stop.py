@@ -29,6 +29,7 @@ import warnings
 from collections.abc import Callable, Coroutine, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
+from traceback import walk_tb
 from typing import Any
 
 import numpy as np
@@ -310,6 +311,10 @@ def test_a_cancellation_that_no_stop_made_keeps_its_meaning(path, scope):
     assert not isinstance(caught.value, Exception)
     record = interruption_record(caught.value)
     assert record is not None and record.kind == "asyncio_cancelled"
+    # It refers to no frame of the read, whose frames hold what the read had
+    # read, however long a handler keeps it.
+    frames = [frame.f_code.co_name for frame, _ in walk_tb(caught.value.__traceback__)]
+    assert "cancelled" not in frames
 
 
 @pytest.mark.parametrize(

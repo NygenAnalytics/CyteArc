@@ -11,12 +11,15 @@ already runs an event loop reads through Zarr's loop.
 """
 
 import asyncio
+import contextlib
 import functools
 import gc
 import http.server
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+
+from typing import Any
 
 import numpy as np
 import pytest
@@ -511,3 +514,313 @@ def test_an_interrupted_read_finishes_the_shared_fetch_that_another_loop_waits_f
     assert ended >= released
     # One listing served both reads: none was abandoned and taken again.
     assert calls == [1]
+
+
+class _FailingStore(MemoryStore):
+    """A memory store whose reads of the keys in ``failing`` raise ``OSError``.
+
+    ``whole_values_too`` makes reads of a whole value fail as well as reads of
+    a byte range, so a shard's index, which Zarr reads from the shard's end,
+    fails only when it is set.
+    """
+
+    failing: frozenset[str] = frozenset()
+    whole_values_too = True
+
+    async def get(self, key, prototype, byte_range=None):  # type: ignore[no-untyped-def]
+        from zarr.abc.store import RangeByteRequest
+
+        if key in self.failing and (
+            self.whole_values_too or isinstance(byte_range, RangeByteRequest)
+        ):
+            raise OSError(f"the store could not read {key}")
+        return await super().get(key, prototype, byte_range)
+
+
+# A read of 4,000 rows by 500 values of uint16 takes 4 MB, and a chunk 400 KB.
+FAILED_READ_SHAPE = (4_000, 500)
+FAILED_READ_CHUNK_BYTES = 400 * 500 * 2
+
+FAILED_READS = {
+    # Zarr fetches each chunk on its own, and the last one fails.
+    "a chunk": ((400, 500), None, {"c/9/0"}, True, slice(None)),
+    # Zarr fetches the whole of each shard it reads, and the second one fails.
+    "a whole shard": ((400, 500), (2_000, 500), {"c/1/0"}, True, slice(None)),
+    # A read of half the chunks of each shard fetches their byte ranges once
+    # it has the shard's index, merged into one fetch, which fails for the
+    # second shard. Zarr's own frames then hold the error group it raises.
+    "the chunks of a shard": (
+        (400, 250),
+        (2_000, 500),
+        {"c/1/0"},
+        False,
+        slice(0, 250),
+    ),
+}
+
+
+def _failing_read(layout: str) -> tuple[zarr.Array, tuple[slice, slice]]:
+    chunks, shards, failing, whole_values_too, columns = FAILED_READS[layout]
+    store = _FailingStore()
+    root = zarr.open_group(store=store, mode="w")
+    array = root.create_array(
+        "counts",
+        shape=FAILED_READ_SHAPE,
+        chunks=chunks,
+        shards=shards,
+        dtype=np.uint16,
+        compressors=ZstdCodec(),
+    )
+    array[:] = np.arange(np.prod(FAILED_READ_SHAPE), dtype=np.uint16).reshape(
+        FAILED_READ_SHAPE
+    )
+    # A read of the first rows, which fails nowhere, makes the codecs and
+    # pools that every read shares before anything is traced.
+    np.asarray(array[:10, :])
+    store.failing = frozenset(f"counts/{key}" for key in failing)
+    store.whole_values_too = whole_values_too
+    return array, (slice(None), columns)
+
+
+def _traced_bytes_settle_below(limit: int, timeout: float = 10.0) -> int:
+    """Return the bytes traced once they fall below ``limit``, or after ``timeout`` seconds.
+
+    On Zarr's loop a failed read's other chunk reads run on after the error
+    reaches the caller, holding the output until they end.
+    """
+    import tracemalloc
+
+    deadline = time.monotonic() + timeout
+    while (traced := tracemalloc.get_traced_memory()[0]) >= limit:
+        if time.monotonic() > deadline:
+            break
+        time.sleep(0.02)
+    return traced
+
+
+def _failed_read_error(path: str, read: Any) -> str | None:
+    """Run the coroutine ``read`` on the read path ``path``, and return the class of its error.
+
+    The error is dropped where it is caught, in the thread that runs an
+    event loop on that path, as a cell of a notebook handles it.
+    """
+    from cytearc.storage.async_execution import run_on_zarr_loop
+
+    def caught() -> str | None:
+        try:
+            (run_read if path == "own loop" else run_on_zarr_loop)(read)
+        except (OSError, ExceptionGroup) as error:
+            # Only the error's class outlives this clause.
+            return type(error).__name__
+        return None
+
+    if path != "inside a running loop":
+        return caught()
+
+    async def inside() -> str | None:
+        try:
+            # A thread that runs an event loop reads through Zarr's loop.
+            run_read(read)
+        except (OSError, ExceptionGroup) as error:
+            return type(error).__name__
+        return None
+
+    return asyncio.run(inside())
+
+
+@pytest.mark.parametrize("layout", FAILED_READS)
+@pytest.mark.parametrize("scope", ["under a stream stop", "outside a stream"])
+@pytest.mark.parametrize("path", ["own loop", "Zarr's loop", "inside a running loop"])
+def test_a_failed_read_frees_its_output_once_its_error_is_dropped(path, scope, layout):
+    import tracemalloc
+
+    from cytearc.storage.async_execution import ReadStop, read_stop_scope
+
+    array, selection = _failing_read(layout)
+    gc.collect()
+    gc.disable()
+    tracemalloc.start()
+    try:
+        with (
+            read_stop_scope(ReadStop())
+            if scope == "under a stream stop"
+            else contextlib.nullcontext()
+        ):
+            raised = _failed_read_error(path, array.async_array.getitem(selection))
+        # Without the collector, only reference counting frees the read's
+        # output, 4 MB, and the shard-level outputs of a sharded read, so
+        # anything that keeps the dropped error in a cycle keeps them all.
+        traced = _traced_bytes_settle_below(FAILED_READ_CHUNK_BYTES)
+        # Nor does any error of the read stay, such as the group that Zarr
+        # raised inside a shard read before the one that reached the caller.
+        left = [
+            item
+            for item in gc.get_objects()
+            if isinstance(item, BaseException)
+            and "the store could not read" in str(item)
+        ]
+    finally:
+        tracemalloc.stop()
+        gc.enable()
+    assert raised == (
+        "ExceptionGroup" if layout == "the chunks of a shard" else "OSError"
+    )
+    assert traced < FAILED_READ_CHUNK_BYTES
+    assert left == []
+
+
+@pytest.mark.parametrize("layout", FAILED_READS)
+@pytest.mark.parametrize("path", ["own loop", "Zarr's loop"])
+def test_a_failed_reads_error_keeps_the_frames_of_the_read_with_their_values(
+    path, layout
+):
+    from tests.test_stream_stop import _read_through
+
+    array, selection = _failing_read(layout)
+    with pytest.raises((OSError, ExceptionGroup)) as caught:
+        _read_through(path, array.async_array.getitem(selection))
+    frames: dict[str, dict[str, object]] = {}
+    trace = caught.value.__traceback__
+    while trace is not None:
+        frames.setdefault(trace.tb_frame.f_code.co_name, trace.tb_frame.f_locals)
+        trace = trace.tb_next
+    # The traceback runs from the runner through Zarr's read, whose frames
+    # keep the output that the read allocated, for a debugger to inspect.
+    assert {"_get_selection", "read_batch"} <= frames.keys()
+    output = frames["_get_selection"]["out_buffer"]
+    assert output is not None
+    assert output.as_numpy_array().shape == (4_000, selection[1].stop or 500)
+
+
+def test_an_interrupted_read_frees_its_output_once_the_interruption_is_dropped():
+    import tracemalloc
+
+    async def read() -> None:
+        # The read's frame holds 4 MB while the interruption reaches it.
+        output = np.ones(FAILED_READ_SHAPE, dtype=np.uint16)
+
+        def interrupt() -> None:
+            raise KeyboardInterrupt
+
+        asyncio.get_running_loop().call_soon(interrupt)
+        await asyncio.sleep(30)
+        del output
+
+    gc.collect()
+    gc.disable()
+    tracemalloc.start()
+    try:
+        try:
+            run_read(read())
+        except KeyboardInterrupt:
+            interrupted = True
+        traced = _traced_bytes_settle_below(FAILED_READ_CHUNK_BYTES, timeout=2)
+    finally:
+        tracemalloc.stop()
+        gc.enable()
+    # The interruption is raised, and the cancellation that it caused in the
+    # read, whose traceback reaches the read's frame, is dropped with it.
+    assert interrupted
+    assert traced < FAILED_READ_CHUNK_BYTES
+
+
+def test_breaking_an_errors_cycles_keeps_every_other_local_and_the_frames_that_run():
+    import concurrent.futures
+
+    from cytearc.storage.async_execution import _break_error_cycles
+
+    class Output:
+        """Stands in for a read's output."""
+
+    def failing() -> None:
+        output = Output()
+        error = OSError("the store could not read a chunk")
+        future: concurrent.futures.Future[None] = concurrent.futures.Future()
+        future.set_exception(error)
+        held = [future]
+        by_name = {"error": error}
+        late = error
+
+        def closure() -> OSError:
+            # A closure that may still run reads ``late``, a cell variable.
+            return late
+
+        assert closure() is error and output is not None
+        held.append(future)
+        by_name["future"] = future
+        raise error
+
+    try:
+        failing()
+    except OSError as caught:
+        error = caught
+        kept = [error]
+        _break_error_cycles(error)
+        # This frame still runs and keeps its own references to the error.
+        assert kept == [error]
+    frame = error.__traceback__.tb_next.tb_frame
+    values = frame.f_locals
+    assert frame.f_code.co_name == "failing"
+    # Each local that held the error, directly, through a finished future or
+    # in a collection, no longer does; the read's output and the cell
+    # variable that a closure shares stay.
+    assert values["error"] is None
+    assert values["future"] is None
+    assert values["held"] is None
+    assert values["by_name"] is None
+    assert values["late"] is error
+    assert isinstance(values["output"], Output)
+
+
+def test_breaking_an_errors_cycles_reaches_the_errors_of_a_group():
+    from cytearc.storage.async_execution import _break_error_cycles
+
+    def failing_task() -> None:
+        error = OSError("the store could not read a chunk")
+        held = [error]
+        assert held
+        raise error
+
+    try:
+        failing_task()
+    except OSError as caught:
+        failure = caught
+    # Raised outside the handler, so the group's only link to the failure is
+    # its list of errors, as a task group's is.
+    try:
+        raise ExceptionGroup("the read's tasks failed", [failure])
+    except ExceptionGroup as caught:
+        group = caught
+    del failure
+    _break_error_cycles(group)
+    [failure] = group.exceptions
+    values = failure.__traceback__.tb_next.tb_frame.f_locals
+    assert values["error"] is None
+    assert values["held"] is None
+
+
+def test_closing_a_suspended_read_closes_it_without_taking_an_error():
+    from cytearc.storage.async_execution import _caught
+
+    class Suspend:
+        """An await that hands control back once, as a read waiting on a store does."""
+
+        def __await__(self):  # type: ignore[no-untyped-def]
+            yield
+
+    steps: list[str] = []
+
+    async def read() -> None:
+        try:
+            await Suspend()
+        finally:
+            steps.append("closed")
+
+    errors: list[BaseException] = []
+    wrapper = _caught(read(), errors)
+    wrapper.send(None)
+    # A coroutine that is closed, as a pending task's is when its loop goes
+    # away, leaves through GeneratorExit, which is no error of the read.
+    wrapper.close()
+    assert steps == ["closed"]
+    assert errors == []
