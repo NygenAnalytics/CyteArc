@@ -268,6 +268,21 @@ def test_every_plot_titles_a_live_column_by_its_cell_field_label(titled):
             plain = plot(
                 store, features=["RNA0", "RNA4"], group_by="cell_type", show=False
             )
+            # Samples named by a CellField weigh cells as the column's name does.
+            by_name, by_field = (
+                plot(
+                    store,
+                    features=["RNA0", "RNA4"],
+                    group_by="cell_type",
+                    sample_by=sample_by,
+                    show=False,
+                )
+                for sample_by in ("sample", CellField("sample", label="Sample"))
+            )
+            assert "per_sample" in by_field.tables
+            _assert_same_tables(by_field, by_name)
+            assert by_field.provenance.extras["sample_by"] == "sample"
+            assert by_field.provenance.n_samples == 6
             for group_by, title in titles.items():
                 result = plot(
                     store, features=["RNA0", "RNA4"], group_by=group_by, show=False
@@ -312,11 +327,12 @@ def test_every_plot_titles_a_live_column_by_its_cell_field_label(titled):
             )
         }
         titled_pairs, plain_pairs, unlabeled = paired.values()
+        # PlotResult.legends reports the title that the figure draws.
         assert _legend_titles(titled_pairs) == ["Cell type", "Treatment", "Summary"]
         assert titled_pairs.legends[1].label == "Treatment"
         for result in (plain_pairs, unlabeled):
             assert _legend_titles(result) == ["Cell type", "Condition", "Summary"]
-            assert result.legends[1].label == "treatment"
+            assert result.legends[1].label == "Condition"
             _assert_same_tables(titled_pairs, result)
             assert result.provenance.extras == titled_pairs.provenance.extras
         assert titled_pairs.provenance.extras["subject_by"] == "subject"
@@ -333,7 +349,7 @@ def test_every_plot_titles_a_live_column_by_its_cell_field_label(titled):
             show=False,
         )
         assert _legend_titles(designed) == ["Cell type", "Condition", "Summary"]
-        assert designed.legends[1].label == "treatment"
+        assert designed.legends[1].label == "Condition"
         _assert_same_tables(designed, titled_pairs)
         # And its sample column replaces sample_by and its label.
         designed_bars = splt.composition(
@@ -417,6 +433,8 @@ _GROUPING_PLOTS = {
     ),
 }
 _GROUPING_ARGUMENTS = [
+    ("dotplot", "sample_by"),
+    ("matrixplot", "sample_by"),
     ("composition", "category_by"),
     ("composition", "sample_by"),
     ("composition", "subject_by"),
@@ -610,6 +628,7 @@ def test_plot_recipes_name_label_artifacts(titled):
                                 {"key": "cell_type", "label": "Cell type"},
                                 "donor",
                             ],
+                            "sampleBy": {"key": "sample", "label": "Sample"},
                         },
                     },
                     {
@@ -640,6 +659,7 @@ def test_plot_recipes_name_label_artifacts(titled):
         assert _legend_titles(shares) == ["Cell type"]
         assert dots.axes["dotplot"].get_xlabel() == "Cell type"
         assert column_matrix.axes["matrixplot"].get_xlabel() == "Cell type / donor"
+        assert column_matrix.provenance.extras["sample_by"] == "sample"
         assert column_shares.axes["composition"].get_xlabel() == "Donor"
         assert _legend_titles(column_shares) == ["Cell type"]
     finally:

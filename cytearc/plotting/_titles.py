@@ -12,7 +12,7 @@ groupings and artifact identities never see it.
 
 from collections import Counter
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, overload
 
 from ..metadata.selection import CellField, NamedCellArtifact
 from ..storage.artifacts import inspect_artifact
@@ -26,6 +26,14 @@ __all__ = [
     "label_artifact",
     "label_column",
 ]
+
+
+@overload
+def label_column(value: None, argument: str) -> tuple[None, None]: ...
+
+
+@overload
+def label_column(value: str | CellField, argument: str) -> tuple[str, str]: ...
 
 
 def label_column(

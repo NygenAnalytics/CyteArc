@@ -2,7 +2,7 @@
 
 from collections.abc import Mapping, Sequence
 import textwrap
-from typing import Any, Hashable
+from typing import Any, Hashable, NamedTuple
 
 import numpy as np
 import pandas as pd
@@ -301,30 +301,64 @@ def _group_by_columns(
     keys: list[str] = []
     titles: list[str] = []
     for item in items:
-        key, title = label_column(item, "each column of group_by")
-        if key is None or title is None:
+        if item is None:
             raise TypeError(
                 "each column of group_by must be a cell column name or a "
                 "CellField, not None"
             )
+        key, title = label_column(item, "each column of group_by")
         keys.append(key)
         titles.append(title)
     return tuple(keys), tuple(titles)
 
 
+class _GroupScales(NamedTuple):
+    """How a dot plot or matrix plot titles, orders and labels its groups.
+
+    Attributes:
+        title: The group axis title.
+        requested_order: The order that the caller gives, or None.
+        scale: The scale of the group ticks.
+        stored: The scale that each grouping column, or the label artifact,
+            stores, or None for each that stores none.
+    """
+
+    title: str
+    requested_order: Sequence[Any] | None
+    scale: CategoricalScale | None
+    stored: list[CategoricalScale | None]
+
+
 def _group_scales(
     store: Any,
     group_keys: Sequence[str],
+    group_titles: Sequence[str],
     groups: ArtifactRef | None,
+    groups_name: str | None,
     categorical_scale: CategoricalScale | None,
-) -> tuple[CategoricalScale | None, list[CategoricalScale | None]]:
-    """Return the scale of the group ticks and the scale each grouping source stores.
+    group_order: Sequence[Any] | None,
+) -> _GroupScales:
+    """Return the title, requested order and scales of a summary plot's groups.
 
-    One column, or a label artifact, merges the caller's
-    ``categorical_scale`` over the scale it stores, as other plots of it do.
-    The groups of two columns take the caller's scale alone, since stored
-    labels and colors name one column's categories, not pairs of them.
+    The group axis is titled by the titles of the ``group_by`` columns
+    joined by " / ", or by the name or the record's title of the label
+    artifact. The caller requests an order with ``group_order``, or else
+    with the order of ``categorical_scale``. One column, or a label
+    artifact, merges the caller's ``categorical_scale`` over the scale it
+    stores for its ticks, as other plots of it do. The groups of two
+    columns take the caller's scale alone, since stored labels and colors
+    name one column's categories, not pairs of them.
     """
+    title = (
+        " / ".join(group_titles)
+        if groups is None
+        else artifact_titles(store, [(groups, groups_name)])[0]
+    )
+    requested_order = (
+        group_order
+        if group_order is not None or categorical_scale is None
+        else categorical_scale.order
+    )
     stored = (
         [stored_artifact_scale(store, groups)]
         if groups is not None
@@ -332,7 +366,7 @@ def _group_scales(
     )
     if len(stored) == 1:
         categorical_scale = merge_categorical_scales(stored[0], categorical_scale)
-    return categorical_scale, stored
+    return _GroupScales(title, requested_order, categorical_scale, stored)
 
 
 def _group_order(
@@ -476,7 +510,7 @@ def dotplot(
     groups: ArtifactRef | NamedCellArtifact | None = None,
     cell_key: str = "I",
     from_assay: str | None = None,
-    sample_by: str | None = None,
+    sample_by: str | CellField | None = None,
     study_design: StudyDesign | None = None,
     normalization: NormalizationSpec | None = None,
     expression_cutoff: float = 0.0,
@@ -509,9 +543,10 @@ def dotplot(
     ``FeatureRef.label`` are pooled into one row. Any other label shared by
     different features raises, including a label shared across assays.
 
-    With ``sample_by`` (or ``study_design.sample_by``), each sample contributes
-    equally: CyteArc first summarizes within sample, then averages across samples.
-    Without it, every cell contributes equally.
+    With ``sample_by``, a column name or a ``CellField``, or with
+    ``study_design.sample_by``, each sample contributes equally: CyteArc first
+    summarizes within sample, then averages across samples. Without it, every
+    cell contributes equally.
 
     ``group_by`` names one cell column or two, each as text or a
     ``CellField``. Groups follow ``group_order``, or the order of
@@ -541,6 +576,7 @@ def dotplot(
     # CellField's label titles its column.
     groups, groups_name = label_artifact(groups, "groups")
     group_by_keys, group_by_titles = _group_by_columns(group_by)
+    sample_key, _ = label_column(sample_by, "sample_by")
     grouping = _resolve_grouping(
         store,
         group_by=group_by_keys,
@@ -548,21 +584,18 @@ def dotplot(
         cell_key=cell_key,
     )
     group_keys, cell_indices, _group_values, group_missing = grouping
-    group_axis_title = (
-        " / ".join(group_by_titles)
-        if groups is None
-        else artifact_titles(store, [(groups, groups_name)])[0]
-    )
     if marker_linewidth < 0:
         raise ValueError("marker_linewidth must be non-negative")
-    requested_group_order = (
-        group_order
-        if group_order is not None or categorical_scale is None
-        else categorical_scale.order
+    group_scales = _group_scales(
+        store,
+        group_keys,
+        group_by_titles,
+        groups,
+        groups_name,
+        categorical_scale,
+        group_order,
     )
-    categorical_scale, stored_scales = _group_scales(
-        store, group_keys, groups, categorical_scale
-    )
+    categorical_scale = group_scales.scale
     feature_pairs = coerce_feature_list(features)
     _check_feature_count(feature_pairs)
     resolved_features = resolve_feature_batch(
@@ -573,7 +606,7 @@ def dotplot(
         resolved_features,
         [group for group, _ in feature_pairs],
         grouping,
-        sample_by=sample_by,
+        sample_by=sample_key,
         study_design=study_design,
         normalization=normalization,
         expression_cutoff=expression_cutoff,
@@ -605,8 +638,8 @@ def dotplot(
     resolved_group_order = _group_order(
         plot_df,
         _group_roles(group_keys),
-        requested_group_order,
-        stored_scales,
+        group_scales.requested_order,
+        group_scales.stored,
     )
     row_index = {row: index for index, row in enumerate(feature_rows)}
     plot_df["group_label"] = pd.Categorical(
@@ -699,7 +732,7 @@ def dotplot(
             # The first group reads at the top, as in the unswapped plot.
             ax.invert_yaxis()
             ax.set_xlabel("")
-            ax.set_ylabel(group_axis_title)
+            ax.set_ylabel(group_scales.title)
         else:
             ax.set_xticks(range(len(resolved_group_order)))
             ax.set_xticklabels(
@@ -718,7 +751,7 @@ def dotplot(
             ax.set_xlim(-0.5, len(resolved_group_order) - 0.5)
             ax.set_ylim(-0.5, len(resolved_feature_order) - 0.5)
             ax.invert_yaxis()
-            ax.set_xlabel(group_axis_title)
+            ax.set_xlabel(group_scales.title)
             ax.set_ylabel("")
         bracket_count = _draw_feature_group_brackets(
             ax,
@@ -817,7 +850,7 @@ def dotplot(
         store,
         cell_key=cell_key,
         cell_indices=cell_indices if groups is not None else None,
-        sample_by=sample_by,
+        sample_by=sample_key,
         study_design=study_design,
     )
     assays = _feature_assays(store, features, from_assay)
@@ -880,7 +913,7 @@ def dotplot(
                 "group_by": list(group_keys) if groups is None else None,
                 "groups": groups.to_dict() if groups is not None else None,
                 "sample_by": (
-                    study_design.sample_by if study_design is not None else sample_by
+                    study_design.sample_by if study_design is not None else sample_key
                 ),
                 "expression_cutoff": expression_cutoff,
                 "dropped_sample_cells": dropped_sample_cells,
@@ -921,7 +954,7 @@ def matrixplot(
     groups: ArtifactRef | NamedCellArtifact | None = None,
     cell_key: str = "I",
     from_assay: str | None = None,
-    sample_by: str | None = None,
+    sample_by: str | CellField | None = None,
     study_design: StudyDesign | None = None,
     normalization: NormalizationSpec | None = None,
     expression_cutoff: float = 0.0,
@@ -1001,6 +1034,7 @@ def matrixplot(
     normalization = normalization or NormalizationSpec()
     groups, groups_name = label_artifact(groups, "groups")
     group_by_keys, group_by_titles = _group_by_columns(group_by)
+    sample_key, _ = label_column(sample_by, "sample_by")
     grouping = _resolve_grouping(
         store,
         group_by=group_by_keys,
@@ -1008,11 +1042,16 @@ def matrixplot(
         cell_key=cell_key,
     )
     group_keys, cell_indices, _group_values, group_missing = grouping
-    group_axis_title = (
-        " / ".join(group_by_titles)
-        if groups is None
-        else artifact_titles(store, [(groups, groups_name)])[0]
+    group_scales = _group_scales(
+        store,
+        group_keys,
+        group_by_titles,
+        groups,
+        groups_name,
+        categorical_scale,
+        group_order,
     )
+    categorical_scale = group_scales.scale
 
     feature_pairs = coerce_feature_list(features)
     _check_feature_count(feature_pairs)
@@ -1024,7 +1063,7 @@ def matrixplot(
         resolved_features,
         [group for group, _ in feature_pairs],
         grouping,
-        sample_by=sample_by,
+        sample_by=sample_key,
         study_design=study_design,
         normalization=normalization,
         expression_cutoff=expression_cutoff,
@@ -1032,14 +1071,6 @@ def matrixplot(
     if standardize == "feature":
         aggregate = _standardize_feature(aggregate)
     color_values = "zscore" if standardize == "feature" else value
-    requested_group_order = (
-        group_order
-        if group_order is not None or categorical_scale is None
-        else categorical_scale.order
-    )
-    categorical_scale, stored_scales = _group_scales(
-        store, group_keys, groups, categorical_scale
-    )
     plot_df = aggregate.copy()
     plot_df["group_label"] = _group_axis_labels(plot_df, _group_roles(group_keys))
     plot_df["row"] = list(
@@ -1058,8 +1089,8 @@ def matrixplot(
     observed_group_order = _group_order(
         plot_df,
         _group_roles(group_keys),
-        requested_group_order,
-        stored_scales,
+        group_scales.requested_order,
+        group_scales.stored,
     )
     # One matrix row per feature and bracket group, as in dotplot.
     row_positions = {row: index for index, row in enumerate(feature_rows)}
@@ -1165,7 +1196,7 @@ def matrixplot(
             rotation=45,
             ha="right",
         )
-        ax.set_xlabel(group_axis_title)
+        ax.set_xlabel(group_scales.title)
         ax.set_yticks(range(len(resolved_feature_order)))
         ax.set_yticklabels(resolved_feature_order)
         annotation_xlim, annotation_ylim = draw_annotation_strips(
@@ -1247,7 +1278,7 @@ def matrixplot(
         store,
         cell_key=cell_key,
         cell_indices=cell_indices if groups is not None else None,
-        sample_by=sample_by,
+        sample_by=sample_key,
         study_design=study_design,
     )
     assays = _feature_assays(store, features, from_assay)
@@ -1284,7 +1315,7 @@ def matrixplot(
                 "group_by": list(group_keys) if groups is None else None,
                 "groups": groups.to_dict() if groups is not None else None,
                 "sample_by": (
-                    study_design.sample_by if study_design is not None else sample_by
+                    study_design.sample_by if study_design is not None else sample_key
                 ),
                 "expression_cutoff": expression_cutoff,
                 "dropped_sample_cells": dropped_sample_cells,

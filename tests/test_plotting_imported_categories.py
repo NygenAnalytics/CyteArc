@@ -446,6 +446,17 @@ def test_summary_groups_follow_the_order_each_grouping_column_stores(grouped):
         pd.testing.assert_frame_equal(
             single.tables["aggregate"], named.tables["aggregate"]
         )
+        # One column's groups take its stored colors and labels, and the
+        # groups of two columns none, since those name one column's
+        # categories.
+        cell_types, joined = (
+            splt.dotplot(store, features=["g0"], group_by=group_by, show=False)
+            for group_by in ("cell_type", ("cell_type", "batch"))
+        )
+        assert cell_types.scales[2].palette == dict(FILE_LEGEND)
+        assert cell_types.scales[2].labels == {label: label for label in FILE_ORDER}
+        assert joined.scales[2].palette is None
+        assert joined.scales[2].labels is None
         # An order that the caller gives wins over the stored orders.
         requested = ["late | b2", "late | b1", "mid | b2", "mid | b1"]
         requested += ["early | b2", "early | b1"]

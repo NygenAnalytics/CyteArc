@@ -436,9 +436,10 @@ def composition(
     sample_key, sample_title = label_column(sample_by, "sample_by")
     subject_key, _ = label_column(subject_by, "subject_by")
     pair_key, _ = label_column(pair_by, "pair_by")
-    condition_key, condition_title = label_column(condition_by, "condition_by")
-    # The conditions' legend is titled "Condition" unless a label names it.
-    condition_legend_title = (
+    condition_key, _ = label_column(condition_by, "condition_by")
+    # The conditions' legend, drawn and reported, is titled "Condition" unless
+    # a label names it.
+    condition_title = (
         condition_by.label
         if isinstance(condition_by, CellField) and condition_by.label
         else "Condition"
@@ -477,8 +478,8 @@ def composition(
         subject_key = study_design.subject_by or subject_key
         pair_key = study_design.pair_by or pair_key
         if study_design.condition_by is not None:
-            condition_key = condition_title = study_design.condition_by
-            condition_legend_title = "Condition"
+            condition_key = study_design.condition_by
+            condition_title = "Condition"
     if (subject_key is not None or pair_key is not None) and condition_key is None:
         raise ValueError(
             "Paired composition requires condition_by together with "
@@ -983,7 +984,7 @@ def composition(
                 if show_legend:
                     blocks = [
                         (category_axis_label, handles),
-                        (condition_legend_title, condition_handles),
+                        (condition_title, condition_handles),
                     ]
                     if summary_handle is not None:
                         blocks.append(("Summary", [summary_handle]))
