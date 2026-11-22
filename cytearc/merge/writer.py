@@ -7,8 +7,14 @@ import zarr
 from scipy.sparse import coo_matrix
 
 from ..assay.rna import RNAassay, library_size_factor
+from ..matrix.chunked import ChunkedArray
 from ..storage.budget import ResourceBudget
-from ..storage.identity import CountSummary, finalize_counts, load_count_summaries
+from ..storage.identity import (
+    CountSummary,
+    finalize_counts,
+    load_count_summaries,
+    summaries_count_every_value,
+)
 from ..storage.count_matrix import CountMatrixPolicy
 from ..storage.io_policy import StorageIoPolicy
 from ..storage.profiles import StorageProfile
@@ -34,7 +40,7 @@ from ..storage.types import as_zarr_array, as_zarr_group
 from ..utils.arrays import canonicalize_sparse, checked_sparse_cast, max_window_nnz
 from ..utils.compute import controlled_compute
 from ..utils.logging import logger
-from ..utils.memory_budget import MemoryBudgetError
+from ..utils.memory_budget import MemoryBudgetError, memory_refusal
 from ..utils.progress import iter_progress
 from .features import FeatureAlignment
 from .row_plan import RowPlan, iter_row_plan_segments, max_row_plan_block_rows
@@ -227,13 +233,137 @@ def create_assay_counts(
     return counts
 
 
-def _row_nnz_load_bytes(assay: Any) -> int:
-    """Bound loading one source's count summaries for the NNZ profile."""
+def _count_scratch_bytes(columns: int) -> int:
+    """Return what ``count_nonzero`` makes of each row of a block of ``columns`` columns.
+
+    That is a boolean copy of the row and the row's count.
+    """
+    return int(columns) * np.dtype(np.bool_).itemsize + np.dtype(np.intp).itemsize
+
+
+def _column_run(counts: ChunkedArray, start: int, stop: int) -> ChunkedArray:
+    """Return the columns ``start`` to ``stop`` of ``counts``, which are all of them or a slice."""
+    return (
+        counts if (start, stop) == (0, int(counts.shape[1])) else counts[:, start:stop]
+    )
+
+
+def _count_read_runs(counts: ChunkedArray, room: int) -> list[ChunkedArray] | None:
+    """Return runs of whole chunk columns of ``counts`` whose streams fit in ``room`` bytes.
+
+    The runs are the widest that fit, down to one chunk column, and each is
+    streamed in whole blocks of a stored band, so that the read decodes each
+    stored chunk once however small ``room`` is. Counts without rows or
+    columns need no run; None when a run of one chunk column does not fit.
+    """
+    n_rows, n_columns = (int(value) for value in counts.shape)
+    if n_rows == 0 or n_columns == 0:
+        return []
+    width = max(1, counts.chunk_columns())
+    for chunks in range(-(-n_columns // width), 0, -1):
+        columns = min(n_columns, chunks * width)
+        run = _column_run(counts, 0, columns)
+        if run.stream_bytes(_count_scratch_bytes(columns)) <= room:
+            return [
+                _column_run(counts, start, min(n_columns, start + columns))
+                for start in range(0, n_columns, columns)
+            ]
+    return None
+
+
+def _smallest_count_read_bytes(counts: ChunkedArray) -> int:
+    """Return what the smallest read of ``counts`` holds.
+
+    That is a stored band of one chunk column, its decode and what
+    ``count_nonzero`` makes of it, or nothing for counts without rows or
+    columns.
+    """
+    n_rows, n_columns = (int(value) for value in counts.shape)
+    if n_rows == 0 or n_columns == 0:
+        return 0
+    columns = min(n_columns, max(1, counts.chunk_columns()))
+    return _column_run(counts, 0, columns).stream_bytes(_count_scratch_bytes(columns))
+
+
+def _row_nnz_load_bytes(assay: Any, reader: ChunkedArray | None) -> int:
+    """Bound what taking one source's nonzero counts per row holds beside the profile.
+
+    Unsigned counts load their count summaries. Other counts, which
+    ``reader`` reads, hold a count of each row beside the smallest read of
+    the counts.
+    """
     n_rows, n_columns = (int(value) for value in assay.rawData.shape)
     itemsize = np.dtype(np.int64).itemsize
+    if reader is not None:
+        return itemsize * n_rows + _smallest_count_read_bytes(reader)
     # Row sums, row positives, and column positives are loaded together, and
     # decoding one of them briefly holds a decoded and an encoded copy.
     return itemsize * (2 * n_rows + n_columns + 2 * max(n_rows, n_columns))
+
+
+def _counting_refusal(
+    assay_name: str | None, item: str, needed_bytes: int, budget_bytes: int
+) -> MemoryBudgetError:
+    """Return the refusal of the step that counts the nonzero values of each merged cell."""
+    of_assay = "" if assay_name is None else f" of assay {assay_name!r}"
+    return memory_refusal(
+        f"Counting the nonzero values of each merged cell{of_assay}",
+        item,
+        needed_bytes,
+        budget_bytes,
+    )
+
+
+def _read_item(source: str) -> str:
+    """Name what a read of a source's counts holds, for a refusal."""
+    return f"each merged cell's count and a read of the counts of source {source!r}"
+
+
+def _counted_row_values(
+    assay: Any,
+    source: str,
+    reader: ChunkedArray,
+    resources: ResourceBudget,
+    *,
+    held_bytes: int,
+) -> np.ndarray:
+    """Count the nonzero values of each row of a source's counts in a read.
+
+    ``reader`` plans the read within the merge's ``resources``, beside
+    ``held_bytes``, what the merge holds while it reads, and the counts that
+    it returns. The read streams the widest runs of whole chunk columns that
+    fit (:func:`_count_read_runs`), so it decodes each stored chunk once.
+
+    Raises:
+        MemoryBudgetError: If a stored band of one chunk column does not fit.
+    """
+    row_values = np.zeros(int(reader.shape[0]), dtype=np.int64)
+    resident = int(held_bytes) + row_values.nbytes
+    budget = int(resources.memoryBytes)
+    runs = _count_read_runs(reader, budget - resident)
+    if runs is None:
+        raise _counting_refusal(
+            assay.name,
+            _read_item(source),
+            resident + _smallest_count_read_bytes(reader),
+            budget,
+        )
+    for run in runs:
+        start = 0
+        for block in run._stream_blocks(
+            nthreads=resources.workers,
+            msg=f"Counting the nonzero values of {assay.name} in source {source}",
+            prefetch=None,
+            row_mask=None,
+            resident_bytes=resident,
+            scratch_bytes_per_row=_count_scratch_bytes(run.shape[1]),
+        ):
+            stop = start + int(block.shape[0])
+            row_values[start:stop] += np.count_nonzero(block, axis=1)
+            start = stop
+            # Release the block before the stream reads the next one.
+            del block
+    return row_values
 
 
 def _cumulative_row_nnz(
@@ -245,40 +375,64 @@ def _cumulative_row_nnz(
 ) -> np.ndarray:
     """Return cumulative nonzero counts over merged rows.
 
-    Each row count is the source row's positive-entry count, read once per
-    source from its saved count summaries. Missing sources contribute zeros.
+    Each row count is the number of nonzero values of the source row, taken
+    once per source. Unsigned counts take it from their saved count
+    summaries; signed and float counts can hold negative values, which the
+    summaries leave out, so their values are counted in a read within the
+    merge's budget (:func:`~cytearc.storage.identity.summaries_count_every_value`).
+    Missing sources contribute zeros.
+
+    Raises:
+        MemoryBudgetError: If the profile and the summaries or the smallest
+            read of a source do not fit, before any source is read.
     """
-    profile_bytes = (row_plan.nCells + 1) * np.dtype(np.int64).itemsize
-    needed = (
-        max(0, int(resident_bytes))
-        + profile_bytes
-        + max(
-            (_row_nnz_load_bytes(assay) for assay in assays if assay is not None),
-            default=0,
-        )
-    )
-    if needed > int(resources.memoryBytes):
-        raise MemoryBudgetError(
-            f"Merged assay NNZ profile needs about {needed} bytes, but the "
-            f"operation limit is {int(resources.memoryBytes)} bytes",
-            needed_bytes=needed,
-            budget_bytes=int(resources.memoryBytes),
-            item="the merged assay's nonzero counts per row",
-        )
-    cumulative = np.zeros(row_plan.nCells + 1, dtype=np.int64)
-    row_nnz = cumulative[1:]
-    for source_idx, assay in enumerate(assays):
+    sources = []
+    for index, assay in enumerate(assays):
         if assay is None:
             continue
-        matrix = assay.matrixGroup
-        counts = as_zarr_array(matrix["counts"], name="counts")
-        _, row_positive, _ = load_count_summaries(matrix, counts)
+        counts = as_zarr_array(assay.matrixGroup["counts"], name="counts")
+        reader = (
+            None
+            if summaries_count_every_value(counts)
+            else assay.rawData._with_resources(resources)
+        )
+        sources.append((index, assay, counts, reader))
+    profile_bytes = (row_plan.nCells + 1) * np.dtype(np.int64).itemsize
+    held = max(0, int(resident_bytes)) + profile_bytes
+    budget = int(resources.memoryBytes)
+    needed, item, assay_name = held, "each merged cell's count", None
+    for index, assay, _, reader in sources:
+        load = _row_nnz_load_bytes(assay, reader)
+        if held + load > needed:
+            source = row_plan.sourceNames[index]
+            needed, assay_name = held + load, assay.name
+            item = (
+                f"each merged cell's count and the count summaries of source {source!r}"
+                if reader is None
+                else _read_item(source)
+            )
+    if needed > budget:
+        raise _counting_refusal(assay_name, item, needed, budget)
+    cumulative = np.zeros(row_plan.nCells + 1, dtype=np.int64)
+    row_nnz = cumulative[1:]
+    for source_idx, assay, counts, reader in sources:
+        row_values = (
+            load_count_summaries(assay.matrixGroup, counts)[1]
+            if reader is None
+            else _counted_row_values(
+                assay,
+                row_plan.sourceNames[source_idx],
+                reader,
+                resources,
+                held_bytes=held,
+            )
+        )
         for segment in iter_row_plan_segments(row_plan):
             if segment.sourceIdx != source_idx:
                 continue
             stop = segment.destStart + int(segment.localRows.size)
-            row_nnz[segment.destStart : stop] = row_positive[segment.localRows]
-        del row_positive
+            row_nnz[segment.destStart : stop] = row_values[segment.localRows]
+        del row_values
     np.cumsum(row_nnz, out=row_nnz)
     return cumulative
 
@@ -456,6 +610,13 @@ def write_assay_counts(
         block_rows * source_n_feats * value_bytes if block_rows > batch_rows else 0
     )
 
+    # The sources' counts are read within the merge's budget, not each
+    # source store's own.
+    readers = [
+        None if assay is None else assay.rawData._with_resources(resources)
+        for assay in assays
+    ]
+
     def source_batches(
         hold_blocks: bool,
     ) -> Iterator[tuple[int, np.ndarray | None, int]]:
@@ -466,20 +627,21 @@ def write_assay_counts(
         """
         for block in iter_row_plan_segments(row_plan):
             assay = assays[block.sourceIdx]
+            reader = readers[block.sourceIdx]
             rows = np.asarray(block.localRows, dtype=np.int64)
-            if assay is None or int(assay.feats.N) == 0:
+            if assay is None or reader is None or int(assay.feats.N) == 0:
                 for offset in range(0, rows.size, batch_rows):
                     yield block.sourceIdx, None, min(batch_rows, rows.size - offset)
                 continue
             held = (
-                controlled_compute(assay.rawData[rows, :], resources.workers)
+                controlled_compute(reader[rows, :], resources.workers)
                 if hold_blocks
                 else None
             )
             for offset in range(0, rows.size, batch_rows):
                 batch = rows[offset : offset + batch_rows]
                 values = (
-                    controlled_compute(assay.rawData[batch, :], resources.workers)
+                    controlled_compute(reader[batch, :], resources.workers)
                     if held is None
                     else held[offset : offset + batch_rows]
                 )

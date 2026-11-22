@@ -2447,14 +2447,15 @@ def _summarized_nonzero(assay: Any, rows: np.ndarray | None = None) -> int | Non
     The summaries count the positive counts of each cell, which are all of
     its nonzero counts when the counts are unsigned, as every import stores
     whole non-negative counts. Counts of another dtype may hold negative
-    values, so they return None. ``rows`` are increasing store rows, every
-    cell by default.
+    values, so they return None
+    (:func:`~cytearc.storage.identity.summaries_count_every_value`).
+    ``rows`` are increasing store rows, every cell by default.
     """
-    from ..storage.identity import positive_value_count
+    from ..storage.identity import positive_value_count, summaries_count_every_value
     from ..storage.types import as_zarr_array
 
     counts = as_zarr_array(assay.matrixGroup["counts"], name="counts")
-    if counts.dtype.kind != "u":
+    if not summaries_count_every_value(counts):
         return None
     return positive_value_count(assay.matrixGroup, counts, rows)
 

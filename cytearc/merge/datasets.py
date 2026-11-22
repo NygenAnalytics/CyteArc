@@ -160,7 +160,9 @@ class DataStoreMerge:
         source_column: Optional cell-metadata column storing source names.
         mem_budget: Memory budget for the merge. Accepts bytes, a size such
                     as ``8G``, or a fraction of detected system memory.
-                    When None, the tightest source budget is used.
+                    When None, the tightest source budget is used. The merge
+                    reads its sources' counts within this budget, whatever
+                    budgets the sources were opened with.
         nthreads: Maximum worker budget. When None, the tightest source
                   worker count is used.
         profile: Zarr encoding profile (``fast_local`` or ``cloud``). When
@@ -183,6 +185,13 @@ class DataStoreMerge:
 
     Merged counts use the common type of the source count dtypes, widened so
     that features summed by name cannot overflow it.
+
+    The number of nonzero values of each cell sizes the batches of the
+    counts write within ``mem_budget``. Unsigned counts, which imports store
+    for whole counts, give it from their count summaries. Signed and float
+    counts, such as normalized or corrected values, can hold negative
+    values, which those summaries leave out, so the merge counts them in a
+    read of the source's counts, once as it plans and once before it writes.
 
     Each merged assay holds the union of its sources' features, and the cells
     of a source that holds the assay but lacks one of its features get zero

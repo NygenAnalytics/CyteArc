@@ -311,6 +311,19 @@ def load_count_summaries(
     return loaded[0], loaded[1], loaded[2]
 
 
+def summaries_count_every_value(counts: zarr.Array) -> bool:
+    """Return whether the count summaries of ``counts`` count each of its nonzero values.
+
+    The summaries count the positive values of each row and column, so they
+    count every nonzero value whenever the counts hold no negative value,
+    which unsigned counts guarantee: the count dtype policy
+    (:mod:`cytearc.storage.count_dtype`) stores a matrix unsigned exactly
+    when its values are whole non-negative counts. Signed and float counts
+    can hold negative values, which the summaries leave out.
+    """
+    return np.dtype(counts.dtype).kind == "u"
+
+
 def positive_value_count(
     matrix: zarr.Group, counts: zarr.Array, rows: np.ndarray | None = None
 ) -> int:
