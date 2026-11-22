@@ -396,13 +396,21 @@ def test_a_read_whose_task_was_cancelled_before_it_started_raises_asyncio_cancel
     assert type(error) is asyncio.CancelledError
     assert inspect.getcoroutinestate(read) == inspect.CORO_CLOSED
     # Neither the read nor the wrapper that would have run it leaves a warning
-    # that it was never awaited once the error, which holds them, is gone.
+    # that it was never awaited once the error, which holds them, is gone. The
+    # collection can also finalize what earlier tests left, such as a temporary
+    # directory, whose warnings say nothing about this read.
     with warnings.catch_warnings(record=True) as recorded:
         warnings.simplefilter("always")
         del error
         raised.clear()
         gc.collect()
-    assert [str(item.message) for item in recorded] == []
+    never_awaited = [
+        str(item.message)
+        for item in recorded
+        if issubclass(item.category, RuntimeWarning)
+        and "was never awaited" in str(item.message)
+    ]
+    assert never_awaited == []
 
 
 # Zarr calls that run on Zarr's loop and that a cancellation can stop: a read
