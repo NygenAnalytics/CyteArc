@@ -1706,24 +1706,9 @@ class FragmentDerivedMatrixSource(BaseMatrixSource):
             + self.regionMetadataBytes
         )
 
-    def _selected_peak_indexes(
-        self,
-        chromosome_id: int,
-        start: int,
-        stop: int,
-    ) -> NDArray[np.int64]:
-        indexes = self._chromosomeIndexes[chromosome_id]
-        if self.logicalTranspose:
-            return indexes
-        return indexes[(indexes >= start) & (indexes < stop)]
-
-    def _peak_contributions(
-        self,
-        start: int,
-        stop: int,
-    ) -> Iterator[tuple[int, int, int]]:
+    def _peak_contributions(self) -> Iterator[tuple[int, int, int]]:
         for chromosome_id in range(len(self.chromosomeLevels)):
-            candidates = self._selected_peak_indexes(chromosome_id, start, stop)
+            candidates = self._chromosomeIndexes[chromosome_id]
             next_candidate = 0
             active: list[int] = []
             for block in self.fragments.iter_chromosome(chromosome_id):
@@ -1737,51 +1722,38 @@ class FragmentDerivedMatrixSource(BaseMatrixSource):
                     active.append(int(candidates[next_candidate]))
                     next_candidate += 1
                 last_start = int(block.starts[-1])
-                if self.logicalTranspose:
-                    keep_cells = (block.cellIds >= start) & (block.cellIds < stop)
-                    if np.any(keep_cells):
-                        cells = block.cellIds[keep_cells]
-                        fragment_starts = block.starts[keep_cells]
-                        fragment_ends = block.ends[keep_cells]
-                    else:
-                        cells = np.empty(0, dtype=np.uint32)
-                        fragment_starts = np.empty(0, dtype=np.uint32)
-                        fragment_ends = np.empty(0, dtype=np.uint32)
-                else:
-                    cells = block.cellIds
-                    fragment_starts = block.starts
-                    fragment_ends = block.ends
+                fragment_starts = block.starts
+                fragment_ends = block.ends
                 retained: list[int] = []
                 for feature in active:
                     peak_start = int(self.starts[feature])
                     peak_end = int(self.ends[feature])
-                    if cells.size:
-                        if self.mode == "overlaps":
-                            mask = (fragment_starts < peak_end) & (
-                                fragment_ends > peak_start
-                            )
-                            counts = None
+                    if self.mode == "overlaps":
+                        mask = (fragment_starts < peak_end) & (
+                            fragment_ends > peak_start
+                        )
+                        counts = None
+                    else:
+                        start_overlap = (fragment_starts >= peak_start) & (
+                            fragment_starts < peak_end
+                        )
+                        end_overlap = (fragment_ends > peak_start) & (
+                            fragment_ends <= peak_end
+                        )
+                        mask = start_overlap | end_overlap
+                        counts = (
+                            start_overlap.astype(np.uint8)
+                            + end_overlap.astype(np.uint8)
+                            if self.mode == "insertions"
+                            else None
+                        )
+                    for position in np.flatnonzero(mask):
+                        cell_id = int(block.cellIds[position])
+                        value = int(counts[position]) if counts is not None else 1
+                        if self.logicalTranspose:
+                            yield cell_id, feature, value
                         else:
-                            start_overlap = (fragment_starts >= peak_start) & (
-                                fragment_starts < peak_end
-                            )
-                            end_overlap = (fragment_ends > peak_start) & (
-                                fragment_ends <= peak_end
-                            )
-                            mask = start_overlap | end_overlap
-                            counts = (
-                                start_overlap.astype(np.uint8)
-                                + end_overlap.astype(np.uint8)
-                                if self.mode == "insertions"
-                                else None
-                            )
-                        for position in np.flatnonzero(mask):
-                            cell_id = int(cells[position])
-                            value = int(counts[position]) if counts is not None else 1
-                            if self.logicalTranspose:
-                                yield cell_id - start, feature, value
-                            else:
-                                yield feature - start, cell_id, value
+                            yield feature, cell_id, value
                     if last_start < peak_end:
                         retained.append(feature)
                 active = retained
@@ -1827,11 +1799,7 @@ class FragmentDerivedMatrixSource(BaseMatrixSource):
             + (adjusted - int(self.starts[region])) // int(self.tileWidths[region])
         )
 
-    def _tile_contributions(
-        self,
-        start: int,
-        stop: int,
-    ) -> Iterator[tuple[int, int, int]]:
+    def _tile_contributions(self) -> Iterator[tuple[int, int, int]]:
         # A fragment inserts at start and end - 1. Insertions mode counts each
         # insertion in its tile; fragments mode counts each tile that holds
         # at least one, so only an end in the start's own tile is skipped.
@@ -1839,8 +1807,6 @@ class FragmentDerivedMatrixSource(BaseMatrixSource):
             for block in self.fragments.iter_chromosome(chromosome_id):
                 for position in range(block.size):
                     cell_id = int(block.cellIds[position])
-                    if self.logicalTranspose and not start <= cell_id < stop:
-                        continue
                     fragment_start = int(block.starts[position])
                     fragment_end = int(block.ends[position])
                     start_region = self._tile_region_for_start(
@@ -1875,19 +1841,20 @@ class FragmentDerivedMatrixSource(BaseMatrixSource):
                         if feature is None:
                             continue
                         if self.logicalTranspose:
-                            yield cell_id - start, feature, 1
-                        elif start <= feature < stop:
-                            yield feature - start, cell_id, 1
+                            yield cell_id, feature, 1
+                        else:
+                            yield feature, cell_id, 1
 
-    def _contributions(
-        self,
-        start: int,
-        stop: int,
-    ) -> Iterator[tuple[int, int, int]]:
+    def _contributions(self) -> Iterator[tuple[int, int, int]]:
+        """Yield the row, column and value of every count that the fragments add.
+
+        The fragments are read once, into the row store that each read slices,
+        so the counts cover every row.
+        """
         if self.matrixType == "PeakMatrix":
-            yield from self._peak_contributions(start, stop)
+            yield from self._peak_contributions()
         else:
-            yield from self._tile_contributions(start, stop)
+            yield from self._tile_contributions()
 
     def estimate_read_memory(self, start: int, stop: int) -> MemoryEstimate:
         start, stop = self._window(start, stop)
@@ -1904,7 +1871,7 @@ class FragmentDerivedMatrixSource(BaseMatrixSource):
 
     def _contribution_chunks(self, max_entries: int) -> Iterator[coo_matrix]:
         chunk_nnz = max(1, min(self._limits.compressedChunkNnz, max_entries))
-        events = self._contributions(0, self.n_cells)
+        events = self._contributions()
         while batch := list(islice(events, chunk_nnz)):
             values = np.asarray(batch, dtype=np.int64)
             del batch
