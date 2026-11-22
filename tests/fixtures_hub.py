@@ -278,13 +278,13 @@ class LoopbackHub(ThreadingHTTPServer):
     ranges does, and a status, or a status with headers, answers with that
     status. The kinds are
     ``"bucket"``, the bucket's lookup, ``"repository"``, the repository's,
-    ``"tree"``, a listing, ``"paths-info"``, a lookup of named bucket files,
-    and ``"file"``, a file's bytes. A request that its plan does not cover is
-    served, and ``requests`` records the kind and path of each, the path of a
-    lookup being the paths it names, joined by ``", "``. ``received`` records
-    them with what else the request asked: ``"recursive"`` or ``"directory"``
-    for a listing, the ``Range`` header, or None, for a file, and None for a
-    lookup.
+    ``"tree"``, a listing, ``"paths-info"``, a lookup of named files of the
+    bucket or the repository, and ``"file"``, a file's bytes. A request that
+    its plan does not cover is served, and ``requests`` records the kind and
+    path of each, the path of a lookup being the paths it names, joined by
+    ``", "``. ``received`` records them with what else the request sent:
+    ``"recursive"`` or ``"directory"`` for a listing, the ``Range`` header, or
+    None, for a file, and the ``Authorization`` header, or None, for a lookup.
     """
 
     daemon_threads = True
@@ -358,29 +358,52 @@ class _LoopbackHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         url = urlsplit(self.path)
-        if url.path != f"/api/buckets/{BUCKET_ID}/paths-info":
+        body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        repository = url.path == f"/api/datasets/{REPOSITORY_ID}/paths-info/main"
+        if not repository and url.path != f"/api/buckets/{BUCKET_ID}/paths-info":
             self._json(404, {"error": f"No route for {url.path}"})
             return
-        body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
-        paths = json.loads(body)["paths"]
-        if self._planned("paths-info", ", ".join(paths), None) is None:
+        try:
+            # huggingface_hub sends a bucket's lookup as JSON and a
+            # repository's form-encoded.
+            paths = (
+                parse_qs(body.decode(), strict_parsing=True)["paths"]
+                if repository
+                else json.loads(body)["paths"]
+            )
+        except (KeyError, ValueError):
+            self._json(400, {"error": "The lookup names no paths"})
             return
-        # The Hub's schema for the answer: an entry for each path that names a
-        # file or a directory, and none for a missing path.
+        if (
+            self._planned(
+                "paths-info", ", ".join(paths), self.headers.get("Authorization")
+            )
+            is None
+        ):
+            return
+        # The Hub's schemas for the answer: an entry for each path that names a
+        # file or a folder, and none for a missing path. A repository names
+        # each entry's git object.
         found: list[dict[str, Any]] = []
         for path in paths:
             target = self.server.root / path
-            entry: dict[str, Any] = {
-                "path": path,
-                "uploadedAt": "2026-01-01T00:00:00.000Z",
-            }
+            entry: dict[str, Any] = (
+                {"path": path, "oid": "0" * 40}
+                if repository
+                else {"path": path, "uploadedAt": "2026-01-01T00:00:00.000Z"}
+            )
             if target.is_file():
-                size = target.stat().st_size
-                found.append(
-                    {**entry, "type": "file", "size": size, "xetHash": "test-hash"}
-                )
+                entry |= {"type": "file", "size": target.stat().st_size}
+                found.append(entry if repository else entry | {"xetHash": "test-hash"})
             elif target.is_dir():
-                found.append({**entry, "type": "directory"})
+                found.append(
+                    entry
+                    | (
+                        {"type": "directory", "size": 0}
+                        if repository
+                        else {"type": "directory"}
+                    )
+                )
         self._json(200, found)
 
     def do_GET(self) -> None:

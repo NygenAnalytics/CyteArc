@@ -28,9 +28,12 @@ import zarr
 from zarr.core.buffer import Buffer, default_buffer_prototype
 from zarr.core.sync import sync
 
+from zarr.storage import StorePath
+
 from ..utils.logging import logger
 from ..utils.shutdown import is_interruption
-from .stores import has_atomic_conditional_writes
+from .profiles import is_remote_zarr_location
+from .stores import has_atomic_conditional_writes, store_location
 
 PREPARATION_CLAIM = ".cytearc-preparation"
 """Name of the claim group below the root or workspace group being prepared."""
@@ -70,7 +73,21 @@ def _claim_holder(stored: Buffer) -> Mapping[str, Any]:
     return holder if isinstance(holder, Mapping) else {}
 
 
-def _held_message(claim: Any, holder: Mapping[str, Any]) -> str:
+def _claim_location(claim: StorePath) -> str:
+    """Return the path or URL of the claim, which a user can remove.
+
+    A store without a path or URL, such as a memory store, names the claim as
+    Zarr names it.
+    """
+    location = store_location(claim.store)
+    if location is None:
+        return str(claim)
+    if is_remote_zarr_location(location):
+        return f"{location.rstrip('/')}/{claim.path}"
+    return os.path.join(location, *claim.path.split("/"))
+
+
+def _held_message(claim: StorePath, holder: Mapping[str, Any]) -> str:
     started = holder.get("startedAtNs")
     when = (
         datetime.datetime.fromtimestamp(started / 1e9, datetime.UTC).isoformat(
@@ -84,7 +101,7 @@ def _held_message(claim: Any, holder: Mapping[str, Any]) -> str:
         f"This store is being prepared by another process ({process}, since "
         f"{when}). Open it again once that open has finished. If no process is "
         "preparing it, a preparation was killed and left its claim: remove "
-        f"{claim} and open the store again."
+        f"{_claim_location(claim)} and open the store again."
     )
 
 
@@ -135,12 +152,11 @@ def preparation_claim(group: zarr.Group) -> Iterator[None]:
     if holder.get("token") != token:
         raise RuntimeError(_held_message(claim, holder))
     if not has_atomic_conditional_writes(group.store):
+        location = store_location(group.store) or "this store"
         logger.warning(
-            "Another process that opens this store at the same moment can prepare "
-            "it beside this open: the store looks a file up and writes it in two "
-            "steps, so its preparation claim refuses only a process that opens it "
-            "later. Open the store from no other process until this open has "
-            "prepared it."
+            f"Another process that opens {location} at the same moment as this "
+            "one could also prepare it, because the store cannot refuse a second "
+            "writer. Open it from one process until it is prepared."
         )
     try:
         yield
@@ -150,6 +166,7 @@ def preparation_claim(group: zarr.Group) -> Iterator[None]:
         except Exception as error:
             # The preparation's own error, if any, is the one that propagates.
             logger.warning(
-                f"Could not remove the preparation claim {claim}: {error}. If the "
-                "store is not prepared, remove the claim before opening it again."
+                f"Could not remove the preparation claim {_claim_location(claim)}: "
+                f"{error}. If the store is not prepared, remove the claim before "
+                "opening it again."
             )

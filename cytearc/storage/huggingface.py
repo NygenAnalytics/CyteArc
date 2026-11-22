@@ -170,35 +170,61 @@ def _list_store(fs: HfFileSystem, path: str) -> _StoreListing:
     return _StoreListing(sizes, url)
 
 
+def _names_a_file(
+    fs: HfFileSystem,
+    url: str,
+    timeout: float,
+    *,
+    json: dict[str, Any] | None = None,
+    data: dict[str, Any] | None = None,
+) -> bool:
+    """Send one lookup of a path to ``url`` and return whether it names a file.
+
+    ``json`` or ``data`` is the request's body. The answer lists the path if
+    it names a file or a folder, and only a file is a key.
+    """
+    response = get_session().post(
+        url,
+        headers=build_hf_headers(token=fs.token),
+        timeout=timeout,
+        json=json,
+        data=data,
+    )
+    hf_raise_for_status(response)
+    return any(entry.get("type") == "file" for entry in response.json())
+
+
 def _holds_file(fs: HfFileSystem, path: str, timeout: float) -> bool:
     """Return whether Hugging Face holds the file at ``path`` when asked.
 
     Hugging Face's file system answers a lookup from the listing of the
-    file's directory that it keeps, which misses a file that another process
-    wrote after the listing and still holds one that it deleted. A bucket file
-    is looked up by its path, with one request whatever the size of its
-    directory, whose listing the Hub does not promise to be current. A
-    repository file is looked up in a listing of its directory made now.
+    file's folder that it keeps, which misses a file that another process
+    wrote after the listing and still holds one that it deleted, and the Hub
+    documents a bucket's non-recursive listings as not strongly consistent.
+    This lookup asks the bucket's or the repository's ``paths-info`` endpoint
+    about the one path instead, with one request whatever the size of its
+    folder, and keeps no answer.
 
     Raises:
-        FileNotFoundError: If the bucket or repository does not exist, or the
-            repository does not hold the file.
+        FileNotFoundError: If the bucket, repository or revision does not
+            exist.
     """
     resolved = fs.resolve_path(path)
-    if not isinstance(resolved, HfFileSystemResolvedBucketPath):
-        fs.invalidate_cache(path)
-        fs.info(path)
-        return True
-    response = get_session().post(
-        f"{fs.endpoint}/api/buckets/{resolved.bucket_id}/paths-info",
-        json={"paths": [resolved.path]},
-        headers=build_hf_headers(token=fs.token),
-        timeout=timeout,
+    if isinstance(resolved, HfFileSystemResolvedBucketPath):
+        url = f"{fs.endpoint}/api/buckets/{resolved.bucket_id}/paths-info"
+        return _names_a_file(fs, url, timeout, json={"paths": [resolved.path]})
+    revision = quote(resolved.revision, safe="")
+    url = (
+        f"{fs.endpoint}/api/{resolved.repo_type}s/{resolved.repo_id}"
+        f"/paths-info/{revision}"
     )
-    hf_raise_for_status(response)
-    # The answer lists the asked path if it names a file or a directory, and
-    # only a file is a key.
-    return any(entry.get("type") == "file" for entry in response.json())
+    # Form-encoded, as huggingface_hub's HfApi.get_paths_info sends it.
+    return _names_a_file(
+        fs,
+        url,
+        timeout,
+        data={"paths": [resolved.path_in_repo], "expand": False},
+    )
 
 
 class _FetchAbandoned(Exception):
@@ -274,13 +300,14 @@ class HfReadStore(FsspecStore):
     exactly the bytes asked for. The listing is a snapshot: the store does not
     see objects written after it, and a listed key that is no longer there
     raises ``OSError``. A writable store reads keys through Hugging Face's file
-    system and asks the server about each key it looks up, with one request for
-    a bucket file, so a lookup sees a key that another process wrote or deleted
-    after the file system listed the key's directory. It reads a key as
-    missing only when the server reports it missing, so a lookup that fails
-    never makes ``set_if_not_exists`` write over a key. That call still looks
-    the key up and then writes it, since Hugging Face's bucket API has no
-    conditional write, and another process can write the key in between.
+    system and asks the server about each key it looks up, with one request,
+    so a lookup sees a key that another process wrote or deleted after the
+    file system listed the key's folder. It reads a key as missing only when
+    the server reports it missing, so a lookup that fails never makes
+    ``set_if_not_exists`` write over a key. That call still looks the key up
+    and then writes it: a bucket's uploads take no condition, nor do the
+    commits that the file system makes to a repository, so another process can
+    write the key in between.
 
     Each attempt at a request of the store, a read, a lookup or a listing, is
     given ``request_timeout`` seconds, 60 by default. An attempt that times
@@ -350,10 +377,14 @@ class HfReadStore(FsspecStore):
             store._listing = self._listing
         return store
 
+    def _hf_fs(self) -> HfFileSystem | None:
+        """Return Hugging Face's file system, or None for another file system."""
+        fs = getattr(self.fs, "sync_fs", self.fs)
+        return fs if isinstance(fs, HfFileSystem) else None
+
     def _listed_fs(self) -> HfFileSystem | None:
         """Return Hugging Face's file system when the store reads through its listing."""
-        fs = getattr(self.fs, "sync_fs", self.fs)
-        return fs if self.read_only and isinstance(fs, HfFileSystem) else None
+        return self._hf_fs() if self.read_only else None
 
     async def _store_listing(self, fs: HfFileSystem) -> _StoreListing:
         return await self._listing.get(
@@ -527,16 +558,17 @@ class HfReadStore(FsspecStore):
         if fs is not None:
             return key in (await self._store_listing(fs)).sizes
         path = _dereference_path(self.path, key)
-        files = getattr(self.fs, "sync_fs", self.fs)
+        files = self._hf_fs()
 
         async def look_up() -> bool:
             # Hugging Face's exists answers False for any OSError, and the
-            # HfHubHTTPError of a failed request is one. Its info raises
-            # FileNotFoundError only for a key that the server does not hold,
-            # and lets every other failure reach _request, which retries it
-            # or raises it, as the lookup of a bucket file does.
+            # HfHubHTTPError of a failed request is one. A lookup by path
+            # raises FileNotFoundError only for a bucket, repository or
+            # revision that does not exist, and another file system's info
+            # only for a missing key; every other failure reaches _request,
+            # which retries it or raises it.
             try:
-                if isinstance(files, HfFileSystem):
+                if files is not None:
                     return await asyncio.to_thread(
                         _holds_file, files, path, self.request_timeout
                     )

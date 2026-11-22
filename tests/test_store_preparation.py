@@ -3,6 +3,7 @@
 import asyncio
 import concurrent.futures
 import os
+import re
 import select
 import shutil
 import signal
@@ -273,14 +274,13 @@ def test_a_store_without_conditional_writes_is_prepared_without_a_claim(
     assert failed.value.__context__ is None
 
 
-# The warning of an open that claims a store whose conditional write looks a
-# file up and then writes it.
-_UNGUARDED_CLAIM = (
-    "Another process that opens this store at the same moment can prepare it "
-    "beside this open: the store looks a file up and writes it in two steps, so "
-    "its preparation claim refuses only a process that opens it later. Open the "
-    "store from no other process until this open has prepared it."
-)
+def _unguarded_claim(location: object) -> str:
+    """The warning of an open that claims a store without atomic conditional writes."""
+    return (
+        f"Another process that opens {location} at the same moment as this one "
+        "could also prepare it, because the store cannot refuse a second writer. "
+        "Open it from one process until it is prepared."
+    )
 
 
 def test_a_store_without_atomic_conditional_writes_claims_with_a_warning(tmp_path):
@@ -294,10 +294,12 @@ def test_a_store_without_atomic_conditional_writes_claims_with_a_warning(tmp_pat
     claim = location / PREPARATION_CLAIM / "zarr.json"
     with _messages("WARNING") as warnings:
         with preparation_claim(root):
+            # The open warns before it prepares the store.
+            warned = list(warnings)
             held = claim.read_bytes()
     assert b"cytearc:preparationClaim" in held
     assert not claim.exists()
-    assert warnings == [_UNGUARDED_CLAIM]
+    assert warned == warnings == [_unguarded_claim(location)]
 
     # The claim still refuses one that another process wrote before, and keeps it.
     claim.parent.mkdir()
@@ -336,14 +338,13 @@ def test_a_datastore_open_that_prepares_a_store_without_atomic_writes_warns_once
         )
     assert ds.cells.N == 6
     assert zarr.open_group(location, mode="r")["RNA"].attrs["prepared"] is True
-    assert [message for message in warnings if "preparation claim" in message] == [
-        _UNGUARDED_CLAIM
-    ]
+    unguarded = _unguarded_claim(location)
+    assert [message for message in warnings if message == unguarded] == [unguarded]
     assert _residue(location) == []
     # A prepared store takes no claim, so a later open does not warn.
     with _messages("WARNING") as warnings:
         _open(FsspecStore.from_url(f"file://{location}", storage_options=options))
-    assert [message for message in warnings if "preparation claim" in message] == []
+    assert [message for message in warnings if "prepare" in message] == []
 
 
 def test_a_cancelled_claim_write_stops_the_preparation(monkeypatch):
@@ -367,10 +368,19 @@ def test_a_cancelled_claim_write_stops_the_preparation(monkeypatch):
     assert f"{PREPARATION_CLAIM}/zarr.json" not in root.store._store_dict
 
 
-def test_a_claim_that_cannot_be_removed_is_reported(monkeypatch):
+@pytest.mark.parametrize("kind", ["local", "memory"])
+def test_a_claim_that_cannot_be_removed_is_reported(monkeypatch, tmp_path, kind):
     from zarr.storage._common import StorePath
 
-    root = zarr.open_group(store=MemoryStore(), mode="w")
+    if kind == "local":
+        location = tmp_path / "store.zarr"
+        root = zarr.open_group(location, mode="w")
+        # The path that the user removes.
+        named = str(location / PREPARATION_CLAIM)
+    else:
+        root = zarr.open_group(store=MemoryStore(), mode="w")
+        # A memory store has no path, and the claim is named as Zarr names it.
+        named = str(root.store_path / PREPARATION_CLAIM)
 
     async def refuse(self) -> None:
         raise OSError("store is unavailable")
@@ -379,12 +389,12 @@ def test_a_claim_that_cannot_be_removed_is_reported(monkeypatch):
     with _messages("WARNING") as warnings:
         with preparation_claim(root):
             pass
-    assert len(warnings) == 1
-    assert warnings[0].startswith("Could not remove the preparation claim ")
-    assert warnings[0].endswith(
-        ": store is unavailable. If the store is not prepared, remove the claim "
-        "before opening it again."
-    )
+    assert warnings == [
+        f"Could not remove the preparation claim {named}: store is unavailable. If "
+        "the store is not prepared, remove the claim before opening it again."
+    ]
+    if kind == "local":
+        assert Path(named, "zarr.json").is_file()
     assert _claim_document("token").to_bytes().startswith(b"{")
 
 
@@ -514,13 +524,16 @@ def test_a_killed_preparation_names_its_claim_until_it_is_removed(tmp_path):
     ) as refused:
         _open(location)
     assert f"process {killed.pid} on host " in str(refused.value)
-    assert str(refused.value).endswith(
-        f"remove file://{location}/{PREPARATION_CLAIM} and open the store again."
+    named = re.fullmatch(
+        r".* remove (.+) and open the store again\.", str(refused.value)
     )
+    assert named is not None
+    assert named.group(1) == f"{location}/{PREPARATION_CLAIM}"
 
-    # The operator confirms that the process stopped and removes the claim.
-    # The next open is the store's first preparation, with its default filter.
-    shutil.rmtree(Path(location) / PREPARATION_CLAIM)
+    # The operator confirms that the process stopped and removes the claim
+    # that the refusal names. The next open is the store's first preparation,
+    # with its default filter.
+    shutil.rmtree(named.group(1))
     with pytest.warns(UserWarning, match="Will not remove low quality cells"):
         opened = _open(location)
     assert int(opened.cells.fetch_all("I").sum()) == 6
