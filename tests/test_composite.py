@@ -5,7 +5,6 @@ import json
 import re
 import shutil
 from contextlib import contextmanager
-from contextvars import ContextVar
 
 import numpy as np
 import pandas as pd
@@ -2685,58 +2684,46 @@ def test_composite_store_mutations_preserve_bindings_and_sources(
     } == source_digests
 
 
-_CLAIMANT: ContextVar[str | None] = ContextVar("claimant", default=None)
-
-
 class _HeldClaim(WrapperStore):
-    """Make two claimants of one key both act on it before either reads it back.
+    """Make two writers of one key both look it up before either writes it.
 
-    After its first call on ``key``, whatever the call, the first claimant waits
-    until the second has made its first call, and the second then waits until
-    the first has read the key back. A store that looks the key up and then
-    writes it lets both claimants find the key missing and read back their own
-    writes. ``_CLAIMANT`` names the claimant of each call.
+    The first write of ``key`` waits until a second write of it arrives, and
+    the second waits until the key is first read. A store that looks the key up
+    and then writes it lets both writers find the key missing and read back
+    their own writes.
     """
 
     def __init__(self, store, key):
         super().__init__(store)
         self.key = key
-        self.claimants = []
-        self.second_called = asyncio.Event()
-        self.first_read_back = asyncio.Event()
+        self.writes = 0
+        self.second_write = asyncio.Event()
+        self.first_read = asyncio.Event()
 
     async def _hold(self, key):
-        claimant = _CLAIMANT.get()
-        if key != self.key or claimant is None or claimant in self.claimants:
+        if key != self.key:
             return
-        self.claimants.append(claimant)
+        self.writes += 1
         async with asyncio.timeout(10):
-            if len(self.claimants) == 1:
-                await self.second_called.wait()
-            else:
-                self.second_called.set()
-                await self.first_read_back.wait()
-
-    async def exists(self, key):
-        found = await self._store.exists(key)
-        await self._hold(key)
-        return found
+            if self.writes == 1:
+                await self.second_write.wait()
+            elif self.writes == 2:
+                self.second_write.set()
+                await self.first_read.wait()
 
     async def get(self, key, prototype, byte_range=None):
         value = await self._store.get(key, prototype, byte_range)
-        if key == self.key and self.second_called.is_set():
-            if self.claimants[0] == _CLAIMANT.get():
-                self.first_read_back.set()
-        await self._hold(key)
+        if key == self.key:
+            self.first_read.set()
         return value
 
     async def set(self, key, value):
-        await self._store.set(key, value)
         await self._hold(key)
+        await self._store.set(key, value)
 
     async def set_if_not_exists(self, key, value):
-        await self._store.set_if_not_exists(key, value)
         await self._hold(key)
+        await self._store.set_if_not_exists(key, value)
 
 
 def test_one_of_two_runs_finalizing_one_label_on_a_composite_takes_it(
@@ -2757,7 +2744,6 @@ def test_one_of_two_runs_finalizing_one_label_on_a_composite_takes_it(
     monkeypatch.setattr(root.store, "_store", held)
 
     def finalize(run_id):
-        _CLAIMANT.set(run_id)
         try:
             pipeline_runs.complete_pipeline_run_record(
                 root,
@@ -2771,18 +2757,22 @@ def test_one_of_two_runs_finalizing_one_label_on_a_composite_takes_it(
 
     with ThreadPoolExecutor(2) as pool:
         outcomes = dict(zip(run_ids, pool.map(finalize, run_ids), strict=True))
-    # Both runs wrote or looked up the claim before either read it back.
-    assert sorted(held.claimants) == sorted(run_ids)
+    # Both runs looked the claim up before either wrote it.
+    assert held.second_write.is_set()
     winner = pipeline_runs.open_pipeline_run_record(root, label=label).run_id
     loser = next(run_id for run_id in run_ids if run_id != winner)
-    assert outcomes == {
-        winner: "completed",
-        loser: f"Pipeline label {label!r} is currently being finalized by run {winner}",
+    assert outcomes[winner] == "completed"
+    # The winner can commit before the loser reads the winner's run record.
+    assert outcomes[loser] in {
+        f"Pipeline label {label!r} is currently being finalized by run {winner}",
+        f"Pipeline label {label!r} is already committed by run {winner}",
     }
     assert pipeline_runs.load_pipeline_run_record(root, loser).status == "failed"
 
 
-def test_zarr_creates_nodes_on_a_composite_beside_its_record(composite_adapter):
+def test_zarr_creates_nodes_on_a_composite_without_changing_its_record(
+    composite_adapter,
+):
     joint = composite_adapter
     folder = joint.z.store.root
     record = (folder / "zarr.json").read_bytes()
@@ -2858,7 +2848,7 @@ def test_composite_conditional_writes_keep_existing_keys_and_refuse_protected_on
         "a shard outside the counts": "PermissionError: Composite counts are immutable",
         "an existing mapping": None,
         "a new mapping": "PermissionError: Composite mappings are immutable",
-        "an existing key, read-only": None,
+        "an existing key, read-only": "PermissionError: Composite store is read-only",
         "a new key, read-only": "PermissionError: Composite store is read-only",
     }
     # Nothing was written: an existing key keeps its bytes, and the computed
@@ -2867,6 +2857,38 @@ def test_composite_conditional_writes_keep_existing_keys_and_refuse_protected_on
     assert {
         name: _tree_digest(source.z.store.root) for name, source in sources.items()
     } == source_digests
+
+
+def test_a_composite_being_created_records_counts_and_writes_mappings_if_missing(
+    composite_adapter, sources
+):
+    from cytearc.composite.store import CompositeStore
+
+    folder = composite_adapter.z.store.root
+    building = CompositeStore(
+        LocalStore(folder),
+        copy.deepcopy(composite_adapter.z.store.record),
+        {name: source.z for name, source in sources.items()},
+        constructing=True,
+    )
+    prototype = default_buffer_prototype()
+    group = {"zarr_format": 3, "node_type": "group", "attributes": {}}
+    try:
+        transposed = building.record["arrays"].pop("RNA/countsT")
+        for key, document in (
+            ("RNA/countsT/zarr.json", transposed),
+            ("_composite/extra/zarr.json", group),
+        ):
+            raw = prototype.buffer.from_bytes(json.dumps(document).encode())
+            sync(building.set_if_not_exists(key, raw))
+    finally:
+        building.close()
+    # The count metadata goes to the record, never to the folder.
+    assert building.record["arrays"]["RNA/countsT"] == transposed
+    assert not (folder / "RNA" / "countsT" / "zarr.json").exists()
+    assert json.loads((folder / "_composite" / "extra" / "zarr.json").read_bytes()) == (
+        group
+    )
 
 
 def test_composite_store_lifecycle_and_routing_contracts(

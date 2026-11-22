@@ -277,8 +277,8 @@ def has_atomic_conditional_writes(store: Store) -> bool:
     stores and with them Hugging Face's, keep Zarr's default, which looks the
     key up and then writes it, so another process can write the key in
     between. A wrapper store is judged by the store it wraps, since Zarr's
-    wrappers and a mount pass the call to that store, and so does a composite
-    for every key outside its computed counts and mappings.
+    wrappers and a mount pass the call to that store, and a composite passes
+    it on for every missing key outside its computed counts and mappings.
     """
     while isinstance(store, WrapperStore):
         store = store._store
