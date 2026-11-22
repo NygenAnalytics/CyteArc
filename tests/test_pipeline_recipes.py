@@ -661,6 +661,9 @@ def test_atac_settings_are_checked_before_the_run(atac) -> None:
         lsi={"dims": 6, "skip_first": False},
     )
     assert plan.config["stages"]["lsi"] == {"dims": 6, "skip_first": False}
+    # Settings without dims keep the method's default dims.
+    plan = _resolve("atac", atac.datastore, lsi={"n_iter": 3})
+    assert plan.config["stages"]["lsi"] == {"n_iter": 3}
 
 
 def test_atac_prevalent_peaks_default_to_fewer_than_the_assay_holds(

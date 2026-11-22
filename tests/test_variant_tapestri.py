@@ -907,7 +907,8 @@ def test_source_genotypes_of_tapestri_counts_follow_ngt(store, tmp_path) -> None
 
 @pytest.mark.parametrize(
     ("min_quality", "min_depth"),
-    [(60, None), (None, 33), (45.5, 30), (0, 1)],
+    # The last depth exceeds every cell's, so no depth passes at any site.
+    [(60, None), (None, 33), (45.5, 30), (0, 1), (None, int(TRUTH.depth.max()) + 1)],
 )
 def test_source_calls_below_a_quality_or_depth_are_filtered(
     store, tmp_path, min_quality, min_depth

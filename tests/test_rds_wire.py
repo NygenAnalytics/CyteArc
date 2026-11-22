@@ -1057,6 +1057,33 @@ def test_xz_reader_returns_buffered_output_across_small_reads() -> None:
     assert max(len(chunk) for chunk in chunks) == 16
 
 
+def test_xz_reader_decodes_a_source_that_returns_one_byte_a_read() -> None:
+    from cytearc.readers._rds._storage import _XzReader
+
+    class OneByteReads(io.RawIOBase):
+        """A stream, such as a pipe, that returns fewer bytes than a read asks for."""
+
+        def __init__(self, data: bytes) -> None:
+            self.data = memoryview(data)
+
+        def readable(self) -> bool:
+            return True
+
+        def readinto(self, buffer: memoryview) -> int:
+            if not self.data:
+                return 0
+            buffer[:1] = self.data[:1]
+            self.data = self.data[1:]
+            return 1
+
+    # The decoder takes in each stream's headers a byte at a time before it
+    # returns any output.
+    expected = bytes(range(256)) * 8
+    payload = lzma.compress(expected) + b"\x00" * 4 + lzma.compress(b"def")
+    reader = io.BufferedReader(_XzReader(OneByteReads(payload)))
+    assert reader.read() == expected + b"def"
+
+
 @pytest.mark.parametrize(
     ("raw", "gp", "encoding", "expected"),
     [

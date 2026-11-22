@@ -826,11 +826,15 @@ def test_modern_plotting_surface_matches_baseline():
         assert hasattr(plotting, name)
 
 
-def test_plotting_submodule_import_does_not_clobber_function_export():
+def test_plotting_submodule_import_does_not_clobber_function_export(monkeypatch):
     plotting = import_module("cytearc.plotting")
     canonical_module = import_module("cytearc.plotting.embedding")
+    # The first import of a submodule binds it to the package's attribute of
+    # its name, whichever earlier test of the process imported it.
+    monkeypatch.setitem(vars(plotting), "embedding", canonical_module)
 
     assert plotting.embedding is canonical_module.embedding
+    assert vars(plotting)["embedding"] is canonical_module.embedding
 
 
 def test_legacy_plotting_surface_remains_absent():

@@ -1000,6 +1000,23 @@ def test_the_search_stops_at_the_most_clones_a_fit_may_hold(monkeypatch) -> None
     ]
 
 
+def test_the_search_stops_merging_clones_at_its_rounds_cap(monkeypatch) -> None:
+    from cytearc.variants import genotype_clones
+
+    # Four clones, of which the merge rounds join one to another.
+    truth = dropout_truth(n_cells=800, n_sites=24, n_clones=4, dropout=0.2, seed=15)
+    true_genotypes = {genotype.tobytes() for genotype in truth.genotypes}
+    merged = _call(truth.calls)
+    merged_genotypes = {genotype.tobytes() for genotype in merged.genotypes}
+    assert len(merged.sizes) == 3 and merged_genotypes < true_genotypes
+
+    # With no round, the fit keeps the clone that a merge would join.
+    monkeypatch.setattr(genotype_clones, "MAX_MERGE_ROUNDS", 0)
+    kept = _call(truth.calls)
+    assert len(kept.sizes) == 4
+    assert {genotype.tobytes() for genotype in kept.genotypes} == true_genotypes
+
+
 def test_proposals_that_no_joint_bound_accepts_end_the_search(monkeypatch) -> None:
     from cytearc.variants import genotype_clones
 

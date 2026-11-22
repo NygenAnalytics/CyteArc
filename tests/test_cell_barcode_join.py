@@ -619,12 +619,46 @@ def test_a_file_listed_twice_with_the_same_prefix_and_suffix_is_refused(
         barcode_suffix="-1",
     )
     assert importer.joined(store, ref) == {"s1__AAAC-1", "s2__AAAC-1"}
+    # So does one path listed twice under two prefixes.
+    again = importer.run(
+        store,
+        [path, path],
+        cell_selection=cells,
+        barcode_prefix=["s1__", "s2__"],
+        barcode_suffix="-1",
+    )
+    assert importer.joined(store, again) == {"s1__AAAC-1", "s2__AAAC-1"}
     # "the clone files" names the files of a listing as the errors do.
     noun = importer.files[1].removeprefix("the ")
     with pytest.raises(ValueError, match=f"lists 3 values for 2 {noun}"):
         importer.run(
             store, [path, copy], cell_selection=cells, barcode_prefix=["a", "b", "c"]
         )
+
+
+def test_a_variant_file_listed_twice_is_read_once(
+    joined, tmp_path, monkeypatch
+) -> None:
+    from cytearc.datastore._operations import variants as operations
+
+    store, cells = joined
+    path = write_variant_file(tmp_path / "s.txt", ["AAAC"])
+    reads: list[str] = []
+    read_source = operations._read_source
+
+    def counted(key, *arguments):
+        reads.append(key)
+        return read_source(key, *arguments)
+
+    monkeypatch.setattr(operations, "_read_source", counted)
+    ref = store.variants.import_counts(
+        [path, path],
+        cell_selection=cells,
+        barcode_prefix=["s1__", "s2__"],
+        barcode_suffix="-1",
+    )
+    assert reads == [str(path)]
+    assert _listed_cells(store, ref) == {"s1__AAAC-1", "s2__AAAC-1"}
 
 
 def test_guide_calls_refuse_two_barcodes_that_name_one_cell(joined, tmp_path) -> None:

@@ -1726,6 +1726,33 @@ def _cells_with_categories(path: Path, layout: str) -> str:
     return str(path)
 
 
+def test_an_import_skips_a_column_of_two_dimensions(tmp_path) -> None:
+    # AnnData writes one value for each cell of an obs column; another writer
+    # may store an array of two for each.
+    path = _h5ad_with(
+        tmp_path / "pairs.h5ad",
+        {"obs/pairs": np.arange(8, dtype=np.int64).reshape(4, 2)},
+    )
+    with h5py.File(path, "r+") as h5:
+        h5["obs"].attrs["column-order"] = np.array(["pairs"], dtype=object)
+    skipped = "Skipping obs column 'pairs' because it holds 2-dimensional values"
+    destination = tmp_path / "pairs.zarr"
+    reader = H5adReader(path)
+    try:
+        with _warnings() as read_warnings:
+            columns = dict(reader.get_cell_columns())
+        with _warnings() as import_warnings:
+            H5adToZarr(reader, str(destination), nthreads=1, shuffle_cells=False).dump()
+    finally:
+        reader.close()
+
+    assert [text.rstrip("\n") for text in read_warnings] == [skipped]
+    assert skipped in [text.rstrip("\n") for text in import_warnings]
+    assert columns == {}
+    cells = zarr.open_group(str(destination), mode="r")["cellData"]
+    assert sorted(cells.array_keys()) == ["I", "ids", "names"]
+
+
 @pytest.mark.parametrize("layout", list(_FOUND_CATEGORIES))
 def test_an_import_skips_a_categorical_whose_categories_are_not_one_value_each(
     tmp_path, layout

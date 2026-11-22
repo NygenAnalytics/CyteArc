@@ -1449,6 +1449,45 @@ def test_a_lineage_whose_sink_cells_fill_a_graph_component_is_refused() -> None:
     assert not result.members[branching.arms == "z"].any()
 
 
+def test_curves_placed_a_cell_at_a_time_leave_the_unscored_cells_unplaced() -> None:
+    # A far cluster of 20 cells is a graph component of its own, which the
+    # pseudotime from t1 does not reach, so the fate map leaves it unscored.
+    arms, positions, labels, points = _trajectory_cells()
+    far = np.array([30.0, 30.0]) + np.random.default_rng(4).uniform(
+        -0.05, 0.05, size=(20, 2)
+    )
+    branching = _graph_of(
+        np.concatenate([arms, np.full(20, "far", dtype=object)]),
+        np.concatenate([positions, np.arange(20)]),
+        np.concatenate([labels, np.full(20, "f", dtype=object)]),
+        np.vstack([points, far]),
+    )
+    store = branching.store
+    clusters = branching.label_artifact()
+    sinks = ["a2", "b2"]
+    pseudotime = store.trajectory.pseudotime(
+        branching.graph, source_sink=clusters, sources=_SOURCES, sinks=sinks
+    )
+    fate = store.trajectory.fate(pseudotime, clusters, sinks=sinks)
+    unscored = ~store.trajectory.load_fate(fate).valid
+    np.testing.assert_array_equal(unscored, branching.arms == "far")
+
+    whole = store.trajectory.load_curves(
+        store.trajectory.curves(fate, n_points=40, df=6.0)
+    )
+    # Blocks of one cell, some of which hold no scored cell.
+    single = store.trajectory.load_curves(
+        store.trajectory.curves(
+            fate, n_points=40, df=6.0, batch_size=1, invalidate_cache=True
+        )
+    )
+    for name in ("progress", "distance"):
+        placed = getattr(single, name)
+        np.testing.assert_array_equal(placed, getattr(whole, name))
+        assert np.isnan(placed[unscored]).all()
+        assert not np.isnan(placed[~unscored]).any()
+
+
 def test_a_sink_that_the_curves_leave_out_stays_out_of_the_trunk() -> None:
     # The trunk extends backward into 20 cells of D's sink, which the fate
     # map's score, each cell's x coordinate, puts before every other cell.

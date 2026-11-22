@@ -2,6 +2,7 @@ import math
 import re
 import warnings
 from dataclasses import dataclass
+from decimal import Decimal, localcontext
 from pathlib import Path
 
 import numpy as np
@@ -443,6 +444,84 @@ def test_sizes_without_overdispersion_fall_back_to_the_pearson_equation(
     np.testing.assert_allclose(dispersion, size_root(pearson, mu, 4.0), rtol=1e-10)
     assert dispersion > 0
     assert glm.size_dispersion(poisson, mu, 4.0) == 0.0
+
+
+def _exact_size_score(y: np.ndarray, mu: np.ndarray, size: Decimal) -> Decimal:
+    """The likelihood's derivative in the size of integer counts, to 40 digits.
+
+    The digamma differences of a count are finite sums.
+    """
+    total = Decimal(0)
+    for count, mean in zip(y.astype(np.int64).tolist(), mu.tolist(), strict=True):
+        mean = Decimal(mean)
+        total += sum(Decimal(1) / (size + j) for j in range(count))
+        total += (size / (size + mean)).ln() + (mean - count) / (size + mean)
+    return total
+
+
+@pytest.mark.parametrize("compiled", [True, False], ids=["jit", "python"])
+def test_a_size_search_that_rounding_keeps_from_settling_ends_at_its_maximum(
+    monkeypatch, compiled
+) -> None:
+    # Poisson counts whose small excess puts the likelihood's maximum at a
+    # size near 1e5, where the likelihood is so flat in the size that the
+    # rounding of its gradient moves each step by more than 1e-10.
+    rng = np.random.default_rng(1948)
+    mu = rng.gamma(2.0, 5.0, size=200)
+    y = rng.poisson(mu).astype(np.float64)
+    steps = []
+    if not compiled:
+        derivatives = glm.size_derivatives
+
+        def counted(*arguments):
+            steps.append(1)
+            return derivatives(*arguments)
+
+        monkeypatch.setattr(glm, "size_derivatives", counted)
+    size_dispersion = glm.size_dispersion if compiled else glm.size_dispersion.py_func
+
+    found = -math.log(size_dispersion(y, mu, 199.0))
+
+    with localcontext(prec=40):
+        low, high = Decimal(10) ** 4, Decimal(10) ** 6
+        assert _exact_size_score(y, mu, low) > 0 > _exact_size_score(y, mu, high)
+        for _ in range(40):
+            middle = (low * high).sqrt()
+            if _exact_size_score(y, mu, middle) > 0:
+                low = middle
+            else:
+                high = middle
+        best = float(low.ln())
+    # The search ends within the rounding of its steps of the maximum, where
+    # the likelihood differs from it by less than 1e-8.
+    assert abs(found - best) < 0.1
+    if not compiled:
+        assert len(steps) == 100
+
+
+@pytest.mark.parametrize("compiled", [True, False], ids=["jit", "python"])
+def test_a_pearson_dispersion_beyond_its_steps_stops_below_the_root(compiled) -> None:
+    pearson_dispersion = (
+        glm.pearson_dispersion if compiled else glm.pearson_dispersion.py_func
+    )
+    # Newton's steps from 0 about double the dispersion until they near the
+    # root. A count of 1 at a mean of 1e-80 puts the root near 1e160, more
+    # doublings than the 200 steps.
+    y = np.array([1.0, 0.0, 0.0])
+    far = np.array([1e-80, 1.0, 1.0])
+    near = np.array([1e-20, 1.0, 1.0])
+
+    def pearson_sum(mu: np.ndarray, dispersion: float) -> float:
+        return float(((y - mu) ** 2 / (mu + dispersion * mu * mu)).sum())
+
+    stopped = pearson_dispersion(y, far, 1.0)
+    # The sum falls as the dispersion rises and reaches 1 near 1e160.
+    assert pearson_sum(far, 1e159) > 1.0 > pearson_sum(far, 1e161)
+    assert 0.0 < stopped < 1e159
+    assert pearson_sum(far, stopped) > 1.0
+    # A mean of 1e-20 puts the root near 1e40, which the steps reach.
+    solved = pearson_dispersion(y, near, 1.0)
+    assert pearson_sum(near, solved) == pytest.approx(1.0, rel=1e-9)
 
 
 def test_sizes_stop_at_their_limits(monkeypatch) -> None:
