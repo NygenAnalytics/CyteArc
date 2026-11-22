@@ -180,24 +180,31 @@ def test_the_objects_of_a_zarr_read_lie_within_what_object_bytes_charges(
     assert geometry is not None
     decodes = min(concurrency, n_chunks)
     charged = geometry.objectBytes(n_chunks, decodes)
+    traced = []
     with zarr_io_concurrency(concurrency):
-        # Two reads make what every read shares, and a full collection then
-        # empties CPython's free lists, so that the traced read allocates
-        # each of its objects anew.
+        # Two reads make what every read shares.
         for _ in range(2):
             read_selection(array, slice(0, 1), slice(None))
-        gc.collect()
-        tracemalloc.start()
-        try:
-            start = tracemalloc.get_traced_memory()[0]
-            block = read_selection(array, slice(0, 1), slice(None))
-            held = tracemalloc.get_traced_memory()[1] - start
-        finally:
-            tracemalloc.stop()
-    np.testing.assert_array_equal(block, values[:1])
+        for _ in range(3):
+            # A full collection empties CPython's free lists, so that the
+            # traced read allocates each of its objects anew.
+            gc.collect()
+            tracemalloc.start()
+            try:
+                start = tracemalloc.get_traced_memory()[0]
+                block = read_selection(array, slice(0, 1), slice(None))
+                traced.append(tracemalloc.get_traced_memory()[1] - start)
+            finally:
+                tracemalloc.stop()
+            np.testing.assert_array_equal(block, values[:1])
+            del block
+    # tracemalloc counts what every thread allocates, which can only add
+    # bytes, so the smallest of the three reads is the one that other threads
+    # disturbed least.
+    held = min(traced)
     # The buffers: the row, and Zarr's shard-level copy of it, the stored
     # chunks, and the chunks decoded at once, under 2 KB in all.
-    buffers = (2 if sharded else 1) * block.nbytes + stored + decodes * 16
+    buffers = (2 if sharded else 1) * values[:1].nbytes + stored + decodes * 16
     # Within half of the charge, a charge that drifted up from Zarr's objects
     # fails too, as one that falls short of them does.
     assert charged / 2 <= held - buffers <= charged
