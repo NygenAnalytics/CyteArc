@@ -1,6 +1,7 @@
 """Native diagnostic plots."""
 
-from collections.abc import Sequence
+import warnings
+from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -18,9 +19,17 @@ from ..utils.arrays import sort_categories
 from ._style import (
     apply_figure_chrome,
     colormap_argument,
+    positive_argument,
+    scatter_edgecolor,
+    theme_argument,
     theme_context,
 )
-from ..utils.arguments import RANDOM_STATE_MAX, bool_argument, integer_argument
+from ..utils.arguments import (
+    RANDOM_STATE_MAX,
+    bool_argument,
+    float_argument,
+    integer_argument,
+)
 
 if TYPE_CHECKING:
     from matplotlib.colors import Colormap
@@ -267,7 +276,7 @@ def elbow(
 ) -> PlotResult:
     """Plot explained variance and mark the detected elbow.
 
-    Principal components are numbered from 1, as ``dims`` counts them, so the elbow line stands at the number of the PC where the curve bends. The ``variance_explained`` table holds ``pc``, ``variance_explained`` and ``is_elbow`` for each PC, and ``provenance.extras["elbow_pc"]`` holds the elbow PC's number, or None when no elbow is detected.
+    Principal components are numbered from 1, as ``dims`` counts them, so the elbow line stands at the number of the PC where the curve bends. The ``variance_explained`` table holds ``pc``, ``variance_explained`` and ``is_elbow`` for each PC, and ``provenance.extras["elbow_pc"]`` holds the elbow PC's number, or None when no elbow is detected. Fewer than three values, or values that are all equal, have no elbow. Without a width in ``figsize``, the figure is a quarter inch wide for each PC and at least 2.25 inches wide.
     """
     show = bool_argument(show, "show")
     require_matplotlib()
@@ -278,19 +287,32 @@ def elbow(
         raise ValueError("variance_explained must contain only finite values")
 
     pcs = np.arange(1, len(values) + 1, dtype=np.int64)
-    knee_locator = require_kneed()
-    locator = knee_locator(
-        pcs,
-        values,
-        S=1.0,
-        curve="convex",
-        direction="decreasing",
-    )
-    detected = getattr(locator, "elbow", None)
-    elbow_pc = None if detected is None else int(detected)
+    elbow_pc = None
+    # An elbow lies between the curve's ends, and kneed scales the values by
+    # their range, so fewer than three values, or values that are all equal,
+    # are not searched.
+    if len(values) >= 3 and values.min() < values.max():
+        knee_locator = require_kneed()
+        with warnings.catch_warnings():
+            # kneed 0.8.1 to 0.8.3 warn when they find no knee, which
+            # elbow_pc reports; later releases do not warn.
+            warnings.filterwarnings(
+                "ignore", message="No knee/elbow found$", category=UserWarning
+            )
+            locator = knee_locator(
+                pcs,
+                values,
+                S=1.0,
+                curve="convex",
+                direction="decreasing",
+            )
+        detected = getattr(locator, "elbow", None)
+        elbow_pc = None if detected is None else int(detected)
     width, height = figsize
     resolved_figsize = (
-        0.25 * len(values) if width is None else float(width),
+        # 2.25 inches fit the x axis label, 1.4 inches wide at 9 points,
+        # beside the y axis label and tick labels of up to seven characters.
+        max(2.25, 0.25 * len(values)) if width is None else float(width),
         float(height),
     )
 
@@ -460,6 +482,94 @@ def graph_qc(
     return _return_result(result, show=show)
 
 
+def _pair(
+    value: object, name: str, pair: str, item: Callable[[object, str], float]
+) -> tuple[float, float]:
+    """Check a pair of numbers, such as a figure's width and height, each with ``item``."""
+    if isinstance(value, np.ndarray):
+        value = value.tolist()
+    if isinstance(value, str | bytes) or not isinstance(value, Sequence):
+        raise TypeError(f"{name} must be a pair of {pair}")
+    if len(value) != 2:
+        raise ValueError(f"{name} must contain two values")
+    first, second = value
+    return item(first, f"{name}[0]"), item(second, f"{name}[1]")
+
+
+def _marker_area(value: object, name: str) -> float:
+    area = float_argument(value, name)
+    if area < 0:
+        raise ValueError(f"{name} must be at least 0")
+    return area
+
+
+def _label_size_option(value: object) -> float:
+    return positive_argument(value, "label_size")
+
+
+def _figsize_option(value: object) -> tuple[float, float] | None:
+    if value is None:
+        return None
+    return _pair(
+        value, "figsize", "numbers, the width and height in inches", positive_argument
+    )
+
+
+def _point_sizes_option(value: object) -> tuple[float, float]:
+    return _pair(
+        value,
+        "point_sizes",
+        "marker areas in points squared, for the features not selected and "
+        "the selected ones",
+        _marker_area,
+    )
+
+
+def _colormaps_option(value: object) -> tuple[str | None, str | None]:
+    if isinstance(value, str) or not isinstance(value, Sequence):
+        raise TypeError(
+            "colormaps must be a pair of colormaps, for the features not "
+            "selected and the selected ones"
+        )
+    if len(value) != 2:
+        raise ValueError("colormaps must contain two values")
+    return (
+        colormap_argument(value[0], "colormaps[0]", optional=True),
+        colormap_argument(value[1], "colormaps[1]", optional=True),
+    )
+
+
+_HVG_PLOT_OPTIONS: dict[str, Callable[[object], Any]] = {
+    "label_size": _label_size_option,
+    "figsize": _figsize_option,
+    "point_sizes": _point_sizes_option,
+    "colormaps": _colormaps_option,
+    "theme": theme_argument,
+}
+
+
+def hvg_plot_options(**options: object) -> dict[str, Any]:
+    """Check options of :func:`highly_variable_features` without drawing.
+
+    The plot checks its options with it before it draws, and
+    ``features.hvgs`` checks the options that it passes to the plot, whose
+    names it has checked against the plot's signature, before it selects
+    genes or saves anything.
+
+    Returns:
+        The options given, as the plot draws them: ``label_size`` as a float,
+        ``figsize`` and ``point_sizes`` as pairs of floats, ``colormaps`` as
+        a pair of colormap names or None, and ``theme``.
+
+    Raises:
+        TypeError: If an option has a wrong type.
+        ValueError: If a pair does not hold two values, a size is out of
+            range, or a colormap is not one that Matplotlib holds.
+        KeyError: If ``theme`` names no theme.
+    """
+    return {name: _HVG_PLOT_OPTIONS[name](value) for name, value in options.items()}
+
+
 @close_figures_on_error
 def highly_variable_features(
     mean_nonzero: np.ndarray,
@@ -468,7 +578,7 @@ def highly_variable_features(
     selected: np.ndarray,
     *,
     label_size: float = 12,
-    figsize: tuple[float, float] = (4.5, 4.0),
+    figsize: tuple[float, float] | None = (4.5, 4.0),
     point_sizes: tuple[float, float] = (3, 30),
     colormaps: "tuple[str | Colormap | None, str | Colormap | None]" = (
         "winter",
@@ -481,21 +591,28 @@ def highly_variable_features(
 
     ``colormaps`` colors the features not selected and the selected ones by
     the number of cells that express them, each a Matplotlib colormap name
-    or a registered ``Colormap``, or None for Matplotlib's default.
+    or a registered ``Colormap``, or None for Matplotlib's default. The
+    legend marks each group with one marker of one size in the middle color
+    of its colormap. ``point_sizes`` holds the two groups' marker areas in
+    points squared, ``label_size`` the size in points of the axis labels and
+    ticks, and ``figsize`` the figure's width and height in inches, or None
+    for CyteArc's default panel size. Every option is checked before the plot
+    draws.
     """
     show = bool_argument(show, "show")
-    if isinstance(colormaps, str) or not isinstance(colormaps, Sequence):
-        raise TypeError(
-            "colormaps must be a pair of colormaps, for the features not "
-            "selected and the selected ones"
-        )
-    if len(colormaps) != 2:
-        raise ValueError("colormaps must contain two values")
-    colormaps = (
-        colormap_argument(colormaps[0], "colormaps[0]", optional=True),
-        colormap_argument(colormaps[1], "colormaps[1]", optional=True),
+    options = hvg_plot_options(
+        label_size=label_size,
+        figsize=figsize,
+        point_sizes=point_sizes,
+        colormaps=colormaps,
+        theme=theme,
     )
-    require_matplotlib()
+    label_size = options["label_size"]
+    figsize = options["figsize"]
+    point_sizes = options["point_sizes"]
+    colormaps = options["colormaps"]
+    theme = options["theme"]
+    _, mpl = require_matplotlib()
     means = np.asarray(mean_nonzero, dtype=np.float64)
     variances = np.asarray(corrected_variance, dtype=np.float64)
     cell_counts = np.asarray(n_cells, dtype=np.float64)
@@ -506,8 +623,6 @@ def highly_variable_features(
     if len({len(array) for array in arrays}) != 1:
         raise ValueError("feature diagnostic inputs must have matching lengths")
     selected_mask = selected_mask.astype(bool, copy=False)
-    if len(point_sizes) != 2:
-        raise ValueError("point_sizes must contain two values")
 
     with np.errstate(divide="ignore", invalid="ignore"):
         log_means = np.log2(means)
@@ -520,7 +635,7 @@ def highly_variable_features(
             figsize=figsize,
         )
         ax = axes["highly_variable_features"]
-        ax.scatter(
+        not_selected_points = ax.scatter(
             log_means[~selected_mask],
             log_variances[~selected_mask],
             alpha=0.6,
@@ -529,7 +644,7 @@ def highly_variable_features(
             s=point_sizes[0],
             label="Not selected",
         )
-        ax.scatter(
+        selected_points = ax.scatter(
             log_means[selected_mask],
             log_variances[selected_mask],
             alpha=0.8,
@@ -542,7 +657,33 @@ def highly_variable_features(
         )
         ax.set_xlabel("Log mean non-zero expression", fontsize=label_size)
         ax.set_ylabel("Log corrected variance", fontsize=label_size)
-        ax.legend(frameon=False, fontsize=max(8.0, label_size - 2.0))
+        # A scatter's own legend marker copies its first point, which is
+        # tiny for the features not selected, and transparent when no cell
+        # expresses the first of them, so each group gets a marker of its own.
+        # A thin neutral edge keeps a colormap's pale middle, such as bwr's
+        # white, visible beside the selected marker's black edge.
+        ax.legend(
+            handles=[
+                mpl.lines.Line2D(
+                    [],
+                    [],
+                    marker="o",
+                    linestyle="",
+                    markersize=6,
+                    markerfacecolor=points.get_cmap()(0.5),
+                    markeredgecolor=edgecolor,
+                    markeredgewidth=0.5,
+                    alpha=points.get_alpha(),
+                    label=points.get_label(),
+                )
+                for points, edgecolor in (
+                    (not_selected_points, scatter_edgecolor(theme)),
+                    (selected_points, "black"),
+                )
+            ],
+            frameon=False,
+            fontsize=max(8.0, label_size - 2.0),
+        )
         _clean_axis(ax, tick_size=label_size)
         apply_figure_chrome(figure, theme)
 

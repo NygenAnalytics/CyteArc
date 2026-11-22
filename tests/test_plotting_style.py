@@ -18,7 +18,9 @@ from cytearc.plotting._style import (
     colormap_argument,
     continuous_norm,
     palette_for_n,
+    positive_argument,
     scale_argument,
+    theme_argument,
     theme_context,
 )
 from cytearc.storage.refs import ArtifactRef
@@ -918,6 +920,54 @@ def test_theme_context_restores_state_after_error_and_rejects_unknown_theme():
     with pytest.raises(KeyError, match="Unknown theme"):
         with theme_context("missing-theme"):
             pass
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [(2, 2.0), (0.25, 0.25), (np.float64(3.5), 3.5), (1e-9, 1e-9)],
+)
+def test_positive_argument_returns_a_float(value, expected):
+    resolved = positive_argument(value, "line_width")
+
+    assert resolved == expected
+    assert type(resolved) is float
+
+
+@pytest.mark.parametrize("value", [True, False, "2", None, [1.0], np.bool_(True)])
+def test_positive_argument_rejects_values_that_are_not_real_numbers(value):
+    with pytest.raises(TypeError, match="node_size must be a real number"):
+        positive_argument(value, "node_size")
+
+
+@pytest.mark.parametrize("value", [0, 0.0, -1, -0.5, np.nan, np.inf, -np.inf])
+def test_positive_argument_rejects_values_that_are_not_positive_and_finite(value):
+    with pytest.raises(ValueError, match="df must be positive and finite"):
+        positive_argument(value, "df")
+
+
+@pytest.mark.parametrize("value", [np.int64(40), np.float32(40.0)])
+def test_positive_argument_accepts_numpy_scalars(value):
+    assert positive_argument(value, "node_size") == 40.0
+
+
+def test_theme_argument_returns_a_theme_and_names_the_themes_to_choose_from():
+    for name in ("dark", "minimal", "notebook", "paper"):
+        assert theme_argument(name) == name
+    for name in ("missing-theme", "Paper", 3, None):
+        with pytest.raises(KeyError) as raised:
+            theme_argument(name)
+        assert raised.value.args == (
+            f"Unknown theme {name!r}. Choose from: ['dark', 'minimal', 'notebook', "
+            "'paper']",
+        )
+    # theme_context refuses a theme with the same error.
+    with pytest.raises(KeyError) as entered:
+        with theme_context("missing-theme"):
+            pass
+    assert entered.value.args == (
+        "Unknown theme 'missing-theme'. Choose from: ['dark', 'minimal', "
+        "'notebook', 'paper']",
+    )
 
 
 def _rc_params_except_interactive(mpl):

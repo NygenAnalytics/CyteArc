@@ -30,6 +30,7 @@ from ._style import (
     default_point_size,
     finish_embedding_axes,
     padded_square_limits,
+    positive_argument,
     theme_context,
 )
 
@@ -41,16 +42,6 @@ else:
     Colormap = Any
 
 __all__ = ["lineage_curves", "lineage_heatmap", "lineage_trends", "lineage_tree"]
-
-
-def _positive(value: float, name: str) -> float:
-    try:
-        resolved = float_argument(value, name)
-    except ValueError:
-        resolved = np.nan
-    if not resolved > 0:
-        raise ValueError(f"{name} must be positive and finite")
-    return resolved
 
 
 def _require_loaded(loaded: ArtifactRef, requested: ArtifactRef, label: str) -> None:
@@ -387,7 +378,7 @@ def lineage_trends(
         )
     if axis not in {"progress", "pseudotime"}:
         raise ValueError("axis must be 'progress' or 'pseudotime'")
-    line_width = _positive(line_width, "line_width")
+    line_width = positive_argument(line_width, "line_width")
     loaded = store.trajectory.load_lineage_aggregation(aggregation)
     _require_loaded(loaded.ref, aggregation, "lineage aggregation")
     columns = _lineage_selection(loaded.lineages, lineages)
@@ -552,9 +543,9 @@ def lineage_curves(
     lineage_cmap = colormap_argument(lineage_cmap, "lineage_cmap", optional=True)
     if not isinstance(curves, ArtifactRef):
         raise TypeError("curves must be an ArtifactRef")
-    line_width = _positive(line_width, "line_width")
+    line_width = positive_argument(line_width, "line_width")
     if point_size is not None:
-        point_size = _positive(point_size, "point_size")
+        point_size = positive_argument(point_size, "point_size")
     if not np.isfinite(point_alpha) or not 0 <= point_alpha <= 1:
         raise ValueError("point_alpha must be between zero and one")
     # The store draws the curves in the layout, checking the curves, the
@@ -703,9 +694,9 @@ def lineage_tree(
     show = bool_argument(show, "show")
     if not isinstance(tree, ArtifactRef):
         raise TypeError("tree must be an ArtifactRef")
-    node_size = _positive(node_size, "node_size")
+    node_size = positive_argument(node_size, "node_size")
     if point_size is not None:
-        point_size = _positive(point_size, "point_size")
+        point_size = positive_argument(point_size, "point_size")
     if not np.isfinite(point_alpha) or not 0 <= point_alpha <= 1:
         raise ValueError("point_alpha must be between zero and one")
     loaded = store.trajectory.load_lineage_tree(tree)

@@ -11,6 +11,7 @@ from weakref import WeakKeyDictionary
 import numpy as np
 import pandas as pd
 
+from ..utils.arguments import float_argument
 from ..utils.arrays import sort_categories
 from ._contracts import (
     CategoricalScale,
@@ -1231,6 +1232,37 @@ def apply_figure_chrome(figure: Any, theme: str = "notebook") -> None:
         ax.spines["right"].set_visible(False)
 
 
+def positive_argument(value: object, name: str) -> float:
+    """Check a size or width that must be positive and finite, and return it as a float.
+
+    Raises:
+        TypeError: If ``value`` is not a real number.
+        ValueError: If ``value`` is not positive and finite.
+    """
+    try:
+        resolved = float_argument(value, name)
+    except ValueError:
+        resolved = np.nan
+    if not resolved > 0:
+        raise ValueError(f"{name} must be positive and finite")
+    return resolved
+
+
+def theme_argument(name: object) -> str:
+    """Check the name of a theme of ``THEMES``, and return it.
+
+    Plots check their ``theme`` with it when they enter the theme, and a plot
+    whose options are checked before a store computes anything, such as the
+    mean-variance plot of ``features.hvgs``, checks it then.
+
+    Raises:
+        KeyError: If ``name`` names no theme.
+    """
+    if name not in THEMES:
+        raise KeyError(f"Unknown theme {name!r}. Choose from: {sorted(THEMES)}")
+    return name
+
+
 @contextmanager
 def theme_context(name: str = "notebook") -> Iterator[None]:
     """Apply a CyteArc theme's rcParams inside the context and restore them on exit.
@@ -1242,8 +1274,7 @@ def theme_context(name: str = "notebook") -> Iterator[None]:
     of ``plt.ion()`` or ``plt.ioff()`` in the body also lasts beyond the
     context.
     """
-    if name not in THEMES:
-        raise KeyError(f"Unknown theme {name!r}. Choose from: {sorted(THEMES)}")
+    name = theme_argument(name)
     from ._deps import require_matplotlib
 
     _, mpl = require_matplotlib()

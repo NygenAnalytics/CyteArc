@@ -1098,9 +1098,11 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
 
         Extra keyword arguments are options of
         :func:`cytearc.plotting.highly_variable_features`, used when
-        ``show_plot`` is True. Any other keyword raises ``TypeError`` before
-        anything is computed or saved. A read-only store returns a saved
-        selection and refuses only to compute one.
+        ``show_plot`` is True. Any other keyword raises ``TypeError``, and an
+        option value that the plot refuses raises the plot's error, before
+        anything is computed or saved; without matplotlib, which looks up the
+        plot's colormaps, only the keywords are checked. A read-only store
+        returns a saved selection and refuses only to compute one.
 
         Args:
             cell_selection: The cells whose variability is scored.
@@ -1173,6 +1175,7 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
             ValueError: If an option is invalid or does not apply to the
                 flavor, a batch is missing or too small, or no gene passes
                 the filters.
+            KeyError: If the plot's ``theme`` names no theme.
             UnmeasuredCellsError: If the assay did not measure a selected cell.
             PermissionError: If the selection, its feature summary, or its
                 feature-name snapshot must be saved and the store is not
@@ -1235,6 +1238,13 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
                     "features.hvgs() got unexpected keyword arguments: "
                     + ", ".join(repr(name) for name in unknown)
                 )
+            if _matplotlib_available():
+                from ...plotting.diagnostics import hvg_plot_options
+
+                # The plot's own checks, so that the selection is not saved
+                # before the plot refuses a value, and is recorded with the
+                # options as the plot draws them, a colormap by its name.
+                plot_kwargs = hvg_plot_options(**plot_kwargs)
         assay = self._get_assay(from_assay)
         if not isinstance(assay, RNAassay):
             raise TypeError(
