@@ -7,7 +7,7 @@ import pandas as pd
 
 from ..metadata.selection import NamedCellArtifact
 from ..storage.artifacts import ArtifactRef
-from ._contracts import CategoricalScale, PlotProvenance, StudyDesign
+from ._contracts import CategoricalScale, CellField, PlotProvenance, StudyDesign
 from ._data import (
     _artifact_cell_selection,
     _category_universe,
@@ -16,8 +16,14 @@ from ._data import (
     _resolve_grouping,
 )
 from ._deps import require_matplotlib
-from ._display import resolve_artifact_scale, resolve_categorical_scale
-from ._titles import artifact_titles, label_artifact
+from ._display import (
+    labels_in_stored_order,
+    resolve_artifact_scale,
+    resolve_categorical_scale,
+    stored_artifact_scale,
+    stored_categorical_scale,
+)
+from ._titles import artifact_titles, label_artifact, label_column
 from ._figure import (
     LegendSpec,
     PlotResult,
@@ -143,12 +149,14 @@ _PREFERRED_CONDITIONS = (
 )
 
 
-def _sort_conditions(values: list[Any]) -> list[Any]:
-    """Order conditions for paired plots with a light before/after preference.
+def _sort_conditions(values: list[Any], stored: CategoricalScale | None) -> list[Any]:
+    """Order conditions for paired plots by the order their column stores.
 
-    Recognized before/after names come first in that order; the others follow
-    in natural category order.
+    Without a stored order, recognized before/after names come first in that
+    order; the others follow in natural category order.
     """
+    if stored is not None:
+        return labels_in_stored_order(values, stored)
     known = [value for value in values if str(value).lower() in _PREFERRED_CONDITIONS]
     known.sort(key=lambda value: _PREFERRED_CONDITIONS.index(str(value).lower()))
     return known + sort_categories(value for value in values if value not in known)
@@ -338,14 +346,14 @@ def _draw_summary_markers(
 def composition(
     store: Any,
     *,
-    category_by: str | None = None,
+    category_by: str | CellField | None = None,
     categories: ArtifactRef | NamedCellArtifact | None = None,
     cell_key: str = "I",
-    sample_by: str | None = None,
+    sample_by: str | CellField | None = None,
     grouping: ArtifactRef | NamedCellArtifact | None = None,
-    subject_by: str | None = None,
-    pair_by: str | None = None,
-    condition_by: str | None = None,
+    subject_by: str | CellField | None = None,
+    pair_by: str | CellField | None = None,
+    condition_by: str | CellField | None = None,
     study_design: StudyDesign | None = None,
     kind: Literal["stacked", "per_sample"] = "stacked",
     show_summary: bool = True,
@@ -376,7 +384,14 @@ def composition(
     cells, such as labels of every cell, serves; a grouping that holds no
     label for some of them raises ``ValueError``. A ``NamedCellArtifact`` as
     ``categories`` or ``grouping`` titles the legend or the bar axis by its
-    name; a bare artifact takes the title of its record.
+    name; a bare artifact takes the title of its record. The cell columns of
+    ``category_by``, ``sample_by``, ``subject_by``, ``pair_by`` and
+    ``condition_by`` are named as text or as a ``CellField``. A column's name
+    titles the legend of the categories and the bar axis of the samples, and
+    the legend of the conditions is titled "Condition"; a ``CellField``'s
+    label titles them instead. The bars follow the order that ``sample_by``
+    or ``grouping`` stores, as a stored display or ordered categories, and
+    natural order without one.
     ``kind="per_sample"`` draws one point per sample in each category (requires
     ``sample_by`` or a :class:`StudyDesign`).
 
@@ -384,7 +399,9 @@ def composition(
     ``subject_by`` or ``pair_by`` (directly or via ``study_design``). CyteArc
     then connects the same subject across conditions inside each category.
     When a subject has several samples in one condition, those proportions are
-    averaged for the connecting line.
+    averaged for the connecting line. Conditions follow the order that
+    ``condition_by`` stores, or else come before/after names first, such as
+    "baseline" before "treated", and the others in natural order.
     Per-sample plots show sample means with 95% confidence intervals by
     default. Use ``uncertainty`` to select standard deviation, standard error,
     or no interval.
@@ -413,6 +430,20 @@ def composition(
         raise ValueError("segment_linewidth must be non-negative")
     if not 0 <= label_min_fraction <= 1:
         raise ValueError("label_min_fraction must be between 0 and 1")
+    # Columns are read by their keys, and a CellField's label titles its
+    # legend or axis, as a named artifact's name does.
+    category_key, category_title = label_column(category_by, "category_by")
+    sample_key, sample_title = label_column(sample_by, "sample_by")
+    subject_key, _ = label_column(subject_by, "subject_by")
+    pair_key, _ = label_column(pair_by, "pair_by")
+    condition_key, _ = label_column(condition_by, "condition_by")
+    # The conditions' legend, drawn and reported, is titled "Condition" unless
+    # a label names it.
+    condition_title = (
+        condition_by.label
+        if isinstance(condition_by, CellField) and condition_by.label
+        else "Condition"
+    )
     # Named artifacts are read as their artifacts and title their legend or axis.
     categories, categories_name = label_artifact(categories, "categories")
     grouping, grouping_name = label_artifact(grouping, "grouping")
@@ -428,13 +459,13 @@ def composition(
         zip(titled, artifact_titles(store, list(titled.values())), strict=True)
     )
     if grouping is not None:
-        if sample_by is not None or study_design is not None:
+        if sample_key is not None or study_design is not None:
             raise ValueError(
                 "grouping is mutually exclusive with sample_by or StudyDesign"
             )
         if kind != "stacked":
             raise ValueError("grouping is supported only for kind='stacked'")
-        if subject_by is not None or pair_by is not None or condition_by is not None:
+        if subject_key is not None or pair_key is not None or condition_key is not None:
             raise ValueError(
                 "grouping cannot be combined with subject, pair, or condition metadata"
             )
@@ -443,16 +474,18 @@ def composition(
                 "cell_key cannot override an artifact's stored cell selection"
             )
     if study_design is not None:
-        sample_by = study_design.sample_by
-        subject_by = study_design.subject_by or subject_by
-        pair_by = study_design.pair_by or pair_by
-        condition_by = study_design.condition_by or condition_by
-    if (subject_by is not None or pair_by is not None) and condition_by is None:
+        sample_key = sample_title = study_design.sample_by
+        subject_key = study_design.subject_by or subject_key
+        pair_key = study_design.pair_by or pair_key
+        if study_design.condition_by is not None:
+            condition_key = study_design.condition_by
+            condition_title = "Condition"
+    if (subject_key is not None or pair_key is not None) and condition_key is None:
         raise ValueError(
             "Paired composition requires condition_by together with "
             "subject_by or pair_by"
         )
-    if (category_by is None) == (categories is None):
+    if (category_key is None) == (categories is None):
         raise ValueError("Provide exactly one of category_by or categories")
     if categories is not None and cell_key != "I":
         raise ValueError("cell_key cannot override an artifact's stored cell selection")
@@ -490,20 +523,20 @@ def composition(
         cell_indices = grouping_indices
         grouping_values = np.asarray(resolved_grouping[0], dtype=object)
     if categories is None:
-        assert category_by is not None
+        assert category_key is not None and category_title is not None
         categorical_scale = resolve_categorical_scale(
             store,
-            category_by,
+            category_key,
             categorical_scale,
         )
         cats = _fetch_cell_column(
             store,
-            category_by,
+            category_key,
             cell_key=cell_key,
             cell_idx=cell_indices,
             labels=True,
         ).astype(object)
-        category_axis_label = category_by
+        category_axis_label = category_title
     else:
         assert category_values is not None
         categorical_scale = resolve_artifact_scale(store, categories, categorical_scale)
@@ -518,8 +551,8 @@ def composition(
         cats,
         categorical_scale,
         universe=(
-            _category_universe(store, category_by)
-            if category_by is not None
+            _category_universe(store, category_key)
+            if category_key is not None
             and (
                 categorical_scale is None
                 or (
@@ -543,10 +576,10 @@ def composition(
     summary_table: pd.DataFrame | None = None
     condition_order: list[Any] | None = None
 
-    if sample_by is None and grouping is None:
+    if sample_key is None and grouping is None:
         if kind == "per_sample":
             raise ValueError("kind='per_sample' requires sample_by or StudyDesign")
-        if subject_by is not None or pair_by is not None:
+        if subject_key is not None or pair_key is not None:
             raise ValueError("subject_by / pair_by require sample_by or StudyDesign")
         counts = pd.Series(cats).value_counts()
         props = counts.reindex(cat_order).fillna(0) / max(counts.sum(), 1)
@@ -559,19 +592,23 @@ def composition(
         per_sample = None
         props_mat = None
     else:
-        if grouping_values is not None:
+        # Bars follow the order that the samples' column or artifact stores.
+        if grouping is not None:
+            assert grouping_values is not None
             samples = grouping_values
+            sample_scale = stored_artifact_scale(store, grouping)
         else:
-            assert sample_by is not None
+            assert sample_key is not None
             samples = _fetch_cell_column(
                 store,
-                sample_by,
+                sample_key,
                 cell_key=cell_key,
                 cell_idx=cell_indices,
                 labels=True,
             )
+            sample_scale = stored_categorical_scale(store, sample_key)
         sample_axis_label = (
-            artifact_title_of["grouping"] if grouping is not None else sample_by
+            artifact_title_of["grouping"] if grouping is not None else sample_title
         )
         valid = pd.notna(samples) & (np.asarray(samples, dtype=object) != "")
         if not valid.any():
@@ -586,7 +623,7 @@ def composition(
         )
         ct = pd.crosstab(df["sample"], df["category"])
         ct = ct.reindex(
-            index=sort_categories(ct.index),
+            index=labels_in_stored_order(ct.index, sample_scale),
             columns=cat_order,
             fill_value=0,
         )
@@ -604,34 +641,34 @@ def composition(
         subject_vals = (
             _fetch_cell_column(
                 store,
-                subject_by,
+                subject_key,
                 cell_key=cell_key,
                 cell_idx=cell_indices,
                 labels=True,
             )[valid]
-            if subject_by is not None
+            if subject_key is not None
             else None
         )
         pair_vals = (
             _fetch_cell_column(
                 store,
-                pair_by,
+                pair_key,
                 cell_key=cell_key,
                 cell_idx=cell_indices,
                 labels=True,
             )[valid]
-            if pair_by is not None
+            if pair_key is not None
             else None
         )
         condition_vals = (
             _fetch_cell_column(
                 store,
-                condition_by,
+                condition_key,
                 cell_key=cell_key,
                 cell_idx=cell_indices,
                 labels=True,
             )[valid]
-            if condition_by is not None
+            if condition_key is not None
             else None
         )
         per_sample = _attach_sample_meta(
@@ -641,9 +678,9 @@ def composition(
             pair_vals=pair_vals,
             condition_vals=condition_vals,
         )
-        if pair_by is not None:
+        if pair_key is not None:
             pair_col = "pair"
-        elif subject_by is not None:
+        elif subject_key is not None:
             pair_col = "subject"
         if pair_col is not None:
             sample_pairs = per_sample[["sample", pair_col]].drop_duplicates()
@@ -660,14 +697,14 @@ def composition(
         )
         if kind == "per_sample" and show_summary:
             summary_source = per_sample
-            if condition_by is not None:
+            if condition_key is not None:
                 valid_condition = pd.notna(per_sample["condition"]) & (
                     per_sample["condition"].astype(str) != ""
                 )
                 summary_source = per_sample.loc[valid_condition]
             summary_table = _summarize_proportions(
                 summary_source,
-                by_condition=condition_by is not None,
+                by_condition=condition_key is not None,
                 uncertainty=resolved_uncertainty,
             )
 
@@ -696,7 +733,7 @@ def composition(
             )
         elif (
             kind == "stacked"
-            and (sample_by is not None or grouping is not None)
+            and (sample_key is not None or grouping is not None)
             and per_sample is not None
         ):
             n_samples = int(per_sample["sample"].nunique())
@@ -730,7 +767,7 @@ def composition(
 
             # The first category sits on top, so the stack reads from the top
             # in the legend's order.
-            if sample_by is None and grouping is None:
+            if sample_key is None and grouping is None:
                 proportions = [
                     float(
                         aggregate.loc[aggregate["category"] == cat, "proportion"].iloc[
@@ -835,10 +872,13 @@ def composition(
                     )
         else:
             assert per_sample is not None
-            if condition_by is not None:
+            if condition_key is not None:
                 valid_conditions = per_sample["condition"].dropna()
                 valid_conditions = valid_conditions[valid_conditions.astype(str) != ""]
-                condition_order = _sort_conditions(list(valid_conditions.unique()))
+                condition_order = _sort_conditions(
+                    list(valid_conditions.unique()),
+                    stored_categorical_scale(store, condition_key),
+                )
                 if not condition_order:
                     raise ValueError("condition_by has no valid sample values")
                 if pair_col is not None and len(condition_order) < 2:
@@ -944,7 +984,7 @@ def composition(
                 if show_legend:
                     blocks = [
                         (category_axis_label, handles),
-                        ("Condition", condition_handles),
+                        (condition_title, condition_handles),
                     ]
                     if summary_handle is not None:
                         blocks.append(("Summary", [summary_handle]))
@@ -1064,7 +1104,7 @@ def composition(
         legends.append(
             LegendSpec(
                 kind="marker",
-                label=condition_by,
+                label=condition_title,
                 extras={
                     "values": list(condition_order),
                     "markers": [
@@ -1094,12 +1134,12 @@ def composition(
             renderer="matplotlib",
             notes=tuple(notes),
             extras={
-                "category_by": category_by,
+                "category_by": category_key,
                 "categories": (None if categories is None else categories.to_dict()),
                 "grouping": None if grouping is None else grouping.to_dict(),
-                "subject_by": subject_by,
-                "pair_by": pair_by,
-                "condition_by": condition_by,
+                "subject_by": subject_key,
+                "pair_by": pair_key,
+                "condition_by": condition_key,
                 "show_summary": show_summary if kind == "per_sample" else False,
                 "uncertainty": (
                     resolved_uncertainty

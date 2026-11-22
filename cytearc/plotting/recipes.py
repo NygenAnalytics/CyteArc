@@ -199,6 +199,17 @@ class _NamedArtifactSlot:
 _NAMED_ARTIFACT_KEYS = frozenset({"name", "artifact"})
 # The plot keywords that take a label artifact, as one value.
 _LABEL_ARTIFACT_KWARGS = ("categories", "grouping", "groups")
+# The plot keywords that take a cell column of labels, as one value or, for
+# group_by, a list of them, with their names in a recipe.
+_LABEL_COLUMN_KWARGS = (
+    ("category_by", "categoryBy"),
+    ("condition_by", "conditionBy"),
+    ("group_by", "groupBy"),
+    ("pair_by", "pairBy"),
+    ("sample_by", "sampleBy"),
+    ("split_by", "splitBy"),
+    ("subject_by", "subjectBy"),
+)
 
 
 def _is_named_artifact(value: Any) -> bool:
@@ -282,6 +293,18 @@ def _coerce_serialized_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
             out["grouping"],
             context="grouping",
         )
+    # A cell column is named as {"key": ..., "label": ...}.
+    for name, context in _LABEL_COLUMN_KWARGS:
+        value = out.get(name)
+        if isinstance(value, Mapping):
+            out[name] = _contract_from_mapping(CellField, value, context=context)
+        elif isinstance(value, Sequence) and not isinstance(value, str | bytes):
+            out[name] = [
+                _contract_from_mapping(CellField, item, context=context)
+                if isinstance(item, Mapping)
+                else item
+                for item in value
+            ]
     for name, context in (("color_by", "colorBy"), ("keys", "keys")):
         if name not in out:
             continue

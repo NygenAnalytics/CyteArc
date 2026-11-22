@@ -17,6 +17,7 @@ from ..storage.types import as_zarr_array, as_zarr_group
 from ._contracts import CategoricalScale, ColorScale, FeatureRef, PlotProvenance
 from ._data import _artifact_input, shown_feature_rows, unmeasured_extras
 from ._deps import require_matplotlib, require_seaborn
+from ._display import labels_in_stored_order, stored_artifact_scale
 from ._figure import (
     LegendSpec,
     PlotResult,
@@ -33,7 +34,6 @@ from ._heatmap_utils import (
     validate_linkage,
 )
 from ..utils.arguments import bool_argument, integer_argument, optional_bool_argument
-from ..utils.arrays import sort_categories
 from ._style import (
     apply_figure_chrome,
     colormap_argument,
@@ -261,7 +261,10 @@ def _prepare_marker_heatmap(
                 group_sums[label] += summed
                 group_counts[label] += int(block_count.loc[label])
 
-    labels = sort_categories(list(group_sums))
+    # Groups follow the order that the marker search's clusters store.
+    labels = labels_in_stored_order(
+        group_sums, stored_artifact_scale(store, clusters_ref)
+    )
     group_means = pd.DataFrame(
         np.vstack([group_sums[label] / group_counts[label] for label in labels]),
         index=labels,

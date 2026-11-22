@@ -414,6 +414,29 @@ def test_matrixplot_columns_pair_two_grouping_keys_in_natural_order():
         result.close()
 
 
+def test_two_grouping_columns_order_each_columns_labels_naturally():
+    # Sorting the joined text would put "T reg | b1" before "T | b1", since
+    # "r" sorts before "|"; each column's own natural order puts "T" first,
+    # as a plot of the first column alone does, and "B2" before "B10".
+    store = _keyed_summary_store(
+        cell_type=np.repeat(["T reg", "T", "B10", "B2"], 2),
+        batch=np.tile(["b2", "b1"], 4),
+    )
+    expected = ["B2 | b1", "B2 | b2", "B10 | b1", "B10 | b2"]
+    expected += ["T | b1", "T | b2", "T reg | b1", "T reg | b2"]
+    for plot, name in ((splt.dotplot, "dotplot"), (splt.matrixplot, "matrixplot")):
+        result = plot(
+            store, features=["GeneA"], group_by=("cell_type", "batch"), show=False
+        )
+        try:
+            ax = result.axes[name]
+            assert [text.get_text() for text in ax.get_xticklabels()] == expected
+            assert ax.get_xlabel() == "cell_type / batch"
+            assert result.provenance.extras["group_order"] == expected
+        finally:
+            result.close()
+
+
 def test_summary_tables_weight_samples_whose_condition_is_constant():
     # Three cells in each of four samples, two of each condition; the groups
     # cut across the samples unevenly.

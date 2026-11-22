@@ -592,6 +592,45 @@ def test_summary_plot_ticks_show_category_labels():
         plt.close("all")
 
 
+def test_groups_that_a_stored_order_leaves_out_follow_it_naturally():
+    # A display that lists two of the eight categories.
+    display = {
+        "kind": "categorical",
+        "categories": [
+            {"value": value, "label": value.upper(), "color": STORED_COLORS[value]}
+            for value in ("Beta", "Alpha")
+        ],
+    }
+    store = _store(displays={"cluster": display})
+    order = ["Beta", "Alpha", "Delta", "Ductal", "Epsilon", "Ngn3 high EP"]
+    order += ["Ngn3 low EP", "Pre-endocrine"]
+    try:
+        matrix = splt.matrixplot(
+            store, features=["GeneA"], group_by="cluster", show=False
+        )
+        assert matrix.tables["matrix"].columns.tolist() == order
+        assert [
+            tick.get_text() for tick in matrix.axes["matrixplot"].get_xticklabels()
+        ] == ["BETA", "ALPHA", *order[2:]]
+        dots = splt.dotplot(store, features=["GeneA"], group_by="cluster", show=False)
+        assert dots.provenance.extras["group_order"] == order
+        composition = splt.composition(
+            store, category_by="batch", sample_by="cluster", show=False
+        )
+        assert [
+            tick.get_text()
+            for tick in composition.axes["composition"].get_xticklabels()
+        ] == order
+        facets = splt.embedding(
+            store, layout_key="umap", color_by="batch", facet_by="cluster", show=False
+        )
+        assert [axis.get_title() for axis in facets.axes.values()] == [
+            f"batch | cluster={value}" for value in order
+        ]
+    finally:
+        plt.close("all")
+
+
 def _scale_plots(store, scale, **options):
     """The order, colors and labels that each plot of the column draws under ``scale``."""
     drawn = {}
@@ -821,6 +860,35 @@ def test_missing_cells_take_the_stored_missing_color_and_label_unless_set():
     # Without a stored display, missing cells take the defaults.
     store._stored_display_metadata = lambda column: None
     assert legend(splt.CategoricalScale(labels={"Beta": "B"}))[-1] == ("NA", "#bdbdbd")
+
+
+def test_labels_take_the_stored_order_and_then_their_natural_order():
+    from cytearc.plotting._display import labels_in_stored_order
+
+    stored = splt.CategoricalScale(order=("late", "early", "unused"))
+    # Stored categories first, in their order, and the others naturally:
+    # "a2" before "a10", and missing labels last.
+    assert labels_in_stored_order(
+        ["mid", "a10", None, "early", "a2", "late"], stored
+    ) == ["late", "early", "a2", "a10", "mid", None]
+    # A source that stores no order sorts every label naturally.
+    assert labels_in_stored_order(["10", "2", "1"], None) == ["1", "2", "10"]
+    assert labels_in_stored_order(["10", "2", "1"], splt.CategoricalScale()) == [
+        "1",
+        "2",
+        "10",
+    ]
+    assert labels_in_stored_order([], stored) == []
+    # Integer labels match the stored integers and are returned as given.
+    ordered = labels_in_stored_order(
+        np.array([1, 2, 3, 4], dtype=np.int64), splt.CategoricalScale(order=(3, 1, 2))
+    )
+    assert ordered == [3, 1, 2, 4]
+    assert [type(label) for label in ordered] == [np.int64] * 4
+    # A category that the order repeats keeps its first place.
+    assert labels_in_stored_order(
+        ["a", "b"], splt.CategoricalScale(order=("b", "a", "b"))
+    ) == ["b", "a"]
 
 
 def test_merge_categorical_scales_merges_each_field():

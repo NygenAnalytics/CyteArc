@@ -20,7 +20,7 @@ from ..storage.selections import (
     selections_hold_same_cells,
     validate_stored_selection_live_alias,
 )
-from ._contracts import CategoricalScale, PlotProvenance, SizeScale
+from ._contracts import CategoricalScale, CellField, PlotProvenance, SizeScale
 from ._deps import require_matplotlib
 from ._data import (
     _artifact_cell_selection,
@@ -30,7 +30,7 @@ from ._data import (
     _resolve_layout,
 )
 from ._display import resolve_artifact_scale, resolve_categorical_scale
-from ._titles import artifact_titles, label_artifact
+from ._titles import artifact_titles, label_artifact, label_column
 from ._figure import (
     LegendSpec,
     PlotResult,
@@ -179,7 +179,7 @@ def _edge_widths(
 def cluster_connectivity(
     store: Any,
     *,
-    group_by: str | None = None,
+    group_by: str | CellField | None = None,
     layout_key: str | None = None,
     groups: ArtifactRef | NamedCellArtifact | None = None,
     layout: ArtifactRef | None = None,
@@ -222,6 +222,8 @@ def cluster_connectivity(
     cells, or groups without a label for some of the graph's cells, raise
     ``ValueError``. A ``NamedCellArtifact`` as ``groups`` titles the groups'
     legend by its name; a bare artifact takes the title of its record.
+    ``group_by`` names a live column as text or as a ``CellField``, whose
+    label titles the legend in place of the column's name.
     """
     show_cells = bool_argument(show_cells, "show_cells")
     labels = bool_argument(labels, "labels")
@@ -250,12 +252,14 @@ def cluster_connectivity(
 
     if not isinstance(graph, ArtifactRef):
         raise TypeError("graph must be an ArtifactRef")
-    # A named artifact groups by its artifact and titles the groups' legend.
+    # A named artifact groups by its artifact and titles the groups' legend,
+    # as a CellField's label titles its column.
     groups, groups_name = label_artifact(groups, "groups")
+    group_key, group_title = label_column(group_by, "group_by")
     selection = graph_cell_selection(store.zw, graph)
     group_universe: np.ndarray | None = None
     uses_artifacts = groups is not None or layout is not None
-    uses_live_metadata = group_by is not None or layout_key is not None
+    uses_live_metadata = group_key is not None or layout_key is not None
     if uses_artifacts and uses_live_metadata:
         raise ValueError(
             "Use groups and layout together, or group_by and layout_key together"
@@ -308,7 +312,7 @@ def cluster_connectivity(
         categorical_scale = resolve_artifact_scale(store, groups, categorical_scale)
         group_label = artifact_titles(store, [(groups, groups_name)])[0]
     else:
-        if group_by is None or layout_key is None:
+        if group_key is None or layout_key is None:
             raise ValueError("group_by and layout_key must be provided together")
         validate_stored_selection_live_alias(
             store.zw,
@@ -321,16 +325,17 @@ def cluster_connectivity(
         )
         x, y, group_values_array = _fetch_inputs(
             store,
-            group_by=group_by,
+            group_by=group_key,
             layout_key=layout_key,
             cell_key=cell_key,
         )
         categorical_scale = resolve_categorical_scale(
             store,
-            group_by,
+            group_key,
             categorical_scale,
         )
-        group_label = group_by
+        assert group_title is not None
+        group_label = group_title
     try:
         resolved_categorical_scale = resolve_category_scale(
             group_values_array,
@@ -520,7 +525,7 @@ def cluster_connectivity(
                 "artifact" if uses_artifacts else "live_metadata",
             ),
             extras={
-                "group_by": group_by,
+                "group_by": group_key,
                 "layout_key": layout_key,
                 "groups": None if groups is None else groups.to_dict(),
                 "layout": None if layout is None else layout.to_dict(),

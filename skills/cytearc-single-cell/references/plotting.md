@@ -36,7 +36,7 @@ artifact refs. Docs: <https://docs.nygen.io/CyteArc/tutorials/plotting>,
 - Ref mode, everything else: `layout=run["umap"]`, `color_by=` an `ArtifactRef`, a live metadata
   column, a gene name, `FeatureRef`, `CellField`, or a list of these (one panel each). Cells come
   from the layout artifact's selection; live columns are aligned to it.
-- Helpers in `cytearc.plotting`: `CellField(key, kind="auto"|"categorical"|"continuous", label=)`, `NamedCellArtifact(name, artifact)` (titles a label artifact in panels, axes and legends wherever a plot or a clone summary takes one; without it a plot titles the artifact from its record, such as `"Leiden, resolution 1.0"` or the copied column), `FeatureRef(value, assay=None, by="name"|"id"|"index", label=, reduction=)` (`value` is a string for `name` and `id` and an integer for `index`), `NormalizationSpec(source="assay"|"raw", transform="none"|"log1p")`, `ColorScale(cmap, vmin, vmax, vcenter, quantiles, missing_color, scope, scale)`, `CategoricalScale(order, palette, labels, missing_color, missing_label, palette_name)`, whose unset fields keep the column's stored display or stored order, `Highlight(by, groups, indices, color, dim_alpha, ...)`, `DensityOverlay`, `SizeScale`, `StudyDesign`.
+- Helpers in `cytearc.plotting`: `CellField(key, kind="auto"|"categorical"|"continuous", label=)` (names a live column in `embedding(color_by=)`, `distribution(grouping=, split_by=, sample_by=)`, `composition(category_by=, sample_by=, subject_by=, pair_by=, condition_by=)`, `dotplot` and `matrixplot(group_by=, sample_by=)`, also as a column of a `group_by` tuple, and `cluster_connectivity(group_by=)`, and `label` titles the axis or legend that the plot draws for it; groupings refuse `kind="continuous"`), `NamedCellArtifact(name, artifact)` (titles a label artifact in panels, axes and legends wherever a plot or a clone summary takes one; without it a plot titles the artifact from its record, such as `"Leiden, resolution 1.0"` or the copied column), `FeatureRef(value, assay=None, by="name"|"id"|"index", label=, reduction=)` (`value` is a string for `name` and `id` and an integer for `index`), `NormalizationSpec(source="assay"|"raw", transform="none"|"log1p")`, `ColorScale(cmap, vmin, vmax, vcenter, quantiles, missing_color, scope, scale)`, `CategoricalScale(order, palette, labels, missing_color, missing_label, palette_name)`, whose unset fields keep the column's stored display or stored order, `Highlight(by, groups, indices, color, dim_alpha, ...)`, `DensityOverlay`, `SizeScale`, `StudyDesign`.
 - A gene name that several features share, such as MATR3 in the 10x Genomics human reference, raises `ValueError` naming their IDs wherever a `FeatureRef` is accepted, `imputation.compute_imputed` included. Pass `FeatureRef(feature_id, by="id")` for one feature, or `reduction="mean"` for their mean. `lineage_trends(features=...)` and the `show_features` of `pseudotime_heatmap` and `lineage_heatmap` take `FeatureRef` values without a reduction, and label a feature whose name another retained feature shares as `name (ID)`.
 - Plots are display. `max_points` thins only the overlaid points in `distribution`, and
   `provenance.notes` gains `"subsampled_display"`; a violin estimates its density from at most
@@ -177,8 +177,10 @@ ds.plots.distribution("baseline_doublet_score", grouping=run["clusters"], show=F
 
 ### Dot plots, matrix plots and marker heatmaps
 
-Here `groups=` is the cluster `ArtifactRef`; `group_by=` names a live column instead and groups
-the cells of `cell_key` (default `"I"`, not the run's cells). Table columns are named by role,
+Here `groups=` is the cluster `ArtifactRef`; `group_by=` names a live column instead, or a tuple of
+two, each as text or a `CellField`, and groups the cells of `cell_key` (default `"I"`, not the
+run's cells). Groups follow `group_order`, or each column's stored order (the first column's, then
+the second's), else natural order. Table columns are named by role,
 whatever the grouping column is called: `group` (the `groups=` labels or the first `group_by`
 key), `subgroup` (a second `group_by` key) and, with `sample_by`, `sample`.
 `provenance.extras["group_by"]` names the source columns.

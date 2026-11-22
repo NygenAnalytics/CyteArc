@@ -897,6 +897,87 @@ def test_serialized_contracts_cover_grouping_keys_and_nested_scales() -> None:
     assert dynamics["pseudotime_scale"] == plotting.ColorScale(cmap="plasma")
 
 
+def test_serialized_grouping_columns_read_as_cell_fields() -> None:
+    recipe = PlotRecipe.from_dict(
+        {
+            "steps": [
+                {
+                    "name": "dots",
+                    "plot": "dotplot",
+                    "kwargs": {
+                        "features": ["CD3D"],
+                        "groupBy": [{"key": "cluster", "label": "Cluster"}, "sample"],
+                    },
+                },
+                {
+                    "name": "shares",
+                    "plot": "composition",
+                    "kwargs": {
+                        "categoryBy": {"key": "cluster", "kind": "categorical"},
+                        "sampleBy": {"key": "sample", "label": "Sample"},
+                        "subjectBy": {"key": "donor"},
+                        "pairBy": "pair",
+                        "conditionBy": {"key": "condition", "label": "Treatment"},
+                    },
+                },
+                {
+                    "name": "violins",
+                    "plot": "distribution",
+                    "kwargs": {
+                        "keys": "CD3D",
+                        "splitBy": {"key": "batch", "label": "Batch"},
+                    },
+                },
+                {
+                    "name": "graph",
+                    "plot": "cluster_connectivity",
+                    "kwargs": {"groupBy": {"key": "cluster"}},
+                },
+            ]
+        }
+    )
+
+    dots, shares, violins, graph = (step.kwargs for step in recipe.steps)
+    assert dots["group_by"] == [
+        plotting.CellField(key="cluster", label="Cluster"),
+        "sample",
+    ]
+    assert shares == {
+        "category_by": plotting.CellField(key="cluster", kind="categorical"),
+        "sample_by": plotting.CellField(key="sample", label="Sample"),
+        "subject_by": plotting.CellField(key="donor"),
+        "pair_by": "pair",
+        "condition_by": plotting.CellField(key="condition", label="Treatment"),
+    }
+    assert violins["split_by"] == plotting.CellField(key="batch", label="Batch")
+    assert graph["group_by"] == plotting.CellField(key="cluster")
+    # A malformed column names the keyword as the recipe spells it.
+    with pytest.raises(ValueError, match="Unknown groupBy key"):
+        PlotRecipe.from_dict(
+            {
+                "steps": [
+                    {
+                        "name": "dots",
+                        "plot": "dotplot",
+                        "kwargs": {"groupBy": [{"key": "cluster", "name": "x"}]},
+                    }
+                ]
+            }
+        )
+    with pytest.raises(ValueError, match="Invalid sampleBy"):
+        PlotRecipe.from_dict(
+            {
+                "steps": [
+                    {
+                        "name": "shares",
+                        "plot": "composition",
+                        "kwargs": {"sampleBy": {"key": "sample", "kind": "x"}},
+                    }
+                ]
+            }
+        )
+
+
 @pytest.mark.parametrize(
     "filenames",
     [

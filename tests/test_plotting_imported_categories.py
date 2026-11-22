@@ -27,6 +27,9 @@ FILE_LEGEND = list(zip(FILE_ORDER, FILE_COLORS, strict=True))
 # The first four colors of CyteArc's default palette, as plots assign them in
 # order.
 DEFAULT_COLORS = ["#1f77b4", "#ff7f0e", "#279e68", "#d62728"]
+# Treatments stored as ordered categories, whose natural order puts "high
+# dose" before "low dose".
+TREATMENTS = ["untreated", "low dose", "high dose"]
 
 
 @pytest.fixture(scope="module")
@@ -349,6 +352,253 @@ def test_only_a_store_with_a_root_reads_an_artifacts_categories(imported):
 
 
 @pytest.fixture(scope="module")
+def grouped(imported) -> SimpleNamespace:
+    """The imported store with columns that group, split, pair and lay out its cells.
+
+    ``batch`` alternates b1 and b2 along the stored cells. Nine samples of 20
+    cells belong to three donors, whose three samples each take one of the
+    treatments, stored as ordered categories in ``treatment`` and as text in
+    ``treatment_text``. ``UA`` and ``UB`` are two layouts of cell columns.
+    """
+    store = imported.store
+    n_cells = store.cells.N
+    sample = np.arange(n_cells) % 9
+    treatments = np.array(TREATMENTS)[sample % 3]
+    columns = {
+        "batch": np.where(np.arange(n_cells) % 2 == 0, "b1", "b2"),
+        "sample": np.array([f"s{index + 1}" for index in sample]),
+        "donor": np.array([f"d{index // 3 + 1}" for index in sample]),
+        "treatment": pd.Categorical(treatments, categories=TREATMENTS, ordered=True),
+        "treatment_text": treatments,
+    }
+    coordinates = np.random.default_rng(1).normal(size=(n_cells, 4))
+    for index, name in enumerate(("UA1", "UA2", "UB1", "UB2")):
+        columns[name] = coordinates[:, index]
+    for name, values in columns.items():
+        store.cells.insert(name, by_cell_id(store.cells, values))
+    return imported
+
+
+def _ticks(axis):
+    return [tick.get_text() for tick in axis.get_xticklabels()]
+
+
+def test_summary_groups_follow_the_order_each_grouping_column_stores(grouped):
+    store = grouped.store
+    expected = {
+        # One column in its stored order, named alone or in a tuple.
+        "stage": ["early", "mid", "late"],
+        ("stage",): ["early", "mid", "late"],
+        # Two columns: the first one's stored order, then the second's.
+        ("stage", "batch"): [
+            "early | b1",
+            "early | b2",
+            "mid | b1",
+            "mid | b2",
+            "late | b1",
+            "late | b2",
+        ],
+        ("batch", "stage"): [
+            "b1 | early",
+            "b1 | mid",
+            "b1 | late",
+            "b2 | early",
+            "b2 | mid",
+            "b2 | late",
+        ],
+        # The file's order of the imported cell types.
+        ("cell_type", "batch"): [
+            "T | b1",
+            "T | b2",
+            "B | b1",
+            "B | b2",
+            "NK | b1",
+            "NK | b2",
+        ],
+        # Ordered integers in their stored order, 3, 1 and 2.
+        ("grade", "batch"): [
+            "3 | b1",
+            "3 | b2",
+            "1 | b1",
+            "1 | b2",
+            "2 | b1",
+            "2 | b2",
+        ],
+        # Unordered categories sort naturally, "2" before "10".
+        ("cluster_codes", "stage"): ["1 | mid", "2 | early", "10 | late"],
+    }
+    try:
+        for group_by, groups in expected.items():
+            dots = splt.dotplot(store, features=["g0"], group_by=group_by, show=False)
+            assert _ticks(dots.axes["dotplot"]) == groups, group_by
+            assert dots.provenance.extras["group_order"] == groups, group_by
+            matrix = splt.matrixplot(
+                store, features=["g0"], group_by=group_by, show=False
+            )
+            assert matrix.tables["matrix"].columns.tolist() == groups, group_by
+            assert _ticks(matrix.axes["matrixplot"]) == groups, group_by
+            plt.close("all")
+        # A tuple of one column summarizes as the column's name does.
+        named, single = (
+            splt.dotplot(store, features=["g0", "g31"], group_by=group_by, show=False)
+            for group_by in ("stage", ("stage",))
+        )
+        pd.testing.assert_frame_equal(
+            single.tables["aggregate"], named.tables["aggregate"]
+        )
+        # One column's groups take its stored colors and labels, and the
+        # groups of two columns none, since those name one column's
+        # categories.
+        cell_types, joined = (
+            splt.dotplot(store, features=["g0"], group_by=group_by, show=False)
+            for group_by in ("cell_type", ("cell_type", "batch"))
+        )
+        assert cell_types.scales[2].palette == dict(FILE_LEGEND)
+        assert cell_types.scales[2].labels == {label: label for label in FILE_ORDER}
+        assert joined.scales[2].palette is None
+        assert joined.scales[2].labels is None
+        # An order that the caller gives wins over the stored orders.
+        requested = ["late | b2", "late | b1", "mid | b2", "mid | b1"]
+        requested += ["early | b2", "early | b1"]
+        dots = splt.dotplot(
+            store,
+            features=["g0"],
+            group_by=("stage", "batch"),
+            group_order=requested,
+            show=False,
+        )
+        assert _ticks(dots.axes["dotplot"]) == requested
+        reversed_stages = splt.CategoricalScale(order=("late", "early", "mid"))
+        for plot, name in ((splt.dotplot, "dotplot"), (splt.matrixplot, "matrixplot")):
+            result = plot(
+                store,
+                features=["g0"],
+                group_by=("stage",),
+                categorical_scale=reversed_stages,
+                show=False,
+            )
+            assert _ticks(result.axes[name]) == ["late", "early", "mid"]
+    finally:
+        plt.close("all")
+
+
+def test_facets_follow_the_order_the_facet_column_stores(grouped):
+    store, layout = grouped.store, grouped.layout
+
+    def titles(**options):
+        result = splt.embedding(store, color_by="batch", show=False, **options)
+        found = [axis.get_title() for axis in result.axes.values()]
+        result.close()
+        return found
+
+    stages = ["batch | stage=early", "batch | stage=mid", "batch | stage=late"]
+    assert titles(layout=layout, facet_by="stage") == stages
+    # Each layout of a figure of several draws its facets in that order.
+    assert titles(layout_key=["UA", "UB"], facet_by="stage") == [
+        f"{name} | {title}" for name in ("UA", "UB") for title in stages
+    ]
+    # The file's order of the imported cell types.
+    assert titles(layout=layout, facet_by="cell_type") == [
+        "batch | cell_type=T",
+        "batch | cell_type=B",
+        "batch | cell_type=NK",
+    ]
+    # Unordered categories sort naturally.
+    assert titles(layout=layout, facet_by="cluster_codes") == [
+        "batch | cluster_codes=1",
+        "batch | cluster_codes=2",
+        "batch | cluster_codes=10",
+    ]
+    # facet_order and requested groups win over the stored order.
+    assert titles(
+        layout=layout, facet_by="stage", facet_order=["late", "early", "mid"]
+    ) == [
+        "batch | stage=late",
+        "batch | stage=early",
+        "batch | stage=mid",
+    ]
+    assert titles(layout=layout, facet_by="stage", groups=["mid", "early"]) == [
+        "batch | stage=mid",
+        "batch | stage=early",
+    ]
+
+
+def _legend_texts(result, title):
+    """The entries of the figure legend that ``title`` heads."""
+    (legend,) = [
+        legend
+        for legend in result.figure.legends
+        if legend.get_title().get_text() == title
+    ]
+    return [text.get_text() for text in legend.get_texts()]
+
+
+def test_composition_bars_and_conditions_follow_the_order_their_columns_store(
+    grouped,
+):
+    store = grouped.store
+
+    def bars(**options):
+        result = splt.composition(store, category_by="batch", show=False, **options)
+        found = _ticks(result.axes["composition"])
+        table = "per_group" if "grouping" in options else "per_sample"
+        assert list(dict.fromkeys(result.tables[table]["sample"])) == found
+        result.close()
+        return found
+
+    assert bars(sample_by="stage") == ["early", "mid", "late"]
+    # An imported clustering's bars take the file's order.
+    assert bars(grouping=grouped.clusters) == FILE_ORDER
+    # Unordered categories sort naturally.
+    assert bars(sample_by="cluster_codes") == ["1", "2", "10"]
+
+    def conditions(condition_by):
+        result = splt.composition(
+            store,
+            category_by="cell_type",
+            sample_by="sample",
+            subject_by="donor",
+            condition_by=condition_by,
+            kind="per_sample",
+            show=False,
+        )
+        drawn = _legend_texts(result, "Condition")
+        assert result.legends[1].extras["values"] == drawn
+        result.close()
+        return drawn
+
+    # The stored order of the treatments, which no before/after name sets.
+    assert conditions("treatment") == ["untreated", "low dose", "high dose"]
+    # The same text without a stored order: "untreated" first as a before
+    # name, then the others naturally.
+    assert conditions("treatment_text") == ["untreated", "high dose", "low dose"]
+
+
+def test_marker_heatmaps_order_groups_as_their_clusters_store_them(grouped):
+    store = grouped.store
+    features = store.features.universe(from_assay="RNA")
+    codes = store.snapshot_cluster_labels(
+        "cluster_codes", cell_selection=store.snapshot_cell_selection()
+    )
+    expected = {
+        # The file's order of the imported clusters.
+        grouped.clusters: FILE_ORDER,
+        # A snapshot of unordered categories sorts them naturally.
+        codes: ["1", "2", "10"],
+    }
+    for clusters, groups in expected.items():
+        markers = store.markers.search(clusters, features=features)
+        result = splt.marker_heatmap(
+            store, marker=markers, topn=2, cluster_columns=False, show=False
+        )
+        try:
+            assert result.tables["matrix"].columns.tolist() == groups
+            assert _ticks(result.axes["heatmap"]) == groups
+        finally:
+            result.close()
+
+
+@pytest.fixture(scope="module")
 def paris_tree(imported, tmp_path_factory) -> SimpleNamespace:
     """A Paris clustering of the cells of codes 2 and 10, on a copy of the store.
 
@@ -476,6 +726,15 @@ def test_run_plots_of_frozen_columns_draw_them_as_plots_of_the_live_columns(
             ("early", DEFAULT_COLORS[0]),
             ("middle", DEFAULT_COLORS[1]),
             ("late", DEFAULT_COLORS[2]),
+        ]
+        # Facets of a frozen column follow the order that the run records.
+        faceted = store.plots.embedding(
+            run=run, color_by="cell_type", facet_by="stage", show=False
+        )
+        assert [axis.get_title() for axis in faceted.axes.values()] == [
+            "cell_type | stage=early",
+            "cell_type | stage=mid",
+            "cell_type | stage=late",
         ]
     finally:
         plt.close("all")

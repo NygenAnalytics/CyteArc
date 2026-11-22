@@ -317,7 +317,8 @@ def _expression_matrix_figures(
     matrix = splt.matrixplot(
         store,
         features=markers,
-        groups=clusters,
+        # The name titles the group axis, as the other figures name the clusters.
+        groups=splt.NamedCellArtifact(_CLUSTER_LABEL, clusters),
         normalization=splt.NormalizationSpec(transform="log1p"),
         standardize="feature",
         cluster_groups=True,
