@@ -2,6 +2,7 @@
 
 import weakref
 from collections.abc import Iterator
+from dataclasses import replace
 from typing import Any
 
 import numpy as np
@@ -63,6 +64,48 @@ def test_read_bytes_follow_what_a_zarr_read_holds() -> None:
         == 500 + 2 * (2_048 + 2_048 + 16 + 1_024 + 100) + 1 * 2_048
     )
     assert scratched.readBytes(0, 1) == 2_048 + 2_048 + 16 + 1_024 + 100
+
+
+def test_a_read_on_cytearcs_pools_holds_its_objects_where_a_plain_pool_keeps_a_chunk() -> (
+    None
+):
+    # Chunks of 1,000 by 1,000 uint32 values decode to 4,000,000 bytes and
+    # are stored in at most 4,000,000 // 128 + 1,024 more.
+    sharded = ArrayGeometry(
+        shape=(4_000, 10_000), chunks=(1_000, 1_000), shards=(1_000, 10_000), itemsize=4
+    )
+    decoded = 4_000_000
+    encoded = decoded + decoded // 128 + 1_024
+    # Ten chunks decoded one at a time hold no previous chunk on CyteArc's
+    # pools, only the objects of Zarr's read: 64 KiB, 4 KiB for each of the
+    # ten chunks and 16 KiB for the one decode under way.
+    objects = 65_536 + 10 * 4_096 + 16_384
+    assert sharded.heldDecodeBytes(10, 1) == objects
+    assert sharded.readBytes(0, 10, decodes=1) == 10 * encoded + decoded + objects
+    # Four at a time hold 64 KiB more for the three more decodes.
+    assert sharded.heldDecodeBytes(10, 4) == objects + 3 * 16_384
+    # A plain pool's threads, as Zarr's opt-in pipeline runs, keep the chunk
+    # that each decoded before, one for each decode under way.
+    own_pool = replace(sharded, poolKeepsDecodedChunk=True)
+    assert own_pool.heldDecodeBytes(10, 1) == decoded
+    assert own_pool.heldDecodeBytes(10, 4) == 4 * decoded
+    # A read that decodes every chunk at once has no previous chunk either way.
+    assert sharded.heldDecodeBytes(10, 10) == own_pool.heldDecodeBytes(10, 10) == 0
+    # A whole read of an unsharded array of four 40,000,000-byte chunks, two
+    # at a time, as the memory ledger plans one, holds the 160,000,000-byte
+    # result and the two chunks under way, each as stored and decoded, beside
+    # the read's objects, where a plain pool also keeps one earlier chunk for
+    # each decode under way.
+    unsharded = replace(sharded, shards=None, chunks=(1_000, 10_000))
+    stored = 40_000_000 + 40_000_000 + 40_000_000 // 128 + 1_024
+    assert unsharded.wholeReadBytes(2) == (
+        160_000_000 + 2 * stored + 65_536 + 4 * 4_096 + 2 * 16_384
+    )
+    assert replace(unsharded, poolKeepsDecodedChunk=True).wholeReadBytes(2) == (
+        160_000_000 + 2 * stored + 2 * 40_000_000
+    )
+    # Chunks smaller than the read's objects, such as the 80-byte chunks of
+    # the test above, are charged the chunks, as before.
 
 
 @pytest.mark.parametrize(
@@ -174,14 +217,52 @@ def test_a_band_read_of_a_sharded_array_holds_no_more_than_its_charge(
             tracemalloc.stop()
 
     # The read held its result, Zarr's shard-level copy of it, the shard's
-    # two compressed chunks and one decoded chunk, more than those alone. On
-    # a busy machine it also held the first chunk while the second decoded,
-    # since the pool thread that decoded the first keeps it until it runs
-    # again; with two chunks decoded one at a time, no more than that one.
-    # The charge for one decode at a time covers all of it.
+    # two compressed chunks and one decoded chunk, more than those alone. No
+    # pool thread keeps the first chunk once the read has copied it, so the
+    # charge for one decode at a time covers all of it with the read's
+    # objects, 88 KiB, in place of the decoded chunk that it reserved before.
     decoded = 4_096 * 512 * 4
     assert peak - base > 2 * band.nbytes + 3 * decoded
     assert geometry.readBytes(band.nbytes, 2, decodes=1) >= peak - base
+    assert geometry.readBytes(band.nbytes, 2, decodes=1) - decoded < peak - base
+
+
+def test_a_whole_read_of_an_unsharded_array_holds_no_decoded_chunk_beside_its_decodes(
+    tmp_path: Any,
+) -> None:
+    import tracemalloc
+
+    from cytearc.storage.async_execution import zarr_io_concurrency
+    from cytearc.storage.geometry import array_geometry
+
+    # Four chunks of random bits, 1 MiB each, which a whole read decodes two
+    # at a time, as the memory ledger plans whole reads of normalized values.
+    root = zarr.open_group(store=LocalStore(str(tmp_path)), mode="w")
+    stored = root.create_array(
+        "values", shape=(1_024, 1_024), chunks=(256, 1_024), dtype=np.uint32
+    )
+    stored[:] = np.random.default_rng(1).integers(
+        0, 1 << 32, size=stored.shape, dtype=np.uint32
+    )
+    geometry = array_geometry(stored)
+    assert geometry is not None and not geometry.poolKeepsDecodedChunk
+    with zarr_io_concurrency(2):
+        stored[:, :]
+        tracemalloc.start()
+        try:
+            base, _ = tracemalloc.get_traced_memory()
+            values = stored[:, :]
+            _current, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+    decoded = 256 * 1_024 * 4
+    # The result and two chunks under way, each compressed and decoded, and
+    # no more than the read's objects beside them: the plan covers it without
+    # the earlier decoded chunk that it reserved for each decode before.
+    assert values.nbytes == 4 * decoded
+    assert peak - base > values.nbytes + 2 * 2 * decoded
+    assert geometry.wholeReadBytes(2) >= peak - base
+    assert geometry.wholeReadBytes(2) - decoded < peak - base
 
 
 def test_a_row_block_stream_of_an_unsharded_array_reserves_each_stored_chunk() -> None:

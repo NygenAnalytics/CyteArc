@@ -92,6 +92,46 @@ def test_array_geometry_is_absent_for_in_memory_arrays() -> None:
     assert array_geometry(np.zeros((4, 4), dtype=np.uint32)) is None
 
 
+@pytest.mark.parametrize(
+    ("pipeline", "max_workers", "keeps"),
+    [
+        ("zarr.core.codec_pipeline.BatchedCodecPipeline", None, False),
+        ("zarr.core.codec_pipeline.BatchedCodecPipeline", 4, False),
+        ("zarr.core.codec_pipeline.FusedCodecPipeline", 2, True),
+        ("zarr.core.codec_pipeline.FusedCodecPipeline", 1, False),
+        # Zarr reads a value it cannot use as a worker for each CPU.
+        ("zarr.core.codec_pipeline.FusedCodecPipeline", "many", "cpus"),
+        ("zarr.core.codec_pipeline.FusedCodecPipeline", None, "cpus"),
+    ],
+    ids=[
+        "Zarr's default pipeline",
+        "the default pipeline with workers set",
+        "the opt-in pipeline of two workers",
+        "the opt-in pipeline of one worker",
+        "the opt-in pipeline of an unreadable count",
+        "the opt-in pipeline of a worker per CPU",
+    ],
+)
+def test_array_geometry_records_whether_zarr_decodes_on_a_pool_of_its_own(
+    pipeline: str, max_workers: object, keeps: object
+) -> None:
+    import os
+
+    # The pipeline is the one the array was opened with; its worker count is
+    # read when the plan is made.
+    with zarr.config.set({"codec_pipeline.path": pipeline}):
+        array = _array(shape=(20, 20), chunks=(5, 5), shards=(10, 10))
+    with zarr.config.set({"codec_pipeline.max_workers": max_workers}):
+        geometry = array_geometry(array)
+    assert geometry is not None
+    expected = (os.cpu_count() or 1) > 1 if keeps == "cpus" else keeps
+    assert geometry.poolKeepsDecodedChunk is expected
+    # An array opened after the setting is gone keeps Zarr's default pipeline.
+    reopened = zarr.open_array(array.store, path=array.path, mode="r")
+    with zarr.config.set({"codec_pipeline.max_workers": max_workers}):
+        assert array_geometry(reopened).poolKeepsDecodedChunk is False
+
+
 def test_array_geometry_records_shards_and_falls_back_to_chunks() -> None:
     sharded = array_geometry(_array(shape=(20, 20), chunks=(5, 5), shards=(10, 10)))
     plain = array_geometry(_array(shape=(20, 20), chunks=(5, 5)))
