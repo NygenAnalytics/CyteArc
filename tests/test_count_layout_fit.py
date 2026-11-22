@@ -757,7 +757,8 @@ def _counts_mismatch(
     fingerprint unlike the source's means the import summarized a wrong
     count, so the count changed before Zarr encoded it. With the source's
     fingerprint, a count still wrong on a fresh read changed in encoding or
-    storage, and one right on a fresh read was changed by the first read.
+    storage, and one that a fresh read finds right is right in storage, so the
+    first read returned it wrong.
     """
     counts = {
         name: zarr.open_group(str(path), mode="r")[f"{assay}/counts"]
@@ -828,8 +829,8 @@ def _counts_mismatch(
             )
         elif source is not None:
             line += (
-                ", and its fingerprint is the source's, so the first read changed "
-                "the stored count"
+                ", and its fingerprint is the source's, so the count is right in "
+                "storage and the first read returned it wrong"
             )
         lines.append(line)
     kept = Path(tempfile.mkdtemp(prefix="cytearc-count-mismatch-"))
@@ -980,7 +981,8 @@ def test_a_count_changed_by_its_read_is_reported_as_right_in_storage(flip_stores
     assert report is not None
     assert report.splitlines()[5] == (
         "- explicit, cell 4, gene 2: a fresh open reads 1, and its fingerprint is "
-        "the source's, so the first read changed the stored count"
+        "the source's, so the count is right in storage and the first read "
+        "returned it wrong"
     )
 
 
@@ -1001,6 +1003,30 @@ def test_a_fingerprint_alone_that_differs_is_a_mismatch(flip_stores):
     assert lines[4].startswith(f"- content fingerprints: fit {'0' * 64}, explicit ")
     # No count is wrong, so none is read again.
     assert lines[5].startswith("Both stores are kept in ")
+
+
+def test_two_stores_that_agree_on_a_fingerprint_unlike_the_sources_are_a_mismatch(
+    flip_stores,
+):
+    locations, values = flip_stores
+    source = zarr.open_group(str(locations["fit"]))["RNA/counts"].attrs[
+        "content_fingerprint"
+    ]
+    # Both imports summarized the same counts, which are not the source's.
+    for path in locations.values():
+        counts = zarr.open_group(str(path), mode="r+")["RNA/counts"]
+        counts.attrs["content_fingerprint"] = "0" * 64
+
+    report = _counts_mismatch("RNA", locations, _read_counts(locations), values)
+
+    assert report is not None
+    lines = report.splitlines()
+    assert lines[1:5] == [
+        "- fit and explicit hold the same counts",
+        "- fit and source hold the same counts",
+        "- explicit and source hold the same counts",
+        f"- content fingerprints: fit {'0' * 64}, explicit {'0' * 64}, source {source}",
+    ]
 
 
 def test_without_a_source_both_stores_read_their_mismatched_count_again(
