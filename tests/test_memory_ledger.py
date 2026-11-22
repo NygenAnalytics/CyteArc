@@ -15,7 +15,7 @@ import numpy as np
 import pytest
 import zarr
 
-from cytearc.metadata.rows import read_rows, read_text_rows, read_whole
+from cytearc.metadata.rows import read_rows, read_text_rows, read_whole, row_read_bytes
 from cytearc.metadata.selection import (
     category_codes,
     plan_cell_selection_read,
@@ -388,6 +388,48 @@ def test_a_row_read_gives_its_rows(tmp_path, n_rows, shape, chunks, dtype) -> No
     rows = np.sort(np.random.default_rng(2).choice(shape[0], n_rows, replace=False))
     result = read_rows(MemoryLedger(None, "Reading"), array, rows, item="the rows")
     assert np.array_equal(result, values[rows])
+
+
+#: What a read of selected rows holds beside what it charges: Zarr's own
+#: objects and buffers, which the budget leaves out.
+_READ_OBJECT_BYTES = 192 * 1024
+
+
+@pytest.mark.parametrize(
+    ("shape", "chunks", "dtype", "n_rows"),
+    [
+        ((300_000,), (100_000,), np.int64, 60_000),
+        ((300_000,), (2_000,), np.int32, 1_000),
+        ((300_000, 4), (100_000, 4), np.int32, 250_000),
+        # Half the profiles of 2,000 features of 4 lineages by 50 bins, which
+        # a lineage aggregation stores in one chunk of 3.2 MB.
+        ((2_000, 4, 50), (2_000, 4, 50), np.float64, 1_000),
+    ],
+    ids=["int64", "small-chunks", "two-axes", "profiles"],
+)
+def test_a_row_read_holds_what_it_charges(tmp_path, shape, chunks, dtype, n_rows):
+    import gc
+    import tracemalloc
+
+    root = zarr.open_group(tmp_path / "store.zarr", mode="w")
+    array, values = _incompressible(root, "values", shape, chunks, dtype)
+    rows = np.sort(np.random.default_rng(2).choice(shape[0], n_rows, replace=False))
+    # A first read starts the pools that Zarr decodes on, which a traced read
+    # then reuses.
+    read_rows(MemoryLedger(None, "Reading"), array, rows[:1], item="the rows")
+    gc.collect()
+    tracemalloc.start()
+    try:
+        before, _ = tracemalloc.get_traced_memory()
+        result = read_rows(MemoryLedger(None, "Reading"), array, rows, item="the rows")
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert np.array_equal(result, values[rows])
+    # Zarr copies the rows that a decoded chunk holds before it places them
+    # in the rows it returns.
+    charged = row_read_bytes(array_geometry(array), n_rows)
+    assert peak - before <= charged + _READ_OBJECT_BYTES
 
 
 @pytest.mark.parametrize("kind", ["ASCII", "four-byte"])

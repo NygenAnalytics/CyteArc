@@ -288,8 +288,9 @@ def test_feature_analyses_charge_their_features_beside_the_graph_load(
     fate = refused(lambda: trajectory.load_fate(lineage_fate))
     # Each feature analysis holds the int64 positions of its features while
     # the graph of its pseudotime or fate map loads.
-    detected = 8 * len(_feature_indices(datastore, detected_features))
-    hvgs = 8 * len(_feature_indices(datastore, mark_hvgs))
+    n_detected = len(_feature_indices(datastore, detected_features))
+    n_hvgs = len(_feature_indices(datastore, mark_hvgs))
+    detected, hvgs = 8 * n_detected, 8 * n_hvgs
     computing = {
         "markers": lambda: trajectory.markers(
             pseudotime_scoring, features=detected_features, invalidate_cache=True
@@ -315,39 +316,50 @@ def test_feature_analyses_charge_their_features_beside_the_graph_load(
             lambda: trajectory.load_markers(pseudotime_markers),
             pseudotime_markers,
             pseudotime.needed_bytes + detected,
+            n_detected,
         ),
         "Loading a pseudotime aggregation": (
             lambda: trajectory.load_aggregation(pseudotime_aggregation),
             pseudotime_aggregation,
             pseudotime.needed_bytes + detected,
+            n_detected,
         ),
         "Loading lineage markers": (
             lambda: trajectory.load_lineage_markers(lineage_markers),
             lineage_markers,
             fate.needed_bytes + hvgs,
+            n_hvgs,
         ),
         "Loading lineage drivers": (
             lambda: trajectory.load_drivers(lineage_drivers),
             lineage_drivers,
             fate.needed_bytes + hvgs,
+            n_hvgs,
         ),
         "Loading a lineage aggregation": (
             lambda: trajectory.load_lineage_aggregation(lineage_aggregation),
             lineage_aggregation,
             fate.needed_bytes + hvgs,
+            n_hvgs,
         ),
     }
-    for work, (call, ref, graph_only) in loaders.items():
+    for work, (call, ref, graph_only, n_features) in loaders.items():
         reads.clear()
         refusal = refused(call)
-        # The loader's refusal names the check of its saved table of every
-        # feature, which reads the frozen feature names whole, beside a
-        # stored chunk of them as decoded, before the graph is read.
+        # The loader's refusal names its saved table, whose check reads the
+        # frozen names of every feature whole, beside a stored chunk of them
+        # as decoded, before the graph is read.
         names = artifact_group(datastore.zw, ref)["feature_names"]
         whole = names.nbytes + names.chunks[0] * names.dtype.itemsize
         assert refusal.needed_bytes > graph_only
         assert refusal.needed_bytes > whole
+        table = f"the saved table of {n_features} features and its work"
+        assert refusal.item == table
         assert str(refusal).startswith(f"{work} of ")
+        assert (
+            f" cells needs about {refusal.needed_bytes} bytes in memory for {table}, "
+            in str(refusal)
+        )
         assert reads == []
         # The budget that the refusal names loads the analysis, reading the
         # graph once.
@@ -421,6 +433,68 @@ def test_a_saved_feature_analysis_is_checked_against_the_budget_before_it_is_reu
         assert run_at(needed, call).kind == ref.kind
         assert checked
         assert _artifacts_of(datastore, ref.kind) == saved
+
+
+def test_a_feature_analysis_computed_anew_is_not_refused_once_it_has_computed(
+    datastore,
+    monkeypatch,
+    pseudotime_scoring,
+    lineage_fate,
+    mark_hvgs,
+) -> None:
+    from cytearc.storage import artifact_writer
+
+    # Thirty of the highly variable genes: their analyses compute within less
+    # than checking a saved table of every feature of the assay holds, the
+    # check that each result passes before it is published.
+    few = datastore.features.snapshot(
+        from_assay="RNA", feature_indexes=_feature_indices(datastore, mark_hvgs)[:30]
+    )
+    refused_at_publication: list[str] = []
+    validate = artifact_writer.validate_artifact_payload
+
+    def validated(group: Any, planned: Any) -> None:
+        try:
+            validate(group, planned)
+        except MemoryBudgetError as error:
+            refused_at_publication.append(str(error))
+            raise
+
+    monkeypatch.setattr(artifact_writer, "validate_artifact_payload", validated)
+    fresh = {"invalidate_cache": True}
+    trajectory = datastore.trajectory
+    calls = {
+        "pseudotime_markers": lambda: trajectory.markers(
+            pseudotime_scoring, features=few, **fresh
+        ),
+        "pseudotime_aggregation": lambda: trajectory.aggregation(
+            pseudotime_scoring, features=few, n_clusters=2, n_neighbors=3, **fresh
+        ),
+        "lineage_markers": lambda: trajectory.lineage_markers(
+            lineage_fate, features=few, **fresh
+        ),
+        "lineage_drivers": lambda: trajectory.drivers(
+            lineage_fate, features=few, **fresh
+        ),
+        "lineage_aggregation": lambda: trajectory.lineage_aggregation(
+            lineage_fate, features=few, n_clusters=2, n_neighbors=3, **fresh
+        ),
+    }
+    for kind, call in calls.items():
+        saved = _artifacts_of(datastore, kind)
+        # Each refusal names a budget, which runs the call or at which a
+        # later step refuses and names more, before the call computes.
+        budget = 1
+        for _ in range(6):
+            monkeypatch.setattr(datastore, "memoryBytes", budget)
+            monkeypatch.setattr(datastore, "resources", ResourceBudget(budget, 1))
+            try:
+                result = call()
+                break
+            except MemoryBudgetError as refused:
+                budget = refused.needed_bytes
+        assert refused_at_publication == []
+        assert result.kind == kind and result not in saved
 
 
 def _artifacts_of(datastore: Any, kind: str) -> list[ArtifactRef]:
@@ -526,6 +600,109 @@ def test_feature_analysis_loaders_run_within_the_budget_they_name(
             assert result in saved
 
     _assert_calls_run_within_the_budget_they_name(store, calls, check=check)
+
+
+@pytest.mark.slow
+def test_loaders_of_analyses_of_every_expressed_feature_run_within_the_budget_they_name(
+    datastore,
+    auto_filter_cells,
+    pseudotime_scoring,
+    lineage_fate,
+) -> None:
+    from .test_trajectory_membership import (
+        _assert_calls_run_within_the_budget_they_name,
+    )
+
+    # Analyses of every feature that a cell expresses, half of the assay's:
+    # loading one, or drawing its heatmap, holds more of its saved table than
+    # checking the table holds.
+    features = datastore.features.detected(auto_filter_cells, min_cells=1)
+    trajectory = datastore.trajectory
+    saved = {
+        "load_markers": (
+            trajectory.load_markers,
+            trajectory.markers(pseudotime_scoring, features=features),
+        ),
+        "load_aggregation": (
+            trajectory.load_aggregation,
+            trajectory.aggregation(
+                pseudotime_scoring,
+                features=features,
+                n_clusters=15,
+                window_size=50,
+                chunk_size=10,
+            ),
+        ),
+        "load_lineage_markers": (
+            trajectory.load_lineage_markers,
+            trajectory.lineage_markers(lineage_fate, features=features),
+        ),
+        "load_drivers": (
+            trajectory.load_drivers,
+            trajectory.drivers(lineage_fate, features=features),
+        ),
+        "load_lineage_aggregation": (
+            trajectory.load_lineage_aggregation,
+            trajectory.lineage_aggregation(
+                lineage_fate, features=features, n_bins=12, n_clusters=5
+            ),
+        ),
+    }
+    plots = datastore.plots
+    _assert_calls_run_within_the_budget_they_name(
+        datastore,
+        {
+            **{
+                name: (lambda load=load, ref=ref: load(ref))
+                for name, (load, ref) in saved.items()
+            },
+            "pseudotime_heatmap": lambda: plots.pseudotime_heatmap(
+                aggregation=saved["load_aggregation"][1], show=False
+            ).close(),
+            "lineage_heatmap": lambda: plots.lineage_heatmap(
+                aggregation=saved["load_lineage_aggregation"][1], show=False
+            ).close(),
+        },
+    )
+
+
+@pytest.mark.slow
+def test_heatmaps_of_many_bins_run_within_the_budget_they_name(
+    datastore,
+    pseudotime_scoring,
+    detected_features,
+    lineage_fate,
+) -> None:
+    from .test_trajectory_membership import (
+        _assert_calls_run_within_the_budget_they_name,
+    )
+
+    # Profiles of 200 bins, and of 40 for each of the fate map's three
+    # lineages, of the features detected in 20 cells, which drawing a heatmap
+    # copies more often than loading their aggregation reads them.
+    trajectory = datastore.trajectory
+    pseudotime = trajectory.aggregation(
+        pseudotime_scoring,
+        features=detected_features,
+        n_clusters=15,
+        window_size=50,
+        chunk_size=200,
+    )
+    lineage = trajectory.lineage_aggregation(
+        lineage_fate, features=detected_features, n_bins=40, n_clusters=5
+    )
+    plots = datastore.plots
+    _assert_calls_run_within_the_budget_they_name(
+        datastore,
+        {
+            "pseudotime_heatmap": lambda: plots.pseudotime_heatmap(
+                aggregation=pseudotime, show=False
+            ).close(),
+            "lineage_heatmap": lambda: plots.lineage_heatmap(
+                aggregation=lineage, show=False
+            ).close(),
+        },
+    )
 
 
 def test_lineage_markers_reuse_and_recompute_identically(

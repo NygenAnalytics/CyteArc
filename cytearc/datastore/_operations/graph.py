@@ -696,18 +696,23 @@ def _require_graph_budget(
     work: str,
     n_cells: int,
     n_edges: int,
+    item: str | None = None,
 ) -> None:
-    """Raise MemoryError, before a graph or neighbor matrix is read, over budget."""
+    """Raise MemoryError, before a graph or neighbor matrix is read, over budget.
+
+    The refusal names ``item`` where a later step than the graph's load
+    needs the bytes, and the graph and its work otherwise.
+    """
     limit = int(resources.memoryBytes)
     if required <= limit:
         return
     raise MemoryBudgetError(
         f"{work} of {n_cells} cells needs about {required} bytes in memory "
-        f"for a graph of {n_edges} edges, but the operation limit is {limit} "
-        "bytes. Raise mem_budget.",
+        f"for {f'a graph of {n_edges} edges' if item is None else item}, but the "
+        f"operation limit is {limit} bytes. Raise mem_budget.",
         needed_bytes=required,
         budget_bytes=limit,
-        item=f"the graph of {n_edges} edges and its work",
+        item=f"the graph of {n_edges} edges and its work" if item is None else item,
     )
 
 
@@ -803,6 +808,7 @@ class _GraphOperationsMixin(_GraphOperationsBase):
         work: str,
         keep_nearest: bool = False,
         later_bytes: Callable[[int, GraphLoadMemory], int] | None = None,
+        later_item: str | None = None,
     ) -> None:
         """Raise MemoryError before a consumer of ``graph`` loads it, over budget.
 
@@ -813,7 +819,8 @@ class _GraphOperationsMixin(_GraphOperationsBase):
         ``keep_nearest`` loads fewer than each cell's stored edges.
         ``later_bytes(n_cells, load)`` is what the consumer needs in a later
         step, as a whole; the check names it when it is more than the load
-        needs, so one refusal names a budget that runs the consumer.
+        needs, so one refusal names a budget that runs the consumer, and
+        then refuses for ``later_item``, where the consumer names that step.
         """
         graph_loc = self._graph_location(graph)
         group = as_zarr_group(self.zw[graph_loc], name=graph_loc)
@@ -831,15 +838,15 @@ class _GraphOperationsMixin(_GraphOperationsBase):
             keep_nearest=keep_nearest,
         )
         working = working_bytes(n_cells, load)
+        loading = held_bytes + max(load.peakBytes, load.heldBytes + working)
+        later = 0 if later_bytes is None else later_bytes(n_cells, load)
         _require_graph_budget(
             self.resources,
-            required=max(
-                0 if later_bytes is None else later_bytes(n_cells, load),
-                held_bytes + max(load.peakBytes, load.heldBytes + working),
-            ),
+            required=max(later, loading),
             work=work,
             n_cells=n_cells,
             n_edges=n_edges,
+            item=later_item if later > loading else None,
         )
 
     def _store_to_sparse(self, graph_loc: str, use_k: int | None) -> csr_matrix:

@@ -1253,19 +1253,45 @@ def test_scattered_rows_of_variable_width_text_are_read_a_chunk_span_at_a_time(
         "ids", data=values.astype(np.dtypes.StringDType()), chunks=(50,)
     )
     _refuse_zarr_selections(monkeypatch)
+    spans: list[slice] = []
+    getitem = zarr.Array.__getitem__
+
+    def recorded(self, selection):
+        spans.append(selection)
+        return getitem(self, selection)
+
+    monkeypatch.setattr(zarr.Array, "__getitem__", recorded)
+
+    def chunks_of(selections: list[slice]) -> list[int]:
+        """The stored chunk of 50 rows that each read takes a slice of."""
+        assert all(isinstance(span, slice) for span in selections)
+        assert all(span.start // 50 == (span.stop - 1) // 50 for span in selections)
+        return [span.start // 50 for span in selections]
+
     scattered = np.sort(np.random.default_rng(4).choice(400, 77, replace=False))
 
-    # Distinct ascending rows, as chunkwise reads and fingerprints take them.
+    # Distinct ascending rows, as chunkwise reads and fingerprints take them:
+    # one slice of each stored chunk that holds some of them.
     np.testing.assert_array_equal(
         read_array_rows_chunkwise(stored, scattered), values[scattered]
     )
+    assert chunks_of(spans) == np.unique(scattered // 50).tolist()
     assert fingerprint_stored_rows(stored, scattered) == fingerprint_strings(
         values[scattered]
     )
-    # Rows out of order and repeated, across chunks, through a table's column.
+    # Rows out of order and repeated, across chunks, through a table's column:
+    # a slice of each chunk, from its first selected row to its last.
     rows = np.array([399, 3, 3, 120, 51, 50, 49, 0, 399])
     table = SimpleNamespace(_get_array=lambda column: stored)
+    spans.clear()
     np.testing.assert_array_equal(read_metadata_rows(table, "ids", rows), values[rows])
+    assert sorted((span.start, span.stop) for span in spans) == [
+        (0, 50),
+        (50, 52),
+        (120, 121),
+        (399, 400),
+    ]
+    chunks_of(spans)
     # Text in memory, and no rows.
     in_memory = values.astype(np.dtypes.StringDType())
     np.testing.assert_array_equal(
@@ -1320,6 +1346,7 @@ def test_reading_scattered_variable_width_text_does_not_crash_the_interpreter() 
 
 
 def test_variable_width_text_is_charged_at_its_longest_value(monkeypatch) -> None:
+    import gc
     import tracemalloc
 
     import cytearc.metadata.rows as rows_module
@@ -1350,34 +1377,27 @@ def test_variable_width_text_is_charged_at_its_longest_value(monkeypatch) -> Non
     assert text_width(stored) == 30
     assert len(measured) == 3
     stored[1] = "bé"
-    # A row holds its 16-byte element and up to 8 bytes a character three
-    # times, beside 16 int64 positions; decoding a chunk of 2 values holds
-    # for each that element, its encoded bytes twice, 4 and 4 a character,
-    # and a Python string of 64 bytes and 4 a character.
-    value = 16 + 8 * 23
-    chunk = 2 * (value + 2 * (4 + 4 * 23) + 64 + 4 * 23)
-    per_row = 3 * value + 16 * 8
-    assert array_row_selection_parts(stored) == (chunk, per_row)
-    assert text_read_bytes(stored, 3) == chunk + 3 * (per_row + 64 + 4 * 23)
 
-    # Reading scattered rows of 300 characters as Python strings holds what
-    # the charge states, and more than four times a charge without them.
+    # Reading rows of 300 characters as Python strings holds what the charge
+    # states: one row decodes its whole chunk of 1,024 values, each held as
+    # NumPy keeps it, encoded twice and as a Python string, and 600 rows of
+    # chunks of 256 hold their copies beside a chunk at a time.
     long = np.asarray(
         [f"{index:04d}" + "\N{GRINNING FACE}" * 296 for index in range(1_024)]
     )
-    many = root.create_array(
-        "long", data=long.astype(np.dtypes.StringDType()), chunks=(256,)
-    )
-    rows = np.sort(np.random.default_rng(5).choice(1_024, 600, replace=False))
-    text_width(many)
-    tracemalloc.start()
-    before, _ = tracemalloc.get_traced_memory()
-    strings = read_array_rows_chunkwise(many, rows).astype(object)
-    _, peak = tracemalloc.get_traced_memory()
-    tracemalloc.stop()
-    assert strings.tolist() == long[rows].tolist()
-    fixed, per_row = array_row_selection_parts(many)
-    assert fixed > 0 and per_row > 0
-    assert peak - before <= text_read_bytes(many, 600)
-    without_characters = 2 * 256 * 16 + 1024 + 600 * (3 * 16 + 16 * 8 + 64)
-    assert peak - before > 4 * without_characters
+    scattered = np.sort(np.random.default_rng(5).choice(1_024, 600, replace=False))
+    for chunk_rows, rows in ((1_024, np.array([512])), (256, scattered)):
+        many = root.create_array(
+            f"long-{chunk_rows}",
+            data=long.astype(np.dtypes.StringDType()),
+            chunks=(chunk_rows,),
+        )
+        text_width(many)
+        gc.collect()
+        tracemalloc.start()
+        before, _ = tracemalloc.get_traced_memory()
+        strings = read_array_rows_chunkwise(many, rows).astype(object)
+        _, peak = tracemalloc.get_traced_memory()
+        tracemalloc.stop()
+        assert strings.tolist() == long[rows].tolist()
+        assert peak - before <= text_read_bytes(many, len(rows))

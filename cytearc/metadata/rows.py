@@ -295,18 +295,23 @@ def row_read_bytes(geometry: ArrayGeometry | None, n_rows: int) -> int:
     ``storage.geometry.ROW_INDEX_BYTES`` counts them. Reading the bands then
     holds each row in the result and the indices it keeps, one band's
     selected rows as Zarr returns them and what reading the band holds, as
-    ``ArrayGeometry.bandReadBytes`` counts. Without a geometry, as for an
-    array in memory, a row's bytes are not known, so only the rows' indices
-    are counted; :func:`read_rows_bytes` adds the rows from the array.
+    ``ArrayGeometry.bandReadBytes`` counts. An unsharded array's read also
+    copies the rows that a decoded chunk holds before it places them, up to
+    a chunk's rows; a sharded array's read places them through its
+    shard-level copy, which ``bandReadBytes`` counts. Without a geometry, as
+    for an array in memory, a row's bytes are not known, so only the rows'
+    indices are counted; :func:`read_rows_bytes` adds the rows from the
+    array.
     """
     n_rows = int(n_rows)
     ordering = n_rows * ROW_INDEX_BYTES
     if geometry is None:
         return ordering
-    reading = n_rows * (
-        geometry.rowBytes() + ROW_KEPT_INDEX_BYTES
-    ) + geometry.bandReadBytes(
-        min(n_rows, geometry.axisChunk(0)), operation_concurrency()
+    band_rows = min(n_rows, geometry.axisChunk(0))
+    reading = (
+        n_rows * (geometry.rowBytes() + ROW_KEPT_INDEX_BYTES)
+        + geometry.bandReadBytes(band_rows, operation_concurrency())
+        + (band_rows * geometry.rowBytes() if geometry.shards is None else 0)
     )
     return max(ordering, reading)
 

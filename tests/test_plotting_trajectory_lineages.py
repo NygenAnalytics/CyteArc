@@ -183,6 +183,27 @@ def feature_names(loaded_aggregation) -> list[str]:
     return np.asarray(loaded_aggregation.feature_names).astype(str).tolist()
 
 
+def _load_lineage_heatmap_aggregation(
+    monkeypatch: pytest.MonkeyPatch,
+    loaded: Any,
+    requests: list[ArtifactRef] | None = None,
+) -> None:
+    """Make the lineage heatmap's loader return ``loaded``, recording each request in ``requests``.
+
+    The heatmap's loader takes what drawing holds, which its check of the
+    graph counts.
+    """
+
+    def load(store: Any, ref: ArtifactRef, *, drawing_bytes: Any, work: str) -> Any:
+        assert drawing_bytes is lineage_plots.lineage_heatmap_bytes
+        assert work == "Drawing a lineage heatmap"
+        if requests is not None:
+            requests.append(ref)
+        return loaded
+
+    monkeypatch.setattr(DataStore, "_load_lineage_aggregation", load)
+
+
 @pytest.fixture
 def shared_name(monkeypatch: pytest.MonkeyPatch, loaded_aggregation):
     """The session aggregation with two retained features renamed to share MATR3.
@@ -199,6 +220,7 @@ def shared_name(monkeypatch: pytest.MonkeyPatch, loaded_aggregation):
     monkeypatch.setattr(
         TrajectoryAccessor, "load_lineage_aggregation", lambda accessor, ref: renamed
     )
+    _load_lineage_heatmap_aggregation(monkeypatch, renamed)
     ids = np.asarray(loaded_aggregation.feature_ids).astype(str)
     indices = np.asarray(loaded_aggregation.feature_indices)
     assert not np.array_equal(renamed.data[rows[0]], renamed.data[rows[1]])
@@ -1088,10 +1110,8 @@ def test_lineage_heatmap_spans_sparse_unscaled_profiles_to_their_maximum(
     # percentile is the minimum.
     sparse = np.zeros(loaded.data.shape)
     sparse[0, 0, 0] = 3.0
-    monkeypatch.setattr(
-        TrajectoryAccessor,
-        "load_lineage_aggregation",
-        lambda accessor, ref: dataclasses.replace(loaded, data=sparse),
+    _load_lineage_heatmap_aggregation(
+        monkeypatch, dataclasses.replace(loaded, data=sparse)
     )
 
     result = closing(splt.lineage_heatmap(datastore, aggregation=unscaled, show=False))
@@ -1123,12 +1143,8 @@ def test_lineage_heatmap_rejects_a_loaded_result_of_another_artifact(
     loaded_aggregation,
 ):
     requests: list[ArtifactRef] = []
-
-    def load(accessor: Any, ref: ArtifactRef) -> Any:
-        requests.append(ref)
-        return dataclasses.replace(loaded_aggregation, ref=_other_ref(ref))
-
-    monkeypatch.setattr(TrajectoryAccessor, "load_lineage_aggregation", load)
+    other = dataclasses.replace(loaded_aggregation, ref=_other_ref(lineage_aggregation))
+    _load_lineage_heatmap_aggregation(monkeypatch, other, requests)
 
     with pytest.raises(ValueError, match="does not match the request"):
         splt.lineage_heatmap(

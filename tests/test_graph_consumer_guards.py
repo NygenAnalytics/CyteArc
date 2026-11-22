@@ -404,6 +404,49 @@ def test_consumers_run_within_the_admitted_budget(writable) -> None:
         assert store.artifacts.inspect(ref).complete
 
 
+def test_the_graph_check_names_a_later_step_that_needs_more_than_the_load(
+    writable,
+) -> None:
+    from cytearc.utils.memory_budget import MemoryBudgetError
+
+    store, refs = writable
+    graph = refs["rna_graph"]
+    loading = _required(_load(store, graph), 0, 0)
+    store.resources = ResourceBudget(1, 1)
+
+    def refusal(later: int) -> MemoryBudgetError:
+        with pytest.raises(MemoryBudgetError) as caught:
+            store._require_graph_load_budget(
+                graph,
+                symmetric=False,
+                upper_only=False,
+                held_bytes=0,
+                working_bytes=lambda _cells, _load: 0,
+                work="Loading a saved table",
+                later_bytes=lambda _cells, _load: later,
+                later_item="the saved table and its work",
+            )
+        return caught.value
+
+    # A later step that needs as much as the load leaves the graph named.
+    named = refusal(loading)
+    assert (named.needed_bytes, named.item) == (
+        loading,
+        f"the graph of {N_CELLS * K} edges and its work",
+    )
+    # A byte more names the later step, in the message too.
+    table = refusal(loading + 1)
+    assert (table.needed_bytes, table.item) == (
+        loading + 1,
+        "the saved table and its work",
+    )
+    assert str(table) == (
+        f"Loading a saved table of {N_CELLS} cells needs about {loading + 1} bytes "
+        "in memory for the saved table and its work, but the operation limit is 1 "
+        "bytes. Raise mem_budget."
+    )
+
+
 def test_the_graph_load_estimate_pins_its_terms() -> None:
     # 500 stored edges of 100 cells, int32 pairs and float32 weights: SciPy
     # loads an entry as an int32 index and a float32 weight, 8 bytes, beside

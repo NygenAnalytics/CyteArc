@@ -693,15 +693,17 @@ def pseudotime_heatmap_bytes(
     The loaded aggregation keeps each of its ``n_features`` features'
     position, module and validity, beside its stored name and ID,
     ``label_bytes`` in all. The drawing reads the features' profiles of
-    ``n_bins`` bins and holds them in five copies: as read, ordered by
-    module, in the order drawn, as matplotlib normalizes them, and as the
-    matrix table. It copies the names and IDs three times and makes a Python
-    string of each name twice, holds four values for each of the
-    pseudotime's ``n_cells`` cells, and matplotlib's figure objects.
+    ``n_bins`` bins and holds four copies of them at once: ordered by
+    module, in the order drawn, as matplotlib keeps the image, and as the
+    matrix table; rendering the figure normalizes them once more, which a
+    call with ``show=False`` does not do. It copies the names and IDs three
+    times and makes a Python string of each name twice, holds four values
+    for each of the pseudotime's ``n_cells`` cells, and matplotlib's figure
+    objects.
     """
     n_features, label_bytes = int(n_features), int(label_bytes)
     kept = n_features * (24 + label_bytes)
-    profiles = 5 * 8 * n_features * int(n_bins)
+    profiles = 4 * 8 * n_features * int(n_bins)
     labels = n_features * (3 * label_bytes + 2 * (STRING_BYTES + label_bytes))
     return kept + profiles + labels + 32 * int(n_cells) + _HEATMAP_FIGURE_BYTES
 
