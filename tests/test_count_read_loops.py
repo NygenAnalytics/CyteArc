@@ -598,6 +598,27 @@ def _traced_bytes_settle_below(limit: int, timeout: float = 10.0) -> int:
     return traced
 
 
+def _read_errors_left(timeout: float = 10.0) -> list[BaseException]:
+    """Return the failed read's errors that are still alive, once none are or after ``timeout`` seconds.
+
+    On Zarr's loop the gather of a failed read's other chunk reads holds the
+    error until those reads end, after the error reaches the caller; with
+    the collector off, an error that a reference cycle keeps never goes.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        left = [
+            item
+            for item in gc.get_objects()
+            if isinstance(item, BaseException)
+            and "the store could not read" in str(item)
+        ]
+        if not left or time.monotonic() > deadline:
+            return left
+        del left
+        time.sleep(0.02)
+
+
 def _failed_read_error(path: str, read: Any) -> str | None:
     """Run the coroutine ``read`` on the read path ``path``, and return the class of its error.
 
@@ -653,12 +674,7 @@ def test_a_failed_read_frees_its_output_once_its_error_is_dropped(path, scope, l
         traced = _traced_bytes_settle_below(FAILED_READ_CHUNK_BYTES)
         # Nor does any error of the read stay, such as the group that Zarr
         # raised inside a shard read before the one that reached the caller.
-        left = [
-            item
-            for item in gc.get_objects()
-            if isinstance(item, BaseException)
-            and "the store could not read" in str(item)
-        ]
+        left = _read_errors_left()
     finally:
         tracemalloc.stop()
         gc.enable()

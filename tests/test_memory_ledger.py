@@ -391,7 +391,8 @@ def test_a_row_read_gives_its_rows(tmp_path, n_rows, shape, chunks, dtype) -> No
 
 
 #: What a read of selected rows holds beside what it charges: Zarr's own
-#: objects and buffers, which the budget leaves out.
+#: objects and buffers beyond the objects of each band's read, which the
+#: charge counts as ``ArrayGeometry.objectBytes`` does.
 _READ_OBJECT_BYTES = 192 * 1024
 
 
