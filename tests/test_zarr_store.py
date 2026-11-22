@@ -571,6 +571,30 @@ def test_copy_metadata_array_drops_presentation_attributes():
     assert names.attrs["display"] == {"label": "Name"}
 
 
+@pytest.mark.parametrize(
+    ("n_rows", "width", "chunk_rows"),
+    [(2, 6, 2), (150_000, 3, 100_000)],
+    ids=["two-names", "more-rows-than-a-chunk-holds"],
+)
+def test_copy_metadata_array_chunks_the_copy_as_a_table_column(
+    n_rows: int, width: int, chunk_rows: int
+) -> None:
+    # A feature analysis freezes its assay's feature names and IDs this way:
+    # a chunk holds at most 100,000 rows and no more rows than the column
+    # has, where it held 100,000 rows whatever the column's length.
+    source = zarr.open_group(store=MemoryStore(), mode="w")
+    names = source.create_array(
+        "names",
+        data=np.asarray([f"{row:0{width}d}"[-width:] for row in range(n_rows)]),
+    )
+    target = zarr.open_group(store=MemoryStore(), mode="w")
+
+    copied = copy_metadata_array(names, target, "feature_names")
+
+    assert copied.chunks == (chunk_rows,)
+    assert copied[:].tolist() == names[:].tolist()
+
+
 @pytest.mark.parametrize("dtype", ["f8", "U8", "S8", "T"])
 @pytest.mark.parametrize("selected_rows", [False, True])
 @pytest.mark.parametrize("resources", [None, ResourceBudget(64 * 1024**2, 4)])
@@ -603,6 +627,45 @@ def test_metadata_copy_overlaps_full_fixed_width_chunk_reads(
         target["values"][:], expected if rows is None else expected[rows]
     )
     assert target["values"].attrs["display"] == {"label": "Values"}
+
+
+def test_copying_selected_rows_of_variable_width_text_keeps_their_strings(
+    monkeypatch,
+) -> None:
+    # IDs of 9 to 40 characters, some beyond ASCII, which another tool wrote
+    # as variable-width text. Zarr's selection of scattered rows of such text
+    # crashes NumPy 2.1 and returns other strings on NumPy 2.2 to 2.3.1, so
+    # the copy must not reach it.
+    values = np.asarray(
+        [
+            f"cell{index:05d}" + ("é" if index % 5 == 0 else "") + "x" * (index % 31)
+            for index in range(300)
+        ]
+    )
+    source = zarr.open_group(store=MemoryStore(), mode="w")
+    source.create_array(
+        "ids", data=values.astype(np.dtypes.StringDType()), chunks=(40,)
+    )
+    orthogonal = zarr.Array.get_orthogonal_selection
+
+    def sliced(self, selection, *args, **kwargs):
+        parts = selection if isinstance(selection, tuple) else (selection,)
+        assert all(isinstance(part, slice) for part in parts), (
+            "Zarr selected scattered rows of variable-width text"
+        )
+        return orthogonal(self, selection, *args, **kwargs)
+
+    monkeypatch.setattr(zarr.Array, "get_orthogonal_selection", sliced)
+    rows = np.concatenate(
+        (np.arange(299, 200, -3), np.sort(np.random.default_rng(2).choice(200, 60)))
+    )
+    target = zarr.open_group(store=MemoryStore(), mode="w")
+
+    copy_zarr_group_tree(source, target, row_indices=rows)
+
+    # The copy keeps the rows' strings, as fixed-width text of the longest.
+    assert target["ids"][:].tolist() == values[rows].tolist()
+    assert target["ids"].dtype == np.dtype(f"U{max(map(len, values[rows]))}")
 
 
 @pytest.mark.parametrize(

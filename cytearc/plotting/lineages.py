@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 
 from ..features.values import feature_description, resolve_feature_rows
+from ..metadata.rows import STRING_BYTES
 from ..metadata.selection import cell_selection_indices
 from ..storage.artifacts import ArtifactRef, inspect_artifact
 from ..trajectory.curves import layout_rows
@@ -42,6 +43,34 @@ else:
     Colormap = Any
 
 __all__ = ["lineage_curves", "lineage_heatmap", "lineage_trends", "lineage_tree"]
+
+
+#: What drawing a lineage heatmap holds whatever its size, and for each
+#: lineage it draws: matplotlib's figure, its axes, images and text,
+#: measured after a full collection has emptied CPython's free lists.
+_LINEAGE_HEATMAP_FIGURE_BYTES = 512 * 1024
+_LINEAGE_PANEL_BYTES = 640 * 1024
+
+
+def lineage_heatmap_bytes(
+    n_features: int, n_lineages: int, n_values: int, label_bytes: int
+) -> int:
+    """Return the most bytes that drawing a lineage heatmap holds once its aggregation is loaded, with it.
+
+    The loaded aggregation keeps each of its ``n_features`` features'
+    profile of ``n_values`` values over ``n_lineages`` lineages, its
+    position and module, beside its stored name and ID, ``label_bytes`` in
+    all. The drawing holds three more copies of the profiles: of the drawn
+    lineages in the order drawn, as matplotlib keeps each lineage's image,
+    and as the profile table. It copies the names and IDs three times and
+    makes a Python string of each name twice, beside matplotlib's figure.
+    """
+    n_features, label_bytes = int(n_features), int(label_bytes)
+    profiles = 8 * n_features * int(n_values)
+    kept = profiles + n_features * (16 + label_bytes)
+    labels = n_features * (3 * label_bytes + 2 * (STRING_BYTES + label_bytes))
+    figure = _LINEAGE_HEATMAP_FIGURE_BYTES + int(n_lineages) * _LINEAGE_PANEL_BYTES
+    return kept + 3 * profiles + labels + figure
 
 
 def _require_loaded(loaded: ArtifactRef, requested: ArtifactRef, label: str) -> None:
@@ -123,7 +152,13 @@ def lineage_heatmap(
     for limit in (vmin, vmax):
         if limit is not None and not np.isfinite(limit):
             raise ValueError("vmax must be greater than vmin, and both finite")
-    loaded = store.trajectory.load_lineage_aggregation(aggregation)
+    # The loader checks what drawing holds against the memory budget before
+    # it reads the aggregation.
+    loaded = store._load_lineage_aggregation(
+        aggregation,
+        drawing_bytes=lineage_heatmap_bytes,
+        work="Drawing a lineage heatmap",
+    )
     _require_loaded(loaded.ref, aggregation, "lineage aggregation")
     z_scaled = bool(
         (inspect_artifact(store.zw, aggregation).parameters or {})["z_scale"]

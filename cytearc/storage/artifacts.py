@@ -368,7 +368,11 @@ def fingerprint_stored_arrays(
     *,
     arrays: Mapping[str, zarr.Array] | None = None,
 ) -> str:
-    """Fingerprint stored arrays; pass ``arrays`` already opened to skip reopening."""
+    """Fingerprint stored arrays; pass ``arrays`` already opened to skip reopening.
+
+    Each array is read a scan band at a time, and each band is let go before
+    the next is read, so the fingerprint holds one band of one array.
+    """
     builder = ValueFingerprintBuilder()
     for name in names:
         array = as_zarr_array(
@@ -384,6 +388,7 @@ def fingerprint_stored_arrays(
                 (start,) + (0,) * (array.ndim - 1),
                 block,
             )
+            del block
         builder.end_array(name)
     return builder.hexdigest()
 

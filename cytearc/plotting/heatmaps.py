@@ -10,6 +10,7 @@ import pandas as pd
 from ..assay.normalization import resolve_normalization_params
 from ..features.markers.table import MarkerSlot
 from ..metadata.membership import measured_rows
+from ..metadata.rows import STRING_BYTES
 from ..metadata.selection import grouping_value_name
 from ..storage.artifacts import ArtifactRef, artifact_path
 from ..storage.selections import read_stored_selection_indices
@@ -678,6 +679,35 @@ def marker_heatmap(
     return result
 
 
+#: What drawing a pseudotime heatmap holds whatever its size: matplotlib's
+#: figure, its four axes, the colorbar and their text, measured after a full
+#: collection has emptied CPython's free lists.
+_HEATMAP_FIGURE_BYTES = 1536 * 1024
+
+
+def pseudotime_heatmap_bytes(
+    n_features: int, n_bins: int, label_bytes: int, n_cells: int
+) -> int:
+    """Return the most bytes that drawing a pseudotime heatmap holds once its aggregation is loaded, with it.
+
+    The loaded aggregation keeps each of its ``n_features`` features'
+    position, module and validity, beside its stored name and ID,
+    ``label_bytes`` in all. The drawing reads the features' profiles of
+    ``n_bins`` bins and holds four copies of them at once: ordered by
+    module, in the order drawn, as matplotlib keeps the image, and as the
+    matrix table; rendering the figure normalizes them once more, which a
+    call with ``show=False`` does not do. It copies the names and IDs three
+    times and makes a Python string of each name twice, holds four values
+    for each of the pseudotime's ``n_cells`` cells, and matplotlib's figure
+    objects.
+    """
+    n_features, label_bytes = int(n_features), int(label_bytes)
+    kept = n_features * (24 + label_bytes)
+    profiles = 4 * 8 * n_features * int(n_bins)
+    labels = n_features * (3 * label_bytes + 2 * (STRING_BYTES + label_bytes))
+    return kept + profiles + labels + 32 * int(n_cells) + _HEATMAP_FIGURE_BYTES
+
+
 def _prepare_pseudotime_heatmap(
     store: Any,
     *,
@@ -686,8 +716,13 @@ def _prepare_pseudotime_heatmap(
     if not isinstance(aggregation, ArtifactRef):
         raise TypeError("aggregation must be an ArtifactRef")
     # The aggregation's loader validates it against its pseudotime, which it
-    # hands back, so the pseudotime and its graph are loaded once.
-    loaded, pseudotime_result = store._load_aggregation_with_pseudotime(aggregation)
+    # hands back, so the pseudotime and its graph are loaded once, and checks
+    # what drawing holds against the memory budget before it reads them.
+    loaded, pseudotime_result = store._load_aggregation_with_pseudotime(
+        aggregation,
+        drawing_bytes=pseudotime_heatmap_bytes,
+        work="Drawing a pseudotime heatmap",
+    )
     if loaded.ref != aggregation:
         raise ValueError("Loaded pseudotime aggregation does not match the request")
     if pseudotime_result.cell_selection != loaded.cell_selection:

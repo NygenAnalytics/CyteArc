@@ -39,6 +39,7 @@ from cytearc.metadata.rows import (
     array_row_selection_parts,
     iter_metadata_column_blocks,
     metadata_missing_mask,
+    read_array_rows_chunkwise,
     read_metadata_missing_rows,
     read_metadata_rows,
     read_metadata_rows_chunkwise,
@@ -1160,12 +1161,12 @@ def test_stored_rows_are_fingerprinted_a_chunk_at_a_time_as_read_whole(kind) -> 
     root = zarr.open_group(store=MemoryStore(), mode="w")
     stored = root.create_array("ids", data=values, chunks=(50,))
     rng = np.random.default_rng(4)
-    selections = [np.arange(400), np.array([399]), np.array([], dtype=np.int64)]
-    if kind == "fixed":
-        # NumPy 2.1, the oldest that CyteArc supports, crashes on Zarr's
-        # selection of scattered rows of variable-width text; a store holds
-        # text at a fixed width.
-        selections.append(np.sort(rng.choice(400, 77, replace=False)))
+    selections = [
+        np.arange(400),
+        np.array([399]),
+        np.array([], dtype=np.int64),
+        np.sort(rng.choice(400, 77, replace=False)),
+    ]
     for rows in selections:
         assert fingerprint_stored_rows(stored, rows) == fingerprint_strings(
             values[rows]
@@ -1188,3 +1189,215 @@ def test_stored_rows_are_fingerprinted_a_chunk_at_a_time_as_read_whole(kind) -> 
     _, peak = tracemalloc.get_traced_memory()
     tracemalloc.stop()
     assert peak - before < 40_000 * 15 * 4 // 4
+
+
+# Text of variable width, which another tool can write
+
+
+def _variable_text(n_values: int) -> np.ndarray:
+    """Values of 9 to 40 characters, every fifth beyond ASCII.
+
+    NumPy keeps a value of up to 15 bytes in UTF-8 inside its 16-byte
+    element and a longer one in an arena beside the array, and the values
+    that NumPy before 2.3.2 mishandles under a selection of scattered rows
+    are the longer ones.
+    """
+    return np.asarray(
+        [
+            f"cell{index:05d}" + ("é" if index % 5 == 0 else "") + "x" * (index % 31)
+            for index in range(n_values)
+        ]
+    )
+
+
+def _refuse_zarr_selections(monkeypatch) -> None:
+    """Make Zarr's selections of scattered rows of variable-width text fail, as they do on NumPy 2.1.
+
+    Zarr reads a slice through its orthogonal selection too, which indexes
+    each chunk with slices and stays, as do selections of other values.
+    """
+    orthogonal = zarr.Array.get_orthogonal_selection
+
+    coordinate = zarr.Array.get_coordinate_selection
+
+    def scattered(self, selection):
+        parts = selection if isinstance(selection, tuple) else (selection,)
+        return self.dtype.kind == "T" and not all(
+            isinstance(part, slice) for part in parts
+        )
+
+    def sliced(self, selection, *args, **kwargs):
+        if scattered(self, selection):
+            raise AssertionError("Zarr selected scattered rows of variable-width text")
+        return orthogonal(self, selection, *args, **kwargs)
+
+    def coordinates(self, selection, *args, **kwargs):
+        if self.dtype.kind == "T":
+            raise AssertionError("Zarr selected scattered rows of variable-width text")
+        return coordinate(self, selection, *args, **kwargs)
+
+    monkeypatch.setattr(zarr.Array, "get_orthogonal_selection", sliced)
+    monkeypatch.setattr(zarr.Array, "get_coordinate_selection", coordinates)
+
+
+def test_scattered_rows_of_variable_width_text_are_read_a_chunk_span_at_a_time(
+    monkeypatch,
+) -> None:
+    from cytearc.metadata.rows import fingerprint_stored_rows
+    from cytearc.storage.artifacts import fingerprint_strings
+    from cytearc.storage.partition import read_variable_text_rows
+
+    values = _variable_text(400)
+    root = zarr.open_group(store=MemoryStore(), mode="w")
+    stored = root.create_array(
+        "ids", data=values.astype(np.dtypes.StringDType()), chunks=(50,)
+    )
+    _refuse_zarr_selections(monkeypatch)
+    spans: list[slice] = []
+    getitem = zarr.Array.__getitem__
+
+    def recorded(self, selection):
+        spans.append(selection)
+        return getitem(self, selection)
+
+    monkeypatch.setattr(zarr.Array, "__getitem__", recorded)
+
+    def chunks_of(selections: list[slice]) -> list[int]:
+        """The stored chunk of 50 rows that each read takes a slice of."""
+        assert all(isinstance(span, slice) for span in selections)
+        assert all(span.start // 50 == (span.stop - 1) // 50 for span in selections)
+        return [span.start // 50 for span in selections]
+
+    scattered = np.sort(np.random.default_rng(4).choice(400, 77, replace=False))
+
+    # Distinct ascending rows, as chunkwise reads and fingerprints take them:
+    # one slice of each stored chunk that holds some of them.
+    np.testing.assert_array_equal(
+        read_array_rows_chunkwise(stored, scattered), values[scattered]
+    )
+    assert chunks_of(spans) == np.unique(scattered // 50).tolist()
+    assert fingerprint_stored_rows(stored, scattered) == fingerprint_strings(
+        values[scattered]
+    )
+    # Rows out of order and repeated, across chunks, through a table's column:
+    # a slice of each chunk, from its first selected row to its last.
+    rows = np.array([399, 3, 3, 120, 51, 50, 49, 0, 399])
+    table = SimpleNamespace(_get_array=lambda column: stored)
+    spans.clear()
+    np.testing.assert_array_equal(read_metadata_rows(table, "ids", rows), values[rows])
+    assert sorted((span.start, span.stop) for span in spans) == [
+        (0, 50),
+        (50, 52),
+        (120, 121),
+        (399, 400),
+    ]
+    chunks_of(spans)
+    # Text in memory, and no rows.
+    in_memory = values.astype(np.dtypes.StringDType())
+    np.testing.assert_array_equal(
+        read_variable_text_rows(in_memory, rows), values[rows]
+    )
+    empty = read_variable_text_rows(stored, np.array([], dtype=np.int64))
+    assert empty.shape == (0,) and empty.dtype == stored.dtype
+
+
+# Reads of scattered rows of the issue's IDs, and a copy of those rows. On
+# NumPy 2.1, Zarr's selection of these rows crashes the interpreter.
+_SCATTERED_TEXT_READS = """
+import json
+import numpy as np
+import zarr
+from zarr.storage import MemoryStore
+from cytearc.metadata.rows import read_array_rows_chunkwise
+from cytearc.storage.copy import copy_zarr_group_tree
+
+values = np.asarray([f"cell{index:05d}" + "x" * (index % 9) for index in range(400)])
+root = zarr.open_group(store=MemoryStore(), mode="w")
+root.create_array("ids", data=values.astype(np.dtypes.StringDType()), chunks=(50,))
+rows = np.sort(np.random.default_rng(4).choice(400, 77, replace=False))
+read = read_array_rows_chunkwise(root["ids"], rows)
+copy = zarr.open_group(store=MemoryStore(), mode="w")
+copy_zarr_group_tree(root, copy, row_indices=rows)
+print(json.dumps([read.tolist(), copy["ids"][:].tolist()]))
+"""
+
+
+def test_reading_scattered_variable_width_text_does_not_crash_the_interpreter() -> None:
+    import subprocess
+    import sys
+
+    # A crash would stop the test run, so the reads run in a process of their own.
+    result = subprocess.run(
+        [sys.executable, "-c", _SCATTERED_TEXT_READS],
+        capture_output=True,
+        text=True,
+        timeout=600,
+    )
+    assert result.returncode == 0, (
+        f"reading scattered rows of variable-width text exited with "
+        f"{result.returncode}:\n{result.stderr[-3000:]}"
+    )
+    values = np.asarray(
+        [f"cell{index:05d}" + "x" * (index % 9) for index in range(400)]
+    )
+    expected = values[np.sort(np.random.default_rng(4).choice(400, 77, replace=False))]
+    read, copied = json.loads(result.stdout)
+    assert read == copied == expected.tolist()
+
+
+def test_variable_width_text_is_charged_at_its_longest_value(monkeypatch) -> None:
+    import gc
+    import tracemalloc
+
+    import cytearc.metadata.rows as rows_module
+    from cytearc.storage.content_stamps import clear_content_cache
+
+    values = np.asarray(["a", "bé", "c" * 23, ""])
+    root = zarr.open_group(store=MemoryStore(), mode="w")
+    stored = root.create_array(
+        "ids", data=values.astype(np.dtypes.StringDType()), chunks=(2,)
+    )
+    measured: list[int] = []
+    measure = rows_module._longest_text_characters
+
+    def counted(array):
+        measured.append(1)
+        return measure(array)
+
+    monkeypatch.setattr(rows_module, "_longest_text_characters", counted)
+    clear_content_cache()
+    assert text_width(stored) == 23
+    assert text_width(values.astype(np.dtypes.StringDType())) == 23
+    assert len(measured) == 2
+    # The stored values' measure is reused while their stored bytes are
+    # unchanged, and taken again after an edit.
+    assert text_width(stored) == 23
+    assert len(measured) == 2
+    stored[1] = "d" * 30
+    assert text_width(stored) == 30
+    assert len(measured) == 3
+    stored[1] = "bé"
+
+    # Reading rows of 300 characters as Python strings holds what the charge
+    # states: one row decodes its whole chunk of 1,024 values, each held as
+    # NumPy keeps it, encoded twice and as a Python string, and 600 rows of
+    # chunks of 256 hold their copies beside a chunk at a time.
+    long = np.asarray(
+        [f"{index:04d}" + "\N{GRINNING FACE}" * 296 for index in range(1_024)]
+    )
+    scattered = np.sort(np.random.default_rng(5).choice(1_024, 600, replace=False))
+    for chunk_rows, rows in ((1_024, np.array([512])), (256, scattered)):
+        many = root.create_array(
+            f"long-{chunk_rows}",
+            data=long.astype(np.dtypes.StringDType()),
+            chunks=(chunk_rows,),
+        )
+        text_width(many)
+        gc.collect()
+        tracemalloc.start()
+        before, _ = tracemalloc.get_traced_memory()
+        strings = read_array_rows_chunkwise(many, rows).astype(object)
+        _, peak = tracemalloc.get_traced_memory()
+        tracemalloc.stop()
+        assert strings.tolist() == long[rows].tolist()
+        assert peak - before <= text_read_bytes(many, len(rows))

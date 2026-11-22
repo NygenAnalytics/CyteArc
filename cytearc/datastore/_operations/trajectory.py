@@ -124,6 +124,8 @@ from ...trajectory.artifacts import (
     MARKER_INPUTS as _MARKER_INPUTS,
     MARKER_PAYLOAD as _MARKER_PAYLOAD,
     PSEUDOTIME_INPUTS as _PSEUDOTIME_INPUTS,
+    aggregation_check_bytes as _aggregation_check_bytes_impl,
+    aggregation_load_bytes as _aggregation_load_bytes_impl,
     aggregation_payload_is_valid as _aggregation_payload_is_valid,
     diffusion_payload_is_valid as _diffusion_payload_is_valid,
     diffusion_write_bytes as _diffusion_write_bytes_impl,
@@ -132,19 +134,26 @@ from ...trajectory.artifacts import (
     fate_payload_is_valid as _fate_payload_is_valid,
     listed_labels as _listed_labels,
     listed_labels_bytes,
+    lineage_aggregation_check_bytes as _lineage_aggregation_check_bytes_impl,
+    lineage_aggregation_load_bytes as _lineage_aggregation_load_bytes_impl,
     lineage_aggregation_payload_is_valid as _lineage_aggregation_payload_is_valid,
     lineage_curve_payload_is_valid as _lineage_curve_payload_is_valid,
     lineage_driver_payload_is_valid as _lineage_driver_payload_is_valid,
     lineage_marker_payload_is_valid as _lineage_marker_payload_is_valid,
     lineage_membership_payload_is_valid as _lineage_membership_payload_is_valid,
+    lineage_statistics_check_bytes as _lineage_statistics_check_bytes_impl,
+    lineage_statistics_load_bytes as _lineage_statistics_load_bytes_impl,
     lineage_tree_payload_is_valid as _lineage_tree_payload_is_valid,
     load_cell_artifact_values as _load_cell_artifact_values,
+    marker_check_bytes as _marker_check_bytes_impl,
+    marker_load_bytes as _marker_load_bytes_impl,
     marker_payload_is_valid as _marker_payload_is_valid,
     pseudotime_method as _pseudotime_method,
     pseudotime_parameter_names as _pseudotime_parameter_names,
     pseudotime_payload_is_valid as _pseudotime_payload_is_valid,
     require_exact_record_keys as _require_exact_record_keys,
     selection_size as _selection_size,
+    stored_profile_sizes as _stored_profile_sizes_impl,
     true_array_indices as _true_array_indices,
     validate_aggregation_parameters as _validate_aggregation_parameters,
     validate_fate_parameters as _validate_fate_parameters,
@@ -408,6 +417,45 @@ class _PseudotimeFeatureCells:
     pseudotime: PseudotimeScoreResult
     cell_indices: np.ndarray
     ordering: np.ndarray
+
+    @property
+    def nbytes(self) -> int:
+        """Bytes these axes hold, the pseudotime's values among them."""
+        return int(
+            sum(
+                values.nbytes
+                for values in (
+                    self.feature_indices,
+                    self.pseudotime.values,
+                    self.pseudotime.valid,
+                    self.pseudotime.component,
+                    self.cell_indices,
+                    self.ordering,
+                )
+            )
+        )
+
+
+#: What a loaded pseudotime holds for each of its cells: its value, whether
+#: it is scored, and its component.
+_PSEUDOTIME_CELL_BYTES = 17
+
+
+def _lineage_cells_bytes(n_cells: int, n_lineages: int, n_sinks: int) -> int:
+    """The most bytes that a fate map's cells hold as a lineage feature analysis takes them.
+
+    The analysis keeps each cell's store row, place and order, its weight
+    for each of ``n_lineages`` lineages, whether it is absorbing and whether
+    it is scored, beside the fate map's probabilities of its ``n_sinks``
+    sinks; taking them holds two more copies of the probabilities, and the
+    direction's scores and components and which sink each cell holds.
+    """
+    return int(n_cells) * (8 * (int(n_lineages) + 3 * int(n_sinks)) + 44)
+
+
+def _saved_table_item(n_features: int) -> str:
+    """What a refusal to load a saved feature analysis of ``n_features`` features names."""
+    return f"the saved table of {int(n_features)} features and its work"
 
 
 @dataclass(frozen=True, slots=True)
@@ -1716,6 +1764,7 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         subgraph: bool,
         work: str,
         later_bytes: Callable[[int, GraphLoadMemory], int] | None = None,
+        later_item: str | None = None,
     ) -> None:
         """Refuse, before ``graph`` is read, a load to number its components that does not fit.
 
@@ -1724,7 +1773,8 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         subgraph that some of its cells induce, copies it.
         ``later_bytes(n_cells, load)`` is what the call needs in a later step,
         which the check names when it is more, so that one refusal names a
-        budget that runs the call.
+        budget that runs the call, for ``later_item`` where the call names
+        that step.
         """
         if self._get_graph_ncells_k(self._graph_location(graph))[0] == 0:
             # A graph of no cells holds nothing to load, and the loaders
@@ -1740,6 +1790,7 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
             ),
             work=work,
             later_bytes=later_bytes,
+            later_item=later_item,
         )
 
     def _load_pseudotime_scoring_with_graph(
@@ -1748,6 +1799,7 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         *,
         held_bytes: int = 0,
         later_bytes: Callable[[int, GraphLoadMemory], int] | None = None,
+        later_item: str | None = None,
         work: str = "Loading a pseudotime",
     ) -> _ScoredGraph:
         """Load pseudotime values and the symmetric graph used to validate them.
@@ -1760,8 +1812,9 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         components needs of it stays: which listed label each cell holds, or
         the stored vector. The load of the graph is then checked against the
         memory budget before the graph is read, beside them, or against the
-        ``later_bytes`` that the caller needs after the load, when more.
-        ``work`` names the call in refusals.
+        ``later_bytes`` that the caller needs after the load, when more, which
+        a refusal names as ``later_item``. ``work`` names the call in
+        refusals.
         """
         if not isinstance(ref, ArtifactRef):
             raise TypeError("ref must be an ArtifactRef")
@@ -1837,6 +1890,7 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
             subgraph=places is not None,
             work=work,
             later_bytes=later_bytes,
+            later_item=later_item,
         )
         ledger = MemoryLedger(
             self.resources.memoryBytes, work, codec_threads=self.nthreads
@@ -1995,6 +2049,7 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         *,
         held_bytes: int = 0,
         later_bytes: Callable[[int, GraphLoadMemory], int] | None = None,
+        later_item: str | None = None,
         work: str = "Loading a direction score",
     ) -> tuple[_FateDirection, csr_matrix]:
         """Read a direction score of a graph's cells, with the symmetric graph.
@@ -2006,7 +2061,8 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         cells' IDs, which go before the graph is read. The load is checked
         against the memory budget before the graph is read, beside the
         scores, or against the ``later_bytes`` that the caller needs after the
-        load, when more. ``work`` names the call in refusals.
+        load, when more, which a refusal names as ``later_item``. ``work``
+        names the call in refusals.
         """
         require_graph_kind(graph)
         selection = graph_cell_selection(self.zw, graph)
@@ -2028,6 +2084,7 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
             subgraph=False,
             work=work,
             later_bytes=later_bytes,
+            later_item=later_item,
         )
         ledger = MemoryLedger(
             self.resources.memoryBytes, work, codec_threads=self.nthreads
@@ -2549,6 +2606,7 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         record: _FateMapRecord | None = None,
         held_bytes: int = 0,
         later_bytes: Callable[[int, GraphLoadMemory], int] | None = None,
+        later_item: str | None = None,
         work: str | None = None,
     ) -> _FateInputs:
         """Load a fate map with the direction and sink labels that validate it.
@@ -2557,9 +2615,9 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         Lineage operations need both again, so they keep what validation read:
         of the sink labels, which sink each cell holds. Loading the direction
         loads the graph, beside the ``held_bytes`` that the caller holds, and
-        the sink labels are read once the graph is let go. ``later_bytes`` goes
-        to the graph's check, and ``work`` names the call in refusals, which
-        otherwise name the load that refuses. ``record`` is the fate map's
+        the sink labels are read once the graph is let go. ``later_bytes`` and
+        ``later_item`` go to the graph's check, and ``work`` names the call in
+        refusals, which otherwise name the load that refuses. ``record`` is the fate map's
         record, when the caller has read it.
         """
         if record is None:
@@ -2577,6 +2635,7 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
                 direction,
                 held_bytes=held_bytes,
                 later_bytes=later_bytes,
+                later_item=later_item,
                 work=work or "Loading a direction score",
             )[0]
             if directed.cell_selection != selection:
@@ -2589,6 +2648,7 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
                 pseudotime,
                 held_bytes=held_bytes,
                 later_bytes=later_bytes,
+                later_item=later_item,
                 work=work or "Loading a pseudotime",
             )
             pseudotime_result = loaded.pseudotime
@@ -4583,6 +4643,37 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
 
 
 class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
+    def _reuse_within_budget(
+        self,
+        *,
+        work: str,
+        held_bytes: int,
+        check_bytes: Callable[[Any], int],
+        check: Callable[[Any], bool],
+    ) -> Callable[[ArtifactRef, Any], bool]:
+        """Return a check of a saved feature analysis to reuse, refused over the memory budget before it reads.
+
+        The call holds ``held_bytes`` while it checks a saved result, and
+        ``check_bytes(group)`` is what checking that result holds, which is
+        charged before ``check(group)`` reads it; ``work`` names the call in
+        refusals. The same check runs on the call's own result before it is
+        published, an incomplete group, which is not charged, so a call never
+        refuses once it has computed.
+        """
+
+        def reusable(_ref: ArtifactRef, group: Any) -> bool:
+            if group.attrs.get("complete") is True:
+                ledger = MemoryLedger(
+                    self.resources.memoryBytes, work, codec_threads=self.nthreads
+                )
+                ledger.hold("the cells and features of the analysis", held_bytes)
+                ledger.peak(
+                    "checking a saved result before reusing it", check_bytes(group)
+                )
+            return check(group)
+
+        return reusable
+
     def _pseudotime_feature_assay(
         self,
         pseudotime: ArtifactRef,
@@ -4725,7 +4816,20 @@ class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
         label: str,
         input_names: frozenset[str],
         validate_parameters: Callable[[Mapping[str, Any]], dict[str, Any]],
+        work: str,
+        load_bytes: Callable[[Any, int, int], int],
+        cell_bytes: int = _PSEUDOTIME_CELL_BYTES,
     ) -> _PseudotimeFeatureRecord:
+        """Validate a saved pseudotime feature analysis's record and load its pseudotime.
+
+        ``load_bytes(group, n_selected, n_cells)`` is what checking and
+        loading the saved payload holds, and what the caller does with it,
+        once the pseudotime is loaded, beside the positions of the selected
+        features and ``cell_bytes`` for each of the ``n_cells`` cells of the
+        pseudotime's graph; the check of that graph names it, as the saved
+        table, when it is more than the graph's load, so one refusal names a
+        budget that loads the analysis. ``work`` names the call in refusals.
+        """
         head = self._feature_record_head(
             ref,
             kind=kind,
@@ -4735,13 +4839,23 @@ class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
             validate_parameters=validate_parameters,
             upstream="pseudotime",
         )
+        group = as_zarr_group(self.zw[head.path], name=head.path)
+        positions = head.feature_indices.nbytes
         ptime_result = self._load_pseudotime_scoring_with_graph(
-            head.upstream, held_bytes=head.feature_indices.nbytes
+            head.upstream,
+            held_bytes=positions,
+            later_bytes=lambda cells, _load: (
+                positions
+                + cell_bytes * cells
+                + load_bytes(group, len(head.feature_indices), cells)
+            ),
+            later_item=_saved_table_item(len(head.feature_indices)),
+            work=work,
         ).pseudotime
         if ptime_result.cell_selection != head.cell_selection:
             raise ValueError(f"{label} cell selection does not match pseudotime")
         return _PseudotimeFeatureRecord(
-            group=as_zarr_group(self.zw[head.path], name=head.path),
+            group=group,
             parameters=head.parameters,
             assay=head.assay,
             cell_selection=head.cell_selection,
@@ -4877,12 +4991,19 @@ class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
                     expected_types=(str,),
                 ),
             ),
-            reuse_validator=lambda _ref, group: _marker_payload_is_valid(
-                group,
-                n_features=assay.feats.N,
-                selected_features=feature_index,
-                expected_feature_ids_fingerprint=identity.ids_fingerprint,
-                expected_feature_names_fingerprint=identity.names_fingerprint,
+            reuse_validator=self._reuse_within_budget(
+                work="Pseudotime marker search",
+                held_bytes=axes.nbytes,
+                check_bytes=lambda group: _marker_check_bytes_impl(
+                    group, n_selected=len(feature_index)
+                ),
+                check=lambda group: _marker_payload_is_valid(
+                    group,
+                    n_features=assay.feats.N,
+                    selected_features=feature_index,
+                    expected_feature_ids_fingerprint=identity.ids_fingerprint,
+                    expected_feature_names_fingerprint=identity.names_fingerprint,
+                ),
             ),
         )
         if planned.reused:
@@ -4932,6 +5053,10 @@ class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
             label="Pseudotime-marker",
             input_names=_MARKER_INPUTS,
             validate_parameters=_validate_marker_parameters,
+            work="Loading pseudotime markers",
+            load_bytes=lambda group, n_selected, _n_cells: _marker_load_bytes_impl(
+                group, n_selected=n_selected
+            ),
         )
         group = record.group
         feature_indices = record.feature_indices
@@ -5172,19 +5297,29 @@ class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
                     expected_types=(str,),
                 ),
             ),
-            reuse_validator=lambda _ref, group: _aggregation_payload_is_valid(
-                group,
-                n_features=assay.feats.N,
-                selected_features=feature_indices,
-                n_bins=effective_bins,
-                n_clusters=n_clusters,
-                n_neighbors=n_neighbors,
-                nan_cluster_value=nan_cluster_value,
-                ann_params=resolved_ann_params,
-                expected_input_fingerprints=input_fingerprints,
-                expected_feature_ids_fingerprint=identity.ids_fingerprint,
-                expected_feature_names_fingerprint=identity.names_fingerprint,
-                effective_window=effective_window,
+            reuse_validator=self._reuse_within_budget(
+                work="Pseudotime aggregation",
+                held_bytes=axes.nbytes
+                + cell_ordering.nbytes
+                + cell_indices.nbytes
+                + feature_indices.nbytes,
+                check_bytes=lambda group: _aggregation_check_bytes_impl(
+                    group, n_selected=len(feature_indices)
+                ),
+                check=lambda group: _aggregation_payload_is_valid(
+                    group,
+                    n_features=assay.feats.N,
+                    selected_features=feature_indices,
+                    n_bins=effective_bins,
+                    n_clusters=n_clusters,
+                    n_neighbors=n_neighbors,
+                    nan_cluster_value=nan_cluster_value,
+                    ann_params=resolved_ann_params,
+                    expected_input_fingerprints=input_fingerprints,
+                    expected_feature_ids_fingerprint=identity.ids_fingerprint,
+                    expected_feature_names_fingerprint=identity.names_fingerprint,
+                    effective_window=effective_window,
+                ),
             ),
         )
         if planned.reused:
@@ -5282,13 +5417,29 @@ class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
     def _load_aggregation_with_pseudotime(
         self,
         ref: ArtifactRef,
+        *,
+        drawing_bytes: Callable[[int, int, int, int], int] | None = None,
+        work: str = "Loading a pseudotime aggregation",
     ) -> tuple[PseudotimeAggregationResult, PseudotimeScoreResult]:
         """Load a pseudotime aggregation with the pseudotime that validated it.
 
         Validating the aggregation loads its pseudotime, and with it the graph,
         so a caller that needs the pseudotime takes it from here rather than
-        loading it again.
+        loading it again. ``drawing_bytes(n_features, n_bins, label_bytes,
+        n_cells)`` is what the caller then holds with the loaded aggregation,
+        given its features, bins, the bytes of each feature's stored name and
+        ID, and its graph's cells, which the check of the graph names when it
+        is more than loading the aggregation; ``work`` names the call in
+        refusals.
         """
+
+        def load_bytes(group: Any, n_selected: int, n_cells: int) -> int:
+            loading = _aggregation_load_bytes_impl(group, n_selected=n_selected)
+            if drawing_bytes is None:
+                return loading
+            n_bins, label_bytes = _stored_profile_sizes_impl(group)
+            return max(loading, drawing_bytes(n_selected, n_bins, label_bytes, n_cells))
+
         record = self._load_pseudotime_feature_record(
             ref,
             kind="pseudotime_aggregation",
@@ -5296,6 +5447,11 @@ class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
             label="Pseudotime-aggregation",
             input_names=_AGGREGATION_INPUTS,
             validate_parameters=_validate_aggregation_parameters,
+            work=work,
+            load_bytes=load_bytes,
+            # Beside the pseudotime, the loader holds each cell's store row,
+            # and each scored cell's row and order.
+            cell_bytes=_PSEUDOTIME_CELL_BYTES + 24,
         )
         parameters = record.parameters
         ptime_result = record.pseudotime_result
@@ -5608,13 +5764,20 @@ class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
             required_attributes=(
                 AttributeRequirement("payload_fingerprint", expected_types=(str,)),
             ),
-            reuse_validator=lambda _ref, group: _lineage_marker_payload_is_valid(
-                group,
-                n_features=n_features,
-                n_lineages=n_lineages,
-                selected_features=feature_indices,
-                expected_feature_ids_fingerprint=identity.ids_fingerprint,
-                expected_feature_names_fingerprint=identity.names_fingerprint,
+            reuse_validator=self._reuse_within_budget(
+                work="Lineage marker search",
+                held_bytes=feature_indices.nbytes + axes.nbytes,
+                check_bytes=lambda group: _lineage_statistics_check_bytes_impl(
+                    group, _LINEAGE_MARKER_PAYLOAD, n_selected=len(feature_indices)
+                ),
+                check=lambda group: _lineage_marker_payload_is_valid(
+                    group,
+                    n_features=n_features,
+                    n_lineages=n_lineages,
+                    selected_features=feature_indices,
+                    expected_feature_ids_fingerprint=identity.ids_fingerprint,
+                    expected_feature_names_fingerprint=identity.names_fingerprint,
+                ),
             ),
         )
         if planned.reused:
@@ -5669,7 +5832,19 @@ class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
         label: str,
         input_names: frozenset[str],
         validate_parameters: Callable[[Mapping[str, Any]], dict[str, Any]],
+        work: str,
+        load_bytes: Callable[[Any, int, int], int],
     ) -> _LineageFeatureRecord:
+        """Validate a saved lineage feature analysis's record and load its fate map's cells.
+
+        ``load_bytes(group, n_selected, n_lineages)`` is what checking and
+        loading the saved payload holds, which the caller does once the fate
+        map is loaded, beside the positions of the selected features and the
+        fate map's cells, as ``_lineage_cells_bytes`` counts them for each
+        cell of its graph; the check of that graph names it, as the saved
+        table, when it is more than the graph's load, so one refusal names a
+        budget that loads the analysis. ``work`` names the call in refusals.
+        """
         head = self._feature_record_head(
             ref,
             kind=kind,
@@ -5679,18 +5854,30 @@ class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
             validate_parameters=validate_parameters,
             upstream="fate",
         )
+        lineages = list(head.parameters["lineages"])
+        group = as_zarr_group(self.zw[head.path], name=head.path)
+        fate_record = self._fate_map_record(head.upstream)
+        positions = head.feature_indices.nbytes
         fate_inputs = self._load_fate_inputs(
-            head.upstream, held_bytes=head.feature_indices.nbytes
+            head.upstream,
+            record=fate_record,
+            held_bytes=positions,
+            later_bytes=lambda cells, _load: (
+                positions
+                + _lineage_cells_bytes(cells, len(lineages), len(fate_record.sinks))
+                + load_bytes(group, len(head.feature_indices), len(lineages))
+            ),
+            later_item=_saved_table_item(len(head.feature_indices)),
+            work=work,
         )
         if fate_inputs.fate.cell_selection != head.cell_selection:
             raise ValueError(f"{label} cell selection does not match its fate map")
-        lineages = list(head.parameters["lineages"])
         try:
             _select_lineages_impl(fate_inputs.fate.sink_labels, lineages)
         except ValueError as exc:
             raise ValueError(f"{label} lineages are not sinks of its fate map") from exc
         return _LineageFeatureRecord(
-            group=as_zarr_group(self.zw[head.path], name=head.path),
+            group=group,
             inputs=head.inputs,
             parameters=head.parameters,
             assay=head.assay,
@@ -5751,6 +5938,15 @@ class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
             label="Lineage-marker",
             input_names=_LINEAGE_MARKER_INPUTS,
             validate_parameters=_validate_lineage_marker_parameters,
+            work="Loading lineage markers",
+            load_bytes=lambda group, n_selected, n_lineages: (
+                _lineage_statistics_load_bytes_impl(
+                    group,
+                    _LINEAGE_MARKER_PAYLOAD,
+                    n_selected=n_selected,
+                    n_lineages=n_lineages,
+                )
+            ),
         )
         if not _lineage_marker_payload_is_valid(
             record.group,
@@ -5932,14 +6128,24 @@ class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
                 AttributeRequirement("payload_fingerprint", expected_types=(str,)),
                 AttributeRequirement("n_cells", expected_types=(int,)),
             ),
-            reuse_validator=lambda _ref, group: _lineage_driver_payload_is_valid(
-                group,
-                n_features=n_features,
-                n_lineages=n_lineages,
-                n_cells=n_cells,
-                selected_features=feature_indices,
-                expected_feature_ids_fingerprint=identity.ids_fingerprint,
-                expected_feature_names_fingerprint=identity.names_fingerprint,
+            reuse_validator=self._reuse_within_budget(
+                work="Lineage driver search",
+                held_bytes=feature_indices.nbytes
+                + axes.nbytes
+                + mask.nbytes
+                + driver_indices.nbytes,
+                check_bytes=lambda group: _lineage_statistics_check_bytes_impl(
+                    group, _LINEAGE_DRIVER_PAYLOAD, n_selected=len(feature_indices)
+                ),
+                check=lambda group: _lineage_driver_payload_is_valid(
+                    group,
+                    n_features=n_features,
+                    n_lineages=n_lineages,
+                    n_cells=n_cells,
+                    selected_features=feature_indices,
+                    expected_feature_ids_fingerprint=identity.ids_fingerprint,
+                    expected_feature_names_fingerprint=identity.names_fingerprint,
+                ),
             ),
         )
         if planned.reused:
@@ -6001,6 +6207,15 @@ class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
             label="Lineage-driver",
             input_names=_LINEAGE_DRIVER_INPUTS,
             validate_parameters=_validate_lineage_driver_parameters,
+            work="Loading lineage drivers",
+            load_bytes=lambda group, n_selected, n_lineages: (
+                _lineage_statistics_load_bytes_impl(
+                    group,
+                    _LINEAGE_DRIVER_PAYLOAD,
+                    n_selected=n_selected,
+                    n_lineages=n_lineages,
+                )
+            ),
         )
         driver_cells = parse_artifact_ref(
             record.inputs.get("driver_cells"), "Lineage-driver cells input"
@@ -6235,18 +6450,25 @@ class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
                 ),
                 AttributeRequirement("payload_fingerprint", expected_types=(str,)),
             ),
-            reuse_validator=lambda _ref, group: _lineage_aggregation_payload_is_valid(
-                group,
-                n_features=n_features,
-                selected_features=feature_indices,
-                n_lineages=n_lineages,
-                n_bins=n_bins,
-                n_clusters=n_clusters,
-                n_neighbors=n_neighbors,
-                nan_cluster_value=nan_cluster_value,
-                expected_input_fingerprints=input_fingerprints,
-                expected_feature_ids_fingerprint=identity.ids_fingerprint,
-                expected_feature_names_fingerprint=identity.names_fingerprint,
+            reuse_validator=self._reuse_within_budget(
+                work="Lineage aggregation",
+                held_bytes=feature_indices.nbytes + axes.nbytes,
+                check_bytes=lambda group: _lineage_aggregation_check_bytes_impl(
+                    group, n_selected=len(feature_indices)
+                ),
+                check=lambda group: _lineage_aggregation_payload_is_valid(
+                    group,
+                    n_features=n_features,
+                    selected_features=feature_indices,
+                    n_lineages=n_lineages,
+                    n_bins=n_bins,
+                    n_clusters=n_clusters,
+                    n_neighbors=n_neighbors,
+                    nan_cluster_value=nan_cluster_value,
+                    expected_input_fingerprints=input_fingerprints,
+                    expected_feature_ids_fingerprint=identity.ids_fingerprint,
+                    expected_feature_names_fingerprint=identity.names_fingerprint,
+                ),
             ),
         )
         if planned.reused:
@@ -6393,6 +6615,35 @@ class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
         ref: ArtifactRef,
     ) -> LineageAggregationResult:
         """Load fate-weighted lineage profiles from an explicit artifact."""
+        return self._load_lineage_aggregation(ref)
+
+    @validation_scoped
+    def _load_lineage_aggregation(
+        self,
+        ref: ArtifactRef,
+        *,
+        drawing_bytes: Callable[[int, int, int, int], int] | None = None,
+        work: str = "Loading a lineage aggregation",
+    ) -> LineageAggregationResult:
+        """Load fate-weighted lineage profiles, checking what the caller then holds with them against the memory budget first.
+
+        ``drawing_bytes(n_features, n_lineages, n_values, label_bytes)`` is
+        what the caller holds with the loaded aggregation, given its features
+        and lineages, the values of each feature's profile and the bytes of
+        each feature's stored name and ID, which the check of the fate map's
+        graph names when it is more than loading the aggregation; ``work``
+        names the call in refusals.
+        """
+
+        def load_bytes(group: Any, n_selected: int, n_lineages: int) -> int:
+            loading = _lineage_aggregation_load_bytes_impl(group, n_selected=n_selected)
+            if drawing_bytes is None:
+                return loading
+            n_values, label_bytes = _stored_profile_sizes_impl(group)
+            return max(
+                loading, drawing_bytes(n_selected, n_lineages, n_values, label_bytes)
+            )
+
         record = self._load_lineage_feature_record(
             ref,
             kind="lineage_aggregation",
@@ -6400,6 +6651,8 @@ class _TrajectoryFeatureOperationsMixin(_TrajectoryFeatureOperationsBase):
             label="Lineage-aggregation",
             input_names=_LINEAGE_AGGREGATION_INPUTS,
             validate_parameters=_validate_lineage_aggregation_parameters,
+            work=work,
+            load_bytes=load_bytes,
         )
         parameters = record.parameters
         axes = record.axes

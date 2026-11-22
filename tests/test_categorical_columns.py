@@ -1288,6 +1288,18 @@ def _unordered(group: zarr.Group) -> None:
     del group["__cytearc_categories__labels"].attrs["ordered"]
 
 
+def _variable_width_categories(group: zarr.Group) -> None:
+    # Another tool rewrites the categories as variable-width text, which
+    # decoding would index with the codes; the column refuses them instead.
+    categories = group["__cytearc_categories__labels"]
+    group.create_array(
+        "__cytearc_categories__labels",
+        data=np.asarray(categories[:]).astype(np.dtypes.StringDType()),
+        overwrite=True,
+        attributes=categories.attrs.asdict(),
+    )
+
+
 def _code_past_the_categories(group: zarr.Group) -> None:
     group["labels"][0] = 12
 
@@ -1311,6 +1323,7 @@ def _padded_without_a_reserved_entry(group: zarr.Group) -> None:
         (_drop_categories, "categories array that is missing"),
         (_float_codes, "signed integer code"),
         (_unordered, "malformed categories array"),
+        (_variable_width_categories, "malformed categories array"),
         (_code_past_the_categories, "holds the code 12"),
         (_code_below_missing, "holds the code -2"),
         (_padded_with_text, "reserved entry is malformed"),

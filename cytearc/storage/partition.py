@@ -3,12 +3,12 @@
 import operator
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 import numpy as np
 
 from ..utils.arrays import has_duplicates
-from .geometry import ArrayGeometry
+from .geometry import ArrayGeometry, array_geometry
 
 type Fits = Callable[[int], bool]
 
@@ -20,6 +20,7 @@ __all__ = [
     "indexed_read_parts",
     "is_contiguous",
     "partition_indices",
+    "read_variable_text_rows",
     "row_band",
     "row_read_parts",
     "scan_band",
@@ -247,6 +248,36 @@ def _bin_groups(
         (int(ordered[edges[position]]), order[edges[position] : edges[position + 1]])
         for position in range(edges.size - 1)
     ]
+
+
+def read_variable_text_rows(array: Any, rows: np.ndarray) -> np.ndarray:
+    """Read rows of an array of variable-width text, a stored chunk's span at a time.
+
+    Zarr's selections of scattered rows index each decoded chunk with the
+    rows followed by an Ellipsis, which NumPy releases before 2.3.2
+    mishandle for variable-width text (numpy/numpy#29279): NumPy 2.1
+    corrupts memory and crashes, and NumPy 2.2 to 2.3.1 return other
+    strings. This reads, for each stored chunk, the slice that spans its
+    selected rows, which decodes no more than Zarr's selection would, and
+    takes the rows from it with ``np.take``, which reads the stored strings
+    on every supported release. The rows can repeat and come in any order;
+    the caller checks that they lie in the array.
+    """
+    indices = np.asarray(rows, dtype=np.int64)
+    if indices.size == 0:
+        return np.asarray(array[0:0])
+    geometry = array_geometry(array)
+    if geometry is None:
+        return np.take(np.asarray(array), indices, axis=0)
+    output = np.empty((indices.size, *array.shape[1:]), dtype=array.dtype)
+    for _chunk, positions in _bin_groups(geometry, 0, indices):
+        chunk_rows = indices[positions]
+        start = int(chunk_rows.min())
+        span = np.asarray(array[start : int(chunk_rows.max()) + 1])
+        output[positions] = np.take(span, chunk_rows - start, axis=0)
+        # A chunk's span goes before the next is read.
+        del span
+    return output
 
 
 def partition_indices(

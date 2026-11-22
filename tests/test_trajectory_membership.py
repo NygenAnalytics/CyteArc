@@ -2164,7 +2164,6 @@ def test_trajectory_and_graph_calls_run_within_the_budget_they_name(
     window = cell_selection_indices(
         store.zw, store.trajectory.branch_cells(computed, sinks)
     )
-    unbounded = store.memoryBytes
     again = {"invalidate_cache": True}
     # A score keyed by cell ID, which directs a fate map of its own.
     score = by_cell_id(
@@ -2206,37 +2205,8 @@ def test_trajectory_and_graph_calls_run_within_the_budget_they_name(
         "graph.load": lambda: store.graph.load(branching.graph, symmetric=True),
         "graph.load nearest": lambda: store.graph.load(branching.graph, use_k=2),
     }
-    peaks = {}
-    # A full collection empties CPython's free lists, after which a call's
-    # small objects are allocated, and traced, anew, so each traced call
-    # follows one and is measured at its most; the report counts the full
-    # collections around a call over its budget.
-    full_collections = {}
-    last_full = _full_collections()
-    for call_name, call in calls.items():
-        # Each refusal names a budget, which runs the call or a later step
-        # refuses and names more.
-        budget = 1
-        for _ in range(5):
-            _set_budget(store, budget)
-            try:
-                result = call()
-                break
-            except MemoryBudgetError as refused:
-                budget = refused.needed_bytes
-        gc.collect()
-        full = _full_collections()
-        tracemalloc.start()
-        try:
-            before, _ = tracemalloc.get_traced_memory()
-            result = call()
-            _, peak = tracemalloc.get_traced_memory()
-        finally:
-            tracemalloc.stop()
-        peaks[call_name] = (peak - before, budget)
-        full_collections[call_name] = (full - last_full, _full_collections() - full)
-        last_full = _full_collections()
-        _set_budget(store, unbounded)
+
+    def check(call_name: str, result: Any) -> None:
         if call_name == "membership":
             np.testing.assert_array_equal(
                 store.trajectory.load_lineage_membership(result).members, members
@@ -2245,9 +2215,177 @@ def test_trajectory_and_graph_calls_run_within_the_budget_they_name(
             np.testing.assert_array_equal(
                 cell_selection_indices(store.zw, result), window
             )
+
+    _assert_calls_run_within_the_budget_they_name(store, calls, check=check)
+
+
+def _assert_calls_run_within_the_budget_they_name(
+    store: Any,
+    calls: dict[str, Callable[[], Any]],
+    *,
+    check: Callable[[str, Any], None] | None = None,
+) -> None:
+    """Assert that each call runs within the budget that its refusals name, traced after a full collection.
+
+    Each call starts at a budget of one byte and follows its refusals, each
+    of which names a budget that runs the call or at which a later step
+    refuses and names more. At the last budget the call runs again, traced,
+    and ``check(name, result)`` checks what it returned at the store's own
+    budget. A call over its budget is traced once more, since CPython grows
+    its own tables, such as the one of interned strings, now and then as a
+    session interns names, and the call that grows one holds the new table
+    once, 7.7 MB when it makes room for 349,525 strings, which no step
+    charges. A call over its budget in both runs is named with the
+    allocations near its peak.
+    """
+    unbounded = store.memoryBytes
+    peaks = {}
+    # A full collection empties CPython's free lists, after which a call's
+    # small objects are allocated, and traced, anew, so each traced call
+    # follows one and is measured at its most; the report counts the full
+    # collections around a call over its budget.
+    full_collections = {}
+    last_full = _full_collections()
+    try:
+        for call_name, call in calls.items():
+            budget = 1
+            for _ in range(5):
+                _set_budget(store, budget)
+                try:
+                    result = call()
+                    break
+                except MemoryBudgetError as refused:
+                    budget = refused.needed_bytes
+            gc.collect()
+            full = _full_collections()
+            for _ in range(2):
+                tracemalloc.start()
+                try:
+                    before, _ = tracemalloc.get_traced_memory()
+                    result = call()
+                    _, peak = tracemalloc.get_traced_memory()
+                finally:
+                    tracemalloc.stop()
+                peaks[call_name] = (peak - before, budget)
+                if peak - before <= budget:
+                    break
+                gc.collect()
+            full_collections[call_name] = (
+                full - last_full,
+                _full_collections() - full,
+            )
+            last_full = _full_collections()
+            _set_budget(store, unbounded)
+            if check is not None:
+                check(call_name, result)
+    finally:
+        _set_budget(store, unbounded)
     over = {name: held for name, held in peaks.items() if held[0] > held[1]}
     assert not over, _over_budget_report(
         store, calls, over, full_collections, unbounded
+    )
+
+
+def _cells_with_ids(
+    layout: tuple[_Arm, ...], ids: np.ndarray, chunk_rows: int
+) -> tuple[Any, ArtifactRef, ArtifactRef, pd.Series]:
+    """Store a layout's cells in a shuffled order, with ``ids`` as stored, and the graph of each cell's five nearest cells.
+
+    Returns the store, the graph, a selection of every cell but those of the
+    side branch C, so that its rows lie scattered among the store's, and a
+    source/sink vector over the selected cells keyed by their IDs: the
+    first half of the trunk its sources and the second halves of A and B its
+    sinks. The IDs are stored in chunks of ``chunk_rows``.
+    """
+    arms, _positions, labels, points = _trajectory_cells(layout)
+    order = np.random.default_rng(10).permutation(len(arms))
+    arms, labels, points = arms[order], labels[order], points[order]
+    store = _memory_graph_store()
+    table = store.z.create_group("cellData")
+    table.create_array("ids", data=ids, chunks=(chunk_rows,))
+    table.create_array("I", data=np.ones(len(arms), dtype=bool))
+    table.create_array("kept", data=arms != "c")
+    store.cells = MetaData(table)
+    selections = [
+        resolve_stored_selection_artifact(
+            store.zw,
+            table_path="cellData",
+            id_column="ids",
+            source_column=column,
+            scope="datastore",
+            kind="cell_selection",
+            operation="test_selection",
+            parameters={},
+            inputs={},
+        )
+        for column in ("I", "kept")
+    ]
+    graph, _neighbors, coordinates = _native_chain(
+        store.zw, "RNA", cell_selection=selections[0]
+    )
+    _write_neighbor_graph(store, graph, points, 5)
+    artifact_group(store.zw, coordinates)["data"][:] = points
+    kept_labels = labels[arms != "c"]
+    vector = np.zeros(len(kept_labels))
+    vector[kept_labels == "t1"] = -1.0 / np.sum(kept_labels == "t1")
+    sinks = np.isin(kept_labels, ["a2", "b2"])
+    vector[sinks] = 1.0 / np.sum(sinks)
+    return store, graph, selections[1], by_cell_id(store.cells, vector, key="kept")
+
+
+def test_a_pseudotime_of_some_cells_reads_variable_width_ids_without_zarr_selections(
+    monkeypatch,
+) -> None:
+    from .test_metadata_contracts import _refuse_zarr_selections
+
+    # IDs of 26 characters, which NumPy keeps outside its 16-byte elements,
+    # stored as fixed-width text, as CyteArc writes them, and as
+    # variable-width text, as another tool writes them with Zarr's
+    # dtype=str. Zarr's selection of scattered rows of the latter crashes
+    # NumPy 2.1, and the pseudotime of some of the graph's cells reads their
+    # IDs to check its source/sink snapshot.
+    ids = np.asarray([f"cell-{row:05d}-" + "x" * 15 for row in range(145)])
+    loaded = {}
+    for kind, stored in (
+        ("fixed", ids),
+        ("variable", ids.astype(np.dtypes.StringDType())),
+    ):
+        if kind == "variable":
+            _refuse_zarr_selections(monkeypatch)
+        store, graph, kept, ss_vec = _cells_with_ids(_TWO_ARMS, stored, 32)
+        ref = store.trajectory.pseudotime(graph, cells=kept, ss_vec=ss_vec)
+        loaded[kind] = store.trajectory.load_pseudotime(ref)
+    assert loaded["variable"].valid.sum() == 140
+    np.testing.assert_array_equal(loaded["variable"].valid, loaded["fixed"].valid)
+    np.testing.assert_array_equal(loaded["variable"].values, loaded["fixed"].values)
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize(
+    "character", ["x", "\N{GRINNING FACE}"], ids=["ascii", "beyond-ascii"]
+)
+def test_pseudotime_calls_that_read_variable_width_ids_run_within_the_budget_they_name(
+    character: str,
+) -> None:
+    # 2,065 cells whose IDs of 300 characters, stored as variable-width text,
+    # outweigh their graph of five neighbors: charged without their
+    # characters, the pseudotime of some of the cells held 3.42 times the
+    # budget that its refusals named with ASCII IDs and 7.23 times with IDs
+    # beyond it, and its load 2.21 and 7.36 times.
+    n_cells = 60 + 2 * 1_000 + 5
+    ids = np.asarray([f"c{row:05d}".ljust(300, character) for row in range(n_cells)])
+    store, graph, kept, ss_vec = _cells_with_ids(
+        _long_arms(1_000), ids.astype(np.dtypes.StringDType()), 1_024
+    )
+    ref = store.trajectory.pseudotime(graph, cells=kept, ss_vec=ss_vec)
+    _assert_calls_run_within_the_budget_they_name(
+        store,
+        {
+            "pseudotime of some cells": lambda: store.trajectory.pseudotime(
+                graph, cells=kept, ss_vec=ss_vec, invalidate_cache=True
+            ),
+            "load_pseudotime": lambda: store.trajectory.load_pseudotime(ref),
+        },
     )
 
 

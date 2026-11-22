@@ -1,3 +1,5 @@
+from typing import Any
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -22,13 +24,27 @@ from cytearc.storage.selections import (
 from cytearc.trajectory.artifacts import (
     AGGREGATION_PAYLOAD,
     FATE_PAYLOAD,
+    LINEAGE_AGGREGATION_PAYLOAD,
+    LINEAGE_DRIVER_PAYLOAD,
+    LINEAGE_MARKER_PAYLOAD,
     MARKER_PAYLOAD,
     PSEUDOTIME_PAYLOAD,
+    aggregation_check_bytes,
+    aggregation_load_bytes,
     aggregation_payload_is_valid,
     fate_payload_is_valid,
+    lineage_aggregation_check_bytes,
+    lineage_aggregation_load_bytes,
+    lineage_aggregation_payload_is_valid,
+    lineage_driver_payload_is_valid,
+    lineage_marker_payload_is_valid,
+    lineage_statistics_check_bytes,
+    lineage_statistics_load_bytes,
     listed_labels,
     listed_labels_bytes,
     load_cell_artifact_values,
+    marker_check_bytes,
+    marker_load_bytes,
     marker_payload_is_valid,
     pseudotime_payload_is_valid,
     validate_aggregation_parameters,
@@ -611,3 +627,320 @@ def test_listed_labels_hold_what_their_estimate_states(labels: np.ndarray) -> No
     _, peak = tracemalloc.get_traced_memory()
     tracemalloc.stop()
     assert peak - before <= listed_labels_bytes(len(labels), labels.dtype)
+
+
+# What checking a saved feature analysis holds
+
+
+def _feature_payload(
+    root: zarr.Group,
+    kind: str,
+    *,
+    n_features: int,
+    identity_rows: int,
+    n_lineages: int = 3,
+    n_bins: int = 20,
+    width: int = 15,
+    every: int = 10,
+) -> tuple[zarr.Group, dict[str, object]]:
+    """Store a valid payload of a feature analysis of ``n_features`` features and the arguments that check it.
+
+    Every ``every``-th feature is selected, and every seventh selected one
+    has no profile. The statistics are chunked as the analyses write them, at most
+    100,000 features to a chunk, and the frozen names and IDs of ``width``
+    characters in chunks of ``identity_rows``, as analyses saved before
+    their chunks followed a feature table's did with 100,000.
+    """
+    rng = np.random.default_rng(3)
+    selected = np.arange(0, n_features, every)
+    n_selected = len(selected)
+    rows = min(n_features, 100_000)
+    group = root.create_group(kind)
+    # A width shorter than the features' numbers keeps their last digits.
+    names = np.asarray([f"{index:0{width}d}"[-width:] for index in range(n_features)])
+    for name, values in (
+        ("feature_names", names),
+        ("feature_ids", np.char.upper(names)),
+    ):
+        group.create_array(name, data=values, chunks=(identity_rows,))
+    arguments: dict[str, object] = {
+        "n_features": n_features,
+        "selected_features": selected,
+        "expected_feature_ids_fingerprint": fingerprint_stored_strings(
+            group["feature_ids"]
+        ),
+        "expected_feature_names_fingerprint": fingerprint_stored_strings(
+            group["feature_names"]
+        ),
+    }
+
+    def statistics(columns: int | None, *names: str) -> None:
+        shape = (n_features,) if columns is None else (n_features, columns)
+        for name in names:
+            values = np.full(shape, np.nan)
+            values[selected] = rng.uniform(0.0, 1.0, size=values[selected].shape)
+            group.create_array(name, data=values, chunks=(rows, *shape[1:]))
+
+    valid = np.arange(n_selected) % 7 != 0
+    clusters = np.where(valid, 1 + np.arange(n_selected) % 4, -1)
+    cluster_values = np.full(n_features, -1, dtype=np.int64)
+    cluster_values[selected[valid]] = clusters[valid]
+
+    def modules(data_shape: tuple[int, ...]) -> None:
+        data = rng.normal(size=data_shape)
+        data[~valid] = 0.0
+        if len(data_shape) == 2:
+            # A pseudotime aggregation keeps its profiles in one shard of one
+            # chunk, and a lineage aggregation in chunks of about a million
+            # values.
+            group.create_array("data", data=data, chunks=data_shape, shards=data_shape)
+        else:
+            band = max(1, min(n_selected, 1_000_000 // (n_lineages * n_bins)))
+            group.create_array("data", data=data, chunks=(band, *data_shape[1:]))
+        selected_rows = (min(n_selected, 100_000),)
+        for name, values in (
+            ("feature_indices", selected.astype(np.uint64)),
+            ("valid_features", valid),
+            ("feature_clusters", clusters.astype(np.int64)),
+        ):
+            group.create_array(name, data=values, chunks=selected_rows)
+        group.create_array("cluster_values", data=cluster_values, chunks=(rows,))
+        arguments.update(
+            n_clusters=4, n_neighbors=3, nan_cluster_value=-1, n_bins=data_shape[-1]
+        )
+
+    if kind == "markers":
+        statistics(None, "r_value", "p_value", "p_value_adjusted")
+        names_stored = MARKER_PAYLOAD
+    elif kind == "lineage_markers":
+        statistics(n_lineages, "r_value", "p_value", "p_value_adjusted")
+        group.create_array("effective_cells", data=np.full(n_lineages, 12.5))
+        arguments["n_lineages"] = n_lineages
+        names_stored = LINEAGE_MARKER_PAYLOAD
+    elif kind == "drivers":
+        statistics(n_lineages, *LINEAGE_DRIVER_PAYLOAD[:5])
+        group.attrs["n_cells"] = 40
+        arguments.update(n_lineages=n_lineages, n_cells=40)
+        names_stored = LINEAGE_DRIVER_PAYLOAD
+    elif kind == "aggregation":
+        modules((n_selected, n_bins))
+        fingerprints = ["cells", "features", "ordering"]
+        group.attrs.update(
+            input_fingerprints=fingerprints,
+            nan_cluster_value=-1,
+            effective_window=20,
+            effective_bins=n_bins,
+        )
+        arguments.update(
+            ann_params=resolve_aggregation_ann_params(None, dim=n_bins),
+            expected_input_fingerprints=fingerprints,
+            effective_window=20,
+        )
+        names_stored = AGGREGATION_PAYLOAD
+    else:
+        modules((n_selected, n_lineages, n_bins))
+        group.create_array(
+            "bin_pseudotime",
+            data=np.tile(np.linspace(0.0, 1.0, n_bins), (n_lineages, 1)),
+        )
+        group.create_array("lineage_weight", data=np.full(n_lineages, 2.0 * n_bins))
+        fingerprints = ["cells", "features", "ordering", "weights"]
+        group.attrs["input_fingerprints"] = fingerprints
+        arguments.update(
+            n_lineages=n_lineages, expected_input_fingerprints=fingerprints
+        )
+        names_stored = LINEAGE_AGGREGATION_PAYLOAD
+    group.attrs.update(
+        {
+            "artifact_id": "a" * 64,
+            "kind": kind,
+            "provenance": {},
+            "execution_options": {},
+            "created_at_ns": 1,
+            "cytearc_version": "test",
+            "complete": True,
+            "payload_fingerprint": fingerprint_stored_arrays(group, names_stored),
+        }
+    )
+    return group, arguments
+
+
+_FEATURE_CHECKS = {
+    "markers": (marker_payload_is_valid, marker_check_bytes),
+    "aggregation": (aggregation_payload_is_valid, aggregation_check_bytes),
+    "lineage_markers": (
+        lineage_marker_payload_is_valid,
+        lambda group, n_selected: lineage_statistics_check_bytes(
+            group, LINEAGE_MARKER_PAYLOAD, n_selected=n_selected
+        ),
+    ),
+    "drivers": (
+        lineage_driver_payload_is_valid,
+        lambda group, n_selected: lineage_statistics_check_bytes(
+            group, LINEAGE_DRIVER_PAYLOAD, n_selected=n_selected
+        ),
+    ),
+    "lineage_aggregation": (
+        lineage_aggregation_payload_is_valid,
+        lineage_aggregation_check_bytes,
+    ),
+}
+
+
+_FEATURE_LOADS = {
+    "markers": lambda group, n_selected: marker_load_bytes(
+        group, n_selected=n_selected
+    ),
+    "aggregation": lambda group, n_selected: aggregation_load_bytes(
+        group, n_selected=n_selected
+    ),
+    "lineage_markers": lambda group, n_selected: lineage_statistics_load_bytes(
+        group, LINEAGE_MARKER_PAYLOAD, n_selected=n_selected, n_lineages=3
+    ),
+    "drivers": lambda group, n_selected: lineage_statistics_load_bytes(
+        group, LINEAGE_DRIVER_PAYLOAD, n_selected=n_selected, n_lineages=3
+    ),
+    "lineage_aggregation": lambda group, n_selected: lineage_aggregation_load_bytes(
+        group, n_selected=n_selected
+    ),
+}
+
+
+def _traced_check(
+    check: Any, group: zarr.Group, arguments: dict[str, object]
+) -> tuple[bool, int]:
+    """Run a payload's check, traced at its most, and return its verdict and the bytes it held."""
+    import gc
+    import tracemalloc
+
+    from cytearc.storage.content_stamps import clear_content_cache
+
+    # The first check of a process fingerprints the frozen names and IDs,
+    # and a full collection empties CPython's free lists, so the check
+    # allocates, and is traced at, its most.
+    clear_content_cache()
+    gc.collect()
+    tracemalloc.start()
+    try:
+        before, _ = tracemalloc.get_traced_memory()
+        verdict = check(group, **arguments)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    return verdict, peak - before
+
+
+# Each payload makes one step of its check hold the most: kind, features,
+# rows to a chunk of the frozen names and IDs, lineages, bins, characters of
+# a name, and how far apart the selected features are.
+_TRACED_PAYLOADS = [
+    # Frozen names and IDs in chunks of 100,000 rows, as analyses saved
+    # before their chunks followed a feature table's: fingerprinting them
+    # holds the most.
+    *(
+        pytest.param(kind, 30_000, 100_000, 3, 20, 15, 10, id=f"{kind}-old-names")
+        for kind in _FEATURE_CHECKS
+    ),
+    # 400 features, whose checks hold little beside their own objects.
+    pytest.param("aggregation", 400, 400, 3, 20, 5, 10, id="aggregation-small"),
+    pytest.param(
+        "lineage_aggregation", 400, 400, 3, 20, 5, 10, id="lineage_aggregation-small"
+    ),
+    # Markers of each of 200,000 features, in two chunks: the check keeps a
+    # chunk's three statistics and two copies of their selected features
+    # while it marks which features of the next chunk are selected.
+    pytest.param("markers", 200_000, 200_000, 3, 20, 1, 1, id="markers-every-feature"),
+    # Lineage statistics: the check reads each array's block beside the one
+    # before it and, where every feature is selected, a copy of its values.
+    pytest.param(
+        "lineage_markers", 100_000, 100_000, 3, 20, 1, 10, id="lineage_markers-tenth"
+    ),
+    pytest.param(
+        "lineage_markers", 30_000, 30_000, 3, 20, 1, 1, id="lineage_markers-every"
+    ),
+    pytest.param("drivers", 30_000, 30_000, 3, 20, 1, 1, id="drivers-every-feature"),
+    # Profiles of two bins of every feature, read beside the positions,
+    # validity and clusters of their block.
+    pytest.param("aggregation", 30_000, 30_000, 3, 2, 1, 1, id="aggregation-profiles"),
+    pytest.param(
+        "lineage_aggregation",
+        30_000,
+        30_000,
+        2,
+        2,
+        1,
+        1,
+        id="lineage_aggregation-profiles",
+    ),
+    # Every feature's cluster, read beside the clusters expected of them.
+    pytest.param(
+        "aggregation", 100_000, 100_000, 3, 2, 1, 10, id="aggregation-clusters"
+    ),
+    pytest.param(
+        "lineage_aggregation",
+        100_000,
+        100_000,
+        3,
+        2,
+        1,
+        10,
+        id="lineage_aggregation-clusters",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("kind", "n_features", "identity_rows", "n_lineages", "n_bins", "width", "every"),
+    _TRACED_PAYLOADS,
+)
+def test_checking_a_saved_feature_analysis_holds_what_its_estimate_states(
+    tmp_path,
+    kind: str,
+    n_features: int,
+    identity_rows: int,
+    n_lineages: int,
+    n_bins: int,
+    width: int,
+    every: int,
+) -> None:
+    root = zarr.open_group(str(tmp_path / "store.zarr"), mode="w")
+    group, arguments = _feature_payload(
+        root,
+        kind,
+        n_features=n_features,
+        identity_rows=identity_rows,
+        n_lineages=n_lineages,
+        n_bins=n_bins,
+        width=width,
+        every=every,
+    )
+    check, estimate = _FEATURE_CHECKS[kind]
+    verdict, held = _traced_check(check, group, arguments)
+    assert verdict
+    expected = estimate(group, n_selected=len(arguments["selected_features"]))
+    assert held <= expected
+    # Charged at the bound of their compressed bytes, the reads err high, by
+    # no more than the decoded chunks they count once more.
+    assert expected < 3 * held
+
+
+@pytest.mark.parametrize("kind", list(_FEATURE_CHECKS))
+def test_a_payload_that_lacks_an_array_is_refused_within_its_estimates(
+    tmp_path, kind: str
+) -> None:
+    # A saved analysis whose frozen feature IDs are gone: its check refuses
+    # it within what its estimates name, which read only what is stored.
+    root = zarr.open_group(str(tmp_path / "store.zarr"), mode="w")
+    group, arguments = _feature_payload(
+        root, kind, n_features=3_000, identity_rows=3_000
+    )
+    del group["feature_ids"]
+    check, estimate = _FEATURE_CHECKS[kind]
+    n_selected = len(arguments["selected_features"])
+    verdict, held = _traced_check(check, group, arguments)
+    assert not verdict
+    assert held <= estimate(group, n_selected=n_selected)
+    # Loading the payload checks it first.
+    assert _FEATURE_LOADS[kind](group, n_selected) >= estimate(
+        group, n_selected=n_selected
+    )
