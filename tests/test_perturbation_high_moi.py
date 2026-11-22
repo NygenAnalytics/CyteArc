@@ -1468,6 +1468,11 @@ def test_high_moi_held_and_streamed_counts_agree(screen, monkeypatch, n_tested) 
 
     for name in ("discovery", "calibration", "positive"):
         pd.testing.assert_frame_equal(getattr(streamed, name), getattr(held, name))
+    # Each tested gene's cells and expressing cells, against the planted calls.
+    for row in held.discovery.itertuples():
+        group = CALLED[:, SCREEN_GUIDES[row.target]].any(axis=1)
+        gene = int(row.feature.removeprefix("RNA"))
+        assert _qc_of(row) == _expected_qc(group, gene)
 
 
 def test_high_moi_refuses_a_budget_without_room_for_one_gene(screen) -> None:

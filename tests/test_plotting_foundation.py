@@ -1462,6 +1462,19 @@ def test_multi_layout_embedding_uses_native_feature_values(
     result.close()
 
 
+def test_a_gene_named_without_its_assay_takes_the_stores_default_assay(datastore):
+    # A feature named by text alone, without from_assay, reads the store's
+    # default assay, which the plot records.
+    layouts = _add_synthetic_embeddings(datastore, "RNA")
+    gene = str(datastore.RNA.feats.fetch_all("names")[0])
+    result = splt.embedding(datastore, layout_key=layouts, color_by=gene, show=False)
+
+    assert datastore._defaultAssay == "RNA"
+    assert result.provenance.assay == "RNA"
+    assert result.provenance.extras["assays"] == ["RNA"]
+    result.close()
+
+
 def test_multi_layout_embedding_accepts_matching_target_axes(synthetic_plot_store):
     import matplotlib.pyplot as plt
 
