@@ -10,19 +10,13 @@ from typing import Any, Literal
 
 import zarr
 from zarr.errors import ContainsArrayError, ContainsGroupError
-from zarr.abc.store import Store
 from zarr.core.buffer import Buffer, default_buffer_prototype
 from zarr.core.sync import collect_aiterator, sync
-from zarr.storage import (
-    LocalStore,
-    MemoryStore,
-    ObjectStore,
-    StorePath,
-    WrapperStore,
-)
+from zarr.storage import StorePath
 
 from .artifacts import parse_artifact_ref, require_complete_artifact
 from .refs import ArtifactRef
+from .stores import has_atomic_conditional_writes
 from .types import as_zarr_group
 from ..utils.logging import logger
 from ..utils.process import TRACE_POINT_LIMIT
@@ -1679,12 +1673,6 @@ def _pipeline_label_claim_namespaces(root: zarr.Group) -> tuple[str, ...]:
     return tuple(namespaces)
 
 
-def _store_supports_atomic_label_claims(store: Store) -> bool:
-    while isinstance(store, WrapperStore):
-        store = store._store
-    return isinstance(store, LocalStore | MemoryStore | ObjectStore)
-
-
 def _pipeline_label_claim_bytes(label: str, run_id: str) -> Buffer:
     payload = json.dumps(
         {"label": label, "runId": run_id},
@@ -1776,7 +1764,7 @@ def _claim_pipeline_label(root: zarr.Group, label: str, run_id: str) -> None:
 
     _validate_non_empty_string(label, "label")
     _validate_run_id(run_id)
-    if not _store_supports_atomic_label_claims(root.store):
+    if not has_atomic_conditional_writes(root.store):
         raise RuntimeError(
             "Pipeline label uniqueness requires a Zarr store with atomic "
             "set_if_not_exists support"
@@ -2313,7 +2301,7 @@ def ensure_pipeline_label_claimable(root: zarr.Group, label: str) -> None:
     """Fail before computation when a requested label cannot be claimed safely."""
 
     _validate_non_empty_string(label, "label")
-    if not _store_supports_atomic_label_claims(root.store):
+    if not has_atomic_conditional_writes(root.store):
         raise RuntimeError(
             "Pipeline labels require a Zarr store with atomic set_if_not_exists support"
         )
@@ -2360,7 +2348,7 @@ def abandon_pipeline_label_claim(
     _validate_non_empty_string(label, "label")
     _validate_run_id(run_id)
     _validate_non_empty_string(reason, "reason")
-    if not _store_supports_atomic_label_claims(root.store):
+    if not has_atomic_conditional_writes(root.store):
         raise RuntimeError(
             "Pipeline labels require a Zarr store with atomic set_if_not_exists support"
         )

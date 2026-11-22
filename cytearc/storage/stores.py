@@ -25,7 +25,7 @@ from zarr.abc.store import (
 )
 from zarr.core.buffer import Buffer, BufferPrototype
 from zarr.core.common import ZARR_JSON
-from zarr.storage import WrapperStore
+from zarr.storage import LocalStore, MemoryStore, ObjectStore, WrapperStore
 
 from ..utils.arguments import bool_argument
 from .types import ZarrMode, as_zarr_array, as_zarr_group
@@ -265,6 +265,25 @@ def make_store(
     raise TypeError(
         f"zarr location must be a path string or zarr Store, got {type(location)!r}"
     )
+
+
+def has_atomic_conditional_writes(store: Store) -> bool:
+    """Return whether ``store`` writes a key only where none exists, in one step.
+
+    Of the processes that call ``set_if_not_exists`` for one key at once,
+    exactly one then writes it: Zarr's local store creates the file
+    exclusively, its memory store sets the key in one dictionary operation,
+    and its object store makes a conditional put. Other stores, such as fsspec
+    stores and with them Hugging Face's, keep Zarr's default, which looks the
+    key up and then writes it, so another process can write the key in
+    between. A wrapper store is judged by the store it wraps. That holds for
+    Zarr's wrappers and a mount, which pass the call to that store, but not
+    for a composite, whose own ``set_if_not_exists`` looks the key up and then
+    writes it.
+    """
+    while isinstance(store, WrapperStore):
+        store = store._store
+    return isinstance(store, LocalStore | MemoryStore | ObjectStore)
 
 
 def _open_store_root(

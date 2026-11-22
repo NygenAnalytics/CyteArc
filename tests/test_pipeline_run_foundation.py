@@ -7,7 +7,7 @@ from typing import Any
 import numpy as np
 import pytest
 import zarr
-from zarr.storage import FsspecStore, LoggingStore, MemoryStore, ZipStore
+from zarr.storage import MemoryStore
 
 import cytearc.storage.pipeline_runs as pipeline_run_storage
 from cytearc.datastore.pipeline_run import (
@@ -690,7 +690,7 @@ def test_labeled_run_rejects_unsupported_backend_before_record_creation(
     root = _root()
     monkeypatch.setattr(
         pipeline_run_storage,
-        "_store_supports_atomic_label_claims",
+        "has_atomic_conditional_writes",
         lambda _store: False,
     )
 
@@ -716,6 +716,30 @@ def test_labeled_run_rejects_unsupported_backend_before_record_creation(
         cytearc_version="1.0.0",
     )
     assert unlabeled.status == "running"
+
+
+def test_label_claims_refuse_a_store_that_looks_a_key_up_before_writing_it(
+    tmp_path: Any,
+) -> None:
+    from zarr.storage import FsspecStore
+
+    # An fsspec store, a Hugging Face bucket's among them, keeps Zarr's
+    # set_if_not_exists, a lookup and then a write.
+    store = FsspecStore.from_url(f"memory://cytearc-labels/{tmp_path.name}")
+    root = _root(store=store)
+    run_id = "a" * 64
+    try:
+        with pytest.raises(RuntimeError, match="atomic set_if_not_exists"):
+            pipeline_run_storage.ensure_pipeline_label_claimable(root, "label")
+        with pytest.raises(RuntimeError, match="atomic set_if_not_exists"):
+            pipeline_run_storage._claim_pipeline_label(root, "label", run_id)
+        with pytest.raises(RuntimeError, match="atomic set_if_not_exists"):
+            pipeline_run_storage.abandon_pipeline_label_claim(
+                root, label="label", run_id=run_id, reason="stopped"
+            )
+    finally:
+        store.close()
+    assert "pipeline" not in root
 
 
 @pytest.mark.parametrize("container_kind", ("group", "nonempty", "wrong_dtype"))
@@ -969,7 +993,7 @@ def test_running_label_claim_requires_explicit_exact_owner_abandonment(
     with monkeypatch.context() as unsupported_backend:
         unsupported_backend.setattr(
             pipeline_run_storage,
-            "_store_supports_atomic_label_claims",
+            "has_atomic_conditional_writes",
             lambda _store: False,
         )
         with pytest.raises(RuntimeError, match="atomic set_if_not_exists"):
@@ -1209,32 +1233,6 @@ def test_terminal_label_claim_backend_failure_is_durable(
     assert failed.complete
     assert failed.error is not None
     assert failed.error.type == "PipelineLabelClaimUnavailable"
-
-
-def test_atomic_label_claim_backend_detection(tmp_path: Any) -> None:
-    memory_store = MemoryStore()
-    safe_wrapper = LoggingStore(memory_store)
-    fsspec_store = FsspecStore.from_url(
-        f"memory://cytearc-label-claims/{tmp_path.name}"
-    )
-    unsafe_wrapper = LoggingStore(fsspec_store)
-    zip_store = ZipStore(tmp_path / "label-claims.zip", mode="w")
-    try:
-        assert pipeline_run_storage._store_supports_atomic_label_claims(memory_store)
-        assert pipeline_run_storage._store_supports_atomic_label_claims(safe_wrapper)
-        assert not pipeline_run_storage._store_supports_atomic_label_claims(
-            fsspec_store
-        )
-        assert not pipeline_run_storage._store_supports_atomic_label_claims(
-            unsafe_wrapper
-        )
-        assert not pipeline_run_storage._store_supports_atomic_label_claims(zip_store)
-    finally:
-        safe_wrapper.close()
-        unsafe_wrapper.close()
-        # zarr 3.2.0 ZipStore.close() requires _lock, which exists only after open.
-        if getattr(zip_store, "_is_open", False):
-            zip_store.close()
 
 
 def test_run_view_reads_frozen_fields_and_ignores_live_i_drift() -> None:

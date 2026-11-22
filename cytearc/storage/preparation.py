@@ -8,7 +8,10 @@ root or workspace group, which it creates with the store's conditional write
 and removes when its preparation ends, however it ends. Another process that
 finds the claim raises ``RuntimeError`` instead of preparing the same columns
 beside it. A process that is killed while it prepares leaves its claim, which
-names the process; remove the claim once that process has stopped.
+names the process; remove the claim once that process has stopped. On a store
+whose conditional write looks the key up and then writes it, such as an
+``hf://`` store, two processes that open the store at the same moment can both
+take the claim, so such an open warns.
 """
 
 import datetime
@@ -25,8 +28,12 @@ import zarr
 from zarr.core.buffer import Buffer, default_buffer_prototype
 from zarr.core.sync import sync
 
+from zarr.storage import StorePath
+
 from ..utils.logging import logger
 from ..utils.shutdown import is_interruption
+from .profiles import is_remote_zarr_location
+from .stores import has_atomic_conditional_writes, store_location
 
 PREPARATION_CLAIM = ".cytearc-preparation"
 """Name of the claim group below the root or workspace group being prepared."""
@@ -66,7 +73,21 @@ def _claim_holder(stored: Buffer) -> Mapping[str, Any]:
     return holder if isinstance(holder, Mapping) else {}
 
 
-def _held_message(claim: Any, holder: Mapping[str, Any]) -> str:
+def _claim_location(claim: StorePath) -> str:
+    """Return the path or URL of the claim, which a user can remove.
+
+    A store without a path or URL, such as a memory store, names the claim as
+    Zarr names it.
+    """
+    location = store_location(claim.store)
+    if location is None:
+        return str(claim)
+    if is_remote_zarr_location(location):
+        return f"{location.rstrip('/')}/{claim.path}"
+    return os.path.join(location, *claim.path.split("/"))
+
+
+def _held_message(claim: StorePath, holder: Mapping[str, Any]) -> str:
     started = holder.get("startedAtNs")
     when = (
         datetime.datetime.fromtimestamp(started / 1e9, datetime.UTC).isoformat(
@@ -80,7 +101,7 @@ def _held_message(claim: Any, holder: Mapping[str, Any]) -> str:
         f"This store is being prepared by another process ({process}, since "
         f"{when}). Open it again once that open has finished. If no process is "
         "preparing it, a preparation was killed and left its claim: remove "
-        f"{claim} and open the store again."
+        f"{_claim_location(claim)} and open the store again."
     )
 
 
@@ -90,8 +111,11 @@ def preparation_claim(group: zarr.Group) -> Iterator[None]:
 
     A store that cannot make the conditional write, such as an object store
     without conditional puts, is prepared without the claim, as before claims
-    existed, with a warning. A cancelled write raises its cancellation, and
-    nothing is prepared.
+    existed, with a warning. A store whose conditional write is a lookup and
+    then a write, as ``has_atomic_conditional_writes`` tells, holds the claim
+    with a warning that another process opening the store at the same moment
+    can take it too. A cancelled write raises its cancellation, and nothing is
+    prepared.
 
     Raises:
         RuntimeError: If another process holds the claim; nothing is written.
@@ -127,6 +151,13 @@ def preparation_claim(group: zarr.Group) -> Iterator[None]:
         return
     if holder.get("token") != token:
         raise RuntimeError(_held_message(claim, holder))
+    if not has_atomic_conditional_writes(group.store):
+        location = store_location(group.store) or "this store"
+        logger.warning(
+            f"Another process that opens {location} at the same moment as this "
+            "one could also prepare it, because the store cannot refuse a second "
+            "writer. Open it from one process until it is prepared."
+        )
     try:
         yield
     finally:
@@ -135,6 +166,7 @@ def preparation_claim(group: zarr.Group) -> Iterator[None]:
         except Exception as error:
             # The preparation's own error, if any, is the one that propagates.
             logger.warning(
-                f"Could not remove the preparation claim {claim}: {error}. If the "
-                "store is not prepared, remove the claim before opening it again."
+                f"Could not remove the preparation claim {_claim_location(claim)}: "
+                f"{error}. If the store is not prepared, remove the claim before "
+                "opening it again."
             )

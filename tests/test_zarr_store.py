@@ -47,6 +47,8 @@ from cytearc.storage.sharding import (
     write_counts_t,
 )
 from cytearc.storage.stores import (
+    MountedArtifactStore,
+    has_atomic_conditional_writes,
     is_remote_datastore,
     load_zarr,
     make_store,
@@ -209,6 +211,56 @@ def test_hugging_face_store_uses_shared_reader(monkeypatch):
         "storageOptions": {"token": False},
         "readOnly": True,
     }
+
+
+def test_atomic_conditional_writes_are_those_of_local_memory_and_object_stores(
+    tmp_path, hub_offline
+):
+    from obstore.store import MemoryStore as ObstoreMemoryStore
+    from zarr.storage import FsspecStore, LocalStore, LoggingStore, ObjectStore
+    from zarr.storage import ZipStore
+
+    from cytearc.storage.huggingface import HfReadStore
+
+    memory = MemoryStore()
+    local = LocalStore(tmp_path / "local.zarr")
+    fsspec = FsspecStore.from_url(f"memory://cytearc-claims/{tmp_path.name}")
+    # Opening a Hugging Face store sends no request.
+    bucket = HfReadStore.from_url(
+        "hf://buckets/test/cytearc/data.zarr", storage_options={"token": False}
+    )
+    archive = ZipStore(tmp_path / "claims.zip", mode="w")
+    # Zarr's local store creates a file exclusively, its memory store sets a
+    # key in one dictionary operation and its object store puts with
+    # mode="create"; the others look a key up and then write it, or, as a zip
+    # file does, guard the write in one process only.
+    atomic = {
+        "memory": memory,
+        "local": local,
+        "object": ObjectStore(ObstoreMemoryStore()),
+        "logged memory": LoggingStore(memory),
+        "mount of a local target": MountedArtifactStore(local, fsspec, ["artifacts"]),
+    }
+    unguarded = {
+        "fsspec": fsspec,
+        "logged fsspec": LoggingStore(fsspec),
+        "Hugging Face bucket": bucket,
+        "zip": archive,
+        "mount of a bucket target": MountedArtifactStore(bucket, local, ["artifacts"]),
+    }
+    try:
+        assert {
+            name: has_atomic_conditional_writes(s) for name, s in atomic.items()
+        } == {name: True for name in atomic}
+        assert {
+            name: has_atomic_conditional_writes(s) for name, s in unguarded.items()
+        } == {name: False for name in unguarded}
+    finally:
+        fsspec.close()
+        bucket.close()
+        # zarr 3.2.0 ZipStore.close() requires _lock, which exists only after open.
+        if getattr(archive, "_is_open", False):
+            archive.close()
 
 
 def test_count_plan_uses_paired_rotate_once_geometry():

@@ -526,16 +526,7 @@ closed.
 
 ## Preparation
 
-The first writable `DataStore` open of a fresh import prepares its assays: it derives their cell
-and feature summaries and publishes their identity. One process prepares a store: the preparing
-open holds a claim, the group `.cytearc-preparation` below the root or workspace group, which it
-creates with the store's conditional write (`set_if_not_exists`) and removes when the preparation
-ends, however it ends. Another process that opens the store meanwhile raises `RuntimeError`, which
-names the process and host that hold the claim, instead of writing the same columns beside it; open
-it again once that open has finished. A killed preparing process leaves its claim, and the error
-names the claim to remove once that process has stopped. A backend whose conditional write is not
-atomic gives a best-effort claim, and one that refuses the conditional write prepares without a
-claim, with a warning.
+The first writable `DataStore` open of a fresh import prepares its assays: it derives their cell and feature summaries and publishes their identity. One process prepares a store: the preparing open holds a claim, the group `.cytearc-preparation` below the root or workspace group, which it creates with the store's conditional write (`set_if_not_exists`) and removes when the preparation ends, however it ends. Another process that opens the store meanwhile raises `RuntimeError`, which names the process and host that hold the claim, instead of writing the same columns beside it; open it again once that open has finished. A killed preparing process leaves its claim, and the error names the claim to remove once that process has stopped. The claim also excludes a process that opens the store at the same moment only where the conditional write is atomic, on the stores that `storage.stores.has_atomic_conditional_writes` names and that label claims require: Zarr's local, memory and object stores. Any other store, such as an `hf://` store or another fsspec store, looks the claim up and then writes it, so its claim refuses a process that opens the store after the claim is written but not one that opens it at the same moment, and the open that takes the claim warns of that. A store that refuses the conditional write prepares without a claim, with a warning.
 
 The first writable open of a store also removes the low-feature cells of its default assay from
 `I`, with `min_features_per_cell`, and records what it applied as the cell table's
