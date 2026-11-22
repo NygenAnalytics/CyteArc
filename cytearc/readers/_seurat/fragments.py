@@ -1308,76 +1308,77 @@ def fragment_source_from_slots(
                 source,
                 cell_names=tuple(prefix + name for name in source.cellNames),
             )
-        if class_name == "RegionSelect":
-            chromosome_levels = _text_values(
-                slots.get("chr_levels"),
-                f"{object_path}@chr_levels",
-                limits,
+        # RegionSelect is the one wrapper class left that the capability
+        # registry accepts.
+        assert class_name == "RegionSelect"
+        chromosome_levels = _text_values(
+            slots.get("chr_levels"),
+            f"{object_path}@chr_levels",
+            limits,
+        )
+        chromosome_ids = _unsigned_vector(
+            slots.get("chr_id"),
+            "chr_id",
+            object_path,
+            limits,
+        )
+        starts = _unsigned_vector(
+            slots.get("start"),
+            "start",
+            object_path,
+            limits,
+        )
+        ends = _unsigned_vector(
+            slots.get("end"),
+            "end",
+            object_path,
+            limits,
+        )
+        if not (chromosome_ids.shape == starts.shape == ends.shape) or np.any(
+            chromosome_ids >= len(chromosome_levels)
+        ):
+            raise MatrixSourceError("fragment region metadata is inconsistent")
+        if np.any(ends < starts):
+            raise MatrixSourceError("fragment region end precedes its start")
+        chromosome_lookup = {
+            chromosome: index for index, chromosome in enumerate(source.chromosomeNames)
+        }
+        level_sources = np.asarray(
+            [chromosome_lookup.get(name, -1) for name in chromosome_levels],
+            dtype=np.int64,
+        )
+        region_sources = (
+            level_sources[chromosome_ids.astype(np.int64)]
+            if chromosome_ids.size
+            else np.empty(0, dtype=np.int64)
+        )
+        normalized_regions = {
+            int(source_id): (
+                starts[region_sources == source_id],
+                ends[region_sources == source_id],
             )
-            chromosome_ids = _unsigned_vector(
-                slots.get("chr_id"),
-                "chr_id",
-                object_path,
-                limits,
+            for source_id in np.unique(region_sources[region_sources >= 0])
+        }
+        metadata_bytes = (
+            chromosome_ids.nbytes
+            + starts.nbytes
+            + ends.nbytes
+            + _metadata_bytes(chromosome_levels)
+        )
+        if metadata_bytes > limits.maxMetadataBytes:
+            raise ResourceLimitError(
+                "fragment region metadata exceeds "
+                f"maxMetadataBytes={limits.maxMetadataBytes}"
             )
-            starts = _unsigned_vector(
-                slots.get("start"),
-                "start",
-                object_path,
-                limits,
-            )
-            ends = _unsigned_vector(
-                slots.get("end"),
-                "end",
-                object_path,
-                limits,
-            )
-            if not (chromosome_ids.shape == starts.shape == ends.shape) or np.any(
-                chromosome_ids >= len(chromosome_levels)
-            ):
-                raise MatrixSourceError("fragment region metadata is inconsistent")
-            if np.any(ends < starts):
-                raise MatrixSourceError("fragment region end precedes its start")
-            chromosome_lookup = {
-                chromosome: index
-                for index, chromosome in enumerate(source.chromosomeNames)
-            }
-            level_sources = np.asarray(
-                [chromosome_lookup.get(name, -1) for name in chromosome_levels],
-                dtype=np.int64,
-            )
-            region_sources = (
-                level_sources[chromosome_ids.astype(np.int64)]
-                if chromosome_ids.size
-                else np.empty(0, dtype=np.int64)
-            )
-            normalized_regions = {
-                int(source_id): (
-                    starts[region_sources == source_id],
-                    ends[region_sources == source_id],
-                )
-                for source_id in np.unique(region_sources[region_sources >= 0])
-            }
-            metadata_bytes = (
-                chromosome_ids.nbytes
-                + starts.nbytes
-                + ends.nbytes
-                + _metadata_bytes(chromosome_levels)
-            )
-            if metadata_bytes > limits.maxMetadataBytes:
-                raise ResourceLimitError(
-                    "fragment region metadata exceeds "
-                    f"maxMetadataBytes={limits.maxMetadataBytes}"
-                )
-            return RegionSelectedFragmentSource(
-                source,
-                normalized_regions,
-                invert=logical_scalar(
-                    slots.get("invert_selection", False),
-                    f"{object_path}@invert_selection",
-                ),
-                metadata_bytes=metadata_bytes,
-            )
+        return RegionSelectedFragmentSource(
+            source,
+            normalized_regions,
+            invert=logical_scalar(
+                slots.get("invert_selection", False),
+                f"{object_path}@invert_selection",
+            ),
+            metadata_bytes=metadata_bytes,
+        )
 
     store: _BPArrayStore
     if class_name in {"UnpackedMemFragments", "PackedMemFragments"}:

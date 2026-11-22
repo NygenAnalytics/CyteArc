@@ -1,5 +1,7 @@
+from bisect import bisect_right
 from collections.abc import Callable
 from dataclasses import dataclass
+from itertools import accumulate
 from typing import Any
 
 import h5py
@@ -717,15 +719,14 @@ def _first_undecodable(values: list[bytes]) -> int | None:
     """Return the position of the first value that is not UTF-8 text, or None."""
     # Joined by a byte of one character, which no character of several bytes
     # holds, the values decode together exactly when each decodes alone, and
-    # one decode takes a fraction of the time of one decode per value.
+    # the first error lies in the first value that fails. One decode takes a
+    # fraction of the time of one decode per value.
     try:
         b"\n".join(values).decode("utf-8")
-    except UnicodeDecodeError:
-        for position, value in enumerate(values):
-            try:
-                value.decode("utf-8")
-            except UnicodeDecodeError:
-                return position
+    except UnicodeDecodeError as error:
+        # Each value starts one byte after the end of the value before it.
+        starts = list(accumulate((len(value) + 1 for value in values), initial=0))
+        return bisect_right(starts, error.start) - 1
     return None
 
 

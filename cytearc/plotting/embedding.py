@@ -2417,10 +2417,9 @@ def embedding(
         assay_name = (
             item.assay
             if isinstance(item, FeatureRef) and item.assay is not None
-            else resolved_from_assay or getattr(store, "_defaultAssay", None)
+            else resolved_from_assay or store._defaultAssay
         )
-        if assay_name is not None:
-            feature_assays.add(assay_name)
+        feature_assays.add(assay_name)
 
     # A panel-scope colorbar that no panel gave limits has no scale to show.
     legends = [

@@ -476,8 +476,6 @@ def load_cell_artifact_values(
     value_name: str | None = None,
 ) -> tuple[np.ndarray, ArtifactRef, np.ndarray | None]:
     """Return a cell artifact's values, its cell selection, and its missing-row mask."""
-    if not isinstance(ref, ArtifactRef):
-        raise TypeError("cell data input must be an ArtifactRef")
     resolved = resolve_cell_aligned_artifact(
         root,
         ref,

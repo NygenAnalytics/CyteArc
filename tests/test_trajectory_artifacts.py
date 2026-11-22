@@ -427,6 +427,9 @@ def test_raw_source_sink_snapshot_is_replayable_and_selection_aligned() -> None:
     assert (inspect_artifact(root, snapshot).inputs or {})["cell_selection"] == (
         selection.to_dict()
     )
+    # Values that are not an artifact are refused before anything is read.
+    with pytest.raises(TypeError, match="^artifact must be an ArtifactRef$"):
+        load_cell_artifact_values(root, values)  # type: ignore[arg-type]
 
 
 def test_nullable_zero_label_is_not_treated_as_an_endpoint() -> None:
