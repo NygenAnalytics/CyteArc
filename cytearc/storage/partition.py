@@ -127,9 +127,9 @@ def band_shards(
         ends = np.minimum(starts + band, rows.stop) - 1
         return int((ends // extent - starts // extent).max()) + 1
     shard = np.asarray(rows, dtype=np.int64) // extent
-    entered = np.ones(shard.size, dtype=np.int64)
+    entered = np.ones(shard.size, dtype=bool)
     entered[1:] = shard[1:] != shard[:-1]
-    entered[::band] = 1
+    entered[::band] = True
     return int(np.add.reduceat(entered, np.arange(0, shard.size, band)).max())
 
 
@@ -225,7 +225,6 @@ def indexed_read_parts(
             decodes=reads,
             shards=min(reads, max(1, int(shards)) * _column_shards(geometry, columns)),
             gapBytes=coalesced_gap_bytes(geometry, columns, chunks=touched),
-            objects=reads > 1,
         )
 
     fixed = read(0)
@@ -262,14 +261,9 @@ def row_read_parts(
     reads = max(1, int(concurrency))
     row_chunks = -(-geometry.axisShard(0) // geometry.axisChunk(0))
     touched = row_chunks * _shard_column_chunks(geometry, columns)
-    # A read priced at more than one decode at a time, as a dense write prices
-    # its producer's, is charged the objects of Zarr's read in full, which
-    # small chunks do not cover; reads one decode at a time keep their charge.
-    if geometry.shards is None and reads == 1:
-        fixed = geometry.readBytes(0, touched, decodes=1)
-    elif geometry.shards is None:
+    if geometry.shards is None:
         chunks = max(1, int(shards)) * int(np.unique(geometry.binOf(1, columns)).size)
-        fixed = geometry.readBytes(0, chunks, decodes=reads, objects=True)
+        fixed = geometry.readBytes(0, chunks, decodes=reads)
     else:
         fixed = geometry.readBytes(
             0,
@@ -277,7 +271,6 @@ def row_read_parts(
             decodes=reads,
             shards=min(reads, max(1, int(shards)) * _column_shards(geometry, columns)),
             gapBytes=coalesced_gap_bytes(geometry, columns, chunks=touched),
-            objects=reads > 1,
         )
     per_row = columns.size * geometry.itemsize if geometry.shards is not None else 0
     column_gather = not is_contiguous(columns)

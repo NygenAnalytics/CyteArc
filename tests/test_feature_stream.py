@@ -48,10 +48,15 @@ def _array(
     )
 
 
+def _read_objects(chunks: int, decodes: int) -> int:
+    """The objects of one Zarr read: 32 KiB, 4 KiB a chunk and 16 KiB a decode at once."""
+    return 32_768 + chunks * 4_096 + decodes * 16_384
+
+
 # A chunk of 5 by 5 uint32 values decodes to 100 bytes, and a read holds it as
-# stored and decoded: the 100 decoded bytes beside the bound of their
-# compressed bytes, 100 + 1,024.
-_DECODE = 100 + 100 + 1_024
+# stored and decoded, the 100 decoded bytes beside the bound of their
+# compressed bytes, 100 + 1,024, and the objects of Zarr's read of one chunk.
+_DECODE = 100 + 100 + 1_024 + _read_objects(1, 1)
 
 
 def test_feature_stream_packs_only_adjacent_whole_bins() -> None:
@@ -62,7 +67,7 @@ def test_feature_stream_packs_only_adjacent_whole_bins() -> None:
         cellAxis=0,
         featureIndices=np.array([0, 1, 5, 6, 17]),
         cellIndices=np.arange(12),
-        resources=ResourceBudget(10_000, 4),
+        resources=ResourceBudget(10_000 + _read_objects(1, 1), 4),
         blockBytes=lambda width: width * 100,
     )
 
@@ -81,7 +86,7 @@ def test_feature_stream_preserves_destination_order_for_unsorted_features() -> N
         cellAxis=0,
         featureIndices=np.array([12, 1, 6]),
         cellIndices=np.arange(12),
-        resources=ResourceBudget(10_000, 2),
+        resources=ResourceBudget(10_000 + _read_objects(1, 1), 2),
         blockBytes=lambda width: width * 100,
     )
 
@@ -111,7 +116,8 @@ def test_feature_stream_splits_one_bin_and_counts_repeated_tiles() -> None:
 def test_feature_stream_budgets_an_edge_chunk_at_its_nominal_size() -> None:
     # A 5 x 3 chunk of uint32 decodes to 60 bytes even where it overhangs the
     # 12 x 7 array and only 2 x 1 of its elements are addressable, and a read
-    # holds it as stored and decoded, 60 + 60 + 1,024 bytes.
+    # holds it as stored and decoded, 60 + 60 + 1,024 bytes, beside the
+    # objects of Zarr's read of one chunk.
     array = _array(shape=(12, 7), chunks=(5, 3))
     kwargs = {
         "featureAxis": 1,
@@ -121,7 +127,7 @@ def test_feature_stream_budgets_an_edge_chunk_at_its_nominal_size() -> None:
         "blockBytes": lambda width: width,
     }
 
-    edge = 60 + 60 + 1_024
+    edge = 60 + 60 + 1_024 + _read_objects(1, 1)
     plan = plan_feature_stream(array, resources=ResourceBudget(1 + edge, 1), **kwargs)
     assert plan.geometry.nominalChunkBytes() == 60
     assert len(plan.blocks) == 1
@@ -203,7 +209,7 @@ def test_feature_stream_records_optional_shard_geometry() -> None:
         cellAxis=0,
         featureIndices=np.array([0]),
         cellIndices=np.array([0]),
-        resources=ResourceBudget(4_000, 1),
+        resources=ResourceBudget(4_000 + _read_objects(2, 1), 1),
         blockBytes=lambda _width: 1,
     )
 
@@ -218,7 +224,7 @@ def test_feature_stream_packs_many_single_feature_bins() -> None:
         cellAxis=0,
         featureIndices=np.arange(2_000),
         cellIndices=np.arange(10),
-        resources=ResourceBudget(10_000, 2),
+        resources=ResourceBudget(10_000 + _read_objects(1, 1), 2),
         blockBytes=lambda width: width,
     )
 
@@ -353,9 +359,9 @@ def test_cell_band_admission_charges_the_zarr_read_of_each_band(
     counts_t = _counts_t_with_plan(values)
     band_bytes = 200
     # The band, Zarr's shard-level copy, and the chunk decoded next to its
-    # compressed bytes, charged at the bound of their encoded size: 200 +
-    # 200 // 128 + 1,024 bytes.
-    read_bytes = 2 * band_bytes + (200 + 1 + 1_024) + 200
+    # compressed bytes, charged at the bound of their encoded size, 200 +
+    # 200 // 128 + 1,024 bytes, beside the objects of Zarr's read of it.
+    read_bytes = 2 * band_bytes + (200 + 1 + 1_024) + 200 + _read_objects(1, 1)
     # A local and a destination index per cell, and the selected cells.
     index_bytes = 10 * 8 * 2 + 10 * 8
     metrics: dict[str, object] = {}
@@ -798,7 +804,8 @@ def test_map_feature_read_groups_share_the_requested_read_width(
         values,
         policy=CountMatrixPolicy(unitBytes=2_000, chunkBytes=200),
     )
-    resources = ResourceBudget(1024 * 1024, 2)
+    # Room for twenty reads of a band, each with the objects of Zarr's read.
+    resources = ResourceBudget(2 * 1024 * 1024, 2)
     metrics: dict[str, object] = {}
     groups = list(
         map_feature_read_groups(

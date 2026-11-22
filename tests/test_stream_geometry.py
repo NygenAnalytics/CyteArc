@@ -359,23 +359,24 @@ def test_row_reads_at_a_concurrency_hold_the_shards_and_decodes_they_run_at_once
     decoded = 160_000
     encoded = decoded + decoded // 128 + 1_024
     # One read at a time: the ten compressed chunks of a shard, one decoded
-    # chunk, and the read's objects, up to one more decoded chunk.
+    # chunk, and the objects of the read: 32 KiB, 4 KiB for each chunk it
+    # touches and 16 KiB for each chunk it decodes at once.
     one, per_row = row_read_parts(geometry, every_gene, rows_contiguous=True)
-    assert one == 10 * encoded + decoded + (65_536 + 10 * 4_096 + 16_384)
+    assert one == 10 * encoded + decoded + (32_768 + 10 * 4_096 + 16_384)
     assert per_row == 400 * 4
     # Ten at once over a band of one shard decode its ten chunks at once,
     # beside the objects of ten decodes.
     ten, ten_per_row = row_read_parts(
         geometry, every_gene, rows_contiguous=True, concurrency=10
     )
-    shard = 10 * encoded + 10 * decoded + 65_536 + 10 * 4_096 + 10 * 16_384
+    shard = 10 * encoded + 10 * decoded + 32_768 + 10 * 4_096 + 10 * 16_384
     assert (ten, ten_per_row) == (shard, per_row)
     # Over a band of four shards, ten at once read all four together; two at
     # once read two shards, each decoding two chunks at once.
     assert row_read_parts(
         geometry, every_gene, rows_contiguous=True, concurrency=10, shards=4
     ) == (4 * shard, per_row)
-    two = 10 * encoded + 2 * decoded + 65_536 + 10 * 4_096 + 2 * 16_384
+    two = 10 * encoded + 2 * decoded + 32_768 + 10 * 4_096 + 2 * 16_384
     assert row_read_parts(
         geometry, every_gene, rows_contiguous=True, concurrency=2, shards=4
     ) == (2 * two, per_row)
@@ -386,7 +387,7 @@ def test_row_reads_at_a_concurrency_hold_the_shards_and_decodes_they_run_at_once
     )
     # Shards of half the genes are read side by side, ten at once.
     halves = replace(geometry, shards=(1_000, 200))
-    half = 5 * encoded + 5 * decoded + 65_536 + 5 * 4_096 + 5 * 16_384
+    half = 5 * encoded + 5 * decoded + 32_768 + 5 * 4_096 + 5 * 16_384
     assert row_read_parts(halves, every_gene, rows_contiguous=True, concurrency=10) == (
         2 * half,
         per_row,
@@ -397,7 +398,7 @@ def test_row_reads_at_a_concurrency_hold_the_shards_and_decodes_they_run_at_once
     assert row_read_parts(
         own_pool, every_gene, rows_contiguous=True, concurrency=2
     ) == (
-        10 * encoded + 2 * decoded + 2 * decoded + 65_536 + 10 * 4_096 + 2 * 16_384,
+        10 * encoded + 2 * decoded + 2 * decoded + 32_768 + 10 * 4_096 + 2 * 16_384,
         per_row,
     )
     # Scattered rows over genes of wide spans in two chunks are read a row
@@ -406,7 +407,7 @@ def test_row_reads_at_a_concurrency_hold_the_shards_and_decodes_they_run_at_once
     # chunks at once, and Zarr's indices of the 9 shards and 4 genes, and of
     # each row.
     wide = np.array([0, 39, 40, 79])
-    shard_read = 2 * encoded + 2 * decoded + 65_536 + 2 * 4_096 + 2 * 16_384
+    shard_read = 2 * encoded + 2 * decoded + 32_768 + 2 * 4_096 + 2 * 16_384
     assert row_read_parts(
         geometry, wide, rows_contiguous=False, concurrency=4, shards=2
     ) == (2 * 4 * 1_000 * 4 + 2 * shard_read + 128 * (9 + 4), 4 * 4 + 128)
@@ -414,16 +415,17 @@ def test_row_reads_at_a_concurrency_hold_the_shards_and_decodes_they_run_at_once
         geometry, wide, block_rows=1_000, concurrency=4, shards=2
     ) == (2 * 4 * 1_000 * 4 + 2 * shard_read, 0)
     # An unsharded array's chunks are each read on their own, so a band over
-    # three of them holds up to the concurrency of them at once.
+    # three of them holds up to the concurrency of them at once, beside the
+    # objects of a read of the three.
     unsharded = ArrayGeometry((8_000, 400), (1_000, 400), None, 4)
     stored = 2 * 1_600_000 + 1_600_000 // 128 + 1_024
     assert row_read_parts(unsharded, every_gene, rows_contiguous=True, shards=3) == (
-        stored,
+        stored + 32_768 + 3 * 4_096 + 16_384,
         0,
     )
     assert row_read_parts(
         unsharded, every_gene, rows_contiguous=True, concurrency=8, shards=3
-    ) == (3 * stored + 65_536 + 3 * 4_096 + 3 * 16_384, 0)
+    ) == (3 * stored + 32_768 + 3 * 4_096 + 3 * 16_384, 0)
 
 
 def test_band_costs_are_zero_for_empty_selections() -> None:
@@ -443,8 +445,9 @@ def test_selected_row_cost_admits_only_touched_chunks_within_each_shard() -> Non
     # Both selections touch three feature chunks, but only the second puts
     # them in one shard alongside its two row chunks: four more compressed
     # chunks, each at the bound of its encoded size, 1,024 bytes beyond the
-    # 16 it decodes to.
-    assert wide - narrow == 4 * (geometry.nominalChunkBytes() + 1_024)
+    # 16 it decodes to, and the 4 KiB of objects that Zarr's read makes for
+    # each.
+    assert wide - narrow == 4 * (geometry.nominalChunkBytes() + 1_024 + 4_096)
     minimum = narrow + 1
     admitted = admit_stream(
         ResourceBudget(minimum, 1), nBlocks=1, blockBytes=1, decodeBytes=narrow
@@ -724,9 +727,10 @@ def test_row_band_reproduces_every_expression_it_replaced() -> None:
 # A block of four features of 25 cells holds 400 bytes of uint32 values, and
 # reading it decodes one chunk of 25 by 4 values, held as stored and decoded:
 # the 400 decoded bytes beside the bound of their compressed bytes, 400 + 3 +
-# 1,024.
+# 1,024, and the objects of Zarr's read of one chunk, 32 KiB, 4 KiB for the
+# chunk and 16 KiB for its decode.
 _BLOCK = 400
-_DECODE = 400 + 400 + 3 + 1_024
+_DECODE = 400 + 400 + 3 + 1_024 + 32_768 + 4_096 + 16_384
 
 
 def _plan_with(
@@ -815,9 +819,12 @@ def test_streamed_row_blocks_decode_only_as_many_chunks_as_budgeted() -> None:
     # A row block spans the four column chunks of one chunk row, so an
     # unbounded read can hold all four decodes at once. The budget affords one
     # 2048 byte block beside a single chunk of 512 bytes, held as stored and
-    # decoded, 512 + 4 + 1,024 bytes beside it, and no more.
+    # decoded, 512 + 4 + 1,024 bytes beside it, and the objects of Zarr's read
+    # of one chunk, and no more.
+    objects = 32_768 + 4_096 + 16_384
     budgeted = ChunkedArray(
-        array, resources=ResourceBudget(2_048 + 512 + 512 + 4 + 1_024 + 440, 4)
+        array,
+        resources=ResourceBudget(2_048 + 512 + 512 + 4 + 1_024 + objects + 440, 4),
     )
     store.reset()
     blocks = list(budgeted.stream_blocks())
@@ -840,7 +847,8 @@ def test_planned_reads_never_decode_more_chunks_than_budgeted() -> None:
     # decodes: charging one decode per read admits four concurrent chunk
     # decodes, which overruns the limit once they are actually in flight.
     # Each block holds 1,024 bytes, and each decode a chunk of 256 bytes as
-    # stored and decoded, 256 + 2 + 1,024 bytes beside it.
+    # stored and decoded, 256 + 2 + 1,024 bytes beside it, and the objects of
+    # Zarr's read of that chunk.
     store = RecordingStore(delay=0.005)
     root = zarr.open_group(store=store, mode="w")
     array = root.create_array(
@@ -854,7 +862,7 @@ def test_planned_reads_never_decode_more_chunks_than_budgeted() -> None:
     array[:] = np.arange(64 * 32, dtype=np.uint32).reshape(64, 32)
 
     cells = np.arange(64)
-    decode = 256 + 256 + 2 + 1_024
+    decode = 256 + 256 + 2 + 1_024 + 32_768 + 4_096 + 16_384
     resources = ResourceBudget(3 * (1_024 + decode) + 440, 8)
     block_bytes = 4 * cells.size * 4
     plan = plan_feature_stream(

@@ -30,10 +30,12 @@ ROW_KEPT_INDEX_BYTES = 32
 #: What one Zarr read holds beside its buffers, whatever their size: the
 #: objects of the read of one shard, or of an unsharded read, those of each
 #: chunk it takes, since Zarr makes a task for every chunk before it reads
-#: any, and those of each chunk it decodes at once. Measured at about 45 KB,
-#: 2.5 KB and 11 KB on Zarr 3.4 after a full collection has emptied CPython's
-#: free lists, so that each object is allocated anew.
-_READ_OBJECT_BYTES = 64 * 1024
+#: any, and those of each chunk it decodes at once. A read of one chunk
+#: traced 31 to 45 KB, each further chunk 2.2 to 2.4 KB and each further
+#: decode at once 12.5 KB, on Zarr 3.4 after a full collection had emptied
+#: CPython's free lists, so that each object was allocated anew; reads of
+#: tiny chunks are held between half of these charges and the whole of them.
+_READ_OBJECT_BYTES = 32 * 1024
 _READ_CHUNK_OBJECT_BYTES = 4 * 1024
 _READ_DECODE_OBJECT_BYTES = 16 * 1024
 
@@ -117,25 +119,22 @@ class ArrayGeometry:
     def heldDecodeBytes(self, chunks: int, decodes: int) -> int:
         """Return what a read of ``chunks`` chunks, ``decodes`` at a time, holds beside the chunks it decodes at once.
 
-        A thread of a plain thread pool keeps the last chunk it decoded until
-        it runs again, which on a busy machine can be after the read has moved
-        on, so a read on such a pool holds one previous decoded chunk for each
-        decode under way, and no more than the decodes that follow the first
-        ones. Only Zarr's opt-in ``FusedCodecPipeline``, with
-        ``codec_pipeline.max_workers`` above 1, decodes on such a pool, as
-        ``poolKeepsDecodedChunk`` records. CyteArc's codec pools hand each
-        decoded chunk back to the read's event loop, so a read on them holds
-        no previous chunk, only the objects of Zarr's read that
-        :meth:`objectBytes` counts, which are charged up to those chunks: a
-        read of chunks smaller than its objects is charged the chunks, as
-        before.
+        Every read holds the objects of Zarr's read that :meth:`objectBytes`
+        counts. A thread of a plain thread pool also keeps the last chunk it
+        decoded until it runs again, which on a busy machine can be after the
+        read has moved on, so a read on such a pool also holds one previous
+        decoded chunk for each decode under way, and no more than the decodes
+        that follow the first ones. Only Zarr's opt-in ``FusedCodecPipeline``,
+        with ``codec_pipeline.max_workers`` above 1, decodes on such a pool,
+        as ``poolKeepsDecodedChunk`` records; CyteArc's codec pools hand each
+        decoded chunk back to the read's event loop and keep none.
         """
         touched = max(1, int(chunks))
         decoding = min(touched, max(1, int(decodes)))
-        previous = min(decoding, touched - decoding) * self.nominalChunkBytes()
-        if self.poolKeepsDecodedChunk:
-            return previous
-        return min(previous, self.objectBytes(touched, decoding))
+        objects = self.objectBytes(touched, decoding)
+        if not self.poolKeepsDecodedChunk:
+            return objects
+        return objects + min(decoding, touched - decoding) * self.nominalChunkBytes()
 
     def wholeReadBytes(self, concurrency: int) -> int:
         """Return what reading the whole array at ``concurrency`` holds while it runs, with the result.
@@ -161,10 +160,11 @@ class ArrayGeometry:
         """Return what reading ``rows`` rows of one band of chunks holds beside the result it fills.
 
         The read holds those rows as Zarr returns them and the band's chunks
-        that it decodes at once, each as stored and decoded, beside any
-        previous chunks that :meth:`heldDecodeBytes` counts; a sharded array
-        also fills a shard-level copy of the rows and holds the stored bytes
-        of every chunk of the band it fetched, which covers those.
+        that it decodes at once, each as stored and decoded, beside what
+        :meth:`heldDecodeBytes` counts; a sharded array also fills a
+        shard-level copy of the rows and holds the stored bytes of every chunk
+        of the band it fetched, which cover any previous decoded chunks,
+        beside the objects of Zarr's read.
         """
         rows_bytes = max(0, int(rows)) * self.rowBytes()
         touched = self.bandChunks()
@@ -178,6 +178,7 @@ class ArrayGeometry:
                 rows_bytes
                 + touched * self.storedChunkBytes()
                 + decoding * self.nominalChunkBytes()
+                + self.objectBytes(touched, decoding)
             )
         return rows_bytes + band + self.readScratchBytes
 
@@ -189,7 +190,6 @@ class ArrayGeometry:
         *,
         shards: int = 1,
         gapBytes: int = 0,
-        objects: bool = False,
     ) -> int:
         """Return the bytes one Zarr read holds while it runs.
 
@@ -201,8 +201,9 @@ class ArrayGeometry:
         than it decodes to. An unsharded read holds its result and each chunk
         it decodes at once as stored and decoded, as :meth:`storedChunkBytes`
         counts, since Zarr keeps a chunk's compressed bytes beside it while it
-        decodes it. Either read that decodes more chunks than it decodes at
-        once also holds what :meth:`heldDecodeBytes` counts. ``chunks``
+        decodes it. Either read also holds what :meth:`heldDecodeBytes`
+        counts: the objects of Zarr's read, and the previous decoded chunks
+        that a plain pool keeps. ``chunks``
         counts the inner chunks the read touches in one shard and ``decodes``
         the chunks Zarr decodes at once, all of them unless given.
         Storage-provided scratch covers one shard request, including its
@@ -214,21 +215,13 @@ class ArrayGeometry:
         ``shards`` counts the shards that a sharded read reads at once, as
         Zarr reads up to its async concurrency of the shards a selection
         touches together: each holds the compressed bytes of the chunks it
-        touches, its decodes, scratch and gap, while their shard-level copies
-        together hold the selection once. With ``objects``, the read is
-        charged the objects of Zarr's read in full, as :meth:`objectBytes`
-        counts them, for each shard it reads, beside any chunks that a plain
-        pool keeps; without it, it is charged them only up to the previous
-        decoded chunks that :meth:`heldDecodeBytes` reserves, as plans of
-        reads at one decode at a time were before.
+        touches, its decodes, what :meth:`heldDecodeBytes` counts, scratch and
+        gap, while their shard-level copies together hold the selection once.
         """
         touched = max(1, int(chunks))
         decoding = touched if decodes is None else min(touched, max(1, int(decodes)))
         result = max(0, int(resultBytes))
         held = self.heldDecodeBytes(touched, decoding)
-        if objects:
-            kept = held if self.poolKeepsDecodedChunk else 0
-            held = kept + self.objectBytes(touched, decoding)
         if self.shards is None:
             return (
                 result
