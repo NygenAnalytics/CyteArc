@@ -583,6 +583,8 @@ def test_derived_sources_reuse_store_from_an_earlier_invocation(tmp_path):
     store.mkdir(parents=True)
     payload = store / "counts"
     payload.write_bytes(b"prepared source counts")
+    # A finished rebuild writes its archive beside the store.
+    (source / generator.ARCHIVE_NAME).write_bytes(b"archive")
 
     class Repository:
         def download_dataset(self, *args, **kwargs):
@@ -597,6 +599,28 @@ def test_derived_sources_reuse_store_from_an_earlier_invocation(tmp_path):
 
     assert resolved == {"tabula_sapiens": source}
     assert payload.read_bytes() == b"prepared source counts"
+
+
+def test_derived_sources_refuse_a_store_whose_rebuild_did_not_finish(tmp_path):
+    # A rebuild that stopped partway leaves its store without an archive.
+    source = tmp_path / "tabula_sapiens"
+    (source / generator.STORE_NAME).mkdir(parents=True)
+
+    class Repository:
+        def download_dataset(self, *args, **kwargs):
+            raise AssertionError("A partial local source must not be downloaded over")
+
+    with pytest.raises(
+        FileNotFoundError,
+        match="has no data.zarr.tar.gz beside it, so its rebuild did not finish. "
+        "Rebuild tabula_sapiens first",
+    ):
+        generator._resolve_derived_sources(
+            repository=Repository(),
+            source_datasets=["tabula_sapiens"],
+            local_sources={},
+            work=tmp_path / "_source",
+        )
 
 
 def test_external_source_download_verifies_checksum(tmp_path, monkeypatch):
@@ -719,26 +743,36 @@ def _publication_build_root(
     return build_root
 
 
+def _refuse_bucket_access(*_args: object, **_kwargs: object) -> None:
+    raise AssertionError("the test reached the bucket")
+
+
 def test_publication_without_names_plans_only_the_rebuilt_datasets(
     tmp_path, monkeypatch, capsys
 ):
     from scripts import publish_docs_datasets as publisher
 
     build_root = _publication_build_root(
-        tmp_path, monkeypatch, manifests=("rebuilt", "unbuilt"), archives=("rebuilt",)
+        tmp_path,
+        monkeypatch,
+        manifests=("rebuilt", "stopped", "unbuilt"),
+        archives=("rebuilt",),
     )
-    # A store without its archive does not count as rebuilt.
-    (build_root / "unbuilt" / publisher.STORE_NAME).mkdir(parents=True)
+    # A rebuild that stops partway leaves a store without its archive.
+    (build_root / "stopped" / publisher.STORE_NAME).mkdir(parents=True)
 
     assert publisher.main(["--build-root", str(build_root)]) == 0
 
     out = capsys.readouterr().out
     assert "upload   cytearc_docs/rebuilt/data.zarr.tar.gz" in out
+    assert "cytearc_docs/stopped/" not in out
     assert "cytearc_docs/unbuilt/" not in out
     archive_layout = build_root / "<dataset>" / publisher.ARCHIVE_NAME
-    assert (
-        f"Leaving out the datasets with no archive at {archive_layout}:\n  unbuilt\n\n"
-    ) in out
+    assert out.startswith(
+        f"Leaving out the datasets with no archive at {archive_layout}:\n"
+        "  stopped: its data.zarr has no archive, so its rebuild did not finish\n"
+        "  unbuilt\n\n"
+    )
 
 
 @pytest.mark.parametrize(
@@ -824,6 +858,91 @@ def test_publication_of_named_datasets_plans_only_those_datasets(
         publisher.main(["unbuilt", "--build-root", str(build_root)])
 
 
+_ARCHIVED_STORE_FILES = {
+    "zarr.json": b'{"zarr_format": 3}',
+    "RNA/counts/c/0/0": b"0123456789",
+    "RNA/counts/c/1/0": b"01234",
+}
+
+
+def _unpacked_build_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store_files: dict[str, bytes]
+) -> Path:
+    from scripts import publish_docs_datasets as publisher
+
+    build_root = _publication_build_root(
+        tmp_path, monkeypatch, manifests=("unpacked",), archives=("unpacked",)
+    )
+    manifest = tmp_path / "manifests" / "unpacked_manifest.json"
+    record = json.loads(manifest.read_text())
+    # The archived store's files hold 18, 10 and 5 bytes.
+    record["storeBytes"] = 33
+    manifest.write_text(json.dumps(record))
+    store = build_root / "unpacked" / publisher.STORE_NAME
+    for name, payload in store_files.items():
+        (store / name).parent.mkdir(parents=True, exist_ok=True)
+        (store / name).write_bytes(payload)
+    monkeypatch.setattr(publisher, "UNPACKED_DATASETS", frozenset({"unpacked"}))
+    monkeypatch.setattr(publisher, "list_bucket_tree", _refuse_bucket_access)
+    monkeypatch.setattr(publisher, "batch_bucket_files", _refuse_bucket_access)
+    return build_root
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [[], ["unpacked"], ["--apply"], ["--apply", "unpacked"]],
+    ids=["without-names", "named", "apply-without-names", "apply-named"],
+)
+def test_publication_refuses_an_unpacked_store_unlike_the_archived_one(
+    tmp_path, monkeypatch, capsys, argv
+):
+    from scripts import publish_docs_datasets as publisher
+
+    # An interrupted copy of the build root holds two of the store's files.
+    partial = {
+        name: _ARCHIVED_STORE_FILES[name] for name in ("zarr.json", "RNA/counts/c/0/0")
+    }
+    build_root = _unpacked_build_root(tmp_path, monkeypatch, partial)
+
+    with pytest.raises(
+        RuntimeError, match="holds 28 bytes, but the manifest of unpacked records 33 "
+    ):
+        publisher.main([*argv, "--build-root", str(build_root)])
+
+    assert capsys.readouterr().out == ""
+
+
+def test_publication_syncs_an_unpacked_store_that_matches_its_manifest(
+    tmp_path, monkeypatch
+):
+    from scripts import publish_docs_datasets as publisher
+
+    build_root = _unpacked_build_root(tmp_path, monkeypatch, _ARCHIVED_STORE_FILES)
+    prefix = "cytearc_docs/unpacked/data.zarr"
+    published = [f"{prefix}/zarr.json", f"{prefix}/RNA/counts/c/2/0"]
+    monkeypatch.setattr(
+        publisher, "_published_files", lambda _dataset: dict.fromkeys(published)
+    )
+
+    plan = publisher._plan_dataset("unpacked", build_root)
+
+    store = build_root / "unpacked" / publisher.STORE_NAME
+    assert plan.upload == [
+        (
+            build_root / "unpacked" / publisher.ARCHIVE_NAME,
+            "cytearc_docs/unpacked/data.zarr.tar.gz",
+        ),
+        (
+            tmp_path / "manifests" / "unpacked_manifest.json",
+            "cytearc_docs/unpacked/manifest.json",
+        ),
+        (store / "RNA/counts/c/0/0", f"{prefix}/RNA/counts/c/0/0"),
+        (store / "RNA/counts/c/1/0", f"{prefix}/RNA/counts/c/1/0"),
+        (store / "zarr.json", f"{prefix}/zarr.json"),
+    ]
+    assert plan.remove == [f"{prefix}/RNA/counts/c/2/0"]
+
+
 class _RebuildStopped(Exception):
     pass
 
@@ -881,40 +1000,31 @@ def test_a_rebuild_stopped_during_its_analysis_leaves_nothing_to_publish(
         )
     assert (build_root / "unpacked" / generator.STORE_NAME / "RNA").is_dir()
 
-    # Publishing the unpacked store lists the bucket and syncs it; here the
-    # bucket functions only record what a plan asks of them.
-    listed: list[str] = []
+    # Planning the unpacked store would list the bucket, which refuses here, and
+    # uploads are only recorded.
     batches: list[dict[str, object]] = []
-
-    def published_files(prefix: str) -> dict[str, None]:
-        listed.append(prefix)
-        return dict.fromkeys(["cytearc_docs/unpacked/data.zarr/RNA/counts/c/0/0"])
 
     def batch_bucket_files(_bucket_id: str, **changes: object) -> None:
         batches.append(changes)
 
-    def refuse(*_args: object, **_kwargs: object) -> None:
-        raise AssertionError("the test reached the bucket")
-
     monkeypatch.setattr(publisher, "UNPACKED_DATASETS", frozenset({"unpacked"}))
-    monkeypatch.setattr(publisher, "_published_files", published_files)
     monkeypatch.setattr(publisher, "batch_bucket_files", batch_bucket_files)
-    monkeypatch.setattr(publisher, "list_bucket_tree", refuse)
+    monkeypatch.setattr(publisher, "list_bucket_tree", _refuse_bucket_access)
 
     archive_layout = build_root / "<dataset>" / publisher.ARCHIVE_NAME
     for apply in ([], ["--apply"]):
         assert publisher.main([*apply, "--build-root", str(build_root)]) == 0
         out = capsys.readouterr().out
+        # The left-out list comes first, so --apply prints it before uploading.
+        assert out.startswith(
+            f"Leaving out the datasets with no archive at {archive_layout}:\n"
+            "  unpacked: its data.zarr has no archive, so its rebuild did not finish\n\n"
+        )
         assert "upload   cytearc_docs/complete/data.zarr.tar.gz" in out
         assert "cytearc_docs/unpacked/" not in out
-        assert (
-            f"Leaving out the datasets with no archive at {archive_layout}:\n"
-            "  unpacked\n\n"
-        ) in out
         with pytest.raises(FileNotFoundError, match="rebuild unpacked first"):
             publisher.main([*apply, "unpacked", "--build-root", str(build_root)])
 
-    assert listed == []
     assert batches == [
         {
             "add": [
@@ -973,11 +1083,10 @@ def test_a_run_needs_named_datasets_or_all(capsys):
         generator.main([])
 
     assert exited.value.code == 2
-    assert (
-        capsys.readouterr()
-        .err.rstrip()
-        .endswith("error: name at least one dataset or pass --all")
-    )
+    err = capsys.readouterr().err
+    assert err.rstrip().endswith("error: name at least one dataset or pass --all")
+    # The usage line above the error offers the recipes and nothing else.
+    assert "{" + ",".join(generator.RECIPES) + "}" in err
 
 
 def test_teaseq_annotations_map_original_barcodes_through_well_suffix(tmp_path):
