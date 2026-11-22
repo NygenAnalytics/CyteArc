@@ -48,6 +48,7 @@ from ._data import (
 from ._deps import require_matplotlib
 from ._display import (
     continuous_display_scale,
+    labels_in_stored_order,
     merge_categorical_scales,
     stored_artifact_scale,
     stored_categorical_scale,
@@ -68,7 +69,6 @@ from ..utils.arguments import (
     clip_fraction_argument,
     optional_bool_argument,
 )
-from ..utils.arrays import sort_categories
 from ._style import (
     DEFAULT_PANEL_INCHES,
     DEFAULT_RASTERIZE_THRESHOLD,
@@ -297,7 +297,9 @@ def _multi_layout_facets(
         subset=subset,
         subset_name=subset_by,
     )
-    return sort_categories(list(pd.unique(values[selection])))
+    return labels_in_stored_order(
+        pd.unique(values[selection]), stored_categorical_scale(store, facet_by)
+    )
 
 
 def _embedding_multiple_layouts(
@@ -1467,7 +1469,10 @@ def embedding(
     either. With several genes, CyteArc draws one panel per gene. With
     ``facet_by``, each gene becomes a row of facet panels that wraps at four
     columns, and cells without a facet value get their own panel, titled with
-    the facet column's missing label (``NA`` by default). Color limits for a
+    the facet column's missing label (``NA`` by default). Facets follow
+    ``groups`` or ``facet_order``, or else the order that the facet column
+    stores, as a stored display or ordered categories, and natural order
+    without one. Color limits for a
     gene are shared across facets so panels stay comparable. Multiple
     ``layout_key`` values produce the cartesian product of layouts and colors
     in one figure, one layout per row of panels.
@@ -1853,7 +1858,11 @@ def embedding(
         elif facet_order is not None:
             facets = list(facet_order)
         else:
-            facets = sort_categories(list(pd.unique(facet_values[base_mask])))
+            # Facets follow the order that the facet column stores.
+            facets = labels_in_stored_order(
+                pd.unique(facet_values[base_mask]),
+                stored_categorical_scale(store, facet_by),
+            )
         if any(_is_missing_category(facet) for facet in facets):
             facet_missing_label = _facet_missing_label(store, facet_by)
     else:

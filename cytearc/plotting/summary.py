@@ -13,6 +13,7 @@ from ..storage.artifacts import ArtifactRef
 
 from ._contracts import (
     CategoricalScale,
+    CellField,
     ColorScale,
     FeatureRef,
     NormalizationSpec,
@@ -30,8 +31,13 @@ from ._data import (
     unmeasured_extras,
 )
 from ._deps import require_matplotlib
-from ._display import resolve_artifact_scale, resolve_categorical_scale
-from ._titles import artifact_titles, label_artifact
+from ._display import (
+    labels_in_stored_order,
+    merge_categorical_scales,
+    stored_artifact_scale,
+    stored_categorical_scale,
+)
+from ._titles import artifact_titles, label_artifact, label_column
 from ._figure import (
     LegendSpec,
     PlotResult,
@@ -267,20 +273,104 @@ def _label_order(
     return [value for value in order if value in present]
 
 
-def _group_order(
-    observed: Sequence[str],
-    group_order: Sequence[Any] | None,
+def _group_by_columns(
+    group_by: str | CellField | Sequence[str | CellField] | None,
+) -> tuple[tuple[str, ...] | None, tuple[str, ...]]:
+    """Return the cell columns that ``group_by`` names and their titles.
+
+    ``group_by`` names one column, as text or a ``CellField``, or two in a
+    tuple; None names none, and gives None for the columns.
+
+    Raises:
+        TypeError: If ``group_by`` or one of its columns is neither a column
+            name nor a ``CellField``.
+        ValueError: If a ``CellField`` has ``kind="continuous"``.
+    """
+    if group_by is None:
+        return None, ()
+    if isinstance(group_by, str | CellField):
+        items: tuple[Any, ...] = (group_by,)
+    else:
+        try:
+            items = tuple(group_by)
+        except TypeError:
+            raise TypeError(
+                "group_by must be a cell column name, a CellField, or a tuple "
+                f"of them, not {type(group_by).__name__}"
+            ) from None
+    keys: list[str] = []
+    titles: list[str] = []
+    for item in items:
+        key, title = label_column(item, "each column of group_by")
+        if key is None or title is None:
+            raise TypeError(
+                "each column of group_by must be a cell column name or a "
+                "CellField, not None"
+            )
+        keys.append(key)
+        titles.append(title)
+    return tuple(keys), tuple(titles)
+
+
+def _group_scales(
+    store: Any,
+    group_keys: Sequence[str],
+    groups: ArtifactRef | None,
     categorical_scale: CategoricalScale | None,
-) -> list[str]:
-    """Group columns in requested, stored display, or natural order."""
-    requested = (
-        group_order
-        if group_order is not None
-        else categorical_scale.order
-        if categorical_scale is not None
-        else None
+) -> tuple[CategoricalScale | None, list[CategoricalScale | None]]:
+    """Return the scale of the group ticks and the scale each grouping source stores.
+
+    One column, or a label artifact, merges the caller's
+    ``categorical_scale`` over the scale it stores, as other plots of it do.
+    The groups of two columns take the caller's scale alone, since stored
+    labels and colors name one column's categories, not pairs of them.
+    """
+    stored = (
+        [stored_artifact_scale(store, groups)]
+        if groups is not None
+        else [stored_categorical_scale(store, key) for key in group_keys]
     )
-    return _label_order(observed, requested, name="group order", noun="groups")
+    if len(stored) == 1:
+        categorical_scale = merge_categorical_scales(stored[0], categorical_scale)
+    return categorical_scale, stored
+
+
+def _group_order(
+    plot_df: pd.DataFrame,
+    roles: Sequence[str],
+    requested: Sequence[Any] | None,
+    stored_scales: Sequence[CategoricalScale | None],
+) -> list[str]:
+    """Order the groups of a summary table by their labels, compared as text.
+
+    A requested order, ``group_order`` or the order of the caller's
+    ``categorical_scale``, must list every group. Otherwise the groups
+    follow the labels of their first grouping column, then those of the
+    second, each column's labels in the order that the column or label
+    artifact stores and then in natural order.
+    """
+    first_rows = ~plot_df["group_label"].duplicated()
+    groups = plot_df.loc[first_rows, "group_label"].tolist()
+    if requested is not None:
+        return _label_order(groups, requested, name="group order", noun="groups")
+    # Each group's position among the text labels of each grouping column.
+    places = []
+    for role, scale in zip(roles, stored_scales, strict=True):
+        texts = plot_df.loc[first_rows, role].astype(str).tolist()
+        stored = (
+            None
+            if scale is None or scale.order is None
+            else CategoricalScale(order=tuple(str(value) for value in scale.order))
+        )
+        rank = {
+            text: index
+            for index, text in enumerate(
+                labels_in_stored_order(dict.fromkeys(texts), stored)
+            )
+        }
+        places.append([rank[text] for text in texts])
+    position = dict(zip(groups, zip(*places, strict=True), strict=True))
+    return sorted(groups, key=position.__getitem__)
 
 
 def _group_tick_labels(
@@ -382,7 +472,7 @@ def dotplot(
     store: Any,
     *,
     features: Sequence[str | FeatureRef] | Mapping[str, Sequence[str | FeatureRef]],
-    group_by: str | tuple[str, ...] | None = None,
+    group_by: str | CellField | tuple[str | CellField, ...] | None = None,
     groups: ArtifactRef | NamedCellArtifact | None = None,
     cell_key: str = "I",
     from_assay: str | None = None,
@@ -423,8 +513,17 @@ def dotplot(
     equally: CyteArc first summarizes within sample, then averages across samples.
     Without it, every cell contributes equally.
 
-    The group axis is titled by the ``group_by`` columns, or by the name of a
-    ``NamedCellArtifact`` as ``groups``, or else by the title of the label
+    ``group_by`` names one cell column or two, each as text or a
+    ``CellField``. Groups follow ``group_order``, or the order of
+    ``categorical_scale``, which must list every group. Otherwise they
+    follow the categories of their first column, then of their second, each
+    column in the order that it stores, as a stored display or ordered
+    categories, and in natural order without one; a label artifact's groups
+    follow the order it stores.
+
+    The group axis is titled by the titles of the ``group_by`` columns, a
+    ``CellField``'s label or else its key, joined by " / ", or by the name of
+    a ``NamedCellArtifact`` as ``groups``, or else by the title of the label
     artifact's record.
     """
     swap_axes = bool_argument(swap_axes, "swap_axes")
@@ -438,30 +537,32 @@ def dotplot(
         raise NotImplementedError("dotplot currently supports only linear color scales")
     size_scale_is_explicit = size_scale is not None
     normalization = normalization or NormalizationSpec()
-    # A named artifact groups by its artifact and titles the group axis.
+    # A named artifact groups by its artifact and titles the group axis, as a
+    # CellField's label titles its column.
     groups, groups_name = label_artifact(groups, "groups")
+    group_by_keys, group_by_titles = _group_by_columns(group_by)
     grouping = _resolve_grouping(
         store,
-        group_by=group_by,
+        group_by=group_by_keys,
         groups=groups,
         cell_key=cell_key,
     )
     group_keys, cell_indices, _group_values, group_missing = grouping
     group_axis_title = (
-        " / ".join(group_keys)
+        " / ".join(group_by_titles)
         if groups is None
         else artifact_titles(store, [(groups, groups_name)])[0]
     )
     if marker_linewidth < 0:
         raise ValueError("marker_linewidth must be non-negative")
-    if isinstance(group_by, str):
-        categorical_scale = resolve_categorical_scale(
-            store,
-            group_by,
-            categorical_scale,
-        )
-    elif groups is not None:
-        categorical_scale = resolve_artifact_scale(store, groups, categorical_scale)
+    requested_group_order = (
+        group_order
+        if group_order is not None or categorical_scale is None
+        else categorical_scale.order
+    )
+    categorical_scale, stored_scales = _group_scales(
+        store, group_keys, groups, categorical_scale
+    )
     feature_pairs = coerce_feature_list(features)
     _check_feature_count(feature_pairs)
     resolved_features = resolve_feature_batch(
@@ -502,9 +603,10 @@ def dotplot(
     )
     resolved_feature_order = [label for _, label in feature_rows]
     resolved_group_order = _group_order(
-        list(dict.fromkeys(plot_df["group_label"].tolist())),
-        group_order,
-        categorical_scale,
+        plot_df,
+        _group_roles(group_keys),
+        requested_group_order,
+        stored_scales,
     )
     row_index = {row: index for index, row in enumerate(feature_rows)}
     plot_df["group_label"] = pd.Categorical(
@@ -815,7 +917,7 @@ def matrixplot(
     store: Any,
     *,
     features: Sequence[str | FeatureRef] | Mapping[str, Sequence[str | FeatureRef]],
-    group_by: str | tuple[str, ...] | None = None,
+    group_by: str | CellField | tuple[str | CellField, ...] | None = None,
     groups: ArtifactRef | NamedCellArtifact | None = None,
     cell_key: str = "I",
     from_assay: str | None = None,
@@ -853,11 +955,12 @@ def matrixplot(
     """Heatmap of mean expression or detection fraction by group.
 
     Rows follow the feature input order and columns follow the group order of
-    :func:`dotplot`: ``categorical_scale`` or a stored display order,
-    otherwise natural order. Set explicit orders, compared as text, or enable
-    hierarchical clustering independently for either axis; a clustered axis
-    draws its dendrogram beside the matrix. Group ticks show
-    ``categorical_scale.labels`` or the stored display labels.
+    :func:`dotplot`: ``categorical_scale``, or else the order that each
+    grouping column stores, otherwise natural order. Set explicit orders,
+    compared as text, or enable hierarchical clustering independently for
+    either axis; a clustered axis draws its dendrogram beside the matrix.
+    Group ticks show ``categorical_scale.labels`` or the stored display
+    labels.
     ``value="mean"`` colors by average expression; ``value="fraction"`` colors
     by the share of measured cells above ``expression_cutoff``.
     ``standardize="feature"`` applies only to means. ``sample_by`` has the same
@@ -868,8 +971,8 @@ def matrixplot(
     per feature and group, so a feature listed under two groups keeps a row in
     each, and brackets each group's rows. The matrix table is then indexed by
     ``feature_group`` and ``feature``. Grouped rows keep their groups, so they
-    cannot be clustered. ``groups`` takes a ``NamedCellArtifact`` as
-    :func:`dotplot` does; the matrix draws no group axis title.
+    cannot be clustered. ``group_by`` and ``groups`` take what :func:`dotplot`
+    takes, and title the group axis as :func:`dotplot` does.
     """
     cluster_features = bool_argument(cluster_features, "cluster_features")
     cluster_groups = bool_argument(cluster_groups, "cluster_groups")
@@ -896,14 +999,20 @@ def matrixplot(
             "matrixplot currently supports only linear color scales"
         )
     normalization = normalization or NormalizationSpec()
-    groups, _groups_name = label_artifact(groups, "groups")
+    groups, groups_name = label_artifact(groups, "groups")
+    group_by_keys, group_by_titles = _group_by_columns(group_by)
     grouping = _resolve_grouping(
         store,
-        group_by=group_by,
+        group_by=group_by_keys,
         groups=groups,
         cell_key=cell_key,
     )
     group_keys, cell_indices, _group_values, group_missing = grouping
+    group_axis_title = (
+        " / ".join(group_by_titles)
+        if groups is None
+        else artifact_titles(store, [(groups, groups_name)])[0]
+    )
 
     feature_pairs = coerce_feature_list(features)
     _check_feature_count(feature_pairs)
@@ -923,14 +1032,14 @@ def matrixplot(
     if standardize == "feature":
         aggregate = _standardize_feature(aggregate)
     color_values = "zscore" if standardize == "feature" else value
-    if isinstance(group_by, str):
-        categorical_scale = resolve_categorical_scale(
-            store,
-            group_by,
-            categorical_scale,
-        )
-    elif groups is not None:
-        categorical_scale = resolve_artifact_scale(store, groups, categorical_scale)
+    requested_group_order = (
+        group_order
+        if group_order is not None or categorical_scale is None
+        else categorical_scale.order
+    )
+    categorical_scale, stored_scales = _group_scales(
+        store, group_keys, groups, categorical_scale
+    )
     plot_df = aggregate.copy()
     plot_df["group_label"] = _group_axis_labels(plot_df, _group_roles(group_keys))
     plot_df["row"] = list(
@@ -947,9 +1056,10 @@ def matrixplot(
         feature_order,
     )
     observed_group_order = _group_order(
-        list(dict.fromkeys(plot_df["group_label"].tolist())),
-        group_order,
-        categorical_scale,
+        plot_df,
+        _group_roles(group_keys),
+        requested_group_order,
+        stored_scales,
     )
     # One matrix row per feature and bracket group, as in dotplot.
     row_positions = {row: index for index, row in enumerate(feature_rows)}
@@ -1055,6 +1165,7 @@ def matrixplot(
             rotation=45,
             ha="right",
         )
+        ax.set_xlabel(group_axis_title)
         ax.set_yticks(range(len(resolved_feature_order)))
         ax.set_yticklabels(resolved_feature_order)
         annotation_xlim, annotation_ylim = draw_annotation_strips(

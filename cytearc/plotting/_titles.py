@@ -1,11 +1,12 @@
-"""Titles of the label artifacts that plots group or color cells by.
+"""Titles of the cell columns and label artifacts that plots group or color cells by.
 
-A caller names a label artifact with ``NamedCellArtifact(name, artifact)``,
-as ``CellField(key, label=...)`` names a live column. A bare ``ArtifactRef``
-takes a title from the artifact's own record: the ``obs`` key that an H5AD
-import read, or the column that a snapshot or label transfer copied; the
-method and resolution of a Leiden clustering; or else its kind in words, such
-as "Cluster labels". The title only labels the figure: summaries, their
+A caller names a live column with ``CellField(key, label=...)``, which a
+column name alone titles by itself, and a label artifact with
+``NamedCellArtifact(name, artifact)``. A bare ``ArtifactRef`` takes a title
+from the artifact's own record: the ``obs`` key that an H5AD import read, or
+the column that a snapshot or label transfer copied; the method and
+resolution of a Leiden clustering; or else its kind in words, such as
+"Cluster labels". The title only labels the figure: summaries, their
 groupings and artifact identities never see it.
 """
 
@@ -13,7 +14,7 @@ from collections import Counter
 from collections.abc import Sequence
 from typing import Any
 
-from ..metadata.selection import NamedCellArtifact
+from ..metadata.selection import CellField, NamedCellArtifact
 from ..storage.artifacts import inspect_artifact
 from ..storage.refs import ArtifactRef
 
@@ -23,7 +24,38 @@ __all__ = [
     "artifact_titles",
     "kind_title",
     "label_artifact",
+    "label_column",
 ]
+
+
+def label_column(
+    value: str | CellField | None, argument: str
+) -> tuple[str | None, str | None]:
+    """Return the cell column that a grouping argument names and the title it takes.
+
+    A column name is its own title, and a ``CellField`` is titled by its
+    ``label``, or else by its ``key``. None gives None for both.
+
+    Raises:
+        TypeError: If ``value`` is neither a column name, a ``CellField``,
+            nor None.
+        ValueError: If ``value`` is a ``CellField`` of
+            ``kind="continuous"``, since a grouping takes categories.
+    """
+    if value is None or isinstance(value, str):
+        return value, value
+    if not isinstance(value, CellField):
+        raise TypeError(
+            f"{argument} must be a cell column name or a CellField, "
+            f"not {type(value).__name__}"
+        )
+    if value.kind == "continuous":
+        raise ValueError(
+            f"{argument} groups cells by category, so its CellField cannot "
+            "have kind='continuous'; pass kind='categorical' or 'auto'"
+        )
+    return value.key, value.label or value.key
+
 
 type LabelArtifact = ArtifactRef | NamedCellArtifact
 

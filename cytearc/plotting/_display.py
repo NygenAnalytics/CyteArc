@@ -1,5 +1,6 @@
 """Resolve stored display metadata into plotting scale contracts."""
 
+from collections.abc import Iterable
 from typing import Any
 
 from ..metadata.artifacts import (
@@ -9,6 +10,7 @@ from ..metadata.artifacts import (
     validate_display_metadata,
 )
 from ..storage.refs import ArtifactRef
+from ..utils.arrays import sort_categories
 from ._contracts import CategoricalScale, ColorScale
 
 
@@ -115,6 +117,30 @@ def stored_artifact_scale(store: Any, ref: ArtifactRef) -> CategoricalScale | No
         return None
     recorded = artifact_categories(root, ref)
     return _stored_scale(recorded.display, recorded.ordered_levels)
+
+
+def labels_in_stored_order(
+    labels: Iterable[Any], scale: CategoricalScale | None
+) -> list[Any]:
+    """Order distinct labels as a column's or label artifact's stored scale lists them.
+
+    ``scale`` is what :func:`stored_categorical_scale` or
+    :func:`stored_artifact_scale` returns. The labels that its order lists
+    come first, in that order, and the others follow in natural order, as
+    every label does when the source stores no order. A label matches the
+    stored category that equals it, so an integer label matches the stored
+    integer whatever its NumPy type. The labels are returned as given.
+    """
+    observed = list(labels)
+    if scale is None or scale.order is None:
+        return sort_categories(observed)
+    ranks: dict[Any, int] = {}
+    for rank, category in enumerate(scale.order):
+        ranks.setdefault(category, rank)
+    listed = sorted(
+        (label for label in observed if label in ranks), key=ranks.__getitem__
+    )
+    return listed + sort_categories(label for label in observed if label not in ranks)
 
 
 def _stored_scale(

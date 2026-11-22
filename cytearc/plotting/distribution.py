@@ -57,7 +57,7 @@ from ._data import (
 )
 from ._deps import require_matplotlib, require_seaborn
 from ._display import resolve_artifact_scale, resolve_categorical_scale
-from ._titles import artifact_titles, label_artifact
+from ._titles import artifact_titles, label_artifact, label_column
 from ._figure import (
     LegendSpec,
     PlotResult,
@@ -967,8 +967,8 @@ def distribution(
     grouping: ArtifactRef | CellField | NamedCellArtifact | None = None,
     cell_selection: ArtifactRef | None = None,
     groups: Sequence[Any] | None = None,
-    split_by: str | None = None,
-    sample_by: str | None = None,
+    split_by: str | CellField | None = None,
+    sample_by: str | CellField | None = None,
     study_design: StudyDesign | None = None,
     sample_stat: Literal["mean", "median", "fraction"] = "mean",
     expression_cutoff: float = 0.0,
@@ -1052,7 +1052,9 @@ def distribution(
     samples before plotting. A study design's ``subject_by`` or ``pair_by``
     column is used only with paired Wilcoxon ``stats_results``, matching
     ``run_statistical_testing``. ``split_by`` draws two violin halves for a
-    second categorical variable.
+    second categorical variable. ``split_by`` and ``sample_by`` name cell
+    columns as text or as a ``CellField``, whose label titles the legend of
+    the split in place of the column's name.
 
     Pass ``stats_results`` (a single
     :class:`~cytearc.features.statistical.StatisticalTestResult`, or a mapping
@@ -1174,6 +1176,10 @@ def distribution(
     grouping_name: str | None = None
     if isinstance(grouping, NamedCellArtifact):
         grouping, grouping_name = label_artifact(grouping, "grouping")
+    # Columns are read by their keys, and a CellField's label titles the
+    # legend of the split.
+    split_by, split_title = label_column(split_by, "split_by")
+    sample_by, _ = label_column(sample_by, "sample_by")
     if cell_selection is not None and not isinstance(cell_selection, ArtifactRef):
         raise TypeError("cell_selection must be an ArtifactRef or None")
     if isinstance(stats_results, ArtifactRef):
@@ -1781,7 +1787,7 @@ def distribution(
                         ax.legend(
                             handles,
                             [split_labels.get(text, text) for text in labels],
-                            title=split_by or "split",
+                            title=split_title or "split",
                             frameon=False,
                             loc="upper left",
                             bbox_to_anchor=(1.02, 1),
@@ -2144,7 +2150,7 @@ def distribution(
         )
         scale_specs: tuple[Any, ...] = (resolved_color_scale,)
     elif resolved_split_scale is not None:
-        legend_specs = (LegendSpec(kind="categorical", label=split_by or "split"),)
+        legend_specs = (LegendSpec(kind="categorical", label=split_title or "split"),)
         scale_specs = (resolved_split_scale,)
     else:
         legend_specs = (LegendSpec(kind="distribution", label=kind),)

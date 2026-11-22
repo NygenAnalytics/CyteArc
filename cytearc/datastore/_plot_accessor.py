@@ -1015,7 +1015,7 @@ class DataStorePlotAccessor:
         features: (
             "Sequence[str | FeatureRef] | Mapping[str, Sequence[str | FeatureRef]]"
         ),
-        group_by: str | tuple[str, ...] | None = None,
+        group_by: str | CellField | tuple[str | CellField, ...] | None = None,
         groups: ArtifactRef | NamedCellArtifact | None = None,
         cell_key: str = "I",
         from_assay: str | None = None,
@@ -1050,7 +1050,7 @@ class DataStorePlotAccessor:
         features: (
             "Sequence[str | FeatureRef] | Mapping[str, Sequence[str | FeatureRef]]"
         ),
-        group_by: str | tuple[str, ...] | None = None,
+        group_by: str | CellField | tuple[str | CellField, ...] | None = None,
         groups: ArtifactRef | NamedCellArtifact | None = None,
         cell_key: str = "I",
         from_assay: str | None = None,
@@ -1087,14 +1087,14 @@ class DataStorePlotAccessor:
     def composition(
         self,
         *,
-        category_by: str | None = None,
+        category_by: str | CellField | None = None,
         categories: ArtifactRef | NamedCellArtifact | None = None,
         cell_key: str = "I",
-        sample_by: str | None = None,
+        sample_by: str | CellField | None = None,
         grouping: ArtifactRef | NamedCellArtifact | None = None,
-        subject_by: str | None = None,
-        pair_by: str | None = None,
-        condition_by: str | None = None,
+        subject_by: str | CellField | None = None,
+        pair_by: str | CellField | None = None,
+        condition_by: str | CellField | None = None,
         study_design: "StudyDesign | None" = None,
         kind: Literal["stacked", "per_sample"] = "stacked",
         show_summary: bool = True,
@@ -1127,8 +1127,8 @@ class DataStorePlotAccessor:
         grouping: ArtifactRef | CellField | NamedCellArtifact | None = None,
         cell_selection: ArtifactRef | None = None,
         groups: Sequence[Any] | None = None,
-        split_by: str | None = None,
-        sample_by: str | None = None,
+        split_by: str | CellField | None = None,
+        sample_by: str | CellField | None = None,
         study_design: "StudyDesign | None" = None,
         sample_stat: Literal["mean", "median", "fraction"] = "mean",
         expression_cutoff: float = 0.0,
@@ -1230,7 +1230,7 @@ class DataStorePlotAccessor:
     def cluster_connectivity(
         self,
         *,
-        group_by: str | None = None,
+        group_by: str | CellField | None = None,
         layout_key: str | None = None,
         groups: ArtifactRef | NamedCellArtifact | None = None,
         layout: ArtifactRef | None = None,
