@@ -78,7 +78,7 @@ tsne = [
     "sgtsnepi>=0.7",
 ]
 test = [
-    "pytest>=7.0",
+    "pytest>=7.3",
     "pytest-cov>=4",
     # Workers run every test in their main thread from 3.6 on. Earlier
     # releases can start a worker's session in another thread, where the
