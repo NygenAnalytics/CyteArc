@@ -824,6 +824,138 @@ def test_publication_of_named_datasets_plans_only_those_datasets(
         publisher.main(["unbuilt", "--build-root", str(build_root)])
 
 
+class _RebuildStopped(Exception):
+    pass
+
+
+def _recipe_stopped_during_analysis() -> generator.ExternalDatasetRecipe:
+    def stop(_datastore: object) -> None:
+        raise _RebuildStopped
+
+    return generator.ExternalDatasetRecipe(
+        sources=(),
+        convert=generator._convert_h5ad,
+        analyze=stop,
+        summary="",
+        attribution=(),
+        cell_selection="",
+        import_memory_bytes=1 << 30,
+        analysis_memory_bytes=1 << 30,
+        analysis_parameters=(),
+    )
+
+
+@pytest.mark.parametrize(
+    "earlier_build",
+    ["store-and-archive", "archive-without-store", "none"],
+    ids=["earlier-build", "earlier-archive-only", "fresh-build-root"],
+)
+def test_a_rebuild_stopped_during_its_analysis_leaves_nothing_to_publish(
+    tmp_path, monkeypatch, capsys, earlier_build
+):
+    from scripts import publish_docs_datasets as publisher
+
+    # Both datasets have a committed manifest. Each earlier archive in the build
+    # root matches its manifest, and the earlier store may have been removed.
+    archives = ("complete",) if earlier_build == "none" else ("complete", "unpacked")
+    build_root = _publication_build_root(
+        tmp_path,
+        monkeypatch,
+        manifests=("complete", "unpacked"),
+        archives=archives,
+    )
+    if earlier_build == "store-and-archive":
+        (build_root / "unpacked" / generator.STORE_NAME).mkdir()
+        (build_root / "unpacked" / generator.STORE_NAME / "zarr.json").write_text("{}")
+    monkeypatch.setattr(generator, "MANIFEST_DIR", tmp_path / "manifests")
+    source = build_root / "_source" / "unpacked"
+    source.mkdir(parents=True)
+    _write_h5ad_source(source, np.arange(1, 73, dtype=np.int32).reshape(6, 12))
+
+    with pytest.raises(_RebuildStopped):
+        generator.build_store(
+            dataset="unpacked",
+            recipe=_recipe_stopped_during_analysis(),
+            destination=build_root,
+            repository_name="cytearc_docs",
+        )
+    assert (build_root / "unpacked" / generator.STORE_NAME / "RNA").is_dir()
+
+    # Publishing the unpacked store lists the bucket and syncs it; here the
+    # bucket functions only record what a plan asks of them.
+    listed: list[str] = []
+    batches: list[dict[str, object]] = []
+
+    def published_files(prefix: str) -> dict[str, None]:
+        listed.append(prefix)
+        return dict.fromkeys(["cytearc_docs/unpacked/data.zarr/RNA/counts/c/0/0"])
+
+    def batch_bucket_files(_bucket_id: str, **changes: object) -> None:
+        batches.append(changes)
+
+    def refuse(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("the test reached the bucket")
+
+    monkeypatch.setattr(publisher, "UNPACKED_DATASETS", frozenset({"unpacked"}))
+    monkeypatch.setattr(publisher, "_published_files", published_files)
+    monkeypatch.setattr(publisher, "batch_bucket_files", batch_bucket_files)
+    monkeypatch.setattr(publisher, "list_bucket_tree", refuse)
+
+    archive_layout = build_root / "<dataset>" / publisher.ARCHIVE_NAME
+    for apply in ([], ["--apply"]):
+        assert publisher.main([*apply, "--build-root", str(build_root)]) == 0
+        out = capsys.readouterr().out
+        assert "upload   cytearc_docs/complete/data.zarr.tar.gz" in out
+        assert "cytearc_docs/unpacked/" not in out
+        assert (
+            f"Leaving out the datasets with no archive at {archive_layout}:\n"
+            "  unpacked\n\n"
+        ) in out
+        with pytest.raises(FileNotFoundError, match="rebuild unpacked first"):
+            publisher.main([*apply, "unpacked", "--build-root", str(build_root)])
+
+    assert listed == []
+    assert batches == [
+        {
+            "add": [
+                (
+                    str(build_root / "complete" / publisher.ARCHIVE_NAME),
+                    "cytearc_docs/complete/data.zarr.tar.gz",
+                ),
+                (
+                    str(tmp_path / "manifests" / "complete_manifest.json"),
+                    "cytearc_docs/complete/manifest.json",
+                ),
+            ]
+        }
+    ]
+
+
+def test_a_rebuild_removes_the_earlier_archive_before_the_earlier_store(
+    tmp_path, monkeypatch
+):
+    build_root = _publication_build_root(
+        tmp_path, monkeypatch, manifests=("unpacked",), archives=("unpacked",)
+    )
+    (build_root / "unpacked" / generator.STORE_NAME).mkdir()
+    monkeypatch.setattr(generator, "MANIFEST_DIR", tmp_path / "manifests")
+
+    def stop_while_removing(_path: Path) -> None:
+        raise _RebuildStopped
+
+    monkeypatch.setattr(generator.shutil, "rmtree", stop_while_removing)
+    with pytest.raises(_RebuildStopped):
+        generator.build_store(
+            dataset="unpacked",
+            recipe=_recipe_stopped_during_analysis(),
+            destination=build_root,
+            repository_name="cytearc_docs",
+        )
+
+    assert (build_root / "unpacked" / generator.STORE_NAME).is_dir()
+    assert not (build_root / "unpacked" / generator.ARCHIVE_NAME).exists()
+
+
 def test_all_cannot_silently_ignore_named_external_dataset(capsys):
     with pytest.raises(SystemExit) as exited:
         generator.main(["--all", generator.TEASEQ_DATASET])

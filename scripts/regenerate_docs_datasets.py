@@ -1207,6 +1207,9 @@ def build_store(
     output = destination / dataset
     output.mkdir(parents=True, exist_ok=True)
     store = output / STORE_NAME
+    # The earlier archive still matches its manifest, so it goes before the
+    # earlier store: a rebuild that stops partway leaves nothing to publish.
+    (output / ARCHIVE_NAME).unlink(missing_ok=True)
     if store.exists():
         shutil.rmtree(store)
     if isinstance(recipe, RawDatasetRecipe):

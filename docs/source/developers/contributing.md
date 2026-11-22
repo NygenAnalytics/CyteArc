@@ -245,9 +245,7 @@ Nothing leaves `build/cytebase` until you publish:
     uv run python scripts/publish_docs_datasets.py            # print the plan
     uv run python scripts/publish_docs_datasets.py --apply    # needs a write token
 
-Publishing replaces `<dataset>/data.zarr.tar.gz` and `<dataset>/manifest.json`.
-For stores used in remote examples, it also synchronizes their unpacked files.
-A dataset needs a matching generated manifest and archive before it can be published.
+Publishing replaces `<dataset>/data.zarr.tar.gz` and `<dataset>/manifest.json`. For stores used in remote examples, it also synchronizes their unpacked files. A dataset needs a matching generated manifest and archive before it can be published: run without names, the script publishes every dataset with an archive in `build/cytebase` and lists the ones it leaves out. A rebuild removes the dataset's earlier archive before its earlier store, so a rebuild that stops partway leaves nothing of that dataset to publish.
 
 The bucket paths carry no version, so publishing replaces the stores that the tutorials of every CyteArc version download.
 A rebuild whose stores the latest release cannot read, or whose run labels that release's tutorials do not open, breaks those tutorials until the next release.
