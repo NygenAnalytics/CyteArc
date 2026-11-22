@@ -707,8 +707,10 @@ def _compact_failure(error: Exception) -> str:
     return f"{type(error).__name__}: {detail}" if detail else type(error).__name__
 
 
-def _log_failure(step_name: str, failure: str) -> None:
-    logger.exception(f"Plot recipe step {step_name!r} failed: {failure}")
+def _log_failure(step_name: str, failure: str, error: Exception) -> None:
+    logger.opt(exception=error).error(
+        f"Plot recipe step {step_name!r} failed: {failure}"
+    )
 
 
 def _named_artifacts(value: Any, artifacts: Mapping[str, Any]) -> Any:
@@ -774,33 +776,66 @@ def _run_step(
         kwargs["target"] = targets[step.target.panel]
     kwargs["show"] = False
     plot_result = plot(store, **kwargs)
-    should_close = output_path is not None or show
-
-    try:
-        if output_path is not None:
-            assert step.output is not None
+    if output_path is not None:
+        assert step.output is not None
+        try:
             plot_result.save(
                 output_path,
                 dpi=step.output.dpi,
                 transparent=step.output.transparent,
                 exact_size=step.output.exact_size,
             )
-        if show:
-            plot_result.show()
-    except Exception as error:
-        if should_close and getattr(plot_result, "owns_figure", False):
-            try:
-                plot_result.close()
-            except Exception as close_error:
-                error.add_note(
-                    "The plot also failed to close cleanly: "
-                    f"{type(close_error).__name__}: {close_error}"
-                )
-        raise
-
-    if should_close and getattr(plot_result, "owns_figure", False):
-        plot_result.close()
+        except Exception as error:
+            _close_owned(plot_result, error)
+            raise
+        # A figure that the recipe writes and does not show is finished.
+        if not show and getattr(plot_result, "owns_figure", False):
+            plot_result.close()
     return PlotOutput(name=step.name, result=plot_result, path=output_path)
+
+
+def _close_owned(plot_result: Any, error: Exception) -> None:
+    """Close a figure that its plot created, after ``error``, noting a failure to close."""
+    if not getattr(plot_result, "owns_figure", False):
+        return
+    try:
+        plot_result.close()
+    except Exception as close_error:
+        error.add_note(
+            "The plot also failed to close cleanly: "
+            f"{type(close_error).__name__}: {close_error}"
+        )
+
+
+def _show_figures(
+    outputs: Sequence[PlotOutput], *, stop_at_error: bool
+) -> list[tuple[tuple[str, ...], Exception]]:
+    """Show each figure that the steps drew once, in the order of its first step.
+
+    A figure whose panels several steps fill through ``targets`` is shown with every panel drawn, and a figure that a step created is closed once it is shown or fails to show. Returns the steps of each figure that failed to show, with the error; with ``stop_at_error``, the first error is raised instead, after the figures left to show are closed.
+    """
+    figures: dict[int, list[PlotOutput]] = {}
+    for output in outputs:
+        figures.setdefault(id(output.result.figure), []).append(output)
+    drawn = list(figures.values())
+    failed: list[tuple[tuple[str, ...], Exception]] = []
+    for index, steps in enumerate(drawn):
+        plot_result = steps[0].result
+        try:
+            try:
+                plot_result.show()
+            except Exception as error:
+                _close_owned(plot_result, error)
+                raise
+            if getattr(plot_result, "owns_figure", False):
+                plot_result.close()
+        except Exception as error:
+            if stop_at_error:
+                for left in drawn[index + 1 :]:
+                    _close_owned(left[0].result, error)
+                raise
+            failed.append((tuple(output.name for output in steps), error))
+    return failed
 
 
 @validation_scoped
@@ -816,7 +851,9 @@ def run_recipe(
 ) -> PlotRecipeResult:
     """Run a plotting recipe's steps in order after any analysis has completed.
 
-    Plots do not display themselves unless ``show`` is set.
+    With ``show=True``, the recipe shows each figure that its steps drew once, after the last step, in the order of the first step that drew it, and closes each figure that a step created once it is shown, so a figure whose panels several steps fill through ``targets`` is shown complete. Plots do not display themselves otherwise.
+
+    A step that raises stops the recipe, after the figures of the steps before it are shown, unless ``continue_on_error`` records the error under the step's name in ``failures`` and runs the other steps. A figure that fails to show stops the recipe too, or with ``continue_on_error`` records the error under each step that drew the figure, and ``outputs`` leaves those steps out.
     """
     show = bool_argument(show, "show")
     continue_on_error = bool_argument(continue_on_error, "continue_on_error")
@@ -844,7 +881,6 @@ def run_recipe(
         }
 
     outputs: list[PlotOutput] = []
-    written_paths: list[Path] = []
     captured_warnings: list[str] = []
     failures: dict[str, str] = {}
 
@@ -866,22 +902,41 @@ def run_recipe(
                 f"{step.name}: {warning.message}" for warning in recorded
             )
             if not continue_on_error:
+                if show:
+                    # The steps before this one show their figures as they
+                    # stand, as the end of the recipe would have.
+                    for names, show_error in _show_figures(
+                        outputs, stop_at_error=False
+                    ):
+                        error.add_note(
+                            f"The figure of {', '.join(map(repr, names))} also "
+                            f"failed to show: {_compact_failure(show_error)}"
+                        )
                 raise
             failure = _compact_failure(error)
             failures[step.name] = failure
-            _log_failure(step.name, failure)
+            _log_failure(step.name, failure, error)
             continue
 
         captured_warnings.extend(
             f"{step.name}: {warning.message}" for warning in recorded
         )
         outputs.append(output)
-        if output.path is not None:
-            written_paths.append(output.path)
+
+    if show:
+        shown = _show_figures(outputs, stop_at_error=not continue_on_error)
+        for names, show_error in shown:
+            failure = _compact_failure(show_error)
+            for name in names:
+                failures[name] = failure
+                _log_failure(name, failure, show_error)
+        outputs = [output for output in outputs if output.name not in failures]
 
     return PlotRecipeResult(
         outputs=tuple(outputs),
-        written_paths=tuple(written_paths),
+        written_paths=tuple(
+            output.path for output in outputs if output.path is not None
+        ),
         warnings=tuple(captured_warnings),
         failures=failures,
     )
