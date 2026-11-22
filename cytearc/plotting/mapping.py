@@ -38,6 +38,7 @@ from ._style import (
     padded_square_limits,
     resolve_category_scale,
     resolve_color_limits,
+    scale_argument,
     scatter_edgecolor,
     theme_context,
 )
@@ -160,6 +161,7 @@ def mapping_score(
     weighted = bool_argument(weighted, "weighted")
     show_legend = bool_argument(show_legend, "show_legend")
     show = bool_argument(show, "show")
+    color_scale = scale_argument(color_scale, "color_scale", ColorScale)
     if kind not in ("embedding", "histogram", "box"):
         raise ValueError("kind must be 'embedding', 'histogram', or 'box'")
     if kind == "embedding" and layout is None:
@@ -623,6 +625,7 @@ def mapping_confusion(
     """
     show_legend = bool_argument(show_legend, "show_legend")
     show = bool_argument(show, "show")
+    color_scale = scale_argument(color_scale, "color_scale", ColorScale)
     if normalize not in ("none", "true", "predicted", "all"):
         raise ValueError("normalize must be 'none', 'true', 'predicted', or 'all'")
     if not isinstance(abstention_label, str) or not abstention_label:

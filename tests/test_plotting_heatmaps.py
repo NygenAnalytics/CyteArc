@@ -9,6 +9,9 @@ import pytest
 
 matplotlib.use("Agg")
 
+from matplotlib import colormaps
+from matplotlib.colors import ListedColormap
+
 import cytearc.plotting as splt
 from cytearc.storage.artifacts import ArtifactRef
 from cytearc.plotting.cluster_tree import _hierarchy_positions
@@ -143,20 +146,22 @@ def test_hierarchy_positions_rejects_non_trees():
 def test_tree_palette_requires_complete_color_key():
     from cytearc.plotting.cluster_tree import _tree_palette
 
-    with pytest.raises(KeyError, match="missing in `color_key`"):
-        _tree_palette(
-            ["A", "B"],
-            cmap="tab20",
-            color_key={"A": "#ff0000"},
-        )
-    color_key = {"A": "#ff0000", "B": "#00ff00"}
-    palette = _tree_palette(
-        ["A", "B"],
-        cmap="tab20",
-        color_key=color_key,
+    scale = splt.CategoricalScale(
+        order=("A", "B"), palette={"A": "#111111", "B": "#222222"}
     )
+    with pytest.raises(KeyError, match="missing in `color_key`"):
+        _tree_palette(scale, cmap=None, color_key={"A": "#ff0000"})
+    color_key = {"A": "#ff0000", "B": "#00ff00"}
+    palette = _tree_palette(scale, cmap="viridis", color_key=color_key)
     assert palette == color_key
     assert palette is not color_key
+    # A colormap is sampled over the scale's order; without one or a color
+    # key, the categories keep the scale's colors.
+    assert _tree_palette(scale, cmap="viridis", color_key=None) == {
+        "A": "#440154",
+        "B": "#fde725",
+    }
+    assert _tree_palette(scale, cmap=None, color_key=None) == scale.palette
 
 
 def test_cluster_tree_rejects_misaligned_color_values():
@@ -1542,6 +1547,106 @@ def test_marker_heatmap_categorical_legend_serializes_and_preserves_target(
     plt.close(figure)
 
 
+def _marker_heatmap(monkeypatch, *, on_caller_axes, **options):
+    """Draw marker_heatmap of a saved two-gene matrix, on its own figure or on caller axes."""
+    import matplotlib.pyplot as plt
+
+    import cytearc.plotting.heatmaps as heatmap_plotting
+
+    monkeypatch.setattr(
+        heatmap_plotting,
+        "_prepare_marker_heatmap",
+        lambda *_args, **_kwargs: {
+            "matrix": pd.DataFrame(
+                [[0.0, 1.0], [1.0, 0.0]],
+                index=["gene1", "gene2"],
+                columns=["group1", "group2"],
+            ),
+            "markers": pd.DataFrame(),
+            "assay": "RNA",
+            "marker_ref": _plot_ref("marker_table", "3"),
+            "clusters_ref": _plot_ref("cluster_labels", "4"),
+            "cell_selection": _plot_ref("cell_selection", "5", assay=None),
+            "n_cells": 4,
+            "unmeasured_cells": {},
+        },
+    )
+    target = plt.subplots()[1] if on_caller_axes else None
+    return heatmap_plotting.marker_heatmap(
+        object(),
+        marker=_plot_ref("marker_table", "3"),
+        cluster_rows=False,
+        cluster_columns=False,
+        target=target,
+        show=False,
+        **options,
+    )
+
+
+def _drawn_colormap(result):
+    heatmap = result.axes["heatmap"]
+    return (heatmap.images or heatmap.collections)[0].get_cmap()
+
+
+@pytest.mark.parametrize("on_caller_axes", [False, True])
+def test_marker_heatmap_draws_a_list_of_colors_or_a_held_colormap(
+    monkeypatch: pytest.MonkeyPatch, registered_colormap, on_caller_axes
+):
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import to_hex
+
+    red_blue = registered_colormap(
+        ListedColormap(["#ff0000", "#0000ff"], name="cytearc_red_blue")
+    )
+    try:
+        # seaborn's heatmap reads a list of colors as their colormap, which
+        # names no colormap for the result to record.
+        listed = _marker_heatmap(
+            monkeypatch, on_caller_axes=on_caller_axes, cmap=["#000000", "#ffffff"]
+        )
+        assert [to_hex(color) for color in _drawn_colormap(listed).colors] == [
+            "#000000",
+            "#ffffff",
+        ]
+        assert listed.scales[0].cmap is None
+        held = _marker_heatmap(
+            monkeypatch, on_caller_axes=on_caller_axes, cmap=red_blue
+        )
+        assert _drawn_colormap(held) == red_blue
+        assert held.scales[0].cmap == "cytearc_red_blue"
+        # None draws the default of seaborn's heatmap or of Matplotlib, as
+        # before, and the result records no colormap.
+        default = _marker_heatmap(monkeypatch, on_caller_axes=on_caller_axes, cmap=None)
+        assert _drawn_colormap(default).name == (
+            "viridis" if on_caller_axes else "rocket"
+        )
+        assert default.scales[0].cmap is None
+    finally:
+        plt.close("all")
+
+
+@pytest.mark.parametrize(
+    ("cmap", "message"),
+    [
+        (
+            ["#ff0000", "not_a_color"],
+            "cmap must list colors, but ['#ff0000', 'not_a_color'] holds a value "
+            "that is no color",
+        ),
+        ([], "cmap must list at least one color"),
+    ],
+)
+def test_marker_heatmap_refuses_a_list_without_colors_before_reading_the_store(
+    cmap, message
+):
+    with pytest.raises(ValueError) as raised:
+        splt.marker_heatmap(
+            _UnreadableStore(), marker=_plot_ref("marker_table", "3"), cmap=cmap
+        )
+
+    assert raised.value.args == (message,)
+
+
 def test_marker_heatmap_validates_cluster_kwargs_and_target_layout(
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -1878,6 +1983,74 @@ def test_pseudotime_heatmap_draws_saved_rows_clusters_and_bins():
     np.testing.assert_array_equal(heatmap.get_yticks(), [2])
     assert result.provenance.n_cells == 4
     result.close()
+
+
+@pytest.mark.parametrize(
+    ("options", "colors", "palette_name"),
+    [
+        # Modules take the colorblind palette in module order, as lineages do.
+        ({}, ["#0072B2", "#E69F00"], "colorblind"),
+        # A colormap is sampled at 0 and 1.
+        ({"clusterbar_cmap": "viridis"}, ["#440154", "#fde725"], None),
+        # So is a Colormap that Matplotlib holds: Set1's first and last colors.
+        ({"clusterbar_cmap": colormaps["Set1"]}, ["#e41a1c", "#999999"], None),
+    ],
+)
+def test_pseudotime_heatmap_colors_modules(options, colors, palette_name):
+    from matplotlib.colors import to_hex
+
+    result = splt.pseudotime_heatmap(
+        _pseudotime_store(), aggregation=_AGGREGATION, show=False, **options
+    )
+    try:
+        cluster_image = result.axes["feature_clusters"].images[0]
+        assert [to_hex(color) for color in cluster_image.cmap.colors] == [
+            color.lower() for color in colors
+        ]
+        scale = result.scales[1]
+        assert scale.order == (0, 1)
+        assert scale.palette == dict(zip((0, 1), colors, strict=True))
+        assert scale.palette_name == palette_name
+    finally:
+        result.close()
+
+
+def test_pseudotime_heatmap_draws_with_colormaps_it_is_given(registered_colormap):
+    profiles = registered_colormap(
+        ListedColormap(["#000000", "#ffffff"], name="cytearc_profiles")
+    )
+    strip = registered_colormap(
+        ListedColormap(["#ff0000", "#0000ff"], name="cytearc_strip")
+    )
+
+    result = splt.pseudotime_heatmap(
+        _pseudotime_store(),
+        aggregation=_AGGREGATION,
+        heatmap_cmap=profiles,
+        pseudotime_cmap=strip,
+        show=False,
+    )
+    scaled = splt.pseudotime_heatmap(
+        _pseudotime_store(),
+        aggregation=_AGGREGATION,
+        heatmap_cmap=profiles,
+        color_scale=splt.ColorScale(cmap="magma"),
+        show=False,
+    )
+    try:
+        assert result.axes["heatmap"].images[0].get_cmap() == profiles
+        assert result.axes["pseudotime"].images[0].get_cmap() == strip
+        # The result records each colormap by its name.
+        assert (result.scales[0].cmap, result.scales[2].cmap) == (
+            "cytearc_profiles",
+            "cytearc_strip",
+        )
+        # A color scale that names a colormap replaces heatmap_cmap.
+        assert scaled.axes["heatmap"].images[0].get_cmap().name == "magma"
+        assert scaled.scales[0].cmap == "magma"
+    finally:
+        result.close()
+        scaled.close()
 
 
 def test_pseudotime_heatmap_on_caller_axes_can_leave_out_its_color_bar():

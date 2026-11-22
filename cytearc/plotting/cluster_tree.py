@@ -1,7 +1,7 @@
 """Native cluster-tree plotting."""
 
 import math
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 import pandas as pd
@@ -9,22 +9,32 @@ import pandas as pd
 from ..metadata.rows import apply_missing_mask
 from ..storage.artifacts import ArtifactRef
 from ._contracts import CategoricalScale, ColorScale, PlotProvenance, SizeScale
+from ._data import _category_universe
 from ._deps import require_matplotlib
+from ._display import stored_artifact_scale, stored_categorical_scale
 from ._figure import (
     LegendSpec,
     PlotResult,
     close_figures_on_error,
     normalize_axes_target,
 )
-from ..utils.arrays import sort_categories
 from ._style import (
     apply_figure_chrome,
+    colormap_argument,
     colormap_palette,
     continuous_norm,
+    resolve_category_scale,
     resolve_color_limits,
     theme_context,
 )
 from ..utils.arguments import bool_argument
+
+if TYPE_CHECKING:
+    from matplotlib.colors import Colormap
+else:
+    # Matplotlib is optional, so the hints name Colormap only for type
+    # checkers and resolve without it.
+    Colormap = Any
 
 
 def _hierarchy_positions(
@@ -160,18 +170,27 @@ def _tree_color_series(
 
 
 def _tree_palette(
-    categories: list[Any],
+    scale: CategoricalScale,
     *,
-    cmap: str,
+    cmap: str | None,
     color_key: dict[Any, str] | None,
 ) -> dict[Any, str]:
+    """The colors of the categories of a resolved scale.
+
+    ``color_key`` names every category's color, and a colormap is sampled
+    over the categories in their order; otherwise they keep the colors of
+    the scale.
+    """
+    categories = list(scale.order or ())
     if color_key is not None:
         palette = dict(color_key)
         missing = [category for category in categories if category not in palette]
         if missing:
             raise KeyError(f"ERROR: key {missing[0]} missing in `color_key`")
         return palette
-    return colormap_palette(categories, cmap)
+    if cmap is not None:
+        return colormap_palette(categories, cmap)
+    return dict(scale.palette or {})
 
 
 def _pie_wedge_paths(values: np.ndarray) -> list[Any]:
@@ -253,7 +272,7 @@ def cluster_tree(
     fontsize: float = 10,
     root_color: str = "#C0C0C0",
     non_leaf_color: str = "k",
-    cmap: str = "tab20",
+    cmap: "str | Colormap | None" = None,
     color_key: dict[Any, str] | None = None,
     edgecolors: str = "k",
     edgewidth: float = 1,
@@ -263,10 +282,21 @@ def cluster_tree(
     theme: str = "notebook",
     show: bool = True,
 ) -> PlotResult:
-    """Plot the coalesced hierarchy for a clustering result."""
+    """Plot the coalesced hierarchy for a clustering result.
+
+    Clusters, and the categories of a categorical ``fill_by_value`` column,
+    take the colors that an embedding colored by them takes: the categories
+    and colors that the column or the clustering stores, such as the
+    ``uns`` colors that an H5AD import keeps, or else default colors
+    assigned over every label of the column in natural order. ``color_key``
+    names a color for each category, and ``cmap``, a Matplotlib colormap
+    name or a registered ``Colormap``, is sampled at evenly spaced positions
+    over the categories instead. A numeric fill takes ``cmap``, viridis by default.
+    """
     force_ints_as_cats = bool_argument(force_ints_as_cats, "force_ints_as_cats")
     show_labels = bool_argument(show_labels, "show_labels")
     show = bool_argument(show, "show")
+    cmap = colormap_argument(cmap, "cmap", optional=True)
     import networkx as nx
 
     prepared = store._prepare_cluster_tree(
@@ -311,14 +341,31 @@ def cluster_tree(
     palette: dict[Any, str] | None = None
     cluster_means: pd.Series | None = None
     norm = None
-    colormap = mpl.colormaps.get_cmap(cmap)
+    colormap = mpl.colormaps.get_cmap("viridis" if cmap is None else cmap)
     if categorical:
-        categories = sort_categories(list(color_values.dropna().unique()))
-        palette = _tree_palette(
-            categories,
-            cmap=cmap,
-            color_key=color_key,
+        # The categories take the order and colors that an embedding colored
+        # by the clusters or the column takes. Default colors range over every
+        # label of the column, so a tree of some cells colors each category as
+        # a plot of all of them does.
+        stored = (
+            stored_artifact_scale(store, clusters)
+            if using_clusters
+            else stored_categorical_scale(store, cast(str, fill_by_value))
         )
+        scale = resolve_category_scale(
+            color_values.cat.categories,
+            stored,
+            universe=(
+                _category_universe(store, cast(str, fill_by_value))
+                if stored is None
+                and not using_clusters
+                and color_key is None
+                and cmap is None
+                else None
+            ),
+        )
+        categories = list(scale.order or ())
+        palette = _tree_palette(scale, cmap=cmap, color_key=color_key)
     else:
         cluster_means = (
             pd.DataFrame({"cluster": cluster_values, "value": color_values})
@@ -477,7 +524,7 @@ def cluster_tree(
     else:
         assert norm is not None
         color_scale = ColorScale(
-            cmap=cmap,
+            cmap=colormap.name,
             vmin=color_min,
             vmax=color_max,
         )

@@ -519,7 +519,14 @@ def test_cluster_tree_fill_values_show_masked_rows_as_missing() -> None:
         np.asarray([1, 0, 0, 2, 2, 2]),
         np.asarray([False, True, True, False, False, False]),
     )
-    store = SimpleNamespace(_prepare_cluster_tree=lambda **_kwargs: prepared)
+    # The donor column holds these cells' labels, whose masked rows store 0.
+    store = SimpleNamespace(
+        _prepare_cluster_tree=lambda **_kwargs: prepared,
+        cells=SimpleNamespace(
+            fetch_all=lambda _column: prepared["color_values"],
+            _get_missing_mask_array=lambda _column: prepared["color_missing"],
+        ),
+    )
     result = splt.cluster_tree(
         store,
         graph=prepared["graph_ref"],
@@ -527,7 +534,11 @@ def test_cluster_tree_fill_values_show_masked_rows_as_missing() -> None:
         fill_by_value="donor",
         show=False,
     )
-    assert result.scales[0].order == (1, 2)
+    # The masked rows' 0 is no category, so donors 1 and 2 take the first two
+    # default colors.
+    assert result.scales[0] == splt.CategoricalScale(
+        order=(1, 2), palette={1: "#1f77b4", 2: "#ff7f0e"}
+    )
     result.close()
 
 

@@ -118,6 +118,27 @@ def _reset_zarr_runtime() -> None:
 
 
 @pytest.fixture
+def registered_colormap():
+    """Register Colormaps of a test with Matplotlib, as a user would, until it ends.
+
+    Call it with a Colormap; it returns the Colormap, which plots take by its
+    name or as itself while Matplotlib holds it.
+    """
+    from matplotlib import colormaps
+
+    names: list[str] = []
+
+    def register(colormap):
+        colormaps.register(colormap)
+        names.append(colormap.name)
+        return colormap
+
+    yield register
+    for name in names:
+        colormaps.unregister(name)
+
+
+@pytest.fixture
 def figures_closed():
     """Fail a test that leaves matplotlib figures open, and close them."""
     import matplotlib.pyplot as plt

@@ -597,6 +597,121 @@ def test_highly_variable_features_rejects_malformed_adapters(
         splt.highly_variable_features(*arguments, show=False, **kwargs)
 
 
+@pytest.mark.parametrize(
+    ("colormaps", "error", "message"),
+    [
+        (
+            ("winter", 3),
+            TypeError,
+            "colormaps[1] must be None, a Matplotlib colormap name or a registered "
+            "Colormap, not int",
+        ),
+        (
+            ("not_a_colormap", "magma_r"),
+            ValueError,
+            "colormaps[0] must name a Matplotlib colormap, such as 'viridis'; "
+            "'not_a_colormap' is not one",
+        ),
+        # A name has two letters, but it is one colormap, not two.
+        (
+            "ab",
+            TypeError,
+            "colormaps must be a pair of colormaps, for the features not "
+            "selected and the selected ones",
+        ),
+        (
+            3,
+            TypeError,
+            "colormaps must be a pair of colormaps, for the features not "
+            "selected and the selected ones",
+        ),
+    ],
+)
+def test_highly_variable_features_name_the_colormap_they_refuse(
+    colormaps, error, message
+):
+    with pytest.raises(error) as raised:
+        splt.highly_variable_features(
+            *_hvg_arguments(), colormaps=colormaps, show=False
+        )
+
+    assert raised.value.args == (message,)
+
+
+def test_highly_variable_features_draw_with_colormaps_they_are_given(
+    registered_colormap,
+):
+    from matplotlib.colors import ListedColormap
+
+    not_selected = registered_colormap(
+        ListedColormap(["#000000", "#ffffff"], name="cytearc_black_white")
+    )
+    result = splt.highly_variable_features(
+        *_hvg_arguments(), colormaps=(not_selected, "plasma"), show=False
+    )
+    # None draws Matplotlib's default colormap, viridis, as it always has.
+    default = splt.highly_variable_features(
+        *_hvg_arguments(), colormaps=(None, "plasma"), show=False
+    )
+
+    unselected, selected = result.axes["highly_variable_features"].collections
+    assert unselected.get_cmap() == not_selected
+    assert selected.get_cmap().name == "plasma"
+    assert default.axes["highly_variable_features"].collections[0].get_cmap().name == (
+        "viridis"
+    )
+    # The results record each colormap by its name, and None as None.
+    assert result.provenance.extras["colormaps"] == ["cytearc_black_white", "plasma"]
+    assert default.provenance.extras["colormaps"] == [None, "plasma"]
+    result.close()
+    default.close()
+
+
+@pytest.mark.parametrize(
+    ("cmap", "error", "message"),
+    [
+        (
+            3,
+            TypeError,
+            "cmap must be a seaborn palette or Matplotlib colormap name, or a "
+            "list of colors, not 3",
+        ),
+        (
+            "not_a_palette",
+            ValueError,
+            "cmap must be a seaborn palette or Matplotlib colormap name, or a "
+            "list of colors, not 'not_a_palette'",
+        ),
+        (
+            ["#ff0000", "not_a_color"],
+            ValueError,
+            "cmap must be a seaborn palette or Matplotlib colormap name, or a "
+            "list of colors, not ['#ff0000', 'not_a_color']",
+        ),
+    ],
+)
+def test_qc_names_the_palette_it_refuses(cmap, error, message):
+    with pytest.raises(error) as raised:
+        splt.qc(_qc_data(), cmap=cmap, show=False)
+
+    assert raised.value.args == (message,)
+
+
+@pytest.mark.parametrize(
+    ("cmap", "colors"),
+    [
+        # seaborn's deep palette, and a list of colors, in group order.
+        ("deep", {"a": "#4c72b0", "b": "#dd8452"}),
+        (["#ff0000", "#0000ff"], {"a": "#ff0000", "b": "#0000ff"}),
+    ],
+)
+def test_qc_takes_any_palette_that_seaborn_reads(cmap, colors):
+    result = splt.qc(_qc_data(), cmap=cmap, max_points=0, show=False)
+
+    assert result.scales[0].palette == colors
+    result.close()
+
+
 def test_highly_variable_features_accepts_empty_feature_arrays():
     empty_float = np.array([], dtype=float)
     empty_bool = np.array([], dtype=bool)

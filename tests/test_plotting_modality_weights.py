@@ -7,7 +7,7 @@ from typing import Any
 import numpy as np
 import pytest
 import zarr
-from matplotlib.colors import to_rgba
+from matplotlib.colors import ListedColormap, to_rgba
 from zarr.storage import MemoryStore
 
 from cytearc.plotting._figure import PlotResult
@@ -176,6 +176,39 @@ def test_modality_weights_respects_columns_colormap_and_rasterization(
     result.close()
 
 
+def test_modality_weights_draw_with_a_colormap_it_is_given(
+    monkeypatch: pytest.MonkeyPatch, registered_colormap
+) -> None:
+    weights = np.asarray([[0.0, 1.0], [1.0, 0.0], [0.5, 0.5]], dtype=np.float64)
+    store, graph, layout, selection = _wnn_store(weights)
+    monkeypatch.setattr(
+        modality_weights_module,
+        "_resolve_layout",
+        lambda *_args: _resolved_layout(selection),
+    )
+    two_colors = registered_colormap(
+        ListedColormap(["#000000", "#ff0000"], name="cytearc_black_red")
+    )
+
+    result = modality_weights(
+        store, graph=graph, layout=layout, cmap=two_colors, show=False
+    )
+
+    for axis, column in zip(result.axes.values(), (0, 1), strict=True):
+        points = axis.collections[0]
+        points.update_scalarmappable()
+        # A weight below one half takes the first color, and one half or more
+        # the second.
+        expected = [
+            to_rgba("#ff0000" if value >= 0.5 else "#000000")
+            for value in weights[:, column]
+        ]
+        np.testing.assert_allclose(points.get_facecolors(), expected)
+    # The result records the colormap by its name.
+    assert result.scales[0].cmap == "cytearc_black_red"
+    result.close()
+
+
 def test_modality_weights_take_a_given_figure_size(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -231,7 +264,16 @@ def test_modality_weights_shows_owned_results_by_default(
             ValueError,
             "point_alpha must be between zero and one",
         ),
-        ({"cmap": ""}, TypeError, "cmap must be a non-empty string"),
+        (
+            {"cmap": ""},
+            ValueError,
+            "cmap must name a Matplotlib colormap, such as 'viridis'; '' is not one",
+        ),
+        (
+            {"cmap": 3},
+            TypeError,
+            "cmap must be a Matplotlib colormap name or a registered Colormap, not int",
+        ),
         (
             {"rasterize_threshold": True},
             ValueError,
