@@ -102,7 +102,6 @@ from ...storage.artifact_writer import (
     planned_diagnostics,
     reused_artifact_group,
 )
-from ...storage.async_execution import zarr_decoding_threads
 from ...storage.artifacts import (
     ArtifactRef,
     ArtifactStatus,
@@ -847,15 +846,12 @@ class _GraphOperationsMixin(_GraphOperationsBase):
         """Read a stored graph as CSR, keeping each cell's ``use_k`` nearest edges.
 
         Callers validate ``use_k`` against the graph's ``k``; None keeps every edge.
-        The arrays decode on the store's ``nthreads`` threads, as many as the
-        consumer that loads the graph computes on.
         """
         logger.debug(f"Loading graph from location: {graph_loc}")
         store = as_zarr_group(self.zw[graph_loc], name=graph_loc)
         n_cells, k = self._get_graph_ncells_k(graph_loc)
-        with zarr_decoding_threads(self.nthreads):
-            w = np.asarray(as_zarr_array(store["weights"], name="weights")[:])
-            e = np.asarray(as_zarr_array(store["edges"], name="edges")[:])
+        w = np.asarray(as_zarr_array(store["weights"], name="weights")[:])
+        e = np.asarray(as_zarr_array(store["edges"], name="edges")[:])
         if use_k is not None and use_k != k:
             from ...neighbors.graph import take_nearest_per_row
 

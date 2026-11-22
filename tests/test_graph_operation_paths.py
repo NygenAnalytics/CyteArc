@@ -23,7 +23,7 @@ from cytearc.storage.artifacts import (
 from cytearc.storage.errors import ArtifactResolutionError
 from cytearc.utils.logging import collect_warnings, logger
 from tests.storage_helpers import by_cell_id, write_count_store
-from tests.storage_helpers import insert_nullable_cell_column, recorded_codec_pools
+from tests.storage_helpers import insert_nullable_cell_column
 
 N_CELLS = 40
 
@@ -573,38 +573,6 @@ def test_load_graph_rejects_a_graph_without_its_dimensions(graph_store) -> None:
     for use_k in (None, 1):
         with pytest.raises(ValueError, match="missing n_cells or n_neighbors"):
             store.graph.load(graph, use_k=use_k)
-
-
-@pytest.mark.parametrize("nthreads", [1, 2])
-def test_load_graph_decodes_its_edges_on_the_stores_threads(
-    graph_template, nthreads, monkeypatch
-) -> None:
-    zarr_loc, refs = graph_template
-    store = DataStore(
-        str(zarr_loc),
-        default_assay="RNA",
-        min_features_per_cell=0,
-        nthreads=nthreads,
-        zarr_mode="r",
-    )
-    read_graph = DataStore._store_to_sparse
-
-    with recorded_codec_pools(host_threads=4) as pools:
-
-        def labeled(self: DataStore, *args: Any, **kwargs: Any) -> Any:
-            pools.label = "edges and weights"
-            try:
-                return read_graph(self, *args, **kwargs)
-            finally:
-                pools.label = None
-
-        monkeypatch.setattr(DataStore, "_store_to_sparse", labeled)
-        loaded = store.graph.load(refs["wnn"])
-
-    assert loaded.shape == (N_CELLS, N_CELLS)
-    # The graph's two arrays decode on the store's threads, not on the four
-    # host threads, outside a pipeline stage too.
-    assert pools.threads("edges and weights") == [nthreads, nthreads]
 
 
 def test_integration_sources_must_belong_to_an_assay(read_only_store) -> None:
