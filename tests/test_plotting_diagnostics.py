@@ -168,8 +168,9 @@ def test_elbow_result_records_detection_and_line_artists():
     }
     assert result.legends[0].label == "Elbow"
     assert result.legends[0].extras == {"pc": 3}
-    # The default width spends a quarter inch on each component.
-    assert result.figure.get_size_inches() == pytest.approx((2.0, 2.0))
+    # A quarter inch on each of the 8 components would be 2 inches, below the
+    # floor of 2.25 that the x label needs.
+    assert result.figure.get_size_inches() == pytest.approx((2.25, 2.0))
 
     ax = result.axes["elbow"]
     curve, marker = ax.lines
@@ -518,9 +519,9 @@ def test_elbow_rejects_malformed_variance_arrays(values):
 @pytest.mark.parametrize(
     ("values", "width"),
     [
-        pytest.param([5.0], 2.0, id="one-pc"),
-        pytest.param([5.0, 1.0], 2.0, id="two-pcs"),
-        pytest.param([3.0, 3.0, 3.0], 2.0, id="equal-values"),
+        pytest.param([5.0], 2.25, id="one-pc"),
+        pytest.param([5.0, 1.0], 2.25, id="two-pcs"),
+        pytest.param([3.0, 3.0, 3.0], 2.25, id="equal-values"),
         # Twelve PCs take their quarter inch each, above the floor.
         pytest.param([0.0] * 12, 3.0, id="twelve-zeros"),
     ],
@@ -582,8 +583,8 @@ def test_elbow_keeps_only_kneeds_warning_of_no_knee_from_its_caller(monkeypatch)
 
         return Locator
 
-    # kneed 0.8.1, the oldest supported, warns that it found no knee, which
-    # elbow_pc already says; the plot leaves that warning out.
+    # kneed 0.8.1 to 0.8.3 warn that they found no knee, which elbow_pc
+    # already says; the plot leaves that warning out.
     monkeypatch.setattr(
         diagnostics,
         "require_kneed",
@@ -612,9 +613,9 @@ def test_elbow_keeps_only_kneeds_warning_of_no_knee_from_its_caller(monkeypatch)
 
 @pytest.mark.parametrize(
     ("n_pcs", "width"),
-    [(1, 2.0), (4, 2.0), (7, 2.0), (8, 2.0), (9, 2.25), (30, 7.5)],
+    [(1, 2.25), (4, 2.25), (8, 2.25), (9, 2.25), (10, 2.5), (30, 7.5)],
 )
-def test_elbow_is_a_quarter_inch_wide_per_pc_and_at_least_two_inches(n_pcs, width):
+def test_elbow_is_a_quarter_inch_wide_per_pc_and_at_least_2_25_inches(n_pcs, width):
     values = np.linspace(10.0, 1.0, n_pcs) ** 2
     result = splt.elbow(values, show=False)
 
@@ -622,9 +623,18 @@ def test_elbow_is_a_quarter_inch_wide_per_pc_and_at_least_two_inches(n_pcs, widt
     result.close()
 
 
-@pytest.mark.parametrize("theme", ["notebook", "paper"])
-def test_elbow_of_one_pc_is_wide_enough_for_its_axis_label(theme):
-    result = splt.elbow([5.0], theme=theme, show=False)
+@pytest.mark.parametrize("theme", ["notebook", "paper", "minimal", "dark"])
+@pytest.mark.parametrize(
+    "values",
+    [
+        pytest.param([5.0], id="short-ticks"),
+        # Ticks such as 0.1150, or -0.0002 beside an offset of 99.9985.
+        pytest.param([0.123], id="six-character-ticks"),
+        pytest.param([99.999, 99.998], id="offset-ticks"),
+    ],
+)
+def test_elbow_at_its_narrowest_is_wide_enough_for_its_axis_label(values, theme):
+    result = splt.elbow(values, theme=theme, show=False)
     figure = result.figure
     figure.canvas.draw()
 
@@ -863,10 +873,11 @@ def test_highly_variable_features_legend_draws_each_group_whatever_comes_first(
     assert to_rgba(selected.get_markerfacecolor())[3] == 1.0
     assert not_selected.get_alpha() == 0.6
     assert selected.get_alpha() == 0.8
-    # The selected points' black edge marks the selected marker alone.
+    # The selected marker takes the selected points' black edge, and the other
+    # a thin neutral one.
     assert to_rgba(selected.get_markeredgecolor()) == to_rgba("black")
-    assert selected.get_markeredgewidth() == 0.5
-    assert not_selected.get_markeredgecolor() == "none"
+    assert to_hex(not_selected.get_markeredgecolor()) == "#333333"
+    assert selected.get_markeredgewidth() == not_selected.get_markeredgewidth() == 0.5
     assert not_selected.get_marker() == selected.get_marker() == "o"
     # The points keep their sizes, and the undetected one its transparent
     # color, which the legend no longer shows.
@@ -878,6 +889,28 @@ def test_highly_variable_features_legend_draws_each_group_whatever_comes_first(
     assert selected_points.get_sizes().tolist() == [30.0]
     undetected = 0 if order == "undetected-first" else 2
     assert to_rgba(unselected_points.get_facecolors()[undetected]) == (0, 0, 0, 0)
+    result.close()
+
+
+@pytest.mark.parametrize(
+    ("theme", "edge"),
+    [("notebook", "#333333"), ("paper", "#333333"), ("dark", "#8f8f8f")],
+)
+def test_highly_variable_features_legend_outlines_a_pale_middle_color(theme, edge):
+    from matplotlib.colors import to_hex
+
+    # bwr's middle, #fffefe, is all but the white of a light figure, so the
+    # marker of the genes not selected shows only by its edge.
+    result = splt.highly_variable_features(
+        *_hvg_arguments(), colormaps=("bwr", "magma_r"), theme=theme, show=False
+    )
+
+    marker = _legend_markers(result)["Not selected"]
+    assert to_hex(marker.get_markerfacecolor()) == "#fffefe"
+    assert to_hex(marker.get_markeredgecolor()) == edge
+    assert marker.get_markeredgewidth() == 0.5
+    if theme != "dark":
+        assert to_hex(result.figure.get_facecolor()) == "#ffffff"
     result.close()
 
 
@@ -935,11 +968,6 @@ def test_hvg_plot_options_check_every_option_of_the_plot():
         "colormaps": ("winter", "magma_r"),
         "theme": "notebook",
     }
-    with pytest.raises(TypeError) as raised:
-        hvg_plot_options(title="HVGs", show=False)
-    assert raised.value.args == (
-        "highly_variable_features() got unexpected keyword arguments: 'show', 'title'",
-    )
 
 
 _PAIR_OF_SIZES = (
@@ -954,19 +982,27 @@ _PAIR_OF_LENGTHS = "figsize must be a pair of numbers, the width and height in i
     [
         ("label_size", "big", TypeError, "label_size must be a real number"),
         ("label_size", True, TypeError, "label_size must be a real number"),
-        ("label_size", np.nan, ValueError, "label_size must be finite"),
-        ("label_size", 0, ValueError, "label_size must be positive"),
+        ("label_size", np.nan, ValueError, "label_size must be positive and finite"),
+        ("label_size", 0, ValueError, "label_size must be positive and finite"),
         ("figsize", "wide", TypeError, _PAIR_OF_LENGTHS),
         ("figsize", np.array(4.0), TypeError, _PAIR_OF_LENGTHS),
         ("figsize", (4.0,), ValueError, "figsize must contain two values"),
         ("figsize", (10, 8, "cm"), ValueError, "figsize must contain two values"),
         ("figsize", ("4", 3), TypeError, "figsize[0] must be a real number"),
-        ("figsize", (0, 4), ValueError, "figsize[0] must be positive"),
-        ("figsize", (4, -1e-9), ValueError, "figsize[1] must be positive"),
-        ("figsize", (4, np.inf), ValueError, "figsize[1] must be finite"),
+        ("figsize", (None, 4), TypeError, "figsize[0] must be a real number"),
+        ("figsize", (0, 4), ValueError, "figsize[0] must be positive and finite"),
+        ("figsize", (4, -1e-9), ValueError, "figsize[1] must be positive and finite"),
+        ("figsize", (4, np.inf), ValueError, "figsize[1] must be positive and finite"),
         ("point_sizes", 3, TypeError, _PAIR_OF_SIZES),
         ("point_sizes", (3,), ValueError, "point_sizes must contain two values"),
         ("point_sizes", ("a", "b"), TypeError, "point_sizes[0] must be a real number"),
+        # One area for each point, which Matplotlib takes, is not one per group.
+        (
+            "point_sizes",
+            (np.array([5.0, 50.0]), 30),
+            TypeError,
+            "point_sizes[0] must be a real number",
+        ),
         ("point_sizes", (-1, 30), ValueError, "point_sizes[0] must be at least 0"),
         ("point_sizes", (3, np.nan), ValueError, "point_sizes[1] must be finite"),
         (

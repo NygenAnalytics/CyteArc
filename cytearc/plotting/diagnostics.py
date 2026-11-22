@@ -19,6 +19,8 @@ from ..utils.arrays import sort_categories
 from ._style import (
     apply_figure_chrome,
     colormap_argument,
+    positive_argument,
+    scatter_edgecolor,
     theme_argument,
     theme_context,
 )
@@ -274,7 +276,7 @@ def elbow(
 ) -> PlotResult:
     """Plot explained variance and mark the detected elbow.
 
-    Principal components are numbered from 1, as ``dims`` counts them, so the elbow line stands at the number of the PC where the curve bends. The ``variance_explained`` table holds ``pc``, ``variance_explained`` and ``is_elbow`` for each PC, and ``provenance.extras["elbow_pc"]`` holds the elbow PC's number, or None when no elbow is detected. Fewer than three values, or values that are all equal, have no elbow. Without a width in ``figsize``, the figure is a quarter inch wide for each PC and at least two inches wide.
+    Principal components are numbered from 1, as ``dims`` counts them, so the elbow line stands at the number of the PC where the curve bends. The ``variance_explained`` table holds ``pc``, ``variance_explained`` and ``is_elbow`` for each PC, and ``provenance.extras["elbow_pc"]`` holds the elbow PC's number, or None when no elbow is detected. Fewer than three values, or values that are all equal, have no elbow. Without a width in ``figsize``, the figure is a quarter inch wide for each PC and at least 2.25 inches wide.
     """
     show = bool_argument(show, "show")
     require_matplotlib()
@@ -292,8 +294,8 @@ def elbow(
     if len(values) >= 3 and values.min() < values.max():
         knee_locator = require_kneed()
         with warnings.catch_warnings():
-            # kneed 0.8.1, the oldest supported, warns when it finds no knee,
-            # which elbow_pc reports; later releases do not warn.
+            # kneed 0.8.1 to 0.8.3 warn when they find no knee, which
+            # elbow_pc reports; later releases do not warn.
             warnings.filterwarnings(
                 "ignore", message="No knee/elbow found$", category=UserWarning
             )
@@ -308,9 +310,9 @@ def elbow(
         elbow_pc = None if detected is None else int(detected)
     width, height = figsize
     resolved_figsize = (
-        # Two inches fit the x axis label, 1.4 inches wide at 9 points, beside
-        # the y axis label and ticks.
-        max(2.0, 0.25 * len(values)) if width is None else float(width),
+        # 2.25 inches fit the x axis label, 1.4 inches wide at 9 points,
+        # beside the y axis label and tick labels of up to seven characters.
+        max(2.25, 0.25 * len(values)) if width is None else float(width),
         float(height),
     )
 
@@ -480,8 +482,10 @@ def graph_qc(
     return _return_result(result, show=show)
 
 
-def _number_pair(value: object, name: str, pair: str) -> tuple[float, float]:
-    """Check a pair of finite numbers, such as a figure's width and height."""
+def _pair(
+    value: object, name: str, pair: str, item: Callable[[object, str], float]
+) -> tuple[float, float]:
+    """Check a pair of numbers, such as a figure's width and height, each with ``item``."""
     if isinstance(value, np.ndarray):
         value = value.tolist()
     if isinstance(value, str | bytes) or not isinstance(value, Sequence):
@@ -489,37 +493,36 @@ def _number_pair(value: object, name: str, pair: str) -> tuple[float, float]:
     if len(value) != 2:
         raise ValueError(f"{name} must contain two values")
     first, second = value
-    return float_argument(first, f"{name}[0]"), float_argument(second, f"{name}[1]")
+    return item(first, f"{name}[0]"), item(second, f"{name}[1]")
+
+
+def _marker_area(value: object, name: str) -> float:
+    area = float_argument(value, name)
+    if area < 0:
+        raise ValueError(f"{name} must be at least 0")
+    return area
 
 
 def _label_size_option(value: object) -> float:
-    size = float_argument(value, "label_size")
-    if size <= 0:
-        raise ValueError("label_size must be positive")
-    return size
+    return positive_argument(value, "label_size")
 
 
 def _figsize_option(value: object) -> tuple[float, float] | None:
     if value is None:
         return None
-    size = _number_pair(value, "figsize", "numbers, the width and height in inches")
-    for index, length in enumerate(size):
-        if length <= 0:
-            raise ValueError(f"figsize[{index}] must be positive")
-    return size
+    return _pair(
+        value, "figsize", "numbers, the width and height in inches", positive_argument
+    )
 
 
 def _point_sizes_option(value: object) -> tuple[float, float]:
-    sizes = _number_pair(
+    return _pair(
         value,
         "point_sizes",
         "marker areas in points squared, for the features not selected and "
         "the selected ones",
+        _marker_area,
     )
-    for index, size in enumerate(sizes):
-        if size < 0:
-            raise ValueError(f"point_sizes[{index}] must be at least 0")
-    return sizes
 
 
 def _colormaps_option(value: object) -> tuple[str | None, str | None]:
@@ -549,8 +552,9 @@ def hvg_plot_options(**options: object) -> dict[str, Any]:
     """Check options of :func:`highly_variable_features` without drawing.
 
     The plot checks its options with it before it draws, and
-    ``features.hvgs`` checks the options that it passes to the plot before it
-    selects genes or saves anything.
+    ``features.hvgs`` checks the options that it passes to the plot, whose
+    names it has checked against the plot's signature, before it selects
+    genes or saves anything.
 
     Returns:
         The options given, as the plot draws them: ``label_size`` as a float,
@@ -558,17 +562,11 @@ def hvg_plot_options(**options: object) -> dict[str, Any]:
         a pair of colormap names or None, and ``theme``.
 
     Raises:
-        TypeError: If an option is not one of the plot's, or has a wrong type.
+        TypeError: If an option has a wrong type.
         ValueError: If a pair does not hold two values, a size is out of
             range, or a colormap is not one that Matplotlib holds.
         KeyError: If ``theme`` names no theme.
     """
-    unknown = sorted(set(options) - set(_HVG_PLOT_OPTIONS))
-    if unknown:
-        raise TypeError(
-            "highly_variable_features() got unexpected keyword arguments: "
-            + ", ".join(repr(name) for name in unknown)
-        )
     return {name: _HVG_PLOT_OPTIONS[name](value) for name, value in options.items()}
 
 
@@ -662,6 +660,8 @@ def highly_variable_features(
         # A scatter's own legend marker copies its first point, which is
         # tiny for the features not selected, and transparent when no cell
         # expresses the first of them, so each group gets a marker of its own.
+        # A thin neutral edge keeps a colormap's pale middle, such as bwr's
+        # white, visible beside the selected marker's black edge.
         ax.legend(
             handles=[
                 mpl.lines.Line2D(
@@ -677,7 +677,7 @@ def highly_variable_features(
                     label=points.get_label(),
                 )
                 for points, edgecolor in (
-                    (not_selected_points, "none"),
+                    (not_selected_points, scatter_edgecolor(theme)),
                     (selected_points, "black"),
                 )
             ],

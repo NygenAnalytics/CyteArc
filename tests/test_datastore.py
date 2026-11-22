@@ -817,7 +817,7 @@ def test_pca_of_one_or_two_components_shows_an_elbow_plot_without_warnings(
         100 * dataset.artifacts.load(pca)["variance_ratio"][:],
     )
     assert result.provenance.extras["elbow_pc"] is None
-    assert result.figure.get_size_inches() == pytest.approx((2.0, 2.0))
+    assert result.figure.get_size_inches() == pytest.approx((2.25, 2.0))
     result.close()
 
 

@@ -447,34 +447,6 @@ def test_accessor_and_function_draw_the_same_plot(
 
 
 @pytest.mark.parametrize(
-    ("value", "expected"),
-    [(2, 2.0), (0.25, 0.25), (np.float64(3.5), 3.5), (1e-9, 1e-9)],
-)
-def test_positive_returns_a_float(value, expected):
-    resolved = lineage_plots._positive(value, "line_width")
-
-    assert resolved == expected
-    assert type(resolved) is float
-
-
-@pytest.mark.parametrize("value", [True, False, "2", None, [1.0], np.bool_(True)])
-def test_positive_rejects_values_that_are_not_real_numbers(value):
-    with pytest.raises(TypeError, match="node_size must be a real number"):
-        lineage_plots._positive(value, "node_size")
-
-
-@pytest.mark.parametrize("value", [0, 0.0, -1, -0.5, np.nan, np.inf, -np.inf])
-def test_positive_rejects_values_that_are_not_positive_and_finite(value):
-    with pytest.raises(ValueError, match="df must be positive and finite"):
-        lineage_plots._positive(value, "df")
-
-
-@pytest.mark.parametrize("value", [np.int64(40), np.float32(40.0)])
-def test_positive_accepts_numpy_scalars(value):
-    assert lineage_plots._positive(value, "node_size") == 40.0
-
-
-@pytest.mark.parametrize(
     ("available", "lineages", "expected"),
     [
         ((2, 3, 4), None, [0, 1, 2]),

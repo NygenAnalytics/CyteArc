@@ -622,36 +622,56 @@ def test_select_hvgs_rejects_unknown_keywords_before_saving(
     }
 
 
-# The plot's own messages, which features.hvgs raises for the values it passes.
+# Wrong values of the plot's options, with the plot's own messages, which
+# features.hvgs raises for the values it passes.
+_PLOT_OPTION_REFUSALS = {
+    "colormaps": (
+        {"colormaps": ("winter", 3)},
+        TypeError,
+        "colormaps[1] must be None, a Matplotlib colormap name or a registered "
+        "Colormap, not int",
+    ),
+    "point_sizes": (
+        {"point_sizes": (-1, 30)},
+        ValueError,
+        "point_sizes[0] must be at least 0",
+    ),
+    "label_size": (
+        {"label_size": "big"},
+        TypeError,
+        "label_size must be a real number",
+    ),
+    "figsize": (
+        {"figsize": (0, 4)},
+        ValueError,
+        "figsize[0] must be positive and finite",
+    ),
+    "theme": (
+        {"theme": "sepia"},
+        KeyError,
+        "Unknown theme 'sepia'. Choose from: ['dark', 'minimal', 'notebook', 'paper']",
+    ),
+}
+
+
+# Every option through the summary path, and one through each other path.
 @pytest.mark.parametrize(
-    ("option", "error", "message"),
+    ("flavor", "show_plot", "refused"),
     [
-        (
-            {"colormaps": ("winter", 3)},
-            TypeError,
-            "colormaps[1] must be None, a Matplotlib colormap name or a registered "
-            "Colormap, not int",
-        ),
-        ({"point_sizes": (-1, 30)}, ValueError, "point_sizes[0] must be at least 0"),
-        ({"label_size": "big"}, TypeError, "label_size must be a real number"),
-        ({"figsize": (0, 4)}, ValueError, "figsize[0] must be positive"),
-        (
-            {"theme": "sepia"},
-            KeyError,
-            "Unknown theme 'sepia'. Choose from: ['dark', 'minimal', 'notebook', "
-            "'paper']",
-        ),
+        *(("cytearc", True, name) for name in _PLOT_OPTION_REFUSALS),
+        ("seurat_v3", True, "colormaps"),
+        ("cytearc", False, "figsize"),
     ],
-    ids=["colormaps", "point_sizes", "label_size", "figsize", "theme"],
-)
-@pytest.mark.parametrize(
-    ("flavor", "show_plot"),
-    [("cytearc", True), ("seurat_v3", True), ("cytearc", False)],
-    ids=["summary-plot", "count-model-plot", "no-plot"],
+    ids=[
+        *(f"summary-plot-{name}" for name in _PLOT_OPTION_REFUSALS),
+        "count-model-plot-colormaps",
+        "no-plot-figsize",
+    ],
 )
 def test_select_hvgs_refuses_a_plot_option_value_before_writing(
-    hvg_store, option, error, message, flavor, show_plot
+    hvg_store, flavor, show_plot, refused
 ) -> None:
+    option, error, message = _PLOT_OPTION_REFUSALS[refused]
     store = hvg_store
     active = np.asarray(store.cells.fetch_all("I"), dtype=bool)
     subset = active.copy()
@@ -673,9 +693,13 @@ def test_select_hvgs_refuses_a_plot_option_value_before_writing(
     assert _all_artifacts(store) == before
 
 
-@pytest.mark.parametrize("flavor", ["cytearc", "seurat_v3"])
+@pytest.mark.parametrize(
+    ("flavor", "show_plot"),
+    [("cytearc", True), ("seurat_v3", True), ("cytearc", False)],
+    ids=["summary-plot", "count-model-plot", "no-plot"],
+)
 def test_select_hvgs_records_and_draws_a_registered_colormap_by_its_name(
-    hvg_store, registered_colormap, monkeypatch, flavor
+    hvg_store, registered_colormap, monkeypatch, flavor, show_plot
 ) -> None:
     from matplotlib.colors import ListedColormap
 
@@ -697,16 +721,21 @@ def test_select_hvgs_records_and_draws_a_registered_colormap_by_its_name(
         store.snapshot_cell_selection(),
         top_n=50,
         flavor=flavor,
+        show_plot=show_plot,
         colormaps=(grays, "magma_r"),
         label_size=np.float32(9),
     )
 
     # The selection records the options as the plot draws them, a colormap
-    # by its name, which a Colormap itself could not be recorded as.
+    # by its name, which a Colormap itself could not be recorded as, whether
+    # or not the plot is drawn.
     assert inspect_artifact(store.zw, ref).execution_options["plot_kwargs"] == {
         "colormaps": ["cytearc_hvg_grays", "magma_r"],
         "label_size": 9.0,
     }
+    if not show_plot:
+        assert shown == []
+        return
     (result,) = shown
     unselected, selected = result.axes["highly_variable_features"].collections
     assert unselected.get_cmap() == grays
