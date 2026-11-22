@@ -69,6 +69,7 @@ def qc(
     show_on_single_row: bool = True,
     show: bool = True,
     theme: str = "notebook",
+    group_title: str | None = None,
 ) -> PlotResult:
     """Plot grouped distributions for cell-level QC metrics.
 
@@ -76,7 +77,12 @@ def qc(
     ``seed``, a seed of NumPy's ``RandomState`` from 0 to 2**32 - 1. The
     groups take the colors of ``cmap``, a palette that seaborn's
     ``color_palette`` reads: the name of a seaborn palette or a Matplotlib
-    colormap, or a list of colors.
+    colormap, or a list of colors. ``group_title`` names what the groups
+    of the ``groups`` column are, such as "Sample": it titles each panel's
+    axis of the groups and the legend that ``PlotResult.legends`` reports.
+    Without it the axis is left blank and the legend is reported as
+    ``groups``, the column's name; a panel of one group draws no axis of
+    groups to title.
     """
     show_on_single_row = bool_argument(show_on_single_row, "show_on_single_row")
     show = bool_argument(show, "show")
@@ -85,6 +91,10 @@ def qc(
     sns = require_seaborn()
     if "groups" not in data.columns:
         raise KeyError("data must contain a 'groups' column")
+    if group_title is not None and not isinstance(group_title, str):
+        raise TypeError(
+            f"group_title must be text or None, not {type(group_title).__name__}"
+        )
     if data.empty:
         raise ValueError("data must contain at least one row")
     if max_points < 0:
@@ -207,7 +217,10 @@ def qc(
                 )
 
             ax.set_ylabel(str(metric), fontsize=label_size)
-            ax.set_xlabel("")
+            ax.set_xlabel(
+                group_title if group_title and n_groups > 1 else "",
+                fontsize=label_size,
+            )
             if n_groups == 1:
                 ax.set_xticks([])
                 finite = numeric_values[metric][np.isfinite(numeric_values[metric])]
@@ -238,7 +251,7 @@ def qc(
         legends=(
             LegendSpec(
                 kind="categorical",
-                label="groups",
+                label="groups" if group_title is None else group_title,
                 extras={"categories": list(group_order)},
             ),
         ),

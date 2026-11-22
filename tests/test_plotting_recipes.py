@@ -1305,11 +1305,19 @@ def test_serialized_grouping_columns_read_as_cell_fields() -> None:
                     "plot": "cluster_connectivity",
                     "kwargs": {"groupBy": {"key": "cluster"}},
                 },
+                {
+                    "name": "facets",
+                    "plot": "embedding",
+                    "kwargs": {
+                        "layoutKey": "umap",
+                        "facetBy": {"key": "stage", "label": "Stage"},
+                    },
+                },
             ]
         }
     )
 
-    dots, shares, violins, graph = (step.kwargs for step in recipe.steps)
+    dots, shares, violins, graph, facets = (step.kwargs for step in recipe.steps)
     assert dots["group_by"] == [
         plotting.CellField(key="cluster", label="Cluster"),
         "sample",
@@ -1323,6 +1331,7 @@ def test_serialized_grouping_columns_read_as_cell_fields() -> None:
     }
     assert violins["split_by"] == plotting.CellField(key="batch", label="Batch")
     assert graph["group_by"] == plotting.CellField(key="cluster")
+    assert facets["facet_by"] == plotting.CellField(key="stage", label="Stage")
     # A malformed column names the keyword as the recipe spells it.
     with pytest.raises(ValueError, match="Unknown groupBy key"):
         PlotRecipe.from_dict(

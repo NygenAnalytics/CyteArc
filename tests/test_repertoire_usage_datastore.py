@@ -351,6 +351,41 @@ def test_gene_usage_plot_draws_one_panel_per_locus(tmp_path) -> None:
     plotting.gene_usage(object(), j_genes, show=False).close()
 
 
+def test_usage_figures_draw_groups_in_the_order_their_column_stores(tmp_path) -> None:
+    store, receptors, _clonotypes = _sources(tmp_path)
+    # s2 before s1, as ordered categories store them, where natural order
+    # puts s1 first.
+    store.cells.insert(
+        "sample_s2_first",
+        by_cell_id(
+            store.cells, pd.Categorical(SAMPLES, categories=["s2", "s1"], ordered=True)
+        ),
+    )
+    usage = store.repertoire.gene_usage(receptors, group_by="sample_s2_first")
+    # The record keeps the natural order of its groups; the figure draws the
+    # order that the column stores.
+    assert usage.group_keys.index.tolist() == ["s1", "s2"]
+    grouped = plotting.gene_usage(
+        store, usage, max_genes=1, show_legend=False, show=False
+    )
+    try:
+        ticks = grouped.axes["TRA"].get_xticklabels()
+        assert [tick.get_text() for tick in ticks] == ["s2", "s1"]
+        assert grouped.tables["usage"] is usage.table
+    finally:
+        grouped.close()
+    lengths = plotting.spectratype(
+        store,
+        store.repertoire.spectratype(receptors, group_by="sample_s2_first"),
+        show=False,
+    )
+    try:
+        legend = lengths.axes["TRA"].get_legend()
+        assert [text.get_text() for text in legend.get_texts()] == ["s2", "s1"]
+    finally:
+        lengths.close()
+
+
 def test_gene_usage_of_a_label_artifact_alone_draws_a_heatmap(tmp_path) -> None:
     store, receptors, _clonotypes = _sources(tmp_path)
     labels = store.snapshot_cluster_labels(

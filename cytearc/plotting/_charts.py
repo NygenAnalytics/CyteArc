@@ -126,6 +126,7 @@ def draw_bars(
     side_by_side: bool = False,
     numeric_items: bool = False,
     value_label: str,
+    item_label: str | None = None,
     title: str | None = None,
     legend_title: str | None = None,
     show_legend: bool = True,
@@ -148,6 +149,9 @@ def draw_bars(
     named slot. Named slots are named as a heatmap's rows are: once the
     figure is laid out, every item, or else every second, third or nth from
     the first, as many as the axis holds, at most ``MAX_NAMED_ITEMS``.
+    ``value_label`` titles the axis of the values, and ``item_label``, when
+    given, the axis that names the items, such as the grouping that names
+    them.
 
     Returns:
         The legend of the segments, or of the items' colors, drawn beside
@@ -237,6 +241,8 @@ def draw_bars(
         # Fractions span the whole axis, whichever parts are empty.
         (ax.set_xlim if horizontal else ax.set_ylim)(0.0, 1.0)
     (ax.set_xlabel if horizontal else ax.set_ylabel)(value_label)
+    if item_label is not None:
+        (ax.set_ylabel if horizontal else ax.set_xlabel)(item_label)
     if title is not None:
         ax.set_title(title)
     if legend_title is None or not isinstance(colors, CategoricalScale):

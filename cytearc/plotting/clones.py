@@ -14,7 +14,7 @@ from ..clones.overlap import OVERLAP_INDICES, CloneOverlap, CloneTracking
 from ..metadata.selection import NamedCellArtifact
 from ..storage.refs import ArtifactRef
 from ..utils.arguments import bool_argument, integer_argument, quoted_value
-from ..utils.arrays import sort_categories, sorted_unique
+from ..utils.arrays import sorted_unique
 from ._charts import draw_bars, draw_lines, draw_matrix, pair_matrix
 from ._clone_names import CloneNames, clone_names
 from ._contracts import CategoricalScale, ColorScale
@@ -165,6 +165,13 @@ def _kept_apart_labels(
 ) -> list[tuple[str, np.ndarray]]:
     """Each cell's labels in the columns of ``cells`` that the clones keep apart."""
     return [(column, np.asarray(cells[column], dtype=object)) for column in columns]
+
+
+def _in_group_order(table: pd.DataFrame, names: Sequence[str]) -> pd.DataFrame:
+    """The rows of a summary's table, one per ``group``, in the figure's order of the groups."""
+    place = {name: at for at, name in enumerate(names)}
+    order = [place[str(group)] for group in table["group"].tolist()]
+    return table.iloc[np.argsort(order, kind="stable")]
 
 
 @close_figures_on_error
@@ -408,16 +415,19 @@ def clonal_expansion(
     clones. Windows that hold no cell are left out.
 
     The groups are the expansion's own, such as its samples, unless
-    ``group_by`` names cell metadata columns, one or several, such as the
-    cell type, or ``groups`` a cell-label artifact, such as a clustering; the
+    ``group_by`` names cell metadata columns, one or several, such as the cell
+    type, or ``groups`` a cell-label artifact, such as a clustering; the
     plotted groups are then the combinations of their labels, as the clone
-    summaries group cells, and a ``NamedCellArtifact`` as ``groups`` titles
-    the artifact by its name. Each cell keeps the category measured within its
-    expansion group, so grouping the cells by cell type shows which cell
-    types hold the expanded cells of their samples; the ranks are counted
-    within the plotted groups. Labels that the clones keep apart stay apart:
-    the plotted groups of clonotypes are each group's receptor types, named
-    like ``"blood, TCR"``. Cells without a category or a group are left out.
+    summaries group cells. Both panels title their group axis by the grouping:
+    the columns' names, a ``NamedCellArtifact`` as ``groups`` by its name, or
+    else the title of the artifact's record. The groups follow the order that
+    their columns or label artifact store, then natural order, and receptor
+    types their vocabulary's. Each cell keeps the category measured within its
+    expansion group, so grouping the cells by cell type shows which cell types
+    hold the expanded cells of their samples; the ranks are counted within the
+    plotted groups. Labels that the clones keep apart stay apart: the plotted
+    groups of clonotypes are each group's receptor types, named like
+    ``"blood, TCR"``. Cells without a category or a group are left out.
 
     Tables: ``categories`` (``group``, ``category``, then ``n_cells`` or
     ``n_clones``, and ``fraction``) and ``rank_windows`` (``group``,
@@ -452,9 +462,11 @@ def clonal_expansion(
     window_names = list(rank_window_labels(splits))
     if groups is None and not names_columns(group_by):
         # The expansion's own groups, which the loaded tables count, titled
-        # as a summary's groups are.
-        group_name = table_groups(store, loaded).title
-        order = sort_categories(pd.unique(loaded.categories["group"].to_numpy(object)))
+        # and ordered as a summary's groups are.
+        own = table_groups(store, loaded)
+        group_name = own.title
+        counted_groups = set(loaded.categories["group"].tolist())
+        order = [name for name in own.names if name in counted_groups]
         wide = (
             loaded.categories.pivot(
                 index="group", columns="category", values=f"n_{count}"
@@ -552,6 +564,7 @@ def clonal_expansion(
                 value_label=(
                     f"Fraction of {counted}" if normalize else counted.capitalize()
                 ),
+                item_label=group_name,
                 title="Clonal expansion",
                 legend_title=(
                     f"{noun} size"
@@ -569,6 +582,7 @@ def clonal_expansion(
                 colors=window_colors,
                 normalize=normalize,
                 value_label="Fraction of cells" if normalize else "Cells",
+                item_label=group_name,
                 title=f"Clonal space by {names.singular} rank",
                 legend_title=f"{noun} rank",
                 show_legend=show_legend,
@@ -816,7 +830,9 @@ def clonal_diversity(
         )
     names = clone_names(store, diversity.clones)
     plotted = table_groups(store, diversity, groups)
-    colors = plotted.scale(table["group"].tolist())
+    # The bars follow the groups' order; the record keeps its own.
+    bars = _in_group_order(table, plotted.names)
+    colors = plotted.scale(bars["group"].tolist())
     titles = _index_titles(names)
     legend_panel = chosen[min(_SMALL_MULTIPLES, len(chosen)) - 1]
     if figsize is None and target is None:
@@ -838,7 +854,7 @@ def clonal_diversity(
             ax = axes[index]
             found = draw_bars(
                 ax,
-                table,
+                bars,
                 item="group",
                 value=index,
                 colors=colors,
@@ -921,11 +937,14 @@ def clone_overlap(
     the color map and limits, viridis over the pairs' values by default,
     so two figures can share them.
 
-    ``groups``, a ``NamedCellArtifact`` of the label artifact that the
-    record groups by, titles the artifact by its name; without it, the
-    figure takes the title of the artifact's record.
+    The groups follow the order that their columns or label artifact
+    store, then natural order, and the grouping titles the axis below the
+    matrix: the columns' names, the name of ``groups``, a
+    ``NamedCellArtifact`` of the label artifact that the record groups by,
+    or else the title of the artifact's record.
 
-    Tables: ``matrix`` (groups by groups) and ``pairs``, the record's pairs.
+    Tables: ``matrix`` (groups by groups, in the drawn order) and ``pairs``,
+    the record's pairs.
 
     Raises:
         TypeError: If ``overlap`` is not a ``CloneOverlap`` record,
@@ -949,15 +968,15 @@ def clone_overlap(
         raise ValueError(
             "The overlap compares no pair of groups, so there is nothing to plot"
         )
-    names = list(overlap.group_sizes["group"])
+    plotted = table_groups(store, overlap, groups)
+    sizes = _in_group_order(overlap.group_sizes, plotted.names)
+    names = list(sizes["group"])
     matrix = pair_matrix(
         overlap.pairs,
         names,
         index,
         diagonal=(
-            overlap.group_sizes["n_clones"].to_numpy(dtype=np.float64)
-            if index == "shared"
-            else 1.0
+            sizes["n_clones"].to_numpy(dtype=np.float64) if index == "shared" else 1.0
         ),
     )
     title = _overlap_titles(clone_names(store, overlap.clones))[index]
@@ -977,6 +996,7 @@ def clone_overlap(
             show_legend=show_legend,
         )
         axes["matrix"].set_title(title)
+        axes["matrix"].set_xlabel(plotted.title or "")
     return finish_plot(
         figure,
         axes,
@@ -987,7 +1007,7 @@ def clone_overlap(
         drawn=[drawn],
         inputs={"clones": overlap.clones},
         settings={
-            "grouping": table_groups(store, overlap, groups).title,
+            "grouping": plotted.title,
             "index": index,
             "groups": names,
         },
@@ -1023,12 +1043,12 @@ def clone_tracking(
     ``group_by`` columns and the ``groups`` artifact, joined by commas;
     ``order`` lists those names from left to right, or values whose text is
     the name, such as time points as integers, and by default the names
-    follow their natural order. The legend lists the clones, the largest
-    first.
+    follow the order that their columns or label artifact store, then
+    natural order. The legend lists the clones, the largest first.
 
-    ``groups``, a ``NamedCellArtifact`` of the label artifact that the
-    record groups by, titles the artifact by its name; without it, the
-    figure takes the title of the artifact's record.
+    The grouping titles the axis of the groups: the columns' names, the name
+    of ``groups``, a ``NamedCellArtifact`` of the label artifact that the
+    record groups by, or else the title of the artifact's record.
 
     Tables: ``tracking``, the record's ``table`` with each clone's ``label``
     after its ``clone`` (``clone``, ``label``, ``group``, ``n_cells`` and
@@ -1077,6 +1097,7 @@ def clone_tracking(
     # group_by columns and the label artifact's kind, the first key columns.
     group_keys = tracking.group_keys
     n_grouping = len(tracking.group_by) + (tracking.groups is not None)
+    plotted = table_groups(store, tracking, groups)
     group_names = [str(group) for group in group_keys.index.tolist()]
     position_of = dict(zip(group_names, group_names, strict=True))
     if n_grouping:
@@ -1089,7 +1110,14 @@ def clone_tracking(
             [position_of[group] for group in cells["group"].tolist()], dtype=object
         )
     )
-    present = sort_categories(pd.unique(placed["position"]))
+    # Positions follow the groups' order, which their columns' stored
+    # orders set.
+    held = set(placed["position"].tolist())
+    present = list(
+        dict.fromkeys(
+            position_of[name] for name in plotted.names if position_of[name] in held
+        )
+    )
     if order is None:
         positions = list(present)
     else:
@@ -1125,6 +1153,10 @@ def clone_tracking(
             colors=colors,
             positions=positions,
             markers=True,
+            # The positions are named by the grouping columns alone.
+            x_label=(
+                ", ".join(plotted.titles[:n_grouping]) if n_grouping else plotted.title
+            ),
             y_label="Fraction of the group's cells",
             title=f"{names.plural.capitalize()} across groups",
             legend_title=names.singular.capitalize(),
@@ -1140,7 +1172,7 @@ def clone_tracking(
         drawn=[drawn],
         inputs={"clones": tracking.clones},
         settings={
-            "grouping": table_groups(store, tracking, groups).title,
+            "grouping": plotted.title,
             "tracked": list(tracking.tracked),
             "order": positions,
         },
@@ -1178,9 +1210,9 @@ def clone_coupling(
     viridis; ``color_scale`` sets the map and limits instead, so two figures
     can share them.
 
-    ``groups``, a ``NamedCellArtifact`` of the label artifact that the
-    record groups by, titles the artifact by its name; without it, the
-    figure takes the title of the artifact's record.
+    The grouping titles the axis below the matrix: the columns' names, the
+    name of ``groups``, a ``NamedCellArtifact`` of the label artifact that
+    the record groups by, or else the title of the artifact's record.
 
     Tables: ``matrix`` (groups by groups, in the drawn order) and ``pairs``.
 
@@ -1229,6 +1261,7 @@ def clone_coupling(
         coupling.method, str(coupling.method)
     )
     tree = _ordered_linkage(coupling)
+    grouping = table_groups(store, coupling, groups).title
     if figsize is None and target is None:
         figsize = _matrix_figure_size(len(names), extra_height=0.8)
     with theme_context(theme):
@@ -1246,6 +1279,7 @@ def clone_coupling(
             show_legend=show_legend,
         )
         ax.set_title(f"{title}, z-score" if value == "z_score" else title, y=1.18)
+        ax.set_xlabel(grouping or "")
         axes["dendrogram"] = draw_dendrogram(
             ax, tree, side="top", color=foreground_color(theme)
         )
@@ -1259,7 +1293,7 @@ def clone_coupling(
         drawn=[drawn],
         inputs={"clones": coupling.clones},
         settings={
-            "grouping": table_groups(store, coupling, groups).title,
+            "grouping": grouping,
             "method": coupling.method,
             "value": value,
             "groups": names,

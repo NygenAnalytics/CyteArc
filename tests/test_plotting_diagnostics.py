@@ -105,6 +105,10 @@ def test_qc_result_contains_tables_metadata_and_artists():
     assert result.provenance.extras["seed"] == 13
     assert result.legends[0].kind == "categorical"
     assert result.legends[0].extras == {"categories": ["a", "b"]}
+    # Without a title, the axis of the groups is blank and the legend takes
+    # the column's name.
+    assert result.legends[0].label == "groups"
+    assert [ax.get_xlabel() for ax in result.axes.values()] == ["", ""]
     # Two groups take the first two tab20 colors.
     assert result.scales[0].palette == {"a": "#1f77b4", "b": "#aec7e8"}
 
@@ -386,6 +390,43 @@ def test_highly_variable_features_result_contains_feature_table_and_scatters():
 def test_qc_rejects_malformed_dataframes(data, kwargs, error, message):
     with pytest.raises(error, match=message):
         splt.qc(data, show=False, **kwargs)
+
+
+def test_qc_titles_the_axis_of_its_groups_when_asked():
+    titled = splt.qc(
+        _qc_data(), max_points=0, label_size=7.0, group_title="Sample", show=False
+    )
+    try:
+        # Each panel's axis of the groups, in the size of the other labels,
+        # and the reported legend take the title.
+        for ax in titled.axes.values():
+            assert ax.get_xlabel() == "Sample"
+            assert ax.xaxis.label.get_fontsize() == 7.0
+            assert [label.get_text() for label in ax.get_xticklabels()] == ["a", "b"]
+        assert titled.legends[0].label == "Sample"
+    finally:
+        titled.close()
+    # A panel of one group draws no axis of groups, so there is no title to
+    # draw; an empty title is drawn as given.
+    single = splt.qc(
+        pd.DataFrame({"groups": ["only"] * 3, "metric": [1.0, 2.0, 3.0]}),
+        max_points=0,
+        group_title="Sample",
+        show=False,
+    )
+    empty = splt.qc(_qc_data(), max_points=0, group_title="", show=False)
+    try:
+        assert single.axes["metric"].get_xlabel() == ""
+        assert single.legends[0].label == "Sample"
+        assert [ax.get_xlabel() for ax in empty.axes.values()] == ["", ""]
+        assert empty.legends[0].label == ""
+    finally:
+        single.close()
+        empty.close()
+    for title in (b"Sample", 3, ["Sample"]):
+        message = f"^group_title must be text or None, not {type(title).__name__}$"
+        with pytest.raises(TypeError, match=message):
+            splt.qc(_qc_data(), group_title=title, show=False)
 
 
 def test_qc_samples_its_points_with_any_seed_of_numpy():

@@ -262,6 +262,170 @@ def test_plot_groups_align_labels_to_clones_of_later_cells(plotted) -> None:
     assert _grouped(found) == ([1, 0, 1], ("x", "y"), "group")
 
 
+def _store_y_first(store) -> None:
+    """Store the groups as ordered categories, y before x, where natural order puts x first."""
+    store.cells.insert(
+        "group_y_first",
+        by_cell_id(
+            store.cells, pd.Categorical(GROUPS, categories=["y", "x"], ordered=True)
+        ),
+        overwrite=True,
+    )
+
+
+def test_plot_groups_follow_the_order_each_key_column_stores(plotted) -> None:
+    store, clones = plotted
+    _store_y_first(store)
+    # half stores no order, so its labels take natural order.
+    store.cells.insert(
+        "half",
+        by_cell_id(
+            store.cells, np.asarray(["b", "a", "b", "a", "a", "b"], dtype=object)
+        ),
+        overwrite=True,
+    )
+    # Each cell keeps its group, c0, c1 and c3 x and c2 and c4 y, numbered
+    # in the stored order.
+    found = plot_groups(store, clones, group_by="group_y_first", groups=None, n_cells=6)
+    assert _grouped(found) == ([1, 1, 0, 1, 0, -1], ("y", "x"), "group_y_first")
+    # The first column's order leads, and the second's orders the groups of
+    # each of its labels: c0 is (x, b), c1 (x, a), c2 (y, b), c3 (x, a) and
+    # c4 (y, a).
+    crossed = plot_groups(
+        store, clones, group_by=["group_y_first", "half"], groups=None, n_cells=6
+    )
+    assert _grouped(crossed)[:2] == (
+        [3, 2, 1, 2, 0, -1],
+        ("y, a", "y, b", "x, a", "x, b"),
+    )
+    swapped = plot_groups(
+        store, clones, group_by=["half", "group_y_first"], groups=None, n_cells=6
+    )
+    assert _grouped(swapped)[:2] == (
+        [3, 1, 2, 1, 0, -1],
+        ("a, y", "a, x", "b, y", "b, x"),
+    )
+    # Three labels stored in a turn of their natural order: each cell keeps
+    # its label, p, q or r, however far its group moves.
+    store.cells.insert(
+        "trio",
+        by_cell_id(
+            store.cells,
+            pd.Categorical(list("pqrpqr"), categories=["q", "r", "p"], ordered=True),
+        ),
+        overwrite=True,
+    )
+    turned = plot_groups(store, clones, group_by="trio", groups=None, n_cells=6)
+    assert _grouped(turned) == ([2, 0, 1, 2, 0, 1], ("q", "r", "p"), "trio")
+
+
+def test_plot_groups_follow_the_order_a_label_artifact_stores(plotted) -> None:
+    store, clones = plotted
+    _store_y_first(store)
+    store.cells.insert(
+        "half",
+        by_cell_id(
+            store.cells, np.asarray(["b", "a", "b", "a", "a", "b"], dtype=object)
+        ),
+        overwrite=True,
+    )
+    # Labels of c0 to c3, which keep the column's order, y before x, after
+    # the column stores x first.
+    labels = store.snapshot_cluster_labels(
+        "group_y_first", cell_selection=store.snapshot_cell_selection("first_four")
+    )
+    store.cells.insert(
+        "group_y_first",
+        by_cell_id(
+            store.cells, pd.Categorical(GROUPS, categories=["x", "y"], ordered=True)
+        ),
+        overwrite=True,
+    )
+    found = plot_groups(store, clones, group_by=None, groups=labels, n_cells=6)
+    assert _grouped(found) == ([1, 1, 0, 1, -1, -1], ("y", "x"), "group_y_first")
+    # A column's labels lead the artifact's: c0 is (b, x), c1 (a, x), c2
+    # (b, y) and c3 (a, x).
+    by_half = plot_groups(store, clones, group_by="half", groups=labels, n_cells=6)
+    assert _grouped(by_half)[:2] == ([2, 0, 1, 0, -1, -1], ("a, x", "b, y", "b, x"))
+
+
+def test_figures_draw_groups_in_the_order_their_column_stores(plotted) -> None:
+    store, clones = plotted
+    _store_y_first(store)
+    by = "group_y_first"
+    figures = []
+    try:
+        abundance = clone_abundance(store, clones, group_by=by, show=False)
+        figures.append(abundance)
+        legend = abundance.axes["top"].get_legend()
+        assert [text.get_text() for text in legend.get_texts()] == ["y", "x"]
+        # The summaries keep the natural order of their groups; their figures
+        # draw the order that the column stores.
+        expansion = store.clones.expansion(clones, group_by=by)
+        assert store.clones.load_expansion(expansion).group_keys.index.tolist() == [
+            "x",
+            "y",
+        ]
+        for drawn in (
+            clonal_expansion(store, expansion, show=False),
+            clonal_expansion(
+                store, store.clones.expansion(clones), group_by=by, show=False
+            ),
+        ):
+            figures.append(drawn)
+            for panel in ("categories", "rank_windows"):
+                assert axis_names(drawn.axes[panel].yaxis)[1] == ["y", "x"], panel
+                assert drawn.axes[panel].get_ylabel() == by
+            assert drawn.tables["categories"]["group"].unique().tolist() == ["y", "x"]
+        diversity = store.clones.diversity(clones, group_by=by)
+        assert diversity.indices["group"].tolist() == ["x", "y"]
+        drawn = clonal_diversity(store, diversity, indices=["shannon"], show=False)
+        figures.append(drawn)
+        assert axis_names(drawn.axes["shannon"].yaxis)[1] == ["y", "x"]
+        # The figure reports the record's table as the record holds it.
+        assert drawn.tables["indices"] is diversity.indices
+        overlap = store.clones.overlap(clones, group_by=by)
+        drawn = clone_overlap(store, overlap, index="shared", show=False)
+        figures.append(drawn)
+        assert axis_names(drawn.axes["matrix"].xaxis)[1] == ["y", "x"]
+        assert axis_names(drawn.axes["matrix"].yaxis)[1] == ["y", "x"]
+        # The matrix follows the drawn order; y holds clone a, x clones a and
+        # b, so they share one clone.
+        assert drawn.tables["matrix"].index.tolist() == ["y", "x"]
+        assert drawn.tables["matrix"].to_numpy().tolist() == [[1.0, 1.0], [1.0, 2.0]]
+        assert overlap.group_sizes["group"].tolist() == ["x", "y"]
+        tracking = store.clones.track(clones, group_by=by, top_n=2)
+        drawn = clone_tracking(store, tracking, show=False)
+        figures.append(drawn)
+        assert axis_names(drawn.axes["tracking"].xaxis)[1] == ["y", "x"]
+        assert drawn.axes["tracking"].get_xlabel() == by
+    finally:
+        for figure in figures:
+            figure.close()
+
+
+def test_receptor_types_follow_their_vocabulary(truth_plot, truth_clonotypes) -> None:
+    store = truth_plot.store
+    # TCR before BCR, as the vocabulary of receptor types lists them, where
+    # their text puts BCR first.
+    vocabulary = ["TCR", "BCR", "ambiguous", "multichain"]
+    result = clone_abundance(store, truth_clonotypes, show=False)
+    try:
+        legend = result.axes["top"].get_legend()
+        assert [text.get_text() for text in legend.get_texts()] == vocabulary
+        assert result.tables["sizes"]["group"].unique().tolist() == vocabulary
+    finally:
+        result.close()
+    drawn = clonal_expansion(
+        store, store.clones.expansion(truth_clonotypes), show=False
+    )
+    try:
+        assert axis_names(drawn.axes["categories"].yaxis)[1] == vocabulary
+        assert drawn.axes["categories"].get_ylabel() == "receptor_type"
+    finally:
+        drawn.close()
+
+
 def test_clones_of_equal_size_list_in_rank_order(plotted) -> None:
     store, _clones = plotted
     # 9 and 10 hold two cells each and rank by number, 9 first, where their
@@ -690,6 +854,10 @@ def test_the_tracking_table_pairs_each_clone_with_its_label(
     assert [text.get_text() for text in legend.get_texts()] == [
         labels[clone] for clone in tracking.tracked
     ]
+    # The groups of each receptor type share their sample's position, which
+    # the sample alone names and titles.
+    assert axis_names(result.axes["tracking"].xaxis)[1] == ["d2", "d4"]
+    assert result.axes["tracking"].get_xlabel() == "sample"
     result.close()
 
 
@@ -1989,9 +2157,12 @@ def test_each_summarys_figure_takes_the_name_of_its_named_artifact(
             ),
         ),
     ]
-    # The figures that draw a legend of the groups; the overlap and coupling
-    # name their groups along their axes, and the tracking lists its clones.
+    # The figures that draw a legend of the groups, and those that title the
+    # axis that names the groups: below the overlap's and coupling's matrix,
+    # whose dendrogram stands above it, and below the tracking's lines.
     group_legends = {clonal_rarefaction, clonal_diversity, clone_fate_bias}
+    group_axes = {clone_overlap: "matrix", clone_tracking: "tracking"}
+    group_axes[clone_coupling] = "matrix"
     for figure, record in cases:
         result = figure(store, record, groups=named, show=False)
         bare = figure(store, record, show=False)
@@ -2002,6 +2173,12 @@ def test_each_summarys_figure_takes_the_name_of_its_named_artifact(
             if figure in group_legends:
                 assert _legend_titles(result) == ["Cell type"], figure
                 assert _legend_titles(bare) == ["cell_type"], figure
+            if figure in group_axes:
+                assert result.axes[group_axes[figure]].get_xlabel() == "Cell type"
+                assert bare.axes[group_axes[figure]].get_xlabel() == "cell_type"
+            if group_axes.get(figure) == "matrix":
+                # A square matrix titles its groups once, below it.
+                assert result.axes["matrix"].get_ylabel() == ""
             # The name changes nothing that the figure counts.
             assert result.tables.keys() == bare.tables.keys()
             for key, table in result.tables.items():

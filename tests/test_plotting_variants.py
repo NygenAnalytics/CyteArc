@@ -2,6 +2,7 @@
 
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 import pytest
 
 from matplotlib.colors import to_hex
@@ -191,6 +192,37 @@ def test_groups_are_drawn_in_the_natural_order_of_their_labels(plotted) -> None:
     assert [text.get_text() for text in legend.get_texts()] == ["s2", "s10"]
     assert result.tables["cells"]["group"].tolist() == ["s10", "s2", "s10", "s2"]
     plt.close(result.figure)
+
+
+def test_groups_follow_the_order_their_column_stores(plotted) -> None:
+    store, targets, _positions = plotted
+    # s10 before s2, as ordered categories store them, where natural order
+    # puts s2 first.
+    store.cells.insert(
+        "stored_lane",
+        by_cell_id(
+            store.cells,
+            pd.Categorical(
+                ["s10", "s2", "s10", "s2", "s2"], categories=["s10", "s2"], ordered=True
+            ),
+        ),
+        overwrite=True,
+    )
+    depth = variant_depth(store, targets, group_by="stored_lane", show=False)
+    legend = depth.axes["cells"].get_legend()
+    assert [text.get_text() for text in legend.get_texts()] == ["s10", "s2"]
+    plt.close(depth.figure)
+    called = store.variants.genotypes(targets, method="threshold", min_mutant_umis=1)
+    calls = genotypes(store, called, group_by="stored_lane", show=False)
+    ax = calls.axes["calls"]
+    assert [label.get_text() for label in ax.get_yticklabels()] == [
+        "CALR, s10",
+        "CALR, s2",
+        "SF3B1, s10",
+        "SF3B1, s2",
+    ]
+    assert calls.tables["calls"]["group"].drop_duplicates().tolist() == ["s10", "s2"]
+    plt.close(calls.figure)
 
 
 def test_the_store_accessor_draws_the_same_plot(plotted) -> None:
@@ -683,6 +715,8 @@ def test_genotypes_draw_each_sites_calls_by_group(plotted) -> None:
     assert calls.groupby(["site", "group"])["n_cells"].sum().tolist() == [5, 5]
     ax = result.axes["calls"]
     assert [label.get_text() for label in ax.get_yticklabels()] == ["CALR", "SF3B1"]
+    # Bars of all cells are named by their sites alone, under no title.
+    assert ax.get_ylabel() == ""
     # One segment per bar and call that some cell holds, named in words in
     # the vocabulary's order; the table keeps every call's token.
     assert len(ax.patches) == 2 * 3
@@ -713,6 +747,8 @@ def test_genotypes_draw_each_sites_calls_by_group(plotted) -> None:
     assert grouped.provenance.n_cells == 4
     labels = [label.get_text() for label in grouped.axes["calls"].get_yticklabels()]
     assert labels == ["CALR, x", "CALR, y", "SF3B1, x", "SF3B1, y"]
+    # The bars, named by site and group, are titled so.
+    assert grouped.axes["calls"].get_ylabel() == "Site, group"
     by_group = {
         ("CALR, x", "wild_type"): 0.5,
         ("CALR, x", "alternative_present"): 0.5,
@@ -735,6 +771,7 @@ def test_genotypes_draw_each_sites_calls_by_group(plotted) -> None:
     assert _shares(crossed)[("CALR", "x, a")] == {"alternative_present": 1.0}
     assert _shares(crossed)[("CALR", "y, b")] == {"missing": 1.0}
     assert crossed.provenance.extras["grouping"] == "group, half"
+    assert crossed.axes["calls"].get_ylabel() == "Site, group, half"
     assert crossed.provenance.n_cells == 4
     plt.close(crossed.figure)
     # A label artifact of the labeled cells draws the groups of the column.
@@ -747,13 +784,16 @@ def test_genotypes_draw_each_sites_calls_by_group(plotted) -> None:
     assert _shares(by_labels) == _shares(grouped)
     assert _drawn_shares(by_labels.axes["calls"]) == pytest.approx(by_group)
     assert by_labels.provenance.extras["grouping"] == "group"
+    # A bare artifact takes the title of its record, the column it copied.
+    assert by_labels.axes["calls"].get_ylabel() == "Site, group"
     plt.close(by_labels.figure)
-    # A name titles the labels in the record; the bars are named by their
-    # sites and groups alone.
+    # A name titles the labels in the record and on the axis; the bars are
+    # named by their sites and groups alone.
     named = genotypes(
         store, called, groups=NamedCellArtifact("Group", labels), show=False
     )
     assert named.provenance.extras["grouping"] == "Group"
+    assert named.axes["calls"].get_ylabel() == "Site, Group"
     assert _drawn_shares(named.axes["calls"]) == pytest.approx(by_group)
     plt.close(named.figure)
 

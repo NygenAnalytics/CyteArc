@@ -726,10 +726,13 @@ def genotypes(
     ``missing`` there. ``group_by`` names cell metadata columns, one or
     several, such as the cell type, and ``groups`` a cell-label artifact;
     the groups are the combinations of their labels, as the clone summaries
-    group cells, named by their labels joined by commas, and a
-    ``NamedCellArtifact`` as ``groups`` titles the artifact by its name.
-    Without either,
-    each site has one bar of all cells. Cells without a group are left out.
+    group cells, named by their labels joined by commas, in the order that
+    their columns or label artifact store, then natural order. Each bar is
+    named by its site and group, and the axis of the bars is titled by
+    ``Site`` and the grouping: the columns' names, a ``NamedCellArtifact`` as
+    ``groups`` by its name, or else the title of the artifact's record.
+    Without either, each site has one bar of all cells. Cells without a group
+    are left out.
 
     With ``layout``, an embedding artifact of the genotypes' cells, whichever
     operation made its cell selection, such as a UMAP of the cells whose
@@ -883,6 +886,7 @@ def genotypes(
             colors=scale,
             normalize=True,
             value_label="Fraction of cells",
+            item_label=f"Site, {group_name}" if plotted.columns else None,
             title="Calls by group" if plotted.columns else "Calls",
         )
         if cells_table is not None:

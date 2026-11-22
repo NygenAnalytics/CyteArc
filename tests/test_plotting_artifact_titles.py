@@ -431,6 +431,9 @@ _GROUPING_PLOTS = {
     "distribution": lambda **options: splt.distribution(
         object(), "RNA0", show=False, **options
     ),
+    "embedding": lambda **options: splt.embedding(
+        object(), layout=_ARTIFACT, show=False, **options
+    ),
 }
 _GROUPING_ARGUMENTS = [
     ("dotplot", "sample_by"),
@@ -443,6 +446,7 @@ _GROUPING_ARGUMENTS = [
     ("cluster_connectivity", "group_by"),
     ("distribution", "split_by"),
     ("distribution", "sample_by"),
+    ("embedding", "facet_by"),
 ]
 
 
@@ -546,7 +550,8 @@ def test_a_summarys_figure_names_the_summarys_artifact(titled):
             splt.clonal_diversity(
                 store, diversity, groups=titled.cell_types, show=False
             )
-        # The expansion plot titles the regrouped cells and its own groups.
+        # The expansion plot titles the axis of the regrouped cells and of its
+        # own groups in both panels; all cells form one group with no title.
         expansion = store.clones.expansion(clones, groups=titled.cell_types)
         regrouped = splt.clonal_expansion(
             store, expansion, groups=cell_type, show=False
@@ -554,6 +559,13 @@ def test_a_summarys_figure_names_the_summarys_artifact(titled):
         assert regrouped.provenance.extras["grouping"] == "Cell type"
         own = splt.clonal_expansion(store, expansion, show=False)
         assert own.provenance.extras["grouping"] == "cell_type"
+        ungrouped = splt.clonal_expansion(
+            store, store.clones.expansion(clones), show=False
+        )
+        for panel in ("categories", "rank_windows"):
+            assert regrouped.axes[panel].get_ylabel() == "Cell type"
+            assert own.axes[panel].get_ylabel() == "cell_type"
+            assert ungrouped.axes[panel].get_ylabel() == ""
     finally:
         plt.close("all")
 

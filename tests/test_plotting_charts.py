@@ -244,6 +244,39 @@ def test_plain_bars_take_one_color_or_their_items_colors(ax) -> None:
     assert drawn.scale.order == ("x", "y")
 
 
+@pytest.mark.parametrize(
+    ("horizontal", "item_axis", "value_axis"), [(True, "y", "x"), (False, "x", "y")]
+)
+def test_bars_title_the_axis_of_their_items_when_asked(
+    ax, horizontal, item_axis, value_axis
+) -> None:
+    table = pd.DataFrame({"group": ["y", "x"], "value": [2.0, 5.0]})
+    label = {"x": ax.get_xlabel, "y": ax.get_ylabel}
+    draw_bars(
+        ax,
+        table,
+        item="group",
+        value="value",
+        colors="#333333",
+        horizontal=horizontal,
+        value_label="Cells",
+        item_label="Sample",
+    )
+    assert (label[item_axis](), label[value_axis]()) == ("Sample", "Cells")
+    ax.clear()
+    # Without an item label the axis of the items stays untitled.
+    draw_bars(
+        ax,
+        table,
+        item="group",
+        value="value",
+        colors="#333333",
+        horizontal=horizontal,
+        value_label="Cells",
+    )
+    assert (label[item_axis](), label[value_axis]()) == ("", "Cells")
+
+
 @pytest.mark.parametrize("horizontal", [True, False])
 @pytest.mark.parametrize("n_items", [5, MAX_NAMED_ITEMS, MAX_NAMED_ITEMS + 1, 1000])
 @pytest.mark.parametrize("inches", [3.0, 12.0])

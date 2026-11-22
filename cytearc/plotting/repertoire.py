@@ -93,12 +93,14 @@ def _draw_categories(
     normalize: bool,
     title: str,
     show_legend: bool,
+    group_title: str | None = None,
 ) -> Drawn | None:
     """Draw the cells of each category of a vocabulary that holds cells.
 
     Without a grouping, each category draws one bar, named on its axis, of
     its cells or their fraction of every cell; with one, each group draws
-    one vertical bar stacked by category, under a legend of the categories.
+    one vertical bar stacked by category, under a legend of the categories,
+    and ``group_title`` titles the axis that names the groups.
     """
     held = table.groupby(column, sort=False)["n_cells"].sum()
     present = [name for name, cells in held.items() if cells > 0]
@@ -132,6 +134,7 @@ def _draw_categories(
         horizontal=False,
         normalize=normalize,
         value_label=value_label,
+        item_label=group_title,
         title=title,
         legend_title=title,
         show_legend=show_legend,
@@ -167,11 +170,14 @@ def receptor_qc(
     ``group_by`` names cell metadata columns, one or several, such as the
     sample, and ``groups`` a cell-label artifact, such as a clustering; the
     groups are the combinations of their labels, as the clone summaries group
-    cells, named by their labels joined by commas. A ``NamedCellArtifact`` as
-    ``groups`` titles the artifact by its name. With a grouping, the first
+    cells, named by their labels joined by commas. With a grouping, the first
     two panels draw one bar per group, stacked by category, the first on
     top as its legend lists them, of the fraction of the group's cells by
-    default (``normalize``), and cells without a group are left out. A
+    default (``normalize``), and cells without a group are left out. The
+    groups follow the order that their columns or label artifact store,
+    then natural order, and the lower of the two panels titles its axis of
+    groups by the grouping: the columns' names, a ``NamedCellArtifact`` as
+    ``groups`` by its name, or else the title of the artifact's record. A
     label artifact may hold fewer cells than the receptors.
 
     Tables: ``receptor_type`` and ``chain_pairing``, one row per group and
@@ -277,6 +283,9 @@ def receptor_qc(
                 normalize=fractions,
                 title=title,
                 show_legend=show_legend,
+                # Of the two panels that stack the groups, the lower one
+                # titles them.
+                group_title=plotted.title if column == "chain_pairing" else None,
             )
             for column, vocabulary, title in (
                 ("receptor_type", RECEPTOR_TYPE_SCALE, "Receptor type"),
@@ -471,7 +480,8 @@ def gene_usage(
     table = usage.table
     loci = _locus_panels(table, f"a {gene}")
     counted = _counted(store, source, count)
-    grouping = table_groups(store, usage, groups).title
+    plotted = table_groups(store, usage, groups)
+    grouping = plotted.title
     grouped = bool(usage.group_by) or usage.groups is not None
     by_locus = dict(tuple(table.groupby("locus", sort=False)))
     ranked = {locus: _ranked(by_locus[locus], gene, count) for locus in loci}
@@ -507,8 +517,10 @@ def gene_usage(
                 wide = by_locus[locus].pivot_table(
                     index=gene, columns="group", values="fraction", fill_value=0
                 )
+                # The groups follow their columns' stored orders.
                 matrices[locus] = wide.reindex(
-                    index=shown[locus], columns=sort_categories(wide.columns)
+                    index=shown[locus],
+                    columns=[name for name in plotted.names if name in wide.columns],
                 )
             drawn = _locus_heatmaps(
                 axes, matrices, value_label=value_label, show_legend=show_legend

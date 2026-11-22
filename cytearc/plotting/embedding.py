@@ -63,7 +63,7 @@ from ._figure import (
     normalize_axes_target,
 )
 from ._labels import place_layout_labels, register_layout_labels
-from ._titles import artifact_titles
+from ._titles import artifact_titles, label_column
 from ..utils.arguments import (
     bool_argument,
     clip_fraction_argument,
@@ -251,9 +251,9 @@ def _block_slots(
     ]
 
 
-def _facet_title(facet_by: str, facet: Any, missing_label: str) -> str:
-    """Name a facet panel, with ``missing_label`` for cells without a facet value."""
-    return f"{facet_by}={missing_label if _is_missing_category(facet) else facet}"
+def _facet_title(column_title: str, facet: Any, missing_label: str) -> str:
+    """Name a facet panel by its column's title, with ``missing_label`` for cells without a facet value."""
+    return f"{column_title}={missing_label if _is_missing_category(facet) else facet}"
 
 
 def _facet_missing_label(store: Any, facet_by: str) -> str:
@@ -313,7 +313,7 @@ def _embedding_multiple_layouts(
     | NamedCellArtifact
     | Sequence[str | ArtifactRef | FeatureRef | CellField | NamedCellArtifact]
     | None,
-    facet_by: str | None,
+    facet_by: str | CellField | None,
     facet_order: Sequence[Any] | None,
     cell_key: str,
     from_assay: str | None,
@@ -334,7 +334,7 @@ def _embedding_multiple_layouts(
     labels = _color_labels(store, color_items, titles, from_assay=from_assay)
     facets = _multi_layout_facets(
         store,
-        facet_by=facet_by,
+        facet_by=label_column(facet_by, "facet_by")[0],
         facet_order=facet_order,
         groups=groups,
         subset_by=subset_by,
@@ -1429,7 +1429,7 @@ def embedding(
     | NamedCellArtifact
     | Sequence[str | ArtifactRef | FeatureRef | CellField | NamedCellArtifact]
     | None = None,
-    facet_by: str | None = None,
+    facet_by: str | CellField | None = None,
     facet_order: Sequence[Any] | None = None,
     cell_key: str = "I",
     from_assay: str | None = None,
@@ -1472,10 +1472,12 @@ def embedding(
     the facet column's missing label (``NA`` by default). Facets follow
     ``groups`` or ``facet_order``, or else the order that the facet column
     stores, as a stored display or ordered categories, and natural order
-    without one. Color limits for a
-    gene are shared across facets so panels stay comparable. Multiple
-    ``layout_key`` values produce the cartesian product of layouts and colors
-    in one figure, one layout per row of panels.
+    without one. ``facet_by`` names the column as text or as a ``CellField``,
+    whose label names the column in each facet's title, such as
+    ``Stage=early``, and refuses another value or ``kind="continuous"``. Color
+    limits for a gene are shared across facets so panels stay comparable.
+    Multiple ``layout_key`` values produce the cartesian product of layouts and
+    colors in one figure, one layout per row of panels.
 
     Common choices:
 
@@ -1560,6 +1562,9 @@ def embedding(
                 "cell_key cannot override an artifact's stored cell selection"
             )
         layout_keys = []
+    # The facet column is read by its key, and a CellField's label names it in
+    # each facet's title.
+    facet_key, facet_title = label_column(facet_by, "facet_by")
     if len(layout_keys) > 1:
         return _embedding_multiple_layouts(
             store,
@@ -1791,10 +1796,10 @@ def embedding(
     facet_values: np.ndarray | None = None
     groups_category: np.ndarray | None = None
     groups_color_index: int | None = None
-    if facet_by is not None:
+    if facet_key is not None:
         facet_values = _selected_metadata_column(
             store,
-            facet_by,
+            facet_key,
             cell_key=cell_key,
             cell_indices=artifact_cell_indices,
             kind="categorical",
@@ -1851,7 +1856,7 @@ def embedding(
         color_cache = clipped
 
     facet_missing_label = MISSING_CATEGORY_LABEL
-    if facet_by is not None:
+    if facet_key is not None:
         assert facet_values is not None
         if groups is not None and group_order is not None:
             facets = list(group_order)
@@ -1861,10 +1866,10 @@ def embedding(
             # Facets follow the order that the facet column stores.
             facets = labels_in_stored_order(
                 pd.unique(facet_values[base_mask]),
-                stored_categorical_scale(store, facet_by),
+                stored_categorical_scale(store, facet_key),
             )
         if any(_is_missing_category(facet) for facet in facets):
-            facet_missing_label = _facet_missing_label(store, facet_by)
+            facet_missing_label = _facet_missing_label(store, facet_key)
     else:
         facets = [None]
 
@@ -2136,8 +2141,8 @@ def embedding(
                     ax.set_axis_off()
                     ax.set_title(
                         f"{label} | "
-                        f"{_facet_title(facet_by, fac, facet_missing_label)} (empty)"
-                        if facet_by is not None
+                        f"{_facet_title(facet_title, fac, facet_missing_label)} (empty)"
+                        if facet_title is not None
                         else f"{label} (empty)"
                     )
                     panel_i += 1
@@ -2337,12 +2342,12 @@ def embedding(
 
                 if not show_titles:
                     title = None
-                elif facet_by is None:
+                elif facet_title is None:
                     # A labeled colorbar already names the panel.
                     title = None if (not is_cat and add_cb) else label
                 else:
-                    facet_title = _facet_title(facet_by, fac, facet_missing_label)
-                    title = f"{label} | {facet_title}" if label else facet_title
+                    panel_title = _facet_title(facet_title, fac, facet_missing_label)
+                    title = f"{label} | {panel_title}" if label else panel_title
                 col = positions[panel_i] % n_columns
                 row = positions[panel_i] // n_columns
                 finish_embedding_axes(
@@ -2472,7 +2477,7 @@ def embedding(
                 "draw_order": draw_orders,
                 "color_scale_scope": color_scale.scope,
                 "color_limits": color_limits,
-                "facet_by": facet_by,
+                "facet_by": facet_key,
                 "n_colors": n_colors,
                 "n_facets": n_facets,
                 "panel_keys": [str(k) for k in panel_keys],
