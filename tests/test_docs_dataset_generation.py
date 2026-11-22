@@ -759,6 +759,8 @@ def test_publication_without_names_needs_an_archive_in_the_build_root(
     assert exited.value.code == 2
     captured = capsys.readouterr()
     assert captured.out == ""
+    # The usage line above the error offers only the datasets with a manifest.
+    assert "{unbuilt,unbuilt_too}" in captured.err
     archive_layout = build_root / "<dataset>" / publisher.ARCHIVE_NAME
     assert (
         f"no dataset has an archive at {archive_layout}, "

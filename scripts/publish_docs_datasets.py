@@ -145,7 +145,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "datasets",
         nargs="*",
-        choices=[*available, []],
+        choices=available,
         help=(
             "Datasets to publish, defaults to every dataset with an archive in the "
             "build root"
