@@ -549,3 +549,61 @@ def test_sharded_feature_blocks_reserve_their_read() -> None:
     assert (planned.readWorkers, planned.ioConcurrency) == (1, 1)
     with pytest.raises(MemoryError, match="affordable width is 7"):
         plan(needed - 1)
+
+
+def test_a_run_of_rows_over_scattered_columns_holds_the_chunks_between_them(
+    tmp_path: Any,
+) -> None:
+    import tracemalloc
+
+    from cytearc.storage.async_execution import zarr_io_concurrency
+    from cytearc.storage.count_matrix import (
+        CountMatrixPolicy,
+        create_product_counts_array,
+    )
+    from cytearc.storage.geometry import array_geometry
+    from cytearc.storage.partition import row_read_parts
+    from cytearc.storage.virtual_arrays import read_selection
+
+    root = zarr.open_group(store=LocalStore(str(tmp_path)), mode="w")
+    counts = create_product_counts_array(
+        root.require_group("RNA"),
+        2_000,
+        400,
+        np.uint32,
+        profile="fast_local",
+        policy=CountMatrixPolicy(unitBytes=1_600_000, chunkBytes=160_000),
+    )
+    assert (counts.chunks, counts.shards) == ((1_000, 40), (1_000, 400))
+    # Random bits do not compress, so each chunk is stored a few bytes larger
+    # than the 160,000 bytes it decodes to.
+    counts[:] = np.random.default_rng(6).integers(
+        0, 1 << 32, size=(2_000, 400), dtype=np.uint32
+    )
+    cells = np.arange(100, 433)
+    # These genes fall in chunks 0, 1, 3, 5, 7 and 9 of the shard's ten, so
+    # Zarr's merged fetch also takes chunks 2, 4, 6 and 8.
+    genes = np.array([5, 397, 41, 42, 200, 120, 0, 300])
+    geometry = array_geometry(counts)
+    assert geometry is not None and geometry.coalesceGapBytes == 1 << 20
+    fixed, per_row = row_read_parts(geometry, genes, rows_contiguous=True)
+    apart, _ = row_read_parts(
+        replace(geometry, coalesceGapBytes=0), genes, rows_contiguous=True
+    )
+    with zarr_io_concurrency(1):
+        read_selection(counts, cells, genes)
+        tracemalloc.start()
+        try:
+            base, _ = tracemalloc.get_traced_memory()
+            block = read_selection(counts, cells, genes)
+            _current, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+    held = peak - base - block.nbytes
+    # The read held more than the six chunks it decodes from, which a charge
+    # of those alone, the charge before, left out, and no more than a charge
+    # of the four chunks between them too, as row selections and row-block
+    # streams over those genes plan it.
+    assert held > apart + cells.size * per_row
+    assert held <= fixed + cells.size * per_row
+    assert ChunkedArray(counts, cols=genes)._read_bytes(block.nbytes) >= peak - base

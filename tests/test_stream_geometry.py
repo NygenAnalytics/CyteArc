@@ -14,6 +14,7 @@ from cytearc.storage.parallel import stream_shards
 from cytearc.storage.partition import (
     affordable_width,
     checked_indices,
+    coalesced_gap_bytes,
     contiguous_ranges,
     indexed_read_parts,
     is_contiguous,
@@ -254,6 +255,72 @@ def test_indexed_read_parts_charge_the_narrower_band() -> None:
         decode,
         geometry.readBytes(16 * 2, touched, decodes=1) - decode,
     )
+
+
+def test_a_read_of_part_of_a_shard_is_charged_the_chunks_between_its_columns() -> None:
+    from dataclasses import replace
+
+    # Shards of one row of ten 40-gene chunks store them in column order.
+    plain = ArrayGeometry((2_000, 400), (1_000, 40), (1_000, 400), 4)
+    geometry = replace(plain, coalesceGapBytes=1 << 20)
+    # Each chunk decodes to 160,000 bytes and is stored in at most 1/128 of
+    # that and 1,024 bytes more.
+    stored = 160_000 + 160_000 // 128 + 1_024
+    # Genes 5, 0, 41, 42, 120, 200, 300 and 397 fall in chunks 0, 1, 3, 5, 7
+    # and 9: a merged fetch also takes chunks 2, 4, 6 and 8 between them.
+    genes = np.array([5, 397, 41, 42, 200, 120, 0, 300])
+    assert coalesced_gap_bytes(geometry, genes, chunks=6) == 4 * stored
+    # Zarr merges no gap wider than its setting, so a gap counts at most that.
+    assert (
+        coalesced_gap_bytes(
+            replace(geometry, coalesceGapBytes=100_000), genes, chunks=6
+        )
+        == 4 * 100_000
+    )
+    # Two gaps of two chunks each, between chunks 0, 3 and 6.
+    assert coalesced_gap_bytes(geometry, np.array([0, 120, 240]), chunks=3) == 2 * min(
+        1 << 20, 2 * stored
+    )
+    # Adjacent chunks, one chunk, every chunk of the shard, and no merging.
+    assert coalesced_gap_bytes(geometry, np.arange(0, 120), chunks=3) == 0
+    assert coalesced_gap_bytes(geometry, np.array([7]), chunks=1) == 0
+    assert coalesced_gap_bytes(geometry, np.arange(400), chunks=10) == 0
+    assert coalesced_gap_bytes(plain, genes, chunks=6) == 0
+    # The charge of a run of rows over those genes holds the chunks between,
+    # and so does a banded read of scattered rows over them.
+    with_gaps, per_row = row_read_parts(geometry, genes, rows_contiguous=True)
+    without_gaps, same_per_row = row_read_parts(plain, genes, rows_contiguous=True)
+    assert with_gaps - without_gaps == 4 * stored
+    assert per_row == same_per_row
+    banded = indexed_read_parts(geometry, genes, block_rows=1_000)
+    banded_apart = indexed_read_parts(plain, genes, block_rows=1_000)
+    assert banded[0] - banded_apart[0] == 4 * stored
+    # Of shards of five chunks, the one whose chunks lie furthest apart counts:
+    # chunks 0, 2 and 4 of the first leave two gaps, 5 and 6 of the second none.
+    halves = replace(geometry, shards=(1_000, 200))
+    apart_first = np.array([0, 80, 160, 200, 240])
+    assert coalesced_gap_bytes(halves, apart_first, chunks=3) == 2 * stored
+    assert coalesced_gap_bytes(halves, apart_first[::-1], chunks=3) == 2 * stored
+
+
+def test_a_read_of_part_of_a_shard_of_several_rows_of_chunks_is_bounded_in_any_order() -> (
+    None
+):
+    # Shards of two rows of four chunks, which Zarr writes in Morton order.
+    geometry = ArrayGeometry((64, 32), (8, 8), (16, 32), 4, coalesceGapBytes=10_000)
+    stored = 256 + 256 // 128 + 1_024
+    # A read of one column chunk in both rows of chunks takes two of the eight
+    # chunks; up to the six others may lie between them, but there is one gap.
+    assert coalesced_gap_bytes(geometry, np.arange(8), chunks=2) == min(
+        1 * 10_000, 6 * stored
+    )
+    # Three column chunks in both rows: six chunks taken, five gaps at most,
+    # each no wider than the setting, and no more than the two chunks left.
+    assert coalesced_gap_bytes(geometry, np.arange(24), chunks=6) == min(
+        5 * 10_000, 2 * stored
+    )
+    # Every chunk of the shard is fetched whole.
+    assert coalesced_gap_bytes(geometry, np.arange(32), chunks=8) == 0
 
 
 def test_band_costs_are_zero_for_empty_selections() -> None:

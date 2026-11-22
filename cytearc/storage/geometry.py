@@ -52,6 +52,10 @@ class ArrayGeometry:
     #: ``FusedCodecPipeline`` with more than one worker. Every other read
     #: decodes on CyteArc's codec pools, which keep none.
     poolKeepsDecodedChunk: bool = False
+    #: The most bytes apart that Zarr merges two byte ranges of a read of part
+    #: of a shard into one fetch, ``sharding_coalesce_max_gap_bytes`` of the
+    #: array's configuration; none for a geometry of no opened array.
+    coalesceGapBytes: int = 0
 
     def axisChunk(self, axis: int) -> int:
         """Return the chunk extent along one axis."""
@@ -178,7 +182,12 @@ class ArrayGeometry:
         return rows_bytes + band + self.readScratchBytes
 
     def readBytes(
-        self, resultBytes: int, chunks: int = 1, decodes: int | None = None
+        self,
+        resultBytes: int,
+        chunks: int = 1,
+        decodes: int | None = None,
+        *,
+        gapBytes: int = 0,
     ) -> int:
         """Return the bytes one Zarr read holds while it runs.
 
@@ -192,12 +201,14 @@ class ArrayGeometry:
         counts, since Zarr keeps a chunk's compressed bytes beside it while it
         decodes it. Either read that decodes more chunks than it decodes at
         once also holds what :meth:`heldDecodeBytes` counts. ``chunks``
-        counts the inner chunks the
-        read touches in one shard and ``decodes`` the chunks Zarr decodes at
-        once, all of them unless given. Storage-provided scratch covers one
-        shard request, including its sequential inner-chunk reads. Independent
-        shard requests each need this allowance. Unsharded reads charge
-        scratch per decode.
+        counts the inner chunks the read touches in one shard and ``decodes``
+        the chunks Zarr decodes at once, all of them unless given.
+        Storage-provided scratch covers one shard request, including its
+        sequential inner-chunk reads. Independent shard requests each need
+        this allowance. Unsharded reads charge scratch per decode.
+        ``gapBytes`` are the stored bytes that a sharded read of part of a
+        shard also fetches between the chunks it touches, as
+        :func:`~cytearc.storage.partition.coalesced_gap_bytes` counts them.
         """
         touched = max(1, int(chunks))
         decoding = touched if decodes is None else min(touched, max(1, int(decodes)))
@@ -216,6 +227,7 @@ class ArrayGeometry:
             + decoding * decoded
             + held
             + self.readScratchBytes
+            + max(0, int(gapBytes))
         )
 
     def binOf(self, axis: int, indices: np.ndarray) -> np.ndarray:
@@ -267,7 +279,18 @@ def array_geometry(array: Any) -> ArrayGeometry | None:
         itemsize=max(1, int(np.dtype(array.dtype).itemsize)),
         readScratchBytes=scratch,
         poolKeepsDecodedChunk=_decodes_on_zarrs_own_pool(array),
+        coalesceGapBytes=_coalesce_gap_bytes(array),
     )
+
+
+def _coalesce_gap_bytes(array: Any) -> int:
+    """Return the most bytes apart that Zarr merges two byte ranges of a partial shard read of ``array``.
+
+    A Zarr array keeps the setting of the configuration it was opened with;
+    an array of another library, which Zarr does not read, merges none.
+    """
+    config = getattr(getattr(array, "async_array", array), "config", None)
+    return max(0, int(getattr(config, "sharding_coalesce_max_gap_bytes", 0)))
 
 
 def _decodes_on_zarrs_own_pool(array: Any) -> bool:
