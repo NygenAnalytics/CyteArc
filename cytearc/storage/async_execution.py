@@ -4,11 +4,10 @@ import asyncio
 import contextvars
 import functools
 import importlib
-import inspect
 import itertools
-import sys
 import threading
 import time
+import traceback
 import weakref
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Iterator
 from concurrent.futures import CancelledError, Future, ThreadPoolExecutor
@@ -19,8 +18,7 @@ from contextlib import (
     contextmanager,
     nullcontext,
 )
-from types import FrameType
-from typing import Any, NoReturn, TypeVar, cast
+from typing import Any, TypeVar, cast
 
 import zarr
 
@@ -630,116 +628,33 @@ def _stoppable(
     return nullcontext() if stop is None else stop.cancelling(cancel)
 
 
-async def _caught(
-    coroutine: Coroutine[Any, Any, T], errors: list[BaseException]
-) -> T | None:
-    """Run a read's ``coroutine``, leaving the error it raises in ``errors`` instead of raising it.
+def release_exception_frames(error: BaseException) -> None:
+    """Clear the locals of the finished frames in the tracebacks of ``error``, its causes and contexts, and the errors of a group.
 
-    The error's traceback reaches the read's frames, which hold its output and
-    the shards it decoded. A task that ended with the error, and the frame of
-    a runner that raised it from that task, as asyncio's
-    ``run_until_complete`` and Zarr's ``sync`` do, would each close a
-    reference cycle around it, which only Python's cycle collector frees. The
-    task of this coroutine ends without the error instead, so the runner
-    raises it from a frame that keeps no reference to it, and the output is
-    freed once the caller drops the error.
+    A traceback keeps every frame it passed through, and those frames keep
+    what their locals hold, such as the output of a failed read and the
+    shards it decoded, until the error is freed; a frame whose locals refer
+    back to the error keeps both in a reference cycle that only Python's
+    cycle collector frees. Clearing the frames frees what they hold as soon
+    as this runs, also while a caller or IPython still holds the error; the
+    traceback keeps its lines. A frame that still runs or is suspended is
+    left as it is.
     """
-    try:
-        return await coroutine
-    except GeneratorExit:
-        raise
-    except BaseException as error:
-        errors.append(error)
-        return None
-
-
-def _holds_error(value: Any, errors: dict[int, BaseException], depth: int = 0) -> bool:
-    """Return whether ``value`` is one of ``errors``, a finished future or task that holds one, or a collection of those."""
-    if id(value) in errors:
-        return True
-    if isinstance(value, asyncio.Future | Future):
-        if not value.done() or value.cancelled():
-            return False
-        failure = value.exception()
-        return (
-            id(failure) in errors
-            if failure is not None
-            else depth < 2 and _holds_error(value.result(), errors, depth + 1)
-        )
-    if depth < 2 and isinstance(value, list | tuple | set | frozenset | dict):
-        items = value.values() if isinstance(value, dict) else value
-        return any(_holds_error(item, errors, depth + 1) for item in items)
-    return False
-
-
-def _break_error_cycles(error: BaseException) -> None:
-    """Drop each local of a finished frame in the tracebacks of ``error`` that keeps it alive in a cycle.
-
-    A traceback holds the frames it passed through, so a local of one of them
-    that holds the error, directly, through a finished future or task, or in a
-    collection, closes a reference cycle that only Python's cycle collector
-    frees. Zarr's own frames do so: a partial shard read whose range fetch
-    fails keeps the error group that it raises, and the failed tasks behind
-    it, in locals of the frames of that group's traceback. Those locals, and
-    those of the related errors (causes, contexts and the errors of a group),
-    are set to None; every other local is kept, so a debugger still sees the
-    read's state. The frames of the calling thread's stack are left alone;
-    the read has ended, so every other frame of its tracebacks has too.
-    """
-    related: dict[int, BaseException] = {}
-    pending: list[BaseException | None] = [error]
+    pending = [error]
+    seen: set[int] = set()
     while pending:
-        item = pending.pop()
-        if item is None or id(item) in related:
+        current = pending.pop()
+        if id(current) in seen:
             continue
-        related[id(item)] = item
-        pending.extend((item.__cause__, item.__context__))
-        if isinstance(item, BaseExceptionGroup):
-            pending.extend(item.exceptions)
-    running: set[int] = set()
-    # The walk ends on None, so no local keeps this frame, whose locals hold
-    # the error, in a cycle of its own.
-    frame: FrameType | None = sys._getframe()
-    while frame is not None:
-        running.add(id(frame))
-        frame = frame.f_back
-    for item in list(related.values()):
-        trace = item.__traceback__
-        while trace is not None:
-            frame = trace.tb_frame
-            code = frame.f_code
-            if id(frame) not in running and code.co_flags & inspect.CO_OPTIMIZED:
-                # Cell variables are shared with closures that may still run.
-                plain = set(code.co_varnames) - set(code.co_cellvars)
-                values = frame.f_locals
-                for name in [
-                    name
-                    for name, value in values.items()
-                    if name in plain and _holds_error(value, related)
-                ]:
-                    values[name] = None
-            trace = trace.tb_next
-
-
-def _raise_read_error(error: BaseException, *, stopped: bool) -> NoReturn:
-    """Raise the error of a read's coroutine as the read's caller sees it.
-
-    A cancellation that the stop of the read's block stream made raises
-    ``ReadStopped``, and any other cancellation a fresh
-    ``asyncio.CancelledError``, which, as ``ReadStopped`` does, refers to no
-    frame of the read. Any other error is raised as it is, with its traceback,
-    once no frame of the read keeps it in a reference cycle.
-    """
-    _break_error_cycles(error)
-    try:
-        if stopped and _cancelled_only(error):
-            raise ReadStopped("The block stream closed while this read ran") from None
-        if isinstance(error, asyncio.CancelledError):
-            raise asyncio.CancelledError(*error.args) from None
-        raise error
-    finally:
-        # The error leaves this frame without the frame keeping it.
-        del error
+        seen.add(id(current))
+        traceback.clear_frames(current.__traceback__)
+        pending.extend(
+            item
+            for item in (current.__cause__, current.__context__)
+            if item is not None
+        )
+        if isinstance(current, BaseExceptionGroup):
+            pending.extend(current.exceptions)
 
 
 def run_read(coroutine: Coroutine[Any, Any, T]) -> T:
@@ -755,9 +670,10 @@ def run_read(coroutine: Coroutine[Any, Any, T]) -> T:
     so a cancelled read leaves no store call or decode holding its chunk. An
     interruption, such as Ctrl-C, cancels the read and waits for it to stop,
     and so does the stop of the block stream that runs the read, which then
-    raises ``ReadStopped``. A read that fails raises its error without a
-    reference cycle, so its output is freed once the caller drops the error.
-    A thread that already runs an event loop reads through Zarr's loop, with
+    raises ``ReadStopped``. Before a failed read's error leaves,
+    :func:`release_exception_frames` clears the frames of its traceback, so
+    the read's output and the shards it decoded are freed at once. A thread
+    that already runs an event loop reads through Zarr's loop, with
     :func:`run_on_zarr_loop`.
     """
     if _in_event_loop():
@@ -765,11 +681,10 @@ def run_read(coroutine: Coroutine[Any, Any, T]) -> T:
     ensure_zarr_host_ceiling()
     pool = _LentPool(importlib.import_module("zarr.core.sync")._executor)
     loop = asyncio.new_event_loop()
-    errors: list[BaseException] = []
-    stopped = False
     try:
         loop.set_default_executor(pool)
-        task = loop.create_task(_caught(coroutine, errors))
+        task = loop.create_task(coroutine)
+        stopped = False
 
         def cancel(cancel_task: Callable[[], Any] = task.cancel) -> None:
             nonlocal stopped
@@ -780,27 +695,24 @@ def run_read(coroutine: Coroutine[Any, Any, T]) -> T:
                 # The read already ended and its loop closed.
                 pass
 
-        interrupted = True
         try:
             with _stoppable(_READ_STOP.get(), cancel):
-                result = loop.run_until_complete(task)
-            interrupted = False
+                return loop.run_until_complete(task)
+        except BaseException as error:
+            release_exception_frames(error)
+            if stopped and _cancelled_only(error):
+                raise ReadStopped(
+                    "The block stream closed while this read ran"
+                ) from None
+            # An interruption leaves the read running; it stops at its next await.
+            task.cancel()
+            raise
         finally:
-            if interrupted:
-                # An interruption leaves the read running; it stops at its
-                # next await.
-                task.cancel()
-            del task
+            del task, cancel
             _finish_tasks(loop)
             pool.wait_for_calls()
-            if interrupted:
-                # The interruption is raised, not the cancellation it caused.
-                errors.clear()
     finally:
         loop.close()
-    if errors:
-        _raise_read_error(errors.pop(), stopped=stopped)
-    return cast(T, result)
 
 
 def run_on_zarr_loop(coroutine: Coroutine[Any, Any, T]) -> T:
@@ -811,65 +723,64 @@ def run_on_zarr_loop(coroutine: Coroutine[Any, Any, T]) -> T:
     A read whose task is cancelled otherwise raises ``asyncio.CancelledError``,
     as a read on its own loop does, and an error that the read raises itself,
     ``concurrent.futures.CancelledError`` among them, is raised as it is,
-    without a reference cycle, so its output is freed once the caller drops
-    the error. Every read on Zarr's loop shares Zarr's codec pool, so a store
-    call or decode that a stopped read had started there can end after this
+    with the frames of its traceback cleared, as :func:`run_read` clears
+    them. Every read on Zarr's loop shares Zarr's codec pool, so a store call
+    or decode that a stopped read had started there can end after this
     returns.
     """
     sync_module = importlib.import_module("zarr.core.sync")
-    errors: list[BaseException] = []
-    # The read's task while it runs, for the stop to cancel. Nothing keeps it
-    # once it has ended, so neither it nor its result outlives the read.
-    running: list[asyncio.Task[Any]] = []
-    lock = threading.Lock()
-    stopped = False
+    started: Future[asyncio.Task[T]] = Future()
 
-    async def tracked() -> T | None:
-        task = asyncio.current_task()
-        assert task is not None
-        with lock:
-            running.append(task)
-            if stopped:
-                # The stream stopped before the read began. The read stops at
-                # its first await, as a stop that comes while it runs stops it.
-                task.get_loop().call_soon(task.cancel)
-        del task
-        try:
-            return await _caught(coroutine, errors)
-        finally:
-            with lock:
-                running.clear()
+    async def tracked() -> T:
+        # No local of this frame holds the task: a stopped task keeps its
+        # cancellation, whose traceback keeps this frame, so such a local
+        # would keep the read's output in a reference cycle.
+        started.set_result(cast("asyncio.Task[T]", asyncio.current_task()))
+        return await coroutine
+
+    stopped = False
 
     def cancel() -> None:
         nonlocal stopped
-        with lock:
-            stopped = True
-            tasks = list(running)
-        for task in tasks:
-            task.get_loop().call_soon_threadsafe(task.cancel)
+        stopped = True
+        # The task may not have started yet; it is cancelled once it has.
+        started.add_done_callback(
+            lambda ready: (
+                ready.result().get_loop().call_soon_threadsafe(ready.result().cancel)
+            )
+        )
 
     read = tracked()
     try:
         with _stoppable(_READ_STOP.get(), cancel):
-            result = sync_module.sync(read)
+            return cast(T, sync_module.sync(read))
     except sync_module.SyncError:
         # Zarr refuses a read from its own loop thread before the read starts.
         read.close()
         raise
-    except CancelledError:
-        # The wrapper takes every error of a read that began, so Zarr's sync()
-        # raises the CancelledError of concurrent.futures only for a task
-        # that Zarr's loop cancelled before its first step: neither the
-        # wrapper nor the read ever ran, and closing them keeps Python from
-        # warning that they were never awaited.
-        read.close()
-        coroutine.close()
+    except CancelledError as error:
+        release_exception_frames(error)
+        if not started.done():
+            # Zarr's loop cancelled the read's task before its first step, so
+            # neither the wrapper nor the read ever ran.
+            read.close()
+            coroutine.close()
         if stopped:
             raise ReadStopped("The block stream closed while this read ran") from None
-        raise asyncio.CancelledError from None
-    if errors:
-        _raise_read_error(errors.pop(), stopped=stopped)
-    return cast(T, result)
+        # Zarr's sync() reports a read whose task was cancelled with the
+        # CancelledError of concurrent.futures, an Exception, and re-raises one
+        # that the read raised itself. Only the first is a cancellation, which
+        # raises asyncio's class, a BaseException, as on the read's own loop.
+        if not started.done() or started.result().cancelled():
+            raise asyncio.CancelledError from None
+        raise
+    except BaseException as error:
+        release_exception_frames(error)
+        raise
+    finally:
+        # This frame stays in the error's traceback, so it drops the read's
+        # task, which holds the error.
+        started = Future()
 
 
 class ByteLedger:
