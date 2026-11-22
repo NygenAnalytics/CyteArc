@@ -1170,6 +1170,13 @@ def _resolve_derived_sources(
             continue
         source_path = work.parent / source_dataset
         if (source_path / STORE_NAME).is_dir():
+            # A rebuild writes the archive last, so a store without one is partial.
+            if not (source_path / ARCHIVE_NAME).is_file():
+                raise FileNotFoundError(
+                    f"{source_path / STORE_NAME} has no {ARCHIVE_NAME} beside it, "
+                    f"so its rebuild did not finish. Rebuild {source_dataset} "
+                    f"first, or remove {source_path} to use its published store."
+                )
             resolved[source_dataset] = source_path
             continue
         try:
@@ -1207,6 +1214,9 @@ def build_store(
     output = destination / dataset
     output.mkdir(parents=True, exist_ok=True)
     store = output / STORE_NAME
+    # The earlier archive still matches its manifest, so it goes before the
+    # earlier store: a rebuild that stops partway leaves nothing to publish.
+    (output / ARCHIVE_NAME).unlink(missing_ok=True)
     if store.exists():
         shutil.rmtree(store)
     if isinstance(recipe, RawDatasetRecipe):
@@ -1388,7 +1398,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "datasets",
         nargs="*",
-        choices=[*RECIPES, []],
+        choices=list(RECIPES),
         help="Datasets to rebuild",
     )
     parser.add_argument(

@@ -234,10 +234,7 @@ Prepare Tabula Sapiens once, then derive the teaching sample from its local stor
 
     uv run python scripts/regenerate_docs_datasets.py tabula_sapiens tabula_sapiens_100k
 
-The full atlas retains the authors' annotations and UMAPs. The 100,000-cell sample adds a
-prepared CyteArc analysis shared by the quick start and result-reuse tutorial. Rebuilding only
-`tabula_sapiens_100k` reuses `build/cytebase/tabula_sapiens/data.zarr` when it is present.
-Documentation rendering reads saved notebooks and does not rebuild either dataset.
+The full atlas retains the authors' annotations and UMAPs. The 100,000-cell sample adds a prepared CyteArc analysis shared by the quick start and result-reuse tutorial. Rebuilding only `tabula_sapiens_100k` reuses `build/cytebase/tabula_sapiens/data.zarr` when its archive is beside it, and stops at a store without one, which a rebuild that stopped partway leaves. Documentation rendering reads saved notebooks and does not rebuild either dataset.
 
 Rebuild a store whenever its dataset recipe changes, or whenever the stored layout changes in a way that would stop the published artifacts from being reused.
 Nothing leaves `build/cytebase` until you publish:
@@ -245,9 +242,7 @@ Nothing leaves `build/cytebase` until you publish:
     uv run python scripts/publish_docs_datasets.py            # print the plan
     uv run python scripts/publish_docs_datasets.py --apply    # needs a write token
 
-Publishing replaces `<dataset>/data.zarr.tar.gz` and `<dataset>/manifest.json`.
-For stores used in remote examples, it also synchronizes their unpacked files.
-A dataset needs a matching generated manifest and archive before it can be published.
+Publishing replaces `<dataset>/data.zarr.tar.gz` and `<dataset>/manifest.json`. For stores used in remote examples, it also synchronizes their unpacked files, and it refuses an unpacked store whose size differs from the one its manifest records. A dataset needs a matching generated manifest and archive before it can be published. Run without names, the script publishes every dataset with an archive in `build/cytebase`, including archives of earlier rebuilds and of stores rebuilt only as sources for another dataset, and lists the ones it leaves out; name datasets to publish only those. A rebuild removes the dataset's earlier archive before its earlier store, even if the rebuild then fails, so a dataset whose rebuild stopped partway has nothing to publish until it is rebuilt.
 
 The bucket paths carry no version, so publishing replaces the stores that the tutorials of every CyteArc version download.
 A rebuild whose stores the latest release cannot read, or whose run labels that release's tutorials do not open, breaks those tutorials until the next release.
