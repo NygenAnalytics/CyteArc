@@ -278,11 +278,13 @@ class LoopbackHub(ThreadingHTTPServer):
     ranges does, and a status, or a status with headers, answers with that
     status. The kinds are
     ``"bucket"``, the bucket's lookup, ``"repository"``, the repository's,
-    ``"tree"``, a listing, and ``"file"``,
-    a file's bytes. A request that its plan does not cover is served, and
-    ``requests`` records the kind and path of each. ``received`` records them
-    with what else the request asked: ``"recursive"`` or ``"directory"`` for a
-    listing, and the ``Range`` header, or None, for a file.
+    ``"tree"``, a listing, ``"paths-info"``, a lookup of named bucket files,
+    and ``"file"``, a file's bytes. A request that its plan does not cover is
+    served, and ``requests`` records the kind and path of each, the path of a
+    lookup being the paths it names, joined by ``", "``. ``received`` records
+    them with what else the request asked: ``"recursive"`` or ``"directory"``
+    for a listing, the ``Range`` header, or None, for a file, and None for a
+    lookup.
     """
 
     daemon_threads = True
@@ -339,6 +341,48 @@ class _LoopbackHandler(BaseHTTPRequestHandler):
     ) -> None:
         self._answer(status, json.dumps(payload).encode(), headers)
 
+    def _planned(self, kind: str, path: str, detail: str | None) -> str | None:
+        """Take the plan of a request: answer a planned status, or return the plan."""
+        planned = self.server.take(kind, path, detail)
+        if planned == "stall":
+            # Once the hub closes, end the request with a status that
+            # huggingface_hub never retries, so that a client which gave up on
+            # it sends nothing more.
+            self.server.closing.wait(timeout=60)
+            planned = 410
+        if isinstance(planned, str):
+            return planned
+        status, headers = planned if isinstance(planned, tuple) else (planned, {})
+        self._json(status, {"error": f"Planned status {status}"}, headers)
+        return None
+
+    def do_POST(self) -> None:
+        url = urlsplit(self.path)
+        if url.path != f"/api/buckets/{BUCKET_ID}/paths-info":
+            self._json(404, {"error": f"No route for {url.path}"})
+            return
+        body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        paths = json.loads(body)["paths"]
+        if self._planned("paths-info", ", ".join(paths), None) is None:
+            return
+        # The Hub's schema for the answer: an entry for each path that names a
+        # file or a directory, and none for a missing path.
+        found: list[dict[str, Any]] = []
+        for path in paths:
+            target = self.server.root / path
+            entry: dict[str, Any] = {
+                "path": path,
+                "uploadedAt": "2026-01-01T00:00:00.000Z",
+            }
+            if target.is_file():
+                size = target.stat().st_size
+                found.append(
+                    {**entry, "type": "file", "size": size, "xetHash": "test-hash"}
+                )
+            elif target.is_dir():
+                found.append({**entry, "type": "directory"})
+        self._json(200, found)
+
     def do_GET(self) -> None:
         url = urlsplit(self.path)
         api = f"/api/buckets/{BUCKET_ID}"
@@ -371,19 +415,11 @@ class _LoopbackHandler(BaseHTTPRequestHandler):
             if kind == "file"
             else None
         )
-        planned = self.server.take(kind, path, detail)
-        if planned == "stall":
-            # Once the hub closes, end the request with a status that
-            # huggingface_hub never retries, so that a client which gave up on
-            # it sends nothing more.
-            self.server.closing.wait(timeout=60)
-            planned = 410
+        planned = self._planned(kind, path, detail)
+        if planned is None:
+            return
         if planned == "whole" and kind == "file":
             self._file(path, whole=True)
-            return
-        if planned != "serve":
-            status, headers = planned if isinstance(planned, tuple) else (planned, {})
-            self._json(status, {"error": f"Planned status {status}"}, headers)
             return
         if kind == "repository":
             self._json(200, {"id": REPOSITORY_ID, "sha": "0" * 40})

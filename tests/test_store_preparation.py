@@ -273,6 +273,79 @@ def test_a_store_without_conditional_writes_is_prepared_without_a_claim(
     assert failed.value.__context__ is None
 
 
+# The warning of an open that claims a store whose conditional write looks a
+# file up and then writes it.
+_UNGUARDED_CLAIM = (
+    "Another process that opens this store at the same moment can prepare it "
+    "beside this open: the store looks a file up and writes it in two steps, so "
+    "its preparation claim refuses only a process that opens it later. Open the "
+    "store from no other process until this open has prepared it."
+)
+
+
+def test_a_store_without_atomic_conditional_writes_claims_with_a_warning(tmp_path):
+    from zarr.storage import FsspecStore
+
+    location = tmp_path / "store.zarr"
+    store = FsspecStore.from_url(
+        f"file://{location}", storage_options={"auto_mkdir": True}
+    )
+    root = zarr.open_group(store=store, mode="w")
+    claim = location / PREPARATION_CLAIM / "zarr.json"
+    with _messages("WARNING") as warnings:
+        with preparation_claim(root):
+            held = claim.read_bytes()
+    assert b"cytearc:preparationClaim" in held
+    assert not claim.exists()
+    assert warnings == [_UNGUARDED_CLAIM]
+
+    # The claim still refuses one that another process wrote before, and keeps it.
+    claim.parent.mkdir()
+    theirs = _claim_document("another process").to_bytes()
+    claim.write_bytes(theirs)
+    with _messages("WARNING") as warnings:
+        with pytest.raises(RuntimeError, match="is being prepared by another process"):
+            with preparation_claim(root):
+                raise AssertionError("a second holder must not start")
+    assert claim.read_bytes() == theirs
+    assert warnings == []
+
+
+def test_a_local_store_claims_its_preparation_without_a_warning(tmp_path):
+    location = tmp_path / "store.zarr"
+    root = zarr.open_group(location, mode="w")
+    with _messages("WARNING") as warnings:
+        with preparation_claim(root):
+            held = (location / PREPARATION_CLAIM / "zarr.json").exists()
+    assert held
+    assert not (location / PREPARATION_CLAIM).exists()
+    assert warnings == []
+
+
+def test_a_datastore_open_that_prepares_a_store_without_atomic_writes_warns_once(
+    tmp_path,
+):
+    from zarr.storage import FsspecStore
+
+    location = _fresh(tmp_path / "store.zarr")
+    options = {"auto_mkdir": True}
+    with _messages("WARNING") as warnings:
+        ds = _open(
+            FsspecStore.from_url(f"file://{location}", storage_options=options),
+            min_features_per_cell=-1,
+        )
+    assert ds.cells.N == 6
+    assert zarr.open_group(location, mode="r")["RNA"].attrs["prepared"] is True
+    assert [message for message in warnings if "preparation claim" in message] == [
+        _UNGUARDED_CLAIM
+    ]
+    assert _residue(location) == []
+    # A prepared store takes no claim, so a later open does not warn.
+    with _messages("WARNING") as warnings:
+        _open(FsspecStore.from_url(f"file://{location}", storage_options=options))
+    assert [message for message in warnings if "preparation claim" in message] == []
+
+
 def test_a_cancelled_claim_write_stops_the_preparation(monkeypatch):
     from zarr.storage._common import StorePath
 

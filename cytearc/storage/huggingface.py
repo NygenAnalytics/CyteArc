@@ -170,6 +170,37 @@ def _list_store(fs: HfFileSystem, path: str) -> _StoreListing:
     return _StoreListing(sizes, url)
 
 
+def _holds_file(fs: HfFileSystem, path: str, timeout: float) -> bool:
+    """Return whether Hugging Face holds the file at ``path`` when asked.
+
+    Hugging Face's file system answers a lookup from the listing of the
+    file's directory that it keeps, which misses a file that another process
+    wrote after the listing and still holds one that it deleted. A bucket file
+    is looked up by its path, with one request whatever the size of its
+    directory, whose listing the Hub does not promise to be current. A
+    repository file is looked up in a listing of its directory made now.
+
+    Raises:
+        FileNotFoundError: If the bucket or repository does not exist, or the
+            repository does not hold the file.
+    """
+    resolved = fs.resolve_path(path)
+    if not isinstance(resolved, HfFileSystemResolvedBucketPath):
+        fs.invalidate_cache(path)
+        fs.info(path)
+        return True
+    response = get_session().post(
+        f"{fs.endpoint}/api/buckets/{resolved.bucket_id}/paths-info",
+        json={"paths": [resolved.path]},
+        headers=build_hf_headers(token=fs.token),
+        timeout=timeout,
+    )
+    hf_raise_for_status(response)
+    # The answer lists the asked path if it names a file or a directory, and
+    # only a file is a key.
+    return any(entry.get("type") == "file" for entry in response.json())
+
+
 class _FetchAbandoned(Exception):
     """The fetch that a reader waited for ended with its event loop."""
 
@@ -242,10 +273,14 @@ class HfReadStore(FsspecStore):
     and a read of a key it holds is one GET of the key's resolver URL for
     exactly the bytes asked for. The listing is a snapshot: the store does not
     see objects written after it, and a listed key that is no longer there
-    raises ``OSError``. A writable store reads and looks up keys through
-    Hugging Face's file system, and reads a key as missing only when the
-    server reports it missing, so a lookup that fails never makes
-    ``set_if_not_exists`` write over a key.
+    raises ``OSError``. A writable store reads keys through Hugging Face's file
+    system and asks the server about each key it looks up, with one request for
+    a bucket file, so a lookup sees a key that another process wrote or deleted
+    after the file system listed the key's directory. It reads a key as
+    missing only when the server reports it missing, so a lookup that fails
+    never makes ``set_if_not_exists`` write over a key. That call still looks
+    the key up and then writes it, since Hugging Face's bucket API has no
+    conditional write, and another process can write the key in between.
 
     Each attempt at a request of the store, a read, a lookup or a listing, is
     given ``request_timeout`` seconds, 60 by default. An attempt that times
@@ -492,14 +527,19 @@ class HfReadStore(FsspecStore):
         if fs is not None:
             return key in (await self._store_listing(fs)).sizes
         path = _dereference_path(self.path, key)
+        files = getattr(self.fs, "sync_fs", self.fs)
 
         async def look_up() -> bool:
             # Hugging Face's exists answers False for any OSError, and the
             # HfHubHTTPError of a failed request is one. Its info raises
             # FileNotFoundError only for a key that the server does not hold,
             # and lets every other failure reach _request, which retries it
-            # or raises it.
+            # or raises it, as the lookup of a bucket file does.
             try:
+                if isinstance(files, HfFileSystem):
+                    return await asyncio.to_thread(
+                        _holds_file, files, path, self.request_timeout
+                    )
                 await self.fs._info(path)
             except FileNotFoundError:
                 return False

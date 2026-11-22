@@ -8,7 +8,10 @@ root or workspace group, which it creates with the store's conditional write
 and removes when its preparation ends, however it ends. Another process that
 finds the claim raises ``RuntimeError`` instead of preparing the same columns
 beside it. A process that is killed while it prepares leaves its claim, which
-names the process; remove the claim once that process has stopped.
+names the process; remove the claim once that process has stopped. On a store
+whose conditional write looks the key up and then writes it, such as an
+``hf://`` store, two processes that open the store at the same moment can both
+take the claim, so such an open warns.
 """
 
 import datetime
@@ -27,6 +30,7 @@ from zarr.core.sync import sync
 
 from ..utils.logging import logger
 from ..utils.shutdown import is_interruption
+from .stores import has_atomic_conditional_writes
 
 PREPARATION_CLAIM = ".cytearc-preparation"
 """Name of the claim group below the root or workspace group being prepared."""
@@ -90,8 +94,11 @@ def preparation_claim(group: zarr.Group) -> Iterator[None]:
 
     A store that cannot make the conditional write, such as an object store
     without conditional puts, is prepared without the claim, as before claims
-    existed, with a warning. A cancelled write raises its cancellation, and
-    nothing is prepared.
+    existed, with a warning. A store whose conditional write is a lookup and
+    then a write, as ``has_atomic_conditional_writes`` tells, holds the claim
+    with a warning that another process opening the store at the same moment
+    can take it too. A cancelled write raises its cancellation, and nothing is
+    prepared.
 
     Raises:
         RuntimeError: If another process holds the claim; nothing is written.
@@ -127,6 +134,14 @@ def preparation_claim(group: zarr.Group) -> Iterator[None]:
         return
     if holder.get("token") != token:
         raise RuntimeError(_held_message(claim, holder))
+    if not has_atomic_conditional_writes(group.store):
+        logger.warning(
+            "Another process that opens this store at the same moment can prepare "
+            "it beside this open: the store looks a file up and writes it in two "
+            "steps, so its preparation claim refuses only a process that opens it "
+            "later. Open the store from no other process until this open has "
+            "prepared it."
+        )
     try:
         yield
     finally:
