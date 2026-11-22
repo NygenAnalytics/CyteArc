@@ -6,14 +6,14 @@ import sys
 import pytest
 
 from cytearc.utils import configure_output, logger, set_verbosity
-from cytearc.utils.logging import _config, progress_enabled
+from cytearc.utils.logging import _config, _OutputConfig, progress_enabled
+from tests.conftest import quiet_cytearc_output
 
 
 @pytest.fixture(autouse=True)
 def _restore_output_configuration():
     yield
-    set_verbosity("INFO")
-    configure_output(progress=False, timestamps=False)
+    quiet_cytearc_output()
 
 
 def test_import_defaults_are_notebook_first_in_isolated_process():
@@ -86,6 +86,39 @@ def test_reconfiguration_tolerates_a_stale_cytearc_handler(capsys):
     logger.debug("restored")
 
     assert capsys.readouterr().out == "DEBUG: restored\n"
+
+
+def test_quieting_the_output_keeps_only_errors_on_stderr(tmp_path, capsys):
+    log_file = tmp_path / "cytearc.log"
+    set_verbosity("DEBUG", str(log_file))
+    configure_output(progress=True, timestamps=True)
+
+    quiet_cytearc_output()
+    logger.info("an INFO line")
+    logger.warning("a warning")
+    logger.error("an error")
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.endswith(" - an error\n")
+    assert "an INFO line" not in captured.err and "a warning" not in captured.err
+    assert log_file.read_text(encoding="utf-8") == ""
+    assert _config == _OutputConfig(progress=False)
+
+
+# pytest runs a module's tests in their order, so the restore after the first
+# of these two tests runs before the second.
+def test_turning_the_output_up_before_the_next_test(capsys):
+    set_verbosity("DEBUG")
+    logger.debug("turned up")
+
+    assert capsys.readouterr().out == "DEBUG: turned up\n"
+
+
+def test_the_test_before_leaves_the_output_quiet(capsys):
+    logger.info("an INFO line")
+
+    assert capsys.readouterr().out == ""
 
 
 @pytest.mark.parametrize("setting", ["progress", "timestamps"])

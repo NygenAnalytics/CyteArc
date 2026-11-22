@@ -55,6 +55,7 @@ from cytearc.utils.arrays import (
 )
 from cytearc.utils.errors import raise_collected_errors
 from cytearc.utils.progress import iter_progress
+from tests.conftest import quiet_cytearc_output
 
 
 def test_as_zarr_array_accepts_array():
@@ -172,7 +173,7 @@ def test_set_verbosity_accepts_valid_level():
             set_verbosity(None)
         assert _config.level == "ERROR"
     finally:
-        set_verbosity("INFO")
+        quiet_cytearc_output()
     assert (_config.level, _config.filepath) == ("INFO", None)
 
 
@@ -200,7 +201,7 @@ def test_tqdmbar_uses_explicit_progress_independently_of_severity(monkeypatch):
         configure_output(progress=True)
         list(tqdmbar(range(1), desc="test", disable=True))
     finally:
-        configure_output(level="INFO", progress=False, timestamps=False)
+        quiet_cytearc_output()
 
     assert captured == [False, False, True, True, True]
 

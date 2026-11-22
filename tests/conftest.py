@@ -22,7 +22,7 @@ import sys
 import pytest
 from threadpoolctl import threadpool_limits
 
-from cytearc.utils import configure_output, logger
+from cytearc.utils import configure_output, logger, set_verbosity
 
 
 def _lock_numba_cache_files() -> None:
@@ -100,12 +100,25 @@ def _share_numba_threads():
         numba.set_num_threads(previous)
 
 
+def quiet_cytearc_output() -> None:
+    """Put CyteArc's output back in the state that the suite keeps it in.
+
+    CyteArc's settings return to the library's defaults without progress bars,
+    and loguru keeps one handler, which writes errors to stderr, so a test
+    captures only what it prints. A test that changes CyteArc's output calls
+    this when it ends; restoring the library's defaults instead would show
+    CyteArc's INFO lines in every later test of the process.
+    """
+    set_verbosity("INFO")
+    configure_output(progress=False, timestamps=False)
+    logger.remove()
+    logger.add(sys.stderr, level="ERROR")
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _quiet_test_logs() -> None:
     """Keep pytest output readable while standalone CLIs retain INFO logs."""
-    configure_output(progress=False)
-    logger.remove()
-    logger.add(sys.stderr, level="ERROR")
+    quiet_cytearc_output()
 
 
 @pytest.fixture(autouse=True)
