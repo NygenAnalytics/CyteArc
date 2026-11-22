@@ -1,8 +1,11 @@
-"""Reads that a memory ledger charges decode on as many threads of Zarr's codec pool as the ledger counts, on any machine."""
+"""Reads that a memory ledger charges, and every public call of a store, decode on as many threads of Zarr's codec pool as the ledger or the store counts, on any machine."""
 
 import contextvars
+import shutil
 import threading
+import warnings
 from collections.abc import Callable, Iterator
+from pathlib import Path
 from typing import Any
 from concurrent.futures import ThreadPoolExecutor
 
@@ -12,6 +15,8 @@ import zarr
 import zarr.core.sync as zarr_sync
 from zarr.codecs import BloscCodec, ZstdCodec
 
+import cytearc.plotting as plotting
+from cytearc import DataStore, to_h5ad, to_mtx
 from cytearc.metadata.rows import read_rows, read_whole
 from cytearc.storage import async_execution
 from cytearc.storage.async_execution import (
@@ -19,7 +24,9 @@ from cytearc.storage.async_execution import (
     zarr_decoding_threads,
     zarr_io_concurrency,
 )
+from zarr.core.codec_pipeline import BatchedCodecPipeline
 from cytearc.utils.memory_budget import MemoryLedger
+from tests.storage_helpers import recorded_codec_pools
 
 #: Which reader a decode belongs to, set in each reading thread.
 _READER: contextvars.ContextVar[str | None] = contextvars.ContextVar(
@@ -372,6 +379,931 @@ def test_shutting_the_pools_down_shuts_down_the_pool_of_every_count() -> None:
                 pools.submit(threading.current_thread)
         finally:
             async_execution._DECODING_THREADS.reset(token)
+
+
+# The public calls of a store decode on the store's threads.
+
+
+def _copied_store(source: str, folder: Path, *, nthreads: int) -> Any:
+    location = folder / f"threads_{nthreads}.zarr"
+    shutil.copytree(source, location)
+    return DataStore(str(location), default_assay="RNA", nthreads=nthreads)
+
+
+@pytest.fixture(scope="module")
+def one_thread_analysis(datastore_zarr_root, tmp_path_factory) -> dict[str, Any]:
+    """A copy of the PBMC fixture opened with nthreads=1, with a graph and its clusters."""
+    from cytearc.utils.warnings import DiagnosticWarning
+
+    store = _copied_store(
+        datastore_zarr_root, tmp_path_factory.mktemp("one_thread"), nthreads=1
+    )
+    cells = store.snapshot_cell_selection("I")
+    hvgs = store.features.hvgs(
+        cells, top_n=50, min_cells=0, max_cells=np.inf, show_plot=False
+    )
+    normalized = store.features.normalize(cells, hvgs)
+    pca = store.reduction.pca(normalized, dims=4)
+    ann = store.graph.ann_index(pca, ann_efc=40, ann_ef=40, ann_m=8)
+    with warnings.catch_warnings():
+        # The small index misses neighbors; the warning test checks the warning.
+        warnings.simplefilter("ignore", DiagnosticWarning)
+        neighbors = store.graph.neighbors(ann, k=5)
+    graph = store.graph.connectivity(neighbors)
+    leiden = store.clusters.leiden(graph, resolution=0.5)
+    return {
+        "store": store,
+        "location": str(store.zarr_loc),
+        "source": datastore_zarr_root,
+        "cells": cells,
+        "normalized": normalized,
+        "pca": pca,
+        "ann": ann,
+        "graph": graph,
+        "leiden": leiden,
+    }
+
+
+# Each call reads data that the fixture's calls left unread or computes a
+# result that they did not, so that each one decodes chunks.
+_ONE_THREAD_CALLS = (
+    "opening the store",
+    "snapshot_cell_selection",
+    "cells.fetch",
+    "cells.to_pandas_dataframe",
+    "cells.iter_row_blocks",
+    "RNA.feats.fetch_all",
+    "qc.auto_filter",
+    "features.hvgs",
+    "reduction.pca",
+    "embeddings.initialization",
+    "graph.load",
+    "clusters.leiden",
+    "artifacts.load_values",
+    "to_anndata",
+    "to_h5ad",
+    "to_mtx",
+    "plots.distribution",
+    "cytearc.plotting.distribution",
+    "RNA.rawData compute",
+    "RNA.normed compute",
+    "RNA.score_features",
+    "artifacts.load group read",
+    "a caller's own open of the store",
+)
+
+
+def _call(name: str, analysis: dict[str, Any], folder: Path) -> None:
+    store = analysis["store"]
+    match name:
+        case "opening the store":
+            # The first writable open of a store applies its cell filter.
+            _copied_store(analysis["source"], folder, nthreads=1)
+        case "snapshot_cell_selection":
+            store.snapshot_cell_selection("I")
+        case "cells.fetch":
+            store.cells.fetch("RNA_nCounts")
+        case "cells.to_pandas_dataframe":
+            store.cells.to_pandas_dataframe(["RNA_nFeatures", "RNA_percentMito"])
+        case "cells.iter_row_blocks":
+            list(store.cells.iter_row_blocks(columns=["RNA_percentRibo"]))
+        case "RNA.feats.fetch_all":
+            store.RNA.feats.fetch_all("names")
+        case "qc.auto_filter":
+            store.qc.auto_filter(method="gaussian")
+        case "features.hvgs":
+            store.features.hvgs(
+                analysis["cells"],
+                top_n=40,
+                min_cells=0,
+                max_cells=np.inf,
+                show_plot=False,
+            )
+        case "reduction.pca":
+            store.reduction.pca(analysis["normalized"], dims=3)
+        case "embeddings.initialization":
+            store.embeddings.initialization(
+                analysis["pca"], n_centroids=50, rand_state=7
+            )
+        case "graph.load":
+            store.graph.load(analysis["graph"])
+        case "clusters.leiden":
+            store.clusters.leiden(analysis["graph"], resolution=0.7)
+        case "artifacts.load_values":
+            store.artifacts.load_values(analysis["leiden"])
+        case "to_anndata":
+            store.to_anndata(
+                cell_selection=analysis["cells"], obs={"leiden": analysis["leiden"]}
+            )
+        case "to_h5ad":
+            to_h5ad(store.RNA, str(folder / "export.h5ad"))
+        case "to_mtx":
+            to_mtx(store.RNA, str(folder / "export_mtx"))
+        case "plots.distribution":
+            store.plots.distribution(
+                "RNA_nCounts", grouping=analysis["leiden"], show=False
+            ).close()
+        case "cytearc.plotting.distribution":
+            plotting.distribution(store, "RNA_nFeatures", show=False).close()
+        case "RNA.rawData compute":
+            store.RNA.rawData[:300].compute()
+        case "RNA.normed compute":
+            store.RNA.normed()[:300].compute()
+        case "RNA.score_features":
+            store.RNA.score_features(["CD3D", "LYZ", "CD79A"], "I", 20, 5, 7)
+        case "artifacts.load group read":
+            store.artifacts.load(analysis["cells"])["values"][:]
+        case "a caller's own open of the store":
+            # It equals the store's own, so it decodes on the store's threads.
+            zarr.open_group(str(store.zarr_loc), mode="r")["cellData/ids"][:]
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("call", list(_ONE_THREAD_CALLS))
+def test_each_call_of_a_one_thread_store_decodes_on_one_thread(
+    one_thread_analysis, tmp_path, call
+) -> None:
+    # Opening the store, its own methods, an operation of each accessor
+    # family that the fixture holds data for, its cell and feature tables,
+    # its exports, its plots, the arrays it hands out and a caller's own open
+    # of its location each decode and encode on one thread, not on the
+    # host's seven. Before, all but the reads that a memory ledger charges
+    # decoded on the host's threads.
+    with recorded_codec_pools(host_threads=_HOST_THREADS) as pools:
+        pools.label = call
+        _call(call, one_thread_analysis, tmp_path)
+        pools.label = None
+    assert pools.threads(call), f"{call} decoded no chunk"
+    assert set(pools.threads(call)) == {1}, pools.threads(call)
+    assert pools.threads(None) == []
+
+
+@pytest.mark.slow
+def test_a_store_of_the_hosts_threads_decodes_on_zarrs_pool(
+    datastore_zarr_root, tmp_path
+) -> None:
+    # A store whose nthreads equal the host threads, as a store opened with
+    # CYTEARC_WORKERS unset has, opens, operates, plots and exports on Zarr's
+    # pool itself, as before, and makes no pool of its own count. The storage
+    # runner of a write still encodes on a pool of its own, as before.
+    with recorded_codec_pools(host_threads=_HOST_THREADS) as pools:
+        host = zarr_sync._executor
+        store = _copied_store(datastore_zarr_root, tmp_path, nthreads=_HOST_THREADS)
+        cells = store.snapshot_cell_selection("I")
+        store.cells.fetch("RNA_nCounts")
+        hvgs = store.features.hvgs(
+            cells, top_n=20, min_cells=0, max_cells=np.inf, show_plot=False
+        )
+        store.features.normalize(cells, hvgs)
+        store.plots.distribution("RNA_nCounts", show=False).close()
+        to_mtx(store.RNA, str(tmp_path / "export_mtx"))
+        sized = dict(host._sized)
+    assert pools.threads(None).count(_HOST_THREADS) > 40
+    assert sized == {}
+
+
+def test_a_decode_error_reaches_the_caller_and_the_next_read_decodes_as_before(
+    tmp_path,
+) -> None:
+    # A chunk whose stored bytes are not zstd fails to decode on the store's
+    # one thread; the codec's error reaches the caller through CyteArc's codec
+    # pipeline unchanged, the pipeline leaves no threads behind in the
+    # caller's context, and the next read decodes on the store's thread.
+    import traceback
+
+    root, values = _registered_values(tmp_path, 1)
+    (tmp_path / "registered.zarr" / "values" / "c" / "1").write_bytes(b"not zstd" * 8)
+    with recorded_codec_pools(host_threads=_HOST_THREADS) as pools:
+        pools.label = "corrupt"
+        with pytest.raises(RuntimeError, match="Zstd decompression error") as failure:
+            root["values"][1_000:2_000]
+        pools.label = "next"
+        np.testing.assert_array_equal(root["values"][2_000:3_000], values[2_000:3_000])
+    frames = [
+        (Path(frame.filename).name, frame.name)
+        for frame in traceback.extract_tb(failure.value.__traceback__)
+    ]
+    assert ("async_execution.py", "read") in frames, frames
+    assert pools.threads("corrupt") == [1]
+    assert pools.threads("next") == [1]
+    assert async_execution._DECODING_THREADS.get() is None
+
+
+def test_a_read_leaves_its_threads_to_no_later_read_of_its_task(tmp_path) -> None:
+    # One coroutine reads a store registered with one thread, then a store
+    # that no one registered: the first read's threads end with it, so the
+    # second decodes on the host's threads.
+    registered, values = _registered_values(tmp_path, 1)
+    other = zarr.open_group(str(tmp_path / "other.zarr"), mode="w")
+    other_values = _values(other, n_chunks=3)
+
+    arrays = (registered["values"].async_array, other["values"].async_array)
+
+    async def read_both() -> tuple[Any, Any]:
+        first = await arrays[0].getitem(slice(None))
+        second = await arrays[1].getitem(slice(None))
+        return first, second
+
+    with recorded_codec_pools(host_threads=_HOST_THREADS) as pools:
+        pools.label = "both"
+        first, second = zarr_sync.sync(read_both())
+    np.testing.assert_array_equal(first, values)
+    np.testing.assert_array_equal(second, other_values)
+    assert pools.threads("both") == [1] * 4 + [_HOST_THREADS] * 3
+
+
+@pytest.mark.parametrize("any_loop", [True, False], ids=["own loop", "zarr's loop"])
+def test_an_array_read_decodes_the_chunks_it_reads_on_the_arrays_threads(
+    tmp_path, monkeypatch, any_loop
+) -> None:
+    # A composite's reads read its sources' chunks through stores that no
+    # DataStore of the composite registered. run_array_read gives them the
+    # threads of the array it reads, on the read's own event loop and on
+    # Zarr's alike: here an unregistered store's chunks, read for an array of
+    # a store registered with one thread.
+    from cytearc.storage import virtual_arrays
+
+    registered, _ = _registered_values(tmp_path, 1)
+    other = zarr.open_group(str(tmp_path / "other.zarr"), mode="w")
+    values = _values(other, n_chunks=3)
+    monkeypatch.setattr(virtual_arrays, "_reads_on_any_loop", lambda *_: any_loop)
+    with recorded_codec_pools(host_threads=_HOST_THREADS) as pools:
+        pools.label = "read"
+        result = virtual_arrays.run_array_read(
+            registered["values"], other["values"].async_array.getitem(slice(None))
+        )
+    np.testing.assert_array_equal(result, values)
+    assert pools.threads("read") == [1] * 3
+
+
+@pytest.mark.parametrize("workspace", [None, "analysis"])
+def test_the_feature_and_cell_tables_of_a_one_thread_store_read_on_one_thread(
+    tmp_path, workspace
+) -> None:
+    # The tables of a store with a workspace, whose features live below it,
+    # read on the store's thread as those of a store without one do.
+    from cytearc.storage.schema import create_cell_data, create_zarr_count_assay
+    from cytearc.storage.stores import load_zarr
+    from cytearc.writers.counts_t import finalize_writer_counts_t
+    from tests.storage_helpers import finalize_test_counts
+
+    location = str(tmp_path / "tables.zarr")
+    root = load_zarr(zarr_loc=location, mode="w")
+    counts = np.random.default_rng(5).poisson(4.0, size=(30, 6)).astype(np.uint32) + 1
+    cell_ids = np.asarray([f"cell{index}" for index in range(30)])
+    feature_ids = np.asarray([f"gene{index}" for index in range(6)])
+    create_cell_data(root, workspace, ids=cell_ids, names=cell_ids)
+    array = create_zarr_count_assay(
+        root,
+        "RNA",
+        workspace,
+        30,
+        feat_ids=feature_ids,
+        feat_names=feature_ids,
+        dtype="uint32",
+    )
+    array[:] = counts
+    finalize_test_counts(array)
+    finalize_writer_counts_t(root, "RNA", workspace)
+    store = DataStore(
+        location,
+        default_assay="RNA",
+        workspace=workspace,
+        min_features_per_cell=-1,
+        nthreads=1,
+    )
+    with recorded_codec_pools(host_threads=_HOST_THREADS) as pools:
+        pools.label = "features"
+        np.testing.assert_array_equal(store.RNA.feats.fetch_all("ids"), feature_ids)
+        pools.label = "cells"
+        np.testing.assert_array_equal(store.cells.fetch_all("ids"), cell_ids)
+    for label in ("features", "cells"):
+        assert pools.threads(label) and set(pools.threads(label)) == {1}, label
+
+
+def test_stores_of_different_threads_read_at_once_on_their_own_threads(
+    datastore_zarr_root, tmp_path, monkeypatch
+) -> None:
+    # Two stores read from two threads at once: each decodes on a pool of its
+    # own nthreads, since each call holds its store's threads in its own
+    # thread's context.
+    one = _copied_store(datastore_zarr_root, tmp_path, nthreads=1)
+    two = _copied_store(datastore_zarr_root, tmp_path, nthreads=2)
+    decodes = _Decodes(monkeypatch, each_reader=("one", "two"))
+
+    def read(store: Any, reader: str) -> np.ndarray:
+        token = _READER.set(reader)
+        try:
+            return np.asarray(store.cells.fetch_all("RNA_nCounts"))
+        finally:
+            _READER.reset(token)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        reads = [pool.submit(read, one, "one"), pool.submit(read, two, "two")]
+        first, second = (read.result(timeout=60) for read in reads)
+    np.testing.assert_array_equal(first, second)
+    for reader, threads in (("one", 1), ("two", 2)):
+        names = {thread.name for thread in decodes.threads(reader)}
+        assert names and all(f"_of_{threads}_" in name for name in names), names
+
+
+def _imported(folder: Path, tag: str) -> str:
+    """Import the 1K PBMC Cell Ranger file into a fresh store, and return its location."""
+    from cytearc import CrH5Reader, CrToZarr
+    from tests import full_path
+
+    location = str(folder / f"imported_{tag}.zarr")
+    CrToZarr(CrH5Reader(full_path("1K_pbmc_citeseq.h5")), location).dump()
+    return location
+
+
+@pytest.mark.slow
+def test_the_first_writable_open_of_an_import_prepares_it_on_the_stores_thread(
+    tmp_path,
+) -> None:
+    # The first writable open of a fresh import computes its cell properties
+    # and filter, reading its counts and writing columns; with nthreads=1 all
+    # of it decodes and encodes on one thread.
+    location = _imported(tmp_path, "open")
+    with recorded_codec_pools(host_threads=_HOST_THREADS) as pools:
+        pools.label = "open"
+        DataStore(location, default_assay="RNA", nthreads=1)
+        pools.label = None
+    assert len(pools.threads("open")) > 20
+    assert set(pools.threads("open")) == {1}
+    assert pools.threads(None) == []
+
+
+def _prepare(name: str, analysis: dict[str, Any], folder: Path) -> dict[str, Any]:
+    """Open the sources that a writer reads, with more threads than the writer's one."""
+    source = analysis["source"]
+    match name:
+        case "h5ad import":
+            path = folder / "export.h5ad"
+            to_h5ad(analysis["store"].RNA, str(path))
+            return {"h5ad": str(path)}
+        case "subset" | "subset_assay_zarr" | "mount" | "repack_store":
+            store = _copied_store(source, folder / "source", nthreads=3)
+            return {
+                "store": store,
+                "cell_ids": store.cells.fetch_all("ids")[:200],
+                "shape": store.RNA.rawData.shape,
+            }
+        case "merge" | "composite":
+            return {
+                "stores": [
+                    _copied_store(source, folder / "a", nthreads=2),
+                    _copied_store(source, folder / "b", nthreads=3),
+                ]
+            }
+    return {}
+
+
+def _write(name: str, prepared: dict[str, Any], folder: Path) -> None:
+    from scipy.sparse import random as sparse_random
+
+    from cytearc import (
+        CrH5Reader,
+        CrToZarr,
+        CSVReader,
+        CSVtoZarr,
+        DataStoreMerge,
+        H5adReader,
+        H5adToZarr,
+        SeuratReader,
+        SeuratToZarr,
+        SparseToZarr,
+        SubsetZarr,
+        subset_assay_zarr,
+    )
+    from cytearc.composite.create import create_composite
+    from cytearc.datastore.datastore import mount_datastore
+    from cytearc.tools.repack_zarr import repack_store
+    from tests import full_path
+
+    match name:
+        case "cell ranger import":
+            CrToZarr(
+                CrH5Reader(full_path("1K_pbmc_citeseq.h5")),
+                str(folder / "imported.zarr"),
+                nthreads=1,
+            ).dump()
+        case "h5ad import":
+            reader = H5adReader(prepared["h5ad"])
+            try:
+                H5adToZarr(reader, str(folder / "h5ad.zarr"), nthreads=1).dump()
+            finally:
+                reader.close()
+        case "seurat import":
+            with SeuratReader(
+                Path(full_path("seurat_assay5_synthetic.rds")), reductions=[]
+            ) as reader:
+                SeuratToZarr(reader, str(folder / "seurat.zarr"), nthreads=1).dump()
+        case "csv import":
+            table = folder / "counts.csv"
+            rows = [f"c{row},{row % 3},{row % 5},{(row * 7) % 4}" for row in range(60)]
+            table.write_text("cell,g0,g1,g2\n" + "\n".join(rows) + "\n")
+            CSVtoZarr(
+                CSVReader(str(table), id_column=0, batch_size=20),
+                str(folder / "csv.zarr"),
+                assay_name="RNA",
+                nthreads=1,
+            ).dump()
+        case "sparse import":
+            counts = sparse_random(
+                120, 40, density=0.2, format="csr", random_state=3
+            ).astype("float32")
+            counts.data = (counts.data * 9).round() + 1
+            SparseToZarr(
+                counts,
+                str(folder / "sparse.zarr"),
+                cell_ids=[f"c{row}" for row in range(120)],
+                feature_ids=[f"g{column}" for column in range(40)],
+                nthreads=1,
+            ).dump()
+        case "subset":
+            SubsetZarr(
+                str(folder / "subset.zarr"),
+                [prepared["store"].RNA],
+                cell_ids=prepared["cell_ids"],
+                nthreads=1,
+            ).dump()
+        case "subset_assay_zarr":
+            cells, features = prepared["shape"]
+            subset_assay_zarr(
+                str(prepared["store"].zarr_loc),
+                "RNA/counts",
+                "RNA_subset/counts",
+                np.arange(0, cells, 2),
+                np.arange(0, features, 3),
+                nthreads=1,
+            )
+        case "merge":
+            DataStoreMerge(
+                prepared["stores"], str(folder / "merged.zarr"), ["a", "b"], nthreads=1
+            ).dump()
+        case "mount":
+            mount_datastore(
+                str(prepared["store"].zarr_loc),
+                str(folder / "mounted.zarr"),
+                default_assay="RNA",
+                nthreads=1,
+            )
+        case "composite":
+            first, second = prepared["stores"]
+            create_composite(
+                {"a": first, "b": second},
+                at=folder / "composite.zarr",
+                features="union",
+                nthreads=1,
+            )
+        case "repack_store":
+            repack_store(
+                str(prepared["store"].zarr_loc),
+                str(folder / "repacked.zarr"),
+                nthreads=1,
+            )
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize(
+    "name",
+    [
+        "cell ranger import",
+        "h5ad import",
+        "seurat import",
+        "csv import",
+        "sparse import",
+        "subset",
+        "subset_assay_zarr",
+        "merge",
+        "mount",
+        "composite",
+        "repack_store",
+    ],
+)
+def test_a_writer_of_one_thread_writes_its_new_store_on_one_thread(
+    one_thread_analysis, tmp_path, name
+) -> None:
+    # Each import, both subsets, a merge, a mount, a composite and a repack
+    # given nthreads=1 read their sources and write their new data,
+    # construction included, on one thread, although the DataStores that
+    # opened their sources have two or three.
+    prepared = _prepare(name, one_thread_analysis, tmp_path)
+    with recorded_codec_pools(host_threads=_HOST_THREADS) as pools:
+        pools.label = name
+        _write(name, prepared, tmp_path)
+        pools.label = None
+    assert len(pools.threads(name)) >= 5, pools.threads(name)
+    assert set(pools.threads(name)) == {1}, pools.threads(name)
+
+
+@pytest.mark.slow
+def test_a_mount_reads_its_sources_counts_on_its_threads(
+    datastore_zarr_root, tmp_path
+) -> None:
+    # A mount's counts live in its source store, which the mount registers
+    # with the mount's threads beside its own, so they decode on the fewer of
+    # the mount's one thread and the three of the DataStore that opened the
+    # source. A caller's own open of the mount's target reads on one thread
+    # too.
+    from cytearc.datastore.datastore import mount_datastore
+
+    source = _copied_store(datastore_zarr_root, tmp_path, nthreads=3)
+    mounted = mount_datastore(
+        str(source.zarr_loc), str(tmp_path / "mounted.zarr"), nthreads=1
+    )
+    # The mount's store wraps its target's, which a caller can open itself.
+    target = zarr.open_group(str(tmp_path / "mounted.zarr"), mode="r")
+    with recorded_codec_pools(host_threads=_HOST_THREADS) as pools:
+        pools.label = "counts"
+        mounted.RNA.rawData[:300].compute()
+        pools.label = "cells"
+        mounted.cells.fetch_all("ids")
+        pools.label = "target"
+        target["cellData/ids"][:]
+    for label in ("counts", "cells", "target"):
+        assert pools.threads(label) and set(pools.threads(label)) == {1}, label
+
+
+@pytest.mark.slow
+def test_a_composite_reads_its_sources_on_its_threads(
+    datastore_zarr_root, tmp_path
+) -> None:
+    # A composite reads its sources' stores on its own thread, whatever the
+    # threads of the DataStores that opened them: as it is created, and as it
+    # reads its counts from them afterwards.
+    from cytearc.composite.create import create_composite
+
+    sources = {
+        name: _copied_store(datastore_zarr_root, tmp_path / name, nthreads=2)
+        for name in ("a", "b")
+    }
+    with recorded_codec_pools(host_threads=_HOST_THREADS) as pools:
+        pools.label = "creation"
+        composite = create_composite(
+            sources, at=tmp_path / "composite.zarr", features="union", nthreads=1
+        )
+        pools.label = "counts"
+        composite.RNA.rawData[:200].compute()
+    for label in ("creation", "counts"):
+        assert pools.threads(label) and set(pools.threads(label)) == {1}, label
+
+
+def test_a_mount_refuses_a_store_object_before_it_opens_it(
+    datastore_zarr_root, tmp_path
+) -> None:
+    # A mount takes its source as a location; it refuses a store object
+    # before opening it, so the store registers no threads and no target is
+    # created.
+    from zarr.storage import LocalStore
+
+    from cytearc.datastore.datastore import mount_datastore
+
+    location = tmp_path / "source.zarr"
+    shutil.copytree(datastore_zarr_root, location)
+    store = LocalStore(str(location), read_only=True)
+    with pytest.raises(TypeError, match="Matrix source location must be"):
+        mount_datastore(store, str(tmp_path / "mounted.zarr"), nthreads=1)
+    assert _entries_of(store) == []
+    assert not (tmp_path / "mounted.zarr").exists()
+
+
+# Which threads a store's reads decode on: the caller's, else the store's,
+# else the host's.
+
+
+def _registered_values(folder: Path, threads: int) -> tuple[zarr.Group, np.ndarray]:
+    root = zarr.open_group(str(folder / "registered.zarr"), mode="w")
+    values = _values(root, n_chunks=4)
+    async_execution.register_store_threads(root.store, threads)
+    return root, values
+
+
+def test_a_registered_store_decodes_on_its_threads_unless_its_caller_sets_them(
+    tmp_path,
+) -> None:
+    # A store registered with two threads decodes on two, wherever no caller
+    # sets threads; a caller's three win, and a store that no one registered
+    # decodes on the host's seven.
+    root, values = _registered_values(tmp_path, 2)
+    other = zarr.open_group(str(tmp_path / "other.zarr"), mode="w")
+    _values(other, n_chunks=4)
+    with recorded_codec_pools(host_threads=_HOST_THREADS) as pools:
+        pools.label = "store"
+        np.testing.assert_array_equal(root["values"][:], values)
+        pools.label = "caller"
+        with zarr_decoding_threads(3):
+            np.testing.assert_array_equal(root["values"][:], values)
+        pools.label = "after"
+        np.testing.assert_array_equal(root["values"][:], values)
+        pools.label = "unregistered"
+        other["values"][:]
+        pools.label = "write"
+        root["values"][:1_000] = values[:1_000]
+    assert pools.threads("store") == [2] * 4
+    assert pools.threads("caller") == [3] * 4
+    assert pools.threads("after") == [2] * 4
+    assert pools.threads("unregistered") == [_HOST_THREADS] * 4
+    assert pools.threads("write") == [2]
+
+
+def test_a_copy_or_another_open_of_a_registered_location_takes_its_threads(
+    tmp_path,
+) -> None:
+    # The read-only copy that zarr.open_group(store, mode="r") makes, and a
+    # caller's own open of the same location, equal the registered store and
+    # decode on its threads.
+    root, values = _registered_values(tmp_path, 2)
+    copy = zarr.open_group(root.store, mode="r")
+    reopened = zarr.open_group(str(tmp_path / "registered.zarr"), mode="r")
+    assert copy.store is not root.store and reopened.store is not root.store
+    with recorded_codec_pools(host_threads=_HOST_THREADS) as pools:
+        pools.label = "copy"
+        np.testing.assert_array_equal(copy["values"][:], values)
+        pools.label = "reopened"
+        np.testing.assert_array_equal(reopened["values"][:], values)
+    assert pools.threads("copy") == [2] * 4
+    assert pools.threads("reopened") == [2] * 4
+
+
+def test_the_stores_of_one_location_decode_on_the_fewest_threads_registered_for_it(
+    tmp_path,
+) -> None:
+    # Two local stores of one location registered with one and three threads,
+    # another open of the location and a wrapper of it all decode on one, so
+    # no store exceeds either bound. Once the store of one thread is
+    # collected, the others decode on three.
+    import gc
+
+    from zarr.storage import LocalStore, LoggingStore
+
+    root = zarr.open_group(str(tmp_path / "shared.zarr"), mode="w")
+    values = _values(root, n_chunks=2)
+    first = zarr.open_group(str(tmp_path / "shared.zarr"), mode="r")
+    second = zarr.open_group(str(tmp_path / "shared.zarr"), mode="r")
+    async_execution.register_store_threads(first.store, 1)
+    async_execution.register_store_threads(second.store, 3)
+    wrapped = zarr.open_group(
+        store=LoggingStore(LocalStore(str(tmp_path / "shared.zarr"), read_only=True)),
+        mode="r",
+    )
+    groups = {"first": first, "second": second, "other": root, "wrapped": wrapped}
+    with recorded_codec_pools(host_threads=_HOST_THREADS) as pools:
+        for label, group in groups.items():
+            pools.label = label
+            np.testing.assert_array_equal(group["values"][:], values)
+        del groups["first"], first
+        gc.collect()
+        for label, group in groups.items():
+            pools.label = f"{label} later"
+            np.testing.assert_array_equal(group["values"][:], values)
+    for label in ("first", "second", "other", "wrapped"):
+        assert pools.threads(label) == [1, 1], label
+    for label in ("second", "other", "wrapped"):
+        assert pools.threads(f"{label} later") == [3, 3], label
+
+
+def test_a_store_registered_again_keeps_the_fewest_threads(tmp_path) -> None:
+    # One store object that two DataStores registered with three and with one
+    # thread decodes on one, whatever the order, and registering it with
+    # three again changes nothing.
+    root, values = _registered_values(tmp_path, 3)
+    async_execution.register_store_threads(root.store, 1)
+    async_execution.register_store_threads(root.store, 3)
+    with recorded_codec_pools(host_threads=_HOST_THREADS) as pools:
+        pools.label = "store"
+        np.testing.assert_array_equal(root["values"][:], values)
+    assert pools.threads("store") == [1] * 4
+    assert sorted(_entries_of(root.store)) == [1, 3]
+
+
+def test_a_memory_store_takes_only_its_own_threads(monkeypatch) -> None:
+    # A memory store's equality compares its keys and bytes, not a location,
+    # so another memory store that holds the same bytes takes no threads of a
+    # registered one, and a lookup never compares them.
+    from zarr.core.buffer import cpu
+    from zarr.storage import MemoryStore
+
+    memory = MemoryStore()
+    root = zarr.open_group(store=memory, mode="w")
+    values = _values(root, n_chunks=2)
+    async_execution.register_store_threads(memory, 2)
+    twin = MemoryStore(
+        {
+            key: cpu.Buffer.from_bytes(value.to_bytes())
+            for key, value in memory._store_dict.items()
+        }
+    )
+    assert twin == memory
+
+    def compared(self: Any, other: object) -> bool:
+        raise AssertionError("a lookup compared two memory stores")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(MemoryStore, "__eq__", compared)
+        assert async_execution._registered_threads(twin) is None
+        assert async_execution._registered_threads(memory) == 2
+    with recorded_codec_pools(host_threads=_HOST_THREADS) as pools:
+        pools.label = "registered"
+        np.testing.assert_array_equal(root["values"][:], values)
+        pools.label = "twin"
+        np.testing.assert_array_equal(
+            zarr.open_group(store=twin, mode="r")["values"][:], values
+        )
+    assert pools.threads("registered") == [2, 2]
+    assert pools.threads("twin") == [_HOST_THREADS] * 2
+
+
+def test_a_lookup_compares_a_store_only_with_registered_stores_of_its_type(
+    tmp_path, caplog
+) -> None:
+    # A LoggingStore logs every call, its equality checks included; reads of
+    # stores of other types never ask a registered one whether it equals them.
+    import logging
+
+    from zarr.storage import LocalStore, LoggingStore
+
+    logged = LoggingStore(LocalStore(str(tmp_path / "logged.zarr")))
+    async_execution.register_store_threads(logged, 2)
+    root = zarr.open_group(str(tmp_path / "plain.zarr"), mode="w")
+    values = _values(root, n_chunks=2)
+    caplog.clear()
+    with caplog.at_level(logging.DEBUG):
+        np.testing.assert_array_equal(root["values"][:], values)
+    assert not [record for record in caplog.records if "__eq__" in record.getMessage()]
+    assert async_execution._registered_threads(logged) == 2
+
+
+def _entries_of(store: Any) -> list[int]:
+    return [
+        threads
+        for reference, threads in async_execution._STORE_THREADS
+        if reference() is store
+    ]
+
+
+@pytest.mark.parametrize("closed", [False, True], ids=["dropped", "closed"])
+def test_the_registry_keeps_no_store_alive_and_forgets_a_collected_one(
+    tmp_path, closed
+) -> None:
+    # The registry holds a store weakly: once nothing else holds the store,
+    # closed or not, it is collected, its registration no longer bounds
+    # another open of its location, and the next registration drops its
+    # entry.
+    import gc
+    import weakref
+
+    from zarr.storage import LocalStore
+
+    store = LocalStore(str(tmp_path / "dropped.zarr"))
+    async_execution.register_store_threads(store, 2)
+    reopened = LocalStore(str(tmp_path / "dropped.zarr"))
+    assert async_execution._registered_threads(reopened) == 2
+    (entry,) = [
+        reference
+        for reference, _ in async_execution._STORE_THREADS
+        if reference() is store
+    ]
+    held = weakref.ref(store)
+    if closed:
+        store.close()
+    del store
+    gc.collect()
+    assert held() is None
+    assert async_execution._registered_threads(reopened) is None
+    later = LocalStore(str(tmp_path / "later.zarr"))
+    async_execution.register_store_threads(later, 3)
+    assert all(
+        reference is not entry for reference, _ in async_execution._STORE_THREADS
+    )
+
+
+def test_registrations_from_many_threads_all_hold(tmp_path) -> None:
+    # Eight threads register 150 stores each at once, switching between
+    # threads every microsecond so that registrations interleave; every store
+    # keeps its own threads and none is lost.
+    import sys
+
+    from zarr.storage import LocalStore
+
+    stores = [
+        [LocalStore(str(tmp_path / f"s{worker}_{index}.zarr")) for index in range(150)]
+        for worker in range(8)
+    ]
+    barrier = threading.Barrier(8, timeout=20)
+
+    def register(worker: int) -> None:
+        barrier.wait()
+        for store in stores[worker]:
+            async_execution.register_store_threads(store, worker + 1)
+
+    interval = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)
+    try:
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            list(pool.map(register, range(8)))
+    finally:
+        sys.setswitchinterval(interval)
+    for worker, of_worker in enumerate(stores):
+        for store in of_worker:
+            assert _entries_of(store) == [worker + 1]
+            assert async_execution._registered_threads(store) == worker + 1
+
+
+@pytest.mark.parametrize("threads", [0, -1, True, 1.5, "2", None])
+def test_a_stores_threads_are_a_whole_number_of_at_least_one(tmp_path, threads) -> None:
+    from zarr.storage import LocalStore
+
+    store = LocalStore(str(tmp_path / "refused.zarr"))
+    with pytest.raises(ValueError, match="whole number of threads of at least 1"):
+        async_execution.register_store_threads(store, threads)
+    assert _entries_of(store) == []
+
+
+def test_registering_a_store_installs_cytearcs_codec_pipeline_first(tmp_path) -> None:
+    # In a new interpreter whose first CyteArc call registers a store, the
+    # store's arrays, opened after it, read through CyteArc's pipeline.
+    import subprocess
+    import sys
+
+    code = (
+        "import zarr, numpy as np\n"
+        "from cytearc.storage import async_execution\n"
+        f"group = zarr.open_group({str(tmp_path / 'fresh.zarr')!r}, mode='w')\n"
+        "group.create_array('values', data=np.arange(10))\n"
+        "async_execution.register_store_threads(group.store, 1)\n"
+        "array = zarr.open_group(group.store)['values']\n"
+        "print(type(array.async_array.codec_pipeline).__name__)\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, timeout=120
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.split()[-1] == "StoreThreadsCodecPipeline"
+
+
+@pytest.mark.slow
+def test_the_first_datastore_of_a_process_is_freed_once_dropped(
+    datastore_zarr_root, tmp_path
+) -> None:
+    # The first DataStore of a new interpreter starts Zarr's event loop, which
+    # keeps the context it starts in for as long as it runs. It starts in an
+    # empty one, so the DataStore's store and arrays go once the DataStore is
+    # dropped, and so does its registration.
+    import subprocess
+    import sys
+
+    location = str(tmp_path / "first.zarr")
+    shutil.copytree(datastore_zarr_root, location)
+    code = (
+        "import gc, weakref, zarr\n"
+        "from zarr.storage import LocalStore\n"
+        "from cytearc import DataStore\n"
+        "from cytearc.storage import async_execution\n"
+        f"store = DataStore({location!r}, default_assay='RNA', nthreads=2)\n"
+        "held = weakref.ref(store.z.store)\n"
+        "del store\n"
+        "gc.collect()\n"
+        "arrays = [o for o in gc.get_objects() if isinstance(o, zarr.Array)]\n"
+        f"print(held() is None, len([a for a in arrays if {location!r} in str(a.store)]),"
+        f" async_execution._registered_threads(LocalStore({location!r})))\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, timeout=300
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.split()[-3:] == ["True", "0", "None"]
+
+
+class _OwnPipeline(BatchedCodecPipeline):
+    """A codec pipeline that a user configures in place of Zarr's default."""
+
+
+def test_cytearcs_codec_pipeline_replaces_only_zarrs_default(tmp_path) -> None:
+    # With Zarr's default pipeline configured, the host ceiling installs
+    # CyteArc's; a pipeline that a user configured stays, and a registered
+    # store's arrays opened under it decode on the host's threads.
+    from zarr.registry import register_pipeline
+
+    default = "zarr.core.codec_pipeline.BatchedCodecPipeline"
+    own = f"{__name__}._OwnPipeline"
+    register_pipeline(_OwnPipeline)
+    with zarr.config.set({"codec_pipeline.path": default}):
+        ensure_zarr_host_ceiling()
+        assert zarr.config.get("codec_pipeline.path") == (
+            "cytearc.storage.async_execution.StoreThreadsCodecPipeline"
+        )
+    root, values = _registered_values(tmp_path, 2)
+    with zarr.config.set({"codec_pipeline.path": own}):
+        ensure_zarr_host_ceiling()
+        assert zarr.config.get("codec_pipeline.path") == own
+        opened = zarr.open_group(root.store, mode="r")["values"]
+        assert type(opened.async_array.codec_pipeline) is _OwnPipeline
+        with recorded_codec_pools(host_threads=_HOST_THREADS) as pools:
+            pools.label = "own"
+            np.testing.assert_array_equal(opened[:], values)
+    assert pools.threads("own") == [_HOST_THREADS] * 4
 
 
 # A pool thread that has reported a call's result.

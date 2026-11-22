@@ -43,6 +43,7 @@ from ..merge.writer import create_assay_counts, shared_normalization
 from ..metadata.membership import resolve_assay_membership
 from ..metadata.rows import default_block_rows
 from ..storage.artifacts import fingerprint_stored_arrays
+from ..storage.async_execution import zarr_decoding_threads
 from ..storage.budget import ResourceBudget, resolve_budget
 from ..storage.categorical import CategoricalColumn
 from ..storage.count_matrix import (
@@ -844,8 +845,6 @@ def create_composite(
         The composite, open for writing.
     """
     from ..datastore.datastore import DataStore
-    from .reader import source_index_bytes
-    from .store import CompositeStore
 
     if not sources:
         raise ValueError("At least one source datastore is required")
@@ -875,16 +874,51 @@ def create_composite(
     if zarr_location_has_content(target, storage_options=storage_options):
         raise FileExistsError(f"Composite destination already exists: {target}")
     check_destination(target, storage_options=storage_options)
-    # The absolute path or URL of the destination, or None for a store object
-    # that has neither, whose overlap with the sources cannot be checked.
-    destination = store_location(target)
-    profile = resolve_storage_profile(target)
     resources = resolve_budget(
         mem_budget
         if mem_budget is not None
         else min(ds.memoryBytes for ds in datasets),
         nthreads if nthreads is not None else min(ds.nthreads for ds in datasets),
     )
+    # The composite reads its sources and writes its store on its threads,
+    # whatever the threads of the DataStores that opened its sources.
+    with zarr_decoding_threads(resources.workers):
+        return _write_composite(
+            names,
+            datasets,
+            selections,
+            assay=assay,
+            features=features,
+            target=target,
+            resources=resources,
+            storage_options=storage_options,
+            source_column=source_column,
+            relative_sources=relative_sources,
+        )
+
+
+def _write_composite(
+    names: list[str],
+    datasets: list["DataStore"],
+    selections: dict[str, Sequence[int] | np.ndarray],
+    *,
+    assay: str,
+    features: Literal["union", "intersection"],
+    target: ZarrLocation,
+    resources: ResourceBudget,
+    storage_options: dict[str, Any] | None,
+    source_column: str,
+    relative_sources: bool,
+) -> "DataStore":
+    """Write the composite of ``datasets`` that ``create_composite`` describes."""
+    from ..datastore.datastore import DataStore
+    from .reader import source_index_bytes
+    from .store import CompositeStore
+
+    # The absolute path or URL of the destination, or None for a store object
+    # that has neither, whose overlap with the sources cannot be checked.
+    destination = store_location(target)
+    profile = resolve_storage_profile(target)
     assays: list[Any] = []
     selected_rows = []
     locations = []

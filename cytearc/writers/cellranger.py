@@ -147,6 +147,7 @@ class CrToZarr:
             normalized_values_record,
             validate_assay_name,
         )
+        from ..storage.async_execution import register_store_threads
         from ..storage.destinations import check_destination, create_destination
         from ..storage.sharding import count_layout_request
         from ..assay.classification import validate_assay_type
@@ -255,6 +256,8 @@ class CrToZarr:
             self.z = create_destination(
                 zarr_loc, overwrite=overwrite, storage_options=storage_options
             )
+            # The import writes the new store on its threads.
+            register_store_threads(self.z.store, self.resources.workers)
             cell_names = np.array(self.cr.cell_names())
             if self._cellOrder is not None:
                 cell_names = cell_names[self._cellOrder]

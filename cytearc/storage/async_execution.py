@@ -21,6 +21,9 @@ from contextlib import (
 from typing import Any, TypeVar, cast
 
 import zarr
+from zarr.core.codec_pipeline import BatchedCodecPipeline
+from zarr.registry import register_pipeline
+from zarr.storage import LocalStore, WrapperStore
 
 from ..utils.memory_budget import MemoryBudgetError
 from ..utils.numba import numba_threads
@@ -39,7 +42,8 @@ _ACTIVE_IO_LIMITS: dict[object, int] = {}
 _IDLE_IO_LIMIT: int | None = None
 
 # The threads that the Zarr reads of the calling context decode on, or None
-# for the host threads of Zarr's codec pool.
+# for the threads registered for the store read, if any, else the host
+# threads of Zarr's codec pool.
 _DECODING_THREADS: contextvars.ContextVar[int | None] = contextvars.ContextVar(
     "zarr_decoding_threads", default=None
 )
@@ -402,7 +406,10 @@ def _install_decoding_pools(workers: int) -> None:
     since the loop may be submitting to it.
     """
     sync: Any = importlib.import_module("zarr.core.sync")
-    loop = sync._get_loop()
+    # A loop keeps the context it was created in for as long as it runs, so
+    # it starts in an empty one: the caller's, such as a DataStore's
+    # validation scope, would keep that DataStore's arrays alive.
+    loop = contextvars.Context().run(sync._get_loop)
     pools = loop._default_executor
     if not isinstance(pools, _DecodingPools):
         pools = sync._executor
@@ -422,6 +429,7 @@ def ensure_zarr_host_ceiling() -> int:
     """
     global _HOST_THREAD_CEILING
     with _ZARR_CONFIG_LOCK:
+        _install_store_threads_pipeline()
         active = _active_zarr_workers()
         if active is not None:
             _HOST_THREAD_CEILING = active
@@ -471,6 +479,143 @@ def zarr_host_threads() -> Iterator[None]:
         yield
     finally:
         _DECODING_THREADS.reset(token)
+
+
+# The threads that the chunks of each store that a DataStore or a writer
+# registered decode and encode on, one entry for each store and count. Each
+# entry holds its store weakly, so the registry keeps nothing alive; the entry
+# of a collected store matches no store and goes at the next registration.
+_STORE_THREADS: tuple[tuple["weakref.ref[Any]", int], ...] = ()
+_STORE_THREADS_LOCK = threading.Lock()
+
+
+def _store_layers(store: Any) -> Iterator[Any]:
+    """Yield ``store`` and each store that it wraps, outermost first."""
+    while store is not None:
+        yield store
+        store = store._store if isinstance(store, WrapperStore) else None
+
+
+def register_store_threads(store: Any, threads: int) -> None:
+    """Decode and encode the chunks of ``store`` on at most ``threads`` threads wherever no caller sets them.
+
+    Every Zarr read and write of the arrays of ``store``, and of each store
+    that it wraps, decodes and encodes on at most that many threads, from any
+    thread, unless it runs within :func:`zarr_decoding_threads`, whose count
+    wins. A store registered more than once, and a local store of the same
+    root as a registered one, such as the read-only copy that
+    ``zarr.open_group(store, mode="r")`` makes or a caller's own open of the
+    location, decode on the fewest threads registered for any of them, so no
+    registration's bound is exceeded. The registry holds each store weakly,
+    so it keeps nothing alive, and a registration ends as its store is
+    collected.
+
+    Raises:
+        ValueError: If ``threads`` is not a whole number of at least 1.
+    """
+    global _STORE_THREADS
+    if isinstance(threads, bool) or not isinstance(threads, int) or threads < 1:
+        raise ValueError(
+            f"Reads decode on a whole number of threads of at least 1, not {threads!r}"
+        )
+    # The store's arrays, opened after this, take CyteArc's codec pipeline.
+    ensure_zarr_host_ceiling()
+    layers = list(_store_layers(store))
+    with _STORE_THREADS_LOCK:
+        entries = [entry for entry in _STORE_THREADS if entry[0]() is not None]
+        for layer in layers:
+            if not any(
+                reference() is layer and count == threads
+                for reference, count in entries
+            ):
+                entries.append((weakref.ref(layer), threads))
+        _STORE_THREADS = tuple(entries)
+
+
+def _registered_threads(store: Any) -> int | None:
+    """Return the fewest threads registered for ``store`` or for a store that it wraps, or None.
+
+    A layer of ``store`` matches the registrations of that store object and,
+    for a local store, those of each registered local store of its root.
+    Other stores match only themselves: their equality can compare their
+    contents, as a memory store's does, rather than their location.
+    """
+    entries = _STORE_THREADS
+    fewest: int | None = None
+    for layer in _store_layers(store):
+        local = type(layer) is LocalStore
+        for reference, threads in entries:
+            registered = reference()
+            if registered is layer or (
+                local and type(registered) is LocalStore and registered == layer
+            ):
+                fewest = threads if fewest is None else min(fewest, threads)
+    return fewest
+
+
+@contextmanager
+def store_decoding_threads(store: Any) -> Iterator[None]:
+    """Decode the Zarr reads and writes of ``store`` made in this context on the fewest threads registered for it.
+
+    A context that already holds threads, such as a pipeline stage's, a
+    memory ledger's or a writer's, keeps them, and a store that no DataStore
+    or writer registered decodes on the host's threads.
+    """
+    threads = (
+        None if _DECODING_THREADS.get() is not None else _registered_threads(store)
+    )
+    if threads is None:
+        yield
+        return
+    ensure_zarr_host_ceiling()
+    token = _DECODING_THREADS.set(threads)
+    try:
+        yield
+    finally:
+        _DECODING_THREADS.reset(token)
+
+
+def _batch_store(batch_info: list[Any]) -> Any:
+    """Return the store of a batch's first chunk, or None for the chunks of a shard in memory."""
+    return getattr(batch_info[0][0], "store", None) if batch_info else None
+
+
+class StoreThreadsCodecPipeline(BatchedCodecPipeline):
+    """Zarr's batched codec pipeline, decoding and encoding the chunks of each store on its registered threads.
+
+    A read or write takes the threads of its chunks' store, as
+    :func:`store_decoding_threads` gives them, so a store that a DataStore
+    opened decodes on at most the store's ``nthreads`` whoever reads it. The
+    inner chunks of a shard, which the shard's own read decodes, take the
+    shard's.
+    """
+
+    async def read(self, batch_info: Any, out: Any, drop_axes: Any = ()) -> Any:
+        chunks = list(batch_info)
+        with store_decoding_threads(_batch_store(chunks)):
+            return await super().read(chunks, out, drop_axes)
+
+    async def write(self, batch_info: Any, value: Any, drop_axes: Any = ()) -> None:
+        chunks = list(batch_info)
+        with store_decoding_threads(_batch_store(chunks)):
+            await super().write(chunks, value, drop_axes)
+
+
+_ZARR_CODEC_PIPELINE = "zarr.core.codec_pipeline.BatchedCodecPipeline"
+
+
+def _install_store_threads_pipeline() -> None:
+    """Make CyteArc's codec pipeline Zarr's while Zarr's default pipeline is configured.
+
+    A pipeline that a user configured, such as ``FusedCodecPipeline``, stays.
+    Zarr builds each array's pipeline as the array opens, so arrays opened
+    before keep theirs.
+    """
+    if zarr.config.get("codec_pipeline.path") == _ZARR_CODEC_PIPELINE:
+        register_pipeline(StoreThreadsCodecPipeline)
+        zarr.config.set(
+            {"codec_pipeline.path": f"{__name__}.{StoreThreadsCodecPipeline.__name__}"}
+        )
 
 
 class _LentPool(ThreadPoolExecutor):

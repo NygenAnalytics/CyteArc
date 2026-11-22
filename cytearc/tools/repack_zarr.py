@@ -9,6 +9,7 @@ import zarr
 from zarr.core.sync import sync
 
 from cytearc.storage.arrays import create_numeric_array
+from cytearc.storage.async_execution import zarr_decoding_threads
 from cytearc.storage.budget import ResourceBudget, resolve_budget
 from cytearc.storage.cell_order import CELL_ORDER_ATTR
 from cytearc.storage.copy import (
@@ -342,6 +343,34 @@ def repack_store(
     ``storage_options`` open the input and the output, and a mounted input's
     source too unless ``source_storage_options`` give the source its own.
     """
+    if locations_overlap(input_path, output_path):
+        raise ValueError("input_path and output_path must not overlap")
+    resources = resolve_budget(mem_budget, nthreads)
+    # The repack reads its input and writes its output on its threads,
+    # whatever the threads of the DataStores that opened them.
+    with zarr_decoding_threads(resources.workers):
+        _write_repacked_store(
+            input_path,
+            output_path,
+            profile,
+            storage_options,
+            data_only=data_only,
+            source_storage_options=source_storage_options,
+            resources=resources,
+        )
+
+
+def _write_repacked_store(
+    input_path: str,
+    output_path: str,
+    profile: StorageProfile,
+    storage_options: dict | None,
+    *,
+    data_only: bool,
+    source_storage_options: dict | None,
+    resources: ResourceBudget,
+) -> None:
+    """Copy or rebuild ``input_path`` into ``output_path``, as ``repack_store`` describes."""
     from ..assay import RNAassay, preset_assay_types
     from ..assay.classification import (
         default_feature_sets,
@@ -352,9 +381,6 @@ def repack_store(
     from ..features.gene_families import DEFAULT_PERCENT_PATTERNS
     from ..metadata import MetaData
 
-    if locations_overlap(input_path, output_path):
-        raise ValueError("input_path and output_path must not overlap")
-    resources = resolve_budget(mem_budget, nthreads)
     src = _open_store_root(
         input_path,
         mode="r",

@@ -11,6 +11,7 @@ from ..storage.artifacts import (
     inspect_artifact,
     list_artifacts as list_artifact_refs,
 )
+from ..storage.async_execution import register_store_threads
 from ..storage.types import ZarrMode, as_zarr_group, read_fresh_group
 from ..storage.validation_scope import validation_scoped
 from ..storage.budget import ResourceBudget
@@ -271,6 +272,11 @@ class BaseDataStore:
             raise RuntimeError(f"{import_source} import is incomplete")
         self.resources = resources
         self.nthreads = self.resources.workers
+        # The chunks of the store, the stores it wraps and a mount's source
+        # decode and encode on the store's threads, whoever reads them.
+        register_store_threads(self.z.store, self.nthreads)
+        if self._matrix_z is not None:
+            register_store_threads(self._matrix_z.store, self.nthreads)
         self.memoryBytes = self.resources.memoryBytes
         self.storageProfile = storage_profile
         self.storageIo = storageIo

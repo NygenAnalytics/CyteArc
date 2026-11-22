@@ -120,6 +120,7 @@ def mount_datastore(
         is_rna_assay_type,
         validate_assay_types,
     )
+    from ..storage.async_execution import zarr_decoding_threads
     from ..storage.budget import ResourceBudget
     from ..utils.arguments import bool_argument
     from ..storage.stores import (
@@ -154,42 +155,47 @@ def mount_datastore(
             ),
         )
 
-    source_root = _open_store_root(
-        source, storage_options=source_options, operation="mounted"
-    )
-    source_store = DataStore(
-        source_root.store,
-        workspace=workspace,
-        zarr_mode="r",
-        storage_options=source_options,
-        default_assay=datastore_options.get("default_assay"),
-    )
-    # The target opens each assay as the type that its assay_types declares,
-    # or else as the source declares it, so those types decide which mounted
-    # counts need a transpose.
-    explicit = validate_assay_types(
-        datastore_options.get("assay_types"), source_store.assay_names
-    )
-    required_transposes = frozenset(
-        name
-        for name in source_store.assay_names
-        if is_rna_assay_type(
-            explicit.get(name, declared_assay_type(source_store.get_assay(name)))
+    # Refused before the source opens, so a refused mount opens nothing.
+    if not isinstance(source, str) or not source:
+        raise TypeError("Matrix source location must be a non-empty string")
+    # The copy reads the source and writes the target on the mount's threads.
+    with zarr_decoding_threads(resources.workers):
+        source_root = _open_store_root(
+            source, storage_options=source_options, operation="mounted"
         )
-    )
-    del source_store
-    target = create_matrix_source(
-        source,
-        at,
-        required_transposes=required_transposes,
-        workspace=workspace,
-        storage_options=storage_options,
-        source_storage_options=source_storage_options,
-        profile=datastore_options.get("zarrProfile"),
-        source_root=source_root,
-        resources=resources,
-        relative_sources=relative_sources,
-    )
+        source_store = DataStore(
+            source_root.store,
+            workspace=workspace,
+            zarr_mode="r",
+            storage_options=source_options,
+            default_assay=datastore_options.get("default_assay"),
+        )
+        # The target opens each assay as the type that its assay_types declares,
+        # or else as the source declares it, so those types decide which mounted
+        # counts need a transpose.
+        explicit = validate_assay_types(
+            datastore_options.get("assay_types"), source_store.assay_names
+        )
+        required_transposes = frozenset(
+            name
+            for name in source_store.assay_names
+            if is_rna_assay_type(
+                explicit.get(name, declared_assay_type(source_store.get_assay(name)))
+            )
+        )
+        del source_store
+        target = create_matrix_source(
+            source,
+            at,
+            required_transposes=required_transposes,
+            workspace=workspace,
+            storage_options=storage_options,
+            source_storage_options=source_storage_options,
+            profile=datastore_options.get("zarrProfile"),
+            source_root=source_root,
+            resources=resources,
+            relative_sources=relative_sources,
+        )
     try:
         return DataStore(
             at,

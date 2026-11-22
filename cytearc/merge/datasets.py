@@ -1255,11 +1255,15 @@ class DataStoreMerge:
 
     def dump(self) -> MergeResult:
         """Write or resume the merge and return a component-level result."""
-        plan = self.plan()
-        try:
-            return self._dump_prepared(plan)
-        finally:
-            self._reset_prepared_state()
+        from ..storage.async_execution import zarr_decoding_threads
+
+        # The merge reads its sources and writes its store on its threads.
+        with zarr_decoding_threads(self.resources.workers):
+            plan = self.plan()
+            try:
+                return self._dump_prepared(plan)
+            finally:
+                self._reset_prepared_state()
 
     def _dump_prepared(self, plan: MergePlan) -> MergeResult:
         assert self._rowPlan is not None

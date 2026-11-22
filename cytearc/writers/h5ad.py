@@ -942,6 +942,7 @@ class H5adToZarr:
         from ..storage.schema import create_zarr_count_assay, normalized_values_record
         from ..storage.sharding import count_layout_request
         from ._store import resolve_import_values
+        from ..storage.async_execution import register_store_threads
         from ..storage.destinations import check_destination, create_destination
         from ..assay.classification import validate_assay_type
 
@@ -1118,6 +1119,8 @@ class H5adToZarr:
             self.z = create_destination(
                 zarr_loc, overwrite=overwrite, storage_options=storage_options
             )
+            # The import writes the new store on its threads.
+            register_store_threads(self.z.store, self.resources.workers)
             self._ini_cell_data()
             for resolved_assay_name in self.assayNames:
                 if self.assayFeatures is None:

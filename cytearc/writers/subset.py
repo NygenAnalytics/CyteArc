@@ -8,6 +8,7 @@ import zarr
 
 from ..storage.types import as_zarr_array, as_zarr_group
 from ..storage.arrays import create_zarr_obj_array
+from ..storage.async_execution import zarr_decoding_threads
 from ..storage.cell_order import copy_cell_order
 from ..storage.count_matrix import (
     COUNT_MATRIX_LAYOUT_KEY,
@@ -138,81 +139,83 @@ def subset_assay_zarr(
         )
     resources = resolve_budget(mem_budget, nthreads)
     resolved_profile = resolve_storage_profile(zarr_loc, profile)
-    z = load_zarr(zarr_loc, "r+", storage_options=storage_options)
-    ig = as_zarr_array(z[in_grp], name=in_grp)
-    _check_new_output(z, out_grp, out_parts)
-    cells_idx = checked_indices(cells_idx, limit=ig.shape[0], name="cells_idx")
-    feat_idx = checked_indices(feat_idx, limit=ig.shape[1], name="feat_idx")
-    if feat_idx.size == 0:
-        raise ValueError("feat_idx must select at least one feature")
-    resident = (
-        cells_idx.nbytes
-        + feat_idx.nbytes
-        + CountSummary.nbytes_for(len(cells_idx), len(feat_idx))
-    )
-    # Each band reads its cells' rows over the selected features, at the
-    # write's I/O concurrency: a sharded source holds a shard-level copy of
-    # them beside, for the shards that the band's cells fall in and that Zarr
-    # reads at once, the compressed bytes of the inner chunks that the read
-    # touches and the chunks it decodes at once. A subset of no cells reads
-    # nothing.
-    geometry = array_geometry(ig)
-    contiguous = is_contiguous(cells_idx)
+    # The subset reads its source and writes its counts on its threads.
+    with zarr_decoding_threads(resources.workers):
+        z = load_zarr(zarr_loc, "r+", storage_options=storage_options)
+        ig = as_zarr_array(z[in_grp], name=in_grp)
+        _check_new_output(z, out_grp, out_parts)
+        cells_idx = checked_indices(cells_idx, limit=ig.shape[0], name="cells_idx")
+        feat_idx = checked_indices(feat_idx, limit=ig.shape[1], name="feat_idx")
+        if feat_idx.size == 0:
+            raise ValueError("feat_idx must select at least one feature")
+        resident = (
+            cells_idx.nbytes
+            + feat_idx.nbytes
+            + CountSummary.nbytes_for(len(cells_idx), len(feat_idx))
+        )
+        # Each band reads its cells' rows over the selected features, at the
+        # write's I/O concurrency: a sharded source holds a shard-level copy of
+        # them beside, for the shards that the band's cells fall in and that Zarr
+        # reads at once, the compressed bytes of the inner chunks that the read
+        # touches and the chunks it decodes at once. A subset of no cells reads
+        # nothing.
+        geometry = array_geometry(ig)
+        contiguous = is_contiguous(cells_idx)
 
-    def producer(rows: int) -> ProducerBytes:
-        if not cells_idx.size:
-            return 0
-        shards = band_shards(geometry, cells_idx, rows)
+        def producer(rows: int) -> ProducerBytes:
+            if not cells_idx.size:
+                return 0
+            shards = band_shards(geometry, cells_idx, rows)
 
-        def held(concurrency: int) -> int:
-            fixed, per_row = row_read_parts(
-                geometry,
-                feat_idx,
-                rows_contiguous=contiguous,
-                concurrency=concurrency,
-                shards=shards,
-            )
-            return fixed + int(rows) * per_row
+            def held(concurrency: int) -> int:
+                fixed, per_row = row_read_parts(
+                    geometry,
+                    feat_idx,
+                    rows_contiguous=contiguous,
+                    concurrency=concurrency,
+                    shards=shards,
+                )
+                return fixed + int(rows) * per_row
 
-        return held
+            return held
 
-    layout = fit_count_layout(
-        {out_grp: (len(feat_idx), ig.dtype)},
-        nCells=len(cells_idx),
-        profile=resolved_profile,
-        memoryBytes=resources.memoryBytes,
-        transposed=(),
-        admitCounts=dense_counts_admission(resident, producer),
-        requested=policy,
-        subject="The subset",
-    )
-    plan = plan_count_matrix_pair(
-        len(cells_idx),
-        len(feat_idx),
-        ig.dtype,
-        policy=layout,
-        profile=resolved_profile,
-    )
-    # Zarr refuses to replace a node that appeared since the check.
-    og = create_count_matrix_array(
-        z, "/".join(out_parts), replace(plan.counts, overwrite=False)
-    )
-    # The counts and their parent group carry the layout the count contract checks.
-    parent = "/".join(out_parts[:-1])
-    persist_count_matrix_plan(as_zarr_group(z[parent]) if parent else z, plan)
-    persist_count_matrix_plan(og, plan)
-    summary = CountSummary(og)
-    write_dense_in_shard_rows(
-        og,
-        lambda start, end: read_selection(ig, cells_idx[start:end], feat_idx),
-        msg="Subsetting assay",
-        resources=resources,
-        io=io,
-        producerBytes=producer(array_shard_rows(og)),
-        residentBytes=resident,
-        countSummary=summary,
-    )
-    finalize_counts(og, summary=summary)
+        layout = fit_count_layout(
+            {out_grp: (len(feat_idx), ig.dtype)},
+            nCells=len(cells_idx),
+            profile=resolved_profile,
+            memoryBytes=resources.memoryBytes,
+            transposed=(),
+            admitCounts=dense_counts_admission(resident, producer),
+            requested=policy,
+            subject="The subset",
+        )
+        plan = plan_count_matrix_pair(
+            len(cells_idx),
+            len(feat_idx),
+            ig.dtype,
+            policy=layout,
+            profile=resolved_profile,
+        )
+        # Zarr refuses to replace a node that appeared since the check.
+        og = create_count_matrix_array(
+            z, "/".join(out_parts), replace(plan.counts, overwrite=False)
+        )
+        # The counts and their parent group carry the layout the count contract checks.
+        parent = "/".join(out_parts[:-1])
+        persist_count_matrix_plan(as_zarr_group(z[parent]) if parent else z, plan)
+        persist_count_matrix_plan(og, plan)
+        summary = CountSummary(og)
+        write_dense_in_shard_rows(
+            og,
+            lambda start, end: read_selection(ig, cells_idx[start:end], feat_idx),
+            msg="Subsetting assay",
+            resources=resources,
+            io=io,
+            producerBytes=producer(array_shard_rows(og)),
+            residentBytes=resident,
+            countSummary=summary,
+        )
+        finalize_counts(og, summary=summary)
     return None
 
 
@@ -287,18 +290,6 @@ class SubsetZarr:
         self.outWorkspace = out_workspace
         self.storage_options = storage_options
         self.assays = self._check_assays(assays)
-        # A pending derived assay is incomplete; its membership column would
-        # be copied with the cell metadata as finished data.
-        source = self.assays[0].z
-        refuse_pending_assays(
-            zarr.open_group(
-                store=source.store,
-                mode="r" if source.read_only else "r+",
-                use_consolidated=False,
-            ),
-            operation="subset",
-        )
-        self.cellIdx = self._selected_rows(cell_key, cell_ids)
         assay_resources = [
             assay.resources for assay in assays if hasattr(assay, "resources")
         ]
@@ -324,16 +315,32 @@ class SubsetZarr:
         )
         self.profile = resolve_storage_profile(zarr_loc, profile)
         self.io = io
-        # A layout that does not fit fails here, before the destination exists.
-        self._layouts = {
-            assay.name: self._fit_count_layout(assay, policy) for assay in self.assays
-        }
-        self._check_overlap(zarr_loc)
-        self.z = create_destination(
-            zarr_loc,
-            overwrite=overwrite_existing_file,
-            storage_options=self.storage_options,
-        )
+        # The subset reads its sources and creates its store on its threads.
+        with zarr_decoding_threads(self.resources.workers):
+            # A pending derived assay is incomplete; its membership column
+            # would be copied with the cell metadata as finished data.
+            source = self.assays[0].z
+            refuse_pending_assays(
+                zarr.open_group(
+                    store=source.store,
+                    mode="r" if source.read_only else "r+",
+                    use_consolidated=False,
+                ),
+                operation="subset",
+            )
+            self.cellIdx = self._selected_rows(cell_key, cell_ids)
+            # A layout that does not fit fails here, before the destination
+            # exists.
+            self._layouts = {
+                assay.name: self._fit_count_layout(assay, policy)
+                for assay in self.assays
+            }
+            self._check_overlap(zarr_loc)
+            self.z = create_destination(
+                zarr_loc,
+                overwrite=overwrite_existing_file,
+                storage_options=self.storage_options,
+            )
 
     def _check_overlap(self, zarr_loc: ZarrLocation) -> None:
         """Raise when the destination is, or overlaps, a source store."""
@@ -588,47 +595,49 @@ class SubsetZarr:
         Returns:
             None
         """
-        self._prep_cell_data()
-        self._prep_counts()
-        for assay in self.assays:
-            raw_data = assay.rawData[self.cellIdx]
-            if self.outWorkspace is None:
-                store = as_zarr_array(
-                    self.z[f"{assay.name}/counts"],
-                    name=f"{assay.name}/counts",
+        # The subset reads its sources and writes its store on its threads.
+        with zarr_decoding_threads(self.resources.workers):
+            self._prep_cell_data()
+            self._prep_counts()
+            for assay in self.assays:
+                raw_data = assay.rawData[self.cellIdx]
+                if self.outWorkspace is None:
+                    store = as_zarr_array(
+                        self.z[f"{assay.name}/counts"],
+                        name=f"{assay.name}/counts",
+                    )
+                else:
+                    store = as_zarr_array(
+                        self.z[f"matrices/{assay.name}/counts"],
+                        name=f"matrices/{assay.name}/counts",
+                    )
+                summary = CountSummary(store)
+                write_dense_in_shard_rows(
+                    store,
+                    lambda start, end: raw_data[start:end, :].compute(),
+                    msg=f"Subsetting assay: {assay.name}",
+                    resources=self.resources,
+                    io=self.io,
+                    producerBytes=raw_data._with_block_size(
+                        array_shard_rows(store)
+                    )._block_task_bytes(),
+                    residentBytes=raw_data._resident_bytes() + summary.nbytes,
+                    countSummary=summary,
                 )
-            else:
-                store = as_zarr_array(
-                    self.z[f"matrices/{assay.name}/counts"],
-                    name=f"matrices/{assay.name}/counts",
-                )
-            summary = CountSummary(store)
-            write_dense_in_shard_rows(
-                store,
-                lambda start, end: raw_data[start:end, :].compute(),
-                msg=f"Subsetting assay: {assay.name}",
-                resources=self.resources,
-                io=self.io,
-                producerBytes=raw_data._with_block_size(
-                    array_shard_rows(store)
-                )._block_task_bytes(),
-                residentBytes=raw_data._resident_bytes() + summary.nbytes,
-                countSummary=summary,
-            )
-            finalize_counts(store, summary=summary)
-            from ..assay.classification import declared_assay_type
-            from .counts_t import finalize_writer_counts_t
+                finalize_counts(store, summary=summary)
+                from ..assay.classification import declared_assay_type
+                from .counts_t import finalize_writer_counts_t
 
-            finalize_writer_counts_t(
-                self.z,
-                assay.name,
-                self.outWorkspace,
-                assay_type=declared_assay_type(assay),
-                resources=self.resources,
-                profile=self.profile,
-                io=self.io,
+                finalize_writer_counts_t(
+                    self.z,
+                    assay.name,
+                    self.outWorkspace,
+                    assay_type=declared_assay_type(assay),
+                    resources=self.resources,
+                    profile=self.profile,
+                    io=self.io,
+                )
+            logger.info(
+                f"Wrote a subset of {len(self.cellIdx)} cells across "
+                f"{len(self.assays)} assay(s)"
             )
-        logger.info(
-            f"Wrote a subset of {len(self.cellIdx)} cells across "
-            f"{len(self.assays)} assay(s)"
-        )
