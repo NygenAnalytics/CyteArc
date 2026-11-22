@@ -34,6 +34,7 @@ from ._style import (
     item_inches,
     resolve_category_scale,
     resolve_color_limits,
+    theme_argument,
     theme_context,
 )
 
@@ -197,6 +198,7 @@ def receptor_qc(
     normalize = optional_bool_argument(normalize, "normalize")
     show_legend = bool_argument(show_legend, "show_legend")
     show = bool_argument(show, "show")
+    theme = theme_argument(theme)
     loaded = store_method(store, "repertoire.load_receptors", "immune receptors")(
         receptors, fields=()
     )
@@ -457,6 +459,7 @@ def gene_usage(
     """
     show_legend = bool_argument(show_legend, "show_legend")
     show = bool_argument(show, "show")
+    theme = theme_argument(theme)
     max_genes = integer_argument(max_genes, "max_genes", minimum=1)
     if not isinstance(usage, GeneUsage):
         raise TypeError("usage must be the GeneUsage of ds.repertoire.gene_usage")
@@ -588,6 +591,7 @@ def gene_pairing(
     """
     show_legend = bool_argument(show_legend, "show_legend")
     show = bool_argument(show, "show")
+    theme = theme_argument(theme)
     max_genes = integer_argument(max_genes, "max_genes", minimum=1)
     if not isinstance(usage, GeneUsage):
         raise TypeError("usage must be the GeneUsage of ds.repertoire.gene_usage")
@@ -723,6 +727,7 @@ def spectratype(
     """
     show_legend = bool_argument(show_legend, "show_legend")
     show = bool_argument(show, "show")
+    theme = theme_argument(theme)
     if not isinstance(spectratype, Spectratype):
         raise TypeError(
             "spectratype must be the Spectratype of ds.repertoire.spectratype"

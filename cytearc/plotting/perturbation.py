@@ -35,6 +35,7 @@ from ._style import (
     finish_embedding_axes,
     foreground_color,
     padded_square_limits,
+    theme_argument,
     theme_context,
 )
 
@@ -228,6 +229,7 @@ def guide_calls(
     """
     show_legend = bool_argument(show_legend, "show_legend")
     show = bool_argument(show, "show")
+    theme = theme_argument(theme)
     max_guides_per_cell = integer_argument(
         max_guides_per_cell, "max_guides_per_cell", minimum=2
     )
@@ -851,6 +853,7 @@ def guide_thresholds(
     """
     show_legend = bool_argument(show_legend, "show_legend")
     show = bool_argument(show, "show")
+    theme = theme_argument(theme)
     max_panels = integer_argument(max_panels, "max_panels", minimum=1)
     # The guides index of a loaded record, or an array, names guides as a
     # list does, as load_guide_thresholds takes them.
@@ -1119,6 +1122,7 @@ def efficiency(
     """
     show_legend = bool_argument(show_legend, "show_legend")
     show = bool_argument(show, "show")
+    theme = theme_argument(theme)
     max_rows = integer_argument(max_rows, "max_rows", minimum=1)
     alpha = _alpha_argument(alpha)
     loaded = _load(store, "load_efficiency", efficiency)
@@ -1260,6 +1264,7 @@ def edistance(
     """
     show_legend = bool_argument(show_legend, "show_legend")
     show = bool_argument(show, "show")
+    theme = theme_argument(theme)
     max_rows = integer_argument(max_rows, "max_rows", minimum=1)
     alpha = _alpha_argument(alpha)
     loaded = _load(store, "load_edistance", edistance)
@@ -1751,6 +1756,7 @@ def mixscape(
     """
     show_legend = bool_argument(show_legend, "show_legend")
     show = bool_argument(show, "show")
+    theme = theme_argument(theme)
     if not isinstance(panel, str) or panel not in (_CLASSES_PANEL, _SCORES_PANEL):
         raise ValueError(f"panel must be 'classes' or 'scores', not {panel!r}")
     max_targets = integer_argument(max_targets, "max_targets", minimum=1)
@@ -2105,6 +2111,7 @@ def association_volcano(
     """
     show_legend = bool_argument(show_legend, "show_legend")
     show = bool_argument(show, "show")
+    theme = theme_argument(theme)
     label_top = integer_argument(label_top, "label_top", minimum=0)
     requested = _distinct_values(targets, "targets", "target")
     loaded = _load(store, "load_associations", tests)
@@ -2659,6 +2666,7 @@ def association_calibration(
     """
     show_legend = bool_argument(show_legend, "show_legend")
     show = bool_argument(show, "show")
+    theme = theme_argument(theme)
     loaded = _load(store, "load_associations", tests)
     side = str(loaded.side)
     alpha = float(loaded.alpha)
@@ -3129,6 +3137,7 @@ def perturbation_clusters(
     """
     show_legend = bool_argument(show_legend, "show_legend")
     show = bool_argument(show, "show")
+    theme = theme_argument(theme)
     if not isinstance(panel, str) or panel not in (_HEATMAP_PANEL, _EMBEDDING_PANEL):
         raise ValueError(f"panel must be 'heatmap' or 'embedding', not {panel!r}")
     requested = _distinct_values(perturbations, "perturbations", "perturbation")

@@ -802,6 +802,33 @@ def test_run_plots_check_show_before_they_draw(
     assert len(harness.calls) == 2 and len(shown) == 1
 
 
+@pytest.mark.parametrize("name", ["embedding", "embedding_raster"])
+def test_run_plots_check_their_theme_before_they_read_the_run(
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+):
+    class UnreadableCells:
+        """Frozen cells whose every read fails."""
+
+        def __getattr__(self, attribute: str) -> object:
+            raise AssertionError(f"The plot read the run's cells.{attribute}")
+
+    harness = _RunHarness(monkeypatch)
+    harness.run.cells = UnreadableCells()
+    method = getattr(harness.accessor, name)
+
+    with pytest.raises(KeyError) as unknown:
+        method(run=harness.run, color_by="sample_id", theme="sepia", show=False)
+    # A theme of THEMES passes, and the plot goes on to read the run's cells.
+    with pytest.raises(AssertionError, match="The plot read the run's cells"):
+        method(run=harness.run, color_by="sample_id", theme="paper", show=False)
+
+    assert unknown.value.args == (
+        "Unknown theme 'sepia'. Choose from: ['dark', 'minimal', 'notebook', 'paper']",
+    )
+    assert harness.calls == []
+
+
 def test_run_embedding_forwards_frozen_field_options_and_run_outputs(
     monkeypatch: pytest.MonkeyPatch,
 ):

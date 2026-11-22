@@ -46,6 +46,7 @@ from ._style import (
     register_layout_point_size,
     resolve_category_scale,
     scatter_edgecolor,
+    theme_argument,
     theme_context,
 )
 from ..utils.arguments import bool_argument
@@ -228,6 +229,7 @@ def cluster_connectivity(
     show_cells = bool_argument(show_cells, "show_cells")
     labels = bool_argument(labels, "labels")
     show = bool_argument(show, "show")
+    theme = theme_argument(theme)
     check_edge_filters(minimum_edge_weight, max_edges_per_node)
     if cell_size is not None and (not np.isfinite(cell_size) or cell_size < 0):
         raise ValueError("cell_size must be finite and non-negative")

@@ -42,6 +42,7 @@ from ._style import (
     missing_category_entry,
     resolve_category_scale,
     scatter_edgecolor,
+    theme_argument,
     theme_context,
 )
 from ..utils.arguments import bool_argument
@@ -412,6 +413,7 @@ def composition(
     show_percent_labels = bool_argument(show_percent_labels, "show_percent_labels")
     show_legend = bool_argument(show_legend, "show_legend")
     show = bool_argument(show, "show")
+    theme = theme_argument(theme)
     _, mpl = require_matplotlib()
     if kind not in ("stacked", "per_sample"):
         raise ValueError("kind must be 'stacked' or 'per_sample'")

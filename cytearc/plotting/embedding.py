@@ -101,6 +101,7 @@ from ._style import (
     scale_argument,
     scatter_edgecolor,
     scatter_edges,
+    theme_argument,
     theme_context,
 )
 
@@ -1540,6 +1541,7 @@ def embedding(
     show_legend = bool_argument(show_legend, "show_legend")
     show_titles = bool_argument(show_titles, "show_titles")
     show = bool_argument(show, "show")
+    theme = theme_argument(theme)
     clip_fraction = clip_fraction_argument(clip_fraction)
     color_scale = scale_argument(color_scale, "color_scale", ColorScale)
     density_overlay = scale_argument(density_overlay, "density_overlay", DensityOverlay)

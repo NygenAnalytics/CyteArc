@@ -40,6 +40,7 @@ from ._style import (
     resolve_color_limits,
     scale_argument,
     scatter_edgecolor,
+    theme_argument,
     theme_context,
 )
 from ..utils.arguments import bool_argument
@@ -161,6 +162,7 @@ def mapping_score(
     weighted = bool_argument(weighted, "weighted")
     show_legend = bool_argument(show_legend, "show_legend")
     show = bool_argument(show, "show")
+    theme = theme_argument(theme)
     color_scale = scale_argument(color_scale, "color_scale", ColorScale)
     if kind not in ("embedding", "histogram", "box"):
         raise ValueError("kind must be 'embedding', 'histogram', or 'box'")
@@ -481,6 +483,7 @@ def mapping_evidence(
     """
     show_legend = bool_argument(show_legend, "show_legend")
     show = bool_argument(show, "show")
+    theme = theme_argument(theme)
     if kind not in ("histogram", "box"):
         raise ValueError("kind must be 'histogram' or 'box'")
     if bins < 1:
@@ -625,6 +628,7 @@ def mapping_confusion(
     """
     show_legend = bool_argument(show_legend, "show_legend")
     show = bool_argument(show, "show")
+    theme = theme_argument(theme)
     color_scale = scale_argument(color_scale, "color_scale", ColorScale)
     if normalize not in ("none", "true", "predicted", "all"):
         raise ValueError("normalize must be 'none', 'true', 'predicted', or 'all'")
@@ -825,6 +829,7 @@ def mapping_calibration(
     only when it is one of them.
     """
     show = bool_argument(show, "show")
+    theme = theme_argument(theme)
     if n_thresholds < 2:
         raise ValueError("n_thresholds must be at least 2")
     if direction not in ("auto", "higher", "lower"):
