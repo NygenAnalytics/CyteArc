@@ -243,10 +243,15 @@ class CodecPools:
 
     label: str | None = None
     calls: list[tuple[str | None, int | None]] = field(default_factory=list)
+    running: threading.local = field(default_factory=threading.local)
 
     def threads(self, label: str | None) -> list[int | None]:
         """The pool threads of each call under ``label``, in order."""
         return [threads for of, threads in self.calls if of == label]
+
+    def current_threads(self) -> int | None:
+        """The threads of the pool that runs the calling thread's call, or None outside one."""
+        return getattr(self.running, "threads", None)
 
 
 @contextmanager
@@ -267,7 +272,7 @@ def recorded_codec_pools(host_threads: int) -> Iterator[CodecPools]:
     from zarr.codecs._v2 import V2Codec
 
     recorded = CodecPools()
-    running = threading.local()
+    running = recorded.running
     submit = async_execution._ReleasingPool.submit
 
     def submitting(pool: Any, call: Any, /, *args: Any, **kwargs: Any) -> Any:
@@ -284,7 +289,7 @@ def recorded_codec_pools(host_threads: int) -> Iterator[CodecPools]:
 
     def recording(codec_call: Any) -> Any:
         def run(codec: Any, *args: Any, **kwargs: Any) -> Any:
-            recorded.calls.append((recorded.label, getattr(running, "threads", None)))
+            recorded.calls.append((recorded.label, recorded.current_threads()))
             return codec_call(codec, *args, **kwargs)
 
         return run

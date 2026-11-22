@@ -1,4 +1,5 @@
 import asyncio
+import contextvars
 import os
 import posixpath
 from datetime import timedelta
@@ -181,13 +182,17 @@ def prefetch_metadata_listing(group: zarr.Group) -> None:
 
 
 def run_concurrently[T](tasks: Sequence[Callable[[], T]], *, workers: int) -> list[T]:
-    """Run independent storage tasks in order, overlapping them when useful."""
+    """Run independent storage tasks in order, overlapping them when useful.
+
+    Each task runs in a copy of the caller's context, so the reads of a
+    pipeline stage's tasks decode on the stage's threads.
+    """
     if workers <= 1 or len(tasks) <= 1:
         return [task() for task in tasks]
     from concurrent.futures import ThreadPoolExecutor
 
     with ThreadPoolExecutor(max_workers=min(workers, len(tasks))) as pool:
-        futures = [pool.submit(task) for task in tasks]
+        futures = [pool.submit(contextvars.copy_context().run, task) for task in tasks]
         return [future.result() for future in futures]
 
 

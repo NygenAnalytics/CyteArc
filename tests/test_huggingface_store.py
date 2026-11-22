@@ -23,12 +23,14 @@ from zarr.core.sync import _get_loop, sync
 from zarr.storage import FsspecStore
 
 from cytearc.storage import huggingface
+from cytearc.storage.async_execution import zarr_decoding_threads
 from cytearc.storage.preparation import (
     PREPARATION_CLAIM,
     _claim_document,
     preparation_claim,
 )
 from tests.fixtures_hub import BUCKET_ID, REPOSITORY_ID
+from tests.storage_helpers import recorded_codec_pools
 
 pytestmark = pytest.mark.usefixtures("hub_offline")
 
@@ -724,6 +726,43 @@ def test_read_store_answers_lookups_and_listings_from_the_bucket(loopback_hub):
     assert sorted(children) == ["c", "zarr.json"]
     assert found and not missing
     assert size == (published / "zarr.json").stat().st_size
+
+
+def test_a_read_on_one_decoding_thread_fetches_on_the_host_threads(
+    loopback_hub, monkeypatch
+):
+    store = _loopback_store(loopback_hub)
+    requests: list[int | None] = []
+    session = huggingface.get_session
+    list_store = huggingface._list_store
+
+    with recorded_codec_pools(host_threads=4) as pools:
+
+        class _Session:
+            def get(self, *args, **kwargs):
+                requests.append(pools.current_threads())
+                return session().get(*args, **kwargs)
+
+        def listing(*args):
+            requests.append(pools.current_threads())
+            return list_store(*args)
+
+        monkeypatch.setattr(huggingface, "get_session", _Session)
+        monkeypatch.setattr(huggingface, "_list_store", listing)
+        pools.label = "read"
+        try:
+            # As a stage of a one-worker store reads.
+            with zarr_decoding_threads(1):
+                values = zarr.open_array(store=store, mode="r")[:]
+        finally:
+            pools.label = None
+            store.close()
+
+    np.testing.assert_array_equal(values, np.arange(64).reshape(8, 8))
+    # The listing, the metadata and the four chunks are fetched on the host's
+    # four threads, and the four chunks decode on the one thread asked for.
+    assert len(requests) == 6 and set(requests) == {4}
+    assert pools.threads("read") == [1] * 4
 
 
 @pytest.mark.parametrize("read_only", [True, False])
