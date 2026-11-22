@@ -10,6 +10,8 @@ truth fixes.
 """
 
 import gzip
+import re
+import warnings
 from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
@@ -18,6 +20,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from cytearc import DiagnosticWarning
 from cytearc.clones.barcodes import LineageBarcodes
 from cytearc.utils.logging import collect_warnings
 from tests.clone_helpers import (
@@ -818,12 +821,35 @@ def test_a_subset_of_cells_holds_only_its_barcodes(shared, tmp_path) -> None:
     assert list(messages)
 
 
-def test_a_file_without_barcodes_of_the_selected_cells_saves_none(
+def test_a_file_without_rows_saves_no_barcode_and_warns_naming_it(
     shared, tmp_path
 ) -> None:
     path = tmp_path / "molecules.txt"
     path.write_text("#cell_id\tumi\tclone_id\tread_count\n")
-    ref = shared.store.clones.import_barcodes(path, cell_selection=shared.cells)
+    # The import warns, naming the file, and a reused import warns again.
+    refs = []
+    for _call in range(2):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            refs.append(
+                shared.store.clones.import_barcodes(path, cell_selection=shared.cells)
+            )
+        assert [type(item.message) for item in caught] == [DiagnosticWarning]
+        warning = caught[0].message
+        assert isinstance(warning, DiagnosticWarning)
+        assert re.fullmatch(
+            r"The import read no row from the barcode file '[^']*molecules\.txt', "
+            r"so no selected cell has a barcode\. Pass a file that lists the cells' "
+            r"lineage barcodes\.",
+            str(warning),
+        )
+        assert (warning.operation, warning.diagnostic, warning.value) == (
+            "import_lineage_barcodes",
+            "fileRows",
+            0,
+        )
+    assert refs[0] == refs[1]
+    ref = refs[0]
     loaded = shared.store.clones.load_barcodes(ref)
     assert loaded.records.empty
     assert (loaded.cells["n_barcodes"] == 0).all()
@@ -836,6 +862,54 @@ def test_a_file_without_barcodes_of_the_selected_cells_saves_none(
         "has_reads": [False],
     }
     assert loaded.pairs().empty
+
+
+def test_only_files_that_hold_no_row_are_warned_of(tmp_path) -> None:
+    path = tmp_path / "store.zarr"
+    write_count_store(
+        str(path),
+        {
+            "RNA": np.ones((N_CELLS, 3), dtype=np.uint16),
+            "LINEAGE": np.zeros((N_CELLS, 2), dtype=np.uint16),
+        },
+        "uint16",
+        cell_ids=TRUTH.cell_ids,
+    )
+    store = open_store(path)
+    store.cells.insert(
+        "every_cell", by_cell_id(store.cells, np.ones(N_CELLS, dtype=bool))
+    )
+    cells = store.snapshot_cell_selection("every_cell")
+    current = tmp_path / "current.txt"
+    current.write_text("#cell_id\tumi\tclone_id\tread_count\n")
+    early = tmp_path / "early.txt"
+    early.write_text("#cell_id\tumi\tclone_id\n")
+    # One warning names both files.
+    with pytest.warns(DiagnosticWarning) as caught:
+        store.clones.import_barcodes([current, early], cell_selection=cells)
+    assert len(caught) == 1
+    named = re.fullmatch(
+        "The import read no row from the barcode files '([^']*)', '([^']*)', so no "
+        r"selected cell has a barcode\. Pass files that list the cells' lineage "
+        r"barcodes\.",
+        str(caught[0].message),
+    )
+    assert named is not None
+    assert {Path(name).name for name in named.groups()} == {"current.txt", "early.txt"}
+    # One row of a selected cell beside a file without rows is enough.
+    one = tmp_path / "one.txt"
+    one.write_text(f"#cell_id\tumi\tclone_id\n{TRUTH.cell_ids[0]}\tAAAA\tACGT\n")
+    with collect_warnings() as messages:
+        store.clones.import_barcodes([early, one], cell_selection=cells)
+    assert messages == []
+    # An assay's counts are no file: an assay without a count reads no row
+    # and names no file.
+    with collect_warnings() as messages:
+        counted = store.clones.import_barcodes(
+            cell_selection=cells, from_assay="LINEAGE"
+        )
+    assert messages == []
+    assert store.artifacts.inspect(counted).diagnostics["fileRows"] == 0
 
 
 def test_rows_without_a_barcode_or_counted_zero_hold_none(shared, tmp_path) -> None:

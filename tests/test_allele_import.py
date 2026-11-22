@@ -6,6 +6,7 @@ quirks. Each import must give exactly the records that the truth fixes for
 the file, state by state.
 """
 
+import re
 import shutil
 import warnings
 from pathlib import Path
@@ -14,6 +15,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from cytearc import DiagnosticWarning
 from tests.clone_helpers import assert_joined, every_cell, write_truth_store
 from tests.storage_helpers import by_cell_id, copy_store
 from tests.clone_truth import (
@@ -760,7 +762,12 @@ def test_files_of_a_header_alone_import_no_records(
 ):
     path = tmp_path / name
     path.write_text(text)
-    ref = store.clones.import_alleles(path, cell_selection=every_cell(store), **options)
+    refs = [
+        _import_warning_of_no_row(store, path, name, **options) for _call in range(2)
+    ]
+    # A reused import warns again.
+    assert refs[0] == refs[1]
+    ref = refs[0]
     loaded = store.clones.load_alleles(ref)
     assert len(loaded.records) == 0 and loaded.records.columns.tolist()[:3] == [
         "ids",
@@ -774,15 +781,63 @@ def test_files_of_a_header_alone_import_no_records(
         store.clones.export_characters(ref, tmp_path / "out.zarr")
 
 
+def _import_warning_of_no_row(store, path: Path, name: str, **options):
+    """Import an allele file that holds no row, checking its one warning, which names the file ``name``."""
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        ref = store.clones.import_alleles(
+            path, cell_selection=every_cell(store), **options
+        )
+    assert [type(item.message) for item in caught] == [DiagnosticWarning]
+    warning = caught[0].message
+    assert isinstance(warning, DiagnosticWarning)
+    assert re.fullmatch(
+        f"The import read no row from the allele file '[^']*{re.escape(name)}', so "
+        r"no selected cell has an allele\. Pass a file that lists the cells' "
+        r"recorder alleles\.",
+        str(warning),
+    )
+    assert (warning.operation, warning.diagnostic, warning.value) == (
+        "import_recorder_alleles",
+        "fileRows",
+        0,
+    )
+    return ref
+
+
 def test_an_empty_carlin_pair_imports_no_records(store, tmp_path):
     folder = tmp_path / "pair"
     folder.mkdir()
     (folder / "AlleleAnnotations.txt").write_text("")
     (folder / "AlleleColonies.txt").write_text("")
-    ref = store.clones.import_alleles(
-        folder, cell_selection=every_cell(store), integrations="CA"
+    # The pair is named by the file of its cells.
+    ref = _import_warning_of_no_row(
+        store, folder, "AlleleColonies.txt", integrations="CA"
     )
     assert len(store.clones.load_alleles(ref).records) == 0
+
+
+def test_allele_files_that_hold_no_row_are_named_in_one_warning(store, tmp_path):
+    petracer = tmp_path / "petracer.csv"
+    petracer.write_text("intID,cellBC,RNF2,HEK3,EMX1,UMI,readCount\n")
+    typewriter = tmp_path / "typewriter.csv"
+    typewriter.write_text("Cell,TargetBC,Site1,Site2,Site3,Site4,Site5,nUMI\n")
+    with pytest.warns(DiagnosticWarning) as caught:
+        store.clones.import_alleles(
+            [petracer, typewriter], cell_selection=every_cell(store)
+        )
+    assert len(caught) == 1
+    named = re.fullmatch(
+        "The import read no row from the allele files '([^']*)', '([^']*)', so no "
+        r"selected cell has an allele\. Pass files that list the cells' recorder "
+        r"alleles\.",
+        str(caught[0].message),
+    )
+    assert named is not None
+    assert {Path(name).name for name in named.groups()} == {
+        "petracer.csv",
+        "typewriter.csv",
+    }
 
 
 def test_a_pair_listed_twice_keeps_each_listings_integration(tmp_path):

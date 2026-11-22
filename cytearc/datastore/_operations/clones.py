@@ -2,7 +2,7 @@ import os
 import sys
 from collections import Counter
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -119,6 +119,7 @@ from .cell_barcodes import (
     CellBarcodeJoin,
     barcode_files,
     derived_id_bytes,
+    empty_files_rule,
     unmatched_barcode_rules,
 )
 from .cell_groups import (
@@ -421,10 +422,13 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         beside the cell ID it derives, then ``fileRows``, the rows of the
         files, a matrix's cells. The clone writer adds ``cellsWithClone``
         and ``largestCloneShare``. Barcodes of no cell are named in a
-        warning, which a reused import gives again. A file is identified by
-        the SHA-256 of its bytes, and of a matrix's cell and clone lists, so a moved file
-        reuses the saved clones, an edited one gives new clones, and the
-        order of the files does not matter.
+        warning; when the files hold no row, such as a table of a header
+        alone, another warning names them, since the clone summaries and
+        ``export_clones`` refuse the clones of such an import. A reused import
+        gives both warnings again. A file is identified by the SHA-256 of its
+        bytes, and of a matrix's cell and clone lists, so a moved file reuses
+        the saved clones, an edited one gives new clones, and the order of the
+        files does not matter.
 
         Clone IDs are unique only within one tool's run, so with several
         files each file's labels start with its ``barcode_prefix``, or with
@@ -538,7 +542,20 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             with_probability=with_probability,
             required_attributes=("n_clones",),
         )
-        warnings = unmatched_barcode_rules(files_text("clone", len(files)))
+        warnings = (
+            *unmatched_barcode_rules(files_text("clone", len(files))),
+            empty_files_rule(
+                "fileRows",
+                "row",
+                files,
+                kind="clone",
+                outcome="no selected cell has a clone",
+                remedy=(
+                    "Pass a file that lists the cells' clones.",
+                    "Pass files that list the cells' clones.",
+                ),
+            ),
+        )
         if planned.reused:
             # Saved clones warn as they did when they were imported.
             warn_diagnostics(
@@ -588,6 +605,12 @@ class _CloneOperationsMixin(_CloneOperationsBase):
                 row_chars=row_chars,
             )
         assignment = assigner.finish()
+        if with_probability and assignment.probabilities is None:
+            # The files give probabilities, which the clones were planned
+            # with, but no row gave a selected cell a clone, so every cell's
+            # probability is unknown. Saving charges them as it charges the
+            # probabilities that rows give.
+            assignment = replace(assignment, probabilities=np.full(n_cells, np.nan))
         write_clones(
             self.zw,
             planned,
@@ -828,6 +851,38 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         require_complete_artifact(self.zw, clones)
         return artifact_group(self.zw, clones)
 
+    def _require_file_rows(self, clones: ArtifactRef) -> None:
+        """Refuse clones whose import read no row, for a call that would read them as clones of no cell.
+
+        :meth:`_clone_group` opens such clones, which ``load_clones`` reads,
+        and ``plots.clone_abundance`` says that there is nothing to plot.
+        ``export_clones``, which would write a file of a header alone, and
+        the summaries, where they find no measured cell with a clone and
+        would name the grouping or the early cells, refuse them with one
+        message that names the empty import. Clones whose files hold rows of
+        no measured cell, as a selection without the files' cells gives, and
+        the clones of other sources, which record no rows of files, pass.
+
+        Raises:
+            ValueError: If the clones' import read no row.
+        """
+        status = inspect_artifact(self.zw, clones)
+        if (
+            status.operation != CloneImportArguments.operation
+            or status.diagnostics["fileRows"] != 0
+        ):
+            return
+        n_files = len((status.inputs or {})["sources"])
+        raise ValueError(
+            "The clones give no cell a clone: their import read no row from "
+            + files_text("clone", n_files)
+            + (
+                "; import a file that lists the cells' clones"
+                if n_files == 1
+                else "; import files that list the cells' clones"
+            )
+        )
+
     @validation_scoped
     def _clones_load_clones(self, clones: ArtifactRef) -> Clones:
         """Read saved clones as a table of cells and a table of clones.
@@ -949,7 +1004,9 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         store's, and a path ending in ``.gz`` is gzip-compressed. Clone
         probabilities are not written. Cells are written in the order of the
         file that the store imported, as their ``sourceRow`` records it, or
-        in store order with ``cell_order="stored"``.
+        in store order with ``cell_order="stored"``. Clones whose import read
+        no row are refused before anything is written, while clones that give
+        no cell of their selection a clone write the header alone.
 
         Args:
             clones: A clone artifact, such as ``clones`` or ``clonotypes``.
@@ -964,8 +1021,9 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         Raises:
             TypeError: If an argument has the wrong type.
             ValueError: If ``clones`` is not a ``clones`` or ``clonotypes``
-                artifact, ``format`` or ``cell_order`` is unknown, a ``"cospar"`` table would hold a
-                clone label that reads as no clone, such as ``"NA"``, or a
+                artifact, ``format`` or ``cell_order`` is unknown, the clones'
+                import read no row, a ``"cospar"`` table would hold a clone
+                label that reads as no clone, such as ``"NA"``, or a
                 ``"matrix"`` would list a label or cell ID that holds a line
                 break.
             KeyError: If the store holds no such artifact, or not the
@@ -987,6 +1045,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             )
         cell_order_argument(cell_order)
         group = self._clone_group(clones)
+        self._require_file_rows(clones)
         n_cells = int(as_zarr_array(group["codes"], name="codes").shape[0])
         planned_cells = plan_artifact_cells(self.zw, clones)
         ledger = MemoryLedger(
@@ -1679,7 +1738,8 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             that holds them.
 
         Raises:
-            ValueError: If no cell has both a clone and a group.
+            ValueError: If the clones' import read no row, or no cell has
+                both a clone and a group.
         """
         if ledger is None:
             ledger = self._clone_ledger(clones, "Summarizing the clone sizes")
@@ -1709,6 +1769,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         clone_sizes = GroupedCloneSizes.from_clones(pair_groups, pair_cells, len(keys))
         check(len(clone_sizes.values))
         if not clone_sizes.n.any():
+            self._require_file_rows(clones)
             raise ValueError("No cell has both a clone and a group")
         return keys, clone_sizes, grouping, ledger
 
@@ -1785,9 +1846,10 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         Raises:
             TypeError: If an argument has the wrong type.
             ValueError: If ``clones`` is not a clone artifact, both bounds
-                are given, the bounds are invalid, no measured cell has both a
-                clone and a group, a column of the groups is missing or named
-                twice, or two groups get one name.
+                are given, the bounds are invalid, the clones' import read no
+                row, no measured cell has both a clone and a group, a column
+                of the groups is missing or named twice, or two groups get one
+                name.
             KeyError: If the store holds no such ``clones`` artifact, or not the
                 receptors of the clonotypes.
             RuntimeError: If the ``clones`` artifact or the receptors of the
@@ -1848,6 +1910,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         )
         ledger.release(rows)
         if not grouped.keys:
+            self._require_file_rows(clones)
             raise ValueError("No cell has both a clone and a group")
         columns = group_columns(group_by)
         if columns:
@@ -2154,9 +2217,10 @@ class _CloneOperationsMixin(_CloneOperationsBase):
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If ``clones`` is not a clone artifact, no cell has a
-                clone and a group, a column of the groups is missing or named
-                twice, or ``size`` is not positive.
+            ValueError: If ``clones`` is not a clone artifact, the clones'
+                import read no row, no cell has a clone and a group, a column
+                of the groups is missing or named twice, or ``size`` is not
+                positive.
             KeyError: If the store holds no such ``clones`` artifact, or not the
                 receptors of the clonotypes.
             RuntimeError: If the ``clones`` artifact or the receptors of the
@@ -2251,8 +2315,8 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         Raises:
             TypeError: If an argument has the wrong type.
             ValueError: If ``clones`` is not a clone artifact, an order,
-                size, endpoint or knots is invalid, or no cell has a clone and
-                a group.
+                size, endpoint or knots is invalid, the clones' import read no
+                row, or no cell has a clone and a group.
             KeyError: If the store holds no such ``clones`` artifact, or not the
                 receptors of the clonotypes.
             RuntimeError: If the ``clones`` artifact or the receptors of the
@@ -2378,11 +2442,12 @@ class _CloneOperationsMixin(_CloneOperationsBase):
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If ``clones`` is not a clone artifact, no cell has
-                both a clone and a group, fewer than two groups hold a cell
-                with a clone, no two groups share the labels that the clones
-                keep apart, a column of the groups is missing or named twice,
-                two key columns share a name, or two groups get one name.
+            ValueError: If ``clones`` is not a clone artifact, the clones'
+                import read no row, no cell has both a clone and a group,
+                fewer than two groups hold a cell with a clone, no two groups
+                share the labels that the clones keep apart, a column of the
+                groups is missing or named twice, two key columns share a
+                name, or two groups get one name.
             KeyError: If the store holds no such ``clones`` artifact, or not the
                 receptors of the clonotypes.
             RuntimeError: If the ``clones`` artifact or the receptors of the
@@ -2402,6 +2467,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             ledger=ledger,
         )
         if len(pair_cells) == 0:
+            self._require_file_rows(clones)
             raise ValueError("No cell has both a clone and a group")
         if len(keys) < 2:
             raise ValueError("Overlap needs at least two groups of cells with a clone")
@@ -2487,10 +2553,10 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         Raises:
             TypeError: If an argument has the wrong type.
             ValueError: If ``clones`` is not a clone artifact, ``top_n`` is not
-                positive, ``labels`` is empty or a label names no clone, no
-                cell has both a clone and a group, a column of the groups is
-                missing or named twice, two key columns share a name, or two
-                groups get one name.
+                positive, ``labels`` is empty or a label names no clone, the
+                clones' import read no row, no cell has both a clone and a
+                group, a column of the groups is missing or named twice, two
+                key columns share a name, or two groups get one name.
             KeyError: If the store holds no such ``clones`` artifact, or not the
                 receptors of the clonotypes.
             RuntimeError: If the ``clones`` artifact or the receptors of the
@@ -2522,6 +2588,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             ledger=ledger,
         )
         if len(pair_cells) == 0:
+            self._require_file_rows(clones)
             raise ValueError("No cell has both a clone and a group")
         assert source.clone_ids is not None
         identifiers = source.clone_ids
@@ -2694,12 +2761,12 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             TypeError: If an argument has the wrong type.
             ValueError: If ``clones`` is not a clone artifact, ``method`` is
                 unknown, ``n_permutations`` is 1 or negative, ``random_seed`` is
-                negative or 2**64 or more, no cell has both a clone and a
-                group, fewer than two groups hold a cell with a clone, no two
-                groups share the labels that the clones keep apart, a column
-                of the groups is missing or named twice, two key columns share
-                a name, two groups get one name, or
-                ``"normalized_covariance"`` meets fewer than two clones.
+                negative or 2**64 or more, the clones' import read no row, no
+                cell has both a clone and a group, fewer than two groups hold a
+                cell with a clone, no two groups share the labels that the
+                clones keep apart, a column of the groups is missing or named
+                twice, two key columns share a name, two groups get one name,
+                or ``"normalized_covariance"`` meets fewer than two clones.
             KeyError: If the store holds no such ``clones`` artifact, or not the
                 receptors of the clonotypes.
             RuntimeError: If the ``clones`` artifact or the receptors of the
@@ -2739,6 +2806,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             ledger=ledger,
         )
         if len(pair_cells) == 0:
+            self._require_file_rows(clones)
             raise ValueError("No cell has both a clone and a group")
         if len(keys) < 2:
             raise ValueError("Coupling needs at least two groups of cells with a clone")
@@ -2900,11 +2968,11 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             TypeError: If an argument has the wrong type.
             ValueError: If ``clones`` is not a clone artifact, ``early`` or
                 ``late`` is not a cell selection or selects no cell, a cell is
-                both early and late, the clones give no early cell or no late
-                cell a clone, no late cell with a clone has a fate, fewer than
-                two fates hold a late cell, a column of
-                the fates is missing or named twice, two key columns share a
-                name, or two fates get one name.
+                both early and late, the clones' import read no row, the
+                clones give no early cell or no late cell a clone, no late
+                cell with a clone has a fate, fewer than two fates hold a late
+                cell, a column of the fates is missing or named twice, two key
+                columns share a name, or two fates get one name.
             KeyError: If the store holds no such ``clones`` artifact, or not the
                 receptors of the clonotypes.
             RuntimeError: If the ``clones`` artifact or the receptors of the
@@ -2963,6 +3031,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             source, early, ledger, with_kept=False
         )
         if not (early_codes >= 0).any():
+            self._require_file_rows(clones)
             raise ValueError(
                 f"None of the {n_early} cells of early has a clone; pass early "
                 "cells that the clones give a clone, or clones imported on the "

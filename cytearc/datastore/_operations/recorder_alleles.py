@@ -76,6 +76,7 @@ from .cell_barcodes import (
     BarcodeFile,
     CellBarcodeJoin,
     barcode_files,
+    empty_files_rule,
     unmatched_barcode_rules,
 )
 from .clone_artifacts import plan_clones, write_clones
@@ -319,9 +320,11 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
         the files' rows, ``unmatchedRows``, those of no selected cell,
         ``slotsBeyondLength``, the slots beyond their integration's length
         that hold an insertion, and ``rowsWithoutIntegration``, the rows
-        that name none; each of the last two above 0 gives a warning too. A
-        file is identified by the SHA-256 of its bytes and of the files read
-        beside it, so the order of the files does not matter.
+        that name none; each of the last two above 0 gives a warning too,
+        and a ``fileRows`` of 0, as files of a header alone give, gives one
+        that names the files. A file is identified by the SHA-256 of its
+        bytes and of the files read beside it, so the order of the files does
+        not matter.
 
         Args:
             paths: One allele file, or several, plain or gzip-compressed: a
@@ -405,7 +408,20 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
             sources=sources,
             invalidate_cache=invalidate_cache,
         )
-        warnings = _allele_import_rules(files_text("allele", len(files)))
+        warnings = (
+            *_allele_import_rules(files_text("allele", len(files))),
+            empty_files_rule(
+                "fileRows",
+                "row",
+                files,
+                kind="allele",
+                outcome="no selected cell has an allele",
+                remedy=(
+                    "Pass a file that lists the cells' recorder alleles.",
+                    "Pass files that list the cells' recorder alleles.",
+                ),
+            ),
+        )
         planned = self._plan_alleles(arguments, cell_selection, n_cells)
         if planned.reused:
             # Saved alleles warn as they did when they were imported.

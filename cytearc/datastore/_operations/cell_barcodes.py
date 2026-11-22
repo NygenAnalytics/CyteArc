@@ -7,8 +7,9 @@ first keep the part of the barcode that its ``barcode`` group matches. Every
 importer joins its files through ``CellBarcodeJoin`` and orders and identifies
 them through ``barcode_files``, so they share the rules, the diagnostics that
 count the barcodes that name no cell of the store and those that name a cell
-outside the selection, and the warning about the first. The join charges what
-it holds to the importer's memory ledger.
+outside the selection, and the warning about the first; importers that keep
+files without a row share the warning that names such files. The join charges
+what it holds to the importer's memory ledger.
 """
 
 import functools
@@ -34,6 +35,7 @@ from ...utils.memory_budget import (
     python_text_bytes,
 )
 from ...utils.arguments import quoted_value
+from .clone_steps import files_text
 
 __all__ = [
     "LOOKUP_BYTES_PER_CELL",
@@ -43,6 +45,7 @@ __all__ = [
     "barcode_files",
     "barcode_pattern",
     "derived_id_bytes",
+    "empty_files_rule",
     "id_hashing_bytes",
     "join_bytes",
     "lookup_bytes",
@@ -854,5 +857,36 @@ def unmatched_barcode_rules(files: str) -> tuple[DiagnosticRule, ...]:
             "unmatchedBarcodes",
             applies=lambda diagnostics: int(diagnostics["unmatchedBarcodes"]) > 0,
             message=lambda diagnostics: unmatched_barcodes_message(diagnostics, files),
+        ),
+    )
+
+
+def empty_files_rule(
+    diagnostic: str,
+    noun: str,
+    files: Sequence[BarcodeFile],
+    *,
+    kind: str,
+    outcome: str,
+    remedy: tuple[str, str],
+) -> DiagnosticRule:
+    """Return an import's warning when its files hold nothing that it reads, naming them.
+
+    The warning applies when the saved ``diagnostic``, the import's count of
+    each ``noun`` that it read from its files, such as ``"row"`` or
+    ``"contig"``, is 0, as a table of a header alone gives, so a reused
+    import gives it again. It names the files of ``kind``, such as
+    ``"clone"`` for "the clone file", says the ``outcome``, such as "no
+    selected cell has a clone", and ends with the first ``remedy`` for one
+    file and the second for several.
+    """
+    text = files_text(kind, len(files))
+    names = ", ".join(quoted_value(os.fspath(file.path)) for file in files)
+    advice = remedy[0] if len(files) == 1 else remedy[1]
+    return DiagnosticRule(
+        diagnostic,
+        applies=lambda diagnostics: int(diagnostics[diagnostic]) == 0,
+        message=lambda _diagnostics: (
+            f"The import read no {noun} from {text} {names}, so {outcome}. {advice}"
         ),
     )
