@@ -2231,8 +2231,12 @@ def _assert_calls_run_within_the_budget_they_name(
     of which names a budget that runs the call or at which a later step
     refuses and names more. At the last budget the call runs again, traced,
     and ``check(name, result)`` checks what it returned at the store's own
-    budget. A call over its budget is named with the allocations near its
-    peak.
+    budget. A call over its budget is traced once more, since CPython grows
+    its own tables, such as the one of interned strings, now and then as a
+    session interns names, and the call that grows one holds the new table
+    once, 7.7 MB when it makes room for 349,525 strings, which no step
+    charges. A call over its budget in both runs is named with the
+    allocations near its peak.
     """
     unbounded = store.memoryBytes
     peaks = {}
@@ -2254,14 +2258,18 @@ def _assert_calls_run_within_the_budget_they_name(
                     budget = refused.needed_bytes
             gc.collect()
             full = _full_collections()
-            tracemalloc.start()
-            try:
-                before, _ = tracemalloc.get_traced_memory()
-                result = call()
-                _, peak = tracemalloc.get_traced_memory()
-            finally:
-                tracemalloc.stop()
-            peaks[call_name] = (peak - before, budget)
+            for _ in range(2):
+                tracemalloc.start()
+                try:
+                    before, _ = tracemalloc.get_traced_memory()
+                    result = call()
+                    _, peak = tracemalloc.get_traced_memory()
+                finally:
+                    tracemalloc.stop()
+                peaks[call_name] = (peak - before, budget)
+                if peak - before <= budget:
+                    break
+                gc.collect()
             full_collections[call_name] = (
                 full - last_full,
                 _full_collections() - full,
