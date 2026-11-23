@@ -1528,7 +1528,9 @@ class BaseDataStore:
                            computed. Clipped integer columns are returned as float64.
 
         Returns:
-            The requested values; a feature is NaN in cells its assay did not measure.
+            The requested values; a feature is NaN in cells that its assay did
+            not measure, and in cells whose source of a merge did not measure
+            it, as the assay's ``measured_in_<source>`` feature columns record.
         """
         from ..utils.arguments import clip_fraction_argument
 

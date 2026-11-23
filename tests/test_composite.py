@@ -1363,19 +1363,18 @@ def _zeros_read_as_counts(first: str, *, adt: bool = False, shared: bool = True)
     assay is of type ADT, which the ADT recipe reads, and ``shared`` whether
     every source measured some feature.
     """
-    if adt:
-        zeros = (
-            " The composite reads zero counts for the features a source lacks; "
-            f"columns such as 'measured_in_{first}' record what each source "
-            "measured, so the ADT recipe leaves those antibodies out of its panel "
-            "and markers, while other analyses read the zeros as counts."
+    zeros = (
+        " The composite reads zero counts for the features a source lacks; columns "
+        f"such as 'measured_in_{first}' record what each source measured, so "
+        + (
+            "plots, marker search, compare.test and the ADT recipe leave those "
+            "zeros out, while normalization and scores still read them as counts."
+            if adt
+            else "plots, marker search and compare.test leave those zeros out, "
+            "while normalization, feature selection and scores still read them "
+            "as counts."
         )
-    else:
-        zeros = (
-            " The composite reads zero counts for the features a source lacks, "
-            f"which analyses read as counts; columns such as 'measured_in_{first}' "
-            "record what each source measured."
-        )
+    )
     return zeros + (
         " Pass features='intersection' to keep only the features that every "
         "source measured."
@@ -1489,9 +1488,17 @@ def test_composite_records_which_features_each_source_measured(tmp_path, feature
     assert {
         column: stored[f"featureData/{column}"].attrs.asdict() for column in columns
     } == {
-        f"measured_in_{name}": {"role": "measured_features", "source": name}
+        f"measured_in_{name}": {
+            "role": "measured_features",
+            "source": name,
+            "sourceColumn": "dataset",
+        }
         for name in panels
     }
+    # The composite's column of sources is the categorical column they name.
+    sources = joint.cells._get_array("dataset")
+    assert sources.attrs["role"] == "cell_sources"
+    assert sources.categories.tolist() == list(panels)
 
 
 def test_composite_records_a_source_whose_name_holds_a_path_separator(tmp_path):
@@ -1761,9 +1768,10 @@ def test_unshared_features_warning_names_its_combinations():
     assert unshared_features_warning(
         "RNA", alignment, ["a", "b"], combination="merge", assay_type="RNA"
     ) == shared.format("merged") + (
-        " The merge writes zero counts for the features a source lacks, which "
-        "analyses read as counts; columns such as 'measured_in_a' record what each "
-        "source measured."
+        " The merge writes zero counts for the features a source lacks; columns "
+        "such as 'measured_in_a' record what each source measured, so plots, "
+        "marker search and compare.test leave those zeros out, while "
+        "normalization, feature selection and scores still read them as counts."
     )
     assert unshared_features_warning(
         "RNA", alignment, ["a", "b"], combination="composite", assay_type="RNA"

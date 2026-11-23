@@ -72,6 +72,17 @@ QUOTED_LIMIT = 80
 RANDOM_STATE_MAX = 2**32 - 1
 
 
+NAMED_EXAMPLES = 5
+"""The most values that a message names before counting the rest."""
+
+
+def quoted_examples(values: Sequence[object], limit: int = NAMED_EXAMPLES) -> str:
+    """Return the first ``limit`` of ``values`` quoted, then how many others there are, as ``'a', 'b' and 3 more``."""
+    shown = ", ".join(map(quoted_value, np.asarray(values[:limit]).tolist()))
+    more = len(values) - limit
+    return shown + (f" and {more:,} more" if more > 0 else "")
+
+
 def quoted_value(value: object) -> str:
     """Return ``repr(value)`` for an error message, cut to ``QUOTED_LIMIT``.
 

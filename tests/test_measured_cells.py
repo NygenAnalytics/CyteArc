@@ -11,8 +11,11 @@ writable and on a read-only store, and runs over the cells that
 missing values instead of zero expression.
 """
 
+import asyncio
 import pickle
+import shutil
 import stat
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,6 +25,7 @@ import numpy as np
 import pandas as pd
 import pytest
 import zarr
+from zarr.storage import LocalStore, WrapperStore
 
 from cytearc import DataStore
 from cytearc.datastore._pipeline.recipes.adt import resolve_adt
@@ -36,16 +40,24 @@ from cytearc.features.values import (
 from cytearc.mapping.reference import MappingReference
 from cytearc.merge import DataStoreMerge
 from cytearc.metadata import MetaData
+from cytearc.metadata import membership as membership_module
 from cytearc.metadata.membership import (
     UnmeasuredCellsError,
+    cell_sources,
     count_unmeasured_cells_with_counts,
+    features_measured_by_cells,
+    measured_features_by_source,
     measured_rows,
     measured_selection,
     membership_attributes,
     require_measured_cells,
+    require_measured_features,
 )
 from cytearc.metadata.selection import CellField, FeatureRef, NormalizationSpec
 from cytearc.storage.artifacts import ArtifactRef, fingerprint_array, list_artifacts
+from cytearc.storage.arrays import create_metadata_column
+from cytearc.storage.categorical import CategoricalColumn
+from cytearc.storage.feature_selection import read_feature_selection_indices
 from cytearc.writers._store import write_membership_column
 from tests.fixtures_datastore import build_neighborhood_graph
 from tests.storage_helpers import by_cell_id, write_count_store
@@ -2036,3 +2048,866 @@ def test_argument_and_assay_type_errors_come_before_the_membership_check(
     with pytest.raises(error, match=match) as raised:
         call(measured.open(), measured)
     assert not isinstance(raised.value, UnmeasuredCellsError), operation
+
+
+# Features that a source of a merge did not measure ---------------------------
+
+_SHARED_ANTIBODIES = ["CD3", "CD4", "CD8", "CD19", "CD14", "CD16"]
+_PANELS = {
+    "left": [*_SHARED_ANTIBODIES, "CD45RA", "CD27"],
+    "right": [*_SHARED_ANTIBODIES, "CD20"],
+}
+_N_STUDY = 150
+
+
+@dataclass(frozen=True)
+class _PanelStores:
+    """A merge of two studies' ADT stores, beside the stores that it merged."""
+
+    base: Path
+
+    def open(self, name: str = "merged") -> DataStore:
+        return DataStore(
+            str(self.base / f"{name}.zarr"),
+            default_assay="ADT",
+            min_features_per_cell=0,
+            nthreads=1,
+        )
+
+
+@pytest.fixture(scope="module")
+def panels(tmp_path_factory) -> _PanelStores:
+    """Merge two studies of T and B cells, in opposite proportions, with antibodies of their own.
+
+    T cells count 200 of CD3 and B cells 200 of CD19 on average; every other
+    count follows Poisson(10), those of CD45RA and CD27, which only the left
+    study stained, and CD20, which only the right stained, included.
+    """
+    base = tmp_path_factory.mktemp("panels")
+    rng = np.random.default_rng(0)
+    for name, t_share in (("left", 0.8), ("right", 0.2)):
+        panel = _PANELS[name]
+        t_cell = rng.random(_N_STUDY) < t_share
+        rates = np.full((_N_STUDY, len(panel)), 10.0)
+        rates[t_cell, panel.index("CD3")] = 200
+        rates[~t_cell, panel.index("CD19")] = 200
+        write_count_store(
+            str(base / f"{name}.zarr"),
+            {"ADT": rng.poisson(rates)},
+            "uint16",
+            feature_ids={"ADT": panel},
+        )
+    stores = _PanelStores(base)
+    DataStoreMerge(
+        [stores.open(name) for name in _PANELS],
+        str(base / "merged.zarr"),
+        list(_PANELS),
+        nthreads=1,
+    ).dump()
+    merged = stores.open()
+    ids = merged.cells.fetch_all("ids").astype(str)
+    left = np.char.startswith(ids, "left__")
+    cd3 = np.asarray(merged.ADT.rawData[:, [_SHARED_ANTIBODIES.index("CD3")]].compute())
+    merged.cells.insert("left_cells", by_cell_id(merged.cells, left))
+    merged.cells.insert(
+        "study", by_cell_id(merged.cells, np.where(left, "left", "right"))
+    )
+    merged.cells.insert(
+        "cell_type", by_cell_id(merged.cells, np.where(cd3.ravel() > 100, "T", "B"))
+    )
+    # A live layout: x is the cell's row.
+    merged.cells.insert(
+        "xy1", by_cell_id(merged.cells, np.arange(len(ids), dtype=np.float64))
+    )
+    merged.cells.insert(
+        "xy2", by_cell_id(merged.cells, (np.arange(len(ids)) % 7).astype(np.float64))
+    )
+    return stores
+
+
+def _values_by_cell(
+    store: DataStore, feature: str, merged_ids: np.ndarray
+) -> np.ndarray:
+    """Return one study's own display values of ``feature`` for merged cells of that study."""
+    own = fetch_normalized_feature_matrix(
+        store,
+        [resolve_feature(store, FeatureRef(feature, assay="ADT"))],
+        np.arange(store.cells.N),
+    )[:, 0]
+    by_id = dict(zip(store.cells.fetch_all("ids").astype(str), own, strict=True))
+    return np.array([by_id[str(cell).split("__", 1)[1]] for cell in merged_ids])
+
+
+def test_display_reads_show_a_feature_that_a_cells_source_did_not_measure_as_missing(
+    panels,
+) -> None:
+    store = panels.open()
+    ids = store.cells.fetch_all("ids").astype(str)
+    left = np.char.startswith(ids, "left__")
+    every = np.arange(len(ids))
+    names = ("CD45RA", "CD3", "CD20")
+    features = [resolve_feature(store, FeatureRef(name, assay="ADT")) for name in names]
+    unmeasured: dict[str, np.ndarray] = {}
+
+    matrix = fetch_normalized_feature_matrix(
+        store, features, every, unmeasured=unmeasured
+    )
+
+    # Each study's own antibody is missing in the other study's cells, and its
+    # cells read what a read of them alone gives: CLR over the study's cells.
+    assert np.isnan(matrix[~left, 0]).all() and np.isnan(matrix[left, 2]).all()
+    np.testing.assert_allclose(
+        matrix[left, 0], _values_by_cell(panels.open("left"), "CD45RA", ids[left])
+    )
+    np.testing.assert_allclose(
+        matrix[~left, 2], _values_by_cell(panels.open("right"), "CD20", ids[~left])
+    )
+    # Both studies measured CD3, whose CLR spans every cell, as the assay's own
+    # normalization gives it.
+    cd3 = int(store.ADT.feats.get_index_by(["CD3"], "names")[0])
+    normed = store.ADT.normed(cell_idx=every, feat_idx=np.array([cd3]))
+    np.testing.assert_allclose(
+        matrix[:, 1], np.concatenate(list(normed.stream_blocks(nthreads=1)))[:, 0]
+    )
+    # The assay measured every cell, so no cell is unmeasured as a whole.
+    assert unmeasured == {}
+    streamed = np.full_like(matrix, -1.0)
+    for slots, start, values in iter_normalized_feature_blocks(store, features, every):
+        streamed[start : start + len(values), slots] = values
+    np.testing.assert_array_equal(streamed, matrix)
+    # Any order of cells reads the same values, to the rounding of the CLR's
+    # sums, and the cells of the right study alone have no value of CD45RA.
+    np.testing.assert_allclose(
+        fetch_normalized_feature_matrix(store, features, every[::-1]),
+        matrix[::-1],
+        rtol=1e-12,
+    )
+    assert np.isnan(
+        fetch_normalized_feature_matrix(store, features[:1], np.flatnonzero(~left))
+    ).all()
+    np.testing.assert_array_equal(
+        store.get_cell_vals("ADT", "I", "CD45RA"), matrix[:, 0]
+    )
+    # The left study measured CD45RA and CD3, so a read of its cells reads both
+    # in one pass and normalizes CD3 over them, as the study's own store does.
+    left_rows = np.flatnonzero(left)
+    blocks = list(iter_normalized_feature_blocks(store, features[:2], left_rows))
+    assert {tuple(slots) for slots, _, _ in blocks} == {(0, 1)}
+    np.testing.assert_allclose(
+        fetch_normalized_feature_matrix(store, features[:2], left_rows),
+        np.column_stack(
+            [
+                _values_by_cell(panels.open("left"), name, ids[left])
+                for name in names[:2]
+            ]
+        ),
+    )
+    # A slot that averages a shared antibody with CD45RA has a value only where
+    # both were measured.
+    store.ADT.feats.insert(
+        "pair",
+        np.isin(store.ADT.feats.fetch_all("ids"), ["CD3", "CD45RA"]),
+    )
+    pair_indices = np.flatnonzero(store.ADT.feats.fetch_all("pair"))
+    from cytearc.features.values import measured_feature_means
+
+    means = measured_feature_means(store.ADT, pair_indices, every, nthreads=1)
+    assert np.isnan(means[~left]).all()
+    np.testing.assert_allclose(
+        means[left],
+        measured_feature_means(store.ADT, pair_indices, left_rows, nthreads=1),
+    )
+
+
+def test_plots_draw_a_feature_that_a_cells_source_did_not_measure_as_missing(
+    panels,
+) -> None:
+    plotting = _plotting()
+    import matplotlib
+
+    store = panels.open()
+    ids = store.cells.fetch_all("ids").astype(str)
+    left = np.char.startswith(ids, "left__")
+    own = _values_by_cell(panels.open("left"), "CD45RA", ids[left])
+
+    layout = plotting.embedding(store, layout_key="xy", color_by="CD45RA", show=False)
+    try:
+        (axis,) = layout.axes.values()
+        points = axis.collections[0]
+        rows = np.asarray(points.get_offsets())[:, 0].astype(int)
+        gray = np.all(
+            np.isclose(
+                points.get_facecolors(),
+                matplotlib.colors.to_rgba(plotting.ColorScale().missing_color),
+            ),
+            axis=1,
+        )
+        # The right study's cells take the color of missing values, and the
+        # color limits come from the left study's values alone.
+        np.testing.assert_array_equal(gray, ~left[rows])
+        assert layout.provenance.extras["color_limits"] == {
+            "CD45RA": (float(own.min()), float(own.max()))
+        }
+    finally:
+        layout.close()
+
+    dots = plotting.dotplot(store, features=["CD45RA"], group_by="study", show=False)
+    try:
+        table = dots.tables["aggregate"].set_index("group")
+        # The right study has no cell with a value of CD45RA to summarize.
+        assert table.loc["right", "n_cells"] == 0
+        assert np.isnan(table.loc["right", "mean"])
+        assert table.loc["left", "n_cells"] == _N_STUDY
+        np.testing.assert_allclose(table.loc["left", "mean"], own.mean())
+    finally:
+        dots.close()
+
+    violins = plotting.distribution(
+        store, "CD45RA", grouping=CellField("study"), show=False
+    )
+    try:
+        values = violins.tables["CD45RA"]["value"].to_numpy()
+        np.testing.assert_allclose(np.sort(values), np.sort(own))
+    finally:
+        violins.close()
+
+
+def test_marker_search_ranks_the_features_that_every_selected_cells_source_measured(
+    panels,
+) -> None:
+    store = panels.open()
+    every = store.snapshot_cell_selection("I")
+    labels = store.snapshot_cluster_labels("cell_type", cell_selection=every)
+    universe = store.features.universe(from_assay="ADT")
+    names = store.ADT.feats.fetch_all("names").astype(str)
+    shared = np.isin(names, _SHARED_ANTIBODIES)
+
+    with pytest.warns(UserWarning) as caught:
+        ref = store.markers.search(labels, features=universe)
+    assert [str(warning.message) for warning in caught] == [
+        "The marker search leaves out the features that some source of the "
+        "selected cells did not measure, since their zero counts in its cells "
+        "are not measurements: 'CD45RA', 'CD27', 'CD20'."
+    ]
+    # The search ranks the shared antibodies, as a search of them alone does.
+    ranked = store.artifacts.inspect(ref).input_ref("feature_selection")
+    assert read_feature_selection_indices(store.zw, "ADT", ranked).tolist() == (
+        np.flatnonzero(shared).tolist()
+    )
+    alone = store.markers.search(
+        labels,
+        features=store.features.snapshot(
+            from_assay="ADT", feature_indexes=np.flatnonzero(shared).tolist()
+        ),
+    )
+    markers = store.markers.load(ref)
+    pd.testing.assert_frame_equal(markers, store.markers.load(alone))
+    best = markers.sort_values("score", ascending=False).groupby("group_id")
+    assert dict(best["feature_name"].first()) == {"B": "CD19", "T": "CD3"}
+
+    # The cells of the left study measured its own antibodies, which a search
+    # of them keeps.
+    left_labels = store.snapshot_cluster_labels(
+        "cell_type", cell_selection=store.snapshot_cell_selection("left_cells")
+    )
+    with pytest.warns(UserWarning, match="its cells are not measurements: 'CD20'.$"):
+        left_ref = store.markers.search(left_labels, features=universe)
+    left_ranked = store.artifacts.inspect(left_ref).input_ref("feature_selection")
+    assert (
+        names[read_feature_selection_indices(store.zw, "ADT", left_ranked)].tolist()
+        == _PANELS["left"]
+    )
+
+    # Labels that the search refuses leave no selection of measured features,
+    # such as the CD3 and CD45RA of three antibodies that the left study's
+    # cells would keep.
+    one_study = store.snapshot_cluster_labels(
+        "study", cell_selection=store.snapshot_cell_selection("left_cells")
+    )
+    trio = store.features.snapshot(
+        from_assay="ADT",
+        feature_indexes=np.flatnonzero(
+            np.isin(names, ["CD3", "CD45RA", "CD20"])
+        ).tolist(),
+    )
+    selections = len(
+        list_artifacts(store.zw, scope="assay", assay="ADT", kind="feature_selection")
+    )
+    with pytest.raises(ValueError, match="at least two populated groups"):
+        store.markers.search(one_study, features=trio)
+    assert selections == len(
+        list_artifacts(store.zw, scope="assay", assay="ADT", kind="feature_selection")
+    )
+
+    only_own = store.features.snapshot(
+        from_assay="ADT",
+        feature_indexes=np.flatnonzero(np.isin(names, ["CD45RA", "CD20"])).tolist(),
+    )
+    with pytest.raises(ValueError) as refused:
+        store.markers.search(labels, features=only_own)
+    assert str(refused.value) == (
+        "No selected feature was measured by the source of every selected cell; "
+        "some source of the cells did not measure 'CD45RA', 'CD20'. Search the "
+        "markers of the cells of the sources that measured them, or of features "
+        "that every source measured."
+    )
+
+
+def test_analyses_refuse_a_feature_that_a_source_of_their_cells_did_not_measure(
+    panels,
+) -> None:
+    store = panels.open()
+    every = store.snapshot_cell_selection("I")
+    remedy = (
+        "Assay 'ADT' records that source 'right' did not measure 'CD45RA', so the "
+        "zero counts of its cells are not measurements; "
+    )
+    with pytest.raises(ValueError) as refused:
+        store.compare.test(["CD45RA"], CellField("cell_type"), skip_save=True)
+    assert str(refused.value) == remedy + (
+        "test the cells of the sources that measured it, with a cell_selection or "
+        "subset_by that leaves the others out"
+    )
+    # Both studies measured CD3, and the left study CD45RA.
+    left_cells = store.snapshot_cell_selection("left_cells")
+    with pytest.warns(UserWarning, match="^Cell-level statistical testing"):
+        # A metadata key reads no feature.
+        store.compare.test(["CD3", "xy2"], CellField("cell_type"), skip_save=True)
+        store.compare.test(["xy2"], CellField("cell_type"), skip_save=True)
+        store.compare.test(
+            ["CD45RA"],
+            CellField("cell_type"),
+            cell_selection=left_cells,
+            skip_save=True,
+        )
+        # So do the cells that subset_by keeps.
+        store.compare.test(
+            ["CD45RA"], CellField("cell_type"), subset_by="left_cells", skip_save=True
+        )
+
+    graph = _graph(store, "ADT", every, store.features.universe(from_assay="ADT"))
+    diffusion = store.imputation.diffusion(graph)
+    with pytest.raises(ValueError) as refused:
+        store.imputation.compute_imputed(["CD3", "CD45RA"], diffusion)
+    assert str(refused.value) == remedy + (
+        "impute it over a diffusion operator of the cells of the sources that "
+        "measured it"
+    )
+    assert np.isfinite(store.imputation.compute_imputed("CD3", diffusion)).all()
+
+
+def test_each_cells_source_is_its_label_in_the_merges_column_of_sources(
+    panels, monkeypatch
+) -> None:
+    store = panels.open()
+    ids = store.cells.fetch_all("ids").astype(str)
+    left = np.char.startswith(ids, "left__")
+    # The merge stores each cell's source in the categorical column 'dataset',
+    # which every column of the record names.
+    column = store.cells._get_array("dataset")
+    assert isinstance(column, CategoricalColumn)
+    assert column.categories.tolist() == ["left", "right"]
+    assert column.attrs["role"] == "cell_sources"
+    np.testing.assert_array_equal(
+        store.cells.fetch_all("dataset"), np.where(left, "left", "right")
+    )
+    record = measured_features_by_source(store.ADT.feats)
+    assert record is not None
+    assert (record.sources, record.sourceColumn) == (["left", "right"], "dataset")
+    assert record.columns == ["measured_in_left", "measured_in_right"]
+    expected = np.where(left, 0, 1)
+    rows = np.arange(len(ids))
+    np.testing.assert_array_equal(
+        cell_sources(store.cells, store.ADT.feats, rows, record, assay="ADT"), expected
+    )
+    # Blocks of a few cells, in any order, give each cell the same source.
+    monkeypatch.setattr(membership_module, "_SOURCE_ROWS", 7)
+    picked = rows[::-3]
+    np.testing.assert_array_equal(
+        cell_sources(store.cells, store.ADT.feats, picked, record, assay="ADT"),
+        expected[picked],
+    )
+    # The sources of a block of left cells and a block of right cells are both
+    # counted, so only the shared antibodies count as measured.
+    both = np.concatenate([np.flatnonzero(left)[:7], np.flatnonzero(~left)[:7]])
+    measured = features_measured_by_cells(
+        store.cells, store.ADT.feats, both, assay="ADT"
+    )
+    assert measured is not None
+    assert (
+        store.ADT.feats.fetch_all("names").astype(str)[measured].tolist()
+        == _SHARED_ANTIBODIES
+    )
+    # The cells of the right study measured the shared antibodies and CD20,
+    # and a label that reads CD3 and CD45RA needs both in every cell.
+    right_rows = np.flatnonzero(~left)
+    measured = features_measured_by_cells(
+        store.cells, store.ADT.feats, right_rows, assay="ADT"
+    )
+    names = store.ADT.feats.fetch_all("names").astype(str)
+    assert measured is not None and names[measured].tolist() == _PANELS["right"]
+    both = np.flatnonzero(np.isin(names, ["CD3", "CD45RA"])).tolist()
+    with pytest.raises(ValueError, match="^Assay 'ADT' records that source 'right'"):
+        require_measured_features(
+            store.cells,
+            store.ADT.feats,
+            rows,
+            {"CD3 and CD45RA": both},
+            assay="ADT",
+            remedy="probe",
+        )
+    # A store without a record measured every feature in every cell.
+    own = panels.open("left")
+    assert measured_features_by_source(own.ADT.feats) is None
+    assert (
+        features_measured_by_cells(own.cells, own.ADT.feats, rows[:3], assay="ADT")
+        is None
+    )
+    require_measured_features(
+        own.cells,
+        own.ADT.feats,
+        rows[:3],
+        {"CD45RA": [6]},
+        assay="ADT",
+        remedy="unused",
+    )
+
+
+def _copied_panels(panels: _PanelStores, tmp_path: Path) -> DataStore:
+    """Return a copy of the merge of the panels' studies, which a test may change."""
+    shutil.copytree(panels.base / "merged.zarr", tmp_path / "merged.zarr")
+    return _PanelStores(tmp_path).open()
+
+
+class _LatencyStore(WrapperStore):
+    """A store whose every get waits ``delay`` seconds first, as a remote store's round trip does."""
+
+    def __init__(self, store: Any, delay: float) -> None:
+        super().__init__(store)
+        self.delay = delay
+
+    def with_read_only(self, read_only: bool = False) -> "_LatencyStore":
+        return _LatencyStore(self._store.with_read_only(read_only), self.delay)
+
+    async def get(self, key: str, prototype: Any, byte_range: Any = None) -> Any:
+        await asyncio.sleep(self.delay)
+        return await self._store.get(key, prototype, byte_range)
+
+
+def _record_lookup_seconds(location: Path, n_sources: int, delay: float) -> float:
+    """Return how long a read of one feature's row of a record of ``n_sources`` sources takes when every get waits ``delay``."""
+    names = ["CD3", "CD4", "CD8"]
+    write_count_store(
+        str(location),
+        {"ADT": np.full((4, len(names)), 3)},
+        "uint16",
+        feature_ids={"ADT": names},
+    )
+    stored = zarr.open_group(str(location), mode="r+")
+    for index in range(n_sources):
+        source = f"s{index:02d}"
+        create_metadata_column(
+            stored["ADT/featureData"],
+            f"measured_in_{source}",
+            data=np.array([True, index % 2 == 0, True]),
+            dtype=bool,
+            attributes={
+                "role": "measured_features",
+                "source": source,
+                "sourceColumn": "dataset",
+            },
+        )
+    remote = zarr.open_group(
+        store=_LatencyStore(LocalStore(str(location)), delay),
+        mode="r",
+        path="ADT/featureData",
+    )
+    table = MetaData(remote)
+    start = time.perf_counter()
+    record = measured_features_by_source(table, [1])
+    elapsed = time.perf_counter() - start
+    assert record is not None and len(record.sources) == n_sources
+    np.testing.assert_array_equal(record.measured[:, 0], np.arange(n_sources) % 2 == 0)
+    return elapsed
+
+
+def test_a_record_of_many_sources_is_read_in_about_the_round_trips_of_few(
+    tmp_path,
+) -> None:
+    # Each source's column costs a round trip to open and one to read. Read
+    # one after another, 24 sources would take 12 times as long as 2.
+    delay = 0.03
+    few = _record_lookup_seconds(tmp_path / "few.zarr", 2, delay)
+    many = _record_lookup_seconds(tmp_path / "many.zarr", 24, delay)
+    assert few >= 2 * delay
+    assert many < 3 * few, (few, many)
+
+
+def test_a_record_without_its_cells_sources_is_refused_with_the_calls_that_drop_it(
+    panels, tmp_path
+) -> None:
+    store = _copied_panels(panels, tmp_path)
+    stored = zarr.open_group(str(tmp_path / "merged.zarr"), mode="r+")
+    for name in ("measured_in_left", "measured_in_right"):
+        attributes = stored[f"ADT/featureData/{name}"].attrs
+        attributes.put(
+            {key: value for key, value in attributes.items() if key != "sourceColumn"}
+        )
+    store = _PanelStores(tmp_path).open()
+    drop = (
+        "Merge the sources again, or drop the record with "
+        "ds.ADT.feats.drop('measured_in_left'), "
+        "ds.ADT.feats.drop('measured_in_right'), after which analyses read the "
+        "zero counts of a feature in the cells of a source that did not measure "
+        "it as counts again."
+    )
+    with pytest.raises(ValueError) as refused:
+        store.get_cell_vals("ADT", "I", "CD45RA")
+    assert str(refused.value) == (
+        "Assay 'ADT' records which features each source of a merge measured, in "
+        "its feature columns 'measured_in_left', 'measured_in_right', but the "
+        "cell column that names each cell's source, which a merge or a composite "
+        "writes beside the record, is missing. " + drop
+    )
+    # A feature that every source measured needs no cell's source.
+    np.testing.assert_array_equal(
+        store.get_cell_vals("ADT", "I", "CD3"),
+        panels.open().get_cell_vals("ADT", "I", "CD3"),
+    )
+    with pytest.warns(UserWarning, match="^Cell-level statistical testing"):
+        store.compare.test(["CD3"], CellField("cell_type"), skip_save=True)
+    with pytest.raises(ValueError, match="is missing. Merge the sources again"):
+        store.compare.test(["CD45RA"], CellField("cell_type"), skip_save=True)
+    # So does a marker search of the shared antibodies alone.
+    names = store.ADT.feats.fetch_all("names").astype(str)
+    labels = store.snapshot_cluster_labels(
+        "cell_type", cell_selection=store.snapshot_cell_selection("I")
+    )
+    shared = store.features.snapshot(
+        from_assay="ADT",
+        feature_indexes=np.flatnonzero(np.isin(names, _SHARED_ANTIBODIES)).tolist(),
+    )
+    store.markers.search(labels, features=shared)
+    with pytest.raises(ValueError, match="is missing. Merge the sources again"):
+        store.markers.search(labels, features=store.features.universe(from_assay="ADT"))
+    # Without the record, the zeros of the right study read as counts again.
+    for name in ("measured_in_left", "measured_in_right"):
+        store.ADT.feats.drop(name)
+    assert np.isfinite(store.get_cell_vals("ADT", "I", "CD45RA")).all()
+
+
+def test_each_group_of_a_display_read_charges_the_cells_it_holds(
+    panels, monkeypatch
+) -> None:
+    from cytearc.assay import normalization
+
+    store = panels.open()
+    every = np.arange(store.cells.N)
+    features = [
+        resolve_feature(store, FeatureRef(name, assay="ADT"))
+        for name in ("CD45RA", "CD3", "CD20")
+    ]
+    charged: list[int] = []
+    read = normalization.feature_value_blocks
+
+    def recorded(*args: Any, resident_bytes: int, **kwargs: Any) -> Any:
+        charged.append(resident_bytes)
+        return read(*args, resident_bytes=resident_bytes, **kwargs)
+
+    monkeypatch.setattr(normalization, "feature_value_blocks", recorded)
+    list(iter_normalized_feature_blocks(store, features, every))
+
+    # Three groups: CD45RA over the 150 left cells, CD3 over all 300, CD20
+    # over the 150 right cells. A group's read holds the other groups' masks
+    # of one byte per cell, and a group of some cells also its own mask and
+    # the 8-byte rows of its cells.
+    masks = 2 * len(every)
+    own = len(every) + 150 * 8
+    assert charged == [masks - len(every) + own, masks, masks - len(every) + own]
+
+
+def test_a_record_that_names_a_missing_cell_column_is_refused(panels, tmp_path) -> None:
+    _copied_panels(panels, tmp_path)
+    stored = zarr.open_group(str(tmp_path / "merged.zarr"), mode="r+")
+    for name in ("measured_in_left", "measured_in_right"):
+        stored[f"ADT/featureData/{name}"].attrs.update({"sourceColumn": "gone"})
+    store = _PanelStores(tmp_path).open()
+    with pytest.raises(ValueError) as refused:
+        store.get_cell_vals("ADT", "I", "CD45RA")
+    assert str(refused.value).startswith(
+        "Assay 'ADT' records which features each source of a merge measured, in "
+        "its feature columns 'measured_in_left', 'measured_in_right', but the "
+        "cell column 'gone' that names each cell's source, which a merge or a "
+        "composite writes beside the record, is missing. Merge the sources again"
+    )
+
+
+def test_a_column_of_sources_without_its_role_is_refused(panels, tmp_path) -> None:
+    store = _copied_panels(panels, tmp_path)
+    codes = zarr.open_group(str(tmp_path / "merged.zarr"), mode="r+")[
+        "cellData/dataset"
+    ]
+    codes.attrs.put({key: value for key, value in codes.attrs.items() if key != "role"})
+    store = _PanelStores(tmp_path).open()
+    with pytest.raises(ValueError) as refused:
+        store.get_cell_vals("ADT", "I", "CD45RA")
+    assert str(refused.value).startswith(
+        "Assay 'ADT' records which features each source of a merge measured, in "
+        "its feature columns 'measured_in_left', 'measured_in_right', but the "
+        "cell column 'dataset' that names each cell's source, which a merge or a "
+        "composite writes beside the record, has no role 'cell_sources', which "
+        "marks that column. Merge the sources again"
+    )
+
+
+def test_a_cell_without_a_source_is_refused(panels, tmp_path) -> None:
+    from cytearc.storage.identity import replace_metadata_column
+
+    store = _copied_panels(panels, tmp_path)
+    cells = zarr.open_group(str(tmp_path / "merged.zarr"), mode="r+")["cellData"]
+    column = store.cells._get_array("dataset")
+    codes = np.asarray(column.codes[:]).astype(np.int64)
+    codes[0] = -1
+    replace_metadata_column(cells, "dataset", codes, categories=column.categories)
+    cells["dataset"].attrs.update({"role": "cell_sources"})
+    store = _PanelStores(tmp_path).open()
+    first = str(store.cells.fetch_all("ids")[0])
+    with pytest.raises(ValueError) as refused:
+        store.get_cell_vals("ADT", "I", "CD45RA")
+    assert str(refused.value).startswith(
+        f"Cell {first!r} has the source '' in cell column 'dataset', which is "
+        "not one of the sources whose measured features assay 'ADT' records "
+        "('left', 'right')."
+    )
+
+
+def test_a_merge_that_names_its_column_of_sources_says_why_a_name_collides(
+    panels, tmp_path
+) -> None:
+    write_count_store(
+        str(tmp_path / "third.zarr"),
+        {"ADT": np.full((4, 2), 7)},
+        "uint16",
+        feature_ids={"ADT": ["CD3", "CD20"]},
+    )
+    stores = _PanelStores(tmp_path)
+    # The merged store holds its own column 'dataset', which a merge without a
+    # prefix copies under that name.
+    for prefix in (None, ""):
+        with pytest.raises(ValueError) as refused:
+            DataStoreMerge(
+                [panels.open(), stores.open("third")],
+                str(tmp_path / "outer.zarr"),
+                ["inner", "third"],
+                prepend_text=prefix,
+                nthreads=1,
+            ).dump()
+        assert str(refused.value) == (
+            "The sources measured different features, so the merge writes each "
+            "cell's source in the cell column 'dataset' beside its record of "
+            "which features each source measured, but a source's own cell column "
+            "takes that name. Pass source_column= another name for the column of "
+            "sources, or a prepend_text that keeps the sources' own columns under "
+            "other names, such as the default 'orig'."
+        )
+    DataStoreMerge(
+        [panels.open(), stores.open("third")],
+        str(tmp_path / "outer.zarr"),
+        ["inner", "third"],
+        prepend_text=None,
+        source_column="study_of_cell",
+        nthreads=1,
+    ).dump()
+    outer = stores.open("outer")
+    assert measured_features_by_source(outer.ADT.feats).sourceColumn == "study_of_cell"
+
+
+def test_a_cell_of_a_source_that_the_record_lacks_is_refused(panels, tmp_path) -> None:
+    store = _copied_panels(panels, tmp_path)
+    store.ADT.feats.drop("measured_in_right")
+    with pytest.raises(ValueError) as refused:
+        store.get_cell_vals("ADT", "I", "CD20")
+    first_right = next(
+        str(cell)
+        for cell in store.cells.fetch_all("ids").astype(str)
+        if cell.startswith("right__")
+    )
+    assert str(refused.value) == (
+        f"Cell {first_right!r} has the source 'right' in cell column 'dataset', "
+        "which is not one of the sources whose measured features assay 'ADT' "
+        "records ('left'). Merge the sources again, or drop the record with "
+        "ds.ADT.feats.drop('measured_in_left'), after which analyses read the "
+        "zero counts of a feature in the cells of a source that did not measure "
+        "it as counts again."
+    )
+
+
+def test_the_column_of_cells_sources_is_kept_while_a_record_names_it(
+    panels, tmp_path
+) -> None:
+    store = _copied_panels(panels, tmp_path)
+    for change in (
+        lambda: store.cells.drop("dataset"),
+        lambda: store.cells.insert(
+            "dataset", by_cell_id(store.cells, np.zeros(store.cells.N)), overwrite=True
+        ),
+    ):
+        with pytest.raises(
+            ValueError,
+            match="^Cell column 'dataset' names each cell's source for the records "
+            r"of which features each source measured \(ADT/measured_in_left, "
+            r"ADT/measured_in_right\)",
+        ):
+            change()
+    # Other columns stay as free as before.
+    store.cells.insert("dataset_2", by_cell_id(store.cells, np.zeros(store.cells.N)))
+    store.cells.drop("dataset_2")
+    for name in ("measured_in_left", "measured_in_right"):
+        store.ADT.feats.drop(name)
+    store.cells.drop("dataset")
+    assert "dataset" not in store.cells.columns
+
+
+def test_a_merge_names_its_column_of_sources_after_source_column(tmp_path) -> None:
+    for name, panel in (
+        ("a", ["CD3", "CD4"]),
+        ("b", ["CD3", "CD8"]),
+        ("c", ["CD3", "CD4"]),
+    ):
+        write_count_store(
+            str(tmp_path / f"{name}.zarr"),
+            {"ADT": np.full((3, len(panel)), 5)},
+            "uint16",
+            feature_ids={"ADT": panel},
+        )
+    stores = _PanelStores(tmp_path)
+
+    def merged(names: list[str], destination: str, **settings: Any) -> DataStore:
+        DataStoreMerge(
+            [stores.open(name) for name in names],
+            str(tmp_path / f"{destination}.zarr"),
+            names,
+            nthreads=1,
+            **settings,
+        ).dump()
+        return stores.open(destination)
+
+    # Panels that differ give the record a categorical column of sources,
+    # named by source_column.
+    named = merged(["a", "b"], "named", source_column="study")
+    column = named.cells._get_array("study")
+    assert isinstance(column, CategoricalColumn)
+    assert column.attrs["role"] == "cell_sources"
+    assert "dataset" not in named.cells.columns
+    record = measured_features_by_source(named.ADT.feats)
+    assert record is not None and record.sourceColumn == "study"
+    # Panels that agree record nothing: source_column holds text, as before,
+    # and without it the merge writes no column of sources.
+    same = merged(["a", "c"], "same", source_column="study")
+    assert not isinstance(same.cells._get_array("study"), CategoricalColumn)
+    assert "role" not in same.cells._get_array("study").attrs
+    assert (
+        same.cells.fetch_all("study").tolist() == ["a"] * 3 + ["c"] * 3
+        or sorted(same.cells.fetch_all("study").tolist()) == ["a"] * 3 + ["c"] * 3
+    )
+    assert "dataset" not in merged(["a", "c"], "plain").cells.columns
+
+
+def test_the_source_of_a_cell_of_a_merge_of_merges_is_the_outer_one(
+    panels, tmp_path
+) -> None:
+    write_count_store(
+        str(tmp_path / "third.zarr"),
+        {"ADT": np.full((4, 2), 7)},
+        "uint16",
+        feature_ids={"ADT": ["CD3", "CD20"]},
+    )
+    DataStoreMerge(
+        [panels.open(), _PanelStores(tmp_path).open("third")],
+        str(tmp_path / "outer.zarr"),
+        ["inner", "third"],
+        nthreads=1,
+    ).dump()
+    outer = _PanelStores(tmp_path).open("outer")
+    ids = outer.cells.fetch_all("ids").astype(str)
+    inner = np.char.startswith(ids, "inner__")
+    # The outer merge writes its own column of sources; the inner one's is
+    # copied as an ordinary column of text.
+    np.testing.assert_array_equal(
+        outer.cells.fetch_all("dataset"), np.where(inner, "inner", "third")
+    )
+    copied = outer.cells._get_array("orig_dataset")
+    assert not isinstance(copied, CategoricalColumn)
+    assert "role" not in copied.attrs
+    record = measured_features_by_source(outer.ADT.feats)
+    assert record is not None and record.sources == ["inner", "third"]
+    rows = np.arange(len(ids))
+    np.testing.assert_array_equal(
+        cell_sources(outer.cells, outer.ADT.feats, rows, record, assay="ADT"),
+        np.where(inner, 0, 1),
+    )
+    # The inner store measured the shared antibodies in every cell, and the
+    # third source CD3 and CD20.
+    names = outer.ADT.feats.fetch_all("names").astype(str)
+    measured = features_measured_by_cells(
+        outer.cells, outer.ADT.feats, rows, assay="ADT"
+    )
+    assert measured is not None and names[measured].tolist() == ["CD3"]
+
+
+def test_a_feature_of_an_assay_that_some_sources_lack_is_missing_where_either_says(
+    tmp_path,
+) -> None:
+    rng = np.random.default_rng(3)
+    panels = {"left": ["CD3", "CD45RA"], "right": ["CD3", "CD20"]}
+    for name, panel in panels.items():
+        write_count_store(
+            str(tmp_path / f"{name}.zarr"),
+            {
+                "RNA": rng.integers(1, 9, size=(12, 3)),
+                "ADT": rng.integers(1, 30, size=(12, len(panel))),
+            },
+            "uint32",
+            feature_ids={"ADT": panel},
+        )
+    write_count_store(
+        str(tmp_path / "rna.zarr"), {"RNA": rng.integers(1, 9, size=(6, 3))}, "uint32"
+    )
+
+    def opened(name: str) -> DataStore:
+        return DataStore(
+            str(tmp_path / f"{name}.zarr"),
+            default_assay="RNA",
+            min_features_per_cell=0,
+            nthreads=1,
+        )
+
+    # The source without ADT comes first, so the record's sources, which hold
+    # the assay, are not the first categories of the column of sources.
+    DataStoreMerge(
+        [opened(name) for name in ("rna", "left", "right")],
+        str(tmp_path / "merged.zarr"),
+        ["rna", "left", "right"],
+        nthreads=1,
+    ).dump()
+    store = opened("merged")
+    ids = store.cells.fetch_all("ids").astype(str)
+    left = np.char.startswith(ids, "left__")
+    adt_cells = np.asarray(store.cells.fetch_all("ADT_I"), dtype=bool)
+    assert int(adt_cells.sum()) == 24
+    cd45ra = resolve_feature(store, FeatureRef("CD45RA", assay="ADT"))
+    unmeasured: dict[str, np.ndarray] = {}
+
+    values = fetch_normalized_feature_matrix(
+        store, [cd45ra], np.arange(len(ids)), unmeasured=unmeasured
+    )[:, 0]
+
+    # The cells outside the assay and those of the right study have no value;
+    # the left study's cells read what its own store gives.
+    np.testing.assert_array_equal(unmeasured["ADT"], ~adt_cells)
+    assert np.isnan(values[~left]).all()
+    np.testing.assert_allclose(
+        values[left], _values_by_cell(opened("left"), "CD45RA", ids[left])
+    )
+    # get_cell_vals reads the same values, membership and record together.
+    np.testing.assert_array_equal(store.get_cell_vals("ADT", "I", "CD45RA"), values)

@@ -1099,9 +1099,9 @@ def test_adt_panel_leaves_out_antibodies_that_not_every_merged_source_measured(
         logger.remove(sink)
 
     assert messages == [
-        "The ADT panel and markers leave out the antibodies that not every source "
-        "of the merged store measured, whose zero counts in the cells of the other "
-        "sources are not measurements: 'CD45RA', 'CD27', 'CD19'. The run records "
+        "The ADT panel and markers leave out the antibodies that some source of "
+        "the run's cells did not measure, since their zero counts in its cells "
+        "are not measurements: 'CD45RA', 'CD27', 'CD19'. The run records "
         "them as the panel's 'unmeasured'."
     ]
     assert _config(runs["union"])["stages"]["panel"] == {
@@ -1186,6 +1186,131 @@ def test_adt_markers_rank_only_the_antibodies_that_every_merged_source_measured(
     assert sorted(best) == ["CD19", "CD3"]
 
 
+def test_adt_run_of_one_studys_cells_keeps_the_antibodies_that_study_measured(
+    tmp_path: Path,
+) -> None:
+    from cytearc.utils.logging import logger
+
+    shared = ["CD3", "CD4", "CD8", "CD14", "IgG1_isotype"]
+    panels = {"left": [*shared, "CD45RA", "CD27"], "right": [*shared, "CD19"]}
+    union = _merged_panels(tmp_path, panels, "union")
+    ids = union.cells.fetch_all("ids").astype(str)
+    left = np.char.startswith(ids, "left__")
+    union.cells.insert("left_cells", by_cell_id(union.cells, left))
+    settings: dict[str, Any] = {
+        "neighbors": {"k": 5},
+        "leiden": False,
+        "umap": False,
+        "markers": False,
+    }
+    messages: list[str] = []
+    sink = logger.add(
+        lambda message: messages.append(message.record["message"]), level="WARNING"
+    )
+    try:
+        run = union.pipeline.adt(cells="left_cells", **settings)
+    finally:
+        logger.remove(sink)
+
+    # Every cell of the run measured the left panel, and none of them CD19.
+    assert messages == [
+        "The ADT panel and markers leave out the antibodies that some source of "
+        "the run's cells did not measure, since their zero counts in its cells "
+        "are not measurements: 'CD19'. The run records them as the panel's "
+        "'unmeasured'."
+    ]
+    assert _config(run)["stages"]["panel"]["unmeasured"] == ["CD19"]
+    # The oracle is the left study's own store, which holds the same counts of
+    # the same cells and nothing else.
+    own = DataStore(
+        str(tmp_path / "left.zarr"),
+        default_assay="ADT",
+        min_features_per_cell=0,
+        nthreads=1,
+    )
+    alone = own.pipeline.adt(**settings)
+    for result in (run, alone):
+        names = result.features.fetch_all("names")
+        assert names[result.features.fetch_all("panel")].tolist() == [
+            "CD3",
+            "CD4",
+            "CD8",
+            "CD14",
+            "CD45RA",
+            "CD27",
+        ]
+    row_of = {
+        cell: row for row, cell in enumerate(own.cells.fetch_all("ids").astype(str))
+    }
+    rows = [row_of[cell.split("__", 1)[1]] for cell in ids[left]]
+    normalized = union.artifacts.load(run["normalized"])["data"][:]
+    np.testing.assert_allclose(
+        normalized, own.artifacts.load(alone["normalized"])["data"][:][rows]
+    )
+
+
+@pytest.mark.slow
+def test_multimodal_markers_rank_the_antibodies_every_source_of_its_cells_measured(
+    tmp_path: Path,
+) -> None:
+    from cytearc.merge import DataStoreMerge
+    from cytearc.storage.feature_selection import read_feature_selection_indices
+
+    shared = ["CD3", "CD4", "CD8", "CD14"]
+    panels = {"left": [*shared, "CD45RA"], "right": [*shared, "CD19"]}
+    sources = []
+    for seed, (name, panel) in enumerate(panels.items()):
+        write_count_store(
+            str(tmp_path / f"{name}.zarr"),
+            {
+                "RNA": _counts(80, 120, seed=seed),
+                "ADT": np.random.default_rng(seed).poisson(20, size=(80, len(panel))),
+            },
+            "uint16",
+            feature_ids={"ADT": panel},
+        )
+        sources.append(
+            DataStore(
+                str(tmp_path / f"{name}.zarr"),
+                default_assay="RNA",
+                min_features_per_cell=0,
+                nthreads=1,
+            )
+        )
+    DataStoreMerge(
+        sources, str(tmp_path / "merged.zarr"), list(panels), nthreads=1
+    ).dump()
+    store = DataStore(
+        str(tmp_path / "merged.zarr"),
+        default_assay="RNA",
+        min_features_per_cell=0,
+        nthreads=1,
+    )
+    rna = store.pipeline.rna(**SMALL_RNA_SETTINGS)
+    adt = store.pipeline.adt(cells=rna, **ADT_SETTINGS)
+
+    with pytest.warns(UserWarning) as caught:
+        wnn = store.pipeline.multimodal([rna, adt], umap=False)
+    assert (
+        "The marker search leaves out the features that some source of the "
+        "selected cells did not measure, since their zero counts in its cells "
+        "are not measurements: 'CD45RA', 'CD19'."
+    ) in [str(warning.message) for warning in caught]
+    names = store.ADT.feats.fetch_all("names").astype(str)
+    ranked = store.artifacts.inspect(wnn["markers_ADT"]).input_ref("feature_selection")
+    assert names[read_feature_selection_indices(store.zw, "ADT", ranked)].tolist() == (
+        shared
+    )
+    # The RNA modality's sources measured the same genes, so its markers rank
+    # every gene.
+    ranked_rna = store.artifacts.inspect(wnn["markers_RNA"]).input_ref(
+        "feature_selection"
+    )
+    assert read_feature_selection_indices(store.zw, "RNA", ranked_rna).tolist() == (
+        list(range(120))
+    )
+
+
 def test_adt_panel_names_five_of_the_antibodies_that_it_leaves_out(
     tmp_path: Path,
 ) -> None:
@@ -1206,9 +1331,9 @@ def test_adt_panel_names_five_of_the_antibodies_that_it_leaves_out(
         logger.remove(sink)
 
     assert messages == [
-        "The ADT panel and markers leave out the antibodies that not every source "
-        "of the merged store measured, whose zero counts in the cells of the other "
-        "sources are not measurements: 'CD14', 'CD16', 'CD19', 'CD56', 'CD11c' and "
+        "The ADT panel and markers leave out the antibodies that some source of "
+        "the run's cells did not measure, since their zero counts in its cells "
+        "are not measurements: 'CD14', 'CD16', 'CD19', 'CD56', 'CD11c' and "
         "1 more. The run records them as the panel's 'unmeasured'."
     ]
     assert plan.config["stages"]["panel"]["unmeasured"] == extras
@@ -1230,8 +1355,8 @@ def test_adt_panel_refuses_a_merged_store_whose_sources_share_one_antibody(
         union.pipeline.adt(leiden=False, umap=False, markers=False)
     assert str(caught.value) == (
         f"The ADT panel keeps 1 of 4 antibodies after panel['exclude']="
-        f"{DEFAULT_PANEL_EXCLUDE!r} and the 2 that not every source of the merged "
-        "store measured; it needs at least two"
+        f"{DEFAULT_PANEL_EXCLUDE!r} and the 2 that some source of the run's "
+        "cells did not measure; it needs at least two"
     )
     assert union.pipeline.list_runs() == ()
 

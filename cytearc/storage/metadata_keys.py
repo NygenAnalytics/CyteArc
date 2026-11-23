@@ -40,8 +40,17 @@ def assay_membership_attributes(assay: str) -> dict[str, str]:
     return {"role": ASSAY_MEMBERSHIP_ROLE, "assay": assay}
 
 
+MEASURED_FEATURES_PREFIX = "measured_in_"
+"""Start of the name of each feature column that records which features one source of a merge measured."""
+
 MEASURED_FEATURES_ROLE = "measured_features"
 """``role`` attribute of a feature column that records which features one source of a merge measured."""
+
+CELL_SOURCES_ROLE = "cell_sources"
+"""``role`` attribute of the cell column that names each cell's source in a merge or a composite that records which features each source measured."""
+
+SOURCE_COLUMN_ATTRIBUTE = "sourceColumn"
+"""Attribute of a feature column of :data:`MEASURED_FEATURES_ROLE` that names the cell column of each cell's source."""
 
 
 def measured_features_column(source: str) -> str:
@@ -53,12 +62,25 @@ def measured_features_column(source: str) -> str:
     :func:`measured_features_attributes` returns, which keep the source's own
     name.
     """
-    return metadata_column_key(f"measured_in_{source}")
+    return metadata_column_key(f"{MEASURED_FEATURES_PREFIX}{source}")
 
 
-def measured_features_attributes(source: str) -> dict[str, str]:
-    """Return the attributes that mark a feature column as the record of what ``source`` measured."""
-    return {"role": MEASURED_FEATURES_ROLE, "source": source}
+def measured_features_attributes(source: str, source_column: str) -> dict[str, str]:
+    """Return the attributes that mark a feature column as the record of what ``source`` measured.
+
+    ``source_column`` is the cell column of :data:`CELL_SOURCES_ROLE` that
+    names each cell's source.
+    """
+    return {
+        "role": MEASURED_FEATURES_ROLE,
+        "source": source,
+        SOURCE_COLUMN_ATTRIBUTE: source_column,
+    }
+
+
+def cell_sources_attributes() -> dict[str, str]:
+    """Return the attributes that mark a cell column as the name of each cell's source."""
+    return {"role": CELL_SOURCES_ROLE}
 
 
 def measured_features_columns(sources: Iterable[str]) -> dict[str, str]:

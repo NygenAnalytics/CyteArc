@@ -7,8 +7,8 @@ from typing import Any
 import numpy as np
 
 from ....assay import ADTassay
-from ....metadata.membership import features_measured_by_every_source
-from ....utils.arguments import integer_argument, quoted_value
+from ....metadata.membership import features_measured_by_cells
+from ....utils.arguments import integer_argument, quoted_examples
 from ....utils.logging import logger
 from ..executor import FEATURE_NAMES, PlannedStage, RecipePlan, RunState
 from ..fields import cell_fields, feature_fields
@@ -38,6 +38,7 @@ from ....utils.arguments import bool_argument
 from .common import (
     check_harmony_labels,
     cell_snapshots,
+    input_cell_mask,
     check_tsne,
     harmony_config,
     modality_assay,
@@ -59,8 +60,6 @@ OPERATION = "pipeline.adt"
 FILTER_SUFFIXES = ("nCounts",)
 DEFAULT_PANEL_EXCLUDE = r"(?i)isotype|control|ctrl"
 """Antibody names that the panel leaves out by default: isotype controls."""
-# The most antibodies that the warning about unmeasured antibodies names.
-_UNMEASURED_EXAMPLES = 5
 
 
 def _excluded(names: np.ndarray, pattern: re.Pattern[str] | None) -> np.ndarray:
@@ -78,9 +77,10 @@ def _panel_stage(
 ) -> PlannedStage:
     """Return the stage that keeps the antibodies that ``pattern`` does not match.
 
-    When not every source of a merged store measured every antibody,
-    ``measured`` marks those that every source measured: the panel keeps
-    only them, and the stage saves them as ``measured_antibodies``, which the
+    The panel follows the run's own cells: when some source of a merged
+    store among them did not measure every antibody, ``measured`` marks those
+    that every source of the run's cells measured. The panel keeps only
+    them, and the stage saves them as ``measured_antibodies``, which the
     markers rank in place of the feature universe.
     """
 
@@ -105,20 +105,8 @@ def _panel_stage(
     return PlannedStage("panel", action, inputs=(FEATURE_NAMES,), outputs=outputs)
 
 
-def _resolve_panel(
-    store: Any,
-    assay: str,
-    value: object,
-) -> tuple[re.Pattern[str] | None, np.ndarray | None, dict[str, Any], int]:
-    """Return the exclusion pattern, the antibodies that every source measured, the recorded settings, and the panel size.
-
-    A merged store records which antibodies each of its sources measured
-    when they measured different ones. The panel and the markers then leave
-    out those that not every source measured, whose zero counts in the other
-    sources' cells are not measurements, with a warning that names them, and
-    the run records them as ``unmeasured``. The antibodies that every source
-    measured are None when every source measured every antibody.
-    """
+def _panel_pattern(value: object) -> re.Pattern[str] | None:
+    """Return the panel's exclusion pattern, checked."""
     _enabled, settings = stage_settings("panel", value, optional=False)
     raw = settings.get("exclude", DEFAULT_PANEL_EXCLUDE)
     if raw is not None and (not isinstance(raw, str) or not raw):
@@ -127,16 +115,38 @@ def _resolve_panel(
         pattern = None if raw is None else re.compile(raw)
     except re.error as error:
         raise ValueError(f"panel['exclude'] is not a valid pattern: {error}") from error
+    return pattern
+
+
+def _resolve_panel(
+    store: Any,
+    assay: str,
+    pattern: re.Pattern[str] | None,
+    cells: np.ndarray,
+) -> tuple[np.ndarray | None, dict[str, Any], int]:
+    """Return the antibodies that the source of every cell of the run measured, the recorded settings, and the panel size.
+
+    ``cells`` are the store rows of the run's cells. A merged store records
+    which antibodies each of its sources measured when they measured
+    different ones. The panel and the markers then leave out those that the
+    source of some cell of the run did not measure, whose zero counts in
+    those cells are not measurements, with a warning that names them, and the
+    run records them as ``unmeasured``; a run of the cells of the sources
+    that measured an antibody keeps it. The antibodies are None when the
+    source of every cell measured every antibody.
+    """
+    raw = None if pattern is None else pattern.pattern
     features = store._get_assay(assay).feats
     names = np.asarray(features.fetch_all("names")).astype(str)
     excluded = _excluded(names, pattern)
-    measured = features_measured_by_every_source(features)
+    by_cells = features_measured_by_cells(store.cells, features, cells, assay=assay)
+    measured = np.ones(len(names), dtype=bool) if by_cells is None else by_cells
     unmeasured = ~measured & ~excluded
     kept = int(np.count_nonzero(~excluded & measured))
     if kept < 2:
         unmeasured_words = (
-            f" and the {int(unmeasured.sum())} that not every source of the "
-            "merged store measured"
+            f" and the {int(unmeasured.sum())} that some source of the run's "
+            "cells did not measure"
             if unmeasured.any()
             else ""
         )
@@ -147,17 +157,14 @@ def _resolve_panel(
     recorded: dict[str, Any] = {"exclude": raw, "excluded": names[excluded].tolist()}
     if unmeasured.any():
         left_out = names[unmeasured].tolist()
-        listed = ", ".join(map(quoted_value, left_out[:_UNMEASURED_EXAMPLES]))
-        more = len(left_out) - _UNMEASURED_EXAMPLES
         logger.warning(
-            "The ADT panel and markers leave out the antibodies that not every "
-            "source of the merged store measured, whose zero counts in the cells "
-            f"of the other sources are not measurements: {listed}"
-            + (f" and {more} more" if more > 0 else "")
-            + ". The run records them as the panel's 'unmeasured'."
+            "The ADT panel and markers leave out the antibodies that some source "
+            "of the run's cells did not measure, since their zero counts in its "
+            f"cells are not measurements: {quoted_examples(left_out)}. The run "
+            "records them as the panel's 'unmeasured'."
         )
         recorded["unmeasured"] = left_out
-    return pattern, None if measured.all() else measured, recorded, kept
+    return None if measured.all() else measured, recorded, kept
 
 
 def resolve_adt(
@@ -198,23 +205,9 @@ def resolve_adt(
     resolved_species = resolve_species(species)
     membership_strength = bool_argument(membership_strength, "membership_strength")
     markers = bool_argument(markers, "markers")
-    pattern, measured, panel_config, panel_size = _resolve_panel(
-        store, assay_name, panel
-    )
+    pattern = _panel_pattern(panel)
     normalization_settings = resolve_normalization(store, assay_name, normalization)
     _pca, pca_settings = stage_settings("pca", pca, optional=False)
-    # A panel holds few antibodies, so PCA keeps one dimension fewer than the
-    # panel unless the call sets dims.
-    pca_dims = integer_argument(
-        pca_settings.pop("dims", min(PCA_DIMS_DEFAULT, panel_size - 1)),
-        "pca dims",
-        minimum=1,
-    )
-    if pca_dims >= panel_size:
-        raise ValueError(
-            f"pca dims ({pca_dims}) must be below the {panel_size} antibodies of "
-            "the panel: PCA needs at least dims + 1 features"
-        )
     harmony_columns, harmony_settings = resolve_harmony(store, harmony)
     graph = resolve_graph(
         ann_index=ann_index,
@@ -237,6 +230,26 @@ def resolve_adt(
     # The settings are checked, so the run's cells are checked last.
     source = resolve_cells(store, cells, assays=(assay_name,), operation=OPERATION)
     check_harmony_labels(store, source, harmony_columns)
+    # The panel keeps the antibodies that the sources of the run's cells
+    # measured.
+    measured, panel_config, panel_size = _resolve_panel(
+        store,
+        assay_name,
+        pattern,
+        np.flatnonzero(input_cell_mask(store, source)),
+    )
+    # A panel holds few antibodies, so PCA keeps one dimension fewer than the
+    # panel unless the call sets dims.
+    pca_dims = integer_argument(
+        pca_settings.pop("dims", min(PCA_DIMS_DEFAULT, panel_size - 1)),
+        "pca dims",
+        minimum=1,
+    )
+    if pca_dims >= panel_size:
+        raise ValueError(
+            f"pca dims ({pca_dims}) must be below the {panel_size} antibodies of "
+            "the panel: PCA needs at least dims + 1 features"
+        )
     # ADT runs usually share the QC-passing cells of an RNA run, so they
     # filter only when asked.
     filtering_config = resolve_run_filtering(

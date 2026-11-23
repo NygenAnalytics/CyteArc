@@ -657,6 +657,9 @@ class _PresentationOperationsMixin(_PresentationOperationsBase):
             "var",
         )
         shape = (len(cell_idx), len(feat_idx))
+        measured_features, cell_sources = exported_measured_features(
+            assay.feats, assay.name
+        )
         return H5adExportPlan(
             x=H5adMatrix(
                 shape=shape, dtype=np.dtype(x.dtype), blocks=partial(_materialized, x)
@@ -679,7 +682,8 @@ class _PresentationOperationsMixin(_PresentationOperationsBase):
                 for layer, (layer_assay, layer_feat_idx) in layer_features.items()
             },
             membership=declared,
-            measured_features=exported_measured_features(assay.feats, assay.name),
+            measured_features=measured_features,
+            cell_sources=cell_sources,
         )
 
     def _layer_features(

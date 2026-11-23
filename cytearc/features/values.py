@@ -6,7 +6,13 @@ from typing import Any
 
 import numpy as np
 
-from ..metadata.membership import measured_rows
+from ..metadata.membership import (
+    FeatureRecord,
+    cell_sources,
+    measured_features_by_source,
+    measured_rows,
+    present_sources,
+)
 from ..metadata.selection import (
     FeatureReduction,
     FeatureRef,
@@ -319,6 +325,202 @@ def spread_measured_rows(
         emitted = end
 
 
+def _record_of_features(assay: Any, features: np.ndarray) -> FeatureRecord | None:
+    """Return an assay's record of which features each source measured, over ``features``, None when every source measured every one of them.
+
+    Features that every source measured need no cell's source.
+    """
+    record = measured_features_by_source(assay.feats, features)
+    if record is None or bool(record.measured.all()):
+        return None
+    return record
+
+
+class _CellSources:
+    """The source of each requested cell, with which features each source measured.
+
+    ``codes`` gives the source of each requested cell that the assay
+    measured, in their order, and ``present`` the sources among them.
+    """
+
+    __slots__ = ("codes", "measured", "present", "record")
+
+    def __init__(
+        self,
+        assay: Any,
+        record: FeatureRecord,
+        cell_idx: np.ndarray,
+        measured: np.ndarray | None,
+    ) -> None:
+        self.record = record
+        self.measured = measured
+        rows = cell_idx if measured is None else cell_idx[measured]
+        self.codes = cell_sources(
+            assay.cells, assay.feats, rows, record, assay=assay.name
+        )
+        self.present = present_sources(self.codes, len(record.sources))
+
+    def measuring(self, features: Sequence[int] | np.ndarray) -> np.ndarray:
+        """Return whether each source measured every one of ``features``."""
+        return self.record.measured_of(features).all(axis=1)
+
+    def cells(self, sources: np.ndarray, n_cells: int) -> np.ndarray | None:
+        """Return whether each requested cell's source is one of ``sources``, None for all of them.
+
+        ``sources`` marks the sources as :meth:`measuring` does. A cell that
+        the assay did not measure has none of them.
+        """
+        cells = sources[self.codes]
+        if self.measured is not None:
+            within = np.zeros(n_cells, dtype=bool)
+            within[self.measured] = cells
+            cells = within
+        return None if bool(cells.all()) else cells
+
+
+def _measured_cells_of_features(
+    assay: Any, features: Sequence[int] | np.ndarray, cell_idx: np.ndarray
+) -> np.ndarray | None:
+    """Return whether each cell at ``cell_idx`` measured every one of ``features``, None for all of them.
+
+    A cell measured a feature when its assay measured the cell
+    (:func:`~cytearc.metadata.membership.measured_rows`) and, when the assay
+    records which features each source of a merge measured, the cell's source
+    measured the feature.
+    """
+    measured = measured_rows(assay.cells, assay.name, cell_idx)
+    indices = np.asarray(features, dtype=np.int64)
+    record = _record_of_features(assay, indices)
+    if record is None:
+        return measured
+    sources = _CellSources(assay, record, np.asarray(cell_idx), measured)
+    return sources.cells(sources.measuring(indices), len(cell_idx))
+
+
+def _slot_groups(
+    assay: Any,
+    resolved: Sequence[ResolvedFeature],
+    slots: list[int],
+    cell_idx: np.ndarray,
+    measured: np.ndarray | None,
+) -> list[tuple[list[int], np.ndarray | None]]:
+    """Group ``slots`` by the cells that measured every feature that each slot reads.
+
+    Each group pairs its slots with those cells among ``cell_idx``, None for
+    all of them. When the assay records no source that lacks a feature of the
+    slots, the cells are those that the assay measured, ``measured``.
+    """
+    record = _record_of_features(
+        assay,
+        np.concatenate(
+            [np.asarray(resolved[slot].indices, dtype=np.int64) for slot in slots]
+        ),
+    )
+    if record is None:
+        return [(slots, measured)]
+    sources = _CellSources(assay, record, cell_idx, measured)
+    groups: dict[bytes, tuple[np.ndarray, list[int]]] = {}
+    for slot in slots:
+        measuring = sources.measuring(resolved[slot].indices)
+        # Slots that the same sources among the requested cells measured are
+        # measured by the same cells, so they are read together.
+        key = measuring[sources.present].tobytes()
+        groups.setdefault(key, (measuring, []))[1].append(slot)
+    return [
+        (group_slots, sources.cells(measuring, len(cell_idx)))
+        for measuring, group_slots in groups.values()
+    ]
+
+
+def _slot_blocks(
+    store: Any,
+    assay: Any,
+    resolved: Sequence[ResolvedFeature],
+    slots: list[int],
+    cell_idx: np.ndarray,
+    measured: np.ndarray | None,
+    normalization: NormalizationSpec,
+    resident_bytes: int,
+) -> Iterator[tuple[list[int], int, np.ndarray]]:
+    """Yield the normalized values of ``slots`` over ``cell_idx``, NaN where ``measured`` is False.
+
+    Only the measured cells are read and normalized.
+    """
+    from ..assay.normalization import feature_value_blocks, streamed_block_rows
+
+    physical_indices = np.unique(
+        np.concatenate(
+            [np.asarray(resolved[slot].indices, dtype=np.int64) for slot in slots]
+        )
+    )
+    local_indices = [
+        np.searchsorted(physical_indices, resolved[slot].indices) for slot in slots
+    ]
+    log_raw = normalization.source == "raw" and normalization.transform == "log1p"
+
+    def reduce_block(block: Any) -> np.ndarray:
+        normalized = np.asarray(block, dtype=np.float64)
+        if normalized.ndim == 1:
+            normalized = normalized.reshape(-1, 1)
+        if log_raw:
+            normalized = np.log1p(normalized)
+        output = np.empty((len(normalized), len(slots)), dtype=np.float64)
+        for column, (slot, indices) in enumerate(
+            zip(slots, local_indices, strict=True)
+        ):
+            selected = normalized[:, indices]
+            if selected.shape[1] == 1:
+                output[:, column] = selected[:, 0]
+            elif resolved[slot].reduction == "sum":
+                output[:, column] = selected.sum(axis=1)
+            else:
+                output[:, column] = selected.mean(axis=1)
+        return output
+
+    # ``reduce_block`` holds two float64 copies of a block and its output.
+    float_bytes = np.dtype(np.float64).itemsize
+    scratch_bytes_per_row = (2 * len(physical_indices) + len(slots)) * float_bytes
+    if measured is None:
+        _, blocks = feature_value_blocks(
+            assay,
+            physical_indices,
+            cell_idx,
+            normalization,
+            nthreads=store.nthreads,
+            resident_bytes=resident_bytes,
+            scratch_bytes_per_row=scratch_bytes_per_row,
+        )
+        start = 0
+        for block in blocks:
+            output = reduce_block(block)
+            yield slots, start, output
+            start += len(output)
+        return
+    read_idx = np.asarray(cell_idx)[measured]
+    if len(read_idx) == 0:
+        # No requested cell was measured, so nothing is normalized.
+        measured_blocks: Iterable[np.ndarray] = ()
+        piece_rows = streamed_block_rows(assay.rawData)
+    else:
+        # The mask of measured cells and their positions are held beside the
+        # stream, which charges the rows that it reads.
+        held = measured.nbytes + read_idx.nbytes
+        piece_rows, raw_blocks = feature_value_blocks(
+            assay,
+            physical_indices,
+            read_idx,
+            normalization,
+            nthreads=store.nthreads,
+            resident_bytes=resident_bytes + held,
+            scratch_bytes_per_row=scratch_bytes_per_row,
+        )
+        measured_blocks = (reduce_block(block) for block in raw_blocks)
+    for start, output in spread_measured_rows(
+        measured_blocks, measured, len(slots), piece_rows
+    ):
+        yield slots, start, output
+
+
 def iter_normalized_feature_blocks(
     store: Any,
     resolved: Sequence[ResolvedFeature],
@@ -328,9 +530,14 @@ def iter_normalized_feature_blocks(
     resident_bytes: int = 0,
     unmeasured: dict[str, np.ndarray] | None = None,
 ) -> Iterator[tuple[list[int], int, np.ndarray]]:
-    """Yield feature slots, selected-row offsets, and normalized value blocks."""
-    from ..assay.normalization import feature_value_blocks, streamed_block_rows
+    """Yield feature slots, selected-row offsets, and normalized value blocks.
 
+    A value is NaN in a cell that did not measure the feature: a cell that
+    its assay did not measure, which ``unmeasured`` receives by assay, or,
+    when the assay records which features each source of a merge measured, a
+    cell whose source did not measure it. Each slot's values are read and
+    normalized over the cells that measured every feature it reads.
+    """
     normalization = normalization or NormalizationSpec()
     assay_slots: dict[str, list[int]] = {}
     for slot, feat in enumerate(resolved):
@@ -338,84 +545,25 @@ def iter_normalized_feature_blocks(
 
     for assay_name, slots in assay_slots.items():
         assay = store._get_assay(assay_name)
-        physical_indices = np.unique(
-            np.concatenate(
-                [np.asarray(resolved[slot].indices, dtype=np.int64) for slot in slots]
-            )
-        )
-        local_indices = [
-            np.searchsorted(physical_indices, resolved[slot].indices) for slot in slots
-        ]
-        log_raw = normalization.source == "raw" and normalization.transform == "log1p"
-
-        def reduce_block(
-            block: Any,
-            slots: list[int] = slots,
-            local: list[np.ndarray] = local_indices,
-        ) -> np.ndarray:
-            normalized = np.asarray(block, dtype=np.float64)
-            if normalized.ndim == 1:
-                normalized = normalized.reshape(-1, 1)
-            if log_raw:
-                normalized = np.log1p(normalized)
-            output = np.empty((len(normalized), len(slots)), dtype=np.float64)
-            for column, (slot, indices) in enumerate(zip(slots, local, strict=True)):
-                selected = normalized[:, indices]
-                if selected.shape[1] == 1:
-                    output[:, column] = selected[:, 0]
-                elif resolved[slot].reduction == "sum":
-                    output[:, column] = selected.sum(axis=1)
-                else:
-                    output[:, column] = selected.mean(axis=1)
-            return output
-
-        # ``reduce_block`` holds two float64 copies of a block and its output.
-        float_bytes = np.dtype(np.float64).itemsize
-        scratch_bytes_per_row = (2 * len(physical_indices) + len(slots)) * float_bytes
         # Membership comes from the assay's own cell table, which a run's
         # frozen cell view does not replace.
         measured = measured_rows(assay.cells, assay_name, cell_idx)
-        if measured is None:
-            _, blocks = feature_value_blocks(
-                assay,
-                physical_indices,
-                cell_idx,
-                normalization,
-                nthreads=store.nthreads,
-                resident_bytes=resident_bytes,
-                scratch_bytes_per_row=scratch_bytes_per_row,
-            )
-            start = 0
-            for block in blocks:
-                output = reduce_block(block)
-                yield slots, start, output
-                start += len(output)
-            continue
-        if unmeasured is not None:
+        if measured is not None and unmeasured is not None:
             unmeasured[assay_name] = ~measured
-        read_idx = np.asarray(cell_idx)[measured]
-        if len(read_idx) == 0:
-            # No requested cell was measured, so nothing is normalized.
-            blocks = ()
-            piece_rows = streamed_block_rows(assay.rawData)
-        else:
-            # The membership mask and the positions of the measured cells are
-            # held beside the stream, which charges the rows that it reads.
-            held = measured.nbytes + read_idx.nbytes
-            piece_rows, raw_blocks = feature_value_blocks(
+        groups = _slot_groups(assay, resolved, slots, np.asarray(cell_idx), measured)
+        # Each group's read also holds the cells of the groups beside it.
+        masks = sum(cells.nbytes for _slots, cells in groups if cells is not None)
+        for group_slots, cells in groups:
+            yield from _slot_blocks(
+                store,
                 assay,
-                physical_indices,
-                read_idx,
+                resolved,
+                group_slots,
+                cell_idx,
+                cells,
                 normalization,
-                nthreads=store.nthreads,
-                resident_bytes=resident_bytes + held,
-                scratch_bytes_per_row=scratch_bytes_per_row,
+                resident_bytes + masks - (0 if cells is None else cells.nbytes),
             )
-            blocks = (reduce_block(block) for block in raw_blocks)
-        for start, output in spread_measured_rows(
-            blocks, measured, len(slots), piece_rows
-        ):
-            yield slots, start, output
 
 
 def measured_feature_means(
@@ -427,12 +575,14 @@ def measured_feature_means(
 ) -> np.ndarray:
     """Return the mean normalized value of features in each cell.
 
-    Cells that the assay did not measure are NaN.
+    Cells that did not measure every one of the features are NaN
+    (:func:`_measured_cells_of_features`), and only the others are read and
+    normalized.
     """
     from ..assay.normalization import feature_value_blocks
 
     cell_idx = np.asarray(cell_idx, dtype=np.int64)
-    measured = measured_rows(assay.cells, assay.name, cell_idx)
+    measured = _measured_cells_of_features(assay, feature_indices, cell_idx)
     read_idx = cell_idx if measured is None else cell_idx[measured]
     if len(read_idx) == 0:
         return np.full(len(cell_idx), np.nan)

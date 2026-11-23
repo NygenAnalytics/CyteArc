@@ -2,6 +2,7 @@ from typing import Literal, overload
 
 import numpy as np
 import zarr
+from zarr.core.sync import sync
 from zarr.errors import GroupNotFoundError
 
 
@@ -111,3 +112,12 @@ def read_fresh_group(
         if missing_ok:
             return None
         raise
+
+
+async def _listed(group: zarr.Group) -> list[str]:
+    return [name async for name in group.store.list_dir(group.path)]
+
+
+def member_names(group: zarr.Group) -> list[str]:
+    """Return the names of the keys directly below ``group`` from one listing of its store, which opens no member."""
+    return sync(_listed(group))

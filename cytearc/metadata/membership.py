@@ -38,26 +38,39 @@ A merge whose sources measured different features records, the same way,
 which features each of them measured: one Boolean feature column for each
 source that holds the assay, named by
 :func:`~cytearc.storage.metadata_keys.measured_features_column`, whose
-``role`` and ``source`` attributes are those that
+``role``, ``source`` and ``sourceColumn`` attributes are those that
 :func:`~cytearc.storage.metadata_keys.measured_features_attributes` returns
-(see :func:`measured_feature_columns`). A feature table without such columns,
-as an import or an earlier release writes it, counts every feature as
-measured by every source (see :func:`features_measured_by_every_source`). An
-export declares the record of the exported assay in
-``uns["cytearc"]["measuredFeatures"]``, which maps the assay to each column
-and its source, so an import restores it.
+(see :func:`measured_feature_columns`). ``sourceColumn`` names the cell
+column of each cell's source, a categorical column of the source names that
+the merge writes beside the record, with the ``role`` that
+:func:`~cytearc.storage.metadata_keys.cell_sources_attributes` returns;
+readers pair the record with each cell through it (see :func:`cell_sources`).
+A feature table without such columns, as an import or an earlier release
+writes it, counts every feature as measured by every source (see
+:func:`features_measured_by_every_source`). An export declares the record of
+the exported assay in ``uns["cytearc"]["measuredFeatures"]``, which maps the
+assay to each column and its source, and the cell column of sources in
+``uns["cytearc"]["cellSources"]``, so an import restores both.
 """
 
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from dataclasses import dataclass
 from functools import partial
 from typing import Any, Literal
 
 import numpy as np
+import zarr
 
 from ..storage.artifacts import ValueFingerprintBuilder
+from ..storage.types import member_names
+from ..storage.stores import metadata_workers, run_concurrently
+from ..storage.categorical import CategoricalColumn, category_codes_dtype
 from ..storage.metadata_keys import (
     ASSAY_MEMBERSHIP_ROLE,
+    CELL_SOURCES_ROLE,
+    MEASURED_FEATURES_PREFIX,
     MEASURED_FEATURES_ROLE,
+    SOURCE_COLUMN_ATTRIBUTE,
     assay_membership_attributes,
     assay_membership_column,
     measured_features_column,
@@ -65,6 +78,7 @@ from ..storage.metadata_keys import (
 from .rows import (
     iter_metadata_column_blocks,
     metadata_missing_mask,
+    read_array_rows_chunkwise,
     read_metadata_rows_chunkwise,
 )
 
@@ -72,6 +86,8 @@ from .rows import (
 # once, since it touches nearly every chunk; a smaller one reads only the
 # chunks that hold its rows.
 _DENSE_SELECTION = 16
+# The cells whose sources a read of the cell column of sources holds at once.
+_SOURCE_ROWS = 1 << 16
 
 type MeasuredCellsRemedy = Literal[
     "labels", "graph", "cell_key", "cells", "cell_selection", "export"
@@ -101,6 +117,9 @@ MEMBERSHIP_UNS_KEY = "assayMembership"
 
 MEASURED_FEATURES_UNS_KEY = "measuredFeatures"
 """Key, in CyteArc's ``uns`` namespace, of each assay's record of which features each source measured."""
+
+CELL_SOURCES_UNS_KEY = "cellSources"
+"""Key of ``uns["cytearc"]`` that names the ``obs`` column of each cell's source, which a record of measured features names."""
 
 
 def membership_attributes(assay: str) -> dict[str, str]:
@@ -188,25 +207,36 @@ def membership_columns(table: Any) -> dict[str, str]:
     return found
 
 
-def measured_feature_columns(table: Any) -> dict[str, str]:
-    """Return the feature columns that record which features each source of a merge measured, mapped to their sources.
+def _record_candidates(table: Any) -> list[str]:
+    """Return the columns of a table whose names a record of measured features takes, from a listing of its keys.
 
-    A merge or a composite whose sources measured different features writes
-    one Boolean column for each source that holds the assay, named by
-    :func:`~cytearc.storage.metadata_keys.measured_features_column` of the
-    source that its ``source`` attribute keeps, with the ``role`` attribute
-    :data:`~cytearc.storage.metadata_keys.MEASURED_FEATURES_ROLE`; other
-    feature tables hold none.
+    A ``MetaData`` table's keys are listed from its store, which opens no
+    column, so a table without such names costs one listing.
+    """
+    group = getattr(table, "_group", None)
+    names = member_names(group) if isinstance(group, zarr.Group) else table.columns
+    return sorted(name for name in names if name.startswith(MEASURED_FEATURES_PREFIX))
+
+
+def _table_workers(table: Any) -> int:
+    """Return how many small reads to overlap on a table's store, one for a local store."""
+    group = getattr(table, "_group", None)
+    return metadata_workers(group) if isinstance(group, zarr.Group) else 1
+
+
+def _record_arrays(table: Any) -> list[tuple[str, str, Any]]:
+    """Return the name, source and opened array of each record column of a feature table, opened concurrently.
 
     Raises:
-        ValueError: If a column with that role is not such a column, as an
-            earlier release writes one when it merges a store that holds the
-            record, naming the call that drops it.
+        ValueError: As :func:`measured_feature_columns` raises.
     """
-    names, column_array = _column_arrays(table)
-    found: dict[str, str] = {}
-    for name in names:
-        array = column_array(name)
+    names = _record_candidates(table)
+    arrays = run_concurrently(
+        [partial(table._get_array, name) for name in names],
+        workers=_table_workers(table),
+    )
+    found: list[tuple[str, str, Any]] = []
+    for name, array in zip(names, arrays, strict=True):
         attributes = getattr(array, "attrs", {})
         if attributes.get("role") != MEASURED_FEATURES_ROLE:
             continue
@@ -216,14 +246,10 @@ def measured_feature_columns(table: Any) -> dict[str, str]:
             problem = f"its source attribute, {source!r}, does not name it"
         elif np.dtype(array.dtype).kind != "b":
             problem = f"it has dtype {np.dtype(array.dtype)}, not bool"
-        elif metadata_missing_mask(table, name) is not None:
+        elif "missing_mask" in attributes:
             problem = "it has missing values"
         if problem is not None:
-            # A feature table is the featureData group of its assay.
-            assay = str(table._group.path).strip("/").split("/")[-2]
-            store = (
-                f"ds.{assay}" if assay.isidentifier() else f"ds.get_assay({assay!r})"
-            )
+            store = _record_store(table)
             raise ValueError(
                 f"Feature column {name!r} has the role of a record of which "
                 f"features one source of a merge measured, but {problem}. Earlier "
@@ -232,27 +258,340 @@ def measured_feature_columns(table: Any) -> dict[str, str]:
                 f"{store}.feats.drop({name!r}), or merge the sources again to "
                 "record what each one measured."
             )
-        found[name] = str(source)
+        found.append((name, str(source), array))
     return found
+
+
+def measured_feature_columns(table: Any) -> dict[str, str]:
+    """Return the feature columns that record which features each source of a merge measured, mapped to their sources.
+
+    A merge or a composite whose sources measured different features writes
+    one Boolean column for each source that holds the assay, named by
+    :func:`~cytearc.storage.metadata_keys.measured_features_column` of the
+    source that its ``source`` attribute keeps, with the ``role`` attribute
+    :data:`~cytearc.storage.metadata_keys.MEASURED_FEATURES_ROLE`; other
+    feature tables hold none. Only columns named ``measured_in_<source>``
+    are opened.
+
+    Raises:
+        ValueError: If a column with that role is not such a column, as an
+            earlier release writes one when it merges a store that holds the
+            record, naming the call that drops it.
+    """
+    return {name: source for name, source, _array in _record_arrays(table)}
+
+
+def _linked_column(arrays: Iterable[Any]) -> str | None:
+    """Return the cell column that every record column names, or None when they name none or different ones."""
+    linked = {array.attrs.get(SOURCE_COLUMN_ATTRIBUTE) for array in arrays}
+    column = next(iter(linked), None)
+    return column if len(linked) == 1 and isinstance(column, str) else None
+
+
+@dataclass(frozen=True, slots=True)
+class FeatureRecord:
+    """Which features each source of a merge measured, as a feature table records it.
+
+    Attributes:
+        sources: Each source, in the order of the record's columns.
+        columns: The feature column that records each source's features.
+        measured: Whether each source measured each feature of ``features``,
+            sources by features.
+        features: The features, in increasing order, that ``measured``
+            covers.
+        sourceColumn: The cell column that names each cell's source, or None
+            when the record names none.
+    """
+
+    sources: list[str]
+    columns: list[str]
+    measured: np.ndarray
+    features: np.ndarray
+    sourceColumn: str | None
+
+    def measured_of(self, features: Sequence[int] | np.ndarray) -> np.ndarray:
+        """Return whether each source measured each of ``features``, which ``self.features`` holds, sources by features."""
+        indices = np.asarray(features, dtype=np.int64)
+        return self.measured[:, np.searchsorted(self.features, indices)]
+
+
+def measured_features_by_source(
+    table: Any, features: Sequence[int] | np.ndarray | None = None
+) -> FeatureRecord | None:
+    """Return the record of which features each source measured that a feature table holds, or None.
+
+    The record's columns are those of :func:`measured_feature_columns`; a
+    table without them holds no record. With ``features``, only their rows
+    of each column are read.
+    """
+    record = _record_arrays(table)
+    if not record:
+        return None
+    rows = (
+        np.arange(int(table.N))
+        if features is None
+        else np.unique(np.asarray(features, dtype=np.int64))
+    )
+    arrays = [array for _name, _source, array in record]
+    read = (
+        [partial(np.asarray, array) for array in arrays]
+        if features is None
+        else [partial(read_array_rows_chunkwise, array, rows) for array in arrays]
+    )
+    return FeatureRecord(
+        sources=[source for _name, source, _array in record],
+        columns=[name for name, _source, _array in record],
+        measured=np.stack(
+            [
+                np.asarray(values, dtype=bool)
+                for values in run_concurrently(read, workers=_table_workers(table))
+            ]
+        ),
+        features=rows,
+        sourceColumn=_linked_column(arrays),
+    )
 
 
 def features_measured_by_every_source(table: Any) -> np.ndarray:
     """Return whether every source of a merge measured each feature of ``table``.
 
-    A feature counts as measured by every source when each column of
-    :func:`measured_feature_columns` is True for it, and every feature of a
-    table without such columns does.
+    Every feature of a table without a record
+    (:func:`measured_features_by_source`) counts as measured by every source.
     """
-    measured = np.ones(int(table.N), dtype=bool)
-    for name in measured_feature_columns(table):
-        measured &= np.asarray(table.fetch_all(name), dtype=bool)
-    return measured
+    record = measured_features_by_source(table)
+    if record is None:
+        return np.ones(int(table.N), dtype=bool)
+    return np.asarray(record.measured.all(axis=0))
 
 
-def exported_measured_features(table: Any, assay: str) -> dict[str, dict[str, str]]:
-    """Return the record of which features each source measured that an export of ``assay`` declares."""
-    columns = measured_feature_columns(table)
-    return {assay: columns} if columns else {}
+def present_sources(codes: np.ndarray, n_sources: int) -> np.ndarray:
+    """Return the positions of the sources that ``codes``, the sources of some cells, hold."""
+    return np.flatnonzero(np.bincount(codes, minlength=n_sources))
+
+
+def _record_store(table: Any) -> str:
+    """Return how a message names the assay of a feature table, as ``ds.ADT`` or ``ds.get_assay('...')``."""
+    # A feature table is the featureData group of its assay.
+    assay = str(table._group.path).strip("/").split("/")[-2]
+    return f"ds.{assay}" if assay.isidentifier() else f"ds.get_assay({assay!r})"
+
+
+def _dropped_record(features: Any, record: FeatureRecord) -> str:
+    """Return the remedy that drops a record, and what dropping it does."""
+    store = _record_store(features)
+    calls = ", ".join(f"{store}.feats.drop({column!r})" for column in record.columns)
+    return (
+        f"Merge the sources again, or drop the record with {calls}, after which "
+        "analyses read the zero counts of a feature in the cells of a source "
+        "that did not measure it as counts again."
+    )
+
+
+def _source_blocks(
+    cells: Any, features: Any, rows: np.ndarray, record: FeatureRecord, *, assay: str
+) -> Iterator[tuple[int, np.ndarray]]:
+    """Yield the offset of each block of ``rows`` and the position in ``record.sources`` of each of its cells' sources.
+
+    The codes take the smallest integer type of the sources' positions.
+
+    Raises:
+        ValueError: As :func:`cell_sources` raises.
+    """
+    column = record.sourceColumn
+    stored = (
+        cells._get_array(column)
+        if column is not None and _has_column(cells, column)
+        else None
+    )
+    if stored is None or stored.attrs.get("role") != CELL_SOURCES_ROLE:
+        named = "" if column is None else f" {column!r}"
+        problem = (
+            "is missing"
+            if stored is None
+            else f"has no role {CELL_SOURCES_ROLE!r}, which marks that column"
+        )
+        raise ValueError(
+            f"Assay {assay!r} records which features each source of a merge "
+            f"measured, in its feature columns {', '.join(map(repr, record.columns))}, "
+            f"but the cell column{named} that names each cell's source, which a "
+            f"merge or a composite writes beside the record, {problem}. "
+            + _dropped_record(features, record)
+        )
+    assert column is not None
+    dtype = category_codes_dtype(len(record.sources))
+    lookup: np.ndarray | None = None
+    if isinstance(stored, CategoricalColumn):
+        # Each category's position among the sources, and -1 after the last
+        # category, which a missing row's code -1 takes.
+        lookup = np.full(stored.n_categories + 1, -1, dtype=dtype)
+        for position, source in enumerate(record.sources):
+            lookup[np.flatnonzero(stored.categories == source)] = position
+    indices = np.asarray(rows, dtype=np.int64)
+    for start in range(0, indices.size, _SOURCE_ROWS):
+        block = indices[start : start + _SOURCE_ROWS]
+        if lookup is not None:
+            codes = lookup[read_array_rows_chunkwise(stored.codes, block)]
+        else:
+            labels = read_metadata_rows_chunkwise(cells, column, block)
+            codes = np.full(block.size, -1, dtype=dtype)
+            for position, source in enumerate(record.sources):
+                codes[labels == source] = position
+        unknown = np.flatnonzero(codes < 0)
+        if unknown.size:
+            row = block[unknown[:1]]
+            cell = read_metadata_rows_chunkwise(cells, "ids", row)[0]
+            label = read_metadata_rows_chunkwise(cells, column, row)[0]
+            raise ValueError(
+                f"Cell {str(cell)!r} has the source {str(label)!r} in cell column "
+                f"{column!r}, which is not one of the sources whose measured "
+                f"features assay {assay!r} records "
+                f"({', '.join(map(repr, record.sources))}). "
+                + _dropped_record(features, record)
+            )
+        yield start, codes
+
+
+def cell_sources(
+    cells: Any, features: Any, rows: np.ndarray, record: FeatureRecord, *, assay: str
+) -> np.ndarray:
+    """Return the position in ``record.sources`` of the source of each cell at ``rows``.
+
+    The cells must be cells that ``assay`` measured. Their sources are the
+    labels of the cell column that the record names, which holds the role
+    :data:`~cytearc.storage.metadata_keys.CELL_SOURCES_ROLE`, read a block
+    of rows at a time: the codes of the categorical column that a merge or a
+    composite writes, or the labels of a column of text. The positions take
+    the smallest integer type that holds them.
+
+    Raises:
+        ValueError: If the record names no cell column, the cells lack it,
+            it lacks the role, or a cell's source is not a source of the
+            record, giving the calls that drop the record.
+    """
+    positions = np.empty(
+        np.asarray(rows).size, dtype=category_codes_dtype(len(record.sources))
+    )
+    for start, codes in _source_blocks(cells, features, rows, record, assay=assay):
+        positions[start : start + codes.size] = codes
+    return positions
+
+
+def sources_of_cells(
+    cells: Any, features: Any, rows: np.ndarray, record: FeatureRecord, *, assay: str
+) -> np.ndarray:
+    """Return the positions in ``record.sources`` of the sources that some cell at ``rows`` belongs to.
+
+    Each block's sources are counted as it is read, so no code is held for
+    every cell.
+
+    Raises:
+        ValueError: As :func:`cell_sources` raises.
+    """
+    present = np.zeros(len(record.sources), dtype=bool)
+    for _start, codes in _source_blocks(cells, features, rows, record, assay=assay):
+        present[present_sources(codes, len(record.sources))] = True
+    return np.flatnonzero(present)
+
+
+def features_measured_by_cells(
+    cells: Any,
+    features: Any,
+    rows: np.ndarray,
+    *,
+    assay: str,
+    selected: np.ndarray | None = None,
+) -> np.ndarray | None:
+    """Return whether the source of every cell at ``rows`` measured each feature of ``features``.
+
+    The cells must be cells that ``assay`` measured. None when the feature
+    table holds no record, or when every source of the record measured every
+    feature of the Boolean mask ``selected``, or every feature without one;
+    the cells' sources are read only otherwise.
+
+    Raises:
+        ValueError: As :func:`cell_sources` raises.
+    """
+    record = measured_features_by_source(features)
+    if record is None:
+        return None
+    if (record.measured if selected is None else record.measured[:, selected]).all():
+        return None
+    present = sources_of_cells(cells, features, rows, record, assay=assay)
+    return np.asarray(np.logical_and.reduce(record.measured[present], axis=0))
+
+
+def require_measured_features(
+    cells: Any,
+    features: Any,
+    rows: np.ndarray,
+    requested: Mapping[str, Sequence[int]],
+    *,
+    assay: str,
+    remedy: str,
+) -> None:
+    """Refuse a requested feature that the source of a cell at ``rows`` did not measure.
+
+    ``requested`` maps each requested label to the features of ``assay``
+    that it reads. An analysis that reads values over cells refuses zero
+    counts that are not measurements, as it refuses cells that the assay did
+    not measure (:func:`require_measured_cells`). The cells' sources are read
+    only when some source did not measure a requested feature.
+
+    Raises:
+        ValueError: Naming the first label that reads a feature that the
+            source of some of the cells did not measure, those sources, and
+            ``remedy``; or as :func:`cell_sources` raises.
+    """
+    record = measured_features_by_source(
+        features,
+        np.concatenate(
+            [np.asarray(indices, dtype=np.int64) for indices in requested.values()]
+            or [np.empty(0, dtype=np.int64)]
+        ),
+    )
+    if record is None:
+        return
+    lacked = {
+        label: measured
+        for label, measured in (
+            (label, record.measured_of(indices)) for label, indices in requested.items()
+        )
+        if not measured.all()
+    }
+    if not lacked:
+        return
+    present = sources_of_cells(cells, features, rows, record, assay=assay)
+    for label, measured in lacked.items():
+        lacking = [record.sources[code] for code in present if not measured[code].all()]
+        if lacking:
+            noun, pronoun = (
+                ("source", "its") if len(lacking) == 1 else ("sources", "their")
+            )
+            raise ValueError(
+                f"Assay {assay!r} records that {noun} "
+                f"{', '.join(map(repr, lacking))} did not measure {label!r}, so "
+                f"the zero counts of {pronoun} cells are not measurements; {remedy}"
+            )
+
+
+def exported_measured_features(
+    table: Any, assay: str
+) -> tuple[dict[str, dict[str, str]], str | None]:
+    """Return the record of which features each source measured that an export of ``assay`` declares, and the cell column of sources that it names."""
+    record = _record_arrays(table)
+    if not record:
+        return {}, None
+    return (
+        {assay: {name: source for name, source, _array in record}},
+        _linked_column(array for _name, _source, array in record),
+    )
+
+
+def cell_sources_declaration(column: str | None) -> dict[str, dict[str, str]]:
+    """Return the AnnData ``uns`` entries that declare the ``obs`` column of each cell's source."""
+    if column is None:
+        return {}
+    return {CYTEARC_UNS_KEY: {CELL_SOURCES_UNS_KEY: column}}
 
 
 def measured_features_declaration(

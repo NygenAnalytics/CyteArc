@@ -153,6 +153,7 @@ _CLUSTER_LABELS = "H5AD cluster labels"
 _FEATURE_TYPES = "H5AD feature types"
 _MEMBERSHIP_COLUMNS = "H5AD membership column names"
 _RECORD_SOURCES = "H5AD source names of measured features"
+_CELL_SOURCES = "The H5AD obs column of cell sources"
 
 
 def _array_bytes(values: np.ndarray) -> int:
@@ -1304,6 +1305,23 @@ class H5adReader:
                 for column, entry in columns.items()
             }
         return parse_measured_features_declaration(declared)
+
+    def cell_sources(self) -> str | None:
+        """Return the ``obs`` column that the file declares as each cell's source, or None.
+
+        Raises:
+            ValueError: If the declaration is not one text value, or it is
+                bytes that are not UTF-8 text.
+        """
+        from ..metadata.membership import CELL_SOURCES_UNS_KEY, CYTEARC_UNS_KEY
+
+        location = f"uns/{CYTEARC_UNS_KEY}/{CELL_SOURCES_UNS_KEY}"
+        entry = self.h5.get(location)
+        if entry is None:
+            return None
+        return self._declared_text(
+            entry, location, "the obs column of each cell's source", _CELL_SOURCES
+        )
 
     def _declared_text(self, entry: Any, location: str, held: str, label: str) -> str:
         """Return the one text value of an entry of a ``uns`` declaration.

@@ -31,7 +31,13 @@ from typing import Any
 import numpy as np
 import zarr
 
-from .arrays import missing_placeholder
+from .arrays import (
+    create_metadata_column,
+    encode_metadata_values,
+    missing_placeholder,
+)
+from .layout import column_chunk_rows
+from .profiles import StorageProfile
 from .geometry import array_geometry
 from .partition import row_band
 from .types import as_zarr_array
@@ -393,3 +399,32 @@ class CategoricalColumn:
             f"<CategoricalColumn {self.basename!r} of {self.size} rows, "
             f"{self.n_categories} {self.dtype} categories>"
         )
+
+
+def link_categories(
+    group: zarr.Group,
+    name: str,
+    categories: np.ndarray,
+    *,
+    profile: StorageProfile | None = None,
+) -> None:
+    """Store unordered ``categories`` beside the written codes of column ``name`` and link them.
+
+    The codes are each row's position among ``categories``, as a writer that
+    streams them stores them (:func:`~cytearc.storage.categorical.category_codes_dtype`).
+    """
+    codes = as_zarr_array(group[name], name=name)
+    labels = encode_metadata_values(
+        np.asarray(categories), np.asarray(categories).dtype, name=name
+    )
+    held, padding = stored_categories(labels, int(codes.shape[0]))
+    create_metadata_column(
+        group,
+        categories_name(name),
+        data=held,
+        dtype=held.dtype,
+        chunkSize=column_chunk_rows(len(held), max(1, held.dtype.itemsize)),
+        profile=profile,
+        attributes={ORDERED_ATTRIBUTE: False, **padding},
+    )
+    codes.attrs[CATEGORIES_LINK] = categories_name(name)

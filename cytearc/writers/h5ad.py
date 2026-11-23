@@ -983,6 +983,9 @@ class H5adToZarr:
         # malformed fails here, before the destination is read or created.
         self._membership = self._declared_membership()
         self._measuredFeatures = self._declared_measured_features()
+        # The obs column of each cell's source, and the key under which the
+        # import writes it, both known before anything is written.
+        self._cellSources, self._cellSourcesKey = self._declared_cell_sources()
         # A destination that would be refused fails before the passes over
         # the source below; create_destination checks it again.
         check_destination(
@@ -1249,6 +1252,56 @@ class H5adToZarr:
             restored[assay] = checked_membership_values(values, missing, assay=assay)
         return restored
 
+    def _declared_cell_sources(self) -> tuple[str | None, str | None]:
+        """Return the ``obs`` column of each cell's source that an imported record of measured features names, and the key that the import writes it under.
+
+        The key is planned as :meth:`_ini_cell_data` plans it.
+
+        Raises:
+            ValueError: If the file declares a record for an imported assay
+                but no ``obs`` column of cell sources, one that ``obs`` lacks,
+                or one that the import would skip.
+        """
+        from ..metadata.membership import reserved_membership_columns
+        from ..storage.cell_order import SOURCE_ROW
+        from ..storage.metadata_keys import metadata_column_keys
+
+        if not self._measuredFeatures:
+            return None, None
+        declared = (
+            "The file declares which features each source of a merge measured, "
+            f"for assays {sorted(self._measuredFeatures)}, but"
+        )
+        column = self.h5ad.cell_sources()
+        if column is None:
+            raise ValueError(
+                f"{declared} declares no {self.h5ad.cellAttrsKey} column of each "
+                "cell's source; export the store again with this release"
+            )
+        if not self.h5ad._check_exists(self.h5ad.cellAttrsKey, column):
+            raise ValueError(
+                f"{declared} {self.h5ad.cellAttrsKey} lacks the column {column!r} "
+                "that it declares as each cell's source"
+            )
+        key = metadata_column_keys(
+            self.h5ad._source_column_names(self.h5ad.cellAttrsKey),
+            taken=[
+                "ids",
+                "names",
+                "I",
+                *((SOURCE_ROW,) if self.shuffleCells else ()),
+                *reserved_membership_columns(self.assayNames),
+            ],
+        ).get(column)
+        if key is None:
+            raise ValueError(
+                f"{declared} the import would skip the {self.h5ad.cellAttrsKey} "
+                f"column {column!r} that it declares as each cell's source, "
+                "whose name CyteArc reserves or cannot store; rename it in the "
+                "file and import it again"
+            )
+        return column, key
+
     def _declared_measured_features(self) -> dict[str, dict[str, str]]:
         """Read the record of which features each source measured that the file declares for each imported assay.
 
@@ -1287,6 +1340,7 @@ class H5adToZarr:
         from ..metadata.membership import reserved_membership_columns
         from ..storage.metadata_keys import (
             assay_membership_column,
+            cell_sources_attributes,
             metadata_column_keys,
         )
         from ..storage.cell_order import write_shuffled_cell_order
@@ -1349,6 +1403,9 @@ class H5adToZarr:
                     missing=missing,
                     display=True,
                 )
+            if name == self._cellSources:
+                assert key == self._cellSourcesKey, (key, self._cellSourcesKey)
+                g[key].attrs.update(cell_sources_attributes())
         for assay, members in self._membership.items():
             write_membership_column(
                 g,
@@ -1448,7 +1505,10 @@ class H5adToZarr:
         # under their own names, and take back the record's attributes.
         for assay_name, feat_group, _feature_indexes in targets:
             for record, source in self._measuredFeatures.get(assay_name, {}).items():
-                feat_group[record].attrs.update(measured_features_attributes(source))
+                assert self._cellSourcesKey is not None
+                feat_group[record].attrs.update(
+                    measured_features_attributes(source, self._cellSourcesKey)
+                )
 
     def dump(self, batch_size: int | None = None) -> H5adImportResult:
         """Write h5ad matrix data into Zarr ``counts`` and RNA ``countsT``.

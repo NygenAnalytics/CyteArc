@@ -280,6 +280,8 @@ def _summary_store(values: np.ndarray) -> SimpleNamespace:
     class Assay:
         # A cell table without membership columns: every cell is measured.
         cells = SimpleNamespace(columns=())
+        # A feature table without a record of what each source measured.
+        feats = SimpleNamespace(columns=())
 
         @staticmethod
         def normed(*, cell_idx, feat_idx, log_transform=False):

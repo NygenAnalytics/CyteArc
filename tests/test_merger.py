@@ -264,7 +264,9 @@ def test_merged_case_distinct_ids_resolve_and_fetch_exactly():
     values = fetch_normalized_feature_matrix(
         merged, resolved, np.arange(2), NormalizationSpec(source="raw")
     )
-    np.testing.assert_array_equal(values, [[5, 0], [0, 7]])
+    # Each source's cell has no value of the other source's gene, which it did
+    # not measure.
+    np.testing.assert_array_equal(values, [[5, np.nan], [np.nan, 7]])
     with pytest.raises(KeyError, match="not found"):
         resolve_feature(merged, FeatureRef("GENEA", by="id"))
     with pytest.raises(ValueError, match="matches 2 entries"):
@@ -7227,6 +7229,7 @@ def test_dataset_merge_plans_no_source_column_that_its_record_replaces(tmp_path)
     assert dict(features["measured_in_right"].attrs) == {
         "role": "measured_features",
         "source": "right",
+        "sourceColumn": "dataset",
     }
 
 

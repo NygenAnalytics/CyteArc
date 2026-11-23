@@ -1,6 +1,6 @@
 import hashlib
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any
 
 import numpy as np
@@ -27,6 +27,9 @@ from .geometry import array_geometry
 from .layout import column_chunk_rows
 from .metadata_keys import (
     ASSAY_MEMBERSHIP_ROLE,
+    CELL_SOURCES_ROLE,
+    MEASURED_FEATURES_ROLE,
+    SOURCE_COLUMN_ATTRIBUTE,
     assay_membership_column,
     validate_metadata_column_name,
 )
@@ -612,6 +615,7 @@ def protect_metadata_column(
             else as_zarr_group(root[parent_path], name=parent_path)
         )
         groups = dict(parent.groups())
+        _protect_cell_sources(group, column, removing, groups)
         for name, assay in groups.items():
             if assay_membership_column(name) == column and (
                 assay.attrs.get("is_assay") is True or PENDING_ASSAY_ATTR in assay.attrs
@@ -665,6 +669,41 @@ def _protect_source_row(removing: zarr.Array | None) -> None:
             "file and cannot be dropped: exports sort by it to restore the "
             "file's order of the shuffled cells."
         )
+
+
+def _protect_cell_sources(
+    group: zarr.Group,
+    column: str,
+    removing: zarr.Array | None,
+    assays: Mapping[str, zarr.Group],
+) -> None:
+    """Refuse a change to the cell column that a record of measured features names as each cell's source."""
+    try:
+        stored = as_zarr_array(group[column], name=column)
+    except KeyError:
+        return
+    if stored.attrs.get("role") != CELL_SOURCES_ROLE:
+        return
+    records = sorted(
+        f"{name}/{key}"
+        for name, assay in assays.items()
+        if assay.attrs.get("is_assay") is True and "featureData" in assay
+        for key, array in as_zarr_group(
+            assay["featureData"], name="featureData"
+        ).arrays()
+        if array.attrs.get("role") == MEASURED_FEATURES_ROLE
+        and array.attrs.get(SOURCE_COLUMN_ATTRIBUTE) == column
+    )
+    if not records:
+        return
+    change = "dropped" if removing is not None else "inserted, overwritten, or reset"
+    raise ValueError(
+        f"Cell column {column!r} names each cell's source for the records of "
+        f"which features each source measured ({', '.join(records)}), so it "
+        f"cannot be {change}. Store other values under another name. Dropping "
+        "those feature columns first frees it, after which analyses read the "
+        "zero counts of a feature that a source did not measure as counts again."
+    )
 
 
 def _protect_membership_column(
