@@ -52,6 +52,8 @@ from ..storage.cell_order import (
     SOURCE_ROW,
     SOURCE_ROW_ROLE,
     is_source_row_column,
+    record_cell_shuffle,
+    recorded_shuffle_seed,
     source_order_ranks,
 )
 from ..storage.copy import COLUMN_METADATA_ATTRIBUTES
@@ -80,10 +82,9 @@ from ..utils.logging import logger
 from ..utils.memory_budget import MemoryBudgetError
 from .features import NestedSources, nested_source_name
 from .row_plan import (
+    WINDOW_BYTES_PER_ROW,
     RowPlan,
-    RowPlanSegment,
-    iter_row_plan_segments,
-    max_row_plan_block_rows,
+    iter_row_plan_windows,
     prefixed_cell_ids,
     verify_merged_cell_ids,
 )
@@ -157,7 +158,8 @@ def _column_working_bytes(
     itemsize = max(1, int(spec.dtype.itemsize))
     mask_bytes = width * np.dtype(bool).itemsize if spec.hasMissing else 0
     string_bytes = width * itemsize if spec.dtype.kind in {"U", "S", "O"} else 0
-    staging = width * 3 * itemsize + mask_bytes + string_bytes
+    # The window of merged rows that the values fill indexes its parts.
+    staging = width * (3 * itemsize + WINDOW_BYTES_PER_ROW) + mask_bytes + string_bytes
     source_read = max(0, int(spec.sourceReadFixedBytes)) + width * max(
         0, int(spec.sourceReadBytesPerRow)
     )
@@ -445,10 +447,7 @@ def resolve_identity_validation_rows(
     resident_bytes: int,
 ) -> int:
     """Return the largest admitted cell-identity validation width."""
-    preferred = min(
-        metadata_chunk_rows(row_plan),
-        max(1, max_row_plan_block_rows(row_plan)),
-    )
+    preferred = metadata_chunk_rows(row_plan)
     ids_spec = next(spec for spec in metadata_plan.columns if spec.name == "ids")
     stored_fixed, _ = array_row_selection_parts(stored_ids)
     band_rows = min(max(1, int(stored_ids.chunks[0])), max(1, row_plan.nCells))
@@ -1323,14 +1322,7 @@ def plan_cell_metadata(
         if row_plan is None:
             return None
         if index not in taken_rows:
-            parts = [
-                segment.localRows
-                for segment in iter_row_plan_segments(row_plan)
-                if segment.sourceIdx == index
-            ]
-            taken_rows[index] = (
-                np.sort(np.concatenate(parts)) if parts else np.empty(0, np.int64)
-            )
+            taken_rows[index] = row_plan.source_rows(index)
         return taken_rows[index]
 
     def sources_of(public: str) -> list[tuple[int, Any, str]]:
@@ -1974,30 +1966,6 @@ def write_feature_metadata(
         )
 
 
-def _iter_destination_chunk_segments(
-    row_plan: RowPlan,
-    *,
-    segment_rows: int,
-    chunk_rows: int,
-) -> Iterator[RowPlanSegment]:
-    for segment in iter_row_plan_segments(row_plan):
-        offset = 0
-        while offset < segment.localRows.size:
-            dest_start = segment.destStart + offset
-            rows_to_boundary = chunk_rows - (dest_start % chunk_rows)
-            width = min(
-                segment_rows,
-                rows_to_boundary,
-                int(segment.localRows.size) - offset,
-            )
-            yield RowPlanSegment(
-                sourceIdx=segment.sourceIdx,
-                destStart=dest_start,
-                localRows=segment.localRows[offset : offset + width],
-            )
-            offset += width
-
-
 def merged_source_rows(
     row_plan: RowPlan, source_cell_tables: list[Any]
 ) -> list[tuple[np.ndarray, np.ndarray]]:
@@ -2018,13 +1986,7 @@ def merged_source_rows(
     lookups: list[tuple[np.ndarray, np.ndarray]] = []
     offset = 0
     for index, table in enumerate(source_cell_tables):
-        blocks = list(row_plan.permutationsRows[index].values())
-        selected = (
-            np.sort(np.concatenate(blocks)).astype(np.int64, copy=False)
-            if blocks
-            else np.zeros(0, dtype=np.int64)
-        )
-        del blocks
+        selected = row_plan.source_rows(index)
         column = table._get_array(SOURCE_ROW) if SOURCE_ROW in table.columns else None
         if is_source_row_column(column):
             values = read_metadata_rows_chunkwise(table, SOURCE_ROW, selected)
@@ -2095,11 +2057,6 @@ def _iter_column_blocks(
     chunk_rows: int,
     nested: Sequence[NestedSources | None] = (),
 ) -> Iterator[MetadataBlock]:
-    # Segments fill one destination chunk band at a time, so each band is
-    # written with a single whole-chunk write instead of partial updates.
-    band_start = 0
-    band_values: np.ndarray | None = None
-    band_missing: np.ndarray | None = None
     lookups = (
         merged_source_rows(row_plan, source_cell_tables)
         if spec.name == SOURCE_ROW
@@ -2110,13 +2067,11 @@ def _iter_column_blocks(
     first_category = np.cumsum(
         [0, *(1 if item is None else len(item.names) for item in owned)]
     )
-    for segment in _iter_destination_chunk_segments(
-        row_plan,
-        segment_rows=segment_rows,
-        chunk_rows=chunk_rows,
-    ):
-        source_idx = segment.sourceIdx
-        local_rows = segment.localRows
+
+    def part_values(
+        source_idx: int, local_rows: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray | None]:
+        """Return the values of the source rows ``local_rows`` and, with a mask, which are missing."""
         name = row_plan.sourceNames[source_idx]
         table = source_cell_tables[source_idx]
         n = int(local_rows.size)
@@ -2206,17 +2161,28 @@ def _iter_column_blocks(
                         "Plan the merge again, with a new DataStoreMerge or "
                         "create_composite call, to merge the source as it is now."
                     )
+        return values, missing
 
+    # Windows fill one destination chunk band at a time, so each band is
+    # written with a single whole-chunk write instead of partial updates.
+    band_start = 0
+    band_values: np.ndarray | None = None
+    band_missing: np.ndarray | None = None
+    for window in iter_row_plan_windows(
+        row_plan, segment_rows, boundary_rows=chunk_rows
+    ):
         if band_values is None:
             band_rows = min(chunk_rows, row_plan.nCells - band_start)
             band_values = np.empty(band_rows, dtype=spec.dtype)
             band_missing = np.zeros(band_rows, dtype=bool) if spec.hasMissing else None
-        offset = segment.destStart - band_start
-        band_values[offset : offset + n] = values
-        if band_missing is not None and missing is not None:
-            band_missing[offset : offset + n] = missing
-        del values, missing
-        if offset + n == band_values.size:
+        offset = window.destStart - band_start
+        for part in window.parts:
+            values, missing = part_values(part.sourceIdx, part.localRows)
+            band_values[offset + part.positions] = values
+            if band_missing is not None and missing is not None:
+                band_missing[offset + part.positions] = missing
+            del values, missing
+        if offset + window.nRows == band_values.size:
             yield MetadataBlock(band_start, band_values, band_missing)
             band_start += band_values.size
             band_values = band_missing = None
@@ -2233,8 +2199,13 @@ def write_cell_metadata(
     reset_cell_filter: bool,
     source_column: str | None,
     membership: SourceMembership,
+    shuffle_seed: int | None = None,
 ) -> zarr.Group:
-    """Stream cell metadata columns in merged row order, replacing any partial slot."""
+    """Stream cell metadata columns in merged row order, replacing any partial slot.
+
+    ``shuffle_seed``, which :func:`merged_shuffle_seed` gives, is recorded
+    as the shuffle of the merged cells; None records none.
+    """
     cell_slot = _cell_data_path(workspace)
     if cell_slot in root:
         del root[cell_slot]
@@ -2279,8 +2250,29 @@ def write_cell_metadata(
                 np.asarray(metadata_plan.sourceCategories),
                 profile=profile,
             )
+    if shuffle_seed is not None:
+        record_cell_shuffle(group, shuffle_seed)
     group.attrs["complete"] = True
     return group
+
+
+def merged_shuffle_seed(
+    row_plan: RowPlan, source_cell_groups: Sequence[zarr.Group]
+) -> int | None:
+    """Return the seed to record as the shuffle of the merged cells, or None.
+
+    The merged order is uniformly random when every source that gives cells
+    lists them in a uniformly random order, as its ``cellOrder`` record
+    states, since the merge keeps each source's order and interleaves the
+    sources at random. A source without the record gives None.
+
+    Raises:
+        ValueError: If a source's ``cellOrder`` record is malformed.
+    """
+    for cells, group in zip(row_plan.sourceCells, source_cell_groups, strict=True):
+        if cells and recorded_shuffle_seed(group) is None:
+            return None
+    return row_plan.seed
 
 
 def validate_cell_metadata(

@@ -16,7 +16,7 @@ Every per-cell array follows the one order: `counts` and `countsT`, the cell IDs
 
 Analyses that draw random numbers, such as UMAP and Leiden clustering, draw them over the cells in store order. A store imported in another order therefore gives slightly different layouts and clusters, as another seed would, and its cluster numbers can differ.
 
-Merges and composites order their cells otherwise, in blocks that each hold the cells of one count shard of one source, shuffled within the block, so a contiguous slice of their rows, such as a training mini-batch, can hold the cells of a single source. The [import and export reference](/api/import_export.html#merged-cell-order) describes the order.
+Merges and composites interleave the cells of their sources at random and keep each source's cells in the order that the source stores them, so every contiguous slice of their rows holds each source's cells in proportion to its size. When every source lists its cells in a uniformly random order, as imports do by default, so does the merge or composite: every contiguous slice, such as a training mini-batch, is a random sample of its cells, and its cell table records the shuffle. A source in its file's order, such as a store that CyteArc 1.4.0 or an earlier release imported, keeps that order inside the merge, so the cells that a slice takes from it come from one stretch of its file. The [import and export reference](/api/import_export.html#merged-cell-order) describes the order.
 
 ## Where each cell came from
 

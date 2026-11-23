@@ -449,7 +449,7 @@ def test_composite_metadata_prefetch_raises_every_fetch_that_failed(
 def test_composite_count_prefetch_starts_shards_past_a_slow_one(tmp_path, monkeypatch):
     import asyncio
 
-    from cytearc.composite.create import _prefetch_counts
+    from cytearc.composite.create import _count_segments, _prefetch_counts
     from cytearc.composite.source_cache import SourceCache
     from cytearc.merge.row_plan import build_row_plan
     from cytearc.storage.geometry import array_geometry
@@ -460,7 +460,7 @@ def test_composite_count_prefetch_starts_shards_past_a_slow_one(tmp_path, monkey
     )
     cache = SourceCache(max_entries=16)
     array = zarr.open_array(cache.wrap(root.store), path="a", mode="r")
-    plan = build_row_plan([64], [16], ["a"])
+    plan = build_row_plan([64], ["a"])
     requested = []
     others: asyncio.Event | None = None
     waited = {}
@@ -488,9 +488,9 @@ def test_composite_count_prefetch_starts_shards_past_a_slow_one(tmp_path, monkey
         _prefetch_counts(
             [array],
             plan,
+            _count_segments(plan, [array_geometry(array)], 64),
             [np.arange(16)],
             [array_geometry(array)],
-            segment_rows=64,
             read_workers=2,
             memory_bytes=1024**2,
             cache=cache,
@@ -508,7 +508,7 @@ def test_composite_count_prefetch_starts_shards_past_a_slow_one(tmp_path, monkey
 def test_composite_count_prefetch_only_admits_selected_objects(
     tmp_path, monkeypatch, reason
 ):
-    from cytearc.composite.create import _prefetch_counts
+    from cytearc.composite.create import _count_segments, _prefetch_counts
     from cytearc.composite.source_cache import SourceCache
     from cytearc.merge.row_plan import build_row_plan
     from cytearc.storage.geometry import array_geometry
@@ -529,9 +529,8 @@ def test_composite_count_prefetch_only_admits_selected_objects(
     cached = cache.wrap(root.store)
     arrays = [zarr.open_array(cached, path=name, mode="r") for name in ("a", "b")]
     selections = [np.array([0]), np.array([], dtype=np.int64)] if sparse else None
-    plan = build_row_plan(
-        [shape[0]] * 2, [shape[0]] * 2, ["a", "b"], selected_rows=selections
-    )
+    plan = build_row_plan([shape[0]] * 2, ["a", "b"], selected_rows=selections)
+    geometries = [array_geometry(array) for array in arrays]
     mappings = [np.arange(shape[1]) for _ in arrays]
     if reason == "empty_features":
         mappings = [np.full(shape[1], -1) for _ in arrays]
@@ -550,9 +549,9 @@ def test_composite_count_prefetch_only_admits_selected_objects(
         _prefetch_counts(
             arrays,
             plan,
+            _count_segments(plan, geometries, shape[0]),
             mappings,
-            [array_geometry(array) for array in arrays],
-            segment_rows=shape[0],
+            geometries,
             read_workers=2,
             memory_bytes=4096 if reason == "memory" else 1024**2,
             cache=cache,
@@ -562,11 +561,11 @@ def test_composite_count_prefetch_only_admits_selected_objects(
         elif sparse:
             assert requests == ["a/c/0/0"]
         else:
-            first = ("a", "b")[plan.coordinatesPermutations[0, 0]]
-            assert requests == [f"{first}/c/0/0"]
+            # The summary reads source a's shard first, and one entry holds it.
+            assert requests == ["a/c/0/0"]
             assert len(cache._entries) == 1
-            np.testing.assert_array_equal(arrays[("a", "b").index(first)][:], 1)
-            assert requests == [f"{first}/c/0/0"]
+            np.testing.assert_array_equal(arrays[0][:], 1)
+            assert requests == ["a/c/0/0"]
     finally:
         cache.close()
 
@@ -1170,82 +1169,53 @@ def test_empty_source_selection_still_participates_in_features(
     np.testing.assert_array_equal(joint.RNA.matrixGroup["countsT"][:], expected.T)
 
 
-# The rows of one count shard of each source of the composite_sources fixture.
-_FIXTURE_SHARD_ROWS = {"a": 12, "b": 9}
+def _interleaved_ids(selected, seed=42):
+    """Return the merged cell IDs that the rule of the merge section of the import and export reference gives.
 
-# The order of every cell of the fixture's sources in a composite, and in a merge
-# with the default seed, by the rule of the merge section of the import and export
-# reference. Source a's 13 cells fall in the blocks a0 (c0 to c11) and a1 (c12),
-# and source b's 11 cells in b0 (c0 to c8) and b1 (c9, c10). The blocks a0 and b0
-# come first, in the order that the seed draws, and the last blocks a1 and b1
-# follow in source order. Each block's cells are in the order of its fixed shuffle.
+    ``selected`` maps each source name, in source order, to its selected
+    rows. The concatenated selected cells take the turns that the import
+    shuffle of ``seed`` gives them, and each source gives its cells in its
+    stored order.
+    """
+    from cytearc.storage.cell_order import shuffled_order
+
+    names = list(selected)
+    rows = {name: sorted(map(int, selected[name])) for name in names}
+    sizes = [len(rows[name]) for name in names]
+    turns = np.searchsorted(
+        np.cumsum(sizes), shuffled_order(sum(sizes), seed), side="right"
+    )
+    taken = dict.fromkeys(names, 0)
+    ids = []
+    for turn in turns.tolist():
+        name = names[turn]
+        ids.append(f"{name}__c{rows[name][taken[name]]}")
+        taken[name] += 1
+    return ids
+
+
+# The order of every cell of the fixture's sources, 13 of a and 11 of b, in a
+# composite and in a merge with the default seed: each source's cells in their
+# stored order, taking the turns that the seed draws.
 _ALL_CELLS_ORDER = [
-    *("b__c3", "b__c0", "b__c7", "b__c2", "b__c4", "b__c6", "b__c1", "b__c5"),
-    *("b__c8", "a__c0", "a__c7", "a__c6", "a__c9", "a__c11", "a__c3", "a__c5"),
-    *("a__c2", "a__c4", "a__c10", "a__c1", "a__c8", "a__c12", "b__c9", "b__c10"),
+    *("b__c0", "a__c0", "b__c1", "b__c2", "a__c1", "b__c3", "a__c2", "a__c3"),
+    *("b__c4", "b__c5", "a__c4", "a__c5", "b__c6", "b__c7", "a__c6", "a__c7"),
+    *("a__c8", "a__c9", "a__c10", "b__c8", "b__c9", "b__c10", "a__c11", "a__c12"),
 ]
 
-# The order with rows={"a": [12, 0, 7, 4]}: the selected cells of a fall in the
-# blocks a0 (c0, c4, c7) and a1 (c12), and b keeps every block, so the blocks come
-# in the order above.
+# The order with rows={"a": [12, 0, 7, 4]}: a's selected cells in its stored
+# order, interleaved with every cell of b.
 _SELECTED_CELLS_ORDER = [
-    *("b__c3", "b__c0", "b__c7", "b__c2", "b__c4", "b__c6", "b__c1", "b__c5"),
-    *("b__c8", "a__c7", "a__c4", "a__c0", "a__c12", "b__c9", "b__c10"),
+    *("b__c0", "b__c1", "b__c2", "b__c3", "b__c4", "b__c5", "a__c0", "b__c6"),
+    *("b__c7", "b__c8", "a__c4", "b__c9", "a__c7", "a__c12", "b__c10"),
 ]
 
-# The order of a merge with seed=0, which draws a0 before b0. The cells within
-# each block keep the order of the default seed.
+# The order of a merge with seed=0, which draws other turns.
 _SEED_0_ORDER = [
-    *("a__c0", "a__c7", "a__c6", "a__c9", "a__c11", "a__c3", "a__c5", "a__c2"),
-    *("a__c4", "a__c10", "a__c1", "a__c8", "b__c3", "b__c0", "b__c7", "b__c2"),
-    *("b__c4", "b__c6", "b__c1", "b__c5", "b__c8", "a__c12", "b__c9", "b__c10"),
+    *("b__c0", "b__c1", "b__c2", "b__c3", "b__c4", "b__c5", "a__c0", "a__c1"),
+    *("b__c6", "a__c2", "a__c3", "a__c4", "b__c7", "b__c8", "a__c5", "a__c6"),
+    *("a__c7", "a__c8", "b__c9", "a__c9", "b__c10", "a__c10", "a__c11", "a__c12"),
 ]
-
-
-def _shard_runs(ids):
-    """Split merged cell IDs into runs of cells from one count shard of one source.
-
-    Each run is ``(source, shard, rows)``: the source name, the index of the
-    shard in the source's counts, and the source rows of the run's cells in
-    the listed order.
-    """
-    runs = []
-    for identity in ids:
-        name, cell = identity.split("__c")
-        row = int(cell)
-        shard = row // _FIXTURE_SHARD_ROWS[name]
-        if runs and runs[-1][:2] == (name, shard):
-            runs[-1][2].append(row)
-        else:
-            runs.append((name, shard, [row]))
-    return runs
-
-
-def _assert_merged_cell_order(ids, selected):
-    """Check merged cell IDs against the documented rule of the merged cell order.
-
-    ``selected`` maps each source name, in source order, to its selected rows.
-    Each source's selected cells form one block for each count shard that
-    holds any of them; each block comes once and whole, and each source's last
-    block follows every other block, in source order.
-    """
-    runs = _shard_runs(ids)
-    blocks = {
-        (name, shard): sorted(
-            row for row in rows if row // _FIXTURE_SHARD_ROWS[name] == shard
-        )
-        for name, rows in selected.items()
-        for shard in {row // _FIXTURE_SHARD_ROWS[name] for row in rows}
-    }
-    assert sorted((name, shard) for name, shard, _ in runs) == sorted(blocks)
-    for name, shard, rows in runs:
-        assert sorted(rows) == blocks[name, shard]
-    last_blocks = [
-        (name, max(row // _FIXTURE_SHARD_ROWS[name] for row in rows))
-        for name, rows in selected.items()
-        if len(rows)
-    ]
-    assert [run[:2] for run in runs[len(runs) - len(last_blocks) :]] == last_blocks
 
 
 def _concatenated_source_rows(ids, selected):
@@ -1278,16 +1248,14 @@ def _concatenated_source_rows(ids, selected):
     ],
     ids=["all", "selected", "selected_reordered", "all_selected_reversed"],
 )
-def test_composite_lists_cells_in_shuffled_blocks_of_their_count_shards(
+def test_composite_interleaves_the_sources_cells_in_their_stored_order(
     sources, tmp_path, rows, expected
 ):
-    for name, shard_rows in _FIXTURE_SHARD_ROWS.items():
-        assert sources[name].RNA.matrixGroup["counts"].shards[0] == shard_rows
     selected = {
         name: sorted(map(int, (rows or {}).get(name, range(source.cells.N))))
         for name, source in sources.items()
     }
-    _assert_merged_cell_order(expected, selected)
+    assert _interleaved_ids(selected) == expected
 
     joint = create_composite(
         sources,
@@ -1302,6 +1270,8 @@ def test_composite_lists_cells_in_shuffled_blocks_of_their_count_shards(
     assert joint.cells.fetch_all("sourceRow").tolist() == _concatenated_source_rows(
         expected, selected
     )
+    # The fixture's sources record no shuffle, so the composite records none.
+    assert "cellOrder" not in joint.cells._group.attrs
 
 
 @pytest.mark.parametrize(
@@ -1309,13 +1279,13 @@ def test_composite_lists_cells_in_shuffled_blocks_of_their_count_shards(
     [({}, _ALL_CELLS_ORDER), ({"seed": 0}, _SEED_0_ORDER)],
     ids=["default_seed", "seed_0"],
 )
-def test_merge_seed_orders_the_blocks_and_not_the_cells_within_them(
+def test_merge_seed_draws_the_turns_of_the_sources_and_keeps_each_ones_order(
     sources, tmp_path, options, expected
 ):
     from cytearc.merge import DataStoreMerge
 
     every = {"a": list(range(13)), "b": list(range(11))}
-    _assert_merged_cell_order(expected, every)
+    assert _interleaved_ids(every, options.get("seed", 42)) == expected
     path = tmp_path / "merged.zarr"
 
     DataStoreMerge(
@@ -1333,8 +1303,6 @@ def test_merge_seed_orders_the_blocks_and_not_the_cells_within_them(
     assert merged.cells.fetch_all("sourceRow").tolist() == _concatenated_source_rows(
         ids, every
     )
-    # Each block keeps the cells and their order that the default seed gives.
-    assert sorted(_shard_runs(ids)) == sorted(_shard_runs(_ALL_CELLS_ORDER))
 
 
 @contextmanager
@@ -4136,3 +4104,48 @@ def test_reopened_composite_retries_throttled_source_reads(
     finally:
         for datastore in (reopened, joint, source):
             datastore.z.store.close()
+
+
+@pytest.mark.parametrize(
+    ("shuffled", "rows"),
+    [
+        ({"a": True, "b": True}, None),
+        ({"a": True, "b": True}, {"a": np.arange(0, 300, 2)}),
+        ({"a": True, "b": False}, None),
+    ],
+    ids=["shuffled", "shuffled_rows", "b_in_file_order"],
+)
+def test_contiguous_slices_of_a_composite_of_shuffled_imports_are_random_samples(
+    tmp_path, shuffled, rows
+):
+    from cytearc.merge import DataStoreMerge
+    from tests.storage_helpers import (
+        assert_random_sample_order,
+        grouped_file_rows,
+        import_grouped_cells,
+        open_store,
+    )
+
+    sources = import_grouped_cells(tmp_path, shuffled=shuffled)
+    joint = create_composite(
+        sources, at=tmp_path / "joint.zarr", features="union", rows=rows, nthreads=1
+    )
+    ids = joint.cells.fetch_all("ids").tolist()
+
+    # The composite reads each cell's counts: its row in its file, plus one.
+    counts = np.asarray(joint.RNA.matrixGroup["counts"][:])
+    np.testing.assert_array_equal(counts[:, 0], grouped_file_rows(ids) + 1)
+    if all(shuffled.values()):
+        assert_random_sample_order(ids)
+        assert joint.cells._group.attrs["cellOrder"] == {"shuffled": True, "seed": 42}
+    else:
+        # A source in its file's order keeps that order, and the composite
+        # records no shuffle.
+        with pytest.raises(AssertionError):
+            assert_random_sample_order(ids)
+        assert "cellOrder" not in joint.cells._group.attrs
+    if rows is None:
+        # A composite of every cell lists them as the merge of its sources does.
+        merged = tmp_path / "merged.zarr"
+        DataStoreMerge([sources["a"], sources["b"]], str(merged), ["a", "b"]).dump()
+        assert open_store(merged).cells.fetch_all("ids").tolist() == ids

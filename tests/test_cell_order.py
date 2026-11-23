@@ -98,8 +98,12 @@ def test_each_row_is_equally_likely_at_each_destination() -> None:
         (True, TypeError, "shuffle_seed must be an integer"),
         (1.0, TypeError, "shuffle_seed must be an integer"),
         ("1", TypeError, "shuffle_seed must be an integer"),
-        (-1, ValueError, "shuffle_seed must be at least 0"),
-        (2**64, ValueError, r"shuffle_seed must be at most 18446744073709551615"),
+        (-1, ValueError, r"^shuffle_seed must be from 0 to 2\*\*64 - 1, not -1$"),
+        (
+            2**64,
+            ValueError,
+            r"^shuffle_seed must be from 0 to 2\*\*64 - 1, not 18446744073709551616$",
+        ),
     ],
 )
 def test_a_bad_seed_is_refused(seed, error, message) -> None:

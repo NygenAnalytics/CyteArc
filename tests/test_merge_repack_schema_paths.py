@@ -22,7 +22,6 @@ from cytearc import DataStore, mount_datastore
 from cytearc.assay import ADTassay, ATACassay, RNAassay
 from cytearc.merge import DataStoreMerge
 from cytearc.merge.features import align_features
-from cytearc.merge.row_plan import iter_row_plan_segments
 from cytearc.metadata import MetaData
 from cytearc.metadata.membership import membership_attributes
 from cytearc.storage.arrays import create_metadata_column
@@ -900,9 +899,7 @@ def test_merge_refuses_a_feature_profile_beyond_its_budget(tmp_path):
     destination = tmp_path / "merged.zarr"
     assays = [source.get_assay("RNA") for source in sources]
     alignment = align_features(assays, _NAMES)
-    row_plan = build_row_plan(
-        [4, 4], [assay.rawData.chunksize[0] for assay in assays], _NAMES, seed=0
-    )
+    row_plan = build_row_plan([4, 4], _NAMES, seed=0)
     # Every phase holds the row plan, the feature alignment and the
     # destination's count summary, 40 bytes for each of the 8 merged cells
     # and 16 for each of the 25,000 features. Counting each merged cell's
@@ -1130,13 +1127,17 @@ def recorded_blocks(monkeypatch) -> list[tuple[int, int, int, int]]:
 def _merged_order_values(
     row_plan: Any, stores: Sequence[tuple[str, np.ndarray]]
 ) -> np.ndarray:
-    """Count each merged cell's nonzero values with NumPy, in the merged order."""
-    return np.concatenate(
-        [
-            np.count_nonzero(stores[segment.sourceIdx][1][segment.localRows], axis=1)
-            for segment in iter_row_plan_segments(row_plan)
-        ]
-    )
+    """Count each merged cell's nonzero values with NumPy, in the merged order.
+
+    Each source's cells take, in their stored order, the merged rows that
+    the plan gives the source.
+    """
+    values = np.empty(row_plan.nCells, dtype=np.int64)
+    for source, (_, counts) in enumerate(stores):
+        values[np.flatnonzero(row_plan.owners == source)] = np.count_nonzero(
+            counts, axis=1
+        )
+    return values
 
 
 def test_merge_counts_signed_values_within_its_budget_or_names_the_budget_it_needs(
@@ -1155,7 +1156,7 @@ def test_merge_counts_signed_values_within_its_budget_or_names_the_budget_it_nee
     assays = [_opened_with_budget(path, 1_000).get_assay("RNA") for path, _ in stores]
     assert assays[0].rawData.chunksize == (12, 600)
     assert assays[0].rawData.chunk_columns() == 100
-    row_plan = build_row_plan([24, 24], [12, 12], _NAMES, seed=0)
+    row_plan = build_row_plan([24, 24], _NAMES, seed=0)
     expected = _merged_order_values(row_plan, stores)
     # Each band, one chunk column at a time, as the smallest read takes them.
     one_chunk_column = sorted(
@@ -1251,7 +1252,7 @@ def test_merge_refuses_before_it_reads_any_source_when_one_cannot_be_read(
     ]
     assays = [_open(path).get_assay("RNA") for path, _ in stores]
     assert [assay.rawData.chunk_columns() for assay in assays] == [100, 300]
-    row_plan = build_row_plan([24, 24], [12, 12], _NAMES, seed=0)
+    row_plan = build_row_plan([24, 24], _NAMES, seed=0)
 
     def profile(budget: int) -> np.ndarray:
         recorded_blocks.clear()
@@ -1290,9 +1291,7 @@ def test_merge_names_the_count_summaries_that_its_budget_cannot_load(
         _counts_with_negative_values(tmp_path / "right.zarr", "float32", n_cells=200),
     ]
     assays = [_open(path).get_assay("RNA") for path, _ in stores]
-    row_plan = build_row_plan(
-        [400, 200], [assay.rawData.chunksize[0] for assay in assays], _NAMES, seed=0
-    )
+    row_plan = build_row_plan([400, 200], _NAMES, seed=0)
 
     def profile(budget: int) -> np.ndarray:
         recorded_blocks.clear()

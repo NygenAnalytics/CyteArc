@@ -31,6 +31,7 @@ from ..merge.metadata import (
     SOURCE_MEASURES_ALL,
     admit_cell_metadata_plan,
     admit_feature_metadata,
+    merged_shuffle_seed,
     metadata_chunk_rows,
     nested_sources,
     plan_cell_metadata,
@@ -38,13 +39,7 @@ from ..merge.metadata import (
     write_cell_metadata,
     write_feature_metadata,
 )
-from ..merge.row_plan import (
-    RowPlan,
-    RowPlanSegment,
-    build_row_plan,
-    iter_row_plan_segments,
-    max_row_plan_block_rows,
-)
+from ..merge.row_plan import RowPlan, build_row_plan, iter_row_plan_windows
 from ..merge.writer import create_assay_counts, shared_normalization
 from ..metadata.membership import resolve_assay_membership
 from ..metadata.rows import default_block_rows
@@ -234,12 +229,7 @@ def _copied_row_objects(row_plan: RowPlan, source: int) -> Callable[[int], np.nd
 
     @functools.cache
     def objects(extent: int) -> np.ndarray:
-        parts = [
-            np.unique(segment.localRows // extent)
-            for segment in iter_row_plan_segments(row_plan)
-            if segment.sourceIdx == source
-        ]
-        return np.unique(np.concatenate(parts)) if parts else np.empty(0, np.int64)
+        return np.unique(row_plan.source_rows(source) // extent)
 
     return objects
 
@@ -382,18 +372,49 @@ def _prefetch_metadata(
         raise
 
 
+@dataclass(frozen=True, slots=True)
+class _CountSegment:
+    """A source's cells ``start`` to ``stop``, among those the composite takes, all in one stored shard of the source's counts."""
+
+    sourceIdx: int
+    start: int
+    stop: int
+
+
+def _count_segments(
+    row_plan: RowPlan, geometries: Sequence[ArrayGeometry | None], block_rows: int
+) -> list[_CountSegment]:
+    """Split each source's cells, in source order, into segments of at most ``block_rows`` cells in one stored shard of its counts."""
+    segments: list[_CountSegment] = []
+    for source in range(len(row_plan.sourceNames)):
+        rows = row_plan.source_rows(source)
+        geometry = geometries[source]
+        shard_rows = max(
+            1, int(rows.size if geometry is None else geometry.axisShard(0))
+        )
+        edges = np.flatnonzero(np.diff(rows // shard_rows)) + 1
+        for start, stop in zip(
+            [0, *edges.tolist()], [*edges.tolist(), int(rows.size)], strict=True
+        ):
+            segments.extend(
+                _CountSegment(source, first, min(stop, first + block_rows))
+                for first in range(start, stop, block_rows)
+            )
+    return segments
+
+
 def _prefetch_counts(
     arrays: list[zarr.Array],
     row_plan: RowPlan,
+    segments: Sequence[_CountSegment],
     feature_maps: list[np.ndarray],
     geometries: list[ArrayGeometry | None],
     *,
-    segment_rows: int,
     read_workers: int,
     memory_bytes: int,
     cache: SourceCache,
 ) -> None:
-    """Fetch the count shards that creation reads whole into ``cache``.
+    """Fetch the count shards that creation reads whole into ``cache``, in the order of ``segments``.
 
     Up to ``read_workers`` fetches run at once, and each one that ends lets
     the next start, so a slow shard holds back nothing but itself. Shards
@@ -406,21 +427,20 @@ def _prefetch_counts(
         return
 
     def requests() -> Iterator[tuple[CachedSourceStore, str, int]]:
-        for segment in iter_row_plan_segments(row_plan, segment_rows=segment_rows):
+        for segment in segments:
             owner = segment.sourceIdx
             geometry = geometries[owner]
             assert geometry is not None
             columns = np.flatnonzero(feature_maps[owner] >= 0)
             if not columns.size:
                 continue
-            plan = shard_prefetch_plan(
-                arrays[owner], segment.localRows, columns, geometry
-            )
+            local_rows = row_plan.source_rows(owner, segment.start, segment.stop)
+            plan = shard_prefetch_plan(arrays[owner], local_rows, columns, geometry)
             if plan is None:
                 continue
             assert plan.store.cache is cache
             column_shards = np.unique(columns // geometry.axisShard(1))
-            for row in np.unique(segment.localRows // geometry.axisShard(0)):
+            for row in np.unique(local_rows // geometry.axisShard(0)):
                 for column in column_shards:
                     key = plan.shardKey(
                         int(row) * geometry.axisShard(0),
@@ -736,8 +756,10 @@ def _require_unique_cell_ids(
 
 
 def _summarize_count_segment(
-    segment: RowPlanSegment,
+    segment: _CountSegment,
     *,
+    row_plan: RowPlan,
+    destinations: Sequence[np.ndarray],
     count_arrays: Sequence[zarr.Array],
     feature_maps: Sequence[np.ndarray],
     n_feats: int,
@@ -746,32 +768,34 @@ def _summarize_count_segment(
     sums: Mapping[str, tuple[np.ndarray, np.ndarray]],
     read_workers: int,
 ) -> None:
-    """Read one row-plan segment's counts into a block and add its rows to ``summary`` and ``sums``.
+    """Read one segment's counts into a block and add its rows to ``summary`` and ``sums`` at their composite rows.
 
-    The read runs through the store check of ``run_array_read``: on an event
-    loop of the calling thread when every store it touches works on any loop,
-    and on Zarr's loop otherwise. ``read_workers`` rectangles are read at once.
+    ``destinations`` holds each source's composite rows. The read runs
+    through the store check of ``run_array_read``: on an event loop of the
+    calling thread when every store it touches works on any loop, and on
+    Zarr's loop otherwise. ``read_workers`` rectangles are read at once.
     """
     from .reader import copy_source_selection
 
     source_array = count_arrays[segment.sourceIdx]
     mapping = feature_maps[segment.sourceIdx]
-    block = np.zeros((len(segment.localRows), n_feats), dtype=dtype)
+    local_rows = row_plan.source_rows(segment.sourceIdx, segment.start, segment.stop)
+    block = np.zeros((local_rows.size, n_feats), dtype=dtype)
     columns = np.flatnonzero(mapping >= 0)
     run_array_read(
         source_array,
         copy_source_selection(
             source_array,
-            segment.localRows,
+            local_rows,
             columns,
             block,
-            np.arange(len(segment.localRows)),
+            np.arange(local_rows.size),
             mapping[columns],
             read_workers=read_workers,
         ),
     )
-    summary.update(segment.destStart, block)
-    target_rows = slice(segment.destStart, segment.destStart + len(segment.localRows))
+    target_rows = destinations[segment.sourceIdx][segment.start : segment.stop]
+    summary.update_rows(target_rows, block)
     for indices, totals in sums.values():
         totals[target_rows] = block[:, indices].sum(axis=1, dtype=np.float64)
 
@@ -797,14 +821,16 @@ def create_composite(
     unless ``relative_sources`` is False, and any other source by its
     absolute path or URL. New arrays use the storage profile of ``at``.
 
-    The composite lists its cells in a fixed order, neither the sources' order
-    nor the order of ``rows``: the order of a merge of ``assay`` by
-    ``DataStoreMerge`` with its default ``seed``. The selected cells of each
-    source are split into blocks, one for each shard of the source's counts,
-    the cells of each block are shuffled, and the blocks of all sources are
-    interleaved, with each source's last block at the end. Pair per-cell
-    values with the composite by cell ID, ``{name}__{cell_id}``, or by
-    ``sourceRow``, and never by position.
+    The composite lists its cells in the order of a merge of the same sources
+    by ``DataStoreMerge`` with its default ``seed``: the sources' selected
+    cells interleave in a random order, each source's cells in their stored
+    order, whatever the order of ``rows``. Every contiguous slice of the
+    composite's rows holds each source's cells in proportion to the cells it
+    gives. When every source lists its cells in a uniformly random order, as
+    imports do by default, so does the composite, and its cell table records
+    the shuffle in its ``cellOrder`` attribute. Pair per-cell values with the
+    composite by cell ID, ``{name}__{cell_id}``, or by ``sourceRow``, and
+    never by position.
 
     Args:
         sources: Open source DataStores by name. A cell's ID in the composite
@@ -1007,10 +1033,10 @@ def _write_composite(
     # written.
     measured_record = feature_record(alignment, names, nested, assay_name=assay)
     row_plan = build_row_plan(
-        [source.cells.N for source in datasets],
-        [int(source.rawData.chunksize[0]) for source in assays],
-        names,
-        selected_rows=selected_rows,
+        [source.cells.N for source in datasets], names, selected_rows=selected_rows
+    )
+    shuffle_seed = merged_shuffle_seed(
+        row_plan, [source.cells._group for source in datasets]
     )
     del selected_rows
     if row_plan.nCells == 0:
@@ -1178,12 +1204,13 @@ def _write_composite(
         source_rows = maps.create_array(
             "sourceRows", shape=(row_plan.nCells,), dtype="int64", chunks=(width,)
         )
-        for segment in iter_row_plan_segments(row_plan):
-            destination_rows = slice(
-                segment.destStart, segment.destStart + len(segment.localRows)
-            )
-            row_sources[destination_rows] = segment.sourceIdx
-            source_rows[destination_rows] = segment.localRows
+        for window in iter_row_plan_windows(row_plan, width, boundary_rows=width):
+            destination_rows = slice(window.destStart, window.destStart + window.nRows)
+            row_sources[destination_rows] = row_plan.owners[destination_rows]
+            local_rows = np.empty(window.nRows, dtype=np.int64)
+            for part in window.parts:
+                local_rows[part.positions] = part.localRows
+            source_rows[destination_rows] = local_rows
         maps.create_array(
             "featureColumns",
             data=feature_columns,
@@ -1211,6 +1238,7 @@ def _write_composite(
             reset_cell_filter=True,
             source_column=source_column,
             membership={assay: membership},
+            shuffle_seed=shuffle_seed,
         )
         del cell_tables
         _require_unique_cell_ids(
@@ -1266,22 +1294,30 @@ def _write_composite(
         summary_bytes = (
             CountSummary.nbytes_for(row_plan.nCells, alignment.nFeats) + family_bytes
         )
+        # The pass reads each source's cells shard by shard, as the sources
+        # store them, and places each cell's summary at its composite row.
+        destinations = [
+            row_plan.destination_rows(source) for source in range(len(names))
+        ]
+        pass_resident = resident + sum(int(rows.nbytes) for rows in destinations)
         # Each segment in flight maps its source's columns and indexes its rows.
         segment_index_bytes = 96 * max(
             array.shape[1] for array in source_arrays["counts"]
         ) + max(
-            source_index_bytes(
-                geometry, max_row_plan_block_rows(row_plan), geometry.shape[1]
-            )
+            source_index_bytes(geometry, geometry.axisShard(0), geometry.shape[1])
             for geometry in geometries
             if geometry is not None
         )
         available = (
-            resources.memoryBytes - resident - summary_bytes - segment_index_bytes
+            resources.memoryBytes - pass_resident - summary_bytes - segment_index_bytes
         )
         row_bytes = 3 * alignment.nFeats * np.dtype(dtype).itemsize + 96
         block_rows = min(
-            max_row_plan_block_rows(row_plan), (available - read_bytes) // row_bytes
+            max(
+                (geometry.axisShard(0) for geometry in geometries if geometry),
+                default=1,
+            ),
+            (available - read_bytes) // row_bytes,
         )
         if block_rows < 1:
             # One row of every source read beside what the preparation keeps.
@@ -1293,7 +1329,7 @@ def _write_composite(
                 budget_bytes=int(resources.memoryBytes),
                 item="one row of the composite count preparation",
             )
-        segments = list(iter_row_plan_segments(row_plan, segment_rows=block_rows))
+        segments = _count_segments(row_plan, geometries, block_rows)
         # Segments read at once, each with its rectangle reads, fit beside what
         # the pass holds throughout, and their reads together stay within every
         # source's read-worker limit.
@@ -1303,7 +1339,7 @@ def _write_composite(
             taskBytes=lambda reads: (
                 block_rows * row_bytes + segment_index_bytes + reads * read_bytes
             ),
-            residentBytes=resident,
+            residentBytes=pass_resident,
             reservedBytes=summary_bytes,
             reservedFor="the count summary and feature sums",
             requested=min(
@@ -1321,9 +1357,9 @@ def _write_composite(
             _prefetch_counts(
                 count_arrays,
                 row_plan,
+                segments,
                 alignment.featOrderMap,
                 geometries,
-                segment_rows=block_rows,
                 read_workers=schema_read_workers,
                 memory_bytes=available - 96 * block_rows,
                 cache=count_cache,
@@ -1336,6 +1372,8 @@ def _write_composite(
 
         summarize = functools.partial(
             _summarize_count_segment,
+            row_plan=row_plan,
+            destinations=destinations,
             count_arrays=count_arrays,
             feature_maps=alignment.featOrderMap,
             n_feats=alignment.nFeats,
@@ -1344,8 +1382,8 @@ def _write_composite(
             sums=sums,
             read_workers=read_workers,
         )
-        # The summary takes bands in any order, and each segment's sums fill its
-        # own rows, so segments are read and summarized at once.
+        # The summary takes rows in any order, and each segment's sums fill
+        # its own rows, so segments are read and summarized at once.
         for _ in stream_shards(segments, summarize, workers=segment_workers):
             pass
         del summarize
@@ -1361,7 +1399,8 @@ def _write_composite(
                 "cytearc:import_complete": True,
             }
         )
-        del summary, sums, segments, alignment, feature_columns, row_plan
+        del summary, sums, segments, destinations, alignment, feature_columns
+        del row_plan
         result = DataStore(
             wrapper,
             default_assay=assay,

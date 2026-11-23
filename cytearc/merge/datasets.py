@@ -6,6 +6,7 @@ import zarr
 
 from ..metadata.rows import metadata_column_fingerprint
 from ..storage.budget import resolve_budget
+from ..storage.cell_order import shuffle_seed_argument
 from ..storage.count_matrix import (
     CountMatrixPolicy,
     load_count_matrix_plan,
@@ -57,6 +58,7 @@ from .metadata import (
     _cell_data_path,
     admit_cell_metadata_plan,
     admit_feature_metadata,
+    merged_shuffle_seed,
     metadata_chunk_rows,
     nested_sources,
     plan_cell_metadata,
@@ -165,8 +167,10 @@ class DataStoreMerge:
                       rather than copied. None or ``""`` keeps the source
                       names.
         reset_cell_filter: If True, mark every merged cell as selected.
-        seed: RNG seed for interleaving source cell blocks. None draws a fresh,
-              unseeded interleaving, so the merged row order can differ between runs.
+        seed: Seed of the random order in which the sources' cells
+              interleave, an integer from 0 to 2**64 - 1. One seed gives
+              one order on every platform. None draws a new order for each
+              merge.
         storage_options: Backend options passed when opening the destination.
         source_column: Cell column that stores each cell's source name. None
             writes none, unless the sources measured different features of
@@ -245,14 +249,16 @@ class DataStoreMerge:
     recorded as one source. A source column of the same name as one of these
     columns is left out with a warning.
 
-    Merged cells are in an order of their own, neither the sources' order nor
-    a uniform random order. The cells of each source are split into blocks,
-    one for each shard of its counts, the cells of each block are shuffled
-    with a fixed seed, and the blocks of all sources follow in an order that
-    ``seed`` draws, with each source's last block at the end. Pair per-cell
-    values with merged cells by cell ID, ``{name}__{cell_id}``, or by
-    ``sourceRow``, each cell's row in the concatenation of the sources, and
-    never by position.
+    Merged cells interleave the sources' cells in a random order that
+    ``seed`` draws, each source's cells in their stored order, so every
+    contiguous slice of merged rows holds each source's cells in proportion
+    to its size. When every source lists its cells in a uniformly random
+    order, as imports do by default, so does the merge: every contiguous
+    slice is a random sample of the merged cells, and the merged cell table
+    records the shuffle in its ``cellOrder`` attribute. A source kept in its
+    file's order keeps that order among its cells. Pair per-cell values with
+    merged cells by cell ID, ``{name}__{cell_id}``, or by ``sourceRow``, each
+    cell's row in the concatenation of the sources, and never by position.
     """
 
     def __init__(
@@ -316,7 +322,7 @@ class DataStoreMerge:
         self.overwrite = overwrite
         self.prependText = prepend_text
         self.resetCellFilter = reset_cell_filter
-        self.seed = seed
+        self.seed = None if seed is None else shuffle_seed_argument(seed, "seed")
         self.storageOptions = storage_options
         self.sourceColumn = source_column
         self.missingAssayPolicy = missing_assay_policy
@@ -335,6 +341,9 @@ class DataStoreMerge:
         self.profile = resolve_storage_profile(zarr_path, profile)
         self.uniqueAssays = self._resolve_assays()
         self._rowPlan: RowPlan | None = None
+        # The seed that the merged cell table records as its shuffle, when
+        # every source records one.
+        self._shuffleSeed: int | None = None
         self._alignments: dict[str, Any] = {}
         # A source without an assay is None in that assay's source list.
         self._assaySources: dict[str, list[Any | None]] = {}
@@ -385,24 +394,6 @@ class DataStoreMerge:
     def _source_cell_counts(self) -> list[int]:
         return [int(ds.cells.N) for ds in self.datasets]
 
-    def _row_chunk_sizes(self) -> list[int]:
-        sizes: list[int] = []
-        for ds in self.datasets:
-            selected = [
-                name
-                for name in ds.assay_names
-                if self.assayFilter is None or name in self.assayFilter
-            ]
-            if not selected:
-                sizes.append(max(1, int(ds.cells.default_block_rows("ids"))))
-                continue
-            chunk_rows = [
-                max(1, int(ds.get_assay(name).rawData.chunksize[0]))
-                for name in selected
-            ]
-            sizes.append(min(chunk_rows))
-        return sizes
-
     def _prepare_sources(self) -> None:
         if self._rowPlan is not None:
             return
@@ -412,10 +403,12 @@ class DataStoreMerge:
                     ds.z, operation="merged", subject=f"Source {name!r}"
                 )
             self._rowPlan = build_row_plan(
-                self._source_cell_counts(),
-                self._row_chunk_sizes(),
-                self.names,
-                seed=self.seed,
+                self._source_cell_counts(), self.names, seed=self.seed
+            )
+            # A malformed record of a source's cell order is refused before
+            # anything is written.
+            self._shuffleSeed = merged_shuffle_seed(
+                self._rowPlan, [ds.cells._group for ds in self.datasets]
             )
             self._nestedSources = [
                 nested_sources(
@@ -1452,6 +1445,7 @@ class DataStoreMerge:
                 reset_cell_filter=self.resetCellFilter,
                 source_column=self._sourcesColumn,
                 membership=self._sourceMembership,
+                shuffle_seed=self._shuffleSeed,
             )
             components.append(ComponentResult("cellData", cell_action))
         else:
@@ -1578,6 +1572,7 @@ class DataStoreMerge:
 
     def _reset_prepared_state(self) -> None:
         self._rowPlan = None
+        self._shuffleSeed = None
         self._alignments.clear()
         self._assaySources.clear()
         self._assayTypes.clear()

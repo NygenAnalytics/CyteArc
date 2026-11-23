@@ -178,7 +178,7 @@ def test_composite_count_prefill_overlaps_sources_and_preserves_preparation(
 def test_composite_count_prefill_stops_without_eviction_and_deduplicates(
     prefill_sources, prefill_reads, admission, monkeypatch
 ):
-    from cytearc.composite.create import _prefetch_counts
+    from cytearc.composite.create import _count_segments, _prefetch_counts
 
     paths = [path for path, _, _ in prefill_sources.values()]
     prefix_limit = 4096
@@ -199,18 +199,21 @@ def test_composite_count_prefill_stops_without_eviction_and_deduplicates(
     ]
     try:
         assert sync(arrays[0].store.prefetch(seed_key, max_bytes=len(seed_body)))
-        plan = build_row_plan([64] * 4, [16] * 4, list(prefill_sources))
-        first_owners = list(dict.fromkeys(plan.coordinatesPermutations[:, 0]))
+        plan = build_row_plan([64] * 4, list(prefill_sources))
         geometries = [array_geometry(array) for array in arrays]
+        segments = _count_segments(plan, geometries, 8)
+        # The count summary reads each source's shard in source order.
+        first_owners = list(dict.fromkeys(segment.sourceIdx for segment in segments))
+        assert first_owners == [0, 1, 2, 3]
         assert all(
             2 * geometry.nominalChunkBytes() == prefix_limit for geometry in geometries
         )
         _prefetch_counts(
             arrays,
             plan,
+            segments,
             [np.arange(64) for _ in arrays],
             geometries,
-            segment_rows=8,
             read_workers=3,
             memory_bytes=1_000_000,
             cache=cache,
@@ -247,7 +250,7 @@ def test_composite_count_prefill_stops_without_eviction_and_deduplicates(
 def test_composite_count_prefill_skips_unadmitted_or_narrow_reads(
     prefill_sources, prefill_reads, reason
 ):
-    from cytearc.composite.create import _prefetch_counts
+    from cytearc.composite.create import _count_segments, _prefetch_counts
 
     cache = SourceCache()
     try:
@@ -263,12 +266,14 @@ def test_composite_count_prefill_skips_unadmitted_or_narrow_reads(
         if reason == "narrow":
             for mapping in mappings:
                 mapping[1:] = -1
+        plan = build_row_plan([64] * 4, list(prefill_sources))
+        geometries = [array_geometry(array) for array in arrays]
         _prefetch_counts(
             arrays,
-            build_row_plan([64] * 4, [16] * 4, list(prefill_sources)),
+            plan,
+            _count_segments(plan, geometries, 8),
             mappings,
-            [array_geometry(array) for array in arrays],
-            segment_rows=8,
+            geometries,
             read_workers=3,
             memory_bytes=10_000 if reason == "memory" else 1_000_000,
             cache=cache,
@@ -282,7 +287,7 @@ def test_composite_count_prefill_skips_unadmitted_or_narrow_reads(
 def test_composite_count_prefill_joins_declined_wave_and_stops(
     tmp_path, monkeypatch, decline
 ):
-    from cytearc.composite.create import _prefetch_counts
+    from cytearc.composite.create import _count_segments, _prefetch_counts
 
     paths = [tmp_path / f"source{index}.zarr" for index in range(4)]
     originals = [
@@ -319,12 +324,14 @@ def test_composite_count_prefill_joins_declined_wave_and_stops(
         arrays = [
             zarr.open_array(cache.wrap(array.store), mode="r") for array in originals
         ]
+        plan = build_row_plan([64] * 4, [f"s{index}" for index in range(4)])
+        geometries = [array_geometry(array) for array in arrays]
         _prefetch_counts(
             arrays,
-            build_row_plan([64] * 4, [64] * 4, [f"s{index}" for index in range(4)]),
+            plan,
+            _count_segments(plan, geometries, 64),
             [np.arange(64) for _ in arrays],
-            [array_geometry(array) for array in arrays],
-            segment_rows=64,
+            geometries,
             read_workers=2,
             memory_bytes=1_000_000,
             cache=cache,
@@ -1642,7 +1649,9 @@ def test_composite_creation_reuses_only_selected_encoded_metadata_chunks(
         assert current.keys() == prior.keys()
         if selected_rows is None:
             assert set(current) == {f"{prefix}{index}" for index in range(3)}
-            assert sum(current.values()) < sum(prior.values())
+            # The composite takes the source's cells in its stored order, so
+            # each chunk is fetched once with the cache or without it.
+            assert sum(current.values()) <= sum(prior.values())
         else:
             assert set(current) == {f"{prefix}1"}
         assert max(current.values()) == 1

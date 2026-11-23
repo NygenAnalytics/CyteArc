@@ -17,7 +17,9 @@ and its rows are already in that order. A merge writes ``sourceRow`` as each
 cell's row in the concatenation of its sources, and a subset copies it, so
 exports of either restore the order of the files they came from. Since such
 readers and subsets leave gaps in the values, they are only sorted and ranked,
-never taken as positions.
+never taken as positions. A merge or composite interleaves its sources' cells
+in a random order and keeps each source's order, so it records the shuffle,
+with the seed of its interleaving, when every source records one.
 """
 
 from typing import Any, Literal
@@ -43,6 +45,7 @@ __all__ = [
     "destination_rows",
     "exported_cell_order",
     "is_source_row_column",
+    "record_cell_shuffle",
     "recorded_shuffle_seed",
     "shuffle_seed_argument",
     "shuffled_order",
@@ -95,14 +98,20 @@ def cell_order_argument(value: object) -> CellOrder:
     )
 
 
-def shuffle_seed_argument(value: object) -> int:
-    """Return ``shuffle_seed`` as a Python integer from 0 to 2**64 - 1.
+def shuffle_seed_argument(value: object, name: str = "shuffle_seed") -> int:
+    """Return the seed of a shuffle as a Python integer from 0 to 2**64 - 1.
+
+    ``name`` is the argument that errors name, such as an import's
+    ``shuffle_seed`` or a merge's ``seed``.
 
     Raises:
         TypeError: If ``value`` is not an integer.
         ValueError: If ``value`` is negative or above 2**64 - 1.
     """
-    return integer_argument(value, "shuffle_seed", minimum=0, maximum=_MAX_SEED)
+    seed = integer_argument(value, name)
+    if not 0 <= seed <= _MAX_SEED:
+        raise ValueError(f"{name} must be from 0 to 2**64 - 1, not {seed}")
+    return seed
 
 
 def shuffled_order(n_rows: int, seed: int) -> np.ndarray:
@@ -192,6 +201,16 @@ def write_shuffled_cell_order(
         profile=profile,
         attributes={"role": SOURCE_ROW_ROLE},
     )
+    record_cell_shuffle(cells, seed)
+
+
+def record_cell_shuffle(cells: zarr.Group, seed: int) -> None:
+    """Record in the ``cellOrder`` attribute that a cell table's rows are in a uniformly random order that ``seed`` drew.
+
+    Raises:
+        TypeError: If ``seed`` is not an integer.
+        ValueError: If ``seed`` lies outside 0 to 2**64 - 1.
+    """
     cells.attrs[CELL_ORDER_ATTR] = {
         "shuffled": True,
         "seed": shuffle_seed_argument(seed),
@@ -199,10 +218,12 @@ def write_shuffled_cell_order(
 
 
 def recorded_shuffle_seed(cells: zarr.Group) -> int | None:
-    """Return the seed with which an import shuffled a cell table, or None.
+    """Return the seed of the shuffle that ordered a cell table, or None.
 
-    None means the table records no shuffle: its import kept the file's
-    order, or wrote the store before imports could shuffle.
+    The seed is an import's, or the seed of the interleaving of a merge or
+    composite whose sources all record a shuffle. None means the table
+    records no shuffle: its import kept the file's order, it was written
+    before imports could shuffle, or it merges a source that records none.
 
     Raises:
         ValueError: If the ``cellOrder`` record is malformed.
@@ -385,4 +406,4 @@ def copy_cell_order(source: zarr.Group, target: zarr.Group) -> None:
     """
     seed = recorded_shuffle_seed(source)
     if seed is not None:
-        target.attrs[CELL_ORDER_ATTR] = {"shuffled": True, "seed": seed}
+        record_cell_shuffle(target, seed)

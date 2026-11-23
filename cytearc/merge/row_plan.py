@@ -1,3 +1,4 @@
+import secrets
 from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
@@ -5,153 +6,176 @@ from typing import Any
 import numpy as np
 
 from ..metadata.rows import read_metadata_rows_chunkwise
+from ..storage.cell_order import shuffle_seed_argument, shuffled_order
 from ..storage.partition import checked_indices
-from ..utils.arrays import permute_into_chunks
 
 # The text between a source's name and the source's own cell ID in each cell
 # ID of a merged store.
 MERGED_ID_SEPARATOR = "__"
+# What a window of merged rows holds for each of its rows while it is in use:
+# the positions and source rows of its parts, and the sort that groups them.
+WINDOW_BYTES_PER_ROW = 24
 
 
 @dataclass(frozen=True, slots=True)
 class RowPlan:
-    """Shared merged cell order across every assay in a DataStoreMerge."""
+    """The order of the cells that a merge or composite takes from its sources.
 
-    permutationsRows: dict[int, dict[int, np.ndarray]]
-    coordinatesPermutations: np.ndarray
+    Merged row ``r`` holds the next cell of source ``owners[r]``: each
+    source's cells keep their stored order, and the sources take turns in
+    the order that ``shuffled_order(nCells, seed)`` gives their concatenated
+    cells. ``owners`` is therefore a uniformly random arrangement of the
+    sources' cells, and when each source lists its cells in a uniformly
+    random order, so does the merge.
+    """
+
+    # The source of each merged row, as the smallest unsigned integers that
+    # hold every source.
+    owners: np.ndarray
+    # The rows that each source contributes, increasing, or None for every row.
+    selectedRows: tuple[np.ndarray | None, ...]
+    # The cells that each source contributes.
+    sourceCells: tuple[int, ...]
     nCells: int
+    seed: int
     sourceNames: tuple[str, ...]
 
     def resident_bytes(self) -> int:
-        return int(self.coordinatesPermutations.nbytes) + sum(
-            int(rows.nbytes)
-            for chunks in self.permutationsRows.values()
-            for rows in chunks.values()
+        return int(self.owners.nbytes) + sum(
+            int(rows.nbytes) for rows in self.selectedRows if rows is not None
         )
+
+    def source_rows(
+        self, source: int, start: int = 0, stop: int | None = None
+    ) -> np.ndarray:
+        """Return the rows of ``source`` that the merge takes, from its ``start``-th to before its ``stop``-th, increasing."""
+        stop = self.sourceCells[source] if stop is None else stop
+        selected = self.selectedRows[source]
+        if selected is None:
+            return np.arange(start, stop, dtype=np.int64)
+        return selected[start:stop]
+
+    def destination_rows(self, source: int) -> np.ndarray:
+        """Return the merged rows of the cells of ``source``, increasing."""
+        return np.flatnonzero(self.owners == source)
 
 
 @dataclass(frozen=True, slots=True)
-class RowPlanSegment:
+class RowPlanPart:
+    """The cells of one source in a window of merged rows.
+
+    ``positions`` are their rows in the window and ``localRows`` their rows in
+    the source, both increasing.
+    """
+
     sourceIdx: int
-    destStart: int
+    positions: np.ndarray
     localRows: np.ndarray
+
+
+@dataclass(frozen=True, slots=True)
+class RowPlanWindow:
+    """Merged rows ``destStart`` to ``destStart + nRows`` and the cells of each source in them."""
+
+    destStart: int
+    nRows: int
+    parts: tuple[RowPlanPart, ...]
 
 
 def build_row_plan(
     n_cells_per_source: list[int],
-    row_chunk_sizes: list[int],
     source_names: list[str],
     seed: int | None = 42,
     *,
     selected_rows: list[np.ndarray | None] | None = None,
 ) -> RowPlan:
-    """Build a deterministic shared row order for concatenated sources."""
-    if len(n_cells_per_source) != len(row_chunk_sizes):
-        raise ValueError("Row chunk sizes must match the number of sources")
+    """Interleave the sources' cells in the random order that ``seed`` draws.
+
+    ``selected_rows`` gives, for each source, the rows that it contributes,
+    in any order, or None for every row; each source's cells keep their
+    stored order. ``seed`` None draws a new order.
+    """
     if len(n_cells_per_source) != len(source_names):
         raise ValueError("Source names must match the number of sources")
-    if any(rows <= 0 for rows in row_chunk_sizes):
-        raise ValueError("Row chunk sizes must be positive")
     if len(source_names) != len(set(source_names)):
         raise ValueError("A unique name must be provided for each source DataStore")
     if selected_rows is not None and len(selected_rows) != len(source_names):
         raise ValueError("Selected rows must match the number of sources")
+    seed = secrets.randbits(64) if seed is None else shuffle_seed_argument(seed, "seed")
 
-    rng = np.random.default_rng(seed=seed)
-    chunk_size = np.asarray(row_chunk_sizes, dtype=int)
-    n_cells = np.asarray(n_cells_per_source, dtype=int)
-    # Within-block permutation keeps the historical fixed seed used by
-    # permute_into_chunks; the caller seed only reorders source blocks.
-    permutations = {}
-    for i in range(len(n_cells_per_source)):
-        selected = None if selected_rows is None else selected_rows[i]
+    chosen: list[np.ndarray | None] = []
+    cells: list[int] = []
+    for index, n_cells in enumerate(n_cells_per_source):
+        selected = None if selected_rows is None else selected_rows[index]
         if selected is None:
-            permutations[i] = permute_into_chunks(int(n_cells[i]), int(chunk_size[i]))
+            chosen.append(None)
+            cells.append(int(n_cells))
             continue
-        selected = np.sort(
-            checked_indices(selected, limit=int(n_cells[i]), name="selected_rows")
+        rows = np.sort(
+            checked_indices(selected, limit=int(n_cells), name="selected_rows")
         )
-        boundaries = np.flatnonzero(np.diff(selected // chunk_size[i])) + 1
-        block_rng = np.random.default_rng(42)
-        permutations[i] = [
-            block_rng.permutation(block)
-            for block in np.split(selected, boundaries)
-            if block.size
-        ]
-        n_cells[i] = selected.size
-    permutations_rows = {
-        key: {i: x for i, x in enumerate(arrays)}
-        for key, arrays in permutations.items()
-    }
-
-    coordinates: list[list[int]] = []
-    extra: list[list[int]] = []
-    for i in range(len(n_cells_per_source)):
-        for j in range(len(permutations[i])):
-            if j == len(permutations[i]) - 1:
-                extra.append([i, j])
-                continue
-            coordinates.append([i, j])
-    coordinates_permutations = rng.permutation(coordinates)
-    if len(coordinates_permutations) > 0:
-        coordinates_permutations = np.concatenate(
-            [coordinates_permutations, extra],
-            axis=0,
-        )
-    else:
-        coordinates_permutations = np.array(extra, dtype=np.int64)
-
+        chosen.append(rows)
+        cells.append(int(rows.size))
+    n_total = sum(cells)
+    # The concatenated cells of source s are the integers from the cells of
+    # the sources before it up to its own last; a uniform permutation of them
+    # gives the turn of every merged row to the source of its cell.
+    owners = np.searchsorted(
+        np.cumsum(cells), shuffled_order(n_total, seed), side="right"
+    ).astype(np.min_scalar_type(max(0, len(cells) - 1)), copy=False)
     return RowPlan(
-        permutationsRows=permutations_rows,
-        coordinatesPermutations=np.asarray(
-            coordinates_permutations, dtype=np.int64
-        ).reshape(-1, 2),
-        nCells=int(n_cells.sum()),
+        owners=owners,
+        selectedRows=tuple(chosen),
+        sourceCells=tuple(cells),
+        nCells=n_total,
+        seed=seed,
         sourceNames=tuple(source_names),
     )
 
 
-def max_row_plan_block_rows(row_plan: RowPlan) -> int:
-    return max(
-        (
-            int(rows.size)
-            for blocks in row_plan.permutationsRows.values()
-            for rows in blocks.values()
-        ),
-        default=0,
-    )
-
-
-def iter_row_plan_segments(
+def iter_row_plan_windows(
     row_plan: RowPlan,
+    window_rows: int,
     *,
-    segment_rows: int | None = None,
-) -> Iterator[RowPlanSegment]:
-    """Yield destination-ordered source row segments from a row plan.
+    boundary_rows: int | None = None,
+) -> Iterator[RowPlanWindow]:
+    """Yield the merged rows in order, in windows of at most ``window_rows`` rows.
 
-    Blocks fill the destination contiguously in ``coordinatesPermutations``
-    order, so each block starts where the previous one ended.
+    No window crosses a multiple of ``boundary_rows``, such as the edge of a
+    stored chunk band. A window in use holds ``WINDOW_BYTES_PER_ROW`` bytes
+    for each of its rows.
     """
-    if segment_rows is not None and int(segment_rows) < 1:
-        raise ValueError("segment_rows must be positive")
-
-    dest_start = 0
-    for source_value, block_value in row_plan.coordinatesPermutations:
-        source_idx = int(source_value)
-        block_idx = int(block_value)
-        local_rows = row_plan.permutationsRows[source_idx][block_idx]
-        if local_rows.size:
-            width = local_rows.size if segment_rows is None else int(segment_rows)
-            for offset in range(0, local_rows.size, width):
-                yield RowPlanSegment(
-                    sourceIdx=source_idx,
-                    destStart=dest_start + offset,
-                    localRows=local_rows[offset : offset + width],
+    if int(window_rows) < 1:
+        raise ValueError("window_rows must be positive")
+    if boundary_rows is not None and int(boundary_rows) < 1:
+        raise ValueError("boundary_rows must be positive")
+    n_sources = len(row_plan.sourceNames)
+    taken = np.zeros(n_sources, dtype=np.int64)
+    start = 0
+    while start < row_plan.nCells:
+        stop = min(row_plan.nCells, start + int(window_rows))
+        if boundary_rows is not None:
+            stop = min(stop, (start // int(boundary_rows) + 1) * int(boundary_rows))
+        owners = row_plan.owners[start:stop]
+        # A stable sort keeps each source's positions increasing.
+        grouped = np.argsort(owners, kind="stable")
+        counts = np.bincount(owners, minlength=n_sources)
+        parts = []
+        offset = 0
+        for source in np.flatnonzero(counts).tolist():
+            count = int(counts[source])
+            first = int(taken[source])
+            parts.append(
+                RowPlanPart(
+                    sourceIdx=source,
+                    positions=grouped[offset : offset + count],
+                    localRows=row_plan.source_rows(source, first, first + count),
                 )
-        dest_start += int(local_rows.size)
-
-    if dest_start != row_plan.nCells:
-        raise AssertionError("Merged row plan does not cover every planned cell")
+            )
+            offset += count
+        taken += counts
+        yield RowPlanWindow(destStart=start, nRows=stop - start, parts=tuple(parts))
+        start = stop
 
 
 def prefixed_cell_ids(name: str, source_ids: np.ndarray, dtype: Any) -> np.ndarray:
@@ -171,26 +195,27 @@ def iter_merged_cell_ids(
     source_cell_tables: list[Any],
     *,
     dtype: Any,
-    block_rows: int | None = None,
+    block_rows: int = 100_000,
 ) -> Iterator[tuple[int, np.ndarray]]:
-    """Yield contiguous merged cell-id blocks in destination row order.
+    """Yield the merged cell IDs in merged row order, ``block_rows`` at a time.
 
-    Each yield is ``(start, ids)`` where ``ids`` are already prefixed with
-    ``{source_name}__``. Blocks follow ``coordinatesPermutations`` so a single
+    Each yield is ``(start, ids)``, where ``ids`` are the IDs of the merged
+    rows from ``start``, already prefixed with ``{source_name}__``, so one
     generator can both write and verify cell identity.
     """
     if len(source_cell_tables) != len(row_plan.sourceNames):
         raise ValueError("Source cell tables must match the row plan")
-    for segment in iter_row_plan_segments(row_plan, segment_rows=block_rows):
-        source_idx = segment.sourceIdx
-        source_ids = read_metadata_rows_chunkwise(
-            source_cell_tables[source_idx],
-            "ids",
-            segment.localRows,
-        )
-        merged = prefixed_cell_ids(row_plan.sourceNames[source_idx], source_ids, dtype)
-        del source_ids
-        yield segment.destStart, merged
+    for window in iter_row_plan_windows(row_plan, block_rows):
+        merged = np.empty(window.nRows, dtype=np.dtype(dtype))
+        for part in window.parts:
+            source_ids = read_metadata_rows_chunkwise(
+                source_cell_tables[part.sourceIdx], "ids", part.localRows
+            )
+            merged[part.positions] = prefixed_cell_ids(
+                row_plan.sourceNames[part.sourceIdx], source_ids, dtype
+            )
+            del source_ids
+        yield window.destStart, merged
 
 
 def verify_merged_cell_ids(
@@ -202,8 +227,8 @@ def verify_merged_cell_ids(
 ) -> None:
     """Compare stored cell ids against the row-plan identity generator.
 
-    Stored ids are read one whole chunk band at a time. Segments arrive in
-    destination order, so each band is read once.
+    Stored ids are read one whole chunk band at a time. Windows arrive in
+    merged row order, so each band is read once.
     """
     n_cells = int(stored_ids.shape[0])
     if n_cells != row_plan.nCells:
