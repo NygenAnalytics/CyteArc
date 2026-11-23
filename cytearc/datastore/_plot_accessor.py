@@ -32,6 +32,7 @@ from ..plotting._contracts import (
 )
 from ..plotting._figure import PlotResult
 from ..plotting._style import scale_argument, theme_argument
+from ..plotting._titles import label_column
 from ..plotting.recipes import PlotRecipe, PlotRecipeResult
 from ..repertoire.usage import GeneUsage, Spectratype
 from ..storage.refs import ArtifactRef
@@ -387,7 +388,7 @@ class DataStorePlotAccessor:
             " | Sequence[str | ArtifactRef | FeatureRef | CellField | NamedCellArtifact]"
             " | None"
         ) = None,
-        facet_by: str | None = None,
+        facet_by: str | CellField | None = None,
         facet_order: Sequence[Any] | None = None,
         cell_key: str = "I",
         from_assay: str | None = None,
@@ -449,7 +450,7 @@ class DataStorePlotAccessor:
             _check_run_embedding_colors(run, frozen, color_by, normalization)
             _require_run_fields(
                 frozen.cells,
-                facet_by,
+                label_column(facet_by, "facet_by")[0],
                 subset_by,
                 None if highlight is None else highlight.by,
                 None if density_overlay is None else density_overlay.group_by,

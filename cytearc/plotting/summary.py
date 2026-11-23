@@ -32,7 +32,7 @@ from ._data import (
 )
 from ._deps import require_matplotlib
 from ._display import (
-    labels_in_stored_order,
+    groups_in_stored_order,
     merge_categorical_scales,
     stored_artifact_scale,
     stored_categorical_scale,
@@ -387,24 +387,10 @@ def _group_order(
     groups = plot_df.loc[first_rows, "group_label"].tolist()
     if requested is not None:
         return _label_order(groups, requested, name="group order", noun="groups")
-    # Each group's position among the text labels of each grouping column.
-    places = []
-    for role, scale in zip(roles, stored_scales, strict=True):
-        texts = plot_df.loc[first_rows, role].astype(str).tolist()
-        stored = (
-            None
-            if scale is None or scale.order is None
-            else CategoricalScale(order=tuple(str(value) for value in scale.order))
-        )
-        rank = {
-            text: index
-            for index, text in enumerate(
-                labels_in_stored_order(dict.fromkeys(texts), stored)
-            )
-        }
-        places.append([rank[text] for text in texts])
-    position = dict(zip(groups, zip(*places, strict=True), strict=True))
-    return sorted(groups, key=position.__getitem__)
+    # Each group's labels in its grouping columns, as text.
+    texts = [plot_df.loc[first_rows, role].astype(str).tolist() for role in roles]
+    labels = [tuple(column[at] for column in texts) for at in range(len(groups))]
+    return [groups[at] for at in groups_in_stored_order(labels, stored_scales)]
 
 
 def _group_tick_labels(

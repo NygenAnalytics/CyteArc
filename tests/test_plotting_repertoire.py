@@ -87,6 +87,9 @@ def test_receptor_qc_counts_cells_by_category(receptors) -> None:
         # One bar per category with cells.
         assert len(result.axes["receptor_type"].patches) == 5
         assert result.axes["receptor_type"].get_xlabel() == "Cells"
+        # The bars of all cells name their categories, and no group axis
+        # needs a title.
+        assert result.axes["chain_pairing"].get_ylabel() == ""
         assert result.provenance.n_cells == N_CELLS
         assert result.provenance.extras["grouping"] is None
     finally:
@@ -140,6 +143,10 @@ def test_receptor_qc_stacks_groups_of_a_cell_column(receptors) -> None:
         assert np.isclose(sum(heights), 2.0)
         assert result.provenance.extras["grouping"] == "sample"
         assert result.provenance.extras["normalize"] is True
+        # The lower panel of the two that stack the groups titles their axis,
+        # which the upper panel shares.
+        assert result.axes["chain_pairing"].get_xlabel() == "sample"
+        assert result.axes["receptor_type"].get_xlabel() == ""
     finally:
         result.close()
     counts = plotting.receptor_qc(
@@ -169,8 +176,15 @@ def test_receptor_qc_groups_by_labels_of_fewer_cells(receptors) -> None:
         assert table.sum().tolist() == [2, 2]
         assert result.provenance.n_cells == 4
         assert result.tables["chains_per_cell"].sum().tolist() == [4, 4]
-        # The labels are titled by the column they copied.
+        # The labels are titled by the column they copied, and by a name
+        # that the caller gives.
         assert result.provenance.extras["grouping"] == "cluster"
+        assert result.axes["chain_pairing"].get_xlabel() == "cluster"
+        named = plotting.receptor_qc(
+            store, ref, groups=plotting.NamedCellArtifact("Lane", labels), show=False
+        )
+        assert named.axes["chain_pairing"].get_xlabel() == "Lane"
+        named.close()
     finally:
         result.close()
 
@@ -384,6 +398,7 @@ def test_receptor_qc_groups_cells_by_several_columns(receptors) -> None:
             show=False,
         )
         assert named.provenance.extras["grouping"] == "sample, Lane"
+        assert named.axes["chain_pairing"].get_xlabel() == "sample, Lane"
         named.close()
     finally:
         both.close()
@@ -426,6 +441,32 @@ def test_receptor_qc_draws_one_group_named_like_the_tables_columns(
         assert drawn[label][part] == drawn["s1"][part], part
     assert drawn[label]["legend"] and drawn[label]["axis"] == "Fraction of cells"
     assert sum(drawn[label]["heights"]) == pytest.approx(1.0)
+
+
+def test_receptor_qc_draws_groups_in_the_order_their_column_stores(
+    receptors,
+) -> None:
+    store, ref = receptors
+    # b before a, as ordered categories store them, where natural order puts
+    # a first.
+    samples = ["a", "a", "b", "b", "a", "b", "a", "b"]
+    store.cells.insert(
+        "sample",
+        by_cell_id(
+            store.cells, pd.Categorical(samples, categories=["b", "a"], ordered=True)
+        ),
+    )
+    result = plotting.receptor_qc(store, ref, group_by="sample", show=False)
+    try:
+        for panel in ("receptor_type", "chain_pairing"):
+            ticks = result.axes[panel].get_xticklabels()
+            assert [tick.get_text() for tick in ticks] == ["b", "a"], panel
+        assert result.tables["receptor_type"]["group"].tolist() == ["b"] * 5 + ["a"] * 5
+        # Each group keeps its cells: four a and four b.
+        table = _wide(result.tables["receptor_type"], "receptor_type")
+        assert table.loc["no IR"].to_dict() == {"b": 2, "a": 1}
+    finally:
+        result.close()
 
 
 def test_receptor_qc_needs_a_store_with_receptors(receptors) -> None:

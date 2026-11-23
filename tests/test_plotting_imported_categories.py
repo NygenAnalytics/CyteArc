@@ -155,6 +155,7 @@ def _legend(result):
 
 def test_plots_of_imported_cluster_labels_draw_the_files_order_and_colors(imported):
     from cytearc.plotting._groups import _colors as group_colors
+    from cytearc.plotting._groups import _key_scales
 
     store, layout, clusters = imported.store, imported.layout, imported.clusters
     try:
@@ -200,7 +201,12 @@ def test_plots_of_imported_cluster_labels_draw_the_files_order_and_colors(import
 
         # Clone and variant figures color the groups of the labels the same way.
         groups = group_colors(
-            store, ["NK", "T", "B"], [clusters.kind], group_by=(), groups=clusters
+            store,
+            ["NK", "T", "B"],
+            [clusters.kind],
+            _key_scales(store, [clusters.kind], n_group_by=0, groups=clusters),
+            group_by=(),
+            groups=clusters,
         )
         assert list(groups.palette.items()) == FILE_LEGEND
 
@@ -521,6 +527,43 @@ def test_facets_follow_the_order_the_facet_column_stores(grouped):
         "batch | stage=mid",
         "batch | stage=early",
     ]
+    # A CellField's label names the column in each facet's title, in every
+    # layout and in a facet that no cell holds; the facets keep the order
+    # that the column stores, and a field without a label shows its key.
+    field = splt.CellField("stage", label="Stage")
+    labeled = ["batch | Stage=early", "batch | Stage=mid", "batch | Stage=late"]
+    assert titles(layout=layout, facet_by=field) == labeled
+    assert titles(layout_key=["UA", "UB"], facet_by=field) == [
+        f"{name} | {title}" for name in ("UA", "UB") for title in labeled
+    ]
+    assert titles(layout=layout, facet_by=splt.CellField("stage")) == stages
+    assert titles(
+        layout=layout, facet_by=field, facet_order=["late", "early", "mid", "unseen"]
+    ) == [
+        "batch | Stage=late",
+        "batch | Stage=early",
+        "batch | Stage=mid",
+        "batch | Stage=unseen (empty)",
+    ]
+    # The label changes the titles alone: the panels, tables, legends and
+    # record name the column by its key.
+    named, plain = (
+        splt.embedding(
+            store, layout=layout, color_by="batch", facet_by=facet_by, show=False
+        )
+        for facet_by in (field, "stage")
+    )
+    try:
+        assert list(named.axes) == list(plain.axes)
+        assert list(named.tables) == list(plain.tables)
+        for name, table in named.tables.items():
+            pd.testing.assert_frame_equal(table, plain.tables[name])
+        assert named.legends == plain.legends
+        assert named.provenance.extras == plain.provenance.extras
+        assert named.provenance.extras["facet_by"] == "stage"
+    finally:
+        named.close()
+        plain.close()
 
 
 def _legend_texts(result, title):
@@ -727,7 +770,8 @@ def test_run_plots_of_frozen_columns_draw_them_as_plots_of_the_live_columns(
             ("middle", DEFAULT_COLORS[1]),
             ("late", DEFAULT_COLORS[2]),
         ]
-        # Facets of a frozen column follow the order that the run records.
+        # Facets of a frozen column follow the order that the run records,
+        # and a CellField names the run's field by its key.
         faceted = store.plots.embedding(
             run=run, color_by="cell_type", facet_by="stage", show=False
         )
@@ -736,6 +780,18 @@ def test_run_plots_of_frozen_columns_draw_them_as_plots_of_the_live_columns(
             "cell_type | stage=mid",
             "cell_type | stage=late",
         ]
+        labeled = store.plots.embedding(
+            run=run,
+            color_by="cell_type",
+            facet_by=splt.CellField("stage", label="Stage"),
+            show=False,
+        )
+        assert [axis.get_title() for axis in labeled.axes.values()] == [
+            "cell_type | Stage=early",
+            "cell_type | Stage=mid",
+            "cell_type | Stage=late",
+        ]
+        assert labeled.provenance.extras["facet_by"] == "stage"
     finally:
         plt.close("all")
 

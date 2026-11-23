@@ -516,6 +516,22 @@ def test_cells_without_a_facet_value_get_a_labeled_panel():
         )
     finally:
         layouts.close()
+    # A CellField's label names the column, whose stored missing label still
+    # names the cells without a value.
+    field = splt.embedding(
+        labeled,
+        layout_key="U",
+        facet_by=splt.CellField("facet", label="Facet"),
+        show=False,
+    )
+    try:
+        assert [ax.get_title() for ax in field.axes.values()] == [
+            "cells | Facet=x",
+            "cells | Facet=y",
+            "cells | Facet=unassigned",
+        ]
+    finally:
+        field.close()
 
 
 def _grid_slots(result):

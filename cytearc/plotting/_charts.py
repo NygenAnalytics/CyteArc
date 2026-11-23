@@ -126,6 +126,7 @@ def draw_bars(
     side_by_side: bool = False,
     numeric_items: bool = False,
     value_label: str,
+    item_label: str | None = None,
     title: str | None = None,
     legend_title: str | None = None,
     show_legend: bool = True,
@@ -148,6 +149,9 @@ def draw_bars(
     named slot. Named slots are named as a heatmap's rows are: once the
     figure is laid out, every item, or else every second, third or nth from
     the first, as many as the axis holds, at most ``MAX_NAMED_ITEMS``.
+    ``value_label`` titles the axis of the values, and ``item_label``, when
+    given, the axis that names the items, such as the grouping that names
+    them.
 
     Returns:
         The legend of the segments, or of the items' colors, drawn beside
@@ -227,9 +231,15 @@ def draw_bars(
             where = positions - shift if horizontal else positions + shift
             base = np.zeros(len(items), dtype=np.float64)
         if horizontal:
-            ax.barh(where, lengths, left=base, color=fills[at], height=extent)
+            bars = ax.barh(where, lengths, left=base, color=fills[at], height=extent)
         else:
-            ax.bar(where, lengths, bottom=base, color=fills[at], width=extent)
+            bars = ax.bar(where, lengths, bottom=base, color=fills[at], width=extent)
+        # A part without length, 0 or not a number, stands where its bar
+        # ends, so its base would keep the value axis from its margin beyond
+        # the longest bar.
+        for bar, length in zip(bars.patches, lengths, strict=True):
+            if not abs(length) > 0:
+                (bar.sticky_edges.x if horizontal else bar.sticky_edges.y).clear()
         start = start + np.nan_to_num(lengths)
     if not numeric_items:
         _name_items(ax, positions, [str(name) for name in items], horizontal=horizontal)
@@ -237,6 +247,8 @@ def draw_bars(
         # Fractions span the whole axis, whichever parts are empty.
         (ax.set_xlim if horizontal else ax.set_ylim)(0.0, 1.0)
     (ax.set_xlabel if horizontal else ax.set_ylabel)(value_label)
+    if item_label is not None:
+        (ax.set_ylabel if horizontal else ax.set_xlabel)(item_label)
     if title is not None:
         ax.set_title(title)
     if legend_title is None or not isinstance(colors, CategoricalScale):

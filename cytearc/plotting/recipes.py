@@ -204,6 +204,7 @@ _LABEL_ARTIFACT_KWARGS = ("categories", "grouping", "groups")
 _LABEL_COLUMN_KWARGS = (
     ("category_by", "categoryBy"),
     ("condition_by", "conditionBy"),
+    ("facet_by", "facetBy"),
     ("group_by", "groupBy"),
     ("pair_by", "pairBy"),
     ("sample_by", "sampleBy"),

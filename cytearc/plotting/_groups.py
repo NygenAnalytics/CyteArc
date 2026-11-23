@@ -1,15 +1,18 @@
 """The groups of the figures of clones, receptors and variants, and their colors.
 
 Figures group cells as the clone summaries do, through the store's
-``_figure_groups``, and figures of a summary take the groups of its record.
-A group keeps its color in every figure: a grouping by one cell metadata
-column takes the column's stored display palette, or colors assigned over
-every label of the column, as master's figures color categories; a label
-artifact's groups take colors over every label of the artifact; receptor
-types take their vocabulary's palette; and groups of several columns take
-colors over the groups drawn. The labels that colors range over are read
-only when a figure colors its groups: a column's a stored chunk at a time,
-and a label artifact's within the store's memory budget.
+``_figure_groups``, and figures of a summary take the groups of its record. The
+groups follow the labels of their first key column, then of the second: each
+column's labels in the order that the column or label artifact stores, as a
+stored display or ordered categories, then in natural order, and the receptor
+types in their vocabulary's order. A group keeps its color in every figure: a
+grouping by one cell metadata column takes the column's stored display palette,
+or colors assigned over every label of the column; a label artifact's groups
+take colors over every label of the artifact; receptor types take their
+vocabulary's palette; and groups of several columns take colors over the groups
+drawn. The labels that colors range over are read only when a figure colors its
+groups: a column's a stored chunk at a time, and a label artifact's within the
+store's memory budget.
 """
 
 from collections.abc import Callable, Sequence
@@ -37,7 +40,12 @@ from ..utils.arguments import quoted_value
 from ..utils.memory_budget import MemoryLedger
 from ._contracts import CategoricalScale
 from ._data import store_method
-from ._display import stored_artifact_scale, stored_categorical_scale
+from ._display import (
+    groups_in_stored_order,
+    stored_artifact_scale,
+    stored_categorical_scale,
+    text_keyed_scale,
+)
 from ._style import RECEPTOR_TYPE_SCALE, palette_for_n, resolve_category_scale
 from ._titles import artifact_titles, label_artifact
 
@@ -49,8 +57,10 @@ __all__ = [
     "table_groups",
 ]
 
-# The key columns whose labels are a vocabulary of fixed colors.
+# The key columns whose labels are a vocabulary of fixed colors, and their
+# titles.
 _VOCABULARY_SCALES = {"receptor_type": RECEPTOR_TYPE_SCALE}
+_VOCABULARY_TITLES = {"receptor_type": "Receptor type"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,7 +69,10 @@ class PlotGroups:
 
     Attributes:
         names: The groups' names, the labels of each joined by commas, in
-            the natural order of the labels; ``("all cells",)`` without a
+            the order of the first key column's labels, then the second's:
+            each column's labels in the order that the column or label
+            artifact stores, then in natural order, and the receptor types
+            in their vocabulary's order; ``("all cells",)`` without a
             grouping.
         columns: The grouping's key columns, empty without one.
         codes: Each cell's group, a position in ``names``, -1 for none; empty
@@ -140,28 +153,6 @@ def _texts(values: Any) -> list[str]:
     return list(dict.fromkeys(str(value) for value in labels))
 
 
-def _as_text(scale: CategoricalScale | None) -> CategoricalScale | None:
-    """A stored display's scale keyed by the text of each value, as groups are named."""
-    if scale is None:
-        return None
-    return CategoricalScale(
-        order=None if scale.order is None else tuple(map(str, scale.order)),
-        palette=(
-            None
-            if scale.palette is None
-            else {str(value): color for value, color in scale.palette.items()}
-        ),
-        labels=(
-            None
-            if scale.labels is None
-            else {str(value): label for value, label in scale.labels.items()}
-        ),
-        missing_color=scale.missing_color,
-        missing_label=scale.missing_label,
-        palette_name=scale.palette_name,
-    )
-
-
 def _store_labels(store: Any) -> None:
     """Refuse a store that cannot give the labels which group colors range over."""
     if not hasattr(store, "zw") or not hasattr(store, "cells"):
@@ -219,17 +210,22 @@ def _colors(
     store: Any,
     names: Sequence[str],
     columns: Sequence[str],
+    scales: Sequence[CategoricalScale | None],
     *,
     group_by: Sequence[str],
     groups: ArtifactRef | None,
 ) -> CategoricalScale | None:
-    """Every group's color, when the groups are those of one column or vocabulary."""
+    """Every group's color, when the groups are those of one column or vocabulary.
+
+    ``scales`` holds the scale of each key column that :func:`_key_scales`
+    read, so the stored scales are read once for a figure.
+    """
     if len(columns) != 1:
         return None
     (column,) = columns
+    (stored,) = scales
     if tuple(group_by) == (column,):
         _store_labels(store)
-        stored = _as_text(stored_categorical_scale(store, column))
         return resolve_category_scale(
             list(names),
             stored,
@@ -237,7 +233,6 @@ def _colors(
         )
     if not group_by and groups is not None and column == groups.kind:
         _store_labels(store)
-        stored = _as_text(stored_artifact_scale(store, groups))
         return resolve_category_scale(
             list(names),
             stored,
@@ -261,11 +256,39 @@ def _key_titles(
     groups: ArtifactRef | None,
     name: str | None,
 ) -> tuple[str, ...]:
-    """The title of each key column: the label artifact's kind, after the ``group_by`` columns, takes its name or title."""
+    """The title of each key column: its name, the vocabulary's for the labels that clones keep apart, and the label artifact's name or title for its kind."""
     titles = [str(column) for column in columns]
+    for position in range(n_group_by + (groups is not None), len(columns)):
+        titles[position] = _VOCABULARY_TITLES.get(titles[position], titles[position])
     if groups is not None:
         (titles[n_group_by],) = artifact_titles(store, [(groups, name)])
     return tuple(titles)
+
+
+def _key_scales(
+    store: Any,
+    columns: Sequence[str],
+    *,
+    n_group_by: int,
+    groups: ArtifactRef | None,
+) -> list[CategoricalScale | None]:
+    """The scale of each key column, keyed by the text of its labels.
+
+    A ``group_by`` column takes the scale it stores, the label artifact's
+    kind the artifact's, and the receptor types their vocabulary's; other
+    columns store none. The groups follow these scales' orders, and the
+    groups of one column or vocabulary take their colors.
+    """
+    scales = []
+    for position, column in enumerate(columns):
+        if position < n_group_by:
+            scale = text_keyed_scale(stored_categorical_scale(store, column))
+        elif groups is not None and position == n_group_by:
+            scale = text_keyed_scale(stored_artifact_scale(store, groups))
+        else:
+            scale = _VOCABULARY_SCALES.get(column)
+        scales.append(scale)
+    return scales
 
 
 def plot_groups(
@@ -310,14 +333,27 @@ def plot_groups(
     grouped = store_method(store, "_figure_groups", "the groups of figures")(
         artifact, group_by=group_by, groups=groups, kept_apart=tuple(kept_apart)
     )
-    names = tuple(group_names(grouped.keys))
     columns = tuple(grouped.key_columns)
     by = columns[: len(columns) - (groups is not None) - len(kept_apart)]
+    scales = _key_scales(store, columns, n_group_by=len(by), groups=groups)
+    order = groups_in_stored_order(
+        [tuple(key[column] for column in columns) for key in grouped.keys], scales
+    )
+    names = tuple(group_names([grouped.keys[at] for at in order]))
+    codes = np.asarray(grouped.codes, dtype=np.int64)
+    if order != list(range(len(order))):
+        # Each cell's code moves to its group's place in the figure's order,
+        # and -1, a cell without a group, to the last place, which keeps -1.
+        place = np.full(len(order) + 1, -1, dtype=np.int64)
+        place[order] = np.arange(len(order))
+        codes = place[codes]
     return PlotGroups(
         names=names,
         columns=columns,
-        codes=np.asarray(grouped.codes, dtype=np.int64),
-        colors=partial(_colors, store, names, columns, group_by=by, groups=groups),
+        codes=codes,
+        colors=partial(
+            _colors, store, names, columns, scales, group_by=by, groups=groups
+        ),
         titles=_key_titles(
             store, columns, n_group_by=len(by), groups=groups, name=name
         ),
@@ -334,9 +370,11 @@ def table_groups(
     and its ``group_by`` and ``groups`` name the grouping, after which the
     key columns hold the labels the clones keep apart. The record's label
     artifact is titled by ``groups``, a ``NamedCellArtifact`` of that
-    artifact, or else by its own record.
+    artifact, or else by its own record. The groups follow the order that
+    each key column stores, as :func:`plot_groups` orders them; the record's
+    tables keep their own order.
 
-    Nothing is read from the store until a figure colors the groups.
+    The store's labels are read only when a figure colors the groups.
 
     Raises:
         TypeError: If ``groups`` is not a ``NamedCellArtifact`` or None.
@@ -358,8 +396,15 @@ def table_groups(
             )
         )
     keys: pd.DataFrame = record.group_keys
-    names = tuple(str(name) for name in keys.index.tolist())
     columns = tuple(str(column) for column in keys.columns)
+    scales = _key_scales(
+        store, columns, n_group_by=len(record.group_by), groups=record.groups
+    )
+    # Each group's labels as text, also for a record without key columns,
+    # whose one group is "all cells".
+    labels = [tuple(map(str, row)) for row in keys.to_numpy(dtype=object)]
+    found = [str(name) for name in keys.index.tolist()]
+    names = tuple(found[at] for at in groups_in_stored_order(labels, scales))
     return PlotGroups(
         names=names,
         columns=columns,
@@ -369,6 +414,7 @@ def table_groups(
             store,
             names,
             columns,
+            scales,
             group_by=tuple(record.group_by),
             groups=record.groups,
         ),

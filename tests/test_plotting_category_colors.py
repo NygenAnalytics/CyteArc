@@ -891,6 +891,27 @@ def test_labels_take_the_stored_order_and_then_their_natural_order():
     ) == ["b", "a"]
 
 
+def test_groups_follow_each_columns_stored_order_compared_as_text():
+    from cytearc.plotting._display import groups_in_stored_order, text_keyed_scale
+
+    # Integer categories stored as 10 before 2 name groups by their text.
+    days = splt.CategoricalScale(order=(10, 2), palette={10: "#000001", 2: "#000002"})
+    assert text_keyed_scale(days) == splt.CategoricalScale(
+        order=("10", "2"), palette={"10": "#000001", "2": "#000002"}
+    )
+    assert text_keyed_scale(None) is None
+    # The first column leads, 10 and 2 as stored and then 3 naturally, and
+    # the second orders the groups of each of its labels naturally.
+    labels = [("2", "b"), ("10", "b"), ("2", "a"), ("10", "a"), ("3", "a")]
+    assert groups_in_stored_order(labels, [days, None]) == [3, 1, 2, 0, 4]
+    # Without a stored order, 2 comes before 10.
+    assert groups_in_stored_order(labels, [None, None]) == [2, 0, 4, 3, 1]
+    assert groups_in_stored_order([], [days]) == []
+    # Each group names a label of each column.
+    with pytest.raises(ValueError):
+        groups_in_stored_order([("2", "b")], [days])
+
+
 def test_merge_categorical_scales_merges_each_field():
     from cytearc.plotting._display import merge_categorical_scales
 
@@ -1022,6 +1043,7 @@ def test_a_column_stored_as_ordered_keeps_its_order_in_plots(tmp_path):
     import pandas as pd
 
     from cytearc.plotting._groups import _colors as _group_colors
+    from cytearc.plotting._groups import _key_scales
 
     x = np.arange(12, dtype=np.float64)
     store, imported, _counts = _imported_plot_store(
@@ -1075,7 +1097,12 @@ def test_a_column_stored_as_ordered_keeps_its_order_in_plots(tmp_path):
         )
         # Clone and variant figures color groups of the column in that order.
         groups = _group_colors(
-            store, ["late", "mid", "early"], ["grade"], group_by=["grade"], groups=None
+            store,
+            ["late", "mid", "early"],
+            ["grade"],
+            _key_scales(store, ["grade"], n_group_by=1, groups=None),
+            group_by=["grade"],
+            groups=None,
         )
         assert groups.order == ("early", "mid", "late")
         assert groups.palette == dict(zip(groups.order, stored_colors, strict=True))
