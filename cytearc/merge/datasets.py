@@ -427,6 +427,16 @@ class DataStoreMerge:
             self._reset_prepared_state()
             raise
 
+    def _assay_source_names(self, assay_name: str) -> list[str]:
+        """The names of the sources that hold ``assay_name``, in merge order."""
+        return [
+            name
+            for name, source in zip(
+                self.names, self._assaySources[assay_name], strict=True
+            )
+            if source is not None
+        ]
+
     def _measured_features(self, assay_name: str) -> dict[str, np.ndarray]:
         """Return the record of what each source that holds ``assay_name`` measured, empty when they measured the same features."""
         return feature_record(self._alignments[assay_name], self.names)
@@ -1155,6 +1165,7 @@ class DataStoreMerge:
                         self._alignments[assay_name].nFeats,
                         resources=self.resources,
                         resident_bytes=counts_t_resident,
+                        names=self._assay_source_names(assay_name),
                         sources=self._measured_features(assay_name),
                     )
                 else:
@@ -1421,6 +1432,7 @@ class DataStoreMerge:
                     + sum(item.resident_bytes() for item in self._alignments.values()),
                     profile=self.profile,
                     measured=self._measured_features(assay_name),
+                    names=self._assay_source_names(assay_name),
                 )
                 write_assay_counts(
                     root,

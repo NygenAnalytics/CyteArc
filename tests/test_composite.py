@@ -753,6 +753,188 @@ def test_a_composite_charges_the_selected_rows_that_its_scan_holds(
     assert scanned[0] - admitted[0] == 2 * 8 * 5
 
 
+def _insert_times(sources, cells, features):
+    """Insert each source's cell and feature columns, keyed in store order."""
+    for name, source in sources.items():
+        for column, values in cells[name].items():
+            source.cells.insert(
+                column, by_cell_id(source.cells, values, key=None), key=None
+            )
+        for column, values in features[name].items():
+            source.RNA.feats.insert(column, values)
+
+
+def test_a_composite_keeps_dates_and_durations_of_different_units_at_the_finer_unit(
+    sources, tmp_path
+):
+    import anndata
+
+    import cytearc
+
+    # a holds dates at seconds and durations at seconds, b at nanoseconds and
+    # milliseconds, with NaT in rows that the composite takes and leaves out.
+    seconds = np.datetime64("2026-01-01", "s") + np.arange(13).astype("timedelta64[s]")
+    seconds[[2, 7]] = np.datetime64("NaT", "s")
+    nanos = np.datetime64("2026-02-01", "ns") + np.arange(11).astype("timedelta64[ns]")
+    nanos[[1, 9]] = np.datetime64("NaT", "ns")
+    cells = {
+        "a": {"day": seconds, "wait": np.arange(13).astype("timedelta64[s]")},
+        "b": {
+            "day": nanos,
+            "wait": np.where(
+                np.arange(11) == 4,
+                np.timedelta64("NaT", "ms"),
+                np.arange(11).astype("timedelta64[ms]"),
+            ).astype("timedelta64[ms]"),
+        },
+    }
+    genes = {
+        name: source.RNA.feats.fetch_all("ids").tolist()
+        for name, source in sources.items()
+    }
+    features = {
+        "a": {"lag": np.arange(len(genes["a"])).astype("timedelta64[s]")},
+        "b": {"lag": np.full(len(genes["b"]), np.timedelta64("NaT", "ms"))},
+    }
+    _insert_times(sources, cells, features)
+    rows = {"a": [0, 2, 5, 12], "b": [1, 3, 4, 10]}
+    joint = create_composite(
+        sources,
+        at=tmp_path / "joint.zarr",
+        features="union",
+        rows=rows,
+        mem_budget="64M",
+        nthreads=1,
+    )
+    stored_cells = joint.z["cellData"]
+    ids = stored_cells["ids"][:].tolist()
+    cytearc.to_h5ad(joint.RNA, str(tmp_path / "export.h5ad"))
+    exported = anndata.read_h5ad(tmp_path / "export.h5ad")
+    for column, dtype in (
+        ("day", np.dtype("datetime64[ns]")),
+        ("wait", np.dtype("timedelta64[ms]")),
+    ):
+        stored = np.asarray(stored_cells[f"orig_{column}"][:])
+        assert stored.dtype == dtype, column
+        # Each selected cell holds its value as NumPy casts it to the finer
+        # unit, NaT included, which readers take as missing without a mask,
+        # and an export writes each as the text that NumPy writes.
+        expected = {
+            f"{name}__c{row}": str(cells[name][column][[row]].astype(dtype)[0])
+            for name, selected in rows.items()
+            for row in selected
+        }
+        assert f"__cytearc_missing__orig_{column}" not in stored_cells, column
+        assert {
+            cell: str(value) for cell, value in zip(ids, stored, strict=True)
+        } == expected, column
+        assert {
+            cell: str(value) for cell, value in exported.obs[f"orig_{column}"].items()
+        } == expected, column
+    # b holds no lag, so each gene takes a's, cast to milliseconds by NumPy.
+    lags = joint.z["RNA/featureData"]
+    assert np.asarray(lags["lag"][:]).dtype == np.dtype("timedelta64[ms]")
+    expected_lags = {
+        gene: str(np.timedelta64(position, "s").astype("timedelta64[ms]"))
+        for position, gene in enumerate(genes["a"])
+    } | {gene: None for gene in genes["b"] if gene not in genes["a"]}
+    assert {
+        gene: None if flagged else str(value)
+        for gene, value, flagged in zip(
+            lags["ids"][:].tolist(),
+            np.asarray(lags["lag"][:]),
+            lags["__cytearc_missing__lag"][:],
+            strict=True,
+        )
+    } == expected_lags
+
+
+@pytest.mark.parametrize(
+    ("selected", "refused"),
+    [
+        # The composite takes a's cell of 1500, which nanoseconds cannot hold.
+        pytest.param([0, 3], True, id="takes it"),
+        # It leaves that cell out, so a's dates fit.
+        pytest.param([0, 1], False, id="leaves it out"),
+    ],
+)
+def test_a_composite_refuses_the_dates_of_the_cells_it_takes_that_the_finer_unit_cannot_hold(
+    sources, tmp_path, selected, refused
+):
+    days = np.full(13, np.datetime64("2026-01-01", "s"))
+    days[3] = np.datetime64("1500-01-01", "s")
+    _insert_times(
+        sources,
+        {
+            "a": {"day": days},
+            "b": {"day": np.full(11, np.datetime64("2026-01-02", "ns"))},
+        },
+        {"a": {}, "b": {}},
+    )
+
+    def create():
+        return create_composite(
+            sources,
+            at=tmp_path / "joint.zarr",
+            features="union",
+            rows={"a": selected},
+            mem_budget="64M",
+            nthreads=1,
+        )
+
+    if not refused:
+        joint = create()
+        assert np.asarray(joint.z["cellData/orig_day"][:]).dtype == np.dtype(
+            "datetime64[ns]"
+        )
+        # The cells it takes hold no NaT, so the column has no mask.
+        assert "__cytearc_missing__orig_day" not in joint.z["cellData"]
+        return
+    with pytest.raises(
+        ValueError,
+        match=re.escape(
+            "Column 'day' of source 'a' holds dates, such as "
+            "1500-01-01T00:00:00, that datetime64[ns], the finest unit of the "
+            "merged sources, cannot hold"
+        ),
+    ):
+        create()
+    assert not (tmp_path / "joint.zarr").exists()
+
+
+def test_a_composite_refuses_feature_dates_that_the_finer_unit_cannot_hold_before_it_writes(
+    sources, tmp_path
+):
+    genes = {
+        name: source.RNA.feats.fetch_all("ids").tolist()
+        for name, source in sources.items()
+    }
+    _insert_times(
+        sources,
+        {"a": {}, "b": {}},
+        {
+            "a": {"added": np.full(len(genes["a"]), np.datetime64("1500-01-01", "s"))},
+            "b": {"added": np.full(len(genes["b"]), np.datetime64("2026-01-01", "ns"))},
+        },
+    )
+    with pytest.raises(
+        ValueError,
+        match=re.escape(
+            "Feature column 'added' of source 'a' holds dates, such as "
+            "1500-01-01T00:00:00, that datetime64[ns], the finest unit of the "
+            "merged sources, cannot hold"
+        ),
+    ):
+        create_composite(
+            sources,
+            at=tmp_path / "joint.zarr",
+            features="union",
+            mem_budget="64M",
+            nthreads=1,
+        )
+    assert not (tmp_path / "joint.zarr").exists()
+
+
 def test_a_composite_of_narrow_labels_and_dates_that_are_all_nat(sources, tmp_path):
     nat = np.datetime64("NaT", "ns")
     # One-letter labels plan columns of one character, which the text of NaT

@@ -13,7 +13,12 @@ import zarr
 from zarr.storage import MemoryStore
 
 from cytearc.metadata import MetaData
-from cytearc.metadata.encoding import missing_placeholder, missing_rows, nullable_values
+from cytearc.metadata.encoding import (
+    inexact_time_rows,
+    missing_placeholder,
+    missing_rows,
+    nullable_values,
+)
 from cytearc.metadata.rows import metadata_column_fingerprint, metadata_missing_mask
 from cytearc.storage.selections import _stored_selection_summary
 from cytearc.writers._store import write_metadata_column
@@ -176,6 +181,14 @@ def test_missing_supplied_values_are_flagged_in_full_and_partial_inserts():
             [_DAYS[0], np.datetime64("2021-01-01", "D"), _DAYS[1]],
         ),
         (_DATES, _NAT, "<M8[ns]", [_DATES[0], _NAT, _DATES[1]]),
+        # Within one second of the earliest date that nanoseconds hold,
+        # 1677-09-21T00:12:43.145224193 as NumPy documents it.
+        (
+            _DATES,
+            np.datetime64("1677-09-21T00:12:44", "s"),
+            "<M8[ns]",
+            [_DATES[0], np.datetime64("1677-09-21T00:12:44", "ns"), _DATES[1]],
+        ),
         (
             _SECONDS,
             np.timedelta64(2, "m"),
@@ -222,6 +235,7 @@ def test_an_explicit_fill_is_stored_as_a_real_value(values, fill_value, dtype, s
         # out of range, or tied to a time zone.
         (_DAYS, datetime.datetime(2020, 1, 1, 12, 30)),
         (_DATES, datetime.datetime(3000, 1, 1)),
+        (_DATES, np.datetime64("1677-09-21T00:12:43", "s")),
         (_DATES, datetime.datetime(2020, 1, 1, tzinfo=datetime.timezone.utc)),
         (_SECONDS, np.timedelta64(1500, "ms")),
         (_NANOSECONDS, np.timedelta64(10**6, "D")),
@@ -241,6 +255,98 @@ def test_an_explicit_fill_that_does_not_fit_is_rejected_before_writing(
 
     assert table.fetch_all("x").tolist() == [7, 8, 9]
     assert _mask(table, "x") is None
+
+
+@pytest.mark.parametrize(
+    ("values", "dtype", "changed"),
+    [
+        # NumPy documents nanoseconds from 1677-09-21T00:12:43.145224193 to
+        # 2262-04-11T23:47:16.854775807.
+        (
+            np.asarray(
+                [
+                    "1677-09-21T00:12:43",
+                    "1677-09-21T00:12:44",
+                    "NaT",
+                    "2262-04-11T23:47:16",
+                    "2262-04-11T23:47:17",
+                ],
+                dtype="datetime64[s]",
+            ),
+            "datetime64[ns]",
+            [True, False, False, False, True],
+        ),
+        # 9223372036854775807 milliseconds is the most that int64 holds.
+        (
+            np.asarray(
+                [
+                    -9223372036854776,
+                    -9223372036854775,
+                    9223372036854775,
+                    9223372036854776,
+                ],
+                dtype="timedelta64[s]",
+            ),
+            "timedelta64[ms]",
+            [True, False, False, True],
+        ),
+        # Weeks count from Thursday 1 January 1970: June 2000 starts on a
+        # Thursday, and July on a Saturday.
+        (
+            np.asarray(["2000-06", "2000-07", "NaT"], dtype="datetime64[M]"),
+            "datetime64[W]",
+            [False, True, False],
+        ),
+        (
+            np.asarray(["2000-06", "2000-07"], dtype="datetime64[M]"),
+            "datetime64[D]",
+            [False, False],
+        ),
+        (
+            np.asarray(["1500", "2000"], dtype="datetime64[Y]"),
+            "datetime64[ns]",
+            [True, False],
+        ),
+        # 1500 milliseconds lie between seconds, and 2000 do not.
+        (
+            np.asarray([1500, 2000, "NaT", -2500], dtype="timedelta64[ms]"),
+            "timedelta64[s]",
+            [True, False, False, True],
+        ),
+        # An attosecond lies between weeks.
+        (
+            np.asarray([0, 1, -1], dtype="timedelta64[as]"),
+            "timedelta64[W]",
+            [False, True, True],
+        ),
+        # NumPy refuses to convert any year to attoseconds, so each year is
+        # read on its own and is changed, and NaT is not.
+        (
+            np.asarray(["1970", "NaT", "2000"], dtype="datetime64[Y]"),
+            "datetime64[as]",
+            [True, False, True],
+        ),
+        # Units of several steps: 30 and 10 seconds are both whole steps of 5.
+        (np.asarray([3, 1], dtype="datetime64[10s]"), "datetime64[5s]", [False, False]),
+    ],
+    ids=[
+        "seconds to nanoseconds",
+        "seconds to milliseconds",
+        "milliseconds to seconds",
+        "months to weeks",
+        "months to days",
+        "years to nanoseconds",
+        "attoseconds to weeks",
+        "years to attoseconds",
+        "steps of 10 to 5 seconds",
+    ],
+)
+def test_inexact_time_rows_are_those_that_a_unit_cannot_hold(values, dtype, changed):
+    import datetime
+
+    assert datetime.date(2000, 6, 1).weekday() == datetime.date(1970, 1, 1).weekday()
+    assert datetime.date(2000, 7, 1).weekday() == 5
+    assert inexact_time_rows(values, np.dtype(dtype)).tolist() == changed
 
 
 def test_an_explicit_fill_is_not_needed_when_values_cover_every_row():

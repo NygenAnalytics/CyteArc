@@ -29,6 +29,7 @@ from ..merge.features import (
 from ..merge.metadata import (
     SOURCE_MEASURES_ALL,
     admit_cell_metadata_plan,
+    admit_feature_metadata,
     metadata_chunk_rows,
     plan_cell_metadata,
     resolve_metadata_schema_scan_rows,
@@ -1108,6 +1109,17 @@ def _write_composite(
         metadata_plan = admit_cell_metadata_plan(
             metadata_plan, row_plan, resources, resident_bytes=resident
         )
+        # Feature annotations must fit the budget, and their dates the merged
+        # unit, before the destination is created, as a merge plans them.
+        admit_feature_metadata(
+            feature_tables,
+            alignment.featOrderMap,
+            alignment.nFeats,
+            resources=resources,
+            resident_bytes=resident,
+            names=names,
+            sources=measured_record,
+        )
         source_arrays = {
             name: [
                 as_zarr_array(source.matrixGroup[name], name=name) for source in assays
@@ -1204,6 +1216,7 @@ def _write_composite(
             resident_bytes=resident,
             profile=profile,
             measured=measured_record,
+            names=names,
         )
         del feature_tables
         if metadata_cache is not None:
