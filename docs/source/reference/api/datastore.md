@@ -9,8 +9,8 @@ myst:
 `DataStore` is the primary analyst-facing object.
 It inherits graph, mapping, and assay helpers from the classes below.
 Use this page for analyst-facing methods and consult the inheritance appendix when extending CyteArc.
-A `DataStore` is not designed for concurrent use from several threads; call its methods from one
-thread at a time. Write a store from one process at a time.
+A `DataStore` is not designed for concurrent use from several threads; call its methods from one thread at a time.
+Several processes can save results into one store at once; [Several processes on one store](../concepts/provenance#several-processes-on-one-store) lists the calls that need the store to themselves.
 
 Graph-construction methods are documented on {doc}`graph_construction`.
 Artifact and run inspection, including the metadata-only `DataStore.summary()`, is documented on {doc}`artifacts`.
@@ -281,6 +281,8 @@ A pseudotime scores one connected component of its graph: the largest by default
 ```
 
 The lineage methods resolve one fate map into its lineages: each scored cell weighs in each lineage by its fate probability. `lineage_markers` and `lineage_aggregation` follow features along each lineage, `drivers` correlates features with fate probabilities, and `curves` fits one curve per lineage through the graph's coordinates. `lineage_tree` is a diagnostic that proposes candidate sinks from a cluster tree; check them before passing them to `fate`, or find terminal states from the walk itself with `states`. See [Resolve gene dynamics by lineage](../tutorials/lineage-dynamics) and [Draw lineage curves and check the trajectory](../tutorials/lineage-curves).
+
+Each trajectory call reads only the saved results that its arguments name, so a call made in a process of its own, from the refs of the calls before it, saves what the same call saves in a chain in one process, with the same provenance, and returns that result where the store already holds it ([Several processes on one store](../concepts/provenance#several-processes-on-one-store)).
 
 `curves_in_layout(curves, layout)` returns the curves drawn in a two-dimensional layout, such as a UMAP, as a table of each curve's points, `lineage`, `point`, `x` and `y`, which `plots.lineage_curves` draws. It averages the layout coordinates of the scored cells with each lineage's fate weights along the curve and smooths them with the curves' spline, needs no plotting dependencies and saves nothing, so a viewer of its own can draw the curves. The layout may come from any cell selection that holds the curves' cells, such as a UMAP of the whole graph for curves of some of its cells.
 

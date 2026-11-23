@@ -1712,10 +1712,7 @@ def test_ann_storage_fails_closed() -> None:
         store.graph.neighbors(missing)
 
 
-def test_normalized_local_cache_cleans_up_after_failure(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_normalized_local_cache_cleans_up_after_failure(tmp_path: Path) -> None:
     store = _memory_graph_store()
     store.zarr_loc = "remote"
     store.resources = None
@@ -1741,30 +1738,14 @@ def test_normalized_local_cache_cleans_up_after_failure(
 
     cache_base = tmp_path / "normalized_cache"
     cache_base.mkdir()
-    staged_root = zarr.open_group(store=MemoryStore(), mode="w")
-    staged = staged_root.create_array(
-        "data",
-        shape=(3, 2),
-        dtype=np.float32,
-        chunks=(2, 2),
-    )
     store._resolve_local_cache_plan = Mock(return_value=(True, str(cache_base), True))
-    monkeypatch.setattr(
-        "cytearc.datastore._operations.graph.create_or_open_staged_normed_array",
-        Mock(return_value=staged),
-    )
-
-    def copy_array(source, target, **_kwargs):
-        target[:, :] = source[:, :]
-
-    monkeypatch.setattr(
-        "cytearc.datastore._operations.graph.copy_zarr_array",
-        copy_array,
-    )
 
     with pytest.raises(RuntimeError, match="downstream failure"):
         with store._cache_normalized_artifact(normalized, True, 2):
-            assert normalized in store._normalizedArtifactCache
+            staged = store._normalizedArtifactCache[normalized]
+            np.testing.assert_array_equal(
+                staged.compute(), np.arange(6, dtype=np.float32).reshape(3, 2)
+            )
             raise RuntimeError("downstream failure")
 
     assert normalized not in store._normalizedArtifactCache
@@ -1791,10 +1772,7 @@ def test_normalized_local_cache_removes_a_failed_staging_copy(
         target[:1, :] = source[:1, :]
         raise ConnectionError("remote read failed while staging")
 
-    monkeypatch.setattr(
-        "cytearc.datastore._operations.graph.copy_zarr_array",
-        interrupted_copy,
-    )
+    monkeypatch.setattr("cytearc.storage.copy.copy_zarr_array", interrupted_copy)
     with pytest.raises(ConnectionError, match="while staging"):
         with store._cache_normalized_artifact(normalized, True, 2):
             raise AssertionError("staging failed, so the block must not run")

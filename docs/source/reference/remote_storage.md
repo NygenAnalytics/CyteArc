@@ -220,7 +220,7 @@ reduction = remote_writable.reduction.pca(
 )
 ```
 
-`local_cache` controls where a stage reads its working data. It does not change what the stage computes or the result's identity, so a completed result can be reused under a different scratch policy later. Temporary scratch (`True` or `"auto"` on a remote store) is deleted when the stage ends, on both success and failure. A path-string cache is kept for reuse or inspection.
+`local_cache` controls where a stage reads its working data. It does not change what the stage computes or the result's identity, so a completed result can be reused under a different scratch policy later. Temporary scratch (`True` or `"auto"` on a remote store) is deleted when the stage ends, on both success and failure. A path-string cache is kept for reuse or inspection. Several processes can share one: each stages its copy in a folder of its own and renames it into place once complete, so no process reads a copy that is still being written, and processes that stage one artifact at once all read the copy placed first. Processes that stage one artifact at once each make a copy, so three of them need three copies' worth of disk space and read the artifact from the remote store three times. A process killed outright, by `SIGKILL` or the out-of-memory killer, leaves its partial copy in a folder named after the copy's place with a random suffix and `.staging`, up to the size of the array, which nothing removes. An incomplete copy, which an interrupted staging of an earlier release can leave in place, is refused with its folder named; remove it once no process uses the cache.
 
 Plan local disk for float32 dense blocks roughly as `n_cells × n_features × 4` bytes (about 8 GiB for 1M cells × 2000 HVGs).
 
