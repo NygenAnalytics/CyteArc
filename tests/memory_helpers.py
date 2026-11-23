@@ -7,7 +7,7 @@ import weakref
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import pytest
 
@@ -105,11 +105,27 @@ def recording_ledger(doing: str = "Recording charges") -> Any:
     return RecordingLedger()
 
 
-def traced_charge(call: Callable[[Any], Any]) -> tuple[int, int]:
-    """Run ``call(ledger)`` once untraced, then traced after a full collection, and return the most it held and the most its ledger charged.
+class TracedCharge(NamedTuple):
+    """What a traced call held against what its ledger charged.
+
+    Attributes:
+        held: The most the call held at once.
+        charged: The most its ledger charged at once, peaks included.
+        kept: What the call still held when it returned, its result among it.
+        kept_charged: What its ledger still held charged when it returned.
+    """
+
+    held: int
+    charged: int
+    kept: int
+    kept_charged: int
+
+
+def traced_charge(call: Callable[[Any], Any]) -> TracedCharge:
+    """Run ``call(ledger)`` once untraced, then traced after a full collection, against a :func:`recording_ledger`.
 
     The untraced run warms what a first call allocates once, such as
-    imports and Zarr's objects, and each run takes a :func:`recording_ledger`.
+    imports and Zarr's objects.
     """
     import gc
     import tracemalloc
@@ -120,11 +136,12 @@ def traced_charge(call: Callable[[Any], Any]) -> tuple[int, int]:
     tracemalloc.start()
     try:
         before, _ = tracemalloc.get_traced_memory()
-        call(ledger)
-        _, peak = tracemalloc.get_traced_memory()
+        result = call(ledger)
+        current, peak = tracemalloc.get_traced_memory()
     finally:
         tracemalloc.stop()
-    return peak - before, ledger.most
+    del result
+    return TracedCharge(peak - before, ledger.most, current - before, ledger.held_bytes)
 
 
 class HandedArrays:

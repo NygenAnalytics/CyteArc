@@ -1496,25 +1496,51 @@ def test_reading_variable_width_rows_measures_their_column_once(monkeypatch) -> 
     assert len(stamps) == 1
 
 
-# Values of 8 random digits and then one character repeated, so that they
-# compress as identifiers do: ASCII, up to U+00FF, and beyond U+FFFF.
+# Values of random digits and then one character repeated, which compress as
+# identifiers do, and values of random characters, which barely compress:
+# ASCII, up to U+00FF, and beyond U+FFFF.
 _TEXT_KINDS = {"ascii": "x", "latin-1": "\u00e9", "astral": "\N{GRINNING FACE}"}
+_ALPHABETS = {
+    "ascii": "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+    "latin-1": "".join(map(chr, range(0xC0, 0x100))),
+    "astral": "".join(map(chr, range(0x1F600, 0x1F650))),
+}
 
 
 def _digits_then(character: str, characters: int, n_values: int) -> np.ndarray:
     rng = np.random.default_rng(characters)
+    digits = min(8, characters)
     return np.asarray(
         [
-            "".join(rng.choice(list("0123456789"), 8)) + character * (characters - 8)
+            "".join(rng.choice(list("0123456789"), digits))
+            + character * (characters - digits)
             for _ in range(n_values)
         ]
     )
 
 
-@pytest.mark.parametrize("kind", list(_TEXT_KINDS))
-@pytest.mark.parametrize(("characters", "chunk_rows"), [(12, 4_000), (120, 1_024)])
+def _random_text(kind: str, characters: int, n_values: int) -> np.ndarray:
+    rng = np.random.default_rng(characters)
+    letters = rng.choice(list(_ALPHABETS[kind]), size=(n_values, characters))
+    return np.asarray(["".join(row) for row in letters])
+
+
+@pytest.mark.parametrize(
+    ("kind", "characters", "n_values", "chunk_rows", "random"),
+    [
+        # Short values in one chunk, which a read of any of them decodes.
+        ("ascii", 6, 20_000, 20_000, False),
+        # Values of 16 bytes or more, which NumPy keeps beside its elements.
+        ("latin-1", 12, 4_000, 1_024, False),
+        # Long values that barely compress, in one chunk.
+        ("ascii", 120, 4_000, 4_000, True),
+        ("latin-1", 120, 4_000, 4_000, True),
+        ("astral", 120, 4_000, 4_000, True),
+    ],
+    ids=["short", "short-in-the-arena", "long-ascii", "long-latin-1", "long-astral"],
+)
 def test_reads_of_variable_width_text_hold_what_they_charge(
-    kind, characters, chunk_rows, tmp_path
+    kind, characters, n_values, chunk_rows, random, tmp_path
 ) -> None:
     from cytearc.metadata.rows import (
         read_rows,
@@ -1525,18 +1551,22 @@ def test_reads_of_variable_width_text_hold_what_they_charge(
         text_read_bytes,
     )
 
-    values = _digits_then(_TEXT_KINDS[kind], characters, 4_000)
+    values = (
+        _random_text(kind, characters, n_values)
+        if random
+        else _digits_then(_TEXT_KINDS[kind], characters, n_values)
+    )
     root = zarr.open_group(tmp_path / "ids.zarr", mode="w")
     stored = root.create_array(
         "ids", data=values.astype(np.dtypes.StringDType()), chunks=(chunk_rows,)
     )
-    scattered = np.sort(np.random.default_rng(1).choice(4_000, 1_300, replace=False))
+    rng = np.random.default_rng(1)
+    scattered = np.sort(rng.choice(n_values, n_values // 3, replace=False))
     one = np.array([chunk_rows // 2])
     # Each read, and what the planners of reads state it holds beside its
     # own charge.
     reads = {
         "whole": (lambda ledger: read_whole(ledger, root, "ids", item="the IDs"), None),
-        # One row decodes its chunk's every value.
         "one row": (
             lambda ledger: read_rows(ledger, stored, one, item="the IDs"),
             read_rows_bytes(stored, 1),
@@ -1555,9 +1585,12 @@ def test_reads_of_variable_width_text_hold_what_they_charge(
         ),
     }
     for name, (read, planned) in reads.items():
-        held, charged = traced_charge(read)
-        assert held <= charged, name
-        assert planned is None or held <= planned, name
+        traced = traced_charge(read)
+        assert traced.held <= traced.charged, name
+        assert planned is None or traced.held <= planned, name
+        # What the read returns stays charged, beside the few KiB of objects
+        # that Zarr keeps after a read.
+        assert traced.kept <= traced.kept_charged + 32 * 1024, name
 
 
 def test_a_read_of_variable_width_labels_is_charged_by_their_characters(
@@ -1572,13 +1605,13 @@ def test_a_read_of_variable_width_labels_is_charged_by_their_characters(
     stored = root.create_array(
         "labels", data=labels.astype(np.dtypes.StringDType()), chunks=(20_000,)
     )
-    held, charged = traced_charge(
+    traced = traced_charge(
         lambda ledger: read_whole(ledger, root, "labels", item="the labels")
     )
-    assert held <= charged
+    assert traced.held <= traced.charged
     # A charge at NumPy's 16-byte elements, as such a read had, is passed.
     elements = array_geometry(stored)
-    assert elements is not None and held > elements.wholeReadBytes(1)
+    assert elements is not None and traced.held > elements.wholeReadBytes(1)
 
 
 @pytest.mark.parametrize("kind", list(_TEXT_KINDS))
@@ -1601,10 +1634,10 @@ def test_variable_width_text_reads_as_python_strings(kind) -> None:
         strings = read(ledger)
         assert strings.dtype == object
         assert strings.tolist() == expected.tolist()
-        # The ledger keeps the strings and their references charged, at
-        # least what CPython holds for them, and lets go of the stored rows.
+        # The ledger keeps the strings and their references charged, what
+        # CPython holds for them, and lets go of the stored rows.
         actual = sum(map(sys.getsizeof, strings)) + 8 * len(strings)
-        assert actual <= ledger.held_bytes < 2 * actual
+        assert actual <= ledger.held_bytes <= 1.05 * actual
     numbers = root.create_array("numbers", data=np.arange(5), chunks=(5,))
     with pytest.raises(TypeError, match="IDs must be stored as text, not as int64"):
         read_text_rows(recording_ledger("Reading"), numbers, np.arange(2), item="IDs")

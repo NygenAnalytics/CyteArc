@@ -1008,23 +1008,30 @@ def test_the_join_counts_the_barcodes_beyond_the_selection_over_chunked_store_id
     assert (join.n_unselected_barcodes, join.n_unmatched_barcodes) == (5_000, 5_000)
 
 
-@pytest.mark.parametrize("letter", ["a", "\u00e9", "\U0001f600"])
+@pytest.mark.parametrize(
+    "first", [0x41, 0xC0, 0x1F600], ids=["ascii", "latin-1", "astral"]
+)
 def test_the_pass_over_variable_width_store_ids_holds_what_it_charges(
-    tmp_path, letter
+    tmp_path, first
 ) -> None:
     import zarr
 
     from tests.memory_helpers import traced_charge
 
-    # 60,000 IDs of up to 73 characters in chunks of 20,000, as another tool
-    # stores them with Zarr's dtype=str; a barcode of no cell makes the join
-    # hash every one of them.
+    # 30,000 IDs of 165 characters in chunks of 10,000, random enough not to
+    # compress, as another tool stores them with Zarr's dtype=str; a barcode
+    # of no cell makes the join hash every one of them.
+    rng = np.random.default_rng(first)
+    letters = rng.integers(first, first + 26, size=(30_000, 150))
     ids = np.asarray(
-        [f"s1__{index:09d}" + letter * (index % 60) + "-1" for index in range(60_000)]
+        [
+            f"s1__{index:09d}-" + "".join(map(chr, row))
+            for index, row in enumerate(letters)
+        ]
     )
     group = zarr.open_group(tmp_path / "ids.zarr", mode="w")
     array = group.create_array(
-        "ids", data=ids.astype(np.dtypes.StringDType()), chunks=(20_000,)
+        "ids", data=ids.astype(np.dtypes.StringDType()), chunks=(10_000,)
     )
     selected = ids[:10].astype(object)
     file = _plain(prefix="s1__", suffix="-1")
@@ -1034,8 +1041,8 @@ def test_the_pass_over_variable_width_store_ids_holds_what_it_charges(
         joined.cells(file, np.asarray(["none"], dtype=object))
         assert joined.n_unmatched_barcodes == 1
 
-    held, charged = traced_charge(join)
-    assert held <= charged
+    traced = traced_charge(join)
+    assert traced.held <= traced.charged
 
 
 def test_the_join_reads_the_stores_cell_ids_once_and_only_when_it_needs_them() -> None:
