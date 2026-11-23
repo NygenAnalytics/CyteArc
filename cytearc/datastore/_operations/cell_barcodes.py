@@ -47,9 +47,11 @@ __all__ = [
     "derived_id_bytes",
     "empty_files_rule",
     "file_names",
+    "files_with_rows",
     "id_hashing_bytes",
     "join_bytes",
     "lookup_bytes",
+    "selected_cells_named",
     "store_pass_bytes",
     "texts_per_file",
     "unmatched_barcode_rules",
@@ -854,6 +856,15 @@ def unmatched_barcodes_message(diagnostics: Mapping[str, Any], files: str) -> st
     )
 
 
+def selected_cells_named(diagnostics: Mapping[str, Any]) -> int:
+    """The selected cells that an import's files name, from the join's saved counts: their barcodes less those of no cell of the store and those of cells outside the selection."""
+    return (
+        int(diagnostics["fileBarcodes"])
+        - int(diagnostics["unmatchedBarcodes"])
+        - int(diagnostics["unselectedBarcodes"])
+    )
+
+
 def unmatched_barcode_rules(files: str) -> tuple[DiagnosticRule, ...]:
     """Return the join's warning: barcodes of the files that match no cell of the store.
 
@@ -874,6 +885,17 @@ def file_names(files: Sequence[BarcodeFile]) -> str:
     named = ", ".join(quoted_value(os.fspath(file.path)) for file in files[:EXAMPLES])
     more = len(files) - EXAMPLES
     return named + (f" and {more} more" if more > 0 else "")
+
+
+def files_with_rows[T](files: Sequence[T], counts: Sequence[int] | None) -> list[T]:
+    """The files that hold rows, of ``files`` in the canonical order of an import's files, by its count of each file's rows.
+
+    An import saved before a revision added the counts reads them as None,
+    and all of its files are returned.
+    """
+    if counts is None:
+        return list(files)
+    return [file for file, count in zip(files, counts, strict=True) if count]
 
 
 def empty_files_rule(

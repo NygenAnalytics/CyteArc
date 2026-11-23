@@ -20,6 +20,7 @@ from tests.clone_truth import (
     CloneTruth,
     ReceptorTruth,
     barcode_truth,
+    clone_truth,
     recorder_truth,
     truth_phylogeny,
     write_bartab_counts,
@@ -37,6 +38,22 @@ from tests.storage_helpers import by_cell_id, open_store, write_count_store
 if TYPE_CHECKING:
     from cytearc.datastore.datastore import DataStore
     from cytearc.storage.refs import ArtifactRef
+
+
+#: The first ten cells of the clone truth, which the files of the tests of no
+#: clone and of no barcode name.
+LISTED = [str(cell) for cell in clone_truth().cell_ids[:10]]
+#: The columns of the tables of barcode pairs that ``write_pairs`` writes.
+PAIRS = {"cell": "cell", "barcode": "barcode", "umis": "umis"}
+
+
+def write_pairs(path: Path, rows: Mapping[str, str]) -> Path:
+    """Write a table of barcode pairs, read by ``PAIRS``: each cell's barcode, or NA, counted 3 UMIs."""
+    path.write_text(
+        "cell,barcode,umis\n"
+        + "".join(f"{cell},{barcode},3\n" for cell, barcode in rows.items())
+    )
+    return path
 
 
 def example_ids(examples: Sequence[str]) -> list[str]:

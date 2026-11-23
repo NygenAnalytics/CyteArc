@@ -467,6 +467,11 @@ class CloneAssigner:
                     + " and ".join(quoted_value(name) for name in names)
                 )
             n_several = int(np.count_nonzero(several))
+            if n_several == 1:
+                raise ValueError(
+                    f"1 cell is listed in two different clones, {examples[0]}. "
+                    "Pass multiple='drop' to leave it without a clone"
+                )
             raise ValueError(
                 f"{n_several} cells are listed in two different clones, for "
                 f"example {'; '.join(examples)}. Pass multiple='drop' to leave "

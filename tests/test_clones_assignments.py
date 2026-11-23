@@ -157,9 +157,11 @@ def test_a_cell_in_two_clones_raises_within_one_chunk_or_across_two() -> None:
     within = CloneAssigner(
         CELLS, multiple="error", ledger=MemoryLedger(None, "assigning")
     )
+    # One cell is named as one, and its pair of clones is the whole example.
     with pytest.raises(
         ValueError,
-        match="1 cells are listed in two different clones, for example 'c2' in 'a' and 'b'",
+        match="^1 cell is listed in two different clones, 'c2' in 'a' and 'b'\\. "
+        "Pass multiple='drop' to leave it without a clone$",
     ):
         within.add(np.asarray([2, 2]), _labels("a", "b"))
     across = CloneAssigner(

@@ -3,11 +3,13 @@
 Clone import, the clone summaries, lineage barcodes, recorder alleles,
 phylogenies and receptors read the same kinds of stored arrays and name their
 files and clones alike: integer codes read whole as int64, the IDs of a
-cell-aligned artifact's cells, the labels of clones ranked by size and the
-words for the files of an import. Operation modules may not import each
-other, so each step lives here once.
+cell-aligned artifact's cells, the labels of clones ranked by size, the
+words for the files and the cells of an import, and whether a lineage
+barcode import's rows of selected cells hold no barcode. Operation modules
+may not import each other, so each step lives here once.
 """
 
+from collections.abc import Mapping
 from typing import Any
 
 import numpy as np
@@ -31,9 +33,13 @@ __all__ = [
     "exported_cell_positions",
     "files_text",
     "hold_ranked_clone_labels",
+    "holds_no_barcode",
     "measured_within_types",
+    "no_barcode_cause",
+    "outside_cells_text",
     "plan_artifact_cells",
     "read_codes",
+    "selected_cells_text",
 ]
 
 # Bytes of one int64 row position.
@@ -52,6 +58,40 @@ REPRESENTATIVES_WITHIN_TYPE = "representatives_within_type"
 def files_text(noun: str, n_files: int) -> str:
     """The words for the files of an import in its messages, such as "the clone files"."""
     return f"the {noun} file" if n_files == 1 else f"the {noun} files"
+
+
+def selected_cells_text(n_cells: int) -> tuple[str, str]:
+    """The words of a message for ``n_cells`` selected cells, and the pronoun that refers to them, such as ``("1 selected cell", "it")``."""
+    if n_cells == 1:
+        return "1 selected cell", "it"
+    return f"{n_cells} selected cells", "them"
+
+
+def holds_no_barcode(diagnostics: Mapping[str, Any]) -> bool:
+    """Whether a barcode import's rows name selected cells but none of them holds a barcode.
+
+    A row without a barcode and a pair counted 0 hold none, and ``emptyRows``
+    counts the rows of selected cells that hold none, among the files' rows
+    less ``unmatchedRows``, those of no selected cell. An import of an
+    assay's counts holds a barcode in each of its rows.
+    """
+    selected = int(diagnostics["fileRows"]) - int(diagnostics["unmatchedRows"])
+    return selected > 0 and int(diagnostics["emptyRows"]) == selected
+
+
+def no_barcode_cause(n_files: int, n_cells: int) -> str:
+    """How files name selected cells but give none of them a barcode, for a refusal or a warning."""
+    cells, them = selected_cells_text(n_cells)
+    name, give = ("names", "gives") if n_files == 1 else ("name", "give")
+    given = f"{them} no barcode" if n_cells == 1 else f"none of {them} a barcode"
+    return f"{name} {cells} but {give} {given}"
+
+
+def outside_cells_text(n_cells: int) -> tuple[str, str]:
+    """The words for the cells outside a selection that an import's files name, and for a selection of them, such as ``("the 4 cells outside the selection", "those cells")``."""
+    if n_cells == 1:
+        return "the cell outside the selection", "that cell"
+    return f"the {n_cells} cells outside the selection", "those cells"
 
 
 def measured_within_types(clones: ArtifactRef, status: Any, group: zarr.Group) -> bool:
