@@ -128,6 +128,7 @@ from .cell_barcodes import (
     empty_files_rule,
     file_names,
     files_with_rows,
+    selected_cells_named,
     unmatched_barcode_rules,
 )
 from .cell_groups import (
@@ -147,13 +148,14 @@ from .clone_artifacts import (
 from .clone_steps import (
     CODES_WITHIN_TYPE,
     artifact_cell_ids,
-    barcode_import_cause,
     exported_cell_positions,
     files_text,
+    holds_no_barcode,
     measured_within_types,
+    no_barcode_cause,
+    outside_cells_text,
     plan_artifact_cells,
     read_codes,
-    selected_cells_named,
     selected_cells_text,
 )
 
@@ -389,7 +391,8 @@ def _no_clone_rule(
 
     The warning names the files that hold rows, of which ``matrices`` tells
     whether each is a clone matrix, and when they also name cells outside
-    the selection, offers a selection of the cells that they give a clone.
+    the selection, offers a selection of those cells if the files give them
+    clones, which the saved counts cannot tell.
     """
 
     def message(diagnostics: Mapping[str, Any]) -> str:
@@ -402,10 +405,16 @@ def _no_clone_rule(
             if one
             else "Pass files that list the cells' clones"
         )
-        if int(diagnostics["unselectedBarcodes"]):
+        n_outside = int(diagnostics["unselectedBarcodes"])
+        if n_outside:
+            outside, those = outside_cells_text(n_outside)
+            it, gives, names = (
+                ("it", "gives", "names") if one else ("they", "give", "name")
+            )
+            given = "a clone" if n_outside == 1 else "clones"
             remedy += (
-                ", or a cell_selection of the cells to which "
-                f"{'it gives' if one else 'they give'} a clone"
+                f", or, if {it} {gives} {given} to {outside} that {it} {names}, a "
+                f"cell_selection of {those}"
             )
         cause = _no_clone_cause(
             len(held),
@@ -418,6 +427,83 @@ def _no_clone_rule(
         )
 
     return DiagnosticRule("cellsWithClone", applies=_gives_no_clone, message=message)
+
+
+def _barcode_import_cause(root: zarr.Group, barcodes: ArtifactRef) -> str | None:
+    """Why clones called from ``barcodes`` give no cell a clone, in a refusal's words, when the barcodes' import holds no barcode of a selected cell; otherwise None.
+
+    An assay that counts no barcode of the selected cells, files that hold
+    no row, and files whose rows of selected cells give none of them a
+    barcode leave every selected cell without one, so every clone called
+    from them is a clone of no cell, whatever the rules. The words name the
+    remedy and the clones to call from the new barcodes: the barcodes of
+    files or of an assay that counts them; other files, or other columns for
+    files read by ``columns``; or a selection of the cells outside the
+    selection that the files name, if the files list their barcodes. The
+    files that hold rows are counted, as the import's warning counts them.
+    Barcodes that are no longer complete are not read and give no cause.
+    """
+    from ...readers.lineage_barcodes import TABLE_FORMATS
+
+    status = inspect_artifact(root, barcodes)
+    if not status.complete:
+        return None
+    diagnostics = status.diagnostics
+    sources = (status.inputs or {})["sources"]
+    if "assay" in sources[0]:
+        if int(diagnostics["fileRows"]):
+            return None
+        return (
+            "their barcodes' import read no count from the assay "
+            f"{quoted_value(sources[0]['assay'])}; import the cells' barcodes from "
+            "files or an assay that counts them, and call the clones from the new "
+            "barcodes"
+        )
+    if int(diagnostics["fileRows"]) == 0:
+        remedy = (
+            "import a file that lists the cells' lineage barcodes"
+            if len(sources) == 1
+            else "import files that list the cells' lineage barcodes"
+        )
+        return (
+            f"their barcodes' import read no row from "
+            f"{files_text('barcode', len(sources))}; {remedy} and call the clones "
+            "from the new barcodes"
+        )
+    if not holds_no_barcode(diagnostics):
+        return None
+    held = files_with_rows(sources, diagnostics["rowsPerFile"])
+    one = len(held) == 1
+    it, them, its, lists, names = (
+        ("it", "it", "its", "lists", "names")
+        if one
+        else ("they", "them", "their", "list", "name")
+    )
+    remedy = (
+        "import a file that lists the cells' lineage barcodes"
+        if one
+        else "import files that list the cells' lineage barcodes"
+    )
+    several = False
+    if any(source["format"] in TABLE_FORMATS for source in held):
+        remedy = (
+            f"import {them} with columns that name {its} barcode and count columns, "
+            f"or {remedy}"
+        )
+        several = True
+    n_outside = int(diagnostics["unselectedBarcodes"])
+    if n_outside:
+        outside, those = outside_cells_text(n_outside)
+        remedy += (
+            f", or, if {it} {lists} barcodes of {outside} that {it} {names}, import "
+            f"{them} on a cell_selection of {those}"
+        )
+        several = True
+    cause = no_barcode_cause(len(held), selected_cells_named(diagnostics))
+    return (
+        f"{files_text('barcode', len(held))} of their barcodes {cause}; {remedy}"
+        f"{',' if several else ''} and call the clones from the new barcodes"
+    )
 
 
 def _column_label_bytes(array: Any) -> int:
@@ -516,7 +602,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         such as MiTo's ``"unassigned"`` or Cassiopeia's lineage group 0, and
         a clone matrix without entries give; when the files also name cells
         outside the selection, the warning suggests a ``cell_selection`` of
-        the cells to which they give a clone. The clone summaries and
+        those cells if the files give them clones. The clone summaries and
         ``export_clones`` refuse the clones of an import that gave no
         selected cell a clone so, or of which ``multiple="drop"`` left out
         every cell, naming the cause; a reused import gives the warnings
@@ -957,8 +1043,10 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         without entries give; or left out every cell that it gave a clone, as
         ``multiple="drop"`` does with the cells that its files list in several
         clones. Clones called from lineage barcodes give none when the
-        barcodes' files hold no row, or rows of selected cells that hold no
-        barcode. :meth:`_clone_group` opens such clones, which
+        barcodes' files hold no row or rows of selected cells that give none
+        of them a barcode, or the barcodes' assay counts no barcode of a
+        selected cell; only clones without a cell with a clone read their
+        barcodes. :meth:`_clone_group` opens such clones, which
         ``load_clones`` reads, and ``plots.clone_abundance`` says that there
         is nothing to plot. ``export_clones``, which would write a file of a
         header alone, and the summaries, where they find no measured cell
@@ -977,27 +1065,37 @@ class _CloneOperationsMixin(_CloneOperationsBase):
 
         status = inspect_artifact(self.zw, clones)
         if status.operation == BarcodeCloneArguments.operation:
-            barcodes = ArtifactRef.from_dict((status.inputs or {})["barcodes"])
-            cause = barcode_import_cause(self.zw, barcodes)
-            if cause is not None:
-                raise ValueError(f"The clones give no cell a clone: {cause}")
+            # Clones with a cell pass without a read of their barcodes.
+            if int(status.diagnostics["cellsWithClone"]) == 0:
+                barcodes = ArtifactRef.from_dict((status.inputs or {})["barcodes"])
+                cause = _barcode_import_cause(self.zw, barcodes)
+                if cause is not None:
+                    raise ValueError(f"The clones give no cell a clone: {cause}")
             return
         if status.operation != CloneImportArguments.operation:
             return
         diagnostics = status.diagnostics
         sources = (status.inputs or {})["sources"]
-        one = len(sources) == 1
+        if diagnostics["fileRows"] == 0:
+            remedy = (
+                "import a file that lists the cells' clones"
+                if len(sources) == 1
+                else "import files that list the cells' clones"
+            )
+            raise ValueError(
+                "The clones give no cell a clone: their import read no row from "
+                f"{files_text('clone', len(sources))}; {remedy}"
+            )
+        # The files that hold rows are counted, as the import's warning counts
+        # them.
+        held = files_with_rows(sources, diagnostics["rowsPerFile"])
+        one = len(held) == 1
         their = "their clone file" if one else "their clone files"
         remedy = (
             "import a file that lists the cells' clones"
             if one
             else "import files that list the cells' clones"
         )
-        if diagnostics["fileRows"] == 0:
-            raise ValueError(
-                "The clones give no cell a clone: their import read no row from "
-                f"{files_text('clone', len(sources))}; {remedy}"
-            )
         dropped = int(diagnostics["cellsInSeveralClones"])
         if int(diagnostics["cellsWithClone"]) == 0 and dropped > 0:
             raise ValueError(
@@ -1009,17 +1107,22 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             )
         if _gives_no_clone(diagnostics):
             cause = _no_clone_cause(
-                len(sources),
+                len(held),
                 selected_cells_named(diagnostics),
-                [
-                    source["format"] in MATRIX_FORMATS
-                    for source in files_with_rows(sources, diagnostics["rowsPerFile"])
-                ],
+                [source["format"] in MATRIX_FORMATS for source in held],
             )
-            if int(diagnostics["unselectedBarcodes"]):
+            n_outside = int(diagnostics["unselectedBarcodes"])
+            if n_outside:
+                outside, those = outside_cells_text(n_outside)
+                it, them, gives, names = (
+                    ("it", "it", "gives", "names")
+                    if one
+                    else ("they", "them", "give", "name")
+                )
+                given = "a clone" if n_outside == 1 else "clones"
                 remedy += (
-                    f", or import {'it' if one else 'them'} on a cell_selection of "
-                    f"the cells to which {'it gives' if one else 'they give'} a clone"
+                    f", or, if {it} {gives} {given} to {outside} that {it} {names}, "
+                    f"import {them} on a cell_selection of {those}"
                 )
             raise ValueError(
                 f"The clones give no cell a clone: {their} {cause}; {remedy}"
@@ -1168,7 +1271,8 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             TypeError: If an argument has the wrong type.
             ValueError: If ``clones`` is not a ``clones`` or ``clonotypes``
                 artifact, ``format`` or ``cell_order`` is unknown, the clones'
-                import gave no selected cell a clone, a ``"cospar"`` table
+                import gave no selected cell a clone, the barcodes of barcode
+                clones give no selected cell a barcode, a ``"cospar"`` table
                 would hold a clone label that reads as no clone, such as
                 ``"NA"``, or a ``"matrix"`` would list a label or cell ID that
                 holds a line break.

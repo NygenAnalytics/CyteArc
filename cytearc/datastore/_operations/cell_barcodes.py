@@ -51,6 +51,7 @@ __all__ = [
     "id_hashing_bytes",
     "join_bytes",
     "lookup_bytes",
+    "selected_cells_named",
     "store_pass_bytes",
     "texts_per_file",
     "unmatched_barcode_rules",
@@ -852,6 +853,15 @@ def unmatched_barcodes_message(diagnostics: Mapping[str, Any], files: str) -> st
         )
         + ". Check barcode_prefix, barcode_suffix and barcode_pattern against the "
         "store's cell IDs."
+    )
+
+
+def selected_cells_named(diagnostics: Mapping[str, Any]) -> int:
+    """The selected cells that an import's files name, from the join's saved counts: their barcodes less those of no cell of the store and those of cells outside the selection."""
+    return (
+        int(diagnostics["fileBarcodes"])
+        - int(diagnostics["unmatchedBarcodes"])
+        - int(diagnostics["unselectedBarcodes"])
     )
 
 
