@@ -315,7 +315,8 @@ def test_show_displays_the_figure_that_holds_the_subfigures_that_steps_fill(
 
     figure = plt.figure()
     left, right = figure.subfigures(1, 2)
-    targets = {"left": left.subplots(), "right": right.subplots()}
+    # The left panel is a level deeper, so its parent is not the figure.
+    targets = {"left": left.subfigures(2, 1)[0].subplots(), "right": right.subplots()}
 
     try:
         run_recipe(object(), _steps("left", "right"), targets=targets, show=True)

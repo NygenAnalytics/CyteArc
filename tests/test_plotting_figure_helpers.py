@@ -26,7 +26,9 @@ from cytearc.plotting._figure import (
     is_colorbar_axes,
     label_panels,
     normalize_axes_target,
+    side_legend,
 )
+from cytearc.plotting._style import apply_figure_chrome
 
 
 @pytest.fixture(autouse=True)
@@ -316,13 +318,19 @@ def test_plot_result_show_outside_ipython_keeps_a_caller_figure_open(monkeypatch
     assert result.figure.number in plt.get_fignums()
 
 
-def _subfigure_result():
-    """A caller's plot drawn into the axes of the left of two subfigures, and their figure."""
-    figure = plt.figure()
+def _subfigure_result(*, theme: str = "notebook"):
+    """A caller's plot drawn into a subfigure within the left of two, and their figure.
+
+    The plot's subfigure is nested a level deeper than the figure's own
+    subfigures, so the figure that holds it is not its parent, and it takes
+    the theme's chrome, as a plot gives the figure that it draws into.
+    """
+    figure = plt.figure(figsize=(8, 4))
     left, right = figure.subfigures(1, 2)
     right.subplots().plot([1, 0])
-    axis = left.subplots()
+    axis = left.subfigures(2, 1)[0].subplots()
     axis.plot([0, 1])
+    apply_figure_chrome(axis.figure, theme)
     result = PlotResult(
         figure=axis.figure,
         axes={"main": axis},
@@ -331,6 +339,7 @@ def _subfigure_result():
         scales=(),
         provenance=splt.PlotProvenance(cytearc_version="test"),
         owns_figure=False,
+        theme=theme,
     )
     return result, figure
 
@@ -370,6 +379,104 @@ def test_plot_result_show_outside_ipython_shows_the_figure_of_a_subfigure(monkey
     assert show_calls == [True]
     assert plt.fignum_exists(figure.number)
     plt.close(figure)
+
+
+@pytest.mark.parametrize(
+    ("theme", "transparent", "corner"),
+    [
+        ("notebook", False, (1.0, 1.0, 1.0, 1.0)),
+        ("dark", False, (17 / 255, 17 / 255, 17 / 255, 1.0)),
+        ("notebook", True, None),
+        ("dark", True, None),
+    ],
+)
+def test_plot_result_saves_the_whole_figure_of_a_subfigure(
+    tmp_path, theme, transparent, corner
+):
+    result, figure = _subfigure_result(theme=theme)
+
+    path = result.save(tmp_path / "panels.png", dpi=50, transparent=transparent)
+
+    # The file holds the whole figure, 8 by 4 inches at 50 dpi, and the top
+    # corner of each half, outside every panel, takes the export's background.
+    pixels = plt.imread(path)
+    assert pixels.shape[:2] == (200, 400)
+    for column in (2, 397):
+        if corner is None:
+            assert pixels[2, column, 3] == 0
+        else:
+            np.testing.assert_allclose(pixels[2, column], corner, atol=1 / 255)
+    # Writing restored the chrome of the plot's subfigure.
+    assert result.figure.patch.get_alpha() == (0 if theme == "dark" else 1.0)
+    plt.close(figure)
+
+
+def test_plot_result_provenance_describes_the_whole_figure_of_a_subfigure(tmp_path):
+    result, figure = _subfigure_result()
+
+    path = result.save(tmp_path / "panels.png", provenance_sidecar=True)
+
+    sidecar = json.loads((tmp_path / "panels.png.json").read_text())
+    assert sidecar["figure"] == {
+        "width_inches": 8.0,
+        "height_inches": 4.0,
+        "dpi": float(figure.dpi),
+    }
+    assert plt.imread(path).shape[1] == round(8.0 * sidecar["export"]["dpi"])
+    plt.close(figure)
+
+
+# The figure is 6.4 inches wide, a whole number of pixels at each dpi: the
+# notebook theme's export dpi, 150, one passed, and the figure's own, 100,
+# which writes the file of a theme that sets no export dpi.
+@pytest.mark.parametrize(
+    ("theme", "dpi"), [("notebook", None), ("notebook", 50), ("minimal", None)]
+)
+def test_plot_result_sidecar_records_the_dpi_that_its_file_was_written_at(
+    tmp_path, theme, dpi
+):
+    result = _plot_result()
+    result.theme = theme
+    width, _ = result.figure.get_size_inches()
+    options = {} if dpi is None else {"dpi": dpi}
+
+    path = result.save(tmp_path / "plot.png", provenance_sidecar=True, **options)
+
+    # Without a dpi, the theme's export dpi writes the file, not the figure's.
+    sidecar = json.loads((tmp_path / "plot.png.json").read_text())
+    assert plt.imread(path).shape[1] == round(width * sidecar["export"]["dpi"])
+    result.close()
+
+
+def test_plot_result_close_of_a_subfigure_closes_the_figure_that_holds_it():
+    result, figure = _subfigure_result()
+    composed = compose_results(
+        result.figure, [result], panel_labels=False, owns_figure=True
+    )
+
+    composed.close()
+
+    assert not plt.fignum_exists(figure.number)
+
+
+def test_a_side_legend_beside_a_panel_of_a_subfigure_fits_the_subfigure():
+    labels = [f"group {index}" for index in range(40)]
+
+    def columns(axis):
+        handles = [axis.plot([0, 1])[0] for _ in labels]
+        return side_legend(axis, handles, labels, title="Group")._ncols
+
+    short, short_axis = plt.subplots(figsize=(4, 3))
+    tall, tall_axis = plt.subplots(figsize=(4, 6))
+    figure = plt.figure(figsize=(4, 6))
+    top, _ = figure.subfigures(2, 1)
+    try:
+        # A panel of a subfigure 3 inches high lays out its legend as one of
+        # a figure 3 inches high does, not as one of the figure that holds it.
+        assert columns(top.subplots()) == columns(short_axis) != columns(tall_axis)
+    finally:
+        for each in (short, tall, figure):
+            plt.close(each)
 
 
 def test_plot_result_save_restores_chrome_when_backend_raises(monkeypatch, tmp_path):

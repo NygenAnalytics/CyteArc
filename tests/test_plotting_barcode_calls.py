@@ -191,6 +191,26 @@ def test_barcode_calls_refuse_bad_arguments(imported) -> None:
         plt.close(figure)
 
 
+def test_barcode_calls_draw_their_legend_beside_a_panel_of_a_subfigure(
+    imported,
+) -> None:
+    store, ref = imported
+    figure = plt.figure(figsize=(9, 6))
+    top, _ = figure.subfigures(2, 1)
+    try:
+        result = plotting.barcode_calls(
+            store, ref, target=top.subplots(1, 3), show=False
+        )
+        # The legend of the libraries stands beside the last panel, which a
+        # subfigure holds.
+        legends = [axis.get_legend() for axis in result.axes.values()]
+        titles = [legend.get_title().get_text() for legend in legends if legend]
+        assert titles == ["Library"]
+        assert result.figure is top
+    finally:
+        plt.close(figure)
+
+
 def test_barcode_calls_show_their_figure_by_default(imported) -> None:
     store, ref = imported
     result = store.plots.barcode_calls(ref)

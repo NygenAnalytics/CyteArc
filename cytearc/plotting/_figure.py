@@ -102,7 +102,7 @@ def close_figures_on_error[**P, R](function: Callable[P, R]) -> Callable[P, R]:
 def root_figure(figure: Any) -> Any:
     """Return the figure that holds ``figure``: itself, or the figure of a SubFigure.
 
-    Matplotlib gives the axes of a SubFigure that subfigure as their figure. A SubFigure, however deeply nested, gives the figure that holds it as ``figure``, from Matplotlib 3.9 on, and a figure gives itself.
+    Matplotlib gives the axes of a SubFigure that subfigure as their figure. On every supported Matplotlib, a SubFigure, however deeply nested, gives the figure that holds it as ``figure``, and a figure gives itself.
     """
     return figure.figure
 
@@ -121,7 +121,7 @@ class PlotResult:
     is True when CyteArc created the figure. ``close()`` closes an owned
     figure in pyplot and keeps the result metadata.
 
-    In IPython, ``show()`` displays the figure and then closes it in pyplot, as ``plt.show()`` does in Jupyter, so the end of the cell does not draw it a second time. This holds for every figure, a figure passed with ``target=`` or composed with :func:`compose_results` included. Outside IPython, ``show()`` hands an interactive canvas to ``plt.show()`` and closes only an owned figure. A closed figure can still be saved or drawn on. In Jupyter, ``display(result.figure)`` and ``result.show()`` show it with everything drawn on it, and ``plt.show()`` does not. A plot drawn into the axes of a SubFigure keeps the subfigure as ``figure``; ``show()`` shows the whole figure that holds it, and closes that figure where it closes one.
+    In IPython, ``show()`` displays the figure and then closes it in pyplot, as ``plt.show()`` does in Jupyter, so the end of the cell does not draw it a second time. This holds for every figure, a figure passed with ``target=`` or composed with :func:`compose_results` included. Outside IPython, ``show()`` hands an interactive canvas to ``plt.show()`` and closes only an owned figure. A closed figure can still be saved or drawn on. In Jupyter, ``result.show()`` and ``display`` of the figure, ``result.figure``, show it with everything drawn on it, and ``plt.show()`` does not. A plot drawn into the axes of a SubFigure keeps the subfigure as ``figure``: ``show()``, ``close()``, ``save()`` and ``save_provenance()`` act on the whole figure that holds it, ``result.figure.figure``, which is the figure to ``display``.
     """
 
     figure: Any
@@ -195,7 +195,7 @@ class PlotResult:
         if not self.owns_figure:
             return
         plt, _ = require_matplotlib()
-        plt.close(self.figure)
+        plt.close(root_figure(self.figure))
 
     def save_provenance(
         self,
@@ -207,13 +207,14 @@ class PlotResult:
         """Write a JSON file describing scales, legends, and cell counts."""
         out = Path(path)
         out.parent.mkdir(parents=True, exist_ok=True)
-        width, height = self.figure.get_size_inches()
+        figure = root_figure(self.figure)
+        width, height = figure.get_size_inches()
         payload = {
             "provenance": self.provenance,
             "figure": {
                 "width_inches": float(width),
                 "height_inches": float(height),
-                "dpi": float(self.figure.dpi),
+                "dpi": float(figure.dpi),
             },
             "legends": self.legends,
             "scales": [
@@ -236,7 +237,7 @@ class PlotResult:
             payload["export"] = {
                 "filename": exported.name,
                 "format": exported.suffix.lower().lstrip("."),
-                "dpi": float(dpi if dpi is not None else self.figure.dpi),
+                "dpi": float(dpi if dpi is not None else figure.dpi),
             }
         out.write_text(
             json.dumps(
@@ -288,7 +289,9 @@ class PlotResult:
         if dpi is not None and dpi <= 0:
             raise ValueError("dpi must be positive")
         file_type = out.suffix.lower().lstrip(".")
-        supported = self.figure.canvas.get_supported_filetypes()
+        # A plot drawn into the axes of a SubFigure writes the figure that holds it.
+        figure = root_figure(self.figure)
+        supported = figure.canvas.get_supported_filetypes()
         if file_type not in supported:
             raise ValueError(
                 f"Unsupported export format {out.suffix!r}; choose from "
@@ -307,11 +310,10 @@ class PlotResult:
         _, mpl = require_matplotlib()
         # Honor explicit transparent=False even when the active theme prefers none.
         export_rc: dict[str, Any] = {"savefig.bbox": None} if exact_size else {}
-        figure_face = self.figure.patch.get_facecolor()
-        figure_alpha = self.figure.patch.get_alpha()
+        figure_face = figure.patch.get_facecolor()
+        figure_alpha = figure.patch.get_alpha()
         axes_faces = [
-            (ax, ax.patch.get_facecolor(), ax.patch.get_alpha())
-            for ax in self.figure.axes
+            (ax, ax.patch.get_facecolor(), ax.patch.get_alpha()) for ax in figure.axes
         ]
         if transparent:
             export_rc["savefig.transparent"] = True
@@ -320,17 +322,21 @@ class PlotResult:
             background = "#111111" if self.theme == "dark" else "white"
             export_rc["savefig.transparent"] = False
             export_rc["savefig.facecolor"] = background
-            self.figure.patch.set_facecolor(background)
-            self.figure.patch.set_alpha(1.0)
-            for ax in self.figure.axes:
+            figure.patch.set_facecolor(background)
+            figure.patch.set_alpha(1.0)
+            for ax in figure.axes:
                 ax.patch.set_facecolor(background)
                 ax.patch.set_alpha(1.0)
         try:
             with theme_context(self.theme), mpl.rc_context(export_rc):
-                self.figure.savefig(out, **kwargs)
+                # Without a dpi, the theme's savefig.dpi sets the one written.
+                written_dpi = kwargs.get("dpi", mpl.rcParams["savefig.dpi"])
+                if written_dpi == "figure":
+                    written_dpi = figure.dpi
+                figure.savefig(out, **kwargs)
         finally:
-            self.figure.patch.set_facecolor(figure_face)
-            self.figure.patch.set_alpha(figure_alpha)
+            figure.patch.set_facecolor(figure_face)
+            figure.patch.set_alpha(figure_alpha)
             for ax, face, alpha in axes_faces:
                 ax.patch.set_facecolor(face)
                 ax.patch.set_alpha(alpha)
@@ -345,7 +351,7 @@ class PlotResult:
             self.save_provenance(
                 sidecar,
                 figure_path=out,
-                dpi=float(kwargs.get("dpi", self.figure.dpi)),
+                dpi=float(written_dpi),
             )
         return out
 
@@ -1062,11 +1068,18 @@ def _row_inches(ax: Any) -> float:
     """The height in inches of the row of a figure's grid that a panel stands in.
 
     A panel of a grid of one row, or outside a figure's own grid, such as an
-    inset, takes the figure's height.
+    inset, takes the figure's height, or the height of the SubFigure that it
+    stands in.
     """
     from matplotlib.gridspec import GridSpec
 
-    height = float(ax.figure.get_size_inches()[1])
+    figure = ax.figure
+    # A SubFigure has no size of its own; its box gives its height.
+    height = float(
+        figure.get_size_inches()[1]
+        if figure is root_figure(figure)
+        else figure.bbox.height / figure.dpi
+    )
     spec = ax.get_subplotspec()
     # A grid within a grid's cell, as a composite nests, keeps the figure's.
     if spec is None or not isinstance(spec.get_gridspec(), GridSpec):

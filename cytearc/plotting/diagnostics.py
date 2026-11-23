@@ -9,7 +9,7 @@ import pandas as pd
 
 from ._contracts import CategoricalScale, PlotProvenance
 from ._deps import require_kneed, require_matplotlib, require_seaborn
-from ._display import groups_in_stored_order
+from ._display import labels_in_stored_order
 from ._figure import (
     LegendSpec,
     PlotResult,
@@ -132,12 +132,7 @@ def qc(
         if isinstance(groups.dtype, pd.CategoricalDtype) and groups.dtype.ordered
         else None
     )
-    group_order = [
-        observed[at]
-        for at in groups_in_stored_order(
-            [(str(label),) for label in observed], [stored]
-        )
-    ]
+    group_order = labels_in_stored_order(observed, stored)
     n_groups = len(group_order)
     n_panels = len(metric_columns)
     n_columns = n_panels if show_on_single_row else 1
