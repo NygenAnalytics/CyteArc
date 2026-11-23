@@ -578,8 +578,8 @@ class CellBarcodeJoin:
     store's hashes and a block of their IDs at a time replace; and each
     chunk's new hashes before they merge into those held. IDs given as an
     object array of text are the caller's to charge; IDs given as fixed-width
-    text become the Python strings that the lookup keeps, which the join
-    charges. What matching a chunk's barcodes holds for a moment, as
+    or variable-width text become the Python strings that the lookup keeps,
+    which the join charges. What matching a chunk's barcodes holds for a moment, as
     :func:`join_bytes` states it, is the caller's chunk to charge. Barcodes
     are counted by the cell ID they name, so a barcode that two files name
     with different prefixes counts twice.
@@ -593,8 +593,8 @@ class CellBarcodeJoin:
 
     Raises:
         MemoryBudgetError: If the lookup does not fit the ledger's budget.
-        TypeError: If the IDs are neither fixed-width text nor an object
-            array, or the store's IDs are not text.
+        TypeError: If the IDs are neither text nor an object array, or the
+            store's IDs are not text.
         ValueError: If a cell ID repeats.
     """
 
@@ -610,12 +610,17 @@ class CellBarcodeJoin:
                 f"{store_ids.dtype}"
             )
         self._store_ids = store_ids
-        if given.dtype.kind == "U":
+        if given.dtype.kind in "UT":
             # The lookup keeps each ID as the Python string it becomes, which
-            # is measured from each ID's length.
-            ledger.peak("the selected cells' IDs as text", 8 * n_cells)
-            characters = int(np.char.str_len(given).sum()) if n_cells else 0
-            widest = int(given.view(np.uint32).max()) if given.size else 0
+            # is measured from each ID's length; variable-width text, which
+            # another tool can store, is measured as it is charged.
+            if given.dtype.kind == "T":
+                extent = text_extent(given, ledger=ledger)
+                characters, widest = extent.characterTotal, extent.widest
+            else:
+                ledger.peak("the selected cells' IDs as text", 8 * n_cells)
+                characters = int(np.char.str_len(given).sum()) if n_cells else 0
+                widest = int(given.view(np.uint32).max()) if given.size else 0
             ledger.hold(
                 "the selected cells' IDs as text",
                 object_array_bytes(n_cells)

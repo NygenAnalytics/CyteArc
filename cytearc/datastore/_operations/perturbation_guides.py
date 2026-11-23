@@ -83,6 +83,7 @@ from ...storage.artifacts import (
     require_complete_artifact,
 )
 from ...storage.diagnostics import EXAMPLES, DiagnosticRule, warn_diagnostics
+from ...storage.geometry import text_extent
 from ...storage.types import as_zarr_array, read_array
 from ...storage.validation_scope import validation_scoped
 from ...utils.arguments import bool_argument
@@ -564,22 +565,52 @@ def _warn_guide_calls(
     )
 
 
-def _strings_bytes(values: np.ndarray) -> int:
-    """Return the bytes of fixed-width text ``values`` as Python strings and their references.
-
-    Each string is counted at the stored width, which bounds its characters,
-    and at the kind of the widest character stored.
-    """
-    n_values = len(values)
-    width = max(1, values.dtype.itemsize // 4)
-    widest = int(values.view(np.uint32).max()) if values.size else 0
-    return object_array_bytes(n_values) + python_text_bytes(
-        n_values, n_values * width, widest=widest
+def _strings_bytes(values: np.ndarray, ledger: MemoryLedger | None = None) -> int:
+    """Return the bytes of text ``values`` as Python strings and their references, as :func:`_text_size` measures them."""
+    characters, _, widest = _text_size(values, ledger)
+    return object_array_bytes(len(values)) + python_text_bytes(
+        len(values), characters, widest=widest
     )
 
 
+def _text_size(
+    values: np.ndarray, ledger: MemoryLedger | None = None
+) -> tuple[int, int, int]:
+    """Return the characters of text ``values``, the UTF-8 bytes of the longest value and the widest code point.
+
+    Fixed-width text counts each value at the stored width, which bounds its
+    characters, and its UTF-8 bytes at the widest character stored.
+    Variable-width text, which another tool can store, counts them as
+    :func:`~cytearc.storage.geometry.text_extent` measures them, charged to
+    ``ledger``.
+    """
+    if values.dtype.kind == "T":
+        extent = text_extent(values, None, ledger)
+        return extent.characterTotal, extent.utf8Bytes, extent.widest
+    width = max(1, values.dtype.itemsize // 4)
+    widest = int(values.view(np.uint32).max()) if values.size else 0
+    utf8 = 1 if widest < 0x80 else 2 if widest < 0x800 else 3 if widest < 0x10000 else 4
+    return len(values) * width, width * utf8, widest
+
+
+def _text_copy_bytes(values: np.ndarray, ledger: MemoryLedger | None = None) -> int:
+    """Return the bytes of a copy of text ``values``, or of some of them, as NumPy holds it.
+
+    Variable-width text holds its 16-byte elements and the arena beside them,
+    as :func:`~cytearc.storage.geometry.text_extent` measures it, charged to
+    ``ledger``.
+    """
+    if values.dtype.kind == "T":
+        return text_extent(values, None, ledger).keptBytes()
+    return int(values.nbytes)
+
+
 def _frame_bytes(
-    cell_ids: np.ndarray, arrays: Mapping[str, np.ndarray], *, entries: str
+    cell_ids: np.ndarray,
+    arrays: Mapping[str, np.ndarray],
+    *,
+    entries: str,
+    ledger: MemoryLedger | None = None,
 ) -> int:
     """Return the most bytes that the tables of stored per-cell ``arrays`` hold beside them.
 
@@ -587,21 +618,24 @@ def _frame_bytes(
     as pandas makes them, and a copy of each array of numbers. Each entry of
     the padded two-dimensional array ``entries``, such as the calls' guide
     codes, that holds a value, at least 0, becomes a row of its own, which
-    holds its cell's ID, as fixed-width text and as a Python string, its
-    cell and slot, its value and those of the arrays padded beside it, and
-    their gathers and copies.
+    holds its cell's ID, taken from the cells' index as a reference to its
+    string, or with pyarrow as an offset and its UTF-8 bytes, at the
+    longest ID, its cell and slot, its value and those of the arrays padded
+    beside it, and their gathers and copies.
     """
-    total = _strings_bytes(cell_ids)
-    id_width = max(1, cell_ids.dtype.itemsize // 4)
+    n_ids = len(cell_ids)
+    characters, longest, widest = _text_size(cell_ids, ledger)
+    total = object_array_bytes(n_ids) + python_text_bytes(
+        n_ids, characters, widest=widest
+    )
+    entry = 8 + longest
     for values in arrays.values():
         if values.ndim == 1 and values.dtype.kind == "U":
             total += object_array_bytes(len(values)) + _strings_bytes(values)
         elif values.ndim == 1:
             total += 2 * values.nbytes
     n_entries = int(np.count_nonzero(arrays[entries] >= 0))
-    return total + n_entries * (
-        _FRAME_BYTES_PER_ENTRY + 4 * id_width + _strings_bytes(cell_ids[:1])
-    )
+    return total + n_entries * (_FRAME_BYTES_PER_ENTRY + entry)
 
 
 def _read_guide_ids(ledger: MemoryLedger, array: Any) -> np.ndarray:
@@ -630,22 +664,26 @@ def _read_guide_ids(ledger: MemoryLedger, array: Any) -> np.ndarray:
 
 
 def _check_cell_ids(
-    ledger: MemoryLedger, cell_ids: np.ndarray, call_file: BarcodeFile, **words: str
+    ledger: MemoryLedger,
+    cell_ids: np.ndarray,
+    barcode_prefix: str | None,
+    *,
+    barcode_suffix: str | None,
+    **words: str,
 ) -> None:
-    """Refuse cells that the call file's barcodes cannot reach, after charging the check.
+    """Refuse cells that a call file's barcodes cannot reach, after charging the check.
 
-    ``cell_ids`` are the cells' IDs as fixed-width text, and ``words`` the
-    messages' words of :func:`_require_call_file_cells`.
+    ``cell_ids`` are the cells' IDs as stored, fixed-width or variable-width
+    text, ``barcode_prefix`` and ``barcode_suffix`` the file's options, and
+    ``words`` the messages' words of :func:`_require_call_file_cells`, which
+    the import and the perturbation recipe's check of a call file share.
     """
     ledger.peak(
         "checking the cells' IDs against the call file",
-        _CELL_CHECK_BYTES_PER_CELL * len(cell_ids) + cell_ids.nbytes,
+        _CELL_CHECK_BYTES_PER_CELL * len(cell_ids) + _text_copy_bytes(cell_ids, ledger),
     )
     _require_call_file_cells(
-        cell_ids,
-        call_file.barcode_prefix,
-        barcode_suffix=call_file.barcode_suffix,
-        **words,
+        cell_ids, barcode_prefix, barcode_suffix=barcode_suffix, **words
     )
 
 
@@ -1132,13 +1170,16 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
         size = protospacer_calls_size(path)
         # Only the selected cells' IDs are read, a sample's in a merged store.
         id_array = self.cells._get_array("ids")
+        held = ledger.held_bytes
         cell_ids = read_rows(
             ledger, id_array, cell_index, item="the selected cells' IDs"
         )
+        ids_bytes = ledger.held_bytes - held
         _check_cell_ids(
             ledger,
             cell_ids,
-            call_file,
+            call_file.barcode_prefix,
+            barcode_suffix=call_file.barcode_suffix,
             cells="the cells of cell_selection",
             restrict="select only",
             remedy="or call the guides from their counts with perturbation.call_guides",
@@ -1167,7 +1208,6 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
         # The diagnostics hold what the messages name, so that saved calls
         # report their barcodes again as they did.
         diagnostics = join.diagnostics()
-        ids_bytes = cell_ids.nbytes
         del join, cell_ids
         ledger.release(ledger.charged - joining + ids_bytes)
         n_calls = len(file_calls.rows)
@@ -1246,7 +1286,7 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
         cell_ids, arrays = self._cell_arrays(ledger, calls, _GUIDE_CALL_ARRAYS)
         ledger.peak(
             "the tables of cells and calls",
-            _frame_bytes(cell_ids, arrays, entries="guide_codes"),
+            _frame_bytes(cell_ids, arrays, entries="guide_codes", ledger=ledger),
         )
         cells, call_table = guide_calls_frames(cell_ids, **arrays, guide_ids=guide_ids)
         return GuideCalls(
@@ -2348,7 +2388,7 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
         )
         ledger.peak(
             "the tables of cells, targets and guides",
-            _frame_bytes(cell_ids, loaded, entries="target_codes"),
+            _frame_bytes(cell_ids, loaded, entries="target_codes", ledger=ledger),
         )
         cells, targets, guides = perturbation_label_frames(
             cell_ids,

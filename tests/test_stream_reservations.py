@@ -129,13 +129,16 @@ def test_a_read_on_cytearcs_pools_holds_its_objects_where_a_plain_pool_keeps_a_c
     # of 1,000 rows at a time: the 160,000,000-byte result, the band's
     # 40,000,000 bytes twice over, each of its ten chunks as stored and
     # decoded, and the four chunks under way, beside the objects of that
-    # read; the ten chunks cover any chunk that a plain pool keeps.
+    # read; the ten chunks cover any chunk that a plain pool keeps. The reads
+    # of the three earlier bands leave their objects: 32 KiB, and 4 KiB for
+    # each of their thirty chunks.
     whole = (
         160_000_000
         + 2 * 40_000_000
         + 10 * (encoded + decoded)
         + 4 * decoded
         + (32_768 + 10 * 4_096 + 4 * 16_384)
+        + (32_768 + 30 * 4_096)
     )
     assert sharded.wholeReadBytes(4) == own_pool.wholeReadBytes(4) == whole
     unsharded = replace(sharded, shards=None, chunks=(1_000, 10_000))
@@ -144,6 +147,15 @@ def test_a_read_on_cytearcs_pools_holds_its_objects_where_a_plain_pool_keeps_a_c
     assert unsharded.wholeReadBytes(2) == 160_000_000 + 2 * stored + read_objects
     assert replace(unsharded, fusedPoolWorkers=2).wholeReadBytes(2) == (
         160_000_000 + 2 * stored + 2 * 40_000_000 + read_objects
+    )
+    # An unsharded array of a local store reads each chunk as a file, so a
+    # buffer of 4,096 bytes is held for each of the chunks read at once: two
+    # in a whole read, and four of a band of ten chunks.
+    buffered = replace(unsharded, readScratchBytes=4_096)
+    assert buffered.wholeReadBytes(2) == unsharded.wholeReadBytes(2) + 2 * 4_096
+    band = replace(sharded, shards=None)
+    assert replace(band, readScratchBytes=4_096).bandReadBytes(1_000, 4) == (
+        band.bandReadBytes(1_000, 4) + 4 * 4_096
     )
 
 

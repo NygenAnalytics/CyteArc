@@ -1180,10 +1180,13 @@ def test_merge_counts_signed_values_within_its_budget_or_names_the_budget_it_nee
         profile(needed - 1)
     assert short.value.needed_bytes == needed
     # Every larger budget counts every value too, in wider runs of chunk
-    # columns up to every column, each of which fits beside what is held;
-    # steps shorter than the 1,584 bytes held reach every run that fits only
-    # when what is held is left out.
-    for budget in range(needed, 136_000, 1_499):
+    # columns up to every column, each of which fits beside what is held and
+    # the buffer of the counts' shard file; steps shorter than the 1,584 bytes
+    # held reach every run that fits only when what is held is left out.
+    from tests.storage_helpers import local_read_buffer
+
+    buffer = local_read_buffer(Path(stores[0][0]) / "zarr.json", ranged=True)
+    for budget in range(needed, 136_000 + buffer, 1_499):
         np.testing.assert_array_equal(np.diff(profile(budget)), expected)
     assert sorted(recorded_blocks) == sorted([(0, 12, 0, 600), (12, 24, 0, 600)] * 2)
     # What the merge holds beside the read adds to what the read needs, and
@@ -1289,9 +1292,13 @@ def test_merge_names_the_count_summaries_that_its_budget_cannot_load(
     # Beside the 1,000 bytes held, a count of each of the 600 merged cells
     # and one more, 8 bytes each, and a whole read of the left source's
     # summary of its 400 cells in one chunk: the counts, a decoded copy and
-    # an encoded one at its bound, 1/128 more and 1 KiB, and the 52 KiB of
-    # objects of Zarr's read of one chunk.
-    summary = 3 * 8 * 400 + 8 * 400 // 128 + 1_024 + 32_768 + 4_096 + 16_384
+    # an encoded one at its bound, 1/128 more and 1 KiB, the buffer of its
+    # file where Python reads it through one, and the 52 KiB of objects of
+    # Zarr's read of one chunk.
+    from tests.storage_helpers import local_read_buffer
+
+    buffer = local_read_buffer(Path(stores[0][0]) / "zarr.json", ranged=False)
+    summary = 3 * 8 * 400 + 8 * 400 // 128 + 1_024 + buffer + 32_768 + 4_096 + 16_384
     needed = 1_000 + 8 * 601 + summary
     with pytest.raises(MemoryBudgetError) as refused:
         profile(needed - 1)

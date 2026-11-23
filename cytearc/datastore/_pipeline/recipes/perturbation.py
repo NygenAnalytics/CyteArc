@@ -31,12 +31,11 @@ from ....utils.memory_budget import (
 )
 from ..._operations.cell_barcodes import BarcodeFile, barcode_files, derived_id_bytes
 from ..._operations.perturbation_guides import (
-    _CELL_CHECK_BYTES_PER_CELL,
+    _check_cell_ids,
     _guide_positions,
     _parse_call_file,
     _read_guide_ids,
     _refuse_shared_cells,
-    _require_call_file_cells,
     _strings_bytes,
 )
 from ..._operations.cell_samples import require_cell_column
@@ -508,9 +507,9 @@ def _check_call_file_cells(
     be labeled ``"Negative"`` and left out of every later stage.
 
     Returns:
-        The input cells' IDs, as fixed-width text, and the ledger of the
-        check of the call file, which holds them; :func:`_check_call_file`
-        goes on with it.
+        The input cells' IDs, as stored, fixed-width or variable-width text,
+        and the ledger of the check of the call file, which holds them;
+        :func:`_check_call_file` goes on with it.
 
     Raises:
         MemoryBudgetError: If reading or checking the IDs does not fit the
@@ -527,17 +526,14 @@ def _check_call_file_cells(
     ids = read_rows(
         ledger, store.cells._get_array("ids"), rows, item="the run's cells' IDs"
     )
-    ledger.peak(
-        "checking the cells' IDs against the call file",
-        _CELL_CHECK_BYTES_PER_CELL * len(ids) + ids.nbytes,
-    )
-    _require_call_file_cells(
+    _check_cell_ids(
+        ledger,
         ids,
         barcode_prefix,
+        barcode_suffix=barcode_suffix,
         cells="the run's cells",
         restrict="restrict cells to",
         remedy=CALL_FROM_COUNTS,
-        barcode_suffix=barcode_suffix,
     )
     return ids, ledger
 
@@ -553,7 +549,7 @@ def _check_call_file(
 
     The guide IDs and the file are read as the import reads them, and the
     cell that each of the file's barcodes names is found among the input
-    cells' IDs, ``cell_ids``, as fixed-width text, as the import joins them:
+    cells' IDs, ``cell_ids``, as stored, as the import joins them:
     the prefix, the barcode or the part of it that the pattern keeps, and
     the suffix. Each step is charged to the check's ``ledger``, from
     :func:`_check_call_file_cells`, before it allocates, so a malformed
@@ -585,7 +581,7 @@ def _check_call_file(
     # cell ID that each barcode names, and each barcode's cell.
     ledger.peak(
         "finding the call file's barcodes among the run's cells",
-        _strings_bytes(cell_ids)
+        _strings_bytes(cell_ids, ledger)
         + hash_table_bytes(len(cell_ids))
         + derived_id_bytes(call_file, n_rows, size.n_bytes)
         + 8 * n_rows,
