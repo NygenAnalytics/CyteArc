@@ -87,9 +87,10 @@ def measured_features_columns(sources: Iterable[str]) -> dict[str, str]:
     """Return the column that records which features each source measured, by source.
 
     Raises:
-        ValueError: If the columns of two sources are named alike once case
-            is ignored, as a file system that ignores case stores them as one
-            column.
+        ValueError: If two sources share a column, as names that differ only
+            in ``/``, ``\\`` and ``_`` do, or their columns are named alike
+            once case is ignored, as a file system that ignores case stores
+            them as one column.
     """
     columns: dict[str, str] = {}
     first: dict[str, str] = {}
@@ -97,6 +98,14 @@ def measured_features_columns(sources: Iterable[str]) -> dict[str, str]:
         column = measured_features_column(source)
         other = first.setdefault(column.casefold(), source)
         if other != source:
+            if columns[other] == column:
+                raise ValueError(
+                    f"Sources {other!r} and {source!r} would both record which "
+                    f"features they measured in the feature column {column!r}, "
+                    "since a column name counts '/' and '\\' as '_'. Name the "
+                    "sources so that the names differ once '/' and '\\' are "
+                    "counted as '_'."
+                )
             raise ValueError(
                 f"Sources {other!r} and {source!r} would record which features "
                 f"they measured in the feature columns {columns[other]!r} and "
