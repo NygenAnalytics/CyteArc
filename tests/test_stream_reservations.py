@@ -767,6 +767,11 @@ def test_a_read_of_cells_spread_over_shards_holds_a_task_for_each_shard(
     # read; as many cells of fewer shards hold the same indexers and copies.
     charge = block._read_bytes(read.nbytes)
     assert charge - fewer._read_bytes(read.nbytes) == (touched - touched // 100) * 4_096
+    # A stream of blocks of ten of these cells charges each block ten shards,
+    # nine of them waiting, where blocks of one cell charge none waiting.
+    tens = ChunkedArray(stored, rows=spread, cols=columns, block_size=10)
+    ones = ChunkedArray(stored, rows=spread, cols=columns, block_size=1)
+    assert tens._read_bytes(0) - ones._read_bytes(0) == 9 * 4_096
     assert peak <= charge
     if features == "all":
         # Without those tasks the charge would not cover the read, even with
