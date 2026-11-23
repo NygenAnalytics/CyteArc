@@ -63,9 +63,9 @@ _TEXT_LENGTH_BYTES = 4
 #: of a value that it casts: NumPy's cast holds a buffer of up to its buffer
 #: size of values at the width cast to, whatever the values, so a longer
 #: value is measured alone, as a Python string.
-_TEXT_MEASURE_BYTES = 4 * 1024 * 1024
+_TEXT_MEASURE_BYTES = 1024 * 1024
 _TEXT_MEASURE_VALUES = 65_536
-_TEXT_CAST_CHARACTERS = 256
+_TEXT_CAST_CHARACTERS = 64
 #: What a measure keeps for each value of the chunk it measures beside the
 #: chunk: the value's characters, sorted, its place in that order and its
 #: UTF-8 bytes, 8 bytes each.
