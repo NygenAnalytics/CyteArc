@@ -4272,7 +4272,7 @@ def test_a_merge_charges_its_scan_of_a_column_of_variable_width_labels(tmp_path)
     fixed, per_row = array_row_selection_parts(table._get_array("cell_type"))
 
     def scan():
-        merge_metadata._max_text_width(
+        merge_metadata._scan_text_column(
             table, "cell_type", block_rows=n_cells, labels=merge_metadata._Labels()
         )
 
@@ -4641,10 +4641,10 @@ def test_merges_read_the_labels_of_the_rows_they_take(tmp_path, monkeypatch):
 
     def text_labels(column, taken=None):
         labels = merge_metadata._Labels()
-        width = merge_metadata._max_text_width(
+        scan = merge_metadata._scan_text_column(
             store.cells, column, block_rows=2, labels=labels, taken=taken
         )
-        return width, None if labels.overflow else labels.found
+        return scan.width, None if labels.overflow else labels.found
 
     def cast_labels(column, dtype, taken=None):
         labels = merge_metadata._Labels()
@@ -4670,7 +4670,9 @@ def test_merges_read_the_labels_of_the_rows_they_take(tmp_path, monkeypatch):
     objects = _MergeMeta(label=np.asarray(["T", " ", "Plasma", "T", 3], dtype=object))
     labels = merge_metadata._Labels()
     assert (
-        merge_metadata._max_text_width(objects, "label", block_rows=2, labels=labels)
+        merge_metadata._scan_text_column(
+            objects, "label", block_rows=2, labels=labels
+        ).width
         == 6
     )
     assert labels.found == {"T", "Plasma", "3"}
@@ -4808,7 +4810,7 @@ def test_merges_read_the_missing_masks_at_the_rows_they_take_alone(
     # and its scans of labels read no other object of the mask.
     taken = np.asarray([2, 3, 7])
     labels = merge_metadata._Labels()
-    merge_metadata._max_text_width(
+    merge_metadata._scan_text_column(
         table, "cell_type", block_rows=2, labels=labels, taken=taken
     )
     assert labels.found == {"B", "NK", "DC"}
@@ -4973,6 +4975,601 @@ def test_merges_keep_the_labels_alone_of_a_categorical_of_too_many_categories(
     for key in ("levels", "ordered", "display"):
         assert key not in cell_data["orig_cell_type"].attrs, key
     assert "orig_cell_type (levels, ordered, display)" in dropped[0]
+
+
+# A float column holds NaN, and a date column NaT, where a value is missing,
+# as inserts and H5AD imports store them, without a missing mask.
+_MISSING_NUMBERS = np.asarray([np.nan, 1.5, np.nan, 22.5, 1.5, np.nan])
+_MISSING_DAYS = np.asarray(
+    ["2026-01-02", "NaT", "2026-01-01", "NaT", "2026-01-02", "2026-01-02"],
+    dtype="datetime64[ns]",
+)
+
+
+def _rows_of(cell_data, name):
+    """Each merged cell's stored value of a column and whether its missing mask flags it, by cell ID."""
+    ids = cell_data["ids"][:].tolist()
+    mask = f"__cytearc_missing__{name}"
+    missing = cell_data[mask][:].tolist() if mask in cell_data else [False] * len(ids)
+    return dict(
+        zip(ids, zip(cell_data[name][:].tolist(), missing, strict=True), strict=True)
+    )
+
+
+@pytest.mark.parametrize(
+    "second", [_MISSING_NUMBERS, _MISSING_DAYS], ids=["float NaN", "NaT"]
+)
+def test_a_merge_stores_the_missing_numbers_and_times_of_a_source_as_missing_text(
+    tmp_path, second
+):
+    cell_data, dropped = _merged_cell_columns(
+        tmp_path,
+        [
+            {
+                "cell_type": (
+                    np.asarray(["T", "B"] * 3, dtype=object),
+                    _IMPORTED_CELL_TYPES,
+                ),
+                "note": np.asarray(["a", "b"] * 3, dtype=object),
+            },
+            {"cell_type": second, "note": second},
+        ],
+    )
+    # pandas names the missing values, and NumPy writes the others as text.
+    held = [None if pd.isna(value) else str(value) for value in second]
+    assert held.count(None) in (2, 3)
+    for name, first in (
+        ("orig_cell_type", ["T", "B"] * 3),
+        ("orig_note", ["a", "b"] * 3),
+    ):
+        expected = {
+            f"first__first{row}": (label, False) for row, label in enumerate(first)
+        }
+        expected |= {
+            f"second__second{row}": ("", True) if label is None else (label, False)
+            for row, label in enumerate(held)
+        }
+        assert _rows_of(cell_data, name) == expected, name
+    # The labels of the second store follow the file's in natural order, and
+    # no missing value becomes one.
+    added = sorted({label for label in held if label is not None})
+    assert cell_data["orig_cell_type"].attrs["levels"] == ["T", "B", *added]
+    assert [
+        category["value"]
+        for category in cell_data["orig_cell_type"].attrs["display"]["categories"]
+    ] == ["T", "B", *added]
+    assert dropped == []
+    exported, _merged = _exported_merge(tmp_path)
+    for name, first in (
+        ("orig_cell_type", ["T", "B"] * 3),
+        ("orig_note", ["a", "b"] * 3),
+    ):
+        column = exported.obs[name]
+        written = {
+            cell: None if pd.isna(value) else str(value)
+            for cell, value in column.astype(object).items()
+        }
+        assert written == {
+            **{f"first__first{row}": label for row, label in enumerate(first)},
+            **{f"second__second{row}": label for row, label in enumerate(held)},
+        }, name
+    assert exported.obs["orig_cell_type"].cat.categories.tolist() == ["T", "B", *added]
+
+
+def test_a_merge_of_variable_width_labels_with_missing_rows_and_floats_with_nan(
+    tmp_path,
+):
+    from tests.storage_helpers import (
+        by_cell_id,
+        open_store,
+        store_as_variable_width_text,
+        write_count_store,
+    )
+
+    # The first store's labels are variable-width text, as another tool can
+    # store them, whose missing mask flags rows 1 and 4; the second store's
+    # are floats with NaN.
+    columns = {
+        "first": np.asarray(["T", None, "B", "NK", None, "B"], dtype=object),
+        "second": np.asarray([np.nan, 2.5, np.nan, 2.5, 2.5, np.nan]),
+    }
+    stores = []
+    for name, values in columns.items():
+        location = tmp_path / f"{name}.zarr"
+        write_count_store(
+            str(location),
+            {"RNA": np.ones((6, 3), dtype=int)},
+            "uint16",
+            cell_ids=[f"{name}{index}" for index in range(6)],
+        )
+        store = open_store(location)
+        store.cells.insert("cell_type", by_cell_id(store.cells, values))
+        if name == "first":
+            store.zw["cellData"]["cell_type"].attrs.update(
+                {"levels": ["T", "B"], "ordered": False}
+            )
+            store_as_variable_width_text(
+                zarr.open_group(str(location / "cellData"), mode="r+"), "cell_type"
+            )
+        stores.append(open_store(location))
+    first = zarr.open_group(str(tmp_path / "first.zarr"), mode="r")["cellData"]
+    assert first["cell_type"].dtype.kind == "T"
+    assert first["__cytearc_missing__cell_type"][:].tolist() == [
+        False,
+        True,
+        False,
+        False,
+        True,
+        False,
+    ]
+    DataStoreMerge(
+        stores, str(tmp_path / "merged.zarr"), list(columns), nthreads=1
+    ).dump()
+    cell_data = zarr.open_group(str(tmp_path / "merged.zarr"), mode="r")["cellData"]
+    # Rows that either store's missing values or mask leave out are missing,
+    # and only the present labels become categories.
+    expected = {
+        f"first__first{row}": ("", True) if label is None else (label, False)
+        for row, label in enumerate(columns["first"])
+    }
+    expected |= {
+        f"second__second{row}": ("", True) if np.isnan(value) else (str(value), False)
+        for row, value in enumerate(columns["second"])
+    }
+    assert _rows_of(cell_data, "orig_cell_type") == expected
+    assert cell_data["orig_cell_type"].attrs["levels"] == ["T", "B", "2.5", "NK"]
+
+
+def test_a_merge_keeps_the_text_nan_of_a_store_as_a_label(tmp_path):
+    # A store merged before this release holds the text "nan" where a float
+    # source held NaN; text is never read as a missing number.
+    cell_data, _dropped = _merged_cell_columns(
+        tmp_path,
+        [
+            {"cell_type": np.asarray(["T", "nan"] * 3)},
+            {
+                "cell_type": (
+                    np.asarray(["T", "B"] * 3, dtype=object),
+                    _IMPORTED_CELL_TYPES,
+                )
+            },
+        ],
+    )
+    rows = _rows_of(cell_data, "orig_cell_type")
+    assert {value for value, missing in rows.values() if not missing} == {
+        "T",
+        "B",
+        "nan",
+    }
+    assert not any(missing for _value, missing in rows.values())
+    assert cell_data["orig_cell_type"].attrs["levels"] == ["T", "B", "nan"]
+
+
+def test_a_merge_plans_no_missing_mask_for_numbers_without_missing_values(tmp_path):
+    cell_data, _dropped = _merged_cell_columns(
+        tmp_path,
+        [
+            {"note": np.asarray(["a", "b"] * 3, dtype=object)},
+            {"note": np.asarray([1.5, 2.5] * 3)},
+        ],
+    )
+    assert "__cytearc_missing__orig_note" not in cell_data
+    assert sorted(set(cell_data["orig_note"][:].tolist())) == ["1.5", "2.5", "a", "b"]
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        np.asarray([1.5, np.nan, -0.0, np.inf]),
+        np.asarray([complex(np.nan, 1), 1 + 2j, complex(0, np.nan), 0j]),
+        np.asarray(["2026-01-01", "NaT", "NaT", "2026-01-02"], dtype="datetime64[s]"),
+        np.asarray([5, "NaT", 0, -3], dtype="timedelta64[s]"),
+        np.asarray(["nan", "NaT", "", "T"]),
+        # Variable-width text holds no NaN; its missing mask alone flags rows.
+        np.asarray(["nan", "NaT", "", "T"], dtype=np.dtypes.StringDType()),
+        np.asarray([3, 1, 0, 2]),
+        np.asarray([True, False, True, True]),
+    ],
+    ids=[
+        "floats",
+        "complex",
+        "dates",
+        "times",
+        "text",
+        "variable-width text",
+        "integers",
+        "booleans",
+    ],
+)
+@pytest.mark.parametrize("flagged", [None, [False, False, False, True]])
+def test_a_merge_casts_missing_numbers_and_times_to_missing_text(values, flagged):
+    from cytearc.merge.metadata import _as_merged_text
+
+    mask = None if flagged is None else np.asarray(flagged)
+    text, missing = _as_merged_text(values, np.dtype("U40"), mask)
+    # pandas names the missing numbers and times; text is never missing.
+    absent = [
+        bool(pd.isna(value)) and values.dtype.kind not in "UT" for value in values
+    ]
+    expected_missing = [
+        held or (flagged is not None and flagged[row])
+        for row, held in enumerate(absent)
+    ]
+    if any(expected_missing):
+        assert missing is not None and missing.tolist() == expected_missing
+    else:
+        assert missing is None
+    # NumPy writes every other value as its own text.
+    assert text.tolist() == [
+        "" if held else str(value) for value, held in zip(values, absent, strict=True)
+    ]
+    assert text.dtype == np.dtype("U40")
+
+
+def test_a_scan_of_numbers_as_text_leaves_their_missing_values_out():
+    from cytearc.merge.metadata import _Labels, _scan_text_column, _TextScan
+
+    table = _MergeMeta(score=np.asarray([np.nan, 1.5, np.nan, 22.25, 1.5]))
+
+    def scan(taken=None):
+        labels = _Labels()
+        found = _scan_text_column(
+            table,
+            "score",
+            block_rows=2,
+            labels=labels,
+            taken=None if taken is None else np.asarray(taken),
+        )
+        return found.width, found.hasMissing, labels.found
+
+    # The widest value is 22.25; "nan" counts toward neither width nor labels.
+    assert scan() == (5, True, {"1.5", "22.25"})
+    # Rows 1, 3 and 4 hold no missing value, row 2 one, read two at a time.
+    assert scan([1, 3, 4]) == (5, False, {"1.5", "22.25"})
+    assert scan([1, 2]) == (5, True, {"1.5"})
+    # Without labels, the scan still finds the missing values of the rows.
+    assert _scan_text_column(table, "score", block_rows=2).hasMissing
+    assert not _scan_text_column(
+        table, "score", block_rows=2, taken=np.asarray([3])
+    ).hasMissing
+    # Complex numbers write NaN as "(nan+0j)", wider than "0j".
+    numbers = _MergeMeta(z=np.asarray([complex(np.nan, 0), 0j]))
+    assert _scan_text_column(numbers, "z", block_rows=2) == _TextScan(2, True)
+    # Text holds no missing number, whatever it reads.
+    text = _MergeMeta(label=np.asarray(["nan", "NaT", "T"]))
+    assert _scan_text_column(text, "label", block_rows=2) == _TextScan(3, False)
+
+
+def test_a_merge_refuses_missing_values_that_its_plan_gave_no_mask():
+    from cytearc.merge.metadata import MetadataColumnSpec, _iter_column_blocks
+    from cytearc.merge.row_plan import build_row_plan
+
+    table = _MergeMeta(note=np.asarray([1.5, np.nan]))
+    spec = MetadataColumnSpec(name="note", dtype=np.dtype("U3"), hasMissing=False)
+    blocks = _iter_column_blocks(
+        spec,
+        build_row_plan([2], [2], ["only"]),
+        [table],
+        source_columns=[{"note": "note"}],
+        reset_cell_filter=False,
+        source_column=None,
+        membership={},
+        segment_rows=2,
+        chunk_rows=2,
+    )
+    # A source that changed after its merge was planned names the remedy.
+    with pytest.raises(
+        ValueError,
+        match="Source 'only' holds missing values in column 'note' that the "
+        "merge's plan gave no missing mask: the source changed after the merge "
+        "was planned. Plan the merge again",
+    ):
+        list(blocks)
+
+
+@pytest.mark.parametrize(
+    "dtype", [np.dtype("U1"), np.dtype(str)], ids=["U1", "flexible"]
+)
+def test_a_merge_casts_a_block_of_nat_alone_to_text_of_any_width(dtype):
+    from cytearc.merge.metadata import _as_merged_text
+
+    # NumPy refuses to write a date in one character, so only the present
+    # rows are cast, and a block of NaT casts to empty text at any width.
+    with pytest.raises(RuntimeError, match="too short"):
+        np.full(3, np.datetime64("NaT", "ns")).astype("U1")
+    text, missing = _as_merged_text(
+        np.full(3, np.datetime64("NaT", "ns")), dtype, np.asarray([False, True, False])
+    )
+    assert text.tolist() == ["", "", ""]
+    assert missing.tolist() == [True, True, True]
+    if dtype.itemsize:
+        assert text.dtype == dtype
+    days = np.asarray(["2026-01-01", "NaT", "2026-01-02"], dtype="datetime64[D]")
+    text, missing = _as_merged_text(days, np.dtype("U10"), None)
+    assert text.tolist() == ["2026-01-01", "", "2026-01-02"]
+    assert missing.tolist() == [False, True, False]
+
+
+def test_a_merge_of_narrow_labels_and_dates_that_are_all_nat(tmp_path):
+    # One-letter labels plan a column of one character, which the text of NaT
+    # would not fit.
+    nat = np.full(6, np.datetime64("NaT", "ns"))
+    cell_data, dropped = _merged_cell_columns(
+        tmp_path,
+        [{"cell_type": np.asarray(["T", "B"] * 3, dtype=object)}, {"cell_type": nat}],
+    )
+    assert cell_data["orig_cell_type"].dtype == np.dtype("U1")
+    expected = {
+        f"first__first{row}": (label, False) for row, label in enumerate(["T", "B"] * 3)
+    }
+    expected |= {f"second__second{row}": ("", True) for row in range(6)}
+    assert _rows_of(cell_data, "orig_cell_type") == expected
+    assert dropped == []
+    from tests.storage_helpers import open_store, write_count_store
+
+    # Features annotated with one letter, and dates that are all NaT.
+    for name, values in (
+        ("first", np.asarray(["a", "b", "c"], dtype=object)),
+        ("second", np.full(3, np.datetime64("NaT", "ns"))),
+    ):
+        location = str(tmp_path / "features" / f"{name}.zarr")
+        write_count_store(
+            location,
+            {"RNA": np.ones((2, 3), dtype=int)},
+            "uint16",
+            cell_ids=[f"{name}{index}" for index in range(2)],
+        )
+        open_store(location).RNA.feats.insert("biotype", values)
+    DataStoreMerge(
+        [
+            open_store(tmp_path / "features" / f"{name}.zarr")
+            for name in ("first", "second")
+        ],
+        str(tmp_path / "features" / "merged.zarr"),
+        ["first", "second"],
+        nthreads=1,
+    ).dump()
+    features = zarr.open_group(str(tmp_path / "features" / "merged.zarr"), mode="r")[
+        "RNA/featureData"
+    ]
+    assert features["biotype"].dtype == np.dtype("U1")
+    assert dict(
+        zip(features["ids"][:].tolist(), features["biotype"][:].tolist(), strict=True)
+    ) == {"RNA0": "a", "RNA1": "b", "RNA2": "c"}
+    assert not any(features["__cytearc_missing__biotype"][:].tolist())
+
+
+@pytest.mark.parametrize(
+    ("first", "second", "merged"),
+    [
+        pytest.param(
+            np.asarray(["protein_coding", None, "lncRNA"], dtype=object),
+            np.asarray(["protein_coding", "lncRNA", "lncRNA"], dtype=object),
+            ["protein_coding", "lncRNA", "lncRNA"],
+            id="text",
+        ),
+        # A masked integer holds 0, which a merged float column would read as
+        # a value beside the second store's 2.5.
+        pytest.param(
+            pd.array([1, None, 3], dtype="Int64"),
+            np.asarray([1.0, 2.5, 3.0]),
+            [1.0, 2.5, 3.0],
+            id="integers beside floats",
+        ),
+        # Integers have no missing value of their own; the mask alone flags it.
+        pytest.param(
+            pd.array([1, None, 3], dtype="Int64"),
+            np.asarray([1, 2, 3]),
+            [1, 2, 3],
+            id="integers",
+        ),
+    ],
+)
+def test_a_merge_keeps_feature_annotations_that_a_missing_mask_leaves_out(
+    tmp_path, first, second, merged
+):
+    from tests.storage_helpers import open_store, write_count_store
+
+    # The first store leaves RNA1 unannotated under its missing mask, and the
+    # second annotates it.
+    annotations = {"first": first, "second": second}
+    for name, values in annotations.items():
+        location = str(tmp_path / f"{name}.zarr")
+        write_count_store(
+            location,
+            {"RNA": np.ones((2, 3), dtype=int)},
+            "uint16",
+            cell_ids=[f"{name}{index}" for index in range(2)],
+        )
+        open_store(location).RNA.feats.insert("annotation", values)
+    stored = zarr.open_group(str(tmp_path / "first.zarr"), mode="r")["RNA/featureData"]
+    assert stored["__cytearc_missing__annotation"][:].tolist() == [False, True, False]
+    DataStoreMerge(
+        [open_store(tmp_path / f"{name}.zarr") for name in annotations],
+        str(tmp_path / "merged.zarr"),
+        list(annotations),
+        nthreads=1,
+    ).dump()
+    features = zarr.open_group(str(tmp_path / "merged.zarr"), mode="r")[
+        "RNA/featureData"
+    ]
+    assert dict(
+        zip(
+            features["ids"][:].tolist(), features["annotation"][:].tolist(), strict=True
+        )
+    ) == dict(zip(["RNA0", "RNA1", "RNA2"], merged, strict=True))
+    assert not any(features["__cytearc_missing__annotation"][:].tolist())
+
+
+def test_a_scan_budget_charges_dates_that_another_source_holds_as_text(monkeypatch):
+    import tracemalloc
+
+    import cytearc.merge.metadata as merge_metadata
+    from cytearc.storage.budget import ResourceBudget
+
+    width = 4096
+    days = np.arange(width).astype("datetime64[D]").astype("datetime64[ns]")
+    days[::2] = np.datetime64("NaT", "ns")
+    charged: list[int] = []
+
+    def recorded(resources, *, nTasks, taskBytes, residentBytes=0, requested=None):
+        charged.append(int(taskBytes(1)))
+        return 1, 1
+
+    monkeypatch.setattr(merge_metadata, "admitted_worker_split", recorded)
+
+    def charge(**columns):
+        cells = [f"c{index}" for index in range(width)]
+        tables = [
+            _MergeMeta(ids=cells, names=cells, note=np.asarray(["a"] * width)),
+            _MergeMeta(ids=cells, names=cells, **columns),
+        ]
+        charged.clear()
+        merge_metadata.resolve_metadata_schema_scan_rows(
+            tables, ResourceBudget(1 << 34, 1), resident_bytes=0, preferred_rows=width
+        )
+        return charged[-1]
+
+    # Dates that another source holds as text are scanned as text and charged,
+    # unlike dates of a column of their own.
+    shared, own = charge(note=days), charge(day=days)
+    assert shared > own
+    # The charge covers what the scan holds for a block of dates with NaT: the
+    # block, and the text that the cast makes of it, measured as it runs.
+    tracemalloc.start()
+    merge_metadata._as_merged_text(days, np.dtype(str), None)
+    _current, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+    assert shared >= days.nbytes + peak
+
+
+def _feature_columns_merge(tmp_path, second_features, second_columns):
+    """Merge a store whose features RNA0 to RNA2 carry text annotations with one of ``second_features`` and their ``second_columns``, and return the merged feature group, the merge's warnings and the export read back with AnnData."""
+    import anndata
+
+    import cytearc
+    from cytearc.utils.logging import logger
+    from tests.storage_helpers import open_store, write_count_store
+
+    first_columns = {
+        "biotype": np.asarray(
+            ["protein_coding", "lncRNA", "protein_coding"], dtype=object
+        ),
+        "source": np.asarray(["ensembl", "ensembl", "refseq"], dtype=object),
+    }
+    stores = []
+    for name, features, columns in (
+        ("first", ["RNA0", "RNA1", "RNA2"], first_columns),
+        ("second", second_features, second_columns),
+    ):
+        location = str(tmp_path / f"{name}.zarr")
+        write_count_store(
+            location,
+            {"RNA": np.ones((4, len(features)), dtype=int)},
+            "uint16",
+            feature_ids={"RNA": features},
+            cell_ids=[f"{name}{index}" for index in range(4)],
+        )
+        store = open_store(location)
+        for column, values in columns.items():
+            store.RNA.feats.insert(column, values)
+        stores.append(store)
+    messages: list[str] = []
+    sink = logger.add(
+        lambda message: messages.append(message.record["message"]), level="WARNING"
+    )
+    try:
+        DataStoreMerge(
+            stores, str(tmp_path / "merged.zarr"), ["first", "second"], nthreads=1
+        ).dump()
+    finally:
+        logger.remove(sink)
+    merged = open_store(tmp_path / "merged.zarr")
+    cytearc.to_h5ad(merged.RNA, str(tmp_path / "export.h5ad"))
+    features = zarr.open_group(str(tmp_path / "merged.zarr"), mode="r")[
+        "RNA/featureData"
+    ]
+    return features, messages, anndata.read_h5ad(tmp_path / "export.h5ad")
+
+
+@pytest.mark.parametrize(
+    "missing",
+    [np.nan, np.datetime64("NaT", "ns")],
+    ids=["float NaN", "NaT"],
+)
+def test_a_merge_keeps_feature_annotations_where_another_source_holds_missing_values(
+    tmp_path, missing
+):
+    # The second store measures RNA1 to RNA3 and annotates none of RNA1 and
+    # RNA2, holding the missing value of floats or dates there.
+    present = 4.5 if isinstance(missing, float) else np.datetime64("2026-01-01", "ns")
+    column = np.asarray([missing, missing, present])
+    features, messages, exported = _feature_columns_merge(
+        tmp_path, ["RNA1", "RNA2", "RNA3"], {"biotype": column, "source": column}
+    )
+    assert not [message for message in messages if "Feature columns" in message]
+    ids = features["ids"][:].tolist()
+    expected = {
+        "biotype": ["protein_coding", "lncRNA", "protein_coding", str(present)],
+        "source": ["ensembl", "ensembl", "refseq", str(present)],
+    }
+    for name, labels in expected.items():
+        values = dict(zip(ids, features[name][:].tolist(), strict=True))
+        flagged = dict(
+            zip(ids, features[f"__cytearc_missing__{name}"][:].tolist(), strict=True)
+        )
+        assert values == dict(zip(["RNA0", "RNA1", "RNA2", "RNA3"], labels)), name
+        assert not any(flagged.values()), name
+        assert exported.var[name].astype(str).to_dict() == dict(
+            zip(["RNA0", "RNA1", "RNA2", "RNA3"], labels)
+        ), name
+
+
+def test_a_merge_keeps_date_feature_annotations_where_a_source_holds_nat(tmp_path):
+    from tests.storage_helpers import open_store, write_count_store
+
+    # Both stores annotate RNA0 alike, and NaT stands for a missing date.
+    added = {
+        "first": np.asarray(
+            ["2026-01-01", "NaT", "2026-01-03"], dtype="datetime64[ns]"
+        ),
+        "second": np.asarray(["2026-01-01", "NaT", "NaT"], dtype="datetime64[ns]"),
+    }
+    for name, values in added.items():
+        location = str(tmp_path / f"{name}.zarr")
+        write_count_store(
+            location,
+            {"RNA": np.ones((2, 3), dtype=int)},
+            "uint16",
+            cell_ids=[f"{name}{index}" for index in range(2)],
+        )
+        open_store(location).RNA.feats.insert("added", values)
+    DataStoreMerge(
+        [open_store(tmp_path / f"{name}.zarr") for name in added],
+        str(tmp_path / "merged.zarr"),
+        list(added),
+        nthreads=1,
+    ).dump()
+    features = zarr.open_group(str(tmp_path / "merged.zarr"), mode="r")[
+        "RNA/featureData"
+    ]
+    ids = features["ids"][:].tolist()
+    days = np.datetime_as_string(np.asarray(features["added"][:]), unit="D")
+    values = dict(zip(ids, days.tolist(), strict=True))
+    flagged = dict(
+        zip(ids, features["__cytearc_missing__added"][:].tolist(), strict=True)
+    )
+    # RNA1, which neither store dates, is missing, and RNA2 keeps the first
+    # store's date beside the second's NaT.
+    assert {feature: flagged[feature] for feature in ids} == {
+        "RNA0": False,
+        "RNA1": True,
+        "RNA2": False,
+    }
+    assert {feature: values[feature] for feature in ("RNA0", "RNA2")} == {
+        "RNA0": "2026-01-01",
+        "RNA2": "2026-01-03",
+    }
 
 
 def test_dataset_merge_overwrite_refuses_any_prepared_assay(tmp_path):
@@ -5771,8 +6368,13 @@ def test_schema_scan_text_bound_holds_the_text_of_every_value(dtype, values, exa
     [
         ([], np.dtype(bool)),
         ([np.dtype("timedelta64[s]"), np.dtype(np.int32)], np.dtype(np.float64)),
+        # Variable-width text beside numbers is text, which the plan widens.
+        (
+            [np.dtypes.StringDType(), np.dtype(np.float64)],
+            np.dtype("U1"),
+        ),
     ],
-    ids=["no_sources", "time_and_number"],
+    ids=["no_sources", "time_and_number", "variable-width text and number"],
 )
 def test_metadata_dtype_promotion_fallbacks(dtypes, expected):
     from cytearc.merge.metadata import _promote_dtypes

@@ -406,22 +406,76 @@ class _Labels:
             self.found = set()
 
 
-def _max_text_width(
+def _missing_value_rows(values: np.ndarray) -> np.ndarray | None:
+    """The rows of a source block that hold the missing value of its type, or None for a type without one.
+
+    Floats and complex numbers hold NaN, and dates and times NaT, where a
+    value is missing.
+    """
+    kind = values.dtype.kind
+    if kind in "fc":
+        return np.isnan(values)
+    if kind in "Mm":
+        return np.isnat(values)
+    return None
+
+
+def _as_merged_text(
+    values: np.ndarray, dtype: np.dtype[Any], missing: np.ndarray | None
+) -> tuple[np.ndarray, np.ndarray | None]:
+    """Cast a source block to the text ``dtype`` of its merged column, with the rows that are missing there.
+
+    A float or complex block holds NaN, and a date or time block NaT, where a
+    value is missing, which text would hold as "nan" or "NaT". Those rows
+    take the empty text of a missing row and join ``missing``, the rows that
+    the source's missing mask flags, where None stands for none. Only the
+    present rows are cast, since a column planned from them can be too
+    narrow for the text of NaT, as :func:`~cytearc.metadata.encoding.stored_values`
+    casts text. Text, such as "nan", is never read as missing.
+    """
+    block = np.asarray(values)
+    absent = _missing_value_rows(block)
+    if absent is None or not absent.any():
+        return block.astype(dtype, copy=False), missing
+    present = block[~absent].astype(dtype)
+    # A flexible dtype takes the width of the present rows' text.
+    text = np.zeros(block.shape, dtype=present.dtype if dtype.itemsize == 0 else dtype)
+    text[~absent] = present
+    return text, absent if missing is None else np.asarray(missing, dtype=bool) | absent
+
+
+@dataclass(frozen=True)
+class _TextScan:
+    """What a scan of a source column as text finds.
+
+    ``width`` is that of its widest value, and ``hasMissing`` whether the
+    rows that the merged store takes hold a missing number or time, which
+    its merged text column flags in a missing mask.
+    """
+
+    width: int
+    hasMissing: bool
+
+
+def _scan_text_column(
     table: Any,
     column: str,
     *,
     block_rows: int,
     labels: _Labels | None = None,
     taken: np.ndarray | None = None,
-) -> int:
-    """The width of a source column's widest value as text, read a block at a time.
+) -> _TextScan:
+    """Read a source column as the text that its merged column stores, a block at a time.
 
-    With ``labels``, the same pass adds the labels of the rows that the
-    merged store takes, ``taken`` in increasing order or every row for None,
-    as text, which the merged column stores them as. Its missing mask is
-    read at those rows alone, as the merge reads it to write them.
+    Values are cast as :func:`_as_merged_text` casts them, so NaN and NaT
+    count toward neither the width nor the labels, and ``hasMissing`` says
+    whether the rows that the merged store takes, ``taken`` in increasing
+    order or every row for None, hold one. With ``labels``, the same pass
+    adds the labels of those rows. The column's missing mask is read at
+    those rows alone, as the merge reads it to write them.
     """
     width = 1
+    has_missing = False
     mask = None if labels is None else metadata_missing_mask(table, column)
     start = 0
     for values in iter_metadata_column_blocks(
@@ -431,17 +485,27 @@ def _max_text_width(
     ):
         stop = start + len(values)
         block = np.asarray(values)
-        strings = None
+        strings = absent = None
         if block.dtype.kind == "O":
             width = max(width, max((len(str(value)) for value in block), default=0))
         elif block.dtype.kind == "T":
             # Variable-width text, which another tool can store with Zarr's
             # dtype=str, counts its characters as it is, since NumPy casts no
-            # such text to fixed-width text without a width.
+            # such text to fixed-width text without a width. It holds no NaN,
+            # and its missing rows are those that its missing mask flags.
             width = max(width, int(np.strings.str_len(block).max(initial=0)))
         else:
-            strings = np.asarray(block, dtype=str)
+            strings, absent = _as_merged_text(block, np.dtype(str), None)
             width = max(width, int(np.char.str_len(strings).max(initial=0)))
+        rows = (
+            None
+            if taken is None
+            else taken[np.searchsorted(taken, start) : np.searchsorted(taken, stop)]
+        )
+        if absent is not None:
+            has_missing = has_missing or bool(
+                absent.any() if rows is None else absent[rows - start].any()
+            )
         if labels is not None:
             if strings is None:
                 # Variable-width labels become Python strings without
@@ -456,15 +520,12 @@ def _max_text_width(
                     if block.dtype.kind == "T"
                     else np.asarray(block, dtype=str)
                 )
-            if taken is None:
+            if rows is None:
                 labels.add(
                     strings,
                     None if mask is None else np.asarray(mask[start:stop], dtype=bool),
                 )
             else:
-                rows = taken[
-                    np.searchsorted(taken, start) : np.searchsorted(taken, stop)
-                ]
                 labels.add(
                     strings[rows - start],
                     None
@@ -472,7 +533,12 @@ def _max_text_width(
                     else np.asarray(read_array_rows_chunkwise(mask, rows), dtype=bool),
                 )
         start = stop
-    return width
+    return _TextScan(width, has_missing)
+
+
+def _max_text_width(table: Any, column: str, *, block_rows: int) -> int:
+    """The width of a source column's widest value as the text that its merged column stores, read a block at a time."""
+    return _scan_text_column(table, column, block_rows=block_rows).width
 
 
 def _add_column_labels(
@@ -541,25 +607,35 @@ def resolve_metadata_schema_scan_rows(
 
     ``axis`` names the tables scanned, cell or feature tables, in a refusal.
     """
-    arrays: list[Any] = []
-    for table in source_cell_tables:
-        for column in table.columns:
-            dtype = np.dtype(table.get_dtype(column))
-            # Variable-width text, which another tool can store, is scanned
-            # as fixed-width text is.
-            if column in {"ids", "names"} or dtype.kind in {"U", "S", "O", "T"}:
-                arrays.append(table._get_array(column))
+    # A column that a source holds as text, variable-width text included,
+    # which another tool can store, is read as text in every source, numbers
+    # and dates included.
+    text_columns = {
+        column
+        for table in source_cell_tables
+        for column in table.columns
+        if np.dtype(table.get_dtype(column)).kind in {"U", "S", "O", "T"}
+    }
+    arrays = [
+        table._get_array(column)
+        for table in source_cell_tables
+        for column in table.columns
+        if column in {"ids", "names"} or column in text_columns
+    ]
     preferred = max(1, int(preferred_rows))
     # Each column's costs, which measure variable-width text, are the same at
     # every width.
     costs: list[tuple[tuple[int, int], int]] = []
     for array in arrays:
         dtype = np.dtype(array.dtype)
+        # The text of the present rows of numbers or dates with missing values
+        # is held beside the block's text (:func:`_as_merged_text`).
+        copies = 2 if dtype.kind in "fcMm" else 1
         costs.append(
             (
                 array_row_selection_parts(array),
                 max(1, int(dtype.itemsize))
-                + _string_itemsize_bound(dtype)
+                + copies * _string_itemsize_bound(dtype)
                 + np.dtype(np.int64).itemsize,
             )
         )
@@ -1170,16 +1246,17 @@ def plan_cell_metadata(
             labels = category_labels(public)
             max_len = 1
             for index, _table, source_col in sources_of(public):
-                max_len = max(
-                    max_len,
-                    _max_text_width(
-                        source_cell_tables[index],
-                        source_col,
-                        block_rows=scan_rows,
-                        labels=labels,
-                        taken=None if labels is None else taken(index),
-                    ),
+                scan = _scan_text_column(
+                    source_cell_tables[index],
+                    source_col,
+                    block_rows=scan_rows,
+                    labels=labels,
+                    taken=taken(index),
                 )
+                max_len = max(max_len, scan.width)
+                # A float or date source holds NaN or NaT where a value is
+                # missing, which the merged text column flags in its mask.
+                has_missing = has_missing or scan.hasMissing
             dtype = np.dtype(f"U{max_len}")
         value_arrays: list[Any] = []
         mask_arrays: list[Any] = []
@@ -1231,7 +1308,8 @@ def _promote_dtypes(dtypes: list[np.dtype[Any]]) -> np.dtype[Any]:
     # widen to float64, so no imaginary part is cast away.
     if all(dtype.kind in "bifc" for dtype in dtypes):
         return np.dtype(np.complex128)
-    if any(dtype.kind in {"U", "S", "O"} for dtype in dtypes):
+    # Variable-width text, which another tool can store, is text too.
+    if any(dtype.kind in {"U", "S", "O", "T"} for dtype in dtypes):
         return np.dtype("U1")
     return np.dtype(np.float64)
 
@@ -1446,16 +1524,22 @@ def write_feature_metadata(
                 missing = np.ones(stop - start, dtype=bool)
                 for table, mapping in sources:
                     rows = np.flatnonzero((mapping >= start) & (mapping < stop))
-                    incoming = read_metadata_rows_chunkwise(table, name, rows).astype(
-                        dtype
-                    )
+                    raw = read_metadata_rows_chunkwise(table, name, rows)
                     absent = read_metadata_missing_rows_chunkwise(table, name, rows)
+                    if dtype.kind == "U":
+                        incoming, absent = _as_merged_text(raw, dtype, absent)
+                    else:
+                        incoming = raw.astype(dtype)
+                        # A NaN or NaT of a merged column of numbers or dates
+                        # is missing, and agrees with any other source's value.
+                        held = _missing_value_rows(incoming)
+                        if held is not None:
+                            absent = held if absent is None else absent | held
+                    del raw
                     positions = mapping[rows] - start
                     present = (
                         np.ones(len(rows), dtype=bool) if absent is None else ~absent
                     )
-                    if dtype.kind in "fc":
-                        present &= ~np.isnan(incoming)
                     conflict = (
                         present & ~missing[positions] & (values[positions] != incoming)
                     )
@@ -1654,18 +1738,35 @@ def _iter_column_blocks(
                 missing = np.ones(n, dtype=bool)
             else:
                 raw = read_metadata_rows_chunkwise(table, source_col, local_rows)
-                values = raw.astype(spec.dtype, copy=False)
-                del raw
-                if spec.hasMissing:
-                    source_missing = read_metadata_missing_rows_chunkwise(
+                source_missing = (
+                    read_metadata_missing_rows_chunkwise(
                         table,
                         source_col,
                         local_rows,
                     )
+                    if spec.hasMissing
+                    else None
+                )
+                if spec.dtype.kind == "U":
+                    values, source_missing = _as_merged_text(
+                        raw, spec.dtype, source_missing
+                    )
+                else:
+                    values = raw.astype(spec.dtype, copy=False)
+                del raw
+                if spec.hasMissing:
                     missing = (
                         np.zeros(n, dtype=bool)
                         if source_missing is None
                         else source_missing
+                    )
+                elif source_missing is not None:
+                    raise ValueError(
+                        f"Source {name!r} holds missing values in column "
+                        f"{spec.name!r} that the merge's plan gave no missing "
+                        "mask: the source changed after the merge was planned. "
+                        "Plan the merge again, with a new DataStoreMerge or "
+                        "create_composite call, to merge the source as it is now."
                     )
 
         if band_values is None:

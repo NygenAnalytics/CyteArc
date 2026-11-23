@@ -1006,7 +1006,9 @@ def _write_composite(
     scan_rows = resolve_metadata_schema_scan_rows(
         cell_tables,
         resources,
-        resident_bytes=resident,
+        # The plan holds a sorted copy of each source's selected rows while it
+        # scans text columns, and the copy of one source as it sorts them.
+        resident_bytes=resident + 2 * np.dtype(np.int64).itemsize * row_plan.nCells,
         preferred_rows=max(
             min(table.N, table._get_array("ids").chunks[0]) for table in cell_tables
         ),
