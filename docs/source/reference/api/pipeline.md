@@ -34,6 +34,7 @@ returns a durable, read-only {py:class}`~cytearc.PipelineRun` whose outputs are 
    cytearc.datastore.pipeline_accessor.PipelineAccessor.plan
    cytearc.datastore.pipeline_accessor.PipelineAccessor.rerun
    cytearc.datastore.pipeline_accessor.PipelineAccessor.resume
+   cytearc.datastore.pipeline_accessor.PipelineAccessor.end_paused
    cytearc.datastore.pipeline_accessor.PipelineAccessor.describe
    cytearc.datastore.pipeline_accessor.PipelineAccessor.open
    cytearc.datastore.pipeline_accessor.PipelineAccessor.list_runs
@@ -479,9 +480,22 @@ A paused run has no outputs and no label yet: `run[key]` and the frozen views ra
 
 A paused run keeps its requested label without reserving it. The label is checked when the run pauses and when it resumes, and claimed when the run completes, as for any run. A run whose label another run has committed meanwhile fails when it would pause, with `PipelineExecutionError` for the step `pause`, and `resume` refuses it and suggests `ds.pipeline.rerun(run, label=...)`; a run that only holds the label's claim while it finalizes does not stop the pause, since it may still fail and leave the label.
 
-A resume claims its pause with an atomic write before it records the resume, so of two processes that resume one paused run at once, one runs it and the other raises `RuntimeError`, which says that another process resumed the run. A storage backend without atomic conditional creation therefore refuses `run_until` and `resume` before anything is written. A process that dies between claiming the pause and recording the resume, a window of one metadata write, leaves the run paused with its pause claimed, so that no process can resume it; `ds.pipeline.rerun(run)` recovers the analysis under a new run ID, reusing every finished stage.
+A resume claims its pause with an atomic write before it records the resume, so of two processes that resume one paused run at once, one runs it and the other raises `RuntimeError`, which says that another process resumed or ended the run. A storage backend without atomic conditional creation therefore refuses `run_until`, `resume` and `end_paused` before anything is written. A process that dies between claiming the pause and recording the resume, a window of one metadata write, leaves the run paused with its pause claimed, so that no process can resume it; `ds.pipeline.rerun(run)` recovers the analysis under a new run ID, reusing every finished stage, and `end_paused` with `release_claim=True` ends the run ([End a paused run](#end-a-paused-run)).
 
 A cancellation, signal, or failure after a resume ends the run interrupted or failed, as for any run, and its last segment records why. A process that dies leaves the run `running`, as for any run. The finished stages keep their artifacts either way, so `rerun` reuses them under a new run ID.
+
+### End a paused run
+
+A paused run waits for a resume until a process resumes it. `ds.pipeline.end_paused` ends one that never will, because the analysis was dropped or its resume cannot go on:
+
+```python
+for paused in ds.pipeline.list_runs(status="paused"):
+    ds.pipeline.end_paused(paused, reason="analysis dropped")
+```
+
+The run ends `interrupted`, with an interruption of kind `abandoned_pause` whose message is `reason` (default `"ended while paused"`), and its last segment closes with reason `interrupted`, keeping when it paused and the stages that it ran. `list_runs(status="paused")` and the paused count of `DataStore.summary()` no longer include it. The run keeps its stage records and artifacts, and it never held its requested label, so `ds.pipeline.rerun(run, label=...)` reuses every finished stage under a new run ID and can take that label. `end_paused` takes the paused run or its run ID, and refuses a run that is not paused with `ValueError`, writing nothing. A paused run whose pause write was cut off, which cannot resume, ends the same way.
+
+The end claims the pause with the same atomic write as a resume, so of a resume and an end of one paused run, only one goes ahead, and the other raises `RuntimeError` without writing. A pause that a resume claimed without recording itself, as a process that died between the two writes leaves it, ends only with `release_claim=True`. Pass it once you have confirmed that no process resumes the run: CyteArc cannot tell a stopped process from one that is about to record its resume, and does not guess from elapsed time.
 
 ## Describe a recipe
 
@@ -1207,7 +1221,7 @@ for running in monitor.pipeline.list_runs(status="running"):
 
 ```{eval-rst}
 .. autoclass:: cytearc.datastore.pipeline_accessor.PipelineAccessor
-    :members: rna, atac, adt, multimodal, perturbation, plan, rerun, resume, describe, open, list_runs, abandon_label_claim
+    :members: rna, atac, adt, multimodal, perturbation, plan, rerun, resume, end_paused, describe, open, list_runs, abandon_label_claim
 
 .. autoclass:: cytearc.PipelineRun
     :members:
