@@ -1045,6 +1045,19 @@ def test_the_pass_over_variable_width_store_ids_holds_what_it_charges(
     assert traced.held <= traced.charged
 
 
+def test_the_join_takes_variable_width_store_ids_given_in_memory() -> None:
+    # The store's IDs differ in length and reach beyond ASCII; "c\u00e9" names
+    # a cell outside the selection and "z" no cell.
+    store = np.asarray(["a-1", "bb-1", "c\u00e9-1", "d" * 40 + "-1"]).astype(
+        np.dtypes.StringDType()
+    )
+    join = CellBarcodeJoin(
+        np.asarray(["a-1", "bb-1"]), ledger=MemoryLedger(None, "J"), store_ids=store
+    )
+    join.cells(_plain(suffix="-1"), np.asarray(["a", "c\u00e9", "z"], dtype=object))
+    assert join.diagnostics() == _counts(3, ["z -> z-1"], ["c\u00e9 -> c\u00e9-1"])
+
+
 def test_the_join_reads_the_stores_cell_ids_once_and_only_when_it_needs_them() -> None:
     class Counted(np.ndarray):
         reads = 0

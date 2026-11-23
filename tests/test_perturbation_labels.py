@@ -228,6 +228,23 @@ def test_a_target_column_of_variable_width_text_labels_cells_alike(
     )
 
 
+def test_a_target_column_of_numbers_names_each_target_by_its_number(
+    store, template
+) -> None:
+    # Guides CRISPR0 and CRISPR1 target 10, CRISPR2 targets 20, and the
+    # controls CRISPR3 and CRISPR4 target 30 and 40.
+    store._get_assay("CRISPR").feats.insert(
+        "target_code", np.asarray([10, 10, 20, 30, 40])
+    )
+
+    ref = store.perturbation.labels(
+        template.calls, controls=["30", "40"], target_column="target_code"
+    )
+
+    expected = [{"GENE_A": "10", "GENE_B": "20"}.get(label, label) for label in SINGLE]
+    assert store.perturbation.load_labels(ref).cells["label"].tolist() == expected
+
+
 def test_labels_are_reused_and_follow_their_inputs(store, template) -> None:
     calls = template.calls
     ref = store.perturbation.labels(calls, controls=CONTROLS)

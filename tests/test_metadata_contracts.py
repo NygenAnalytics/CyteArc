@@ -1636,9 +1636,15 @@ def test_variable_width_text_reads_as_python_strings(kind) -> None:
         "ids", data=values.astype(np.dtypes.StringDType()), chunks=(8,)
     )
     rows = np.array([49, 0, 17, 18, 3])
+    in_memory = values.astype(np.dtypes.StringDType())
     for read, expected in (
         (lambda ledger: read_text_rows(ledger, stored, rows, item="IDs"), values[rows]),
         (lambda ledger: read_whole_text(ledger, root, "ids", item="IDs"), values),
+        # Text in memory, which has no chunks, is measured as it is.
+        (
+            lambda ledger: read_text_rows(ledger, in_memory, rows, item="IDs"),
+            values[rows],
+        ),
     ):
         ledger = recording_ledger("Reading")
         strings = read(ledger)
@@ -1648,6 +1654,39 @@ def test_variable_width_text_reads_as_python_strings(kind) -> None:
         # CPython holds for them, and lets go of the stored rows.
         actual = sum(map(sys.getsizeof, strings)) + 8 * len(strings)
         assert actual <= ledger.held_bytes <= 1.05 * actual
+    # No row reads no string and keeps nothing charged.
+    ledger = recording_ledger("Reading")
+    empty = read_text_rows(ledger, stored, np.array([], dtype=np.int64), item="IDs")
+    assert empty.dtype == object and empty.size == 0 and ledger.held_bytes == 0
     numbers = root.create_array("numbers", data=np.arange(5), chunks=(5,))
     with pytest.raises(TypeError, match="IDs must be stored as text, not as int64"):
         read_text_rows(recording_ledger("Reading"), numbers, np.arange(2), item="IDs")
+    with pytest.raises(TypeError, match="IDs must be stored as text, not as int64"):
+        read_whole_text(recording_ledger("Reading"), root, "numbers", item="IDs")
+
+
+def test_rows_of_variable_width_text_in_memory_are_planned_by_their_longest_value() -> (
+    None
+):
+    from cytearc.metadata.rows import array_row_selection_parts
+
+    # 1,000 values of 100 bytes and one of 300: NumPy keeps each in its
+    # 16-byte element and the longest's bytes behind an 8-byte size in its
+    # arena (NEP 55), and a selection holds each row three times.
+    values = np.asarray(["x" * 100] * 1_000 + ["y" * 300]).astype(
+        np.dtypes.StringDType()
+    )
+    fixed, per_row = array_row_selection_parts(values)
+    assert fixed == 0
+    assert per_row >= 3 * (16 + 300 + 8)
+
+
+def test_a_whole_read_of_a_scalar_keeps_its_value_charged() -> None:
+    from cytearc.metadata.rows import read_whole
+
+    root = zarr.open_group(store=MemoryStore(), mode="w")
+    root.create_array("count", data=np.asarray(7, dtype=np.int64))
+    ledger = recording_ledger("Reading")
+    value = read_whole(ledger, root, "count", item="the count")
+    assert value.shape == () and int(value) == 7
+    assert ledger.held_bytes == 8
