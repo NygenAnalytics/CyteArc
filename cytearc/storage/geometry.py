@@ -670,9 +670,9 @@ def _utf8_lengths(
         # Another string's widest is its largest code point in UTF-32.
         for string in strings:
             if not string.isascii():
-                points = np.frombuffer(string.encode("utf-32-le"), dtype=np.uint32)
-                most = max(most, int(points.max()))
-                del points
+                code_points = np.frombuffer(string.encode("utf-32-le"), dtype=np.uint32)
+                most = max(most, int(code_points.max()))
+                del code_points
         widest = max(widest, most)
         # The part's Python strings, their UTF-8 bytes, those of its ASCII
         # strings joined, their lists, and one string's code points.

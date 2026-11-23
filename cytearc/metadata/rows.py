@@ -151,19 +151,11 @@ def text_row_selection_parts(
     The store keeps text at the width of its longest value and decodes whole
     chunks, so one long value widens every row that is read. Each row is held
     as :func:`array_row_selection_parts` counts it, and then becomes a Python
-    string of up to four bytes per character, or, for variable-width text, of
-    the bytes per character of its widest character.
+    string of up to four bytes per character, of the longest value for
+    variable-width text, as :func:`text_width` measures it.
     """
-    if np.dtype(array.dtype).kind != "T":
-        fixed, per_row = array_row_selection_parts(array)
-        return fixed, per_row + STRING_BYTES + 4 * text_width(array)
-    geometry = array_geometry(array, measure_text=True, ledger=ledger)
-    fixed, per_row = _row_selection_parts(array, geometry, ledger)
-    extent = text_extent(array, geometry, ledger)
-    string = object_array_bytes(1) + python_text_bytes(
-        1, extent.characters, widest=extent.widest
-    )
-    return fixed, per_row + string
+    fixed, per_row = array_row_selection_parts(array, ledger=ledger)
+    return fixed, per_row + STRING_BYTES + 4 * text_width(array, ledger=ledger)
 
 
 def text_read_bytes(

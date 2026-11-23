@@ -1817,7 +1817,9 @@ def test_variable_width_text_reads_as_python_strings(kind) -> None:
 def test_rows_of_variable_width_text_in_memory_are_planned_by_their_longest_value() -> (
     None
 ):
-    from cytearc.metadata.rows import array_row_selection_parts
+    import sys
+
+    from cytearc.metadata.rows import array_row_selection_parts, read_rows_bytes
 
     # 1,000 values of 100 bytes and one of 300: NumPy keeps each in its
     # 16-byte element and the longest's bytes behind an 8-byte size in its
@@ -1829,6 +1831,13 @@ def test_rows_of_variable_width_text_in_memory_are_planned_by_their_longest_valu
     fixed, per_row = array_row_selection_parts(values)
     assert fixed >= 32 * len(values)
     assert per_row >= 3 * (16 + 300 + 8)
+    # A read of every row holds each value's element and sized bytes, and
+    # their strings too as Python strings, as getsizeof gives them.
+    least = 16 * len(values) + 1_000 * 101 + 308
+    strings = sum(map(sys.getsizeof, values.tolist())) + 8 * len(values)
+    assert read_rows_bytes(values, len(values)) >= least
+    assert text_read_bytes(values, len(values)) >= least + strings
+    assert text_row_selection_parts(values)[1] >= per_row + sys.getsizeof("y" * 300)
 
 
 def test_a_whole_read_of_a_scalar_keeps_its_value_charged() -> None:

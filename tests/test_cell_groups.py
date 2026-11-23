@@ -444,6 +444,8 @@ def test_variable_width_labels_group_and_sample_cells_as_fixed_width_labels_do(
     table.create_array(
         "variable", data=labels.astype(np.dtypes.StringDType()), chunks=(500,)
     )
+    # The same groups as numbers, which are read as stored.
+    table.create_array("numbers", data=np.arange(n_cells) % 50, chunks=(500,))
     store = open_store(path)
     fixed = _group(store, group_by="fixed")
     variable = _group(store, group_by="variable")
@@ -451,6 +453,11 @@ def test_variable_width_labels_group_and_sample_cells_as_fixed_width_labels_do(
         key["fixed"] for key in fixed.keys
     ]
     np.testing.assert_array_equal(variable.codes, fixed.codes)
+    numbered = _group(store, group_by="numbers")
+    # Cells of a label share a group of the number of the label.
+    np.testing.assert_array_equal(
+        pd.factorize(numbered.codes)[0], pd.factorize(fixed.codes)[0]
+    )
     # The labels become Python strings, kept charged by their characters
     # beside the UTF-8 copy that coding them leaves in a string beyond ASCII.
     strings = sum(map(sys.getsizeof, labels.tolist())) + 8 * n_cells
@@ -478,6 +485,12 @@ def test_variable_width_labels_group_and_sample_cells_as_fixed_width_labels_do(
     np.testing.assert_array_equal(with_variable.codes, with_fixed.codes)
     assert with_variable.names == with_fixed.names
     assert held_while_numbered[-1] >= strings
+    with_numbers = cell_samples.read_cell_samples(
+        store, MemoryLedger(None, "Samples"), "numbers", every, reason="r"
+    )
+    np.testing.assert_array_equal(
+        pd.factorize(with_numbers.codes)[0], pd.factorize(with_fixed.codes)[0]
+    )
 
 
 def test_kept_apart_labels_follow_the_rows_that_join_groups(store) -> None:
