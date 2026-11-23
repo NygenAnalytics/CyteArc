@@ -594,23 +594,34 @@ def test_read_bytes_charge_the_indexers_and_copies_of_reads_by_index_arrays() ->
     assert sharded.takenChunkBytes(7, 3, indexedAxes=1) == 42
     assert unsharded.takenChunkBytes(7, 3, indexedAxes=2) == 42 + 8_192 * (8 + 8 + 2)
     assert unsharded.takenChunkBytes(0, 3, indexedAxes=2) == 8_192 * 18
-    # Each chunk decoded at once holds its copy; the indexers are held once.
+    # The indexers are held once, and so is the copy: CyteArc's pipelines
+    # copy each decoded chunk's values on the read's event loop, a chunk at a
+    # time, however many chunks they decode at once.
     nominal = 10 * 4 * 2
     encoded = 80 + 1_024
     assert sharded.readBytes(1_000, 5, decodes=2, indexes=30, takenBytes=42) == (
-        2 * 1_000 + 5 * encoded + 2 * (nominal + 42) + _read_objects(5, 2) + 30 * 64
+        2 * 1_000 + 5 * encoded + 2 * nominal + _read_objects(5, 2) + 42 + 30 * 64
     )
     stored = nominal + nominal + 1_024
     assert unsharded.readBytes(1_000, 5, decodes=2, indexes=30, takenBytes=42) == (
-        1_000 + 2 * (stored + 42) + _read_objects(5, 2) + 30 * 40
+        1_000 + 2 * stored + _read_objects(5, 2) + 42 + 30 * 40
     )
-    # Two shards read at once each copy what they take from the chunks that
-    # they decode at once.
     assert sharded.readBytes(
         1_000, 5, decodes=2, shards=3, indexes=30, takenBytes=42
     ) == (
+        2 * 1_000 + 2 * (5 * encoded + 2 * nominal + _read_objects(5, 2)) + 42 + 30 * 64
+    )
+    # Zarr's fused pipeline copies them on its pool's threads: on a store
+    # that reads synchronously, a pool of two threads reads two of the three
+    # shards at once, each decoding a chunk at a time beside the chunk that
+    # its thread decoded before.
+    fused = replace(sharded, fusedPoolWorkers=2)
+    assert fused.readBytes(
+        1_000, 5, decodes=2, shards=3, indexes=30, takenBytes=42
+    ) == (
         2 * 1_000
-        + 2 * (5 * encoded + 2 * (nominal + 42) + _read_objects(5, 2))
+        + 2 * (5 * encoded + nominal + nominal + _read_objects(5, 1))
+        + 2 * 42
         + 30 * 64
     )
     assert sharded.readBytes(1_000, 5, decodes=2) == sharded.readBytes(
@@ -714,6 +725,50 @@ def test_a_read_of_selected_cells_holds_no_more_than_its_charge(
         assert run._read_bytes(read.nbytes, rows_indexed=True) == charge
     # Without the copy, the charge would not cover the read.
     assert peak > charge - copy
+
+
+@pytest.mark.parametrize("sharded", [True, False], ids=["sharded", "unsharded"])
+def test_reads_of_selected_cells_copy_one_chunk_at_a_time_however_many_they_decode(
+    tmp_path: Any, sharded: bool
+) -> None:
+    import tracemalloc
+
+    from cytearc.storage.async_execution import zarr_io_concurrency
+    from cytearc.storage.geometry import array_geometry
+    from cytearc.storage.virtual_arrays import read_selection
+
+    # 2,000 cells by 512 features in four chunks of 128 features, which a
+    # read at a concurrency of 4 decodes at once.
+    stored, values = _random_bits_store(
+        tmp_path,
+        (2_000, 512),
+        (2_000, 128),
+        (2_000, 512) if sharded else None,
+        np.float32,
+    )
+    geometry = array_geometry(stored)
+    cells = np.random.default_rng(4).permutation(2_000)
+    features = np.arange(512)
+    with zarr_io_concurrency(4):
+        read_selection(stored, cells, features)
+        tracemalloc.start()
+        try:
+            base, _ = tracemalloc.get_traced_memory()
+            read = read_selection(stored, cells, features)
+            _current, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+    np.testing.assert_array_equal(read.view(np.uint32), values[cells].view(np.uint32))
+    fixed, per_row = row_read_parts(
+        geometry, features, rows_contiguous=False, concurrency=4
+    )
+    charge = read.nbytes + fixed + cells.size * per_row
+    # The read's event loop copies the cells' values of one decoded chunk at
+    # a time, 2,000 x 128 x 4 bytes, so the charge holds one such copy, and
+    # without it would not cover the read.
+    copy = 2_000 * 128 * 4
+    assert peak - base <= charge
+    assert peak - base > charge - copy
 
 
 @pytest.mark.parametrize("selected", ["rows", "both"])

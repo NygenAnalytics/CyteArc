@@ -538,17 +538,18 @@ def test_row_reads_at_a_concurrency_hold_the_shards_and_decodes_they_run_at_once
     # chunks of up to two of the four shards at once, each decoding its two
     # chunks at once. The band takes its four genes by an index array, so it
     # also holds Zarr's indexers of them, 64 bytes a gene, and Zarr's copy of
-    # the two genes of 1,000 rows that it takes from each chunk, for each of
-    # the four decodes at once, and the reader orders each row by row chunk,
-    # 32 bytes. A block whose rows form one run is read in one request,
-    # which holds each row's shard-level copy, 16 bytes, and the copy of its
-    # two genes of a chunk for each decode at once, 32 bytes.
+    # the two genes of 1,000 rows that it takes from a chunk, which the read's
+    # event loop makes a chunk at a time, and the reader orders each row by
+    # row chunk, 32 bytes. A block whose rows form one run is read in one
+    # request, which holds each row's shard-level copy, 16 bytes, and the
+    # copy of its two genes of a chunk, 8 bytes, less than that ordering.
     wide = np.array([0, 39, 40, 79])
     shard_read = 2 * encoded + 2 * decoded + 32_768 + 2 * 4_096 + 2 * 16_384
-    band = 2 * 4 * 1_000 * 4 + 2 * shard_read + 4 * 64 + 4 * 1_000 * 2 * 4
+    band = 2 * 4 * 1_000 * 4 + 2 * shard_read + 4 * 64 + 1_000 * 2 * 4
     assert row_read_parts(
         geometry, wide, rows_contiguous=False, concurrency=4, shards=2
-    ) == (band, 4 * 4 + 4 * 2 * 4)
+    ) == (band, 32)
+    assert 4 * 4 + 2 * 4 < 32
     assert indexed_read_parts(
         geometry, wide, block_rows=1_000, concurrency=4, shards=2
     ) == (band, 32)

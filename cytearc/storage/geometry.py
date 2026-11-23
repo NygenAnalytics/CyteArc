@@ -509,32 +509,36 @@ class ArrayGeometry:
         a read decodes at once, in the array or in each shard, also follow
         :meth:`readsAtOnce`. A read that takes ``indexes`` positions by index
         arrays rather than slices, on any of its axes, also holds Zarr's
-        indexers of them, as :meth:`indexBytes` counts, and for each chunk
-        it decodes at once ``takenBytes``, what copying the values it takes
-        from that chunk holds, as :meth:`takenChunkBytes` counts.
+        indexers of them, as :meth:`indexBytes` counts, and ``takenBytes``,
+        what copying the values that it takes from one chunk holds, as
+        :meth:`takenChunkBytes` counts. CyteArc's codec pipelines hand each
+        decoded chunk back to the read's event loop, which copies and places
+        its values before it takes the next, so a read holds one such copy
+        however many chunks it decodes at once; Zarr's fused pipeline copies
+        them on its pool's threads, one for each chunk it decodes at once.
         """
         touched = max(1, int(chunks))
         decoding, reading = self.readsAtOnce(touched, decodes, shards)
         result = max(0, int(resultBytes))
         held = self.heldDecodeBytes(touched, decoding)
-        index = self.indexBytes(indexes)
-        taken = max(0, int(takenBytes))
+        copies = reading * decoding if self.fusedPoolWorkers else 1
+        indexed = self.indexBytes(indexes) + copies * max(0, int(takenBytes))
         if self.shards is None:
             return (
                 result
-                + decoding * (self.storedChunkBytes() + self.readScratchBytes + taken)
+                + decoding * (self.storedChunkBytes() + self.readScratchBytes)
                 + held
-                + index
+                + indexed
             )
         decoded = self.nominalChunkBytes()
         shard = (
             touched * (self.storedChunkBytes() - decoded)
-            + decoding * (decoded + taken)
+            + decoding * decoded
             + held
             + self.readScratchBytes
             + max(0, int(gapBytes))
         )
-        return 2 * result + reading * shard + index
+        return 2 * result + reading * shard + indexed
 
     def binOf(self, axis: int, indices: np.ndarray) -> np.ndarray:
         """Map indices along one axis to the chunk they live in."""
