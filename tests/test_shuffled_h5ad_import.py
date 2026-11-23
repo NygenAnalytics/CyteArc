@@ -895,7 +895,11 @@ def test_counts_are_written_once_from_the_rows_of_their_own_import(tmp_path) -> 
     ("options", "error", "message"),
     [
         ({"shuffle_cells": 1}, TypeError, "shuffle_cells must be a boolean"),
-        ({"shuffle_seed": -1}, ValueError, "shuffle_seed must be at least 0"),
+        (
+            {"shuffle_seed": -1},
+            ValueError,
+            re.escape("shuffle_seed must be from 0 to 2**64 - 1, not -1"),
+        ),
         ({"shuffle_seed": 2.0}, TypeError, "shuffle_seed must be an integer"),
     ],
 )
