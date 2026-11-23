@@ -2365,6 +2365,142 @@ def test_a_merge_records_each_source_of_a_merged_source_in_every_assay(tmp_path)
     assert measured is not None and measured.measured.tolist() == inner_genes
 
 
+def _stored_cells_of_source(source: DataStore) -> dict[str, dict[str, dict[str, int]]]:
+    """Return each cell's RNA and ADT counts by feature ID of an opened source, keyed by cell ID."""
+    ids = np.asarray(source.cells.fetch_all("ids")).astype(str)
+    assays = {
+        assay: (
+            np.asarray(source.get_assay(assay).feats.fetch_all("ids")).astype(str),
+            np.asarray(source.get_assay(assay).rawData.compute()),
+        )
+        for assay in ("RNA", "ADT")
+    }
+    return {
+        cell: {
+            assay: dict(zip(features.tolist(), counts[row].tolist(), strict=True))
+            for assay, (features, counts) in assays.items()
+        }
+        for row, cell in enumerate(ids)
+    }
+
+
+def _stored_cells(location: str) -> dict[str, dict[str, Any]]:
+    """Return each stored cell's source label and RNA and ADT counts by feature ID, keyed by cell ID."""
+    root = zarr.open_group(location, mode="r")
+    ids = np.asarray(root["cellData/ids"][:]).astype(str)
+    categories = np.asarray(root["cellData/__cytearc_categories__dataset"][:]).astype(
+        str
+    )
+    labels = categories[np.asarray(root["cellData/dataset"][:])]
+    assays = {
+        assay: (
+            np.asarray(root[f"{assay}/featureData/ids"][:]).astype(str),
+            np.asarray(root[f"{assay}/counts"][:]),
+        )
+        for assay in ("RNA", "ADT")
+    }
+    return {
+        cell: {
+            "source": str(label),
+            **{
+                assay: dict(zip(features.tolist(), counts[row].tolist(), strict=True))
+                for assay, (features, counts) in assays.items()
+            },
+        }
+        for row, (cell, label) in enumerate(zip(ids, labels, strict=True))
+    }
+
+
+# Cell columns are written in windows of merged rows: all of them at once, or
+# 7 at a time, so that each window takes a few rows of each source.
+@pytest.mark.parametrize("window_rows", [None, 7])
+def test_a_merge_of_a_merged_store_keeps_each_cells_counts_and_source_in_its_interleaved_order(
+    tmp_path, monkeypatch, window_rows
+):
+    import cytearc.merge.metadata as merge_metadata
+
+    def panel_source(n_cells: int, panel: Sequence[str], first: int) -> DataStore:
+        # Every count is unique, numbered from ``first``, so a cell's counts
+        # tell it apart.
+        counts = {
+            assay: (first + offset + np.arange(n_cells * width))
+            .reshape(n_cells, width)
+            .astype(np.uint16)
+            for assay, offset, width in (
+                ("RNA", 0, len(_GENES)),
+                ("ADT", 1000, len(panel)),
+            )
+        }
+        return _open(
+            _write_source(MemoryStore(), counts, ids={"RNA": _GENES, "ADT": panel})
+        )
+
+    # Two panels of 40 and 30 cells merge into the inner store, which a merge
+    # with a third store of 20 cells takes again.
+    inner = str(tmp_path / "inner.zarr")
+    DataStoreMerge(
+        [panel_source(40, _LEFT_PANEL, 0), panel_source(30, _RIGHT_PANEL, 5000)],
+        inner,
+        ["left", "right"],
+        seed=3,
+        nthreads=1,
+    ).dump()
+    outer = str(tmp_path / "outer.zarr")
+    if window_rows is not None:
+        monkeypatch.setattr(
+            merge_metadata,
+            "effective_metadata_segment_rows",
+            lambda metadata_plan, row_plan: window_rows,
+        )
+    DataStoreMerge(
+        [panel_source(20, ["CD3", "CD56"], 9000), _open(inner)],
+        outer,
+        ["third", "inner"],
+        seed=4,
+        nthreads=1,
+    ).dump()
+
+    inner_cells, outer_cells = _stored_cells(inner), _stored_cells(outer)
+    third_cells = _stored_cells_of_source(panel_source(20, ["CD3", "CD56"], 9000))
+    order = np.asarray(zarr.open_group(outer, mode="r")["cellData/ids"][:]).astype(str)
+    # The merge interleaves the third store's cells with the inner store's,
+    # and keeps the inner store's cells in the inner store's own order.
+    inner_order = np.asarray(zarr.open_group(inner, mode="r")["cellData/ids"][:])
+    taken = [cell for cell in order.tolist() if cell.startswith("inner__")]
+    assert taken == [f"inner__{cell}" for cell in inner_order.astype(str).tolist()]
+    third_rows = np.flatnonzero(np.char.startswith(order, "third__"))
+    assert third_rows.size == 20
+    assert third_rows[-1] - third_rows[0] + 1 > third_rows.size
+    assert len(outer_cells) == 90
+    # Cell by cell, by ID, an inner cell keeps the inner store's counts, zero
+    # for the antibodies its store lacks, and the inner store's source of it
+    # under the inner store's name; a third cell keeps its own.
+    for cell, inner_cell in inner_cells.items():
+        merged = outer_cells[f"inner__{cell}"]
+        assert merged["source"] == f"inner__{inner_cell['source']}"
+        assert cell.startswith(f"{inner_cell['source']}__")
+        for assay in ("RNA", "ADT"):
+            assert {
+                feature: value
+                for feature, value in merged[assay].items()
+                if feature in inner_cell[assay]
+            } == inner_cell[assay]
+            assert not any(
+                value
+                for feature, value in merged[assay].items()
+                if feature not in inner_cell[assay]
+            )
+    for cell, counts in third_cells.items():
+        merged = outer_cells[f"third__{cell}"]
+        assert merged["source"] == "third"
+        for assay in ("RNA", "ADT"):
+            assert {
+                feature: value
+                for feature, value in merged[assay].items()
+                if feature in counts[assay]
+            } == counts[assay]
+
+
 def test_a_merge_records_an_assay_only_for_the_sources_of_a_merged_store_that_hold_it(
     tmp_path,
 ):
