@@ -108,8 +108,7 @@ integrates modalities, and one for pooled CRISPR screens:
 - `ds.pipeline.rna()` filters cells on their QC metrics, scores the cell cycle, selects highly
   variable genes, normalizes them, reduces them with PCA, builds a neighbor graph, embeds it with
   UMAP, clusters it with Leiden at several resolutions, scores doublets, and ranks markers.
-- `ds.pipeline.atac()` filters cells, selects the most prevalent peaks, normalizes them with
-  TF-IDF, reduces them with LSI, and builds, embeds, and clusters a graph.
+- `ds.pipeline.atac()` filters cells, selects the most prevalent peaks, normalizes them with TF-IDF, reduces them with LSI, and builds, embeds, and clusters a graph; with `doublets=True` it also scores doublets on the LSI.
 - `ds.pipeline.adt()` leaves isotype controls out of the antibody panel, normalizes the panel with
   CLR, reduces it with PCA, and builds, embeds, and clusters a graph. It filters cells only when
   asked, because it usually analyzes the QC-passing cells of an RNA run. Its default pattern
@@ -225,6 +224,8 @@ compare it with the rate that the capture's loading leads one to expect. A doubl
 one type looks like a singlet and is rarely called. Cells between two populations, such as an
 intermediate state, can also score high, so check the markers of a cluster that is rich in
 predicted doublets before removing it as an artifact.
+
+An ATAC run scores doublets only when asked, with `doublets=True`, and removes nothing either. Its score finds doublets of two distinct cell types, such as a T cell and a monocyte; a doublet of two similar types, such as two T cell subsets, is often missed. A doublet that holds the fragments of both its cells also has more accessible peaks than a singlet, so read `ATAC_nFeatures` beside the score, and in a multiome dataset compare the calls of the RNA and ATAC runs of the same cells before removing any.
 
 ### Modalities of the same cells
 

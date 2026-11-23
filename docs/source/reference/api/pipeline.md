@@ -53,7 +53,7 @@ returns a durable, read-only {py:class}`~cytearc.PipelineRun` whose outputs are 
 | Recipe | Analyzes | Graph coordinates | Feature field | Off by default |
 | --- | --- | --- | --- | --- |
 | `rna` | an RNA assay | PCA of the highly variable genes | `highly_variable_features` | cell calling, hashing, Harmony, Paris, membership strength, LocalMAP, t-SNE |
-| `atac` | an ATAC assay of peak counts | LSI of the most prevalent peaks | `prevalent_peaks` | Harmony, Paris, membership strength, LocalMAP, t-SNE |
+| `atac` | an ATAC assay of peak counts | LSI of the most prevalent peaks | `prevalent_peaks` | Harmony, Paris, membership strength, LocalMAP, t-SNE, doublets |
 | `adt` | an ADT assay of antibody counts | PCA of the antibody panel | `panel` | filtering, Harmony, Paris, membership strength, LocalMAP, t-SNE |
 | `multimodal` | two or more completed runs of the same cells | none; it integrates the runs' graphs | none | Paris, membership strength, t-SNE |
 | `perturbation` | the RNA assay and the guide assay of a pooled CRISPR screen | none; E-distances and signatures read the PCA of the highly variable genes, or its Harmony correction | `highly_variable_features` | Harmony, Mixscape, association tests, clusters |
@@ -98,7 +98,7 @@ atac["lsi"]
 atac.features.fetch("prevalent_peaks")
 ```
 
-The `atac` recipe runs `input_snapshot`, `filtering`, `prevalent_peaks`, `normalization`, `lsi`, `harmony`, `ann_index`, `neighbors`, `connectivity`, `embedding_initialization`, `umap`, `localmap`, `leiden`, `paris`, `cluster_selection`, `membership_strength`, `tsne`, and `markers`.
+The `atac` recipe runs `input_snapshot`, `filtering`, `prevalent_peaks`, `normalization`, `lsi`, `harmony`, `ann_index`, `neighbors`, `connectivity`, `embedding_initialization`, `umap`, `localmap`, `leiden`, `paris`, `cluster_selection`, `membership_strength`, `tsne`, `doublets`, and `markers`.
 
 By default it filters cells on `<assay>_nCounts` and `<assay>_nFeatures` with MAD bounds, keeps the 10,000 most prevalent peaks (`features.prevalent_peaks` `top_n`), normalizes them with the assay's normalizer, TF-IDF for an ATAC assay ([Normalization method](#normalization-method)), and reduces them to 11 LSI dimensions without the first component (`reduction.lsi` `dims` and `skip_first`). It then builds, embeds, and clusters a graph and ranks markers as the RNA recipe does. With Harmony, the run corrects its LSI coordinates.
 
@@ -107,6 +107,8 @@ whichever is smaller, and a given `top_n` must be below the assay's number of pe
 the resolved `top_n`. The LSI needs `dims` prevalent peaks, one more when `skip_first` leaves out
 the first component, so `lsi` `dims` with that component must not exceed `top_n`, and `skip_first`
 must be a boolean.
+
+`doublets=True` scores doublets after the run clusters, with the keywords of `qc.doublets`, as the RNA recipe does ([Doublets and Harmony](#doublets-and-harmony)). The simulated doublets are weighted by TF-IDF and projected onto the run's LSI ([Doublet detection](../reference/methods#doublet-method)), so the run must normalize with `"tf_idf"`, the ATAC default, and its ANN index must measure Euclidean distances, `ann_index` `ann_metric="l2"`, the default. Doublet scoring is off by default, so a run recorded before the ATAC recipe scored doublets replays as it ran.
 
 ### ADT
 
@@ -274,7 +276,7 @@ run = ds.pipeline.rna(
 | `leiden` | all but `perturbation` | {py:meth}`~cytearc.datastore.namespaces.ClustersAccessor.leiden` | `partitions`, `selected`, `backend`, `random_seed`, `symmetric_graph`, `graph_upper_only` |
 | `paris` | all but `perturbation` | {py:meth}`~cytearc.datastore.namespaces.ClustersAccessor.paris` | `n_clusters`, `min_cluster_size` |
 | `membership_strength` | all but `perturbation` | {py:meth}`~cytearc.datastore.namespaces.ClustersAccessor.membership_strength` | none; a bool |
-| `doublets` | `rna` | {py:meth}`~cytearc.datastore.namespaces.QcAccessor.doublets` | `cluster_sample_fraction`, `max_cells_per_cluster`, `sample_column`, `simulation_ratio`, `heterotypic_fraction`, `save_k`, `expected_doublet_rate`, `threshold`, `smoothing_t`, `normalize_scores`, `random_seed` |
+| `doublets` | `rna`, `atac` | {py:meth}`~cytearc.datastore.namespaces.QcAccessor.doublets` | `cluster_sample_fraction`, `max_cells_per_cluster`, `sample_column`, `simulation_ratio`, `heterotypic_fraction`, `save_k`, `expected_doublet_rate`, `threshold`, `smoothing_t`, `normalize_scores`, `random_seed` |
 | `markers` | all but `perturbation` | {py:meth}`~cytearc.datastore.namespaces.MarkersAccessor.search` | none; a bool |
 | `guide_calling` | `perturbation` | {py:meth}`~cytearc.datastore.namespaces.PerturbationAccessor.call_guides`, or {py:meth}`~cytearc.datastore.namespaces.PerturbationAccessor.import_guide_calls` with `path` | `method`, `min_umi`, `fraction_threshold`, `sample_column`; or `path`, `barcode_prefix`, `barcode_suffix` and `barcode_pattern` |
 | `labels` | `perturbation` | {py:meth}`~cytearc.datastore.namespaces.PerturbationAccessor.labels` | `controls` (required), `target_column`, `targets`, `policy` |
@@ -334,13 +336,12 @@ Pearson residuals are already standardized, so the PCA of a run of residuals sca
 
 A recipe checks its call against the store before it creates a run record, and a call that fails a check raises an error such as `TypeError`, `ValueError`, or `KeyError` without writing anything. Unknown keywords or settings, settings without a JSON value, a bool for a stage that always runs, an assay of another modality, missing columns, `cells` that select no cell, cells that an assay did not measure, reserved snapshot fields, invalid stage combinations, settings that a stage's method refuses, and an already completed label fail this way. Among the errors:
 
-- `doublets and markers require at least one Leiden candidate` (`rna` with `leiden=False`;
-  `atac` and `adt` raise `markers require at least one Leiden candidate`), and
-  `membership_strength requires at least one Leiden candidate`;
+- `doublets and markers require at least one Leiden candidate` (`rna` with `leiden=False`; `atac` names the stages that the call turns on, such as `markers require at least one Leiden candidate`, and `adt` raises that message), and `membership_strength requires at least one Leiden candidate`;
 - `pca={'dims': 0} builds the graph on normalized values, which Harmony cannot correct; ...` and
   `pca={'dims': 0} builds the graph on normalized values, but doublet scoring needs a PCA graph; ...`;
 - `The run normalizes assay 'RNA' with ..., but doublet scoring normalizes its simulated doublets by library size and needs lib_size; ...` (`rna` with doublet scoring on, when the run normalizes with another normalizer, such as `"pearson_residuals"`): pass `normalization={"method": "lib_size"}` or `doublets=False`;
 - `pca={'feat_scaling': False} fits PCA without feature scaling, but doublet scoring projects its simulated doublets onto the PCA through a mapping reference, which needs feature scaling; ...` (`rna` with doublet scoring on): pass `doublets=False`, or omit `feat_scaling`, which defaults to True for library-size values;
+- `The run normalizes assay 'ATAC' with ..., but doublet scoring weights its simulated doublets by TF-IDF and needs tf_idf; ...` and `ann_index={'ann_metric': 'cosine'} builds the graph on cosine distances, but doublet scoring of an ATAC assay scores cells by Euclidean distances in the LSI; ...` (`atac` with doublet scoring on): pass `doublets=False`, or keep the TF-IDF normalizer and the `"l2"` metric;
 - `normalization['method'] must be one of [...], or the identity of a custom normalizer that a run recorded; ...`, `Assay 'ATAC' opens as ATACassay, but lib_size needs an RNAassay; ...`, and `normalization['method'] is the custom normalizer ..., which a run applies only as the assay's normMethod, ...` ([Normalization method](#normalization-method));
 - `PCA settings need dims above 0; dims=0 skips PCA`, for other `pca` settings beside `dims=0`;
 - `leiden selected must be one of the partitions`;
@@ -700,16 +701,7 @@ which holds a sample of the cells and one block of coordinates at a time.
 
 ### Doublets and Harmony
 
-`harmony={"batch_columns": [...]}` corrects the run's reduced coordinates, PCA or LSI, and the main
-graph then uses the Harmony coordinates. Doublets form only within one capture, so when an `rna` run
-with Harmony scores doublets, it simulates and scores them within each batch, the cells that share
-every Harmony batch label, on the uncorrected PCA coordinates that Harmony started from; no other
-graph is built. `doublets={"sample_column": ...}` names the column of each cell's capture instead,
-and cannot be None with Harmony. Without Harmony, doublets are scored within each sample of that
-column, or across every cell when it is omitted. The input snapshot stage freezes the sample labels
-as its `doublet_sample_snapshot` output and the Harmony batch labels as its `harmony_snapshot`
-output, apart from the cell snapshot that filtering reads ([Run snapshots](#run-snapshots)), and the
-run configuration records the doublet sample columns as `doubletSampleColumns`.
+`harmony={"batch_columns": [...]}` corrects the run's reduced coordinates, PCA or LSI, and the main graph then uses the Harmony coordinates. Doublets form only within one capture, so when an `rna` or `atac` run with Harmony scores doublets, it simulates and scores them within each batch, the cells that share every Harmony batch label, on the uncorrected PCA or LSI coordinates that Harmony started from; no other graph is built. `doublets={"sample_column": ...}` names the column of each cell's capture instead, and cannot be None with Harmony. Without Harmony, doublets are scored within each sample of that column, or across every cell when it is omitted. The input snapshot stage freezes the sample labels as its `doublet_sample_snapshot` output and the Harmony batch labels as its `harmony_snapshot` output, apart from the cell snapshot that filtering reads ([Run snapshots](#run-snapshots)), and the run configuration records the doublet sample columns as `doubletSampleColumns`.
 
 The `doublets` stage simulates doublets from any two cells of a sample by default. With
 `doublets={"heterotypic_fraction": ...}` above 0, it forces that share of the simulated doublets to
@@ -767,7 +759,7 @@ highly_variable_features, normalized, pca, ann_index, neighbors, connectivity_ma
 embedding_initialization, umap, cluster_selection, clusters, doublets, markers, leiden
 ```
 
-Optional stages add their outputs in place: `cell_calling`, `called_cell_selection`, `hashing`, and `hashed_cell_selection` after `input_cell_selection`; `harmony` after `pca`; `localmap` after `umap`; `paris` after `localmap`; and `membership_strength` and `tsne` after `clusters`. A run with `leiden` `selected` has no `cluster_selection` output. `leiden`, the one output that holds several refs, comes after the others. Runs of earlier releases have one output per Leiden candidate in its place, such as `leiden_1.0` after `umap`, and no `leiden` output.
+Optional stages add their outputs in place: `cell_calling`, `called_cell_selection`, `hashing`, and `hashed_cell_selection` after `input_cell_selection`; `harmony` after `pca`; `localmap` after `umap`; `paris` after `localmap`; `membership_strength` and `tsne` after `clusters`; and an `atac` run's `doublets` before `markers`. A run with `leiden` `selected` has no `cluster_selection` output. `leiden`, the one output that holds several refs, comes after the others. Runs of earlier releases have one output per Leiden candidate in its place, such as `leiden_1.0` after `umap`, and no `leiden` output.
 
 A default `atac` run has:
 
@@ -846,7 +838,7 @@ view.head(n=5)
 | `paris` | cells | Paris runs |
 | `clusters` | cells | a Leiden candidate is saved; the other candidates have no field, and `run["leiden"]` holds them all |
 | `membership_strength` | cells | `membership_strength=True` |
-| `doublet_score`, `predicted_doublet` | cells | an `rna` run scores doublets |
+| `doublet_score`, `predicted_doublet` | cells | an `rna` or `atac` run scores doublets |
 | `weight_<assay>` | cells | a WNN `multimodal` run, one per assay |
 | `guide_call`, `perturbation_label`, `is_control` | cells | a `perturbation` run |
 | `mixscape_class`, `mixscape_posterior` | cells | a `perturbation` run calls Mixscape |
@@ -886,7 +878,7 @@ table for the run's clusters.
 
 ### Run configuration
 
-`run.report()["run"]["config"]` records how the run was called. For `rna`, `atac`, and `adt`, it holds `cells` (`{"column": ...}`, `{"selection": ref}`, or `{"run": {"runId", "label"}, "selection": ref}`), `snapshotColumns`, `species`, `doubletSampleColumns` (`rna` only), `stages`, and `shutdown`, the signal protection of the run. `stages` maps each stage keyword to the settings that the call gave it, `False` for an optional stage that the call turned off, and a bool for `membership_strength` and `markers`. The recipe resolves a few of them: `normalization` records its `method`, `pca` its `dims`, `prevalent_peaks` its `top_n`, `leiden` its `partitions` and `selected` resolution, `panel` its `exclude` pattern and the `excluded` names, and the `unmeasured` antibodies when it leaves any out, `hashing` its `assay`, and `filtering` the filter's parameters. A multimodal run records `method`, `sources` (each run's `runId`, `label`, `recipe`, and `assay`), `cells` (`{"selection": ref}`), `snapshotColumns`, `stages`, and `shutdown`.
+`run.report()["run"]["config"]` records how the run was called. For `rna`, `atac`, and `adt`, it holds `cells` (`{"column": ...}`, `{"selection": ref}`, or `{"run": {"runId", "label"}, "selection": ref}`), `snapshotColumns`, `species`, `doubletSampleColumns` (`rna`, and `atac` runs recorded since the ATAC recipe scores doublets), `stages`, and `shutdown`, the signal protection of the run. `stages` maps each stage keyword to the settings that the call gave it, `False` for an optional stage that the call turned off, and a bool for `membership_strength` and `markers`. The recipe resolves a few of them: `normalization` records its `method`, `pca` its `dims`, `prevalent_peaks` its `top_n`, `leiden` its `partitions` and `selected` resolution, `panel` its `exclude` pattern and the `excluded` names, and the `unmeasured` antibodies when it leaves any out, `hashing` its `assay`, and `filtering` the filter's parameters. A multimodal run records `method`, `sources` (each run's `runId`, `label`, `recipe`, and `assay`), `cells` (`{"selection": ref}`), `snapshotColumns`, `stages`, and `shutdown`.
 
 A `perturbation` run records `cells`, `snapshotColumns`, `guideAssay`, the guide assay, `profileLabels`, the output whose cells the profiles average (`"mixscape"` for knocked-out cells, the default in a run with Mixscape, `"perturbation_labels"` for every labeled cell, and None without clusters), `stages`, and `shutdown`. Its `stages` record `False` for `signature` without Mixscape and for `profiles` without clusters, and a `guide_calling` `path` as the text of the path.
 

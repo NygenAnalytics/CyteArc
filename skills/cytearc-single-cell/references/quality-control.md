@@ -347,13 +347,7 @@ corrected = ds.pipeline.rna(label="soupx", assay="RNA_soupx", cells=first)  # th
 
 ### Doublet scores
 
-The `rna` recipe scores doublets by default (it needs a graph and a clustering), as Scrublet does:
-`doublet_score` is the probability that a cell is a doublet and `predicted_doublet` the call
-above its sample's automatic threshold. Doublets form within one capture, so with several
-captures pass the capture column: `doublets={"sample_column": "sample"}`; a Harmony run scores
-within its batch columns by default. Do not pass HTO identities: hashed samples share a capture.
-High-RNA types such as plasma cells score high as a whole, so check calls and scores within their
-cluster and require co-expressed markers of two lineages before removing cells.
+The `rna` recipe scores doublets by default (it needs a graph and a clustering), as Scrublet does: `doublet_score` is the probability that a cell is a doublet and `predicted_doublet` the call above its sample's automatic threshold. The `atac` recipe scores them on its LSI with `doublets=True`, and `qc.doublets` scores an ATAC graph built on an LSI of TF-IDF values with an `ann_metric="l2"` index. Doublets form within one capture, so with several captures pass the capture column: `doublets={"sample_column": "sample"}`; a Harmony run scores within its batch columns by default. Do not pass HTO identities: hashed samples share a capture. High-RNA types such as plasma cells score high as a whole, so check calls and scores within their cluster and require co-expressed markers of two lineages before removing cells.
 
 ```python
 scores = pd.Series(np.asarray(scaffold.cells.fetch("doublet_score")))

@@ -472,15 +472,8 @@ over the pooled selection. Supplying `sample_column` estimates MAD bounds separa
 are retained with a warning, including small pooled selections. Pass `method="gaussian"`
 explicitly to use the former pooled Gaussian policy and configure its `min_p` and `max_p`
 quantiles. Changing these probabilities with either MAD path raises an error.
-{py:meth}`cytearc.datastore.namespaces.QcAccessor.doublets` scores and calls doublets the way
-Scrublet does, within each sample of `sample_column`, the column of each cell's capture: doublets
-are simulated from pairs of the sample's own cells and every cell is scored against its sample's
-cells and simulated doublets only, so no doublet pairs cells of two captures. Each sample gets its
-own automatic threshold on its simulated doublets' scores, or the given `threshold`. The
-`doublet_score` artifact holds the score in `values`, the fraction of simulated doublets among a
-cell's neighbors in `raw_scores`, and the calls in `predicted_doublets`; its `samples` attribute
-lists each sample's threshold, calls, and estimated doublet rate
-([Doublet detection](../reference/methods#doublet-method)):
+
+{py:meth}`cytearc.datastore.namespaces.QcAccessor.doublets` scores and calls doublets the way Scrublet does, within each sample of `sample_column`, the column of each cell's capture: doublets are simulated from pairs of the sample's own cells and every cell is scored against its sample's cells and simulated doublets only, so no doublet pairs cells of two captures. The simulated doublets of an RNA assay are projected onto the graph's PCA, and those of an ATAC assay are weighted by TF-IDF and projected onto its LSI. Each sample gets its own automatic threshold on its simulated doublets' scores, or the given `threshold`. The `doublet_score` artifact holds the score in `values`, the fraction of simulated doublets among a cell's neighbors in `raw_scores`, and the calls in `predicted_doublets`; its `samples` attribute lists each sample's threshold, calls, and estimated doublet rate ([Doublet detection](../reference/methods#doublet-method)):
 
 ```python
 doublets = ds.qc.doublets(cluster_ref, graph_ref, sample_column="sample")
