@@ -1066,7 +1066,7 @@ CyteArc validates persisted data and public arguments against the following cont
 - Pipeline t-SNE settings get the checks of `embeddings.tsne` when the recipe is resolved, before a run
   record exists. A missing `sgtsnepi` only logs a warning there, because a stored embedding can be
   reused without it.
-- One writer per store is the documented contract: write a store from one process at a time.
+- Several processes may write one store at once: analysis calls and runs write only their own artifacts and run records, and the calls that rewrite shared state, such as table edits, assay changes and `artifacts.prune_incomplete(dry_run=False)`, need the store to themselves ([Several processes on one store](../concepts/provenance.md#several-processes-on-one-store)).
 - Importers no longer delete their destination (`cytearc.storage.destinations`). They and
   `SubsetZarr` raise `FileExistsError` for a destination that holds any key, and `ValueError` for a
   local destination inside a Zarr store or a destination whose root group is an assay group. Each

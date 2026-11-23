@@ -1,3 +1,4 @@
+import re
 import types
 
 from typing import Any
@@ -20,7 +21,7 @@ from cytearc.storage.copy import (
     copy_metadata_array,
     copy_zarr_array,
     copy_zarr_group_tree,
-    create_or_open_staged_normed_array,
+    stage_normed_array,
 )
 from cytearc.storage.layout import (
     ZarrArraySpec,
@@ -1620,6 +1621,13 @@ def _recorded_producer_bytes(monkeypatch):
     return recorded
 
 
+def _staging_target(path, shape: tuple[int, int]) -> zarr.Array:
+    """Make an empty array as a local copy of normalized values is staged."""
+    root = zarr.open_group(path, mode="w", use_consolidated=False)
+    spec = normed_array_spec(shape[0], shape[1], profile="fast_local")
+    return create_numeric_array(root, "data", spec)
+
+
 def test_copying_an_unsharded_array_reserves_its_chunk_as_stored_and_decoded(
     tmp_path, monkeypatch
 ):
@@ -1633,7 +1641,7 @@ def test_copying_an_unsharded_array_reserves_its_chunk_as_stored_and_decoded(
     assert source.chunks == (16, 8)
     expected = np.random.default_rng(1).random((64, 8), dtype=np.float32)
     source[:] = expected
-    target = create_or_open_staged_normed_array(str(tmp_path / "staged"), (64, 8))
+    target = _staging_target(tmp_path / "staged", (64, 8))
 
     copy_zarr_array(source, target, resources=ResourceBudget(1024**2, 1))
 
@@ -1734,7 +1742,7 @@ def test_copying_a_sharded_array_reserves_its_shard_read(tmp_path, monkeypatch):
     assert (source.shards, source.chunks) == ((32, 8), (8, 8))
     expected = np.random.default_rng(2).random((64, 8), dtype=np.float32)
     source[:] = expected
-    target = create_or_open_staged_normed_array(str(tmp_path / "staged"), (64, 8))
+    target = _staging_target(tmp_path / "staged", (64, 8))
     assert target.chunks == (64, 8)
 
     copy_zarr_array(source, target, resources=ResourceBudget(1024**2, 1))
@@ -1879,31 +1887,100 @@ def test_copy_group_tree_preserves_padded_byte_string_fingerprint(tmp_path):
     )
 
 
-def test_staged_normed_array_reuses_matching_shape(tmp_path):
-    path = str(tmp_path / "cache" / "normalized.zarr")
-    first = create_or_open_staged_normed_array(path, (32, 4))
-    first[:] = 1
-    reopened = create_or_open_staged_normed_array(path, (32, 4))
-    np.testing.assert_array_equal(reopened[:], np.ones((32, 4), dtype=np.float32))
+def _normalized_source(path, shape: tuple[int, int], seed: int = 0) -> zarr.Array:
+    root = zarr.open_group(path, mode="w", use_consolidated=False)
+    source = create_numeric_array(
+        root,
+        "data",
+        normed_array_spec(shape[0], shape[1], profile="fast_local"),
+    )
+    source[:] = np.random.default_rng(seed).random(shape, dtype=np.float32)
+    return source
 
 
-def test_staged_normed_array_of_another_shape_or_without_data_starts_anew(tmp_path):
-    path = str(tmp_path / "cache" / "normalized.zarr")
-    first = create_or_open_staged_normed_array(path, (32, 4))
-    first[:] = 1
-    first.attrs["complete"] = True
-    # A cache of another shape is replaced by an empty array, which its
-    # caller fills again since it is not marked complete.
-    resized = create_or_open_staged_normed_array(path, (16, 4))
-    assert resized.shape == (16, 4)
-    assert "complete" not in resized.attrs
-    np.testing.assert_array_equal(resized[:], np.zeros((16, 4), dtype=np.float32))
-    # A cache group that lost its array, as an interrupted write can leave it,
-    # is made again too.
-    zarr.open_group(path, mode="w", use_consolidated=False)
-    remade = create_or_open_staged_normed_array(path, (16, 4))
-    assert remade.shape == (16, 4)
-    np.testing.assert_array_equal(remade[:], np.zeros((16, 4), dtype=np.float32))
+def test_a_staged_copy_is_placed_whole_and_read_by_later_calls(tmp_path, monkeypatch):
+    import cytearc.storage.copy as copy_module
+
+    source = _normalized_source(tmp_path / "source.zarr", (32, 4))
+    cache = tmp_path / "cache" / "artifact"
+    staged = stage_normed_array(str(cache / "normed.zarr"), source)
+    np.testing.assert_array_equal(staged[:], source[:])
+    # The copy was made beside its place and moved there once complete.
+    assert sorted(path.name for path in cache.iterdir()) == ["normed.zarr"]
+    assert staged.attrs["complete"] is True
+
+    def refuse(*args, **kwargs):
+        raise AssertionError("a placed copy is read, not copied again")
+
+    monkeypatch.setattr(copy_module, "copy_zarr_array", refuse)
+    again = stage_normed_array(str(cache / "normed.zarr"), source)
+    np.testing.assert_array_equal(again[:], source[:])
+
+
+def test_a_copy_that_another_process_places_first_is_read_instead(
+    tmp_path, monkeypatch
+):
+    import cytearc.storage.copy as copy_module
+
+    source = _normalized_source(tmp_path / "source.zarr", (32, 4))
+    # Another process's copy, of other values so that the test tells it from
+    # this call's own, is placed while this call copies.
+    other = _normalized_source(tmp_path / "other.zarr", (32, 4), seed=1)
+    cache = tmp_path / "cache" / "artifact"
+    copy = copy_module.copy_zarr_array
+
+    def copy_while_another_process_places_its_copy(src, dst, **kwargs):
+        copy(src, dst, **kwargs)
+        monkeypatch.setattr(copy_module, "copy_zarr_array", copy)
+        stage_normed_array(str(cache / "normed.zarr"), other)
+
+    monkeypatch.setattr(
+        copy_module, "copy_zarr_array", copy_while_another_process_places_its_copy
+    )
+    staged = stage_normed_array(str(cache / "normed.zarr"), source)
+    np.testing.assert_array_equal(staged[:], other[:])
+    # This call's own copy is removed.
+    assert sorted(path.name for path in cache.iterdir()) == ["normed.zarr"]
+
+
+def test_a_failed_staging_leaves_nothing_in_the_cache(tmp_path, monkeypatch):
+    import cytearc.storage.copy as copy_module
+
+    source = _normalized_source(tmp_path / "source.zarr", (32, 4))
+    cache = tmp_path / "cache" / "artifact"
+
+    def fail(*args, **kwargs):
+        raise OSError("the store could not be read")
+
+    monkeypatch.setattr(copy_module, "copy_zarr_array", fail)
+    with pytest.raises(OSError, match="the store could not be read"):
+        stage_normed_array(str(cache / "normed.zarr"), source)
+    assert list(cache.iterdir()) == []
+    monkeypatch.undo()
+    staged = stage_normed_array(str(cache / "normed.zarr"), source)
+    np.testing.assert_array_equal(staged[:], source[:])
+
+
+@pytest.mark.parametrize("left", ["incomplete", "another shape", "no array"])
+def test_a_copy_that_an_earlier_release_left_incomplete_is_refused(tmp_path, left):
+    source = _normalized_source(tmp_path / "source.zarr", (32, 4))
+    cache = tmp_path / "cache" / "artifact" / "normed.zarr"
+    # Earlier releases staged in place, so an interrupted staging left its
+    # copy there, unfinished.
+    if left == "no array":
+        zarr.open_group(cache, mode="w", use_consolidated=False)
+    else:
+        held = _staging_target(cache, (32, 4) if left == "incomplete" else (16, 4))
+        if left == "another shape":
+            held.attrs["complete"] = True
+    before = sorted(str(path) for path in cache.rglob("*"))
+    with pytest.raises(
+        RuntimeError,
+        match=rf"^The local cache folder {re.escape(str(cache))} holds an incomplete copy",
+    ):
+        stage_normed_array(str(cache), source)
+    assert sorted(str(path) for path in cache.rglob("*")) == before
+    assert sorted(path.name for path in cache.parent.iterdir()) == ["normed.zarr"]
 
 
 def test_remote_store_requires_obstore(monkeypatch):

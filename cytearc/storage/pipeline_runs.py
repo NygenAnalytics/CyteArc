@@ -1675,18 +1675,6 @@ def _get_group(root: zarr.Group, path: str, name: str) -> zarr.Group:
     return as_zarr_group(node, name=path)
 
 
-def _ensure_group(root: zarr.Group, path: str) -> zarr.Group:
-    current = root
-    current_path = ""
-    for part in path.split("/"):
-        current_path = f"{current_path}/{part}".strip("/")
-        if part in current:
-            current = as_zarr_group(current[part], name=current_path)
-        else:
-            current = current.create_group(part)
-    return current
-
-
 def _read_attrs(group: zarr.Group) -> dict[str, Any]:
     return {str(key): value for key, value in group.attrs.items()}
 
@@ -1748,11 +1736,13 @@ def create_pipeline_run_record(
         interruption=None,
     )
     try:
-        # One metadata write creates the run with its record.
-        group = _ensure_group(root, PIPELINE_RUNS_PATH).create_group(
-            record.run_id, attributes=record.to_dict()
+        # One metadata write creates the run with its record. Zarr writes each
+        # missing group above it with set_if_not_exists, so runs that start at
+        # once on a store without runs do not fail on each other's groups.
+        group = root.create_group(
+            pipeline_run_path(record.run_id), attributes=record.to_dict()
         )
-    except (ContainsArrayError, ContainsGroupError) as exc:
+    except ContainsGroupError as exc:
         raise FileExistsError(f"Pipeline run already exists: {record.run_id}") from exc
     group.create_group("stages")
     return record

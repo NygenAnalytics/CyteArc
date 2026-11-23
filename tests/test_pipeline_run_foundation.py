@@ -8,7 +8,9 @@ import numpy as np
 import pytest
 import zarr
 from zarr.core.sync import sync
-from zarr.storage import MemoryStore
+from zarr.abc.store import ByteRequest, Store
+from zarr.core.buffer import Buffer, BufferPrototype
+from zarr.storage import LocalStore, MemoryStore, WrapperStore
 
 import cytearc.storage.pipeline_runs as pipeline_run_storage
 from cytearc.datastore.pipeline_run import (
@@ -919,6 +921,148 @@ def test_terminal_label_claim_is_process_safe(tmp_path: Any) -> None:
     assert owner.run_id == next(
         result[1] for result in results if result[0] == "completed"
     )
+
+
+class _GroupsSeenMissing(WrapperStore[Store]):
+    """A store whose first read of each named key finds nothing.
+
+    A process that looked a group up just before another process created it
+    sees the store this way.
+    """
+
+    def __init__(self, store: Store, keys: set[str]) -> None:
+        super().__init__(store)
+        self.unseen = set(keys)
+
+    async def get(
+        self,
+        key: str,
+        prototype: BufferPrototype,
+        byte_range: ByteRequest | None = None,
+    ) -> Buffer | None:
+        if key in self.unseen:
+            self.unseen.remove(key)
+            return None
+        return await self._store.get(key, prototype, byte_range)
+
+
+def test_a_run_starts_when_another_process_creates_the_groups_of_runs_meanwhile(
+    tmp_path: Any,
+) -> None:
+    location = str(tmp_path / "runs.zarr")
+    # Another process has just created the groups that hold runs, after this
+    # process looked them up and found nothing.
+    zarr.open_group(location, mode="w").create_group("pipeline/runs")
+    store = _GroupsSeenMissing(
+        LocalStore(location), {"pipeline/zarr.json", "pipeline/runs/zarr.json"}
+    )
+    record = create_pipeline_run_record(
+        zarr.open_group(store=store, mode="r+"),
+        recipe="rna",
+        requested_label=None,
+        assay="RNA",
+        config={},
+        stage_order=("one",),
+        cytearc_version="1.0",
+    )
+    # The call read both groups as missing, so it met the race.
+    assert store.unseen == set()
+    listed = list_pipeline_run_records(zarr.open_group(location, mode="r"))
+    assert [run.run_id for run in listed] == [record.run_id]
+
+
+def test_a_run_refuses_a_store_whose_runs_are_not_a_group() -> None:
+    root = zarr.open_group(store=MemoryStore(), mode="w")
+    root.create_group("pipeline").create_array("runs", shape=(0,), dtype="uint8")
+    # The error names the array in the way, not a run that already exists.
+    with pytest.raises(ValueError, match="pipeline/runs"):
+        create_pipeline_run_record(
+            root,
+            recipe="rna",
+            requested_label=None,
+            assay="RNA",
+            config={},
+            stage_order=("one",),
+            cytearc_version="1.0",
+        )
+    assert list(root["pipeline"].keys()) == ["runs"]
+
+
+def _writable_store(location: str, kind: str) -> Store:
+    if kind == "fsspec":
+        from zarr.storage import FsspecStore
+
+        return FsspecStore.from_url(
+            f"file://{location}", storage_options={"auto_mkdir": True}
+        )
+    return LocalStore(location)
+
+
+def _start_runs_in_process(
+    locations: list[str], kind: str, barrier: Any, result_queue: Any
+) -> None:
+    started: list[str] = []
+    try:
+        for location in locations:
+            root = zarr.open_group(store=_writable_store(location, kind), mode="r+")
+            barrier.wait(timeout=60)
+            try:
+                record = create_pipeline_run_record(
+                    root,
+                    recipe="rna",
+                    requested_label=None,
+                    assay="RNA",
+                    config={},
+                    stage_order=("one",),
+                    cytearc_version="1.0",
+                )
+            except Exception as exc:
+                started.append(f"{type(exc).__name__}: {exc}")
+            else:
+                started.append(record.run_id)
+    except BaseException:
+        # The other processes stop waiting for this one.
+        barrier.abort()
+        raise
+    finally:
+        result_queue.put(started)
+
+
+@pytest.mark.parametrize("kind", ["local", "fsspec"])
+def test_runs_that_start_together_in_separate_processes_are_all_recorded(
+    tmp_path: Any, kind: str
+) -> None:
+    # Each round, four processes start a run at once on a store without runs.
+    locations = [str(tmp_path / f"round-{index}.zarr") for index in range(20)]
+    for location in locations:
+        zarr.open_group(location, mode="w")
+    context = multiprocessing.get_context("spawn")
+    barrier = context.Barrier(4)
+    result_queue = context.Queue()
+    processes = [
+        context.Process(
+            target=_start_runs_in_process,
+            args=(locations, kind, barrier, result_queue),
+        )
+        for _ in range(4)
+    ]
+    try:
+        for process in processes:
+            process.start()
+        started = [result_queue.get(timeout=300) for _ in processes]
+        for process in processes:
+            process.join(timeout=60)
+    finally:
+        for process in processes:
+            if process.is_alive():
+                process.terminate()
+                process.join(timeout=5)
+
+    assert [len(run_ids) for run_ids in started] == [len(locations)] * 4
+    for index, location in enumerate(locations):
+        returned = sorted(run_ids[index] for run_ids in started)
+        listed = list_pipeline_run_records(zarr.open_group(location, mode="r"))
+        assert sorted(run.run_id for run in listed) == returned, (index, returned)
 
 
 @pytest.mark.parametrize("stale_kind", ("failed", "interrupted", "orphaned"))

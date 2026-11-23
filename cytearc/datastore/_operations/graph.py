@@ -118,10 +118,7 @@ from ...storage.diagnostics import (
 )
 from ...storage.errors import ArtifactResolutionError
 from ...storage.finite_values import FiniteRowWriter, write_finite_array
-from ...storage.copy import (
-    copy_zarr_array,
-    create_or_open_staged_normed_array,
-)
+from ...storage.copy import stage_normed_array
 from ...storage.budget import ResourceBudget
 from ...storage.geometry import array_geometry
 from ...storage.layout import (
@@ -935,8 +932,6 @@ class _GraphOperationsMixin(_GraphOperationsBase):
         except AttributeError:
             cache = {}
             self._normalizedArtifactCache = cache
-        # A staging copy that fails or is interrupted is removed with the rest
-        # of a temporary cache directory.
         try:
             if cache_base is None:
                 raise RuntimeError("Local cache path is missing")
@@ -946,19 +941,7 @@ class _GraphOperationsMixin(_GraphOperationsBase):
                 ref.artifact_id,
                 "normed.zarr",
             )
-            os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-            staged = create_or_open_staged_normed_array(
-                cache_path,
-                (int(source.shape[0]), int(source.shape[1])),
-            )
-            if not bool(staged.attrs.get("complete", False)):
-                copy_zarr_array(
-                    source,
-                    staged,
-                    msg="Staging normalized data locally",
-                    resources=self.resources,
-                )
-                staged.attrs["complete"] = True
+            staged = stage_normed_array(cache_path, source, resources=self.resources)
             cache[ref] = ChunkedArray(
                 staged,
                 block_size=batch_size,

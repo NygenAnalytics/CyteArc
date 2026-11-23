@@ -1,3 +1,6 @@
+import os
+import shutil
+import uuid
 from collections.abc import Callable, Iterator
 from functools import partial
 from pathlib import Path
@@ -469,18 +472,62 @@ def validate_metadata_dependencies(
     return masks
 
 
-def create_or_open_staged_normed_array(
+def stage_normed_array(
     cache_path: str,
-    shape: tuple[int, int],
+    source: zarr.Array,
+    *,
+    resources: ResourceBudget | None = None,
 ) -> zarr.Array:
-    """Open or create a reusable local normalized-data array."""
+    """Return the complete local copy of normalized ``source`` at ``cache_path``.
+
+    A copy is made in a folder of its own beside ``cache_path`` and renamed
+    into place once complete, so processes that share a cache folder never
+    write into, or remove, a copy that another reads. Of processes that stage
+    one array at once, the first rename places its copy, and the others read
+    it and remove their own.
+
+    Raises:
+        RuntimeError: If ``cache_path`` holds an incomplete copy, as an
+            interrupted staging of an earlier release left one in place.
+    """
+    shape = (int(source.shape[0]), int(source.shape[1]))
+    if not _holds_normed_array(cache_path, shape):
+        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+        folder = f"{cache_path}.{uuid.uuid4().hex}.staging"
+        try:
+            root = zarr.open_group(Path(folder), mode="w-", use_consolidated=False)
+            spec = normed_array_spec(shape[0], shape[1], profile="fast_local")
+            staged = create_numeric_array(root, "data", spec)
+            copy_zarr_array(
+                source,
+                staged,
+                msg="Staging normalized data locally",
+                resources=resources,
+            )
+            staged.attrs["complete"] = True
+            try:
+                os.rename(folder, cache_path)
+            except OSError:
+                # Another process placed its copy first, which is read instead.
+                if not _holds_normed_array(cache_path, shape):
+                    raise
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
+    root = zarr.open_group(Path(cache_path), mode="r", use_consolidated=False)
+    return as_zarr_array(root["data"], name="data")
+
+
+def _holds_normed_array(cache_path: str, shape: tuple[int, int]) -> bool:
+    """Return whether ``cache_path`` holds a complete copy of this shape."""
     path = Path(cache_path)
-    if (path / "zarr.json").exists():
-        root = zarr.open_group(path, mode="r+", use_consolidated=False)
-        if "data" in root:
-            array = as_zarr_array(root["data"], name="data")
-            if tuple(array.shape) == tuple(shape):
-                return array
-    root = zarr.open_group(path, mode="w", use_consolidated=False)
-    spec = normed_array_spec(shape[0], shape[1], profile="fast_local")
-    return create_numeric_array(root, "data", spec)
+    if not (path / "zarr.json").exists():
+        return False
+    root = zarr.open_group(path, mode="r", use_consolidated=False)
+    array = as_zarr_array(root["data"], name="data") if "data" in root else None
+    if array is None or array.shape != shape or array.attrs.get("complete") is not True:
+        raise RuntimeError(
+            f"The local cache folder {cache_path} holds an incomplete copy, as an "
+            "interrupted staging of an earlier CyteArc release leaves one. Remove "
+            "it once no process uses this cache, and call again."
+        )
+    return True
