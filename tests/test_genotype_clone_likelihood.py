@@ -28,6 +28,7 @@ from cytearc.utils.memory_budget import MemoryLedger
 from cytearc.variants import genotype_clones as clones_module
 from cytearc.variants import genotype_mixture as mixture_module
 from cytearc.variants.genotype_clones import (
+    MAX_WIDENINGS,
     _removal_deltas,
     genotype_clone_rules,
     likelihood_clones,
@@ -1000,6 +1001,78 @@ def test_the_search_stops_at_the_most_clones_a_fit_may_hold(monkeypatch) -> None
     ]
 
 
+def test_the_search_stops_merging_clones_at_its_rounds_cap(monkeypatch) -> None:
+    from cytearc.variants import genotype_clones
+
+    # Four clones, of which the merge rounds join one to another.
+    truth = dropout_truth(n_cells=800, n_sites=24, n_clones=4, dropout=0.2, seed=15)
+    true_genotypes = {genotype.tobytes() for genotype in truth.genotypes}
+    merged = _call(truth.calls)
+    merged_genotypes = {genotype.tobytes() for genotype in merged.genotypes}
+    assert len(merged.sizes) == 3 and merged_genotypes < true_genotypes
+
+    # With no round, the fit keeps the clone that a merge would join.
+    monkeypatch.setattr(genotype_clones, "MAX_MERGE_ROUNDS", 0)
+    kept = _call(truth.calls)
+    assert len(kept.sizes) == 4
+    assert {genotype.tobytes() for genotype in kept.genotypes} == true_genotypes
+
+
+def test_a_seed_widens_its_sites_at_most_as_often_as_it_may(monkeypatch) -> None:
+    from cytearc.variants import genotype_clones
+
+    split_fit = genotype_clones.split_fit
+    fit_seed = genotype_clones._Search.fit_seed
+    running: list[int] = []
+    fits: list[tuple[int, int]] = []
+
+    def counted_split(*arguments):
+        running[-1] += 1
+        return split_fit(*arguments)
+
+    def counted_seed(self, fit, context, start, widenings):
+        running.append(0)
+        try:
+            return fit_seed(self, fit, context, start, widenings)
+        finally:
+            fits.append((widenings, running.pop()))
+
+    monkeypatch.setattr(genotype_clones, "split_fit", counted_split)
+    monkeypatch.setattr(genotype_clones._Search, "fit_seed", counted_seed)
+    _call(dropout_truth(n_cells=2_000, n_sites=40, n_clones=8, seed=2).calls)
+
+    # A seed fits once without widenings, and once more for each widening it
+    # takes; on this truth, one seed would widen further than it may.
+    assert {count for widenings, count in fits if widenings == 0} == {1}
+    widened = [count for widenings, count in fits if widenings == MAX_WIDENINGS]
+    assert min(widened) == 1 and max(widened) == MAX_WIDENINGS + 1
+
+
+def test_em_of_one_iteration_keeps_its_start(monkeypatch) -> None:
+    truth = dropout_truth(n_cells=600, n_sites=20, n_clones=3, seed=7)
+    mutant, wild = _packed(truth.calls)
+    mixture = GenotypeMixture(
+        mutant,
+        wild,
+        20,
+        dropout_probability=None,
+        error_probability=None,
+        ledger=MemoryLedger(None, "Calling clones"),
+    )
+    start = MixtureFit(
+        truth.genotypes.copy(), np.log(np.full(4, 1 / 4)), mixture.initial_rates()
+    )
+    # One iteration scores the start and stops; a second updates it, and EM
+    # never lowers the log-likelihood.
+    one = mixture.em(start, max_iter=1)
+    np.testing.assert_array_equal(one.genotypes, truth.genotypes)
+    np.testing.assert_array_equal(one.log_weights, np.log(np.full(4, 1 / 4)))
+    assert one.loglik == one.first_loglik
+    two = mixture.em(start, max_iter=2)
+    assert two.first_loglik == one.loglik
+    assert two.loglik > two.first_loglik
+
+
 def test_proposals_that_no_joint_bound_accepts_end_the_search(monkeypatch) -> None:
     from cytearc.variants import genotype_clones
 
@@ -1391,8 +1464,9 @@ def test_a_split_fit_gains_the_evidence_bound_of_its_planted_children(
     if max_iter > 1:
         # Converged, each cell's share is its posterior of the first child,
         # at which the bound is the log-likelihood, and the children are the
-        # planted ones.
-        assert steps < max_iter
+        # planted ones. The first iteration has no gain to compare with, so
+        # convergence takes two at least.
+        assert 2 <= steps < max_iter
         assert bound == pytest.approx(exact, rel=1e-9)
         assert site_gain + rest_gain > 0
         np.testing.assert_array_equal(first, children[0])

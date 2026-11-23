@@ -17,12 +17,13 @@ if int(os.environ.get("PYTEST_XDIST_WORKER_COUNT", "1")) > 1:
     os.environ.setdefault("OMP_WAIT_POLICY", "PASSIVE")
 
 import functools
+import signal
 import sys
 
 import pytest
 from threadpoolctl import threadpool_limits
 
-from cytearc.utils import configure_output, logger
+from cytearc.utils import configure_output, logger, set_verbosity
 
 
 def _lock_numba_cache_files() -> None:
@@ -100,12 +101,47 @@ def _share_numba_threads():
         numba.set_num_threads(previous)
 
 
+def quiet_cytearc_output() -> None:
+    """Put CyteArc's output back in the state that the suite keeps it in.
+
+    CyteArc's settings return to the library's defaults without progress bars,
+    and loguru keeps one handler, which writes errors to stderr, so a test
+    captures only what it prints. A test that changes CyteArc's output calls
+    this from a fixture's teardown; restoring the library's defaults instead
+    would show CyteArc's INFO lines in every later test of the process.
+
+    Never call it while capsys captures a test's output: loguru keeps the
+    stream that ``sys.stderr`` names when the handler is added, and capsys
+    closes its stream when the test ends, so every later error record of the
+    process would fail to write.
+    """
+    set_verbosity("INFO")
+    configure_output(progress=False, timestamps=False)
+    logger.remove()
+    logger.add(sys.stderr, level="ERROR")
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _quiet_test_logs() -> None:
     """Keep pytest output readable while standalone CLIs retain INFO logs."""
-    configure_output(progress=False)
-    logger.remove()
-    logger.add(sys.stderr, level="ERROR")
+    quiet_cytearc_output()
+
+
+@pytest.fixture(autouse=True)
+def _sigint_handler_restored() -> None:
+    """Fail a test that leaves SIGINT's handler other than the one it found.
+
+    Python's own handler turns Ctrl-C into KeyboardInterrupt; a test that
+    replaces it and does not put it back would keep later tests of its worker
+    from being interrupted. The handler is restored before the failure, so a
+    leak is reported once.
+    """
+    found = signal.getsignal(signal.SIGINT)
+    yield
+    left = signal.getsignal(signal.SIGINT)
+    if left != found:
+        signal.signal(signal.SIGINT, found)
+        pytest.fail(f"The test left SIGINT's handler {left!r} in place of {found!r}")
 
 
 @pytest.fixture(autouse=True)

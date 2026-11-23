@@ -719,6 +719,30 @@ def test_the_estimate_of_every_row_scales_each_samples_counts_by_its_rows(
     assert found == expected
 
 
+@pytest.mark.parametrize("compiled", [True, False], ids=["jit", "python"])
+def test_each_samples_size_counts_the_distinct_keys_of_both_lists(compiled) -> None:
+    kernel = histograms._sample_sizes if compiled else histograms._sample_sizes.py_func
+    n_samples, n_guides = 3, 2
+    rng = np.random.default_rng(31)
+    for trial in range(200):
+        drawn = rng.integers(0, n_samples * n_guides, size=(2, 12), dtype=np.uint64)
+        counts = rng.integers(33, 37, size=(2, 12), dtype=np.uint64)
+        both = (drawn << np.uint64(32)) | counts
+        # The merged keys are distinct; a run repeats keys, some of them held.
+        keys = np.unique(both[0, : int(rng.integers(0, 13))])
+        run = np.sort(both[1, : int(rng.integers(0, 13))])
+        if trial % 3 == 0:
+            run = np.sort(np.concatenate([run, keys[: len(keys) // 2]]))
+        sizes = np.zeros(n_samples, dtype=np.int64)
+        kernel(keys, run, n_guides, sizes)
+        distinct = np.union1d(keys, run)
+        expected = np.bincount(
+            (distinct >> np.uint64(32)).astype(np.int64) // n_guides,
+            minlength=n_samples,
+        )
+        np.testing.assert_array_equal(sizes, expected)
+
+
 def test_the_estimate_names_what_the_ledger_holds_beside_the_histograms() -> None:
     # The same merge stops the histograms whether or not the ledger holds
     # 50,000 bytes beside them, and the estimate, like needed_bytes, adds

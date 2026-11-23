@@ -406,6 +406,17 @@ def test_detect_workers_skips_unreadable_quotas_and_affinity(monkeypatch):
     assert detect_workers() == 3
 
 
+def test_detect_workers_without_cpu_affinity_takes_the_cpu_count(monkeypatch):
+    # macOS and Windows have no os.sched_getaffinity; cgroups set no quota.
+    monkeypatch.delattr("os.sched_getaffinity", raising=False)
+    monkeypatch.setattr(budget_module, "_cpu_quota_workers", lambda: None)
+    monkeypatch.setattr("os.cpu_count", lambda: 6)
+    assert detect_workers() == 6
+    # A platform that cannot count its CPUs runs one worker.
+    monkeypatch.setattr("os.cpu_count", lambda: None)
+    assert detect_workers() == 1
+
+
 def test_cpu_quotas_of_zero_cpus_or_a_zero_period_set_no_limit(monkeypatch):
     _serve_files(
         monkeypatch,

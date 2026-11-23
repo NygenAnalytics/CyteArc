@@ -192,7 +192,11 @@ def fit_poisson(
         cholesky_solve(factor, gradient, step)
         scale = 1.0
         candidate = current
-        for _half in range(60):
+        # A small enough share of the step raises the concave log-likelihood,
+        # or leaves it unchanged in floating point, so the halvings end in a
+        # break: no fit of more cells than coefficients, from the start that
+        # callers give, takes all 60.
+        for _half in range(60):  # pragma: no branch
             for c in range(p):
                 trial[c] = coefficients[c] + scale * step[c]
             log_linear_means(covariates, trial, eta, mu)
@@ -615,7 +619,8 @@ def fit_logistic(
             break
         scale = 1.0
         candidate = current
-        for _half in range(60):
+        # As in fit_poisson, the halvings end in a break.
+        for _half in range(60):  # pragma: no branch
             for c in range(p):
                 trial[c] = coefficients[c] + scale * step[c]
             logistic_probabilities(covariates, trial, eta, probabilities)

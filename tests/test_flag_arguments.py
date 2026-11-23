@@ -23,7 +23,6 @@ from typing import Any
 import numpy as np
 import pytest
 
-import cytearc
 import cytearc.plotting as splt
 from cytearc.assay import ADTassay, ATACassay, Assay, RNAassay
 from cytearc.datastore import namespaces
@@ -35,6 +34,7 @@ from cytearc.metadata import MetaData
 from cytearc.plotting import PlotOutputSettings
 from cytearc.regulons import ModuleParameters
 from cytearc.utils.arguments import bool_argument, optional_bool_argument
+from tests.conftest import quiet_cytearc_output
 from tests.stack_modules import STACK_MODULES
 from tests.storage_helpers import by_cell_id, open_store, write_count_store
 
@@ -292,18 +292,8 @@ def flag_store(tmp_path_factory):
 
 @pytest.fixture
 def restored_output_settings():
-    from cytearc.utils import logging as cytearc_logging
-
-    saved = dataclasses.replace(cytearc_logging._config)
-    try:
-        yield
-    finally:
-        cytearc.configure_output(
-            level=saved.level,
-            progress=saved.progress,
-            timestamps=saved.timestamps,
-            stdlib=saved.stdlib,
-        )
+    yield
+    quiet_cytearc_output()
 
 
 def test_the_surface_holds_the_flags_of_every_namespace_and_plot() -> None:

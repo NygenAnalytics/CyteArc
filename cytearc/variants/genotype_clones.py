@@ -666,9 +666,10 @@ class _Search:
         carried_wild, carried_all, absent_mutant, absent_all = context.stats
         first_full = child.copy()
         second_full = remaining.copy()
-        site_gain = mixing = share = 0.0
-        first_mutant = first_wild = np.empty(0)
-        for widening in range(widenings + 1):
+        assert widenings >= 0
+        widening = 0
+        # The last widening, or one that finds no more sites, ends the loop.
+        while True:
             ledger.peak(
                 f"fitting a split of {len(rows)} cells at {len(candidates)} sites",
                 split_fit_bytes(len(rows), len(candidates), n_sites),
@@ -760,6 +761,7 @@ class _Search:
             second_full[extra] = remaining_all[extra]
             candidates = np.sort(np.concatenate([candidates, extra]))
             first_share = float(np.clip(share, 0.05, 0.95))
+            widening += 1
         gain = site_gain + mixing
         total = float(weights.sum())
         if total * share < self.min_size or total * (1 - share) < self.min_size:

@@ -1804,7 +1804,9 @@ def _fragment_matrix(
 
 
 @pytest.mark.parametrize("matrix_type", ["PeakMatrix", "TileMatrix"])
-def test_fragment_contribution_windows_skip_other_cells(matrix_type: str) -> None:
+def test_fragment_contributions_cover_every_cell(matrix_type: str) -> None:
+    # One fragment of each cell, each in a block of its own, inside the one
+    # peak or tile [0, 10).
     fragments = _RecordFragments(
         [(0, 0, 1, 4), (0, 1, 2, 5), (0, 2, 3, 6)],
         ["chr1"],
@@ -1819,9 +1821,11 @@ def test_fragment_contribution_windows_skip_other_cells(matrix_type: str) -> Non
         transpose=True,
     )
     assert isinstance(source, FragmentDerivedMatrixSource)
-    assert list(source._contributions(1, 2)) == [(0, 0, 1)]
-    assert list(source._contributions(2, 2)) == []
+    # Transposed, the cells are the rows.
+    assert list(source._contributions()) == [(0, 0, 1), (1, 0, 1), (2, 0, 1)]
     np.testing.assert_array_equal(source.read_cells(0, 3).toarray(), [[1], [1], [1]])
+    for row in range(3):
+        np.testing.assert_array_equal(source.read_cells(row, row + 1).toarray(), [[1]])
 
 
 @pytest.mark.parametrize("transpose", [True, False])
@@ -2267,7 +2271,7 @@ def test_fragment_wrappers_yield_only_blocks_that_hold_fragments() -> None:
     assert _fragment_records(merged) == [(0, 2, 3, 7), (1, 1, 2, 3)]
 
 
-def test_untransposed_tile_windows_skip_the_tiles_outside_them() -> None:
+def test_untransposed_tile_contributions_place_each_fragment_in_its_tiles() -> None:
     # Tiles [0, 10) and [10, 20) of chr1. Each fragment inserts at its start
     # and end - 1: a in tile 0 alone, b in tiles 0 and 1, c in tile 1 alone.
     fragments = _RecordFragments(
@@ -2282,11 +2286,11 @@ def test_untransposed_tile_windows_skip_the_tiles_outside_them() -> None:
     )
     assert isinstance(source, FragmentDerivedMatrixSource)
     # Untransposed, the tiles are the rows: tile 0 holds a and b, tile 1 b and c.
-    assert list(source._contributions(0, 1)) == [(0, 0, 1), (0, 1, 1)]
-    assert list(source._contributions(1, 2)) == [(0, 1, 1), (0, 2, 1)]
+    assert list(source._contributions()) == [(0, 0, 1), (0, 1, 1), (1, 1, 1), (1, 2, 1)]
     np.testing.assert_array_equal(
         source.read_cells(0, 2).toarray(), [[1, 1, 0], [0, 1, 1]]
     )
+    np.testing.assert_array_equal(source.read_cells(1, 2).toarray(), [[0, 1, 1]])
 
 
 def test_rank_transform_matches_bpcells_zero_offset_and_ties() -> None:
@@ -2730,9 +2734,9 @@ def test_fragment_conversion_does_not_rescan_for_each_window(tmp_path, monkeypat
     original = underlying._contributions
     scans = []
 
-    def count_scan(start, stop):
-        scans.append((start, stop))
-        yield from original(start, stop)
+    def count_scan():
+        scans.append("scan")
+        yield from original()
 
     monkeypatch.setattr(underlying, "_contributions", count_scan)
     source.estimate_read_memory(0, 1)
@@ -2741,7 +2745,7 @@ def test_fragment_conversion_does_not_rescan_for_each_window(tmp_path, monkeypat
     pieces = [source.read_cells(i, i + 1).toarray() for i in range(3)]
     np.testing.assert_array_equal(np.vstack(pieces), source.read_cells(0, 3).toarray())
     # The row store places each fragment's counts as it reads them once.
-    assert scans == [(0, 3)]
+    assert scans == ["scan"]
 
 
 @pytest.mark.parametrize("sparse", [False, True])

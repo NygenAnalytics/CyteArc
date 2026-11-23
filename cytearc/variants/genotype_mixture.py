@@ -960,6 +960,7 @@ def split_fit(
         child's share, the new rates, the first child's expected mutant and
         wild-type calls, and the iterations run.
     """
+    assert max_iter >= 1
     n_rows = local_mutant.shape[0]
     n_local = parent.shape[0]
     old = 0.0
@@ -1022,7 +1023,8 @@ def split_fit(
     site_gain = 0.0
     share = 0.5
     iteration = 0
-    for iteration in range(max_iter):
+    # Convergence, or the last iteration, ends the loop.
+    while True:
         # Genotypes from the counts with the rates so far.
         for column in range(n_local):
             rate_dropout = _clip(new_dropout[column])
@@ -1123,6 +1125,7 @@ def split_fit(
         _split_counts(
             local_mutant, local_wild, weights, shares, first_mutant, first_wild
         )
+        iteration += 1
     return (
         site_gain,
         gain - site_gain,
@@ -1474,6 +1477,7 @@ class GenotypeMixture:
         the ledger until :meth:`release` lets them go; ``start`` should hold
         none.
         """
+        assert max_iter >= 1
         genotypes = start.genotypes.copy()
         log_weights = start.log_weights.copy()
         rates = start.rates
@@ -1503,7 +1507,9 @@ class GenotypeMixture:
         previous = -np.inf
         loglik = -np.inf
         first_loglik = -np.inf
-        for iteration in range(1, max_iter + 1):
+        iteration = 1
+        # Convergence, or the last iteration, ends the loop.
+        while True:
             self.relative(genotypes, rates, relative)
             _posteriors(relative, log_weights, posteriors, sums)
             loglik = float(sums.sum()) + self.baseline(rates)
@@ -1535,6 +1541,7 @@ class GenotypeMixture:
             log_weights = np.log(np.maximum(totals, _LEAST_MASS) / self.n_cells)
             del totals
             rates = self.update_rates(genotypes, mutant, wild)
+            iteration += 1
         del sums, mass, scratch, bits
         ledger.release(scratch_bytes)
         return MixtureFit(

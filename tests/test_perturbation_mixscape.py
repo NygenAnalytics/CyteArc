@@ -70,8 +70,8 @@ CARRIED, KNOCKED, RNA, GUIDES, COORDINATES, RUNS = _screen()
 N_CELLS = len(RNA)
 
 
-def _signature(store: DataStore, cells=None):
-    """A signature of genes 5 to 59 over every cell, from labels of ``cells``."""
+def _signature(store: DataStore, cells=None, genes: range = range(5, N_GENES)):
+    """A signature of ``genes``, by default 5 to 59, over every cell, from labels of ``cells``."""
     calls = store.perturbation.call_guides(
         cells or store.select_measured_cells("CRISPR"), method="fixed", min_umi=10
     )
@@ -82,7 +82,7 @@ def _signature(store: DataStore, cells=None):
         cell_selection=rna_cells,
         name="X",
     )
-    features = store.features.snapshot(feature_indexes=np.arange(5, N_GENES))
+    features = store.features.snapshot(feature_indexes=np.asarray(genes))
     return store.perturbation.signature(
         labels, coordinates, features=features, dims=10, n_neighbors=10
     )
@@ -166,6 +166,30 @@ def test_mixscape_separates_knocked_out_cells_from_escapers(store, template) -> 
         "cell_selection",
     }
     assert status.parameters["perturbation_type"] == "KO"
+
+
+@pytest.mark.parametrize(
+    ("genes", "inside"),
+    [(range(N_GENES), True), (range(30, N_GENES), False)],
+    ids=["every_gene", "no_de_gene"],
+)
+def test_de_genes_inside_or_outside_the_signature_find_the_knocked_out_cells(
+    store, genes, inside
+) -> None:
+    # The DE genes of GENE_A, its planted genes 0 to 9 and two that differ by
+    # chance, all lie in the signature's genes or all outside them, where
+    # their signatures are computed from the counts.
+    classes = store.perturbation.mixscape(_signature(store, genes=genes))
+
+    result = store.perturbation.load_mixscape(classes)
+    de_genes = set(result.de_genes.query("target == 'GENE_A'")["feature"])
+    assert {f"RNA{index}" for index in range(10)} <= de_genes
+    signature_genes = {f"RNA{index}" for index in genes}
+    assert de_genes & signature_genes == (de_genes if inside else set())
+    cells = result.cells
+    assert cells["global_class"].iloc[:N_A].eq("KO").to_numpy().tolist() == (
+        KNOCKED[:N_A].tolist()
+    )
 
 
 def test_mixscape_classifies_each_split_apart(store, template) -> None:

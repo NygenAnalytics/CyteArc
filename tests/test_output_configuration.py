@@ -1,3 +1,4 @@
+import io
 import json
 import re
 import subprocess
@@ -6,14 +7,14 @@ import sys
 import pytest
 
 from cytearc.utils import configure_output, logger, set_verbosity
-from cytearc.utils.logging import _config, progress_enabled
+from cytearc.utils.logging import _config, _OutputConfig, progress_enabled
+from tests.conftest import quiet_cytearc_output
 
 
 @pytest.fixture(autouse=True)
 def _restore_output_configuration():
     yield
-    set_verbosity("INFO")
-    configure_output(progress=False, timestamps=False)
+    quiet_cytearc_output()
 
 
 def test_import_defaults_are_notebook_first_in_isolated_process():
@@ -86,6 +87,29 @@ def test_reconfiguration_tolerates_a_stale_cytearc_handler(capsys):
     logger.debug("restored")
 
     assert capsys.readouterr().out == "DEBUG: restored\n"
+
+
+def test_quieting_the_output_keeps_only_errors_on_stderr(tmp_path, monkeypatch):
+    log_file = tmp_path / "cytearc.log"
+    set_verbosity("DEBUG", str(log_file))
+    configure_output(progress=True, timestamps=True)
+    # Streams that stay open after the test, unlike those of capsys, since
+    # the handler keeps the stderr that it is added with.
+    stdout, stderr = io.StringIO(), io.StringIO()
+    monkeypatch.setattr(sys, "stdout", stdout)
+    monkeypatch.setattr(sys, "stderr", stderr)
+
+    quiet_cytearc_output()
+    logger.info("an INFO line")
+    logger.warning("a warning")
+    logger.error("an error")
+
+    assert stdout.getvalue() == ""
+    assert stderr.getvalue().endswith(" - an error\n")
+    assert "an INFO line" not in stderr.getvalue()
+    assert "a warning" not in stderr.getvalue()
+    assert log_file.read_text(encoding="utf-8") == ""
+    assert _config == _OutputConfig(progress=False)
 
 
 @pytest.mark.parametrize("setting", ["progress", "timestamps"])

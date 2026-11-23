@@ -1443,11 +1443,15 @@ def test_high_moi_pairs_keep_their_tests_whatever_else_is_tested(screen) -> None
     pd.testing.assert_frame_equal(alone, every.loc[[("ENH_B", "RNA2")]])
 
 
-def test_high_moi_held_and_streamed_counts_agree(screen, monkeypatch) -> None:
+@pytest.mark.parametrize("n_tested", [N_SCREEN_GENES, 2])
+def test_high_moi_held_and_streamed_counts_agree(screen, monkeypatch, n_tested) -> None:
     from cytearc.datastore._operations import perturbation_associations as operations
 
-    store, labels, genes = screen
-    arguments = {"features": genes, "moi": "high", "n_calibration_pairs": 20}
+    store, labels, _genes = screen
+    # The calibration's control groups count every gene; with 2 genes tested,
+    # the second band of the QC holds none of them.
+    tested = store.features.snapshot(feature_indexes=np.arange(n_tested))
+    arguments = {"features": tested, "moi": "high", "n_calibration_pairs": 20}
     held = store.perturbation.load_associations(
         store.perturbation.associations(labels, **arguments, **FAST)
     )
@@ -1464,6 +1468,11 @@ def test_high_moi_held_and_streamed_counts_agree(screen, monkeypatch) -> None:
 
     for name in ("discovery", "calibration", "positive"):
         pd.testing.assert_frame_equal(getattr(streamed, name), getattr(held, name))
+    # Each tested gene's cells and expressing cells, against the planted calls.
+    for row in held.discovery.itertuples():
+        group = CALLED[:, SCREEN_GUIDES[row.target]].any(axis=1)
+        gene = int(row.feature.removeprefix("RNA"))
+        assert _qc_of(row) == _expected_qc(group, gene)
 
 
 def test_high_moi_refuses_a_budget_without_room_for_one_gene(screen) -> None:
