@@ -12,6 +12,7 @@ import json
 import multiprocessing
 import re
 import shutil
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -40,7 +41,7 @@ _CHAIN_INPUTS = {
     "lineage_membership": ("curves",),
     "branch_cells": ("lineage_membership",),
     "lineage_markers": ("fate",),
-    "drivers": ("fate",),
+    "drivers": ("fate", "branch_cells"),
     "lineage_aggregation": ("fate",),
     "states": (),
 }
@@ -82,7 +83,10 @@ def _chain(
     made["lineage_markers"] = trajectory.lineage_markers(
         made["fate"], features=refs["hvgs"]
     )
-    made["drivers"] = trajectory.drivers(made["fate"], features=refs["hvgs"])
+    # A keyword input: the cells where two lineages part.
+    made["drivers"] = trajectory.drivers(
+        made["fate"], features=refs["hvgs"], cells=made["branch_cells"], lineages=[2, 3]
+    )
     made["lineage_aggregation"] = trajectory.lineage_aggregation(
         made["fate"], features=refs["hvgs"], n_bins=12, n_clusters=5
     )
@@ -265,7 +269,11 @@ def test_a_changed_argument_computes_its_call_and_every_call_that_takes_its_resu
     assert plan["fate"].status == "computed"
     assert plan["fate"].reason == "changed"
     assert plan["fate"].changed_parameters == ("sinks",)
+    assert plan["fate"].changed_inputs == ()
     assert plan["fate"].existing == chained.made["fate"]
+    assert plan["fate"].detail == (
+        "The closest run_fate_mapping artifact differs in parameters sinks"
+    )
     waiting = ("curves", "lineage_membership", "branch_cells", "lineage_markers")
     for name in (*waiting, "drivers", "lineage_aggregation"):
         assert plan[name].reason == "upstream"
@@ -280,6 +288,38 @@ def test_a_changed_argument_computes_its_call_and_every_call_that_takes_its_resu
 
     made, receipts = _run_recorded(ds, chained.refs, chained.score, sinks=(2, 3))
     _assert_plan_matches_run(plan, made, receipts)
+
+
+@pytest.mark.slow
+def test_a_feature_call_whose_inputs_exist_computes_with_what_differs(
+    chained, tmp_path
+) -> None:
+    location = _copy(chained.location, tmp_path)
+    ds = _open(location)
+    fate, refs = chained.made["fate"], chained.refs
+    with ds.trajectory.plan() as plan:
+        ds.trajectory.lineage_markers(fate, features=refs["detected"])
+        ds.trajectory.lineage_markers(fate, features=refs["hvgs"], min_cells=5)
+    other_features, fewer_cells = plan.calls
+    assert (other_features.reason, fewer_cells.reason) == ("changed", "changed")
+    assert other_features.changed_inputs == ("feature_selection",)
+    assert other_features.changed_parameters == ()
+    assert other_features.detail == (
+        "The closest run_lineage_marker_search artifact differs in inputs "
+        "feature_selection"
+    )
+    assert fewer_cells.changed_parameters == ("min_cells",)
+    assert fewer_cells.changed_inputs == ()
+    assert other_features.existing == chained.made["lineage_markers"]
+    # The calls then compute what the plan named, a new artifact each.
+    for call, kwargs in (
+        (other_features, {"features": refs["detected"]}),
+        (fewer_cells, {"features": refs["hvgs"], "min_cells": 5}),
+    ):
+        with artifact_plan_scope() as receipts:
+            ds.trajectory.lineage_markers(fate, **kwargs)
+        created = [item.operation for item in receipts if item.disposition == "created"]
+        assert created[:1] == [call.operation]
 
 
 def _plan_in_process(location: str, refs: dict, score: pd.Series, results) -> None:
@@ -327,7 +367,7 @@ def test_the_limits_of_a_plans_block_name_what_to_do_instead(
     with pytest.raises(
         RuntimeError,
         match=r"^A call inside ds\.trajectory\.plan\(\) would compute a new "
-        r"run_leiden_clustering result, and a plan writes nothing\. .* make any "
+        r"run_leiden_clustering result, and a plan saves no result\. .* make any "
         r"other call before the plan or after its with block\.$",
     ):
         with ds.trajectory.plan():
@@ -365,10 +405,8 @@ def test_the_limits_of_a_plans_block_name_what_to_do_instead(
         r"ds\.trajectory\.plan\(\) to save its result, and pass the ref that it "
         r"returns\.$"
     )
-    with pytest.raises(TypeError, match="^inspect " + refused):
+    with pytest.raises(TypeError, match="^ref must be an ArtifactRef$"):
         ds.artifacts.inspect(planned)
-    with pytest.raises(TypeError, match="^load_pseudotime " + refused):
-        ds.trajectory.load_pseudotime(planned)
     with pytest.raises(TypeError, match="^fate " + refused):
         with ds.trajectory.plan():
             ds.trajectory.fate(planned, clusters, sinks=[2, 3])
@@ -376,10 +414,58 @@ def test_the_limits_of_a_plans_block_name_what_to_do_instead(
         ds.trajectory.fate(planned, clusters, sinks=[2, 3])
     assert _digest(location) == before
 
-    # After the block, the calls run and save their results unplanned.
+    # A reused call's plan is not its result either: pass its ref.
     tree = ds.trajectory.lineage_tree(graph, clusters, root=1)
+    with ds.trajectory.plan() as plan:
+        ds.trajectory.lineage_tree(graph, clusters, root=1)
+        reused = (
+            r"^drivers was given the plan of lineage_tree, call 0 of a trajectory "
+            r"plan, whose result the store holds\. Pass the result's ref, "
+            r"plan\[0\]\.ref, instead\.$"
+        )
+        with pytest.raises(TypeError, match=reused):
+            ds.trajectory.drivers(planned, features=refs["hvgs"], cells=plan[0])
+    with pytest.raises(TypeError, match="^fate " + reused[len("^drivers ") :]):
+        ds.trajectory.fate(plan[0], clusters, sinks=[2, 3])
+    assert plan[0].ref == tree
+    # After the block, and in another thread, the calls run unplanned.
     assert len(used.calls) == 1
     assert ds.artifacts.inspect(tree).complete
+    with ds.trajectory.plan() as plan:
+        with ThreadPoolExecutor(1) as pool:
+            elsewhere = pool.submit(
+                ds.trajectory.lineage_tree, graph, clusters, root=2
+            ).result()
+    assert plan.calls == ()
+    assert ds.artifacts.inspect(elsewhere).complete
+
+
+@pytest.mark.slow
+def test_a_pipeline_run_or_resume_refuses_to_start_in_a_plan(
+    datastore_zarr_root, tmp_path
+) -> None:
+    location = _copy(Path(datastore_zarr_root), tmp_path)
+    ds = _open(location)
+    settings = {"umap": False, "doublets": False, "markers": False, "cell_cycle": False}
+    paused = ds.pipeline.rna(run_until="pca", **settings)
+    assert paused.status == "paused"
+    before = _digest(location)
+    refusal = (
+        r"^A pipeline run writes its run and stage records, so it cannot run "
+        r"inside ds\.trajectory\.plan\(\), whose calls save nothing\. Run, rerun "
+        r"or resume it before the plan or after its with block\.$"
+    )
+    for start in (
+        lambda: ds.pipeline.rna(**settings),
+        lambda: ds.pipeline.resume(paused.run_id),
+        lambda: ds.pipeline.rerun(paused),
+    ):
+        with pytest.raises(RuntimeError, match=refusal):
+            with ds.trajectory.plan():
+                start()
+    assert _digest(location) == before
+    # The paused run still resumes after the block.
+    assert ds.pipeline.resume(paused.run_id).status == "completed"
 
 
 def test_a_plans_calls_are_found_by_position_or_name(clustered_store, tmp_path) -> None:
@@ -398,6 +484,11 @@ def test_a_plans_calls_are_found_by_position_or_name(clustered_store, tmp_path) 
             graph, source_sink=clusters, sources=[1], sinks=[3]
         )
         fate = ds.trajectory.fate(second, clusters, sinks=[3])
+        # Another root, and a call that asks to compute its result again.
+        rerooted = ds.trajectory.lineage_tree(graph, clusters, root=2)
+        again = ds.trajectory.lineage_tree(
+            graph, clusters, root=1, invalidate_cache=True
+        )
         # A call that refuses its arguments raises from the block, as it does
         # when it runs.
         with pytest.raises(SourceSinkLabelsError):
@@ -405,7 +496,7 @@ def test_a_plans_calls_are_found_by_position_or_name(clustered_store, tmp_path) 
                 graph, source_sink=clusters, sources=[1], sinks=[999]
             )
     reused = plan[0]
-    assert plan.calls == (reused, first, second, fate)
+    assert plan.calls == (reused, first, second, fate, rerooted, again)
     assert (reused.call, reused.status, reused.ref, reused.reason) == (
         "lineage_tree",
         "reused",
@@ -419,15 +510,37 @@ def test_a_plans_calls_are_found_by_position_or_name(clustered_store, tmp_path) 
         "It takes what pseudotime (call 2) would compute, so its identity is "
         "known only after that runs"
     )
+    # The closest tree is the stored one, made with another root.
+    assert rerooted.reason == "changed"
+    assert (rerooted.changed_parameters, rerooted.changed_inputs) == (("root",), ())
+    assert rerooted.existing == tree
+    assert rerooted.detail == (
+        "The closest build_lineage_tree artifact differs in parameters root"
+    )
+    assert (again.reason, again.existing) == ("invalidate_cache", None)
+    assert again.detail == (
+        "The call asks to compute the build_lineage_tree artifact again"
+    )
     with pytest.raises(KeyError, match=r"2 pseudotime calls, at positions \[1, 2\]"):
         plan["pseudotime"]
     with pytest.raises(KeyError, match="no curves call"):
         plan["curves"]
     with pytest.raises(IndexError):
-        plan[4]
-    with pytest.raises(TypeError, match="by position or name"):
-        plan[True]
-    assert plan.computed == ("pseudotime", "pseudotime", "fate")
+        plan[6]
+    assert repr(plan) == (
+        "TrajectoryPlan(6 calls, computed ['pseudotime', 'pseudotime', 'fate', "
+        "'lineage_tree', 'lineage_tree'], reused ['lineage_tree'])"
+    )
+    assert repr(fate) == "TrajectoryCallPlan(3 'fate' computed upstream on [2])"
+    assert repr(reused) == f"TrajectoryCallPlan(0 'lineage_tree' reused {tree!r})"
+    assert repr(rerooted) == "TrajectoryCallPlan(4 'lineage_tree' computed changed)"
+    assert plan.computed == (
+        "pseudotime",
+        "pseudotime",
+        "fate",
+        "lineage_tree",
+        "lineage_tree",
+    )
     assert plan.reused == ("lineage_tree",)
     stored = json.loads(json.dumps(plan.to_dict()))
     assert stored["calls"][0]["ref"] == tree.to_dict()
@@ -446,3 +559,8 @@ def test_a_plans_calls_are_found_by_position_or_name(clustered_store, tmp_path) 
     }
     assert stored["calls"][1]["operation"] == "run_pseudotime_scoring"
     assert stored["calls"][1]["reason"] == "absent"
+    assert stored["calls"][1]["detail"] == (
+        "The store holds no run_pseudotime_scoring artifact"
+    )
+    assert stored["calls"][4]["existing"] == tree.to_dict()
+    assert stored["calls"][4]["changedParameters"] == ["root"]

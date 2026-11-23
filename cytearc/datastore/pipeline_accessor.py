@@ -3,6 +3,7 @@ import inspect
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any, Literal
 
+from ..storage.artifact_writer import artifact_forecast_active
 from ..storage.artifacts import ArtifactRef
 from ..storage.pipeline_runs import (
     PipelineRunRecord,
@@ -384,6 +385,12 @@ class PipelineAccessor:
         )
 
     def _require_runnable(self, callback: PipelineCallback | None) -> None:
+        if artifact_forecast_active():
+            raise RuntimeError(
+                "A pipeline run writes its run and stage records, so it cannot "
+                "run inside ds.trajectory.plan(), whose calls save nothing. Run, "
+                "rerun or resume it before the plan or after its with block."
+            )
         if callback is not None and not callable(callback):
             raise TypeError("callback must be callable")
         if self._store.zarr_mode != "r+":

@@ -1333,23 +1333,31 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         holds, complete and current, returns the result's ref. A call that
         would compute returns its plan, a
         :class:`~cytearc.datastore.trajectory_plan.TrajectoryCallPlan` that
-        says why, in place of the ref, and a later call that takes that plan
-        is reported computed with the reason ``"upstream"``, since its result
-        depends on one that does not exist yet; it does not run. After the
-        block, the calls run as they always do.
+        says why, in place of the ref. A later call that takes that plan is
+        reported computed with the reason ``"upstream"``, since its result
+        depends on one that does not exist yet, and it does not run, so its
+        arguments are not checked until it runs. Pass a reused call's result
+        on as its ref, not its plan. After the block, the calls run as they
+        always do.
 
-        The plan writes nothing and works on a read-only store. Each call does
-        the work that it does before it looks for its result: it reads its
-        inputs' records and small arrays, metadata, and the graph that it
-        walks, so a plan costs about one graph load for each call but
-        ``lineage_tree``, and reads no count matrix. A plan raises the errors
-        that a call raises before it writes, such as a refused memory budget.
+        The planned calls save nothing. Each does the work that it does
+        before it looks for its result: it reads its inputs' records and
+        small arrays, the metadata it checks, and the graph that it walks, so
+        a plan costs about one graph load for each call but ``lineage_tree``,
+        and reads no count matrix. A call whose inputs exist raises the errors
+        that it raises before it writes, such as a refused memory budget. A
+        plan describes the store as it is: a call made twice is planned
+        computed twice, though the chain would compute it once, and a
+        snapshot that two calls save of the same values is named for both,
+        though only the first would save it.
 
-        Every other call inside the block reuses a saved result as it always
-        does, and one that would compute raises ``RuntimeError`` when the block
-        ends, as a plan writes nothing: make such calls before the plan or
-        after it. The plan of a call stands for no saved result, so another
-        call given it raises ``TypeError``, with the call to run instead.
+        The plan covers the calls made in the thread that opened it; a call
+        sent to another thread, such as a thread pool's, runs as it always
+        does. Any other call in the block reuses a saved result as it always
+        does, and one that would compute raises ``RuntimeError`` when the
+        block ends; pipeline runs and resumes refuse to start inside it. A
+        call that changes the store without saving a result, such as
+        ``ds.cells.insert``, still writes.
 
         Returns:
             The plan, whose calls fill as the block runs.

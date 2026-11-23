@@ -13,38 +13,21 @@ exist yet: it is reported computed, waiting on that call, and is not run.
 from collections.abc import Callable, Mapping, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from ..storage.artifact_writer import (
     ArtifactComputationRequired,
-    ComputationReason,
     artifact_forecast_scope,
 )
 from ..storage.refs import ArtifactRef
 
+if TYPE_CHECKING:
+    from ._pipeline.planning import StagePlanReason
+
 __all__ = ["TrajectoryCallPlan", "TrajectoryPlan"]
 
-type CallPlanStatus = Literal["reused", "computed"]
-type CallPlanReason = ComputationReason | Literal["upstream"]
 
-# The trajectory calls that a plan covers, in the order the reference lists them.
-PLANNED_CALLS = (
-    "pseudotime",
-    "fate",
-    "states",
-    "curves",
-    "lineage_tree",
-    "lineage_membership",
-    "branch_cells",
-    "markers",
-    "aggregation",
-    "lineage_markers",
-    "drivers",
-    "lineage_aggregation",
-)
-
-
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, repr=False)
 class TrajectoryCallPlan:
     """What one call of a planned trajectory would do.
 
@@ -85,8 +68,8 @@ class TrajectoryCallPlan:
 
     call: str
     ordinal: int
-    status: CallPlanStatus
-    reason: CallPlanReason | None = None
+    status: Literal["reused", "computed"]
+    reason: "StagePlanReason | None" = None
     detail: str | None = None
     operation: str | None = None
     ref: ArtifactRef | None = None
@@ -94,6 +77,16 @@ class TrajectoryCallPlan:
     changed_parameters: tuple[str, ...] = ()
     changed_inputs: tuple[str, ...] = ()
     upstream: tuple[int, ...] = ()
+
+    def __repr__(self) -> str:
+        shown = [f"{self.ordinal}", repr(self.call), self.status]
+        if self.ref is not None:
+            shown.append(repr(self.ref))
+        if self.reason is not None:
+            shown.append(self.reason)
+        if self.upstream:
+            shown.append(f"on {list(self.upstream)}")
+        return f"TrajectoryCallPlan({' '.join(shown)})"
 
     def to_dict(self) -> dict[str, Any]:
         """Return the call's plan as JSON-compatible values."""
@@ -144,23 +137,31 @@ class TrajectoryPlan:
             )
         self._used = True
         # Every artifact that a call in the block would plan is forecast, so
-        # a call that the plan does not cover cannot write either.
+        # a call that the plan does not cover cannot save a result either.
         self._scope = artifact_forecast_scope()
         self._scope.__enter__()
         self._token = _OPEN.set(self)
         return self
 
     def __exit__(self, kind: Any, error: Any, traceback: Any) -> None:
-        _OPEN.reset(self._token)
-        self._scope.__exit__(None, None, None)
+        try:
+            _OPEN.reset(self._token)
+        finally:
+            self._scope.__exit__(None, None, None)
         if isinstance(error, ArtifactComputationRequired):
             raise RuntimeError(
                 "A call inside ds.trajectory.plan() would compute a new "
-                f"{error.computation.operation} result, and a plan writes "
-                "nothing. A plan covers only the trajectory calls "
-                f"{', '.join(PLANNED_CALLS)}: make any other call before the "
-                "plan or after its with block."
+                f"{error.computation.operation} result, and a plan saves no "
+                "result. Only the trajectory calls that save results are "
+                "planned: make any other call before the plan or after its with "
+                "block."
             ) from error
+
+    def __repr__(self) -> str:
+        return (
+            f"TrajectoryPlan({len(self._calls)} calls, computed {list(self.computed)}, "
+            f"reused {list(self.reused)})"
+        )
 
     @property
     def calls(self) -> tuple[TrajectoryCallPlan, ...]:
@@ -173,13 +174,8 @@ class TrajectoryPlan:
         Raises:
             KeyError: If no call has that name, or several do.
             IndexError: If the plan holds no call at that position.
-            TypeError: If ``key`` is neither a position nor a name.
         """
-        if isinstance(key, bool) or not isinstance(key, int | str):
-            raise TypeError(
-                f"A plan's calls are found by position or name, not {key!r}"
-            )
-        if isinstance(key, int):
+        if not isinstance(key, str):
             return self._calls[key]
         found = [call for call in self._calls if call.call == key]
         if len(found) != 1:
@@ -219,7 +215,13 @@ def _plans_taken(
 
 
 def _plan_passed_on(call: str, taken: TrajectoryCallPlan) -> TypeError:
-    """Refuse a call plan passed to a call that cannot plan with it."""
+    """Refuse a call plan that a call cannot plan with."""
+    if taken.status == "reused":
+        return TypeError(
+            f"{call} was given the plan of {taken.call}, call {taken.ordinal} "
+            "of a trajectory plan, whose result the store holds. Pass the "
+            f"result's ref, plan[{taken.ordinal}].ref, instead."
+        )
     return TypeError(
         f"{call} was given the plan of {taken.call}, call {taken.ordinal} of a "
         "trajectory plan, which would compute a result that does not exist "
@@ -228,44 +230,34 @@ def _plan_passed_on(call: str, taken: TrajectoryCallPlan) -> TypeError:
     )
 
 
-def refuse_call_plans(
-    call: str, args: Sequence[Any], kwargs: Mapping[str, Any]
-) -> None:
-    """Refuse a call plan among the arguments of a call that a plan does not cover.
-
-    Raises:
-        TypeError: If an argument is a :class:`TrajectoryCallPlan`.
-    """
-    taken = _plans_taken(args, kwargs)
-    if taken:
-        raise _plan_passed_on(call, taken[0])
-
-
 def planned_call(
     store: Any,
     call: str,
-    run: Callable[[], ArtifactRef],
+    method: Callable[..., ArtifactRef],
     args: Sequence[Any],
     kwargs: Mapping[str, Any],
 ) -> ArtifactRef | TrajectoryCallPlan:
     """Run a trajectory call, or plan it when a plan of ``store`` is open.
 
     With no plan open, the call runs as it always does. In a plan, a call that
-    takes the plan of an earlier call waits on it; any other call runs in the
-    forecast and returns its ref when the store holds its result, or its plan
-    when it would compute.
+    takes the plan of an earlier call that would compute waits on it; any
+    other call runs in the forecast and returns its ref when the store holds
+    its result, or its plan when it would compute.
 
     Raises:
-        TypeError: If an argument is the plan of a call in no open plan of
-            ``store``.
+        TypeError: If an argument is the plan of a reused call, or of a call
+            in no open plan of ``store``.
         RuntimeError: If a plan of another DataStore is open.
     """
     plan = _OPEN.get()
     taken = _plans_taken(args, kwargs)
+    for value in taken:
+        if value.status == "reused":
+            raise _plan_passed_on(call, value)
     if plan is None:
         if taken:
             raise _plan_passed_on(call, taken[0])
-        return run()
+        return method(*args, **kwargs)
     if plan._store is not store:
         raise RuntimeError(
             f"A trajectory plan of another DataStore is open, so {call} on this "
@@ -296,7 +288,7 @@ def planned_call(
         plan._calls.append(planned)
         return planned
     try:
-        ref = run()
+        ref = method(*args, **kwargs)
     except ArtifactComputationRequired as signal:
         computation = signal.computation
         planned = TrajectoryCallPlan(

@@ -33,7 +33,7 @@ from ._operations.variants import _VariantOperationsMixin
 from .datastore import DataStore
 
 from ..storage.refs import ArtifactRef
-from .trajectory_plan import planned_call, refuse_call_plans
+from .trajectory_plan import planned_call
 
 __all__ = [
     "ClonesAccessor",
@@ -62,8 +62,6 @@ def _bind[**P, R](
 ) -> Callable[Concatenate[Any, P], R]:
     @wraps(entry)
     def call(self: Any, /, *args: P.args, **kwargs: P.kwargs) -> R:
-        # The plan of a call in a trajectory plan stands for no saved result.
-        refuse_call_plans(call.__name__, args, kwargs)
         method = cast(Callable[P, R], getattr(self._store, entry.__name__))
         return method(*args, **kwargs)
 
@@ -84,13 +82,7 @@ def _planned[**P](
         method = cast(Callable[P, ArtifactRef], getattr(self._store, entry.__name__))
         return cast(
             ArtifactRef,
-            planned_call(
-                self._store,
-                call.__name__,
-                lambda: method(*args, **kwargs),
-                args,
-                kwargs,
-            ),
+            planned_call(self._store, call.__name__, method, args, kwargs),
         )
 
     return call

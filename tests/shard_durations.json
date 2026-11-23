@@ -454,7 +454,7 @@
   "tests/test_trajectory_lineage_statistics.py": 2.0,
   "tests/test_trajectory_lineage_tree.py": 0.0,
   "tests/test_trajectory_membership.py": 62.0,
-  "tests/test_trajectory_plan.py": 49.2,
+  "tests/test_trajectory_plan.py": 40.7,
   "tests/test_trajectory_record_paths.py": 5.9,
   "tests/test_trajectory_states.py": 15.0,
   "tests/test_types_and_utils.py": 0.6,
