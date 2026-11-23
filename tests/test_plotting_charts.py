@@ -277,6 +277,41 @@ def test_bars_title_the_axis_of_their_items_when_asked(
     assert (label[item_axis](), label[value_axis]()) == ("", "Cells")
 
 
+@pytest.mark.parametrize("empty", [0.0, np.nan])
+@pytest.mark.parametrize("horizontal", [True, False])
+def test_stacked_bars_keep_the_margin_beyond_the_longest_bar(
+    ax, horizontal, empty
+) -> None:
+    # The longest bar, 7 long, ends with a part that holds nothing: the last
+    # part drawn, the right one of a horizontal bar and the top one of a
+    # vertical bar.
+    order = ("p", "q") if horizontal else ("q", "p")
+    scale = CategoricalScale(order=order, palette={"p": RED, "q": BLUE})
+    table = pd.DataFrame(
+        {
+            "item": ["a", "a", "b", "b"],
+            "segment": ["p", "q", "p", "q"],
+            "value": [7.0, empty, 2.0, 1.0],
+        }
+    )
+    draw_bars(
+        ax,
+        table,
+        item="item",
+        value="value",
+        segment="segment",
+        colors=scale,
+        horizontal=horizontal,
+        value_label="Cells",
+    )
+    low, high = ax.get_xlim() if horizontal else ax.get_ylim()
+    margin = ax.margins()[0 if horizontal else 1]
+    # Bars start at 0, and the axis runs past the longest bar by its margin.
+    assert margin > 0
+    assert low == 0.0
+    assert high == pytest.approx(7.0 * (1.0 + margin))
+
+
 @pytest.mark.parametrize("horizontal", [True, False])
 @pytest.mark.parametrize("n_items", [5, MAX_NAMED_ITEMS, MAX_NAMED_ITEMS + 1, 1000])
 @pytest.mark.parametrize("inches", [3.0, 12.0])

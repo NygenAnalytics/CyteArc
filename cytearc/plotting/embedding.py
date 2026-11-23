@@ -314,6 +314,7 @@ def _embedding_multiple_layouts(
     | Sequence[str | ArtifactRef | FeatureRef | CellField | NamedCellArtifact]
     | None,
     facet_by: str | CellField | None,
+    facet_key: str | None,
     facet_order: Sequence[Any] | None,
     cell_key: str,
     from_assay: str | None,
@@ -334,7 +335,7 @@ def _embedding_multiple_layouts(
     labels = _color_labels(store, color_items, titles, from_assay=from_assay)
     facets = _multi_layout_facets(
         store,
-        facet_by=label_column(facet_by, "facet_by")[0],
+        facet_by=facet_key,
         facet_order=facet_order,
         groups=groups,
         subset_by=subset_by,
@@ -1571,6 +1572,7 @@ def embedding(
             layout_keys=layout_keys,
             color_by=color_by,
             facet_by=facet_by,
+            facet_key=facet_key,
             facet_order=facet_order,
             cell_key=cell_key,
             from_assay=from_assay,

@@ -1,6 +1,6 @@
 """Resolve stored display metadata into plotting scale contracts."""
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from typing import Any
 
 from ..metadata.artifacts import (
@@ -141,6 +141,53 @@ def labels_in_stored_order(
         (label for label in observed if label in ranks), key=ranks.__getitem__
     )
     return listed + sort_categories(label for label in observed if label not in ranks)
+
+
+def text_keyed_scale(scale: CategoricalScale | None) -> CategoricalScale | None:
+    """Key a stored scale by the text of each category, as the names of groups are."""
+    if scale is None:
+        return None
+    return CategoricalScale(
+        order=None if scale.order is None else tuple(map(str, scale.order)),
+        palette=(
+            None
+            if scale.palette is None
+            else {str(value): color for value, color in scale.palette.items()}
+        ),
+        labels=(
+            None
+            if scale.labels is None
+            else {str(value): label for value, label in scale.labels.items()}
+        ),
+        missing_color=scale.missing_color,
+        missing_label=scale.missing_label,
+        palette_name=scale.palette_name,
+    )
+
+
+def groups_in_stored_order(
+    labels: Sequence[Sequence[str]], scales: Sequence[CategoricalScale | None]
+) -> list[int]:
+    """Return the positions of groups in the order that their columns store.
+
+    ``labels`` holds each group's label in each grouping column, as text,
+    and ``scales`` each column's stored scale, or None for a column that
+    stores none. The groups follow the labels of their first column, then
+    of their second: each column's labels in the order that its scale lists
+    their text, then in natural order, as :func:`labels_in_stored_order`
+    orders them.
+    """
+    ranks = []
+    for column, scale in enumerate(scales):
+        texts = dict.fromkeys(group[column] for group in labels)
+        ordered = labels_in_stored_order(texts, text_keyed_scale(scale))
+        ranks.append({text: rank for rank, text in enumerate(ordered)})
+    return sorted(
+        range(len(labels)),
+        key=lambda at: tuple(
+            rank[text] for rank, text in zip(ranks, labels[at], strict=True)
+        ),
+    )
 
 
 def _stored_scale(

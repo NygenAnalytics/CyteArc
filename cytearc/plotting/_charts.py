@@ -231,9 +231,15 @@ def draw_bars(
             where = positions - shift if horizontal else positions + shift
             base = np.zeros(len(items), dtype=np.float64)
         if horizontal:
-            ax.barh(where, lengths, left=base, color=fills[at], height=extent)
+            bars = ax.barh(where, lengths, left=base, color=fills[at], height=extent)
         else:
-            ax.bar(where, lengths, bottom=base, color=fills[at], width=extent)
+            bars = ax.bar(where, lengths, bottom=base, color=fills[at], width=extent)
+        # A part without length, 0 or not a number, stands where its bar
+        # ends, so its base would keep the value axis from its margin beyond
+        # the longest bar.
+        for bar, length in zip(bars.patches, lengths, strict=True):
+            if not abs(length) > 0:
+                (bar.sticky_edges.x if horizontal else bar.sticky_edges.y).clear()
         start = start + np.nan_to_num(lengths)
     if not numeric_items:
         _name_items(ax, positions, [str(name) for name in items], horizontal=horizontal)

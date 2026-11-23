@@ -343,11 +343,12 @@ def test_clone_abundance_counts_the_clonotypes_of_each_receptor_type(
     result = store.plots.clone_abundance(ref, max_clones=3, show=False)
     try:
         sizes = result.tables["sizes"]
-        # One clonotype of 2 B cells; T cell clonotypes of 1, 1 and 3 cells.
+        # T cell clonotypes of 1, 1 and 3 cells, and one clonotype of 2 B
+        # cells, as the vocabulary of receptor types lists them.
         assert sizes.to_dict("list") == {
-            "group": ["BCR", "TCR", "TCR"],
-            "clone_size": [2, 1, 3],
-            "n_clones": [1, 2, 1],
+            "group": ["TCR", "TCR", "BCR"],
+            "clone_size": [1, 3, 2],
+            "n_clones": [2, 1, 1],
         }
         assert sizes.groupby("clone_size")["n_clones"].sum().to_dict() == {
             1: 2,
@@ -361,14 +362,14 @@ def test_clone_abundance_counts_the_clonotypes_of_each_receptor_type(
             # clonotype_1 and clonotype_3, which share their beta chain, by
             # their numbers too.
             "label": ["CASSA 1"] * 2 + ["CARW"] * 2 + ["CASSA 3"] * 2,
-            "group": ["BCR", "TCR"] * 3,
-            "n_cells": [0, 3, 2, 0, 0, 1],
+            "group": ["TCR", "BCR"] * 3,
+            "n_cells": [3, 0, 0, 2, 1, 0],
         }
         ticks = [tick.get_text() for tick in result.axes["top"].get_yticklabels()]
         assert ticks == top["label"].drop_duplicates().tolist()
         # The title names clonotypes once, so their labels need not.
         assert result.axes["top"].get_title() == "Largest 3 clonotypes"
-        assert result.legends[0].label == "receptor_type"
+        assert result.legends[0].label == "Receptor type"
         assert len(result.axes["sizes"].get_lines()) == 2
         assert result.provenance.n_cells == 7
         # Plain numbers label the log axes, not 2x10^0.
@@ -394,19 +395,20 @@ def test_clone_abundance_splits_clonotypes_by_group_and_receptor_type(
     result = plotting.clone_abundance(store, ref, group_by="sample", show=False)
     try:
         sizes = result.tables["sizes"]
+        # Each sample's groups, its receptor types in their vocabulary's order.
         assert sizes.values.tolist() == [
-            ["s1, BCR", 1, 1],
             ["s1, TCR", 1, 1],
             ["s1, TCR", 2, 1],
-            ["s2, BCR", 1, 1],
+            ["s1, BCR", 1, 1],
             ["s2, TCR", 1, 2],
+            ["s2, BCR", 1, 1],
         ]
         in_s1 = sizes[sizes["group"].str.startswith("s1")]
         assert in_s1.groupby("clone_size")["n_clones"].sum().to_dict() == {1: 2, 2: 1}
         top = result.tables["top"].set_index(["clone", "group"])["n_cells"]
         assert top.loc[("clonotype_1", ["s1, TCR", "s2, TCR"])].tolist() == [2, 1]
         assert top.loc[("clonotype_1", ["s1, BCR", "s2, BCR"])].tolist() == [0, 0]
-        assert result.legends[0].label == "sample, receptor_type"
+        assert result.legends[0].label == "sample, Receptor type"
         assert len(result.axes["sizes"].get_lines()) == 4
     finally:
         result.close()
@@ -1265,8 +1267,9 @@ def test_the_fates_plot_draws_a_bar_for_each_clonotype_within_a_type(
         _fate_bias_of(spanning, spanning.together), show=False
     )
     # clonotype_1 is tested in BCR, TCR and the ambiguous type, a bar for
-    # each under its clonotype's junction and its type; by dominant fate in
-    # the fates' order, they come before clonotype_2.
+    # each under its clonotype's junction and its type, drawn by dominant fate
+    # in the order of the fates: each sample's receptor types in their
+    # vocabulary's order, so x, TCR; x, BCR; y, TCR; y, ambiguous.
     table = result.tables["clones"]
     assert table.columns.tolist() == [
         "clone",
@@ -1276,10 +1279,17 @@ def test_the_fates_plot_draws_a_bar_for_each_clonotype_within_a_type(
         "n_late_cells",
     ]
     assert table.astype(object).values.tolist() == [
-        ["clonotype_1 (BCR)", "CARW (BCR)", "x, BCR", 1, 1],
         ["clonotype_1 (TCR)", "CASSA 1 (TCR)", "x, TCR", 1, 2],
-        ["clonotype_1 (ambiguous)", "CASSA 4 (ambiguous)", "y, ambiguous", 0, 1],
+        ["clonotype_1 (BCR)", "CARW (BCR)", "x, BCR", 1, 1],
         ["clonotype_2", "CASSB", "y, TCR", 1, 1],
+        ["clonotype_1 (ambiguous)", "CASSA 4 (ambiguous)", "y, ambiguous", 0, 1],
+    ]
+    legend = result.axes["fates"].get_legend()
+    assert [text.get_text() for text in legend.get_texts()] == [
+        "x, TCR",
+        "x, BCR",
+        "y, TCR",
+        "y, ambiguous",
     ]
     # Each bar is labeled as the clonotypes within types label its cells,
     # by its own representative's junction, with the type of its label.
@@ -1290,10 +1300,10 @@ def test_the_fates_plot_draws_a_bar_for_each_clonotype_within_a_type(
     drawn = fates.pivot(index="label", columns="fate", values="n_cells")
     order = ["x, BCR", "x, TCR", "y, ambiguous", "y, TCR"]
     assert drawn.loc[table["label"], order].values.tolist() == [
-        [1, 0, 0, 0],
         [0, 2, 0, 0],
-        [0, 0, 1, 0],
+        [1, 0, 0, 0],
         [0, 0, 0, 1],
+        [0, 0, 1, 0],
     ]
     ticks = [tick.get_text() for tick in result.axes["fates"].get_xticklabels()]
     assert ticks == table["label"].tolist()
@@ -1305,10 +1315,10 @@ def test_the_fates_plot_draws_a_bar_for_each_clonotype_within_a_type(
     measures = ["fate", "n_early_cells", "n_late_cells"]
     pd.testing.assert_frame_equal(within.tables["clones"][measures], table[measures])
     assert within.tables["clones"]["label"].tolist() == [
-        "CARW",
         "CASSA 1",
-        "CASSA 4",
+        "CARW",
         "CASSB",
+        "CASSA 4",
     ]
     within.close()
     # A figure labels a clonotype within a type by its own representative's
@@ -2048,8 +2058,8 @@ def test_regrouped_expansion_plot_keeps_receptor_types_apart(tmp_path) -> None:
     windows = result.tables["rank_windows"]
     held = windows[windows["n_cells"] > 0]
     assert held[["group", "window", "n_cells"]].values.tolist() == [
-        ["blood, BCR", "1 to 10", 2],
         ["blood, TCR", "1 to 10", 5],
+        ["blood, BCR", "1 to 10", 2],
     ]
     totals = result.tables["categories"].groupby("group")["n_cells"].sum()
     assert totals.to_dict() == {"blood, BCR": 2, "blood, TCR": 5}
@@ -2059,7 +2069,7 @@ def test_regrouped_expansion_plot_keeps_receptor_types_apart(tmp_path) -> None:
     empty = store.plots.clonal_expansion(expansion, group_by=[], show=False)
     for name, table in own.tables.items():
         pd.testing.assert_frame_equal(empty.tables[name], table)
-    assert empty.provenance.extras["grouping"] == "sample, receptor_type"
+    assert empty.provenance.extras["grouping"] == "sample, Receptor type"
     own.close()
     empty.close()
     store.cells.insert(

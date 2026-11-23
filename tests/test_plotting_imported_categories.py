@@ -155,6 +155,7 @@ def _legend(result):
 
 def test_plots_of_imported_cluster_labels_draw_the_files_order_and_colors(imported):
     from cytearc.plotting._groups import _colors as group_colors
+    from cytearc.plotting._groups import _key_scales
 
     store, layout, clusters = imported.store, imported.layout, imported.clusters
     try:
@@ -200,7 +201,12 @@ def test_plots_of_imported_cluster_labels_draw_the_files_order_and_colors(import
 
         # Clone and variant figures color the groups of the labels the same way.
         groups = group_colors(
-            store, ["NK", "T", "B"], [clusters.kind], group_by=(), groups=clusters
+            store,
+            ["NK", "T", "B"],
+            [clusters.kind],
+            _key_scales(store, [clusters.kind], n_group_by=0, groups=clusters),
+            group_by=(),
+            groups=clusters,
         )
         assert list(groups.palette.items()) == FILE_LEGEND
 

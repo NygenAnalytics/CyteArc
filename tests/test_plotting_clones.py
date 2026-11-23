@@ -347,6 +347,63 @@ def test_plot_groups_follow_the_order_a_label_artifact_stores(plotted) -> None:
     # (b, y) and c3 (a, x).
     by_half = plot_groups(store, clones, group_by="half", groups=labels, n_cells=6)
     assert _grouped(by_half)[:2] == ([2, 0, 1, 0, -1, -1], ("a, x", "b, y", "b, x"))
+    # A summary of the labels keeps x before y, and its figures draw y first:
+    # x holds clones a and b, y clone a.
+    overlap = store.clones.overlap(clones, groups=labels)
+    assert overlap.group_sizes["group"].tolist() == ["x", "y"]
+    drawn = clone_overlap(store, overlap, index="shared", show=False)
+    try:
+        assert axis_names(drawn.axes["matrix"].xaxis)[1] == ["y", "x"]
+        assert drawn.tables["matrix"].to_numpy().tolist() == [[1.0, 1.0], [1.0, 2.0]]
+    finally:
+        drawn.close()
+    bars = clonal_diversity(
+        store, store.clones.diversity(clones, groups=labels), show=False
+    )
+    try:
+        assert axis_names(bars.axes["n_clones"].yaxis)[1] == ["y", "x"]
+    finally:
+        bars.close()
+
+
+def test_a_column_named_like_a_vocabulary_is_a_column_like_any_other(
+    plotted,
+) -> None:
+    store, clones = plotted
+    # Clones from a column keep no receptor types apart, so a column named
+    # receptor_type keeps its name as its title and its natural order, BCR
+    # before TCR, where the receptor types' vocabulary puts TCR first.
+    store.cells.insert(
+        "receptor_type",
+        by_cell_id(
+            store.cells,
+            np.asarray(["TCR", "BCR", "TCR", "BCR", "BCR", None], dtype=object),
+        ),
+        overwrite=True,
+    )
+    found = plot_groups(store, clones, group_by="receptor_type", groups=None, n_cells=6)
+    assert _grouped(found) == ([1, 0, 1, 0, 0, -1], ("BCR", "TCR"), "receptor_type")
+
+
+def test_integer_groups_follow_the_order_their_column_stores(plotted) -> None:
+    store, clones = plotted
+    # Days stored as ordered integer categories, 10 before 2, where natural
+    # order puts 2 first; the groups are named by their text.
+    days = [{"x": 2, "y": 10}.get(group) for group in GROUPS]
+    store.cells.insert(
+        "day",
+        by_cell_id(store.cells, pd.Categorical(days, categories=[10, 2], ordered=True)),
+        overwrite=True,
+    )
+    found = plot_groups(store, clones, group_by="day", groups=None, n_cells=6)
+    assert _grouped(found) == ([1, 1, 0, 1, 0, -1], ("10", "2"), "day")
+    drawn = clone_overlap(
+        store, store.clones.overlap(clones, group_by="day"), show=False
+    )
+    try:
+        assert axis_names(drawn.axes["matrix"].xaxis)[1] == ["10", "2"]
+    finally:
+        drawn.close()
 
 
 def test_figures_draw_groups_in_the_order_their_column_stores(plotted) -> None:
@@ -404,6 +461,63 @@ def test_figures_draw_groups_in_the_order_their_column_stores(plotted) -> None:
             figure.close()
 
 
+def test_fates_follow_the_order_of_their_columns(truth_plot) -> None:
+    store, clones = truth_plot.store, truth_plot.clones
+    store.cells.insert(
+        "is_d2", by_cell_id(store.cells, TRUTH.samples == "d2"), overwrite=True
+    )
+    store.cells.insert(
+        "is_d4", by_cell_id(store.cells, TRUTH.samples == "d4"), overwrite=True
+    )
+    # The cell types stored in reverse of their natural order, and halves of
+    # the cells, which store no order.
+    stored = sorted(set(CELL_TYPES))[::-1]
+    store.cells.insert(
+        "type_reversed",
+        by_cell_id(
+            store.cells,
+            pd.Categorical(TRUTH.cell_types, categories=stored, ordered=True),
+        ),
+        overwrite=True,
+    )
+    store.cells.insert(
+        "half",
+        by_cell_id(store.cells, np.asarray(["a", "b"] * (N_CELLS // 2), dtype=object)),
+        overwrite=True,
+    )
+    bias = store.clones.fate_bias(
+        clones,
+        group_by=["type_reversed", "half"],
+        early=store.snapshot_cell_selection("is_d2"),
+        late=store.snapshot_cell_selection("is_d4"),
+    )
+    recorded = [str(fate) for fate in store.clones.load_fate_bias(bias).fates["fate"]]
+    # The record keeps natural order; the figure lists the fates by the first
+    # column's stored order, then the second's natural order.
+    assert recorded == sorted(recorded)
+    expected = [
+        fate
+        for fate in (f"{kind}, {half}" for kind in stored for half in "ab")
+        if fate in recorded
+    ]
+    assert len(expected) == len(recorded) > 2
+    result = clone_fate_bias(store, bias, show=False)
+    try:
+        legend = result.axes["fates"].get_legend()
+        assert [text.get_text() for text in legend.get_texts()] == expected
+        # The clones are grouped by their dominant fate in that order, and
+        # those whose late cells tie between fates come last.
+        dominant = result.tables["clones"]["fate"].astype(object).tolist()
+        places = [
+            expected.index(fate) if isinstance(fate, str) else len(expected)
+            for fate in dominant
+        ]
+        assert places == sorted(places)
+        assert len(set(places) - {len(expected)}) > 1
+    finally:
+        result.close()
+
+
 def test_receptor_types_follow_their_vocabulary(truth_plot, truth_clonotypes) -> None:
     store = truth_plot.store
     # TCR before BCR, as the vocabulary of receptor types lists them, where
@@ -421,7 +535,7 @@ def test_receptor_types_follow_their_vocabulary(truth_plot, truth_clonotypes) ->
     )
     try:
         assert axis_names(drawn.axes["categories"].yaxis)[1] == vocabulary
-        assert drawn.axes["categories"].get_ylabel() == "receptor_type"
+        assert drawn.axes["categories"].get_ylabel() == "Receptor type"
     finally:
         drawn.close()
 
@@ -2081,7 +2195,7 @@ def test_a_regrouped_expansion_of_a_label_artifact_keeps_apart_only_its_kept_lab
         )
     }
     assert set(result.tables["categories"]["group"]) == expected
-    assert result.provenance.extras["grouping"] == "sample, receptor_type"
+    assert result.provenance.extras["grouping"] == "sample, Receptor type"
 
 
 def test_default_figure_sizes_follow_the_clones_and_groups_drawn(

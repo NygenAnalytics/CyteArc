@@ -1333,18 +1333,20 @@ def clone_fate_bias(
     """Plot the fates of the clones of early cells, each clone's late cells by fate.
 
     ``bias`` is a ``clone_fate_bias`` artifact, such as one from
-    ``ds.clones.fate_bias``. The plot draws the ``max_clones`` clones with
-    the most late cells, ties to the larger clone overall, grouped by their
+    ``ds.clones.fate_bias``. The plot draws the ``max_clones`` clones with the
+    most late cells, ties to the larger clone overall, grouped by their
     dominant fate, the fate that holds the most of their late cells, in the
     order of the fates, and within a fate from the most late cells to the
-    fewest; clones whose late cells tie between fates come last. The lower
-    panel stacks each clone's late cells by fate, the first fate on top, or
-    their fractions with ``normalize=True``, and the upper panel draws its
-    early cells. The fates take the colors of their groups, as every
-    figure grouped by the same columns colors them, and a title that drops
-    clones says how many it draws of how many. Clones are labeled as
-    ``clone_abundance`` labels them: by their IDs, and clonotypes by their
-    representative's junction, with their number where two drawn share one.
+    fewest; clones whose late cells tie between fates come last. The fates
+    follow the order that their columns or label artifact store, then natural
+    order, and the receptor types their vocabulary's. The lower panel stacks
+    each clone's late cells by fate, the first fate on top, or their fractions
+    with ``normalize=True``, and the upper panel draws its early cells. The
+    fates take the colors of their groups, as every figure grouped by the same
+    columns colors them, and a title that drops clones says how many it draws
+    of how many. Clones are labeled as ``clone_abundance`` labels them: by
+    their IDs, and clonotypes by their representative's junction, with their
+    number where two drawn share one.
 
     ``groups``, a ``NamedCellArtifact`` of the label artifact that the
     record groups by, titles the artifact by its name; without it, the
@@ -1391,10 +1393,18 @@ def clone_fate_bias(
     early_cells[at.reshape(-1)] = rows["n_early_cells"].to_numpy(np.int64)
     late_cells = cells.sum(axis=1)
     dominant = dominant_fates(cells)
+    # The fates in the order that their columns store, as the legend lists
+    # them, and each recorded fate's place in it.
+    fates = table_groups(store, loaded, groups)
+    recorded = set(fate_names)
+    fate_order = [name for name in fates.names if name in recorded]
+    fate_place = pd.Index(fate_order).get_indexer(fate_names)
     # The clones with the most late cells, ties to the lower code, the larger
     # clone overall, drawn by dominant fate and then by late cells.
     chosen = np.lexsort((codes, -late_cells))[:max_clones]
-    rank = np.where(dominant[chosen] >= 0, dominant[chosen], len(fate_names))
+    rank = np.where(
+        dominant[chosen] >= 0, fate_place[dominant[chosen]], len(fate_names)
+    )
     chosen = chosen[np.lexsort((codes[chosen], -late_cells[chosen], rank))]
     ids = rows["clone"].cat.categories.to_numpy(dtype=object)[codes[chosen]]
     shown_ids = [str(clone) for clone in ids.tolist()]
@@ -1423,7 +1433,6 @@ def clone_fate_bias(
             "n_cells": cells[chosen].reshape(-1),
         }
     )
-    fates = table_groups(store, loaded, groups)
     title = (
         f"The {len(chosen)} of {len(codes)} {names.plural} with the most late cells"
         if len(chosen) < len(codes)
@@ -1462,7 +1471,7 @@ def clone_fate_bias(
             item="label",
             value="n_cells",
             segment="fate",
-            colors=fates.scale(fate_names),
+            colors=fates.scale(fate_order),
             horizontal=False,
             normalize=normalize,
             value_label="Fraction of late cells" if normalize else "Late cells",

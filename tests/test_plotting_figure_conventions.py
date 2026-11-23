@@ -595,7 +595,7 @@ def test_receptor_types_take_their_vocabularys_colors(truth) -> None:
     result = truth.store.plots.clone_abundance(truth.clonotypes, show=False)
     try:
         scale = result.scales[0]
-        assert result.legends[0].label == "receptor_type"
+        assert result.legends[0].label == "Receptor type"
         assert scale.palette == {
             kind: RECEPTOR_TYPE_SCALE.palette[kind] for kind in scale.order
         }
