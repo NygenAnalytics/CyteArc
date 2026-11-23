@@ -1,5 +1,6 @@
 """Plot scale and theme behavior tests."""
 
+import inspect
 import os
 import subprocess
 import sys
@@ -7,6 +8,7 @@ import textwrap
 
 import matplotlib
 import numpy as np
+import pandas as pd
 import pytest
 
 matplotlib.use("Agg")
@@ -706,6 +708,142 @@ def test_plots_check_each_scale_colormap_before_they_read_the_store(
         assert argument not in str(passed.value)
 
 
+# Each plot that takes the store first, and the arguments that it needs
+# besides the store and its theme. The figures of a summary take the record
+# that the summary returns; object() is no such record, which the figure
+# refuses once the theme passes.
+_STORE_PLOTS = {
+    "allele_frequencies": {"variants": _ref("variant_selection")},
+    "association_calibration": {"tests": _ref("perturbation_associations")},
+    "association_volcano": {"tests": _ref("perturbation_associations")},
+    "barcode_calls": {"barcodes": _ref("lineage_barcodes")},
+    "clonal_diversity": {"diversity": object()},
+    "clonal_expansion": {"expansion": _ref("clonal_expansion")},
+    "clonal_rarefaction": {"rarefaction": object()},
+    "clone_abundance": {"clones": _ref("clones")},
+    "clone_coupling": {"coupling": object()},
+    "clone_fate_bias": {"bias": _ref("clone_fate_bias")},
+    "clone_overlap": {"overlap": object()},
+    "clone_tracking": {"tracking": object()},
+    "cluster_connectivity": {"graph": _ref("neighbors"), "group_by": "cell_type"},
+    "cluster_tree": {
+        "graph": _ref("connectivity_map"),
+        "clusters": _ref("cluster_cut"),
+    },
+    "composition": {"category_by": "cell_type"},
+    "distribution": {"keys": ["CD3E"], "grouping": splt.CellField("cell_type")},
+    "dotplot": {"features": ["CD3E"], "group_by": "cell_type"},
+    "edistance": {"edistance": _ref("perturbation_edistance")},
+    "efficiency": {"efficiency": _ref("perturbation_efficiency")},
+    "embedding": {"layout": _ref("embedding")},
+    "embedding_raster": {"layout": _ref("embedding")},
+    "gene_pairing": {"usage": object()},
+    "gene_usage": {"usage": object()},
+    "genotypes": {"genotypes": _ref("variant_genotypes")},
+    "guide_calls": {"calls": _ref("guide_calls")},
+    "guide_thresholds": {"thresholds": _ref("guide_thresholds")},
+    "lineage_curves": {"curves": _ref("lineage_curves"), "layout": _ref("embedding")},
+    "lineage_heatmap": {"aggregation": _ref("lineage_aggregation")},
+    "lineage_tree": {"tree": _ref("lineage_tree"), "layout": _ref("embedding")},
+    "lineage_trends": {
+        "aggregation": _ref("lineage_aggregation"),
+        "features": ["CD3E"],
+    },
+    "mapping_calibration": {
+        "transfer": _ref("label_transfer"),
+        "known_labels": "cell_type",
+    },
+    "mapping_confusion": {
+        "transfer": _ref("label_transfer"),
+        "known_labels": "cell_type",
+    },
+    "mapping_evidence": {"transfer": _ref("label_transfer")},
+    "mapping_score": {
+        "result": _ref("label_transfer"),
+        "reference": object(),
+        "kind": "histogram",
+    },
+    "marker_heatmap": {"marker": _ref("marker_table")},
+    "matrixplot": {"features": ["CD3E"], "group_by": "cell_type"},
+    "mixscape": {"classes": _ref("mixscape_classes")},
+    "modality_weights": {
+        "graph": _ref("integrated_graph", scope="datastore"),
+        "layout": _ref("embedding"),
+    },
+    "perturbation_clusters": {"clusters": _ref("perturbation_clusters")},
+    "phylogeny": {"clones": _ref("clones")},
+    "pseudotime_heatmap": {"aggregation": _ref("pseudotime_aggregation")},
+    "receptor_qc": {"receptors": _ref("immune_receptors")},
+    "recorder_states": {"alleles": _ref("lineage_alleles")},
+    "spectratype": {"spectratype": object()},
+    "variant_depth": {"counts": _ref("variant_counts")},
+    "variant_statistics": {"variants": _ref("variant_selection")},
+}
+
+
+def test_the_theme_check_covers_every_plot_that_takes_the_store():
+    # Every public plot that takes the store first and a theme is in the
+    # table, so a plot added later is checked too.
+    def takes_the_store_and_a_theme(name):
+        value = getattr(splt, name)
+        if not inspect.isfunction(inspect.unwrap(value)):
+            return False
+        parameters = list(inspect.signature(value).parameters)
+        return parameters[:1] == ["store"] and "theme" in parameters
+
+    assert set(filter(takes_the_store_and_a_theme, splt.__all__)) == set(_STORE_PLOTS)
+
+
+@pytest.mark.parametrize("plot", sorted(_STORE_PLOTS))
+def test_plots_check_their_theme_before_they_read_the_store(plot):
+    draw = getattr(splt, plot)
+
+    with pytest.raises(KeyError) as unknown:
+        draw(_UnreadableStore(), **_STORE_PLOTS[plot], theme="sepia", show=False)
+    with pytest.raises(KeyError) as unhashable:
+        draw(_UnreadableStore(), **_STORE_PLOTS[plot], theme=["paper"], show=False)
+    # A theme of THEMES passes the check: the plot reads the store, which the
+    # store double refuses, or refuses the object that stands in for a summary.
+    with pytest.raises((AssertionError, TypeError)) as passed:
+        draw(_UnreadableStore(), **_STORE_PLOTS[plot], theme="paper", show=False)
+
+    choices = "Choose from: ['dark', 'minimal', 'notebook', 'paper']"
+    assert unknown.value.args == (f"Unknown theme 'sepia'. {choices}",)
+    assert unhashable.value.args == (f"Unknown theme ['paper']. {choices}",)
+    assert "theme" not in str(passed.value)
+
+
+# The plots of arrays and tables, which take no store, and data that each
+# refuses with a theme of THEMES.
+_DATA_PLOTS = {
+    "elbow": {"variance_explained": []},
+    "graph_qc": {"graph": object()},
+    "highly_variable_features": {
+        "mean_nonzero": [],
+        "corrected_variance": [],
+        "n_cells": 0,
+        "selected": [],
+    },
+    "qc": {"data": pd.DataFrame()},
+}
+
+
+@pytest.mark.parametrize("plot", sorted(_DATA_PLOTS))
+def test_plots_of_arrays_and_tables_check_their_theme_before_their_data(plot):
+    draw = getattr(splt, plot)
+
+    with pytest.raises(KeyError) as unknown:
+        draw(**_DATA_PLOTS[plot], theme="sepia", show=False)
+    # With a theme of THEMES, the plot refuses its data instead.
+    with pytest.raises((KeyError, TypeError, ValueError)) as refused:
+        draw(**_DATA_PLOTS[plot], theme="paper", show=False)
+
+    assert unknown.value.args == (
+        "Unknown theme 'sepia'. Choose from: ['dark', 'minimal', 'notebook', 'paper']",
+    )
+    assert "theme" not in str(refused.value)
+
+
 @pytest.mark.parametrize(
     ("frame", "expected_xlabel", "expected_ylabel"),
     [
@@ -953,7 +1091,8 @@ def test_positive_argument_accepts_numpy_scalars(value):
 def test_theme_argument_returns_a_theme_and_names_the_themes_to_choose_from():
     for name in ("dark", "minimal", "notebook", "paper"):
         assert theme_argument(name) == name
-    for name in ("missing-theme", "Paper", 3, None):
+    # A value that cannot be hashed, such as a list, names no theme either.
+    for name in ("missing-theme", "Paper", 3, None, ["paper"], {"paper": 1}):
         with pytest.raises(KeyError) as raised:
             theme_argument(name)
         assert raised.value.args == (

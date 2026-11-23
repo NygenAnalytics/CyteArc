@@ -26,6 +26,7 @@ from ._style import (
     missing_category_entry,
     refresh_layout_point_sizes,
     size_legend_layout,
+    theme_argument,
     theme_context,
 )
 from ..utils.arguments import bool_argument
@@ -76,10 +77,15 @@ def categorical_legend(
 
 
 def close_figures_on_error[**P, R](function: Callable[P, R]) -> Callable[P, R]:
-    """Close pyplot figures a plotting call created when that call raises."""
+    """Close pyplot figures a plotting call created when that call raises.
+
+    A ``theme`` passed by keyword, as every plot that takes the store takes it, is checked with :func:`theme_argument` before the plot runs, so a plot refuses an unknown theme before it reads the store or computes anything.
+    """
 
     @functools.wraps(function)
     def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
+        if "theme" in kwargs:
+            theme_argument(kwargs["theme"])
         plt, _ = require_matplotlib()
         existing = set(plt.get_fignums())
         with validation_scope():

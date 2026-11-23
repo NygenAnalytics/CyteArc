@@ -212,10 +212,14 @@ def _arguments(function: Any, flag: str, value: object) -> dict[str, Any]:
 
 
 def _every_argument(function: Any, flag: str, value: object) -> dict[str, Any]:
-    """A placeholder for every argument but ``self`` and the flags, defaults too."""
+    """A placeholder for every argument but ``self`` and the flags, defaults too.
+
+    The theme keeps its default: ``close_figures_on_error`` checks it before
+    the plot runs, so before the plot's own flags.
+    """
     arguments: dict[str, Any] = {}
     for name, parameter in inspect.signature(function).parameters.items():
-        if name in ("self", "cls") or parameter.kind in (
+        if name in ("self", "cls", "theme") or parameter.kind in (
             inspect.Parameter.VAR_POSITIONAL,
             inspect.Parameter.VAR_KEYWORD,
         ):

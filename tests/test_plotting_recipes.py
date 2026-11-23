@@ -1,4 +1,5 @@
 import errno
+import io
 import json
 import warnings
 from dataclasses import FrozenInstanceError
@@ -24,6 +25,8 @@ from cytearc.plotting.recipes import (
 class FakePlotResult:
     def __init__(self, name: str, *, owns_figure: bool = True) -> None:
         self.name = name
+        # Each fake draws on a figure of its own.
+        self.figure = object()
         self.owns_figure = owns_figure
         self.saved: list[Path] = []
         self.save_kwargs: list[dict[str, object]] = []
@@ -41,6 +44,9 @@ class FakePlotResult:
 
     def show(self) -> None:
         self.show_calls += 1
+        # As PlotResult.show() does, showing closes a figure that the plot made.
+        if self.owns_figure:
+            self.close()
 
     def close(self) -> None:
         self.close_calls += 1
@@ -204,6 +210,372 @@ def test_continue_on_error_captures_compact_failures_and_warnings(
         "good: second warning",
     )
     assert successful.usable
+
+
+# Showing figures. The plots draw one line into the axes that a step targets,
+# or into a figure of their own, and IPython's display records each figure it
+# shows with the number of lines in each of the figure's axes at that moment.
+
+
+def _lines_per_axes(figure: object) -> list[int]:
+    return [len(axis.lines) for axis in figure.axes]  # type: ignore[attr-defined]
+
+
+@pytest.fixture
+def displayed(
+    monkeypatch: pytest.MonkeyPatch, panels: object
+) -> list[tuple[object, list[int]]]:
+    # The panels come first: pyplot's first figure installs its display hook
+    # through IPython, which the stub below replaces.
+    shown: list[tuple[object, list[int]]] = []
+    monkeypatch.setattr("IPython.get_ipython", lambda: object())
+    monkeypatch.setattr(
+        "IPython.display.display",
+        lambda figure: shown.append((figure, _lines_per_axes(figure))),
+    )
+    return shown
+
+
+def _warn_when_drawn(figure: object, message: str) -> None:
+    """Warn whenever the figure is drawn, as a font or layout warning does."""
+    figure.canvas.mpl_connect(  # type: ignore[attr-defined]
+        "draw_event", lambda event: warnings.warn(message, UserWarning)
+    )
+
+
+def _line_plot(created: list[object]):
+    def plot(store: object, *, show: bool, target: object = None) -> object:
+        import matplotlib.pyplot as plt
+
+        assert show is False
+        owns_figure = target is None
+        if owns_figure:
+            figure, target = plt.subplots()
+            _warn_when_drawn(figure, f"figure {len(created)} drawn")
+            created.append(figure)
+        target.plot([0, 1], [0, 1])  # type: ignore[attr-defined]
+        return plotting.PlotResult(
+            figure=target.figure,  # type: ignore[attr-defined]
+            axes={"main": target},
+            tables={},
+            legends=(),
+            scales=(),
+            provenance=plotting.PlotProvenance(),
+            owns_figure=owns_figure,
+        )
+
+    return plot
+
+
+def _failing_plot(store: object, **kwargs: object) -> object:
+    raise RuntimeError("plot failed")
+
+
+def _steps(*names: str) -> PlotRecipe:
+    """A step per name: "left" and "right" fill those panels, "broken" fails,
+    and any other name makes a figure of its own."""
+    return PlotRecipe(
+        [
+            PlotStep(
+                name=name,
+                plot="dotplot" if name.startswith("broken") else "embedding",
+                target=PlotPanelTarget(name) if name in ("left", "right") else None,
+            )
+            for name in names
+        ]
+    )
+
+
+@pytest.fixture
+def panels(monkeypatch: pytest.MonkeyPatch):
+    import matplotlib.pyplot as plt
+
+    figure, (left, right) = plt.subplots(1, 2)
+    created: list[object] = []
+    monkeypatch.setattr(plotting, "embedding", _line_plot(created))
+    monkeypatch.setattr(plotting, "dotplot", _failing_plot)
+    yield figure, {"left": left, "right": right}, created
+    plt.close(figure)
+    for own in created:
+        plt.close(own)
+
+
+def test_show_displays_a_figure_that_several_steps_fill_once_with_every_panel(
+    displayed, panels
+) -> None:
+    import matplotlib.pyplot as plt
+
+    figure, targets, _ = panels
+
+    result = run_recipe(object(), _steps("left", "right"), targets=targets, show=True)
+
+    # One image with both panels drawn, where each step showed it before.
+    assert displayed == [(figure, [1, 1])]
+    assert [output.name for output in result.outputs] == ["left", "right"]
+    # Shown in Jupyter, the figure leaves pyplot, so its cell draws it once.
+    assert not plt.fignum_exists(figure.number)
+
+
+def test_show_displays_a_made_figure_in_its_step_and_the_callers_after_the_last(
+    monkeypatch: pytest.MonkeyPatch, displayed, panels
+) -> None:
+    import matplotlib.pyplot as plt
+
+    figure, targets, created = panels
+    draw = plotting.embedding
+    shown_before_each_step: list[int] = []
+
+    def counting(store: object, **kwargs: object) -> object:
+        shown_before_each_step.append(len(displayed))
+        return draw(store, **kwargs)
+
+    monkeypatch.setattr(plotting, "embedding", counting)
+
+    run_recipe(object(), _steps("left", "own", "right"), targets=targets, show=True)
+
+    # The figure that "own" made was shown before "right" ran, and closed;
+    # the caller's figure waited for "right".
+    assert shown_before_each_step == [0, 0, 1]
+    assert displayed == [(created[0], [1]), (figure, [1, 1])]
+    assert not plt.fignum_exists(created[0].number)
+
+
+def test_the_callers_figures_are_shown_in_the_order_of_their_first_step(
+    displayed, panels
+) -> None:
+    import matplotlib.pyplot as plt
+
+    first, targets, _ = panels
+    second, (other_left, other_right) = plt.subplots(1, 2)
+    targets = {**targets, "other_left": other_left, "other_right": other_right}
+    # The steps fill the two figures in turn, the second figure first.
+    recipe = PlotRecipe(
+        [
+            PlotStep(name=name, plot="embedding", target=PlotPanelTarget(name))
+            for name in ("other_left", "left", "other_right", "right")
+        ]
+    )
+
+    try:
+        run_recipe(object(), recipe, targets=targets, show=True)
+    finally:
+        plt.close(second)
+
+    assert displayed == [(second, [1, 1]), (first, [1, 1])]
+
+
+def test_show_displays_the_figures_of_the_steps_that_succeeded(
+    displayed, panels
+) -> None:
+    figure, targets, created = panels
+
+    result = run_recipe(
+        object(),
+        _steps("left", "broken", "own", "right"),
+        targets=targets,
+        show=True,
+        continue_on_error=True,
+    )
+
+    assert displayed == [(created[0], [1]), (figure, [1, 1])]
+    assert result.failures == {"broken": "RuntimeError: plot failed"}
+    assert [output.name for output in result.outputs] == ["left", "own", "right"]
+
+
+def test_a_failing_step_stops_the_recipe_after_the_earlier_figures_are_shown(
+    displayed, panels
+) -> None:
+    import matplotlib.pyplot as plt
+
+    figure, targets, created = panels
+
+    with pytest.raises(RuntimeError, match="plot failed"):
+        run_recipe(
+            object(),
+            _steps("own", "left", "broken", "right"),
+            targets=targets,
+            show=True,
+        )
+
+    # The made figure was shown in its step and closed, and the caller's
+    # figure is shown as the steps before the failure drew it.
+    assert displayed == [(created[0], [1]), (figure, [1, 0])]
+    assert not plt.fignum_exists(created[0].number)
+
+
+def test_without_show_the_recipe_displays_nothing_and_leaves_its_figures_open(
+    displayed, panels
+) -> None:
+    import matplotlib.pyplot as plt
+
+    figure, targets, created = panels
+
+    result = run_recipe(object(), _steps("left", "own", "right"), targets=targets)
+
+    assert displayed == []
+    assert _lines_per_axes(figure) == [1, 1]
+    assert plt.fignum_exists(figure.number) and plt.fignum_exists(created[0].number)
+    assert [output.result.figure for output in result.outputs] == [
+        figure,
+        created[0],
+        figure,
+    ]
+
+
+def test_warnings_raised_while_a_figure_is_shown_are_recorded_under_its_steps(
+    monkeypatch: pytest.MonkeyPatch, panels
+) -> None:
+    figure, targets, created = panels
+    _warn_when_drawn(figure, "the caller's figure drawn")
+    monkeypatch.setattr("IPython.get_ipython", lambda: object())
+    # As matplotlib-inline's formatter does, the display renders the figure,
+    # so the warnings of a draw are raised while it is shown.
+    monkeypatch.setattr(
+        "IPython.display.display",
+        lambda shown: shown.canvas.print_figure(io.BytesIO(), format="png"),
+    )
+
+    with warnings.catch_warnings(record=True) as escaped:
+        warnings.simplefilter("always")
+        result = run_recipe(
+            object(), _steps("left", "own", "right"), targets=targets, show=True
+        )
+
+    assert result.warnings == (
+        "own: figure 0 drawn",
+        "left: the caller's figure drawn",
+        "right: the caller's figure drawn",
+    )
+    assert [str(warning.message) for warning in escaped] == []
+
+
+def test_a_recipe_keeps_one_made_figure_open_at_a_time(
+    monkeypatch: pytest.MonkeyPatch, displayed, panels
+) -> None:
+    import matplotlib.pyplot as plt
+
+    _, _, created = panels
+    draw = plotting.embedding
+    open_before_each_step: list[int] = []
+
+    def counting(store: object, **kwargs: object) -> object:
+        open_before_each_step.append(
+            sum(plt.fignum_exists(own.number) for own in created)
+        )
+        return draw(store, **kwargs)
+
+    monkeypatch.setattr(plotting, "embedding", counting)
+
+    # More figures than the 20 that Matplotlib warns of when they are open.
+    result = run_recipe(object(), _steps(*(f"own{i}" for i in range(22))), show=True)
+
+    assert open_before_each_step == [0] * 22
+    assert len(displayed) == 22
+    assert not any("More than 20 figures" in warning for warning in result.warnings)
+
+
+@pytest.mark.parametrize("continue_on_error", [False, True])
+def test_a_made_figure_that_fails_to_show_fails_its_step_and_is_closed(
+    monkeypatch: pytest.MonkeyPatch, panels, continue_on_error: bool
+) -> None:
+    import matplotlib.pyplot as plt
+
+    _, _, created = panels
+    shown: list[object] = []
+
+    def display(figure: object) -> None:
+        if figure is created[0]:
+            raise RuntimeError("display failed")
+        shown.append(figure)
+
+    monkeypatch.setattr("IPython.get_ipython", lambda: object())
+    monkeypatch.setattr("IPython.display.display", display)
+
+    if continue_on_error:
+        result = run_recipe(
+            object(), _steps("first", "second"), show=True, continue_on_error=True
+        )
+        # The figure that failed to show fails its step, and the next is shown.
+        assert result.failures == {"first": "RuntimeError: display failed"}
+        assert [output.name for output in result.outputs] == ["second"]
+        assert shown == [created[1]]
+    else:
+        with pytest.raises(RuntimeError, match="display failed"):
+            run_recipe(object(), _steps("first", "second"), show=True)
+        # The error stops the recipe before the second step makes its figure.
+        assert len(created) == 1
+    assert not any(plt.fignum_exists(own.number) for own in created)
+
+
+@pytest.mark.parametrize("continue_on_error", [False, True])
+def test_a_callers_figure_that_fails_to_show_fails_every_step_that_drew_it(
+    monkeypatch: pytest.MonkeyPatch, panels, continue_on_error: bool
+) -> None:
+    figure, targets, created = panels
+    shown: list[object] = []
+
+    def display(displayed_figure: object) -> None:
+        if displayed_figure is figure:
+            raise RuntimeError("display failed")
+        shown.append(displayed_figure)
+
+    monkeypatch.setattr("IPython.get_ipython", lambda: object())
+    monkeypatch.setattr("IPython.display.display", display)
+    steps = _steps("left", "own", "right")
+
+    if continue_on_error:
+        result = run_recipe(
+            object(), steps, targets=targets, show=True, continue_on_error=True
+        )
+        failure = "RuntimeError: display failed"
+        assert result.failures == {"left": failure, "right": failure}
+        assert [output.name for output in result.outputs] == ["own"]
+    else:
+        with pytest.raises(RuntimeError, match="display failed"):
+            run_recipe(object(), steps, targets=targets, show=True)
+    # The figure that "own" made was shown in its step either way.
+    assert shown == [created[0]]
+
+
+def test_a_failing_step_notes_an_earlier_figure_that_fails_to_show(
+    monkeypatch: pytest.MonkeyPatch, panels
+) -> None:
+    import matplotlib.pyplot as plt
+
+    figure, targets, _ = panels
+
+    def display(shown: object) -> None:
+        raise RuntimeError("display failed")
+
+    monkeypatch.setattr("IPython.get_ipython", lambda: object())
+    monkeypatch.setattr("IPython.display.display", display)
+
+    with pytest.raises(RuntimeError, match="plot failed") as raised:
+        run_recipe(object(), _steps("left", "broken"), targets=targets, show=True)
+
+    # The step's error is raised, and the caller's figure that failed to show
+    # is named in a note; in Jupyter, showing closed it in pyplot.
+    assert raised.value.__notes__ == [
+        "The figure of 'left' also failed to show: RuntimeError: display failed"
+    ]
+    assert not plt.fignum_exists(figure.number)
+
+
+def test_a_written_figure_that_the_recipe_does_not_show_is_closed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    result = FakePlotResult("embedding")
+    monkeypatch.setattr(plotting, "embedding", lambda store, **kwargs: result)
+    recipe = PlotRecipe(
+        [PlotStep(name="overview", plot="embedding", output_filename="overview.png")]
+    )
+
+    recipe_result = run_recipe(object(), recipe, output_dir=tmp_path)
+
+    assert recipe_result.written_paths == (tmp_path / "overview.png",)
+    assert result.saved == [tmp_path / "overview.png"]
+    assert result.show_calls == 0
+    assert result.close_calls == 1
 
 
 def test_json_and_toml_loaders_have_matching_camel_case_schema(
