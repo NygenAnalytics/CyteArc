@@ -62,6 +62,26 @@ _READ_DECODE_OBJECT_BYTES = 16 * 1024
 #: 2,000 reads of a band, on Python 3.13 and 3.14.
 _READ_LEFTOVER_LIMIT_BYTES = 192 * 1024
 
+#: Zarr's orthogonal indexer orders the positions of an index array by chunk
+#: in arrays of int64. While it builds them it holds each position's chunk,
+#: the order of the chunks, the positions in that order, the chunks in that
+#: order and their steps, 40 bytes a position; it keeps the order and the
+#: ordered positions, and makes each chunk's positions within the chunk for
+#: the read, 24 bytes a position while the read runs. A sharded read builds
+#: such an indexer again in each shard, over the shard's positions and its
+#: inner chunks, and makes their positions within the chunks twice, so it
+#: holds 64 bytes a position while it builds that indexer beside the
+#: array's. Zarr 3.4.2 traced 40 and 64 bytes a position for shuffled
+#: positions, and less for sorted ones.
+_INDEX_BYTES = 40
+_SHARD_INDEX_BYTES = 64
+#: NumPy indexes a chunk by two index arrays at once, as Zarr indexes an
+#: unsharded chunk whose rows and columns are both index arrays, through a
+#: buffer of up to 8,192 elements of each array, 8 bytes each, and of the
+#: values: 133 KB to take the values from a chunk and 165 KB to place 4-byte
+#: values, on NumPy 2.1 and 2.5.
+_INDEX_BUFFER_ELEMENTS = 8192
+
 #: Python's ``open`` buffers a binary file at its file system's block size,
 #: or at ``io.DEFAULT_BUFFER_SIZE`` where the block size is unknown, as on
 #: Windows, and ``Path.read_bytes`` reads a whole file through it. From
@@ -420,6 +440,35 @@ class ArrayGeometry:
         )
         return rows_bytes + band + self.readScratchBytes
 
+    def indexBytes(self, positions: int) -> int:
+        """Return what Zarr's indexers hold for ``positions`` positions that a read takes by index arrays.
+
+        Zarr orders the positions of an index array by chunk, in integer
+        arrays of 40 bytes a position, and a sharded read orders each shard's
+        positions again by inner chunk, 64 bytes a position in all.
+        """
+        per_position = _SHARD_INDEX_BYTES if self.shards is not None else _INDEX_BYTES
+        return max(0, int(positions)) * per_position
+
+    def takenChunkBytes(self, rows: int, columns: int, *, indexedAxes: int) -> int:
+        """Return what copying ``rows`` by ``columns`` values that a read takes from one chunk holds.
+
+        Zarr copies the values that a read takes from a decoded chunk by
+        index arrays on ``indexedAxes`` of its axes before it places them,
+        while a read of slices places a view of the chunk. With index arrays
+        on two axes, NumPy also buffers up to 8,192 elements of each array
+        and of the values, charged whole so that the charge of fewer rows is
+        no less than its share of the charge of more.
+        """
+        if indexedAxes <= 0:
+            return 0
+        held = max(0, int(rows)) * max(0, int(columns)) * self.itemsize
+        if indexedAxes > 1:
+            held += _INDEX_BUFFER_ELEMENTS * (
+                2 * np.dtype(np.intp).itemsize + self.itemsize
+            )
+        return held
+
     def readBytes(
         self,
         resultBytes: int,
@@ -428,6 +477,8 @@ class ArrayGeometry:
         *,
         shards: int = 1,
         gapBytes: int = 0,
+        indexes: int = 0,
+        takenBytes: int = 0,
     ) -> int:
         """Return the bytes one Zarr read holds while it runs.
 
@@ -456,27 +507,34 @@ class ArrayGeometry:
         :meth:`heldDecodeBytes` counts, scratch and gap, while their
         shard-level copies together hold the selection once. The chunks that
         a read decodes at once, in the array or in each shard, also follow
-        :meth:`readsAtOnce`.
+        :meth:`readsAtOnce`. A read that takes ``indexes`` positions by index
+        arrays rather than slices, on any of its axes, also holds Zarr's
+        indexers of them, as :meth:`indexBytes` counts, and for each chunk
+        it decodes at once ``takenBytes``, what copying the values it takes
+        from that chunk holds, as :meth:`takenChunkBytes` counts.
         """
         touched = max(1, int(chunks))
         decoding, reading = self.readsAtOnce(touched, decodes, shards)
         result = max(0, int(resultBytes))
         held = self.heldDecodeBytes(touched, decoding)
+        index = self.indexBytes(indexes)
+        taken = max(0, int(takenBytes))
         if self.shards is None:
             return (
                 result
-                + decoding * (self.storedChunkBytes() + self.readScratchBytes)
+                + decoding * (self.storedChunkBytes() + self.readScratchBytes + taken)
                 + held
+                + index
             )
         decoded = self.nominalChunkBytes()
         shard = (
             touched * (self.storedChunkBytes() - decoded)
-            + decoding * decoded
+            + decoding * (decoded + taken)
             + held
             + self.readScratchBytes
             + max(0, int(gapBytes))
         )
-        return 2 * result + reading * shard
+        return 2 * result + reading * shard + index
 
     def binOf(self, axis: int, indices: np.ndarray) -> np.ndarray:
         """Map indices along one axis to the chunk they live in."""

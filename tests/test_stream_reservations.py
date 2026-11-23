@@ -576,6 +576,184 @@ def test_a_whole_read_of_an_unsharded_array_holds_no_decoded_chunk_beside_its_de
     assert geometry.wholeReadBytes(2) - decoded < peak - base
 
 
+def test_read_bytes_charge_the_indexers_and_copies_of_reads_by_index_arrays() -> None:
+    sharded = ArrayGeometry(
+        shape=(100, 40), chunks=(10, 4), shards=(50, 40), itemsize=2
+    )
+    unsharded = replace(sharded, shards=None)
+    # Zarr's indexers hold 64 bytes for each position of a sharded read, its
+    # own and its shard's, and 40 for each of an unsharded one.
+    assert sharded.indexBytes(1_000) == 64_000
+    assert unsharded.indexBytes(1_000) == 40_000
+    assert sharded.indexBytes(-5) == 0
+    # A read of slices places views of its chunks. One index array copies
+    # the values it takes from a chunk, here 7 rows of 3 two-byte values;
+    # two also hold NumPy's buffers of 8,192 elements of each array, 8 bytes
+    # each, and of the values.
+    assert sharded.takenChunkBytes(7, 3, indexedAxes=0) == 0
+    assert sharded.takenChunkBytes(7, 3, indexedAxes=1) == 42
+    assert unsharded.takenChunkBytes(7, 3, indexedAxes=2) == 42 + 8_192 * (8 + 8 + 2)
+    assert unsharded.takenChunkBytes(0, 3, indexedAxes=2) == 8_192 * 18
+    # Each chunk decoded at once holds its copy; the indexers are held once.
+    nominal = 10 * 4 * 2
+    encoded = 80 + 1_024
+    assert sharded.readBytes(1_000, 5, decodes=2, indexes=30, takenBytes=42) == (
+        2 * 1_000 + 5 * encoded + 2 * (nominal + 42) + _read_objects(5, 2) + 30 * 64
+    )
+    stored = nominal + nominal + 1_024
+    assert unsharded.readBytes(1_000, 5, decodes=2, indexes=30, takenBytes=42) == (
+        1_000 + 2 * (stored + 42) + _read_objects(5, 2) + 30 * 40
+    )
+    # Two shards read at once each copy what they take from the chunks that
+    # they decode at once.
+    assert sharded.readBytes(
+        1_000, 5, decodes=2, shards=3, indexes=30, takenBytes=42
+    ) == (
+        2 * 1_000
+        + 2 * (5 * encoded + 2 * (nominal + 42) + _read_objects(5, 2))
+        + 30 * 64
+    )
+    assert sharded.readBytes(1_000, 5, decodes=2) == sharded.readBytes(
+        1_000, 5, decodes=2, indexes=0, takenBytes=0
+    )
+
+
+def _random_bits_store(
+    tmp_path: Any,
+    shape: tuple[int, int],
+    chunks: tuple[int, int],
+    shards: tuple[int, int] | None,
+    dtype: Any,
+) -> tuple[zarr.Array, np.ndarray]:
+    """Store random bits, which no compressor shrinks, so the stored chunks are as large as they decode to."""
+    bits = np.random.default_rng(0).integers(0, 1 << 32, size=shape, dtype=np.uint32)
+    values = bits.view(np.float32) if dtype == np.float32 else bits.astype(dtype)
+    root = zarr.open_group(store=LocalStore(str(tmp_path)), mode="w")
+    stored = root.create_array(
+        "values", shape=shape, chunks=chunks, shards=shards, dtype=dtype
+    )
+    stored[:] = values
+    return stored, values
+
+
+def _traced_block_read(block: ChunkedArray) -> tuple[np.ndarray, int]:
+    """Read ``block`` whole at one decode at a time, as row-block streams read, once to warm Zarr and once traced."""
+    import tracemalloc
+
+    from cytearc.storage.async_execution import zarr_io_concurrency
+
+    with zarr_io_concurrency(1):
+        block._read(0, block.shape[0])
+        tracemalloc.start()
+        try:
+            base, _ = tracemalloc.get_traced_memory()
+            values = block._read(0, block.shape[0])
+            _current, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+    return values, peak - base
+
+
+@pytest.mark.parametrize("selected", ["rows", "columns", "both"])
+@pytest.mark.parametrize("sharded", [True, False], ids=["sharded", "unsharded"])
+def test_a_read_of_selected_cells_holds_no_more_than_its_charge(
+    tmp_path: Any, sharded: bool, selected: str
+) -> None:
+    # 4,000 cells by 256 features in chunks of 2,000 cells and 128 features,
+    # 1 MB each, in shards of a band of cells or none. The block reads every
+    # cell of the first chunk band in a shuffled order, every other feature,
+    # or both.
+    stored, values = _random_bits_store(
+        tmp_path,
+        (4_000, 256),
+        (2_000, 128),
+        (2_000, 256) if sharded else None,
+        np.float32,
+    )
+    matrix = ChunkedArray(stored)
+    cells = np.random.default_rng(1).permutation(2_000)
+    features = np.arange(0, 256, 2)
+    block = {
+        "rows": matrix[cells, :],
+        "columns": matrix[:2_000, features],
+        "both": matrix[cells, :][:, features],
+    }[selected]
+    read, peak = _traced_block_read(block)
+    expected = values[
+        np.ix_(
+            np.arange(2_000) if selected == "columns" else cells,
+            np.arange(256) if selected == "rows" else features,
+        )
+    ]
+    np.testing.assert_array_equal(read.view(np.uint32), expected.view(np.uint32))
+
+    # Beside a read of the same block of a run of cells and of as many
+    # features in the same chunks, the read holds Zarr's indexers of the
+    # cells or features that it takes by an index array, 64 bytes each in a
+    # sharded read and 40 in an unsharded one, and its copy of what it takes
+    # from each chunk: 2,000 cells of 128 features, or of the 64 selected
+    # features of a chunk. Two index arrays on an unsharded read also hold
+    # NumPy's buffers of 8,192 elements of each array and of the values.
+    charge = block._read_bytes(read.nbytes)
+    assert peak <= charge
+    run = matrix[:2_000, :] if selected == "rows" else matrix[:2_000, 64:192]
+    copy = 2_000 * (128 if selected == "rows" else 64) * 4
+    if selected == "both" and sharded:
+        # A sharded read of both is read in bands, charged beside the read of
+        # a block of a run of cells.
+        assert charge >= run._read_bytes(read.nbytes) + 128 * 64 + copy
+        return
+    indexes = {"rows": 2_000, "columns": 128, "both": 2_128}[selected]
+    buffers = 8_192 * (8 + 8 + 4) if selected == "both" else 0
+    assert charge - run._read_bytes(read.nbytes) == (
+        indexes * (64 if sharded else 40) + copy + buffers
+    )
+    if selected == "rows":
+        # A plan of a read of some of a matrix's rows by an index array, as
+        # a merge plans the cells it holds, charges the same.
+        assert run._read_bytes(read.nbytes, rows_indexed=True) == charge
+    # Without the copy, the charge would not cover the read.
+    assert peak > charge - copy
+
+
+@pytest.mark.parametrize("selected", ["rows", "both"])
+@pytest.mark.parametrize("sharded", [True, False], ids=["sharded", "unsharded"])
+def test_a_read_of_many_cells_of_a_narrow_matrix_holds_their_indexers(
+    tmp_path: Any, sharded: bool, selected: str
+) -> None:
+    # 100,000 cells by 4 uint16 features in chunks of every cell and one
+    # feature: a read of every cell in a shuffled order holds far more
+    # integers indexing the cells than values.
+    stored, values = _random_bits_store(
+        tmp_path,
+        (100_000, 4),
+        (100_000, 1),
+        (100_000, 4) if sharded else None,
+        np.uint16,
+    )
+    cells = np.random.default_rng(2).permutation(100_000)
+    features = np.array([0, 2, 3])
+    matrix = ChunkedArray(stored)
+    block = matrix[cells, :] if selected == "rows" else matrix[cells, :][:, features]
+    read, peak = _traced_block_read(block)
+    np.testing.assert_array_equal(
+        read, values[cells] if selected == "rows" else values[np.ix_(cells, features)]
+    )
+    charge = block._read_bytes(read.nbytes)
+    assert peak <= charge
+    if selected == "both" and sharded:
+        # A sharded read of both is read in bands of the one chunk band of
+        # cells, which index the three features, rather than in bands of a
+        # feature, which would index every cell at 64 bytes each. Ordering
+        # the cells by chunk band keeps 32 bytes of each.
+        assert peak < 64 * 100_000
+        assert peak > charge - 32 * 100_000
+    else:
+        # Zarr's indexers of the cells, 64 bytes a cell in a sharded read and
+        # 40 in an unsharded one, outweigh everything else that it holds.
+        assert peak > charge - (64 if sharded else 40) * 100_000
+
+
 def test_a_row_block_stream_of_an_unsharded_array_reserves_each_stored_chunk() -> None:
     values = np.arange(48, dtype=np.uint16).reshape(12, 4)
     stored = zarr.array(values, chunks=(6, 4))

@@ -24,9 +24,21 @@ class ResourceBudget:
     workers: int
 
 
+def _read_text(path: str) -> str:
+    """Return the text of a small system file, such as a cgroup limit, read without a buffer.
+
+    Every operation plan reads the CPU quota, and from Python 3.14 a buffered
+    open allocates a buffer of at least 128 KiB however small the file. The
+    bytes are decoded as file names are, so a cgroup path that is not UTF-8
+    names its directory.
+    """
+    with open(path, "rb", buffering=0) as file:
+        return os.fsdecode(file.read())
+
+
 def _read_int(path: str) -> int | None:
     try:
-        value = Path(path).read_text().strip()
+        value = _read_text(path).strip()
     except OSError:
         return None
     if not value or value == "max":
@@ -80,10 +92,9 @@ def _read_physical_memory_bytes() -> int | None:
     sysconf, and Windows through GlobalMemoryStatusEx.
     """
     try:
-        with open("/proc/meminfo") as handle:
-            for line in handle:
-                if line.startswith("MemTotal:"):
-                    return int(line.split()[1]) * 1024
+        for line in _read_text("/proc/meminfo").splitlines():
+            if line.startswith("MemTotal:"):
+                return int(line.split()[1]) * 1024
     except OSError:
         pass
     try:
@@ -98,7 +109,7 @@ def _read_physical_memory_bytes() -> int | None:
 
 def _process_cgroup_entry(controller: str) -> tuple[list[str], str] | None:
     try:
-        lines = Path("/proc/self/cgroup").read_text().splitlines()
+        lines = _read_text("/proc/self/cgroup").splitlines()
     except OSError:
         return None
     for line in lines:
@@ -184,7 +195,7 @@ def detect_cpu_quota_cores() -> float | None:
     limits: list[float] = []
     for path in _unified_cgroup_files("cpu.max"):
         try:
-            quota_text, period_text = Path(path).read_text().strip().split()
+            quota_text, period_text = _read_text(path).strip().split()
         except (OSError, ValueError):
             continue
         if quota_text != "max":

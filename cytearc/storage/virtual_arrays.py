@@ -289,11 +289,14 @@ def _read_index_arrays(
     none. Instead, one stored chunk of one axis at a time is read as a band
     that slices the axis over the indices the chunk holds, with the other axis
     indexed by Zarr, and the band's selected positions are copied into the
-    result in the requested order, repeats included. The axis whose widest
-    band is narrower is sliced, so the read holds its result beside one Zarr
-    read of that band, as ``indexed_read_parts`` charges.
+    result in the requested order, repeats included. The axis whose bands
+    hold less is sliced, their values beside Zarr's indexers and copies of
+    the other axis's indices, as ``index_band_bytes`` counts them at Zarr's
+    async concurrency, so the read holds its result beside one Zarr read of
+    such a band, as ``indexed_read_parts`` charges.
     """
-    from .partition import widest_chunk_span
+    from .geometry import array_geometry
+    from .partition import band_shards, index_band_bytes, widest_chunk_span
 
     row_indices = _in_axis_indices(rows, int(array.shape[0]))
     column_indices = _in_axis_indices(columns, int(array.shape[1]))
@@ -301,10 +304,19 @@ def _read_index_arrays(
         # Zarr reads empty selections, negative indices, and boolean masks,
         # and rejects indices outside the axis before it reads anything.
         return _orthogonal_selection(array, (rows, columns))
+    geometry = array_geometry(array)
+    # A Zarr array always has a chunk layout.
+    assert geometry is not None
     row_chunk, column_chunk = (operator.index(extent) for extent in array.chunks)
-    column_band = row_indices.size * widest_chunk_span(column_indices, column_chunk)
-    row_band = column_indices.size * widest_chunk_span(row_indices, row_chunk)
-    if column_band <= row_band:
+    column_bands, row_bands = index_band_bytes(
+        geometry,
+        column_indices,
+        rows=row_indices.size,
+        row_span=widest_chunk_span(row_indices, row_chunk),
+        concurrency=max(1, int(zarr.config.get("async.concurrency"))),
+        shards=band_shards(geometry, row_indices, row_indices.size),
+    )
+    if column_bands <= row_bands:
         return _read_bands(
             array, row_indices, column_indices, axis=1, chunk=column_chunk
         )

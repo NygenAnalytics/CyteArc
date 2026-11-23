@@ -1,6 +1,4 @@
-import builtins
 import ctypes
-import io
 from types import SimpleNamespace
 
 import pytest
@@ -17,26 +15,26 @@ from cytearc.utils.memory_budget import MemoryBudgetError
 
 
 def _serve_files(monkeypatch: pytest.MonkeyPatch, files: dict[str, str]) -> None:
-    """Serve ``Path.read_text`` from ``files``; every other path is missing."""
+    """Serve the system files that the budget reads from ``files``; every other path is missing."""
 
-    def read_text(path, *_args, **_kwargs):
+    def read_text(path):
         try:
             return files[str(path)]
         except KeyError:
             raise OSError(f"missing {path}") from None
 
-    monkeypatch.setattr("pathlib.Path.read_text", read_text)
+    monkeypatch.setattr(budget_module, "_read_text", read_text)
 
 
 def _without_meminfo(monkeypatch: pytest.MonkeyPatch) -> None:
-    real_open = builtins.open
+    real_read = budget_module._read_text
 
-    def fake_open(path, *args, **kwargs):
+    def read_text(path):
         if str(path) == "/proc/meminfo":
             raise OSError("no meminfo")
-        return real_open(path, *args, **kwargs)
+        return real_read(path)
 
-    monkeypatch.setattr(builtins, "open", fake_open)
+    monkeypatch.setattr(budget_module, "_read_text", read_text)
     # Physical memory alone decides the total, whatever cgroup this host runs in.
     monkeypatch.setattr(budget_module, "_cgroup_memory_bytes", lambda: None)
 
@@ -273,14 +271,14 @@ def test_detect_memory_reads_memtotal_in_kibibytes_and_sysconf_without_it(
     monkeypatch,
 ):
     served = {}
-    real_open = builtins.open
+    real_read = budget_module._read_text
 
-    def fake_open(path, *args, **kwargs):
+    def read_text(path):
         if str(path) == "/proc/meminfo":
-            return io.StringIO(served["meminfo"])
-        return real_open(path, *args, **kwargs)
+            return served["meminfo"]
+        return real_read(path)
 
-    monkeypatch.setattr(builtins, "open", fake_open)
+    monkeypatch.setattr(budget_module, "_read_text", read_text)
     monkeypatch.setattr(budget_module, "_cgroup_memory_bytes", lambda: None)
     monkeypatch.setattr(
         "os.sysconf", {"SC_PAGE_SIZE": 4096, "SC_PHYS_PAGES": 1000}.__getitem__
@@ -374,7 +372,7 @@ def test_detect_workers_uses_process_cgroup_path(monkeypatch):
             return "250000 100000"
         raise OSError("missing")
 
-    monkeypatch.setattr("pathlib.Path.read_text", read_text)
+    monkeypatch.setattr(budget_module, "_read_text", read_text)
     monkeypatch.setattr("os.cpu_count", lambda: 16)
     monkeypatch.setattr(
         "os.sched_getaffinity",
@@ -404,6 +402,79 @@ def test_detect_workers_skips_unreadable_quotas_and_affinity(monkeypatch):
 
     # The root quota of three CPUs binds; the others carry no usable limit.
     assert detect_workers() == 3
+
+
+def _serve_host_files(monkeypatch: pytest.MonkeyPatch, host, files: dict[str, str]):
+    """Write ``files`` under ``host`` and serve each path the budget reads from its copy there, through the budget's own reader."""
+    import os
+
+    for name, text in files.items():
+        path = host / name.lstrip("/")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+    real_read = budget_module._read_text
+    monkeypatch.setattr(
+        budget_module,
+        "_read_text",
+        lambda path: real_read(os.path.join(host, str(path).lstrip("/"))),
+    )
+
+
+def test_plans_read_the_hosts_cgroup_and_memory_files_without_a_buffer(
+    tmp_path, monkeypatch
+):
+    import gc
+    import tracemalloc
+
+    # A host in a cgroup with a quota of 1.5 CPUs and a 2 GiB memory limit,
+    # whose legacy CPU controller allows 2.5 CPUs.
+    _serve_host_files(
+        monkeypatch,
+        tmp_path,
+        {
+            "/proc/self/cgroup": "0::/batch/job.scope\n4:cpu:/legacy\n",
+            "/proc/meminfo": "MemTotal:       16384000 kB\nMemFree: 2000 kB\n",
+            "/sys/fs/cgroup/batch/job.scope/cpu.max": "150000 100000\n",
+            "/sys/fs/cgroup/batch/job.scope/memory.max": f"{2 * 1024**3}\n",
+            "/sys/fs/cgroup/cpu/legacy/cpu.cfs_quota_us": "250000\n",
+            "/sys/fs/cgroup/cpu/legacy/cpu.cfs_period_us": "100000\n",
+        },
+    )
+    monkeypatch.setattr("os.cpu_count", lambda: 16)
+    monkeypatch.setattr(
+        "os.sched_getaffinity", lambda pid: set(range(16)), raising=False
+    )
+    assert budget_module.detect_cpu_quota_cores() == 1.5
+    assert detect_workers() == 1
+    assert budget_module.detect_memory_limit_bytes() == 2 * 1024**3
+
+    # Every plan reads the CPU quota, and a default budget the memory. A
+    # buffered read of each file would hold a buffer of at least 128 KiB from
+    # Python 3.14, and 4 to 8 KiB before.
+    gc.collect()
+    tracemalloc.start()
+    try:
+        detect_workers()
+        budget_module.detect_memory_limit_bytes()
+        _current, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak < 16 * 1024
+
+
+def test_system_files_are_read_whole_and_decoded_as_file_names(tmp_path):
+    import os
+
+    quota = tmp_path / "cpu.max"
+    quota.write_bytes(b"150000 100000\n")
+    assert budget_module._read_text(str(quota)) == "150000 100000\n"
+    # A cgroup whose name is not UTF-8 keeps its bytes, so its files open.
+    named = tmp_path / "cgroup"
+    named.write_bytes(b"0::/caf\xe9/job\n")
+    entry = budget_module._read_text(str(named))
+    assert os.fsencode(entry) == b"0::/caf\xe9/job\n"
+    with pytest.raises(OSError):
+        budget_module._read_text(str(tmp_path / "missing"))
 
 
 def test_detect_workers_without_cpu_affinity_takes_the_cpu_count(monkeypatch):
@@ -452,7 +523,7 @@ def test_detect_workers_uses_combined_legacy_controller_mount(monkeypatch):
         except KeyError:
             raise OSError("missing") from None
 
-    monkeypatch.setattr("pathlib.Path.read_text", read_text)
+    monkeypatch.setattr(budget_module, "_read_text", read_text)
     monkeypatch.setattr("os.cpu_count", lambda: 16)
     monkeypatch.setattr(
         "os.sched_getaffinity",
