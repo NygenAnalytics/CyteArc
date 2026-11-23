@@ -406,7 +406,7 @@ def test_detect_workers_skips_unreadable_quotas_and_affinity(monkeypatch):
 
 def _serve_host_files(monkeypatch: pytest.MonkeyPatch, host, files: dict[str, str]):
     """Write ``files`` under ``host`` and serve each path the budget reads from its copy there, through the budget's own reader."""
-    import os
+    from pathlib import PurePath
 
     for name, text in files.items():
         path = host / name.lstrip("/")
@@ -416,7 +416,7 @@ def _serve_host_files(monkeypatch: pytest.MonkeyPatch, host, files: dict[str, st
     monkeypatch.setattr(
         budget_module,
         "_read_text",
-        lambda path: real_read(os.path.join(host, str(path).lstrip("/"))),
+        lambda path: real_read(str(host / PurePath(path).as_posix().lstrip("/"))),
     )
 
 
