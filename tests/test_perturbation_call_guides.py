@@ -1341,9 +1341,15 @@ def test_checking_variable_width_ids_against_a_call_file_holds_what_it_charges()
         dtype=np.dtypes.StringDType(),
     )
 
+    # A store whose cell table holds no column of each cell's source, so the
+    # check reads no sample.
+    unmerged = SimpleNamespace(cells=SimpleNamespace(columns=[], _get_array=None))
+
     def check(ledger) -> None:
         operations._check_cell_ids(
             ledger,
+            unmerged,
+            np.arange(len(ids)),
             ids,
             None,
             barcode_suffix="-1",

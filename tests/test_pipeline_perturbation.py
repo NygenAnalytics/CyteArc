@@ -1641,6 +1641,55 @@ def test_the_call_file_check_reads_the_ids_of_the_runs_cells_only(
         assert set(read.tolist()) == set(np.flatnonzero(LANES == "L1").tolist())
 
 
+def test_the_call_file_check_reads_the_samples_of_the_runs_cells(
+    screen, tmp_path
+) -> None:
+    from cytearc.storage.identity import replace_metadata_column
+
+    location = tmp_path / "merged.zarr"
+    shutil.copytree(screen, location)
+    # A store merged from lanes L1 and L1_, which names each cell's lane in a
+    # column of sources, as a merge whose lanes' features differ does.
+    lanes = np.asarray(["L1", "L1_"])
+    codes = (LANES != "L1").astype(np.int64)
+    cells = zarr.open_group(str(location / "cellData"), mode="r+")
+    cells.create_array(
+        "ids",
+        data=np.asarray(
+            [f"{lanes[code]}__cell{cell}" for cell, code in enumerate(codes)]
+        ),
+        overwrite=True,
+    )
+    replace_metadata_column(cells, "dataset", codes, categories=lanes)
+    cells["dataset"].attrs.update({"role": "cell_sources"})
+    store = _open(location)
+    store.cells.insert("lane1", by_cell_id(store.cells, codes == 0))
+    first = str(lanes[codes[0]])
+    second = str(lanes[1 - codes[0]])
+
+    with pytest.raises(
+        ValueError,
+        match=re.escape(
+            "The call file holds the barcodes of one sample, but the run's cells "
+            f"come from several samples of a merged store, such as {first!r} and "
+            f"{second!r}; restrict cells to the cells of one sample and pass its "
+            f"barcode_prefix, such as {first + '__'!r}"
+        ),
+    ):
+        _check_call_file_cells(store, CellSource(column="I", selection=None), None)
+    # The cells of lane L1 are of one sample by the column, whatever their IDs,
+    # and the check lets go of their samples: its ledger holds their IDs alone,
+    # as it does once the column no longer names the sources.
+    _ids, ledger = _check_call_file_cells(
+        store, CellSource(column="lane1", selection=None), None
+    )
+    cells["dataset"].attrs.update({"role": None})
+    _ids, without = _check_call_file_cells(
+        _open(location), CellSource(column="lane1", selection=None), None
+    )
+    assert ledger.held_bytes == without.held_bytes > 0
+
+
 def test_a_call_file_that_cannot_label_the_runs_cells_is_refused(
     screen, rejection_store, tmp_path
 ) -> None:

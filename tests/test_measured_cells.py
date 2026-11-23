@@ -44,6 +44,7 @@ from cytearc.metadata import membership as membership_module
 from cytearc.metadata.membership import (
     UnmeasuredCellsError,
     cell_sources,
+    cell_sources_column,
     count_unmeasured_cells_with_counts,
     features_measured_by_cells,
     measured_features_by_source,
@@ -2657,6 +2658,27 @@ def test_a_column_of_sources_without_its_role_is_refused(panels, tmp_path) -> No
         "cell column 'dataset' that names each cell's source, which a merge or a "
         "composite writes beside the record, has no role 'cell_sources', which "
         "marks that column. Merge the sources again"
+    )
+
+
+def test_the_column_of_sources_is_the_cell_column_with_its_role(
+    panels, tmp_path
+) -> None:
+    assert cell_sources_column(panels.open().cells) == "dataset"
+    # A store that no merge wrote names no source.
+    assert cell_sources_column(panels.open("left").cells) is None
+    # A second column with the role leaves each cell's source unclear.
+    store = _copied_panels(panels, tmp_path)
+    store.cells.insert("batch", by_cell_id(store.cells, np.zeros(store.cells.N)))
+    cells = zarr.open_group(str(tmp_path / "merged.zarr"), mode="r+")["cellData"]
+    cells["batch"].attrs.update({"role": "cell_sources"})
+    with pytest.raises(ValueError) as refused:
+        cell_sources_column(_PanelStores(tmp_path).open().cells)
+    assert str(refused.value) == (
+        "Cell columns 'batch', 'dataset' each hold the role 'cell_sources' of the "
+        "column that names each cell's source, which a merge or a composite "
+        "writes once; drop the columns that do not name the sources of this "
+        "store's cells"
     )
 
 
