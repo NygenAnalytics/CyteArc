@@ -14,6 +14,7 @@ from cytearc.storage.parallel import stream_shards
 from cytearc.storage.partition import (
     affordable_width,
     checked_indices,
+    coalesced_gap_bytes,
     contiguous_ranges,
     indexed_read_parts,
     is_contiguous,
@@ -90,6 +91,46 @@ def test_an_edge_chunk_decodes_to_the_nominal_size() -> None:
 
 def test_array_geometry_is_absent_for_in_memory_arrays() -> None:
     assert array_geometry(np.zeros((4, 4), dtype=np.uint32)) is None
+
+
+@pytest.mark.parametrize(
+    ("pipeline", "max_workers", "keeps"),
+    [
+        ("zarr.core.codec_pipeline.BatchedCodecPipeline", None, False),
+        ("zarr.core.codec_pipeline.BatchedCodecPipeline", 4, False),
+        ("zarr.core.codec_pipeline.FusedCodecPipeline", 2, True),
+        ("zarr.core.codec_pipeline.FusedCodecPipeline", 1, False),
+        # Zarr reads a value it cannot use as a worker for each CPU.
+        ("zarr.core.codec_pipeline.FusedCodecPipeline", "many", "cpus"),
+        ("zarr.core.codec_pipeline.FusedCodecPipeline", None, "cpus"),
+    ],
+    ids=[
+        "Zarr's default pipeline",
+        "the default pipeline with workers set",
+        "the opt-in pipeline of two workers",
+        "the opt-in pipeline of one worker",
+        "the opt-in pipeline of an unreadable count",
+        "the opt-in pipeline of a worker per CPU",
+    ],
+)
+def test_array_geometry_records_whether_zarr_decodes_on_a_pool_of_its_own(
+    pipeline: str, max_workers: object, keeps: object
+) -> None:
+    import os
+
+    # The pipeline is the one the array was opened with; its worker count is
+    # read when the plan is made.
+    with zarr.config.set({"codec_pipeline.path": pipeline}):
+        array = _array(shape=(20, 20), chunks=(5, 5), shards=(10, 10))
+    with zarr.config.set({"codec_pipeline.max_workers": max_workers}):
+        geometry = array_geometry(array)
+    assert geometry is not None
+    expected = (os.cpu_count() or 1) > 1 if keeps == "cpus" else keeps
+    assert geometry.poolKeepsDecodedChunk is expected
+    # An array opened after the setting is gone keeps Zarr's default pipeline.
+    reopened = zarr.open_array(array.store, path=array.path, mode="r")
+    with zarr.config.set({"codec_pipeline.max_workers": max_workers}):
+        assert array_geometry(reopened).poolKeepsDecodedChunk is False
 
 
 def test_array_geometry_records_shards_and_falls_back_to_chunks() -> None:
@@ -216,6 +257,177 @@ def test_indexed_read_parts_charge_the_narrower_band() -> None:
     )
 
 
+def test_a_read_of_part_of_a_shard_is_charged_the_chunks_between_its_columns() -> None:
+    from dataclasses import replace
+
+    # Shards of one row of ten 40-gene chunks store them in column order.
+    plain = ArrayGeometry((2_000, 400), (1_000, 40), (1_000, 400), 4)
+    geometry = replace(plain, coalesceGapBytes=1 << 20)
+    # Each chunk decodes to 160,000 bytes and is stored in at most 1/128 of
+    # that and 1,024 bytes more.
+    stored = 160_000 + 160_000 // 128 + 1_024
+    # Genes 5, 0, 41, 42, 120, 200, 300 and 397 fall in chunks 0, 1, 3, 5, 7
+    # and 9: a merged fetch also takes chunks 2, 4, 6 and 8 between them.
+    genes = np.array([5, 397, 41, 42, 200, 120, 0, 300])
+    assert coalesced_gap_bytes(geometry, genes, chunks=6) == 4 * stored
+    # Zarr merges no gap wider than its setting, so a gap counts at most that.
+    assert (
+        coalesced_gap_bytes(
+            replace(geometry, coalesceGapBytes=100_000), genes, chunks=6
+        )
+        == 4 * 100_000
+    )
+    # Two gaps of two chunks each, between chunks 0, 3 and 6.
+    assert coalesced_gap_bytes(geometry, np.array([0, 120, 240]), chunks=3) == 2 * min(
+        1 << 20, 2 * stored
+    )
+    # Adjacent chunks, one chunk, every chunk of the shard, and no merging.
+    assert coalesced_gap_bytes(geometry, np.arange(0, 120), chunks=3) == 0
+    assert coalesced_gap_bytes(geometry, np.array([7]), chunks=1) == 0
+    assert coalesced_gap_bytes(geometry, np.arange(400), chunks=10) == 0
+    assert coalesced_gap_bytes(plain, genes, chunks=6) == 0
+    # The charge of a run of rows over those genes holds the chunks between,
+    # and so does a banded read of scattered rows over them.
+    with_gaps, per_row = row_read_parts(geometry, genes, rows_contiguous=True)
+    without_gaps, same_per_row = row_read_parts(plain, genes, rows_contiguous=True)
+    assert with_gaps - without_gaps == 4 * stored
+    assert per_row == same_per_row
+    banded = indexed_read_parts(geometry, genes, block_rows=1_000)
+    banded_apart = indexed_read_parts(plain, genes, block_rows=1_000)
+    assert banded[0] - banded_apart[0] == 4 * stored
+    # Of shards of five chunks, the one whose chunks lie furthest apart counts:
+    # chunks 0, 2 and 4 of the first leave two gaps, 5 and 6 of the second none.
+    halves = replace(geometry, shards=(1_000, 200))
+    apart_first = np.array([0, 80, 160, 200, 240])
+    assert coalesced_gap_bytes(halves, apart_first, chunks=3) == 2 * stored
+    assert coalesced_gap_bytes(halves, apart_first[::-1], chunks=3) == 2 * stored
+
+
+def test_a_read_of_part_of_a_shard_of_several_rows_of_chunks_is_bounded_in_any_order() -> (
+    None
+):
+    # Shards of two rows of four chunks, which Zarr writes in Morton order.
+    geometry = ArrayGeometry((64, 32), (8, 8), (16, 32), 4, coalesceGapBytes=10_000)
+    stored = 256 + 256 // 128 + 1_024
+    # A read of one column chunk in both rows of chunks takes two of the eight
+    # chunks; up to the six others may lie between them, but there is one gap.
+    assert coalesced_gap_bytes(geometry, np.arange(8), chunks=2) == min(
+        1 * 10_000, 6 * stored
+    )
+    # Three column chunks in both rows: six chunks taken, five gaps at most,
+    # each no wider than the setting, and no more than the two chunks left.
+    assert coalesced_gap_bytes(geometry, np.arange(24), chunks=6) == min(
+        5 * 10_000, 2 * stored
+    )
+    # Every chunk of the shard is fetched whole.
+    assert coalesced_gap_bytes(geometry, np.arange(32), chunks=8) == 0
+
+
+def test_band_shards_count_the_rows_of_shards_that_a_band_touches() -> None:
+    from cytearc.storage.partition import band_shards
+
+    geometry = ArrayGeometry((8_000, 400), (1_000, 40), (1_000, 400), 4)
+    # Bands of a run of rows: aligned with the shards, inside them, across
+    # one boundary at most, and from a run that starts inside a shard.
+    assert band_shards(geometry, range(8_000), 1_000) == 1
+    assert band_shards(geometry, range(8_000), 250) == 1
+    assert band_shards(geometry, range(8_000), 1_500) == 2
+    assert band_shards(geometry, range(8_000), 2_000) == 2
+    assert band_shards(geometry, range(500, 7_500), 1_000) == 2
+    assert band_shards(geometry, range(8_000), 10_000) == 8
+    # Every fourth row: a band of 1,000 rows spans 4,000 rows, four shards.
+    assert band_shards(geometry, np.arange(0, 8_000, 4), 1_000) == 4
+    # A band of selected rows that starts inside the shard where the band
+    # before it ends counts that shard too: rows 600 to 1,199 touch two.
+    assert band_shards(geometry, np.arange(3_000), 600) == 2
+    assert band_shards(geometry, range(0, 8_000, 4), 1_000) == 4
+    # Rows that come back to a shard count it again, never fewer than it has.
+    assert band_shards(geometry, np.array([0, 5_000, 1, 5_001]), 4) == 4
+    assert band_shards(geometry, np.array([0, 1, 5_000, 5_001]), 4) == 2
+    # No rows, or no geometry, touch one row of shards at most.
+    assert band_shards(geometry, np.array([], dtype=np.int64), 4) == 1
+    assert band_shards(None, range(10), 4) == 1
+
+
+def test_row_reads_at_a_concurrency_hold_the_shards_and_decodes_they_run_at_once() -> (
+    None
+):
+    from dataclasses import replace
+
+    geometry = ArrayGeometry((8_000, 400), (1_000, 40), (1_000, 400), 4)
+    every_gene = np.arange(400)
+    decoded = 160_000
+    encoded = decoded + decoded // 128 + 1_024
+    # One read at a time: the ten compressed chunks of a shard, one decoded
+    # chunk, and the objects of the read: 32 KiB, 4 KiB for each chunk it
+    # touches and 16 KiB for each chunk it decodes at once.
+    one, per_row = row_read_parts(geometry, every_gene, rows_contiguous=True)
+    assert one == 10 * encoded + decoded + (32_768 + 10 * 4_096 + 16_384)
+    assert per_row == 400 * 4
+    # Ten at once over a band of one shard decode its ten chunks at once,
+    # beside the objects of ten decodes.
+    ten, ten_per_row = row_read_parts(
+        geometry, every_gene, rows_contiguous=True, concurrency=10
+    )
+    shard = 10 * encoded + 10 * decoded + 32_768 + 10 * 4_096 + 10 * 16_384
+    assert (ten, ten_per_row) == (shard, per_row)
+    # Over a band of four shards, ten at once read all four together; two at
+    # once read two shards, each decoding two chunks at once.
+    assert row_read_parts(
+        geometry, every_gene, rows_contiguous=True, concurrency=10, shards=4
+    ) == (4 * shard, per_row)
+    two = 10 * encoded + 2 * decoded + 32_768 + 10 * 4_096 + 2 * 16_384
+    assert row_read_parts(
+        geometry, every_gene, rows_contiguous=True, concurrency=2, shards=4
+    ) == (2 * two, per_row)
+    # At one read at a time the shards that a band touches are read in turn.
+    assert row_read_parts(geometry, every_gene, rows_contiguous=True, shards=4) == (
+        one,
+        per_row,
+    )
+    # Shards of half the genes are read side by side, ten at once.
+    halves = replace(geometry, shards=(1_000, 200))
+    half = 5 * encoded + 5 * decoded + 32_768 + 5 * 4_096 + 5 * 16_384
+    assert row_read_parts(halves, every_gene, rows_contiguous=True, concurrency=10) == (
+        2 * half,
+        per_row,
+    )
+    # On Zarr's own pool, whose threads keep the chunk they decoded, two
+    # decodes at once also hold the two chunks decoded before them.
+    own_pool = replace(geometry, poolKeepsDecodedChunk=True)
+    assert row_read_parts(
+        own_pool, every_gene, rows_contiguous=True, concurrency=2
+    ) == (
+        10 * encoded + 2 * decoded + 2 * decoded + 32_768 + 10 * 4_096 + 2 * 16_384,
+        per_row,
+    )
+    # Scattered rows over genes of wide spans in two chunks are read a row
+    # chunk at a time, a band of their 4 x 1,000 values twice over beside the
+    # chunks of up to two of the four shards at once, each decoding its two
+    # chunks at once, and Zarr's indices of the 9 shards and 4 genes, and of
+    # each row.
+    wide = np.array([0, 39, 40, 79])
+    shard_read = 2 * encoded + 2 * decoded + 32_768 + 2 * 4_096 + 2 * 16_384
+    assert row_read_parts(
+        geometry, wide, rows_contiguous=False, concurrency=4, shards=2
+    ) == (2 * 4 * 1_000 * 4 + 2 * shard_read + 128 * (9 + 4), 4 * 4 + 128)
+    assert indexed_read_parts(
+        geometry, wide, block_rows=1_000, concurrency=4, shards=2
+    ) == (2 * 4 * 1_000 * 4 + 2 * shard_read, 0)
+    # An unsharded array's chunks are each read on their own, so a band over
+    # three of them holds up to the concurrency of them at once, beside the
+    # objects of a read of the three.
+    unsharded = ArrayGeometry((8_000, 400), (1_000, 400), None, 4)
+    stored = 2 * 1_600_000 + 1_600_000 // 128 + 1_024
+    assert row_read_parts(unsharded, every_gene, rows_contiguous=True, shards=3) == (
+        stored + 32_768 + 3 * 4_096 + 16_384,
+        0,
+    )
+    assert row_read_parts(
+        unsharded, every_gene, rows_contiguous=True, concurrency=8, shards=3
+    ) == (3 * stored + 32_768 + 3 * 4_096 + 3 * 16_384, 0)
+
+
 def test_band_costs_are_zero_for_empty_selections() -> None:
     geometry = ArrayGeometry((4096, 4096), (1024, 1024), (4096, 4096), 2)
     empty = np.array([], dtype=np.int64)
@@ -233,8 +445,9 @@ def test_selected_row_cost_admits_only_touched_chunks_within_each_shard() -> Non
     # Both selections touch three feature chunks, but only the second puts
     # them in one shard alongside its two row chunks: four more compressed
     # chunks, each at the bound of its encoded size, 1,024 bytes beyond the
-    # 16 it decodes to.
-    assert wide - narrow == 4 * (geometry.nominalChunkBytes() + 1_024)
+    # 16 it decodes to, and the 4 KiB of objects that Zarr's read makes for
+    # each.
+    assert wide - narrow == 4 * (geometry.nominalChunkBytes() + 1_024 + 4_096)
     minimum = narrow + 1
     admitted = admit_stream(
         ResourceBudget(minimum, 1), nBlocks=1, blockBytes=1, decodeBytes=narrow
@@ -514,9 +727,10 @@ def test_row_band_reproduces_every_expression_it_replaced() -> None:
 # A block of four features of 25 cells holds 400 bytes of uint32 values, and
 # reading it decodes one chunk of 25 by 4 values, held as stored and decoded:
 # the 400 decoded bytes beside the bound of their compressed bytes, 400 + 3 +
-# 1,024.
+# 1,024, and the objects of Zarr's read of one chunk, 32 KiB, 4 KiB for the
+# chunk and 16 KiB for its decode.
 _BLOCK = 400
-_DECODE = 400 + 400 + 3 + 1_024
+_DECODE = 400 + 400 + 3 + 1_024 + 32_768 + 4_096 + 16_384
 
 
 def _plan_with(
@@ -605,9 +819,12 @@ def test_streamed_row_blocks_decode_only_as_many_chunks_as_budgeted() -> None:
     # A row block spans the four column chunks of one chunk row, so an
     # unbounded read can hold all four decodes at once. The budget affords one
     # 2048 byte block beside a single chunk of 512 bytes, held as stored and
-    # decoded, 512 + 4 + 1,024 bytes beside it, and no more.
+    # decoded, 512 + 4 + 1,024 bytes beside it, and the objects of Zarr's read
+    # of one chunk, and no more.
+    objects = 32_768 + 4_096 + 16_384
     budgeted = ChunkedArray(
-        array, resources=ResourceBudget(2_048 + 512 + 512 + 4 + 1_024 + 440, 4)
+        array,
+        resources=ResourceBudget(2_048 + 512 + 512 + 4 + 1_024 + objects + 440, 4),
     )
     store.reset()
     blocks = list(budgeted.stream_blocks())
@@ -630,7 +847,8 @@ def test_planned_reads_never_decode_more_chunks_than_budgeted() -> None:
     # decodes: charging one decode per read admits four concurrent chunk
     # decodes, which overruns the limit once they are actually in flight.
     # Each block holds 1,024 bytes, and each decode a chunk of 256 bytes as
-    # stored and decoded, 256 + 2 + 1,024 bytes beside it.
+    # stored and decoded, 256 + 2 + 1,024 bytes beside it, and the objects of
+    # Zarr's read of that chunk.
     store = RecordingStore(delay=0.005)
     root = zarr.open_group(store=store, mode="w")
     array = root.create_array(
@@ -644,7 +862,7 @@ def test_planned_reads_never_decode_more_chunks_than_budgeted() -> None:
     array[:] = np.arange(64 * 32, dtype=np.uint32).reshape(64, 32)
 
     cells = np.arange(64)
-    decode = 256 + 256 + 2 + 1_024
+    decode = 256 + 256 + 2 + 1_024 + 32_768 + 4_096 + 16_384
     resources = ResourceBudget(3 * (1_024 + decode) + 440, 8)
     block_bytes = 4 * cells.size * 4
     plan = plan_feature_stream(

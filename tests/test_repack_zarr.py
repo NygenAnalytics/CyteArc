@@ -12,6 +12,7 @@ from cytearc.storage.ann_index import (
     ANN_INDEX_FORMAT_VERSION,
     _ANN_INDEX_METADATA,
 )
+from tests.memory_helpers import decodes_held_together
 from tests.storage_helpers import finalize_test_counts
 from cytearc.storage.layout import normalize_chunks
 from cytearc.storage.pipeline_runs import (
@@ -803,45 +804,73 @@ def test_a_repack_reserves_what_reading_a_band_of_sharded_counts_holds(
     # of the copy reads part of one source shard.
     assert band_rows < 1_000
 
-    # The read runs at zarr_io_concurrency(1), one decode at a time, as the
-    # charge prices it, after a read that warms Zarr's own buffers. At a dense
-    # write's I/O concurrency, up to 10, a read of random bits decodes several
-    # chunks at once and holds more than this charge, which is left to an
-    # issue of its own.
+    # Each read follows one that warms Zarr's own buffers. One decode at a
+    # time, beside the band, the read holds the ten stored 160,000-byte chunks
+    # of the shard and a shard-level copy of the band, which one decoded
+    # chunk, the charge before #353, left out. At ten reads at once, as a
+    # dense write of shards of ten chunks runs its producer, it decodes the
+    # ten chunks at once too, which the charge at that concurrency covers and
+    # the charge of one decode at a time does not. How many of those decodes
+    # overlap depends on the machine's threads, so at ten reads at once each
+    # decode holds its chunk until all ten hold theirs.
+    (shards,) = source.metadata.codecs
+    compressor = type(shards.codecs[-1])
     produce = repack_module._row_block_producer(source)
-    with zarr_io_concurrency(1):
-        produce(0, band_rows)
-        tracemalloc.start()
-        try:
-            base, _ = tracemalloc.get_traced_memory()
-            band = produce(0, band_rows)
-            _, peak = tracemalloc.get_traced_memory()
-        finally:
-            tracemalloc.stop()
-    held = peak - base - band.nbytes
-    # Beside the band, the read holds the ten stored 160,000-byte chunks of
-    # the shard and a shard-level copy of the band, which one decoded chunk,
-    # the charge before, left out.
-    assert held > 10 * 160_000 + band.nbytes
-    assert held <= producer
+    held: dict[int, int] = {}
+    for concurrency in (1, 10):
+        with (
+            zarr_io_concurrency(concurrency),
+            decodes_held_together(compressor, concurrency),
+        ):
+            produce(0, band_rows)
+            tracemalloc.start()
+            try:
+                base, _ = tracemalloc.get_traced_memory()
+                band = produce(0, band_rows)
+                _, peak = tracemalloc.get_traced_memory()
+            finally:
+                tracemalloc.stop()
+        held[concurrency] = peak - base - band.nbytes
+        assert held[concurrency] <= producer(concurrency)
+    assert held[1] > 10 * 160_000 + band.nbytes
+    assert held[10] > producer(1) + 8 * 160_000
     np.testing.assert_array_equal(
         zarr.open_group(str(output), mode="r")["RNA/counts"][:], values
     )
 
 
+@pytest.mark.parametrize(
+    "budget",
+    [
+        8 * 1024**2,
+        4 * 1024**2,
+        # Shards of a few rows make hundreds of traced bands.
+        pytest.param(2 * 1024**2, marks=pytest.mark.slow),
+    ],
+)
+@pytest.mark.parametrize("counts", ["Poisson counts", "random bits"])
 def test_a_repack_at_a_tight_budget_reads_each_band_within_its_reserve(
-    tmp_path, monkeypatch, sharded_counts_store
+    tmp_path, monkeypatch, sharded_counts_store, counts, budget
 ):
     import tracemalloc
 
     from cytearc.storage import sharding
 
-    # At 4 MiB the copy writes count shards shorter than the source's, and a
-    # band of them still reads whole source chunks, compressed and decoded.
-    # The reads run at the write's own I/O concurrency on counts, which
-    # compress well below the bound that the charge takes for stored chunks;
-    # a repack of random bits held up to twice its reserve at that
-    # concurrency, which is left to an issue of its own.
+    # At these budgets the copy writes count shards shorter than the source's,
+    # and a band of them still reads whole source chunks, compressed and
+    # decoded, at the write's own I/O concurrency. Counts compress well below
+    # the bound that the charge takes for stored chunks; random bits do not,
+    # and held up to twice the reserve of a plan that priced one decode at a
+    # time.
+    if counts == "random bits":
+        values = np.random.default_rng(4).integers(
+            0, 1 << 32, size=(2_000, 400), dtype=np.uint32
+        )
+        source = tmp_path / "source.zarr"
+        _sharded_counts_source(source, values)
+    else:
+        values = _poisson_counts()
+        source = sharded_counts_store
     reads: list[tuple[int, int]] = []
     write = repack_module.write_dense_in_shard_rows
 
@@ -873,10 +902,10 @@ def test_a_repack_at_a_tight_budget_reads_each_band_within_its_reserve(
     monkeypatch.setattr(repack_module, "write_dense_in_shard_rows", traced)
     output = tmp_path / "output.zarr"
     repack_store(
-        str(sharded_counts_store),
+        str(source),
         str(output),
         data_only=True,
-        mem_budget=4 * 1024**2,
+        mem_budget=budget,
         nthreads=1,
     )
     # The first read also fills Zarr's own buffers.
@@ -884,7 +913,7 @@ def test_a_repack_at_a_tight_budget_reads_each_band_within_its_reserve(
     for held, reserved in reads[1:]:
         assert held <= reserved
     np.testing.assert_array_equal(
-        zarr.open_group(str(output), mode="r")["RNA/counts"][:], _poisson_counts()
+        zarr.open_group(str(output), mode="r")["RNA/counts"][:], values
     )
 
 
@@ -930,7 +959,7 @@ def test_a_repack_reserves_the_shard_read_of_another_two_dimensional_array(
     write = copy_module.write_dense_in_shard_rows
 
     def recording(destination, produce, **kwargs):
-        recorded[destination.basename] = kwargs["producerBytes"]
+        recorded[destination.basename] = kwargs["producerBytes"](1)
         return write(destination, produce, **kwargs)
 
     monkeypatch.setattr(copy_module, "write_dense_in_shard_rows", recording)
@@ -940,8 +969,11 @@ def test_a_repack_reserves_the_shard_read_of_another_two_dimensional_array(
     # A band of all four rows of a shard fills an 80-byte shard-level copy of
     # them, holds the compressed bytes of the shard's two 40-byte chunks, each
     # at most 40 + 40 // 128 + 1,024 bytes, and decodes one chunk at a time
-    # beside the chunk decoded before it, where the copy reserved one chunk.
-    assert recorded["embedding"] == 80 + 2 * (40 + 1_024) + 40 + 40
+    # beside the objects of Zarr's read: 32 KiB, 4 KiB for each of the two
+    # chunks and 16 KiB for the decode.
+    assert recorded["embedding"] == (
+        80 + 2 * (40 + 1_024) + 40 + 32_768 + 2 * 4_096 + 16_384
+    )
     np.testing.assert_array_equal(
         zarr.open_group(str(output), mode="r")["RNA/embedding"][:], embedding
     )

@@ -1911,24 +1911,26 @@ def test_subset_assay_zarr_reserves_what_reading_its_selection_of_sharded_counts
     (producer,) = recorded
     np.testing.assert_array_equal(root["selected"][:], values[np.ix_(cells, features)])
 
-    # The read runs at zarr_io_concurrency(1), one decode at a time, as the
-    # charge prices it, after a read that warms Zarr's own buffers; a dense
-    # write's higher I/O concurrency is left to an issue of its own.
-    with zarr_io_concurrency(1):
-        read_selection(source, cells, features)
-        tracemalloc.start()
-        try:
-            base, _ = tracemalloc.get_traced_memory()
-            block = read_selection(source, cells, features)
-            _, peak = tracemalloc.get_traced_memory()
-        finally:
-            tracemalloc.stop()
-    held = peak - base - block.nbytes
+    # Each read follows one that warms Zarr's own buffers, one decode at a
+    # time and ten at once, as a dense write of shards of ten chunks runs its
+    # producer; the charge at each concurrency covers it.
+    held: dict[int, int] = {}
+    for concurrency in (1, 10):
+        with zarr_io_concurrency(concurrency):
+            read_selection(source, cells, features)
+            tracemalloc.start()
+            try:
+                base, _ = tracemalloc.get_traced_memory()
+                block = read_selection(source, cells, features)
+                _, peak = tracemalloc.get_traced_memory()
+            finally:
+                tracemalloc.stop()
+        held[concurrency] = peak - base - block.nbytes
+        assert held[concurrency] <= producer(concurrency)
     # Every gene is read from the ten stored 160,000-byte chunks of the shard
     # at once; scattered genes a chunk at a time, each stored chunk beside its
-    # decoded copy. One decoded chunk, the charge before, leaves both out.
-    assert held > stored_chunks * 160_000 + 160_000
-    assert held <= producer
+    # decoded copy. One decoded chunk, the charge before #353, leaves both out.
+    assert held[1] > stored_chunks * 160_000 + 160_000
 
 
 def test_subset_assay_zarr_reserves_the_indices_of_scattered_cells(
@@ -1984,7 +1986,8 @@ def test_subset_assay_zarr_reserves_the_indices_of_scattered_cells(
             mem_budget="1G",
             nthreads=1,
         )
-        # The cells fit one count shard, which one read fills.
+        # The cells fit one count shard, which one read fills, at one read at
+        # a time as a shard of one chunk is written.
         (producer,) = recorded
         np.testing.assert_array_equal(root[f"{name}/counts"][:], values[cells])
         with zarr_io_concurrency(1):
@@ -1997,13 +2000,113 @@ def test_subset_assay_zarr_reserves_the_indices_of_scattered_cells(
             finally:
                 tracemalloc.stop()
         held[name] = peak - base - block.nbytes
-        planned[name] = producer
-        assert held[name] <= producer
+        planned[name] = producer(1)
+        assert held[name] <= planned[name]
     # The indices of 100,000 scattered cells, at least two int64 values each,
     # come beside what a run of as many cells holds, and a run is planned
     # near what it holds rather than as scattered cells.
     assert held["scattered"] > held["run"] + 100_000 * 2 * 8
     assert planned["run"] < 2 * held["run"]
+
+
+@pytest.mark.parametrize(
+    ("cells", "shards"),
+    [(np.arange(0, 4_000, 4), 4), (np.arange(500, 3_500), 2)],
+    ids=["every fourth cell", "a run of cells across shards"],
+)
+@pytest.mark.parametrize("counts", ["random bits", "Poisson counts"])
+def test_subset_assay_zarr_band_tasks_fit_their_reserve_at_the_writes_concurrency(
+    tmp_path, monkeypatch, counts, cells, shards
+):
+    import tracemalloc
+
+    from cytearc.storage import sharding
+    from cytearc.storage.count_matrix import create_product_counts_array
+    from cytearc.storage.execution import execution_report_scope
+
+    # Counts of 4,000 cells by 400 genes, shards of 1,000 cells in ten
+    # chunks. A subset band of 1,000 cells, the shard of the subset's own
+    # layout, reads its cells from every source shard they fall in, at the
+    # write's I/O concurrency of ten: Zarr reads those shards at once, each
+    # whole and decoding its ten chunks at once. Random bits are stored at the
+    # bound that the charge takes, and a band of every fourth cell held 1.54
+    # times the reserve of a plan that priced one shard and one decode at a
+    # time; counts compress.
+    store = str(tmp_path / "store.zarr")
+    root = zarr.open_group(store, mode="w")
+    policy = CountMatrixPolicy(unitBytes=1_600_000, chunkBytes=160_000)
+    source = create_product_counts_array(
+        root.require_group("RNA"),
+        4_000,
+        400,
+        np.uint32,
+        profile="fast_local",
+        policy=policy,
+    )
+    rng = np.random.default_rng(8)
+    values = (
+        rng.integers(0, 1 << 32, size=(4_000, 400), dtype=np.uint32)
+        if counts == "random bits"
+        else rng.poisson(2.0, size=(4_000, 400)).astype(np.uint32)
+    )
+    source[:] = values
+    # A subset beforehand compiles the count summary's kernel and warms
+    # Zarr's own buffers, which the traced subset would otherwise hold too.
+    subset_assay_zarr(
+        store,
+        "RNA/counts",
+        "warm/counts",
+        cells[:10],
+        np.arange(400),
+        mem_budget="1G",
+        nthreads=1,
+        policy=policy,
+    )
+    tasks: list[int] = []
+    stream = sharding.stream_shards
+
+    def traced(items, fn, **kwargs):  # type: ignore[no-untyped-def]
+        def task(item):  # type: ignore[no-untyped-def]
+            tracemalloc.reset_peak()
+            base, _ = tracemalloc.get_traced_memory()
+            try:
+                return fn(item)
+            finally:
+                tasks.append(tracemalloc.get_traced_memory()[1] - base)
+
+        return stream(items, task, **kwargs)
+
+    monkeypatch.setattr(sharding, "stream_shards", traced)
+    tracemalloc.start()
+    try:
+        with execution_report_scope() as reports:
+            subset_assay_zarr(
+                store,
+                "RNA/counts",
+                "selected/counts",
+                cells,
+                np.arange(400),
+                mem_budget="1G",
+                nthreads=1,
+                policy=policy,
+            )
+    finally:
+        tracemalloc.stop()
+    np.testing.assert_array_equal(root["selected/counts"][:], values[cells])
+    (report,) = (item for item in reports if item.unitKind == "countsRowBand")
+    plan = report.plan
+    # The budget leaves room for the write's ten inner reads, so its producer
+    # reads at ten too, and each band task, its read and its write, holds no
+    # more than the plan reserves for one.
+    assert plan.ioConcurrency == 10
+    per_task = (plan.reservedBytes - plan.residentBytes) // plan.readWorkers
+    assert len(tasks) == -(-cells.size // 1_000)
+    assert max(tasks) <= per_task
+    # The bands read their cells from this many source shards.
+    assert shards == max(
+        len(np.unique(cells[start : start + 1_000] // 1_000))
+        for start in range(0, cells.size, 1_000)
+    )
 
 
 def test_subset_assay_zarr_that_cannot_hold_its_read_fails_before_writing(

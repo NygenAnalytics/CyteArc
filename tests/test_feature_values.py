@@ -445,8 +445,9 @@ def test_feature_reads_accept_eager_normalized_values(feature_store, monkeypatch
 
 def test_feature_reads_plan_counts_when_transpose_buffers_do_not_fit(monkeypatch):
     # With this many cells the buffers of a countsT read of one feature
-    # outgrow a read of counts row blocks: row blocks fit from about 165,000
-    # bytes, countsT bands from about 270,000.
+    # outgrow a read of counts row blocks: row blocks fit from about 220,000
+    # bytes, countsT bands from about 330,000, each beside the objects of
+    # Zarr's reads.
     counts = np.random.default_rng(19).integers(0, 40, (6000, 21), dtype=np.uint16)
     store = _count_store(counts, CountMatrixPolicy(unitBytes=20_000, chunkBytes=2_000))
     cells = np.arange(store.cells.N)
@@ -465,7 +466,7 @@ def test_feature_reads_plan_counts_when_transpose_buffers_do_not_fit(monkeypatch
 
     # The countsT bands, which touch fewer chunk bytes, are read where they fit.
     assert read(1 << 20) == {"countsTCellBand"}
-    assert read(210_000) == {"countsRowBlock"}
+    assert read(270_000) == {"countsRowBlock"}
 
 
 @pytest.mark.parametrize("feature_store", ["columns"], indirect=True)

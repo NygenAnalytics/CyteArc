@@ -211,7 +211,8 @@ class ChunkedArray:
 
         Row-block streams run Zarr with one decode at a time, and a block's
         read touches, in each shard, the inner chunks of every row chunk and
-        of the selected columns. A block whose rows and columns are both index
+        of the selected columns, beside the stored bytes between them that a
+        merged fetch takes. A block whose rows and columns are both index
         arrays is read in bands instead; see ``_indexed_read_parts``.
         """
         if not self._is_numpy:
@@ -223,14 +224,20 @@ class ChunkedArray:
         geometry = self._geometry()
         if geometry is None:
             return input_bytes
+        from ..storage.partition import coalesced_gap_bytes
+
         row_chunks = -(-geometry.axisShard(0) // geometry.axisChunk(0))
         column_chunks = -(-geometry.axisShard(1) // geometry.axisChunk(1))
+        gap = 0
         if self._cols is not None:
             column_chunks = min(
                 column_chunks, int(np.unique(geometry.binOf(1, self._cols)).size)
             )
+            gap = coalesced_gap_bytes(
+                geometry, self._cols, chunks=row_chunks * column_chunks
+            )
         read_bytes = geometry.readBytes(
-            input_bytes, row_chunks * column_chunks, decodes=1
+            input_bytes, row_chunks * column_chunks, decodes=1, gapBytes=gap
         )
         parts = self._indexed_read_parts(geometry)
         if parts is None:

@@ -366,16 +366,17 @@ def test_streaming_lsi_shrinks_its_blocks_to_fit_a_tight_memory_budget(
     )
     roomy = roomy_store.reduction.lsi(normalized, dims=2)
     # This budget holds the LSI accumulators but not the whole 40-row band:
-    # about 408 kB refuses the fit and 592 kB reads the band whole, since each
-    # block's read holds the normalized chunk beside its compressed bytes. It
-    # reads blocks of 20 rows. The coordinate write holds three blocks at once,
-    # so it needs smaller blocks than the fit.
+    # about 570 kB refuses the fit and 760 kB reads the band whole, since each
+    # block's read holds the normalized chunk beside its compressed bytes and
+    # the objects of Zarr's read. It reads blocks of 29 rows. The coordinate
+    # write holds three blocks at once, so it needs smaller blocks than the
+    # fit.
     tight_store = DataStore(
         str(zarr_loc),
         default_assay="ATAC",
         min_features_per_cell=0,
         nthreads=1,
-        mem_budget=500_000,
+        mem_budget=700_000,
     )
     warnings: list[str] = []
     sink = logger.add(

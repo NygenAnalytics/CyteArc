@@ -16,13 +16,13 @@ from concurrent.futures import Future
 from dataclasses import dataclass, field
 from tempfile import TemporaryDirectory
 from threading import RLock
-from traceback import clear_frames
 from typing import Any, Self
 
 from zarr.abc.store import ByteRequest, RangeByteRequest, Store, SuffixByteRequest
 from zarr.core.buffer import Buffer, BufferPrototype, default_buffer_prototype
 from zarr.storage import LocalStore, WrapperStore
 
+from ..storage.async_execution import release_exception_frames
 from ..utils.logging import logger
 
 SOURCE_CACHE_BYTES_ENV = "CYTEARC_SOURCE_CACHE_BYTES"
@@ -103,24 +103,6 @@ async def _finish_io[T](operation: Awaitable[T]) -> T:
         del result, task, operation
         raise asyncio.CancelledError
     return result
-
-
-def _release_exception_frames(error: BaseException) -> None:
-    pending = [error]
-    seen: set[int] = set()
-    while pending:
-        current = pending.pop()
-        if id(current) in seen:
-            continue
-        seen.add(id(current))
-        clear_frames(current.__traceback__)
-        pending.extend(
-            item
-            for item in (current.__cause__, current.__context__)
-            if item is not None
-        )
-        if isinstance(current, BaseExceptionGroup):
-            pending.extend(current.exceptions)
 
 
 class SourceCache:
@@ -399,7 +381,7 @@ class SourceCache:
             if closed and (error is None or isinstance(error, asyncio.CancelledError)):
                 error = RuntimeError("Composite source cache is closed")
             if error is not None:
-                _release_exception_frames(error)
+                release_exception_frames(error)
             if isinstance(error, asyncio.CancelledError):
                 entry.future.cancel()
             elif error is not None:

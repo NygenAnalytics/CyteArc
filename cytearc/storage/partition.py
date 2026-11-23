@@ -15,7 +15,9 @@ type Fits = Callable[[int], bool]
 __all__ = [
     "IndexBlock",
     "affordable_width",
+    "band_shards",
     "checked_indices",
+    "coalesced_gap_bytes",
     "contiguous_ranges",
     "indexed_read_parts",
     "is_contiguous",
@@ -105,6 +107,38 @@ def widest_chunk_span(indices: np.ndarray, chunk: int) -> int:
     return int((last - first).max()) + 1
 
 
+def band_shards(
+    geometry: ArrayGeometry | None, rows: np.ndarray | range, band_rows: int
+) -> int:
+    """Return the most rows of shards that a band of ``band_rows`` consecutive entries of ``rows`` touches.
+
+    ``rows`` holds rows of the array, or is a ``range`` of them, as a copy
+    reads a run of rows a band at a time; an unsharded array counts its rows
+    of chunks. A band whose rows are not sorted counts a row of shards again
+    wherever it comes back to it, so the count may exceed the rows of shards
+    that the band touches, never fall short of them.
+    """
+    if geometry is None or len(rows) == 0:
+        return 1
+    extent = geometry.axisShard(0)
+    band = max(1, int(band_rows))
+    if isinstance(rows, range) and rows.step == 1:
+        starts = np.arange(rows.start, rows.stop, band, dtype=np.int64)
+        ends = np.minimum(starts + band, rows.stop) - 1
+        return int((ends // extent - starts // extent).max()) + 1
+    shard = np.asarray(rows, dtype=np.int64) // extent
+    entered = np.ones(shard.size, dtype=bool)
+    entered[1:] = shard[1:] != shard[:-1]
+    entered[::band] = True
+    return int(np.add.reduceat(entered, np.arange(0, shard.size, band)).max())
+
+
+def _column_shards(geometry: ArrayGeometry, columns: np.ndarray) -> int:
+    """Return the column shards that ``columns`` touch."""
+    chunks_per_shard = -(-geometry.axisShard(1) // geometry.axisChunk(1))
+    return int(np.unique(geometry.binOf(1, columns) // chunks_per_shard).size)
+
+
 def _shard_column_chunks(geometry: ArrayGeometry, columns: np.ndarray) -> int:
     """Return the most inner column chunks that ``columns`` touch in one shard."""
     column_chunks = np.unique(geometry.binOf(1, columns))
@@ -113,11 +147,51 @@ def _shard_column_chunks(geometry: ArrayGeometry, columns: np.ndarray) -> int:
     return int(counts.max())
 
 
+def coalesced_gap_bytes(
+    geometry: ArrayGeometry, columns: np.ndarray, *, chunks: int
+) -> int:
+    """Return the most stored bytes that a read of ``columns`` fetches in one shard beside the ``chunks`` chunks it is charged.
+
+    Zarr fetches the chunks that a read takes from part of a shard as byte
+    ranges, and merges ranges up to ``coalesceGapBytes`` apart into one fetch,
+    which holds the stored bytes between them too: no more than that many
+    bytes for each gap, nor than the chunks in it at the bound of their
+    encoded size. A shard of one row of chunks stores them in column order,
+    so its gaps lie between the selected column chunks. A shard of several
+    rows of chunks may store them in any order, Zarr's default being Morton
+    order, so each of the ``chunks - 1`` spaces between the chunks that a
+    read takes may hold a gap, up to every chunk of the shard it does not
+    take. A read that takes every chunk of a shard fetches the shard whole.
+    """
+    gap = max(0, int(geometry.coalesceGapBytes))
+    if gap == 0 or geometry.shards is None or columns.size == 0:
+        return 0
+    stored = geometry.storedChunkBytes() - geometry.nominalChunkBytes()
+    per_shard = -(-geometry.axisShard(1) // geometry.axisChunk(1))
+    in_array = -(-geometry.shape[1] // geometry.axisChunk(1))
+    shard_rows = -(-geometry.axisShard(0) // geometry.axisChunk(0))
+    column_chunks = np.unique(geometry.binOf(1, columns))
+    shard_of = column_chunks // per_shard
+    most = 0
+    for shard in np.unique(shard_of).tolist():
+        if shard_rows == 1:
+            between = np.diff(column_chunks[shard_of == shard]) - 1
+            fetched = int(np.minimum(gap, between[between > 0] * stored).sum())
+        else:
+            present = shard_rows * min(per_shard, in_array - shard * per_shard)
+            taken = min(max(1, int(chunks)), present)
+            fetched = min((taken - 1) * gap, (present - taken) * stored)
+        most = max(most, fetched)
+    return most
+
+
 def indexed_read_parts(
     geometry: ArrayGeometry,
     columns: np.ndarray,
     *,
     block_rows: int,
+    concurrency: int = 1,
+    shards: int = 1,
 ) -> tuple[int, int]:
     """Return per-decode and per-row bytes beside a read that indexes both axes.
 
@@ -128,8 +202,13 @@ def indexed_read_parts(
     values per row; a band of rows holds every selected column over at most
     one stored row chunk. The reader slices the axis whose band is narrower,
     so either bound covers its read; the one that is smaller for a block of
-    ``block_rows`` rows is charged. The selected rows are not scanned, so a
-    plan holds no copy of them.
+    ``block_rows`` rows is charged. Either read also holds the stored bytes
+    between the chunks it takes, as :func:`coalesced_gap_bytes` counts them.
+    At Zarr's async ``concurrency``, a band read decodes up to that many
+    chunks of a shard at once, and reads up to that many of the ``shards``
+    rows of shards that the block's rows touch, as :func:`band_shards` counts
+    them, at once in each column shard. The selected rows are not scanned, so
+    a plan holds no copy of them.
     """
     if columns.size == 0:
         return 0, 0
@@ -137,12 +216,23 @@ def indexed_read_parts(
     # A column band touches a column chunk of each row chunk in a shard; a
     # row band touches a row chunk of each selected column chunk.
     touched = max(row_chunks, _shard_column_chunks(geometry, columns))
-    fixed = geometry.readBytes(0, touched, decodes=1)
+    reads = max(1, int(concurrency))
+
+    def read(resultBytes: int) -> int:
+        return geometry.readBytes(
+            resultBytes,
+            touched,
+            decodes=reads,
+            shards=min(reads, max(1, int(shards)) * _column_shards(geometry, columns)),
+            gapBytes=coalesced_gap_bytes(geometry, columns, chunks=touched),
+        )
+
+    fixed = read(0)
     column_band = widest_chunk_span(columns, geometry.axisChunk(1)) * geometry.itemsize
-    per_row = geometry.readBytes(column_band, touched, decodes=1) - fixed
+    per_row = read(column_band) - fixed
     row_span = min(geometry.axisChunk(0), geometry.shape[0])
     rows_band = columns.size * row_span * geometry.itemsize
-    rows_fixed = geometry.readBytes(rows_band, touched, decodes=1)
+    rows_fixed = read(rows_band)
     if max(1, int(block_rows)) * per_row <= rows_fixed - fixed:
         return int(fixed), int(per_row)
     return int(rows_fixed), 0
@@ -153,20 +243,46 @@ def row_read_parts(
     columns: np.ndarray,
     *,
     rows_contiguous: bool,
+    concurrency: int = 1,
+    shards: int = 1,
 ) -> tuple[int, int]:
-    """Return per-decode and per-row bytes beside a selected row block's result."""
+    """Return per-decode and per-row bytes beside a selected row block's result.
+
+    A read of part of a shard also holds the stored bytes between the chunks
+    it takes, as :func:`coalesced_gap_bytes` counts them. Zarr reads a block
+    at its async ``concurrency``: up to that many of the ``shards`` rows of
+    shards that the block's rows touch, as :func:`band_shards` counts them,
+    at once in each column shard, and up to that many chunks of each shard at
+    once. An unsharded array's chunks are read and decoded each on its own,
+    up to that many at once.
+    """
     if geometry is None or columns.size == 0:
         return 0, 0
+    reads = max(1, int(concurrency))
     row_chunks = -(-geometry.axisShard(0) // geometry.axisChunk(0))
     touched = row_chunks * _shard_column_chunks(geometry, columns)
-    fixed = geometry.readBytes(0, touched, decodes=1)
+    if geometry.shards is None:
+        chunks = max(1, int(shards)) * int(np.unique(geometry.binOf(1, columns)).size)
+        fixed = geometry.readBytes(0, chunks, decodes=reads)
+    else:
+        fixed = geometry.readBytes(
+            0,
+            touched,
+            decodes=reads,
+            shards=min(reads, max(1, int(shards)) * _column_shards(geometry, columns)),
+            gapBytes=coalesced_gap_bytes(geometry, columns, chunks=touched),
+        )
     per_row = columns.size * geometry.itemsize if geometry.shards is not None else 0
     column_gather = not is_contiguous(columns)
     if not rows_contiguous and column_gather and geometry.shards is not None:
         # Sharded blocks that index both axes are read in bands. A block whose
         # rows form one run is read by Zarr in one request, so both are covered.
         band_fixed, band_per_row = indexed_read_parts(
-            geometry, columns, block_rows=geometry.axisChunk(0)
+            geometry,
+            columns,
+            block_rows=geometry.axisChunk(0),
+            concurrency=reads,
+            shards=shards,
         )
         fixed = max(fixed, band_fixed)
         per_row = max(per_row, band_per_row)

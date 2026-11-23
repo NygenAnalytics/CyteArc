@@ -1887,12 +1887,15 @@ def test_composite_count_preparation_names_the_budget_of_one_row(tmp_path):
 
     # Sixty-four cells chunk the composite's mappings in 64 entries, and tables
     # of one chunk keep the metadata plans, so that both fit well below the
-    # preparation of the counts.
+    # preparation of the counts. A source of one 131,072-byte chunk makes the
+    # read of one row of it larger than the count reads of the composite's
+    # layout, beside the objects of Zarr's reads of that layout's small
+    # chunks.
     source = _write_source(
         tmp_path / "source.zarr",
-        np.ones((64, 256), dtype=np.uint8),
-        [f"g{index}" for index in range(256)],
-        policy=CountMatrixPolicy(1024, 256),
+        np.ones((64, 2_048), dtype=np.uint8),
+        [f"g{index}" for index in range(2_048)],
+        policy=CountMatrixPolicy(131_072, 131_072),
     )
     for table in (source.cells, source.RNA.feats):
         for name, array in list(table._group.arrays()):
@@ -1905,18 +1908,18 @@ def test_composite_count_preparation_names_the_budget_of_one_row(tmp_path):
                 attributes=attributes,
             )
     # One row of every source is read beside what the preparation keeps,
-    # which 76 kB cannot hold, though it holds the count reads of one layout.
+    # which 1.3 MB cannot hold, though it holds the count reads of one layout.
     with pytest.raises(MemoryBudgetError) as refused:
         create_composite(
             {"source": source},
             at=tmp_path / "joint.zarr",
             features="union",
-            mem_budget=76_000,
+            mem_budget=1_300_000,
             nthreads=1,
         )
     assert refused.value.item == "one row of the composite count preparation"
-    assert refused.value.budget_bytes == 76_000
-    assert refused.value.needed_bytes > 76_000
+    assert refused.value.budget_bytes == 1_300_000
+    assert refused.value.needed_bytes > 1_300_000
 
 
 @pytest.mark.parametrize("phase", ("metadata", "counts"))
@@ -1925,8 +1928,10 @@ def test_composite_creation_rejects_unaffordable_work_before_count_reads(
 ):
     metadata = phase == "metadata"
     # Sixty-four cells chunk the composite's mappings in 64 entries, so that
-    # their reads fit below the preparation of the counts.
-    shape = (100, 2) if metadata else (64, 256)
+    # their reads fit below the preparation of the counts, and a source of
+    # one 131,072-byte chunk makes the read of one row of it larger than the
+    # count reads of the composite's layout.
+    shape = (100, 2) if metadata else (64, 2_048)
     source = _write_source(
         tmp_path / "source.zarr",
         np.ones(shape, dtype=np.uint8),
@@ -1934,7 +1939,9 @@ def test_composite_creation_rejects_unaffordable_work_before_count_reads(
         ids=[f"{index}_{'x' * 1000}" for index in range(shape[0])]
         if metadata
         else None,
-        policy=CountMatrixPolicy(1024, 256),
+        policy=CountMatrixPolicy(1024, 256)
+        if metadata
+        else CountMatrixPolicy(131_072, 131_072),
     )
     for table in (source.cells, source.RNA.feats):
         for name, array in list(table._group.arrays()):
@@ -1967,7 +1974,7 @@ def test_composite_creation_rejects_unaffordable_work_before_count_reads(
             features="union",
             # Large enough to fit the composite layout, too small for one
             # prepared row.
-            mem_budget=76_000 if phase == "counts" else 65_536,
+            mem_budget=1_300_000 if phase == "counts" else 65_536,
             nthreads=1,
         )
     assert not requests

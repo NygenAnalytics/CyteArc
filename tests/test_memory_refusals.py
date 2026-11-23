@@ -277,17 +277,19 @@ def test_feature_streams_name_the_budget_of_their_blocks() -> None:
             residentBytes=resident,
         )
 
-    # A 60-byte chunk, held as stored and decoded, 60 + 60 + 1,024 bytes,
-    # beside the block's one byte, which 1,145 bytes hold.
+    # A 60-byte chunk, held as stored and decoded, 60 + 60 + 1,024 bytes, and
+    # the objects of Zarr's read of one chunk, 32 KiB, 4 KiB for the chunk
+    # and 16 KiB for its decode, beside the block's one byte, which 54,393
+    # bytes hold.
     refusal = named_budget_runs(one_feature, 60, item="one feature of the selection")
-    assert refusal.needed_bytes == 1_145
-    # Beside 200 resident bytes the same block needs 1,345.
+    assert refusal.needed_bytes == 1_145 + 53_248
+    # Beside 200 resident bytes the same block needs 54,593.
     resident = refused(lambda: one_feature(150, 200))
     assert (resident.needed_bytes, resident.item) == (
-        1_345,
+        1_345 + 53_248,
         "one feature beside the resident data",
     )
-    one_feature(1_345, 200)
+    one_feature(1_345 + 53_248, 200)
 
     wide = _array((12, 10), (5, 5))
     refusal = named_budget_runs(
@@ -305,10 +307,11 @@ def test_feature_streams_name_the_budget_of_their_blocks() -> None:
         item="feature batches of 5 features",
     )
     # Five features of 100 bytes each beside one 100-byte chunk, held as
-    # stored and decoded, 100 + 100 + 1,024 bytes.
-    assert refusal.needed_bytes == 1_724
+    # stored and decoded, 100 + 100 + 1,024 bytes, and the objects of Zarr's
+    # read of that chunk.
+    assert refusal.needed_bytes == 1_724 + 53_248
     assert f"It needs at least {refusal.needed_bytes} bytes." in str(refusal)
-    # Beside 300 resident bytes the same batches need 2,024.
+    # Beside 300 resident bytes the same batches need 300 bytes more.
     refusal = named_budget_runs(
         lambda memory: plan_feature_stream(
             wide,
@@ -324,7 +327,7 @@ def test_feature_streams_name_the_budget_of_their_blocks() -> None:
         850,
         item="feature batches of 5 features",
     )
-    assert refusal.needed_bytes == 2_024
+    assert refusal.needed_bytes == 2_024 + 53_248
 
 
 def test_a_predicate_that_accepts_no_index_cannot_partition_a_selection() -> None:

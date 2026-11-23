@@ -341,7 +341,9 @@ def test_a_label_artifact_too_large_for_the_budget_is_refused_in_the_ledgers_wor
     every_cell = store.snapshot_cell_selection("every_cell")
     short = store.snapshot_cluster_labels("cluster", cell_selection=every_cell)
     long = store.snapshot_cluster_labels("long", cell_selection=every_cell)
-    budget = 4_096
+    # Room for the short labels beside the objects of Zarr's read of each
+    # array, 52 KiB, and not for the long ones.
+    budget = 4_096 + 53_248
     grouped = _group(store, groups=short, ledger=MemoryLedger(budget, "Grouping cells"))
     assert grouped.codes.tolist() == [0, 1] * 4
 
