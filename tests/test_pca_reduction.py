@@ -249,7 +249,7 @@ def test_pca_raises_memory_error_before_it_scales_or_fits(wide, monkeypatch) -> 
     def forbidden(*_args, **_kwargs):
         raise AssertionError("a fit over budget must not start")
 
-    monkeypatch.setattr(graph_operations, "_feature_scaling_statistics", forbidden)
+    monkeypatch.setattr(graph_operations, "feature_scaling_statistics", forbidden)
     monkeypatch.setattr("cytearc.embeddings.reduction._fitted_pca", forbidden)
     store.resources = ResourceBudget(required - 1, 1)
     try:

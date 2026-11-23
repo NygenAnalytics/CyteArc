@@ -23,8 +23,8 @@ from numpy.typing import ArrayLike, NDArray
 from scipy.sparse import csr_matrix, vstack
 
 from ..assay import Assay
+from ..assay.normalization import TfIdfFit, normalize_rows
 from ..assay.persistence import _read_block
-from ..mapping.features import normalize_reference_counts
 from ..mapping.reference import MappingReference
 from ..mapping.symphony import project_pca
 from ..matrix import ChunkedArray
@@ -952,9 +952,9 @@ class DoubletProjection(Protocol):
     ``coordinates`` is the Zarr array of the observed cells' coordinates, one
     row of ``n_dims`` values per selected cell. :meth:`project` maps a block
     of summed parent counts of the selected features, one doublet per row,
-    and each doublet's denominator, the sum of its parents' totals, to its
-    coordinates; the denominators are None when the projection normalizes
-    over the selected features alone, as ``renormalize_subset`` says.
+    and each doublet's total, the sum of its parents' totals, to its
+    coordinates; the totals are None when the projection normalizes over the
+    selected features alone, as ``renormalize_subset`` says.
     """
 
     n_dims: int
@@ -985,16 +985,17 @@ class DoubletProjection(Protocol):
 
 
 class PcaDoubletProjection:
-    """Normalize simulated doublets by library size and project them onto a PCA.
+    """Normalize simulated doublets as a PCA's cells were and project them onto it.
 
-    The mapping reference of the PCA gives the size factor, the log
-    transform, and whether totals cover the selected features alone; each
-    doublet's values are then scaled and centered as the PCA's cells were
+    The mapping reference of the PCA gives the fit of its cells' normalizer
+    and whether totals cover the selected features alone; each doublet's
+    values are then scaled, when the PCA scaled its features, and centered
     before they are multiplied by the loadings.
     """
 
     def __init__(self, reference: MappingReference) -> None:
         self.reference = reference
+        self.normalization = reference.normalization
         self.n_dims = int(reference.model.n_dims)
         self.renormalize_subset = bool(
             reference.normalization_parameters["renormalize_subset"]
@@ -1023,11 +1024,13 @@ class PcaDoubletProjection:
         )
 
     def row_bytes(self, counts: csr_matrix) -> int:
-        # A dense copy of each doublet's counts, its normalized values with
-        # their scaled and centered copies, and its coordinates.
+        # A dense copy of each doublet's counts, what normalizing it holds,
+        # its normalized values' scaled and centered copies, and its
+        # coordinates.
         n_features = int(self.reference.model.n_features)
         itemsize = int(counts.dtype.itemsize)
-        return n_features * (max(8, itemsize) + 3 * 8) + self.n_dims * 32 + 64
+        held = self.normalization.held_values + 2
+        return n_features * (max(8, itemsize) + held * 8) + self.n_dims * 32 + 64
 
     def project(
         self,
@@ -1036,14 +1039,9 @@ class PcaDoubletProjection:
         *,
         source: str,
     ) -> NDArray[np.floating]:
-        parameters = self.reference.normalization_parameters
         raw = summed.toarray()
-        normalized = normalize_reference_counts(
-            raw,
-            size_factor=parameters["size_factor"],
-            log_transform=parameters["log_transform"],
-            source=source,
-            denominator=denominators,
+        normalized = normalize_rows(
+            self.normalization, raw, denominators, source=source
         )
         del raw
         return np.asarray(project_pca(normalized, self.reference.model))
@@ -1085,6 +1083,7 @@ class LsiDoubletProjection:
             raise ValueError("LSI coordinates must hold one column per LSI dimension")
         self.loadings = np.ascontiguousarray(values)
         self.idf = weights
+        self.normalization = TfIdfFit(weights)
         self.coordinates = coordinates
         self.renormalize_subset = bool_argument(
             renormalize_subset, "renormalize_subset"
@@ -1108,18 +1107,7 @@ class LsiDoubletProjection:
         *,
         source: str,
     ) -> NDArray[np.floating]:
-        rows = summed.shape[0]
-        totals = (
-            np.asarray(summed.sum(axis=1, dtype=np.float64)).ravel()
-            if denominators is None
-            else np.array(denominators, dtype=np.float64)
-        )
-        if totals.shape != (rows,):
-            raise ValueError(f"{source} needs one denominator per doublet")
-        totals[totals == 0] = 1
-        values = csr_matrix(summed, dtype=np.float64, copy=True)
-        values.data /= np.repeat(totals, np.diff(values.indptr))
-        values.data *= self.idf[values.indices]
+        values = normalize_rows(self.normalization, summed, denominators, source=source)
         return np.asarray(values @ self.loadings)
 
 

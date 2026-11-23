@@ -53,6 +53,7 @@ from ..storage.materialize import (
     feature_summary_bytes,
 )
 from ..utils.arguments import bool_argument, optional_bool_argument
+from ..utils.arrays import clean_array
 from ..utils.compute import controlled_compute
 from ..utils.memory_budget import MemoryBudgetError, refusal_words
 from ..utils.moments import ColumnMoments
@@ -386,6 +387,43 @@ class PassthroughFit:
         return totals
 
 
+def feature_scaling_statistics(
+    data_group: zarr.Group,
+    normalized_data: ChunkedArray,
+    *,
+    nthreads: int,
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    """Return the mean and scale by which PCA standardizes each normalized feature.
+
+    The scale is the population standard deviation, 1 where it is 0 or not
+    finite, and a mean that is not finite is 0. A normalized artifact stores
+    each feature's sum and its sum of squared deviations from the mean
+    (``feature_sum`` and ``feature_m2``), which give both without reading
+    the data. If ``feature_m2`` is absent, statistics are streamed from the
+    normalized data. A variance computed from ``feature_squared_sum`` loses
+    precision.
+    """
+    if "feature_sum" in data_group and "feature_m2" in data_group:
+        moments = ColumnMoments(
+            int(normalized_data.shape[0]),
+            np.asarray(
+                as_zarr_array(data_group["feature_sum"], name="feature_sum")[:],
+                dtype=np.float64,
+            ),
+            np.asarray(
+                as_zarr_array(data_group["feature_m2"], name="feature_m2")[:],
+                dtype=np.float64,
+            ),
+        )
+        mean, deviation = moments.mean, np.sqrt(moments.variance())
+    else:
+        mean, deviation = normalized_data.mean_and_std(
+            nthreads=nthreads,
+            msg="Calculating normalization statistics",
+        )
+    return clean_array(mean), clean_array(deviation, 1)
+
+
 def stream_document_frequency(
     counts: ChunkedArray,
     *,
@@ -673,7 +711,7 @@ class PearsonResidualFit:
         )
         if isinstance(counts, ChunkedArray):
             return counts._binary(residuals, np.reshape(totals, (-1, 1)), "left")
-        return residuals(np.asarray(counts), totals)
+        return residuals(np.asarray(counts), np.asarray(totals))
 
     def denominators(self, totals: NDArray[np.float64], source: str) -> Any:
         # The check refuses negative and non-finite totals; zeros stay.
@@ -827,13 +865,18 @@ def fit_normalization(
     log_transform: bool,
     nthreads: int | None = None,
     name: str = "",
+    source: str = "Cell totals",
 ) -> NormalizationFit | None:
     """Fit an RNA normalizer over the counts of the cells it normalizes.
 
-    ``totals`` holds each cell's total, as ``normed`` reads it; only Pearson
+    ``totals`` holds each cell's total, as ``normed`` reads it, which only
+    Pearson residuals read; ``source`` names them in errors. CLR and Pearson
     residuals fit numbers from the counts. TF-IDF fits document frequencies
     that an ATAC assay counts, and a custom normalizer has no fit, so both
     give None.
+
+    Raises:
+        ValueError: If Pearson residuals get a negative or non-finite total.
     """
     if normalizer is norm_lib_size or normalizer is norm_lib_size_log:
         assert size_factor is not None
@@ -846,6 +889,7 @@ def fit_normalization(
         return ClrFit.fit(counts)
     if isinstance(normalizer, PearsonResidualNormalizer):
         assert totals is not None
+        library_size_divisors(totals, source=source)
         return normalizer.fit(counts, totals, nthreads=nthreads, name=name)
     return None
 

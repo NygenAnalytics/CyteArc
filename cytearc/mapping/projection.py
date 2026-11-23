@@ -287,6 +287,13 @@ class ProjectionWriter:
             raise RuntimeError("Projection writer is aborted")
 
 
+def projection_algorithm(reference: MappingReference, correction: str) -> str:
+    """Name how a query is projected onto ``reference``, as its diagnostics record."""
+    if correction == "symphony":
+        return "symphony"
+    return "scaled_pca" if reference.model.feature_scaling else "pca"
+
+
 def plan_projection(
     root: zarr.Group,
     *,
@@ -362,7 +369,7 @@ def plan_projection(
         reference_feature_keys=reference_feature_keys(reference, feature_key),
         feature_key=feature_key,
     )
-    algorithm_variant = "symphony" if correction == "symphony" else "scaled_pca"
+    algorithm_variant = projection_algorithm(reference, correction)
 
     def valid_projection(_ref: ArtifactRef, group: zarr.Group) -> bool:
         try:
@@ -566,7 +573,7 @@ def _load_projection(
         reference_feature_keys=reference_feature_keys(reference, feature_key),
         feature_key=feature_key,
     )
-    algorithm_variant = "symphony" if correction_method == "symphony" else "scaled_pca"
+    algorithm_variant = projection_algorithm(reference, correction_method)
 
     group = artifact_group(root, ref)
     n_cells, diagnostics, arrays = _validate_payload(

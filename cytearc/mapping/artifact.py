@@ -7,6 +7,7 @@ import numpy as np
 import zarr
 
 from ..assay import RNAassay
+from ..assay.normalization import feature_scaling_statistics
 from ..graph.distances import (
     validate_distance_provenance,
     validate_neighbors_payload,
@@ -31,8 +32,14 @@ from ..storage.geometry import array_geometry
 from ..storage.partition import row_band
 from ..storage.selections import validate_cell_selection
 from ..storage.types import as_zarr_array
+from ..matrix import ChunkedArray
 from .confidence import _distance_quantile_summary
-from .features import _normalization_parameters
+from ..assay.normalization import ClrFit
+from .features import (
+    REFERENCE_FIT_ARRAYS,
+    _normalization_parameters,
+    reference_fit_array_names,
+)
 from .models import ScaledPCAProjectionModel, SymphonyCorrectionModel
 from .reference import (
     MappingReference,
@@ -97,6 +104,11 @@ _SYMPHONY_METADATA = frozenset(
 )
 
 
+# A model array that a reference copies: a stored array, or for a PCA without
+# feature scaling, the statistics of its normalized values.
+type ModelSource = zarr.Array | np.ndarray
+
+
 def symphony_batch_metadata(
     correction: ArtifactStatus,
     group: zarr.Group,
@@ -143,8 +155,8 @@ def _selected_feature_ids(
 def write_artifact_mapping_reference_from_sources(
     group: zarr.Group,
     *,
-    feature_means: zarr.Array,
-    feature_scales: zarr.Array,
+    feature_means: ModelSource,
+    feature_scales: ModelSource,
     center: zarr.Array,
     loadings: zarr.Array,
     symphony_sources: Mapping[str, zarr.Array] | None,
@@ -152,8 +164,13 @@ def write_artifact_mapping_reference_from_sources(
     metadata: dict[str, Any],
     reference_distance_quantiles: np.ndarray,
     reference_distance_values: np.ndarray,
+    normalization_arrays: Mapping[str, np.ndarray] | None = None,
 ) -> None:
-    """Stream an immutable mapping reference from its upstream artifacts."""
+    """Stream an immutable mapping reference from its upstream artifacts.
+
+    ``normalization_arrays`` holds what the cells' normalizer fitted, by the
+    names that ``reference_fit_array_names`` gives for its parameters.
+    """
     create_zarr_obj_array(group, "feature_ids", np.asarray(feature_ids))
     _write_array_from_source(group, "feature_means", feature_means)
     _write_array_from_source(group, "feature_scales", feature_scales)
@@ -182,6 +199,13 @@ def write_artifact_mapping_reference_from_sources(
                 symphony_sources[name],
                 transpose=name == "centroids",
             )
+    fit_names = reference_fit_array_names(metadata["normalization_parameters"])
+    if set(normalization_arrays or {}) != set(fit_names):
+        raise ValueError(
+            "Mapping reference normalization arrays do not match its normalizer"
+        )
+    for name in fit_names:
+        _write_array(group, name, (normalization_arrays or {})[name])
     group.attrs["reference_metadata"] = metadata
     method = metadata.get("method")
     if method not in {"pca", "symphony"}:
@@ -328,8 +352,10 @@ def _validate_and_load_artifact_mapping_reference(
     neighbors_status = inspect_artifact(datastore.zw, neighbors)
     if reduction_status.operation != "run_pca":
         raise contract_error("Mapping reference reduction is not PCA")
-    if (reduction_status.parameters or {}).get("feat_scaling") is not True:
-        raise contract_error("Mapping reference PCA did not enable feature scaling")
+    feature_scaling_enabled = (reduction_status.parameters or {}).get("feat_scaling")
+    if not isinstance(feature_scaling_enabled, bool):
+        raise contract_error("Mapping reference PCA records no feature scaling")
+    scaled: bool = feature_scaling_enabled
     if ann_status.operation != "build_ann_index":
         raise contract_error("Mapping reference ANN input has an old operation")
     if neighbors_status.operation != "query_neighbors":
@@ -384,7 +410,8 @@ def _validate_and_load_artifact_mapping_reference(
         raise contract_error("Normalized input has no dataset fingerprint")
     if (
         scaling_status.operation != "calculate_feature_scaling"
-        or (scaling_status.parameters or {}).get("enabled") is not True
+        or (scaling_status.parameters or {}).get("enabled")
+        is not feature_scaling_enabled
         or scaling_status.input_ref("normalized") != normalized
     ):
         raise contract_error("Feature scaling does not match the PCA input")
@@ -395,7 +422,6 @@ def _validate_and_load_artifact_mapping_reference(
         raise contract_error("Stored selections do not match normalized data")
 
     group = artifact_group(datastore.zw, ref)
-    _validate_payload_names(group, method)
     raw_metadata = group.attrs.get("reference_metadata")
     if not isinstance(raw_metadata, Mapping):
         raise contract_error("Mapping reference metadata is missing")
@@ -423,6 +449,8 @@ def _validate_and_load_artifact_mapping_reference(
         raise contract_error(
             f"Mapping reference normalization is unsupported: {exc}"
         ) from exc
+    fit_names = reference_fit_array_names(normalization_parameters)
+    _validate_payload_names(group, method, fit_names)
 
     ann_metric = (ann_status.parameters or {}).get("ann_metric")
     if ann_metric not in {"l2", "cosine"}:
@@ -498,9 +526,23 @@ def _validate_and_load_artifact_mapping_reference(
             "Mapping reference feature IDs do not match the selected features"
         )
     reduction_group = artifact_group(datastore.zw, reduction)
-    scaling_group = artifact_group(datastore.zw, feature_scaling)
-    source_feature_means = as_zarr_array(scaling_group["mean"], name="mean")
-    source_feature_scales = as_zarr_array(scaling_group["scale"], name="scale")
+    source_feature_means: ModelSource
+    source_feature_scales: ModelSource
+    if feature_scaling_enabled:
+        scaling_group = artifact_group(datastore.zw, feature_scaling)
+        source_feature_means = as_zarr_array(scaling_group["mean"], name="mean")
+        source_feature_scales = as_zarr_array(scaling_group["scale"], name="scale")
+    else:
+        normalized_group = artifact_group(datastore.zw, normalized)
+        source_feature_means, source_feature_scales = feature_scaling_statistics(
+            normalized_group,
+            ChunkedArray(
+                as_zarr_array(normalized_group["data"], name="data"),
+                nthreads=datastore.nthreads,
+                resources=datastore.resources,
+            ),
+            nthreads=datastore.nthreads,
+        )
     if "center" not in reduction_group:
         raise contract_error(
             "Reference PCA has no fitted center; recompute PCA and its descendants"
@@ -687,6 +729,14 @@ def _validate_and_load_artifact_mapping_reference(
         raise contract_error(
             "Mapping reference distance summary changed from its neighbor input"
         )
+    for name in fit_names:
+        fitted = _numeric_payload_array(group, name, ndim=1)
+        if fitted.shape != (n_features,) or not _numeric_values_are_valid(
+            fitted, minimum=0.0, positive=name == REFERENCE_FIT_ARRAYS[ClrFit]
+        ):
+            raise contract_error(
+                f"Mapping reference normalization array {name!r} is invalid"
+            )
     stored_payload_fingerprint = group.attrs.get("payload_fingerprint")
     if (
         not isinstance(stored_payload_fingerprint, str)
@@ -706,7 +756,9 @@ def _validate_and_load_artifact_mapping_reference(
         feature_scales=_values(group, "feature_scales"),
         center=_values(group, "center"),
         loadings=_values(group, "loadings"),
+        feature_scaling=scaled,
     )
+    normalization_arrays = {name: _values(group, name) for name in fit_names}
     symphony_state = (
         SymphonyCorrectionModel(
             centroids=_values(group, "centroids"),
@@ -747,7 +799,9 @@ def _validate_and_load_artifact_mapping_reference(
             metadata=metadata,
             reference_distance_quantiles=distance_quantiles,
             reference_distance_values=distance_values,
+            normalization_arrays=normalization_arrays,
         ),
+        normalization_arrays=normalization_arrays,
     )
 
 
@@ -837,8 +891,8 @@ def validate_mapping_reference_binding(
 def mapping_reference_payload_matches_sources(
     group: zarr.Group,
     *,
-    feature_means: zarr.Array,
-    feature_scales: zarr.Array,
+    feature_means: ModelSource,
+    feature_scales: ModelSource,
     center: zarr.Array,
     loadings: zarr.Array,
     symphony_sources: Mapping[str, zarr.Array] | None,
@@ -916,8 +970,8 @@ def mapping_reference_payload_matches_sources(
 
 def validate_mapping_reference_sources(
     *,
-    feature_means: zarr.Array,
-    feature_scales: zarr.Array,
+    feature_means: ModelSource,
+    feature_scales: ModelSource,
     center: zarr.Array,
     loadings: zarr.Array,
     symphony_sources: Mapping[str, zarr.Array] | None,
@@ -983,14 +1037,14 @@ def validate_mapping_reference_sources(
 
 def mapping_reference_source_fingerprint(
     *,
-    feature_means: zarr.Array,
-    feature_scales: zarr.Array,
+    feature_means: ModelSource,
+    feature_scales: ModelSource,
     center: zarr.Array,
     loadings: zarr.Array,
     symphony_sources: Mapping[str, zarr.Array] | None,
 ) -> str:
     """Fingerprint the exact upstream model values in bounded row blocks."""
-    sources: list[tuple[str, zarr.Array]] = [
+    sources: list[tuple[str, ModelSource]] = [
         ("feature_means", feature_means),
         ("feature_scales", feature_scales),
         ("center", center),
@@ -1033,7 +1087,7 @@ def _numeric_payload_array(
 
 
 def _numeric_values_are_valid(
-    array: zarr.Array,
+    array: ModelSource,
     *,
     positive: bool = False,
     minimum: float | None = None,
@@ -1091,7 +1145,7 @@ def _stored_array_matches_values(
 
 def _stored_array_matches_array(
     stored: zarr.Array,
-    source: zarr.Array,
+    source: ModelSource,
     *,
     transpose: bool = False,
 ) -> bool:
@@ -1205,13 +1259,15 @@ def _complete_status(
     return status
 
 
-def _validate_payload_names(group: zarr.Group, method: str) -> None:
+def _validate_payload_names(
+    group: zarr.Group, method: str, fit_names: tuple[str, ...]
+) -> None:
     if set(group.group_keys()):
         raise contract_error(
             "Mapping reference contains groups outside the current contract"
         )
     arrays = set(group.array_keys())
-    expected = set(_COMMON_ARRAYS)
+    expected = set(_COMMON_ARRAYS) | set(fit_names)
     if method == "symphony":
         expected.update(_SYMPHONY_ARRAYS)
     missing = expected - arrays
@@ -1275,7 +1331,7 @@ def _payload_fingerprint(
         _COMMON_ARRAY_ORDER + _SYMPHONY_ARRAY_ORDER
         if method == "symphony"
         else _COMMON_ARRAY_ORDER
-    )
+    ) + reference_fit_array_names(metadata["normalization_parameters"])
     return payload_fingerprint(
         fingerprint_stored_arrays(group, names),
         "reference_metadata",
@@ -1308,7 +1364,7 @@ def _write_array(group: zarr.Group, name: str, values: np.ndarray) -> None:
 def _write_array_from_source(
     group: zarr.Group,
     name: str,
-    source: zarr.Array,
+    source: ModelSource,
     *,
     transpose: bool = False,
 ) -> None:

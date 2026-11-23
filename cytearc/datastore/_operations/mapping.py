@@ -18,6 +18,7 @@ from ...storage.artifacts import (
 )
 from ...storage.types import as_zarr_array
 from ...assay import RNAassay
+from ...assay.normalization import PassthroughFit
 from ...metadata.alignment import (
     align_to_cell_ids,
     keyed_values_remedy,
@@ -43,6 +44,7 @@ from ...mapping.label_transfer import (
 )
 from ...mapping.models import LabelTransferResult, MappingResult
 from ...mapping.projection import (
+    projection_algorithm,
     NO_QUERY_BATCH_FINGERPRINT,
     ProjectionWriter,
     load_projection,
@@ -172,6 +174,7 @@ def _mapping_memory_reservations(
         reference.model.center,
         reference.model.loadings,
         reference.feature_ids,
+        *reference.normalization_arrays.values(),
     )
     resident = sum(np.asarray(values).nbytes for values in model_arrays)
     if batch_codes is not None:
@@ -360,6 +363,23 @@ class _MappingOperationsMixin(_MappingOperationsBase):
         assay = self._get_assay(assay_name)
         if not isinstance(assay, RNAassay):
             raise TypeError("Mapping currently supports RNA query assays only")
+        # norm_dummy takes each cell's stored values as they are, so a query
+        # maps only when its values are of the reference's kind.
+        reference_counts = reference.datastore._get_assay(
+            reference.assay_name
+        ).holdsCounts
+        if (
+            isinstance(reference.normalization, PassthroughFit)
+            and reference_counts != assay.holdsCounts
+        ):
+            kinds = {True: "counts", False: "values normalized before import"}
+            raise ValueError(
+                "The reference was normalized with norm_dummy, which takes each "
+                f"cell's stored values as they are, and its assay holds "
+                f"{kinds[reference_counts]}, but query assay {assay_name!r} holds "
+                f"{kinds[assay.holdsCounts]}; map a query whose stored values are "
+                "of the same kind, or build the reference on another normalizer"
+            )
         # After the argument and assay checks, so a read-only store refuses
         # unmeasured cells as a writable one does. A read-only store reuses a
         # saved projection and refuses only before it would write.
@@ -397,7 +417,7 @@ class _MappingOperationsMixin(_MappingOperationsBase):
             n_batches = 1
             query_batch_fingerprint = NO_QUERY_BATCH_FINGERPRINT
             correction_method = "none"
-            algorithm_variant = "scaled_pca"
+            algorithm_variant = projection_algorithm(reference, "none")
         else:
             if query_batches is None:
                 batch_codes = np.zeros(n_cells, dtype=np.int64)
@@ -446,6 +466,7 @@ class _MappingOperationsMixin(_MappingOperationsBase):
             feature_key=feature_key,
             reserved_resident_bytes=reserved_resident,
             reserved_per_row_bytes=reserved_per_row,
+            normalization=reference.normalization,
         )
         if _ordered_feature_ids_fingerprint(assay.z) != feature_ids_fingerprint:
             raise ValueError("Query feature identities changed during mapping setup")

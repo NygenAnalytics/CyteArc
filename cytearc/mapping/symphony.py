@@ -15,15 +15,19 @@ SYMPHONY_ALGORITHM = "symphony"
 
 
 def project_pca(values: np.ndarray, model: ScaledPCAProjectionModel) -> np.ndarray:
-    """Project normalized expression onto immutable reference PCA loadings."""
+    """Project normalized expression onto immutable reference PCA loadings.
+
+    The values are standardized as the PCA's were, when it scaled its
+    features, and centered.
+    """
     values = np.asarray(values, dtype=np.float64)
     if values.ndim != 2 or values.shape[1] != model.n_features:
         raise ValueError(
             f"Expected query matrix with {model.n_features} features, got {values.shape}"
         )
-    projected = (
-        (values - model.feature_means) / model.feature_scales - model.center
-    ) @ model.loadings
+    if model.feature_scaling:
+        values = (values - model.feature_means) / model.feature_scales
+    projected = (values - model.center) @ model.loadings
     if not np.all(np.isfinite(projected)):
         raise ValueError("PCA projection produced non-finite values")
     return cast(np.ndarray, projected)
@@ -37,7 +41,8 @@ def scaled_dispersion_sum(
 ) -> float:
     """Return the summed squared scaled deviation of one aligned query block.
 
-    The reference PCA is fitted on z-scored features, so dividing this sum by the
+    Each feature is standardized by the reference cells' mean and standard
+    deviation, whether or not the PCA scaled it, so dividing this sum by the
     cell and feature counts returns exactly 1 for the reference itself. A query
     that returns much less than 1 occupies a narrower region of the same space
     and its cells collect near the middle of the reference cloud, where the

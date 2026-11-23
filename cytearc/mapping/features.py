@@ -6,10 +6,26 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from ..assay import RNAassay, _read_block, norm_lib_size
-from ..assay.normalization import library_size_divisors, library_size_values
+from ..assay import (
+    PearsonResidualNormalizer,
+    RNAassay,
+    _read_block,
+    norm_clr,
+    norm_dummy,
+    norm_lib_size,
+    norm_lib_size_log,
+)
+from ..assay.normalization import (
+    ClrFit,
+    LibrarySizeFit,
+    NormalizationFit,
+    PassthroughFit,
+    PearsonResidualFit,
+    library_size_divisors,
+    normalize_rows,
+    recorded_normalizer,
+)
 from ..metadata.rows import read_metadata_rows_chunkwise
-from ..storage.artifacts import callable_identity
 from ..storage.budget import ResourceBudget
 from ..storage.execution import admit_stream
 from ..storage.geometry import ArrayGeometry, array_geometry
@@ -114,23 +130,19 @@ def _normalization_parameters(parameters: Mapping[str, Any]) -> dict[str, Any]:
         )
 
     method = values["normalization_method"]
-    supported_method = callable_identity(norm_lib_size)
-    if not isinstance(method, Mapping):
+    normalizer = None
+    if isinstance(method, Mapping) and method.get("external_hook", True) is True:
+        normalizer = recorded_normalizer(method)
+    if normalizer is None or not _fits_new_rows(normalizer):
         raise ValueError(
-            "Unsupported reference normalization method. "
-            f"Expected {supported_method!r}, received {method!r}"
-        )
-    method_identity = dict(method)
-    external_hook = method_identity.pop("external_hook", True)
-    if external_hook is not True or method_identity != supported_method:
-        raise ValueError(
-            "Unsupported reference normalization method. "
-            f"Expected {supported_method!r}, received {method!r}"
+            "Unsupported reference normalization method. Expected a built-in RNA "
+            "normalizer, norm_lib_size, norm_lib_size_log, norm_pearson_residuals, "
+            f"norm_clr or norm_dummy, received {method!r}"
         )
     values["normalization_method"] = dict(method)
 
     size_factor = values["size_factor"]
-    if (
+    if size_factor is not None and (
         isinstance(size_factor, bool | np.bool_)
         or not isinstance(size_factor, int | float | np.integer | np.floating)
         or not np.isfinite(size_factor)
@@ -139,7 +151,11 @@ def _normalization_parameters(parameters: Mapping[str, Any]) -> dict[str, Any]:
         raise ValueError(
             "Reference normalization size_factor must be finite and positive"
         )
-    values["size_factor"] = float(size_factor)
+    if size_factor is None and normalizer in (norm_lib_size, norm_lib_size_log):
+        raise ValueError(
+            "Reference normalization size_factor must be finite and positive"
+        )
+    values["size_factor"] = None if size_factor is None else float(size_factor)
 
     for name in ("log_transform", "renormalize_subset"):
         value = values[name]
@@ -149,30 +165,77 @@ def _normalization_parameters(parameters: Mapping[str, Any]) -> dict[str, Any]:
     return values
 
 
-def normalize_reference_counts(
-    raw: np.ndarray,
-    *,
-    size_factor: float,
-    log_transform: bool,
-    source: str,
-    denominator: np.ndarray | None = None,
-) -> np.ndarray:
-    """Library-size normalize rows of counts as a mapping reference does."""
-    if denominator is None:
-        divisors = library_size_divisors(
-            raw.sum(axis=1, dtype=np.float64), source=source, copy=False
-        )
-    elif np.shape(denominator) != (len(raw),):
-        raise ValueError("Normalization totals must hold one value per row of counts")
-    else:
-        divisors = library_size_divisors(denominator, source=source)
-    return library_size_values(
-        raw,
-        divisors,
-        size_factor,
-        dtype=np.float64,
-        log_transform=log_transform,
+def _fits_new_rows(normalizer: Any) -> bool:
+    """Return whether a reference can normalize query rows as ``normalizer`` did."""
+    return isinstance(normalizer, PearsonResidualNormalizer) or any(
+        normalizer is builtin
+        for builtin in (norm_lib_size, norm_lib_size_log, norm_clr, norm_dummy)
     )
+
+
+# The arrays that a mapping reference saves of what its cells' normalizer
+# fitted, beside the PCA, by the kind of fit.
+REFERENCE_FIT_ARRAYS: Mapping[type, str] = {
+    PearsonResidualFit: "pearson_feature_fractions",
+    ClrFit: "clr_feature_scales",
+}
+
+
+def reference_fit_array_names(parameters: Mapping[str, Any]) -> tuple[str, ...]:
+    """Return the fit arrays that a reference of these normalization parameters saves."""
+    normalizer = recorded_normalizer(parameters["normalization_method"])
+    if isinstance(normalizer, PearsonResidualNormalizer):
+        return (REFERENCE_FIT_ARRAYS[PearsonResidualFit],)
+    if normalizer is norm_clr:
+        return (REFERENCE_FIT_ARRAYS[ClrFit],)
+    return ()
+
+
+def reference_fit_arrays(fit: NormalizationFit) -> dict[str, np.ndarray]:
+    """Return the arrays that a reference saves of ``fit``, by name."""
+    if isinstance(fit, PearsonResidualFit):
+        return {REFERENCE_FIT_ARRAYS[PearsonResidualFit]: fit.fractions}
+    if isinstance(fit, ClrFit):
+        return {REFERENCE_FIT_ARRAYS[ClrFit]: fit.scales}
+    return {}
+
+
+def reference_normalization(
+    parameters: Mapping[str, Any],
+    *,
+    n_cells: int | None = None,
+    arrays: Mapping[str, np.ndarray] | None = None,
+) -> NormalizationFit:
+    """Return the fit that normalizes query rows as a reference's cells were.
+
+    ``parameters`` are the reference's checked normalization parameters,
+    ``n_cells`` its cell count, which sets the default clip of Pearson
+    residuals, and ``arrays`` the fit arrays that it saved.
+
+    Raises:
+        ValueError: If the normalizer fitted numbers that ``arrays`` lacks.
+    """
+    checked = _normalization_parameters(parameters)
+    normalizer = recorded_normalizer(checked["normalization_method"])
+    log = checked["log_transform"]
+    if normalizer is norm_lib_size or normalizer is norm_lib_size_log:
+        return LibrarySizeFit(
+            checked["size_factor"], log or normalizer is norm_lib_size_log
+        )
+    if normalizer is norm_dummy:
+        return PassthroughFit(log)
+    (name,) = reference_fit_array_names(checked)
+    if arrays is None or name not in arrays or n_cells is None:
+        raise ValueError(
+            "The reference normalizes with numbers that it fitted over its cells, "
+            f"its array {name!r} and its cell count; load the reference with "
+            "mapping.load_reference"
+        )
+    array = np.asarray(arrays[name], dtype=np.float64)
+    if isinstance(normalizer, PearsonResidualNormalizer):
+        clip = float(np.sqrt(n_cells)) if normalizer.clip is None else normalizer.clip
+        return PearsonResidualFit(array, normalizer.theta, clip)
+    return ClrFit(array)
 
 
 class AlignedFeatureStream:
@@ -181,7 +244,9 @@ class AlignedFeatureStream:
     Query features match reference features by ID, or by name with
     ``feature_key="names"``. Query features that share a reference feature's
     name add their counts before normalization, so the query keeps every
-    count of the feature.
+    count of the feature. The rows are normalized with ``normalization``, the
+    fit of the reference's cells, which the reference's parameters give when
+    their normalizer fitted no number.
     """
 
     def __init__(
@@ -197,6 +262,7 @@ class AlignedFeatureStream:
         feature_key: str = "ids",
         reserved_resident_bytes: int = 0,
         reserved_per_row_bytes: int = 0,
+        normalization: NormalizationFit | None = None,
     ) -> None:
         if not isinstance(query_assay, RNAassay):
             raise TypeError("AlignedFeatureStream supports RNA query assays only")
@@ -247,6 +313,11 @@ class AlignedFeatureStream:
         )
         self._normalization_parameters = _normalization_parameters(
             reference_normalization_parameters
+        )
+        self._normalization = (
+            reference_normalization(self._normalization_parameters)
+            if normalization is None
+            else normalization
         )
         self._missing_feature_policy = missing_feature_policy
         self._resources = resources
@@ -321,17 +392,19 @@ class AlignedFeatureStream:
                 f"The reference-feature subset of query assay {query_assay.name!r}"
             )
         else:
-            # Preparation guarantees a numeric total for every cell.
+            # Preparation guarantees a numeric total for every cell; the check
+            # refuses a negative or non-finite one now, before any block.
             scalar_name = f"{query_assay.name}_nCounts"
             self._totals_source = f"Query assay {scalar_name!r}"
-            scalars = library_size_divisors(
+            scalars = np.asarray(
                 read_metadata_rows_chunkwise(
                     query_assay.cells,
                     scalar_name,
                     self._query_cell_indices,
                 ),
-                source=self._totals_source,
+                dtype=np.float64,
             )
+            library_size_divisors(scalars, source=self._totals_source)
             scalars.setflags(write=False)
             self._cell_scalars = scalars
 
@@ -350,7 +423,8 @@ class AlignedFeatureStream:
             else len(self._reference_index_map) * normalized_bytes
         )
         self._stream_row_bytes = (
-            len(self._query_index_map) * (raw_dtype.itemsize + normalized_bytes)
+            len(self._query_index_map)
+            * (raw_dtype.itemsize + self._normalization.held_values * normalized_bytes)
             + summed_bytes
             + len(self._reference_feature_keys) * normalized_bytes
             + (normalized_bytes if self.renormalize_subset else 0)
@@ -375,14 +449,6 @@ class AlignedFeatureStream:
     @property
     def feature_coverage(self) -> float:
         return self._feature_coverage
-
-    @property
-    def size_factor(self) -> float:
-        return float(self._normalization_parameters["size_factor"])
-
-    @property
-    def log_transform(self) -> bool:
-        return bool(self._normalization_parameters["log_transform"])
 
     @property
     def renormalize_subset(self) -> bool:
@@ -500,16 +566,15 @@ class AlignedFeatureStream:
                         raw, self._column_starts, axis=1, dtype=np.float64
                     )
                 observed = np.count_nonzero(raw, axis=1) > 0
-                normalized = normalize_reference_counts(
+                normalized = normalize_rows(
+                    self._normalization,
                     raw,
-                    size_factor=self.size_factor,
-                    log_transform=self.log_transform,
-                    source=self._totals_source,
-                    denominator=(
+                    (
                         None
                         if self._cell_scalars is None
                         else self._cell_scalars[start : start + len(raw)]
                     ),
+                    source=self._totals_source,
                 )
 
                 values = np.empty(
