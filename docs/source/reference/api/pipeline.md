@@ -916,8 +916,6 @@ unfinished = ds.pipeline.list_runs(status=["running", "interrupted"])
 
 `open` requires exactly one of `run_id` or `label`. Only a successfully completed run acquires its requested label. Paused, failed, and interrupted attempts do not reserve it. `list_runs` returns newest first and includes every status, `running`, `paused`, `completed`, `failed`, and `interrupted`, unless `status` names one or a sequence of them. Concurrent finalizers use an atomic label claim, so at most one completed run can acquire a name. A storage backend without atomic conditional creation rejects `label=` before a run record or computation starts; unlabeled runs are unaffected. An unclean incomplete finalizer blocks reuse of its requested label and fails closed.
 
-Several runs can run at once on one store, each in a process of its own, as [Several processes on one store](../concepts/provenance#several-processes-on-one-store) describes. Each writes its own run record, and a stage that two runs share and neither has saved yet is computed by both.
-
 After confirming that the owner process has stopped, explicitly abandon that exact claim before
 retrying the label:
 
@@ -933,6 +931,8 @@ replacement = ds.pipeline.rna(label="baseline")
 The recovery call succeeds only for the exact current owner while `complete=False`, including a
 torn terminal payload, and records an `abandoned_label_claim` interruption. It refuses every
 `complete=True` owner and has no timeout or automatic stale-process heuristic.
+
+Several runs can run at once on one store, each in a process of its own, as [Several processes on one store](../concepts/provenance#several-processes-on-one-store) describes. Each writes its own run record, and a stage that two runs share and neither has saved yet is computed by both.
 
 Every status exposes identity, status, recipe, and `run.report(format="dict" | "markdown")`. Only a completed run exposes mapping outputs and frozen views. Reports include what each stage used and what its process had ([Stage resources](#stage-resources)), artifact plans with `created` or `reused` dispositions, stage summaries and warnings ([Diagnostics](#diagnostics)), failures, interruption details, and signal-guard availability.
 

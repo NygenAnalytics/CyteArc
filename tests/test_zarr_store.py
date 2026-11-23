@@ -1,6 +1,8 @@
+import os
 import re
 import types
 
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -1943,6 +1945,80 @@ def test_a_copy_that_another_process_places_first_is_read_instead(
     assert sorted(path.name for path in cache.iterdir()) == ["normed.zarr"]
 
 
+def test_a_copy_is_complete_before_it_is_renamed_into_place(tmp_path, monkeypatch):
+    import cytearc.storage.copy as copy_module
+
+    source = _normalized_source(tmp_path / "source.zarr", (32, 4))
+    cache = tmp_path / "cache" / "artifact" / "normed.zarr"
+    rename = os.rename
+    renamed = []
+
+    def check_then_rename(folder, target):
+        # A process that reads the place once the rename lands finds a whole copy.
+        copy = zarr.open_array(Path(folder) / "data", mode="r")
+        assert copy.attrs["complete"] is True
+        np.testing.assert_array_equal(copy[:], source[:])
+        renamed.append((Path(folder).parent, target))
+        rename(folder, target)
+
+    monkeypatch.setattr(copy_module.os, "rename", check_then_rename)
+    staged = stage_normed_array(str(cache), source)
+    assert renamed == [(cache.parent, str(cache))]
+    np.testing.assert_array_equal(staged[:], source[:])
+
+
+def _busy(winerror: int) -> PermissionError:
+    error = PermissionError(13, "The process cannot access the file")
+    # Windows sets winerror on the errors that its file functions raise.
+    error.winerror = winerror
+    return error
+
+
+def test_a_rename_that_windows_refuses_while_a_file_is_held_is_tried_again(
+    tmp_path, monkeypatch
+):
+    import cytearc.storage.copy as copy_module
+
+    source = _normalized_source(tmp_path / "source.zarr", (32, 4))
+    cache = tmp_path / "cache" / "artifact" / "normed.zarr"
+    rename = os.rename
+    refusals = [_busy(32), _busy(5)]
+    waits = []
+
+    def rename_once_free(folder, target):
+        if refusals:
+            raise refusals.pop(0)
+        rename(folder, target)
+
+    monkeypatch.setattr(copy_module.os, "rename", rename_once_free)
+    monkeypatch.setattr(copy_module.time, "sleep", waits.append)
+    staged = stage_normed_array(str(cache), source)
+    np.testing.assert_array_equal(staged[:], source[:])
+    assert waits == [0.01, 0.05]
+    assert sorted(path.name for path in cache.parent.iterdir()) == ["normed.zarr"]
+
+
+def test_a_rename_that_windows_keeps_refusing_raises_its_error(tmp_path, monkeypatch):
+    import cytearc.storage.copy as copy_module
+
+    source = _normalized_source(tmp_path / "source.zarr", (32, 4))
+    cache = tmp_path / "cache" / "artifact" / "normed.zarr"
+    attempts = []
+
+    def refuse(folder, target):
+        attempts.append(target)
+        raise _busy(5)
+
+    monkeypatch.setattr(copy_module.os, "rename", refuse)
+    monkeypatch.setattr(copy_module.time, "sleep", lambda seconds: None)
+    with pytest.raises(PermissionError) as refused:
+        stage_normed_array(str(cache), source)
+    assert refused.value.winerror == 5
+    # Five tries after the delays and one more, all at the copy's place.
+    assert attempts == [str(cache)] * 6
+    assert list(cache.parent.iterdir()) == []
+
+
 def test_a_failed_staging_leaves_nothing_in_the_cache(tmp_path, monkeypatch):
     import cytearc.storage.copy as copy_module
 
@@ -1962,18 +2038,24 @@ def test_a_failed_staging_leaves_nothing_in_the_cache(tmp_path, monkeypatch):
 
 
 def test_a_place_that_other_files_hold_raises_the_rename_error_and_keeps_them(
-    tmp_path,
+    tmp_path, monkeypatch
 ):
     import errno
+
+    import cytearc.storage.copy as copy_module
 
     source = _normalized_source(tmp_path / "source.zarr", (32, 4))
     cache = tmp_path / "cache" / "artifact" / "normed.zarr"
     cache.mkdir(parents=True)
     (cache / "notes.txt").write_text("kept")
-    # The folder holds no copy, so the call stages one, whose rename fails.
+    waits = []
+    monkeypatch.setattr(copy_module.time, "sleep", waits.append)
+    # The folder holds no copy, so the call stages one, whose rename fails at
+    # once: only the errors of a file that Windows holds are tried again.
     with pytest.raises(OSError) as refused:
         stage_normed_array(str(cache), source)
     assert refused.value.errno in (errno.ENOTEMPTY, errno.EEXIST)
+    assert waits == []
     assert sorted(path.name for path in cache.parent.iterdir()) == ["normed.zarr"]
     assert [path.name for path in cache.iterdir()] == ["notes.txt"]
 

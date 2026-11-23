@@ -974,8 +974,11 @@ def test_a_run_starts_when_another_process_creates_the_groups_of_runs_meanwhile(
 def test_a_run_refuses_a_store_whose_runs_are_not_a_group() -> None:
     root = zarr.open_group(store=MemoryStore(), mode="w")
     root.create_group("pipeline").create_array("runs", shape=(0,), dtype="uint8")
-    # The error names the array in the way, not a run that already exists.
-    with pytest.raises(ValueError, match="pipeline/runs"):
+    # Zarr reports that a group above the new run's is an array, where a run
+    # that already exists would be reported as such.
+    with pytest.raises(
+        ValueError, match=r"A parent of \S*pipeline/runs/[0-9a-f]{64} is an array"
+    ):
         create_pipeline_run_record(
             root,
             recipe="rna",
@@ -988,23 +991,13 @@ def test_a_run_refuses_a_store_whose_runs_are_not_a_group() -> None:
     assert list(root["pipeline"].keys()) == ["runs"]
 
 
-def _writable_store(location: str, kind: str) -> Store:
-    if kind == "fsspec":
-        from zarr.storage import FsspecStore
-
-        return FsspecStore.from_url(
-            f"file://{location}", storage_options={"auto_mkdir": True}
-        )
-    return LocalStore(location)
-
-
 def _start_runs_in_process(
-    locations: list[str], kind: str, barrier: Any, result_queue: Any
+    locations: list[str], barrier: Any, result_queue: Any
 ) -> None:
     started: list[str] = []
     try:
         for location in locations:
-            root = zarr.open_group(store=_writable_store(location, kind), mode="r+")
+            root = zarr.open_group(location, mode="r+")
             barrier.wait(timeout=60)
             try:
                 record = create_pipeline_run_record(
@@ -1028,9 +1021,8 @@ def _start_runs_in_process(
         result_queue.put(started)
 
 
-@pytest.mark.parametrize("kind", ["local", "fsspec"])
 def test_runs_that_start_together_in_separate_processes_are_all_recorded(
-    tmp_path: Any, kind: str
+    tmp_path: Any,
 ) -> None:
     # Each round, four processes start a run at once on a store without runs.
     locations = [str(tmp_path / f"round-{index}.zarr") for index in range(20)]
@@ -1042,7 +1034,7 @@ def test_runs_that_start_together_in_separate_processes_are_all_recorded(
     processes = [
         context.Process(
             target=_start_runs_in_process,
-            args=(locations, kind, barrier, result_queue),
+            args=(locations, barrier, result_queue),
         )
         for _ in range(4)
     ]

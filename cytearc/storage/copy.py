@@ -1,5 +1,6 @@
 import os
 import shutil
+import time
 import uuid
 from collections.abc import Callable, Iterator
 from functools import partial
@@ -492,7 +493,6 @@ def stage_normed_array(
     """
     shape = (int(source.shape[0]), int(source.shape[1]))
     if not _holds_normed_array(cache_path, shape):
-        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
         folder = f"{cache_path}.{uuid.uuid4().hex}.staging"
         try:
             root = zarr.open_group(Path(folder), mode="w-", use_consolidated=False)
@@ -506,7 +506,7 @@ def stage_normed_array(
             )
             staged.attrs["complete"] = True
             try:
-                os.rename(folder, cache_path)
+                _rename_once_free(folder, cache_path)
             except OSError:
                 # Another process placed its copy first, which is read instead.
                 if not _holds_normed_array(cache_path, shape):
@@ -515,6 +515,28 @@ def stage_normed_array(
             shutil.rmtree(folder, ignore_errors=True)
     root = zarr.open_group(Path(cache_path), mode="r", use_consolidated=False)
     return as_zarr_array(root["data"], name="data")
+
+
+# Windows refuses to rename a folder while another program, such as a virus
+# scanner, holds a file in it, with access denied (5) or a sharing violation
+# (32). Both clear within moments, so the rename is tried again after each of
+# these delays, then once more. Off Windows an OSError has no winerror.
+_BUSY_WINDOWS_ERRORS = frozenset({5, 32})
+_RENAME_RETRY_DELAYS = (0.01, 0.05, 0.1, 0.25, 0.5)
+
+
+def _rename_once_free(folder: str, target: str) -> None:
+    """Rename ``folder`` to ``target``, trying again while Windows holds a file."""
+    for delay in _RENAME_RETRY_DELAYS:
+        try:
+            os.rename(folder, target)
+        except OSError as error:
+            if getattr(error, "winerror", None) not in _BUSY_WINDOWS_ERRORS:
+                raise
+            time.sleep(delay)
+        else:
+            return
+    os.rename(folder, target)
 
 
 def _holds_normed_array(cache_path: str, shape: tuple[int, int]) -> bool:
