@@ -1,3 +1,5 @@
+import re
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -5586,6 +5588,522 @@ def test_a_merge_keeps_date_feature_annotations_where_a_source_holds_nat(tmp_pat
     }
 
 
+# Dates at seconds and at nanoseconds, and durations at seconds and at
+# milliseconds, as inserts store them, with NaT where a value is missing.
+_TIMES = {
+    "first": {
+        "day": np.asarray(
+            [
+                "2026-01-01T00:00:01",
+                "NaT",
+                "2026-03-01",
+                "NaT",
+                "2026-01-01T00:00:01",
+                "1970-01-01",
+            ],
+            dtype="datetime64[s]",
+        ),
+        "wait": np.asarray([5, "NaT", 0, 86400, "NaT", -3], dtype="timedelta64[s]"),
+    },
+    "second": {
+        "day": np.asarray(
+            [
+                "2026-01-02T00:00:00.000000001",
+                "2026-01-03",
+                "NaT",
+                "2026-01-02T00:00:00.000000001",
+                "1969-12-31T23:59:59.999999999",
+                "2026-01-04",
+            ],
+            dtype="datetime64[ns]",
+        ),
+        "wait": np.asarray([7, 1500, "NaT", 0, 1, -2], dtype="timedelta64[ms]"),
+    },
+}
+
+
+def _merged_stored_columns(tmp_path, sources, *, names=("first", "second")):
+    """Merge stores of six cells whose cell columns another tool wrote as they are, at any unit, and return the merged cellData group.
+
+    An insert stores dates and durations coarser than seconds in seconds, so
+    each column is written to the store directly.
+    """
+    from tests.storage_helpers import open_store, write_count_store
+
+    for name, columns in zip(names, sources, strict=True):
+        location = tmp_path / f"{name}.zarr"
+        write_count_store(
+            str(location),
+            {"RNA": np.ones((6, 3), dtype=int)},
+            "uint16",
+            cell_ids=[f"{name}{index}" for index in range(6)],
+        )
+        group = zarr.open_group(str(location / "cellData"), mode="r+")
+        for column, values in columns.items():
+            group.create_array(column, data=values, chunks=(6,))
+    DataStoreMerge(
+        [open_store(tmp_path / f"{name}.zarr") for name in names],
+        str(tmp_path / "merged.zarr"),
+        list(names),
+        nthreads=1,
+    ).dump()
+    return zarr.open_group(str(tmp_path / "merged.zarr"), mode="r")["cellData"]
+
+
+def _expected_times(sources, column, dtype, ids_of):
+    """Each cell's value of ``column`` as NumPy casts it to ``dtype`` and writes it as text, NaT included, by cell ID."""
+    return {
+        ids_of(name, row): str(value)
+        for name, columns in sources.items()
+        for row, value in enumerate(columns[column].astype(dtype))
+    }
+
+
+def test_a_merge_keeps_dates_and_durations_of_different_units_at_the_finer_unit(
+    tmp_path,
+):
+    cell_data, dropped = _merged_cell_columns(
+        tmp_path, [_TIMES["first"], _TIMES["second"]]
+    )
+    ids = cell_data["ids"][:].tolist()
+    exported, _merged = _exported_merge(tmp_path)
+    for name, column, dtype in (
+        ("orig_day", "day", np.dtype("datetime64[ns]")),
+        ("orig_wait", "wait", np.dtype("timedelta64[ms]")),
+    ):
+        # The finer unit of each column holds every value, and NaT stays
+        # NaT, which readers take as missing without a mask.
+        stored = np.asarray(cell_data[name][:])
+        assert stored.dtype == dtype, name
+        assert f"__cytearc_missing__{name}" not in cell_data, name
+        expected = _expected_times(
+            _TIMES, column, dtype, lambda source, row: f"{source}__{source}{row}"
+        )
+        assert {
+            cell: str(value) for cell, value in zip(ids, stored, strict=True)
+        } == expected, name
+        # An export writes each value as the text that NumPy writes, as it
+        # writes the dates of any store.
+        assert {
+            cell: str(value) for cell, value in exported.obs[name].items()
+        } == expected, name
+    assert dropped == []
+    merged = _merged.cells.to_pandas_dataframe(["orig_day"])["orig_day"]
+    assert int(merged.isna().sum()) == 3
+
+
+def test_a_merge_of_dates_of_one_unit_reads_no_column_of_them(tmp_path, monkeypatch):
+    import cytearc.merge.metadata as merge_metadata
+
+    scanned: list[str] = []
+    scan = merge_metadata._scan_time_column
+
+    def recorded(table, column, *args, **kwargs):
+        scanned.append(column)
+        return scan(table, column, *args, **kwargs)
+
+    monkeypatch.setattr(merge_metadata, "_scan_time_column", recorded)
+    cell_data, _dropped = _merged_cell_columns(
+        tmp_path, [{"day": _TIMES["first"]["day"]}, {"day": _TIMES["first"]["day"]}]
+    )
+    # Dates of one unit keep it, and their NaT, without a mask or a scan.
+    stored = np.asarray(cell_data["orig_day"][:])
+    assert stored.dtype == np.dtype("datetime64[s]")
+    assert np.isnat(stored).sum() == 4
+    assert "__cytearc_missing__orig_day" not in cell_data
+    assert scanned == []
+
+
+def test_a_merge_plans_no_missing_mask_for_dates_without_nat(tmp_path):
+    days = _TIMES["second"]["day"][[0, 1, 3, 4, 5, 0]]
+    cell_data, _dropped = _merged_cell_columns(
+        tmp_path, [{"day": _TIMES["first"]["day"][[0, 2, 4, 5, 0, 2]]}, {"day": days}]
+    )
+    assert np.asarray(cell_data["orig_day"][:]).dtype == np.dtype("datetime64[ns]")
+    assert "__cytearc_missing__orig_day" not in cell_data
+
+
+@pytest.mark.parametrize(
+    ("first", "second", "kind", "holding"),
+    [
+        # 1500 and 2300 lie beyond the dates that nanoseconds hold, on either
+        # side; NaT, which every unit holds, sits beside them.
+        (
+            np.asarray(
+                ["NaT", "1500-01-01", "2026-01-01", "NaT", "2026-01-01", "2026-01-01"],
+                dtype="datetime64[s]",
+            ),
+            np.asarray(["2026-01-01"] * 6, dtype="datetime64[ns]"),
+            "dates, such as 1500-01-01T00:00:00",
+            "datetime64[s]",
+        ),
+        (
+            np.asarray(
+                ["2026-01-01", "NaT", "2300-01-01", "2026-01-01", "NaT", "2026-01-01"],
+                dtype="datetime64[s]",
+            ),
+            np.asarray(["2026-01-01"] * 6, dtype="datetime64[ns]"),
+            "dates, such as 2300-01-01T00:00:00",
+            "datetime64[s]",
+        ),
+        (
+            np.asarray([1, "NaT", 10**10, 1, 1, 1], dtype="timedelta64[s]"),
+            np.asarray([1] * 6, dtype="timedelta64[ns]"),
+            "durations, such as 10000000000 seconds",
+            "timedelta64[s]",
+        ),
+        # Months beside weeks promote to weeks, which start on Thursdays, so
+        # July 2000, a Saturday, lies between them; days hold both.
+        (
+            np.asarray(["2000-06", "2000-07"] * 3, dtype="datetime64[M]"),
+            np.asarray(["2000-06-01"] * 6, dtype="datetime64[W]"),
+            "dates, such as 2000-07",
+            "datetime64[D]",
+        ),
+    ],
+    ids=["dates before", "dates after", "durations", "months beside weeks"],
+)
+def test_a_merge_refuses_values_that_the_finer_unit_cannot_hold(
+    tmp_path, first, second, kind, holding
+):
+    import datetime
+
+    assert np.result_type(first.dtype, second.dtype) == second.dtype
+    if first.dtype == np.dtype("datetime64[M]"):
+        # Python's calendar: weeks count from Thursday 1 January 1970.
+        assert datetime.date(1970, 1, 1).weekday() == 3
+        assert datetime.date(2000, 6, 1).weekday() == 3
+        assert datetime.date(2000, 7, 1).weekday() == 5
+    with pytest.raises(
+        ValueError,
+        match=re.escape(
+            f"Column 'value' of source 'first' holds {kind}, that "
+            f"{second.dtype}, the finest unit of the merged sources, cannot hold. "
+            "Store the column in every source at one unit that holds each value, "
+            f"such as {holding}, and merge again."
+        ),
+    ):
+        _merged_stored_columns(tmp_path, [{"value": first}, {"value": second}])
+    assert not (tmp_path / "merged.zarr").exists()
+
+
+def test_a_merge_keeps_dates_within_one_unit_of_the_finer_units_limits(tmp_path):
+    # NumPy documents nanoseconds from 1677-09-21T00:12:43.145224193 to
+    # 2262-04-11T23:47:16.854775807, so these whole seconds lie within them.
+    first = np.asarray(
+        ["1677-09-21T00:12:44", "2262-04-11T23:47:16"] * 3, dtype="datetime64[s]"
+    )
+    cell_data, _dropped = _merged_cell_columns(
+        tmp_path,
+        [
+            {"day": first},
+            {"day": np.asarray(["2026-01-01"] * 6, dtype="datetime64[ns]")},
+        ],
+    )
+    stored = np.asarray(cell_data["orig_day"][:])
+    assert sorted({str(value) for value in stored}) == [
+        "1677-09-21T00:12:44.000000000",
+        "2026-01-01T00:00:00.000000000",
+        "2262-04-11T23:47:16.000000000",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [
+        (np.dtype("timedelta64[M]"), np.dtype("timedelta64[s]")),
+        (np.dtype("timedelta64[Y]"), np.dtype("timedelta64[D]")),
+    ],
+)
+def test_a_merge_refuses_durations_in_months_or_years_beside_fixed_units(
+    tmp_path, first, second
+):
+    # NumPy finds no unit for both, since a month or a year has no fixed
+    # length.
+    with pytest.raises(TypeError, match="incompatible nonlinear base time units"):
+        np.result_type(first, second)
+    with pytest.raises(
+        ValueError,
+        match=re.escape(
+            f"Column 'wait' of source 'first' holds durations in {first} and column "
+            f"'wait' of source 'second' in {second}, which no unit holds both of"
+        ),
+    ) as refusal:
+        _merged_stored_columns(
+            tmp_path,
+            [
+                {"wait": np.arange(6).astype(first)},
+                {"wait": np.arange(6).astype(second)},
+            ],
+        )
+    assert f"such as {second} after converting" in str(refusal.value)
+    assert not (tmp_path / "merged.zarr").exists()
+
+
+def test_a_merge_of_durations_in_years_and_months_counts_months(tmp_path):
+    cell_data = _merged_stored_columns(
+        tmp_path,
+        [
+            {"wait": np.arange(6).astype("timedelta64[Y]")},
+            {"wait": np.arange(6).astype("timedelta64[M]")},
+        ],
+    )
+    stored = np.asarray(cell_data["orig_wait"][:])
+    assert stored.dtype == np.dtype("timedelta64[M]")
+    assert sorted(stored.astype(np.int64).tolist()) == sorted(
+        [12 * years for years in range(6)] + list(range(6))
+    )
+
+
+def test_a_scan_of_dates_reads_every_block_of_the_rows_it_takes():
+    from cytearc.merge.metadata import _scan_time_column
+
+    # Read two rows at a time, the only date that nanoseconds cannot hold
+    # sits in the third block.
+    days = np.asarray(
+        ["2026-01-01", "NaT", "2026-01-02", "2026-01-03", "1500-01-01", "2026-01-04"],
+        dtype="datetime64[s]",
+    )
+    table = _MergeMeta(day=days)
+
+    def scan(taken=None):
+        _scan_time_column(
+            table,
+            "day",
+            np.dtype("datetime64[ns]"),
+            block_rows=2,
+            taken=None if taken is None else np.asarray(taken),
+            subject="Column 'day' of source 'first'",
+        )
+
+    with pytest.raises(ValueError, match="such as 1500-01-01T00:00:00"):
+        scan()
+    with pytest.raises(ValueError, match="such as 1500-01-01T00:00:00"):
+        scan([1, 2, 4])
+    # The rows that the merge takes hold none.
+    scan([0, 1, 2, 3, 5])
+
+
+def test_a_scan_budget_charges_dates_and_durations_that_a_merge_reads(monkeypatch):
+    import tracemalloc
+
+    import cytearc.merge.metadata as merge_metadata
+    from cytearc.storage.budget import ResourceBudget
+
+    width = 4096
+    days = np.datetime64("2026-01-01", "s") + np.arange(width).astype("timedelta64[s]")
+    days[::3] = np.datetime64("NaT", "s")
+    charged: list[int] = []
+
+    def recorded(resources, *, nTasks, taskBytes, residentBytes=0, requested=None):
+        charged.append(int(taskBytes(1)))
+        return 1, 1
+
+    monkeypatch.setattr(merge_metadata, "admitted_worker_split", recorded)
+
+    def charge(second_days):
+        # One-letter IDs, whose scan holds less than the dates' scan.
+        cells = [chr(ord("a") + index % 26) for index in range(width)]
+        charged.clear()
+        merge_metadata.resolve_metadata_schema_scan_rows(
+            [
+                _MergeMeta(ids=cells, names=cells, day=days),
+                _MergeMeta(ids=cells, names=cells, day=second_days),
+            ],
+            ResourceBudget(1 << 34, 1),
+            resident_bytes=0,
+            preferred_rows=width,
+        )
+        return charged[-1]
+
+    # Dates at two units are scanned and charged; dates at one are not.
+    other_unit, one_unit = charge(days.astype("datetime64[ns]")), charge(days)
+    assert other_unit > one_unit
+    # The charge covers what the scan of a block of dates holds beside it,
+    # measured as it runs, the block included.
+    tracemalloc.start()
+    merge_metadata._scan_time_column(
+        _MergeMeta(day=days),
+        "day",
+        np.dtype("datetime64[ns]"),
+        block_rows=width,
+        taken=None,
+        subject="Column 'day'",
+    )
+    _current, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+    assert other_unit >= days.nbytes + peak
+
+
+def test_an_intersection_merge_checks_the_feature_dates_that_it_keeps(tmp_path):
+    from tests.storage_helpers import open_store, write_count_store
+
+    # RNA0, which only the first store measures, holds a date of 1500, which
+    # nanoseconds cannot hold; a merge of the shared features leaves it out.
+    columns = {
+        "first": (
+            ["RNA0", "RNA1", "RNA2"],
+            np.asarray(["1500-01-01", "2026-01-01", "NaT"], dtype="datetime64[s]"),
+        ),
+        "second": (
+            ["RNA1", "RNA2", "RNA3"],
+            np.asarray(
+                ["NaT", "2026-01-02T00:00:00.000000001", "2026-01-03"],
+                dtype="datetime64[ns]",
+            ),
+        ),
+    }
+    for name, (features, values) in columns.items():
+        location = str(tmp_path / f"{name}.zarr")
+        write_count_store(
+            location,
+            {"RNA": np.ones((2, 3), dtype=int)},
+            "uint16",
+            feature_ids={"RNA": features},
+            cell_ids=[f"{name}{index}" for index in range(2)],
+        )
+        open_store(location).RNA.feats.insert("added", values)
+    DataStoreMerge(
+        [open_store(tmp_path / f"{name}.zarr") for name in columns],
+        str(tmp_path / "merged.zarr"),
+        list(columns),
+        nthreads=1,
+        features="intersection",
+    ).dump()
+    features = zarr.open_group(str(tmp_path / "merged.zarr"), mode="r")[
+        "RNA/featureData"
+    ]
+    stored = np.asarray(features["added"][:])
+    assert stored.dtype == np.dtype("datetime64[ns]")
+    assert dict(
+        zip(features["ids"][:].tolist(), [str(value) for value in stored], strict=True)
+    ) == {
+        "RNA1": str(np.datetime64("2026-01-01", "s").astype("datetime64[ns]")),
+        "RNA2": "2026-01-02T00:00:00.000000001",
+    }
+
+
+def _merged_feature_times(tmp_path, first, second):
+    """Merge a store whose features RNA0 to RNA2 hold ``first`` with one whose features RNA1 to RNA3 hold ``second``, column by column, and return the merged feature group, the export read back with AnnData, and the features of each store."""
+    import anndata
+
+    import cytearc
+    from tests.storage_helpers import open_store, write_count_store
+
+    features = {"first": ["RNA0", "RNA1", "RNA2"], "second": ["RNA1", "RNA2", "RNA3"]}
+    for name, columns in (("first", first), ("second", second)):
+        location = str(tmp_path / f"{name}.zarr")
+        write_count_store(
+            location,
+            {"RNA": np.ones((2, 3), dtype=int)},
+            "uint16",
+            feature_ids={"RNA": features[name]},
+            cell_ids=[f"{name}{index}" for index in range(2)],
+        )
+        store = open_store(location)
+        for column, values in columns.items():
+            store.RNA.feats.insert(column, values)
+    DataStoreMerge(
+        [open_store(tmp_path / f"{name}.zarr") for name in features],
+        str(tmp_path / "merged.zarr"),
+        list(features),
+        nthreads=1,
+    ).dump()
+    merged = open_store(tmp_path / "merged.zarr")
+    cytearc.to_h5ad(merged.RNA, str(tmp_path / "export.h5ad"))
+    return (
+        zarr.open_group(str(tmp_path / "merged.zarr"), mode="r")["RNA/featureData"],
+        anndata.read_h5ad(tmp_path / "export.h5ad"),
+        features,
+    )
+
+
+def test_a_merge_keeps_feature_dates_and_durations_of_different_units(tmp_path):
+    first = {
+        "added": np.asarray(
+            ["2026-01-01T00:00:01", "NaT", "NaT"], dtype="datetime64[s]"
+        ),
+        "lag": np.asarray([5, "NaT", 7], dtype="timedelta64[s]"),
+    }
+    second = {
+        "added": np.asarray(
+            ["NaT", "NaT", "2026-01-02T00:00:00.000000001"], dtype="datetime64[ns]"
+        ),
+        "lag": np.asarray(["NaT", 7000, 3], dtype="timedelta64[ms]"),
+    }
+    features, exported, ids = _merged_feature_times(tmp_path, first, second)
+    merged_ids = features["ids"][:].tolist()
+    for column, dtype in (
+        ("added", np.dtype("datetime64[ns]")),
+        ("lag", np.dtype("timedelta64[ms]")),
+    ):
+        stored = np.asarray(features[column][:])
+        assert stored.dtype == dtype, column
+        # Each feature takes the value of a store that holds one, cast by
+        # NumPy; RNA1, which neither holds, is missing.
+        expected: dict[str, str | None] = {feature: None for feature in merged_ids}
+        for name, columns in (("first", first), ("second", second)):
+            for feature, value in zip(
+                ids[name], columns[column].astype(dtype), strict=True
+            ):
+                if not np.isnat(value):
+                    expected[feature] = str(value)
+        # Feature columns flag the features that no store annotates.
+        missing = features[f"__cytearc_missing__{column}"][:]
+        assert {
+            feature: None if flagged else str(value)
+            for feature, value, flagged in zip(merged_ids, stored, missing, strict=True)
+        } == expected, column
+        written = {
+            feature: None if pd.isna(value) else str(value)
+            for feature, value in exported.var[column].astype(object).items()
+        }
+        assert written == expected, column
+    assert expected == {
+        "RNA0": "5000 milliseconds",
+        "RNA1": None,
+        "RNA2": "7000 milliseconds",
+        "RNA3": "3 milliseconds",
+    }
+
+
+@pytest.mark.parametrize(
+    ("first", "second", "kind"),
+    [
+        (
+            np.asarray(["2026-01-01", "1500-01-01", "NaT"], dtype="datetime64[s]"),
+            np.asarray(["2026-01-01"] * 3, dtype="datetime64[ns]"),
+            "dates, such as 1500-01-01T00:00:00",
+        ),
+        (
+            np.asarray(["NaT", "2026-01-01", "2300-01-01"], dtype="datetime64[s]"),
+            np.asarray(["2026-01-01"] * 3, dtype="datetime64[ns]"),
+            "dates, such as 2300-01-01T00:00:00",
+        ),
+        (
+            np.asarray([1, 10**10, "NaT"], dtype="timedelta64[s]"),
+            np.asarray([1] * 3, dtype="timedelta64[ns]"),
+            "durations, such as 10000000000 seconds",
+        ),
+    ],
+    ids=["dates before", "dates after", "durations"],
+)
+def test_a_merge_refuses_feature_dates_that_the_finer_unit_cannot_hold(
+    tmp_path, first, second, kind
+):
+    with pytest.raises(
+        ValueError,
+        match=re.escape(
+            f"Feature column 'added' of source 'first' holds {kind}, that "
+            f"{second.dtype}, the finest unit of the merged sources, cannot hold. "
+            f"Store the column in every source at one unit that holds each value, "
+            f"such as {first.dtype}, and merge again."
+        ),
+    ):
+        _merged_feature_times(tmp_path, {"added": first}, {"added": second})
+    assert not (tmp_path / "merged.zarr").exists()
+
+
 def test_dataset_merge_overwrite_refuses_any_prepared_assay(tmp_path):
     path = str(tmp_path / "prepared.zarr")
     left, right = _two_assay_sources()
@@ -6387,8 +6905,40 @@ def test_schema_scan_text_bound_holds_the_text_of_every_value(dtype, values, exa
             [np.dtypes.StringDType(), np.dtype(np.float64)],
             np.dtype("U1"),
         ),
+        # Dates and durations of different units take the finest unit.
+        (
+            [np.dtype("datetime64[s]"), np.dtype("datetime64[ns]")],
+            np.dtype("datetime64[ns]"),
+        ),
+        (
+            [np.dtype("datetime64[D]"), np.dtype("datetime64[s]")],
+            np.dtype("datetime64[s]"),
+        ),
+        (
+            [np.dtype("timedelta64[s]"), np.dtype("timedelta64[ms]")],
+            np.dtype("timedelta64[ms]"),
+        ),
+        # A date beside a duration, and the float column of a store that an
+        # earlier release merged beside dates, stay floats.
+        (
+            [np.dtype("datetime64[s]"), np.dtype("timedelta64[s]")],
+            np.dtype(np.float64),
+        ),
+        (
+            [np.dtype(np.float64), np.dtype("datetime64[ns]")],
+            np.dtype(np.float64),
+        ),
     ],
-    ids=["no_sources", "time_and_number", "variable-width text and number"],
+    ids=[
+        "no_sources",
+        "time_and_number",
+        "variable-width text and number",
+        "dates at s and ns",
+        "dates at D and s",
+        "durations at s and ms",
+        "date and duration",
+        "float and date",
+    ],
 )
 def test_metadata_dtype_promotion_fallbacks(dtypes, expected):
     from cytearc.merge.metadata import _promote_dtypes

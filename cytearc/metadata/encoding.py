@@ -20,6 +20,7 @@ missing.
 """
 
 import datetime
+import math
 from collections.abc import Iterable
 from typing import Any
 
@@ -529,6 +530,73 @@ _FILL_KINDS = {
 }
 
 
+# The length of each unit of fixed length, in attoseconds. Years and months
+# have none: they convert through the calendar.
+_UNIT_ATTOSECONDS = {
+    "W": 7 * 86_400 * 10**18,
+    "D": 86_400 * 10**18,
+    "h": 3_600 * 10**18,
+    "m": 60 * 10**18,
+    "s": 10**18,
+    "ms": 10**15,
+    "us": 10**12,
+    "ns": 10**9,
+    "ps": 10**6,
+    "fs": 10**3,
+    "as": 1,
+}
+
+
+def inexact_time_rows(values: np.ndarray, dtype: np.dtype[Any]) -> np.ndarray:
+    """Return the rows of datetime64 or timedelta64 ``values`` that a cast to ``dtype``, of the same kind, would change.
+
+    A value changes where ``dtype`` lies outside its range or between its
+    steps, as a month between weeks. NaT is a value of every unit. NumPy
+    refuses some such casts with ``OverflowError``, wraps others around, and
+    floors between steps, and casting back can overflow near the lower limit
+    of a unit, so units of fixed length are compared by their lengths in
+    integers, and years and months, whose lengths vary, by NumPy's cast and
+    the cast back, value by value where NumPy refuses the block.
+    """
+    values = np.asarray(values)
+    source_unit, source_count = np.datetime_data(values.dtype)
+    target_unit, target_count = np.datetime_data(dtype)
+    counts = values.view(np.int64)
+    present = counts != np.iinfo(np.int64).min
+    if source_unit in _UNIT_ATTOSECONDS and target_unit in _UNIT_ATTOSECONDS:
+        source_length = _UNIT_ATTOSECONDS[source_unit] * source_count
+        target_length = _UNIT_ATTOSECONDS[target_unit] * target_count
+        common = math.gcd(source_length, target_length)
+        # A value of k source steps is k * multiplier / divisor target steps.
+        multiplier = source_length // common
+        divisor = target_length // common
+        limit = int(np.iinfo(np.int64).max)
+        held = counts[present]
+        if divisor > limit:
+            exact = held == 0
+        else:
+            exact = held % divisor == 0
+            steps = held // divisor
+            # The int64 minimum is NaT, so a cast holds -limit to limit.
+            exact &= (steps >= -(limit // multiplier)) & (steps <= limit // multiplier)
+        changed = np.zeros(values.shape, dtype=bool)
+        changed[present] = ~exact
+        return changed
+    try:
+        back = values.astype(dtype).astype(values.dtype)
+    except OverflowError:
+        return np.asarray(
+            [
+                inexact_time_rows(values[index : index + 1], dtype)[0]
+                for index in range(values.size)
+            ]
+            if values.size > 1
+            else present,
+            dtype=bool,
+        )
+    return np.asarray(present & (back != values), dtype=bool)
+
+
 def _exact_time_fill(fill_value: Any, dtype: np.dtype[Any]) -> Any | None:
     """Return a datetime or timedelta fill as a value of ``dtype``, or None.
 
@@ -563,12 +631,9 @@ def _exact_time_fill(fill_value: Any, dtype: np.dtype[Any]) -> Any | None:
         )
     if np.isnat(own):
         return missing_placeholder(dtype)
-    try:
-        cast = own.astype(dtype)
-        exact = bool(cast.astype(own.dtype) == own)
-    except OverflowError:
+    if inexact_time_rows(np.asarray([own]), dtype)[0]:
         return None
-    return cast if exact else None
+    return own.astype(dtype)
 
 
 def _fitted_fill(fill_value: Any, dtype: np.dtype[Any]) -> Any | None:

@@ -21,6 +21,7 @@ from ..metadata.artifacts import (
     validate_display_metadata,
 )
 from ..metadata.membership import measured_feature_columns
+from ..metadata.encoding import inexact_time_rows
 from ..metadata.palettes import stored_category_colors
 from ..metadata.rows import (
     array_row_selection_parts,
@@ -576,6 +577,106 @@ def _add_column_labels(
         )
 
 
+def _source_blocks(
+    table: Any, column: str, *, block_rows: int, taken: np.ndarray | None
+) -> Iterator[np.ndarray]:
+    """Yield the values of a source column's rows that the merged store takes, ``taken`` in increasing order or every row for None, a block at a time."""
+    if taken is None:
+        for values in iter_metadata_column_blocks(table, column, block_rows=block_rows):
+            yield np.asarray(values)
+        return
+    for start in range(0, len(taken), block_rows):
+        yield np.asarray(
+            read_metadata_rows_chunkwise(
+                table, column, taken[start : start + block_rows]
+            )
+        )
+
+
+def _time_unit(kind: str, unit: str) -> np.dtype[Any]:
+    """The dtype of dates (``kind`` "M") or durations ("m") in ``unit``."""
+    return np.dtype(f"{'datetime64' if kind == 'M' else 'timedelta64'}[{unit}]")
+
+
+def _scan_time_column(
+    table: Any,
+    column: str,
+    dtype: np.dtype[Any],
+    *,
+    block_rows: int,
+    taken: np.ndarray | None,
+    subject: str,
+) -> None:
+    """Check that ``dtype``, the finest unit of a merged column, holds each value of a source column of dates or durations stored at another unit.
+
+    The rows that the merged store takes, ``taken`` in increasing order or
+    every row for None, are read a block at a time and cast back and forth
+    (:func:`~cytearc.metadata.encoding.inexact_time_rows`), before the merge
+    writes anything, since a cast beyond a unit's range or between its
+    steps, as months between weeks, changes a value.
+
+    Raises:
+        ValueError: If ``dtype`` cannot hold a value of those rows;
+            ``subject`` names the source's column and the source.
+    """
+    stored = np.dtype(table.get_dtype(column))
+    for block in _source_blocks(table, column, block_rows=block_rows, taken=taken):
+        changed = inexact_time_rows(block, dtype)
+        if not changed.any():
+            continue
+        value = block[changed][0]
+        kind = "dates" if dtype.kind == "M" else "durations"
+        # Days hold the steps of years, months and weeks alike; otherwise the
+        # source's own unit holds its values.
+        holding = (
+            _time_unit(dtype.kind, "D")
+            if np.datetime_data(stored)[0] in ("Y", "M")
+            and np.datetime_data(dtype)[0] == "W"
+            else stored
+        )
+        raise ValueError(
+            f"{subject} holds {kind}, such as {value}, that {dtype}, the finest "
+            "unit of the merged sources, cannot hold. Store the column in every "
+            f"source at one unit that holds each value, such as {holding}, and "
+            "merge again."
+        )
+
+
+def _check_duration_units(
+    column: str, sources: Sequence[tuple[str, str, np.dtype[Any]]]
+) -> None:
+    """Refuse durations in years or months beside durations of fixed length, which NumPy converts into no common unit.
+
+    ``sources`` holds, for each source of merged column ``column``, its
+    name, its own column and its dtype.
+
+    Raises:
+        ValueError: Naming a source of each kind, and a unit to store them at.
+    """
+    calendar = [
+        entry
+        for entry in sources
+        if entry[2].kind == "m" and np.datetime_data(entry[2])[0] in ("Y", "M")
+    ]
+    fixed = [
+        entry
+        for entry in sources
+        if entry[2].kind == "m"
+        and np.datetime_data(entry[2])[0] not in ("Y", "M", "generic")
+    ]
+    if not calendar or not fixed:
+        return
+    (name, own, months), (other, other_own, length) = calendar[0], fixed[0]
+    raise ValueError(
+        f"Column {own!r} of source {name!r} holds durations in {months} and "
+        f"column {other_own!r} of source {other!r} in {length}, which no unit "
+        "holds both of, since a month or a year has no fixed length. Store "
+        f"every source's {column!r} at one unit, such as {length} after "
+        "converting the months or years at the length that they mean, and "
+        "merge again."
+    )
+
+
 def _string_itemsize_bound(dtype: np.dtype[Any]) -> int:
     if dtype.kind == "U":
         return max(1, int(dtype.itemsize))
@@ -622,6 +723,21 @@ def resolve_metadata_schema_scan_rows(
         for column in table.columns
         if column in {"ids", "names"} or column in text_columns
     ]
+    # A column that the sources hold as dates or durations at different units
+    # is read for the values that the merged unit cannot hold
+    # (:func:`_scan_time_column`), which its read's selection charges.
+    units: dict[str, set[np.dtype[Any]]] = {}
+    for table in source_cell_tables:
+        for column in table.columns:
+            dtype = np.dtype(table.get_dtype(column))
+            if dtype.kind in "Mm":
+                units.setdefault(column, set()).add(dtype)
+    time_arrays = [
+        table._get_array(column)
+        for table in source_cell_tables
+        for column in table.columns
+        if len(units.get(column, ())) > 1
+    ]
     preferred = max(1, int(preferred_rows))
     # Each column's costs, which measure variable-width text, are the same at
     # every width.
@@ -639,6 +755,7 @@ def resolve_metadata_schema_scan_rows(
                 + np.dtype(np.int64).itemsize,
             )
         )
+    costs.extend((array_row_selection_parts(array), 0) for array in time_arrays)
 
     def admit(width: int) -> None:
         task_bytes = [
@@ -1238,6 +1355,13 @@ def plan_cell_metadata(
             for table, mapping in zip(source_cell_tables, per_source, strict=True)
             if (source_col := mapping.get(public)) is not None
         )
+        _check_duration_units(
+            public,
+            [
+                (source_names[index], source_col, np.dtype(table.get_dtype(source_col)))
+                for index, table, source_col in sources_of(public)
+            ],
+        )
         dtype = _promote_dtypes(present_dtypes)
         labels: _Labels | None = None
         if dtype.kind in {"U", "S", "O"}:
@@ -1258,6 +1382,20 @@ def plan_cell_metadata(
                 # missing, which the merged text column flags in its mask.
                 has_missing = has_missing or scan.hasMissing
             dtype = np.dtype(f"U{max_len}")
+        elif dtype.kind in "Mm":
+            for index, table, source_col in sources_of(public):
+                # A source of another unit must fit the merged one.
+                if np.dtype(table.get_dtype(source_col)) != dtype:
+                    _scan_time_column(
+                        table,
+                        source_col,
+                        dtype,
+                        block_rows=scan_rows,
+                        taken=taken(index),
+                        subject=(
+                            f"Column {source_col!r} of source {source_names[index]!r}"
+                        ),
+                    )
         value_arrays: list[Any] = []
         mask_arrays: list[Any] = []
         for table, mapping in zip(source_cell_tables, per_source, strict=True):
@@ -1300,6 +1438,12 @@ def _promote_dtypes(dtypes: list[np.dtype[Any]]) -> np.dtype[Any]:
         return np.dtype(bool)
     if all(dtype == dtypes[0] for dtype in dtypes):
         return dtypes[0]
+    # Dates beside dates, and durations beside durations, take the finest unit
+    # among them, as NumPy promotes them; a date beside a duration does not.
+    if all(dtype.kind == "M" for dtype in dtypes) or all(
+        dtype.kind == "m" for dtype in dtypes
+    ):
+        return np.result_type(*dtypes)
     if all(dtype.kind in "biu" for dtype in dtypes):
         return np.result_type(*dtypes)
     if all(dtype.kind in "bif" for dtype in dtypes):
@@ -1370,15 +1514,16 @@ def _plan_feature_columns(
     mappings: list[np.ndarray],
     n_features: int,
     *,
+    names: Sequence[str],
     resources: ResourceBudget,
     resident_bytes: int,
     reserved: frozenset[str] = frozenset(),
 ) -> list[_FeatureColumnPlan]:
     """Resolve every merged feature column and the rows it writes at once.
 
-    Columns named in ``reserved``, which the merge writes itself, are left
-    out. Raises MemoryError when a column cannot fit one row within the
-    budget.
+    ``names`` names the source of each table, as refusals name it. Columns
+    named in ``reserved``, which the merge writes itself, are left out.
+    Raises MemoryError when a column cannot fit one row within the budget.
     """
     table_columns = _annotation_columns(tables)
     columns = sorted(set().union(*table_columns) - reserved)
@@ -1392,14 +1537,23 @@ def _plan_feature_columns(
     )
     plans: list[_FeatureColumnPlan] = []
     for name in columns:
-        sources = [
-            (table, mapping)
-            for table, mapping, present in zip(
-                tables, mappings, table_columns, strict=True
+        held = [
+            (table, mapping, source)
+            for table, mapping, present, source in zip(
+                tables, mappings, table_columns, names, strict=True
             )
             if name in present
         ]
+        sources = [(table, mapping) for table, mapping, _ in held]
+        source_of = [source for _, _, source in held]
         arrays = [table._get_array(name) for table, _ in sources]
+        _check_duration_units(
+            name,
+            [
+                (source, name, np.dtype(array.dtype))
+                for source, array in zip(source_of, arrays, strict=True)
+            ],
+        )
         dtype = _promote_dtypes([np.dtype(array.dtype) for array in arrays])
         if dtype.kind in {"U", "S", "O"}:
             width = max(
@@ -1409,6 +1563,19 @@ def _plan_feature_columns(
                 for (table, _), array in zip(sources, arrays, strict=True)
             )
             dtype = np.dtype(f"U{width}")
+        elif dtype.kind in "Mm":
+            for (table, mapping), source in zip(sources, source_of, strict=True):
+                # The features that the merge takes, of a source of another
+                # unit, must fit the merged one.
+                if np.dtype(table.get_dtype(name)) != dtype:
+                    _scan_time_column(
+                        table,
+                        name,
+                        dtype,
+                        block_rows=scan_rows,
+                        taken=np.flatnonzero(mapping >= 0),
+                        subject=f"Feature column {name!r} of source {source!r}",
+                    )
         masks = [metadata_missing_mask(table, name) for table, _ in sources]
         spec = _metadata_column_spec(
             name,
@@ -1453,19 +1620,22 @@ def admit_feature_metadata(
     *,
     resources: ResourceBudget,
     resident_bytes: int,
+    names: Sequence[str],
     sources: Iterable[str] = (),
 ) -> None:
-    """Raise the MemoryError that merging feature annotations would raise.
+    """Raise the MemoryError, or the refusal of feature annotations, that merging them would raise.
 
     Planning calls this so a merge whose feature columns cannot fit the
-    budget fails before it creates or changes the destination. ``sources``
-    names the sources whose measured features the merge records, as
-    :func:`write_feature_metadata` takes them.
+    budget, or hold dates that the merged unit cannot hold, fails before it
+    creates or changes the destination. ``names`` names the source of each
+    table, and ``sources`` the sources whose measured features the merge
+    records, as :func:`write_feature_metadata` takes them.
     """
     _plan_feature_columns(
         tables,
         mappings,
         n_features,
+        names=names,
         resources=resources,
         resident_bytes=resident_bytes,
         reserved=frozenset(measured_features_columns(sources).values()),
@@ -1482,6 +1652,7 @@ def write_feature_metadata(
     resident_bytes: int,
     profile: StorageProfile,
     measured: Mapping[str, np.ndarray],
+    names: Sequence[str],
 ) -> None:
     """Merge feature annotations that agree across sources, and record each source's measured features.
 
@@ -1508,6 +1679,7 @@ def write_feature_metadata(
         tables,
         mappings,
         n_features,
+        names=names,
         resources=resources,
         resident_bytes=resident_bytes,
         reserved=reserved,
