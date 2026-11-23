@@ -625,6 +625,19 @@ def test_read_store_looks_keys_up_through_another_file_system(tmp_path, read_onl
     assert (sorted(keys), under) == (["chunk", "sub/key"], ["sub/key"])
 
 
+def test_writable_store_over_another_file_system_deletes_a_folder(tmp_path):
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "key").write_bytes(b"x")
+    (tmp_path / "kept").write_bytes(b"y")
+    store = huggingface.HfReadStore.from_url(str(tmp_path), read_only=False)
+    try:
+        asyncio.run(store.delete_dir("sub"))
+    finally:
+        store.close()
+    assert not (tmp_path / "sub" / "key").exists()
+    assert (tmp_path / "kept").read_bytes() == b"y"
+
+
 @pytest.mark.parametrize(
     ("name", "value", "error"),
     [
@@ -1380,40 +1393,38 @@ def test_writable_store_reads_a_key_with_one_request_of_its_resolver_url(
 ):
     store = _loopback_store(loopback_hub, read_only=False, uri=uri)
     held = (loopback_hub.root / "data.zarr/c/1/0").read_bytes()
+    reads = {
+        "whole": None,
+        "range": RangeByteRequest(2, 6),
+        "offset": OffsetByteRequest(5),
+        "suffix": SuffixByteRequest(3),
+        "empty": RangeByteRequest(4, 4),
+    }
     try:
-        chunk = sync(store.get("c/1/0", _PROTOTYPE), timeout=GUARD_SECONDS)
-        part = sync(
-            store.get("c/1/0", _PROTOTYPE, RangeByteRequest(2, 6)),
-            timeout=GUARD_SECONDS,
-        )
-        tail = sync(
-            store.get("c/1/0", _PROTOTYPE, SuffixByteRequest(3)),
-            timeout=GUARD_SECONDS,
-        )
-        empty = sync(
-            store.get("c/1/0", _PROTOTYPE, RangeByteRequest(4, 4)),
-            timeout=GUARD_SECONDS,
-        )
+        read = {
+            name: sync(store.get("c/1/0", _PROTOTYPE, request), timeout=GUARD_SECONDS)
+            for name, request in reads.items()
+        }
         found = sync(store.exists("c/0/1"), timeout=GUARD_SECONDS)
     finally:
         store.close()
-    assert (chunk.to_bytes(), part.to_bytes(), tail.to_bytes(), empty.to_bytes()) == (
-        held,
-        held[2:6],
-        held[-3:],
-        b"",
-    )
+    assert {name: value.to_bytes() for name, value in read.items()} == {
+        "whole": held,
+        "range": held[2:6],
+        "offset": held[5:],
+        "suffix": held[-3:],
+        "empty": b"",
+    }
     assert found
-    # Each read is one GET of the key's resolver URL for the bytes asked, and
-    # a suffix takes the key's size from a lookup first, as does a read of no
-    # bytes, which needs nothing else. Nothing is listed.
+    # Each read is one GET of the key's resolver URL with the range asked for,
+    # and a read of no bytes only looks the key up. Nothing is listed.
     assert _received(loopback_hub, "file") == [
         ("data.zarr/c/1/0", None),
         ("data.zarr/c/1/0", "bytes=2-5"),
-        ("data.zarr/c/1/0", f"bytes={len(held) - 3}-{len(held) - 1}"),
+        ("data.zarr/c/1/0", "bytes=5-"),
+        ("data.zarr/c/1/0", "bytes=-3"),
     ]
     assert _received(loopback_hub, "paths-info") == [
-        ("data.zarr/c/1/0", None),
         ("data.zarr/c/1/0", None),
         ("data.zarr/c/0/1", None),
     ]
@@ -1851,8 +1862,9 @@ def test_writable_store_looks_a_key_up_with_its_token(loopback_hub, uri):
     ]
 
 
-# Bytes of distinct values, so that a slice of the wrong bytes cannot pass.
-_WRITTEN = bytes(range(256)) * 4
+# 1,024 bytes of distinct two-byte words, so that no slice from the wrong
+# offset holds the same bytes.
+_WRITTEN = np.arange(512, dtype=">u2").tobytes()
 
 
 @pytest.mark.parametrize("uri", [LOOPBACK_URI, REPOSITORY_URI])
@@ -1866,6 +1878,7 @@ def test_writable_store_reads_a_key_that_another_process_wrote_after_a_read(
         "range": RangeByteRequest(10, 20),
         "offset": OffsetByteRequest(1000),
         "suffix": SuffixByteRequest(5),
+        "long suffix": SuffixByteRequest(5000),
         "past the end": OffsetByteRequest(2000),
         "empty": RangeByteRequest(7, 7),
     }
@@ -1887,6 +1900,7 @@ def test_writable_store_reads_a_key_that_another_process_wrote_after_a_read(
         "range": _WRITTEN[10:20],
         "offset": _WRITTEN[1000:],
         "suffix": _WRITTEN[-5:],
+        "long suffix": _WRITTEN,
         "past the end": b"",
         "empty": b"",
     }
@@ -1962,12 +1976,14 @@ def test_writable_store_lists_a_prefix_as_a_folder_or_a_key(loopback_hub, uri):
         folder = sync(_names(store.list_prefix("c/1")), timeout=GUARD_SECONDS)
         slashed = sync(_names(store.list_prefix("c/1/")), timeout=GUARD_SECONDS)
         key = sync(_names(store.list_prefix("zarr.json")), timeout=GUARD_SECONDS)
+        missing = sync(_names(store.list_prefix("c/9")), timeout=GUARD_SECONDS)
         names = sync(_names(store.list_dir("c")), timeout=GUARD_SECONDS)
         absent = sync(_names(store.list_dir("c/9")), timeout=GUARD_SECONDS)
     finally:
         store.close()
     assert sorted(folder) == sorted(slashed) == ["c/1/0", "c/1/1"]
     assert key == ["zarr.json"]
+    assert missing == []
     assert sorted(names) == ["0", "1", "1x"]
     assert absent == []
 
@@ -2098,6 +2114,52 @@ def test_writable_store_deletes_a_folder_with_a_key_that_another_process_wrote(
         store.close()
     assert listed == ["0", "1"]
     assert not folder.exists()
+
+
+def test_writable_store_deletes_a_key_written_below_a_folder_it_deleted_before(
+    loopback_hub, monkeypatch
+):
+    store = _loopback_store(loopback_hub, read_only=False)
+    _accept_uploads(loopback_hub, store, monkeypatch)
+    published = loopback_hub.root / "data.zarr"
+    try:
+        # Hugging Face's file system lists the folder and the folders below
+        # it to delete them, and keeps the listings of those below.
+        sync(store.delete_dir("c"), timeout=GUARD_SECONDS)
+        # Another process writes a key below the deleted folder.
+        (published / "c" / "1").mkdir(parents=True)
+        (published / "c" / "1" / "5").write_bytes(b"theirs")
+        sync(store.delete_dir("c/1"), timeout=GUARD_SECONDS)
+    finally:
+        store.close()
+    assert not (published / "c").exists()
+    assert (published / "zarr.json").is_file()
+
+
+def test_a_read_only_view_of_a_writable_store_reads_it_as_the_store_does(
+    loopback_hub,
+):
+    store = _loopback_store(loopback_hub, read_only=False)
+    # A Zarr array opened read-only on the store reads through a view.
+    values = zarr.open_array(store=store, mode="r")[:]
+    view = store.with_read_only(True)
+    key = loopback_hub.root / "data.zarr" / "c" / "1" / "9"
+    try:
+        before = sync(view.get("c/1/9", _PROTOTYPE), timeout=GUARD_SECONDS)
+        # A key written after the view opened.
+        key.write_bytes(b"late")
+        after = sync(view.get("c/1/9", _PROTOTYPE), timeout=GUARD_SECONDS)
+        found = sync(view.exists("c/1/9"), timeout=GUARD_SECONDS)
+        listed = sorted(sync(_names(view.list_prefix("c/1")), timeout=GUARD_SECONDS))
+    finally:
+        view.close()
+        store.close()
+    np.testing.assert_array_equal(values, np.arange(64).reshape(8, 8))
+    assert view.read_only
+    assert (before, after.to_bytes(), found) == (None, b"late", True)
+    assert listed == ["c/1/0", "c/1/1", "c/1/9"]
+    # No view listed the whole store.
+    assert ("data.zarr", "recursive") not in _received(loopback_hub, "tree")
 
 
 def test_writable_store_claims_a_preparation_that_another_process_released(
