@@ -18,6 +18,7 @@ from ...storage.pipeline_runs import (
     PipelineOutputRecord,
     PipelineRunRecord,
     PipelineStageRecord,
+    changed_since_read,
     complete_pipeline_run_record,
     create_pipeline_run_record,
     ensure_pipeline_label_claimable,
@@ -25,7 +26,6 @@ from ...storage.pipeline_runs import (
     load_pipeline_stage_records,
     pause_pipeline_run_record,
     resume_pipeline_run_record,
-    resumed_since_read,
 )
 from ...storage.stores import has_atomic_conditional_writes
 from ...utils.logging import logger
@@ -268,17 +268,18 @@ def _finished_stages(
     """Return the stage records of a paused run, which must be the stages its segments name.
 
     The run record is read again first: one that holds more segments than
-    ``record`` was resumed by another process after this one read it.
+    ``record``, or is no longer paused, was resumed or ended by another
+    process after this one read it.
 
     Raises:
-        RuntimeError: If another process resumed the run since ``record``
-            was read.
+        RuntimeError: If another process resumed or ended the run since
+            ``record`` was read.
         ValueError: If the records name other stages, or one did not end
             successfully.
     """
     current = load_pipeline_run_record(store.zw, record.run_id)
-    if len(current.segments) > len(record.segments):
-        raise resumed_since_read(record.run_id)
+    if len(current.segments) > len(record.segments) or current.status != "paused":
+        raise changed_since_read(record.run_id)
     finished = load_pipeline_stage_records(store.zw, record.run_id)
     paused_after = [stage for segment in record.segments for stage in segment.stages]
     if [stage.stage for stage in finished] != paused_after or any(
