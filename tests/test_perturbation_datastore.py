@@ -19,6 +19,7 @@ import zarr
 from cytearc.datastore.datastore import DataStore
 from cytearc.perturbation import MULTIPLE, NEGATIVE, GuideCalls
 from cytearc.storage.artifacts import ArtifactRef, artifact_group
+from cytearc.storage.identity import replace_metadata_column
 from cytearc.storage.selections import read_stored_selection_indices
 from cytearc.utils.logging import collect_warnings, logger
 from cytearc.utils.memory_budget import MemoryBudgetError, MemoryLedger
@@ -427,6 +428,213 @@ def test_an_import_reaches_the_cells_of_one_sample_of_a_merged_store(
 
     calls = merged.perturbation.import_guide_calls(
         path, cell_selection=first, barcode_prefix="s1__"
+    )
+    cells = merged.perturbation.load_guide_calls(calls).cells
+    assert cells["call"].tolist() == ["CRISPR0", "CRISPR1", MULTIPLE, NEGATIVE]
+
+
+_REMEDY = "or call the guides from their counts with perturbation.call_guides"
+
+
+def _merged_screen(
+    store: DataStore, samples: tuple[str, str], *, sources: bool
+) -> DataStore:
+    """The screen as a store merged from two samples, cells 0 to 3 of the first and 4 to 7 of the second.
+
+    A merged store names each cell ``<sample>__<barcode>``. With ``sources``,
+    it also names each cell's sample in the categorical cell column
+    ``dataset``, with the role that a merge gives that column when its
+    sources measured different features. The cell columns ``every``,
+    ``first`` and ``second`` select the cells of both samples and of each.
+    """
+    codes = (np.arange(8) >= 4).astype(np.int64)
+    ids = np.asarray(
+        [f"{samples[code]}__cell{cell}" for cell, code in enumerate(codes)]
+    )
+    cells = zarr.open_group(str(Path(store.zarr_loc) / "cellData"), mode="r+")
+    cells.create_array("ids", data=ids, overwrite=True)
+    if sources:
+        replace_metadata_column(cells, "dataset", codes, categories=np.asarray(samples))
+        cells["dataset"].attrs.update({"role": "cell_sources"})
+    merged = open_store(store.zarr_loc)
+    for name, keep in (
+        ("every", np.ones(8, dtype=bool)),
+        ("first", codes == 0),
+        ("second", codes == 1),
+    ):
+        merged.cells.insert(name, by_cell_id(merged.cells, keep))
+    return merged
+
+
+def _unclear_ids(example: str, name: str) -> str:
+    """The refusal of the IDs of the four cells of sample ``name + '_'``, without a column of sources."""
+    return re.escape(
+        "The call file holds the barcodes of one sample, but the IDs of 4 of the "
+        f"cells of cell_selection, such as {example!r}, do not tell their sample: "
+        "a merged store names each cell <sample>__<barcode>, so that cell is a "
+        f"cell of {name + '_'!r} or a cell of {name!r} whose barcode starts with "
+        "'_'; select only the cells of one sample and pass its barcode_prefix, "
+        f"such as {name + '___'!r} for {name + '_'!r}, {_REMEDY}"
+    )
+
+
+def _several_samples(first: str, second: str) -> str:
+    """The refusal of the cells of two samples that a column of sources names."""
+    return re.escape(
+        "The call file holds the barcodes of one sample, but the cells of "
+        "cell_selection come from several samples of a merged store, such as "
+        f"{first!r} and {second!r}; select only the cells of one sample and pass "
+        f"its barcode_prefix, such as {first + '__'!r}, {_REMEDY}"
+    )
+
+
+@pytest.mark.parametrize("sources", [False, True], ids=["ids", "column"])
+def test_an_import_tells_apart_samples_whose_names_differ_by_a_trailing_underscore(
+    store, tmp_path, sources
+) -> None:
+    merged = _merged_screen(store, ("pool", "pool_"), sources=sources)
+    every = merged.snapshot_cell_selection("every")
+    path = _call_file(tmp_path)
+    saved = written(merged)
+
+    # The cells of pool_ are not read as cells of pool: without a prefix, the
+    # cells of the two samples are refused together, by their IDs, which do
+    # not tell the sample of a cell of pool_, or by the column of sources.
+    with pytest.raises(
+        ValueError,
+        match=_several_samples("pool", "pool_")
+        if sources
+        else _unclear_ids("pool___cell4", "pool"),
+    ):
+        merged.perturbation.import_guide_calls(path, cell_selection=every)
+    # With pool's prefix, the cells of pool_ go on from it with "_", and are
+    # refused rather than labeled Negative.
+    with pytest.raises(
+        ValueError,
+        match=re.escape(
+            "The call file's barcodes reach the cells whose IDs are "
+            "barcode_prefix 'pool__' and a barcode, but 4 of the cells of "
+            "cell_selection, such as 'pool___cell4', go on from it with '_', as "
+            "the cells of a sample whose name ends with '_' do; select only the "
+            "cells of one sample and pass its barcode_prefix, such as 'pool___' "
+            f"for those cells, {_REMEDY}"
+        ),
+    ):
+        merged.perturbation.import_guide_calls(
+            path, cell_selection=every, barcode_prefix="pool__"
+        )
+    assert written(merged) == saved
+
+    # Each sample's prefix reaches its own cells only.
+    for selection, prefix, expected in (
+        ("first", "pool__", ["CRISPR0", "CRISPR1", MULTIPLE, NEGATIVE]),
+        ("second", "pool___", [NEGATIVE, MULTIPLE, "CRISPR3", "CRISPR1"]),
+    ):
+        calls = merged.perturbation.import_guide_calls(
+            path,
+            cell_selection=merged.snapshot_cell_selection(selection),
+            barcode_prefix=prefix,
+        )
+        cells = merged.perturbation.load_guide_calls(calls).cells
+        assert cells["call"].tolist() == expected
+
+
+def test_a_merge_of_pool_and_pool_underscore_tells_the_import_each_cells_sample(
+    tmp_path,
+) -> None:
+    from cytearc.merge import DataStoreMerge
+
+    # Two screens whose RNA panels differ, so their merge names each cell's
+    # sample in its column of sources.
+    rng = np.random.default_rng(3)
+    sources = []
+    for name, genes in (("pool", 9), ("pool_", 10)):
+        location = tmp_path / f"{name}.zarr"
+        write_count_store(
+            str(location),
+            {"RNA": rng.poisson(2.0, size=(8, genes)) + 1, "CRISPR": GUIDE_COUNTS},
+            "uint16",
+        )
+        sources.append(open_store(location))
+    DataStoreMerge(
+        sources, str(tmp_path / "merged.zarr"), ["pool", "pool_"], seed=0, nthreads=1
+    ).dump()
+    merged = open_store(tmp_path / "merged.zarr")
+    samples = merged.cells.fetch_all("dataset").astype(str)
+    ids = merged.cells.fetch_all("ids").astype(str)
+    merged.cells.insert("every", by_cell_id(merged.cells, np.ones(16, dtype=bool)))
+    merged.cells.insert("pool_", by_cell_id(merged.cells, samples == "pool_"))
+    every = merged.snapshot_cell_selection("every")
+    path = _call_file(tmp_path)
+    first = str(samples[0])
+
+    with pytest.raises(
+        ValueError,
+        match=_several_samples(first, "pool_" if first == "pool" else "pool"),
+    ):
+        merged.perturbation.import_guide_calls(path, cell_selection=every)
+    # With pool's prefix, the cells of pool_ are refused, the first of them as
+    # the example.
+    example = str(ids[np.argmax(samples == "pool_")])
+    with pytest.raises(
+        ValueError,
+        match=re.escape(
+            f"but 8 of the cells of cell_selection, such as {example!r}, go on "
+            "from it with '_'"
+        ),
+    ):
+        merged.perturbation.import_guide_calls(
+            path, cell_selection=every, barcode_prefix="pool__"
+        )
+
+    calls = merged.perturbation.import_guide_calls(
+        path,
+        cell_selection=merged.snapshot_cell_selection("pool_"),
+        barcode_prefix="pool___",
+    )
+    called = merged.perturbation.load_guide_calls(calls).cells["call"]
+    # Cell Ranger's calls of cell0 to cell7, which pool_'s cells take.
+    expected = dict(
+        zip(
+            [f"pool___cell{cell}" for cell in range(8)],
+            [
+                "CRISPR0",
+                "CRISPR1",
+                MULTIPLE,
+                NEGATIVE,
+                NEGATIVE,
+                MULTIPLE,
+                "CRISPR3",
+                "CRISPR1",
+            ],
+            strict=True,
+        )
+    )
+    assert called.to_dict() == expected
+
+
+@pytest.mark.parametrize("sources", [False, True], ids=["ids", "column"])
+def test_a_refusal_suggests_the_prefix_of_a_sample_whose_name_ends_with_an_underscore(
+    store, tmp_path, sources
+) -> None:
+    merged = _merged_screen(store, ("pool_", "other"), sources=sources)
+    path = _call_file(tmp_path)
+
+    with pytest.raises(
+        ValueError,
+        match=_several_samples("pool_", "other")
+        if sources
+        else _unclear_ids("pool___cell0", "pool"),
+    ):
+        merged.perturbation.import_guide_calls(
+            path, cell_selection=merged.snapshot_cell_selection("every")
+        )
+
+    # The prefix that the refusal suggests reaches the cells of pool_.
+    calls = merged.perturbation.import_guide_calls(
+        path,
+        cell_selection=merged.snapshot_cell_selection("first"),
+        barcode_prefix="pool___",
     )
     cells = merged.perturbation.load_guide_calls(calls).cells
     assert cells["call"].tolist() == ["CRISPR0", "CRISPR1", MULTIPLE, NEGATIVE]

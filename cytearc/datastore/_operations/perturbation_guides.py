@@ -15,6 +15,7 @@ from ...metadata.arguments import (
     PerturbationLabelArguments,
 )
 from ...metadata.artifacts import cell_data_write_bytes, write_cell_data_artifact
+from ...metadata.membership import cell_sources_column
 from ...metadata.rows import read_rows, read_text_rows, read_whole
 from ...metadata.selection import (
     CellSelectionRead,
@@ -104,7 +105,7 @@ from .cell_barcodes import (
     join_bytes,
 )
 from .cell_barcodes import barcode_pattern as checked_barcode_pattern
-from .cell_samples import read_cell_samples, require_cell_column
+from .cell_samples import CellSamples, read_cell_samples, require_cell_column
 from .perturbation_store import (
     _count_stream,
     _plan_cells,
@@ -268,6 +269,7 @@ def _require_call_file_cells(
     restrict: str,
     remedy: str,
     barcode_suffix: str | None = None,
+    samples: CellSamples | None = None,
 ) -> None:
     """Refuse cells that the barcodes of one call file cannot reach.
 
@@ -275,9 +277,17 @@ def _require_call_file_cells(
     each of its barcodes to the cell whose ID is ``barcode_prefix`` followed
     by the barcode and ``barcode_suffix``. A cell that no barcode can reach
     would be labeled ``"Negative"``. With a prefix, every cell's ID must
-    start with it, and with a suffix end with it; without a prefix, the
+    start with it, and with a suffix end with it. Without a prefix, the
     cells must not come from several samples of a merged store, which names
-    each cell ``<sample>__<barcode>``.
+    each cell ``<sample>__<barcode>``: their samples are ``samples``, read
+    from the store's cell column of sources, or else the text of each ID
+    before its first ``__``.
+
+    A sample's name may end with ``_``, so an ID that goes on with ``_``
+    after ``__``, such as ``pool___AAAC-1``, may be a cell of ``pool_`` or a
+    cell of ``pool`` whose barcode starts with ``_``. Without a prefix or a
+    column of sources such a cell is refused, and so is a cell whose ID goes
+    on with ``_`` from a prefix that ends with ``__``, such as ``pool__``.
 
     Args:
         cell_ids: The IDs of the cells to label, as text.
@@ -287,11 +297,14 @@ def _require_call_file_cells(
             ``"restrict cells to"``.
         remedy: The other way out that they give.
         barcode_suffix: The suffix of the cell IDs, or None.
+        samples: The cells' samples, by their label in the store's cell
+            column of sources, or None when the store has none.
 
     Raises:
         ValueError: If a cell's ID does not start with ``barcode_prefix`` or
-            end with ``barcode_suffix``, or without a prefix, the cells come
-            from several samples.
+            end with ``barcode_suffix``, goes on with ``_`` from a prefix that
+            ends with ``__``, or without a prefix, the cells come from several
+            samples or an ID does not tell its sample.
     """
     for option, value, end, find in (
         ("barcode_prefix", barcode_prefix, "start", np.strings.startswith),
@@ -310,23 +323,79 @@ def _require_call_file_cells(
                 f"the cells of that sample, {remedy}"
             )
     if barcode_prefix:
+        if barcode_prefix.endswith(MERGED_ID_SEPARATOR):
+            # The prefix may stop one character short of the name of a
+            # sample that ends with "_".
+            beyond = np.strings.startswith(cell_ids, barcode_prefix + "_")
+            count = int(np.count_nonzero(beyond))
+            if count:
+                verb = "goes" if count == 1 else "go"
+                raise ValueError(
+                    f"The call file's barcodes reach the cells whose IDs are "
+                    f"barcode_prefix {barcode_prefix!r} and a barcode, but "
+                    f"{count} of {cells}, such as "
+                    f"{str(cell_ids[np.argmax(beyond)])!r}, {verb} on from it "
+                    "with '_', as the cells of a sample whose name ends with "
+                    f"'_' do; {restrict} the cells of one sample and pass its "
+                    f"barcode_prefix, such as {barcode_prefix + '_'!r} for those "
+                    f"cells, {remedy}"
+                )
+        return
+    if samples is not None:
+        names = samples.names
+        if len(names) > 1:
+            # The first cell of a sample other than the first cell's.
+            later = int(np.argmax(samples.codes != samples.codes[0]))
+            raise _several_samples(
+                str(names[int(samples.codes[0])]),
+                str(names[int(samples.codes[later])]),
+                cells=cells,
+                restrict=restrict,
+                remedy=remedy,
+            )
         return
     position = np.strings.find(cell_ids, MERGED_ID_SEPARATOR)
     merged = np.flatnonzero(position >= 0)
     if not len(merged):
         return
+    # The IDs that go on with "_" after their first "__"; an ID without "__"
+    # holds no "___".
+    unclear = np.flatnonzero(
+        np.strings.startswith(cell_ids, MERGED_ID_SEPARATOR + "_", position)
+    )
+    if len(unclear):
+        example = str(cell_ids[unclear[0]])
+        name = example[: int(position[unclear[0]])]
+        raise ValueError(
+            f"The call file holds the barcodes of one sample, but the IDs of "
+            f"{len(unclear)} of {cells}, such as {example!r}, do not tell their "
+            "sample: a merged store names each cell <sample>__<barcode>, so "
+            f"that cell is a cell of {name + '_'!r} or a cell of {name!r} whose "
+            f"barcode starts with '_'; {restrict} the cells of one sample and "
+            "pass its barcode_prefix, such as "
+            f"{name + '_' + MERGED_ID_SEPARATOR!r} for {name + '_'!r}, {remedy}"
+        )
     first = str(cell_ids[merged[0]])[: int(position[merged[0]])]
     other = merged[
         ~np.strings.startswith(cell_ids[merged], first + MERGED_ID_SEPARATOR)
     ]
     if len(other):
         second = str(cell_ids[other[0]])[: int(position[other[0]])]
-        raise ValueError(
-            f"The call file holds the barcodes of one sample, but {cells} come "
-            f"from several samples of a merged store, such as {first!r} and "
-            f"{second!r}; {restrict} the cells of one sample and pass its "
-            f"barcode_prefix, such as {first + MERGED_ID_SEPARATOR!r}, {remedy}"
+        raise _several_samples(
+            first, second, cells=cells, restrict=restrict, remedy=remedy
         )
+
+
+def _several_samples(
+    first: str, second: str, *, cells: str, restrict: str, remedy: str
+) -> ValueError:
+    """Return the refusal of cells of samples ``first`` and ``second``, which suggests the prefix of ``first``."""
+    return ValueError(
+        f"The call file holds the barcodes of one sample, but {cells} come "
+        f"from several samples of a merged store, such as {first!r} and "
+        f"{second!r}; {restrict} the cells of one sample and pass its "
+        f"barcode_prefix, such as {first + MERGED_ID_SEPARATOR!r}, {remedy}"
+    )
 
 
 def _refuse_shared_cells(
@@ -665,6 +734,8 @@ def _read_guide_ids(ledger: MemoryLedger, array: Any) -> np.ndarray:
 
 def _check_cell_ids(
     ledger: MemoryLedger,
+    store: Any,
+    rows: np.ndarray,
     cell_ids: np.ndarray,
     barcode_prefix: str | None,
     *,
@@ -673,18 +744,40 @@ def _check_cell_ids(
 ) -> None:
     """Refuse cells that a call file's barcodes cannot reach, after charging the check.
 
-    ``cell_ids`` are the cells' IDs as stored, fixed-width or variable-width
-    text, ``barcode_prefix`` and ``barcode_suffix`` the file's options, and
-    ``words`` the messages' words of :func:`_require_call_file_cells`, which
-    the import and the perturbation recipe's check of a call file share.
+    ``rows`` are the cells' positions in ``store`` and ``cell_ids`` their
+    IDs as stored, fixed-width or variable-width text, ``barcode_prefix``
+    and ``barcode_suffix`` the file's options, and ``words`` the messages'
+    words of :func:`_require_call_file_cells`, which the import and the
+    perturbation recipe's check of a call file share. Without a prefix, the
+    cells' samples are read from the store's cell column of sources when it
+    has one, and let go after the check.
     """
+    held = ledger.charged
+    column = None if barcode_prefix else cell_sources_column(store.cells)
+    samples = (
+        None
+        if column is None
+        else read_cell_samples(
+            store,
+            ledger,
+            column,
+            rows,
+            reason="A call file holds the barcodes of one sample, so every cell "
+            "needs its sample",
+        )
+    )
     ledger.peak(
         "checking the cells' IDs against the call file",
         _CELL_CHECK_BYTES_PER_CELL * len(cell_ids) + _text_copy_bytes(cell_ids, ledger),
     )
     _require_call_file_cells(
-        cell_ids, barcode_prefix, barcode_suffix=barcode_suffix, **words
+        cell_ids,
+        barcode_prefix,
+        barcode_suffix=barcode_suffix,
+        samples=samples,
+        **words,
     )
+    ledger.release(ledger.charged - held)
 
 
 def _parse_call_file(
@@ -1038,7 +1131,14 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
         underscores, so import each sample's file with its own prefix and a
         cell selection of that sample; a selection whose cells the file cannot
         reach is refused, since its other cells would be labeled
-        ``"Negative"``. The artifact's diagnostics, which
+        ``"Negative"``. A sample's name may end with ``_``: the IDs of the
+        cells of ``pool_``, such as ``pool___AAAC-1``, also start with
+        ``pool__``, so their prefix is ``pool___``, and a prefix that ends with
+        ``__`` refuses cells whose IDs go on from it with ``_``. Without a
+        prefix, the cells' samples are those of the store's cell column of
+        sources, which a merge writes when its sources measured different
+        features; a store without one refuses cells whose IDs go on with
+        ``_`` after their first ``__``. The artifact's diagnostics, which
         ``ds.artifacts.inspect(calls).diagnostics`` returns, count the file's
         barcodes by the cell ID they name in ``fileBarcodes``, those that
         match no cell of the store in ``unmatchedBarcodes``, which a warning
@@ -1106,10 +1206,11 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
                 exceeds the uint32 maximum, ``barcode_pattern`` has no
                 ``barcode`` group, two barcodes name one cell, or the file's
                 barcodes cannot reach every selected cell: with
-                ``barcode_prefix``, a cell whose ID does not start with it,
-                with ``barcode_suffix``, a cell whose ID does not end with it,
-                and without a prefix, cells from several samples of a merged
-                store.
+                ``barcode_prefix``, a cell whose ID does not start with it or
+                goes on with ``_`` from a prefix that ends with ``__``, with
+                ``barcode_suffix``, a cell whose ID does not end with it, and
+                without a prefix, cells from several samples of a merged store
+                or whose IDs do not tell their sample.
             UnmeasuredCellsError: If the guide assay did not measure a selected
                 cell.
             PermissionError: If the store is read-only and the calls are not
@@ -1177,6 +1278,8 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
         ids_bytes = ledger.held_bytes - held
         _check_cell_ids(
             ledger,
+            self,
+            cell_index,
             cell_ids,
             call_file.barcode_prefix,
             barcode_suffix=call_file.barcode_suffix,

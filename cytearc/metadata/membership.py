@@ -207,6 +207,33 @@ def membership_columns(table: Any) -> dict[str, str]:
     return found
 
 
+def cell_sources_column(table: Any) -> str | None:
+    """Return the cell column that names each cell's source, or None when the table has none.
+
+    A merge or a composite writes the column, with the role
+    :data:`~cytearc.storage.metadata_keys.CELL_SOURCES_ROLE`, when it
+    records which features each source measured; a later merge copies it
+    without the role.
+
+    Raises:
+        ValueError: If several cell columns hold the role.
+    """
+    names, column_array = _column_arrays(table)
+    found = [
+        name
+        for name in names
+        if getattr(column_array(name), "attrs", {}).get("role") == CELL_SOURCES_ROLE
+    ]
+    if len(found) > 1:
+        raise ValueError(
+            f"Cell columns {', '.join(map(repr, found))} each hold the role "
+            f"{CELL_SOURCES_ROLE!r} of the column that names each cell's source, "
+            "which a merge or a composite writes once; drop the columns that do "
+            "not name the sources of this store's cells"
+        )
+    return found[0] if found else None
+
+
 def _record_candidates(table: Any) -> list[str]:
     """Return the columns of a table whose names a record of measured features takes, from a listing of its keys.
 

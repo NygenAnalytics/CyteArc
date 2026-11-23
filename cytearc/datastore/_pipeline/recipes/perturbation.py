@@ -528,6 +528,8 @@ def _check_call_file_cells(
     )
     _check_cell_ids(
         ledger,
+        store,
+        rows,
         ids,
         barcode_prefix,
         barcode_suffix=barcode_suffix,
