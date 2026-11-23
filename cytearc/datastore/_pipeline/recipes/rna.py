@@ -6,8 +6,8 @@ from typing import Any
 import numpy as np
 
 from ....quality_control.hto import checked_hashtag_mapping, checked_hashtags
-from ....assay import ADTassay, NormMethod, RNAassay, norm_tf_idf
-from ....assay.normalization import recorded_normalizer
+from ....assay import ADTassay, NormMethod, RNAassay
+from ....assay.normalization import builtin_normalizer
 from ....storage.artifacts import (
     ArtifactRef,
     artifact_group,
@@ -271,9 +271,9 @@ def _check_doublet_normalization(assay: str, normalizer: NormMethod) -> None:
     run normalized the graph's cells, with what a built-in normalizer fitted
     over them, and projects them onto the PCA of those cells.
     """
-    # The run has already refused a normalizer that provenance cannot identify.
-    recorded = recorded_normalizer(callable_identity(normalizer))
-    if recorded is not None and recorded is not norm_tf_idf:
+    # The run has already refused a normalizer that provenance cannot
+    # identify, and TF-IDF, which needs an ATAC assay.
+    if builtin_normalizer(callable_identity(normalizer)) is not None:
         return
     raise ValueError(
         f"The run normalizes assay {assay!r} with {normalizer_label(normalizer)}, "

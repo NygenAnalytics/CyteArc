@@ -155,14 +155,18 @@ def _stream(
         reference_ids = np.array(["a", "missing", "b"])
     if means is None:
         means = np.array([1.5, 7.5, 2.5])
+    parameters = normalization or _normalization()
     return AlignedFeatureStream(
         query_assay=assay,
         query_cell_indices=cells,
         reference_feature_keys=reference_ids,
         reference_normalized_means=means,
-        reference_normalization_parameters=normalization or _normalization(),
+        reference_normalization_parameters=parameters,
         missing_feature_policy=policy,
         resources=resources or ResourceBudget(1_000_000, 2),
+        normalization=LibrarySizeFit(
+            parameters["size_factor"], parameters["log_transform"]
+        ),
         feature_key=feature_key,
         reserved_resident_bytes=reserved_resident_bytes,
         reserved_per_row_bytes=reserved_per_row_bytes,

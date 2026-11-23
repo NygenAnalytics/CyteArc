@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 
 from ...assay import Assay, ATACassay, RNAassay, norm_tf_idf
-from ...assay.normalization import recorded_normalizer
+from ...assay.normalization import builtin_normalizer
 from ...assay.feature_summary import (
     ensure_feature_summary,
     feature_summary_selected_count,
@@ -168,9 +168,7 @@ def _require_doublet_graph(root: Any, lineage: NativeGraphInputs) -> None:
             "PCA or no normalized values; build the graph on reduction.pca"
         )
     identity = _recorded_normalizer(root, lineage.normalized)
-    normalizer = (
-        recorded_normalizer(identity) if isinstance(identity, Mapping) else None
-    )
+    normalizer = builtin_normalizer(identity) if isinstance(identity, Mapping) else None
     if normalizer is None or normalizer is norm_tf_idf:
         raise ValueError(
             "The graph was built on values normalized with "

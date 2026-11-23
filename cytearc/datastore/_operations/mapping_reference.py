@@ -3,7 +3,11 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 from ...assay import RNAassay
-from ...assay.normalization import fit_normalization, recorded_normalizer
+from ...assay.normalization import (
+    PearsonResidualFit,
+    builtin_normalizer,
+    fit_normalization,
+)
 from ...graph.distances import (
     validate_distance_provenance,
     validate_neighbors_payload,
@@ -20,11 +24,7 @@ from ...mapping.artifact import (
     write_artifact_mapping_reference_from_sources,
 )
 from ...mapping.confidence import _distance_quantile_summary
-from ...mapping.features import (
-    _normalization_parameters,
-    reference_fit_array_names,
-    reference_fit_arrays,
-)
+from ...mapping.features import _normalization_parameters, fitted_array_name
 from ...mapping.reference import MappingReference
 from ...storage.validation_scope import validation_scoped
 from ...storage.artifact_writer import (
@@ -469,8 +469,9 @@ class _MappingReferenceOperationsMixin(_MappingReferenceOperationsBase):
         if not planned.reused:
             self._require_writable("build_mapping_reference")
             normalization_arrays: dict[str, np.ndarray] = {}
-            if reference_fit_array_names(normalization_parameters):
-                normalizer = recorded_normalizer(
+            array_name = fitted_array_name(normalization_parameters)
+            if array_name is not None:
+                normalizer = builtin_normalizer(
                     normalization_parameters["normalization_method"]
                 )
                 assert normalizer is not None
@@ -490,7 +491,9 @@ class _MappingReferenceOperationsMixin(_MappingReferenceOperationsBase):
                     source=source,
                 )
                 assert fit is not None
-                normalization_arrays = reference_fit_arrays(fit)
+                normalization_arrays[array_name] = (
+                    fit.fractions if isinstance(fit, PearsonResidualFit) else fit.scales
+                )
             with artifact_transaction(self.zw, planned) as group:
                 write_artifact_mapping_reference_from_sources(
                     group,

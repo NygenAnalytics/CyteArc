@@ -28,6 +28,7 @@ from ...assay import (
     norm_pearson_residuals,
     norm_tf_idf,
 )
+from ...assay.normalization import builtin_normalizer
 from ...storage.artifacts import ArtifactRef, callable_identity, inspect_artifact
 from ...storage.pipeline_runs import PipelineRunRecord, load_pipeline_stage_records
 
@@ -53,26 +54,21 @@ _IDENTITY_KEYS = (
     frozenset({"module", "qualname", "code"}),
 )
 
-type _IdentityKey = tuple[tuple[str, str], ...]
 type MethodSetting = str | dict[str, str]
 """A recorded ``normalization`` ``method``: a built-in's name or an identity."""
 
 
-def _identity_key(identity: Mapping[str, str]) -> _IdentityKey:
-    return tuple(sorted(identity.items()))
-
-
-_BUILTIN_IDENTITIES: Mapping[_IdentityKey, str] = MappingProxyType(
-    {
-        _identity_key(callable_identity(normalizer)): name
-        for name, normalizer in BUILTIN_NORMALIZERS.items()
-    }
-)
-
-
 def _setting(identity: Mapping[str, str]) -> MethodSetting:
-    """Return the method that records ``identity``: a built-in's name, or the identity."""
-    return _BUILTIN_IDENTITIES.get(_identity_key(identity), dict(identity))
+    """Return the method that records ``identity``: a built-in's name, or the identity.
+
+    A ``PearsonResidualNormalizer`` with other options than the built-in's
+    records its identity.
+    """
+    normalizer = builtin_normalizer(identity)
+    for name, builtin in BUILTIN_NORMALIZERS.items():
+        if normalizer is builtin:
+            return name
+    return dict(identity)
 
 
 def _is_identity(value: Mapping[Any, Any]) -> bool:

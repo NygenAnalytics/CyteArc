@@ -4,7 +4,7 @@ import copy
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, cast
+from typing import Any, cast
 
 import numpy as np
 import zarr
@@ -33,14 +33,10 @@ from ..metadata.rows import (
 )
 from ..metadata.selection import valid_category_mask
 from ..utils.arrays import read_only_copy
-from .features import reference_normalization
 from .models import (
     ScaledPCAProjectionModel,
     SymphonyCorrectionModel,
 )
-
-if TYPE_CHECKING:
-    from ..assay.normalization import NormalizationFit
 
 MAPPING_REFERENCE_REBUILD_MESSAGE = (
     "Rebuild it with mapping.build_reference(neighbors)."
@@ -251,15 +247,6 @@ class MappingReference:
         )
 
     @property
-    def normalization(self) -> "NormalizationFit":
-        """Return the fit that normalizes query rows as the reference's cells were."""
-        return reference_normalization(
-            self.normalization_parameters,
-            n_cells=self.selected_cell_count,
-            arrays=self.normalization_arrays,
-        )
-
-    @property
     def method(self) -> str:
         return str(self.metadata["method"])
 
@@ -275,8 +262,10 @@ class MappingReference:
         return cast(dict[str, Any], _thaw_metadata(values))
 
     @property
-    def size_factor(self) -> float:
-        return float(self.normalization_parameters["size_factor"])
+    def size_factor(self) -> float | None:
+        """The size factor of library-size values, or None for other values."""
+        value = self.normalization_parameters["size_factor"]
+        return None if value is None else float(value)
 
     @property
     def external_ref(self) -> ExternalArtifactRef:

@@ -12,6 +12,7 @@ from cytearc.assay import norm_lib_size
 from cytearc.datastore.datastore import DataStore
 from cytearc.embeddings import simplicial_set_embedding
 from cytearc.embeddings.umap import densmap_distance_graph
+from cytearc.assay.normalization import LibrarySizeFit
 from cytearc.mapping.features import AlignedFeatureStream
 from cytearc.matrix import ChunkedArray
 from cytearc.storage.artifacts import callable_identity
@@ -124,6 +125,7 @@ def test_aligned_stream_rejects_selected_cells_with_negative_library_sizes(
             _normalization(),
             "zero",
             ResourceBudget(16 * 1024**2, 1),
+            normalization=LibrarySizeFit(10.0, False),
         )
 
     with pytest.raises(
@@ -159,6 +161,7 @@ def test_aligned_stream_normalizes_bool_query_counts_as_zeros_and_ones(
         _normalization(),
         "zero",
         ResourceBudget(16 * 1024**2, 1),
+        normalization=LibrarySizeFit(10.0, False),
     )
     aligned = np.concatenate([block.values for block in stream.iter_blocks()])
 

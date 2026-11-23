@@ -7,7 +7,11 @@ import numpy as np
 import zarr
 
 from ..assay import RNAassay
-from ..assay.normalization import ClrFit, feature_scaling_statistics
+from ..assay.normalization import (
+    ClrFit,
+    PearsonResidualFit,
+    feature_scaling_statistics,
+)
 from ..graph.distances import (
     validate_distance_provenance,
     validate_neighbors_payload,
@@ -34,11 +38,7 @@ from ..storage.selections import validate_cell_selection
 from ..storage.types import as_zarr_array
 from ..matrix import ChunkedArray
 from .confidence import _distance_quantile_summary
-from .features import (
-    REFERENCE_FIT_ARRAYS,
-    _normalization_parameters,
-    reference_fit_array_names,
-)
+from .features import _normalization_parameters, fitted_array_name
 from .models import ScaledPCAProjectionModel, SymphonyCorrectionModel
 from .reference import (
     MappingReference,
@@ -59,7 +59,7 @@ _COMMON_ARRAYS = frozenset(
         "reference_distance_values",
     }
 )
-_FIT_ARRAYS = frozenset(REFERENCE_FIT_ARRAYS.values())
+_FIT_ARRAYS = frozenset({PearsonResidualFit.array_name, ClrFit.array_name})
 _SYMPHONY_ARRAYS = frozenset(
     {
         "centroids",
@@ -196,7 +196,7 @@ def write_artifact_mapping_reference_from_sources(
     """Stream an immutable mapping reference from its upstream artifacts.
 
     ``normalization_arrays`` holds what the cells' normalizer fitted, by the
-    names that ``reference_fit_array_names`` gives for its parameters.
+    name that ``fitted_array_name`` gives for its parameters.
     """
     create_zarr_obj_array(group, "feature_ids", np.asarray(feature_ids))
     _write_array_from_source(group, "feature_means", feature_means)
@@ -476,7 +476,8 @@ def _validate_and_load_artifact_mapping_reference(
         raise contract_error(
             f"Mapping reference normalization is unsupported: {exc}"
         ) from exc
-    fit_names = reference_fit_array_names(normalization_parameters)
+    fit_name = fitted_array_name(normalization_parameters)
+    fit_names = () if fit_name is None else (fit_name,)
     _validate_payload_names(group, method, fit_names)
 
     ann_metric = (ann_status.parameters or {}).get("ann_metric")
@@ -745,7 +746,7 @@ def _validate_and_load_artifact_mapping_reference(
     for name in fit_names:
         fitted = _numeric_payload_array(group, name, ndim=1)
         if fitted.shape != (n_features,) or not _numeric_values_are_valid(
-            fitted, minimum=0.0, positive=name == REFERENCE_FIT_ARRAYS[ClrFit]
+            fitted, minimum=0.0, positive=name == ClrFit.array_name
         ):
             raise contract_error(
                 f"Mapping reference normalization array {name!r} is invalid"

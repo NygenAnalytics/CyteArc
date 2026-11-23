@@ -25,6 +25,7 @@ from scipy.sparse import csr_matrix, vstack
 from ..assay import Assay
 from ..assay.normalization import TfIdfFit, normalize_rows
 from ..assay.persistence import _read_block
+from ..mapping.features import reference_normalization
 from ..mapping.reference import MappingReference
 from ..mapping.symphony import project_pca
 from ..matrix import ChunkedArray
@@ -995,7 +996,7 @@ class PcaDoubletProjection:
 
     def __init__(self, reference: MappingReference) -> None:
         self.reference = reference
-        self.normalization = reference.normalization
+        self.normalization = reference_normalization(reference)
         self.n_dims = int(reference.model.n_dims)
         self.renormalize_subset = bool(
             reference.normalization_parameters["renormalize_subset"]

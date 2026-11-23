@@ -662,6 +662,17 @@ def test_loaded_mapping_reference_is_deeply_immutable(
     normalization["size_factor"] = -1
     assert reference.size_factor == 1000.0
     assert reference.current_model_digest() == reference.model_digest
+    # Values of a normalizer that reads no size factor may record None.
+    from dataclasses import replace
+
+    unscaled = replace(
+        reference,
+        metadata={
+            **reference.metadata,
+            "normalization_parameters": {**normalization, "size_factor": None},
+        },
+    )
+    assert unscaled.size_factor is None
 
 
 def test_mapping_reference_binding_and_publication_validation_are_blockwise(

@@ -291,7 +291,8 @@ def tfidf_values[T: (np.ndarray, ChunkedArray)](
 # a ChunkedArray, at once for an array. ``normed`` fits and applies them, and
 # doublet scoring and mapping apply them to rows that are not stored cells,
 # through ``normalize_rows``. ``held_values`` counts the float64 arrays of a
-# block's shape that normalizing a block holds at once.
+# block's shape that normalizing a block holds at once, and ``columns`` gives
+# the fit of a subset of its features, for rows that hold only those.
 
 
 @dataclass(frozen=True, slots=True)
@@ -305,6 +306,9 @@ class LibrarySizeFit:
     size_factor: float
     log: bool
     held_values: ClassVar[int] = 1
+
+    def columns(self, indices: NDArray[np.integer]) -> "LibrarySizeFit":
+        return self
 
     def apply(self, counts: Any, totals: ArrayLike) -> Any:
         scale = partial(
@@ -331,6 +335,11 @@ class ClrFit:
 
     scales: NDArray[np.float64]
     held_values: ClassVar[int] = 3
+    # The array in which a mapping reference saves the scales.
+    array_name: ClassVar[str] = "clr_feature_scales"
+
+    def columns(self, indices: NDArray[np.integer]) -> "ClrFit":
+        return ClrFit(self.scales[indices])
 
     @classmethod
     def fit(cls, counts: Any) -> "ClrFit":
@@ -357,6 +366,9 @@ class TfIdfFit:
     idf: NDArray[np.float64]
     held_values: ClassVar[int] = 2
 
+    def columns(self, indices: NDArray[np.integer]) -> "TfIdfFit":
+        return TfIdfFit(self.idf[indices])
+
     def apply(self, counts: Any, totals: ArrayLike) -> Any:
         if issparse(counts):
             values = csr_matrix(counts, dtype=np.float64, copy=True)
@@ -379,6 +391,9 @@ class PassthroughFit:
 
     log: bool
     held_values: ClassVar[int] = 1
+
+    def columns(self, indices: NDArray[np.integer]) -> "PassthroughFit":
+        return self
 
     def apply(self, counts: Any, totals: ArrayLike | None = None) -> Any:
         return np.log1p(counts, dtype=np.float64) if self.log else counts
@@ -701,6 +716,11 @@ class PearsonResidualFit:
     # The expected counts and residuals, beside the temporaries of their
     # square roots over the positive expectations.
     held_values: ClassVar[int] = 5
+    # The array in which a mapping reference saves the fractions.
+    array_name: ClassVar[str] = "pearson_feature_fractions"
+
+    def columns(self, indices: NDArray[np.integer]) -> "PearsonResidualFit":
+        return PearsonResidualFit(self.fractions[indices], self.theta, self.clip)
 
     def apply(self, counts: Any, totals: ArrayLike) -> Any:
         residuals = partial(
@@ -839,14 +859,22 @@ type NormalizationFit = (
 )
 
 
-def recorded_normalizer(identity: Mapping[str, Any]) -> NormMethod | None:
+def builtin_normalizer(identity: Mapping[str, Any]) -> NormMethod | None:
     """Return the built-in normalizer that provenance records as ``identity``.
 
-    A ``PearsonResidualNormalizer`` with other options is built again from
-    its identity. Custom normalizers give None.
+    Each built-in normalizer gives itself, and a ``PearsonResidualNormalizer``
+    with other options is built again from its identity. Custom normalizers
+    give None.
     """
     recorded = {key: value for key, value in identity.items() if key != "external_hook"}
-    builtins = (norm_lib_size, norm_lib_size_log, norm_clr, norm_tf_idf, norm_dummy)
+    builtins = (
+        norm_lib_size,
+        norm_lib_size_log,
+        norm_pearson_residuals,
+        norm_clr,
+        norm_tf_idf,
+        norm_dummy,
+    )
     for normalizer in builtins:
         if recorded == callable_identity(normalizer):
             return normalizer

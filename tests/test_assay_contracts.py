@@ -30,9 +30,9 @@ from cytearc.assay.normalization import (
     PassthroughFit,
     PearsonResidualFit,
     TfIdfFit,
+    builtin_normalizer,
     fit_normalization,
     normalize_rows,
-    recorded_normalizer,
 )
 from cytearc.assay.base import raw_csr
 from cytearc.assay.rna import library_size_factor
@@ -495,6 +495,28 @@ def test_clr_and_tf_idf_fits_normalize_new_rows_by_hand():
         normalize_rows(TfIdfFit(idf), _ROWS, np.ones(2), source="t")
 
 
+@pytest.mark.parametrize(
+    "fit",
+    [
+        LibrarySizeFit(1000.0, True),
+        PassthroughFit(True),
+        PearsonResidualFit(np.array([0.1, 0.0, 0.3]), theta=4.0, clip=1.0),
+        ClrFit(np.array([1.5, 2.0, 4.0])),
+        TfIdfFit(np.array([0.5, 1.0, 2.0])),
+    ],
+)
+def test_a_fit_of_some_features_normalizes_their_columns_as_the_whole_fit_does(fit):
+    # Rows that hold only some features, as a query that lacks a reference
+    # gene does, keep the totals over every feature.
+    for columns in (np.array([2, 0]), np.array([1]), np.arange(3)):
+        np.testing.assert_array_equal(
+            normalize_rows(
+                fit.columns(columns), _ROWS[:, columns], _TOTALS, source="t"
+            ),
+            normalize_rows(fit, _ROWS, _TOTALS, source="t")[:, columns],
+        )
+
+
 def test_fit_normalization_fits_what_pearson_residuals_and_clr_take_from_counts():
     counts = np.array([[1, 0, 4], [3, 2, 0], [0, 6, 2], [2, 0, 0]], dtype=np.uint16)
     totals = np.array([9.0, 7.0, 12.0, 5.0])
@@ -524,7 +546,7 @@ def test_fit_normalization_fits_what_pearson_residuals_and_clr_take_from_counts(
         fit_normalization(norm_pearson_residuals, counts, -totals, source="RNA_nCounts")
 
 
-def test_recorded_normalizer_finds_each_builtin_by_its_recorded_identity():
+def test_builtin_normalizer_finds_each_builtin_by_its_recorded_identity():
     pearson = PearsonResidualNormalizer(theta=10.0, clip=5.0)
     for normalizer in (
         norm_lib_size,
@@ -536,12 +558,9 @@ def test_recorded_normalizer_finds_each_builtin_by_its_recorded_identity():
     ):
         identity = callable_identity(normalizer)
         for recorded in (identity, {"external_hook": True, **identity}):
-            assert recorded_normalizer(recorded) is normalizer or (
-                normalizer is norm_pearson_residuals
-                and recorded_normalizer(recorded).artifact_identity
-                == normalizer.artifact_identity
-            )
-    rebuilt = recorded_normalizer(callable_identity(pearson))
+            assert builtin_normalizer(recorded) is normalizer
+    # Residuals of other options are built again from their identity.
+    rebuilt = builtin_normalizer(callable_identity(pearson))
     assert isinstance(rebuilt, PearsonResidualNormalizer)
     assert (rebuilt.theta, rebuilt.clip) == (10.0, 5.0)
     for identity in (
@@ -553,7 +572,7 @@ def test_recorded_normalizer_finds_each_builtin_by_its_recorded_identity():
         {"identity": 3},
         {},
     ):
-        assert recorded_normalizer(identity) is None
+        assert builtin_normalizer(identity) is None
 
 
 def test_clr_does_not_reuse_artifacts_with_ambiguous_axis(monkeypatch):

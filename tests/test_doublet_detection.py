@@ -35,7 +35,6 @@ from cytearc.assay import (
 )
 from cytearc.datastore._pipeline.recipes import rna as rna_recipe
 from cytearc.datastore.pipeline_accessor import PipelineAccessor
-from cytearc.assay.normalization import LibrarySizeFit, PearsonResidualFit
 from cytearc.mapping.models import ScaledPCAProjectionModel
 from cytearc.matrix import ChunkedArray
 from cytearc.quality_control import doublets
@@ -1870,21 +1869,17 @@ def test_lsi_projection_holds_its_loadings_and_charges_each_doublet():
 
 
 @pytest.mark.parametrize(
-    ("normalization", "arrays", "values_per_feature"),
+    ("normalizer", "arrays", "values_per_feature"),
     [
         # Library-size values with their scaled and centered copies.
-        (LibrarySizeFit(1000.0, False), {}, 3),
+        (norm_lib_size, {}, 3),
         # Pearson residuals hold their expected counts, residuals and three
         # temporaries of their square roots beside those copies.
-        (
-            PearsonResidualFit(np.full(5, 0.2), 100.0, 3.0),
-            {"pearson_feature_fractions": np.full(5, 0.2)},
-            7,
-        ),
+        (norm_pearson_residuals, {"pearson_feature_fractions": np.full(5, 0.2)}, 7),
     ],
 )
 def test_pca_projection_charges_its_model_and_each_doublet_by_hand(
-    normalization, arrays, values_per_feature
+    normalizer, arrays, values_per_feature
 ):
     model = ScaledPCAProjectionModel(
         feature_means=np.zeros(5),
@@ -1894,9 +1889,14 @@ def test_pca_projection_charges_its_model_and_each_doublet_by_hand(
     )
     reference = SimpleNamespace(
         model=model,
-        normalization=normalization,
         normalization_arrays=arrays,
-        normalization_parameters={"renormalize_subset": False},
+        normalization_parameters={
+            "normalization_method": callable_identity(normalizer),
+            "size_factor": 1000.0,
+            "log_transform": False,
+            "renormalize_subset": False,
+        },
+        selected_cell_count=9,
     )
 
     projection = doublets.PcaDoubletProjection(reference)

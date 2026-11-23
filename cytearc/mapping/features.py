@@ -22,9 +22,9 @@ from ..assay.normalization import (
     NormalizationFit,
     PassthroughFit,
     PearsonResidualFit,
+    builtin_normalizer,
     library_size_divisors,
     normalize_rows,
-    recorded_normalizer,
 )
 from ..metadata.rows import read_metadata_rows_chunkwise
 from ..storage.budget import ResourceBudget
@@ -46,6 +46,7 @@ from ..utils.warnings import warn
 
 if TYPE_CHECKING:
     from ..assay import Assay
+    from .reference import MappingReference
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,7 +134,7 @@ def _normalization_parameters(parameters: Mapping[str, Any]) -> dict[str, Any]:
     method = values["normalization_method"]
     normalizer = None
     if isinstance(method, Mapping) and method.get("external_hook", True) is True:
-        normalizer = recorded_normalizer(method)
+        normalizer = builtin_normalizer(method)
     # TF-IDF normalizes ATAC assays, which references do not map.
     if normalizer is None or normalizer is norm_tf_idf:
         raise ValueError(
@@ -167,67 +168,43 @@ def _normalization_parameters(parameters: Mapping[str, Any]) -> dict[str, Any]:
     return values
 
 
-# The arrays that a mapping reference saves of what its cells' normalizer
-# fitted, beside the PCA, by the kind of fit.
-REFERENCE_FIT_ARRAYS: Mapping[type, str] = {
-    PearsonResidualFit: "pearson_feature_fractions",
-    ClrFit: "clr_feature_scales",
-}
+def fitted_array_name(parameters: Mapping[str, Any]) -> str | None:
+    """Return the array in which a reference saves what its cells' normalizer fitted.
 
-
-def reference_fit_array_names(parameters: Mapping[str, Any]) -> tuple[str, ...]:
-    """Return the fit arrays that a reference of these normalization parameters saves."""
-    normalizer = recorded_normalizer(parameters["normalization_method"])
+    ``parameters`` are the reference's checked normalization parameters.
+    Pearson residuals and CLR fit numbers over the cells; the other built-in
+    normalizers fit none, and give None.
+    """
+    normalizer = builtin_normalizer(parameters["normalization_method"])
     if isinstance(normalizer, PearsonResidualNormalizer):
-        return (REFERENCE_FIT_ARRAYS[PearsonResidualFit],)
-    if normalizer is norm_clr:
-        return (REFERENCE_FIT_ARRAYS[ClrFit],)
-    return ()
+        return PearsonResidualFit.array_name
+    return ClrFit.array_name if normalizer is norm_clr else None
 
 
-def reference_fit_arrays(fit: PearsonResidualFit | ClrFit) -> dict[str, np.ndarray]:
-    """Return the arrays that a reference saves of ``fit``, by name."""
-    if isinstance(fit, PearsonResidualFit):
-        return {REFERENCE_FIT_ARRAYS[PearsonResidualFit]: fit.fractions}
-    return {REFERENCE_FIT_ARRAYS[ClrFit]: fit.scales}
-
-
-def reference_normalization(
-    parameters: Mapping[str, Any],
-    *,
-    n_cells: int | None = None,
-    arrays: Mapping[str, np.ndarray] | None = None,
-) -> NormalizationFit:
+def reference_normalization(reference: "MappingReference") -> NormalizationFit:
     """Return the fit that normalizes query rows as a reference's cells were.
 
-    ``parameters`` are the reference's checked normalization parameters,
-    ``n_cells`` its cell count, which sets the default clip of Pearson
-    residuals, and ``arrays`` the fit arrays that it saved.
-
-    Raises:
-        ValueError: If the normalizer fitted numbers that ``arrays`` lacks.
+    Loading the reference checked its normalization parameters and the array
+    that :func:`fitted_array_name` names. The default clip of Pearson
+    residuals is the square root of the reference's cell count.
     """
-    checked = _normalization_parameters(parameters)
-    normalizer = recorded_normalizer(checked["normalization_method"])
-    log = checked["log_transform"]
-    if normalizer is norm_lib_size or normalizer is norm_lib_size_log:
-        return LibrarySizeFit(
-            checked["size_factor"], log or normalizer is norm_lib_size_log
-        )
+    parameters = reference.normalization_parameters
+    normalizer = builtin_normalizer(parameters["normalization_method"])
+    log = bool(parameters["log_transform"])
+    arrays = reference.normalization_arrays
+    if isinstance(normalizer, PearsonResidualNormalizer):
+        n_cells = reference.selected_cell_count
+        clip = float(np.sqrt(n_cells)) if normalizer.clip is None else normalizer.clip
+        fractions = np.asarray(arrays[PearsonResidualFit.array_name], np.float64)
+        return PearsonResidualFit(fractions, normalizer.theta, clip)
+    if normalizer is norm_clr:
+        return ClrFit(np.asarray(arrays[ClrFit.array_name], np.float64))
     if normalizer is norm_dummy:
         return PassthroughFit(log)
-    (name,) = reference_fit_array_names(checked)
-    if arrays is None or name not in arrays or n_cells is None:
-        raise ValueError(
-            "The reference normalizes with numbers that it fitted over its cells, "
-            f"its array {name!r} and its cell count; load the reference with "
-            "mapping.load_reference"
-        )
-    array = np.asarray(arrays[name], dtype=np.float64)
-    if isinstance(normalizer, PearsonResidualNormalizer):
-        clip = float(np.sqrt(n_cells)) if normalizer.clip is None else normalizer.clip
-        return PearsonResidualFit(array, normalizer.theta, clip)
-    return ClrFit(array)
+    assert normalizer is norm_lib_size or normalizer is norm_lib_size_log
+    return LibrarySizeFit(
+        float(parameters["size_factor"]), log or normalizer is norm_lib_size_log
+    )
 
 
 class AlignedFeatureStream:
@@ -237,8 +214,8 @@ class AlignedFeatureStream:
     ``feature_key="names"``. Query features that share a reference feature's
     name add their counts before normalization, so the query keeps every
     count of the feature. The rows are normalized with ``normalization``, the
-    fit of the reference's cells, which the reference's parameters give when
-    their normalizer fitted no number.
+    fit of the reference's cells over every reference feature, restricted to
+    the features that the query measures.
     """
 
     def __init__(
@@ -251,10 +228,10 @@ class AlignedFeatureStream:
         missing_feature_policy: str,
         resources: ResourceBudget,
         *,
+        normalization: NormalizationFit,
         feature_key: str = "ids",
         reserved_resident_bytes: int = 0,
         reserved_per_row_bytes: int = 0,
-        normalization: NormalizationFit | None = None,
     ) -> None:
         if not isinstance(query_assay, RNAassay):
             raise TypeError("AlignedFeatureStream supports RNA query assays only")
@@ -306,11 +283,6 @@ class AlignedFeatureStream:
         self._normalization_parameters = _normalization_parameters(
             reference_normalization_parameters
         )
-        self._normalization = (
-            reference_normalization(self._normalization_parameters)
-            if normalization is None
-            else normalization
-        )
         self._missing_feature_policy = missing_feature_policy
         self._resources = resources
         self._query_assay = query_assay
@@ -359,6 +331,8 @@ class AlignedFeatureStream:
             )
         self._reference_index_map = read_only_copy(reference_indices, np.int64)
         self._query_index_map = read_only_copy(query_indices, np.int64)
+        # Each block holds the reference features that the query measures.
+        self._normalization = normalization.columns(self._reference_index_map)
         # The first of each reference feature's query columns, which
         # np.add.reduceat sums, when a reference feature has several.
         self._column_starts: np.ndarray | None = (

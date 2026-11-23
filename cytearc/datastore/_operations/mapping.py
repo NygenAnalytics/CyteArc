@@ -18,7 +18,11 @@ from ...storage.artifacts import (
 )
 from ...storage.types import as_zarr_array
 from ...assay import RNAassay
-from ...assay.normalization import PassthroughFit
+from ...assay.normalization import (
+    PassthroughFit,
+    builtin_normalizer,
+    require_counts_for,
+)
 from ...metadata.alignment import (
     align_to_cell_ids,
     keyed_values_remedy,
@@ -29,7 +33,7 @@ from ...mapping.artifact import (
     _reference_available_k,
     validate_mapping_reference_binding,
 )
-from ...mapping.features import AlignedFeatureStream
+from ...mapping.features import AlignedFeatureStream, reference_normalization
 from ...mapping.label_transfer import (
     LabelTransferBlock,
     ReferenceDistancePercentiles,
@@ -304,14 +308,19 @@ class _MappingOperationsMixin(_MappingOperationsBase):
             UnmeasuredCellsError: If the query assay did not measure a selected cell.
             TypeError: If ``query_batches`` is not a DataFrame indexed by cell
                 ID, such as one with a ``RangeIndex``, whose rows would land
-                on cells by position.
+                on cells by position, or the reference normalizes with
+                Pearson residuals or CLR, which need counts, and the query
+                assay holds values normalized before import.
             ValueError: If ``feature_key`` is ``"names"`` and reference
                 features share a name, before anything is written, or
                 ``query_batches`` lacks a selected query cell, repeats a
                 cell ID, or holds in a column values that would form one
                 batch but print differently, such as ``1``, ``1.0`` and
                 ``True``, or values that print alike but would form separate
-                batches, such as ``1`` and ``"1"``.
+                batches, such as ``1`` and ``"1"``, or the reference
+                normalizes with ``norm_dummy`` and the query assay holds
+                another kind of values than the reference's, counts or values
+                normalized before import.
             PermissionError: If the projection or its overlap selection must be
                 written and the query store is not opened with
                 ``zarr_mode='r+'``, before any query cell is projected.
@@ -363,13 +372,20 @@ class _MappingOperationsMixin(_MappingOperationsBase):
         assay = self._get_assay(assay_name)
         if not isinstance(assay, RNAassay):
             raise TypeError("Mapping currently supports RNA query assays only")
-        # norm_dummy takes each cell's stored values as they are, so a query
-        # maps only when its values are of the reference's kind.
+        # Pearson residuals and CLR need the query's counts, and norm_dummy
+        # takes each cell's stored values as they are, so a query maps only
+        # when its values are of the reference's kind.
+        normalizer = builtin_normalizer(
+            reference.normalization_parameters["normalization_method"]
+        )
+        assert normalizer is not None
+        require_counts_for(assay, normalizer)
+        normalization = reference_normalization(reference)
         reference_counts = reference.datastore._get_assay(
             reference.assay_name
         ).holdsCounts
         if (
-            isinstance(reference.normalization, PassthroughFit)
+            isinstance(normalization, PassthroughFit)
             and reference_counts != assay.holdsCounts
         ):
             kinds = {True: "counts", False: "values normalized before import"}
@@ -466,7 +482,7 @@ class _MappingOperationsMixin(_MappingOperationsBase):
             feature_key=feature_key,
             reserved_resident_bytes=reserved_resident,
             reserved_per_row_bytes=reserved_per_row,
-            normalization=reference.normalization,
+            normalization=normalization,
         )
         if _ordered_feature_ids_fingerprint(assay.z) != feature_ids_fingerprint:
             raise ValueError("Query feature identities changed during mapping setup")

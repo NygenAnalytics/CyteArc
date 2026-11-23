@@ -8,13 +8,13 @@ import pytest
 from scipy.sparse import csr_matrix
 
 from cytearc import DataStore
-from cytearc.assay.normalization import LibrarySizeFit
-from cytearc.mapping.features import AlignedFeatureStream
+from cytearc.assay import norm_lib_size_log
+from cytearc.mapping.features import AlignedFeatureStream, reference_normalization
 from cytearc.mapping.models import ScaledPCAProjectionModel
 from cytearc.mapping.symphony import project_pca
 from cytearc.matrix import ChunkedArray
 from cytearc.quality_control import doublets
-from cytearc.storage.artifacts import artifact_group
+from cytearc.storage.artifacts import artifact_group, callable_identity
 from cytearc.storage.budget import ResourceBudget
 from cytearc.storage.count_matrix import CountMatrixPolicy
 
@@ -82,9 +82,13 @@ def test_simulated_doublets_keep_every_pair_and_add_parent_libraries(
     )
     reference = SimpleNamespace(
         model=model,
-        normalization=LibrarySizeFit(100.0, True),
         normalization_arrays={},
-        normalization_parameters={"renormalize_subset": subset},
+        normalization_parameters={
+            "normalization_method": callable_identity(norm_lib_size_log),
+            "size_factor": 100.0,
+            "log_transform": False,
+            "renormalize_subset": subset,
+        },
     )
     assay = SimpleNamespace(rawData=ChunkedArray.from_numpy(counts), name="RNA")
     # Library sizes count features outside the selection too.
@@ -412,6 +416,7 @@ def test_streamed_doublets_match_materialized_doublets(
         reference.normalization_parameters,
         "error",
         ResourceBudget(128 * 1024**2, 1),
+        normalization=reference_normalization(reference),
     )
     expected = project_pca(
         np.vstack([block.values for block in stream.iter_blocks()]), reference.model

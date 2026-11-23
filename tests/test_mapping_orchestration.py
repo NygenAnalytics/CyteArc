@@ -13,7 +13,7 @@ import cytearc.datastore._operations.mapping_reference as mapping_reference_oper
 import cytearc.mapping.features as mapping_features
 import cytearc.mapping.projection as mapping_projection
 from cytearc.datastore.datastore import DataStore, mount_datastore
-from cytearc.mapping.features import AlignedFeatureStream
+from cytearc.mapping.features import AlignedFeatureStream, reference_normalization
 from cytearc.mapping.projection import load_projection
 from cytearc.storage.artifacts import (
     ArtifactRef,
@@ -35,6 +35,7 @@ from cytearc.assay import (
 )
 from cytearc.assay.normalization import ClrFit
 from tests.test_mapping_reference import (
+    MAPPING_EXCLUDED_CELLS,
     MAPPING_N_CELLS,
     MAPPING_REFERENCE_GENES,
     MappingStoreSource,
@@ -758,6 +759,7 @@ def test_query_projection_reproduces_stored_reference_coordinates(
         reference_normalization_parameters=reference.normalization_parameters,
         missing_feature_policy="error",
         resources=reference_store.resources,
+        normalization=reference_normalization(reference),
     )
     projected = np.vstack(
         [
@@ -857,6 +859,7 @@ def test_subset_fitted_pca_center_survives_mapping_reference_reload(
             reference_normalization_parameters=reference.normalization_parameters,
             missing_feature_policy="error",
             resources=reference_store.resources,
+            normalization=reference_normalization(reference),
         )
         projected = np.vstack(
             [
@@ -988,9 +991,17 @@ _REFERENCE_NORMALIZERS = {
 }
 
 
+# The cells that the normalized references hold: every cell but two, so that
+# a fit over every stored cell differs from a fit over the reference's cells.
+_REFERENCE_CELLS = np.setdiff1d(np.arange(MAPPING_N_CELLS), MAPPING_EXCLUDED_CELLS)
+
+
 @pytest.fixture(scope="module", params=sorted(_REFERENCE_NORMALIZERS))
 def normalized_reference(request, tmp_path_factory) -> tuple[str, Path, ArtifactRef]:
-    """A reference of the mapping counts' first genes, normalized by each normalizer."""
+    """A reference of the mapping counts' first genes, normalized by each normalizer.
+
+    Its cells are ``_REFERENCE_CELLS``.
+    """
     normalizer, flags, scaling = _REFERENCE_NORMALIZERS[request.param]
     path = tmp_path_factory.mktemp(f"reference_{request.param}") / "reference.zarr"
     write_count_store(str(path), {"RNA": mapping_counts()}, "uint32")
@@ -1003,7 +1014,9 @@ def normalized_reference(request, tmp_path_factory) -> tuple[str, Path, Artifact
         ),
     )
     datastore.RNA.normMethod = normalizer
-    cells = datastore.snapshot_cell_selection("I")
+    keep = np.isin(np.arange(MAPPING_N_CELLS), _REFERENCE_CELLS)
+    datastore.cells.insert("reference_cells", by_cell_id(datastore.cells, keep))
+    cells = datastore.snapshot_cell_selection("reference_cells")
     features = datastore.features.snapshot(
         from_assay="RNA", feature_indexes=list(range(MAPPING_REFERENCE_GENES))
     )
@@ -1029,16 +1042,19 @@ def test_each_normalizer_maps_the_reference_cells_onto_their_own_coordinates(
         artifact_group(datastore.zw, reference.reduction)["data"][:],
         dtype=np.float64,
     )
-    counts = mapping_counts()[:, :MAPPING_REFERENCE_GENES].astype(np.float64)
+    counts = mapping_counts()[_REFERENCE_CELLS, :MAPPING_REFERENCE_GENES].astype(
+        np.float64
+    )
 
-    # What the normalizer fitted over the reference cells, by hand: integer
-    # sums are exact in float64, and CLR's mean logarithms agree to rounding.
+    # What the normalizer fitted over the reference cells, and over them
+    # alone, by hand: integer sums are exact in float64, and CLR's mean
+    # logarithms agree to rounding.
     arrays = dict(reference.normalization_arrays)
     if name.startswith("pearson"):
         totals = (
             counts.sum(axis=1)
             if name.endswith("subset")
-            else mapping_counts().sum(axis=1)
+            else mapping_counts()[_REFERENCE_CELLS].sum(axis=1)
         )
         np.testing.assert_array_equal(
             arrays.pop("pearson_feature_fractions"),
@@ -1058,13 +1074,13 @@ def test_each_normalizer_maps_the_reference_cells_onto_their_own_coordinates(
     # so they agree to a few float32 epsilons of their largest magnitude.
     stream = AlignedFeatureStream(
         query_assay=datastore.RNA,
-        query_cell_indices=np.arange(MAPPING_N_CELLS),
+        query_cell_indices=_REFERENCE_CELLS,
         reference_feature_keys=reference.feature_ids,
         reference_normalized_means=reference.model.feature_means,
         reference_normalization_parameters=reference.normalization_parameters,
         missing_feature_policy="error",
         resources=datastore.resources,
-        normalization=reference.normalization,
+        normalization=reference_normalization(reference),
     )
     projected = np.vstack(
         [
@@ -1086,7 +1102,7 @@ def test_each_normalizer_maps_the_reference_cells_onto_their_own_coordinates(
     )
     loaded = query.mapping.load_result(result, reference=reference, load_arrays=True)
     assert loaded.indices is not None
-    assert (loaded.indices[:, 0] == np.arange(MAPPING_N_CELLS)).mean() > 0.95
+    assert (loaded.indices[:, 0] == np.arange(len(_REFERENCE_CELLS))).mean() > 0.95
     assert loaded.diagnostics["queryScaledDispersion"] == pytest.approx(1.0, abs=1e-5)
     assert loaded.diagnostics["algorithmVariant"] == ("scaled_pca" if scaled else "pca")
     transfer = query.mapping.load_label_transfer(
@@ -1094,7 +1110,7 @@ def test_each_normalizer_maps_the_reference_cells_onto_their_own_coordinates(
             result, reference=reference, reference_labels="mapping_labels"
         )
     )
-    labels = np.array([f"p{index % 4}" for index in range(MAPPING_N_CELLS)])
+    labels = np.array([f"p{index % 4}" for index in _REFERENCE_CELLS])
     assert (transfer.labels.to_numpy() == labels).mean() > 0.95
 
 
@@ -1118,7 +1134,7 @@ def test_a_clr_reference_fits_its_scales_as_the_normalization_did(
             mem_budget=memory,
         )
         counts = datastore.RNA.rawData[:, np.arange(MAPPING_REFERENCE_GENES)][
-            np.arange(MAPPING_N_CELLS), :
+            _REFERENCE_CELLS, :
         ]
         np.testing.assert_array_equal(ClrFit.fit(counts).scales, scales)
 
@@ -1152,6 +1168,20 @@ def test_a_fitted_reference_is_reused_without_a_fit_and_refuses_changed_fraction
     assert datastore.mapping.load_reference(ref).ref == ref
 
 
+@pytest.mark.parametrize("normalized_reference", ["clr"], indirect=True)
+def test_a_clr_reference_refuses_a_scale_of_zero(normalized_reference, tmp_path):
+    _, path, ref = normalized_reference
+    shutil.copytree(path, tmp_path / "reference.zarr")
+    datastore = DataStore(str(tmp_path / "reference.zarr"), default_assay="RNA")
+    scales = artifact_group(datastore.zw, ref)["clr_feature_scales"]
+    # Each count is divided by its gene's scale, so a scale must be positive,
+    # where a Pearson fraction of 0 is a gene without counts.
+    scales[0] = 0.0
+
+    with pytest.raises(ValueError, match="'clr_feature_scales' is invalid"):
+        datastore.mapping.load_reference(ref)
+
+
 @pytest.mark.parametrize("normalized_reference", ["passthrough"], indirect=True)
 def test_a_passthrough_reference_maps_only_a_query_of_its_kind_of_values(
     normalized_reference, tmp_path
@@ -1175,6 +1205,100 @@ def test_a_passthrough_reference_maps_only_a_query_of_its_kind_of_values(
         "stored values as they are, and its assay holds counts, but query assay "
         "'RNA' holds values normalized before import; map a query whose stored "
         "values are of the same kind, or build the reference on another normalizer"
+    )
+    assert query.artifacts.list(kind="projection", from_assay="RNA") == []
+
+
+@pytest.mark.parametrize(
+    "normalized_reference", ["clr", "pearson_residuals"], indirect=True
+)
+def test_a_query_missing_a_reference_gene_is_normalized_by_the_genes_it_measures(
+    normalized_reference, tmp_path
+):
+    name, path, ref = normalized_reference
+    reference = DataStore(str(path), default_assay="RNA", zarr_mode="r")
+    handle = reference.mapping.load_reference(ref)
+    # The query renames reference gene RNA3, so it measures the other 25.
+    query_counts = mapping_counts(seed=5)
+    ids = [f"RNA{index}" for index in range(query_counts.shape[1])]
+    ids[3] = "OTHER3"
+    query_path = tmp_path / "query.zarr"
+    write_count_store(
+        str(query_path), {"RNA": query_counts}, "uint32", feature_ids={"RNA": ids}
+    )
+    query = DataStore(str(query_path), default_assay="RNA", min_features_per_cell=0)
+
+    stream = AlignedFeatureStream(
+        query_assay=query.RNA,
+        query_cell_indices=np.arange(MAPPING_N_CELLS),
+        reference_feature_keys=handle.feature_ids,
+        reference_normalized_means=handle.model.feature_means,
+        reference_normalization_parameters=handle.normalization_parameters,
+        missing_feature_policy="reference_mean",
+        resources=query.resources,
+        normalization=reference_normalization(handle),
+    )
+    aligned = np.vstack([block.values for block in stream.iter_blocks()])
+
+    # By hand, from the reference cells' counts of the first 26 genes and the
+    # query's counts of the 25 genes it shares with them.
+    measured = np.delete(np.arange(MAPPING_REFERENCE_GENES), 3)
+    cells = mapping_counts()[_REFERENCE_CELLS].astype(np.float64)
+    shared = query_counts[:, measured].astype(np.float64)
+    if name == "clr":
+        scales = np.exp(np.log1p(cells[:, :MAPPING_REFERENCE_GENES]).mean(axis=0))
+        expected = np.log1p(shared / scales[measured])
+    else:
+        # A query cell's total covers every gene it measures, the renamed one
+        # too, as the reference cells' totals covered all 30 of theirs.
+        fractions = cells[:, :MAPPING_REFERENCE_GENES].sum(axis=0) / cells.sum()
+        mu = query_counts.sum(axis=1, keepdims=True) * fractions[measured]
+        clip = np.sqrt(len(_REFERENCE_CELLS))
+        expected = np.clip((shared - mu) / np.sqrt(mu + mu**2 / 100), -clip, clip)
+    np.testing.assert_allclose(aligned[:, measured], expected, rtol=1e-12, atol=1e-12)
+    # The gene the query lacks takes the reference cells' mean.
+    np.testing.assert_array_equal(aligned[:, 3], handle.model.feature_means[3])
+
+    result = query.mapping.run(
+        handle, _query_selection_matching_reference(query, handle), save_k=5
+    )
+    loaded = query.mapping.load_result(result, reference=handle)
+    assert loaded.diagnostics["featureCoverage"] == pytest.approx(25 / 26)
+
+
+@pytest.mark.parametrize(
+    ("normalized_reference", "step"),
+    [
+        (
+            "clr",
+            "CLR normalization needs counts: it divides each feature by its "
+            "geometric mean across cells",
+        ),
+        (
+            "pearson_residuals",
+            "Pearson residuals needs counts: they compare each count with a "
+            "negative binomial expectation",
+        ),
+    ],
+    indirect=["normalized_reference"],
+)
+def test_a_reference_that_fits_numbers_refuses_a_query_of_normalized_values(
+    normalized_reference, step, tmp_path
+):
+    _, path, ref = normalized_reference
+    reference = DataStore(str(path), default_assay="RNA", zarr_mode="r")
+    handle = reference.mapping.load_reference(ref)
+    query_path = tmp_path / "query.zarr"
+    write_count_store(str(query_path), {"RNA": mapping_counts()}, "uint32")
+    record_normalized_values(query_path, "RNA")
+    query = DataStore(str(query_path), default_assay="RNA", min_features_per_cell=0)
+
+    with pytest.raises(TypeError) as caught:
+        query.mapping.run(handle, _query_selection_matching_reference(query, handle))
+
+    assert str(caught.value) == (
+        f"{step}. Assay 'RNA' holds normalized values, imported as log-normalized "
+        "values. Normalize with norm_lib_size"
     )
     assert query.artifacts.list(kind="projection", from_assay="RNA") == []
 

@@ -780,9 +780,14 @@ def test_reference_normalization_rebuilds_a_fit_that_fits_no_number(
         "log_transform": log_transform,
         "renormalize_subset": False,
     }
+    reference = SimpleNamespace(
+        normalization_parameters=parameters,
+        normalization_arrays=arrays,
+        selected_cell_count=16,
+    )
 
-    assert mapping_features.reference_normalization(parameters) == expected
-    assert mapping_features.reference_fit_array_names(parameters) == ()
+    assert mapping_features.reference_normalization(reference) == expected
+    assert mapping_features.fitted_array_name(parameters) is None
 
 
 def test_reference_normalization_rebuilds_pearson_residuals_and_clr_from_saved_arrays():
@@ -797,34 +802,41 @@ def test_reference_normalization_rebuilds_pearson_residuals_and_clr_from_saved_a
         "renormalize_subset": True,
     }
 
+    def reference(method: object, arrays: dict[str, np.ndarray]) -> SimpleNamespace:
+        return SimpleNamespace(
+            normalization_parameters={**parameters, "normalization_method": method},
+            normalization_arrays=arrays,
+            selected_cell_count=16,
+        )
+
     fit = mapping_features.reference_normalization(
-        parameters, n_cells=16, arrays={"pearson_feature_fractions": fractions}
+        reference(callable_identity(pearson), {"pearson_feature_fractions": fractions})
     )
     assert isinstance(fit, PearsonResidualFit)
     np.testing.assert_array_equal(fit.fractions, fractions)
     # The default clip is the square root of the reference's cell count.
     assert (fit.theta, fit.clip) == (20.0, 4.0)
-    clipped = {
-        **parameters,
-        "normalization_method": callable_identity(PearsonResidualNormalizer(clip=2.5)),
-    }
+    assert mapping_features.fitted_array_name(parameters) == (
+        "pearson_feature_fractions"
+    )
+    clipped = callable_identity(PearsonResidualNormalizer(clip=2.5))
     assert (
         mapping_features.reference_normalization(
-            clipped, n_cells=16, arrays={"pearson_feature_fractions": fractions}
+            reference(clipped, {"pearson_feature_fractions": fractions})
         ).clip
         == 2.5
     )
-    clr = {**parameters, "normalization_method": callable_identity(norm_clr)}
-    assert mapping_features.reference_fit_array_names(clr) == ("clr_feature_scales",)
+    clr = callable_identity(norm_clr)
+    assert (
+        mapping_features.fitted_array_name({"normalization_method": clr})
+        == "clr_feature_scales"
+    )
     np.testing.assert_array_equal(
         mapping_features.reference_normalization(
-            clr, n_cells=16, arrays={"clr_feature_scales": scales}
+            reference(clr, {"clr_feature_scales": scales})
         ).scales,
         scales,
     )
-    for options in ({}, {"n_cells": 16}, {"arrays": {"clr_feature_scales": scales}}):
-        with pytest.raises(ValueError, match="'pearson_feature_fractions'"):
-            mapping_features.reference_normalization(parameters, **options)
 
 
 @pytest.mark.parametrize(
@@ -922,6 +934,7 @@ def test_mapping_feature_helper_validation_and_lightweight_methods() -> None:
             normalization,
             "zero",
             ResourceBudget(1_000, 1),
+            normalization=LibrarySizeFit(1_000.0, False),
         )
     assay = object.__new__(RNAassay)
     with pytest.raises(TypeError, match="ResourceBudget"):
@@ -933,6 +946,7 @@ def test_mapping_feature_helper_validation_and_lightweight_methods() -> None:
             normalization,
             "zero",
             object(),  # type: ignore[arg-type]
+            normalization=LibrarySizeFit(1_000.0, False),
         )
     with pytest.raises(ValueError, match="fields must be positive"):
         mapping_features.AlignedFeatureStream(
@@ -943,6 +957,7 @@ def test_mapping_feature_helper_validation_and_lightweight_methods() -> None:
             normalization,
             "zero",
             ResourceBudget(0, 1),
+            normalization=LibrarySizeFit(1_000.0, False),
         )
     with pytest.raises(TypeError, match="must be an integer"):
         mapping_features.AlignedFeatureStream(
@@ -954,6 +969,7 @@ def test_mapping_feature_helper_validation_and_lightweight_methods() -> None:
             "zero",
             ResourceBudget(1_000, 1),
             reserved_resident_bytes=True,
+            normalization=LibrarySizeFit(1_000.0, False),
         )
     with pytest.raises(ValueError, match="must be non-negative"):
         mapping_features.AlignedFeatureStream(
@@ -965,6 +981,7 @@ def test_mapping_feature_helper_validation_and_lightweight_methods() -> None:
             "zero",
             ResourceBudget(1_000, 1),
             reserved_per_row_bytes=-1,
+            normalization=LibrarySizeFit(1_000.0, False),
         )
 
     assay.rawData = SimpleNamespace(shape=(1,), dtype=np.dtype("f8"))
@@ -977,6 +994,7 @@ def test_mapping_feature_helper_validation_and_lightweight_methods() -> None:
             normalization,
             "zero",
             ResourceBudget(1_000, 1),
+            normalization=LibrarySizeFit(1_000.0, False),
         )
     assay.rawData = SimpleNamespace(shape=(1, 1), dtype=np.dtype("O"))
     with pytest.raises(TypeError, match="must be real numbers"):
@@ -988,6 +1006,7 @@ def test_mapping_feature_helper_validation_and_lightweight_methods() -> None:
             normalization,
             "zero",
             ResourceBudget(1_000, 1),
+            normalization=LibrarySizeFit(1_000.0, False),
         )
     assay.rawData = SimpleNamespace(shape=(1, 1), dtype=np.dtype("f8"))
     with pytest.raises(ValueError, match="cannot be empty"):
@@ -999,6 +1018,7 @@ def test_mapping_feature_helper_validation_and_lightweight_methods() -> None:
             normalization,
             "zero",
             ResourceBudget(1_000, 1),
+            normalization=LibrarySizeFit(1_000.0, False),
         )
 
     stream = object.__new__(mapping_features.AlignedFeatureStream)

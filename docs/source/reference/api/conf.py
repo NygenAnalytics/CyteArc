@@ -82,7 +82,6 @@ nitpick_ignore = [
     ("py:class", "collections.abc.Sequence"),
     ("py:class", "collections.abc.Generator"),
     ("py:class", "cytearc.matrix.ChunkedArray"),
-    ("py:class", "cytearc.assay.normalization.NormalizationFit"),
     ("py:class", "cytearc.readers.CrReader"),
     ("py:class", "cytearc.readers.h5ad._H5adAssayFeatures"),
     ("py:class", "cytearc.readers._rds._types.RdsLimits"),
