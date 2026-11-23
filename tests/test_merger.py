@@ -8051,31 +8051,22 @@ def _same_files(merged: dict, reference: dict) -> None:
 
 
 def _traced_band_read(location, rows: int) -> int:
-    """Return the traced peak of reading ``rows`` shuffled cells of every column of a source.
-
-    The read's plan counts the host's CPUs, which on Linux reads cgroup files
-    through a buffer of at least 128 KiB from Python 3.14 on, so the count is
-    taken once beforehand and the band's read alone is traced.
-    """
+    """Return the traced peak of reading ``rows`` shuffled cells of every column of a source, with its plan."""
     import tracemalloc
 
     from cytearc import DataStore
-    from cytearc.storage import execution
     from cytearc.utils.compute import controlled_compute
 
     counts = DataStore(location, default_assay="Counts", nthreads=1).Counts.rawData
     cells = np.random.default_rng(3).permutation(int(counts.shape[0]))[:rows]
-    workers = execution.detect_workers()
-    with pytest.MonkeyPatch.context() as patched:
-        patched.setattr(execution, "detect_workers", lambda: workers)
-        # The first read makes the objects that every later read reuses.
+    # The first read makes the objects that every later read reuses.
+    controlled_compute(counts[cells, :], 1)
+    tracemalloc.start()
+    try:
         controlled_compute(counts[cells, :], 1)
-        tracemalloc.start()
-        try:
-            controlled_compute(counts[cells, :], 1)
-            return tracemalloc.get_traced_memory()[1]
-        finally:
-            tracemalloc.stop()
+        return tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
 
 
 @pytest.mark.parametrize("most_batches", [None, 5, 1])
@@ -8371,11 +8362,8 @@ def test_a_held_read_holds_no_more_than_its_charge(tmp_path, column):
     import tracemalloc
 
     from cytearc import DataStore
-    from cytearc.merge.writer import (
-        _INDEX_BYTES_PER_SELECTED_ROW,
-        _chunk_column_runs,
-        _held_read_bytes,
-    )
+    from cytearc.merge.writer import _chunk_column_runs, _held_read_bytes
+    from cytearc.storage.geometry import array_geometry
     from cytearc.utils.compute import controlled_compute
     from tests.storage_helpers import write_count_store
 
@@ -8420,16 +8408,19 @@ def test_a_held_read_holds_no_more_than_its_charge(tmp_path, column):
 
     np.testing.assert_array_equal(held, values[cells, :width])
     # A read of every cell of the chunk column by an index array holds the
-    # rows that Zarr copies from the chunk and the integers that index the
-    # cells, beside the copies that the read's charge counts. The charge
+    # rows that Zarr copies from the chunk and Zarr's indexers of the cells,
+    # beside the copies that a read of a run of cells holds. The charge
     # holds the read only with the copy for the wide column, and only with
-    # the integers for the narrow one.
+    # the indexers, 64 bytes a cell of a sharded read, for the narrow one.
     charge = _held_read_bytes(run, n_cells)
     assert peak <= charge
     if column == "wide":
         assert peak > charge - n_cells * width * itemsize
     else:
-        assert peak > charge - n_cells * _INDEX_BYTES_PER_SELECTED_ROW
+        geometry = array_geometry(counts._backing)
+        assert geometry is not None and geometry.shards is not None
+        assert geometry.indexBytes(n_cells) == 64 * n_cells
+        assert peak > charge - 64 * n_cells
 
 
 @pytest.mark.parametrize(

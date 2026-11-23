@@ -16,6 +16,7 @@ from cytearc.storage.partition import (
     checked_indices,
     coalesced_gap_bytes,
     contiguous_ranges,
+    index_band_bytes,
     indexed_read_parts,
     is_contiguous,
     partition_indices,
@@ -313,25 +314,78 @@ def test_row_blocks_that_index_both_axes_give_their_selection(
     np.testing.assert_array_equal(block, values[np.ix_(rows, columns)])
 
 
+@pytest.mark.parametrize(
+    ("rows", "columns", "axis"),
+    (
+        # 500 of the 1,024 rows in a shuffled order and three columns, one in
+        # each of three column chunks. Bands of columns would index the 500
+        # rows, 64 bytes each, beside 500 values of each band twice and its
+        # copy of them, 35,000 bytes and 96 to order the three columns;
+        # bands of rows index the three columns and order the 500 rows, 32
+        # bytes each, beside up to 256 rows of three values twice and the
+        # copy of one, under 20,000 bytes. The narrower bands by values alone
+        # are those of columns, 500 values against 3 x 255.
+        (np.random.default_rng(3).permutation(1024)[:500], np.array([0, 300, 600]), 0),
+        # Two rows 255 apart and every other one of the first 128 columns, in
+        # one chunk: bands of columns hold the two rows' span of 127 values
+        # twice and copied, index the two rows and order the 64 columns,
+        # under 4,000 bytes, where a band of rows would hold 256 rows of the
+        # 64 columns twice.
+        (np.array([0, 255]), np.arange(0, 128, 2), 1),
+    ),
+    ids=("index three columns", "index two rows"),
+)
+def test_sharded_reads_that_index_both_axes_slice_the_axis_whose_bands_hold_less(
+    monkeypatch: pytest.MonkeyPatch, rows: np.ndarray, columns: np.ndarray, axis: int
+) -> None:
+    from cytearc.storage import virtual_arrays
+
+    values, array = _sharded_counts()
+    sliced: list[int] = []
+    read_bands = virtual_arrays._read_bands
+
+    def recording(*args, axis, **kwargs):
+        sliced.append(axis)
+        return read_bands(*args, axis=axis, **kwargs)
+
+    monkeypatch.setattr(virtual_arrays, "_read_bands", recording)
+    with zarr_io_concurrency(1):
+        actual = read_selection(array, rows, columns)
+    np.testing.assert_array_equal(actual, values[np.ix_(rows, columns)])
+    assert sliced == [axis]
+
+
 def test_indexed_read_parts_charge_the_narrower_band() -> None:
     geometry = ArrayGeometry((4096, 4096), (1024, 1024), (4096, 4096), 2)
     touched = 4  # four row chunks per shard, or four column chunks of the columns
     decode = geometry.readBytes(0, touched, decodes=1)
     # Two columns in each column chunk span all 1,024 positions, so a block
-    # of 1,024 rows is cheaper to read in bands of rows.
+    # of 1,024 rows is cheaper to read in bands of rows. A band takes its
+    # eight columns by an index array, so it also holds Zarr's indexers of
+    # them, 64 bytes a column in a sharded read, and Zarr's copy of the two
+    # columns of 1,024 rows that it takes from the chunk it decodes; the
+    # reader orders each of the block's rows by row chunk, 32 bytes a row.
     spread = np.array([0, 1023, 1024, 2047, 2048, 3071, 3072, 4095])
     assert widest_chunk_span(spread, 1024) == 1024
     assert indexed_read_parts(geometry, spread, block_rows=1024) == (
-        geometry.readBytes(8 * 1024 * 2, touched, decodes=1),
-        0,
+        geometry.readBytes(8 * 1024 * 2, touched, decodes=1) + 8 * 64 + 1024 * 2 * 2,
+        32,
     )
-    # A dense run in each column chunk spans 16 positions: bands of columns.
+    # A dense run in each column chunk spans 16 positions: bands of columns,
+    # which take each row by an index array, 64 bytes, and copy its 16 values
+    # of the chunk, 32 bytes, beside the reader's ordering of the 32 columns,
+    # 32 bytes each. Bands of rows would hold 2 * 65,536 bytes of the block,
+    # the indexers of 32 columns, the copy of 16 columns of 1,024 rows from a
+    # chunk and the ordering of the 1,024 rows, 198,656 bytes, more than the
+    # 164,864 of column bands.
     dense = np.concatenate([np.arange(start, start + 16) for start in (0, 1024)])
     assert widest_chunk_span(dense, 1024) == 16
     assert indexed_read_parts(geometry, dense, block_rows=1024) == (
-        decode,
-        geometry.readBytes(16 * 2, touched, decodes=1) - decode,
+        decode + 32 * 32,
+        geometry.readBytes(16 * 2, touched, decodes=1) - decode + 64 + 32,
     )
+    assert 32 * 32 + 1024 * (2 * 16 * 2 + 64 + 32) == 164_864
+    assert 2 * 65_536 + 32 * 64 + 1024 * 16 * 2 + 1024 * 32 == 198_656
 
 
 def test_a_read_of_part_of_a_shard_is_charged_the_chunks_between_its_columns() -> None:
@@ -482,16 +536,23 @@ def test_row_reads_at_a_concurrency_hold_the_shards_and_decodes_they_run_at_once
     # Scattered rows over genes of wide spans in two chunks are read a row
     # chunk at a time, a band of their 4 x 1,000 values twice over beside the
     # chunks of up to two of the four shards at once, each decoding its two
-    # chunks at once, and Zarr's indices of the 9 shards and 4 genes, and of
-    # each row.
+    # chunks at once. The band takes its four genes by an index array, so it
+    # also holds Zarr's indexers of them, 64 bytes a gene, and Zarr's copy of
+    # the two genes of 1,000 rows that it takes from a chunk, which the read's
+    # event loop makes a chunk at a time, and the reader orders each row by
+    # row chunk, 32 bytes. A block whose rows form one run is read in one
+    # request, which holds each row's shard-level copy, 16 bytes, and the
+    # copy of its two genes of a chunk, 8 bytes, less than that ordering.
     wide = np.array([0, 39, 40, 79])
     shard_read = 2 * encoded + 2 * decoded + 32_768 + 2 * 4_096 + 2 * 16_384
+    band = 2 * 4 * 1_000 * 4 + 2 * shard_read + 4 * 64 + 1_000 * 2 * 4
     assert row_read_parts(
         geometry, wide, rows_contiguous=False, concurrency=4, shards=2
-    ) == (2 * 4 * 1_000 * 4 + 2 * shard_read + 128 * (9 + 4), 4 * 4 + 128)
+    ) == (band, 32)
+    assert 4 * 4 + 2 * 4 < 32
     assert indexed_read_parts(
         geometry, wide, block_rows=1_000, concurrency=4, shards=2
-    ) == (2 * 4 * 1_000 * 4 + 2 * shard_read, 0)
+    ) == (band, 32)
     # An unsharded array's chunks are each read on their own, so a band over
     # three of them holds up to the concurrency of them at once, beside the
     # objects of a read of the three.
@@ -506,12 +567,44 @@ def test_row_reads_at_a_concurrency_hold_the_shards_and_decodes_they_run_at_once
     ) == (3 * stored + 32_768 + 3 * 4_096 + 3 * 16_384, 0)
 
 
+def test_row_reads_by_index_arrays_charge_their_indexers_and_copies() -> None:
+    unsharded = ArrayGeometry((8_000, 400), (1_000, 400), None, 4)
+    stored = 2 * 1_600_000 + 1_600_000 // 128 + 1_024
+    objects = 32_768 + 4_096 + 16_384
+    three = np.array([0, 5, 9])
+    # Rows that form one run, over a run of genes, are read as slices, whose
+    # chunks Zarr places as views.
+    assert row_read_parts(unsharded, np.arange(3), rows_contiguous=True) == (
+        stored + objects,
+        0,
+    )
+    # Rows by an index array hold Zarr's indexers of each row, 40 bytes in an
+    # unsharded read, and its copy of the row's three genes, 12 bytes.
+    assert row_read_parts(unsharded, np.arange(3), rows_contiguous=False) == (
+        stored + objects,
+        40 + 12,
+    )
+    # Gathered genes hold the indexers of the three genes, and the copy of
+    # each row's three genes.
+    assert row_read_parts(unsharded, three, rows_contiguous=True) == (
+        stored + objects + 3 * 40,
+        12,
+    )
+    # Both also hold NumPy's buffers of 8,192 elements of the two index
+    # arrays, 8 bytes each.
+    assert row_read_parts(unsharded, three, rows_contiguous=False) == (
+        stored + objects + 3 * 40 + 8_192 * 16,
+        40 + 12,
+    )
+
+
 def test_band_costs_are_zero_for_empty_selections() -> None:
     geometry = ArrayGeometry((4096, 4096), (1024, 1024), (4096, 4096), 2)
     empty = np.array([], dtype=np.int64)
     # Callers skip empty selections, but the exported helpers answer them.
     assert widest_chunk_span(empty, 1024) == 0
     assert indexed_read_parts(geometry, empty, block_rows=1024) == (0, 0)
+    assert index_band_bytes(geometry, empty, rows=1024, row_span=1024) == (0, 0)
     assert row_read_parts(geometry, empty, rows_contiguous=False) == (0, 0)
     assert row_read_parts(None, np.array([0, 2]), rows_contiguous=False) == (0, 0)
 
@@ -557,6 +650,9 @@ def test_contiguous_ranges_cover_the_axis_without_overlap() -> None:
         ([2, 4], False),
         ([3, 2], False),
         ([2, 2], False),
+        # The ends of a run, but not in order.
+        ([0, 2, 1, 3], False),
+        ([0, 1, 1, 3], False),
         # A negative start would wrap around as a slice, so it is no run.
         ([-1, 0, 1], False),
         ([-1], False),
@@ -583,6 +679,24 @@ def test_is_contiguous_does_not_wrap_narrow_integer_steps(
     indices, dtype, expected
 ) -> None:
     assert is_contiguous(np.asarray(indices, dtype=dtype)) is expected
+
+
+def test_is_contiguous_tells_a_selection_that_spans_more_than_a_run_apart_without_a_pass() -> (
+    None
+):
+    import tracemalloc
+
+    # A shuffled million rows, whose ends lie further apart than a run's.
+    rows = np.random.default_rng(0).permutation(2_000_000)[:1_000_000]
+    tracemalloc.start()
+    try:
+        assert not is_contiguous(rows)
+        _current, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    # A pass would hold the steps and their comparison, 9 bytes a row.
+    assert peak < 64 * 1024
+    assert is_contiguous(np.arange(5, 1_000_005))
 
 
 def test_affordable_width_finds_the_largest_accepted_width() -> None:

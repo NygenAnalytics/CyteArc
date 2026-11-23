@@ -885,25 +885,15 @@ def _chunk_column_runs(counts: ChunkedArray) -> list[ChunkedArray]:
     return _column_runs(counts, max(1, counts.chunk_columns()))
 
 
-# Zarr's orthogonal indexing makes several arrays of 8-byte integers over
-# the rows that an index array selects, sorting them by chunk at the array
-# and again inside the shard: reads of up to 400,000 rows of one chunk
-# column traced about 60 to 64 bytes a row beside their values.
-_INDEX_BYTES_PER_SELECTED_ROW = 72
-
-
 def _held_read_bytes(run: ChunkedArray, rows: int) -> int:
     """Return what a read of ``rows`` rows of ``run``, one chunk column, holds beside the rows held.
 
-    A read of rows by an index array also holds Zarr's copy of the rows that
-    it selects from each chunk and the integers that index them, which the
-    read's charge leaves out; within one chunk column the copy can be as
-    large as the rows read, and the integers outweigh a narrow column.
+    The read takes the rows by an index array, so its charge counts Zarr's
+    indexers of them and its copy of the rows that it takes from each chunk,
+    which within one chunk column can be as large as the rows read.
     """
     selected = int(rows) * int(run.shape[1]) * run.dtype.itemsize
-    return (
-        run._read_bytes(selected) + selected + int(rows) * _INDEX_BYTES_PER_SELECTED_ROW
-    )
+    return run._read_bytes(selected, rows_indexed=True)
 
 
 def _held_block_rows(
