@@ -78,6 +78,7 @@ ARTIFACT_KINDS = frozenset(
         "reference_labels",
         "smart_label",
         "statistical_tests",
+        "trajectory_states",
         "variant_counts",
         "variant_genotypes",
         "variant_selection",

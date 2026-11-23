@@ -254,8 +254,9 @@ def test_datastore_namespace_bindings_cover_all_moved_methods_and_find():
     # regulons.specificity and regulons.connection_specificity, then
     # trajectory.lineage_membership, trajectory.load_lineage_membership and
     # trajectory.branch_cells, then scores.potency and scores.load_potency,
-    # then embeddings.localmap.
-    assert len(_NAMESPACE_METHODS) == 162
+    # then embeddings.localmap, then trajectory.states and
+    # trajectory.load_states.
+    assert len(_NAMESPACE_METHODS) == 164
     assert {
         "import_receptors",
         "load_receptors",
@@ -347,6 +348,8 @@ def test_datastore_namespace_bindings_cover_all_moved_methods_and_find():
         "lineage_membership",
         "load_lineage_membership",
         "branch_cells",
+        "states",
+        "load_states",
     } <= {
         name
         for namespace, _, name, _ in _NAMESPACE_METHODS

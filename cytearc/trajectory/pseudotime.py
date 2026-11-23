@@ -365,31 +365,45 @@ def _product_bound(n_cells: int, n_modes: int, max_iterations: int) -> int:
 
 
 class _SolveProgress:
-    """Count the Laplacian products of a pseudotime solve and report them.
+    """Count the operator products of an iterative solve and report them.
 
     ``limit`` holds the solve's ``max_iterations`` and the most products
     they allow, or is None for an unbounded solve. A progress bar counts the
     products against that most, or without a total when the solve is
     unbounded, and an INFO record reports them every
     ``_PROGRESS_INTERVAL_SECONDS``. ``solving`` names what the solve finds,
-    such as ``"for 30 singular modes"``.
+    such as ``"for 30 singular modes"``. ``title`` heads the bar, ``call``
+    heads the records, ``unit`` names what is counted, and ``bound`` names
+    the argument that ``limit`` holds, or None to leave it out of the
+    records; the defaults are those of a pseudotime solve.
     """
 
     def __init__(
-        self, n_cells: int, solving: str, limit: tuple[int, int] | None
+        self,
+        n_cells: int,
+        solving: str,
+        limit: tuple[int, int] | None,
+        *,
+        title: str = "Pseudotime solve",
+        call: str = "Pseudotime scoring",
+        unit: str = "operator products",
+        bound: str | None = "max_iterations",
     ) -> None:
         self.products = 0
         self._n_cells = n_cells
         self._solving = solving
         self._limit = limit
+        self._call = call
+        self._unit = unit
+        self._bound = bound
         if limit is None:
             # Without a total, the bar shows the count and its rate.
             self._bar = tqdmbar(
-                desc="Pseudotime solve",
-                bar_format="{desc}: {n_fmt} operator products [{elapsed}, {rate_fmt}]",
+                desc=title,
+                bar_format=f"{{desc}}: {{n_fmt}} {unit} [{{elapsed}}, {{rate_fmt}}]",
             )
         else:
-            self._bar = tqdmbar(total=limit[1], desc="Pseudotime solve")
+            self._bar = tqdmbar(total=limit[1], desc=title)
         self._started = self._recorded = self._shown = time.monotonic()
         self._shown_products = 0
 
@@ -409,14 +423,14 @@ class _SolveProgress:
 
     def _record(self, now: float) -> None:
         if self._limit is None:
-            count = f"{self.products} operator products"
+            count = f"{self.products} {self._unit}"
             bound = "; set max_iterations to bound the solve"
         else:
             max_iterations, most = self._limit
-            count = f"{self.products} of at most {most} operator products"
-            bound = f" (max_iterations={max_iterations})"
+            count = f"{self.products} of at most {most} {self._unit}"
+            bound = "" if self._bound is None else f" ({self._bound}={max_iterations})"
         logger.info(
-            f"Pseudotime scoring: {count} after {now - self._started:.0f} s, "
+            f"{self._call}: {count} after {now - self._started:.0f} s, "
             f"solving {self._solving} of {self._n_cells} cells{bound}"
         )
 

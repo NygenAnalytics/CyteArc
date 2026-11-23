@@ -278,6 +278,13 @@ CyteArc is copyright Nygen Analytics AB and is licensed under the BSD 3-Clause L
 - License: MIT
 - Used in: `cytearc/clones/allele_clones.py` (the clonal p-value of `@Bank/Bank.m` at commit 7b10f94611473de8c70dd78c2f911507f52c626b: `clonal_pvalue_eqn`, the chance that an allele of Poisson rate λ seen among M observations arose more than once, and its use in `compute_clonal_pvalue`, which tests each allele of a sample against its bank rate with M the sample's observations of edited alleles and gives the unedited template a p-value of 1), reimplemented on arrays from the Poisson tails. Alleles that the bank lacks take a rate of 0, where `compute_clonal_pvalue` takes its model's mean rate of unobserved alleles.
 
+### CellRank
+
+- Source: <https://github.com/scverse/cellrank>
+- Copyright (c) 2019, Theis Lab
+- License: BSD-3-Clause
+- Used in: `cytearc/trajectory/states.py`, two rules of CellRank 2.4.0's GPCCA estimator, written from that source: the cells of each state, its `cells_per_state` most likely cells with a cell that several states take going to the one in which its membership is largest, as `_fuzzy_to_discrete` assigns them with `remove_overlap=False`; and the names of states, the label most common among a state's cells with `_1`, `_2` for names that several states take, as `_names_and_colors_from_association` names macrostates. The search itself follows the papers that its docstring cites, and no code of pyGPCCA was read.
+
 ## Data in this repository
 
 - **JASPAR** (<https://jaspar.elixir.no>), CC BY 4.0: the motif matrices MA0004.1 (Arnt) and
@@ -352,6 +359,7 @@ CyteArc is copyright Nygen Analytics AB and is licensed under the BSD 3-Clause L
 - **ConvexML** (<https://github.com/songlab-cal/ConvexML>), BSD-3-Clause, Copyright (c) 2025, Song Lab @ Cal: `tests/data/phylogenies/convexml_tree_0.nwk` is `tests/public_api_tests/data/tree_0_newick.txt` at commit e93f6aee113044c29c1f123023f11fe9e6753bde, unchanged. The license text is at the end of this file.
 - **treedata** (<https://github.com/YosefLab/treedata>), BSD-3-Clause: treedata 0.4.0 wrote `tests/data/phylogenies/truth_tree_treedata_0_4_0.h5td`, `truth_tree_treedata_0_4_0.zarr` and `truth_forest_treedata_0_4_0.h5td` from the synthetic experiment of `tests/clone_truth.py`, so they hold no third-party data.
 - **pycea** (<https://github.com/YosefLab/pycea>), BSD-3-Clause: `tests/pycea_0_4_0_golden.json` holds the clades that pycea 0.4.0's `tl.clades` cut from the PEtracer and ConvexML trees above, after treedata 0.4.0's `read_nwk` read them. No code of pycea was copied.
+- **State search reference**: `tests/data/trajectory_states/cellrank_reference.npz` holds a synthetic branching process of 480 cells, drawn with NumPy as `cellrank_reference.json` describes, so it holds no third-party data, with the walk that CyteArc's fate maps take on it and the Schur vectors, eigenvalues, memberships, coarse-grained transition matrices, coarse stationary distributions and macrostates that CellRank 2.4.0 (<https://github.com/scverse/cellrank>, BSD-3-Clause) computed from that walk through pyGPCCA 1.1.0 (<https://github.com/GPCCA/pyGPCCA>, LGPL-3.0-or-later). CellRank and pyGPCCA were run to produce the values, and no code of pyGPCCA was read or copied.
 - **Potency reference**: `tests/data/potency/scent_reference.npz` holds the counts of 64 cells of the `bastidas-ponce_4K_pancreas-d15_rnaseq` example, credited under "Example datasets", on 5,778 genes, the edges among those genes of the mouse STRING v12.5 network credited under "Networks that CyteArc downloads" (CC BY 4.0), and the signaling entropy rate and CCAT that SCENT 1.1 (<https://github.com/aet21/SCENT>, GPL-3, commit 02b4bc64a45431860d7d756bca58ca3306b5eae9) computed from them; `scent_reference.json` records how they were made. SCENT was run to produce the values, and no code of SCENT was copied.
 - **Color palettes** in `cytearc/metadata/palettes.py`: the 10- and 20-color sets are Tableau 10 and
   20 as distributed with matplotlib (the 10-color set with Scanpy's colorblind substitutions), the
@@ -1671,6 +1679,40 @@ SOFTWARE.
 BSD 3-Clause License
 
 Copyright (c) 2025, Song Lab @ Cal
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this
+   list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+
+3. Neither the name of the copyright holder nor the names of its
+   contributors may be used to endorse or promote products derived from
+   this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+```
+
+### CellRank (BSD 3-Clause License)
+
+```text
+BSD 3-Clause License
+
+Copyright (c) 2019, Theis Lab
+All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
 modification, are permitted provided that the following conditions are met:

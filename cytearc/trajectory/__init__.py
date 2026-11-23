@@ -36,6 +36,7 @@ if TYPE_CHECKING:
         PseudotimeAggregationResult as PseudotimeAggregationResult,
         PseudotimeMarkerResult as PseudotimeMarkerResult,
         PseudotimeScoreResult as PseudotimeScoreResult,
+        TrajectoryStatesResult as TrajectoryStatesResult,
     )
 
 __all__ = [
@@ -54,6 +55,7 @@ __all__ = [
     "PseudotimeMarkerResult",
     "PseudotimeScoreResult",
     "SourceSinkLabelsError",
+    "TrajectoryStatesResult",
     "aggregate_feature_profiles",
     "build_cluster_tree",
     "make_source_sink_vector",
@@ -94,6 +96,7 @@ __getattr__, __dir__ = _lazy_facade(
         "PseudotimeAggregationResult": ".results",
         "PseudotimeMarkerResult": ".results",
         "PseudotimeScoreResult": ".results",
+        "TrajectoryStatesResult": ".results",
         "PseudotimeConvergenceError": ".errors",
         "SourceSinkLabelsError": ".errors",
     },

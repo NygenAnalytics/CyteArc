@@ -265,6 +265,36 @@ class FateMappingArguments(OperationArguments):
 
 
 @dataclass(frozen=True, slots=True)
+class TrajectoryStatesArguments(OperationArguments):
+    operation: ClassVar[str] = "find_trajectory_states"
+    artifact_kind: ClassVar[str] = "trajectory_states"
+    #: The cells searched, those of the graph left out because they lie
+    #: outside the largest connected component of scored cells, the terminal
+    #: states found, the states that hold fewer cells than cells_per_state,
+    #: and the crispness of the memberships.
+    diagnostics: ClassVar[tuple[str, ...]] = (
+        "searchedCells",
+        "cellsLeftOut",
+        "terminalStates",
+        "statesShortOfCells",
+        "crispness",
+    )
+    call: ClassVar[str | None] = "ds.trajectory.states"
+
+    connectivity_map: ArtifactRef = artifact_input()
+    direction: ArtifactRef = artifact_input()
+    cell_selection: ArtifactRef = artifact_input()
+    n_states: int = parameter()
+    cells_per_state: int = parameter()
+    beta: float = parameter()
+    invalidate_cache: bool = execution()
+    # The labels that name the states and the eigen-solve's bound are
+    # recorded only when the call sets them.
+    labels: ArtifactRef | None = artifact_input(None, omit_if_none=True)
+    max_iterations: int | None = parameter(None, omit_if_none=True)
+
+
+@dataclass(frozen=True, slots=True)
 class PseudotimeMarkerArguments(OperationArguments):
     operation: ClassVar[str] = "run_pseudotime_marker_search"
     artifact_kind: ClassVar[str] = "pseudotime_markers"

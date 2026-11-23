@@ -674,3 +674,88 @@ class LineageMembershipResult:
             )
         for name in ("labels", "members", "valid", "distance_limits"):
             object.__setattr__(self, name, read_only_copy(getattr(self, name)))
+
+
+#: The columns of a state search's table, one row per state.
+STATE_TABLE_COLUMNS = (
+    "role",
+    "cells",
+    "cell_share",
+    "walk_share",
+    "enrichment",
+    "stability",
+    "direction",
+)
+
+
+@dataclass(frozen=True, slots=True, eq=False)
+class TrajectoryStatesResult:
+    """The initial, intermediate and terminal states of a walk, loaded from an artifact.
+
+    ``names`` lists the states in the order of the walk, earliest mean
+    direction first. ``labels`` gives, for each cell of ``cell_selection``,
+    the state whose most likely cells it is among, missing elsewhere, and
+    ``memberships`` each cell's membership in each state, cells by states,
+    NaN outside the ``valid`` cells that the search covered.
+    ``coarse_transitions`` is the walk between the states, each row summing
+    to one. ``table`` holds one row per state: its ``role``, the ``cells``
+    that its label marks, its ``cell_share``, the mean of its memberships,
+    its ``walk_share``, its share of a long walk's time, their ratio
+    ``enrichment``, its ``stability``, the probability that one step of the
+    walk stays in it, and its mean ``direction`` score rescaled to [0, 1].
+    The first state is the initial one, and each other state whose
+    enrichment exceeds one is terminal. ``eigenvalues`` holds the walk's
+    ``n_states + 1`` leading eigenvalues, largest real part first, and
+    ``crispness`` how little the states overlap, from 0 to 1.
+    """
+
+    ref: ArtifactRef
+    graph: ArtifactRef
+    direction: ArtifactRef
+    cell_selection: ArtifactRef
+    labels_artifact: ArtifactRef | None
+    names: tuple[str, ...]
+    labels: pd.Categorical = field(repr=False)
+    memberships: np.ndarray = field(repr=False)
+    valid: np.ndarray = field(repr=False)
+    coarse_transitions: np.ndarray = field(repr=False)
+    table: pd.DataFrame = field(repr=False)
+    eigenvalues: np.ndarray = field(repr=False)
+    crispness: float
+
+    def __post_init__(self) -> None:
+        n_states = len(self.names)
+        if n_states < 2 or len(set(self.names)) != n_states:
+            raise ValueError("A state search names at least two distinct states")
+        valid = np.asarray(self.valid, dtype=bool)
+        if valid.ndim != 1:
+            raise ValueError("State validity must be one-dimensional")
+        if np.shape(self.memberships) != (valid.shape[0], n_states):
+            raise ValueError("State memberships must be cells by states")
+        if len(self.labels) != valid.shape[0] or list(self.labels.categories) != list(
+            self.names
+        ):
+            raise ValueError("State labels must name a state of each labeled cell")
+        if np.shape(self.coarse_transitions) != (n_states, n_states):
+            raise ValueError("The coarse transitions must be states by states")
+        if list(self.table.index) != list(self.names) or list(
+            self.table.columns
+        ) != list(STATE_TABLE_COLUMNS):
+            raise ValueError("The state table needs one row per state and its columns")
+        if np.shape(self.eigenvalues) != (n_states + 1,):
+            raise ValueError("A state search holds n_states + 1 eigenvalues")
+        object.__setattr__(self, "valid", read_only_copy(valid))
+        for name in ("memberships", "coarse_transitions", "eigenvalues"):
+            object.__setattr__(
+                self, name, read_only_copy(np.asarray(getattr(self, name)))
+            )
+
+    @property
+    def initial(self) -> tuple[str, ...]:
+        """The initial state, the one that the direction places earliest."""
+        return tuple(self.table.index[self.table["role"] == "initial"])
+
+    @property
+    def terminal(self) -> tuple[str, ...]:
+        """The terminal states, in the order of the walk, to pass to ``fate`` as ``sinks``."""
+        return tuple(self.table.index[self.table["role"] == "terminal"])
