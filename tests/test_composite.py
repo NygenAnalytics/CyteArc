@@ -645,6 +645,187 @@ def test_selected_composite_matches_values_and_reopens(
 
 
 @pytest.mark.parametrize(
+    ("rows", "masked"),
+    [
+        # Rows 0, 2 and 5 of b hold missing values, and the composite takes 0.
+        pytest.param([0, 1, 3, 4], True, id="takes a missing value"),
+        # It leaves every missing value out, so its column needs no mask.
+        pytest.param([1, 3, 4, 6], False, id="leaves them out"),
+    ],
+)
+@pytest.mark.parametrize(
+    "missing", [np.nan, np.datetime64("NaT", "ns")], ids=["float NaN", "NaT"]
+)
+def test_a_composite_stores_missing_numbers_and_times_as_missing_text(
+    sources, tmp_path, rows, masked, missing
+):
+    import anndata
+
+    import cytearc
+
+    present = 4.5 if isinstance(missing, float) else np.datetime64("2026-01-01", "ns")
+    b = np.asarray([missing if row in (0, 2, 5) else present for row in range(11)])
+    a = np.asarray(["T", "B"] * 6 + ["T"], dtype=object)
+    # Both hold a note as well, which records no categories, as text in a.
+    for source, column in ((sources["a"], a), (sources["b"], b)):
+        for name in ("cell_type", "note"):
+            source.cells.insert(
+                name, by_cell_id(source.cells, column, key=None), key=None
+            )
+    sources["a"].zw["cellData"]["cell_type"].attrs.update(
+        {"levels": ["T", "B"], "ordered": False}
+    )
+    joint = create_composite(
+        sources,
+        at=tmp_path / "joint.zarr",
+        features="union",
+        rows={"b": rows},
+        mem_budget="64M",
+        nthreads=1,
+    )
+    cells = joint.z["cellData"]
+    ids = cells["ids"][:].tolist()
+
+    def stored(name):
+        """Each cell's stored value of a column and whether its missing mask flags it."""
+        mask = f"__cytearc_missing__{name}"
+        assert (mask in cells) is masked, name
+        flagged = cells[mask][:].tolist() if masked else [False] * len(ids)
+        return dict(
+            zip(ids, zip(cells[name][:].tolist(), flagged, strict=True), strict=True)
+        )
+
+    # pandas names the missing values, and NumPy writes the others as text.
+    expected = {f"b__c{row}": None if pd.isna(b[row]) else str(b[row]) for row in rows}
+    for name in ("orig_cell_type", "orig_note"):
+        rows_stored = stored(name)
+        assert {cell: rows_stored[cell] for cell in expected} == {
+            cell: ("", True) if label is None else (label, False)
+            for cell, label in expected.items()
+        }, name
+    assert cells["orig_cell_type"].attrs["levels"] == ["T", "B", str(present)]
+    cytearc.to_h5ad(joint.RNA, str(tmp_path / "export.h5ad"))
+    exported = anndata.read_h5ad(tmp_path / "export.h5ad").obs["orig_cell_type"]
+    assert exported.cat.categories.tolist() == ["T", "B", str(present)]
+    assert {
+        cell: None if pd.isna(exported[cell]) else str(exported[cell])
+        for cell in expected
+    } == expected
+
+
+def test_a_composite_charges_the_selected_rows_that_its_scan_holds(
+    sources, tmp_path, monkeypatch
+):
+    import cytearc.composite.create as creation
+
+    scanned: list[int] = []
+    admitted: list[int] = []
+    resolve = creation.resolve_metadata_schema_scan_rows
+    admit = creation.admit_cell_metadata_plan
+
+    def recorded_scan(tables, resources, *, resident_bytes, preferred_rows):
+        scanned.append(resident_bytes)
+        return resolve(
+            tables,
+            resources,
+            resident_bytes=resident_bytes,
+            preferred_rows=preferred_rows,
+        )
+
+    def recorded_admit(plan, row_plan, resources, *, resident_bytes):
+        admitted.append(resident_bytes)
+        return admit(plan, row_plan, resources, resident_bytes=resident_bytes)
+
+    monkeypatch.setattr(creation, "resolve_metadata_schema_scan_rows", recorded_scan)
+    monkeypatch.setattr(creation, "admit_cell_metadata_plan", recorded_admit)
+    create_composite(
+        sources,
+        at=tmp_path / "joint.zarr",
+        features="union",
+        rows={"a": [0, 5, 9], "b": [1, 2]},
+        mem_budget="64M",
+        nthreads=1,
+    )
+    # Beside what the rest of the composite holds, the scan holds a sorted
+    # copy of the 5 selected rows, and the copy of one source as it sorts
+    # them, 8 bytes a row each.
+    assert len(scanned) == 1 and len(admitted) == 1
+    assert scanned[0] - admitted[0] == 2 * 8 * 5
+
+
+def test_a_composite_of_narrow_labels_and_dates_that_are_all_nat(sources, tmp_path):
+    nat = np.datetime64("NaT", "ns")
+    # One-letter labels plan columns of one character, which the text of NaT
+    # would not fit.
+    sources["a"].cells.insert(
+        "cell_type",
+        by_cell_id(
+            sources["a"].cells,
+            np.asarray(["T", "B"] * 6 + ["T"], dtype=object),
+            key=None,
+        ),
+        key=None,
+    )
+    sources["b"].cells.insert(
+        "cell_type",
+        by_cell_id(sources["b"].cells, np.full(11, nat), key=None),
+        key=None,
+    )
+    genes = {
+        name: source.RNA.feats.fetch_all("ids").tolist()
+        for name, source in sources.items()
+    }
+    sources["a"].RNA.feats.insert(
+        "biotype", np.asarray([gene[-1] for gene in genes["a"]], dtype=object)
+    )
+    sources["b"].RNA.feats.insert("biotype", np.full(len(genes["b"]), nat))
+    joint = create_composite(
+        sources,
+        at=tmp_path / "joint.zarr",
+        features="union",
+        rows={"b": [0, 3, 7]},
+        mem_budget="64M",
+        nthreads=1,
+    )
+    cells = joint.z["cellData"]
+    assert cells["orig_cell_type"].dtype == np.dtype("U1")
+    stored = dict(
+        zip(
+            cells["ids"][:].tolist(),
+            zip(
+                cells["orig_cell_type"][:].tolist(),
+                cells["__cytearc_missing__orig_cell_type"][:].tolist(),
+                strict=True,
+            ),
+            strict=True,
+        )
+    )
+    assert stored == {
+        **{
+            f"a__c{row}": (label, False)
+            for row, label in enumerate(["T", "B"] * 6 + ["T"])
+        },
+        **{f"b__c{row}": ("", True) for row in (0, 3, 7)},
+    }
+    features = joint.z["RNA/featureData"]
+    # A gene that only b measures holds no annotation.
+    assert dict(
+        zip(
+            features["ids"][:].tolist(),
+            zip(
+                features["biotype"][:].tolist(),
+                features["__cytearc_missing__biotype"][:].tolist(),
+                strict=True,
+            ),
+            strict=True,
+        )
+    ) == {
+        gene: (gene[-1], False) if gene in genes["a"] else ("", True)
+        for gene in set(genes["a"]) | set(genes["b"])
+    }
+
+
+@pytest.mark.parametrize(
     ("rows", "levels"),
     [
         # The composite leaves out the cells of b that hold NK and Plasma.
