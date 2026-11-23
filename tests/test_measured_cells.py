@@ -1480,7 +1480,8 @@ def test_membership_reads_return_rows_in_order_and_skip_full_columns(
         every[::-1],
         np.array([0, 0, 3, 3, 70, 70, 79]),
         np.array([79, 3, 70, 3, 0]),
-        np.array([63, 64]),
+        # A cell that RNA measured beside one that it did not.
+        np.array([np.flatnonzero(membership)[0], np.flatnonzero(~membership)[0]]),
     ):
         np.testing.assert_array_equal(
             measured_rows(store.cells, "RNA", rows), membership[rows]
