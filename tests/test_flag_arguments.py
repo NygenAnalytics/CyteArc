@@ -256,8 +256,18 @@ STACK_PLOT_FLAGS = _stack_plot_flags()
 
 
 def _called(call: Callable[..., Any], arguments: dict[str, Any]) -> Any:
-    """Call, and start a generator, which checks its arguments when it starts."""
-    result = call(**arguments)
+    """Call, and start a generator, which checks its arguments when it starts.
+
+    An argument that the call takes only by position, such as the run of
+    ``ds.pipeline.end_paused``, is passed by position.
+    """
+    keywords = dict(arguments)
+    positional = [
+        keywords.pop(name)
+        for name, parameter in inspect.signature(call).parameters.items()
+        if parameter.kind is inspect.Parameter.POSITIONAL_ONLY and name in keywords
+    ]
+    result = call(*positional, **keywords)
     if inspect.isgenerator(result):
         try:
             next(result, None)

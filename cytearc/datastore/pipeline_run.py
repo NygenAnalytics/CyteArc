@@ -1214,7 +1214,8 @@ class PipelineRun(Mapping[str, ArtifactRef | tuple[ArtifactRef, ...]]):
         """``"running"``, ``"paused"``, ``"completed"``, ``"failed"``, or ``"interrupted"``.
 
         A run that a recipe called with ``run_until`` stopped is
-        ``"paused"`` until ``ds.pipeline.resume`` runs the rest. The status
+        ``"paused"`` until ``ds.pipeline.resume`` runs the rest, or
+        ``ds.pipeline.end_paused`` ends it as ``"interrupted"``. The status
         is the one that the run record held when this handle was opened.
         """
         return self._record.status

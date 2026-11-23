@@ -7,6 +7,7 @@ from ..storage.artifacts import ArtifactRef
 from ..storage.pipeline_runs import (
     PipelineRunRecord,
     abandon_pipeline_label_claim,
+    end_paused_pipeline_run_record,
     load_pipeline_run_record,
 )
 from ..storage.validation_scope import validation_scoped
@@ -1199,14 +1200,15 @@ class PipelineAccessor:
             TypeError: If ``run`` is neither a run nor a run ID.
             KeyError: If the store holds no such run.
             ValueError: If the run cannot resume, and nothing is written: it
-                is not paused, another release recorded it, its settings or
+                is not paused, as after another process ended it while this
+                one replayed it, another release recorded it, its settings or
                 finished stages no longer match what it recorded, the
                 session's ``normMethod`` is not its custom normalizer, another
                 run committed its label, or ``run_until`` names no stage that
                 it has left to run.
             RuntimeError: If the store lacks atomic conditional writes, an
                 unfinished run holds the claim of its label, or another
-                process resumed the run first.
+                process resumed or ended the run first; nothing is written.
             FileNotFoundError: If the run imports guide calls from a file
                 that is no longer at its recorded path.
             PipelineExecutionError: If a stage fails, or the run cannot pause
@@ -1254,3 +1256,79 @@ class PipelineAccessor:
             cancel=cancel,
             resumed=record,
         )
+
+    def end_paused(
+        self,
+        run: str | PipelineRun,
+        /,
+        *,
+        reason: str = "ended while paused",
+        release_claim: bool = False,
+    ) -> PipelineRun:
+        """End a paused run that will not resume, recorded as interrupted.
+
+        A paused run waits for :meth:`resume` until a process resumes it. One
+        that never will, because the analysis was dropped or its resume
+        cannot go on, ends here: its status becomes ``"interrupted"``, with
+        an interruption of kind ``"ended_pause"`` whose message is
+        ``reason``, and ``list_runs(status="paused")`` no longer lists it.
+        The run keeps its stage records and artifacts, so :meth:`rerun`
+        reuses its finished stages under a new run ID.
+
+        The end claims the pause as a resume does, so of a resume and an
+        end of one pause, only one goes ahead and the other raises without
+        writing. Two states need ``release_claim=True``, passed once you have
+        confirmed that the other process stopped, since CyteArc cannot tell a
+        stopped process from a live one: a pause that a resume or an end
+        claimed without recording itself, as a process that stopped between
+        its two writes leaves it, and a pause whose write was cut off, whose
+        process may still be writing it. If that process is alive after all,
+        the write that lands last wins: the end can be lost, or the resume's
+        next stage fails on the ended record. Nothing is written when the
+        call refuses.
+
+        Args:
+            run: A paused run of this datastore, or its run ID.
+            reason: Why the run ends, recorded as its interruption's message.
+            release_claim: End the run although its pause is claimed or not
+                completely written, after you confirmed that the process
+                that claimed or wrote it stopped.
+
+        Returns:
+            The run, interrupted.
+
+        Raises:
+            PermissionError: If the store is read-only.
+            TypeError: If ``run`` is neither a run nor a run ID, ``reason``
+                is not text, or ``release_claim`` is not a bool.
+            KeyError: If the store holds no such run.
+            ValueError: If the run is not paused.
+            RuntimeError: If the store lacks atomic conditional writes,
+                another process resumed or ended the run first, or, without
+                ``release_claim``, the pause is claimed or still being written.
+
+        Example:
+            >>> paused = ds.pipeline.rna(run_until="pca")
+            >>> ds.pipeline.end_paused(paused, reason="analysis dropped").status
+            'interrupted'
+        """
+        release_claim = bool_argument(release_claim, "release_claim")
+        if not isinstance(reason, str) or not reason:
+            raise TypeError("reason must be a non-empty string")
+        if self._store.zarr_mode != "r+":
+            raise PermissionError("Ending a paused run requires zarr_mode='r+'")
+        if isinstance(run, PipelineRun):
+            run = run.run_id
+        if not isinstance(run, str):
+            raise TypeError(
+                f"run must be a PipelineRun or a run's ID, not {type(run).__name__}"
+            )
+        record = load_pipeline_run_record(self._store.zw, run)
+        ended = end_paused_pipeline_run_record(
+            self._store.zw,
+            run_id=record.run_id,
+            segment=len(record.segments),
+            reason=reason,
+            release_claim=release_claim,
+        )
+        return PipelineRun(self._store, ended)

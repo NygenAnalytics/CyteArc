@@ -25,6 +25,7 @@ import pytest
 import zarr
 
 import cytearc.datastore._pipeline.executor as executor_module
+import cytearc.datastore.pipeline_accessor as accessor_module
 import cytearc.storage.pipeline_runs as pipeline_run_storage
 from cytearc import (
     CancellationToken,
@@ -820,8 +821,9 @@ def test_a_resume_of_a_pause_that_another_resume_claimed_is_refused(
 
     with pytest.raises(
         RuntimeError,
-        match="is claimed by another resume that has not yet recorded itself: .* if "
-        "it stays paused, ds\\.pipeline\\.rerun\\(run\\) starts a new run",
+        match="is claimed by another resume or end that has not yet recorded itself: .* "
+        "ds\\.pipeline\\.end_paused\\(run, release_claim=True\\) ends it, while "
+        "ds\\.pipeline\\.rerun\\(run\\) starts a new run",
     ):
         store.pipeline.resume(paused.run_id)
     assert _files(store) == before
@@ -878,8 +880,9 @@ def test_of_two_processes_that_resume_one_run_at_once_one_wins(
 
     assert outcomes["winner"] == "completed"
     assert isinstance(outcomes["loser"], RuntimeError)
-    assert "is claimed by another resume that has not yet recorded itself" in str(
-        outcomes["loser"]
+    assert (
+        "is claimed by another resume or end that has not yet recorded itself"
+        in str(outcomes["loser"])
     )
     # The loser left the run record as the pause wrote it, for the winner.
     assert seen["after the loser"] == paused_record
@@ -916,7 +919,7 @@ def test_a_resume_refuses_a_run_that_another_process_resumed_before_its_replay(
 
     # The error says what happened, without the advice to rerun the run.
     assert str(refused.value) == (
-        f"Pipeline run {paused.run_id} was resumed by another process after this "
+        f"Pipeline run {paused.run_id} was resumed or ended by another process after this "
         "process read it; open the run again to see its status"
     )
     assert _files(store) == seen["before"]
@@ -948,7 +951,9 @@ def test_a_resume_refuses_a_pause_that_another_process_resumed_after_it_read_it(
     )
     seen: dict[str, Any] = {}
 
-    with pytest.raises(RuntimeError, match="was resumed by another process after"):
+    with pytest.raises(
+        RuntimeError, match="was resumed or ended by another process after"
+    ):
         store.pipeline.resume(paused.run_id)
     assert _files(store) == seen["before"]
 
@@ -1004,6 +1009,221 @@ def test_a_run_whose_label_another_run_committed_fails_when_it_pauses(
     assert record.status == "failed" and record.error is not None
     assert record.error.type == "PipelineLabelConflict"
     assert events[-1] == ("run_failed", "pause")
+
+
+# Ending a paused run ---------------------------------------------------------
+
+
+def test_a_paused_run_ends_and_a_rerun_reuses_its_finished_stages(
+    paused, tmp_path
+) -> None:
+    store = _paused_copy(paused, tmp_path)
+    finished = _stage_names(store, paused.run_id)
+
+    ended = store.pipeline.end_paused(
+        store.pipeline.open(run_id=paused.run_id), reason="analysis dropped"
+    )
+
+    assert (ended.run_id, ended.status, ended.label) == (
+        paused.run_id,
+        "interrupted",
+        None,
+    )
+    report = ended.report()
+    assert (
+        report["run"]["interruption"]["kind"],
+        report["run"]["interruption"]["message"],
+    ) == (
+        "ended_pause",
+        "analysis dropped",
+    )
+    assert report["run"]["segments"][-1]["reason"] == "interrupted"
+    assert store.pipeline.list_runs(status="paused") == ()
+    with pytest.raises(
+        ValueError, match="is 'interrupted', and only a paused run resumes"
+    ):
+        store.pipeline.resume(paused.run_id)
+    # The run reserved no label and kept its stages, so a rerun can take the
+    # label and reuses every finished stage, as its plan reports.
+    plan = store.pipeline.plan(ended, label="split")
+    assert {plan[stage].status for stage in finished} <= {"reused", "skipped"}
+    assert plan.computed and not set(plan.computed) & set(finished)
+
+
+def test_a_pause_still_being_written_ends_only_with_release_claim(
+    paused, tmp_path
+) -> None:
+    store = _paused_copy(paused, tmp_path)
+    _edit_run(store, paused.run_id, complete=False)
+    before = _files(store)
+
+    with pytest.raises(RuntimeError, match="may still be writing") as refused:
+        store.pipeline.end_paused(paused.run_id)
+    assert "ds.pipeline.end_paused(run, release_claim=True)" in str(refused.value)
+    assert _files(store) == before
+
+    ended = store.pipeline.end_paused(paused.run_id, release_claim=True)
+
+    assert ended.status == "interrupted"
+    assert ended.report()["run"]["interruption"]["message"] == "ended while paused"
+
+
+@pytest.mark.parametrize("status", ["running", "failed", "interrupted"])
+def test_end_paused_refuses_a_run_that_is_not_paused(status, paused, tmp_path) -> None:
+    store = _paused_copy(paused, tmp_path)
+    run_id = _ended(store, status)
+    before = _files(store)
+
+    with pytest.raises(
+        ValueError, match=rf"is '{status}', and only a paused run ends this way"
+    ):
+        store.pipeline.end_paused(run_id)
+    assert _files(store) == before
+
+
+def test_end_paused_refuses_other_values_and_a_read_only_store(
+    paused, tmp_path
+) -> None:
+    store = _paused_copy(paused, tmp_path)
+    before = _files(store)
+
+    with pytest.raises(KeyError, match="Pipeline run does not exist"):
+        store.pipeline.end_paused("0" * 64)
+    with pytest.raises(TypeError, match="run must be a PipelineRun or a run's ID"):
+        store.pipeline.end_paused(42)  # type: ignore[arg-type]
+    with pytest.raises(TypeError, match="reason must be a non-empty string"):
+        store.pipeline.end_paused(paused.run_id, reason="")
+    # The arguments are checked before the store is read.
+    with pytest.raises(TypeError, match="reason must be a non-empty string"):
+        store.pipeline.end_paused("0" * 64, reason="")
+    with pytest.raises(TypeError, match="release_claim must be a boolean"):
+        store.pipeline.end_paused(paused.run_id, release_claim=1)  # type: ignore[arg-type]
+    reader = DataStore(store.zarr_loc, default_assay="RNA", zarr_mode="r")
+    with pytest.raises(PermissionError, match="requires zarr_mode='r\\+'"):
+        reader.pipeline.end_paused(paused.run_id)
+    assert _files(store) == before
+
+
+def test_a_paused_run_that_a_stopped_resume_claimed_ends_once_its_claim_is_released(
+    paused, tmp_path
+) -> None:
+    store = _paused_copy(paused, tmp_path)
+    # A resume claimed the pause and stopped before it recorded itself.
+    assert pipeline_run_storage._claim_pipeline_run_resume(store.zw, paused.run_id, 1)
+    before = _files(store)
+
+    for attempt in (store.pipeline.resume, store.pipeline.end_paused):
+        with pytest.raises(
+            RuntimeError,
+            match="is claimed by another resume or end that has not yet recorded itself",
+        ) as refused:
+            attempt(paused.run_id)
+        assert "ds.pipeline.end_paused(run, release_claim=True)" in str(refused.value)
+    assert _files(store) == before
+
+    ended = store.pipeline.end_paused(paused.run_id, release_claim=True)
+
+    assert ended.status == "interrupted"
+    assert ended.report()["run"]["interruption"]["kind"] == "ended_pause"
+
+
+@pytest.mark.parametrize("first", ["end", "resume"])
+def test_of_a_resume_and_an_end_of_one_pause_only_one_goes_ahead(
+    paused, tmp_path, monkeypatch, first
+) -> None:
+    store = _paused_copy(paused, tmp_path)
+    claim = pipeline_run_storage._claim_pipeline_run_resume
+    at_claim = threading.Barrier(2, timeout=60)
+    recorded, tried = threading.Event(), threading.Event()
+    seen: dict[str, Any] = {}
+
+    def claim_in_order(root: Any, run_id: str, segment: int) -> bool:
+        # Both have read the paused run, and the resume has replayed its
+        # finished stages, before either claims the pause.
+        at_claim.wait()
+        if threading.current_thread().name == first:
+            return claim(root, run_id, segment)
+        recorded.wait(timeout=60)
+        seen["before"] = _files(store)
+        return claim(root, run_id, segment)
+
+    def recording(inner: Any) -> Any:
+        def wrapped(*args: Any, **kwargs: Any) -> Any:
+            result = inner(*args, **kwargs)
+            if threading.current_thread().name == first:
+                # The first records its resume or end, and goes on once the
+                # second has tried.
+                recorded.set()
+                tried.wait(timeout=60)
+            return result
+
+        return wrapped
+
+    monkeypatch.setattr(
+        pipeline_run_storage, "_claim_pipeline_run_resume", claim_in_order
+    )
+    monkeypatch.setattr(
+        executor_module,
+        "resume_pipeline_run_record",
+        recording(executor_module.resume_pipeline_run_record),
+    )
+    monkeypatch.setattr(
+        accessor_module,
+        "end_paused_pipeline_run_record",
+        recording(accessor_module.end_paused_pipeline_run_record),
+    )
+    outcomes: dict[str, object] = {}
+
+    def call() -> None:
+        name = threading.current_thread().name
+        session = DataStore(store.zarr_loc, default_assay="RNA")
+        try:
+            if name == "end":
+                outcomes[name] = session.pipeline.end_paused(paused.run_id).status
+            else:
+                outcomes[name] = session.pipeline.resume(paused.run_id).status
+        except RuntimeError as error:
+            outcomes[name] = error
+        finally:
+            if name != first:
+                seen["after"] = _files(store)
+                tried.set()
+
+    threads = [threading.Thread(target=call, name=name) for name in ("end", "resume")]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    second = "resume" if first == "end" else "end"
+    assert outcomes[first] == ("interrupted" if first == "end" else "completed")
+    assert isinstance(outcomes[second], RuntimeError)
+    assert "was resumed or ended by another process" in str(outcomes[second])
+    # The second wrote nothing.
+    assert seen["after"] == seen["before"]
+
+
+def test_a_resume_that_read_the_run_before_it_ended_writes_nothing(
+    paused, tmp_path, monkeypatch
+) -> None:
+    store = _paused_copy(paused, tmp_path)
+    finished_stages = executor_module._finished_stages
+    seen: dict[str, Any] = {}
+
+    def after_an_end(*args: Any, **kwargs: Any) -> Any:
+        # Another process ended the run after this one read its record.
+        pipeline_run_storage.end_paused_pipeline_run_record(
+            store.zw, run_id=paused.run_id, segment=1, reason="dropped"
+        )
+        seen["before"] = _files(store)
+        return finished_stages(*args, **kwargs)
+
+    monkeypatch.setattr(executor_module, "_finished_stages", after_an_end)
+
+    with pytest.raises(RuntimeError, match="was resumed or ended by another process"):
+        store.pipeline.resume(paused.run_id)
+    assert _files(store) == seen["before"]
+    assert load_pipeline_run_record(store.zw, paused.run_id).status == "interrupted"
 
 
 # Ends of a resumed run -------------------------------------------------------
