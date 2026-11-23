@@ -40,6 +40,11 @@ ROW_KEPT_INDEX_BYTES = 32
 _READ_OBJECT_BYTES = 32 * 1024
 _READ_CHUNK_OBJECT_BYTES = 4 * 1024
 _READ_DECODE_OBJECT_BYTES = 16 * 1024
+#: What each chunk that a read takes leaves of those objects in reference
+#: cycles of Zarr's event loop, which Python frees at its next collection:
+#: 0.7 to 1.5 KB a chunk, and 1.7 to 2.4 KB a chunk of a shard, traced after
+#: reads of 10 to 80 chunks on Zarr 3.4.
+_READ_LEFTOVER_CHUNK_BYTES = 3 * 1024
 
 #: NumPy keeps each value of variable-width text in a 16-byte element, and a
 #: value of more than 15 bytes in UTF-8 in an arena beside the array, behind
@@ -224,6 +229,11 @@ class ArrayGeometry:
     def rowBytes(self) -> int:
         """Return the bytes of one row: one value of every later axis."""
         return math.prod(self.shape[1:]) * self.itemsize
+
+    def leftoverBytes(self, rows: int) -> int:
+        """Return the objects that a read of ``rows`` rows leaves for Python's next collection, for each chunk that it takes."""
+        bands = min(max(0, int(rows)), -(-self.shape[0] // self.axisChunk(0)))
+        return bands * self.bandChunks() * _READ_LEFTOVER_CHUNK_BYTES
 
     def rowsBytes(self, rows: int) -> int:
         """Return the bytes of ``rows`` rows as a read returns them.

@@ -1699,22 +1699,13 @@ def test_reads_of_variable_width_text_hold_what_they_charge(
         ),
     }
     traced = {}
-    # Zarr's event loop leaves about 1.3 KiB of objects in reference cycles
-    # after each read of a chunk, which Python frees at its next collection
-    # and the ledger leaves out with the runtime's other objects.
-    n_chunks = -(-n_values // chunks)
-    touched = {
-        "one row": 1,
-        "two rows": len(np.unique(two // chunks)),
-    }
     # An operation measures the column once, before its reads.
     with validation_scope():
         variable_text_extent(stored)
         for name, (read, planned) in reads.items():
-            garbage = 1_536 * touched.get(name, n_chunks)
             traced[name] = traced_charge(read)
-            assert traced[name].held <= traced[name].charged + garbage, name
-            assert planned is None or traced[name].held <= planned + garbage, name
+            assert traced[name].held <= traced[name].charged, name
+            assert planned is None or traced[name].held <= planned, name
             # What the read returns stays charged, beside the few KiB of
             # objects that Zarr keeps after a read.
             assert traced[name].kept <= traced[name].kept_charged + 32 * 1024, name

@@ -1046,15 +1046,13 @@ def test_the_pass_over_variable_width_store_ids_holds_what_it_charges(
 
     # Measuring the IDs is charged with the pass, and so is the pass alone
     # in an operation that measured them before, as an import's read of the
-    # selected cells' IDs does; Zarr's reads leave about 1.3 KiB of objects
-    # a chunk for Python's next collection.
-    garbage = 1_536 * (30_000 // chunk_rows)
+    # selected cells' IDs does.
     traced = traced_charge(join)
-    assert traced.held <= traced.charged + garbage
+    assert traced.held <= traced.charged
     with validation_scope():
         variable_text_extent(array)
         traced = traced_charge(join)
-    assert traced.held <= traced.charged + garbage
+    assert traced.held <= traced.charged
 
 
 def test_the_join_takes_variable_width_store_ids_given_in_memory() -> None:

@@ -335,12 +335,15 @@ def _kept_bytes(
 
     NumPy counts a value of variable-width text at its 16-byte element; the
     geometry counts its characters too, as ``ArrayGeometry.rowsBytes`` counts
-    rows, and text read from an array without chunks is measured itself.
+    rows, beside what the read leaves for Python's next collection, which the
+    strings that such a read makes, charged by their characters, leave no
+    room for; text read from an array without chunks is measured itself.
     """
     if values.dtype.kind != "T":
         return int(values.nbytes)
     if geometry is not None:
-        return geometry.rowsBytes(values.shape[0] if values.ndim else 1)
+        rows = values.shape[0] if values.ndim else 1
+        return geometry.rowsBytes(rows) + geometry.leftoverBytes(rows)
     return text_extent(values, None, ledger).keptBytes()
 
 
