@@ -18,6 +18,7 @@ from huggingface_hub.errors import EntryNotFoundError, HfHubHTTPError
 from huggingface_hub.hf_file_system import (
     HfFileSystem,
     HfFileSystemResolvedBucketPath,
+    HfFileSystemResolvedRepositoryPath,
 )
 from huggingface_hub.utils import (
     build_hf_headers,
@@ -25,7 +26,12 @@ from huggingface_hub.utils import (
     hf_raise_for_status,
     parse_ratelimit_headers,
 )
-from zarr.abc.store import ByteRequest
+from zarr.abc.store import (
+    ByteRequest,
+    OffsetByteRequest,
+    RangeByteRequest,
+    SuffixByteRequest,
+)
 from zarr.core.buffer import Buffer, BufferPrototype
 from zarr.storage import FsspecStore
 from zarr.storage._fsspec import ALLOWED_EXCEPTIONS
@@ -101,7 +107,7 @@ async def _names(listing: AsyncIterator[str]) -> list[str]:
 
 @dataclass(frozen=True)
 class _StoreListing:
-    """Every object of a read-only store, by key, with its size in bytes.
+    """The objects of a store that one listing found, by key, with their sizes in bytes.
 
     ``url`` returns the resolver URL that reads a key.
     """
@@ -114,74 +120,131 @@ def _within(root: str, key: str) -> str:
     return f"{root}/{key}" if root else key
 
 
-def _list_store(fs: HfFileSystem, path: str) -> _StoreListing:
+type _Resolved = HfFileSystemResolvedBucketPath | HfFileSystemResolvedRepositoryPath
+
+
+def _file_url(fs: HfFileSystem, resolved: _Resolved, path: str) -> str:
+    """Return the URL of Hugging Face's resolver for the file at ``path``.
+
+    ``path`` is a path in the bucket or the repository that ``resolved``
+    names.
+    """
+    if isinstance(resolved, HfFileSystemResolvedBucketPath):
+        # As HfFileSystem.url builds a bucket file's URL.
+        return f"{fs.endpoint}/buckets/{resolved.bucket_id}/resolve/{quote(path)}"
+    return hf_hub_url(
+        resolved.repo_id,
+        path,
+        repo_type=resolved.repo_type,
+        revision=resolved.revision,
+        endpoint=fs.endpoint,
+    )
+
+
+def _list_tree(
+    fs: HfFileSystem, resolved: _Resolved, path: str, *, recursive: bool
+) -> Iterable[Any]:
+    """List the folder at ``path`` of the bucket or repository that ``resolved`` names.
+
+    The listing goes to Hugging Face's API directly rather than through the
+    file system's directory cache, which keeps a listing for the life of the
+    process and which concurrent listings can leave half filled. A bucket
+    matches a recursive listing's ``path`` as text.
+    """
+    api = HfApi(endpoint=fs.endpoint, token=fs.token)
+    if isinstance(resolved, HfFileSystemResolvedBucketPath):
+        return api.list_bucket_tree(
+            resolved.bucket_id, path or None, recursive=recursive
+        )
+    return api.list_repo_tree(
+        resolved.repo_id,
+        path or None,
+        recursive=recursive,
+        revision=resolved.revision,
+        repo_type=resolved.repo_type,
+    )
+
+
+def _list_store(
+    fs: HfFileSystem,
+    path: str,
+    within: str = "",
+    timeout: float = REQUEST_TIMEOUT,
+) -> _StoreListing:
     """List the store at ``path`` with one recursive tree listing.
 
-    A bucket, repository, revision or path that does not exist lists as empty.
-    The listing goes to Hugging Face's API directly rather than through the
-    file system's directory cache, which concurrent listings can leave
-    half filled.
+    ``within`` limits the listing to that key or folder of the store and the
+    keys below it. A repository's tree lists folders only, so a key of a
+    repository is looked up, in ``timeout`` seconds, when no folder has its
+    name. A bucket, repository, revision or path that does not exist lists as
+    empty.
     """
     try:
         resolved = fs.resolve_path(path)
     except FileNotFoundError:
         return _StoreListing({}, lambda key: "")
-    api = HfApi(endpoint=fs.endpoint, token=fs.token)
-    url: Callable[[str], str]
-    if isinstance(resolved, HfFileSystemResolvedBucketPath):
-        bucket, root = resolved.bucket_id, resolved.path
-        tree: Iterable[Any] = api.list_bucket_tree(bucket, root or None, recursive=True)
-
-        # As HfFileSystem.url builds a bucket file's URL.
-        def url(key: str) -> str:
-            return f"{fs.endpoint}/buckets/{bucket}/resolve/{quote(_within(root, key))}"
-
-    else:
-        repository = resolved
-        root = repository.path_in_repo
-        tree = api.list_repo_tree(
-            repository.repo_id,
-            root or None,
-            recursive=True,
-            revision=repository.revision,
-            repo_type=repository.repo_type,
-        )
-
-        def url(key: str) -> str:
-            return hf_hub_url(
-                repository.repo_id,
-                _within(root, key),
-                repo_type=repository.repo_type,
-                revision=repository.revision,
-                endpoint=fs.endpoint,
-            )
-
+    root = resolved.path
+    listed = _within(root, within) if within else root
+    tree = _list_tree(fs, resolved, listed, recursive=True)
     prefix = f"{root}/" if root else ""
     sizes: dict[str, int] = {}
     try:
         for entry in tree:
             # Folders carry no size. A prefix matches as text, so "data.zarr"
-            # also lists "data.zarr2/..."; only keys below the root are kept.
+            # also lists "data.zarr2/..."; only keys below the root, and
+            # within the folder asked for, are kept.
             size = getattr(entry, "size", None)
-            if size is not None and entry.path.startswith(prefix):
-                sizes[entry.path[len(prefix) :]] = int(size)
+            if size is None or not entry.path.startswith(prefix):
+                continue
+            key = entry.path[len(prefix) :]
+            if not within or key == within or key.startswith(f"{within}/"):
+                sizes[key] = int(size)
     except EntryNotFoundError:
         sizes = {}
-    return _StoreListing(sizes, url)
+        if within and not isinstance(resolved, HfFileSystemResolvedBucketPath):
+            entry = _file_entry(fs, _dereference_path(path, within), timeout)
+            if entry is not None:
+                sizes[within] = int(entry["size"])
+    return _StoreListing(sizes, lambda key: _file_url(fs, resolved, _within(root, key)))
 
 
-def _names_a_file(
+def _list_folder(fs: HfFileSystem, path: str) -> list[str]:
+    """Return the names of the files and folders in the folder at ``path``.
+
+    The folder is listed when asked, as ``_list_tree`` lists. A folder that
+    does not exist lists as empty.
+    """
+    try:
+        resolved = fs.resolve_path(path)
+    except FileNotFoundError:
+        return []
+    folder = resolved.path
+    start = f"{folder}/" if folder else ""
+    try:
+        # A bucket matches the folder as text, so listing "c/1" also names
+        # "c/10"; only the folder's own entries are kept.
+        return [
+            entry.path[len(start) :]
+            for entry in _list_tree(fs, resolved, folder, recursive=False)
+            if entry.path.startswith(start)
+        ]
+    except EntryNotFoundError:
+        return []
+
+
+def _paths_info(
     fs: HfFileSystem,
     url: str,
     timeout: float,
     *,
     json: dict[str, Any] | None = None,
     data: dict[str, Any] | None = None,
-) -> bool:
-    """Send one lookup of a path to ``url`` and return whether it names a file.
+) -> dict[str, Any] | None:
+    """Send one lookup of a path to ``url`` and return the entry of the file it names.
 
     ``json`` or ``data`` is the request's body. The answer lists the path if
-    it names a file or a folder, and only a file is a key.
+    it names a file or a folder, and only a file is a key, so a folder, like
+    a missing path, gives None.
     """
     response = get_session().post(
         url,
@@ -191,11 +254,12 @@ def _names_a_file(
         data=data,
     )
     hf_raise_for_status(response)
-    return any(entry.get("type") == "file" for entry in response.json())
+    files = (entry for entry in response.json() if entry.get("type") == "file")
+    return next(files, None)
 
 
-def _holds_file(fs: HfFileSystem, path: str, timeout: float) -> bool:
-    """Return whether Hugging Face holds the file at ``path`` when asked.
+def _file_entry(fs: HfFileSystem, path: str, timeout: float) -> dict[str, Any] | None:
+    """Return Hugging Face's entry for the file at ``path`` when asked, or None.
 
     Hugging Face's file system answers a lookup from the listing of the
     file's folder that it keeps, which misses a file that another process
@@ -203,7 +267,7 @@ def _holds_file(fs: HfFileSystem, path: str, timeout: float) -> bool:
     documents a bucket's non-recursive listings as not strongly consistent.
     This lookup asks the bucket's or the repository's ``paths-info`` endpoint
     about the one path instead, with one request whatever the size of its
-    folder, and keeps no answer.
+    folder, and keeps no answer. The entry holds the file's ``size``.
 
     Raises:
         FileNotFoundError: If the bucket, repository or revision does not
@@ -212,19 +276,71 @@ def _holds_file(fs: HfFileSystem, path: str, timeout: float) -> bool:
     resolved = fs.resolve_path(path)
     if isinstance(resolved, HfFileSystemResolvedBucketPath):
         url = f"{fs.endpoint}/api/buckets/{resolved.bucket_id}/paths-info"
-        return _names_a_file(fs, url, timeout, json={"paths": [resolved.path]})
+        return _paths_info(fs, url, timeout, json={"paths": [resolved.path]})
     revision = quote(resolved.revision, safe="")
     url = (
         f"{fs.endpoint}/api/{resolved.repo_type}s/{resolved.repo_id}"
         f"/paths-info/{revision}"
     )
     # Form-encoded, as huggingface_hub's HfApi.get_paths_info sends it.
-    return _names_a_file(
+    return _paths_info(
         fs,
         url,
         timeout,
         data={"paths": [resolved.path_in_repo], "expand": False},
     )
+
+
+def _fetch(
+    fs: HfFileSystem, url: str, timeout: float, asked: str | None
+) -> httpx2.Response:
+    """GET ``url`` with the file system's token, and the ``Range`` ``asked``, if any."""
+    headers = build_hf_headers(token=fs.token)
+    if asked is not None:
+        headers["Range"] = asked
+    return get_session().get(url, headers=headers, timeout=timeout)
+
+
+def _read_file(
+    fs: HfFileSystem, path: str, byte_range: ByteRequest | None, timeout: float
+) -> bytes | None:
+    """Return the bytes of the file at ``path`` that ``byte_range`` asks for, or None.
+
+    The read is one GET of the file's resolver URL, with the ``Range`` that
+    asks for the bytes, as a read-only store reads a listed key, and a 404
+    reads as a missing file. A read of no bytes only looks the file up. A
+    bucket or repository that does not exist holds no file.
+    """
+    try:
+        resolved = fs.resolve_path(path)
+    except FileNotFoundError:
+        return None
+    asked: str | None
+    match byte_range:
+        case None:
+            asked = None
+        case RangeByteRequest(start=start, end=end) if end > start:
+            asked = f"bytes={start}-{end - 1}"
+        case OffsetByteRequest(offset=offset):
+            asked = f"bytes={offset}-"
+        case SuffixByteRequest(suffix=suffix) if suffix > 0:
+            asked = f"bytes=-{suffix}"
+        case _:
+            # A range of no bytes: an empty one, or a suffix of none.
+            return None if _file_entry(fs, path, timeout) is None else b""
+    response = _fetch(fs, _file_url(fs, resolved, resolved.path), timeout, asked)
+    if response.status_code == 404:
+        return None
+    if response.status_code == 416:
+        # The bytes asked for start past the file's end.
+        return b""
+    hf_raise_for_status(response)
+    data = response.content
+    if response.status_code == 200 and asked is not None:
+        # A server that ignores the range sends the whole file.
+        start, stop = byte_request_span(byte_range, len(data))
+        data = data[start:stop]
+    return data
 
 
 class _FetchAbandoned(Exception):
@@ -299,15 +415,17 @@ class HfReadStore(FsspecStore):
     and a read of a key it holds is one GET of the key's resolver URL for
     exactly the bytes asked for. The listing is a snapshot: the store does not
     see objects written after it, and a listed key that is no longer there
-    raises ``OSError``. A writable store reads keys through Hugging Face's file
-    system and asks the server about each key it looks up, with one request,
-    so a lookup sees a key that another process wrote or deleted after the
-    file system listed the key's folder. It reads a key as missing only when
-    the server reports it missing, so a lookup that fails never makes
-    ``set_if_not_exists`` write over a key. That call still looks the key up
-    and then writes it: a bucket's uploads take no condition, nor do the
-    commits that the file system makes to a repository, so another process can
-    write the key in between.
+    raises ``OSError``. A writable store keeps no listing: it reads a key with
+    one GET of the key's resolver URL for the bytes asked, a 404 reading as a
+    missing key, looks a key up, reads its size or reads no bytes of it with
+    one lookup of that key, and lists keys with a listing made when asked, so
+    it sees a key that another process wrote or deleted since its last
+    request. Zarr's read-only views of a writable store read as it does. It
+    reads a key as missing only when the server reports it missing, so a
+    lookup that fails never makes ``set_if_not_exists`` write over a key. That call still
+    looks the key up and then writes it: a bucket's uploads take no
+    condition, nor do the commits that Hugging Face's file system makes to a
+    repository, so another process can write the key in between.
 
     Each attempt at a request of the store, a read, a lookup or a listing, is
     given ``request_timeout`` seconds, 60 by default. An attempt that times
@@ -339,6 +457,9 @@ class HfReadStore(FsspecStore):
         self._location = self.fs.unstrip_protocol(self.path)
         self._metadata = _SharedFetches[bytes | None]()
         self._listing = _SharedFetches[_StoreListing]()
+        # Whether the store reads through one listing, as a store opened
+        # read-only does; Zarr's read-only views of a writable store do not.
+        self._listed = self.read_only
 
     @classmethod
     def from_url(
@@ -373,7 +494,8 @@ class HfReadStore(FsspecStore):
         store = cast(HfReadStore, super().with_read_only(read_only))
         store.request_timeout = self.request_timeout
         store.retry_timeout = self.retry_timeout
-        if read_only and self.read_only:
+        store._listed = read_only and self._listed
+        if store._listed:
             store._listing = self._listing
         return store
 
@@ -384,7 +506,7 @@ class HfReadStore(FsspecStore):
 
     def _listed_fs(self) -> HfFileSystem | None:
         """Return Hugging Face's file system when the store reads through its listing."""
-        return self._hf_fs() if self.read_only else None
+        return self._hf_fs() if self._listed else None
 
     async def _store_listing(self, fs: HfFileSystem) -> _StoreListing:
         return await self._listing.get(
@@ -413,14 +535,8 @@ class HfReadStore(FsspecStore):
         url = listing.url(key)
 
         def fetch() -> bytes:
-            response = get_session().get(
-                url,
-                headers={
-                    **build_hf_headers(token=fs.token),
-                    "Range": f"bytes={start}-{stop - 1}",
-                },
-                timeout=self.request_timeout,
-            )
+            asked = f"bytes={start}-{stop - 1}"
+            response = _fetch(fs, url, self.request_timeout, asked)
             if response.status_code == 404:
                 # Not FileNotFoundError: Zarr reads that from a partial shard
                 # read as a missing shard, which fills its chunks with zeros.
@@ -514,11 +630,21 @@ class HfReadStore(FsspecStore):
         fs = self._listed_fs()
         if fs is not None:
             return await self._read_listed(fs, key, prototype, byte_range)
-        read = super().get
-        return await self._request(
-            f"Reading {key!r} from {self._location}",
-            lambda: read(key, prototype, byte_range),
+        request = f"Reading {key!r} from {self._location}"
+        files = self._hf_fs()
+        if files is None:
+            read = super().get
+            return await self._request(
+                request, lambda: read(key, prototype, byte_range)
+            )
+        path = _dereference_path(self.path, key)
+        data = await self._request(
+            request,
+            lambda: asyncio.to_thread(
+                _read_file, files, path, byte_range, self.request_timeout
+            ),
         )
+        return None if data is None else prototype.buffer.from_bytes(data)
 
     async def _read_metadata(
         self, key: str, prototype: BufferPrototype
@@ -533,7 +659,7 @@ class HfReadStore(FsspecStore):
         byte_range: ByteRequest | None = None,
     ) -> Buffer | None:
         if (
-            not self.read_only
+            not self._listed
             or byte_range is not None
             or key.rsplit("/", 1)[-1]
             not in {"zarr.json", ".zarray", ".zgroup", ".zattrs", ".zmetadata"}
@@ -569,9 +695,10 @@ class HfReadStore(FsspecStore):
             # which retries it or raises it.
             try:
                 if files is not None:
-                    return await asyncio.to_thread(
-                        _holds_file, files, path, self.request_timeout
+                    entry = await asyncio.to_thread(
+                        _file_entry, files, path, self.request_timeout
                     )
+                    return entry is not None
                 await self.fs._info(path)
             except FileNotFoundError:
                 return False
@@ -586,15 +713,55 @@ class HfReadStore(FsspecStore):
             if size is None:
                 raise FileNotFoundError(key)
             return size
-        getsize = super().getsize
-        return await self._request(
-            f"Reading the size of {key!r} in {self._location}", lambda: getsize(key)
+        request = f"Reading the size of {key!r} in {self._location}"
+        files = self._hf_fs()
+        if files is None:
+            getsize = super().getsize
+            return await self._request(request, lambda: getsize(key))
+        path = _dereference_path(self.path, key)
+        entry = await self._request(
+            request,
+            lambda: asyncio.to_thread(_file_entry, files, path, self.request_timeout),
         )
+        if entry is None:
+            raise FileNotFoundError(key)
+        return int(entry["size"])
 
     def close(self) -> None:
         self._metadata.clear()
         self._listing.clear()
         super().close()
+
+    def _forget_listings(self) -> None:
+        """Drop the listings of Hugging Face's file system before it deletes a folder.
+
+        The file system lists a folder before it deletes the keys in it, from
+        its cached listings, and a delete drops only the folder's listing and
+        its parents', so a key written below a subfolder since an earlier delete
+        would stay. The store's reads, lookups and listings do not use these
+        listings. Only the listings go: ``invalidate_cache()`` would also drop
+        the file system's record of which repositories exist, which it would
+        then check again.
+        """
+        files = self._hf_fs()
+        if files is not None:
+            files.dircache.clear()
+
+    async def delete_dir(self, prefix: str) -> None:
+        self._forget_listings()
+        await super().delete_dir(prefix)
+
+    async def _list_now(
+        self, fs: HfFileSystem, request: str, within: str = ""
+    ) -> list[str]:
+        """Return the keys of a writable store, or those within a key or folder, listed now."""
+        listing = await self._request(
+            request,
+            lambda: asyncio.to_thread(
+                _list_store, fs, self.path, within, self.request_timeout
+            ),
+        )
+        return sorted(listing.sizes)
 
     async def list(self) -> AsyncIterator[str]:
         fs = self._listed_fs()
@@ -602,10 +769,14 @@ class HfReadStore(FsspecStore):
             for key in sorted((await self._store_listing(fs)).sizes):
                 yield key
             return
+        request = f"Listing {self._location}"
+        files = self._hf_fs()
+        if files is not None:
+            for key in await self._list_now(files, request):
+                yield key
+            return
         listing = super().list
-        for name in await self._request(
-            f"Listing {self._location}", lambda: _names(listing())
-        ):
+        for name in await self._request(request, lambda: _names(listing())):
             yield name
 
     async def list_prefix(self, prefix: str) -> AsyncIterator[str]:
@@ -618,11 +789,14 @@ class HfReadStore(FsspecStore):
                 if not directory or key == directory or key.startswith(f"{directory}/"):
                     yield key
             return
+        request = f"Listing the keys under {prefix!r} in {self._location}"
+        files = self._hf_fs()
+        if files is not None:
+            for key in await self._list_now(files, request, prefix.rstrip("/")):
+                yield key
+            return
         listing = super().list_prefix
-        for name in await self._request(
-            f"Listing the keys under {prefix!r} in {self._location}",
-            lambda: _names(listing(prefix)),
-        ):
+        for name in await self._request(request, lambda: _names(listing(prefix))):
             yield name
 
     async def list_dir(self, prefix: str) -> AsyncIterator[str]:
@@ -638,12 +812,19 @@ class HfReadStore(FsspecStore):
             for name in sorted(children):
                 yield name
             return
+        request = f"Listing {prefix!r} in {self._location}"
+        files = self._hf_fs()
+        if files is not None:
+            folder = _dereference_path(self.path, prefix)
+            for name in await self._request(
+                request, lambda: asyncio.to_thread(_list_folder, files, folder)
+            ):
+                yield name
+            return
         listing = super().list_dir
-        names = await self._request(
-            f"Listing {prefix!r} in {self._location}",
-            lambda: _names(listing(prefix)),
-        )
-        # Concurrent HF listings can append the same paths to its directory cache.
+        names = await self._request(request, lambda: _names(listing(prefix)))
+        # A file system can list a name twice, as Hugging Face's did when
+        # concurrent listings appended to its directory cache.
         seen: set[str] = set()
         for name in names:
             if name not in seen:

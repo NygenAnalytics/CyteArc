@@ -269,7 +269,8 @@ class LoopbackHub(ThreadingHTTPServer):
 
     The same directory is also the dataset repository ``REPOSITORY_ID`` at
     revision ``main``, whose recursive listings name folders as well as files,
-    as the Hub lists a repository.
+    and list only a folder, never a file or a prefix of a name, as the Hub
+    lists a repository's tree.
 
     ``plan[kind]`` lists what the next requests of a kind meet, in order:
     ``"stall"`` holds a request unanswered until the hub closes, which ends it
@@ -285,6 +286,8 @@ class LoopbackHub(ThreadingHTTPServer):
     ``", "``. ``received`` records them with what else the request sent:
     ``"recursive"`` or ``"directory"`` for a listing, the ``Range`` header, or
     None, for a file, and the ``Authorization`` header, or None, for a lookup.
+    ``authorizations`` records the kind and the ``Authorization`` header, or
+    None, of every request.
     """
 
     daemon_threads = True
@@ -295,6 +298,7 @@ class LoopbackHub(ThreadingHTTPServer):
         self.plan: dict[str, list[str | int | tuple[int, dict[str, str]]]] = {}
         self.requests: list[tuple[str, str]] = []
         self.received: list[tuple[str, str, str | None]] = []
+        self.authorizations: list[tuple[str, str | None]] = []
         self.closing = threading.Event()
         self._lock = threading.Lock()
 
@@ -343,6 +347,7 @@ class _LoopbackHandler(BaseHTTPRequestHandler):
 
     def _planned(self, kind: str, path: str, detail: str | None) -> str | None:
         """Take the plan of a request: answer a planned status, or return the plan."""
+        self.server.authorizations.append((kind, self.headers.get("Authorization")))
         planned = self.server.take(kind, path, detail)
         if planned == "stall":
             # Once the hub closes, end the request with a status that
@@ -465,14 +470,20 @@ class _LoopbackHandler(BaseHTTPRequestHandler):
     def _tree(self, prefix: str, recursive: bool, *, repository: bool) -> None:
         base = self.server.root
         if recursive:
-            # The Hub matches a recursive listing's prefix as text, and lists
-            # only the files of a bucket.
-            entries = [
-                path
-                for path in sorted(base.rglob("*"))
-                if (repository or path.is_file())
-                and path.relative_to(base).as_posix().startswith(prefix)
-            ]
+            # A bucket matches a recursive listing's prefix as text and lists
+            # only its files; a repository lists the folder named, with its
+            # folders, and answers a file or a missing folder with a 404.
+            folder = base / prefix
+            entries = (
+                (sorted(folder.rglob("*")) if folder.is_dir() else [])
+                if repository
+                else [
+                    path
+                    for path in sorted(base.rglob("*"))
+                    if path.is_file()
+                    and path.relative_to(base).as_posix().startswith(prefix)
+                ]
+            )
         else:
             start = base / prefix
             entries = sorted(start.iterdir()) if start.is_dir() else []
@@ -511,9 +522,21 @@ class _LoopbackHandler(BaseHTTPRequestHandler):
         if requested is None or whole:
             self._answer(200, data, content_type="application/octet-stream")
             return
+        # As RFC 9110 answers a byte range: a range from a start past the end,
+        # or a suffix of no bytes, is unsatisfiable, a range that runs past
+        # the end ends at the end, and a suffix longer than the file is the
+        # whole file.
         first, _, last = requested.removeprefix("bytes=").partition("-")
-        start = int(first)
-        stop = int(last) + 1 if last else len(data)
+        start = max(len(data) - int(last), 0) if first == "" else int(first)
+        if start >= len(data) or (first == "" and int(last) == 0):
+            self._answer(
+                416,
+                b"",
+                {"Content-Range": f"bytes */{len(data)}"},
+                content_type="application/octet-stream",
+            )
+            return
+        stop = min(int(last) + 1, len(data)) if last and first else len(data)
         self._answer(
             206,
             data[start:stop],
