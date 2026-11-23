@@ -1890,8 +1890,8 @@ def test_the_membership_estimate_pins_its_bytes_per_cell() -> None:
 def test_a_membership_that_outweighs_its_graph_is_refused_once() -> None:
     # Sinks named by 41 characters on a graph of 4 neighbors: the membership,
     # which holds the labels at 164 bytes a cell, outweighs the graph's load,
-    # so the check of the graph names the membership's bytes, before the graph
-    # is read. Inputs 15,080, beside 145 * 164 = 23,780 bytes of labels, 3,480
+    # so the check of the graph names the membership and its bytes, before
+    # the graph is read. Inputs 15,080, beside 145 * 164 = 23,780 bytes of labels, 3,480
     # more and the write's 65,536 while they are written, and three copies of
     # the labels, 4,060 and the check's 245,760 while the written membership
     # is checked: 15,080 + 92,796 + 321,160.
@@ -1912,8 +1912,10 @@ def test_a_membership_that_outweighs_its_graph_is_refused_once() -> None:
     with pytest.raises(MemoryBudgetError) as refused:
         store.trajectory.lineage_membership(branching.curves, invalidate_cache=True)
     assert refused.value.needed_bytes == needed
+    assert refused.value.item == "the lineage membership of every cell"
     assert str(refused.value).startswith(
-        f"Calling lineage membership of 145 cells needs about {needed} bytes"
+        f"Calling lineage membership of 145 cells needs about {needed} bytes in "
+        "memory for the lineage membership of every cell, but"
     )
     assert reads == []
     # The budget that the refusal names runs the call.
@@ -1987,6 +1989,9 @@ _MEMBERSHIP_CHECK_BYTES = {
     "load_lineage_membership": 275_340,
     "branch_cells": 275_340,
 }
+# Calling a membership names the membership as what needs its bytes, and
+# the other calls the graph.
+_NAMES_THE_MEMBERSHIP = {"lineage_membership", "reused lineage_membership"}
 # Each call names itself in the refusal of the graph's load.
 _GRAPH_LOAD_WORK = {
     "lineage_membership": "Calling lineage membership",
@@ -2029,13 +2034,17 @@ def test_a_budget_below_the_graph_load_is_refused_before_the_graph_is_read(
     with pytest.raises(MemoryBudgetError) as refused:
         calls[call](branching, ref)
     work = _GRAPH_LOAD_WORK.get(call, "Loading a pseudotime")
+    if call in _NAMES_THE_MEMBERSHIP:
+        named = item = "the lineage membership of every cell"
+    else:
+        named, item = "a graph of 725 edges", "the graph of 725 edges and its work"
     assert str(refused.value) == (
         f"{work} of 145 cells needs about {needed} bytes "
-        "in memory for a graph of 725 edges, but the operation limit is "
+        f"in memory for {named}, but the operation limit is "
         f"{needed - 1} bytes. Raise mem_budget."
     )
     assert refused.value.needed_bytes == needed
-    assert refused.value.item == "the graph of 725 edges and its work"
+    assert refused.value.item == item
     assert reads == {}
     assert _artifacts(store, "lineage_membership") == [ref]
     assert (
