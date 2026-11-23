@@ -40,16 +40,13 @@ def test_read_bytes_follow_what_a_zarr_read_holds() -> None:
     assert sharded.readBytes(1_000, 5, decodes=2) == (
         2 * 1_000 + 5 * encoded + 2 * nominal + _read_objects(5, 2)
     )
-    # On a plain pool, as Zarr's opt-in pipeline runs, five chunks decoded two
-    # at a time also hold, beside the two decodes under way, the chunk that
-    # each of the pool's threads decoded before.
-    plain = replace(sharded, poolKeepsDecodedChunk=True)
+    # Zarr's opt-in fused pipeline decodes a shard's chunks one at a time on
+    # a plain pool, whatever the concurrency, and the pool's thread may keep
+    # the chunk it decoded before.
+    plain = replace(sharded, fusedPoolWorkers=2)
+    assert plain.poolKeepsDecodedChunk
     assert plain.readBytes(1_000, 5, decodes=2) == (
-        2 * 1_000 + 5 * encoded + 2 * nominal + 2 * nominal + _read_objects(5, 2)
-    )
-    # Four decodes at a time leave one chunk to decode after them.
-    assert plain.readBytes(1_000, 5, decodes=4) == (
-        2 * 1_000 + 5 * encoded + 4 * nominal + 1 * nominal + _read_objects(5, 4)
+        2 * 1_000 + 5 * encoded + nominal + nominal + _read_objects(5, 1)
     )
     assert sharded.readBytes(1_000, 5, decodes=9) == sharded.readBytes(1_000, 5)
     # An unsharded read holds its result and each chunk it decodes at once as
@@ -61,22 +58,27 @@ def test_read_bytes_follow_what_a_zarr_read_holds() -> None:
     assert unsharded.readBytes(1_000, 5, decodes=1) == (
         1_000 + stored + _read_objects(5, 1)
     )
-    # A plain pool's thread also keeps the chunk it decoded before.
-    assert replace(unsharded, poolKeepsDecodedChunk=True).readBytes(
-        1_000, 5, decodes=1
-    ) == (1_000 + stored + nominal + _read_objects(5, 1))
+    # The fused pipeline decodes two of the five chunks at once on a pool of
+    # two threads, whose threads may keep the two chunks they decoded before;
+    # four at once leave one chunk to decode after them.
+    assert replace(unsharded, fusedPoolWorkers=2).readBytes(1_000, 5, decodes=1) == (
+        1_000 + 2 * stored + 2 * nominal + _read_objects(5, 2)
+    )
+    assert replace(unsharded, fusedPoolWorkers=4).readBytes(1_000, 5, decodes=1) == (
+        1_000 + 4 * stored + 1 * nominal + _read_objects(5, 4)
+    )
     assert unsharded.readBytes(1_000, 1, decodes=1) == (
         1_000 + stored + _read_objects(1, 1)
     )
     assert unsharded.readBytes(1_000, 5, decodes=9) == unsharded.readBytes(1_000, 5)
     # A whole read of the 100 chunks one or ten at a time holds the objects of
-    # that read, and on a plain pool as many previous chunks as it decodes at
-    # once.
+    # that read, and on the fused pipeline's pool of ten threads as many
+    # previous chunks as it decodes at once, whatever the plan's concurrency.
     assert unsharded.wholeReadBytes(1) == 100 * 40 * 2 + stored + _read_objects(100, 1)
     assert unsharded.wholeReadBytes(10) == (
         100 * 40 * 2 + 10 * stored + _read_objects(100, 10)
     )
-    assert replace(unsharded, poolKeepsDecodedChunk=True).wholeReadBytes(10) == (
+    assert replace(unsharded, fusedPoolWorkers=10).wholeReadBytes(1) == (
         100 * 40 * 2 + 10 * (stored + nominal) + _read_objects(100, 10)
     )
     # A chunk of 2,048 bytes is bounded at 16 bytes more than itself, and the
@@ -110,9 +112,9 @@ def test_a_read_on_cytearcs_pools_holds_its_objects_where_a_plain_pool_keeps_a_c
     assert sharded.readBytes(0, 10, decodes=1) == 10 * encoded + decoded + objects
     # Four at a time hold 48 KiB more for the three more decodes.
     assert sharded.heldDecodeBytes(10, 4) == objects + 3 * 16_384
-    # A plain pool's threads, as Zarr's opt-in pipeline runs, also keep the
-    # chunk that each decoded before, one for each decode under way.
-    own_pool = replace(sharded, poolKeepsDecodedChunk=True)
+    # A plain pool's threads, as Zarr's opt-in fused pipeline runs, also keep
+    # the chunk that each decoded before, one for each decode under way.
+    own_pool = replace(sharded, fusedPoolWorkers=4)
     assert own_pool.heldDecodeBytes(10, 1) == decoded + objects
     assert own_pool.heldDecodeBytes(10, 4) == 4 * decoded + objects + 3 * 16_384
     # A read that decodes every chunk at once has no previous chunk either way.
@@ -140,7 +142,7 @@ def test_a_read_on_cytearcs_pools_holds_its_objects_where_a_plain_pool_keeps_a_c
     stored = 40_000_000 + 40_000_000 + 40_000_000 // 128 + 1_024
     read_objects = 32_768 + 4 * 4_096 + 2 * 16_384
     assert unsharded.wholeReadBytes(2) == 160_000_000 + 2 * stored + read_objects
-    assert replace(unsharded, poolKeepsDecodedChunk=True).wholeReadBytes(2) == (
+    assert replace(unsharded, fusedPoolWorkers=2).wholeReadBytes(2) == (
         160_000_000 + 2 * stored + 2 * 40_000_000 + read_objects
     )
 
@@ -158,7 +160,7 @@ def test_a_read_through_zarrs_fused_pipeline_is_charged_at_the_reads_it_runs_at_
     # many of the eight chunks at once as its pool has threads, four,
     # whatever Zarr's async concurrency, and its threads may keep the chunk
     # that each decoded before.
-    fused = replace(unsharded, fusedPoolWorkers=4, poolKeepsDecodedChunk=True)
+    fused = replace(unsharded, fusedPoolWorkers=4)
     assert fused.readsAtOnce(8, 1) == (4, 1)
     assert fused.readBytes(result, 8, decodes=1) == (
         result + 4 * stored + _read_objects(8, 4) + 4 * decoded
@@ -183,7 +185,7 @@ def test_a_read_through_zarrs_fused_pipeline_is_charged_at_the_reads_it_runs_at_
     # selection.
     sharded = ArrayGeometry((4_096, 1_024), (256, 1_024), (1_024, 1_024), 4)
     shard_result = 16 * decoded
-    fused_shards = replace(sharded, fusedPoolWorkers=4, poolKeepsDecodedChunk=True)
+    fused_shards = replace(sharded, fusedPoolWorkers=4)
     assert fused_shards.readsAtOnce(4, 1, shards=4) == (1, 4)
     # Zarr's async concurrency changes neither.
     assert fused_shards.readsAtOnce(4, 10, shards=4) == (1, 4)
@@ -206,9 +208,14 @@ def test_a_read_through_zarrs_fused_pipeline_is_charged_at_the_reads_it_runs_at_
     # An asynchronous store reads the shards at Zarr's async concurrency,
     # each decoding as many chunks at once as the pool has threads.
     gathering_shards = replace(fused_shards, fusedReadsAsync=True)
+    gathering_shard = 4 * (stored - decoded) + 4 * decoded + _read_objects(4, 4)
     assert gathering_shards.readsAtOnce(4, 1, shards=4) == (4, 1)
     assert gathering_shards.readBytes(shard_result, 4, decodes=1, shards=4) == (
-        2 * shard_result + 4 * (stored - decoded) + 4 * decoded + _read_objects(4, 4)
+        2 * shard_result + gathering_shard
+    )
+    assert gathering_shards.readsAtOnce(4, 2, shards=4) == (4, 2)
+    assert gathering_shards.readBytes(shard_result, 4, decodes=2, shards=4) == (
+        2 * shard_result + 2 * gathering_shard
     )
     # CyteArc's pipelines read the shards a read touches, and the chunks of
     # each, at Zarr's async concurrency.
@@ -221,17 +228,28 @@ def test_a_read_through_zarrs_fused_pipeline_is_charged_at_the_reads_it_runs_at_
 
 
 @pytest.mark.parametrize(
-    ("store", "workers"),
+    ("store", "workers", "concurrency"),
     [
-        ("synchronous", 1),
-        ("synchronous", 4),
-        ("asynchronous", 4),
+        ("synchronous", 1, 1),
+        ("synchronous", 4, 1),
+        ("asynchronous", 4, 1),
+        ("asynchronous", 8, 2),
     ],
-    ids=["local store, one worker", "local store, four workers", "async store"],
+    ids=[
+        "local store, one worker",
+        "local store, four workers",
+        "async store, four workers",
+        "async store, eight workers, two reads at once",
+    ],
 )
 @pytest.mark.parametrize("sharded", [False, True], ids=["unsharded", "sharded"])
 def test_a_read_through_zarrs_fused_pipeline_holds_no_more_than_its_charge(
-    tmp_path: Any, store: str, workers: int, sharded: bool
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    store: str,
+    workers: int,
+    concurrency: int,
+    sharded: bool,
 ) -> None:
     import gc
     import tracemalloc
@@ -245,9 +263,14 @@ def test_a_read_through_zarrs_fused_pipeline_holds_no_more_than_its_charge(
     from cytearc.storage.virtual_arrays import read_selection
     from tests.memory_helpers import decodes_on_threads_held_together
 
+    import zarr.core.codec_pipeline as codec_pipeline
+
     # Sixteen chunks of 64 by 1,024 uint32 random bits, 256 KiB each, in
-    # shards of four or each on its own, read whole by a plan of one decode
-    # at a time while Zarr's fused pipeline is configured.
+    # shards of four or each on its own, read whole by a plan of one or two
+    # reads at once while Zarr's fused pipeline is configured, on a pool of
+    # the test's own, which Zarr makes afresh and the test then gives back.
+    monkeypatch.setattr(codec_pipeline, "_pool", None)
+    monkeypatch.setattr(codec_pipeline, "_pool_size", 0)
     settings = {
         "codec_pipeline.path": "zarr.core.codec_pipeline.FusedCodecPipeline",
         "codec_pipeline.max_workers": workers,
@@ -273,15 +296,15 @@ def test_a_read_through_zarrs_fused_pipeline_holds_no_more_than_its_charge(
         )
         array[:] = values
         geometry = array_geometry(array)
-        assert geometry is not None and geometry.fusedPoolWorkers >= workers
+        assert geometry is not None and geometry.fusedPoolWorkers == workers
         assert geometry.fusedReadsAsync is (store == "asynchronous")
         (outer, *_) = array.metadata.codecs
         codecs = outer.codecs if sharded else array.metadata.codecs
         # Each decode on the pool holds its chunk until as many decodes as
         # the pool has workers hold theirs, so the read holds that many at
-        # once on any machine.
+        # once on any machine: two shards of four chunks at two reads at once.
         with (
-            zarr_io_concurrency(1),
+            zarr_io_concurrency(concurrency),
             decodes_on_threads_held_together(type(codecs[-1]), workers),
         ):
             read_selection(array, slice(None), slice(None))
@@ -298,12 +321,12 @@ def test_a_read_through_zarrs_fused_pipeline_holds_no_more_than_its_charge(
     def charge(of: ArrayGeometry) -> int:
         if sharded:
             # The read touches four shards, four chunks in each.
-            return of.readBytes(block.nbytes, 4, decodes=1, shards=4)
-        return of.readBytes(block.nbytes, 16, decodes=1)
+            return of.readBytes(block.nbytes, 4, decodes=concurrency, shards=4)
+        return of.readBytes(block.nbytes, 16, decodes=concurrency)
 
     assert peak - base <= charge(geometry)
     if workers > 1:
-        # A charge that followed the plan's one decode at a time falls short.
+        # A charge that followed the plan's reads at once falls short.
         earlier = replace(geometry, fusedPoolWorkers=0, fusedReadsAsync=False)
         assert peak - base > charge(earlier)
 
@@ -316,6 +339,7 @@ def test_the_objects_of_a_zarr_read_lie_within_what_object_bytes_charges(
 ) -> None:
     import gc
     import os
+    import sys
     import tracemalloc
 
     from zarr.codecs import ZstdCodec
@@ -324,6 +348,11 @@ def test_the_objects_of_a_zarr_read_lie_within_what_object_bytes_charges(
     from cytearc.storage.geometry import array_geometry
     from cytearc.storage.virtual_arrays import read_selection
 
+    if sys.gettrace() is not None:
+        pytest.skip(
+            "a trace function, such as the C tracer that coverage installs, "
+            "allocates inside the traced window"
+        )
     # A row of chunks of 1 by 4 uint32 values, 16 bytes each, so that what a
     # read of the row holds beyond its buffers is the objects of Zarr's read.
     root = zarr.open_group(store=LocalStore(str(tmp_path)), mode="w")

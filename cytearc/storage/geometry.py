@@ -3,12 +3,10 @@
 import importlib
 import math
 import operator
-import os
 from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
-import zarr
 
 from .types import array_metadata_shards
 
@@ -49,11 +47,6 @@ class ArrayGeometry:
     shards: tuple[int, ...] | None
     itemsize: int
     readScratchBytes: int = 0
-    #: Whether Zarr decodes the array's chunks on a pool of its own, whose
-    #: threads keep the last chunk they decoded: Zarr's opt-in
-    #: ``FusedCodecPipeline`` with more than one worker. Every other read
-    #: decodes on CyteArc's codec pools, which keep none.
-    poolKeepsDecodedChunk: bool = False
     #: The threads of Zarr's own pool that its opt-in ``FusedCodecPipeline``
     #: reads the array on, ``codec_pipeline.max_workers`` or more, as many
     #: chunks or shards at once as it has threads, whatever Zarr's async
@@ -68,6 +61,16 @@ class ArrayGeometry:
     #: of a shard into one fetch, ``sharding_coalesce_max_gap_bytes`` of the
     #: array's configuration; none for a geometry of no opened array.
     coalesceGapBytes: int = 0
+
+    @property
+    def poolKeepsDecodedChunk(self) -> bool:
+        """Whether Zarr decodes the array's chunks on a pool of its own, whose threads keep the last chunk they decoded.
+
+        That is Zarr's opt-in ``FusedCodecPipeline`` with more than one
+        worker, as ``fusedPoolWorkers`` counts them. Every other read decodes
+        on CyteArc's codec pools, which keep none.
+        """
+        return self.fusedPoolWorkers > 1
 
     def axisChunk(self, axis: int) -> int:
         """Return the chunk extent along one axis."""
@@ -211,13 +214,13 @@ class ArrayGeometry:
         """
         rows_bytes = max(0, int(rows)) * self.rowBytes()
         touched = self.bandChunks()
-        decoding = min(max(1, int(concurrency)), touched)
         if self.shards is None:
             decoding, _ = self.readsAtOnce(touched, concurrency)
             band = decoding * self.storedChunkBytes() + self.heldDecodeBytes(
                 touched, decoding
             )
         else:
+            decoding = min(max(1, int(concurrency)), touched)
             band = (
                 rows_bytes
                 + touched * self.storedChunkBytes()
@@ -333,7 +336,6 @@ def array_geometry(array: Any) -> ArrayGeometry | None:
         shards=shards,
         itemsize=max(1, int(np.dtype(array.dtype).itemsize)),
         readScratchBytes=scratch,
-        poolKeepsDecodedChunk=fused_workers > 1,
         coalesceGapBytes=_coalesce_gap_bytes(array),
         fusedPoolWorkers=fused_workers,
         fusedReadsAsync=fused_async,
@@ -357,37 +359,25 @@ def _fused_pool(array: Any) -> tuple[int, bool]:
     ``FusedCodecPipeline`` keeps that pipeline in place of CyteArc's
     ``StoreThreadsCodecPipeline``, which ``ensure_zarr_host_ceiling``
     installs only in place of Zarr's default. The pipeline reads on a plain
-    pool of ``codec_pipeline.max_workers`` threads, by default one for each
-    CPU, a pool that grows to the most workers any read asked for and never
-    shrinks, and inline with one worker. It reads synchronously when every
-    codec of the array decodes synchronously and the store serves Zarr's
-    synchronous I/O, as local and memory stores do, and asynchronously
-    otherwise. Every other pipeline gives (0, False).
+    pool of the workers that Zarr resolves from ``codec_pipeline.max_workers``,
+    by default one for each CPU, a pool that grows to the most workers any
+    read asked for and never shrinks, and inline with one worker. It reads
+    synchronously when every codec of the array decodes synchronously and the
+    store serves Zarr's synchronous I/O, as local and memory stores do, and
+    asynchronously otherwise. Every other pipeline gives (0, False).
     """
     async_array = getattr(array, "async_array", array)
     pipeline = getattr(async_array, "codec_pipeline", None)
-    module = importlib.import_module("zarr.core.codec_pipeline")
-    fused = getattr(module, "FusedCodecPipeline", None)
-    if fused is None or not isinstance(pipeline, fused):
+    codec_pipeline: Any = importlib.import_module("zarr.core.codec_pipeline")
+    if not isinstance(pipeline, codec_pipeline.FusedCodecPipeline):
         return 0, False
-    configured = zarr.config.get("codec_pipeline.max_workers", None)
-    try:
-        workers = (os.cpu_count() or 1) if configured is None else int(configured)
-    except (TypeError, ValueError):
-        # Zarr falls back to one worker for each CPU from a value it cannot read.
-        workers = os.cpu_count() or 1
+    workers = int(codec_pipeline._resolve_max_workers())
     if workers > 1:
         # A read of several chunks runs on Zarr's one pool, as many at once
         # as it has threads; one worker reads inline.
-        workers = max(workers, int(getattr(module, "_pool_size", 0) or 0))
-    workers = max(1, workers)
-    supports_sync_io = getattr(
-        importlib.import_module("zarr.abc.store"), "_store_supports_sync_io", None
-    )
-    store = getattr(getattr(async_array, "store_path", None), "store", None)
-    reads_sync = (
-        getattr(pipeline, "sync_transform", None) is not None
-        and supports_sync_io is not None
-        and bool(supports_sync_io(store))
+        workers = max(workers, int(codec_pipeline._pool_size))
+    stores: Any = importlib.import_module("zarr.abc.store")
+    reads_sync = pipeline.sync_transform is not None and bool(
+        stores._store_supports_sync_io(async_array.store_path.store)
     )
     return workers, not reads_sync

@@ -93,79 +93,60 @@ def test_array_geometry_is_absent_for_in_memory_arrays() -> None:
     assert array_geometry(np.zeros((4, 4), dtype=np.uint32)) is None
 
 
-@pytest.mark.parametrize(
-    ("pipeline", "max_workers", "keeps"),
-    [
-        ("zarr.core.codec_pipeline.BatchedCodecPipeline", None, False),
-        ("zarr.core.codec_pipeline.BatchedCodecPipeline", 4, False),
-        ("zarr.core.codec_pipeline.FusedCodecPipeline", 2, True),
-        ("zarr.core.codec_pipeline.FusedCodecPipeline", 1, False),
-        # Zarr reads a value it cannot use as a worker for each CPU.
-        ("zarr.core.codec_pipeline.FusedCodecPipeline", "many", "cpus"),
-        ("zarr.core.codec_pipeline.FusedCodecPipeline", None, "cpus"),
-    ],
-    ids=[
-        "Zarr's default pipeline",
-        "the default pipeline with workers set",
-        "the opt-in pipeline of two workers",
-        "the opt-in pipeline of one worker",
-        "the opt-in pipeline of an unreadable count",
-        "the opt-in pipeline of a worker per CPU",
-    ],
-)
-def test_array_geometry_records_whether_zarr_decodes_on_a_pool_of_its_own(
-    pipeline: str, max_workers: object, keeps: object
-) -> None:
-    import os
-
-    # The pipeline is the one the array was opened with; its worker count is
-    # read when the plan is made.
-    with zarr.config.set({"codec_pipeline.path": pipeline}):
-        array = _array(shape=(20, 20), chunks=(5, 5), shards=(10, 10))
-    with zarr.config.set({"codec_pipeline.max_workers": max_workers}):
-        geometry = array_geometry(array)
-    assert geometry is not None
-    expected = (os.cpu_count() or 1) > 1 if keeps == "cpus" else keeps
-    assert geometry.poolKeepsDecodedChunk is expected
-    # An array opened after the setting is gone keeps Zarr's default pipeline.
-    reopened = zarr.open_array(array.store, path=array.path, mode="r")
-    with zarr.config.set({"codec_pipeline.max_workers": max_workers}):
-        assert array_geometry(reopened).poolKeepsDecodedChunk is False
-
-
 _FUSED = "zarr.core.codec_pipeline.FusedCodecPipeline"
 
 
 @pytest.mark.parametrize(
-    ("max_workers", "pool_size", "workers"),
-    [(3, 0, 3), (3, 6, 6), (1, 6, 1), (None, 0, "cpus"), ("many", 0, "cpus")],
+    ("pipeline", "max_workers", "pool_size", "workers"),
+    [
+        ("zarr.core.codec_pipeline.BatchedCodecPipeline", None, 0, 0),
+        ("zarr.core.codec_pipeline.BatchedCodecPipeline", 4, 0, 0),
+        (_FUSED, 3, 0, 3),
+        (_FUSED, 3, 6, 6),
+        (_FUSED, 1, 6, 1),
+        (_FUSED, None, 0, "cpus"),
+        (_FUSED, "many", 0, "cpus"),
+    ],
     ids=[
-        "three workers",
-        "a pool that an earlier read grew",
-        "one worker, which reads inline",
-        "a worker per CPU",
-        "an unreadable count",
+        "Zarr's default pipeline",
+        "the default pipeline with workers set",
+        "the opt-in pipeline of three workers",
+        "the opt-in pipeline on a pool that an earlier read grew",
+        "the opt-in pipeline of one worker, which reads inline",
+        "the opt-in pipeline of a worker per CPU",
+        "the opt-in pipeline of an unreadable count",
     ],
 )
-def test_array_geometry_records_the_pool_that_zarrs_fused_pipeline_reads_on(
-    monkeypatch, max_workers: object, pool_size: int, workers: object
+def test_array_geometry_records_whether_zarr_decodes_on_a_pool_of_its_own(
+    monkeypatch, pipeline: str, max_workers: object, pool_size: int, workers: object
 ) -> None:
     import os
 
     import zarr.core.codec_pipeline as codec_pipeline
+    from zarr.errors import ZarrUserWarning
 
-    # Zarr's pipeline reads on one pool of the process, which grows to the
-    # most workers that any read asked for and never shrinks.
+    # The pipeline is the one the array was opened with; its worker count is
+    # read when the plan is made. Zarr's fused pipeline reads on one pool of
+    # the process, which grows to the most workers any read asked for and
+    # never shrinks.
     monkeypatch.setattr(codec_pipeline, "_pool_size", pool_size)
-    with zarr.config.set({"codec_pipeline.path": _FUSED}):
+    with zarr.config.set({"codec_pipeline.path": pipeline}):
         array = _array(shape=(20, 20), chunks=(5, 5), shards=(10, 10))
     with zarr.config.set({"codec_pipeline.max_workers": max_workers}):
-        geometry = array_geometry(array)
+        if pipeline == _FUSED and max_workers == "many":
+            # Zarr warns of a count it cannot read and takes one for each CPU.
+            with pytest.warns(ZarrUserWarning, match="Ignoring invalid"):
+                geometry = array_geometry(array)
+        else:
+            geometry = array_geometry(array)
     assert geometry is not None
     expected = max(1, os.cpu_count() or 1) if workers == "cpus" else workers
     # A memory store serves Zarr's synchronous I/O.
     assert (geometry.fusedPoolWorkers, geometry.fusedReadsAsync) == (expected, False)
-    assert array_geometry(_array(shape=(20, 20), chunks=(5, 5))).fusedPoolWorkers == 0
+    assert geometry.poolKeepsDecodedChunk is (expected > 1)
+    # An array opened after the setting is gone keeps Zarr's default pipeline.
+    reopened = zarr.open_array(array.store, path=array.path, mode="r")
+    assert array_geometry(reopened).fusedPoolWorkers == 0
 
 
 def test_a_fused_pipeline_that_a_user_configures_reads_on_its_own_pool_whatever_the_stores_threads(
@@ -180,21 +161,32 @@ def test_a_fused_pipeline_that_a_user_configures_reads_on_its_own_pool_whatever_
         ensure_zarr_host_ceiling,
         register_store_threads,
     )
+    from tests.memory_helpers import decodes_on_threads_held_together
 
+    # A pool of the test's own, which Zarr makes afresh and the test then
+    # gives back, so that no other test reads on a pool sized here.
+    monkeypatch.setattr(codec_pipeline, "_pool", None)
     monkeypatch.setattr(codec_pipeline, "_pool_size", 0)
+    values = np.arange(30 * 10, dtype=np.uint16).reshape(30, 10)
     with zarr.config.set(
         {"codec_pipeline.path": _FUSED, "codec_pipeline.max_workers": 3}
     ):
         # CyteArc's codec pipeline takes the place of Zarr's default only, so
-        # the configured fused pipeline stays, and a DataStore's registration
-        # of one thread for its store does not bound the pool it reads on.
+        # the configured fused pipeline stays.
         ensure_zarr_host_ceiling()
         assert zarr.config.get("codec_pipeline.path") == _FUSED
         store = LocalStore(str(tmp_path / "local.zarr"))
         register_store_threads(store, 1)
         local = zarr.open_group(store=store, mode="w").create_array(
-            "counts", shape=(20, 20), chunks=(5, 5), dtype=np.uint16
+            "counts", data=values, chunks=(10, 10)
         )
+        # A DataStore's registration of one thread for the store does not
+        # bound the pool: each of the read's three decodes holds its chunk
+        # until the other two hold theirs, which only three threads at once
+        # can reach.
+        (*_, compressor) = local.metadata.codecs
+        with decodes_on_threads_held_together(type(compressor), 3, timeout=5.0):
+            np.testing.assert_array_equal(local[:], values)
         files = AsyncFileSystemWrapper(
             LocalFileSystem(auto_mkdir=True), asynchronous=True
         )
@@ -477,13 +469,14 @@ def test_row_reads_at_a_concurrency_hold_the_shards_and_decodes_they_run_at_once
         2 * half,
         per_row,
     )
-    # On Zarr's own pool, whose threads keep the chunk they decoded, two
-    # decodes at once also hold the two chunks decoded before them.
-    own_pool = replace(geometry, poolKeepsDecodedChunk=True)
+    # Zarr's fused pipeline, whose pool threads keep the chunk they decoded,
+    # decodes a shard's chunks one at a time whatever the concurrency, beside
+    # the chunk decoded before.
+    own_pool = replace(geometry, fusedPoolWorkers=2)
     assert row_read_parts(
         own_pool, every_gene, rows_contiguous=True, concurrency=2
     ) == (
-        10 * encoded + 2 * decoded + 2 * decoded + 32_768 + 10 * 4_096 + 2 * 16_384,
+        10 * encoded + decoded + decoded + 32_768 + 10 * 4_096 + 16_384,
         per_row,
     )
     # Scattered rows over genes of wide spans in two chunks are read a row
