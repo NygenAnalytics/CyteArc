@@ -667,6 +667,19 @@ def write_assay_counts(
         (int(reader.chunksize[0]) for reader in readers if reader is not None),
         default=0,
     )
+    # The cells that a batch takes from the largest source read, on average.
+    part_rows = -(
+        -batch_rows
+        * max(
+            (
+                cells
+                for cells, reader in zip(row_plan.sourceCells, readers, strict=True)
+                if reader is not None
+            ),
+            default=0,
+        )
+        // max(1, row_plan.nCells)
+    )
 
     def held_bytes(rows: int) -> int:
         """Return the bytes of windows of ``rows`` rows of every source."""
@@ -798,7 +811,7 @@ def write_assay_counts(
                 yield dense
 
         window_rows = _held_window_rows(
-            shard_rows, batch_rows, lambda rows: dense_write(rows) is not None
+            shard_rows, part_rows, lambda rows: dense_write(rows) is not None
         )
         planned = dense_write(window_rows)
         if planned is not None:
@@ -845,7 +858,7 @@ def write_assay_counts(
             return False
         return True
 
-    window_rows = _held_window_rows(shard_rows, batch_rows, sparse_fits)
+    window_rows = _held_window_rows(shard_rows, part_rows, sparse_fits)
     held = 0
     if window_rows:
         plan = sparse_plan(window_rows)
@@ -925,16 +938,18 @@ def _held_read_bytes(run: ChunkedArray, rows: int) -> int:
 
 
 def _held_window_rows(
-    shard_rows: int, batch_rows: int, fits: Callable[[int], bool]
+    shard_rows: int, part_rows: int, fits: Callable[[int], bool]
 ) -> int:
     """Return the rows of each source that a merge holds at once, or 0 to read batch by batch.
 
     That is the most rows, up to ``shard_rows``, a stored shard of the
-    sources, whose windows ``fits`` admits for every source at once. Windows
-    of fewer rows than a batch, or than the shard when that is less, save no
-    read, so the write then reads each batch's rows as the batch comes.
+    sources, whose windows ``fits`` admits for every source at once.
+    ``part_rows`` are the cells that a batch takes from the largest source.
+    Windows of fewer rows than these, or than the shard when that is less,
+    would decode a shard more often than batches that read their own rows,
+    so the write then reads each batch's rows as the batch comes.
     """
-    least = min(int(batch_rows), int(shard_rows))
+    least = min(int(part_rows), int(shard_rows))
     rows = affordable_width(fits, int(shard_rows))
     return rows if least > 0 and rows >= least else 0
 

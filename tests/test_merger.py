@@ -7800,22 +7800,23 @@ def sparse_band_references():
     [
         ("ids", (), "narrow", True, "block"),
         ("ids", (), "wide", True, "block"),
-        # A smaller budget holds windows of two batches, or of 13 rows, which
-        # stop at each shard's end, or reads batch by batch.
-        ("ids", (), "narrow", True, "two batches"),
+        # A smaller budget holds windows of 8 rows, which divide the shards of
+        # 16, or of 13 rows, which stop at each shard's end, or reads batch
+        # by batch.
+        ("ids", (), "narrow", True, "8 rows"),
         ("ids", (), "narrow", True, "13 rows"),
         ("ids", (), "narrow", True, "batch"),
         ("ids", ("dense",), "narrow", False, "block"),
-        ("ids", ("dense",), "narrow", False, "two batches"),
+        ("ids", ("dense",), "narrow", False, "8 rows"),
         ("ids", ("dense",), "narrow", False, "batch"),
         ("names", (), "narrow", False, "block"),
         ("names", (), "wide", False, "block"),
-        ("names", (), "narrow", False, "two batches"),
+        ("names", (), "narrow", False, "8 rows"),
         ("names", (), "narrow", False, "13 rows"),
         ("names", (), "narrow", False, "batch"),
         ("float", (), "narrow", True, "block"),
         ("float", (), "wide", True, "block"),
-        ("float", (), "narrow", True, "two batches"),
+        ("float", (), "narrow", True, "8 rows"),
         ("missing", (), "narrow", True, "block"),
     ],
 )
@@ -7858,6 +7859,7 @@ def test_merged_counts_match_the_sparse_band_write_byte_for_byte(
 
     reads: list[int] = []
     held_rows: list[tuple[int, int]] = []
+    batches: list[int] = []
     calls = {"scatter_block_dense": 0, "remap_block_to_coo": 0}
     real = {
         name: getattr(merge_writer, name)
@@ -7867,6 +7869,7 @@ def test_merged_counts_match_the_sparse_band_write_byte_for_byte(
             "scatter_block_dense",
             "remap_block_to_coo",
             "_held_window_rows",
+            "iter_row_plan_windows",
         )
     }
 
@@ -7883,17 +7886,20 @@ def test_merged_counts_match_the_sparse_band_write_byte_for_byte(
             )
         return real["plan_dense_write"](*args, **kwargs)
 
-    def held_window_rows(shard_rows, batch_rows, fits):
+    def held_window_rows(shard_rows, part_rows, fits):
         # The budget admits no more held rows of each source than the case
-        # names: a shard, two batches, or none, which reads batch by batch.
-        most = {"block": shard_rows, "two batches": 2 * batch_rows, "13 rows": 13}.get(
-            held, 0
-        )
+        # names: a shard, 8 or 13 rows, or none, which reads batch by batch.
+        most = {"block": shard_rows, "8 rows": 8, "13 rows": 13}.get(held, 0)
         rows = real["_held_window_rows"](
-            shard_rows, batch_rows, lambda rows: rows <= most and fits(rows)
+            shard_rows, part_rows, lambda rows: rows <= most and fits(rows)
         )
-        held_rows.append((batch_rows, rows))
+        held_rows.append((part_rows, rows))
         return rows
+
+    def windows_of(row_plan, window_rows, **options):
+        # The write's batches are its windows of merged rows.
+        batches.append(window_rows)
+        return real["iter_row_plan_windows"](row_plan, window_rows, **options)
 
     def counted(name):
         def call(*args, **kwargs):
@@ -7905,6 +7911,7 @@ def test_merged_counts_match_the_sparse_band_write_byte_for_byte(
     monkeypatch.setattr(merge_writer, "controlled_compute", read)
     monkeypatch.setattr(merge_writer, "plan_dense_write", dense_write)
     monkeypatch.setattr(merge_writer, "_held_window_rows", held_window_rows)
+    monkeypatch.setattr(merge_writer, "iter_row_plan_windows", windows_of)
     for name in ("scatter_block_dense", "remap_block_to_coo"):
         monkeypatch.setattr(merge_writer, name, counted(name))
     actual = merge(tmp_path / "merged.zarr")
@@ -7924,12 +7931,13 @@ def test_merged_counts_match_the_sparse_band_write_byte_for_byte(
     assert any(name.startswith("RNA/counts/") for name in actual)
     assert (calls["scatter_block_dense"] > 0) == dense
     assert (calls["remap_block_to_coo"] > 0) == (not dense)
-    # The RNA counts are written first; antibody bands hold every row.
-    batch_rows, rows = held_rows[0 if scenario == "missing" else -1]
+    # The RNA counts are written first; antibody bands hold every row. A
+    # batch takes about 37 / 66 of its cells from the larger source.
+    part_rows, rows = held_rows[0 if scenario == "missing" else -1]
+    batch_rows = batches[0 if scenario == "missing" else -1]
     assert batch_rows < 8 if shard_rows == "narrow" else batch_rows >= 16
-    assert rows == {"block": 16, "two batches": 2 * batch_rows, "13 rows": 13}.get(
-        held, 0
-    )
+    assert part_rows == -(-batch_rows * 37 // 66)
+    assert rows == {"block": 16, "8 rows": 8, "13 rows": 13}.get(held, 0)
 
     def windows(n_rows, window):
         """The reads of a source's rows held ``window`` at a time within its shards of 16."""
@@ -7943,7 +7951,7 @@ def test_merged_counts_match_the_sparse_band_write_byte_for_byte(
 
     # Each source's shards of 16 rows, 16, 16 and 5 rows of the left source
     # and of its antibodies and 16 and 13 of the right, are held whole or in
-    # windows of two batches or 13 rows, which stop at each shard's end.
+    # windows of 8 or 13 rows, which stop at each shard's end.
     # Batch by batch, each batch of merged rows reads the rows of each source
     # that the merge seed puts in it.
     if held == "batch":
@@ -8134,6 +8142,7 @@ def _merge_chunk_columns(
     widths: Counter = Counter()
     writing = [False]
     held: list[tuple[int, int]] = []
+    batches: list[int] = []
     kept: dict[str, int] = {}
     # The held windows that batches were cut from, and the most of them alive
     # when a read starts.
@@ -8145,6 +8154,7 @@ def _merge_chunk_columns(
         name: getattr(merge_writer, name)
         for name in (
             "_held_window_rows",
+            "iter_row_plan_windows",
             "controlled_compute",
             "write_dense_from_row_batches",
             "accumulate_sparse_to_shards",
@@ -8165,13 +8175,18 @@ def _merge_chunk_columns(
         finally:
             writing[0] = False
 
-    def held_window_rows(shard_rows, batch_rows, fits):
+    def held_window_rows(shard_rows, part_rows, fits):
         most = shard_rows if most_rows is None else most_rows
         rows = real["_held_window_rows"](
-            shard_rows, batch_rows, lambda rows: rows <= most and fits(rows)
+            shard_rows, part_rows, lambda rows: rows <= most and fits(rows)
         )
-        held.append((batch_rows, rows))
+        held.append((part_rows, rows))
         return rows
+
+    def windows_of(row_plan, window_rows, **options):
+        # The write's batches are its windows of merged rows.
+        batches.append(window_rows)
+        return real["iter_row_plan_windows"](row_plan, window_rows, **options)
 
     def read(array, nthreads):
         # Sparse batches pass their cells through the same call.
@@ -8189,7 +8204,7 @@ def _merge_chunk_columns(
         def call(values, *args, **kwargs):
             # A piece, read alone or cut from a held window, spans no more
             # than a batch.
-            assert values.shape[0] <= held[-1][0]
+            assert values.shape[0] <= batches[-1]
             if isinstance(values, np.ndarray) and values.base is not None:
                 held_cells.append(weakref.ref(values.base))
             return real[name](values, *args, **kwargs)
@@ -8210,6 +8225,7 @@ def _merge_chunk_columns(
         patched.setattr(BloscCodec, "_decode_single", counted)
         patched.setattr(merge_datasets, "write_assay_counts", watched)
         patched.setattr(merge_writer, "_held_window_rows", held_window_rows)
+        patched.setattr(merge_writer, "iter_row_plan_windows", windows_of)
         patched.setattr(merge_writer, "controlled_compute", read)
         for name in ("write_dense_from_row_batches", "accumulate_sparse_to_shards"):
             patched.setattr(merge_writer, name, recorded(name))
@@ -8230,9 +8246,10 @@ def _merge_chunk_columns(
             policy=CountMatrixPolicy(unitBytes=1280, chunkBytes=640),
             feature_key=feature_key,
         ).dump()
-    batch_rows, rows = held[-1]
+    part_rows, rows = held[-1]
     return {
-        "batch_rows": batch_rows,
+        "batch_rows": batches[-1],
+        "part_rows": part_rows,
         "held_rows": rows,
         "decodes": dict(decodes),
         "widths": dict(widths),
@@ -8549,9 +8566,9 @@ def test_a_merge_holds_what_fits_of_one_chunk_column_whose_whole_read_does_not(
     held: list[tuple[int, int, int]] = []
     real = merge_writer._held_window_rows
 
-    def recorded(shard_rows, batch_rows, fits):
-        rows = real(shard_rows, batch_rows, fits)
-        held.append((shard_rows, batch_rows, rows))
+    def recorded(shard_rows, part_rows, fits):
+        rows = real(shard_rows, part_rows, fits)
+        held.append((shard_rows, part_rows, rows))
         return rows
 
     monkeypatch.setattr(merge_writer, "_held_window_rows", recorded)
@@ -8570,11 +8587,12 @@ def test_a_merge_holds_what_fits_of_one_chunk_column_whose_whole_read_does_not(
         feature_key="names",
     ).dump()
 
-    # The write holds a window of each source, of at least a batch and at
-    # most the 1,200-cell shard, whose reads fit as planned.
-    shard_rows, batch_rows, rows = held[-1]
+    # The write holds a window of each source, of at least a batch's share
+    # of the larger source and at most its 1,200-cell shard, whose reads fit
+    # as planned.
+    shard_rows, part_rows, rows = held[-1]
     assert shard_rows == 1200
-    assert batch_rows <= rows < shard_rows
+    assert part_rows <= rows <= shard_rows
     # Each merged cell holds its source's values summed by feature name.
     stored = zarr.open_group(str(path), mode="r")
     merged_names = np.asarray(stored["Counts/featureData/names"][:]).astype(str)
@@ -8609,9 +8627,9 @@ def test_a_merge_lets_an_allocation_failure_in_its_held_row_search_through(
             raise failure
         return plan(*args, **kwargs)
 
-    def recorded(shard_rows, batch_rows, fits):
-        searches.append((shard_rows, batch_rows))
-        return search(shard_rows, batch_rows, fits)
+    def recorded(shard_rows, part_rows, fits):
+        searches.append((shard_rows, part_rows))
+        return search(shard_rows, part_rows, fits)
 
     monkeypatch.setattr(merge_writer, "plan_dense_write", fails_first)
     monkeypatch.setattr(merge_writer, "_held_window_rows", recorded)
@@ -8629,7 +8647,8 @@ def test_a_merge_lets_an_allocation_failure_in_its_held_row_search_through(
             policy=CountMatrixPolicy(unitBytes=1280, chunkBytes=640),
         ).dump()
     assert raised.value is failure
-    assert searches == [(600, 16)]
+    # Batches of 16 cells take 9 of them from the larger source, on average.
+    assert searches == [(600, -(-16 * 600 // 1100))]
     assert len(plans) == 1
 
 
@@ -8700,17 +8719,18 @@ def test_a_held_read_holds_no_more_than_its_charge(tmp_path, column):
 
 
 @pytest.mark.parametrize(
-    ("shard_rows", "batch_rows", "most", "expected"),
+    ("shard_rows", "part_rows", "most", "expected"),
     [
         # A whole shard of each source, or the most rows that fit.
         (16, 4, 100, 16),
         (16, 4, 16, 16),
         (16, 4, 10, 10),
-        # At least a batch, or else batch by batch.
+        # At least a batch's share of the largest source, or else batch by
+        # batch.
         (16, 4, 4, 4),
         (16, 4, 3, 0),
         (100, 7, 0, 0),
-        # A shard shorter than a batch is held whole or not at all.
+        # A shard shorter than that share is held whole or not at all.
         (3, 4, 100, 3),
         (3, 4, 2, 0),
         # Sources without rows hold none.
@@ -8718,7 +8738,7 @@ def test_a_held_read_holds_no_more_than_its_charge(tmp_path, column):
     ],
 )
 def test_a_merge_holds_the_most_rows_of_each_source_that_fit(
-    shard_rows, batch_rows, most, expected
+    shard_rows, part_rows, most, expected
 ):
     from cytearc.merge.writer import _held_window_rows
 
@@ -8728,7 +8748,7 @@ def test_a_merge_holds_the_most_rows_of_each_source_that_fit(
         asked.append(rows)
         return rows <= most
 
-    assert _held_window_rows(shard_rows, batch_rows, fits) == expected
+    assert _held_window_rows(shard_rows, part_rows, fits) == expected
     # No window longer than a shard is asked about.
     assert all(0 <= rows <= shard_rows for rows in asked)
 
