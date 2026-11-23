@@ -111,7 +111,8 @@ class TracedCharge(NamedTuple):
     Attributes:
         held: The most the call held at once.
         charged: The most its ledger charged at once, peaks included.
-        kept: What the call still held when it returned, its result among it.
+        kept: What the call still held reachable when it returned, its result
+            among it.
         kept_charged: What its ledger still held charged when it returned.
     """
 
@@ -137,7 +138,10 @@ def traced_charge(call: Callable[[Any], Any]) -> TracedCharge:
     try:
         before, _ = tracemalloc.get_traced_memory()
         result = call(ledger)
-        current, peak = tracemalloc.get_traced_memory()
+        _, peak = tracemalloc.get_traced_memory()
+        # What the call keeps is what stays reachable, its result among it.
+        gc.collect()
+        current, _ = tracemalloc.get_traced_memory()
     finally:
         tracemalloc.stop()
     del result

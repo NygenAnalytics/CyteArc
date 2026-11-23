@@ -29,7 +29,7 @@ from ...storage.geometry import (
     ArrayGeometry,
     TextExtent,
     array_geometry,
-    variable_text_extent,
+    text_extent,
 )
 from ...utils.arrays import union_sorted
 from ...utils.digest import file_sha256
@@ -449,15 +449,13 @@ class _StoreIds:
     text: TextExtent | None
 
     @classmethod
-    def of(cls, store_ids: Any) -> "_StoreIds":
-        """Measure the store's cell IDs once, for the charges of a pass over them."""
-        geometry = array_geometry(store_ids, measure_text=True)
+    def of(cls, store_ids: Any, ledger: MemoryLedger | None) -> "_StoreIds":
+        """Measure the store's cell IDs, for the charges of a pass over them, the measure charged to ``ledger``."""
+        geometry = array_geometry(store_ids, measure_text=True, ledger=ledger)
         dtype = np.dtype(store_ids.dtype)
         if dtype.kind != "T":
             return cls(geometry, max(1, int(dtype.itemsize)), None)
-        text = geometry.text if geometry is not None else None
-        if text is None:
-            text = variable_text_extent(store_ids)
+        text = text_extent(store_ids, geometry, ledger)
         return cls(geometry, text.valueBytes(), text)
 
     def read_bytes(self, n_rows: int) -> int:
@@ -498,7 +496,9 @@ def id_hashing_bytes(n_ids: int, characters: int, widest: int) -> int:
     )
 
 
-def store_pass_bytes(store_ids: Any, n_selected: int) -> int:
+def store_pass_bytes(
+    store_ids: Any, n_selected: int, *, ledger: MemoryLedger | None = None
+) -> int:
     """Return the most bytes that the join's pass over the store's cell IDs holds.
 
     The join charges this when it starts, unless the selection holds every
@@ -511,13 +511,15 @@ def store_pass_bytes(store_ids: Any, n_selected: int) -> int:
     Args:
         store_ids: The store's array of cell IDs, as text.
         n_selected: The selected cells.
+        ledger: The ledger that a measure of variable-width IDs charges, as
+            :func:`~cytearc.storage.geometry.variable_text_extent` takes it.
     """
     n_ids = int(store_ids.shape[0])
     if n_selected == n_ids:
         return 0
     rows = min(n_ids, _store_block_rows(store_ids))
     hashed = min(rows, _HASHED_IDS)
-    ids = _StoreIds.of(store_ids)
+    ids = _StoreIds.of(store_ids, ledger)
     # An ID's bytes as read bound both its Python string's characters and its
     # UTF-8 bytes: fixed-width text takes four bytes a character, and
     # variable-width text more than its UTF-8 bytes.
@@ -646,7 +648,7 @@ class CellBarcodeJoin:
         else:
             self._reserved = ledger.hold(
                 "the pass over the store's cell IDs",
-                store_pass_bytes(store_ids, n_cells),
+                store_pass_bytes(store_ids, n_cells, ledger=ledger),
                 remedy=_STORE_REMEDY,
             )
         self._named = np.zeros(n_cells, dtype=bool)
@@ -699,7 +701,7 @@ class CellBarcodeJoin:
         self._ledger.hold(item, 8 * n_ids, remedy=_STORE_REMEDY)
         hashes = np.empty(n_ids, dtype=np.uint64)
         step = _store_block_rows(store_ids)
-        ids = _StoreIds.of(store_ids)
+        ids = _StoreIds.of(store_ids, self._ledger)
         for start in range(0, n_ids, step):
             stop = min(n_ids, start + step)
             self._ledger.peak(

@@ -1346,6 +1346,13 @@ def test_reading_scattered_variable_width_text_does_not_crash_the_interpreter() 
     assert read == copied == expected.tolist()
 
 
+def _sized_bytes(utf8: int) -> int:
+    """The bytes that NumPy's arena takes for a value of ``utf8`` UTF-8 bytes before it grows (NEP 55): none up to 15 bytes, then the bytes behind a size of a byte up to 255 bytes and of 8 beyond."""
+    if utf8 <= 15:
+        return 0
+    return utf8 + (1 if utf8 <= 255 else 8)
+
+
 @pytest.mark.parametrize("part_bytes", [None, 1], ids=["parts", "one value a part"])
 @pytest.mark.parametrize(
     "values",
@@ -1356,6 +1363,9 @@ def test_reading_scattered_variable_width_text_does_not_crash_the_interpreter() 
         ["\u4e2d\u6587", "plain"],
         ["\N{GRINNING FACE}x", "\u00e9", "\u4e2d"],
         ["\u00e9" * 5, "\u4e2d", "abcdefgh"],
+        ["x" * 300, "y" * 20, "\u4e2d" * 90],
+        ["\u00e9" * 300 + "\N{GRINNING FACE}", "a", "b" * 280],
+        ["", "", "abc"],
         ["", ""],
         [],
     ],
@@ -1366,6 +1376,9 @@ def test_reading_scattered_variable_width_text_does_not_crash_the_interpreter() 
         "bmp",
         "astral",
         "longest-in-characters-not-bytes",
+        "beyond-255-bytes",
+        "long-beyond-ascii",
+        "a-chunk-of-empty-values-first",
         "empty-values",
         "none",
     ],
@@ -1382,33 +1395,37 @@ def test_the_extent_of_variable_width_text_bounds_each_value(
     texts = np.asarray(values, dtype=np.dtypes.StringDType())
     root = zarr.open_group(store=MemoryStore(), mode="w")
     stored = root.create_array("ids", data=texts, chunks=(2,))
+    utf8 = [len(value.encode("utf-8")) for value in values]
     for array in (stored, texts):
         extent = variable_text_extent(array)
         assert extent.characters == max(map(len, values), default=0)
-        assert extent.encodedBytes == max(
-            (len(value.encode("utf-8")) for value in values), default=0
-        )
+        assert extent.utf8Bytes == max(utf8, default=0)
         assert extent.widest == max(
             (ord(character) for value in values for character in value), default=0
         )
+        assert extent.values == len(values)
+        assert extent.characterTotal == sum(map(len, values))
+        assert extent.arenaBytes == sum(map(_sized_bytes, utf8))
         assert text_width(array) == extent.characters
 
 
+@pytest.mark.parametrize("n_values", [19_250, 20_250])
 @pytest.mark.parametrize("encoded_bytes", [1, 15, 16, 255, 256, 1_000])
 def test_numpy_holds_variable_width_values_as_their_extent_counts(
-    encoded_bytes,
+    encoded_bytes, n_values
 ) -> None:
     import gc
     import tracemalloc
 
     from cytearc.storage.geometry import variable_text_extent
 
-    # 20,000 values of one length in UTF-8, made from Python strings as
-    # Zarr's decode makes them.
+    # Values of one length in UTF-8, made from Python strings as Zarr's
+    # decode makes them; at 19,250 values on NumPy 2.1 and 20,250 on NumPy
+    # 2.5 the arena has just grown by a quarter.
     strings = np.asarray(
         [
             (f"{index:06d}" + "x" * encoded_bytes)[:encoded_bytes]
-            for index in range(20_000)
+            for index in range(n_values)
         ],
         dtype=object,
     )
@@ -1420,54 +1437,27 @@ def test_numpy_holds_variable_width_values_as_their_extent_counts(
         held = tracemalloc.get_traced_memory()[0] - before
     finally:
         tracemalloc.stop()
-    charged = len(values) * variable_text_extent(values).valueBytes()
+    extent = variable_text_extent(values)
+    charged = len(values) * extent.valueBytes()
+    assert extent.keptBytes() <= charged
     # NumPy keeps each value's 16-byte element and, beyond 15 bytes, its
-    # bytes behind its size, a byte up to 255 bytes and 8 beyond, in an arena
-    # that it grows by a quarter at a time (NEP 55), so it holds at least the
-    # elements and the sized bytes, and at most a quarter more of the latter.
-    sized = (
-        0 if encoded_bytes <= 15 else encoded_bytes + (1 if encoded_bytes <= 255 else 8)
-    )
+    # sized bytes in an arena that it grows by a quarter at a time (NEP 55),
+    # so it holds at least the elements and the sized bytes, and at most a
+    # quarter more of the latter.
+    sized = _sized_bytes(encoded_bytes)
     least = len(values) * (16 + sized)
     # The array object holds a few hundred bytes beside its values.
-    assert least <= held <= charged + 1_024
+    assert least <= held <= extent.keptBytes() + 1_024
     assert charged <= least + len(values) * (sized // 4 + 1)
 
 
-def test_the_extent_of_variable_width_text_is_measured_once_while_unchanged(
+def test_a_column_of_variable_width_text_is_measured_once_in_an_operation(
     monkeypatch,
 ) -> None:
-    import cytearc.storage.geometry as geometry_module
-    from cytearc.storage.content_stamps import clear_content_cache
-
-    values = np.asarray(["a", "b\u00e9", "c" * 23, ""], dtype=np.dtypes.StringDType())
-    root = zarr.open_group(store=MemoryStore(), mode="w")
-    stored = root.create_array("ids", data=values, chunks=(2,))
-    measured: list[int] = []
-    measure = geometry_module._measured_text_extent
-
-    def counted(array):
-        measured.append(1)
-        return measure(array)
-
-    monkeypatch.setattr(geometry_module, "_measured_text_extent", counted)
-    clear_content_cache()
-    assert text_width(stored) == 23
-    assert text_width(values) == 23
-    assert len(measured) == 2
-    # The stored values' measure is reused while their stored bytes are
-    # unchanged, and taken again after an edit.
-    assert text_width(stored) == 23
-    assert len(measured) == 2
-    stored[1] = "d" * 30
-    assert text_width(stored) == 30
-    assert len(measured) == 3
-
-
-def test_reading_variable_width_rows_measures_their_column_once(monkeypatch) -> None:
     import cytearc.storage.content_stamps as content_stamps
+    import cytearc.storage.geometry as geometry_module
     from cytearc.metadata.rows import read_rows
-    from cytearc.storage.geometry import array_geometry
+    from cytearc.storage.validation_scope import validation_scope
     from cytearc.utils.memory_budget import MemoryLedger
 
     values = _variable_text(400)
@@ -1475,25 +1465,93 @@ def test_reading_variable_width_rows_measures_their_column_once(monkeypatch) -> 
     stored = root.create_array(
         "ids", data=values.astype(np.dtypes.StringDType()), chunks=(10,)
     )
-    stamps: list[int] = []
-    stamp = content_stamps.stored_content_stamp
-    monkeypatch.setattr(
-        content_stamps,
-        "stored_content_stamp",
-        lambda array: stamps.append(1) or stamp(array),
-    )
-    # The chunks alone need no measure, which fetches every stored chunk.
-    geometry = array_geometry(stored)
-    assert geometry is not None and geometry.text is None
-    assert geometry.itemsize == 16 and stamps == []
-    # Once measured, a read of rows across all 40 chunks stamps the column
-    # once, to find its measure current, whatever the chunks it reads.
-    array_geometry(stored, measure_text=True)
-    stamps.clear()
+    measured: list[int] = []
+    measure = geometry_module._measured_text_extent
+
+    def counted(array, ledger):
+        measured.append(1)
+        return measure(array, ledger)
+
+    def no_stamp(array):
+        raise AssertionError("a read of variable-width text stamped its column")
+
+    monkeypatch.setattr(geometry_module, "_measured_text_extent", counted)
+    monkeypatch.setattr(content_stamps, "stored_content_stamp", no_stamp)
     rows = np.arange(0, 400, 3)
-    read = read_rows(MemoryLedger(None, "Reading"), stored, rows, item="the IDs")
-    assert read.tolist() == values[rows].tolist()
-    assert len(stamps) == 1
+
+    def read() -> np.ndarray:
+        return read_rows(MemoryLedger(None, "Reading"), stored, rows, item="the IDs")
+
+    # The chunks alone need no measure.
+    geometry = geometry_module.array_geometry(stored)
+    assert geometry is not None and geometry.text is None and measured == []
+    # In an operation, the column is measured for its first read and its
+    # later reads, and another opening of the array, reuse the measure.
+    with validation_scope():
+        assert read().tolist() == values[rows].tolist()
+        read()
+        assert text_width(root["ids"]) == max(map(len, values))
+    assert len(measured) == 1
+    # Each operation measures it anew, and so does each read outside one.
+    stored[1] = "d" * 90
+    with validation_scope():
+        assert text_width(stored) == 90
+        # An array of the same path in another store is another column.
+        other = zarr.open_group(store=MemoryStore(), mode="w").create_array(
+            "ids", data=np.asarray(["e" * 7]).astype(np.dtypes.StringDType())
+        )
+        assert text_width(other) == 7
+    read()
+    read()
+    assert len(measured) == 5
+
+
+def test_measuring_variable_width_text_is_charged_before_and_as_it_reads(
+    tmp_path, monkeypatch
+) -> None:
+    from cytearc.metadata.rows import read_rows, read_rows_bytes
+    from cytearc.storage.geometry import variable_text_extent
+    from cytearc.utils.memory_budget import MemoryBudgetError, MemoryLedger
+
+    values = _random_text("latin-1", 120, 6_000)
+    root = zarr.open_group(tmp_path / "ids.zarr", mode="w")
+    stored = root.create_array(
+        "ids", data=values.astype(np.dtypes.StringDType()), chunks=(2_000,)
+    )
+    # The measure holds what it charges, chunk by chunk.
+    traced = traced_charge(lambda ledger: variable_text_extent(stored, ledger))
+    assert traced.held <= traced.charged
+    # A chunk whose values cannot all be decoded within the budget, even as
+    # empty strings, is refused before it is read.
+    reads: list[object] = []
+    getitem = zarr.Array.__getitem__
+    monkeypatch.setattr(
+        zarr.Array,
+        "__getitem__",
+        lambda self, key: reads.append(key) or getitem(self, key),
+    )
+    with pytest.raises(MemoryBudgetError, match="a measure of the text of 'ids'"):
+        variable_text_extent(stored, MemoryLedger(100_000, "Reading the IDs"))
+    assert reads == []
+    # A chunk that fits as empty strings but not as its values is refused
+    # once it is measured, before the next is read.
+    with pytest.raises(MemoryBudgetError, match="a measure of the text of 'ids'"):
+        variable_text_extent(stored, MemoryLedger(1_000_000, "Reading the IDs"))
+    assert len(reads) == 1
+    monkeypatch.undo()
+    # Outside an operation, a read measures the column first, which its
+    # planner counts.
+    rows = np.arange(0, 6_000, 7)
+    traced = traced_charge(
+        lambda ledger: read_rows(ledger, stored, rows, item="the IDs")
+    )
+    assert traced.held <= traced.charged
+    assert traced.held <= read_rows_bytes(stored, len(rows))
+    # Text read from memory stays charged as NumPy keeps it.
+    ledger = MemoryLedger(None, "Reading the IDs")
+    taken = read_rows(ledger, values.astype(np.dtypes.StringDType()), rows, item="x")
+    utf8 = [len(value.encode("utf-8")) for value in taken.tolist()]
+    assert ledger.held_bytes >= 16 * len(utf8) + sum(map(_sized_bytes, utf8))
 
 
 # Values of random digits and then one character repeated, which compress as
@@ -1525,23 +1583,62 @@ def _random_text(kind: str, characters: int, n_values: int) -> np.ndarray:
     return np.asarray(["".join(row) for row in letters])
 
 
+def _chunk_bytes(values: list[str]) -> tuple[int, int]:
+    """The least and the most bytes that decoding a stored chunk of ``values`` holds, from known bytes.
+
+    At the least, the chunk's Python strings and their references, as
+    ``sys.getsizeof`` gives them, and NumPy's elements and sized bytes (NEP
+    55). At the most, also the chunk's stored bytes, a 4-byte count and a
+    4-byte length and the UTF-8 bytes of each value, both as decompressed and
+    as stored without compressing, the UTF-8 copy that each string beyond
+    ASCII keeps, and the quarter that NumPy grows its arena by.
+    """
+    import sys
+
+    utf8 = [len(value.encode("utf-8")) for value in values]
+    strings = sum(map(sys.getsizeof, values)) + 8 * len(values)
+    sized = sum(map(_sized_bytes, utf8))
+    least = strings + 16 * len(values) + sized
+    stored = 4 + sum(4 + length for length in utf8)
+    copies = sum(
+        length + 1
+        for value, length in zip(values, utf8, strict=True)
+        if not value.isascii()
+    )
+    most = 2 * stored + strings + copies + 16 * len(values) + sized + sized // 4 + 1
+    return least, most
+
+
 @pytest.mark.parametrize(
-    ("kind", "characters", "n_values", "chunk_rows", "random"),
+    ("kind", "characters", "n_values", "chunks", "shards", "random"),
     [
         # Short values in one chunk, which a read of any of them decodes.
-        ("ascii", 6, 20_000, 20_000, False),
+        ("ascii", 6, 20_000, 20_000, None, False),
         # Values of 16 bytes or more, which NumPy keeps beside its elements.
-        ("latin-1", 12, 4_000, 1_024, False),
+        ("latin-1", 12, 4_000, 1_024, None, False),
         # Long values that barely compress, in one chunk.
-        ("ascii", 120, 4_000, 4_000, True),
-        ("latin-1", 120, 4_000, 4_000, True),
-        ("astral", 120, 4_000, 4_000, True),
+        ("ascii", 120, 4_000, 4_000, None, True),
+        ("latin-1", 120, 4_000, 4_000, None, True),
+        ("astral", 120, 4_000, 4_000, None, True),
+        # Columns of 40 chunks, and shards of 5 chunks.
+        ("ascii", 50, 20_000, 500, None, True),
+        ("latin-1", 50, 20_000, 1_000, 5_000, True),
     ],
-    ids=["short", "short-in-the-arena", "long-ascii", "long-latin-1", "long-astral"],
+    ids=[
+        "short",
+        "short-in-the-arena",
+        "long-ascii",
+        "long-latin-1",
+        "long-astral",
+        "forty-chunks",
+        "sharded",
+    ],
 )
 def test_reads_of_variable_width_text_hold_what_they_charge(
-    kind, characters, n_values, chunk_rows, random, tmp_path
+    kind, characters, n_values, chunks, shards, random, tmp_path
 ) -> None:
+    import os
+
     from cytearc.metadata.rows import (
         array_row_selection_parts,
         read_rows,
@@ -1551,6 +1648,8 @@ def test_reads_of_variable_width_text_hold_what_they_charge(
         read_whole_text,
         text_read_bytes,
     )
+    from cytearc.storage.geometry import variable_text_extent
+    from cytearc.storage.validation_scope import validation_scope
 
     values = (
         _random_text(kind, characters, n_values)
@@ -1559,11 +1658,16 @@ def test_reads_of_variable_width_text_hold_what_they_charge(
     )
     root = zarr.open_group(tmp_path / "ids.zarr", mode="w")
     stored = root.create_array(
-        "ids", data=values.astype(np.dtypes.StringDType()), chunks=(chunk_rows,)
+        "ids",
+        data=values.astype(np.dtypes.StringDType()),
+        chunks=(chunks,),
+        **({} if shards is None else {"shards": (shards,)}),
     )
     rng = np.random.default_rng(1)
     scattered = np.sort(rng.choice(n_values, n_values // 3, replace=False))
-    one = np.array([chunk_rows // 2])
+    one = np.array([chunks // 2])
+    # Two rows at either end of a chunk, which a read takes the chunk's span of.
+    two = np.array([chunks, 2 * chunks - 1]) if n_values >= 2 * chunks else one
     fixed, per_row = array_row_selection_parts(stored)
     # Each read, and what the planners of reads state it holds beside its
     # own charge.
@@ -1572,6 +1676,10 @@ def test_reads_of_variable_width_text_hold_what_they_charge(
         "one row": (
             lambda ledger: read_rows(ledger, stored, one, item="the IDs"),
             read_rows_bytes(stored, 1),
+        ),
+        "two rows": (
+            lambda ledger: read_rows(ledger, stored, two, item="the IDs"),
+            read_rows_bytes(stored, len(two)),
         ),
         "scattered rows": (
             lambda ledger: read_rows(ledger, stored, scattered, item="the IDs"),
@@ -1589,18 +1697,33 @@ def test_reads_of_variable_width_text_hold_what_they_charge(
             text_read_bytes(stored, len(values)),
         ),
     }
-    for name, (read, planned) in reads.items():
-        traced = traced_charge(read)
-        assert traced.held <= traced.charged, name
-        assert planned is None or traced.held <= planned, name
-        # What the read returns stays charged, beside the few KiB of objects
-        # that Zarr keeps after a read.
-        assert traced.kept <= traced.kept_charged + 32 * 1024, name
-    if random:
-        # One row of long values is charged near what decoding its chunk
-        # holds, its own row returned rather than the chunk's.
-        one_row = traced_charge(reads["one row"][0])
-        assert one_row.held >= 0.75 * one_row.charged
+    traced = {}
+    # Zarr's event loop leaves about 1.3 KiB of objects in reference cycles
+    # after each read of a chunk, which Python frees at its next collection
+    # and the ledger leaves out with the runtime's other objects.
+    garbage = 1_536 * -(-n_values // chunks)
+    # An operation measures the column once, before its reads.
+    with validation_scope():
+        variable_text_extent(stored)
+        for name, (read, planned) in reads.items():
+            traced[name] = traced_charge(read)
+            assert traced[name].held <= traced[name].charged + garbage, name
+            assert planned is None or traced[name].held <= planned + garbage, name
+            # What the read returns stays charged, beside the few KiB of
+            # objects that Zarr keeps after a read.
+            assert traced[name].kept <= traced[name].kept_charged + 32 * 1024, name
+    if shards is None:
+        # One row decodes its chunk, which holds at least the known bytes of
+        # the chunk's values, its stored bytes as compressed among them, and
+        # is charged no more than their most, beside the row itself and the
+        # tens of KiB of objects of Zarr's read.
+        chunk = values[(one[0] // chunks) * chunks :][:chunks].tolist()
+        key = stored.metadata.encode_chunk_key((int(one[0]) // chunks,))
+        compressed = os.path.getsize(tmp_path / "ids.zarr" / "ids" / key)
+        least, most = _chunk_bytes(chunk)
+        row = 3 * (16 + _sized_bytes(len(values[one[0]].encode("utf-8"))) * 5 // 4 + 1)
+        assert traced["one row"].held >= compressed + least
+        assert traced["one row"].charged <= most + most // 100 + row + 64 * 1024
 
 
 def test_a_read_of_variable_width_labels_is_charged_by_their_characters(
@@ -1622,6 +1745,35 @@ def test_a_read_of_variable_width_labels_is_charged_by_their_characters(
     # A charge at NumPy's 16-byte elements, as such a read had, is passed.
     elements = array_geometry(stored)
     assert elements is not None and traced.held > elements.wholeReadBytes(1)
+
+
+def test_one_long_label_does_not_widen_the_charge_of_every_label(tmp_path) -> None:
+    from cytearc.metadata.rows import read_rows, read_whole
+
+    # 20,000 labels of 15 characters and one of 5,000, in chunks of 5,000:
+    # the read holds each label as long as it is, so its charge counts every
+    # label's own bytes, and the longest only in its own chunk.
+    labels = [f"cell-{index:08d}-x" for index in range(20_000)]
+    labels[123] = "y" * 5_000
+    root = zarr.open_group(tmp_path / "labels.zarr", mode="w")
+    stored = root.create_array(
+        "labels",
+        data=np.asarray(labels, dtype=np.dtypes.StringDType()),
+        chunks=(5_000,),
+    )
+    whole = traced_charge(lambda ledger: read_whole(ledger, root, "labels", item="v"))
+    assert whole.held <= whole.charged
+    # Every chunk decoded at once, each at most as its own values, beside
+    # the read's result: no more than the known bytes of the labels, four
+    # times over, and far from 20,000 labels of 5,000 characters.
+    _, most = _chunk_bytes(labels)
+    assert whole.charged <= 4 * most
+    # A read of a few rows far from the long label holds and is charged
+    # like any other.
+    rows = traced_charge(
+        lambda ledger: read_rows(ledger, stored, np.arange(10_000, 10_010), item="v")
+    )
+    assert rows.held <= rows.charged <= 4 * most
 
 
 @pytest.mark.parametrize("kind", list(_TEXT_KINDS))
@@ -1672,12 +1824,13 @@ def test_rows_of_variable_width_text_in_memory_are_planned_by_their_longest_valu
 
     # 1,000 values of 100 bytes and one of 300: NumPy keeps each in its
     # 16-byte element and the longest's bytes behind an 8-byte size in its
-    # arena (NEP 55), and a selection holds each row three times.
+    # arena (NEP 55), and a selection holds each row three times. The fixed
+    # bytes are the measure's, which keeps 8 bytes four times for each value.
     values = np.asarray(["x" * 100] * 1_000 + ["y" * 300]).astype(
         np.dtypes.StringDType()
     )
     fixed, per_row = array_row_selection_parts(values)
-    assert fixed == 0
+    assert fixed >= 32 * len(values)
     assert per_row >= 3 * (16 + 300 + 8)
 
 

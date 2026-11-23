@@ -16,7 +16,7 @@ from ..storage.geometry import (
     ArrayGeometry,
     TextExtent,
     array_geometry,
-    variable_text_extent,
+    text_extent,
 )
 from ..storage.partition import (
     checked_indices,
@@ -85,60 +85,67 @@ def _read_array_rows(array: Any, rows: np.ndarray) -> np.ndarray:
     return np.asarray(array[indices])
 
 
-def array_row_selection_parts(array: Any) -> tuple[int, int]:
+def array_row_selection_parts(
+    array: Any, *, ledger: MemoryLedger | None = None
+) -> tuple[int, int]:
     """Return fixed and per-row bytes for one chunk-serial selection.
 
     A stored array counts a chunk as stored and decoded, and each row three
     times beside its indices, at the bytes that ``ArrayGeometry`` gives its
     values; variable-width text counts each value as
     :func:`~cytearc.storage.geometry.variable_text_extent` measures the
-    longest.
+    longest, and the measure among the fixed bytes, charged to ``ledger``.
     """
-    return _row_selection_parts(array, array_geometry(array, measure_text=True))
+    return _row_selection_parts(
+        array, array_geometry(array, measure_text=True, ledger=ledger), ledger
+    )
 
 
-def _row_selection_parts(array: Any, geometry: ArrayGeometry | None) -> tuple[int, int]:
+def _row_selection_parts(
+    array: Any, geometry: ArrayGeometry | None, ledger: MemoryLedger | None
+) -> tuple[int, int]:
     """:func:`array_row_selection_parts` of ``array``, whose geometry, its text measured, is ``geometry``."""
     row_values = int(np.prod(tuple(array.shape)[1:], dtype=np.int64))
+    extent = (
+        text_extent(array, geometry, ledger)
+        if np.dtype(array.dtype).kind == "T"
+        else None
+    )
     if geometry is not None:
         value_bytes = geometry.itemsize
-    elif np.dtype(array.dtype).kind == "T":
-        value_bytes = variable_text_extent(array).valueBytes()
+    elif extent is not None:
+        value_bytes = extent.valueBytes()
     else:
         value_bytes = int(np.dtype(array.dtype).itemsize)
     row_bytes = max(1, value_bytes * row_values)
     index_bytes = np.dtype(np.int64).itemsize
     per_row = 3 * row_bytes + _SELECTION_INDEX_ARRAYS * index_bytes
-    if geometry is None:
-        return 0, int(per_row)
-    return geometry.storedChunkBytes(), int(per_row)
+    fixed = 0 if geometry is None else geometry.storedChunkBytes()
+    if extent is not None:
+        fixed = max(fixed, extent.measureBytes)
+    return fixed, int(per_row)
 
 
-def _text_extent(array: Any, geometry: ArrayGeometry | None) -> TextExtent:
-    """The extent of variable-width text ``array``, from ``geometry`` where its charge measured it."""
-    if geometry is not None and geometry.text is not None:
-        return geometry.text
-    return variable_text_extent(array)
-
-
-def text_width(array: Any) -> int:
+def text_width(array: Any, *, ledger: MemoryLedger | None = None) -> int:
     """Return the characters of each value of a stored text array, 0 for other values.
 
     The store writes text as fixed-width unicode, four bytes per character.
     Text of variable width, which another tool can write, such as Zarr's
-    ``dtype=str``, takes the characters of its longest value, measured a
-    stored chunk at a time; a Zarr array's measure is reused while its stored
-    bytes are unchanged.
+    ``dtype=str``, takes the characters of its longest value, as
+    :func:`~cytearc.storage.geometry.variable_text_extent` measures them,
+    charged to ``ledger``.
     """
     dtype = np.dtype(array.dtype)
     if dtype.kind == "U":
         return int(dtype.itemsize) // 4
     if dtype.kind != "T":
         return 0
-    return variable_text_extent(array).characters
+    return text_extent(array, None, ledger).characters
 
 
-def text_row_selection_parts(array: Any) -> tuple[int, int]:
+def text_row_selection_parts(
+    array: Any, *, ledger: MemoryLedger | None = None
+) -> tuple[int, int]:
     """Return fixed and per-row bytes of reading stored rows as Python strings.
 
     The store keeps text at the width of its longest value and decodes whole
@@ -150,19 +157,53 @@ def text_row_selection_parts(array: Any) -> tuple[int, int]:
     if np.dtype(array.dtype).kind != "T":
         fixed, per_row = array_row_selection_parts(array)
         return fixed, per_row + STRING_BYTES + 4 * text_width(array)
-    geometry = array_geometry(array, measure_text=True)
-    fixed, per_row = _row_selection_parts(array, geometry)
-    extent = _text_extent(array, geometry)
+    geometry = array_geometry(array, measure_text=True, ledger=ledger)
+    fixed, per_row = _row_selection_parts(array, geometry, ledger)
+    extent = text_extent(array, geometry, ledger)
     string = object_array_bytes(1) + python_text_bytes(
         1, extent.characters, widest=extent.widest
     )
     return fixed, per_row + string
 
 
-def text_read_bytes(array: Any, n_rows: int) -> int:
-    """Return the bytes of reading ``n_rows`` stored rows as Python strings."""
-    fixed, per_row = text_row_selection_parts(array)
-    return fixed + int(n_rows) * per_row
+def text_read_bytes(
+    array: Any, n_rows: int, *, ledger: MemoryLedger | None = None
+) -> int:
+    """Return the bytes of reading ``n_rows`` stored rows as Python strings.
+
+    Variable-width text counts the rows, three times as
+    :func:`array_row_selection_parts` counts each row, and their strings, at
+    no more than every value of the array holds, however long its longest
+    value.
+    """
+    n_rows = int(n_rows)
+    if np.dtype(array.dtype).kind != "T":
+        fixed, per_row = text_row_selection_parts(array)
+        return fixed + n_rows * per_row
+    geometry = array_geometry(array, measure_text=True, ledger=ledger)
+    fixed, _ = _row_selection_parts(array, geometry, ledger)
+    extent = text_extent(array, geometry, ledger)
+    characters = min(n_rows * extent.characters, extent.characterTotal)
+    strings = object_array_bytes(n_rows) + python_text_bytes(
+        n_rows, characters, widest=extent.widest
+    )
+    index_bytes = _SELECTION_INDEX_ARRAYS * np.dtype(np.int64).itemsize
+    return (
+        fixed
+        + 3 * _rows_held(array, geometry, extent, n_rows)
+        + n_rows * index_bytes
+        + strings
+    )
+
+
+def _rows_held(
+    array: Any, geometry: ArrayGeometry | None, extent: TextExtent, n_rows: int
+) -> int:
+    """The bytes of ``n_rows`` rows of variable-width text ``array`` as NumPy keeps them: no more than its longest value for each value, nor than every value."""
+    if geometry is not None:
+        return geometry.rowsBytes(n_rows)
+    row_values = int(np.prod(tuple(array.shape)[1:], dtype=np.int64))
+    return min(n_rows * row_values * extent.valueBytes(), extent.keptBytes())
 
 
 def fingerprint_stored_rows(array: Any, rows: np.ndarray) -> str:
@@ -264,11 +305,11 @@ def _read_whole_array(
     ledger: MemoryLedger, group: zarr.Group, name: str, array: zarr.Array, *, item: str
 ) -> tuple[np.ndarray, ArrayGeometry | None]:
     """Read stored array ``name`` of ``group``, ``array``, whole as :func:`read_whole` does, and return the geometry that its charges took."""
-    geometry = array_geometry(array, measure_text=True)
+    geometry = array_geometry(array, measure_text=True, ledger=ledger)
     if geometry is None:
         # An array without chunks, such as a scalar, is read as it is.
         values = read_array(group, name) if array.ndim else np.asarray(array[()])
-        ledger.hold(item, values.nbytes)
+        ledger.hold(item, _kept_bytes(values, None, ledger))
         return values, None
     concurrency = _fitting_concurrency(ledger, geometry.wholeReadBytes)
     ledger.peak(item, geometry.wholeReadBytes(concurrency))
@@ -283,19 +324,24 @@ def _read_whole_array(
             step = geometry.axisChunk(0)
             for start in range(0, geometry.shape[0], step):
                 values[start : start + step] = array[start : start + step]
-    ledger.hold(item, _kept_bytes(values, geometry))
+    ledger.hold(item, _kept_bytes(values, geometry, ledger))
     return values, geometry
 
 
-def _kept_bytes(values: np.ndarray, geometry: ArrayGeometry) -> int:
+def _kept_bytes(
+    values: np.ndarray, geometry: ArrayGeometry | None, ledger: MemoryLedger
+) -> int:
     """The bytes that ``values``, read from an array of ``geometry``, keep.
 
     NumPy counts a value of variable-width text at its 16-byte element; the
-    geometry counts its characters too, as the longest value holds them.
+    geometry counts its characters too, as ``ArrayGeometry.rowsBytes`` counts
+    rows, and text read from an array without chunks is measured itself.
     """
-    if values.dtype.kind == "T":
-        return int(values.size) * geometry.itemsize
-    return int(values.nbytes)
+    if values.dtype.kind != "T":
+        return int(values.nbytes)
+    if geometry is not None:
+        return geometry.rowsBytes(values.shape[0] if values.ndim else 1)
+    return text_extent(values, None, ledger).keptBytes()
 
 
 def _fitting_concurrency(ledger: MemoryLedger, cost: Any) -> int:
@@ -339,27 +385,42 @@ def row_read_bytes(geometry: ArrayGeometry | None, n_rows: int) -> int:
         geometry.axisChunk(0) if geometry.text is not None and n_rows > 1 else band_rows
     )
     reading = (
-        n_rows * (geometry.rowBytes() + ROW_KEPT_INDEX_BYTES)
+        geometry.rowsBytes(n_rows)
+        + n_rows * ROW_KEPT_INDEX_BYTES
         + geometry.bandReadBytes(returned_rows, operation_concurrency())
-        + (band_rows * geometry.rowBytes() if geometry.shards is None else 0)
+        + (geometry.rowsBytes(band_rows) if geometry.shards is None else 0)
     )
     return max(ordering, reading)
 
 
-def read_rows_bytes(array: Any, n_rows: int) -> int:
+def read_rows_bytes(
+    array: Any, n_rows: int, *, ledger: MemoryLedger | None = None
+) -> int:
     """What :func:`read_rows` holds to read ``n_rows`` distinct rows of ``array``, with the rows.
 
-    A stored array holds what :func:`row_read_bytes` states. An array
-    without chunks, such as a NumPy array, holds the rows it returns beside
-    their indices. A categorical column holds the read of its codes, then its
+    A stored array holds what :func:`row_read_bytes` states, and variable-width
+    text no less than what measuring it holds, as
+    :func:`~cytearc.storage.geometry.variable_text_extent` measures it once in
+    an operation, the measure charged to ``ledger``. An array without chunks,
+    such as a NumPy array, holds the rows it returns beside their indices. A
+    categorical column holds the read of its codes, then its
     codes beside the categories, the lookup that decoding builds and the
     labels returned.
     """
     n_rows = int(n_rows)
     if not isinstance(array, CategoricalColumn):
-        geometry = array_geometry(array, measure_text=True)
+        geometry = array_geometry(array, measure_text=True, ledger=ledger)
         if geometry is not None:
-            return row_read_bytes(geometry, n_rows)
+            reading = row_read_bytes(geometry, n_rows)
+            # A read of variable-width text first measures it, unless its
+            # operation has.
+            if geometry.text is not None:
+                return max(reading, geometry.text.measureBytes)
+            return reading
+        if np.dtype(array.dtype).kind == "T":
+            extent = text_extent(array, None, ledger)
+            rows = _rows_held(array, None, extent, n_rows)
+            return row_read_bytes(None, n_rows) + max(rows, extent.measureBytes)
         row_values = int(np.prod(array.shape[1:], dtype=np.int64))
         row_bytes = row_values * int(np.dtype(array.dtype).itemsize)
         return row_read_bytes(None, n_rows) + n_rows * row_bytes
@@ -399,14 +460,11 @@ def _read_stored_rows(
 ) -> tuple[np.ndarray, ArrayGeometry | None]:
     """Read ``rows`` of an array that is not categorical as :func:`read_rows` does, and return the geometry that its charges took."""
     indices = np.asarray(rows)
-    geometry = array_geometry(array, measure_text=True)
+    geometry = array_geometry(array, measure_text=True, ledger=ledger)
     ledger.peak(item, row_read_bytes(geometry, int(indices.size)))
     with zarr_decoding_threads(ledger.codec_threads):
         values = read_array_rows_chunkwise(array, indices)
-    ledger.hold(
-        item,
-        int(values.nbytes) if geometry is None else _kept_bytes(values, geometry),
-    )
+    ledger.hold(item, _kept_bytes(values, geometry, ledger))
     return values, geometry
 
 
@@ -447,7 +505,7 @@ def read_text_rows(
     held = ledger.held_bytes
     stored, geometry = _read_stored_rows(ledger, array, rows, item=item)
     stored_bytes = ledger.held_bytes - held
-    values = _strings_of(ledger, stored, item, widest=_widest(stored, geometry))
+    values = _strings_of(ledger, stored, item, widest=_widest(stored, geometry, ledger))
     del stored
     ledger.release(stored_bytes)
     return values
@@ -480,22 +538,24 @@ def read_whole_text(
     held = ledger.held_bytes
     stored, geometry = _read_whole_array(ledger, group, name, array, item=item)
     stored_bytes = ledger.held_bytes - held
-    values = _strings_of(ledger, stored, item, widest=_widest(stored, geometry))
+    values = _strings_of(ledger, stored, item, widest=_widest(stored, geometry, ledger))
     del stored
     ledger.release(stored_bytes)
     return values
 
 
-def _widest(stored: np.ndarray, geometry: ArrayGeometry | None) -> int:
+def _widest(
+    stored: np.ndarray, geometry: ArrayGeometry | None, ledger: MemoryLedger
+) -> int:
     """The widest code point of text that a read of an array of ``geometry`` returned, 0 for none.
 
     Variable-width text takes the widest of its array, which the read's
-    charge measured.
+    charge measured, or of itself, read from an array without chunks.
     """
     if stored.size == 0:
         return 0
     if stored.dtype.kind == "T":
-        return _text_extent(stored, geometry).widest
+        return text_extent(stored, geometry, ledger).widest
     return int(stored.view(np.uint32).max())
 
 

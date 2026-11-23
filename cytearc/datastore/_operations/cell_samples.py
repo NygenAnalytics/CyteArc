@@ -84,7 +84,7 @@ def read_cell_samples(
         if isinstance(array, CategoricalColumn):
             labels.append(read_categorical_rows(ledger, array, cell_index, item=item))
             continue
-        if np.dtype(array.dtype).kind == "U":
+        if np.dtype(array.dtype).kind in "UT":
             values = read_text_rows(ledger, array, cell_index, item=item)
         else:
             values = read_rows(ledger, array, cell_index, item=item)

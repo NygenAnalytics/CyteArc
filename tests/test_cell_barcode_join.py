@@ -1008,19 +1008,20 @@ def test_the_join_counts_the_barcodes_beyond_the_selection_over_chunked_store_id
     assert (join.n_unselected_barcodes, join.n_unmatched_barcodes) == (5_000, 5_000)
 
 
+@pytest.mark.parametrize("chunk_rows", [10_000, 1_000])
 @pytest.mark.parametrize(
     "first", [0x41, 0xC0, 0x1F600], ids=["ascii", "latin-1", "astral"]
 )
 def test_the_pass_over_variable_width_store_ids_holds_what_it_charges(
-    tmp_path, first
+    tmp_path, first, chunk_rows
 ) -> None:
     import zarr
 
     from tests.memory_helpers import traced_charge
 
-    # 30,000 IDs of 165 characters in chunks of 10,000, random enough not to
-    # compress, as another tool stores them with Zarr's dtype=str; a barcode
-    # of no cell makes the join hash every one of them.
+    # 30,000 IDs of 165 characters in chunks of 10,000 or 1,000, random enough
+    # not to compress, as another tool stores them with Zarr's dtype=str; a
+    # barcode of no cell makes the join measure and hash every one of them.
     rng = np.random.default_rng(first)
     letters = rng.integers(first, first + 26, size=(30_000, 150))
     ids = np.asarray(
@@ -1031,7 +1032,7 @@ def test_the_pass_over_variable_width_store_ids_holds_what_it_charges(
     )
     group = zarr.open_group(tmp_path / "ids.zarr", mode="w")
     array = group.create_array(
-        "ids", data=ids.astype(np.dtypes.StringDType()), chunks=(10_000,)
+        "ids", data=ids.astype(np.dtypes.StringDType()), chunks=(chunk_rows,)
     )
     selected = ids[:10].astype(object)
     file = _plain(prefix="s1__", suffix="-1")

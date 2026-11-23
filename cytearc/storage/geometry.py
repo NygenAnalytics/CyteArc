@@ -8,7 +8,9 @@ from typing import Any
 
 import numpy as np
 
+from ..utils.memory_budget import MemoryLedger, object_array_bytes, python_text_bytes
 from .types import array_metadata_shards
+from .validation_scope import store_key, validated_once
 
 __all__ = [
     "ROW_INDEX_BYTES",
@@ -43,64 +45,103 @@ _READ_DECODE_OBJECT_BYTES = 16 * 1024
 #: value of more than 15 bytes in UTF-8 in an arena beside the array, behind
 #: its size, a byte for a value of up to 255 bytes and 8 for a longer one, in
 #: an arena that NumPy grows by a quarter at a time (NEP 55). Zarr's
-#: ``vlen-utf8`` codec stores each value's UTF-8 bytes behind a 4-byte length.
+#: ``vlen-utf8`` codec stores each value's UTF-8 bytes behind a 4-byte length,
+#: and each chunk behind a 4-byte count.
 _TEXT_ELEMENT_BYTES = 16
 _TEXT_INLINE_BYTES = 15
 _TEXT_SHORT_SIZE_LIMIT = 255
 _TEXT_SHORT_SIZE_BYTES = 1
 _TEXT_SIZE_BYTES = 8
 _TEXT_LENGTH_BYTES = 4
-#: The most bytes of fixed-width text that a measure of variable-width text
-#: casts its values to at once.
+#: The most bytes of fixed-width text, and the most values, that a measure of
+#: variable-width text casts its values to at once, and the most characters
+#: of a value that it casts: NumPy's cast holds a buffer of up to its buffer
+#: size of values at the width cast to, whatever the values, so a longer
+#: value is measured alone, as a Python string.
 _TEXT_MEASURE_BYTES = 4 * 1024 * 1024
+_TEXT_MEASURE_VALUES = 65_536
+_TEXT_CAST_CHARACTERS = 256
+#: What a measure keeps for each value of the chunk it measures beside the
+#: chunk: the value's characters, sorted, its place in that order and its
+#: UTF-8 bytes, 8 bytes each.
+_TEXT_MEASURE_VALUE_BYTES = 32
+
+
+def _decode_bytes(
+    values: int, utf8: int, characters: int, widest: int, arena: int
+) -> int:
+    """What decoding a chunk of ``values`` values of variable-width text holds.
+
+    Zarr's codec holds the chunk's stored bytes and makes a Python string of
+    each value, referenced from an object array, of which NumPy makes its
+    values; NumPy asks each string for its UTF-8 bytes, which a string beyond
+    ASCII then keeps beside its characters. ``utf8``, ``characters`` and
+    ``arena`` are the values' UTF-8 bytes, characters and arena bytes in all,
+    and ``widest`` the widest code point of their characters.
+    """
+    stored = _TEXT_LENGTH_BYTES * (values + 1) + utf8
+    copies = utf8 + values if widest > 0x7F else 0
+    kept = _TEXT_ELEMENT_BYTES * values + -(-5 * arena // 4)
+    return (
+        stored
+        + object_array_bytes(values)
+        + python_text_bytes(values, characters, widest=widest)
+        + copies
+        + kept
+    )
+
+
+def _arena_bytes(utf8: np.ndarray) -> int:
+    """The bytes of NumPy's arena that values of these UTF-8 lengths take before it grows.
+
+    A value of up to 15 bytes takes none; a longer value takes its bytes
+    behind its size.
+    """
+    sized = np.where(
+        utf8 <= _TEXT_SHORT_SIZE_LIMIT, _TEXT_SHORT_SIZE_BYTES, _TEXT_SIZE_BYTES
+    )
+    return int(np.where(utf8 > _TEXT_INLINE_BYTES, utf8 + sized, 0).sum())
 
 
 @dataclass(frozen=True, slots=True)
 class TextExtent:
     """The extent of the values of an array of variable-width text.
 
-    ``characters`` and ``encodedBytes`` are the most characters and the most
-    UTF-8 bytes of any value, and ``widest`` is the widest code point of any
-    value's characters, 0 for none.
+    ``characters`` and ``utf8Bytes`` are the most characters and the most
+    UTF-8 bytes of any value, and ``widest`` the widest code point of any
+    value's characters, 0 for none. ``values``, ``characterTotal`` and
+    ``arenaBytes`` count every value, its characters, and the bytes that
+    NumPy's arena takes for them before it grows. ``chunkDecodeBytes`` and
+    ``chunkStoredBytes`` are the most that decoding one stored chunk holds and
+    the most bytes of one chunk as Zarr stores it before it compresses it,
+    each chunk counted by its own values. ``measureBytes`` is the most that
+    the measure held for one chunk.
     """
 
     characters: int
-    encodedBytes: int
+    utf8Bytes: int
     widest: int
+    values: int
+    characterTotal: int
+    arenaBytes: int
+    chunkDecodeBytes: int
+    chunkStoredBytes: int
+    measureBytes: int
 
     def valueBytes(self) -> int:
         """Return the most bytes that NumPy holds for one value, its element and its arena share."""
-        if self.encodedBytes <= _TEXT_INLINE_BYTES:
+        if self.utf8Bytes <= _TEXT_INLINE_BYTES:
             return _TEXT_ELEMENT_BYTES
         size = (
             _TEXT_SHORT_SIZE_BYTES
-            if self.encodedBytes <= _TEXT_SHORT_SIZE_LIMIT
+            if self.utf8Bytes <= _TEXT_SHORT_SIZE_LIMIT
             else _TEXT_SIZE_BYTES
         )
-        return _TEXT_ELEMENT_BYTES + -(-5 * (self.encodedBytes + size) // 4)
+        return _TEXT_ELEMENT_BYTES + -(-5 * (self.utf8Bytes + size) // 4)
 
-    def storedBytes(self) -> int:
-        """Return the most bytes that Zarr stores one value in before it compresses a chunk."""
-        return _TEXT_LENGTH_BYTES + self.encodedBytes
-
-    def decodeBytes(self) -> int:
-        """Return the most bytes that decoding one value holds.
-
-        Zarr's codec reads the value's stored bytes and makes a Python string
-        of them, referenced from an object array, of which NumPy makes the
-        value. NumPy asks the string for its UTF-8 bytes, which a string
-        beyond ASCII then keeps beside its characters.
-        """
-        from ..utils.memory_budget import object_array_bytes, python_text_bytes
-
-        utf8_copy = self.encodedBytes + 1 if self.widest > 0x7F else 0
-        return (
-            self.storedBytes()
-            + object_array_bytes(1)
-            + python_text_bytes(1, self.characters, widest=self.widest)
-            + utf8_copy
-            + self.valueBytes()
-        )
+    def keptBytes(self) -> int:
+        """Return the most bytes that NumPy holds for every value: their elements and their arena."""
+        return _TEXT_ELEMENT_BYTES * self.values + -(-5 * self.arenaBytes // 4)
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,9 +167,10 @@ class ArrayGeometry:
     #: of a shard into one fetch, ``sharding_coalesce_max_gap_bytes`` of the
     #: array's configuration; none for a geometry of no opened array.
     coalesceGapBytes: int = 0
-    #: The extent of the values of variable-width text, which hold more while
-    #: Zarr decodes them than ``itemsize``, as NumPy keeps them, are stored in
-    #: fewer, and whose scattered rows are read a chunk's span at a time; None
+    #: The extent of variable-width text, whose ``itemsize`` is what NumPy
+    #: keeps for its longest value: its chunks hold what decoding and storing
+    #: its chunk of most bytes held, a read of its rows no more than every
+    #: value holds, and a read of scattered rows a chunk's span of them; None
     #: for values of fixed size.
     text: TextExtent | None = None
 
@@ -156,16 +198,13 @@ class ArrayGeometry:
         """Return the bytes one whole chunk holds while Zarr decodes it, its values decoded.
 
         Zarr stores and decodes a full chunk even where the chunk overhangs the
-        array edge, so this deliberately ignores the clipped extent.
+        array edge, so this deliberately ignores the clipped extent. A chunk
+        of variable-width text holds what decoding the chunk of most bytes
+        held, as ``text`` counts it.
         """
-        value = self.itemsize if self.text is None else self.text.decodeBytes()
-        return self._chunkValues() * value
-
-    def _chunkValues(self) -> int:
-        elements = 1
-        for extent in self.chunks:
-            elements *= max(1, extent)
-        return elements
+        if self.text is not None:
+            return self.text.chunkDecodeBytes
+        return math.prod(max(1, extent) for extent in self.chunks) * self.itemsize
 
     def storedChunkBytes(self) -> int:
         """Return the bytes of one whole chunk as stored and decoded.
@@ -175,14 +214,25 @@ class ArrayGeometry:
         """
         from .layout import _encoded_chunk_bound
 
-        value = self.itemsize if self.text is None else self.text.storedBytes()
-        return self.nominalChunkBytes() + _encoded_chunk_bound(
-            self._chunkValues() * value
+        encoded = (
+            self.nominalChunkBytes()
+            if self.text is None
+            else self.text.chunkStoredBytes
         )
+        return self.nominalChunkBytes() + _encoded_chunk_bound(encoded)
 
     def rowBytes(self) -> int:
         """Return the bytes of one row: one value of every later axis."""
         return math.prod(self.shape[1:]) * self.itemsize
+
+    def rowsBytes(self, rows: int) -> int:
+        """Return the bytes of ``rows`` rows as a read returns them.
+
+        Variable-width text holds no more than every value holds, however
+        long its longest value.
+        """
+        held = max(0, int(rows)) * self.rowBytes()
+        return held if self.text is None else min(held, self.text.keptBytes())
 
     def bandChunks(self) -> int:
         """Return the chunks of one band of rows, those that tile the later axes."""
@@ -267,7 +317,7 @@ class ArrayGeometry:
         inner chunks at a time, as :meth:`bandReadBytes` counts, so that no
         fetch takes more than one band of a shard.
         """
-        result = self.shape[0] * self.rowBytes()
+        result = self.rowsBytes(self.shape[0])
         if self.shards is not None:
             return result + self.bandReadBytes(self.axisChunk(0), concurrency)
         n_chunks = max(1, -(-self.shape[0] // self.axisChunk(0)) * self.bandChunks())
@@ -288,7 +338,7 @@ class ArrayGeometry:
         of the band it fetched, which cover any previous decoded chunks,
         beside the objects of Zarr's read.
         """
-        rows_bytes = max(0, int(rows)) * self.rowBytes()
+        rows_bytes = self.rowsBytes(rows)
         touched = self.bandChunks()
         if self.shards is None:
             decoding, _ = self.readsAtOnce(touched, concurrency)
@@ -368,16 +418,18 @@ class ArrayGeometry:
         return np.asarray(indices, dtype=np.int64) // self.axisChunk(axis)
 
 
-def array_geometry(array: Any, *, measure_text: bool = False) -> ArrayGeometry | None:
+def array_geometry(
+    array: Any, *, measure_text: bool = False, ledger: MemoryLedger | None = None
+) -> ArrayGeometry | None:
     """Read stored geometry, or ``None`` when the array has no chunk layout.
 
     In-memory arrays have no chunks, so callers get one explicit place to decide
     what an unchunked array should mean for them. ``measure_text`` gives
     variable-width text the extent of its values, which a charge of a read
-    of them needs, as :func:`variable_text_extent` measures it; without it
-    such text counts the 16-byte elements that NumPy keeps for its values,
-    as callers that use only the chunks do, since the measure fetches the
-    array's stored bytes to find whether its values changed.
+    of them needs, as :func:`variable_text_extent` measures it, charged to
+    ``ledger``; without it such text counts the 16-byte elements that NumPy
+    keeps for its values, as callers that use only the chunks do, since the
+    measure reads every stored chunk.
     """
     chunks = getattr(array, "chunks", None)
     if chunks is None:
@@ -412,7 +464,7 @@ def array_geometry(array: Any, *, measure_text: bool = False) -> ArrayGeometry |
     fused_workers, fused_async = _fused_pool(array)
 
     text = (
-        variable_text_extent(array)
+        variable_text_extent(array, ledger)
         if measure_text and np.dtype(array.dtype).kind == "T"
         else None
     )
@@ -433,64 +485,201 @@ def array_geometry(array: Any, *, measure_text: bool = False) -> ArrayGeometry |
     )
 
 
-def variable_text_extent(array: Any) -> TextExtent:
+def variable_text_extent(array: Any, ledger: MemoryLedger | None = None) -> TextExtent:
     """Measure the values of an array of variable-width text, a stored chunk at a time.
 
     Zarr's ``dtype=str`` stores text this way, which reads as NumPy's
-    ``StringDType``. A Zarr array's measure is reused while its stored bytes
-    are unchanged, as :func:`~cytearc.storage.content_stamps.cached_for_content`
-    reuses values, so it is taken once while the array is unchanged.
+    ``StringDType``. A Zarr array is measured once in an operation, while a
+    validation scope is open, as each public call of a DataStore opens one,
+    and its stored bytes cannot change, so later reads of it in the operation
+    reuse the measure; an array in memory is measured each time. The measure
+    charges ``ledger`` as it reads, as :func:`_measured_text_extent` states.
     """
     if isinstance(array, zarr.Array):
-        from .content_stamps import cached_for_content
-
-        return cached_for_content(
-            "variable_text_extent", array, lambda: _measured_text_extent(array)
+        return validated_once(
+            ("variable_text_extent", *store_key(array)),
+            lambda: _measured_text_extent(array, ledger),
         )
-    return _measured_text_extent(array)
+    return _measured_text_extent(array, ledger)
 
 
-def _measured_text_extent(array: Any) -> TextExtent:
+def text_extent(
+    array: Any,
+    geometry: ArrayGeometry | None = None,
+    ledger: MemoryLedger | None = None,
+) -> TextExtent:
+    """Return the extent of variable-width text ``array``: that of ``geometry`` where a read's charge measured it, or else :func:`variable_text_extent`'s."""
+    if geometry is not None and geometry.text is not None:
+        return geometry.text
+    return variable_text_extent(array, ledger)
+
+
+def _measured_text_extent(array: Any, ledger: MemoryLedger | None) -> TextExtent:
     """The extent of ``array``'s values, read a stored chunk at a time and cast to fixed-width text in parts.
 
-    A part's values cast to fixed-width text give their code points, from
-    which their widest character and their UTF-8 bytes follow: a byte for
-    each character, and one more for each from U+0080, from U+0800 and from
-    U+10000. Each part holds at most ``_TEXT_MEASURE_BYTES`` of code points,
-    four bytes a character of its block's longest value, beside the stored
-    chunk's read.
+    Each chunk's values are cast to fixed-width text in the order of their
+    characters, as :func:`_utf8_lengths` casts them, which gives each value's
+    UTF-8 bytes and the widest character. A stored chunk counts what decoding
+    it holds, and its rows beyond the array's edge as empty values, as Zarr
+    decodes a whole chunk, with the bound of its compressed bytes and the
+    objects of Zarr's read. Before it reads a stored chunk, the measure
+    charges ``ledger`` what decoding the chunk holds at the least, its values
+    as empty strings, beside what the measure keeps for each value; once the
+    chunk is measured, it charges what reading the chunk held, from the
+    chunk's own values, and what the measure held, before it reads the next
+    chunk. An array in memory charges only what the measure holds.
     """
-    n_rows = int(array.shape[0]) if array.ndim else 1
+    from .layout import _encoded_chunk_bound
+
+    n_rows = int(array.shape[0])
     chunks = getattr(array, "chunks", None)
     rows = max(1, int(chunks[0])) if chunks else max(1, n_rows)
-    characters = encoded = widest = 0
+    chunk_values = rows * math.prod(int(extent) for extent in array.shape[1:])
+    name = getattr(array, "path", None)
+    item = (
+        f"a measure of the text of {name!r}"
+        if name
+        else "a measure of variable-width text"
+    )
+    keeping = _TEXT_MEASURE_VALUE_BYTES * chunk_values
+    objects = _READ_OBJECT_BYTES + _READ_CHUNK_OBJECT_BYTES + _READ_DECODE_OBJECT_BYTES
+    least = keeping + (
+        _decode_bytes(chunk_values, 0, 0, 0, 0) + objects if chunks else 0
+    )
+    characters = utf8_most = widest = values = character_total = arena = 0
+    chunk_decode = chunk_stored = measure = 0
     for start in range(0, n_rows, rows):
+        if ledger is not None:
+            ledger.peak(item, least)
         block = np.asarray(array[start : start + rows]).reshape(-1)
-        lengths = np.strings.str_len(block)
-        longest = int(lengths.max(initial=0))
-        characters = max(characters, longest)
-        if longest == 0:
-            continue
-        step = max(1, _TEXT_MEASURE_BYTES // (4 * longest))
-        for offset in range(0, block.size, step):
-            points = (
-                block[offset : offset + step]
-                .astype(f"U{longest}")
-                .view(np.uint32)
-                .reshape(-1, longest)
+        lengths = np.strings.str_len(block).astype(np.int64, copy=False)
+        utf8, chunk_widest, part_bytes = _utf8_lengths(block, lengths)
+        utf8_total = int(utf8.sum())
+        chunk_characters = int(lengths.sum())
+        chunk_arena = _arena_bytes(utf8)
+        decode = _decode_bytes(
+            chunk_values, utf8_total, chunk_characters, chunk_widest, chunk_arena
+        )
+        stored = _TEXT_LENGTH_BYTES * (chunk_values + 1) + utf8_total
+        reading = decode + _encoded_chunk_bound(stored) + objects
+        held = (reading if chunks else 0) + keeping + part_bytes
+        if ledger is not None:
+            ledger.peak(item, held)
+        characters = max(characters, int(lengths.max(initial=0)))
+        utf8_most = max(utf8_most, int(utf8.max(initial=0)))
+        widest = max(widest, chunk_widest)
+        values += int(block.size)
+        character_total += chunk_characters
+        arena += chunk_arena
+        chunk_decode = max(chunk_decode, decode)
+        chunk_stored = max(chunk_stored, stored)
+        measure = max(measure, held)
+        del block, lengths, utf8
+    return TextExtent(
+        characters=characters,
+        utf8Bytes=utf8_most,
+        widest=widest,
+        values=values,
+        characterTotal=character_total,
+        arenaBytes=arena,
+        chunkDecodeBytes=chunk_decode,
+        chunkStoredBytes=chunk_stored,
+        measureBytes=measure,
+    )
+
+
+def _utf8_lengths(
+    block: np.ndarray, lengths: np.ndarray
+) -> tuple[np.ndarray, int, int]:
+    """Return each value's UTF-8 bytes, the widest code point of the values, and the most bytes that measuring a part held.
+
+    ``lengths`` are the values' characters. Values of up to
+    ``_TEXT_CAST_CHARACTERS`` characters are cast to fixed-width text in the
+    order of their characters, in parts of at most ``_TEXT_MEASURE_VALUES``
+    values and ``_TEXT_MEASURE_BYTES`` of code points, four bytes a character
+    of the part's longest value, beside the buffer of NumPy's cast; the code
+    points give a value's UTF-8 bytes, a byte for each character and one more
+    for each from U+0080, from U+0800 and from U+10000. A longer value is
+    encoded alone, as a Python string. Values without characters need
+    neither.
+    """
+    utf8 = lengths.copy()
+    order = np.argsort(lengths, kind="stable")
+    ordered = lengths[order]
+    widest = part_bytes = 0
+    start = int(np.searchsorted(ordered, 1))
+    cast_stop = int(np.searchsorted(ordered, _TEXT_CAST_CHARACTERS, side="right"))
+    while start < cast_stop:
+        window = ordered[start : min(cast_stop, start + _TEXT_MEASURE_VALUES)]
+        # The values whose cast, as wide as the longest of them, fits.
+        fits = np.arange(1, window.size + 1) * window
+        count = int(np.searchsorted(fits, _TEXT_MEASURE_BYTES // 4, side="right"))
+        stop = start + max(1, count)
+        longest = int(ordered[stop - 1])
+        positions = order[start:stop]
+        # np.take reads variable-width text on every supported NumPy release,
+        # as read_variable_text_rows notes.
+        part = np.take(block, positions)
+        points = part.astype(f"U{longest}").view(np.uint32).reshape(-1, longest)
+        most = int(points.max())
+        widest = max(widest, most)
+        if most > 0x7F:
+            utf8[positions] += sum(
+                np.count_nonzero(points >= limit, axis=1)
+                for limit in (0x80, 0x800, 0x10000)
             )
-            most = int(points.max())
-            widest = max(widest, most)
-            utf8 = lengths[offset : offset + step]
-            if most > 0x7F:
-                utf8 = utf8 + sum(
-                    np.count_nonzero(points >= limit, axis=1)
-                    for limit in (0x80, 0x800, 0x10000)
-                )
-            encoded = max(encoded, int(utf8.max()))
-            del points, utf8
-        del block, lengths
-    return TextExtent(characters=characters, encodedBytes=encoded, widest=widest)
+        # The part as NumPy keeps it, its code points and the buffer of the
+        # cast that made them, a comparison of them and the counts it gives,
+        # and the fits of the part's values.
+        kept = 16 * part.size + 5 * (int(utf8[positions].sum()) + 8 * part.size) // 4
+        cast = points.nbytes * 5 // 4 + np.getbufsize() * 4 * longest
+        part_bytes = max(part_bytes, kept + cast + 24 * window.size)
+        del part, points, fits
+        start = stop
+    # Longer values become Python strings in parts of at most
+    # ``_TEXT_MEASURE_BYTES`` of characters, four bytes each, and each is
+    # encoded alone.
+    longer = order[cast_stop:]
+    reach = np.cumsum(ordered[cast_stop:]) * 4
+    first = 0
+    while first < longer.size:
+        base = int(reach[first - 1]) if first else 0
+        stop = int(np.searchsorted(reach, base + _TEXT_MEASURE_BYTES, side="right"))
+        stop = max(first + 1, min(first + _TEXT_MEASURE_VALUES, stop))
+        positions = longer[first:stop]
+        strings = np.take(block, positions).tolist()
+        encoded = [value.encode("utf-8") for value in strings]
+        utf8[positions] = [len(value) for value in encoded]
+        # An ASCII string's widest character is its largest byte.
+        ascii_bytes = b"".join(
+            value
+            for string, value in zip(strings, encoded, strict=True)
+            if string.isascii()
+        )
+        most = int(np.frombuffer(ascii_bytes, dtype=np.uint8).max(initial=0))
+        # Another string's widest is its largest code point in UTF-32.
+        for string in strings:
+            if not string.isascii():
+                points = np.frombuffer(string.encode("utf-32-le"), dtype=np.uint32)
+                most = max(most, int(points.max()))
+                del points
+        widest = max(widest, most)
+        # The part's Python strings, their UTF-8 bytes, those of its ASCII
+        # strings joined, their lists, and one string's code points.
+        utf8_total = int(utf8[positions].sum())
+        held = (
+            2 * object_array_bytes(len(strings))
+            + python_text_bytes(
+                len(strings), (int(reach[stop - 1]) - base) // 4, widest=most
+            )
+            + 33 * len(strings)
+            + 2 * utf8_total
+            + 4 * int(ordered[cast_stop + stop - 1])
+        )
+        part_bytes = max(part_bytes, held)
+        del strings, encoded, ascii_bytes
+        first = stop
+    return utf8, widest, part_bytes
 
 
 def _coalesce_gap_bytes(array: Any) -> int:

@@ -2809,7 +2809,7 @@ def _packed_text(
     n_rows = int(array.shape[0]) if rows is None else len(rows)
     # Variable-width text packs as fixed-width text of its longest value does.
     itemsize = (
-        4 * text_width(array)
+        4 * text_width(array, ledger=ledger)
         if np.dtype(array.dtype).kind == "T"
         else int(np.dtype(array.dtype).itemsize)
     )
