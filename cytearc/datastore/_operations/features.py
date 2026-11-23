@@ -2,7 +2,7 @@ import os
 import time
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
-from functools import partial
+from functools import cache, partial
 from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
@@ -327,18 +327,6 @@ def _hvg_diagnostics(
         ],
     )
     return diagnostics
-
-
-def _eligible_detection(
-    detected: np.ndarray, measured: np.ndarray | None
-) -> np.ndarray:
-    """Return each gene's detection for the detection ratio, 0 where ``measured`` leaves the gene out.
-
-    The ratio compares the selected genes with those the selection could
-    take, which leave out the genes that some source of the selected cells
-    did not measure.
-    """
-    return np.asarray(detected) if measured is None else np.where(measured, detected, 0)
 
 
 def _hvg_rules(top_n: int) -> tuple[DiagnosticRule, ...]:
@@ -762,21 +750,25 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
             parameters["span"] = options.span
         else:
             parameters.update(theta=options.theta, clip=options.clip)
-        cell_idx = read_stored_selection_indices(
-            self.zw,
-            cell_selection,
-            kind="cell_selection",
-            scope="datastore",
-            assay=None,
-            table_path="cellData",
-        ).astype(np.int64, copy=False)
-        # Genes that some source of the selected cells did not measure take no
-        # part in the scores' fits and are never selected; the selection then
-        # records which genes every source measured.
+        selected_cells = cache(
+            partial(
+                read_stored_selection_indices,
+                self.zw,
+                cell_selection,
+                kind="cell_selection",
+                scope="datastore",
+                assay=None,
+                table_path="cellData",
+            )
+        )
+        # Genes that some source of the selected cells did not measure are
+        # scored as a store of the others alone scores them, and never
+        # selected; the selection then records which genes every source
+        # measured. Only a store with such genes reads the selected cells here.
         measured = leave_out_unmeasured_features(
             assay.cells,
             assay.feats,
-            cell_idx,
+            selected_cells,
             assay=assay.name,
             analysis="features.hvgs",
             kind="gene",
@@ -786,6 +778,11 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
         )
         if measured is not None:
             parameters["measured_features_fingerprint"] = fingerprint_array(measured)
+            if options.flavor == "cytearc":
+                # The counts' values then come from the assay's normalizer and
+                # size factor, which the feature summary records otherwise.
+                parameters["normalization_method"] = callable_identity(assay.normMethod)
+                parameters["size_factor"] = assay.sf
         feature_ids_fingerprint = _ordered_feature_ids_fingerprint(assay.z)
         execution_options = {
             "show_plot": show_plot,
@@ -793,7 +790,7 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
             "nthreads": assay.nthreads,
             "invalidate_cache": invalidate_cache,
         }
-        if options.flavor == "cytearc" and batch is None:
+        if options.flavor == "cytearc" and batch is None and measured is None:
             return self._select_hvgs_from_summary(
                 assay=assay,
                 cell_selection=cell_selection,
@@ -809,7 +806,6 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
                 show_plot=show_plot,
                 invalidate_cache=invalidate_cache,
                 plot_kwargs=plot_kwargs,
-                measured=measured,
             )
         inputs: dict[str, Any] = {
             "cell_selection": cell_selection,
@@ -850,6 +846,7 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
         )
         if not planned.reused:
             self._require_writable("select_hvgs")
+            cell_idx = np.asarray(selected_cells(), dtype=np.int64)
             if batch is None:
                 codes = np.zeros(len(cell_idx), dtype=np.int64)
             scores = assay._batch_hvg_scores(
@@ -901,7 +898,7 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
                     top_n=top_n,
                     detection_ratio=selected_detection_ratio(
                         ranking.selected,
-                        _eligible_detection(scores.detected, measured),
+                        scores.detected,
                         feature_names,
                         min_cells=min_cells,
                         max_cells=max_cells_int,
@@ -947,13 +944,8 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
         show_plot: bool,
         invalidate_cache: bool,
         plot_kwargs: dict[str, Any],
-        measured: np.ndarray | None = None,
     ) -> ArtifactRef:
-        """Select the cytearc flavor's HVGs of all selected cells from their summary.
-
-        ``measured`` marks the genes that every source of the selected cells
-        measured, or is None for every gene.
-        """
+        """Select the cytearc flavor's HVGs of all selected cells from their summary."""
         summary_ref = ensure_feature_summary(
             self.zw,
             assay,
@@ -1000,7 +992,6 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
                 keep_bounds=parameters["keep_bounds"],
                 bin_strategy=parameters["bin_strategy"],
                 feature_names=feature_names,
-                measured=measured,
             )
             _write_feature_selection(
                 self.zw,
@@ -1016,7 +1007,7 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
                     top_n=parameters["top_n"],
                     detection_ratio=selected_detection_ratio(
                         values,
-                        _eligible_detection(summary["normed_n"], measured),
+                        summary["normed_n"],
                         feature_names,
                         min_cells=parameters["min_cells"],
                         max_cells=parameters["max_cells"],
@@ -1119,12 +1110,17 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
 
         On a store merged from sources that measured different genes, as its
         feature columns ``measured_in_<source>`` record, a gene that some
-        source of the selected cells did not measure takes no part in any
-        flavor's fits, scores 0 and is never selected, with a warning that
-        names such genes, since its zero counts in that source's cells are
-        not measurements. The selection then records the genes that every
-        source of the cells measured, as the fingerprint
-        ``measured_features_fingerprint`` of its parameters.
+        source of the selected cells did not measure is left out, with a
+        warning that names such genes, since its zero counts in that source's
+        cells are not measurements. Every flavor then scores the other genes
+        as a store of them alone scores them, each cell's total taken over
+        them, which one more pass over their counts gives, and the cytearc
+        flavor reads the counts as batch-aware selections do; the left-out
+        genes score 0, hold no statistics and are never selected. The
+        selection records the genes that every source of the cells measured,
+        as the fingerprint ``measured_features_fingerprint`` of its
+        parameters, and a cytearc selection also the ``normalization_method``
+        and ``size_factor`` of the values it reads.
 
         The artifact holds the ``values`` mask and each gene's
         ``corrected_variance`` (the flavor's score). seurat_v3,
@@ -1481,7 +1477,7 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
             feature_selection,
             feature_values,
             cell_index,
-            analysis=display_name,
+            analysis=f"scores.{display_name.lower()}",
             remedy=(
                 "Score the cells of the sources that measured them, or features "
                 "that every source measured."
@@ -2197,7 +2193,7 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
             feature_selection,
             feature_values,
             cell_index,
-            analysis="The marker search",
+            analysis="markers.search",
             remedy=(
                 "Search the markers of the cells of the sources that measured "
                 "them, or of features that every source measured."

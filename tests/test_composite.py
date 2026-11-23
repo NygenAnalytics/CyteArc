@@ -1367,16 +1367,13 @@ def _zeros_read_as_counts(first: str, *, adt: bool = False, shared: bool = True)
         " The composite reads zero counts for the features a source lacks; columns "
         f"such as 'measured_in_{first}' record what each source measured, so "
         + (
-            "plots, marker search, bulk profiles and the ADT recipe leave those "
-            "zeros out, normalization, normalized exports, compare.test and "
-            "imputation refuse them, and features.detected and add_grouped_assay "
-            "still read them as counts."
+            "analyses leave those zeros out or refuse them, except some that "
+            "still read them as counts, such as features.detected and "
+            "add_grouped_assay."
             if adt
-            else "plots, marker search, feature selection, WAGGR, AUCell and bulk "
-            "profiles leave those zeros out, normalization, normalized exports, "
-            "compare.test and imputation refuse them, and cell-cycle and "
-            "chromVAR scores, features.detected, add_grouped_assay and mapping "
-            "still read them as counts."
+            else "analyses leave those zeros out or refuse them, except some that "
+            "still read them as counts, such as cell-cycle and chromVAR scores, "
+            "features.detected, add_grouped_assay and mapping."
         )
     )
     return zeros + (
@@ -1528,7 +1525,7 @@ def test_composite_records_a_source_whose_name_holds_a_path_separator(tmp_path):
 def test_a_composite_of_a_merged_store_keeps_the_source_of_each_of_its_cells(tmp_path):
     from cytearc.merge import DataStoreMerge
     from cytearc.metadata.membership import (
-        features_measured_by_cells,
+        cells_measured_features,
         measured_feature_columns,
     )
 
@@ -1608,11 +1605,11 @@ def test_a_composite_of_a_merged_store_keeps_the_source_of_each_of_its_cells(tmp
         ]
     # The cells of p2 measured its panel, and only they have values of CD19.
     rows_p2 = np.flatnonzero(expected == "inner__p2")
-    measured = features_measured_by_cells(
+    measured = cells_measured_features(
         joint.cells, joint.ADT.feats, rows_p2, assay="ADT"
     )
     assert measured is not None
-    assert np.asarray(names)[measured].tolist() == ["CD3", "CD4", "CD19"]
+    assert np.asarray(names)[measured.measured].tolist() == ["CD3", "CD4", "CD19"]
     cd19 = joint.get_cell_vals("ADT", "I", "CD19")
     np.testing.assert_array_equal(np.flatnonzero(~np.isnan(cd19)), rows_p2)
     # A source whose record column a source of the merged store takes is
@@ -1950,12 +1947,10 @@ def test_unshared_features_warning_names_its_combinations():
         "RNA", alignment, ["a", "b"], combination="merge", assay_type="RNA"
     ) == shared.format("merged") + (
         " The merge writes zero counts for the features a source lacks; columns "
-        "such as 'measured_in_a' record what each source measured, so plots, "
-        "marker search, feature selection, WAGGR, AUCell and bulk profiles "
-        "leave those zeros out, normalization, normalized exports, compare.test "
-        "and imputation refuse them, and cell-cycle and chromVAR scores, "
-        "features.detected, add_grouped_assay and mapping still read them as "
-        "counts."
+        "such as 'measured_in_a' record what each source measured, so analyses "
+        "leave those zeros out or refuse them, except some that still read them "
+        "as counts, such as cell-cycle and chromVAR scores, features.detected, "
+        "add_grouped_assay and mapping."
     )
     assert unshared_features_warning(
         "RNA", alignment, ["a", "b"], combination="composite", assay_type="RNA"

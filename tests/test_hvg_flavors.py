@@ -838,6 +838,25 @@ def test_grouped_statistics_match_dense_numpy(banded) -> None:
     assert total[1, 3] == total[2, 3] == m2[1, 3] == m2[2, 3] == 0
 
 
+def test_cell_totals_over_features_sum_the_selected_counts(banded) -> None:
+    from cytearc.assay.hvg_statistics import cell_totals_over_features
+    from cytearc.storage.feature_stream import persisted_read_group
+
+    # Every third gene and every other cell, which span several feature
+    # groups and cell bands of countsT, so each group adds to the totals.
+    assert persisted_read_group(banded.RNA.rawDataT)[0] < _N_GENES
+    cells = np.arange(0, _N_CELLS, 2)
+    genes = np.arange(0, _N_GENES, 3)
+    np.testing.assert_array_equal(
+        cell_totals_over_features(banded.RNA, cells, genes),
+        _COUNTS[np.ix_(cells, genes)].sum(axis=1).astype(np.float64),
+    )
+    assert cell_totals_over_features(banded.RNA, cells, genes[:0]).tolist() == (
+        [0.0] * len(cells)
+    )
+    assert cell_totals_over_features(banded.RNA, cells[:0], genes).size == 0
+
+
 def test_grouped_statistics_check_their_batches(banded) -> None:
     rna = banded.RNA
     empty = grouped_moments(

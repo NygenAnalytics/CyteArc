@@ -1135,10 +1135,12 @@ class _GraphOperationsMixin(_GraphOperationsBase):
         selections = load_normalization_selections(
             self.zw, assay_name, cell_selection, features
         )
+        # Only a store whose record leaves out a selected feature reads the
+        # selected cells here.
         require_features_measured_by_cells(
             assay.cells,
             assay.feats,
-            np.flatnonzero(np.asarray(selections.cells.values[:], dtype=bool)),
+            lambda: np.flatnonzero(np.asarray(selections.cells.values[:], dtype=bool)),
             selections.featureMask,
             assay=assay_name,
             of_cells="the selected cells",

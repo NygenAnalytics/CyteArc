@@ -65,6 +65,22 @@ class BatchHvgScores:
     detected: np.ndarray
     pooled_mean_nonzero: np.ndarray
 
+    def widened(self, feat_idx: np.ndarray, n_features: int) -> "BatchHvgScores":
+        """Return these scores of the features ``feat_idx`` over all ``n_features``, 0 for every other feature."""
+
+        def widen(values: np.ndarray) -> np.ndarray:
+            full = np.zeros((*values.shape[:-1], n_features), dtype=values.dtype)
+            full[..., feat_idx] = values
+            return full
+
+        return BatchHvgScores(
+            sizes=self.sizes,
+            scores=widen(self.scores),
+            mean_nonzero=widen(self.mean_nonzero),
+            detected=widen(self.detected),
+            pooled_mean_nonzero=widen(self.pooled_mean_nonzero),
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class GroupedMoments:
@@ -83,6 +99,24 @@ class GroupedMoments:
     total: np.ndarray
     m2: np.ndarray
     maximum: np.ndarray
+
+
+# How errors name each cell's total over the features that every source of a
+# merged store measured.
+_MEASURED_TOTALS = "The totals over the genes that every source of the cells measured"
+
+
+@njit(cache=True, nogil=True)
+def _band_totals_kernel(
+    values: np.ndarray, value_rows: np.ndarray, local: np.ndarray, out: np.ndarray
+) -> None:
+    """Write each selected cell's sum of the rows ``value_rows`` of ``values`` into ``out``."""
+    for cell in range(local.shape[0]):
+        column = local[cell]
+        total = 0.0
+        for k in range(value_rows.shape[0]):
+            total += np.float64(values[value_rows[k], column])
+        out[cell] = total
 
 
 @njit(cache=True, nogil=True)
@@ -351,6 +385,66 @@ def _band_sizes(band_groups: np.ndarray, n_groups: int) -> np.ndarray:
     return np.bincount(band_groups, minlength=n_groups).astype(np.int64)
 
 
+def cell_totals_over_features(
+    assay: "RNAassay", cell_idx: np.ndarray, feat_idx: np.ndarray
+) -> np.ndarray:
+    """Return each selected cell's total count over the features ``feat_idx``.
+
+    The counts of those features are read feature-major from ``countsT``, a
+    band at a time in a fixed order, and each band's sums are added to its
+    cells' totals. The stream's plan charges the totals, the mask of the
+    features and the sums of one band for each worker beside its bands.
+
+    Args:
+        assay: An RNA assay.
+        cell_idx: The sorted, unique selected cells.
+        feat_idx: The features whose counts are summed.
+
+    Returns:
+        The float64 total of each cell of ``cell_idx``, in its order.
+    """
+    from ..storage.feature_stream import map_feature_cell_bands
+
+    cell_idx = np.asarray(cell_idx, dtype=np.int64)
+    feat_idx = np.asarray(feat_idx, dtype=np.int64)
+    totals = np.zeros(len(cell_idx), dtype=np.float64)
+    if not len(cell_idx) or not len(feat_idx):
+        return totals
+    counts_t = assay.rawDataT
+    # An RNA assay opens only with a complete countsT.
+    assert counts_t is not None
+    summed = np.zeros(int(counts_t.shape[0]), dtype=bool)
+    summed[feat_idx] = True
+    geometry = array_geometry(counts_t)
+    assert geometry is not None
+    band_cells = min(int(geometry.axisChunk(1)), len(cell_idx))
+    scratch = (
+        totals.nbytes
+        + summed.nbytes
+        + assay.resources.workers * np.dtype(np.float64).itemsize * band_cells
+    )
+
+    def process(band: Any) -> tuple[np.ndarray, np.ndarray]:
+        rows = np.flatnonzero(summed[band.featStart + band.featureRows()])
+        sums = np.empty(len(band.selectedLocal), dtype=np.float64)
+        _band_totals_kernel(band.values, rows, band.selectedLocal, sums)
+        return band.selectedDestinations, sums
+
+    for destinations, sums in map_feature_cell_bands(
+        counts_t,
+        process,
+        cell_idx=cell_idx,
+        feat_idx=feat_idx,
+        resources=assay.resources,
+        progress="Summing the counts of the measured features",
+        io=getattr(assay, "storageIo", None),
+        scratchBytes=scratch,
+        orderedCompute=True,
+    ):
+        totals[destinations] += sums
+    return totals
+
+
 def grouped_moments(
     assay: "RNAassay",
     cell_idx: np.ndarray,
@@ -359,12 +453,14 @@ def grouped_moments(
     feat_idx: np.ndarray,
     *,
     library_size: bool,
+    totals: np.ndarray | None = None,
 ) -> GroupedMoments:
     """Return each batch's detections, sums, ``m2``, and maxima of the features.
 
     With ``library_size`` the values are those of ``norm_lib_size``,
     ``sf * count / total`` over each cell's prepared total, as the feature
-    summary of all selected cells has them; otherwise they are the counts.
+    summary of all selected cells has them, or over ``totals``; otherwise
+    they are the counts.
 
     Args:
         assay: An RNA assay, which normalizes with ``norm_lib_size`` and a
@@ -374,6 +470,9 @@ def grouped_moments(
         n_groups: The number of batches.
         feat_idx: The features to summarize.
         library_size: Whether to summarize library-size normalized values.
+        totals: Each selected cell's total, in place of its prepared total,
+            such as its total over the features that every source of a
+            merged store measured.
 
     Returns:
         The statistics, each with a row per batch and a column per feature.
@@ -387,8 +486,14 @@ def grouped_moments(
     if library_size:
         assert assay.sf is not None
         scale = float(assay.sf)
-        inverse_totals = library_size_divisors(
-            assay._cell_count_totals(cell_idx), source=assay._totals_name, copy=False
+        inverse_totals = (
+            library_size_divisors(
+                assay._cell_count_totals(cell_idx),
+                source=assay._totals_name,
+                copy=False,
+            )
+            if totals is None
+            else library_size_divisors(totals, source=_MEASURED_TOTALS)
         )
         np.reciprocal(inverse_totals, out=inverse_totals)
     else:

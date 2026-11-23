@@ -369,13 +369,12 @@ class _PresentationOperationsMixin(_PresentationOperationsBase):
         features to 1,000, without a log transform. The source of every
         exported cell must have measured every exported feature, which a
         store merged from sources that measured different features records.
-        With ``run``, ``X`` holds
-        the run's stored ``normalized`` artifact, the values that its
-        reduction read, over the run's selected features only: an RNA run's
-        highly variable features (log1p of library-size-scaled counts), an
-        ATAC run's prevalent peaks (TF-IDF), or an ADT run's antibody panel
-        (CLR). A multimodal run has no normalized artifact, so it exports
-        raw counts of its first assay.
+        With ``run``, ``X`` holds the run's stored ``normalized`` artifact,
+        the values that its reduction read, over the run's selected features
+        only: an RNA run's highly variable features (log1p of
+        library-size-scaled counts), an ATAC run's prevalent peaks (TF-IDF),
+        or an ADT run's antibody panel (CLR). A multimodal run has no
+        normalized artifact, so it exports raw counts of its first assay.
 
         Args:
             from_assay: Name of assay to be used. If no value is provided then the default assay will be used.

@@ -511,10 +511,14 @@ def _hvg_contract(
 ) -> tuple[frozenset[str], frozenset[str], tuple[str, ...]]:
     """Return the inputs, parameters, and payload of one HVG selection.
 
-    The cytearc flavor of all selected cells reads the feature summary. Other
-    flavors and batch-aware selections read the counts of the selected cells,
-    record the dataset they read and the batch labels, and store the plotted
-    statistics and, with batches, each feature's batch count and median rank.
+    The cytearc flavor of all selected cells reads the feature summary,
+    unless it leaves out genes that some source of the cells did not measure,
+    which it records in ``measured_features_fingerprint`` beside the
+    normalizer and size factor of the counts' values. Other flavors,
+    batch-aware selections and such cytearc selections read the counts of the
+    selected cells, record the dataset they read and the batch labels, and
+    store the plotted statistics and, with batches, each feature's batch
+    count and median rank.
     """
     flavor = parameters.get("flavor", "cytearc")
     if flavor in _HVG_FLAVOR_PARAMETERS:
@@ -531,7 +535,12 @@ def _hvg_contract(
     batch = "batch" in inputs
     if batch and isinstance(parameters.get("batch_column"), str):
         names |= {"batch_column"}
-    if flavor == "cytearc" and not batch:
+    measured = "measured_features_fingerprint" in names
+    if flavor == "cytearc" and measured:
+        # Its values then come from the counts, normalized as the feature
+        # summary records it otherwise.
+        names |= {"normalization_method", "size_factor"}
+    if flavor == "cytearc" and not batch and not measured:
         return (
             frozenset({"feature_snapshot", "feature_summary"}),
             names,

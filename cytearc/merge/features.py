@@ -501,16 +501,13 @@ def unshared_features_warning(
         + " ".join(lacking)
         + f"{zeros}; {record}, so "
         + (
-            "plots, marker search, bulk profiles and the ADT recipe leave those "
-            "zeros out, normalization, normalized exports, compare.test and "
-            "imputation refuse them, and features.detected and add_grouped_assay "
-            "still read them as counts."
+            "analyses leave those zeros out or refuse them, except some that "
+            "still read them as counts, such as features.detected and "
+            "add_grouped_assay."
             if assay_type == "ADT"
-            else "plots, marker search, feature selection, WAGGR, AUCell and bulk "
-            "profiles leave those zeros out, normalization, normalized exports, "
-            "compare.test and imputation refuse them, and cell-cycle and "
-            "chromVAR scores, features.detected, add_grouped_assay and mapping "
-            "still read them as counts."
+            else "analyses leave those zeros out or refuse them, except some that "
+            "still read them as counts, such as cell-cycle and chromVAR scores, "
+            "features.detected, add_grouped_assay and mapping."
         )
     )
     if combination == "merge":

@@ -1353,16 +1353,13 @@ def _zeros_read_as_counts(first: str = "left", *, adt: bool = False) -> str:
         " The merge writes zero counts for the features a source lacks; columns "
         f"such as 'measured_in_{first}' record what each source measured, so "
         + (
-            "plots, marker search, bulk profiles and the ADT recipe leave those "
-            "zeros out, normalization, normalized exports, compare.test and "
-            "imputation refuse them, and features.detected and add_grouped_assay "
-            "still read them as counts."
+            "analyses leave those zeros out or refuse them, except some that "
+            "still read them as counts, such as features.detected and "
+            "add_grouped_assay."
             if adt
-            else "plots, marker search, feature selection, WAGGR, AUCell and bulk "
-            "profiles leave those zeros out, normalization, normalized exports, "
-            "compare.test and imputation refuse them, and cell-cycle and "
-            "chromVAR scores, features.detected, add_grouped_assay and mapping "
-            "still read them as counts."
+            else "analyses leave those zeros out or refuse them, except some that "
+            "still read them as counts, such as cell-cycle and chromVAR scores, "
+            "features.detected, add_grouped_assay and mapping."
         )
     )
 
@@ -1490,10 +1487,9 @@ def test_merge_names_at_most_five_of_the_genes_that_each_source_lacks(tmp_path):
         "'g1000', 'g1001', 'g1002', 'g1003', 'g1004' and 195 more."
         + _zeros_read_as_counts()
     )
-    # Five names of each source and a count of the others keep it short:
-    # about 300 characters of names beside the warning's own text.
+    # Five names of each source and a count of the others keep it short.
     assert "x" * 100 not in message
-    assert len(message) < 800
+    assert len(message) < 700
 
 
 @pytest.mark.parametrize(
@@ -2258,7 +2254,7 @@ def _merged_panel_store(tmp_path: Path) -> str:
 
 
 def test_a_merge_records_each_source_of_a_merged_source_in_every_assay(tmp_path):
-    from cytearc.metadata.membership import features_measured_by_cells
+    from cytearc.metadata.membership import cells_measured_features
 
     inner = str(tmp_path / "inner.zarr")
     # The first source holds no ADT, so the inner store records the panels of
@@ -2328,20 +2324,20 @@ def test_a_merge_records_each_source_of_a_merged_source_in_every_assay(tmp_path)
     )
     for source, panel in (("left", _LEFT_PANEL), ("right", _RIGHT_PANEL)):
         rows = np.flatnonzero(np.char.startswith(ids, f"inner__{source}__"))
-        measured = features_measured_by_cells(
+        measured = cells_measured_features(
             store.cells, store.ADT.feats, rows, assay="ADT"
         )
         assert measured is not None
-        assert np.asarray(adt)[measured].tolist() == [
+        assert np.asarray(adt)[measured.measured].tolist() == [
             name for name in adt if name in panel
         ]
-    measured = features_measured_by_cells(
+    measured = cells_measured_features(
         store.cells,
         store.RNA.feats,
         np.flatnonzero(np.char.startswith(ids, "inner__")),
         assay="RNA",
     )
-    assert measured is not None and measured.tolist() == inner_genes
+    assert measured is not None and measured.measured.tolist() == inner_genes
 
 
 def test_a_merge_records_an_assay_only_for_the_sources_of_a_merged_store_that_hold_it(
@@ -2411,9 +2407,9 @@ def test_a_merged_store_that_alone_holds_an_assay_keeps_its_zero_counts(tmp_path
         "'CD16', 'CD19'. Source 'inner__right' lacks 2: 'CD45RA', 'CD27'. Merged "
         "source 'inner' holds zero counts for the features its sources lack, "
         "which the merge keeps; columns such as 'measured_in_inner__left' record "
-        "what each source measured, so plots, marker search, compare.test and the "
-        "ADT recipe leave those zeros out, while normalization and scores still "
-        "read them as counts."
+        "what each source measured, so analyses leave those zeros out or refuse "
+        "them, except some that still read them as counts, such as "
+        "features.detected and add_grouped_assay."
     ]
     assert set(_measured_columns(str(tmp_path / "outer.zarr"))) == {
         "measured_in_inner__left",

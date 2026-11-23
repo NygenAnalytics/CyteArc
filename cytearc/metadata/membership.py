@@ -562,10 +562,14 @@ class CellsMeasuredFeatures:
         return " ".join(sentences)
 
 
+type CellRows = np.ndarray | Callable[[], np.ndarray]
+"""Cell rows, or a function that reads them, which a reader calls only when the record needs the cells' sources."""
+
+
 def cells_measured_features(
     cells: Any,
     features: Any,
-    rows: np.ndarray,
+    rows: CellRows,
     *,
     assay: str,
     selected: np.ndarray | None = None,
@@ -575,7 +579,8 @@ def cells_measured_features(
     The cells must be cells that ``assay`` measured. None when the feature
     table holds no record, or when every source of the record measured every
     feature of the Boolean mask ``selected``, or every feature without one;
-    the cells' sources are read only otherwise.
+    the cells' sources are read only otherwise, and only then does a
+    callable ``rows`` read the cells.
 
     Raises:
         ValueError: As :func:`cell_sources` raises.
@@ -585,33 +590,14 @@ def cells_measured_features(
         return None
     if (record.measured if selected is None else record.measured[:, selected]).all():
         return None
-    sources = sources_of_cells(cells, features, rows, record, assay=assay)
+    sources = sources_of_cells(
+        cells, features, rows() if callable(rows) else rows, record, assay=assay
+    )
     return CellsMeasuredFeatures(
         record,
         sources,
         np.asarray(np.logical_and.reduce(record.measured[sources], axis=0)),
     )
-
-
-def features_measured_by_cells(
-    cells: Any,
-    features: Any,
-    rows: np.ndarray,
-    *,
-    assay: str,
-    selected: np.ndarray | None = None,
-) -> np.ndarray | None:
-    """Return whether the source of every cell at ``rows`` measured each feature of ``features``.
-
-    None when :func:`cells_measured_features` returns None.
-
-    Raises:
-        ValueError: As :func:`cell_sources` raises.
-    """
-    measured = cells_measured_features(
-        cells, features, rows, assay=assay, selected=selected
-    )
-    return None if measured is None else measured.measured
 
 
 def _selected_and_unmeasured(
@@ -629,7 +615,7 @@ def _selected_and_unmeasured(
 def leave_out_unmeasured_features(
     cells: Any,
     features: Any,
-    rows: np.ndarray,
+    rows: CellRows,
     *,
     assay: str,
     analysis: str,
@@ -687,7 +673,7 @@ def leave_out_unmeasured_features(
 def require_features_measured_by_cells(
     cells: Any,
     features: Any,
-    rows: np.ndarray,
+    rows: CellRows,
     selected: np.ndarray,
     *,
     assay: str,

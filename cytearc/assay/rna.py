@@ -38,6 +38,7 @@ from .normalization import (
     require_counts_for,
     _feature_group_positions,
     _feature_subset_source,
+    applicable_normalization_flags,
     check_normalization_flags,
     lib_size_feature_stream_eligible,
     library_size_divisors,
@@ -992,14 +993,16 @@ class RNAassay(Assay):
         feat_idx: np.ndarray,
         *,
         log_transform: bool = False,
+        renormalize_subset: bool = False,
     ) -> dict[str, np.ndarray]:
         """Compute sufficient feature statistics without persisting metadata.
 
         ``log_transform`` summarizes the values of
-        ``normed(log_transform=True)``.
+        ``normed(log_transform=True)``, and ``renormalize_subset`` those that
+        take each cell's total over ``feat_idx``.
         """
-        log_transform, _ = check_normalization_flags(
-            self, log_transform=log_transform, renormalize_subset=False
+        log_transform, renormalize_subset = check_normalization_flags(
+            self, log_transform=log_transform, renormalize_subset=renormalize_subset
         )
         cell_idx = np.asarray(cell_idx, dtype=np.int64)
         feat_idx = np.asarray(feat_idx, dtype=np.int64)
@@ -1010,11 +1013,16 @@ class RNAassay(Assay):
                 "normed_n": zeros.copy(),
                 "sigmas": zeros.copy(),
             }
-        if uses_library_size_normalization(self):
+        if uses_library_size_normalization(self) and not renormalize_subset:
             return self._streaming_feature_stats(
                 cell_idx, feat_idx, log_transform=log_transform
             )
-        normed = self.normed(cell_idx, feat_idx, log_transform=log_transform)
+        normed = self.normed(
+            cell_idx,
+            feat_idx,
+            log_transform=log_transform,
+            renormalize_subset=renormalize_subset,
+        )
         return {
             "normed_tot": np.asarray(
                 compute_with_progress(
@@ -1060,17 +1068,13 @@ class RNAassay(Assay):
         keep_bounds: bool,
         feature_names: np.ndarray,
         bin_strategy: Literal["fixed", "adaptive"] = "adaptive",
-        measured: np.ndarray | None = None,
     ) -> tuple[np.ndarray, np.ndarray]:
         """Return an HVG mask and corrected variance from sufficient stats.
 
         ``summary`` is a feature summary of this assay and ``feature_names``
         holds one name per feature; inputs of any other length are refused.
-        A gene that ``measured`` leaves out, which some source of the selected
-        cells did not measure, takes no part in the background fit and gets
-        a corrected variance of 0, as a gene without counts does, and is
-        never selected. The selection gives no warning: the operation that
-        saves it warns from its diagnostics.
+        The selection gives no warning: the operation that saves it warns
+        from its diagnostics.
         """
         from ..features.variability import _highly_variable_selection
 
@@ -1084,7 +1088,7 @@ class RNAassay(Assay):
             where=normed_n != 0,
         )
         corrected_variance = _corrected_variance(
-            normed_tot if measured is None else np.where(measured, normed_tot, 0.0),
+            normed_tot,
             sigmas,
             n_selected,
             n_bins=n_bins,
@@ -1095,11 +1099,7 @@ class RNAassay(Assay):
             corrected_variance=corrected_variance,
             normalized_cell_counts=normed_n,
             mean_nonzero=nz_mean,
-            active_features=(
-                np.ones(self.feats.N, dtype=bool)
-                if measured is None
-                else np.asarray(measured, dtype=bool)
-            ),
+            active_features=np.ones(self.feats.N, dtype=bool),
             feature_names=np.asarray(feature_names),
             min_cells=min_cells,
             max_cells=max_cells,
@@ -1152,9 +1152,13 @@ class RNAassay(Assay):
             theta: The Pearson residuals' overdispersion.
             clip: The Pearson residuals' clip, or None for ``sqrt(n)``.
             measured: The features that every source of the selected cells
-                measured, or None for every feature. The others are scored as
-                features without counts, so no trend fit takes them in, and
-                score 0; their detection statistics stay those of the cells.
+                measured, or None for every feature. The features are then
+                scored as a store of them alone scores them: each cell's
+                total is its total over them, which one more pass over their
+                counts gives the cytearc flavor of library-size values and
+                Pearson residuals, and a normalizer that takes
+                ``renormalize_subset`` normalizes over it. Every other
+                feature scores 0 and holds no statistics.
 
         Returns:
             The scores and detection statistics of every batch and feature.
@@ -1165,15 +1169,35 @@ class RNAassay(Assay):
             seurat_v3_expected_variance,
             seurat_v3_standardized_variance,
         )
+        from .hvg_statistics import _MEASURED_TOTALS, cell_totals_over_features
 
         cell_idx = np.asarray(cell_idx, dtype=np.int64)
         groups = np.asarray(groups, dtype=np.int64)
-        feat_idx = np.arange(self.feats.N, dtype=np.int64)
+        feat_idx = (
+            np.arange(self.feats.N, dtype=np.int64)
+            if measured is None
+            else np.flatnonzero(measured)
+        )
         library_size = flavor == "cytearc"
-        if library_size and not uses_library_size_normalization(self):
+        library_values = library_size and uses_library_size_normalization(self)
+        totals = (
+            cell_totals_over_features(self, cell_idx, feat_idx)
+            if measured is not None
+            and (library_values or flavor == "pearson_residuals")
+            else None
+        )
+        if library_size and not library_values:
             # Another normalizer is fitted over each batch's own cells.
+            renormalize = (
+                measured is not None
+                and "renormalize_subset" in applicable_normalization_flags(self)
+            )
             summaries = [
-                self._compute_feature_summary(cell_idx[groups == group], feat_idx)
+                self._compute_feature_summary(
+                    cell_idx[groups == group],
+                    feat_idx,
+                    renormalize_subset=renormalize,
+                )
                 for group in range(n_groups)
             ]
             sizes = np.bincount(groups, minlength=n_groups).astype(np.int64)
@@ -1184,41 +1208,42 @@ class RNAassay(Assay):
             maximum = np.zeros_like(total)
         else:
             moments = grouped_moments(
-                self, cell_idx, groups, n_groups, feat_idx, library_size=library_size
+                self,
+                cell_idx,
+                groups,
+                n_groups,
+                feat_idx,
+                library_size=library_size,
+                totals=totals if library_size else None,
             )
             sizes, total, m2 = moments.sizes, moments.total, moments.m2
             detected, maximum = moments.detected, moments.maximum
         if (sizes < 2).any():
             raise ValueError("Every batch needs at least two selected cells")
-        scored_total, scored_m2 = (
-            (total, m2)
-            if measured is None
-            else (np.where(measured, total, 0.0), np.where(measured, m2, 0.0))
-        )
         scores = np.zeros(total.shape, dtype=np.float64)
         if flavor == "cytearc":
             for group in range(n_groups):
                 scores[group] = _corrected_variance(
-                    scored_total[group],
-                    scored_m2[group] / sizes[group],
+                    total[group],
+                    m2[group] / sizes[group],
                     int(sizes[group]),
                     n_bins=n_bins,
                     lowess_frac=lowess_frac,
                     bin_strategy=bin_strategy,
                 )
         elif flavor == "seurat_v3":
-            means = scored_total / sizes[:, None]
+            means = total / sizes[:, None]
             expected = np.stack(
                 [
                     seurat_v3_expected_variance(
-                        means[group], scored_m2[group] / (sizes[group] - 1), span=span
+                        means[group], m2[group] / (sizes[group] - 1), span=span
                     )
                     for group in range(n_groups)
                 ]
             )
             clips = seurat_v3_clip_values(means, expected, sizes[:, None])
             clipped = (maximum > clips) & (expected > 0)
-            squares = scored_m2.copy()
+            squares = m2.copy()
             # Only genes with a count above their clip are read again.
             reread = np.flatnonzero(clipped.any(axis=0))
             again = grouped_clipped_squares(
@@ -1226,7 +1251,7 @@ class RNAassay(Assay):
                 cell_idx,
                 groups,
                 n_groups,
-                reread,
+                feat_idx[reread],
                 means=means[:, reread],
                 clips=clips[:, reread],
             )
@@ -1236,28 +1261,30 @@ class RNAassay(Assay):
                     squares[group], expected[group], int(sizes[group])
                 )
         else:
-            cell_totals = self._cell_count_totals(cell_idx)
+            cell_totals = (
+                self._cell_count_totals(cell_idx) if totals is None else totals
+            )
             if not (np.isfinite(cell_totals).all() and (cell_totals >= 0).all()):
+                named = self._totals_name if totals is None else _MEASURED_TOTALS
                 raise ValueError(
-                    f"{self._totals_name} holds negative or non-finite totals of "
-                    "selected cells; Pearson residuals require finite non-negative "
-                    "counts"
+                    f"{named} holds negative or non-finite totals of selected "
+                    "cells; Pearson residuals require finite non-negative counts"
                 )
             batch_totals = np.bincount(groups, weights=cell_totals, minlength=n_groups)
             fractions = np.divide(
-                scored_total,
+                total,
                 batch_totals[:, None],
-                out=np.zeros_like(scored_total),
+                out=np.zeros_like(total),
                 where=batch_totals[:, None] > 0,
             )
             # Genes without counts in any batch have residuals of 0.
-            expressed = np.flatnonzero((scored_total > 0).any(axis=0))
+            expressed = np.flatnonzero((total > 0).any(axis=0))
             _, residual_m2 = grouped_pearson_residual_moments(
                 self,
                 cell_idx,
                 groups,
                 n_groups,
-                expressed,
+                feat_idx[expressed],
                 totals=cell_totals,
                 fractions=fractions[:, expressed],
                 theta=theta,
@@ -1268,7 +1295,7 @@ class RNAassay(Assay):
             scores[:, expressed] = residual_m2 / sizes[:, None]
         pooled_total = total.sum(axis=0)
         pooled_detected = detected.sum(axis=0)
-        return BatchHvgScores(
+        found = BatchHvgScores(
             sizes=sizes,
             scores=scores,
             mean_nonzero=np.divide(
@@ -1282,6 +1309,9 @@ class RNAassay(Assay):
                 where=pooled_detected != 0,
             ),
         )
+        if measured is None:
+            return found
+        return found.widened(feat_idx, int(self.feats.N))
 
     @staticmethod
     def _plot_hvgs(

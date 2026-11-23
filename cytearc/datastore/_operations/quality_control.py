@@ -1,4 +1,5 @@
 from collections.abc import Iterable, Mapping, Sequence
+from functools import partial
 from numbers import Real
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -2682,10 +2683,13 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
         self._require_measured_cells(
             assay.name, cell_selection, operation="select_prevalent_peaks"
         )
+        # Only a store whose record leaves out a peak reads the selected cells
+        # here.
         measured = leave_out_unmeasured_features(
             assay.cells,
             assay.feats,
-            read_stored_selection_indices(
+            partial(
+                read_stored_selection_indices,
                 self.zw,
                 cell_selection,
                 kind="cell_selection",
