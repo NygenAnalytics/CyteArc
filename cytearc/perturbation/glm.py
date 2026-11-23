@@ -57,7 +57,8 @@ _FIT_TOLERANCE = 1e-12
 _LOGISTIC_ITERATIONS = 50
 # Counts up to this sum their digamma differences term by term.
 _FINITE_SUM_COUNTS = 8
-# The relative rounding of a double.
+# The gap between 1 and the next double, 2**-52: twice the largest relative
+# error of rounding a result to the nearest double.
 _EPSILON = float(np.finfo(np.float64).eps)
 # A set whose cells the covariates determine, such as the cells of a sample
 # that holds no other cell of the fit, has a score variance of exactly 0. Its
@@ -318,7 +319,7 @@ def trigamma(x: float) -> float:
 def size_derivatives(
     y: np.ndarray, mu: np.ndarray, size: float
 ) -> tuple[float, float, float]:
-    """Return the first two derivatives of the log-likelihood in log(size), and the first's rounding.
+    """Return the first two derivatives of the log-likelihood in log(size), and an estimate of the first's rounding.
 
     The means are held fixed. For an integer count y, psi(size + y) -
     psi(size) is the sum of 1 / (size + k) for k below y. Near the maximum,
@@ -326,7 +327,9 @@ def size_derivatives(
     its error is the rounding of the terms themselves: the finite sums, or the
     digamma values that a large count subtracts, the logarithm of size /
     (size + mean), whose error near 1 is absolute, and (mean - y) / (size +
-    mean). The rounding returned sums those roundings over the cells.
+    mean). The rounding returned estimates that error by summing those
+    roundings over the cells; where the roundings line up, as over cells
+    sorted by their counts, the error can reach a few times the estimate.
     """
     first = 0.0
     second = 0.0
@@ -380,7 +383,7 @@ def size_dispersion(y: np.ndarray, mu: np.ndarray, degrees: float) -> float:
     log_size = math.log(squares / excess)
     for _ in range(100):
         gradient, curvature, rounding = size_derivatives(y, mu, math.exp(log_size))
-        # A gradient within its rounding gives no direction. Near Poisson
+        # A gradient within its rounding may point either way. Near Poisson
         # counts, the likelihood is so flat in the size that steps from such
         # a gradient would follow its rounding and never fall below 1e-10.
         if abs(gradient) <= rounding:

@@ -545,6 +545,8 @@ def test_the_size_gradient_rounding_covers_its_error_near_the_maximum(
     monkeypatch, python_kernels
 ) -> None:
     _python_kernels(monkeypatch, python_kernels)
+    # Cells in random order, whose roundings do not line up as those of cells
+    # sorted by their counts can.
     y, mu = _near_poisson_counts()
     best = _exact_log_size(y, mu, 1e4, 1e6)
     for offset in (-0.1, 0.0, 0.1):
