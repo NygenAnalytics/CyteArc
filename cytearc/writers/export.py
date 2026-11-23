@@ -31,7 +31,7 @@ from collections.abc import (
     Sequence,
 )
 from concurrent.futures import Future, ThreadPoolExecutor
-from contextlib import contextmanager, nullcontext, suppress
+from contextlib import ExitStack, contextmanager, nullcontext, suppress
 from dataclasses import dataclass, field, replace
 from functools import cache, partial
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -526,13 +526,15 @@ def _reordered_blocks(
     read_bytes = _reorder_read_bytes(max_bytes)
     store: SparseRowStore | None = None
     bucket_rows = 1
+    # Closes the store, once one is made, however the rows end.
+    cleanup = ExitStack()
 
     def created(sample: csr_matrix) -> SparseRowStore:
         nonlocal bucket_rows
         bucket_rows = SparseRowStore.whole_row_bucket_rows(
             n_rows, n_values, read_bytes, matrix.dtype.itemsize
         )
-        return SparseRowStore(
+        made = SparseRowStore(
             matrix.shape,
             matrix.dtype,
             operation="export in source order",
@@ -546,8 +548,10 @@ def _reordered_blocks(
             sum_duplicates=False,
             temp_dir=None if temp_dir is None else os.fspath(temp_dir),
         )
+        cleanup.callback(made.close)
+        return made
 
-    try:
+    with cleanup:
         # One batch is appended on a thread while the stream reads and
         # converts the rows of the next.
         with ThreadPoolExecutor(1, thread_name_prefix="cytearc-reorder") as appender:
@@ -580,9 +584,6 @@ def _reordered_blocks(
         store.finalize()
         # Batches are as many rows as a bucket holds.
         yield from store.iter_rows(0, n_rows, bucket_rows, read_ahead=True, delete=True)
-    finally:
-        if store is not None:
-            store.close()
 
 
 def reordered_matrix(
@@ -789,13 +790,15 @@ def reordered_text_rows(
     n_rows = int(np.asarray(destinations).size)
     store: SparseRowStore | None = None
     bucket_rows = 1
+    # Closes the store, once one is made, however the rows end.
+    cleanup = ExitStack()
 
     def created(offsets: np.ndarray) -> SparseRowStore:
         """Create the store, its buckets sized from a block's rows of ``offsets``."""
         nonlocal bucket_rows
         mean = int(offsets[-1]) / max(1, offsets.size - 1)
         bucket_rows = SparseRowStore.ragged_bucket_rows(n_rows, mean, plan.read_bytes)
-        return SparseRowStore(
+        made = SparseRowStore(
             (n_rows, plan.widest_row),
             np.uint8,
             operation=operation,
@@ -807,8 +810,10 @@ def reordered_text_rows(
             entries=math.ceil(mean * n_rows),
             temp_dir=None if temp_dir is None else os.fspath(temp_dir),
         )
+        cleanup.callback(made.close)
+        return made
 
-    try:
+    with cleanup:
         sent = 0
         # One block is sent to its buckets on a thread while the next one
         # arrives.
@@ -844,9 +849,6 @@ def reordered_text_rows(
         yield from store.iter_ragged_rows(
             0, n_rows, bucket_rows, read_ahead=True, delete=True
         )
-    finally:
-        if store is not None:
-            store.close()
 
 
 _DIGIT_RUNS = re.compile(r"(\d+)")
