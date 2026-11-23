@@ -2864,24 +2864,28 @@ def test_a_merge_of_a_merged_store_keeps_the_source_of_each_of_its_cells(
     )
     expected = np.array(
         [
-            f"inner/{source_of[cell.split('__', 1)[1]]}"
+            f"inner__{source_of[cell.split('__', 1)[1]]}"
             if cell.startswith("inner__")
             else "third"
             for cell in ids
         ]
     )
     assert {label: int((expected == label).sum()) for label in set(expected)} == {
-        "inner/left": _N_STUDY,
-        "inner/right": _N_STUDY,
+        "inner__left": _N_STUDY,
+        "inner__right": _N_STUDY,
         "third": 4,
     }
+    # Each label, as each source's name, starts the IDs of its cells.
+    assert all(
+        cell.startswith(f"{label}__") for cell, label in zip(ids, expected, strict=True)
+    )
     # The outer merge names each cell of the inner store by the inner
     # store's source of it, in its categorical column of sources; the inner
     # store's own column is still copied as an ordinary column of text.
     column = outer.cells._get_array("dataset")
     assert isinstance(column, CategoricalColumn)
     assert column.attrs["role"] == "cell_sources"
-    assert column.categories.tolist() == ["inner/left", "inner/right", "third"]
+    assert column.categories.tolist() == ["inner__left", "inner__right", "third"]
     np.testing.assert_array_equal(outer.cells.fetch_all("dataset"), expected)
     copied = outer.cells._get_array("orig_dataset")
     assert not isinstance(copied, CategoricalColumn)
@@ -2890,10 +2894,10 @@ def test_a_merge_of_a_merged_store_keeps_the_source_of_each_of_its_cells(
     # to the outer name, and the third source gets its own.
     record = measured_features_by_source(outer.ADT.feats)
     assert record is not None
-    assert record.sources == ["inner/left", "inner/right", "third"]
+    assert record.sources == ["inner__left", "inner__right", "third"]
     assert record.columns == [
-        "measured_in_inner_left",
-        "measured_in_inner_right",
+        "measured_in_inner__left",
+        "measured_in_inner__right",
         "measured_in_third",
     ]
     names = outer.ADT.feats.fetch_all("names").astype(str)
@@ -2909,7 +2913,7 @@ def test_a_merge_of_a_merged_store_keeps_the_source_of_each_of_its_cells(
         assert [own[name] for name in names] == [
             name in _PANELS[study] for name in names
         ]
-        assert outer.ADT.feats.fetch_all(f"measured_in_inner_{study}").tolist() == [
+        assert outer.ADT.feats.fetch_all(f"measured_in_inner__{study}").tolist() == [
             own[name] for name in names
         ]
     assert outer.ADT.feats.fetch_all("measured_in_third").tolist() == [
@@ -2923,7 +2927,7 @@ def test_a_merge_of_a_merged_store_keeps_the_source_of_each_of_its_cells(
         measured = features_measured_by_cells(
             outer.cells,
             outer.ADT.feats,
-            np.flatnonzero(expected == f"inner/{study}"),
+            np.flatnonzero(expected == f"inner__{study}"),
             assay="ADT",
         )
         assert measured is not None and names[measured].tolist() == _PANELS[study]
@@ -2934,7 +2938,7 @@ def test_a_merge_of_a_merged_store_keeps_the_source_of_each_of_its_cells(
     # The left study's cells read their CD45RA values as the inner store and
     # the left study's own store read them; every other cell has none.
     values = outer.get_cell_vals("ADT", "I", "CD45RA")
-    left = expected == "inner/left"
+    left = expected == "inner__left"
     assert np.isnan(values[~left]).all()
     np.testing.assert_allclose(
         values[left], _values_by_cell(inner, "CD45RA", ids[left])

@@ -430,8 +430,8 @@ def test_a_merge_of_merged_stores_keeps_its_sources_through_h5ad(tmp_path) -> No
     ).dump()
     outer = opened("outer")
     record = {
-        "measured_in_inner_x": "inner/x",
-        "measured_in_inner_y": "inner/y",
+        "measured_in_inner__x": "inner__x",
+        "measured_in_inner__y": "inner__y",
         "measured_in_z": "z",
     }
     assert measured_feature_columns(outer.ADT.feats) == record
@@ -443,18 +443,18 @@ def test_a_merge_of_merged_stores_keeps_its_sources_through_h5ad(tmp_path) -> No
         )
     )
     assert sorted(sources.items()) == [
-        ("inner__x__x0", "inner/x"),
-        ("inner__x__x1", "inner/x"),
-        ("inner__x__x2", "inner/x"),
-        ("inner__y__y0", "inner/y"),
-        ("inner__y__y1", "inner/y"),
+        ("inner__x__x0", "inner__x"),
+        ("inner__x__x1", "inner__x"),
+        ("inner__x__x2", "inner__x"),
+        ("inner__y__y0", "inner__y"),
+        ("inner__y__y1", "inner__y"),
         ("z__z0", "z"),
         ("z__z1", "z"),
     ]
     # Only the cells of y and z measured ADT2, and those of z alone ADT3.
     lacking = {feature: _unmeasured(outer, feature) for feature in ("ADT2", "ADT3")}
     assert lacking == {
-        "ADT2": {cell: source == "inner/x" for cell, source in sources.items()},
+        "ADT2": {cell: source == "inner__x" for cell, source in sources.items()},
         "ADT3": {cell: source != "z" for cell, source in sources.items()},
     }
 
@@ -500,19 +500,19 @@ def test_a_merge_of_merged_stores_keeps_its_sources_through_h5ad(tmp_path) -> No
         ).dump()
         merged = opened(f"{name}_merged")
         assert measured_feature_columns(merged.ADT.feats) == {
-            "measured_in_outer_inner_x": "outer/inner/x",
-            "measured_in_outer_inner_y": "outer/inner/y",
-            "measured_in_outer_z": "outer/z",
+            "measured_in_outer__inner__x": "outer__inner__x",
+            "measured_in_outer__inner__y": "outer__inner__y",
+            "measured_in_outer__z": "outer__z",
             "measured_in_w": "w",
         }
         assert merged.cells._get_array("dataset").categories.tolist() == [
-            "outer/inner/x",
-            "outer/inner/y",
-            "outer/z",
+            "outer__inner__x",
+            "outer__inner__y",
+            "outer__z",
             "w",
         ]
         merged_sources = {
-            f"outer__{cell}": f"outer/{source}" for cell, source in sources.items()
+            f"outer__{cell}": f"outer__{source}" for cell, source in sources.items()
         } | {"w__w0": "w", "w__w1": "w"}
         assert (
             dict(
@@ -526,7 +526,7 @@ def test_a_merge_of_merged_stores_keeps_its_sources_through_h5ad(tmp_path) -> No
         )
         # w measured ADT0 alone, so it has no value of ADT2 either.
         assert _unmeasured(merged, "ADT2") == {
-            cell: source in {"outer/inner/x", "w"}
+            cell: source in {"outer__inner__x", "w"}
             for cell, source in merged_sources.items()
         }
 

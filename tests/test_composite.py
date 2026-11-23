@@ -1557,45 +1557,53 @@ def test_a_composite_of_a_merged_store_keeps_the_source_of_each_of_its_cells(tmp
         + [next(i for i, cell in enumerate(inner_ids) if cell.startswith("p1__"))]
     )
 
-    joint = create_composite(
-        {"inner": inner, "p3": sources["p3"]},
-        at=tmp_path / "joint.zarr",
-        assay="ADT",
-        features="union",
-        rows={"inner": rows},
-    )
+    with _feature_warnings() as messages:
+        joint = create_composite(
+            {"inner": inner, "p3": sources["p3"]},
+            at=tmp_path / "joint.zarr",
+            assay="ADT",
+            features="union",
+            rows={"inner": rows},
+        )
 
+    # The warning names what each source of the merged store lacks.
+    assert messages == [
+        "Assay 'ADT': 4 of the 5 composite features were not measured by every "
+        "source that holds the assay. Source 'inner__p1' lacks 2: 'CD19', 'CD56'. "
+        "Source 'inner__p2' lacks 2: 'CD8', 'CD56'. Source 'p3' lacks 3: 'CD4', "
+        "'CD8', 'CD19'." + _zeros_read_as_counts("inner__p1", adt=True)
+    ]
     ids = joint.cells.fetch_all("ids").astype(str)
     expected = np.array(
         [
-            f"inner/{source_of[cell.split('__', 1)[1]]}"
+            f"inner__{source_of[cell.split('__', 1)[1]]}"
             if cell.startswith("inner__")
             else "p3"
             for cell in ids
         ]
     )
-    assert sorted(expected.tolist()) == ["inner/p1"] + ["inner/p2"] * 3 + ["p3"] * 3
+    assert sorted(expected.tolist()) == ["inner__p1"] + ["inner__p2"] * 3 + ["p3"] * 3
     column = joint.cells._get_array("dataset")
     assert column.attrs["role"] == "cell_sources"
-    assert column.categories.tolist() == ["inner/p1", "inner/p2", "p3"]
+    assert column.categories.tolist() == ["inner__p1", "inner__p2", "p3"]
     np.testing.assert_array_equal(joint.cells.fetch_all("dataset"), expected)
     assert measured_feature_columns(joint.ADT.feats) == {
-        "measured_in_inner_p1": "inner/p1",
-        "measured_in_inner_p2": "inner/p2",
+        "measured_in_inner__p1": "inner__p1",
+        "measured_in_inner__p2": "inner__p2",
         "measured_in_p3": "p3",
     }
     names = joint.ADT.feats.fetch_all("names").astype(str).tolist()
     assert names == ["CD3", "CD4", "CD8", "CD19", "CD56"]
     for column_name, panel in (
-        ("measured_in_inner_p1", panels["p1"]),
-        ("measured_in_inner_p2", panels["p2"]),
+        ("measured_in_inner__p1", panels["p1"]),
+        ("measured_in_inner__p2", panels["p2"]),
         ("measured_in_p3", panels["p3"]),
     ):
         assert joint.ADT.feats.fetch_all(column_name).tolist() == [
             name in panel for name in names
         ]
     # The cells of p2 measured its panel, and only they have values of CD19.
-    rows_p2 = np.flatnonzero(expected == "inner/p2")
+    rows_p2 = np.flatnonzero(expected == "inner__p2")
     measured = features_measured_by_cells(
         joint.cells, joint.ADT.feats, rows_p2, assay="ADT"
     )
@@ -1603,11 +1611,18 @@ def test_a_composite_of_a_merged_store_keeps_the_source_of_each_of_its_cells(tmp
     assert np.asarray(names)[measured].tolist() == ["CD3", "CD4", "CD19"]
     cd19 = joint.get_cell_vals("ADT", "I", "CD19")
     np.testing.assert_array_equal(np.flatnonzero(~np.isnan(cd19)), rows_p2)
-    # A source named as a source of the merged store is refused before
-    # anything is written.
-    with pytest.raises(ValueError, match="^Source 'p1' of the merged source 'inner'"):
+    # A source whose record column a source of the merged store takes is
+    # refused before anything is written.
+    with pytest.raises(
+        ValueError,
+        match=re.escape(
+            "Sources 'inner__p1' and 'inner/_p1' would record which features they "
+            "measured in the feature columns 'measured_in_inner__p1' and "
+            "'measured_in_inner__p1'"
+        ),
+    ):
         create_composite(
-            {"inner": inner, "inner/p1": sources["p3"]},
+            {"inner": inner, "inner/_p1": sources["p3"]},
             at=tmp_path / "clash.zarr",
             assay="ADT",
             features="union",
@@ -1661,12 +1676,12 @@ def test_a_composite_names_the_sources_that_a_merged_stores_column_of_text_holds
     )
 
     assert joint.cells._get_array("dataset").categories.tolist() == [
-        "inner/p1",
-        "inner/p2",
+        "inner__p1",
+        "inner__p2",
         "p3",
     ]
     expected = {
-        f"inner__{cell}": f"inner/{label}"
+        f"inner__{cell}": f"inner__{label}"
         for cell, label, absent in zip(ids, labels, missing, strict=True)
         if not absent
     } | {f"p3__c{cell}": "p3" for cell in range(3)}

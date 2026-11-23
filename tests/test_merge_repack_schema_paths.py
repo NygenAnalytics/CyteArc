@@ -2161,20 +2161,20 @@ def test_a_merge_of_merged_stores_records_what_every_cell_of_each_source_measure
     # what each of them lacks.
     assert messages == [
         "Assay 'ADT': 5 of the 8 merged features were not measured by every "
-        "source that holds the assay. Source 'inner/left' lacks 3: 'CD14', "
-        "'CD16', 'CD19'. Source 'inner/right' lacks 2: 'CD45RA', 'CD27'. "
+        "source that holds the assay. Source 'inner__left' lacks 3: 'CD14', "
+        "'CD16', 'CD19'. Source 'inner__right' lacks 2: 'CD45RA', 'CD27'. "
         "Source 'third' lacks 4: 'CD27', 'CD14', 'CD16', 'CD19'."
-        + _zeros_read_as_counts("inner_left", adt=True)
+        + _zeros_read_as_counts("inner__left", adt=True)
     ]
     assert _measured_columns(union) == {
-        "measured_in_inner_left": [name in _LEFT_PANEL for name in ids],
-        "measured_in_inner_right": [name in _RIGHT_PANEL for name in ids],
+        "measured_in_inner__left": [name in _LEFT_PANEL for name in ids],
+        "measured_in_inner__right": [name in _RIGHT_PANEL for name in ids],
         "measured_in_third": [name in third_panel for name in ids],
     }
     cells = zarr.open_group(union, mode="r")["cellData"]
     assert cells["__cytearc_categories__dataset"][:].tolist() == [
-        "inner/left",
-        "inner/right",
+        "inner__left",
+        "inner__right",
         "third",
     ]
     assert features_measured_by_every_source(_open(union).ADT.feats).tolist() == [
@@ -2267,12 +2267,13 @@ def test_a_merge_records_each_source_of_a_merged_source_in_every_assay(tmp_path)
 
     root = zarr.open_group(outer, mode="r")
     categories = root["cellData/__cytearc_categories__dataset"][:].tolist()
-    assert categories == ["third", "inner/rna", "inner/left", "inner/right"]
-    # Each cell's source is the inner store's source of it, by cell ID.
+    assert categories == ["third", "inner__rna", "inner__left", "inner__right"]
+    # Each cell's source is the inner store's source of it, by cell ID, and
+    # starts the cell's ID.
     labels = np.asarray(categories)[root["cellData/dataset"][:]].tolist()
     assert dict(zip(root["cellData/ids"][:].tolist(), labels, strict=True)) == {
         **{
-            f"inner__{source}__c{cell}": f"inner/{source}"
+            f"inner__{source}__c{cell}": f"inner__{source}"
             for source in ("rna", "left", "right")
             for cell in range(3)
         },
@@ -2282,17 +2283,17 @@ def test_a_merge_records_each_source_of_a_merged_source_in_every_assay(tmp_path)
     # store gave it none, and its cells are not measured by ADT.
     adt = root["ADT/featureData/ids"][:].tolist()
     assert _measured_columns(outer) == {
-        "measured_in_inner_left": [name in _LEFT_PANEL for name in adt],
-        "measured_in_inner_right": [name in _RIGHT_PANEL for name in adt],
+        "measured_in_inner__left": [name in _LEFT_PANEL for name in adt],
+        "measured_in_inner__right": [name in _RIGHT_PANEL for name in adt],
         "measured_in_third": [name in {"CD3", "CD56"} for name in adt],
     }
     # Every source of the inner store measured its genes, G0 and G1.
     assert root["RNA/featureData/ids"][:].tolist() == ["G0", "G2", "G1"]
     inner_genes = [True, False, True]
     assert _measured_columns(outer, "RNA") == {
-        "measured_in_inner_rna": inner_genes,
-        "measured_in_inner_left": inner_genes,
-        "measured_in_inner_right": inner_genes,
+        "measured_in_inner__rna": inner_genes,
+        "measured_in_inner__left": inner_genes,
+        "measured_in_inner__right": inner_genes,
         "measured_in_third": [True, True, False],
     }
     # The reopened store reads which features the cells of each source
@@ -2320,32 +2321,100 @@ def test_a_merge_records_each_source_of_a_merged_source_in_every_assay(tmp_path)
     assert measured is not None and measured.tolist() == inner_genes
 
 
+def test_a_merge_records_an_assay_only_for_the_sources_of_a_merged_store_that_hold_it(
+    tmp_path,
+):
+    # plain measured RNA alone, of other genes than cite, so the inner store
+    # records RNA, and not ADT, which cite alone holds.
+    cite = _panel_source({"RNA": ["G0", "G1"], "ADT": ["CD3", "CD4", "CD45RA"]})
+    plain = _panel_source({"RNA": ["G0", "G2"]})
+    cite2 = _panel_source({"RNA": ["G0", "G1"], "ADT": ["CD3", "CD4", "CD19"]})
+    inner = str(tmp_path / "inner.zarr")
+    DataStoreMerge([cite, plain], inner, ["cite", "plain"], nthreads=1).dump()
+    assert set(_measured_columns(inner, "RNA")) == {
+        "measured_in_cite",
+        "measured_in_plain",
+    }
+    assert _measured_columns(inner) == {}
+    outer = str(tmp_path / "outer.zarr")
+    with _captured_warnings() as messages:
+        DataStoreMerge(
+            [_open(inner), cite2], outer, ["inner", "cite2"], nthreads=1
+        ).dump()
+
+    # The oracle is the merge of the three stores at once, which records each
+    # by its name: plain gets no column of ADT there, and none here.
+    flat = str(tmp_path / "flat.zarr")
+    DataStoreMerge(
+        [cite, plain, cite2], flat, ["cite", "plain", "cite2"], nthreads=1
+    ).dump()
+    renamed = {
+        "measured_in_cite": "measured_in_inner__cite",
+        "measured_in_plain": "measured_in_inner__plain",
+        "measured_in_cite2": "measured_in_cite2",
+    }
+    for assay in ("ADT", "RNA"):
+        assert _measured_columns(outer, assay) == {
+            renamed[name]: measured
+            for name, measured in _measured_columns(flat, assay).items()
+        }
+    assert set(_measured_columns(outer)) == {
+        "measured_in_inner__cite",
+        "measured_in_cite2",
+    }
+    adt = next(message for message in messages if message.startswith("Assay 'ADT'"))
+    assert (
+        "Source 'inner__cite' lacks 1: 'CD19'. Source 'cite2' lacks 1: 'CD45RA'." in adt
+    )
+    assert "inner__plain" not in adt
+
+
+def test_a_merged_store_that_alone_holds_an_assay_keeps_its_zero_counts(tmp_path):
+    inner = _merged_panel_store(tmp_path)
+
+    with _captured_warnings() as messages:
+        DataStoreMerge(
+            [_open(inner), _panel_source({"RNA": _GENES})],
+            str(tmp_path / "outer.zarr"),
+            ["inner", "rna"],
+            nthreads=1,
+        ).dump()
+
+    # The zeros that the warning counts are the inner store's, which the merge
+    # keeps, not zeros that the merge writes.
+    assert [message for message in messages if message.startswith("Assay")] == [
+        "Assay 'ADT': 5 of the 8 merged features were not measured by every "
+        "source that holds the assay. Source 'inner__left' lacks 3: 'CD14', "
+        "'CD16', 'CD19'. Source 'inner__right' lacks 2: 'CD45RA', 'CD27'. Merged "
+        "source 'inner' holds zero counts for the features its sources lack, "
+        "which the merge keeps; columns such as 'measured_in_inner__left' record "
+        "what each source measured, so plots, marker search, compare.test and the "
+        "ADT recipe leave those zeros out, while normalization and scores still "
+        "read them as counts."
+    ]
+    assert set(_measured_columns(str(tmp_path / "outer.zarr"))) == {
+        "measured_in_inner__left",
+        "measured_in_inner__right",
+    }
+
+
 @pytest.mark.parametrize(
-    ("name", "message"),
+    ("name", "columns"),
     [
         pytest.param(
-            "inner/left",
-            "Source 'left' of the merged source 'inner' and source 'inner/left' "
-            "would both be recorded as 'inner/left'. A merge records each source "
-            "of a merged source by the merged source's name, '/' and the source's "
-            "own name. Rename 'inner' or 'inner/left'.",
-            id="name",
+            "inner/_left",
+            "'measured_in_inner__left' and 'measured_in_inner__left'",
+            id="separator",
         ),
         pytest.param(
-            "Inner_Left",
-            "Sources 'inner/left' and 'Inner_Left' would record which features "
-            "they measured in the feature columns 'measured_in_inner_left' and "
-            "'measured_in_Inner_Left', which a file system that ignores case "
-            "stores as one column. Name the sources so that the names differ in "
-            "more than case, with '/' and '\\' counted as '_'. A merge records "
-            "each source of a merged source by the merged source's name, '/' and "
-            "the source's own name.",
-            id="column",
+            "Inner/_Left",
+            "'measured_in_inner__left' and 'measured_in_Inner__Left'",
+            id="case",
         ),
     ],
 )
-def test_a_merge_refuses_a_source_named_as_a_source_of_a_merged_source(
-    tmp_path, name, message
+def test_a_merge_refuses_a_source_whose_column_a_source_of_a_merged_store_takes(
+    tmp_path, name, columns
 ):
     inner = _merged_panel_store(tmp_path)
     destination = tmp_path / "outer.zarr"
@@ -2353,13 +2422,20 @@ def test_a_merge_refuses_a_source_named_as_a_source_of_a_merged_source(
 
     with pytest.raises(ValueError) as refused:
         DataStoreMerge(sources, str(destination), ["inner", name], nthreads=1).plan()
-    assert str(refused.value) == message
+    assert str(refused.value) == (
+        f"Sources 'inner__left' and {name!r} would record which features they "
+        f"measured in the feature columns {columns}, which a file system that "
+        "ignores case stores as one column. Name the sources so that the names "
+        "differ in more than case, with '/' and '\\' counted as '_'. A merge "
+        "records each source of a merged source by the merged source's name, '__' "
+        "and the source's own name."
+    )
     assert not destination.exists()
     # Another name keeps the sources apart.
     DataStoreMerge(sources, str(destination), ["inner", "third"], nthreads=1).dump()
     assert set(_measured_columns(str(destination))) == {
-        "measured_in_inner_left",
-        "measured_in_inner_right",
+        "measured_in_inner__left",
+        "measured_in_inner__right",
         "measured_in_third",
     }
 
@@ -2427,24 +2503,6 @@ def test_only_a_merge_that_records_a_merged_source_by_its_sources_names_them(
     assert set(_outer_manifest(tmp_path, inner, features="intersection")) == (
         _MANIFEST_KEYS | {"features"}
     )
-    # A source that the record names beyond the column's categories, whose
-    # cells a copy left out, is recorded too, after the categories.
-    beyond = _copy(inner, tmp_path / "beyond")
-    create_metadata_column(
-        zarr.open_group(beyond, mode="r+")["ADT/featureData"],
-        "measured_in_gone",
-        data=np.ones(8, dtype=bool),
-        dtype=bool,
-        attributes={
-            "role": "measured_features",
-            "source": "gone",
-            "sourceColumn": "dataset",
-        },
-    )
-    assert _outer_manifest(tmp_path, beyond)["nestedSources"] == [
-        {"column": "dataset", "sources": ["left", "right", "gone"]},
-        None,
-    ]
 
 
 def test_a_merged_store_without_one_column_of_its_sources_is_one_source(tmp_path):
@@ -2506,7 +2564,9 @@ def test_a_merged_store_without_one_column_of_its_sources_is_one_source(tmp_path
     assert set(_outer_manifest(tmp_path, two)) == _MANIFEST_KEYS
 
 
-def test_a_merge_planned_without_the_sources_of_a_merged_source_restarts(tmp_path):
+def test_a_merge_of_a_merged_store_resumes_only_a_plan_that_names_its_sources(
+    tmp_path,
+):
     inner = _merged_panel_store(tmp_path)
     sources = [_open(inner), _panel_source({"RNA": _GENES, "ADT": ["CD3", "CD4"]})]
     destination = str(tmp_path / "outer.zarr")
@@ -2517,9 +2577,8 @@ def test_a_merge_planned_without_the_sources_of_a_merged_source_restarts(tmp_pat
         )
 
     merger().dump()
-    # A merge planned by an earlier release recorded the inner store as one
-    # source, so its manifest names no source of the inner store, and it
-    # stopped before it finished.
+    # A merge that recorded the inner store as one source planned a manifest
+    # that names no source of the inner store, and stopped before it finished.
     root = zarr.open_group(destination, mode="r+")
     manifest = dict(root.attrs["cytearc:merge_manifest"])
     del manifest["nestedSources"]
@@ -2530,77 +2589,62 @@ def test_a_merge_planned_without_the_sources_of_a_merged_source_restarts(tmp_pat
             "cytearc:import_complete": False,
         }
     )
-    blocked = (
-        "Destination contains an incomplete or completed merge with a different "
-        "configuration. This merge records each source of the merged sources "
-        "'inner' in their place, which the merge that wrote the destination did "
-        "not. Set overwrite=True to restart the merge-owned components."
-    )
     plan = merger().plan()
-    assert (plan.canDump, plan.blockedReason) == (False, blocked)
-    with pytest.raises(ValueError) as refused:
-        merger().dump()
-    assert str(refused.value) == blocked
+    assert (plan.canDump, plan.blockedReason) == (
+        False,
+        "Destination contains an incomplete or completed merge with a different "
+        "configuration. Set overwrite=True to restart the merge-owned components.",
+    )
     # The restart writes the record of each source of the inner store.
     merger(overwrite=True).dump()
     assert set(_measured_columns(destination)) == {
-        "measured_in_inner_left",
-        "measured_in_inner_right",
+        "measured_in_inner__left",
+        "measured_in_inner__right",
         "measured_in_third",
     }
-    assert (
-        "nestedSources"
-        in zarr.open_group(destination, mode="r").attrs["cytearc:merge_manifest"]
+
+
+def _no_source(cell: str) -> str:
+    """Return the refusal of a cell of the merged panel store without a source."""
+    return (
+        f"Cell {cell!r} of source 'inner' has no source in its cell column "
+        "'dataset', which names the source of each of its cells for its record of "
+        "which features they measured. Merge 'inner' again from its own sources, "
+        "which writes the column anew, or drop its record with "
+        "ds.ADT.feats.drop('measured_in_left'), "
+        "ds.ADT.feats.drop('measured_in_right'), after which a merge records "
+        "'inner' as one source."
     )
-    # A manifest that differs otherwise is refused as before, as is one of a
-    # merge of plain stores.
-    plain = str(tmp_path / "plain.zarr")
-    _merge(
-        [
-            _panel_source({"RNA": _GENES, "ADT": _LEFT_PANEL}),
-            _panel_source({"RNA": _GENES, "ADT": _RIGHT_PANEL}),
-        ],
-        plain,
-    ).dump()
-    for location in (destination, plain):
-        root = zarr.open_group(location, mode="r+")
-        manifest = dict(root.attrs["cytearc:merge_manifest"])
-        manifest["seed"] = 1
-        root.attrs["cytearc:merge_manifest"] = manifest
-    for planned in (
-        merger(),
-        _merge(
-            [
-                _panel_source({"RNA": _GENES, "ADT": _LEFT_PANEL}),
-                _panel_source({"RNA": _GENES, "ADT": _RIGHT_PANEL}),
-            ],
-            plain,
-        ),
-    ):
-        assert planned.plan().blockedReason == (
-            "Destination contains an incomplete or completed merge with a "
-            "different configuration. Set overwrite=True to restart the "
-            "merge-owned components."
-        )
 
 
-def test_a_merge_refuses_a_merged_source_whose_column_of_sources_is_corrupt(
-    tmp_path,
-):
+def test_a_merge_refuses_a_code_of_a_merged_store_that_names_no_source(tmp_path):
     inner = _merged_panel_store(tmp_path)
-    # A code beyond the column's two categories names no source.
+    store = _open(inner)
+    cell = str(store.cells.fetch_all("ids")[4])
+    merger = DataStoreMerge(
+        [store, _panel_source({"RNA": _GENES, "ADT": ["CD3"]})],
+        str(tmp_path / "outer.zarr"),
+        ["inner", "third"],
+        nthreads=1,
+    )
+    merger.plan()
+    # A code beyond the column's two categories, written after the plan read
+    # the column, names no source.
     zarr.open_group(inner, mode="r+")["cellData/dataset"][4] = 7
-    destination = tmp_path / "outer.zarr"
 
+    with pytest.raises(ValueError) as refused:
+        merger.dump()
+    assert str(refused.value) == _no_source(cell)
+    # A plan that reads the code refuses it before anything is written, as it
+    # reads which sources of the merged store hold RNA, which it records not.
+    destination = tmp_path / "planned.zarr"
     with pytest.raises(ValueError) as refused:
         DataStoreMerge(
             [_open(inner), _panel_source({"RNA": _GENES, "ADT": ["CD3"]})],
             str(destination),
             ["inner", "third"],
             nthreads=1,
-        ).dump()
-    # The plan reads the column, which the merge also copies, before anything
-    # is written.
+        ).plan()
     assert str(refused.value) == (
         "Categorical column 'dataset' holds the code 7, but its codes name 2 "
         "categories and -1 marks a missing row; the column is corrupt, so write it "
@@ -2609,65 +2653,30 @@ def test_a_merge_refuses_a_merged_source_whose_column_of_sources_is_corrupt(
     assert not destination.exists()
 
 
-def test_a_column_of_sources_holds_a_code_for_every_source_of_a_merged_source(
-    tmp_path,
-):
-    from cytearc.merge.metadata import NestedSources, plan_cell_metadata
-
-    inner = _open(_merged_panel_store(tmp_path))
-    plain = _panel_source({"RNA": _GENES})
-    own = tuple(f"s{index}" for index in range(128))
-
-    plan = plan_cell_metadata(
-        [inner.cells, plain.cells],
-        ["inner", "plain"],
-        prepend_text="orig",
-        reset_cell_filter=True,
-        source_column="dataset",
-        record_sources=True,
-        nested=[NestedSources("dataset", own, True), None],
-    )
-    # The 128 sources of the merged store and the plain source take 129
-    # codes, more than int8 holds.
-    assert plan.sourceCategories == (*(f"inner/{name}" for name in own), "plain")
-    spec = next(spec for spec in plan.columns if spec.name == "dataset")
-    assert (spec.dtype, spec.role) == (np.dtype(np.int16), "cell_sources")
-    # Without the record, the column holds the sources' names as text.
-    text = plan_cell_metadata(
-        [inner.cells, plain.cells],
-        ["inner", "plain"],
-        prepend_text="orig",
-        reset_cell_filter=True,
-        source_column="dataset",
-        nested=[NestedSources("dataset", own, True), None],
-    )
-    assert text.sourceCategories == ()
-    assert next(spec for spec in text.columns if spec.name == "dataset").dtype == (
-        np.dtype("U5")
-    )
-
-
-@pytest.mark.parametrize("layout", ["categories", "text"])
-def test_a_merge_refuses_a_cell_of_a_merged_source_without_a_source(tmp_path, layout):
+@pytest.mark.parametrize("layout", ["categories", "missing text", "blank text"])
+def test_a_merge_refuses_a_cell_of_a_merged_store_without_a_source(tmp_path, layout):
     from cytearc.storage.identity import replace_metadata_column
 
     inner = _merged_panel_store(tmp_path)
     store = _open(inner)
     column = store.cells._get_array("dataset")
     codes = np.asarray(column.codes[:]).astype(np.int64)
-    missing = np.zeros(len(codes), dtype=bool)
-    missing[4] = True
+    labels = np.asarray(column.categories)[codes]
     cells = zarr.open_group(inner, mode="r+")["cellData"]
     if layout == "categories":
         codes[4] = -1
         replace_metadata_column(cells, "dataset", codes, categories=column.categories)
+    elif layout == "missing text":
+        # A column of text, as an import with categorical_columns=False writes
+        # it, whose missing row holds blank text.
+        missing = np.arange(len(labels)) == 4
+        replace_metadata_column(
+            cells, "dataset", np.where(missing, "", labels), missing
+        )
     else:
-        # A column of text, as an import with categorical_columns=False
-        # writes it, whose missing row holds the empty text, which another
-        # cell holds as its source.
-        labels = np.where(missing, "", np.asarray(column.categories)[codes])
-        labels[5] = ""
-        replace_metadata_column(cells, "dataset", labels, missing)
+        # Blank text names no source either, as categories leave it out.
+        labels[4] = " "
+        replace_metadata_column(cells, "dataset", labels)
     cells["dataset"].attrs.update({"role": "cell_sources"})
     cell = str(store.cells.fetch_all("ids")[4])
 
@@ -2678,19 +2687,86 @@ def test_a_merge_refuses_a_cell_of_a_merged_source_without_a_source(tmp_path, la
             ["inner", "third"],
             nthreads=1,
         ).dump()
-    assert str(refused.value) == (
-        f"Cell {cell!r} of source 'inner' has no source in its cell column "
-        "'dataset', which names the source of each of its cells for its record of "
-        "which features they measured. Merge 'inner' again from its own sources, "
-        "which writes the column anew."
+    assert str(refused.value) == _no_source(cell)
+
+
+def test_a_merge_writes_a_code_for_every_source_of_a_merged_store(tmp_path):
+    from cytearc.storage.identity import replace_metadata_column
+
+    # A merged store of 130 sources of one cell each, of which the first two
+    # measured RNA, and of different genes, and the others nothing.
+    n_sources = 130
+    counts = np.zeros((n_sources, 2), dtype=np.uint16)
+    counts[:2] = [[3, 4], [5, 0]]
+    inner = str(tmp_path / "inner.zarr")
+    write_count_store(
+        inner,
+        {"RNA": counts},
+        "uint16",
+        feature_ids={"RNA": ["G0", "G1"]},
+        cell_ids=[f"c{index}" for index in range(n_sources)],
     )
+    root = zarr.open_group(inner, mode="r+")
+    replace_metadata_column(
+        root["cellData"],
+        "dataset",
+        np.arange(n_sources),
+        categories=np.asarray([f"s{index}" for index in range(n_sources)]),
+    )
+    root["cellData/dataset"].attrs.update({"role": "cell_sources"})
+    write_membership_column(root["cellData"], "RNA", np.arange(n_sources) < 2)
+    for source, measured in (("s0", [True, True]), ("s1", [True, False])):
+        create_metadata_column(
+            root["RNA/featureData"],
+            f"measured_in_{source}",
+            data=np.asarray(measured),
+            dtype=bool,
+            attributes={
+                "role": "measured_features",
+                "source": source,
+                "sourceColumn": "dataset",
+            },
+        )
+    outer = str(tmp_path / "outer.zarr")
+
+    # The cells that measured no RNA have no counts, which no floor filters.
+    opened = DataStore(inner, default_assay="RNA", min_features_per_cell=-1, nthreads=1)
+
+    DataStoreMerge(
+        [opened, _panel_source({"RNA": ["G0", "G2"]})],
+        outer,
+        ["inner", "third"],
+        nthreads=1,
+    ).dump()
+
+    # The 130 sources of the merged store and the third source take 131 codes,
+    # more than int8 holds, and each cell keeps its own source.
+    root = zarr.open_group(outer, mode="r")
+    codes = root["cellData/dataset"]
+    assert codes.dtype == np.int16
+    categories = np.asarray(root["cellData/__cytearc_categories__dataset"][:])
+    assert dict(
+        zip(
+            root["cellData/ids"][:].tolist(), categories[codes[:]].tolist(), strict=True
+        )
+    ) == {
+        **{f"inner__c{index}": f"inner__s{index}" for index in range(n_sources)},
+        **{f"third__c{cell}": "third" for cell in range(3)},
+    }
+    # Only the two sources that measured RNA hold a column of it.
+    assert _measured_columns(outer, "RNA") == {
+        "measured_in_inner__s0": [True, True, False],
+        "measured_in_inner__s1": [True, False, False],
+        "measured_in_third": [True, False, True],
+    }
 
 
 def test_feature_record_names_each_source_of_a_merged_source():
     from cytearc.merge.features import (
         FeatureAlignment,
+        NestedSources,
         feature_record,
-        recorded_source_names,
+        nested_source_name,
     )
     from cytearc.metadata.membership import FeatureRecord
 
@@ -2713,30 +2789,38 @@ def test_feature_record_names_each_source_of_a_merged_source():
         (np.array([False, True]), np.array([False, True])),
         (own, None),
     )
+    # z held no such assay, so the merged source's record does not name it.
+    nested = NestedSources(
+        "dataset",
+        ("x", "y", "z"),
+        True,
+        {"ADT": ("x", "y"), "RNA": ("x", "z")},
+        {"ADT": ("measured_in_x", "measured_in_y")},
+    )
 
-    record = feature_record(alignment, ["merged", "plain"], [("x", "y", "z"), None])
-    # z, a source of the merged store that its record lacks, held no such
-    # assay, so it is recorded in no column.
+    record = feature_record(
+        alignment, ["merged", "plain"], [nested, None], assay_name="ADT"
+    )
     assert {name: vector.tolist() for name, vector in record.items()} == {
-        "merged/x": [True, True],
-        "merged/y": [False, True],
+        "merged__x": [True, True],
+        "merged__y": [False, True],
         "plain": [False, True],
     }
-    # Without a record of the assay, every source of the merged source counts
-    # as having measured the merged source's features.
+    # Without a record of the assay, each source of the merged source whose
+    # cells the assay measured, x and z here, counts as having measured the
+    # merged source's features.
     unrecorded = dataclasses.replace(alignment, sourceRecords=(None, None))
     assert {
         name: vector.tolist()
         for name, vector in feature_record(
-            unrecorded, ["merged", "plain"], [("x", "y"), None]
+            unrecorded, ["merged", "plain"], [nested, None], assay_name="RNA"
         ).items()
-    } == {"merged/x": [False, True], "merged/y": [False, True], "plain": [False, True]}
-    assert recorded_source_names(["merged", "plain"], [("x", "y"), None]) == [
-        ("merged/x", "merged/y"),
-        ("plain",),
-    ]
-    with pytest.raises(ValueError, match="^Source 'b/c' of the merged source 'a'"):
-        recorded_source_names(["a", "a/b"], [("b/c",), ("c",)])
+    } == {
+        "merged__x": [False, True],
+        "merged__z": [False, True],
+        "plain": [False, True],
+    }
+    assert nested_source_name("merged", "x") == "merged__x"
 
 
 def test_merge_leaves_out_a_source_column_that_its_record_would_replace(tmp_path):

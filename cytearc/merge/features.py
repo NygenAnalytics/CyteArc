@@ -13,18 +13,47 @@ from ..storage.metadata_keys import (
     measured_features_columns,
 )
 from ..utils.arguments import quoted_examples, quoted_value
+from .row_plan import MERGED_ID_SEPARATOR
 
 #: The most features that the warning about unshared features names per source.
 UNSHARED_FEATURE_EXAMPLES = 5
 
 #: The text between a merged source's name and the name of each of its own
-#: sources, under which a merge records that source, such as ``inner/left``.
-NESTED_SOURCE_SEPARATOR = "/"
+#: sources, under which a merge records that source, such as ``inner__left``.
+#: It separates a source's name from each merged cell ID too, so each recorded
+#: name starts the IDs of its cells, such as ``inner__left__AAAC-1``.
+NESTED_SOURCE_SEPARATOR = MERGED_ID_SEPARATOR
 
 _NESTED_NAMES = (
     "A merge records each source of a merged source by the merged source's "
     f"name, {NESTED_SOURCE_SEPARATOR!r} and the source's own name."
 )
+
+
+@dataclass(frozen=True, slots=True)
+class NestedSources:
+    """The sources of a merged source, which a merge of it records in its place.
+
+    Attributes:
+        column: The merged source's cell column that names the source of
+            each of its cells.
+        names: Its sources: the categories of ``column`` in the order of
+            their codes, or, for a column of text, the labels that it holds
+            in sorted order, blank and missing labels left out.
+        categorical: Whether ``column`` stores the codes of its categories.
+        held: The sources of ``names`` that hold each assay of the merged
+            source that the merge takes: those that its record of the assay
+            names, or, for an assay without a record, those with cells that
+            the assay measured.
+        records: The columns of the merged source's record of each assay
+            that holds one, which a refusal names.
+    """
+
+    column: str
+    names: tuple[str, ...]
+    categorical: bool
+    held: dict[str, tuple[str, ...]]
+    records: dict[str, tuple[str, ...]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,26 +170,6 @@ def _merge_order_feats(
     return ret_val
 
 
-def _measured_features(
-    assay: Any, order_map: np.ndarray, n_features: int, record: FeatureRecord | None
-) -> np.ndarray:
-    """Return whether a source measured each merged feature.
-
-    A source measured the features that it holds, except those that
-    ``record``, its own record from the merge that wrote it, marks as
-    unmeasured by one of its own sources, so that a merge of merged stores
-    keeps their record. Of several features that share a name, all must be
-    measured.
-    """
-    measured = np.zeros(n_features, dtype=bool)
-    if assay is None:
-        return measured
-    measured[order_map] = True
-    if record is not None:
-        measured[order_map[~record.measured.all(axis=0)]] = False
-    return measured
-
-
 def _mapped_measured(
     measured: np.ndarray, order_map: np.ndarray, n_features: int
 ) -> np.ndarray:
@@ -217,8 +226,19 @@ def align_features(
         None if assay is None else measured_features_by_source(assay.feats)
         for assay in assays
     )
+    # A source measured the features that it holds, except those that its own
+    # record, from the merge that wrote it, marks as unmeasured by one of its
+    # own sources, so that a merge of merged stores keeps their record.
     measured = tuple(
-        _measured_features(assay, order_map, n_features, record)
+        np.zeros(n_features, dtype=bool)
+        if assay is None
+        else _mapped_measured(
+            np.ones(order_map.size, dtype=bool)
+            if record is None
+            else record.measured.all(axis=0),
+            order_map,
+            n_features,
+        )
         for assay, order_map, record in zip(assays, order_maps, records, strict=True)
     )
     return FeatureAlignment(
@@ -286,117 +306,73 @@ def select_features(
     )
 
 
-def recorded_source_names(
-    names: Sequence[str], nested: Sequence[Sequence[str] | None] | None = None
-) -> list[tuple[str, ...]]:
-    """Return the names under which a merge or a composite records each source.
-
-    A source is recorded under its name. A merged source whose own sources
-    ``nested`` names, in source order, is recorded as each of them instead:
-    the merged source's name, ``/`` and the source's own name, such as
-    ``inner/left``.
-
-    Raises:
-        ValueError: If two sources would be recorded under one name, naming
-            them and the sources to rename.
-    """
-    owned = [None] * len(names) if nested is None else list(nested)
-    recorded = [
-        (name,)
-        if own is None
-        else tuple(f"{name}{NESTED_SOURCE_SEPARATOR}{source}" for source in own)
-        for name, own in zip(names, owned, strict=True)
-    ]
-    first: dict[str, tuple[str, str | None]] = {}
-    for name, own, labels in zip(names, owned, recorded, strict=True):
-        for position, label in enumerate(labels):
-            found = (name, None if own is None else own[position])
-            other = first.setdefault(label, found)
-            if other != found:
-                raise ValueError(
-                    f"Source {_described_source(*other)} and source "
-                    f"{_described_source(*found)} would both be recorded as "
-                    f"{label!r}. {_NESTED_NAMES} Rename {other[0]!r} or {name!r}."
-                )
-    return recorded
-
-
-def _described_source(name: str, own: str | None) -> str:
-    """Return how a message names a source, after the word source: its name, or a merged source's own source."""
-    if own is None:
-        return repr(name)
-    return f"{own!r} of the merged source {name!r}"
+def nested_source_name(source: str, own: str) -> str:
+    """Return the name under which a merge records ``own``, a source of the merged source ``source``, such as ``inner__left``."""
+    return f"{source}{NESTED_SOURCE_SEPARATOR}{own}"
 
 
 def _recorded_vectors(
+    assay_name: str,
     alignment: FeatureAlignment,
     names: Sequence[str],
-    nested: Sequence[Sequence[str] | None] | None,
+    nested: Sequence[NestedSources | None] | None,
 ) -> list[tuple[int, str, np.ndarray]]:
     """Return each recorded source of the sources that hold the assay: its source's position, its name and whether it measured each merged feature.
 
-    A merged source whose own sources ``nested`` names gives one for each of
-    them (:func:`recorded_source_names`): what its own record says that the
-    source measured, or, without a record of this assay, the merged source's
-    features, which each of its sources measured. A source that its record
-    lacks did not hold the assay, and gives none.
+    A merged source of ``nested`` gives one for each of its own sources that
+    hold the assay (:attr:`NestedSources.held`), named by
+    :func:`nested_source_name`: what its record of the assay says that the
+    source measured, or, without a record, the merged source's features,
+    which each of those sources measured.
     """
-    recorded = recorded_source_names(names, nested)
     found: list[tuple[int, str, np.ndarray]] = []
-    for index, (labels, measured, present) in enumerate(
-        zip(
-            recorded,
-            alignment.measuredFeatures,
-            alignment.sourcePresent,
-            strict=True,
-        )
+    for index, (name, measured, present) in enumerate(
+        zip(names, alignment.measuredFeatures, alignment.sourcePresent, strict=True)
     ):
         if not present:
             continue
         own = None if nested is None else nested[index]
         if own is None:
-            found.append((index, labels[0], measured))
+            found.append((index, name, measured))
             continue
         record = alignment.sourceRecords[index]
         rows = {} if record is None else dict(zip(record.sources, record.measured))
-        for label, source in zip(labels, own, strict=True):
-            if record is None:
-                found.append((index, label, measured))
-            elif source in rows:
-                found.append(
-                    (
-                        index,
-                        label,
-                        _mapped_measured(
-                            rows[source],
-                            alignment.featOrderMap[index],
-                            alignment.nFeats,
-                        ),
-                    )
+        for source in own.held[assay_name]:
+            found.append(
+                (
+                    index,
+                    nested_source_name(name, source),
+                    measured
+                    if record is None
+                    else _mapped_measured(
+                        rows[source], alignment.featOrderMap[index], alignment.nFeats
+                    ),
                 )
+            )
     return found
 
 
 def feature_record(
     alignment: FeatureAlignment,
     names: Sequence[str],
-    nested: Sequence[Sequence[str] | None] | None = None,
+    nested: Sequence[NestedSources | None] | None = None,
+    *,
+    assay_name: str = "",
 ) -> dict[str, np.ndarray]:
     """Return whether each source that holds the assay measured each feature, by source, when the sources measured different features.
 
     A merge or a composite records what each source measured only then, as
     when a source lacks a feature that another holds, or a merged source's own
     record marks a feature as unmeasured. Otherwise every source measured
-    every feature, and the record is empty. A merged source whose own sources
-    ``nested`` names, in source order, is recorded as each of them, under the
-    names of :func:`recorded_source_names`: each of its own sources that its
-    record of the assay names, with what it measured, or every one of them,
-    with the merged source's features, when it holds no record of the assay.
+    every feature, and the record is empty. A merged source of ``nested``,
+    in source order, is recorded as each of its own sources that hold the
+    assay ``assay_name``, under :func:`nested_source_name`: with what its
+    record of the assay says that the source measured, or, without one, with
+    the merged source's features.
 
     Raises:
-        ValueError: If two sources would be recorded under one name, or the
-            record's columns of two sources would be named alike once case
-            is ignored
+        ValueError: If the record's columns of two sources would be named
+            alike once case is ignored
             (:func:`~cytearc.storage.metadata_keys.measured_features_columns`).
     """
     if all(
@@ -409,7 +385,9 @@ def feature_record(
         return {}
     record = {
         label: measured
-        for _index, label, measured in _recorded_vectors(alignment, names, nested)
+        for _index, label, measured in _recorded_vectors(
+            assay_name, alignment, names, nested
+        )
     }
     try:
         measured_features_columns(record)
@@ -436,7 +414,7 @@ def unshared_features_warning(
     *,
     combination: Literal["merge", "composite"],
     assay_type: str,
-    nested: Sequence[Sequence[str] | None] | None = None,
+    nested: Sequence[NestedSources | None] | None = None,
 ) -> str | None:
     """Return the warning about the merged features that a source lacks.
 
@@ -452,10 +430,12 @@ def unshared_features_warning(
     order. A source whose assay holds no features lacks every merged feature,
     and the warning says that it holds none. A source without the assay is
     left out, since a merge marks its cells as not measured. A merged source
-    whose own sources ``nested`` names counts as each of its own sources
-    that the record holds (:func:`feature_record`). A composite's warning
-    ends with ``features='intersection'`` as the alternative, or says that
-    it would keep no feature when every source lacks some.
+    of ``nested`` counts as each of its own sources that the record holds
+    (:func:`feature_record`); when it alone holds the assay, a merge's warning
+    says that the merged source holds the zeros, which the merge keeps. A
+    composite's warning ends with ``features='intersection'`` as the
+    alternative, or says that it would keep no feature when every source
+    lacks some.
 
     Args:
         assay_name: The merged assay, named in the warning.
@@ -466,17 +446,18 @@ def unshared_features_warning(
             ``"composite"`` for a union composite, which reads them.
         assay_type: The assay's type; the warning of an ``"ADT"`` assay says
             what the ADT recipe does with the antibodies.
-        nested: The own sources of each merged source whose sources the
-            record holds in its place, and None for every other source.
+        nested: The sources of each merged source, which the record holds in
+            its place, and None for every other source.
 
     Returns:
         The warning, or None when every source that holds the assay measured
         every merged feature, or when fewer than two sources hold it.
     """
     adjective, noun, verb = _combination_words(combination)
+    recorded = _recorded_vectors(assay_name, alignment, names, nested)
     holding = [
         (source_name, alignment.featOrderMap[index], measured)
-        for index, source_name, measured in _recorded_vectors(alignment, names, nested)
+        for index, source_name, measured in recorded
     ]
     if len(holding) < 2:
         return None
@@ -501,7 +482,13 @@ def unshared_features_warning(
     if not lacking:
         return None
     unshared = int(np.count_nonzero(measured_by < len(holding)))
-    zeros = f" The {noun} {verb} zero counts for the features a source lacks"
+    holders = {index for index, _source_name, _measured in recorded}
+    zeros = (
+        f" Merged source {names[holders.pop()]!r} holds zero counts for the "
+        "features its sources lack, which the merge keeps"
+        if combination == "merge" and len(holders) == 1
+        else f" The {noun} {verb} zero counts for the features a source lacks"
+    )
     record = (
         f"columns such as {quoted_value(measured_features_column(holding[0][0]))} "
         "record what each source measured"

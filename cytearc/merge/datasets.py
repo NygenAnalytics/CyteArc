@@ -42,6 +42,7 @@ from ..utils.logging import logger
 from .features import (
     FeatureKey,
     FeatureSet,
+    NestedSources,
     align_features,
     feature_record,
     resolve_merge_dtype,
@@ -53,12 +54,10 @@ from .metadata import (
     SOURCE_LACKS_ASSAY,
     SOURCE_MEASURES_ALL,
     CellMetadataPlan,
-    NestedSources,
     _cell_data_path,
     admit_cell_metadata_plan,
     admit_feature_metadata,
     metadata_chunk_rows,
-    nested_source_names,
     nested_sources,
     plan_cell_metadata,
     resolve_metadata_schema_scan_rows,
@@ -92,9 +91,6 @@ from ..utils.arguments import bool_argument
 
 _IMPORT_SOURCE = "DataStoreMerge"
 _MANIFEST_ATTR = "cytearc:merge_manifest"
-# The manifest key of the sources of each merged source that a merge records
-# in its place, which only such a merge writes.
-_NESTED_SOURCES_KEY = "nestedSources"
 
 
 def _store_location(value: object) -> str | None:
@@ -177,7 +173,7 @@ class DataStoreMerge:
             an assay, when the merge writes the column ``dataset``. Beside a
             record of which features each source measured, the column is
             categorical, it names each cell of a merged source by that
-            source's own source, such as ``inner/left``, and it cannot be
+            source's own source, such as ``inner__left``, and it cannot be
             overwritten or dropped while the record names it.
         mem_budget: Memory budget for the merge. Accepts bytes, a size such
                     as ``8G``, or a fraction of detected system memory.
@@ -238,16 +234,16 @@ class DataStoreMerge:
     written. The ADT recipe leaves the antibodies that not every source
     measured out of its panel and its markers. A source that a merge or a
     composite wrote with such a record, such as ``inner``, merged from
-    ``left`` and ``right``, is recorded by its own sources: ``inner/left``
-    and ``inner/right`` become sources of this merge, each with its own
-    column, such as ``measured_in_inner_left``, and each cell keeps its own
-    source in the cell column of sources, so a run of one study's cells
-    keeps that study's antibodies however often its store is merged again.
-    The merged source's own columns are not copied, and a source of this
-    merge that would be recorded under one of those names is refused before
-    anything is written. A merged store without a record, whose sources
-    measured the same features, is recorded as one source. A source column
-    of the same name as one of these columns is left out with a warning.
+    ``left`` and ``right``, is recorded by its own sources: ``inner__left``
+    and ``inner__right``, each the start of the IDs of its cells, become
+    sources of this merge, each with its own column, such as
+    ``measured_in_inner__left``, in each assay that it holds, and each cell
+    keeps its own source in the cell column of sources, so a run of one
+    study's cells keeps that study's antibodies however often its store is
+    merged again. The merged source's own columns are not copied. A merged
+    store without a record, whose sources measured the same features, is
+    recorded as one source. A source column of the same name as one of these
+    columns is left out with a warning.
 
     Merged cells are in an order of their own, neither the sources' order nor
     a uniform random order. The cells of each source are split into blocks,
@@ -424,11 +420,11 @@ class DataStoreMerge:
             self._nestedSources = [
                 nested_sources(
                     ds.cells,
-                    [
-                        ds.get_assay(assay_name).feats
+                    {
+                        assay_name: ds.get_assay(assay_name).feats
                         for assay_name in self.uniqueAssays
                         if assay_name in ds.assay_names
-                    ],
+                    },
                 )
                 for ds in self.datasets
             ]
@@ -456,7 +452,7 @@ class DataStoreMerge:
                         self.names,
                         combination="merge",
                         assay_type=self._assayTypes[assay_name],
-                        nested=nested_source_names(self._nestedSources),
+                        nested=self._nestedSources,
                     )
                     if self.features == "union"
                     else shared_features_warning(
@@ -496,7 +492,8 @@ class DataStoreMerge:
         return feature_record(
             self._alignments[assay_name],
             self.names,
-            nested_source_names(self._nestedSources),
+            self._nestedSources,
+            assay_name=assay_name,
         )
 
     def _records_measured_features(self) -> bool:
@@ -704,7 +701,7 @@ class DataStoreMerge:
             # as merges written before the record of such sources did.
             **(
                 {
-                    _NESTED_SOURCES_KEY: [
+                    "nestedSources": [
                         None
                         if item is None
                         else {"column": item.column, "sources": list(item.names)}
@@ -936,8 +933,8 @@ class DataStoreMerge:
             return self._blocked_inspection(
                 assay_plans,
                 "Destination contains an incomplete or completed merge with a "
-                f"different configuration. {self._nested_change(stored_manifest)}"
-                "Set overwrite=True to restart the merge-owned components.",
+                "different configuration. Set overwrite=True to restart the "
+                "merge-owned components.",
             )
 
         assert self._rowPlan is not None
@@ -1035,23 +1032,6 @@ class DataStoreMerge:
         return _DestinationInspection(
             actions,
             needsFinalization=all_complete and not (import_complete and complete),
-        )
-
-    def _nested_change(self, stored_manifest: dict[str, Any]) -> str:
-        """Return the sentence that names the merged sources whose sources this merge records in their place, unlike the merge that ``stored_manifest`` describes, or nothing."""
-        if _NESTED_SOURCES_KEY in stored_manifest:
-            return ""
-        merged = [
-            name
-            for name, item in zip(self.names, self._nestedSources, strict=True)
-            if item is not None
-        ]
-        if not merged:
-            return ""
-        return (
-            "This merge records each source of the merged sources "
-            f"{', '.join(map(repr, merged))} in their place, which the merge "
-            "that wrote the destination did not. "
         )
 
     def _completed_counts_policy(

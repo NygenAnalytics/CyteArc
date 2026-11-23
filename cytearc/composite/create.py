@@ -19,6 +19,7 @@ from ..assay.classification import default_feature_sets, declared_assay_type
 from ..merge.features import (
     FeatureAlignment,
     FeatureSet,
+    NestedSources,
     align_features,
     feature_record,
     resolve_merge_dtype,
@@ -31,7 +32,6 @@ from ..merge.metadata import (
     admit_cell_metadata_plan,
     admit_feature_metadata,
     metadata_chunk_rows,
-    nested_source_names,
     nested_sources,
     plan_cell_metadata,
     resolve_metadata_schema_scan_rows,
@@ -540,7 +540,7 @@ def _feature_alignment(
     names: list[str],
     features: FeatureSet,
     assay_type: str,
-    nested: list[tuple[str, ...] | None],
+    nested: list[NestedSources | None],
 ) -> tuple[FeatureAlignment, np.ndarray, str]:
     """Return the composite's alignment of ``assay``, the source column of each of its features, and its counts dtype, after logging the warning of the features that the sources share or lack.
 
@@ -823,7 +823,7 @@ def create_composite(
                   table records which features each source measured, in a
                   Boolean column ``measured_in_<name>`` for each, as a merge
                   does, and records a merged source with such a record by
-                  each of its own sources, such as ``inner/left``.
+                  each of its own sources, such as ``inner__left``.
         assay: Assay to combine, which every source holds as one type.
         rows: Positions of the cells to include, by source name. The
               positions select cells and don't order them. A source left
@@ -997,16 +997,15 @@ def _write_composite(
     (assay_type,) = assay_types
     # A merged source is recorded by its own sources, as a merge records it.
     nested = [
-        nested_sources(source.cells, [source_assay.feats])
+        nested_sources(source.cells, {assay: source_assay.feats})
         for source, source_assay in zip(datasets, assays, strict=True)
     ]
-    nested_names = nested_source_names(nested)
     alignment, feature_columns, dtype = _feature_alignment(
-        assay, assays, names, features, assay_type, nested_names
+        assay, assays, names, features, assay_type, nested
     )
     # Names whose record columns would collide fail here, before anything is
     # written.
-    measured_record = feature_record(alignment, names, nested_names)
+    measured_record = feature_record(alignment, names, nested, assay_name=assay)
     row_plan = build_row_plan(
         [source.cells.N for source in datasets],
         [int(source.rawData.chunksize[0]) for source in assays],

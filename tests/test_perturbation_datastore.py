@@ -620,6 +620,80 @@ def test_a_merge_of_pool_and_pool_underscore_tells_the_import_each_cells_sample(
     assert called.to_dict() == expected
 
 
+def test_an_import_reaches_one_sample_of_a_merge_of_a_merged_screen(tmp_path) -> None:
+    from cytearc.merge import DataStoreMerge
+
+    # Two screens whose RNA panels differ, merged and then merged with a
+    # third, so that the outer store names each cell's sample, such as
+    # inner__pool1, in its column of sources.
+    rng = np.random.default_rng(3)
+    for name, genes in (("pool1", 9), ("pool2", 10), ("third", 11)):
+        write_count_store(
+            str(tmp_path / f"{name}.zarr"),
+            {"RNA": rng.poisson(2.0, size=(8, genes)) + 1, "CRISPR": GUIDE_COUNTS},
+            "uint16",
+        )
+    DataStoreMerge(
+        [open_store(tmp_path / "pool1.zarr"), open_store(tmp_path / "pool2.zarr")],
+        str(tmp_path / "inner.zarr"),
+        ["pool1", "pool2"],
+        seed=0,
+        nthreads=1,
+    ).dump()
+    DataStoreMerge(
+        [open_store(tmp_path / "inner.zarr"), open_store(tmp_path / "third.zarr")],
+        str(tmp_path / "outer.zarr"),
+        ["inner", "third"],
+        seed=0,
+        nthreads=1,
+    ).dump()
+    merged = open_store(tmp_path / "outer.zarr")
+    samples = merged.cells.fetch_all("dataset").astype(str)
+    ids = merged.cells.fetch_all("ids").astype(str)
+    assert sorted(set(samples)) == ["inner__pool1", "inner__pool2", "third"]
+    inner = np.char.startswith(ids, "inner__")
+    merged.cells.insert("inner_cells", by_cell_id(merged.cells, inner))
+    merged.cells.insert("pool1", by_cell_id(merged.cells, samples == "inner__pool1"))
+    path = _call_file(tmp_path)
+
+    # The cells of both samples of the inner screen are refused together, and
+    # the refusal suggests the prefix of the first one's sample.
+    first = str(samples[inner][0])
+    with pytest.raises(
+        ValueError,
+        match=_several_samples(
+            first, "inner__pool2" if first == "inner__pool1" else "inner__pool1"
+        ),
+    ):
+        merged.perturbation.import_guide_calls(
+            path, cell_selection=merged.snapshot_cell_selection("inner_cells")
+        )
+    # The suggested prefix, the sample's name and '__', starts the IDs of its
+    # cells, which take Cell Ranger's calls of cell0 to cell7.
+    calls = merged.perturbation.import_guide_calls(
+        path,
+        cell_selection=merged.snapshot_cell_selection("pool1"),
+        barcode_prefix="inner__pool1__",
+    )
+    called = merged.perturbation.load_guide_calls(calls).cells["call"]
+    assert called.to_dict() == dict(
+        zip(
+            [f"inner__pool1__cell{cell}" for cell in range(8)],
+            [
+                "CRISPR0",
+                "CRISPR1",
+                MULTIPLE,
+                NEGATIVE,
+                NEGATIVE,
+                MULTIPLE,
+                "CRISPR3",
+                "CRISPR1",
+            ],
+            strict=True,
+        )
+    )
+
+
 @pytest.mark.parametrize("sources", [False, True], ids=["ids", "column"])
 def test_a_refusal_suggests_the_prefix_of_a_sample_whose_name_ends_with_an_underscore(
     store, tmp_path, sources
