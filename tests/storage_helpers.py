@@ -231,6 +231,23 @@ def rechunk_column(group: zarr.Group, name: str, rows: int = 100_000) -> None:
     )
 
 
+def store_as_variable_width_text(group: zarr.Group, name: str) -> None:
+    """Store text column ``name`` of ``group`` again as variable-width text, in its chunks and with its attributes.
+
+    Zarr's ``dtype=str`` stores text as variable-width UTF-8, which reads back
+    as NumPy's ``StringDType``, so a store that another tool wrote can hold its
+    columns that way.
+    """
+    array = group[name]
+    group.create_array(
+        name,
+        data=np.asarray(array[:]).astype(np.dtypes.StringDType()),
+        chunks=array.chunks,
+        overwrite=True,
+        attributes=array.attrs.asdict(),
+    )
+
+
 def rechunk_feature_tables(location: str | Path) -> None:
     """Store every column of each assay's feature table at ``location`` again in one chunk of its rows.
 

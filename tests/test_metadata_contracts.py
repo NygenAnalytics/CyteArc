@@ -50,6 +50,7 @@ from cytearc.metadata.rows import (
 from cytearc.metadata.table import MetaData as implementation_metadata
 from cytearc.storage import ArtifactRef
 from cytearc.storage.errors import ArtifactResolutionError
+from tests.memory_helpers import recording_ledger, traced_charge
 from tests.signature_contracts import signature_digest
 
 
@@ -1345,29 +1346,114 @@ def test_reading_scattered_variable_width_text_does_not_crash_the_interpreter() 
     assert read == copied == expected.tolist()
 
 
-def test_variable_width_text_is_charged_at_its_longest_value(monkeypatch) -> None:
+@pytest.mark.parametrize("part_bytes", [None, 1], ids=["parts", "one value a part"])
+@pytest.mark.parametrize(
+    "values",
+    [
+        ["a", "", "c" * 23],
+        ["a", "b\u00e9", "\u00ff" * 9],
+        ["\u0100", "x"],
+        ["\u4e2d\u6587", "plain"],
+        ["\N{GRINNING FACE}x", "\u00e9", "\u4e2d"],
+        ["\u00e9" * 5, "\u4e2d", "abcdefgh"],
+        ["", ""],
+        [],
+    ],
+    ids=[
+        "ascii",
+        "latin-1",
+        "beyond-latin-1",
+        "bmp",
+        "astral",
+        "longest-in-characters-not-bytes",
+        "empty-values",
+        "none",
+    ],
+)
+def test_the_extent_of_variable_width_text_bounds_each_value(
+    values, part_bytes, monkeypatch
+) -> None:
+    import cytearc.storage.geometry as geometry_module
+    from cytearc.storage.geometry import variable_text_extent
+
+    if part_bytes is not None:
+        # Each value is measured in a part of its own.
+        monkeypatch.setattr(geometry_module, "_TEXT_MEASURE_BYTES", part_bytes)
+    texts = np.asarray(values, dtype=np.dtypes.StringDType())
+    root = zarr.open_group(store=MemoryStore(), mode="w")
+    stored = root.create_array("ids", data=texts, chunks=(2,))
+    for array in (stored, texts):
+        extent = variable_text_extent(array)
+        assert extent.characters == max(map(len, values), default=0)
+        assert extent.encodedBytes == max(
+            (len(value.encode("utf-8")) for value in values), default=0
+        )
+        assert extent.widest == max(
+            (ord(character) for value in values for character in value), default=0
+        )
+        assert text_width(array) == extent.characters
+
+
+@pytest.mark.parametrize("encoded_bytes", [1, 15, 16, 255, 256, 1_000])
+def test_numpy_holds_variable_width_values_as_their_extent_counts(
+    encoded_bytes,
+) -> None:
     import gc
     import tracemalloc
 
-    import cytearc.metadata.rows as rows_module
+    from cytearc.storage.geometry import variable_text_extent
+
+    # 20,000 values of one length in UTF-8, made from Python strings as
+    # Zarr's decode makes them.
+    strings = np.asarray(
+        [
+            (f"{index:06d}" + "x" * encoded_bytes)[:encoded_bytes]
+            for index in range(20_000)
+        ],
+        dtype=object,
+    )
+    gc.collect()
+    tracemalloc.start()
+    try:
+        before, _ = tracemalloc.get_traced_memory()
+        values = strings.astype(np.dtypes.StringDType())
+        held = tracemalloc.get_traced_memory()[0] - before
+    finally:
+        tracemalloc.stop()
+    charged = len(values) * variable_text_extent(values).valueBytes()
+    # NumPy keeps each value's 16-byte element and, beyond 15 bytes, its
+    # bytes behind its size, a byte up to 255 bytes and 8 beyond, in an arena
+    # that it grows by a quarter at a time (NEP 55), so it holds at least the
+    # elements and the sized bytes, and at most a quarter more of the latter.
+    sized = (
+        0 if encoded_bytes <= 15 else encoded_bytes + (1 if encoded_bytes <= 255 else 8)
+    )
+    least = len(values) * (16 + sized)
+    # The array object holds a few hundred bytes beside its values.
+    assert least <= held <= charged + 1_024
+    assert charged <= least + len(values) * (sized // 4 + 1)
+
+
+def test_the_extent_of_variable_width_text_is_measured_once_while_unchanged(
+    monkeypatch,
+) -> None:
+    import cytearc.storage.geometry as geometry_module
     from cytearc.storage.content_stamps import clear_content_cache
 
-    values = np.asarray(["a", "bé", "c" * 23, ""])
+    values = np.asarray(["a", "b\u00e9", "c" * 23, ""], dtype=np.dtypes.StringDType())
     root = zarr.open_group(store=MemoryStore(), mode="w")
-    stored = root.create_array(
-        "ids", data=values.astype(np.dtypes.StringDType()), chunks=(2,)
-    )
+    stored = root.create_array("ids", data=values, chunks=(2,))
     measured: list[int] = []
-    measure = rows_module._longest_text_characters
+    measure = geometry_module._measured_text_extent
 
     def counted(array):
         measured.append(1)
         return measure(array)
 
-    monkeypatch.setattr(rows_module, "_longest_text_characters", counted)
+    monkeypatch.setattr(geometry_module, "_measured_text_extent", counted)
     clear_content_cache()
     assert text_width(stored) == 23
-    assert text_width(values.astype(np.dtypes.StringDType())) == 23
+    assert text_width(values) == 23
     assert len(measured) == 2
     # The stored values' measure is reused while their stored bytes are
     # unchanged, and taken again after an edit.
@@ -1376,28 +1462,149 @@ def test_variable_width_text_is_charged_at_its_longest_value(monkeypatch) -> Non
     stored[1] = "d" * 30
     assert text_width(stored) == 30
     assert len(measured) == 3
-    stored[1] = "bé"
 
-    # Reading rows of 300 characters as Python strings holds what the charge
-    # states: one row decodes its whole chunk of 1,024 values, each held as
-    # NumPy keeps it, encoded twice and as a Python string, and 600 rows of
-    # chunks of 256 hold their copies beside a chunk at a time.
-    long = np.asarray(
-        [f"{index:04d}" + "\N{GRINNING FACE}" * 296 for index in range(1_024)]
+
+def test_reading_variable_width_rows_measures_their_column_once(monkeypatch) -> None:
+    import cytearc.storage.content_stamps as content_stamps
+    from cytearc.metadata.rows import read_rows
+    from cytearc.storage.geometry import array_geometry
+    from cytearc.utils.memory_budget import MemoryLedger
+
+    values = _variable_text(400)
+    root = zarr.open_group(store=MemoryStore(), mode="w")
+    stored = root.create_array(
+        "ids", data=values.astype(np.dtypes.StringDType()), chunks=(10,)
     )
-    scattered = np.sort(np.random.default_rng(5).choice(1_024, 600, replace=False))
-    for chunk_rows, rows in ((1_024, np.array([512])), (256, scattered)):
-        many = root.create_array(
-            f"long-{chunk_rows}",
-            data=long.astype(np.dtypes.StringDType()),
-            chunks=(chunk_rows,),
-        )
-        text_width(many)
-        gc.collect()
-        tracemalloc.start()
-        before, _ = tracemalloc.get_traced_memory()
-        strings = read_array_rows_chunkwise(many, rows).astype(object)
-        _, peak = tracemalloc.get_traced_memory()
-        tracemalloc.stop()
-        assert strings.tolist() == long[rows].tolist()
-        assert peak - before <= text_read_bytes(many, len(rows))
+    stamps: list[int] = []
+    stamp = content_stamps.stored_content_stamp
+    monkeypatch.setattr(
+        content_stamps,
+        "stored_content_stamp",
+        lambda array: stamps.append(1) or stamp(array),
+    )
+    # The chunks alone need no measure, which fetches every stored chunk.
+    geometry = array_geometry(stored)
+    assert geometry is not None and geometry.text is None
+    assert geometry.itemsize == 16 and stamps == []
+    # Once measured, a read of rows across all 40 chunks stamps the column
+    # once, to find its measure current, whatever the chunks it reads.
+    array_geometry(stored, measure_text=True)
+    stamps.clear()
+    rows = np.arange(0, 400, 3)
+    read = read_rows(MemoryLedger(None, "Reading"), stored, rows, item="the IDs")
+    assert read.tolist() == values[rows].tolist()
+    assert len(stamps) == 1
+
+
+# Values of 8 random digits and then one character repeated, so that they
+# compress as identifiers do: ASCII, up to U+00FF, and beyond U+FFFF.
+_TEXT_KINDS = {"ascii": "x", "latin-1": "\u00e9", "astral": "\N{GRINNING FACE}"}
+
+
+def _digits_then(character: str, characters: int, n_values: int) -> np.ndarray:
+    rng = np.random.default_rng(characters)
+    return np.asarray(
+        [
+            "".join(rng.choice(list("0123456789"), 8)) + character * (characters - 8)
+            for _ in range(n_values)
+        ]
+    )
+
+
+@pytest.mark.parametrize("kind", list(_TEXT_KINDS))
+@pytest.mark.parametrize(("characters", "chunk_rows"), [(12, 4_000), (120, 1_024)])
+def test_reads_of_variable_width_text_hold_what_they_charge(
+    kind, characters, chunk_rows, tmp_path
+) -> None:
+    from cytearc.metadata.rows import (
+        read_rows,
+        read_rows_bytes,
+        read_text_rows,
+        read_whole,
+        read_whole_text,
+        text_read_bytes,
+    )
+
+    values = _digits_then(_TEXT_KINDS[kind], characters, 4_000)
+    root = zarr.open_group(tmp_path / "ids.zarr", mode="w")
+    stored = root.create_array(
+        "ids", data=values.astype(np.dtypes.StringDType()), chunks=(chunk_rows,)
+    )
+    scattered = np.sort(np.random.default_rng(1).choice(4_000, 1_300, replace=False))
+    one = np.array([chunk_rows // 2])
+    # Each read, and what the planners of reads state it holds beside its
+    # own charge.
+    reads = {
+        "whole": (lambda ledger: read_whole(ledger, root, "ids", item="the IDs"), None),
+        # One row decodes its chunk's every value.
+        "one row": (
+            lambda ledger: read_rows(ledger, stored, one, item="the IDs"),
+            read_rows_bytes(stored, 1),
+        ),
+        "scattered rows": (
+            lambda ledger: read_rows(ledger, stored, scattered, item="the IDs"),
+            read_rows_bytes(stored, len(scattered)),
+        ),
+        "rows as strings": (
+            lambda ledger: read_text_rows(ledger, stored, scattered, item="the IDs"),
+            text_read_bytes(stored, len(scattered)),
+        ),
+        "whole as strings": (
+            lambda ledger: read_whole_text(ledger, root, "ids", item="the IDs"),
+            text_read_bytes(stored, len(values)),
+        ),
+    }
+    for name, (read, planned) in reads.items():
+        held, charged = traced_charge(read)
+        assert held <= charged, name
+        assert planned is None or held <= planned, name
+
+
+def test_a_read_of_variable_width_labels_is_charged_by_their_characters(
+    tmp_path,
+) -> None:
+    from cytearc.metadata.rows import read_whole
+    from cytearc.storage.geometry import array_geometry
+
+    # 20,000 labels of 71 characters in one chunk, which a read decodes whole.
+    labels = _digits_then("x", 71, 20_000)
+    root = zarr.open_group(tmp_path / "labels.zarr", mode="w")
+    stored = root.create_array(
+        "labels", data=labels.astype(np.dtypes.StringDType()), chunks=(20_000,)
+    )
+    held, charged = traced_charge(
+        lambda ledger: read_whole(ledger, root, "labels", item="the labels")
+    )
+    assert held <= charged
+    # A charge at NumPy's 16-byte elements, as such a read had, is passed.
+    elements = array_geometry(stored)
+    assert elements is not None and held > elements.wholeReadBytes(1)
+
+
+@pytest.mark.parametrize("kind", list(_TEXT_KINDS))
+def test_variable_width_text_reads_as_python_strings(kind) -> None:
+    import sys
+
+    from cytearc.metadata.rows import read_text_rows, read_whole_text
+
+    values = _digits_then(_TEXT_KINDS[kind], 30, 50)
+    root = zarr.open_group(store=MemoryStore(), mode="w")
+    stored = root.create_array(
+        "ids", data=values.astype(np.dtypes.StringDType()), chunks=(8,)
+    )
+    rows = np.array([49, 0, 17, 18, 3])
+    for read, expected in (
+        (lambda ledger: read_text_rows(ledger, stored, rows, item="IDs"), values[rows]),
+        (lambda ledger: read_whole_text(ledger, root, "ids", item="IDs"), values),
+    ):
+        ledger = recording_ledger("Reading")
+        strings = read(ledger)
+        assert strings.dtype == object
+        assert strings.tolist() == expected.tolist()
+        # The ledger keeps the strings and their references charged, at
+        # least what CPython holds for them, and lets go of the stored rows.
+        actual = sum(map(sys.getsizeof, strings)) + 8 * len(strings)
+        assert actual <= ledger.held_bytes < 2 * actual
+    numbers = root.create_array("numbers", data=np.arange(5), chunks=(5,))
+    with pytest.raises(TypeError, match="IDs must be stored as text, not as int64"):
+        read_text_rows(recording_ledger("Reading"), numbers, np.arange(2), item="IDs")

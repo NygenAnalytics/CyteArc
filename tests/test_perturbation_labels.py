@@ -194,6 +194,40 @@ def test_targets_replace_the_column_for_the_guides_they_name(store, template) ->
     assert labels[7] == "C"
 
 
+def test_a_target_column_of_variable_width_text_labels_cells_alike(
+    store, template
+) -> None:
+    import zarr
+
+    from cytearc.utils.memory_budget import (
+        MemoryLedger,
+        object_array_bytes,
+        python_text_bytes,
+    )
+    from tests.storage_helpers import store_as_variable_width_text
+
+    # Another tool stored the guides' targets as variable-width text.
+    store_as_variable_width_text(
+        zarr.open_group(f"{store.zarr_loc}/CRISPR/featureData", mode="r+"),
+        "target_gene_name",
+    )
+    store = open_store(store.zarr_loc)
+
+    ref = store.perturbation.labels(template.calls, controls=CONTROLS)
+
+    assert store.perturbation.load_labels(ref).cells["label"].tolist() == SINGLE
+    # The targets are read as Python strings, which stay charged in place of
+    # the stored text.
+    ledger = MemoryLedger(None, "Labeling cells")
+    column = store._guide_feature_column(
+        store._get_assay("CRISPR"), "target_gene_name", "target_column", ledger=ledger
+    )
+    assert column.tolist() == TARGETS.tolist()
+    assert ledger.held_bytes == object_array_bytes(len(TARGETS)) + python_text_bytes(
+        len(TARGETS), sum(map(len, TARGETS))
+    )
+
+
 def test_labels_are_reused_and_follow_their_inputs(store, template) -> None:
     calls = template.calls
     ref = store.perturbation.labels(calls, controls=CONTROLS)

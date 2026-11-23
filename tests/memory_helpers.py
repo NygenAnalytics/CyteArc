@@ -1,4 +1,4 @@
-"""Read the budget that a memory refusal names, follow refusals to a budget that runs, give a domain function a ledger of a budget, wait until the arrays handed to writes are freed, hold a read's decodes together while it is traced, and skip tests that need the resident memory of the test process."""
+"""Read the budget that a memory refusal names, follow refusals to a budget that runs, give a domain function a ledger of a budget, trace what a call holds against what its ledger charges, wait until the arrays handed to writes are freed, hold a read's decodes together while it is traced, and skip tests that need the resident memory of the test process."""
 
 import asyncio
 import re
@@ -103,6 +103,28 @@ def recording_ledger(doing: str = "Recording charges") -> Any:
             self.most = max(self.most, self.held_bytes + int(nbytes))
 
     return RecordingLedger()
+
+
+def traced_charge(call: Callable[[Any], Any]) -> tuple[int, int]:
+    """Run ``call(ledger)`` once untraced, then traced after a full collection, and return the most it held and the most its ledger charged.
+
+    The untraced run warms what a first call allocates once, such as
+    imports and Zarr's objects, and each run takes a :func:`recording_ledger`.
+    """
+    import gc
+    import tracemalloc
+
+    call(recording_ledger())
+    gc.collect()
+    ledger = recording_ledger()
+    tracemalloc.start()
+    try:
+        before, _ = tracemalloc.get_traced_memory()
+        call(ledger)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    return peak - before, ledger.most
 
 
 class HandedArrays:

@@ -2695,3 +2695,36 @@ def test_cell_order_is_checked_as_the_other_exports_check_it(tmp_path) -> None:
         == ("temp_dir must be a path or None, not int")
     )
     assert not path.exists() and not table.exists()
+
+
+@pytest.mark.parametrize("width", ["fixed", "variable"])
+def test_packed_cell_ids_keep_only_their_bytes_and_offsets_charged(
+    tmp_path, width
+) -> None:
+    # Cell IDs of differing lengths, some beyond ASCII, read a few rows at a
+    # time in reverse; each slice that is read is let go once packed, as
+    # fixed-width or variable-width text, which another tool can store.
+    values = np.asarray(
+        [
+            f"cell-{index}" + "é" * (index % 7) + "x" * (index % 40)
+            for index in range(500)
+        ]
+    )
+    group = zarr.open_group(tmp_path / "ids.zarr", mode="w")
+    array = group.create_array(
+        "ids",
+        data=values if width == "fixed" else values.astype(np.dtypes.StringDType()),
+        chunks=(64,),
+    )
+    rows = np.arange(len(values))[::-1].copy()
+    ledger = MemoryLedger(None, "Packing the cells' IDs")
+
+    packed, longest = repertoire_operations._packed_text(
+        ledger, array, rows, 4_096, item="the cells' IDs"
+    )
+
+    encoded = [value.encode("utf-8") for value in values[rows]]
+    assert packed.data.tobytes() == b"".join(encoded)
+    assert np.diff(packed.offsets).tolist() == [len(value) for value in encoded]
+    assert longest == max(map(len, encoded))
+    assert ledger.held_bytes == 8 * (len(rows) + 1) + sum(map(len, encoded))

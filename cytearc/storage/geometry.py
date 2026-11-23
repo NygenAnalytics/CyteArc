@@ -14,7 +14,9 @@ __all__ = [
     "ROW_INDEX_BYTES",
     "ROW_KEPT_INDEX_BYTES",
     "ArrayGeometry",
+    "TextExtent",
     "array_geometry",
+    "variable_text_extent",
 ]
 
 #: A read of selected rows a band of chunks at a time first orders the rows
@@ -36,6 +38,69 @@ ROW_KEPT_INDEX_BYTES = 32
 _READ_OBJECT_BYTES = 32 * 1024
 _READ_CHUNK_OBJECT_BYTES = 4 * 1024
 _READ_DECODE_OBJECT_BYTES = 16 * 1024
+
+#: NumPy keeps each value of variable-width text in a 16-byte element, and a
+#: value of more than 15 bytes in UTF-8 in an arena beside the array, behind
+#: its size, a byte for a value of up to 255 bytes and 8 for a longer one, in
+#: an arena that NumPy grows by a quarter at a time (NEP 55). Zarr's
+#: ``vlen-utf8`` codec stores each value's UTF-8 bytes behind a 4-byte length.
+_TEXT_ELEMENT_BYTES = 16
+_TEXT_INLINE_BYTES = 15
+_TEXT_SHORT_SIZE_LIMIT = 255
+_TEXT_SHORT_SIZE_BYTES = 1
+_TEXT_SIZE_BYTES = 8
+_TEXT_LENGTH_BYTES = 4
+#: The most bytes of fixed-width text that a measure of variable-width text
+#: casts its values to at once.
+_TEXT_MEASURE_BYTES = 4 * 1024 * 1024
+
+
+@dataclass(frozen=True, slots=True)
+class TextExtent:
+    """The extent of the values of an array of variable-width text.
+
+    ``characters`` and ``encodedBytes`` are the most characters and the most
+    UTF-8 bytes of any value, and ``widest`` is the widest code point of any
+    value's characters, 0 for none.
+    """
+
+    characters: int
+    encodedBytes: int
+    widest: int
+
+    def valueBytes(self) -> int:
+        """Return the most bytes that NumPy holds for one value, its element and its arena share."""
+        if self.encodedBytes <= _TEXT_INLINE_BYTES:
+            return _TEXT_ELEMENT_BYTES
+        size = (
+            _TEXT_SHORT_SIZE_BYTES
+            if self.encodedBytes <= _TEXT_SHORT_SIZE_LIMIT
+            else _TEXT_SIZE_BYTES
+        )
+        return _TEXT_ELEMENT_BYTES + -(-5 * (self.encodedBytes + size) // 4)
+
+    def storedBytes(self) -> int:
+        """Return the most bytes that Zarr stores one value in before it compresses a chunk."""
+        return _TEXT_LENGTH_BYTES + self.encodedBytes
+
+    def decodeBytes(self) -> int:
+        """Return the most bytes that decoding one value holds.
+
+        Zarr's codec reads the value's stored bytes and makes a Python string
+        of them, referenced from an object array, of which NumPy makes the
+        value. NumPy asks the string for its UTF-8 bytes, which a string
+        beyond ASCII then keeps beside its characters.
+        """
+        from ..utils.memory_budget import object_array_bytes, python_text_bytes
+
+        utf8_copy = self.encodedBytes + 1 if self.widest > 0x7F else 0
+        return (
+            self.storedBytes()
+            + object_array_bytes(1)
+            + python_text_bytes(1, self.characters, widest=self.widest)
+            + utf8_copy
+            + self.valueBytes()
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,6 +126,11 @@ class ArrayGeometry:
     #: of a shard into one fetch, ``sharding_coalesce_max_gap_bytes`` of the
     #: array's configuration; none for a geometry of no opened array.
     coalesceGapBytes: int = 0
+    #: The extent of the values of variable-width text, which hold more while
+    #: Zarr decodes them than ``itemsize``, as NumPy keeps them, are stored in
+    #: fewer, and whose scattered rows are read a chunk's span at a time; None
+    #: for values of fixed size.
+    text: TextExtent | None = None
 
     @property
     def poolKeepsDecodedChunk(self) -> bool:
@@ -83,15 +153,19 @@ class ArrayGeometry:
         return max(1, self.shards[axis])
 
     def nominalChunkBytes(self) -> int:
-        """Return the bytes one whole chunk decodes to.
+        """Return the bytes one whole chunk holds while Zarr decodes it, its values decoded.
 
         Zarr stores and decodes a full chunk even where the chunk overhangs the
         array edge, so this deliberately ignores the clipped extent.
         """
+        value = self.itemsize if self.text is None else self.text.decodeBytes()
+        return self._chunkValues() * value
+
+    def _chunkValues(self) -> int:
         elements = 1
         for extent in self.chunks:
             elements *= max(1, extent)
-        return elements * self.itemsize
+        return elements
 
     def storedChunkBytes(self) -> int:
         """Return the bytes of one whole chunk as stored and decoded.
@@ -101,8 +175,10 @@ class ArrayGeometry:
         """
         from .layout import _encoded_chunk_bound
 
-        decoded = self.nominalChunkBytes()
-        return decoded + _encoded_chunk_bound(decoded)
+        value = self.itemsize if self.text is None else self.text.storedBytes()
+        return self.nominalChunkBytes() + _encoded_chunk_bound(
+            self._chunkValues() * value
+        )
 
     def rowBytes(self) -> int:
         """Return the bytes of one row: one value of every later axis."""
@@ -292,11 +368,16 @@ class ArrayGeometry:
         return np.asarray(indices, dtype=np.int64) // self.axisChunk(axis)
 
 
-def array_geometry(array: Any) -> ArrayGeometry | None:
+def array_geometry(array: Any, *, measure_text: bool = False) -> ArrayGeometry | None:
     """Read stored geometry, or ``None`` when the array has no chunk layout.
 
     In-memory arrays have no chunks, so callers get one explicit place to decide
-    what an unchunked array should mean for them.
+    what an unchunked array should mean for them. ``measure_text`` gives
+    variable-width text the extent of its values, which a charge of a read
+    of them needs, as :func:`variable_text_extent` measures it; without it
+    such text counts the 16-byte elements that NumPy keeps for its values,
+    as callers that use only the chunks do, since the measure fetches the
+    array's stored bytes to find whether its values changed.
     """
     chunks = getattr(array, "chunks", None)
     if chunks is None:
@@ -330,16 +411,86 @@ def array_geometry(array: Any) -> ArrayGeometry | None:
         raise ValueError(f"Array read scratch cannot be negative, got {scratch}")
     fused_workers, fused_async = _fused_pool(array)
 
+    text = (
+        variable_text_extent(array)
+        if measure_text and np.dtype(array.dtype).kind == "T"
+        else None
+    )
     return ArrayGeometry(
         shape=resolved_shape,
         chunks=resolved_chunks,
         shards=shards,
-        itemsize=max(1, int(np.dtype(array.dtype).itemsize)),
+        itemsize=(
+            max(1, int(np.dtype(array.dtype).itemsize))
+            if text is None
+            else text.valueBytes()
+        ),
         readScratchBytes=scratch,
         coalesceGapBytes=_coalesce_gap_bytes(array),
         fusedPoolWorkers=fused_workers,
         fusedReadsAsync=fused_async,
+        text=text,
     )
+
+
+def variable_text_extent(array: Any) -> TextExtent:
+    """Measure the values of an array of variable-width text, a stored chunk at a time.
+
+    Zarr's ``dtype=str`` stores text this way, which reads as NumPy's
+    ``StringDType``. A Zarr array's measure is reused while its stored bytes
+    are unchanged, as :func:`~cytearc.storage.content_stamps.cached_for_content`
+    reuses values, so it is taken once while the array is unchanged.
+    """
+    if isinstance(array, zarr.Array):
+        from .content_stamps import cached_for_content
+
+        return cached_for_content(
+            "variable_text_extent", array, lambda: _measured_text_extent(array)
+        )
+    return _measured_text_extent(array)
+
+
+def _measured_text_extent(array: Any) -> TextExtent:
+    """The extent of ``array``'s values, read a stored chunk at a time and cast to fixed-width text in parts.
+
+    A part's values cast to fixed-width text give their code points, from
+    which their widest character and their UTF-8 bytes follow: a byte for
+    each character, and one more for each from U+0080, from U+0800 and from
+    U+10000. Each part holds at most ``_TEXT_MEASURE_BYTES`` of code points,
+    four bytes a character of its block's longest value, beside the stored
+    chunk's read.
+    """
+    n_rows = int(array.shape[0]) if array.ndim else 1
+    chunks = getattr(array, "chunks", None)
+    rows = max(1, int(chunks[0])) if chunks else max(1, n_rows)
+    characters = encoded = widest = 0
+    for start in range(0, n_rows, rows):
+        block = np.asarray(array[start : start + rows]).reshape(-1)
+        lengths = np.strings.str_len(block)
+        longest = int(lengths.max(initial=0))
+        characters = max(characters, longest)
+        if longest == 0:
+            continue
+        step = max(1, _TEXT_MEASURE_BYTES // (4 * longest))
+        for offset in range(0, block.size, step):
+            points = (
+                block[offset : offset + step]
+                .astype(f"U{longest}")
+                .view(np.uint32)
+                .reshape(-1, longest)
+            )
+            most = int(points.max())
+            widest = max(widest, most)
+            utf8 = lengths[offset : offset + step]
+            if most > 0x7F:
+                utf8 = utf8 + sum(
+                    np.count_nonzero(points >= limit, axis=1)
+                    for limit in (0x80, 0x800, 0x10000)
+                )
+            encoded = max(encoded, int(utf8.max()))
+            del points, utf8
+        del block, lengths
+    return TextExtent(characters=characters, encodedBytes=encoded, widest=widest)
 
 
 def _coalesce_gap_bytes(array: Any) -> int:

@@ -5482,6 +5482,65 @@ def test_prefixed_cell_ids_format_each_source_id_after_its_name(source_ids, dtyp
     assert merged.tolist() == expected.tolist()
 
 
+def test_a_merge_names_the_cells_of_a_source_whose_ids_are_variable_width_text(
+    tmp_path,
+):
+    from cytearc import DataStore
+    from tests.storage_helpers import store_as_variable_width_text, write_count_store
+
+    # The right source's IDs differ in length and reach beyond Latin-1, as
+    # another tool stored them; the merge writes every ID after its source's
+    # name as fixed-width text as wide as the widest.
+    ids = {
+        "left": [f"cell{index}" for index in range(30)],
+        "right": [
+            f"c-{index}" + "x" * (index % 9) + ("\u00fc" if index % 4 == 0 else "")
+            for index in range(20)
+        ],
+    }
+    rng = np.random.default_rng(3)
+    counts = {
+        name: rng.integers(0, 5, size=(len(cells), 6)).astype(np.uint16)
+        for name, cells in ids.items()
+    }
+    sources = []
+    for name, cells in ids.items():
+        location = tmp_path / f"{name}.zarr"
+        write_count_store(
+            str(location), {"RNA": counts[name]}, "uint16", cell_ids=cells
+        )
+        if name == "right":
+            store_as_variable_width_text(
+                zarr.open_group(str(location / "cellData"), mode="r+"), "ids"
+            )
+        sources.append(
+            DataStore(
+                str(location),
+                default_assay="RNA",
+                nthreads=1,
+                min_features_per_cell=-1,
+            )
+        )
+
+    DataStoreMerge(
+        datasets=sources,
+        zarr_path=str(tmp_path / "merged.zarr"),
+        names=list(ids),
+        prepend_text="",
+        nthreads=1,
+        overwrite=True,
+    ).dump()
+
+    merged = zarr.open_group(str(tmp_path / "merged.zarr"), mode="r")
+    expected = np.asarray([f"{name}__{cell}" for name in ids for cell in ids[name]])
+    assert merged["cellData/ids"].dtype == expected.dtype
+    assert _rows_by_id(merged) == {
+        f"{name}__{cell}": counts[name][row].tolist()
+        for name in ids
+        for row, cell in enumerate(ids[name])
+    }
+
+
 def test_validate_cell_metadata_reports_a_missing_or_incomplete_group():
     import cytearc.merge.metadata as merge_metadata
     from cytearc.merge.row_plan import build_row_plan

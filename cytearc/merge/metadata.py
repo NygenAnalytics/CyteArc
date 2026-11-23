@@ -426,15 +426,28 @@ def _max_text_width(
         block_rows=block_rows,
     ):
         stop = start + len(values)
+        block = np.asarray(values)
         strings = None
-        if np.asarray(values).dtype.kind == "O":
-            width = max(width, max((len(str(value)) for value in values), default=0))
+        if block.dtype.kind == "O":
+            width = max(width, max((len(str(value)) for value in block), default=0))
+        elif block.dtype.kind == "T":
+            # Variable-width text, which another tool can store with Zarr's
+            # dtype=str, counts its characters as it is, since NumPy casts no
+            # such text to fixed-width text without a width.
+            width = max(width, int(np.strings.str_len(block).max(initial=0)))
         else:
-            strings = np.asarray(values, dtype=str)
+            strings = np.asarray(block, dtype=str)
             width = max(width, int(np.char.str_len(strings).max(initial=0)))
         if labels is not None:
             if strings is None:
-                strings = np.asarray(values, dtype=str)
+                # Variable-width labels become their Python strings as the
+                # merged column's fixed-width text holds them, without its
+                # trailing NULs, rather than a cast as wide as the longest.
+                strings = (
+                    np.strings.rstrip(block, "\x00").astype(object)
+                    if block.dtype.kind == "T"
+                    else np.asarray(block, dtype=str)
+                )
             if taken is None:
                 labels.add(
                     strings,

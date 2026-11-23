@@ -21,7 +21,12 @@ from cytearc.storage.count_matrix import CountMatrixPolicy
 from cytearc.storage.schema import create_cell_data, create_zarr_count_assay
 from cytearc.utils.logging import logger
 from cytearc.writers.counts_t import finalize_writer_counts_t
-from tests.storage_helpers import by_cell_id, finalize_test_counts, stored_bytes
+from tests.storage_helpers import (
+    by_cell_id,
+    finalize_test_counts,
+    store_as_variable_width_text,
+    stored_bytes,
+)
 
 
 @pytest.fixture
@@ -1901,8 +1906,18 @@ def test_composite_rejects_duplicate_source_cell_ids_without_changing_source(tmp
     np.testing.assert_array_equal(source.RNA.matrixGroup["counts"][:], 1)
 
 
-def test_composite_rejects_ids_that_two_sources_prefix_alike(tmp_path):
-    # "a" with "_x" and "a_" with "x" both prefix to "a___x".
+def _with_variable_width_ids(path) -> DataStore:
+    """Store the cell IDs of the source at ``path`` again as variable-width text, as another tool can, and open it."""
+    store_as_variable_width_text(
+        zarr.open_group(str(path / "cellData"), mode="r+"), "ids"
+    )
+    return DataStore(str(path), min_features_per_cell=-1, nthreads=1, mem_budget="64M")
+
+
+@pytest.mark.parametrize("width", ["fixed", "variable"])
+def test_composite_rejects_ids_that_two_sources_prefix_alike(tmp_path, width):
+    # "a" with "_x" and "a_" with "x" both prefix to "a___x", whether or not
+    # a's IDs are variable-width text.
     sources = {
         name: _write_source(
             tmp_path / f"{name}.zarr",
@@ -1913,6 +1928,8 @@ def test_composite_rejects_ids_that_two_sources_prefix_alike(tmp_path):
         )
         for name, ids in (("a", ["_x", "y"]), ("a_", ["x", "z"]))
     }
+    if width == "variable":
+        sources["a"] = _with_variable_width_ids(tmp_path / "a.zarr")
     with pytest.raises(ValueError, match="Composite cell IDs are not unique"):
         create_composite(
             sources,
@@ -1921,6 +1938,60 @@ def test_composite_rejects_ids_that_two_sources_prefix_alike(tmp_path):
             mem_budget="64M",
             nthreads=1,
         )
+
+
+def test_composite_names_the_cells_of_a_source_whose_ids_are_variable_width_text(
+    tmp_path,
+):
+    # Source b's IDs differ in length and reach beyond Latin-1, as another
+    # tool stored them; the composite writes every ID after its source's name
+    # as fixed-width text as wide as the widest.
+    ids = {
+        "a": [f"c{row}" for row in range(40)],
+        "b": [
+            f"cell-{row:02d}-" + "x" * (row % 23) + ("\u4e2d" if row % 7 == 0 else "")
+            for row in range(40)
+        ],
+    }
+    counts = {name: np.arange(80, dtype=np.uint8).reshape(40, 2) for name in ids}
+    counts["b"] = counts["b"][::-1].copy()
+    for name in ids:
+        _write_source(
+            tmp_path / f"{name}.zarr",
+            counts[name],
+            ["g0", "g1"],
+            ids=ids[name],
+            policy=CountMatrixPolicy(128, 32),
+        )
+    sources = {
+        "a": DataStore(
+            str(tmp_path / "a.zarr"),
+            min_features_per_cell=-1,
+            nthreads=1,
+            mem_budget="64M",
+        ),
+        "b": _with_variable_width_ids(tmp_path / "b.zarr"),
+    }
+
+    joint = create_composite(
+        sources,
+        at=tmp_path / "joint.zarr",
+        features="union",
+        mem_budget="64M",
+        nthreads=1,
+    )
+
+    expected = np.asarray([f"{name}__{cell}" for name in ids for cell in ids[name]])
+    stored = zarr.open_group(str(tmp_path / "joint.zarr"), mode="r")["cellData/ids"]
+    assert stored.dtype == expected.dtype
+    joined = joint.cells.fetch_all("ids").tolist()
+    assert sorted(joined) == sorted(expected.tolist())
+    # Each cell keeps its source's counts.
+    rows = np.asarray(joint.RNA.rawData.compute())
+    by_id = dict(zip(joined, rows.tolist(), strict=True))
+    for name in ids:
+        for row, cell in enumerate(ids[name]):
+            assert by_id[f"{name}__{cell}"] == counts[name][row].tolist()
 
 
 def test_composite_compares_distinct_ids_whose_hashes_collide(tmp_path, monkeypatch):
