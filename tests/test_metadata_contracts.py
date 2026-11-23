@@ -1539,14 +1539,15 @@ def test_measuring_variable_width_text_is_charged_before_and_as_it_reads(
         variable_text_extent(stored, MemoryLedger(1_000_000, "Reading the IDs"))
     assert len(reads) == 1
     monkeypatch.undo()
-    # Outside an operation, a read measures the column first, which its
-    # planner counts.
-    rows = np.arange(0, 6_000, 7)
+    # Outside an operation, a read of a row measures the column first, which
+    # holds more than reading the row and which its planner counts.
+    rows = np.array([3_000])
     traced = traced_charge(
         lambda ledger: read_rows(ledger, stored, rows, item="the IDs")
     )
     assert traced.held <= traced.charged
     assert traced.held <= read_rows_bytes(stored, len(rows))
+    rows = np.arange(0, 6_000, 7)
     # Text read from memory stays charged as NumPy keeps it.
     ledger = MemoryLedger(None, "Reading the IDs")
     taken = read_rows(ledger, values.astype(np.dtypes.StringDType()), rows, item="x")
@@ -1701,11 +1702,16 @@ def test_reads_of_variable_width_text_hold_what_they_charge(
     # Zarr's event loop leaves about 1.3 KiB of objects in reference cycles
     # after each read of a chunk, which Python frees at its next collection
     # and the ledger leaves out with the runtime's other objects.
-    garbage = 1_536 * -(-n_values // chunks)
+    n_chunks = -(-n_values // chunks)
+    touched = {
+        "one row": 1,
+        "two rows": len(np.unique(two // chunks)),
+    }
     # An operation measures the column once, before its reads.
     with validation_scope():
         variable_text_extent(stored)
         for name, (read, planned) in reads.items():
+            garbage = 1_536 * touched.get(name, n_chunks)
             traced[name] = traced_charge(read)
             assert traced[name].held <= traced[name].charged + garbage, name
             assert planned is None or traced[name].held <= planned + garbage, name

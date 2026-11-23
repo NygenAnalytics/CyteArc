@@ -1017,6 +1017,8 @@ def test_the_pass_over_variable_width_store_ids_holds_what_it_charges(
 ) -> None:
     import zarr
 
+    from cytearc.storage.geometry import variable_text_extent
+    from cytearc.storage.validation_scope import validation_scope
     from tests.memory_helpers import traced_charge
 
     # 30,000 IDs of 165 characters in chunks of 10,000 or 1,000, random enough
@@ -1042,8 +1044,17 @@ def test_the_pass_over_variable_width_store_ids_holds_what_it_charges(
         joined.cells(file, np.asarray(["none"], dtype=object))
         assert joined.n_unmatched_barcodes == 1
 
+    # Measuring the IDs is charged with the pass, and so is the pass alone
+    # in an operation that measured them before, as an import's read of the
+    # selected cells' IDs does; Zarr's reads leave about 1.3 KiB of objects
+    # a chunk for Python's next collection.
+    garbage = 1_536 * (30_000 // chunk_rows)
     traced = traced_charge(join)
-    assert traced.held <= traced.charged
+    assert traced.held <= traced.charged + garbage
+    with validation_scope():
+        variable_text_extent(array)
+        traced = traced_charge(join)
+    assert traced.held <= traced.charged + garbage
 
 
 def test_the_join_takes_variable_width_store_ids_given_in_memory() -> None:
