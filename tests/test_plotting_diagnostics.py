@@ -392,6 +392,105 @@ def test_qc_rejects_malformed_dataframes(data, kwargs, error, message):
         splt.qc(data, show=False, **kwargs)
 
 
+@pytest.mark.parametrize(
+    "data",
+    [
+        object(),
+        np.zeros((3, 2)),
+        {"groups": ["a"], "nCounts": [1.0]},
+        pd.Series([1.0], name="nCounts"),
+    ],
+    ids=["object", "array", "dict", "series"],
+)
+def test_qc_refuses_data_that_is_not_a_dataframe(data):
+    with pytest.raises(TypeError) as refused:
+        splt.qc(data, show=False)
+
+    assert refused.value.args == (
+        "data must be a pandas DataFrame with a 'groups' column, not "
+        f"{type(data).__name__}",
+    )
+
+
+def _stages(values: list[object], *, ordered: bool = True) -> pd.DataFrame:
+    """QC data whose groups are stages, a Categorical in developmental order."""
+    return pd.DataFrame(
+        {
+            "groups": pd.Categorical(
+                values, categories=["early", "mid", "late"], ordered=ordered
+            ),
+            "nCounts": np.arange(1.0, len(values) + 1.0),
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    ("values", "order"),
+    [
+        (["late", "early", "mid", "late"], ("early", "mid", "late")),
+        # The stages drawn keep the categories' order; natural order would
+        # put late first.
+        (["late", "mid", "late"], ("mid", "late")),
+        # Cells without a stage come last.
+        (["late", None, "mid"], ("mid", "late", "NA")),
+    ],
+    ids=["every-stage", "some-stages", "missing-stage"],
+)
+def test_qc_draws_the_groups_of_an_ordered_categorical_in_its_categories_order(
+    values, order
+):
+    import seaborn as sns
+
+    result = splt.qc(_stages(values), max_points=0, show=False)
+
+    scale = result.scales[0]
+    ticks = [tick.get_text() for tick in result.axes["nCounts"].get_xticklabels()]
+    assert scale.order == order
+    assert ticks == list(order)
+    assert result.legends[0].extras["categories"] == list(order)
+    assert result.provenance.extras["groups"] == list(order)
+    # The default colors are dealt out in that order.
+    colors = sns.color_palette("tab20", n_colors=len(order)).as_hex()
+    assert scale.palette == dict(zip(order, colors, strict=True))
+    result.close()
+
+
+def test_qc_orders_an_ordered_categorical_of_numbers_by_its_categories():
+    data = pd.DataFrame(
+        {
+            "groups": pd.Categorical(
+                [2, 3, 1, 10], categories=[10, 3, 1, 2], ordered=True
+            ),
+            "nCounts": [1.0, 2.0, 3.0, 4.0],
+        }
+    )
+
+    result = splt.qc(data, max_points=0, show=False)
+
+    # Natural order would be 1, 2, 3, 10.
+    assert result.scales[0].order == (10, 3, 1, 2)
+    result.close()
+
+
+@pytest.mark.parametrize(
+    "groups",
+    [
+        pd.Categorical(["late", "early", "mid"], categories=["late", "mid", "early"]),
+        ["late", "early", "mid"],
+    ],
+    ids=["unordered-categorical", "text"],
+)
+def test_qc_draws_other_groups_in_natural_order(groups):
+    data = pd.DataFrame({"groups": groups, "nCounts": [1.0, 2.0, 3.0]})
+
+    result = splt.qc(data, max_points=0, show=False)
+
+    # A Categorical that is not ordered stores no order, as an unordered
+    # categorical column of a store does not.
+    assert result.scales[0].order == ("early", "late", "mid")
+    result.close()
+
+
 def test_qc_titles_the_axis_of_its_groups_when_asked():
     titled = splt.qc(
         _qc_data(), max_points=0, label_size=7.0, group_title="Sample", show=False

@@ -9,13 +9,13 @@ import pandas as pd
 
 from ._contracts import CategoricalScale, PlotProvenance
 from ._deps import require_kneed, require_matplotlib, require_seaborn
+from ._display import groups_in_stored_order
 from ._figure import (
     LegendSpec,
     PlotResult,
     close_figures_on_error,
     normalize_axes_target,
 )
-from ..utils.arrays import sort_categories
 from ._style import (
     apply_figure_chrome,
     colormap_argument,
@@ -83,12 +83,19 @@ def qc(
     Without it the axis is left blank and the legend is reported as
     ``groups``, the column's name; a panel of one group draws no axis of
     groups to title.
+
+    ``data`` is a pandas DataFrame with a ``groups`` column and one numeric column per metric. The groups of an ordered ``Categorical`` follow its categories, as the groups of a column stored as ordered do in the other plots, and the cells without a group come after them, as ``NA``; other groups take natural order.
     """
     show_on_single_row = bool_argument(show_on_single_row, "show_on_single_row")
     show = bool_argument(show, "show")
     seed = integer_argument(seed, "seed", minimum=0, maximum=RANDOM_STATE_MAX)
     require_matplotlib()
     sns = require_seaborn()
+    if not isinstance(data, pd.DataFrame):
+        raise TypeError(
+            "data must be a pandas DataFrame with a 'groups' column, not "
+            f"{type(data).__name__}"
+        )
     if "groups" not in data.columns:
         raise KeyError("data must contain a 'groups' column")
     if group_title is not None and not isinstance(group_title, str):
@@ -115,8 +122,22 @@ def qc(
         except (TypeError, ValueError) as exc:
             raise TypeError(f"QC metric {metric!r} must be numeric") from exc
 
-    group_values = data["groups"].astype(object).where(data["groups"].notna(), "NA")
-    group_order = sort_categories(list(pd.unique(group_values)))
+    groups = data["groups"]
+    group_values = groups.astype(object).where(groups.notna(), "NA")
+    observed = list(pd.unique(group_values))
+    # An ordered Categorical orders the groups by its categories, as a column
+    # stored as ordered orders the groups of the other plots.
+    stored = (
+        CategoricalScale(order=tuple(groups.cat.categories))
+        if isinstance(groups.dtype, pd.CategoricalDtype) and groups.dtype.ordered
+        else None
+    )
+    group_order = [
+        observed[at]
+        for at in groups_in_stored_order(
+            [(str(label),) for label in observed], [stored]
+        )
+    ]
     n_groups = len(group_order)
     n_panels = len(metric_columns)
     n_columns = n_panels if show_on_single_row else 1
