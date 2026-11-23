@@ -279,10 +279,7 @@ def received_messages(sent: Sequence[tuple[str, Any]]) -> list[tuple[str, Any]]:
 
     ``sent`` holds, in order, ``("message", value)`` or ``("pickled", bytes)``
     for each message and ``("bytes", buffer)`` for each raw buffer. Each
-    message comes back with the arrays that follow it as raw bytes.
-
-    Raises:
-        AssertionError: If a message ends before the arrays it announced.
+    message comes back with the arrays whose buffers follow it.
     """
     import pickle
 
@@ -293,23 +290,21 @@ def received_messages(sent: Sequence[tuple[str, Any]]) -> list[tuple[str, Any]]:
     class _Receiving:
         def recv(self) -> Any:
             form, value = next(stream)
-            assert form in ("message", "pickled"), (
-                f"a {form} entry where a message was due"
-            )
+            assert form in ("message", "pickled"), f"{form} where a message was due"
             return pickle.loads(value) if form == "pickled" else value
 
         def recv_bytes(self) -> bytes:
             entry = next(stream, None)
-            assert entry is not None and entry[0] == "bytes", (
-                "a message ended before its arrays"
-            )
+            if entry is None:
+                raise EOFError
+            assert entry[0] == "bytes", f"{entry[0]} where a buffer was due"
             return bytes(entry[1])
 
     messages: list[tuple[str, Any]] = []
     end = _Receiving()
     while True:
         try:
-            messages.append(_received(end))
+            messages.append(_received(end, "the process"))
         except StopIteration:
             return messages
 
@@ -342,7 +337,7 @@ class TracedPipeEnd:
     def send(self, message: Any) -> None:
         from multiprocessing.reduction import ForkingPickler
 
-        self._traced("pickled", lambda: ForkingPickler.dumps(message))
+        self._traced("pickled", lambda: bytes(ForkingPickler.dumps(message)))
 
     def send_bytes(self, buffer: Any) -> None:
         self._traced("bytes", lambda: memoryview(buffer))

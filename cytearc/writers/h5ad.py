@@ -1,4 +1,5 @@
 import math
+import pickle
 import time
 from collections.abc import Callable, Generator, Iterator, Mapping, Sequence
 from dataclasses import dataclass
@@ -293,97 +294,47 @@ def _producer_process_bytes(producers: int, processBytes: int) -> int:
     return int(producers) * int(processBytes) if int(producers) > 1 else 0
 
 
-@dataclass(frozen=True, slots=True)
-class _ArraysAfter:
-    """The payload of a message whose arrays follow it on the pipe as raw bytes.
+def _send(connection: Any, kind: str, payload: Any) -> None:
+    """Send ``(kind, payload)`` to the import, with the arrays in it as raw bytes.
 
-    ``rebuild(value, arrays)`` gives the payload back from ``value`` and the
-    arrays, whose dtypes and shapes ``layout`` holds.
+    The message is pickled at protocol 5 with each array's buffer out of
+    band, so nothing copies an array: a small message carries the pickle
+    and the length of each buffer, which then follows as raw bytes from the
+    array itself. Everything is pickled before anything is sent, so a
+    failure while pickling leaves the pipe ready for the error message.
     """
+    buffers: list[pickle.PickleBuffer] = []
+    header = pickle.dumps((kind, payload), protocol=5, buffer_callback=buffers.append)
+    views = [buffer.raw() for buffer in buffers]
+    connection.send((header, [view.nbytes for view in views]))
+    for view in views:
+        connection.send_bytes(view)
 
-    rebuild: Callable[[Any, list[np.ndarray]], Any]
-    value: Any
-    layout: tuple[tuple[str, tuple[int, ...]], ...]
 
+def _received(connection: Any, sender: str) -> tuple[str, Any]:
+    """Receive a message that :func:`_send` sent, with its buffers.
 
-def _send_with_arrays(
-    connection: Any,
-    kind: str,
-    value: Any,
-    arrays: Sequence[np.ndarray],
-    rebuild: Callable[[Any, list[np.ndarray]], Any],
-) -> None:
-    """Send a message whose ``arrays`` follow it as raw bytes, which :func:`_received` reads.
-
-    Pickling copies arrays into a buffer that grows as it is written, about
-    twice their bytes beside them, which a process's share does not hold.
-    Raw bytes go to the pipe from the arrays themselves.
+    Raises:
+        RuntimeError: If ``sender`` closed its pipe before the buffers that
+            its message announced, or sent a buffer of another length.
     """
-    layout = tuple((array.dtype.str, tuple(array.shape)) for array in arrays)
-    connection.send((kind, _ArraysAfter(rebuild, value, layout)))
-    for array in arrays:
-        connection.send_bytes(np.ascontiguousarray(array).reshape(-1).view(np.uint8))
-
-
-def _received(connection: Any) -> tuple[str, Any]:
-    """Receive a message from a process, with the arrays that follow it as raw bytes."""
-    kind, payload = connection.recv()
-    if isinstance(payload, _ArraysAfter):
-        arrays = [
-            np.frombuffer(connection.recv_bytes(), dtype=np.dtype(dtype)).reshape(shape)
-            for dtype, shape in payload.layout
-        ]
-        payload = payload.rebuild(payload.value, arrays)
+    header, lengths = connection.recv()
+    buffers = []
+    for length in lengths:
+        try:
+            buffer = connection.recv_bytes()
+        except EOFError as exc:
+            raise RuntimeError(
+                f"{sender} closed before the arrays of its message"
+            ) from exc
+        if len(buffer) != length:
+            raise RuntimeError(
+                f"{sender} sent {len(buffer)} bytes where its message "
+                f"announced an array of {length}"
+            )
+        buffers.append(buffer)
+    kind, payload = pickle.loads(header, buffers=buffers)
     return kind, payload
-
-
-def _sparse_band_item(value: Any, arrays: list[np.ndarray]) -> tuple[str, Any, int]:
-    """Rebuild the assay, sparse band and producer bytes that a reader process sent."""
-    from ..storage.sharding import SparseRowBand
-
-    assay_name, start, end, n_columns, dtype, producer_bytes = value
-    row, column, data = arrays
-    band = SparseRowBand(start, end, n_columns, row, column, data, dtype)
-    return assay_name, band, producer_bytes
-
-
-def _send_sparse_band(connection: Any, item: tuple[str, Any, int]) -> None:
-    """Send a reader process's sparse band, with its arrays as raw bytes."""
-    assay_name, band, producer_bytes = item
-    _send_with_arrays(
-        connection,
-        "band",
-        (assay_name, band.start, band.end, band.nColumns, band.dtype, producer_bytes),
-        (band.row, band.column, band.data),
-        _sparse_band_item,
-    )
-
-
-def _summary_windows(value: Any, arrays: list[np.ndarray]) -> tuple[Any, dict]:
-    """Rebuild the reports and window summaries that a writer process sent."""
-    reports, starts = value
-    fields = len(arrays) // max(1, len(starts))
-    windows = {
-        assay_name: (start, *arrays[index * fields : (index + 1) * fields])
-        for index, (assay_name, start) in enumerate(starts.items())
-    }
-    return reports, windows
-
-
-def _send_window_summaries(
-    connection: Any, reports: Any, summaries: Mapping[str, Any]
-) -> None:
-    """Send a writer process's reports and the count summaries of its window, as its done message."""
-    windows = {
-        assay_name: summary.window() for assay_name, summary in summaries.items()
-    }
-    _send_with_arrays(
-        connection,
-        "done",
-        (reports, {assay_name: window[0] for assay_name, window in windows.items()}),
-        [array for window in windows.values() for array in window[1:]],
-        _summary_windows,
-    )
 
 
 def _run_worker(
@@ -405,7 +356,7 @@ def _run_worker(
         work(reader)
     except BaseException as exc:
         try:
-            connection.send(("error", f"{type(exc).__name__}: {exc}"))
+            _send(connection, "error", f"{type(exc).__name__}: {exc}")
         except BaseException:
             pass
     finally:
@@ -444,10 +395,14 @@ def _worker_messages(
         for connection in ready:
             index = active[connection]
             try:
-                kind, payload = _received(connection)
+                kind, payload = _received(connection, f"H5AD {role} {index}")
             except EOFError as exc:
                 raise RuntimeError(
                     f"H5AD {role} {index} closed without a result"
+                ) from exc
+            except OSError as exc:
+                raise RuntimeError(
+                    f"H5AD {role} {index} closed in the middle of a message"
                 ) from exc
             if kind == "error":
                 raise RuntimeError(f"H5AD {role} {index} failed: {payload}")
@@ -516,7 +471,7 @@ def _read_h5ad_process_window(
     def send_band(item: tuple[str, Any, int]) -> bool:
         if stop.is_set():
             return False
-        _send_sparse_band(connection, item)
+        _send(connection, "band", item)
         return not stop.is_set()
 
     def work(reader: H5adReader) -> None:
@@ -545,7 +500,7 @@ def _read_h5ad_process_window(
         for item in _finished_count_bands(buffers):
             if not send_band(item):
                 return
-        connection.send(("done", None))
+        _send(connection, "done", None)
 
     _run_worker(reader_kwargs, connection, work, shuffled_rows)
 
@@ -642,7 +597,8 @@ def _write_h5ad_process_window(
                 },
             )
         if not stop.is_set():
-            _send_window_summaries(connection, reports, summaries)
+            windows = {name: summary.window() for name, summary in summaries.items()}
+            _send(connection, "done", (reports, windows))
 
     _run_worker(reader_kwargs, connection, work, shuffled_rows)
 
@@ -671,13 +627,13 @@ def _read_dense_h5ad_process_window(
         ):
             if stop.is_set():
                 return
-            connection.send(("band", item))
+            _send(connection, "band", item)
             if stop.is_set():
                 return
             # The band was sent; its copy here would sit beside the next one.
             del item
         if not stop.is_set():
-            connection.send(("done", None))
+            _send(connection, "done", None)
 
     _run_worker(reader_kwargs, connection, work)
 
@@ -734,7 +690,8 @@ def _write_dense_h5ad_process_window(
                 },
             )
         if not stop.is_set():
-            _send_window_summaries(connection, reports, summaries)
+            windows = {name: summary.window() for name, summary in summaries.items()}
+            _send(connection, "done", (reports, windows))
 
     _run_worker(reader_kwargs, connection, work)
 
@@ -2141,16 +2098,16 @@ class H5adToZarr:
             held -= max(0, int(self.h5ad._sparse_import_resident_bytes()))
         return held
 
-    def _writer_process_bytes(self, process_bytes: int, window_rows: int) -> int:
+    def _writer_process_bytes(self, window_rows: int) -> int:
         """Return what a process that writes ``window_rows`` rows of its own holds beside its writes.
 
-        It holds ``process_bytes``, what :meth:`_window_process_bytes`
-        counts, and the count summaries of its window, which it sends here
-        from their own arrays, without a copy, once its writes are done.
+        It holds what :meth:`_window_process_bytes` counts and the count
+        summaries of its window, which it sends here without a copy once its
+        writes are done.
         """
         from ..storage.identity import CountSummary
 
-        return int(process_bytes) + sum(
+        return self._window_process_bytes() + sum(
             CountSummary.nbytes_for(window_rows, width)
             for width in self._assay_widths().values()
         )
@@ -2453,7 +2410,6 @@ class H5adToZarr:
         batch_rows = self._dense_batch_rows(min(band_rows), batch_size)
         producer_bytes = self._dense_producer_bytes(batch_rows)
         resident = self._count_resident_bytes()
-        process_bytes = self._window_process_bytes()
         filling = filling_band_bytes(arrays)
 
         def window_tasks(start: int, stop: int) -> int:
@@ -2488,14 +2444,14 @@ class H5adToZarr:
                     window_tasks(start, stop) for start, stop in candidate_windows
                 )
                 candidate_resident = (
-                    self._writer_process_bytes(process_bytes, window_rows)
-                    + producer_bytes
-                    + filling
+                    self._writer_process_bytes(window_rows) + producer_bytes + filling
                 )
             else:
-                # Each reader process holds its batch, a band of every assay,
-                # and the pickled copy of the band it sends; this process
-                # unpickles one band beside its writes.
+                # Each reader process holds its batch and a band of every
+                # assay, which it sends without a copy, and the last band it
+                # sent, which its buffer keeps until the next band is made;
+                # this process holds one band that it received beside its
+                # writes.
                 held = producer_bytes + sum(band_bytes) + max(band_bytes)
                 candidate_resources = ResourceBudget(
                     self.resources.memoryBytes, max(1, workers - candidate)
@@ -2692,9 +2648,7 @@ class H5adToZarr:
                         self.h5ad.nCells, shard_rows, candidate
                     )
                 )
-                candidate_resident = self._writer_process_bytes(
-                    process_resident_bytes, window_rows
-                )
+                candidate_resident = self._writer_process_bytes(window_rows)
                 candidate_batch_rows = None
             else:
                 candidate_resources = self.resources
