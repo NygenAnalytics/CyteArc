@@ -14,6 +14,7 @@ from ..assay import (
     norm_dummy,
     norm_lib_size,
     norm_lib_size_log,
+    norm_tf_idf,
 )
 from ..assay.normalization import (
     ClrFit,
@@ -133,7 +134,8 @@ def _normalization_parameters(parameters: Mapping[str, Any]) -> dict[str, Any]:
     normalizer = None
     if isinstance(method, Mapping) and method.get("external_hook", True) is True:
         normalizer = recorded_normalizer(method)
-    if normalizer is None or not _fits_new_rows(normalizer):
+    # TF-IDF normalizes ATAC assays, which references do not map.
+    if normalizer is None or normalizer is norm_tf_idf:
         raise ValueError(
             "Unsupported reference normalization method. Expected a built-in RNA "
             "normalizer, norm_lib_size, norm_lib_size_log, norm_pearson_residuals, "
@@ -163,14 +165,6 @@ def _normalization_parameters(parameters: Mapping[str, Any]) -> dict[str, Any]:
             raise TypeError(f"Reference normalization {name} must be a boolean")
         values[name] = bool(value)
     return values
-
-
-def _fits_new_rows(normalizer: Any) -> bool:
-    """Return whether a reference can normalize query rows as ``normalizer`` did."""
-    return isinstance(normalizer, PearsonResidualNormalizer) or any(
-        normalizer is builtin
-        for builtin in (norm_lib_size, norm_lib_size_log, norm_clr, norm_dummy)
-    )
 
 
 # The arrays that a mapping reference saves of what its cells' normalizer

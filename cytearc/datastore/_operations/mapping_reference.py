@@ -3,11 +3,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 from ...assay import RNAassay
-from ...assay.normalization import (
-    feature_scaling_statistics,
-    fit_normalization,
-    recorded_normalizer,
-)
+from ...assay.normalization import fit_normalization, recorded_normalizer
 from ...graph.distances import (
     validate_distance_provenance,
     validate_neighbors_payload,
@@ -17,6 +13,7 @@ from ...mapping.artifact import (
     load_artifact_mapping_reference,
     mapping_reference_payload_matches_sources,
     mapping_reference_source_fingerprint,
+    reference_feature_statistics,
     symphony_batch_metadata,
     validate_artifact_mapping_reference,
     validate_mapping_reference_sources,
@@ -36,7 +33,6 @@ from ...storage.artifact_writer import (
     plan_artifact,
 )
 from ...storage.ann_index import validate_ann_index_payload
-from ...matrix import ChunkedArray
 from ...storage.artifacts import (
     ArtifactRef,
     artifact_group,
@@ -184,13 +180,12 @@ class _MappingReferenceOperationsMixin(_MappingReferenceOperationsBase):
         )
         if reduction_status.operation != "run_pca":
             raise ValueError("Mapping references require a run_pca reduction")
-        feature_scaling_enabled = (reduction_status.parameters or {}).get(
-            "feat_scaling"
-        )
-        if not isinstance(feature_scaling_enabled, bool):
+        recorded_scaling = (reduction_status.parameters or {}).get("feat_scaling")
+        if not isinstance(recorded_scaling, bool):
             raise ValueError(
                 "Mapping references require a PCA that records feat_scaling"
             )
+        feature_scaling_enabled: bool = recorded_scaling
         normalized = self._artifact_input_ref(
             reduction,
             "normalized",
@@ -267,26 +262,14 @@ class _MappingReferenceOperationsMixin(_MappingReferenceOperationsBase):
         )
 
         reduction_group = artifact_group(self.zw, reduction)
-        feature_means: Any
-        feature_scales: Any
-        if feature_scaling_enabled:
-            scaling_group = artifact_group(self.zw, feature_scaling)
-            feature_means = as_zarr_array(scaling_group["mean"], name="mean")
-            feature_scales = as_zarr_array(scaling_group["scale"], name="scale")
-        else:
-            # A PCA without feature scaling centered the values themselves.
-            # The reference keeps the statistics that scaling would have
-            # used, to fill missing features and compare queries.
-            normalized_group = artifact_group(self.zw, normalized)
-            feature_means, feature_scales = feature_scaling_statistics(
-                normalized_group,
-                ChunkedArray(
-                    as_zarr_array(normalized_group["data"], name="data"),
-                    nthreads=self.nthreads,
-                    resources=self.resources,
-                ),
-                nthreads=self.nthreads,
-            )
+        # A PCA without feature scaling centered the values themselves; its
+        # reference keeps the statistics that scaling would have used.
+        feature_means, feature_scales = reference_feature_statistics(
+            self,
+            normalized=normalized,
+            feature_scaling=feature_scaling,
+            scaled=feature_scaling_enabled,
+        )
         if "center" not in reduction_group:
             raise ValueError(
                 "Reference PCA has no fitted center. Recompute PCA and its "

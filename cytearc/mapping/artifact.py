@@ -7,7 +7,7 @@ import numpy as np
 import zarr
 
 from ..assay import RNAassay
-from ..assay.normalization import feature_scaling_statistics
+from ..assay.normalization import ClrFit, feature_scaling_statistics
 from ..graph.distances import (
     validate_distance_provenance,
     validate_neighbors_payload,
@@ -34,7 +34,6 @@ from ..storage.selections import validate_cell_selection
 from ..storage.types import as_zarr_array
 from ..matrix import ChunkedArray
 from .confidence import _distance_quantile_summary
-from ..assay.normalization import ClrFit
 from .features import (
     REFERENCE_FIT_ARRAYS,
     _normalization_parameters,
@@ -108,6 +107,33 @@ _SYMPHONY_METADATA = frozenset(
 # A model array that a reference copies: a stored array, or for a PCA without
 # feature scaling, the statistics of its normalized values.
 type ModelSource = zarr.Array | np.ndarray
+
+
+def reference_feature_statistics(
+    datastore: Any,
+    *,
+    normalized: ArtifactRef,
+    feature_scaling: ArtifactRef,
+    scaled: bool,
+) -> tuple[ModelSource, ModelSource]:
+    """Return the mean and scale of each feature that a reference compares queries by.
+
+    They are the PCA's feature scaling, or for a PCA without feature scaling,
+    the statistics that scaling would have used, from the normalized values.
+    """
+    if scaled:
+        group = artifact_group(datastore.zw, feature_scaling)
+        return (
+            as_zarr_array(group["mean"], name="mean"),
+            as_zarr_array(group["scale"], name="scale"),
+        )
+    group = artifact_group(datastore.zw, normalized)
+    data = ChunkedArray(
+        as_zarr_array(group["data"], name="data"),
+        nthreads=datastore.nthreads,
+        resources=datastore.resources,
+    )
+    return feature_scaling_statistics(group, data, nthreads=datastore.nthreads)
 
 
 def symphony_batch_metadata(
@@ -527,23 +553,9 @@ def _validate_and_load_artifact_mapping_reference(
             "Mapping reference feature IDs do not match the selected features"
         )
     reduction_group = artifact_group(datastore.zw, reduction)
-    source_feature_means: ModelSource
-    source_feature_scales: ModelSource
-    if feature_scaling_enabled:
-        scaling_group = artifact_group(datastore.zw, feature_scaling)
-        source_feature_means = as_zarr_array(scaling_group["mean"], name="mean")
-        source_feature_scales = as_zarr_array(scaling_group["scale"], name="scale")
-    else:
-        normalized_group = artifact_group(datastore.zw, normalized)
-        source_feature_means, source_feature_scales = feature_scaling_statistics(
-            normalized_group,
-            ChunkedArray(
-                as_zarr_array(normalized_group["data"], name="data"),
-                nthreads=datastore.nthreads,
-                resources=datastore.resources,
-            ),
-            nthreads=datastore.nthreads,
-        )
+    source_feature_means, source_feature_scales = reference_feature_statistics(
+        datastore, normalized=normalized, feature_scaling=feature_scaling, scaled=scaled
+    )
     if "center" not in reduction_group:
         raise contract_error(
             "Reference PCA has no fitted center; recompute PCA and its descendants"
