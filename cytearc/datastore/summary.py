@@ -308,6 +308,7 @@ def build_datastore_summary(
     pipeline_run_counts = {
         "total": len(runs),
         "running": sum(run.status == "running" for run in runs),
+        "paused": sum(run.status == "paused" for run in runs),
         "completed": sum(run.status == "completed" for run in runs),
         "failed": sum(run.status == "failed" for run in runs),
         "interrupted": sum(run.status == "interrupted" for run in runs),

@@ -25,8 +25,15 @@ from ..utils.process import TRACE_POINT_LIMIT
 PIPELINE_RUNS_PATH = "pipeline/runs"
 _PIPELINE_LABEL_CLAIMS_PATH = f"{PIPELINE_RUNS_PATH}/.label-claims"
 _PIPELINE_LABEL_CLAIMS_NAME = ".label-claims"
+_PIPELINE_RESUME_CLAIMS_NAME = ".resume-claims"
+_PIPELINE_RESUME_CLAIMS_PATH = f"{PIPELINE_RUNS_PATH}/{_PIPELINE_RESUME_CLAIMS_NAME}"
 
-type PipelineRunStatus = Literal["running", "completed", "failed", "interrupted"]
+type PipelineRunStatus = Literal[
+    "running", "paused", "completed", "failed", "interrupted"
+]
+# Why a process stopped its part of a run that paused: a pause, or the
+# status that the run ended with.
+type PipelineSegmentReason = Literal["paused", "completed", "failed", "interrupted"]
 type PipelineStageStatus = Literal[
     "running", "completed", "skipped", "failed", "interrupted"
 ]
@@ -35,6 +42,8 @@ type PipelineReportFormat = Literal["dict", "markdown"]
 type ArtifactPlanDisposition = Literal["created", "reused"]
 
 _RUN_ID_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+_RUN_STATUSES = frozenset({"running", "paused", "completed", "failed", "interrupted"})
+_SEGMENT_REASONS = frozenset({"paused", "completed", "failed", "interrupted"})
 _RUN_FIELDS = frozenset(
     {
         "runId",
@@ -56,7 +65,12 @@ _RUN_FIELDS = frozenset(
     }
 )
 # Run fields that a later 1.x release added; a record without them still reads.
-_RUN_OPTIONAL_FIELDS = frozenset({"outputLists"})
+# Only a run that paused holds ``segments``.
+_RUN_OPTIONAL_FIELDS = frozenset({"outputLists", "segments"})
+_SEGMENT_FIELDS = frozenset(
+    {"startedAtNs", "stoppedAtNs", "stages", "reason", "shutdown"}
+)
+_SHUTDOWN_FIELDS = frozenset({"signalGuardAvailable", "unavailableReason"})
 _STAGE_FIELDS = frozenset(
     {
         "stage",
@@ -155,6 +169,7 @@ _TRACE_FIELDS = frozenset(
 # differ from the stage's by up to half of one.
 _TRACE_CPU_TOLERANCE_SECONDS = 0.001
 _LABEL_CLAIM_FIELDS = frozenset({"label", "runId"})
+_RESUME_CLAIM_FIELDS = frozenset({"runId", "segment", "token"})
 _LABEL_CLAIM_KEY_PATTERN = re.compile(
     r"^(?P<digest>[0-9a-f]{64})/(?P<predecessor>head|[0-9a-f]{64})\.json$"
 )
@@ -1312,6 +1327,88 @@ class PipelineStageRecord:
         )
 
 
+def _shutdown_details(value: Any, name: str) -> dict[str, Any]:
+    """Return a process's signal-guard details, as ``config["shutdown"]`` holds them."""
+    raw = _exact_mapping(value, _SHUTDOWN_FIELDS, name)
+    return {
+        "signalGuardAvailable": _validate_bool(
+            raw["signalGuardAvailable"], f"{name} signalGuardAvailable"
+        ),
+        "unavailableReason": _validate_nullable_string(
+            raw["unavailableReason"], f"{name} unavailableReason"
+        ),
+    }
+
+
+@dataclass(frozen=True, slots=True)
+class PipelineRunSegment:
+    """The part of a run that paused which one process ran.
+
+    A run that never paused has no segments. One that paused has one for
+    the process that started it and one for each process that resumed it.
+
+    Attributes:
+        started_at_ns: When the process started or resumed the run.
+        stopped_at_ns: When it stopped, or None while it runs.
+        stages: The stages whose records it wrote, in stage order.
+        reason: Why it stopped: ``"paused"``, or the status that the run
+            ended with; None while it runs.
+        shutdown: Whether the process could install its signal guard, as
+            ``signalGuardAvailable`` and ``unavailableReason``.
+    """
+
+    started_at_ns: int
+    stopped_at_ns: int | None
+    stages: tuple[str, ...]
+    reason: PipelineSegmentReason | None
+    shutdown: Mapping[str, Any]
+
+    def __post_init__(self) -> None:
+        _validate_positive_int(self.started_at_ns, "segment started_at_ns")
+        if self.stopped_at_ns is not None:
+            _validate_positive_int(self.stopped_at_ns, "segment stopped_at_ns")
+            if self.stopped_at_ns < self.started_at_ns:
+                raise ValueError("segment stopped_at_ns cannot precede started_at_ns")
+        if not isinstance(self.stages, tuple):
+            raise TypeError("segment stages must be a tuple")
+        for stage in self.stages:
+            _validate_non_empty_string(stage, "segment stage")
+        if self.reason is not None and self.reason not in _SEGMENT_REASONS:
+            raise ValueError(f"Invalid pipeline segment reason: {self.reason!r}")
+        if (self.stopped_at_ns is None) != (self.reason is None):
+            raise ValueError("a segment that stopped has a reason, and only then")
+        object.__setattr__(
+            self, "shutdown", _shutdown_details(self.shutdown, "segment shutdown")
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "startedAtNs": self.started_at_ns,
+            "stoppedAtNs": self.stopped_at_ns,
+            "stages": list(self.stages),
+            "reason": self.reason,
+            "shutdown": dict(self.shutdown),
+        }
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "PipelineRunSegment":
+        raw = _exact_mapping(value, _SEGMENT_FIELDS, "pipeline run segment")
+        return cls(
+            started_at_ns=_validate_positive_int(
+                raw["startedAtNs"], "segment startedAtNs"
+            ),
+            stopped_at_ns=_validate_nullable_positive_int(
+                raw["stoppedAtNs"], "segment stoppedAtNs"
+            ),
+            stages=tuple(
+                _validate_non_empty_string(stage, "segment stage")
+                for stage in _sequence(raw["stages"], "segment stages")
+            ),
+            reason=raw["reason"],
+            shutdown=_mapping(raw["shutdown"], "segment shutdown"),
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class PipelineRunRecord:
     run_id: str
@@ -1332,6 +1429,8 @@ class PipelineRunRecord:
     interruption: PipelineInterruptionRecord | None
     # The outputs that hold several artifacts, such as the Leiden candidates.
     output_lists: tuple[PipelineOutputListRecord, ...] = ()
+    # The part that each process ran, only for a run that paused.
+    segments: tuple[PipelineRunSegment, ...] = ()
 
     def __post_init__(self) -> None:
         _validate_run_id(self.run_id)
@@ -1344,7 +1443,7 @@ class PipelineRunRecord:
             _validate_positive_int(self.finished_at_ns, "finished_at_ns")
             if self.finished_at_ns < self.started_at_ns:
                 raise ValueError("finished_at_ns cannot precede started_at_ns")
-        if self.status not in {"running", "completed", "failed", "interrupted"}:
+        if self.status not in _RUN_STATUSES:
             raise ValueError(f"Invalid pipeline run status: {self.status!r}")
         _validate_bool(self.complete, "run complete")
         _validate_non_empty_string(self.cytearc_version, "cytearc_version")
@@ -1378,6 +1477,7 @@ class PipelineRunRecord:
             raise ValueError("run output keys must be unique")
         if len(field_keys) != len(set(field_keys)):
             raise ValueError("run field keys must be unique within each axis")
+        self._validate_segments()
         if self.status == "running":
             if self.complete or self.finished_at_ns is not None:
                 raise ValueError("running runs cannot be complete or finished")
@@ -1385,6 +1485,14 @@ class PipelineRunRecord:
                 raise ValueError("running runs cannot contain terminal results")
             if self.error is not None or self.interruption is not None:
                 raise ValueError("running runs cannot contain terminal details")
+            return
+        if self.status == "paused":
+            if self.finished_at_ns is not None:
+                raise ValueError("paused runs cannot be finished")
+            if self.label is not None or self._results:
+                raise ValueError("paused runs cannot contain terminal results")
+            if self.error is not None or self.interruption is not None:
+                raise ValueError("paused runs cannot contain terminal details")
             return
         if self.finished_at_ns is None:
             raise ValueError("terminal runs require finished_at_ns")
@@ -1403,6 +1511,35 @@ class PipelineRunRecord:
                 raise ValueError("interrupted runs cannot expose results or a label")
             if self.interruption is None or self.error is not None:
                 raise ValueError("interrupted runs require only interruption details")
+
+    def _validate_segments(self) -> None:
+        """Check that the segments hold the stages run so far, in order, and end as the run does."""
+        if not isinstance(self.segments, tuple) or any(
+            not isinstance(segment, PipelineRunSegment) for segment in self.segments
+        ):
+            raise TypeError("segments must be PipelineRunSegment values")
+        if not self.segments:
+            if self.status == "paused":
+                raise ValueError("paused runs require their segments")
+            return
+        ran = tuple(stage for segment in self.segments for stage in segment.stages)
+        if ran != self.stage_order[: len(ran)]:
+            raise ValueError(
+                "run segments must hold the first stages of the stage order, each "
+                "once and in order"
+            )
+        *earlier, last = self.segments
+        if any(segment.reason != "paused" for segment in earlier):
+            raise ValueError(
+                "every run segment but the last must have stopped to pause"
+            )
+        if self.status == "running":
+            if last.reason is not None:
+                raise ValueError("the last segment of a running run must still run")
+        elif last.reason != self.status:
+            raise ValueError("the last segment of a run must stop as the run did")
+        if self.status == "completed" and len(ran) != len(self.stage_order):
+            raise ValueError("the segments of a completed run must hold every stage")
 
     @property
     def _results(self) -> bool:
@@ -1433,6 +1570,13 @@ class PipelineRunRecord:
                 None if self.interruption is None else self.interruption.to_dict()
             ),
             "outputLists": [output.to_dict() for output in self.output_lists],
+            # Written only by a run that paused, so that the record of any
+            # other run reads in releases that do not know the field.
+            **(
+                {"segments": [segment.to_dict() for segment in self.segments]}
+                if self.segments
+                else {}
+            ),
         }
 
     @classmethod
@@ -1441,8 +1585,9 @@ class PipelineRunRecord:
             value, _RUN_FIELDS, "pipeline run", optional=_RUN_OPTIONAL_FIELDS
         )
         output_lists = _sequence(raw.get("outputLists", ()), "run outputLists")
+        segments = _sequence(raw.get("segments", ()), "run segments")
         status = raw["status"]
-        if status not in {"running", "completed", "failed", "interrupted"}:
+        if status not in _RUN_STATUSES:
             raise ValueError(f"Invalid pipeline run status: {status!r}")
         stage_order = raw["stageOrder"]
         outputs = raw["outputs"]
@@ -1513,6 +1658,10 @@ class PipelineRunRecord:
             output_lists=tuple(
                 PipelineOutputListRecord.from_dict(_mapping(item, "run output list"))
                 for item in output_lists
+            ),
+            segments=tuple(
+                PipelineRunSegment.from_dict(_mapping(item, "run segment"))
+                for item in segments
             ),
         )
 
@@ -2041,6 +2190,60 @@ def _validate_successful_stages(root: zarr.Group, run: PipelineRunRecord) -> Non
             raise ValueError("A completed run requires terminal successful stages")
 
 
+def _stopped_segments(
+    run: PipelineRunRecord,
+    stage_count: int,
+    reason: PipelineSegmentReason,
+    stopped_at_ns: int,
+) -> tuple[PipelineRunSegment, ...]:
+    """Return the run's segments with the last one stopped for ``reason``.
+
+    The last segment holds the stages from where the earlier segments
+    stopped to the first ``stage_count`` of the stage order. A run that
+    never paused has no segments.
+    """
+    if not run.segments:
+        return ()
+    *earlier, last = run.segments
+    first = sum(len(segment.stages) for segment in earlier)
+    return (
+        *earlier,
+        replace(
+            last,
+            stopped_at_ns=(
+                max(stopped_at_ns, last.started_at_ns)
+                if last.stopped_at_ns is None
+                else last.stopped_at_ns
+            ),
+            stages=run.stage_order[first:stage_count],
+            reason=reason,
+        ),
+    )
+
+
+def _stage_record_count(root: zarr.Group, run_id: str) -> int:
+    """Return how many stage records a run holds, without reading them."""
+    stages = _get_group(root, f"{pipeline_run_path(run_id)}/stages", "Pipeline stages")
+    return sum(1 for name in stages.group_keys() if name.isdigit())
+
+
+def _closed_segments(
+    root: zarr.Group,
+    run: PipelineRunRecord,
+    reason: PipelineSegmentReason,
+    stopped_at_ns: int,
+) -> tuple[PipelineRunSegment, ...]:
+    """Return the run's segments with the last one stopped after the stage records it holds.
+
+    A run that never paused has no segments, and its stages are not listed.
+    """
+    if not run.segments:
+        return ()
+    return _stopped_segments(
+        run, _stage_record_count(root, run.run_id), reason, stopped_at_ns
+    )
+
+
 def complete_pipeline_run_record(
     root: zarr.Group,
     *,
@@ -2054,6 +2257,8 @@ def complete_pipeline_run_record(
     if run.complete or run.status != "running":
         raise ValueError("Pipeline run is already terminal")
     _validate_successful_stages(root, run)
+    finished = _finish_time(run.started_at_ns, finished_at_ns)
+    segments = _stopped_segments(run, len(run.stage_order), "completed", finished)
     resolved_outputs = tuple(outputs)
     resolved_lists = tuple(output_lists)
     resolved_fields = tuple(fields)
@@ -2079,25 +2284,17 @@ def complete_pipeline_run_record(
             )
             _claim_pipeline_label(root, run.requested_label, run.run_id)
         except (ValueError, RuntimeError) as exc:
-            error_type = (
-                "PipelineLabelConflict"
-                if isinstance(exc, ValueError)
-                else "PipelineLabelClaimUnavailable"
-            )
             fail_pipeline_run_record(
                 root,
                 run_id=run.run_id,
-                error=PipelineErrorRecord(
-                    type=error_type,
-                    message=bounded_record_text(str(exc)),
-                ),
+                error=_label_claim_error(exc),
                 finished_at_ns=finished_at_ns,
             )
             raise
     record = replace(
         run,
         label=run.requested_label,
-        finished_at_ns=_finish_time(run.started_at_ns, finished_at_ns),
+        finished_at_ns=finished,
         status="completed",
         complete=True,
         outputs=resolved_outputs,
@@ -2105,6 +2302,7 @@ def complete_pipeline_run_record(
         fields=resolved_fields,
         error=None,
         interruption=None,
+        segments=segments,
     )
     _write_terminal_attrs(
         _get_group(root, pipeline_run_path(run_id), "Pipeline run"),
@@ -2128,10 +2326,11 @@ def fail_pipeline_run_record(
         if isinstance(error, BaseException)
         else error
     )
+    finished = _finish_time(run.started_at_ns, finished_at_ns)
     record = replace(
         run,
         label=None,
-        finished_at_ns=_finish_time(run.started_at_ns, finished_at_ns),
+        finished_at_ns=finished,
         status="failed",
         complete=True,
         outputs=(),
@@ -2139,6 +2338,7 @@ def fail_pipeline_run_record(
         fields=(),
         error=resolved_error,
         interruption=None,
+        segments=_closed_segments(root, run, "failed", finished),
     )
     _write_terminal_attrs(
         _get_group(root, pipeline_run_path(run_id), "Pipeline run"),
@@ -2157,10 +2357,11 @@ def interrupt_pipeline_run_record(
     run = load_pipeline_run_record(root, run_id)
     if run.complete:
         raise ValueError("Pipeline run is already terminal")
+    finished = _finish_time(run.started_at_ns, finished_at_ns)
     record = replace(
         run,
         label=None,
-        finished_at_ns=_finish_time(run.started_at_ns, finished_at_ns),
+        finished_at_ns=finished,
         status="interrupted",
         complete=True,
         outputs=(),
@@ -2168,10 +2369,200 @@ def interrupt_pipeline_run_record(
         fields=(),
         error=None,
         interruption=interruption,
+        segments=_closed_segments(root, run, "interrupted", finished),
     )
     _write_terminal_attrs(
         _get_group(root, pipeline_run_path(run_id), "Pipeline run"),
         record.to_dict(),
+    )
+    return record
+
+
+def _label_claim_error(error: ValueError | RuntimeError) -> PipelineErrorRecord:
+    """Return the run error that a label which cannot be claimed records."""
+    return PipelineErrorRecord(
+        type=(
+            "PipelineLabelConflict"
+            if isinstance(error, ValueError)
+            else "PipelineLabelClaimUnavailable"
+        ),
+        message=bounded_record_text(str(error)),
+    )
+
+
+def pause_pipeline_run_record(
+    root: zarr.Group,
+    *,
+    run_id: str,
+    shutdown: Mapping[str, Any],
+    stopped_at_ns: int | None = None,
+) -> PipelineRunRecord:
+    """Commit a running run as paused after the stages it has recorded, for any process to resume.
+
+    The run's segments gain, or close, the one of this process, with its
+    ``shutdown`` details. A requested label is checked as finalizing will
+    claim it; a label that can no longer be claimed fails the run, with the
+    error that finalizing records, and the error is raised.
+
+    Raises:
+        ValueError: If the run is not running, a stage that it recorded did
+            not complete, no stage is left to run, or its label is committed.
+        RuntimeError: If its label cannot be claimed on this store, or an
+            unfinished run holds it.
+    """
+    run = load_pipeline_run_record(root, run_id)
+    if run.complete or run.status != "running":
+        raise ValueError(
+            f"Pipeline run {run_id} is {run.status!r}; only a running run pauses"
+        )
+    stages = _load_pipeline_stage_records_for_run(root, run)
+    if any(
+        not stage.complete or stage.status not in {"completed", "skipped"}
+        for stage in stages
+    ):
+        raise ValueError(
+            "A pipeline run pauses only after stages that ended successfully"
+        )
+    if len(stages) >= len(run.stage_order):
+        raise ValueError("A pipeline run with no stage left to run completes instead")
+    if run.requested_label is not None:
+        try:
+            ensure_pipeline_label_claimable(root, run.requested_label)
+        except (ValueError, RuntimeError) as exc:
+            fail_pipeline_run_record(root, run_id=run_id, error=_label_claim_error(exc))
+            raise
+    stopped = _finish_time(run.started_at_ns, stopped_at_ns)
+    segments = (
+        _stopped_segments(run, len(stages), "paused", stopped)
+        if run.segments
+        else (
+            PipelineRunSegment(
+                started_at_ns=run.started_at_ns,
+                stopped_at_ns=stopped,
+                stages=run.stage_order[: len(stages)],
+                reason="paused",
+                shutdown=shutdown,
+            ),
+        )
+    )
+    record = replace(run, status="paused", complete=True, segments=segments)
+    _write_terminal_attrs(
+        _get_group(root, pipeline_run_path(run_id), "Pipeline run"),
+        record.to_dict(),
+    )
+    return record
+
+
+def _resume_claim_bytes(run_id: str, segment: int, token: str) -> Buffer:
+    payload = json.dumps(
+        {"runId": run_id, "segment": segment, "token": token},
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return default_buffer_prototype().buffer.from_bytes(payload)
+
+
+def _claim_pipeline_run_resume(root: zarr.Group, run_id: str, segment: int) -> None:
+    """Make this process the one that resumes ``run_id`` into its ``segment``-th segment.
+
+    The claim is an append-only key that ``set_if_not_exists`` writes once,
+    so of the processes that resume one pause at once, exactly one wins.
+
+    Raises:
+        RuntimeError: If the store cannot write a key only where none
+            exists, or another process claimed this pause first, which
+            includes one that stopped before it recorded the resume.
+    """
+    if not has_atomic_conditional_writes(root.store):
+        raise RuntimeError(
+            "Resuming a pipeline run requires a Zarr store with atomic "
+            "set_if_not_exists support"
+        )
+    runs = _get_group(root, PIPELINE_RUNS_PATH, "Pipeline runs")
+    if _PIPELINE_RESUME_CLAIMS_NAME not in runs:
+        # A Zarr child marks the raw claim namespace, as for label claims, so
+        # that hierarchy walks stay free of warnings.
+        try:
+            runs.create_array(_PIPELINE_RESUME_CLAIMS_NAME, shape=(0,), dtype="uint8")
+        except zarr.errors.ContainsArrayError:
+            pass
+    token = secrets.token_hex(16)
+    path = root.store_path / f"{_PIPELINE_RESUME_CLAIMS_PATH}/{run_id}/{segment}.json"
+    sync(path.set_if_not_exists(_resume_claim_bytes(run_id, segment, token)))
+    stored = sync(path.get())
+    if stored is None:
+        raise RuntimeError(f"The resume claim of pipeline run {run_id} was not written")
+    claim = _exact_mapping(
+        json.loads(stored.to_bytes().decode("utf-8")),
+        _RESUME_CLAIM_FIELDS,
+        "pipeline resume claim",
+    )
+    if claim["token"] != token:
+        raise RuntimeError(
+            f"Pipeline run {run_id} is already being resumed by another process, "
+            "or a process stopped while it resumed the run; pipeline.rerun(run) "
+            "starts a new run that reuses its finished stages"
+        )
+
+
+def resume_pipeline_run_record(
+    root: zarr.Group,
+    *,
+    run_id: str,
+    segment: int,
+    shutdown: Mapping[str, Any],
+    started_at_ns: int | None = None,
+) -> PipelineRunRecord:
+    """Claim a paused run for this process and commit it running again, with a new open segment.
+
+    ``segment`` is the number of segments that the paused run held when the
+    caller read it, the pause that the caller resumes. The claim of that
+    pause is an atomic write, so a process that resumes the same pause, or
+    one that read the run before another process resumed it, raises.
+
+    Raises:
+        ValueError: If the run is not paused, or its pause was not written
+            completely.
+        RuntimeError: If the store cannot claim the resume, or another
+            process resumed this pause.
+    """
+    run = load_pipeline_run_record(root, run_id)
+    if run.status != "paused":
+        raise ValueError(
+            f"Pipeline run {run_id} is {run.status!r}; only a paused run resumes"
+        )
+    if not run.complete:
+        raise ValueError(
+            f"Pipeline run {run_id} did not finish writing its pause, so it cannot "
+            "resume"
+        )
+    _validate_non_negative_int(segment, "segment")
+    if len(run.segments) != segment:
+        raise RuntimeError(
+            f"Pipeline run {run_id} was resumed by another process after this one "
+            "read it"
+        )
+    _claim_pipeline_run_resume(root, run_id, segment)
+    record = replace(
+        run,
+        status="running",
+        complete=False,
+        segments=(
+            *run.segments,
+            PipelineRunSegment(
+                started_at_ns=time.time_ns()
+                if started_at_ns is None
+                else started_at_ns,
+                stopped_at_ns=None,
+                stages=(),
+                reason=None,
+                shutdown=shutdown,
+            ),
+        ),
+    )
+    # One metadata write commits the running record.
+    _get_group(root, pipeline_run_path(run_id), "Pipeline run").attrs.put(
+        record.to_dict()
     )
     return record
 
@@ -2219,7 +2610,7 @@ def list_pipeline_run_records(
 
     if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
         raise ValueError("limit must be a positive integer")
-    allowed = {"running", "completed", "failed", "interrupted"}
+    allowed = set(_RUN_STATUSES)
     if status is None:
         statuses = allowed
     elif isinstance(status, str):

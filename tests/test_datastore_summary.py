@@ -25,6 +25,7 @@ from cytearc.storage.pipeline_runs import (
     create_pipeline_run_record,
     fail_pipeline_run_record,
     finish_pipeline_stage_record,
+    pause_pipeline_run_record,
     start_pipeline_stage_record,
 )
 from cytearc.storage.refs import ArtifactRef, ArtifactScope
@@ -143,6 +144,7 @@ def test_summary_of_minimal_store_is_frozen_and_metadata_only(tmp_path: Path) ->
     assert summary.pipeline_run_counts == {
         "total": 0,
         "running": 0,
+        "paused": 0,
         "completed": 0,
         "failed": 0,
         "interrupted": 0,
@@ -227,11 +229,47 @@ def test_summary_discovers_runs_and_labels(
         run_id="c" * 64,
         started_at_ns=300,
     )
+    paused = create_pipeline_run_record(
+        summary_datastore.zw,
+        recipe="basic_rna_analysis",
+        requested_label="paused",
+        assay="RNA",
+        config={},
+        stage_order=("snapshot", "markers"),
+        cytearc_version=cytearc.__version__,
+        run_id="d" * 64,
+        started_at_ns=400,
+    )
+    start_pipeline_stage_record(
+        summary_datastore.zw,
+        run_id=paused.run_id,
+        ordinal=0,
+        stage="snapshot",
+        started_at_ns=410,
+    )
+    finish_pipeline_stage_record(
+        summary_datastore.zw,
+        run_id=paused.run_id,
+        ordinal=0,
+        status="completed",
+        outputs=(PipelineStageOutputRecord("root", artifact, True),),
+        metrics=_metrics(),
+        finished_at_ns=420,
+    )
+    pause_pipeline_run_record(
+        summary_datastore.zw,
+        run_id=paused.run_id,
+        shutdown={"signalGuardAvailable": True, "unavailableReason": None},
+        stopped_at_ns=430,
+    )
     summary = summary_datastore.summary()
 
+    # The paused run committed its pause, so it is not incomplete, and it
+    # takes its label only when a resume completes it.
     assert summary.pipeline_run_counts == {
-        "total": 3,
+        "total": 4,
         "running": 1,
+        "paused": 1,
         "completed": 1,
         "failed": 1,
         "interrupted": 0,
