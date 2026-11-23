@@ -899,6 +899,146 @@ def test_adt_panel_without_exclusions_keeps_every_antibody(cite, adt_own) -> Non
     assert cite.datastore.artifacts.load(adt_own["pca"])["data"].shape[1] == 4
 
 
+def _merged_panels(
+    tmp_path: Path, panels: dict[str, list[str]], features: str
+) -> DataStore:
+    """Merge one store of 60 cells' ADT counts for each panel, by name."""
+    from cytearc.merge import DataStoreMerge
+
+    sources = []
+    for seed, (name, panel) in enumerate(panels.items()):
+        location = tmp_path / f"{name}.zarr"
+        if not location.exists():
+            counts = np.random.default_rng(seed).poisson(20, size=(60, len(panel)))
+            write_count_store(
+                str(location), {"ADT": counts}, "uint16", feature_ids={"ADT": panel}
+            )
+        sources.append(
+            DataStore(
+                str(location), default_assay="ADT", min_features_per_cell=0, nthreads=1
+            )
+        )
+    path = tmp_path / f"{features}.zarr"
+    DataStoreMerge(
+        sources, str(path), list(panels), nthreads=1, features=features
+    ).dump()
+    return DataStore(
+        str(path), default_assay="ADT", min_features_per_cell=0, nthreads=1
+    )
+
+
+def test_adt_panel_leaves_out_antibodies_that_not_every_merged_source_measured(
+    tmp_path: Path,
+) -> None:
+    from cytearc.utils.logging import logger
+
+    shared = ["CD3", "CD4", "CD8", "CD14", "IgG1_isotype"]
+    # The left panel's own isotype control is left out as a control, not as
+    # an antibody that the right source did not measure.
+    panels = {
+        "left": [*shared, "CD45RA", "CD27", "IgG2a_isotype"],
+        "right": [*shared, "CD19"],
+    }
+    union = _merged_panels(tmp_path, panels, "union")
+    intersection = _merged_panels(tmp_path, panels, "intersection")
+    settings: dict[str, Any] = {
+        "neighbors": {"k": 5},
+        "leiden": False,
+        "umap": False,
+        "markers": False,
+    }
+    messages: list[str] = []
+    sink = logger.add(
+        lambda message: messages.append(message.record["message"]), level="WARNING"
+    )
+    try:
+        runs = {
+            "union": union.pipeline.adt(**settings),
+            "intersection": intersection.pipeline.adt(**settings),
+        }
+    finally:
+        logger.remove(sink)
+
+    assert messages == [
+        "The ADT panel leaves out the antibodies that not every source of the "
+        "merged store measured, whose zero counts in the cells of the other "
+        "sources are no measurement: 'CD45RA', 'CD27', 'CD19'. The run records "
+        "them as the panel's 'unmeasured'."
+    ]
+    assert _config(runs["union"])["stages"]["panel"] == {
+        "exclude": DEFAULT_PANEL_EXCLUDE,
+        "excluded": ["IgG1_isotype", "IgG2a_isotype"],
+        "unmeasured": ["CD45RA", "CD27", "CD19"],
+    }
+    # An intersection merge holds no antibody that a source lacks.
+    assert _config(runs["intersection"])["stages"]["panel"] == {
+        "exclude": DEFAULT_PANEL_EXCLUDE,
+        "excluded": ["IgG1_isotype"],
+    }
+    for run in runs.values():
+        names = run.features.fetch_all("names")
+        assert names[run.features.fetch_all("panel")].tolist() == shared[:4]
+    # CLR normalizes each antibody over the run's cells, which both merges
+    # order alike, so leaving the unmeasured antibodies out normalizes the
+    # panel as a run on the intersection merge does.
+    normalized = {
+        features: store.artifacts.load(runs[features]["normalized"])["data"][:]
+        for features, store in (("union", union), ("intersection", intersection))
+    }
+    assert normalized["union"].shape == (120, 4)
+    np.testing.assert_array_equal(normalized["union"], normalized["intersection"])
+
+
+def test_adt_panel_names_five_of_the_antibodies_that_it_leaves_out(
+    tmp_path: Path,
+) -> None:
+    from cytearc.utils.logging import logger
+
+    shared = ["CD3", "CD4", "CD8"]
+    extras = ["CD14", "CD16", "CD19", "CD56", "CD11c", "HLA-DR"]
+    union = _merged_panels(
+        tmp_path, {"left": shared, "right": [*shared, *extras]}, "union"
+    )
+    messages: list[str] = []
+    sink = logger.add(
+        lambda message: messages.append(message.record["message"]), level="WARNING"
+    )
+    try:
+        plan = _resolve("adt", union)
+    finally:
+        logger.remove(sink)
+
+    assert messages == [
+        "The ADT panel leaves out the antibodies that not every source of the "
+        "merged store measured, whose zero counts in the cells of the other "
+        "sources are no measurement: 'CD14', 'CD16', 'CD19', 'CD56', 'CD11c' and 1 "
+        "more. The run records them as the panel's 'unmeasured'."
+    ]
+    assert plan.config["stages"]["panel"]["unmeasured"] == extras
+
+
+def test_adt_panel_refuses_a_merged_store_whose_sources_share_one_antibody(
+    tmp_path: Path,
+) -> None:
+    union = _merged_panels(
+        tmp_path,
+        {
+            "left": ["CD3", "IgG1_isotype", "CD45RA"],
+            "right": ["CD3", "IgG1_isotype", "CD19"],
+        },
+        "union",
+    )
+
+    with pytest.raises(ValueError) as caught:
+        union.pipeline.adt(leiden=False, umap=False, markers=False)
+    assert str(caught.value) == (
+        f"The ADT panel keeps 1 of 4 antibodies after panel['exclude']="
+        f"{DEFAULT_PANEL_EXCLUDE!r} and the 2 that not every source of the merged "
+        "store measured; it needs at least two"
+    )
+    assert union.pipeline.list_runs() == ()
+
+
 def test_adt_panel_settings_are_checked_before_the_run(cite) -> None:
     datastore = cite.datastore
     before = _run_ids(datastore)

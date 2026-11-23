@@ -1,11 +1,14 @@
 import sys
 from collections import Counter
 from dataclasses import dataclass
+from collections.abc import Sequence
 from typing import Any, Literal
 
 import numpy as np
 import pandas as pd
 
+from ..metadata.membership import features_measured_by_every_source
+from ..storage.metadata_keys import measured_features_column
 from ..utils.arguments import quoted_value
 
 #: The most features that the warning about unshared features names per source.
@@ -16,9 +19,12 @@ UNSHARED_FEATURE_EXAMPLES = 5
 class FeatureAlignment:
     """Resolved feature union and per-source remapping for one assay.
 
+    ``featOrderMap`` gives, for each source, the merged position of each of
+    its features, or -1 for a feature that the merged features leave out.
     ``sourcePresent`` tells, in source order, whether each source holds the
     assay, since a source without it and a source whose assay holds no
-    features both map no features.
+    features both map no features. ``measuredFeatures`` tells, for each
+    source, whether it measured each merged feature.
     """
 
     mergedFeatsMap: pd.DataFrame
@@ -26,6 +32,7 @@ class FeatureAlignment:
     nFeats: int
     overlapFraction: float
     sourcePresent: tuple[bool, ...]
+    measuredFeatures: tuple[np.ndarray, ...]
 
     def resident_bytes(self) -> int:
         frame_bytes = int(self.mergedFeatsMap.memory_usage(index=True, deep=True).sum())
@@ -33,10 +40,17 @@ class FeatureAlignment:
             array.nbytes
             for array in {id(array): array for array in self.featOrderMap}.values()
         )
-        return frame_bytes + array_bytes + sys.getsizeof(self.featOrderMap)
+        measured_bytes = sum(vector.nbytes for vector in self.measuredFeatures)
+        return (
+            frame_bytes
+            + array_bytes
+            + measured_bytes
+            + sys.getsizeof(self.featOrderMap)
+        )
 
 
 type FeatureKey = Literal["ids", "names"]
+type FeatureSet = Literal["union", "intersection"]
 
 _NO_OVERLAP = (
     "No overlapping features found! Will not merge the files. No feature {kind} "
@@ -74,8 +88,7 @@ def _merge_order_feats(
     key: FeatureKey,
     *,
     require_overlap: bool,
-    holders: int,
-) -> tuple[pd.DataFrame, float]:
+) -> pd.DataFrame:
     union: dict[Any, Any] = {}
     source_presence: Counter[Any] = Counter()
     for keys, feature_names in keyed:
@@ -103,9 +116,25 @@ def _merge_order_feats(
     ):
         message = _NO_OVERLAP.format(kind="IDs" if key == "ids" else "names")
         raise ValueError(message + (_NAME_HINT if key == "ids" else ""))
-    # The share of merged features that every source holding the assay measured.
-    measured_by_all = sum(count == holders for count in source_presence.values())
-    return ret_val, measured_by_all / len(union)
+    return ret_val
+
+
+def _measured_features(
+    assay: Any, order_map: np.ndarray, n_features: int
+) -> np.ndarray:
+    """Return whether a source measured each merged feature.
+
+    A source measured the features that it holds, except those that a merge
+    that wrote it records as unmeasured by one of its own sources, so that a
+    merge of merged stores keeps their record. Of several features that
+    share a name, all must be measured.
+    """
+    measured = np.zeros(n_features, dtype=bool)
+    if assay is None:
+        return measured
+    measured[order_map] = True
+    measured[order_map[~features_measured_by_every_source(assay.feats)]] = False
+    return measured
 
 
 def align_features(
@@ -134,23 +163,94 @@ def align_features(
             nFeats=0,
             overlapFraction=1.0,
             sourcePresent=source_present,
+            measuredFeatures=tuple(np.zeros(0, dtype=bool) for _ in assays),
         )
 
     keyed = _source_keys(assays, names, key)
-    merged_feats, overlap = _merge_order_feats(
-        keyed, key, require_overlap=require_overlap, holders=sum(source_present)
-    )
+    merged_feats = _merge_order_feats(keyed, key, require_overlap=require_overlap)
     positions = pd.Index(merged_feats["ids"])
+    n_features = int(merged_feats.shape[0])
+    order_maps = [
+        np.asarray(positions.get_indexer(keys), dtype=np.int64)
+        for keys, _names in keyed
+    ]
+    measured = tuple(
+        _measured_features(assay, order_map, n_features)
+        for assay, order_map in zip(assays, order_maps, strict=True)
+    )
     return FeatureAlignment(
         mergedFeatsMap=merged_feats,
-        featOrderMap=[
-            np.asarray(positions.get_indexer(keys), dtype=np.int64)
-            for keys, _names in keyed
-        ],
-        nFeats=int(merged_feats.shape[0]),
-        overlapFraction=overlap,
+        featOrderMap=order_maps,
+        nFeats=n_features,
+        overlapFraction=float(_measured_by_all(measured, source_present).mean()),
         sourcePresent=source_present,
+        measuredFeatures=measured,
     )
+
+
+def _measured_by_all(
+    measured: Sequence[np.ndarray], present: Sequence[bool]
+) -> np.ndarray:
+    """Return whether every source that holds the assay measured each merged feature.
+
+    At least one source holds the assay of an alignment that has features.
+    """
+    holders = [vector for vector, holds in zip(measured, present, strict=True) if holds]
+    return np.asarray(np.logical_and.reduce(holders), dtype=bool)
+
+
+def select_features(
+    assay_name: str, alignment: FeatureAlignment, features: FeatureSet
+) -> FeatureAlignment:
+    """Return the alignment of the merged features that ``features`` keeps.
+
+    ``"union"`` keeps every feature that a source holds, ``alignment``
+    itself. ``"intersection"`` keeps the features that every source holding
+    the assay measured, in merged order, maps every other source feature to
+    -1, and so measures every feature that it keeps. An assay of no features
+    in any source keeps its alignment either way.
+
+    Raises:
+        ValueError: If ``features`` is neither, or ``"intersection"`` keeps no
+            feature of an assay whose sources hold some.
+    """
+    if features not in {"union", "intersection"}:
+        raise ValueError(
+            f"features must be 'union' or 'intersection', got {features!r}"
+        )
+    # An assay of no features in any source keeps none either way, and none
+    # of its sources lacks one.
+    if features == "union" or alignment.nFeats == 0:
+        return alignment
+    measured = alignment.measuredFeatures
+    selected = np.flatnonzero(_measured_by_all(measured, alignment.sourcePresent))
+    if selected.size == 0:
+        raise ValueError(
+            f"No feature of assay {assay_name!r} was measured by every source "
+            "that holds it, so features='intersection' keeps none; pass "
+            "features='union' to keep every feature of any source."
+        )
+    positions = np.full(alignment.nFeats, -1, dtype=np.int64)
+    positions[selected] = np.arange(selected.size)
+    frame = alignment.mergedFeatsMap.iloc[selected].copy().reset_index(drop=True)
+    frame["idx"] = np.arange(selected.size)
+    return FeatureAlignment(
+        mergedFeatsMap=frame,
+        featOrderMap=[positions[order_map] for order_map in alignment.featOrderMap],
+        nFeats=int(selected.size),
+        overlapFraction=1.0,
+        sourcePresent=alignment.sourcePresent,
+        measuredFeatures=tuple(vector[selected] for vector in measured),
+    )
+
+
+def _combination_words(combination: str) -> tuple[str, str]:
+    """Return the adjective of the combined features and the subject that keeps them."""
+    if combination == "merge":
+        return "merged", "the merge"
+    if combination == "composite":
+        return "composite", "the composite"
+    raise ValueError(f"combination must be 'merge' or 'composite', got {combination!r}")
 
 
 def unshared_features_warning(
@@ -163,14 +263,19 @@ def unshared_features_warning(
     """Return the warning about the merged features that a source lacks.
 
     A merge writes zero counts for a feature in the cells of a source that
-    lacks it, and a union composite reads them, which analyses then take as
-    measured counts. The warning counts the merged features of ``assay_name``
-    that not every source holding the assay measured, then gives each such
+    lacks it, and a union composite reads them. Both record which features
+    each source measured in a feature column of its own
+    (:func:`~cytearc.storage.metadata_keys.measured_features_column`), which
+    the ADT recipe reads, while other analyses take the zeros as measured
+    counts. The warning counts the merged features of ``assay_name`` that
+    not every source holding the assay measured, then gives each such
     source's number of missing features and names the first
     ``UNSHARED_FEATURE_EXAMPLES`` of them in merged order. A source whose
     assay holds no features lacks every merged feature, and the warning says
     that it holds none. A source without the assay is left out, since a merge
-    marks its cells as not measured.
+    marks its cells as not measured. The warning ends with
+    ``features='intersection'`` as the alternative, or says that it would
+    keep no feature when every source lacks some.
 
     Args:
         assay_name: The merged assay, named in the warning.
@@ -178,26 +283,21 @@ def unshared_features_warning(
             which every source feature has a merged position.
         names: The source names, in the order of ``alignment.featOrderMap``.
         combination: ``"merge"`` for a merge, which writes the zeros, or
-            ``"composite"`` for a union composite, which reads them and whose
-            warning names ``features='intersection'`` as the alternative, or
-            says that it would keep no feature when every source lacks some.
+            ``"composite"`` for a union composite, which reads them.
 
     Returns:
         The warning, or None when every source that holds the assay measured
         every merged feature, or when fewer than two sources hold it.
     """
-    if combination == "merge":
-        adjective, zeros = "merged", "The merge writes"
-    elif combination == "composite":
-        adjective, zeros = "composite", "The composite reads"
-    else:
-        raise ValueError(
-            f"combination must be 'merge' or 'composite', got {combination!r}"
-        )
+    adjective, subject = _combination_words(combination)
     holding = [
-        (source_name, order_map)
-        for source_name, order_map, present in zip(
-            names, alignment.featOrderMap, alignment.sourcePresent, strict=True
+        (source_name, order_map, measured)
+        for source_name, order_map, measured, present in zip(
+            names,
+            alignment.featOrderMap,
+            alignment.measuredFeatures,
+            alignment.sourcePresent,
+            strict=True,
         )
         if present
     ]
@@ -206,9 +306,7 @@ def unshared_features_warning(
     measured_by = np.zeros(alignment.nFeats, dtype=np.int64)
     lacking: list[str] = []
     feature_names = alignment.mergedFeatsMap["names"].to_numpy()
-    for source_name, order_map in holding:
-        measured = np.zeros(alignment.nFeats, dtype=bool)
-        measured[order_map] = True
+    for source_name, order_map, measured in holding:
         measured_by += measured
         missing = np.flatnonzero(~measured)
         if missing.size == 0:
@@ -231,16 +329,19 @@ def unshared_features_warning(
     if not lacking:
         return None
     unshared = int(np.count_nonzero(measured_by < len(holding)))
+    zeros = "writes" if combination == "merge" else "reads"
+    column = quoted_value(measured_features_column(holding[0][0]))
     warning = (
         f"Assay {assay_name!r}: {unshared:,} of the {alignment.nFeats:,} "
         f"{adjective} features {'was' if unshared == 1 else 'were'} not measured "
         "by every source that holds the assay. "
         + " ".join(lacking)
-        + f" {zeros} zero counts for a feature in the cells of each source that "
-        "lacks it, and analyses read those zeros as measured counts."
+        + f" {subject.capitalize()} {zeros} zero counts for a feature in the "
+        "cells of each source that lacks it, and records which features each "
+        f"source measured in a feature column of its own, such as {column}. The "
+        "ADT recipe leaves the antibodies that not every source measured out of "
+        "its panel; other analyses read those zeros as measured counts."
     )
-    if combination == "merge":
-        return warning
     if unshared < alignment.nFeats:
         return warning + (
             " Pass features='intersection' to keep only the features that every "
@@ -253,7 +354,11 @@ def unshared_features_warning(
 
 
 def shared_features_warning(
-    assay_name: str, alignment: FeatureAlignment, names: list[str]
+    assay_name: str,
+    alignment: FeatureAlignment,
+    names: list[str],
+    *,
+    combination: Literal["merge", "composite"],
 ) -> str | None:
     """Return the warning about an intersection that keeps few features.
 
@@ -268,32 +373,33 @@ def shared_features_warning(
         alignment: The assay's alignment from :func:`align_features`, over the
             union of the sources' features.
         names: The source names, in the order of ``alignment.featOrderMap``.
+        combination: ``"merge"`` or ``"composite"``, which the warning names
+            as what keeps the features.
 
     Returns:
         The warning, or None when the intersection keeps at least a tenth of
         the union.
     """
+    _adjective, subject = _combination_words(combination)
     holding = [
-        (source_name, order_map)
-        for source_name, order_map, present in zip(
-            names, alignment.featOrderMap, alignment.sourcePresent, strict=True
+        (source_name, measured)
+        for source_name, measured, present in zip(
+            names, alignment.measuredFeatures, alignment.sourcePresent, strict=True
         )
         if present
     ]
     presence = np.zeros(alignment.nFeats, dtype=np.int64)
-    for _source_name, order_map in holding:
-        presence[order_map] += 1
+    for _source_name, measured in holding:
+        presence += measured
     kept = int(np.count_nonzero(presence == len(holding)))
     if kept * 10 >= alignment.nFeats:
         return None
     without = []
-    for source_name, order_map in holding:
-        measured = np.zeros(alignment.nFeats, dtype=np.int64)
-        measured[order_map] = 1
+    for source_name, measured in holding:
         kept_without = int(np.count_nonzero(presence - measured == len(holding) - 1))
         without.append(f"{kept_without:,} without {source_name!r}")
     return (
-        f"Assay {assay_name!r}: the composite keeps {kept:,} of the "
+        f"Assay {assay_name!r}: {subject} keeps {kept:,} of the "
         f"{alignment.nFeats:,} features of its sources, since "
         "features='intersection' keeps only the features that every source "
         f"measured. It would keep {', '.join(without[:-1])} and {without[-1]}."
@@ -349,11 +455,12 @@ def resolve_merge_dtype(
             + ", ".join(sorted({dtype.name for dtype in dtypes}))
             + " have no common integer dtype"
         )
+    # A source feature that the merged features leave out maps to -1.
     max_copies = max(
         (
-            int(np.unique(order_map, return_counts=True)[1].max())
+            int(np.unique(order_map[order_map >= 0], return_counts=True)[1].max())
             for order_map in feat_order_map
-            if order_map.size
+            if np.any(order_map >= 0)
         ),
         default=1,
     )

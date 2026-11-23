@@ -7,7 +7,9 @@ from typing import Any
 import numpy as np
 
 from ....assay import ADTassay
-from ....utils.arguments import integer_argument
+from ....metadata.membership import features_measured_by_every_source
+from ....utils.arguments import integer_argument, quoted_value
+from ....utils.logging import logger
 from ..executor import FEATURE_NAMES, PlannedStage, RecipePlan, RunState
 from ..fields import cell_fields, feature_fields
 from ..filtering import default_filter_columns
@@ -57,6 +59,8 @@ OPERATION = "pipeline.adt"
 FILTER_SUFFIXES = ("nCounts",)
 DEFAULT_PANEL_EXCLUDE = r"(?i)isotype|control|ctrl"
 """Antibody names that the panel leaves out by default: isotype controls."""
+# The most antibodies that the warning about unmeasured antibodies names.
+_UNMEASURED_EXAMPLES = 5
 
 
 def _excluded(names: np.ndarray, pattern: re.Pattern[str] | None) -> np.ndarray:
@@ -69,12 +73,16 @@ def _excluded(names: np.ndarray, pattern: re.Pattern[str] | None) -> np.ndarray:
     )
 
 
-def _panel_stage(assay: str, pattern: re.Pattern[str] | None) -> PlannedStage:
+def _panel_stage(
+    assay: str, pattern: re.Pattern[str] | None, measured: np.ndarray
+) -> PlannedStage:
+    """Return the stage that keeps the antibodies of ``measured`` that ``pattern`` does not match."""
+
     def action(state: RunState) -> Outputs:
         assert state.feature_names is not None
         ref = state.store._features_snapshot(
             from_assay=assay,
-            mask=~_excluded(state.feature_names, pattern),
+            mask=~_excluded(state.feature_names, pattern) & measured,
         )
         return (("panel", ref),)
 
@@ -85,8 +93,14 @@ def _resolve_panel(
     store: Any,
     assay: str,
     value: object,
-) -> tuple[re.Pattern[str] | None, dict[str, Any], int]:
-    """Return the exclusion pattern, the recorded settings, and the panel size."""
+) -> tuple[re.Pattern[str] | None, np.ndarray, dict[str, Any], int]:
+    """Return the exclusion pattern, the antibodies that every source measured, the recorded settings, and the panel size.
+
+    A merged store records which antibodies each of its sources measured,
+    and the panel leaves out those that not every source measured, whose
+    zero counts in the other sources' cells are no measurement, with a
+    warning that names them. The run records them as ``unmeasured``.
+    """
     _enabled, settings = stage_settings("panel", value, optional=False)
     raw = settings.get("exclude", DEFAULT_PANEL_EXCLUDE)
     if raw is not None and (not isinstance(raw, str) or not raw):
@@ -95,19 +109,37 @@ def _resolve_panel(
         pattern = None if raw is None else re.compile(raw)
     except re.error as error:
         raise ValueError(f"panel['exclude'] is not a valid pattern: {error}") from error
-    names = np.asarray(store._get_assay(assay).feats.fetch_all("names")).astype(str)
+    features = store._get_assay(assay).feats
+    names = np.asarray(features.fetch_all("names")).astype(str)
     excluded = _excluded(names, pattern)
-    kept = int(np.count_nonzero(~excluded))
+    measured = features_measured_by_every_source(features)
+    unmeasured = ~measured & ~excluded
+    kept = int(np.count_nonzero(~excluded & measured))
     if kept < 2:
+        unmeasured_words = (
+            f" and the {int(unmeasured.sum())} that not every source of the "
+            "merged store measured"
+            if unmeasured.any()
+            else ""
+        )
         raise ValueError(
             f"The ADT panel keeps {kept} of {len(names)} antibodies after "
-            f"panel['exclude']={raw!r}; it needs at least two"
+            f"panel['exclude']={raw!r}{unmeasured_words}; it needs at least two"
         )
-    return (
-        pattern,
-        {"exclude": raw, "excluded": names[excluded].tolist()},
-        kept,
-    )
+    recorded: dict[str, Any] = {"exclude": raw, "excluded": names[excluded].tolist()}
+    if unmeasured.any():
+        left_out = names[unmeasured].tolist()
+        listed = ", ".join(map(quoted_value, left_out[:_UNMEASURED_EXAMPLES]))
+        more = len(left_out) - _UNMEASURED_EXAMPLES
+        logger.warning(
+            "The ADT panel leaves out the antibodies that not every source of the "
+            "merged store measured, whose zero counts in the cells of the other "
+            f"sources are no measurement: {listed}"
+            + (f" and {more} more" if more > 0 else "")
+            + ". The run records them as the panel's 'unmeasured'."
+        )
+        recorded["unmeasured"] = left_out
+    return pattern, measured, recorded, kept
 
 
 def resolve_adt(
@@ -148,7 +180,9 @@ def resolve_adt(
     resolved_species = resolve_species(species)
     membership_strength = bool_argument(membership_strength, "membership_strength")
     markers = bool_argument(markers, "markers")
-    pattern, panel_config, panel_size = _resolve_panel(store, assay_name, panel)
+    pattern, measured, panel_config, panel_size = _resolve_panel(
+        store, assay_name, panel
+    )
     normalization_settings = resolve_normalization(store, assay_name, normalization)
     _pca, pca_settings = stage_settings("pca", pca, optional=False)
     # A panel holds few antibodies, so PCA keeps one dimension fewer than the
@@ -220,7 +254,7 @@ def resolve_adt(
             extra_snapshots=extra_snapshots,
         ),
         filtering_stage(filtering_config, source),
-        _panel_stage(assay_name, pattern),
+        _panel_stage(assay_name, pattern, measured),
         normalization_stage("panel", normalization_settings.flags),
         pca_stage(pca_dims, pca_settings),
         harmony_stage(harmony_columns, harmony_settings),

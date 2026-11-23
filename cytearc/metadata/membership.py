@@ -33,6 +33,15 @@ Display reads show those cells as missing (see :func:`measured_rows`).
 Membership is read in bounded blocks. A selection of a few cells reads only
 the chunks that hold them; a selection of at least one cell in
 ``_DENSE_SELECTION`` streams the column once.
+
+A merge records, the same way, which features each of its sources measured:
+one Boolean feature column for each source that holds the assay, named by
+:func:`~cytearc.storage.metadata_keys.measured_features_column` and marked
+by the ``role`` attribute
+:data:`~cytearc.storage.metadata_keys.MEASURED_FEATURES_ROLE` (see
+:func:`measured_feature_columns`). A feature table without such columns, as
+an import or an earlier release writes it, counts every feature as measured
+by every source (see :func:`features_measured_by_every_source`).
 """
 
 from collections.abc import Callable, Iterable, Mapping
@@ -44,6 +53,7 @@ import numpy as np
 from ..storage.artifacts import ValueFingerprintBuilder
 from ..storage.metadata_keys import (
     ASSAY_MEMBERSHIP_ROLE,
+    MEASURED_FEATURES_ROLE,
     assay_membership_attributes,
     assay_membership_column,
 )
@@ -168,6 +178,51 @@ def membership_columns(table: Any) -> dict[str, str]:
             assert column is not None
             found[assay] = column
     return found
+
+
+def measured_feature_columns(table: Any) -> list[str]:
+    """Return the feature columns that record which features each source of a merge measured.
+
+    A merge writes one Boolean column for each source that holds the assay,
+    named by :func:`~cytearc.storage.metadata_keys.measured_features_column`,
+    whose ``role`` attribute is
+    :data:`~cytearc.storage.metadata_keys.MEASURED_FEATURES_ROLE`; other
+    feature tables hold none.
+
+    Raises:
+        ValueError: If a column with that role is not Boolean or has missing
+            values.
+    """
+    names, column_array = _column_arrays(table)
+    found: list[str] = []
+    for name in names:
+        array = column_array(name)
+        if getattr(array, "attrs", {}).get("role") != MEASURED_FEATURES_ROLE:
+            continue
+        if (
+            np.dtype(array.dtype).kind != "b"
+            or metadata_missing_mask(table, name) is not None
+        ):
+            raise ValueError(
+                f"Feature column {name!r} records which features a source of a "
+                "merge measured, so it must be Boolean without missing values; "
+                "merge the sources again to write it."
+            )
+        found.append(name)
+    return found
+
+
+def features_measured_by_every_source(table: Any) -> np.ndarray:
+    """Return whether every source of a merge measured each feature of ``table``.
+
+    A feature counts as measured by every source when each column of
+    :func:`measured_feature_columns` is True for it, and every feature of a
+    table without such columns does.
+    """
+    measured = np.ones(int(table.N), dtype=bool)
+    for name in measured_feature_columns(table):
+        measured &= np.asarray(table.fetch_all(name), dtype=bool)
+    return measured
 
 
 def exported_membership(

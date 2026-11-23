@@ -20,6 +20,7 @@ from ..merge.features import (
     FeatureAlignment,
     align_features,
     resolve_merge_dtype,
+    select_features,
     shared_features_warning,
     unshared_features_warning,
 )
@@ -73,6 +74,7 @@ from ..storage.identity import (
 )
 from ..storage.metadata_keys import (
     assay_membership_column,
+    measured_features_column,
     validate_metadata_column_name,
 )
 from ..storage.parallel import stream_shards
@@ -536,22 +538,9 @@ def _feature_alignment(
 ) -> tuple[FeatureAlignment, np.ndarray, str]:
     union = align_features(assays, names, require_overlap=False)
     dtype = resolve_merge_dtype(assays, union.featOrderMap)
-    presence = np.zeros(union.nFeats, dtype=np.int64)
-    for mapping in union.featOrderMap:
-        presence[mapping] += 1
-    selected = np.flatnonzero(
-        presence == len(assays) if features == "intersection" else presence > 0
-    )
-    if selected.size == 0:
+    alignment = select_features(assay, union, features)
+    if alignment.nFeats == 0:
         raise ValueError("The composite feature space is empty")
-    positions = np.full(union.nFeats, -1, dtype=np.int64)
-    positions[selected] = np.arange(selected.size)
-    mappings = [positions[mapping] for mapping in union.featOrderMap]
-    frame = union.mergedFeatsMap.iloc[selected].copy().reset_index(drop=True)
-    frame["idx"] = np.arange(selected.size)
-    alignment = FeatureAlignment(
-        frame, mappings, selected.size, union.overlapFraction, union.sourcePresent
-    )
     # A union reads zero counts where a source lacks a feature, as a merge
     # writes them, and warns as a merge does. An intersection leaves those
     # features out, and warns when it keeps under a tenth of the union.
@@ -562,11 +551,11 @@ def _feature_alignment(
         if unshared is not None:
             logger.warning(unshared)
     else:
-        shared = shared_features_warning(assay, union, names)
+        shared = shared_features_warning(assay, union, names, combination="composite")
         if shared is not None:
             logger.warning(shared)
-    columns = np.full((len(assays), selected.size), -1, dtype=np.int64)
-    for index, mapping in enumerate(mappings):
+    columns = np.full((len(assays), alignment.nFeats), -1, dtype=np.int64)
+    for index, mapping in enumerate(alignment.featOrderMap):
         source_columns = np.flatnonzero(mapping >= 0)
         columns[index, mapping[source_columns]] = source_columns
     return alignment, columns, dtype
@@ -811,9 +800,12 @@ def create_composite(
                   where a source lacks one, and logs a warning that gives
                   the number of features each such source lacks and names up
                   to five of them. ``"intersection"`` keeps the features that
-                  every source holds, and logs a warning that gives their
+                  every source measured, and logs a warning that gives their
                   number, the union's, and how many each source's absence
                   would keep, when they are fewer than a tenth of the union.
+                  Either way the feature table records which features each
+                  source measured, in a Boolean column ``measured_in_<name>``
+                  for each, as a merge does.
         assay: Assay to combine, which every source holds as one type.
         rows: Positions of the cells to include, by source name. The
               positions select cells and don't order them. A source left
@@ -858,6 +850,14 @@ def create_composite(
         not isinstance(name, str) or not name.strip() or "__" in name for name in names
     ):
         raise ValueError("Source names must be nonempty strings without '__'")
+    for name in names:
+        try:
+            validate_metadata_column_name(measured_features_column(name))
+        except ValueError as error:
+            raise ValueError(
+                f"Source name {name!r} cannot name the feature column that "
+                f"records which features it measured: {error}"
+            ) from error
     datasets = list(sources.values())
     if any(not isinstance(source, DataStore) for source in datasets):
         raise TypeError("Every source must be an open DataStore")
@@ -1202,6 +1202,7 @@ def _write_composite(
             resources=resources,
             resident_bytes=resident,
             profile=profile,
+            measured=dict(zip(names, alignment.measuredFeatures, strict=True)),
         )
         del feature_tables
         if metadata_cache is not None:

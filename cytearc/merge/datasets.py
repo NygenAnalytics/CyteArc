@@ -1,6 +1,7 @@
 from dataclasses import dataclass, replace
 from typing import Any
 
+import numpy as np
 import zarr
 
 from ..metadata.rows import metadata_column_fingerprint
@@ -19,6 +20,7 @@ from ..storage.io_policy import StorageIoPolicy
 from ..storage.layout import ZarrArraySpec, _group_zarr_format, count_array_spec
 from ..storage.metadata_keys import (
     assay_membership_column,
+    measured_features_column,
     validate_metadata_column_name,
 )
 from ..storage.profiles import (
@@ -40,8 +42,11 @@ from ..storage.types import as_zarr_array, as_zarr_group
 from ..utils.logging import logger
 from .features import (
     FeatureKey,
+    FeatureSet,
     align_features,
     resolve_merge_dtype,
+    select_features,
+    shared_features_warning,
     unshared_features_warning,
 )
 from .metadata import (
@@ -182,6 +187,13 @@ class DataStoreMerge:
                      sources that use different ID schemes for the same genes.
                      The merged IDs are then the names, and features that share
                      a name within one source are summed.
+        features: ``"union"``, the default, keeps every feature of any
+                  source that holds the assay. ``"intersection"`` keeps the
+                  features that every source holding the assay measured,
+                  such as the antibodies that two panels share, logs a
+                  warning when they are fewer than a tenth of the union, and
+                  refuses to merge when it keeps no feature of an assay that
+                  has some.
 
     Merged counts use the common type of the source count dtypes, widened so
     that features summed by name cannot overflow it.
@@ -193,11 +205,20 @@ class DataStoreMerge:
     values, which those summaries leave out, so the merge counts them in a
     read of the source's counts, once as it plans and once before it writes.
 
-    Each merged assay holds the union of its sources' features, and the cells
-    of a source that holds the assay but lacks one of its features get zero
-    counts of that feature. Planning then logs a warning for the assay with
-    the number of features that each such source lacks and up to five of
-    their names, so that a merge of different antibody panels is flagged.
+    With ``features="union"``, the cells of a source that holds the assay but
+    lacks one of its features get zero counts of that feature. Planning then
+    logs a warning for the assay with the number of features that each such
+    source lacks and up to five of their names, so that a merge of different
+    antibody panels is flagged. The merged feature table records which
+    features each source that holds the assay measured, in a Boolean column
+    ``measured_in_<name>`` for each, such as ``measured_in_ctrl``, which
+    ``ds.ADT.feats.to_pandas_dataframe(["names", "measured_in_ctrl",
+    "measured_in_stim"])`` reads; subsets and repacks keep them. The ADT
+    recipe leaves the antibodies that not every source measured out of its
+    panel. A source that a merge wrote counts a feature as measured when
+    every one of its own sources measured it, and its own columns are not
+    copied. A source column of the same name as one of these is left out
+    with a warning.
 
     Merged cells are in an order of their own, neither the sources' order nor
     a uniform random order. The cells of each source are split into blocks,
@@ -230,6 +251,7 @@ class DataStoreMerge:
         io: StorageIoPolicy | None = None,
         missing_assay_policy: MissingAssayPolicy = "zero_fill",
         feature_key: FeatureKey = "ids",
+        features: FeatureSet = "union",
     ) -> None:
         overwrite = bool_argument(overwrite, "overwrite")
         reset_cell_filter = bool_argument(reset_cell_filter, "reset_cell_filter")
@@ -253,6 +275,18 @@ class DataStoreMerge:
             )
         if feature_key not in {"ids", "names"}:
             raise ValueError("feature_key must be one of 'ids' or 'names'")
+        if features not in {"union", "intersection"}:
+            raise ValueError(
+                f"features must be 'union' or 'intersection', got {features!r}"
+            )
+        for name in names:
+            try:
+                validate_metadata_column_name(measured_features_column(name))
+            except ValueError as error:
+                raise ValueError(
+                    f"Source name {name!r} cannot name the feature column that "
+                    f"records which features it measured: {error}"
+                ) from error
         # Zarr would nest a merged column whose name holds a path separator.
         if source_column is not None:
             validate_metadata_column_name(source_column)
@@ -270,6 +304,7 @@ class DataStoreMerge:
         self.sourceColumn = source_column
         self.missingAssayPolicy = missing_assay_policy
         self.featureKey = feature_key
+        self.features = features
         self.policy = policy
         self.io = io
         self.resources = resolve_budget(
@@ -371,18 +406,39 @@ class DataStoreMerge:
                         if source is not None
                     },
                 )
-                alignment = align_features(sources, self.names, key=self.featureKey)
+                union = align_features(sources, self.names, key=self.featureKey)
+                alignment = select_features(assay_name, union, self.features)
                 self._alignments[assay_name] = alignment
-                unshared = unshared_features_warning(
-                    assay_name, alignment, self.names, combination="merge"
+                features_warning = (
+                    unshared_features_warning(
+                        assay_name, alignment, self.names, combination="merge"
+                    )
+                    if self.features == "union"
+                    else shared_features_warning(
+                        assay_name, union, self.names, combination="merge"
+                    )
                 )
-                if unshared is not None:
-                    logger.warning(unshared)
+                if features_warning is not None:
+                    logger.warning(features_warning)
             self._sourceMembership = self._source_membership()
         except BaseException:
             # A failed preparation leaves no partial state for a later call.
             self._reset_prepared_state()
             raise
+
+    def _measured_features(self, assay_name: str) -> dict[str, np.ndarray]:
+        """Return whether each source that holds ``assay_name`` measured each merged feature."""
+        alignment = self._alignments[assay_name]
+        return {
+            name: measured
+            for name, measured, present in zip(
+                self.names,
+                alignment.measuredFeatures,
+                alignment.sourcePresent,
+                strict=True,
+            )
+            if present
+        }
 
     def _assay_sources(self, assay_name: str) -> list[Any | None]:
         """Return each source's assay, or None for a source without it."""
@@ -572,6 +628,9 @@ class DataStoreMerge:
             },
             "missingAssayPolicy": self.missingAssayPolicy,
             "featureKey": self.featureKey,
+            # Merges of the union record no features, as merges written
+            # before the setting did, so that they still resume.
+            **({} if self.features == "union" else {"features": self.features}),
             "outWorkspace": self.outWorkspace,
             "nCells": self._rowPlan.nCells,
         }
@@ -1105,6 +1164,7 @@ class DataStoreMerge:
                         self._alignments[assay_name].nFeats,
                         resources=self.resources,
                         resident_bytes=counts_t_resident,
+                        sources=self._measured_features(assay_name),
                     )
                 else:
                     assert layout is not None
@@ -1369,6 +1429,7 @@ class DataStoreMerge:
                     resident_bytes=self._rowPlan.resident_bytes()
                     + sum(item.resident_bytes() for item in self._alignments.values()),
                     profile=self.profile,
+                    measured=self._measured_features(assay_name),
                 )
                 write_assay_counts(
                     root,

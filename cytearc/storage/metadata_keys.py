@@ -8,7 +8,9 @@ missing-value masks linked through ``__cytearc_missing__<name>``, and the
 categories of categorical columns linked through
 ``__cytearc_categories__<name>`` are reserved.
 The cell column named by :func:`assay_membership_column` records which cells
-an assay measures.
+an assay measures, and the feature columns named by
+:func:`measured_features_column` which features each source of a merge
+measured.
 """
 
 from collections.abc import Iterable
@@ -36,6 +38,19 @@ def assay_membership_column(assay: str) -> str:
 def assay_membership_attributes(assay: str) -> dict[str, str]:
     """Return the attributes that mark ``<assay>_I`` as the membership of ``assay``."""
     return {"role": ASSAY_MEMBERSHIP_ROLE, "assay": assay}
+
+
+MEASURED_FEATURES_ROLE = "measured_features"
+"""``role`` attribute of a feature column that records which features one source of a merge measured."""
+
+
+def measured_features_column(source: str) -> str:
+    """Return the name of the feature column that records which features ``source`` measured.
+
+    A merge writes one, a Boolean column whose ``role`` attribute is
+    :data:`MEASURED_FEATURES_ROLE`, for each source that holds the assay.
+    """
+    return f"measured_in_{source}"
 
 
 _UNSTORABLE_NAMES = frozenset({"", ".", ".."})

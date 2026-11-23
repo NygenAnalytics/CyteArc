@@ -253,7 +253,11 @@ that every integrated assay measured (chain the call per assay, pass it as the f
 run's `cells=` with `filtering=True`, then `cells=<first run>` to the others; modality recipes and
 `ds.pipeline.multimodal` are in `pipeline-runs-and-artifacts.md`). `overwrite=True`
 restarts only an earlier merge; a destination that holds another store or other files raises
-`ValueError`.
+`ValueError`. Studies of different antibody panels: the default `features="union"` writes zero
+counts for an antibody in the cells of a study that never stained it and records each study's
+panel in the feature columns `measured_in_<name>`, which the ADT recipe reads to leave those
+antibodies out of its panel; `features="intersection"` keeps only the antibodies that every
+study measured.
 `out_workspace=` adds a workspace to an existing CyteArc store and keeps its other members. Mapping
 keeps a reference fixed; the query is another store.
 

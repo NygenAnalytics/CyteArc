@@ -454,6 +454,12 @@ a membership column counts every cell as measured; rebuild it under a new label 
 was partially measured. A column for an assay that is absent from a store is ordinary metadata,
 and `drop` can remove it.
 
+(measured_features)=
+
+## Features each source measured
+
+A merge and a composite record in their feature table which features each source that holds the assay measured: a Boolean column `measured_in_<source>` for each such source (`storage.metadata_keys.measured_features_column`), true for the features that the source measured, without a missing-value mask, and with the attribute `role="measured_features"`, by which readers find the columns (`metadata.membership.measured_feature_columns`); a column of that role that is not Boolean or has missing values raises `ValueError` when read. A source that a merge wrote counts a feature as measured when every one of its own columns is true for it, and the merge does not copy those columns, which describe its own sources; a source column of the same name as one that the merge writes is left out with a warning. Subset, repack, data-only repack and mount copy the columns with their attributes. `features_measured_by_every_source` combines the columns, and counts every feature of a table without them, as imports and earlier releases write it, as measured by every source. The ADT recipe's panel leaves out the antibodies that not every source measured.
+
 ## Count arrays
 
 `counts` is the cell-major assay matrix (`n_cells` × `n_features`).
