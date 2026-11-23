@@ -33,6 +33,19 @@ Display reads show those cells as missing (see :func:`measured_rows`).
 Membership is read in bounded blocks. A selection of a few cells reads only
 the chunks that hold them; a selection of at least one cell in
 ``_DENSE_SELECTION`` streams the column once.
+
+A merge whose sources measured different features records, the same way,
+which features each of them measured: one Boolean feature column for each
+source that holds the assay, named by
+:func:`~cytearc.storage.metadata_keys.measured_features_column`, whose
+``role`` and ``source`` attributes are those that
+:func:`~cytearc.storage.metadata_keys.measured_features_attributes` returns
+(see :func:`measured_feature_columns`). A feature table without such columns,
+as an import or an earlier release writes it, counts every feature as
+measured by every source (see :func:`features_measured_by_every_source`). An
+export declares the record of the exported assay in
+``uns["cytearc"]["measuredFeatures"]``, which maps the assay to each column
+and its source, so an import restores it.
 """
 
 from collections.abc import Callable, Iterable, Mapping
@@ -44,8 +57,10 @@ import numpy as np
 from ..storage.artifacts import ValueFingerprintBuilder
 from ..storage.metadata_keys import (
     ASSAY_MEMBERSHIP_ROLE,
+    MEASURED_FEATURES_ROLE,
     assay_membership_attributes,
     assay_membership_column,
+    measured_features_column,
 )
 from .rows import (
     iter_metadata_column_blocks,
@@ -83,6 +98,9 @@ CYTEARC_UNS_KEY = "cytearc"
 
 MEMBERSHIP_UNS_KEY = "assayMembership"
 """Key, in CyteArc's ``uns`` namespace, of each assay's membership column."""
+
+MEASURED_FEATURES_UNS_KEY = "measuredFeatures"
+"""Key, in CyteArc's ``uns`` namespace, of each assay's record of which features each source measured."""
 
 
 def membership_attributes(assay: str) -> dict[str, str]:
@@ -168,6 +186,120 @@ def membership_columns(table: Any) -> dict[str, str]:
             assert column is not None
             found[assay] = column
     return found
+
+
+def measured_feature_columns(table: Any) -> dict[str, str]:
+    """Return the feature columns that record which features each source of a merge measured, mapped to their sources.
+
+    A merge or a composite whose sources measured different features writes
+    one Boolean column for each source that holds the assay, named by
+    :func:`~cytearc.storage.metadata_keys.measured_features_column` of the
+    source that its ``source`` attribute keeps, with the ``role`` attribute
+    :data:`~cytearc.storage.metadata_keys.MEASURED_FEATURES_ROLE`; other
+    feature tables hold none.
+
+    Raises:
+        ValueError: If a column with that role is not such a column, as an
+            earlier release writes one when it merges a store that holds the
+            record, naming the call that drops it.
+    """
+    names, column_array = _column_arrays(table)
+    found: dict[str, str] = {}
+    for name in names:
+        array = column_array(name)
+        attributes = getattr(array, "attrs", {})
+        if attributes.get("role") != MEASURED_FEATURES_ROLE:
+            continue
+        source = attributes.get("source")
+        problem: str | None = None
+        if not isinstance(source, str) or measured_features_column(source) != name:
+            problem = f"its source attribute, {source!r}, does not name it"
+        elif np.dtype(array.dtype).kind != "b":
+            problem = f"it has dtype {np.dtype(array.dtype)}, not bool"
+        elif metadata_missing_mask(table, name) is not None:
+            problem = "it has missing values"
+        if problem is not None:
+            # A feature table is the featureData group of its assay.
+            assay = str(table._group.path).strip("/").split("/")[-2]
+            store = (
+                f"ds.{assay}" if assay.isidentifier() else f"ds.get_assay({assay!r})"
+            )
+            raise ValueError(
+                f"Feature column {name!r} has the role of a record of which "
+                f"features one source of a merge measured, but {problem}. Earlier "
+                "releases of CyteArc copy such a column without its source and "
+                "with missing values when they merge stores. Drop it with "
+                f"{store}.feats.drop({name!r}), or merge the sources again to "
+                "record what each one measured."
+            )
+        found[name] = str(source)
+    return found
+
+
+def features_measured_by_every_source(table: Any) -> np.ndarray:
+    """Return whether every source of a merge measured each feature of ``table``.
+
+    A feature counts as measured by every source when each column of
+    :func:`measured_feature_columns` is True for it, and every feature of a
+    table without such columns does.
+    """
+    measured = np.ones(int(table.N), dtype=bool)
+    for name in measured_feature_columns(table):
+        measured &= np.asarray(table.fetch_all(name), dtype=bool)
+    return measured
+
+
+def exported_measured_features(table: Any, assay: str) -> dict[str, dict[str, str]]:
+    """Return the record of which features each source measured that an export of ``assay`` declares."""
+    columns = measured_feature_columns(table)
+    return {assay: columns} if columns else {}
+
+
+def measured_features_declaration(
+    declared: Mapping[str, Mapping[str, str]],
+) -> dict[str, dict[str, dict[str, dict[str, str]]]]:
+    """Return the AnnData ``uns`` entries that declare each assay's record of what its sources measured."""
+    if not declared:
+        return {}
+    return {
+        CYTEARC_UNS_KEY: {
+            MEASURED_FEATURES_UNS_KEY: {
+                assay: dict(columns) for assay, columns in declared.items()
+            }
+        }
+    }
+
+
+def parse_measured_features_declaration(
+    declared: Mapping[str, Mapping[str, str]],
+) -> dict[str, dict[str, str]]:
+    """Check and return each assay's record of what its sources measured that an AnnData ``uns`` declares."""
+    for assay, columns in declared.items():
+        for column, source in columns.items():
+            if measured_features_column(source) != column:
+                raise ValueError(
+                    f"uns['{CYTEARC_UNS_KEY}']['{MEASURED_FEATURES_UNS_KEY}'] maps "
+                    f"column {column!r} of assay {assay!r} to the source {source!r}; "
+                    "CyteArc declares the column of each source as "
+                    "'measured_in_<source>'. Remove the entry from the file or "
+                    "correct it."
+                )
+    return {assay: dict(columns) for assay, columns in declared.items()}
+
+
+def checked_measured_features_values(
+    values: np.ndarray, missing: np.ndarray, *, column: str, assay: str
+) -> None:
+    """Check the values of a column that a file declares as a record of what a source of ``assay`` measured."""
+    declared = (
+        f"Column {column!r} is declared as the record of which features a source "
+        f"of assay {assay!r} measured, but it"
+    )
+    array = np.asarray(values)
+    if array.dtype.kind != "b":
+        raise ValueError(f"{declared} has dtype {array.dtype}, not bool")
+    if np.asarray(missing, dtype=bool).any():
+        raise ValueError(f"{declared} has missing values")
 
 
 def exported_membership(

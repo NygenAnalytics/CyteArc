@@ -551,6 +551,11 @@ def fit_assay_counts_layout(
     )
 
 
+def _kept_columns(counts: ChunkedArray, columns: np.ndarray) -> ChunkedArray:
+    """Return the ``columns`` of ``counts``, which are all of them or a selection."""
+    return counts if columns.size == int(counts.shape[1]) else counts[:, columns]
+
+
 def write_assay_counts(
     root: zarr.Group,
     assay_name: str,
@@ -610,11 +615,22 @@ def write_assay_counts(
         block_rows * source_n_feats * value_bytes if block_rows > batch_rows else 0
     )
 
+    # A source feature that the merged features leave out, as an
+    # intersection does, maps to -1, and the read leaves its column out.
+    kept_columns = [
+        np.flatnonzero(order_map >= 0) for order_map in alignment.featOrderMap
+    ]
+    kept_maps = [
+        order_map[columns]
+        for order_map, columns in zip(alignment.featOrderMap, kept_columns, strict=True)
+    ]
     # The sources' counts are read within the merge's budget, not each
     # source store's own.
     readers = [
-        None if assay is None else assay.rawData._with_resources(resources)
-        for assay in assays
+        None
+        if assay is None
+        else _kept_columns(assay.rawData._with_resources(resources), columns)
+        for assay, columns in zip(assays, kept_columns, strict=True)
     ]
 
     def source_batches(
@@ -650,7 +666,7 @@ def write_assay_counts(
 
     if all(
         np.unique(order_map).size == order_map.size
-        for assay, order_map in zip(assays, alignment.featOrderMap, strict=True)
+        for assay, order_map in zip(assays, kept_maps, strict=True)
         if assay is not None and int(assay.feats.N) > 0
     ):
         shard_rows = array_shard_rows(destination)
@@ -672,7 +688,7 @@ def write_assay_counts(
                 else:
                     yield scatter_block_dense(
                         values,
-                        alignment.featOrderMap[source_idx],
+                        kept_maps[source_idx],
                         alignment.nFeats,
                         destination_dtype,
                     )
@@ -736,7 +752,7 @@ def write_assay_counts(
             if values is None
             else remap_block_to_coo(
                 values,
-                alignment.featOrderMap[source_idx],
+                kept_maps[source_idx],
                 alignment.nFeats,
                 resources.workers,
                 destination_dtype,

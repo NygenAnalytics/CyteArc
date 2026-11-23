@@ -8,7 +8,9 @@ missing-value masks linked through ``__cytearc_missing__<name>``, and the
 categories of categorical columns linked through
 ``__cytearc_categories__<name>`` are reserved.
 The cell column named by :func:`assay_membership_column` records which cells
-an assay measures.
+an assay measures, and the feature columns named by
+:func:`measured_features_column` which features each source of a merge
+measured, under names that :func:`measured_features_columns` checks.
 """
 
 from collections.abc import Iterable
@@ -36,6 +38,52 @@ def assay_membership_column(assay: str) -> str:
 def assay_membership_attributes(assay: str) -> dict[str, str]:
     """Return the attributes that mark ``<assay>_I`` as the membership of ``assay``."""
     return {"role": ASSAY_MEMBERSHIP_ROLE, "assay": assay}
+
+
+MEASURED_FEATURES_ROLE = "measured_features"
+"""``role`` attribute of a feature column that records which features one source of a merge measured."""
+
+
+def measured_features_column(source: str) -> str:
+    """Return the name of the feature column that records which features ``source`` measured.
+
+    It is ``measured_in_<source>``, with ``_`` in place of each ``/`` and
+    ``\\`` (:func:`metadata_column_key`). A merge or a composite writes it as
+    a Boolean column with the attributes that
+    :func:`measured_features_attributes` returns, which keep the source's own
+    name.
+    """
+    return metadata_column_key(f"measured_in_{source}")
+
+
+def measured_features_attributes(source: str) -> dict[str, str]:
+    """Return the attributes that mark a feature column as the record of what ``source`` measured."""
+    return {"role": MEASURED_FEATURES_ROLE, "source": source}
+
+
+def measured_features_columns(sources: Iterable[str]) -> dict[str, str]:
+    """Return the column that records which features each source measured, by source.
+
+    Raises:
+        ValueError: If the columns of two sources are named alike once case
+            is ignored, as a file system that ignores case stores them as one
+            column.
+    """
+    columns: dict[str, str] = {}
+    first: dict[str, str] = {}
+    for source in sources:
+        column = measured_features_column(source)
+        other = first.setdefault(column.casefold(), source)
+        if other != source:
+            raise ValueError(
+                f"Sources {other!r} and {source!r} would record which features "
+                f"they measured in the feature columns {columns[other]!r} and "
+                f"{column!r}, which a file system that ignores case stores as one "
+                "column. Name the sources so that the names differ in more than "
+                "case, with '/' and '\\' counted as '_'."
+            )
+        columns[source] = column
+    return columns
 
 
 _UNSTORABLE_NAMES = frozenset({"", ".", ".."})

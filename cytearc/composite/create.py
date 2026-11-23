@@ -5,7 +5,7 @@ import math
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
 import numpy as np
@@ -18,8 +18,11 @@ from zarr.storage import FsspecStore, LocalStore, WrapperStore
 from ..assay.classification import default_feature_sets, declared_assay_type
 from ..merge.features import (
     FeatureAlignment,
+    FeatureSet,
     align_features,
+    feature_record,
     resolve_merge_dtype,
+    select_features,
     shared_features_warning,
     unshared_features_warning,
 )
@@ -532,41 +535,29 @@ def _feature_alignment(
     assay: str,
     assays: list[Any],
     names: list[str],
-    features: Literal["union", "intersection"],
+    features: FeatureSet,
+    assay_type: str,
 ) -> tuple[FeatureAlignment, np.ndarray, str]:
     union = align_features(assays, names, require_overlap=False)
     dtype = resolve_merge_dtype(assays, union.featOrderMap)
-    presence = np.zeros(union.nFeats, dtype=np.int64)
-    for mapping in union.featOrderMap:
-        presence[mapping] += 1
-    selected = np.flatnonzero(
-        presence == len(assays) if features == "intersection" else presence > 0
-    )
-    if selected.size == 0:
+    alignment = select_features(assay, union, features)
+    if alignment.nFeats == 0:
         raise ValueError("The composite feature space is empty")
-    positions = np.full(union.nFeats, -1, dtype=np.int64)
-    positions[selected] = np.arange(selected.size)
-    mappings = [positions[mapping] for mapping in union.featOrderMap]
-    frame = union.mergedFeatsMap.iloc[selected].copy().reset_index(drop=True)
-    frame["idx"] = np.arange(selected.size)
-    alignment = FeatureAlignment(
-        frame, mappings, selected.size, union.overlapFraction, union.sourcePresent
-    )
     # A union reads zero counts where a source lacks a feature, as a merge
     # writes them, and warns as a merge does. An intersection leaves those
     # features out, and warns when it keeps under a tenth of the union.
     if features == "union":
         unshared = unshared_features_warning(
-            assay, alignment, names, combination="composite"
+            assay, alignment, names, combination="composite", assay_type=assay_type
         )
         if unshared is not None:
             logger.warning(unshared)
     else:
-        shared = shared_features_warning(assay, union, names)
+        shared = shared_features_warning(assay, union, names, combination="composite")
         if shared is not None:
             logger.warning(shared)
-    columns = np.full((len(assays), selected.size), -1, dtype=np.int64)
-    for index, mapping in enumerate(mappings):
+    columns = np.full((len(assays), alignment.nFeats), -1, dtype=np.int64)
+    for index, mapping in enumerate(alignment.featOrderMap):
         source_columns = np.flatnonzero(mapping >= 0)
         columns[index, mapping[source_columns]] = source_columns
     return alignment, columns, dtype
@@ -775,7 +766,7 @@ def create_composite(
     sources: Mapping[str, "DataStore"],
     *,
     at: ZarrLocation | Path,
-    features: Literal["union", "intersection"],
+    features: FeatureSet,
     assay: str = "RNA",
     rows: Mapping[str, Sequence[int] | np.ndarray] | None = None,
     mem_budget: int | str | None = None,
@@ -811,9 +802,13 @@ def create_composite(
                   where a source lacks one, and logs a warning that gives
                   the number of features each such source lacks and names up
                   to five of them. ``"intersection"`` keeps the features that
-                  every source holds, and logs a warning that gives their
+                  every source measured, and logs a warning that gives their
                   number, the union's, and how many each source's absence
                   would keep, when they are fewer than a tenth of the union.
+                  When the sources measured different features, the feature
+                  table records which features each source measured, in a
+                  Boolean column ``measured_in_<name>`` for each, as a merge
+                  does.
         assay: Assay to combine, which every source holds as one type.
         rows: Positions of the cells to include, by source name. The
               positions select cells and don't order them. A source left
@@ -903,7 +898,7 @@ def _write_composite(
     selections: dict[str, Sequence[int] | np.ndarray],
     *,
     assay: str,
-    features: Literal["union", "intersection"],
+    features: FeatureSet,
     target: ZarrLocation,
     resources: ResourceBudget,
     storage_options: dict[str, Any] | None,
@@ -980,9 +975,13 @@ def _write_composite(
     for source, source_assay in zip(datasets, assays, strict=True):
         prefetch_metadata_listing(source.cells._group)
         prefetch_metadata_listing(source_assay.feats._group)
+    (assay_type,) = assay_types
     alignment, feature_columns, dtype = _feature_alignment(
-        assay, assays, names, features
+        assay, assays, names, features, assay_type
     )
+    # Names whose record columns would collide fail here, before anything is
+    # written.
+    measured_record = feature_record(alignment, names)
     row_plan = build_row_plan(
         [source.cells.N for source in datasets],
         [int(source.rawData.chunksize[0]) for source in assays],
@@ -1202,6 +1201,7 @@ def _write_composite(
             resources=resources,
             resident_bytes=resident,
             profile=profile,
+            measured=measured_record,
         )
         del feature_tables
         if metadata_cache is not None:

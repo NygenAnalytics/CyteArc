@@ -20,7 +20,9 @@ class AssayMergePlan:
     features, so the assay then reports ``0.0``, while an assay of no features
     in any source reports ``1.0``. A source without the assay is left out,
     since the merge marks its cells as not measured, so an assay that only one
-    source holds reports ``1.0``.
+    source holds reports ``1.0``. A merge with ``features="intersection"``
+    keeps only the features that every source holding the assay measured, so
+    it reports ``1.0``.
     """
 
     assayName: str

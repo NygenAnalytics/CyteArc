@@ -1,5 +1,6 @@
 """Merge, repack, assay schema, and count identity paths."""
 
+import re
 import runpy
 from functools import partial
 import shutil
@@ -10,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import pandas as pd
 import pytest
 import zarr
 from zarr.storage import MemoryStore
@@ -1239,10 +1241,26 @@ def test_merge_reads_signed_counts_within_its_own_budget_whatever_the_sources_bu
 
 
 _GENES = ["G0", "G1"]
-_ZEROS_READ_AS_COUNTS = (
-    " The merge writes zero counts for a feature in the cells of each source "
-    "that lacks it, and analyses read those zeros as measured counts."
-)
+
+
+def _zeros_read_as_counts(first: str = "left", *, adt: bool = False) -> str:
+    """Return how a merge's warning about unmeasured features ends.
+
+    ``first`` is the first source that holds the assay, and ``adt`` whether
+    the assay is of type ADT, which the ADT recipe reads.
+    """
+    if adt:
+        return (
+            " The merge writes zero counts for the features a source lacks; "
+            f"columns such as 'measured_in_{first}' record what each source "
+            "measured, so the ADT recipe leaves those antibodies out of its panel "
+            "and markers, while other analyses read the zeros as counts."
+        )
+    return (
+        " The merge writes zero counts for the features a source lacks, which "
+        f"analyses read as counts; columns such as 'measured_in_{first}' record "
+        "what each source measured."
+    )
 
 
 def test_merge_gives_one_warning_naming_each_assay_whose_sources_share_few_features(
@@ -1279,11 +1297,11 @@ def test_merge_gives_one_warning_naming_each_assay_whose_sources_share_few_featu
         "Assay 'ADT': 18 of the 19 merged features were not measured by every "
         "source that holds the assay. Source 'left' lacks 9: 'b1', 'b2', 'b3', "
         "'b4', 'b5' and 4 more. Source 'right' lacks 9: 'a1', 'a2', 'a3', 'a4', "
-        "'a5' and 4 more." + _ZEROS_READ_AS_COUNTS,
+        "'a5' and 4 more." + _zeros_read_as_counts(adt=True),
         "Assay 'RNA': 20 of the 21 merged features were not measured by every "
         "source that holds the assay. Source 'left' lacks 10: 'y1', 'y2', 'y3', "
         "'y4', 'y5' and 5 more. Source 'right' lacks 10: 'x1', 'x2', 'x3', 'x4', "
-        "'x5' and 5 more." + _ZEROS_READ_AS_COUNTS,
+        "'x5' and 5 more." + _zeros_read_as_counts(),
     ]
 
 
@@ -1322,7 +1340,8 @@ def test_merge_warns_of_the_antibodies_that_each_panel_lacks(tmp_path):
     assert messages == [
         "Assay 'ADT': 5 of the 8 merged features were not measured by every "
         "source that holds the assay. Source 'left' lacks 3: 'CD14', 'CD16', "
-        "'CD19'. Source 'right' lacks 2: 'CD45RA', 'CD27'." + _ZEROS_READ_AS_COUNTS
+        "'CD19'. Source 'right' lacks 2: 'CD45RA', 'CD27'."
+        + _zeros_read_as_counts(adt=True)
     ]
     # The merged counts hold the zeros that the warning describes.
     root = zarr.open_group(destination, mode="r")
@@ -1365,7 +1384,7 @@ def test_merge_names_at_most_five_of_the_genes_that_each_source_lacks(tmp_path):
     assert tail.endswith(
         "xxx', 'h1', 'h2', 'h3', 'h4' and 2,995 more. Source 'right' lacks 200: "
         "'g1000', 'g1001', 'g1002', 'g1003', 'g1004' and 195 more."
-        + _ZEROS_READ_AS_COUNTS
+        + _zeros_read_as_counts()
     )
     assert "x" * 100 not in message
     assert len(message) < 500
@@ -1409,7 +1428,9 @@ def test_merge_plan_counts_the_antibodies_that_every_one_of_three_panels_measure
     adt = next(item for item in plan.assays if item.assayName == "ADT")
     assert adt.nFeatures == 4
     assert adt.featureOverlapFraction == fraction
-    assert messages == ["Assay 'ADT': " + warning + _ZEROS_READ_AS_COUNTS]
+    assert messages == [
+        "Assay 'ADT': " + warning + _zeros_read_as_counts("a", adt=True)
+    ]
 
 
 def test_three_panels_of_which_two_overlap_merge_with_no_antibody_in_all_three(
@@ -1431,7 +1452,7 @@ def test_three_panels_of_which_two_overlap_merge_with_no_antibody_in_all_three(
         "Assay 'ADT': 4 of the 4 merged features were not measured by every "
         "source that holds the assay. Source 'a' lacks 2: 'CD8', 'CD14'. Source "
         "'b' lacks 2: 'CD8', 'CD14'. Source 'c' lacks 2: 'CD3', 'CD4'."
-        + _ZEROS_READ_AS_COUNTS
+        + _zeros_read_as_counts("a", adt=True)
     ]
     rows = _rows_by_cell(destination, "ADT/counts")
     assert [rows["a__c0"], rows["b__c0"], rows["c__c0"]] == [
@@ -1522,7 +1543,7 @@ def test_merge_of_sources_that_measured_one_panel_names_no_feature(
 _NO_ANTIBODIES = (
     "Assay 'ADT': 2 of the 2 merged features were not measured by every source "
     "that holds the assay. Source 'c' holds no features of the assay, so it "
-    "lacks every merged feature." + _ZEROS_READ_AS_COUNTS
+    "lacks every merged feature." + _zeros_read_as_counts("a", adt=True)
 )
 
 
@@ -1574,6 +1595,558 @@ def test_merge_names_a_source_whose_assay_holds_no_features(
     assert adt.featureOverlapFraction == fraction
     rows = _rows_by_cell(destination, "ADT/counts")
     assert [rows[f"c__c{cell}"] for cell in range(3)] == [[0] * adt.nFeatures] * 3
+
+
+_LEFT_PANEL = ["CD3", "CD4", "CD8", "CD45RA", "CD27"]
+# The right panel lists the antibodies that it shares with the left in
+# another order, so that a merge places each of them.
+_RIGHT_PANEL = ["CD8", "CD14", "CD3", "CD16", "CD4", "CD19"]
+
+
+def _measured_columns(location: str, assay: str = "ADT") -> dict[str, list[bool]]:
+    """Return the columns of a stored feature table that record a source's measured features."""
+    table = zarr.open_group(location, mode="r")[f"{assay}/featureData"]
+    return {
+        name: array[:].tolist()
+        for name, array in table.arrays()
+        if array.attrs.get("role") == "measured_features"
+    }
+
+
+def _panel_counts(panel: Sequence[str]) -> np.ndarray:
+    """Return the counts that ``_panel_source`` writes for a panel."""
+    return np.arange(1, 3 * len(panel) + 1).reshape(3, len(panel))
+
+
+def test_merge_records_which_features_each_source_measured(tmp_path):
+    from cytearc.metadata.membership import features_measured_by_every_source
+
+    sources = [
+        _panel_source({"RNA": _GENES, "ADT": _LEFT_PANEL}),
+        _panel_source({"RNA": _GENES, "ADT": _RIGHT_PANEL}),
+        _panel_source({"RNA": _GENES}),
+    ]
+    destination = str(tmp_path / "merged.zarr")
+    merger = DataStoreMerge(
+        sources, destination, ["left", "right", "third"], nthreads=1
+    )
+    plan = merger.plan()
+    merger.dump()
+
+    features = zarr.open_group(destination, mode="r")["ADT/featureData"]
+    ids = features["ids"][:].tolist()
+    # Each source that holds an assay gets a column, true for the features of
+    # its panel, whose attributes keep the source's name; the source without
+    # ADT gets none.
+    assert _measured_columns(destination) == {
+        "measured_in_left": [name in _LEFT_PANEL for name in ids],
+        "measured_in_right": [name in _RIGHT_PANEL for name in ids],
+    }
+    assert {
+        name: dict(features[name].attrs)
+        for name in ("measured_in_left", "measured_in_right")
+    } == {
+        "measured_in_left": {"role": "measured_features", "source": "left"},
+        "measured_in_right": {"role": "measured_features", "source": "right"},
+    }
+    # Every source measured both genes, which needs no record.
+    assert _measured_columns(destination, "RNA") == {}
+    assert (
+        "measured_in_left"
+        not in zarr.open_group(destination, mode="r")["RNA/featureData"]
+    )
+    # A merge of the union records no setting in its manifest, as merges
+    # written before the setting did.
+    assert "features" not in plan.manifest
+    # The reopened store reads them as Boolean feature columns.
+    merged = _open(destination)
+    frame = merged.ADT.feats.to_pandas_dataframe(
+        ["names", "measured_in_left", "measured_in_right"]
+    )
+    shared = frame["measured_in_left"] & frame["measured_in_right"]
+    assert frame["names"][shared].tolist() == ["CD3", "CD4", "CD8"]
+    assert features_measured_by_every_source(merged.ADT.feats).tolist() == [
+        name in {"CD3", "CD4", "CD8"} for name in ids
+    ]
+
+
+def test_intersection_merge_keeps_the_features_that_every_source_measured(tmp_path):
+    sources = [
+        _panel_source({"RNA": _GENES, "ADT": _LEFT_PANEL}),
+        _panel_source({"RNA": _GENES, "ADT": _RIGHT_PANEL}),
+        _panel_source({"RNA": _GENES}),
+    ]
+    destination = str(tmp_path / "merged.zarr")
+    merger = DataStoreMerge(
+        sources,
+        destination,
+        ["left", "right", "third"],
+        nthreads=1,
+        features="intersection",
+    )
+    plan = merger.plan()
+    merger.dump()
+
+    adt = next(item for item in plan.assays if item.assayName == "ADT")
+    assert (adt.nFeatures, adt.featureOverlapFraction) == (3, 1.0)
+    assert plan.manifest["features"] == "intersection"
+    # The antibodies left out of the merge sum with nothing, so the counts keep
+    # the sources' dtype.
+    assert adt.dtype == "uint16"
+    root = zarr.open_group(destination, mode="r")
+    assert root["ADT/counts"].dtype == np.uint16
+    assert root["ADT/featureData/ids"][:].tolist() == ["CD3", "CD4", "CD8"]
+    assert root["RNA/featureData/ids"][:].tolist() == _GENES
+    # Each cell keeps its counts of the three antibodies, wherever its panel
+    # holds them; the source without ADT holds zeros, which its membership
+    # column marks as unmeasured.
+    rows = _rows_by_cell(destination, "ADT/counts")
+    left, right = _panel_counts(_LEFT_PANEL), _panel_counts(_RIGHT_PANEL)
+    for cell in range(3):
+        assert rows[f"left__c{cell}"] == left[cell, [0, 1, 2]].tolist()
+        assert rows[f"right__c{cell}"] == right[cell, [2, 4, 0]].tolist()
+        assert rows[f"third__c{cell}"] == [0, 0, 0]
+    # Every source measured every antibody that the merge keeps, which needs
+    # no record.
+    assert _measured_columns(destination) == {}
+
+
+def test_select_features_keeps_what_every_holder_measured_and_renumbers_it():
+    from cytearc.merge.features import select_features
+
+    sources = [
+        _panel_source({"RNA": _GENES, "ADT": ["CD45RA", "CD3", "CD4"]}),
+        _panel_source({"RNA": _GENES, "ADT": ["CD4", "CD19", "CD3"]}),
+        _panel_source({"RNA": _GENES}),
+    ]
+    assays = [source.ADT if "ADT" in source.assay_names else None for source in sources]
+    union = align_features(assays, ["left", "right", "third"])
+    # The union is CD45RA, CD3, CD4, CD19, of which both holders measured the
+    # middle two; the third source holds no ADT and is left out.
+    assert union.mergedFeatsMap["ids"].tolist() == ["CD45RA", "CD3", "CD4", "CD19"]
+    assert union.overlapFraction == 0.5
+    assert select_features("ADT", union, "union") is union
+
+    shared = select_features("ADT", union, "intersection")
+    assert shared.mergedFeatsMap.to_dict("list") == {
+        "idx": [0, 1],
+        "names": ["CD3", "CD4"],
+        "ids": ["CD3", "CD4"],
+    }
+    # Each source feature maps to its kept position, or to -1 when it is
+    # left out.
+    assert [order_map.tolist() for order_map in shared.featOrderMap] == [
+        [-1, 0, 1],
+        [1, -1, 0],
+        [],
+    ]
+    assert [vector.tolist() for vector in shared.measuredFeatures] == [
+        [True, True],
+        [True, True],
+        [False, False],
+    ]
+    assert (shared.nFeats, shared.overlapFraction, shared.sourcePresent) == (
+        2,
+        1.0,
+        (True, True, False),
+    )
+
+
+def test_intersection_merge_refuses_sources_that_share_no_feature(tmp_path):
+    # Every antibody is in two panels, so the union merges, but none is in all
+    # three, so the intersection would keep none.
+    panels = (["CD3", "CD4"], ["CD4", "CD3"], ["CD8", "CD14"])
+    sources = [_panel_source({"RNA": _GENES, "ADT": panel}) for panel in panels]
+    destination = tmp_path / "merged.zarr"
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            "^No feature of assay 'ADT' was measured by every source that holds it, "
+            "so features='intersection' keeps none"
+        ),
+    ):
+        DataStoreMerge(
+            sources, str(destination), ["a", "b", "c"], features="intersection"
+        ).plan()
+    assert not destination.exists()
+
+
+def test_intersection_merge_keeps_an_assay_that_no_source_measured_a_feature_of(
+    tmp_path,
+):
+    sources = [
+        _panel_source({"RNA": _GENES, **panel})
+        for panel in ({"ADT": []}, {}, {"ADT": []})
+    ]
+    destination = str(tmp_path / "merged.zarr")
+
+    merger = DataStoreMerge(
+        sources, destination, ["a", "b", "c"], nthreads=1, features="intersection"
+    )
+    plan = merger.plan()
+    merger.dump()
+    # The intersection of no features is the union, as for a merge of the
+    # union: an assay of no features, which no cell reads a zero of.
+    assert {item.assayName: item.nFeatures for item in plan.assays} == {
+        "ADT": 0,
+        "RNA": 2,
+    }
+    assert {item.featureOverlapFraction for item in plan.assays} == {1.0}
+    assert zarr.open_group(destination, mode="r")["ADT/counts"].shape == (9, 0)
+
+    # A source that holds the assay but none of its features measured none of
+    # the features of the others, so no feature is kept.
+    sources[1] = _panel_source({"RNA": _GENES, "ADT": ["CD3", "CD4"]})
+    with pytest.raises(ValueError, match="^No feature of assay 'ADT' was measured"):
+        DataStoreMerge(
+            sources,
+            str(tmp_path / "shared.zarr"),
+            ["a", "b", "c"],
+            features="intersection",
+        ).plan()
+
+
+def test_intersection_merge_warns_when_it_keeps_under_a_tenth_of_the_features(
+    tmp_path,
+):
+    left = [f"x{index}" for index in range(11)]
+    right = ["x0", *(f"y{index}" for index in range(1, 11))]
+    sources = [_panel_source({"RNA": left}), _panel_source({"RNA": right})]
+
+    with _captured_warnings() as messages:
+        plan = _merge(
+            sources, str(tmp_path / "merged.zarr"), features="intersection"
+        ).plan()
+    # The sources share x0 alone; without either, the other's 11 genes remain.
+    assert messages == [
+        "Assay 'RNA': the merge keeps 1 of the 21 features of its sources, since "
+        "features='intersection' keeps only the features that every source "
+        "measured. It would keep 11 without 'left' and 11 without 'right'."
+    ]
+    assert (plan.assays[0].nFeatures, plan.assays[0].featureOverlapFraction) == (
+        1,
+        1.0,
+    )
+
+
+def test_intersection_merge_by_name_sums_the_features_it_keeps(tmp_path):
+    # Each source's feature that the other lacks comes before the features
+    # that it keeps, so the kept columns are not the first ones.
+    left = np.array([[4, 1, 2, 3], [8, 5, 6, 7]])
+    right = np.array([[10, 40, 20, 30], [50, 80, 60, 70]])
+    sources = [
+        _open(_write_source(MemoryStore(), {"RNA": values}, names=names))
+        for values, names in (
+            (left, ["C", "A", "A", "B"]),
+            (right, ["A", "D", "B", "B"]),
+        )
+    ]
+    destination = str(tmp_path / "merged.zarr")
+
+    merger = _merge(sources, destination, feature_key="names", features="intersection")
+    # Two features of each source share a name, so the sums need a wider dtype.
+    assert merger.plan().assays[0].dtype == "uint32"
+    merger.dump()
+    root = zarr.open_group(destination, mode="r")
+    assert root["RNA/featureData/ids"][:].tolist() == ["A", "B"]
+    # The left source leaves C out and sums its middle two features into A;
+    # the right leaves D out and sums its last two into B.
+    assert _rows_by_cell(destination) == {
+        "left__c0": [3, 3],
+        "left__c1": [11, 7],
+        "right__c0": [10, 50],
+        "right__c1": [50, 130],
+    }
+    assert _measured_columns(destination, "RNA") == {}
+
+
+def test_merge_refuses_features_that_are_neither_union_nor_intersection(tmp_path):
+    sources = [
+        _panel_source({"RNA": _GENES, "ADT": _LEFT_PANEL}),
+        _panel_source({"RNA": _GENES, "ADT": _RIGHT_PANEL}),
+    ]
+
+    with pytest.raises(
+        ValueError,
+        match=re.escape("features must be 'union' or 'intersection', got 'shared'"),
+    ):
+        DataStoreMerge(
+            sources, str(tmp_path / "merged.zarr"), _NAMES, features="shared"
+        )
+
+
+def test_merge_records_a_source_whose_name_holds_a_path_separator(tmp_path):
+    from cytearc.metadata.membership import measured_feature_columns
+
+    sources = [
+        _panel_source({"RNA": _GENES, "ADT": _LEFT_PANEL}),
+        _panel_source({"RNA": _GENES, "ADT": _RIGHT_PANEL}),
+    ]
+    destination = str(tmp_path / "merged.zarr")
+    names = ["GSE1/run1", "GSE2\\run1"]
+
+    DataStoreMerge(sources, destination, names, nthreads=1).dump()
+    ids = zarr.open_group(destination, mode="r")["ADT/featureData/ids"][:].tolist()
+    # Zarr would nest a column named with a path separator, so each column
+    # takes '_' in its place and keeps the source's name in its attributes.
+    assert _measured_columns(destination) == {
+        "measured_in_GSE1_run1": [name in _LEFT_PANEL for name in ids],
+        "measured_in_GSE2_run1": [name in _RIGHT_PANEL for name in ids],
+    }
+    assert measured_feature_columns(_open(destination).ADT.feats) == {
+        "measured_in_GSE1_run1": "GSE1/run1",
+        "measured_in_GSE2_run1": "GSE2\\run1",
+    }
+
+
+@pytest.mark.parametrize(
+    ("names", "columns"),
+    [
+        (["Ctrl", "ctrl"], "'measured_in_Ctrl' and 'measured_in_ctrl'"),
+        (["a/b", "a_b"], "'measured_in_a_b' and 'measured_in_a_b'"),
+    ],
+    ids=["case", "separator"],
+)
+def test_merge_refuses_sources_whose_record_columns_would_be_one(
+    tmp_path, names, columns
+):
+    destination = tmp_path / "merged.zarr"
+    panels = [
+        _panel_source({"RNA": _GENES, "ADT": _LEFT_PANEL}),
+        _panel_source({"RNA": _GENES, "ADT": _RIGHT_PANEL}),
+    ]
+
+    with pytest.raises(ValueError) as refused:
+        DataStoreMerge(panels, str(destination), names, nthreads=1).plan()
+    assert str(refused.value) == (
+        f"Sources {names[0]!r} and {names[1]!r} would record which features they "
+        f"measured in the feature columns {columns}, which a file system that "
+        "ignores case stores as one column. Name the sources so that the names "
+        "differ in more than case, with '/' and '\\' counted as '_'."
+    )
+    assert not destination.exists()
+    # Sources that measured the same features need no record, and merge.
+    same = [_panel_source({"RNA": _GENES, "ADT": _LEFT_PANEL}) for _ in names]
+    DataStoreMerge(same, str(destination), names, nthreads=1).dump()
+    assert _measured_columns(str(destination)) == {}
+
+
+def test_subsets_keep_the_record_of_the_features_each_source_measured(tmp_path):
+    from cytearc.metadata.membership import measured_feature_columns
+
+    sources = [
+        _panel_source({"RNA": _GENES, "ADT": _LEFT_PANEL}),
+        _panel_source({"RNA": _GENES, "ADT": _RIGHT_PANEL}),
+    ]
+    merged = str(tmp_path / "merged.zarr")
+    _merge(sources, merged).dump()
+    store = _open(merged)
+    subset = str(tmp_path / "subset.zarr")
+    ids = store.cells.fetch_all("ids")[[0, 5]]
+
+    SubsetZarr(subset, [store.ADT], cell_ids=ids, nthreads=1).dump()
+    assert _measured_columns(subset) == _measured_columns(merged)
+    # The subset keeps each column's source, which a read of the record checks.
+    reopened = DataStore(
+        subset, default_assay="ADT", min_features_per_cell=0, nthreads=1
+    )
+    assert measured_feature_columns(reopened.ADT.feats) == {
+        "measured_in_left": "left",
+        "measured_in_right": "right",
+    }
+
+
+def test_a_merge_of_merged_stores_records_what_every_cell_of_each_source_measured(
+    tmp_path,
+):
+    from cytearc.metadata.membership import features_measured_by_every_source
+
+    inner = str(tmp_path / "inner.zarr")
+    _merge(
+        [
+            _panel_source({"RNA": _GENES, "ADT": _LEFT_PANEL}),
+            _panel_source({"RNA": _GENES, "ADT": _RIGHT_PANEL}),
+        ],
+        inner,
+    ).dump()
+    third_panel = ["CD3", "CD4", "CD8", "CD45RA"]
+    sources = [_open(inner), _panel_source({"RNA": _GENES, "ADT": third_panel})]
+
+    union = str(tmp_path / "union.zarr")
+    with _captured_warnings() as messages:
+        DataStoreMerge(sources, union, ["inner", "third"], nthreads=1).dump()
+    ids = zarr.open_group(union, mode="r")["ADT/featureData/ids"][:].tolist()
+    # The warning counts what the inner store's record marks as unmeasured as
+    # missing from it, though the store holds those antibodies.
+    assert messages == [
+        "Assay 'ADT': 5 of the 8 merged features were not measured by every "
+        "source that holds the assay. Source 'inner' lacks 5: 'CD45RA', 'CD27', "
+        "'CD14', 'CD16', 'CD19'. Source 'third' lacks 4: 'CD27', 'CD14', 'CD16', "
+        "'CD19'." + _zeros_read_as_counts("inner", adt=True)
+    ]
+    # The inner store holds all eight antibodies, but the cells of its right
+    # source never stained CD45RA or CD27, and those of its left source never
+    # stained CD14, CD16 or CD19. Its own record describes its sources, so the
+    # outer merge folds it into one column and keeps no other.
+    assert _measured_columns(union) == {
+        "measured_in_inner": [name in {"CD3", "CD4", "CD8"} for name in ids],
+        "measured_in_third": [name in third_panel for name in ids],
+    }
+    assert features_measured_by_every_source(_open(union).ADT.feats).tolist() == [
+        name in {"CD3", "CD4", "CD8"} for name in ids
+    ]
+
+    # Both sources hold CD45RA, but not every cell of the inner one measured
+    # it, so the intersection leaves it out.
+    shared = str(tmp_path / "shared.zarr")
+    DataStoreMerge(
+        sources, shared, ["inner", "third"], nthreads=1, features="intersection"
+    ).dump()
+    assert zarr.open_group(shared, mode="r")["ADT/featureData/ids"][:].tolist() == [
+        "CD3",
+        "CD4",
+        "CD8",
+    ]
+
+
+def test_an_intersection_of_a_merged_store_warns_of_what_its_cells_measured(
+    tmp_path,
+):
+    left = [f"x{index}" for index in range(11)]
+    right = ["x0", *(f"y{index}" for index in range(1, 11))]
+    inner = str(tmp_path / "inner.zarr")
+    _merge([_panel_source({"RNA": left}), _panel_source({"RNA": right})], inner).dump()
+    # The inner store holds all 21 genes, but only x0 in every one of its
+    # cells, and the third source measured all 21.
+    sources = [_open(inner), _panel_source({"RNA": [*left, *right[1:]]})]
+
+    with _captured_warnings() as messages:
+        plan = DataStoreMerge(
+            sources,
+            str(tmp_path / "shared.zarr"),
+            ["inner", "third"],
+            nthreads=1,
+            features="intersection",
+        ).plan()
+    assert messages == [
+        "Assay 'RNA': the merge keeps 1 of the 21 features of its sources, since "
+        "features='intersection' keeps only the features that every source "
+        "measured. It would keep 21 without 'inner' and 1 without 'third'."
+    ]
+    assert plan.assays[0].nFeatures == 1
+
+
+def test_merge_leaves_out_a_source_column_that_its_record_would_replace(tmp_path):
+    left = _panel_source({"RNA": _GENES, "ADT": _LEFT_PANEL})
+    left.ADT.feats.insert("measured_in_right", np.ones(len(_LEFT_PANEL), dtype=bool))
+    left.ADT.feats.insert("clone", np.asarray([f"clone{i}" for i in range(5)]))
+    right = _panel_source({"RNA": _GENES, "ADT": _RIGHT_PANEL})
+    destination = str(tmp_path / "merged.zarr")
+
+    with _captured_warnings() as messages:
+        _merge([left, right], destination).dump()
+    assert (
+        "Feature columns of the sources were not merged, since the merge records "
+        "in each which features one source measured: measured_in_right"
+    ) in messages
+    ids = zarr.open_group(destination, mode="r")["ADT/featureData/ids"][:].tolist()
+    assert _measured_columns(destination)["measured_in_right"] == [
+        name in _RIGHT_PANEL for name in ids
+    ]
+    # Other annotations merge as before.
+    clone = zarr.open_group(destination, mode="r")["ADT/featureData/clone"][:]
+    assert clone[: len(_LEFT_PANEL)].tolist() == [f"clone{i}" for i in range(5)]
+
+
+def test_a_feature_table_without_a_record_counts_every_feature_as_measured(tmp_path):
+    from cytearc.metadata.membership import (
+        features_measured_by_every_source,
+        measured_feature_columns,
+    )
+
+    destination = str(tmp_path / "merged.zarr")
+    sources = [
+        _panel_source({"RNA": _GENES, "ADT": _LEFT_PANEL}),
+        _panel_source({"RNA": _GENES, "ADT": _RIGHT_PANEL}),
+    ]
+    _merge(sources, destination).dump()
+    # A store merged by an earlier release holds no record.
+    root = zarr.open_group(destination, mode="r+")
+    for name in ("measured_in_left", "measured_in_right"):
+        del root[f"ADT/featureData/{name}"]
+    earlier = _open(destination)
+    assert measured_feature_columns(earlier.ADT.feats) == {}
+    assert features_measured_by_every_source(earlier.ADT.feats).all()
+
+
+@pytest.mark.parametrize(
+    ("values", "attributes", "problem"),
+    [
+        pytest.param(
+            pd.array([True, None, False], dtype="boolean"),
+            {"role": "measured_features"},
+            "its source attribute, None, does not name it",
+            id="copied by an earlier release",
+        ),
+        pytest.param(
+            np.array([True, True, False]),
+            {"role": "measured_features", "source": "right"},
+            "its source attribute, 'right', does not name it",
+            id="of another source",
+        ),
+        pytest.param(
+            np.ones(3, dtype=np.int8),
+            {"role": "measured_features", "source": "left"},
+            "it has dtype int8, not bool",
+            id="not Boolean",
+        ),
+        pytest.param(
+            pd.array([True, None, False], dtype="boolean"),
+            {"role": "measured_features", "source": "left"},
+            "it has missing values",
+            id="with missing values",
+        ),
+    ],
+)
+def test_a_malformed_record_of_measured_features_is_refused_with_its_remedy(
+    values, attributes, problem
+):
+    from cytearc.metadata.membership import features_measured_by_every_source
+
+    source = _panel_source({"RNA": _GENES, "ADT": ["CD3", "CD4", "CD8"]})
+    source.ADT.feats.insert("measured_in_left", values)
+    source.ADT.feats._get_array("measured_in_left").attrs.update(attributes)
+
+    with pytest.raises(ValueError) as refused:
+        features_measured_by_every_source(source.ADT.feats)
+    assert str(refused.value) == (
+        "Feature column 'measured_in_left' has the role of a record of which "
+        f"features one source of a merge measured, but {problem}. Earlier "
+        "releases of CyteArc copy such a column without its source and with "
+        "missing values when they merge stores. Drop it with "
+        "ds.ADT.feats.drop('measured_in_left'), or merge the sources again to "
+        "record what each one measured."
+    )
+    # The call that the message names leaves no record.
+    source.ADT.feats.drop("measured_in_left")
+    assert features_measured_by_every_source(source.ADT.feats).all()
+
+
+def test_the_remedy_of_a_malformed_record_names_an_assay_that_is_no_attribute():
+    from cytearc.metadata.membership import measured_feature_columns
+
+    source = _panel_source({"RNA": _GENES, "ADT-2": ["CD3", "CD4", "CD8"]})
+    features = source.get_assay("ADT-2").feats
+    features.insert("measured_in_left", np.array([True, False, True]))
+    features._get_array("measured_in_left").attrs["role"] = "measured_features"
+
+    # ds.ADT-2 is no Python expression, so the message names get_assay.
+    with pytest.raises(
+        ValueError,
+        match=re.escape("Drop it with ds.get_assay('ADT-2').feats.drop("),
+    ):
+        measured_feature_columns(features)
 
 
 def test_merge_by_name_sums_signed_counts_in_a_wider_dtype(tmp_path):

@@ -20,6 +20,7 @@ from ..metadata.artifacts import (
     stored_levels,
     validate_display_metadata,
 )
+from ..metadata.membership import measured_feature_columns
 from ..metadata.palettes import stored_category_colors
 from ..metadata.rows import (
     array_row_selection_parts,
@@ -32,6 +33,7 @@ from ..metadata.rows import (
 from ..storage.arrays import (
     MISSING_MASK_PREFIX,
     MetadataBlock,
+    create_metadata_column,
     create_streamed_metadata_column,
 )
 from ..metadata.selection import valid_category_mask
@@ -55,6 +57,8 @@ from ..storage.metadata_keys import (
     ASSAY_MEMBERSHIP_ROLE,
     assay_membership_column,
     is_reserved_metadata_name,
+    measured_features_attributes,
+    measured_features_columns,
     metadata_column_key,
     validate_metadata_column_name,
 )
@@ -1269,6 +1273,20 @@ class _FeatureColumnPlan:
     blockRows: int
 
 
+def _annotation_columns(tables: list[Any]) -> list[set[str]]:
+    """Return each table's columns that a merge may carry as feature annotations.
+
+    A table's own record of which features its sources measured describes
+    that table's sources, which the merge records anew, so it is left out
+    with the columns that CyteArc writes for every feature table.
+    """
+    excluded = {"ids", "names", "I", *GENERATED_FEATURE_COLUMNS}
+    return [
+        set(table.columns) - excluded - set(measured_feature_columns(table))
+        for table in tables
+    ]
+
+
 def _plan_feature_columns(
     tables: list[Any],
     mappings: list[np.ndarray],
@@ -1276,14 +1294,16 @@ def _plan_feature_columns(
     *,
     resources: ResourceBudget,
     resident_bytes: int,
+    reserved: frozenset[str] = frozenset(),
 ) -> list[_FeatureColumnPlan]:
     """Resolve every merged feature column and the rows it writes at once.
 
-    Raises MemoryError when a column cannot fit one row within the budget.
+    Columns named in ``reserved``, which the merge writes itself, are left
+    out. Raises MemoryError when a column cannot fit one row within the
+    budget.
     """
-    excluded = {"ids", "names", "I", *GENERATED_FEATURE_COLUMNS}
-    table_columns = [set(table.columns) for table in tables]
-    columns = sorted(set().union(*table_columns) - excluded)
+    table_columns = _annotation_columns(tables)
+    columns = sorted(set().union(*table_columns) - reserved)
     mapping_bytes = max((mapping.nbytes * 3 for mapping in mappings), default=0)
     scan_rows = resolve_metadata_schema_scan_rows(
         tables,
@@ -1355,11 +1375,14 @@ def admit_feature_metadata(
     *,
     resources: ResourceBudget,
     resident_bytes: int,
+    sources: Iterable[str] = (),
 ) -> None:
     """Raise the MemoryError that merging feature annotations would raise.
 
     Planning calls this so a merge whose feature columns cannot fit the
-    budget fails before it creates or changes the destination.
+    budget fails before it creates or changes the destination. ``sources``
+    names the sources whose measured features the merge records, as
+    :func:`write_feature_metadata` takes them.
     """
     _plan_feature_columns(
         tables,
@@ -1367,6 +1390,7 @@ def admit_feature_metadata(
         n_features,
         resources=resources,
         resident_bytes=resident_bytes,
+        reserved=frozenset(measured_features_columns(sources).values()),
     )
 
 
@@ -1379,14 +1403,28 @@ def write_feature_metadata(
     resources: ResourceBudget,
     resident_bytes: int,
     profile: StorageProfile,
+    measured: Mapping[str, np.ndarray],
 ) -> None:
-    """Merge feature annotations that agree across sources.
+    """Merge feature annotations that agree across sources, and record each source's measured features.
 
     A column whose values or metadata differ for a shared feature describes
     the source datasets rather than the features, so it is left out with a
     warning. Per-dataset analysis outputs such as highly variable gene flags
     usually fall in this group. Every column is planned before any is written.
+
+    ``measured``, the record of :func:`~cytearc.merge.features.feature_record`,
+    maps each source that holds the assay to whether it measured each merged
+    feature, which a Boolean column of its own records, named by
+    :func:`~cytearc.storage.metadata_keys.measured_features_column` and with
+    the attributes of
+    :func:`~cytearc.storage.metadata_keys.measured_features_attributes`; it is
+    empty when the sources measured the same features. A source column of the
+    same name is left out with a warning, and a source's own record is left
+    out, as the merged record holds it.
     """
+    columns = measured_features_columns(measured)
+    reserved = frozenset(columns.values())
+    taken = sorted(reserved & set().union(*_annotation_columns(tables)))
     skipped: list[str] = []
     for column_plan in _plan_feature_columns(
         tables,
@@ -1394,6 +1432,7 @@ def write_feature_metadata(
         n_features,
         resources=resources,
         resident_bytes=resident_bytes,
+        reserved=reserved,
     ):
         name = column_plan.name
         sources = column_plan.sources
@@ -1452,6 +1491,23 @@ def write_feature_metadata(
         logger.warning(
             "Feature columns that differ between merged sources were not merged: "
             + ", ".join(skipped)
+        )
+    for name, vector in measured.items():
+        values = np.asarray(vector, dtype=bool)
+        assert values.shape == (n_features,), (name, values.shape, n_features)
+        create_metadata_column(
+            destination,
+            columns[name],
+            data=values,
+            dtype=bool,
+            chunkSize=column_chunk_rows(n_features, values.dtype.itemsize),
+            profile=profile,
+            attributes=measured_features_attributes(name),
+        )
+    if taken:
+        logger.warning(
+            "Feature columns of the sources were not merged, since the merge "
+            "records in each which features one source measured: " + ", ".join(taken)
         )
 
 

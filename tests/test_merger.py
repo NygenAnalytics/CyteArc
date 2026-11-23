@@ -6034,6 +6034,33 @@ def test_dataset_merge_below_one_feature_metadata_row_fails_before_the_destinati
     assert not path.exists()
 
 
+def test_dataset_merge_plans_no_source_column_that_its_record_replaces(tmp_path):
+    path = tmp_path / "merged.zarr"
+    long_text = {"measured_in_right": np.array(["x" * 5_000, "y" * 5_000])}
+    # The left source's column of 5,000-character values would need about
+    # 240 KB to merge, more than the budget that admits the rest of the merge,
+    # but the merge writes its record of the right source under that name, so
+    # it plans and writes no such column.
+    DataStoreMerge(
+        datasets=_feature_annotated_sources(long_text, {}),
+        zarr_path=str(path),
+        names=["left", "right"],
+        prepend_text="",
+        seed=0,
+        nthreads=1,
+        mem_budget=150_000,
+    ).dump()
+
+    features = zarr.open_group(str(path), mode="r")["RNA/featureData"]
+    np.testing.assert_array_equal(features["ids"][:], ["a", "b", "c"])
+    assert features["measured_in_left"][:].tolist() == [True, True, False]
+    assert features["measured_in_right"][:].tolist() == [False, True, True]
+    assert dict(features["measured_in_right"].attrs) == {
+        "role": "measured_features",
+        "source": "right",
+    }
+
+
 def test_a_merged_feature_column_names_the_budget_beside_the_feature_mappings(
     tmp_path,
 ):

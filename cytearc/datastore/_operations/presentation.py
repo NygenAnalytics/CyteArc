@@ -33,7 +33,7 @@ from ...metadata.arguments import (
     SmartLabelArguments,
 )
 from ...metadata.alignment import align_to_cell_ids, keyed_values_remedy
-from ...metadata.membership import exported_membership
+from ...metadata.membership import exported_measured_features, exported_membership
 from ...metadata.rows import apply_missing_mask, read_metadata_missing_rows
 from ...metadata.selection import resolve_complete_labels
 from ...metadata.artifacts import (
@@ -679,6 +679,7 @@ class _PresentationOperationsMixin(_PresentationOperationsBase):
                 for layer, (layer_assay, layer_feat_idx) in layer_features.items()
             },
             membership=declared,
+            measured_features=exported_measured_features(assay.feats, assay.name),
         )
 
     def _layer_features(

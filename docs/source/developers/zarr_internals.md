@@ -454,6 +454,12 @@ a membership column counts every cell as measured; rebuild it under a new label 
 was partially measured. A column for an assay that is absent from a store is ordinary metadata,
 and `drop` can remove it.
 
+(measured_features)=
+
+## Features each source measured
+
+A merge and a composite whose sources measured different features record in their feature table which features each source that holds the assay measured (`merge.features.feature_record`): a Boolean column for each such source, true for the features that the source measured, without a missing-value mask. The column is named `measured_in_<source>` with `_` in place of each `/` and `\` (`storage.metadata_keys.measured_features_column`), and its attributes are `role="measured_features"` and `source`, the source's own name (`measured_features_attributes`). Readers find the columns by their role (`metadata.membership.measured_feature_columns`); a column of that role whose `source` does not name it, that is not Boolean, or that has missing values raises `ValueError` when read, naming the `feats.drop` call that removes it. `measured_features_columns` refuses sources whose columns would be named alike once case is ignored. A source that a merge wrote counts a feature as measured when every one of its own columns is true for it, and the merge does not copy those columns, which describe its own sources; a source column of the same name as one that the merge writes is left out with a warning. Subset, repack, data-only repack and mount copy the columns with their attributes, and an H5AD export declares them in `uns["cytearc"]["measuredFeatures"]`, which maps the exported assay to each column and its source, so that an import of an assay of that name restores the attributes. `features_measured_by_every_source` combines the columns, and counts every feature of a table without them, as imports and earlier releases write it, as measured by every source. The ADT recipe's panel and markers leave out the antibodies that not every source measured.
+
 ## Count arrays
 
 `counts` is the cell-major assay matrix (`n_cells` × `n_features`).

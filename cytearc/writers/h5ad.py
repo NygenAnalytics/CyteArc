@@ -979,9 +979,10 @@ class H5adToZarr:
         self.resources = resolve_budget(mem_budget, nthreads)
         self.profile = resolve_storage_profile(zarr_loc, profile)
         self.io = io
-        # A declared membership column that is malformed fails here, before
-        # the destination is read or created.
+        # A declared membership column or record of measured features that is
+        # malformed fails here, before the destination is read or created.
         self._membership = self._declared_membership()
+        self._measuredFeatures = self._declared_measured_features()
         # A destination that would be refused fails before the passes over
         # the source below; create_destination checks it again.
         check_destination(
@@ -1248,6 +1249,40 @@ class H5adToZarr:
             restored[assay] = checked_membership_values(values, missing, assay=assay)
         return restored
 
+    def _declared_measured_features(self) -> dict[str, dict[str, str]]:
+        """Read the record of which features each source measured that the file declares for each imported assay.
+
+        Returns:
+            The record's columns of each declared assay that the import
+            writes, mapped to their sources.
+
+        Raises:
+            ValueError: If a declared column is absent from ``var``, is not
+                boolean, or has missing values.
+        """
+        from ..metadata.membership import checked_measured_features_values
+
+        declared = self.h5ad.measured_features()
+        restored: dict[str, dict[str, str]] = {}
+        for assay in self.assayNames:
+            columns = declared.get(assay, {})
+            for column in columns:
+                if not self.h5ad._check_exists(self.h5ad.featureAttrsKey, column):
+                    raise ValueError(
+                        f"The file declares {column!r} as the record of which "
+                        f"features a source of assay {assay!r} measured, but "
+                        f"{self.h5ad.featureAttrsKey} has no such column"
+                    )
+                values, missing = self.h5ad._read_column(
+                    self.h5ad.featureAttrsKey, column
+                )
+                checked_measured_features_values(
+                    values, missing, column=column, assay=assay
+                )
+            if columns:
+                restored[assay] = columns
+        return restored
+
     def _ini_cell_data(self) -> None:
         from ..metadata.membership import reserved_membership_columns
         from ..storage.metadata_keys import (
@@ -1354,7 +1389,10 @@ class H5adToZarr:
         )
 
     def _ini_feature_data(self) -> None:
-        from ..storage.metadata_keys import metadata_column_keys
+        from ..storage.metadata_keys import (
+            measured_features_attributes,
+            metadata_column_keys,
+        )
         from ._store import keyed_metadata_columns
 
         targets: list[tuple[str, Any, np.ndarray | None]] = []
@@ -1406,6 +1444,11 @@ class H5adToZarr:
                         missing=selected_missing,
                         display=False,
                     )
+        # The declared columns, Boolean without missing values, were written
+        # under their own names, and take back the record's attributes.
+        for assay_name, feat_group, _feature_indexes in targets:
+            for record, source in self._measuredFeatures.get(assay_name, {}).items():
+                feat_group[record].attrs.update(measured_features_attributes(source))
 
     def dump(self, batch_size: int | None = None) -> H5adImportResult:
         """Write h5ad matrix data into Zarr ``counts`` and RNA ``countsT``.

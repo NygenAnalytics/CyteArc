@@ -115,7 +115,11 @@ integrates modalities, and one for pooled CRISPR screens:
   asked, because it usually analyzes the QC-passing cells of an RNA run. Its default pattern
   leaves out antibodies whose names contain "isotype", "control", or "ctrl"; check the excluded
   names that the run records against the panel's controls, and set `panel={"exclude": ...}` when
-  they differ.
+  they differ. On a store merged from studies of different antibody panels, the panel and the
+  markers also leave out the antibodies that not every study measured, since the other studies'
+  cells hold zero counts of them that are not measurements; the merged feature columns
+  `measured_in_<study>` record each study's panel. To compare an antibody that only some studies
+  stained, merge only those studies.
 - `ds.pipeline.multimodal(runs)` integrates completed runs of the same cells into one graph, then
   embeds and clusters it.
 - `ds.pipeline.perturbation(labels={"controls": [...]})` calls the guides of a pooled CRISPR screen, labels each cell by the genes its guides target, and measures each perturbation over the RNA recipe's highly variable genes and PCA ([Perturbation screens](#perturbation-screens)).

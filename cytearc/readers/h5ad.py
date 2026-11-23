@@ -152,6 +152,7 @@ _FEATURE_METADATA = "H5AD feature metadata"
 _CLUSTER_LABELS = "H5AD cluster labels"
 _FEATURE_TYPES = "H5AD feature types"
 _MEMBERSHIP_COLUMNS = "H5AD membership column names"
+_RECORD_SOURCES = "H5AD source names of measured features"
 
 
 def _array_bytes(values: np.ndarray) -> int:
@@ -1250,25 +1251,80 @@ class H5adReader:
             raise ValueError(
                 f"{location} must be a mapping from assay name to membership column"
             )
-        declared: dict[str, str] = {}
-        for assay, entry in node.items():
-            if not isinstance(entry, h5py.Dataset) or entry.shape != ():
-                raise ValueError(
-                    f"{location}/{assay} must hold one text value, the membership "
-                    "column of the assay"
-                )
-            value = entry[()]
-            if isinstance(value, bytes):
-                try:
-                    value = value.decode("utf-8")
-                except UnicodeDecodeError:
-                    raise ValueError(
-                        f"{_MEMBERSHIP_COLUMNS} must be UTF-8 text; "
-                        f"{location}/{assay} of {quoted_value(str(self.h5adFn))} "
-                        f"holds {quoted_value(bytes(value))}"
-                    ) from None
-            declared[assay] = as_text(value)
+        declared = {
+            assay: self._declared_text(
+                entry,
+                f"{location}/{assay}",
+                "the membership column of the assay",
+                _MEMBERSHIP_COLUMNS,
+            )
+            for assay, entry in node.items()
+        }
         return parse_membership_declaration(declared)
+
+    def measured_features(self) -> dict[str, dict[str, str]]:
+        """Return each assay's record of which features each source measured that the file declares.
+
+        Raises:
+            ValueError: If the declaration is not a mapping from assay name
+                to a mapping from column name to one text value, a source
+                name is bytes that are not UTF-8 text, naming the file and
+                where the bytes are, or a column is not
+                ``measured_in_<source>``.
+        """
+        from ..metadata.membership import (
+            CYTEARC_UNS_KEY,
+            MEASURED_FEATURES_UNS_KEY,
+            parse_measured_features_declaration,
+        )
+
+        location = f"uns/{CYTEARC_UNS_KEY}/{MEASURED_FEATURES_UNS_KEY}"
+        node = self.h5.get(location)
+        if node is None:
+            return {}
+        if not isinstance(node, h5py.Group):
+            raise ValueError(
+                f"{location} must be a mapping from assay name to the columns "
+                "that record which features each source measured"
+            )
+        declared: dict[str, dict[str, str]] = {}
+        for assay, columns in node.items():
+            if not isinstance(columns, h5py.Group):
+                raise ValueError(
+                    f"{location}/{assay} must be a mapping from column name to "
+                    "the source whose measured features the column records"
+                )
+            declared[assay] = {
+                column: self._declared_text(
+                    entry,
+                    f"{location}/{assay}/{column}",
+                    "the source whose measured features the column records",
+                    _RECORD_SOURCES,
+                )
+                for column, entry in columns.items()
+            }
+        return parse_measured_features_declaration(declared)
+
+    def _declared_text(self, entry: Any, location: str, held: str, label: str) -> str:
+        """Return the one text value of an entry of a ``uns`` declaration.
+
+        Raises:
+            ValueError: If the entry is not one value, or it is bytes that are
+                not UTF-8 text, naming the file and where the bytes are.
+        """
+        if not isinstance(entry, h5py.Dataset) or entry.shape != ():
+            raise ValueError(f"{location} must hold one text value, {held}")
+        value = entry[()]
+        if isinstance(value, bytes):
+            try:
+                value = value.decode("utf-8")
+            except UnicodeDecodeError:
+                raise ValueError(
+                    f"{label} must be UTF-8 text; {location} of "
+                    f"{quoted_value(str(self.h5adFn))} holds "
+                    f"{quoted_value(bytes(value))}"
+                ) from None
+        return as_text(value)
 
     def feature_types(self, key: str) -> list[str]:
         """Return decoded feature types from a var column.

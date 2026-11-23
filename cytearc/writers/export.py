@@ -148,6 +148,7 @@ class H5adExportPlan:
     obsm: Mapping[str, Callable[[], np.ndarray]] = field(default_factory=dict)
     layers: Mapping[str, H5adMatrix] = field(default_factory=dict)
     membership: Mapping[str, str] = field(default_factory=dict)
+    measured_features: Mapping[str, Mapping[str, str]] = field(default_factory=dict)
     obsp: Mapping[str, Callable[[], csr_matrix]] = field(default_factory=dict)
     varm: Mapping[str, Callable[[], np.ndarray]] = field(default_factory=dict)
     uns: Mapping[str, Any] = field(default_factory=dict)
@@ -1441,13 +1442,18 @@ def plan_uns(
     obs_columns: Iterable[str],
     colors: Mapping[str, tuple[str, ...]],
 ) -> dict[str, Any]:
-    """Return the ``uns`` of an export: the plan's values, colors, and membership.
+    """Return the ``uns`` of an export: the plan's values, colors, and declarations.
 
     Each written ``obs`` column whose categories have colors adds
-    ``<column>_colors``, and the membership columns that the export holds are
-    declared under ``uns["cytearc"]["assayMembership"]``.
+    ``<column>_colors``, the membership columns that the export holds are
+    declared under ``uns["cytearc"]["assayMembership"]``, and the ``var``
+    columns that record which features each source measured under
+    ``uns["cytearc"]["measuredFeatures"]``.
     """
-    from ..metadata.membership import membership_declaration
+    from ..metadata.membership import (
+        measured_features_declaration,
+        membership_declaration,
+    )
 
     written = set(obs_columns)
     uns = dict(plan.uns)
@@ -1458,7 +1464,10 @@ def plan_uns(
         for assay_name, column in plan.membership.items()
         if column in written
     }
-    return _merged(uns, membership_declaration(declared))
+    return _merged(
+        _merged(uns, membership_declaration(declared)),
+        measured_features_declaration(plan.measured_features),
+    )
 
 
 def _check_plan(plan: H5adExportPlan) -> None:
@@ -2519,10 +2528,11 @@ def live_h5ad_plan(
     ``display``. Column names that AnnData reserves or that the export
     already uses are renamed (:func:`unique_column_names`).
     """
-    from ..metadata.membership import exported_membership
+    from ..metadata.membership import exported_measured_features, exported_membership
 
     membership, omitted = exported_membership(assay.cells, assay.name)
     cells, feats = assay.cells, assay.feats
+    measured_features = exported_measured_features(feats, assay.name)
     exported_rows = cell_rows
     if order is not None:
         exported_rows = (
@@ -2615,6 +2625,7 @@ def live_h5ad_plan(
         var=planned(feats, var_keys, var_names, None),
         obsm=obsm,
         membership=membership,
+        measured_features=measured_features,
     )
 
 
