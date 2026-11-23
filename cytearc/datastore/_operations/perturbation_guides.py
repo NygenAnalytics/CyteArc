@@ -566,37 +566,31 @@ def _warn_guide_calls(
 
 
 def _strings_bytes(values: np.ndarray, ledger: MemoryLedger | None = None) -> int:
-    """Return the bytes of text ``values`` as Python strings and their references, as :func:`_text_bytes` counts them."""
-    return _text_bytes(values, ledger)[0]
+    """Return the bytes of text ``values`` as Python strings and their references, as :func:`_text_size` measures them."""
+    characters, _, widest = _text_size(values, ledger)
+    return object_array_bytes(len(values)) + python_text_bytes(
+        len(values), characters, widest=widest
+    )
 
 
-def _text_bytes(
+def _text_size(
     values: np.ndarray, ledger: MemoryLedger | None = None
-) -> tuple[int, int]:
-    """Return the bytes of text ``values`` as Python strings and their references, and of one of them as NumPy gathers it and as a Python string.
+) -> tuple[int, int, int]:
+    """Return the characters of text ``values``, the UTF-8 bytes of the longest value and the widest code point.
 
     Fixed-width text counts each value at the stored width, which bounds its
-    characters, and at the kind of the widest character stored. Variable-width
-    text, which another tool can store, counts its characters, the longest
-    value and the widest character as
+    characters, and its UTF-8 bytes at the widest character stored.
+    Variable-width text, which another tool can store, counts them as
     :func:`~cytearc.storage.geometry.text_extent` measures them, charged to
-    ``ledger``. One value is counted at the longest and the widest.
+    ``ledger``.
     """
-    n_values = len(values)
     if values.dtype.kind == "T":
         extent = text_extent(values, None, ledger)
-        characters, longest = extent.characterTotal, extent.characters
-        widest, element = extent.widest, extent.valueBytes()
-    else:
-        longest = max(1, values.dtype.itemsize // 4)
-        characters = n_values * longest
-        widest = int(values.view(np.uint32).max()) if values.size else 0
-        element = int(values.dtype.itemsize)
-    strings = object_array_bytes(n_values) + python_text_bytes(
-        n_values, characters, widest=widest
-    )
-    one = element + object_array_bytes(1) + python_text_bytes(1, longest, widest=widest)
-    return strings, one
+        return extent.characterTotal, extent.utf8Bytes, extent.widest
+    width = max(1, values.dtype.itemsize // 4)
+    widest = int(values.view(np.uint32).max()) if values.size else 0
+    utf8 = 1 if widest < 0x80 else 2 if widest < 0x800 else 3 if widest < 0x10000 else 4
+    return len(values) * width, width * utf8, widest
 
 
 def _text_copy_bytes(values: np.ndarray, ledger: MemoryLedger | None = None) -> int:
@@ -624,11 +618,17 @@ def _frame_bytes(
     as pandas makes them, and a copy of each array of numbers. Each entry of
     the padded two-dimensional array ``entries``, such as the calls' guide
     codes, that holds a value, at least 0, becomes a row of its own, which
-    holds its cell's ID, as fixed-width text and as a Python string, its
-    cell and slot, its value and those of the arrays padded beside it, and
-    their gathers and copies.
+    holds its cell's ID, taken from the cells' index as a reference to its
+    string, or with pyarrow as an offset and its UTF-8 bytes, at the
+    longest ID, its cell and slot, its value and those of the arrays padded
+    beside it, and their gathers and copies.
     """
-    total, entry = _text_bytes(cell_ids, ledger)
+    n_ids = len(cell_ids)
+    characters, longest, widest = _text_size(cell_ids, ledger)
+    total = object_array_bytes(n_ids) + python_text_bytes(
+        n_ids, characters, widest=widest
+    )
+    entry = 8 + longest
     for values in arrays.values():
         if values.ndim == 1 and values.dtype.kind == "U":
             total += object_array_bytes(len(values)) + _strings_bytes(values)

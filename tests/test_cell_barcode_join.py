@@ -1094,6 +1094,39 @@ def test_the_pass_over_variable_width_store_ids_holds_what_it_charges(
     assert traced.held <= traced.charged
 
 
+def test_the_join_keeps_variable_width_selected_ids_as_the_strings_it_charges(
+    tmp_path,
+) -> None:
+    import zarr
+
+    from tests.memory_helpers import traced_charge
+
+    # 20,000 selected cells, every cell of the store, whose IDs of 150 to 250
+    # characters, every seventh beyond ASCII, another tool stored as
+    # variable-width text; the lookup keeps each as a Python string, whose
+    # characters outweigh the lookup's table.
+    lengths = np.random.default_rng(6).integers(150, 251, 20_000)
+    ids = np.asarray(
+        [
+            f"s1__{index:06d}" + "x" * (length - 13) + ("\u00e9" * (index % 7 == 0))
+            for index, length in enumerate(lengths)
+        ],
+        dtype=np.dtypes.StringDType(),
+    )
+    array = zarr.open_group(tmp_path / "ids.zarr", mode="w").create_array(
+        "ids", data=ids, chunks=(5_000,)
+    )
+
+    def join(ledger: MemoryLedger) -> CellBarcodeJoin:
+        return CellBarcodeJoin(ids, ledger=ledger, store_ids=array)
+
+    # The least of three joins holds no more than it charges while it starts,
+    # and keeps no more than stays charged, its lookup's strings among it.
+    traced = traced_charge(join, runs=3)
+    assert traced.held <= traced.charged
+    assert traced.kept <= traced.kept_charged
+
+
 def test_the_join_takes_variable_width_store_ids_given_in_memory() -> None:
     # The store's IDs differ in length and reach beyond ASCII; "c\u00e9" names
     # a cell outside the selection and "z" no cell.

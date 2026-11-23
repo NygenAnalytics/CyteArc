@@ -1280,40 +1280,58 @@ def test_the_cells_ids_are_charged_as_their_strings_and_values() -> None:
     # bytes behind a one-byte size in an arena beside them.
     elements = 16 * len(strings) + sum(size + 1 for size in utf8 if size > 15)
 
-    every, one = operations._text_bytes(ids)
-
     # Python strings of one kind are counted as sys.getsizeof gives each,
     # beside a reference to each.
+    every = operations._strings_bytes(ids)
     assert every == sum(map(sys.getsizeof, strings)) + 8 * len(strings)
-    # One entry holds the longest ID as NumPy gathers it, at least its
-    # element and sized bytes and at most a quarter more of them for the
-    # arena's growth, and as a Python string beside its reference.
-    sized = 16 + len(longest.encode("utf-8")) + 1
-    string = sys.getsizeof(longest) + 8
-    assert sized + string <= one <= sized + (sized - 16) // 4 + 1 + string
+    # A table entry's ID, under pyarrow, holds the longest ID's UTF-8 bytes.
+    assert operations._text_size(ids) == (
+        sum(map(len, strings)),
+        len(longest.encode("utf-8")),
+        ord("é"),
+    )
     # A copy of some of the IDs holds no more than NumPy keeps for every one,
     # and those at least NEP 55's elements and sized bytes.
     copy = operations._text_copy_bytes(ids)
     assert elements <= copy <= elements + (elements - 16 * len(strings)) // 4 + 1
 
 
-def test_a_fixed_width_entry_counts_its_id_at_the_widest_character_of_any() -> None:
+def test_fixed_width_ids_are_counted_at_the_widest_character_of_any() -> None:
     import sys
 
-    # The first ID is ASCII, a later one beyond Latin-1, so a table entry of
-    # any cell can hold a string of two characters of two bytes each.
+    # The first ID is ASCII, a later one beyond Latin-1, so every ID can hold
+    # two characters of three bytes each in UTF-8, and of two in Python.
     ids = np.asarray(["ab", "c中"])
 
-    every, one = operations._text_bytes(ids)
+    characters, longest, widest = operations._text_size(ids)
 
-    assert one >= ids.dtype.itemsize + 8 + sys.getsizeof("中中")
-    assert every >= sum(sys.getsizeof(str(value)) for value in ids) + 8 * len(ids)
+    assert widest == ord("中")
+    assert longest >= len("中中".encode("utf-8"))
+    assert characters >= sum(map(len, ids.tolist()))
+    assert operations._strings_bytes(ids) >= len(ids) * (sys.getsizeof("中中") + 8)
+
+
+def test_each_call_of_a_table_is_charged_its_ids_reference_and_bytes() -> None:
+    # A call takes its cell's ID from the cells' index: a reference to the
+    # index's string, or with pyarrow an offset of 8 bytes and the ID's UTF-8
+    # bytes, beside the row's own values; the longest ID here holds 8 bytes.
+    ids = np.asarray(["cell-1", "c-\u00e9\u00e9\u00e9"], dtype=np.dtypes.StringDType())
+    arrays = _call_arrays(2)
+    one, two = (
+        operations._frame_bytes(
+            ids,
+            {**arrays, "guide_codes": np.asarray(codes)},
+            entries="guide_codes",
+        )
+        for codes in ([[0, -1], [-1, -1]], [[0, 1], [-1, -1]])
+    )
+    assert two - one >= operations._FRAME_BYTES_PER_ENTRY + 8 + 8
 
 
 def test_checking_variable_width_ids_against_a_call_file_holds_what_it_charges() -> (
     None
 ):
-    from tests.memory_helpers import least_traced_charge
+    from tests.memory_helpers import traced_charge
 
     # IDs of a merged store's sample, 41 characters each, which NumPy keeps
     # beside its elements, so that the check's copy of the IDs that hold the
@@ -1334,5 +1352,5 @@ def test_checking_variable_width_ids_against_a_call_file_holds_what_it_charges()
             remedy="or call the guides from their counts",
         )
 
-    traced = least_traced_charge(check)
+    traced = traced_charge(check, runs=3)
     assert traced.held <= traced.charged

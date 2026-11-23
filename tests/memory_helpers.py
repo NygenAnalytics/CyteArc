@@ -122,46 +122,23 @@ class TracedCharge(NamedTuple):
     kept_charged: int
 
 
-def traced_charge(call: Callable[[Any], Any]) -> TracedCharge:
-    """Run ``call(ledger)`` once untraced, then traced after a full collection, against a :func:`recording_ledger`.
+def traced_charge(call: Callable[[Any], Any], runs: int = 1) -> TracedCharge:
+    """Run ``call(ledger)`` once untraced, then ``runs`` times traced after a full collection each, against a :func:`recording_ledger`, and return the run that held the least.
 
     The untraced run warms what a first call allocates once, such as
-    imports and Zarr's objects.
-    """
-    import gc
-    import tracemalloc
-
-    call(recording_ledger())
-    gc.collect()
-    ledger = recording_ledger()
-    tracemalloc.start()
-    try:
-        before, _ = tracemalloc.get_traced_memory()
-        result = call(ledger)
-        _, peak = tracemalloc.get_traced_memory()
-        # What the call keeps is what stays reachable, its result among it.
-        gc.collect()
-        current, _ = tracemalloc.get_traced_memory()
-    finally:
-        tracemalloc.stop()
-    del result
-    return TracedCharge(peak - before, ledger.most, current - before, ledger.held_bytes)
-
-
-def least_traced_charge(call: Callable[[Any], Any], runs: int = 3) -> TracedCharge:
-    """Run ``call(ledger)`` once untraced, then ``runs`` times traced, each after a full collection, and return the run that held the least.
-
-    What a call leaves for Python's collector and in CPython's free lists
-    varies from one run to the next with when the collector runs, so a bound
-    that holds for the least of a few runs is not undone by one late
-    collection.
+    imports and Zarr's objects. A traced run can also hold a block that the
+    call does not make for itself: the interpreter's table of interned
+    strings resizes when it fills, as pathlib's interning of the paths that
+    Zarr's local store reads fills it, which one of five traced reads of
+    1,000 bands held as a block of 3.84 MB. The least of a few runs leaves
+    such a block out.
     """
     import gc
     import tracemalloc
 
     call(recording_ledger())
     traced = []
-    for _ in range(runs):
+    for _ in range(max(1, int(runs))):
         gc.collect()
         ledger = recording_ledger()
         tracemalloc.start()
@@ -169,6 +146,7 @@ def least_traced_charge(call: Callable[[Any], Any], runs: int = 3) -> TracedChar
             before, _ = tracemalloc.get_traced_memory()
             result = call(ledger)
             _, peak = tracemalloc.get_traced_memory()
+            # What the call keeps is what stays reachable, its result among it.
             gc.collect()
             current, _ = tracemalloc.get_traced_memory()
         finally:

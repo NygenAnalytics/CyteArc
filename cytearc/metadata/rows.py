@@ -11,6 +11,7 @@ import zarr
 from ..storage.async_execution import zarr_decoding_threads, zarr_io_concurrency
 from ..storage.categorical import CategoricalColumn
 from ..storage.geometry import (
+    ROW_BLOCK_BYTES,
     ROW_INDEX_BYTES,
     ROW_KEPT_INDEX_BYTES,
     ArrayGeometry,
@@ -356,8 +357,9 @@ def row_read_bytes(geometry: ArrayGeometry | None, n_rows: int) -> int:
     """What reading ``n_rows`` distinct rows of an array of ``geometry`` a band of chunks at a time holds, with the rows.
 
     Ordering the rows by band holds their indices as
-    ``storage.geometry.ROW_INDEX_BYTES`` counts them. Reading the bands then
-    holds each row in the result and the indices it keeps, one band's
+    ``storage.geometry.ROW_INDEX_BYTES`` counts them, and a block of each
+    band's rows, which ``ROW_BLOCK_BYTES`` counts. Reading the bands then
+    holds each row in the result, the indices and blocks it keeps, one band's
     selected rows as Zarr returns them and what reading the band holds, as
     ``ArrayGeometry.bandReadBytes`` counts. An unsharded array's read also
     copies the rows that a decoded chunk holds before it places them, up to
@@ -371,21 +373,22 @@ def row_read_bytes(geometry: ArrayGeometry | None, n_rows: int) -> int:
     array.
     """
     n_rows = int(n_rows)
-    ordering = n_rows * ROW_INDEX_BYTES
     if geometry is None:
-        return ordering
+        return n_rows * ROW_INDEX_BYTES
+    # Each band is a read of its own, of a block of its rows, and what the
+    # earlier bands' reads leave stays while the last one runs.
+    bands = min(n_rows, geometry.bandCount())
+    ordering = n_rows * ROW_INDEX_BYTES + bands * ROW_BLOCK_BYTES
     band_rows = min(n_rows, geometry.axisChunk(0))
     # Variable-width text is read a chunk's span of the rows at a time, which
     # Zarr returns up to a chunk of rows; one row is its own span.
     returned_rows = (
         geometry.axisChunk(0) if geometry.text is not None and n_rows > 1 else band_rows
     )
-    # Each band is a read of its own, and what the earlier bands' reads leave
-    # stays while the last one runs.
-    bands = min(n_rows, geometry.bandCount())
     reading = (
         geometry.rowsBytes(n_rows)
         + n_rows * ROW_KEPT_INDEX_BYTES
+        + bands * ROW_BLOCK_BYTES
         + geometry.bandReadBytes(returned_rows, operation_concurrency())
         + (geometry.rowsBytes(band_rows) if geometry.shards is None else 0)
         + geometry.bandsLeftoverBytes(bands - 1)

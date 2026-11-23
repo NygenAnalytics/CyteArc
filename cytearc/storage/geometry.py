@@ -1,10 +1,12 @@
 """Stored chunk geometry of a streamed array."""
 
+import functools
 import importlib
 import io
 import math
 import operator
 import os
+import sys
 from dataclasses import dataclass
 from typing import Any
 
@@ -16,6 +18,7 @@ from .types import array_metadata_shards
 from .validation_scope import store_key, validated_once
 
 __all__ = [
+    "ROW_BLOCK_BYTES",
     "ROW_INDEX_BYTES",
     "ROW_KEPT_INDEX_BYTES",
     "ArrayGeometry",
@@ -31,6 +34,11 @@ __all__ = [
 #: as int64.
 ROW_INDEX_BYTES = 48
 ROW_KEPT_INDEX_BYTES = 32
+#: Ordering the rows also makes a block of each band's rows, which it keeps
+#: while it reads: an object and two arrays of the rows' indices, 400 to 420
+#: bytes beside the indices, and 70 to 90 bytes more of each band while the
+#: sort groups them.
+ROW_BLOCK_BYTES = 512
 
 #: What one Zarr read holds beside its buffers, whatever their size: the
 #: objects of the read of one shard, or of an unsharded read, those of each
@@ -49,6 +57,18 @@ ROW_KEPT_INDEX_BYTES = 32
 _READ_OBJECT_BYTES = 32 * 1024
 _READ_CHUNK_OBJECT_BYTES = 4 * 1024
 _READ_DECODE_OBJECT_BYTES = 16 * 1024
+#: What the reads of a band each leave of their objects levels off as CPython
+#: reuses the objects it freed for the next reads: 140 to 150 KB after 100 to
+#: 2,000 reads of a band, on Python 3.13 and 3.14.
+_READ_LEFTOVER_LIMIT_BYTES = 192 * 1024
+
+#: Python's ``open`` buffers a binary file at its file system's block size,
+#: or at ``io.DEFAULT_BUFFER_SIZE`` where the block size is unknown, as on
+#: Windows, and ``Path.read_bytes`` reads a whole file through it. From
+#: Python 3.14 ``open`` buffers at least ``io.DEFAULT_BUFFER_SIZE``, 128 KiB,
+#: and at most 8 MiB, and ``Path.read_bytes`` reads unbuffered.
+_FILE_BUFFER_LIMIT_BYTES = 8 * 1024 * 1024
+_WHOLE_FILES_UNBUFFERED = sys.version_info >= (3, 14)
 
 #: NumPy keeps each value of variable-width text in a 16-byte element, and a
 #: value of more than 15 bytes in UTF-8 in an arena beside the array, behind
@@ -247,12 +267,17 @@ class ArrayGeometry:
 
         They are counted as :meth:`objectBytes` counts the objects of a read
         and of each chunk that it takes while it runs, for every chunk of the
-        bands, whether one read takes them or a read of each band does.
+        bands, whether one read takes them or a read of each band does, up to
+        192 KiB, where what the reads leave levels off as CPython reuses the
+        objects it freed.
         """
         chunks = max(0, int(bands)) * self.bandChunks()
         if chunks == 0:
             return 0
-        return _READ_OBJECT_BYTES + chunks * _READ_CHUNK_OBJECT_BYTES
+        return min(
+            _READ_LEFTOVER_LIMIT_BYTES,
+            _READ_OBJECT_BYTES + chunks * _READ_CHUNK_OBJECT_BYTES,
+        )
 
     def bandCount(self) -> int:
         """Return the bands of chunks along the first axis."""
@@ -363,7 +388,7 @@ class ArrayGeometry:
         decoding, _ = self.readsAtOnce(n_chunks, concurrency)
         return (
             result
-            + decoding * self.storedChunkBytes()
+            + decoding * (self.storedChunkBytes() + self.readScratchBytes)
             + self.heldDecodeBytes(n_chunks, decoding)
         )
 
@@ -380,18 +405,19 @@ class ArrayGeometry:
         rows_bytes = self.rowsBytes(rows)
         touched = self.bandChunks()
         if self.shards is None:
+            # Each chunk decoded at once is a read of its own scratch.
             decoding, _ = self.readsAtOnce(touched, concurrency)
-            band = decoding * self.storedChunkBytes() + self.heldDecodeBytes(
-                touched, decoding
-            )
-        else:
-            decoding = min(max(1, int(concurrency)), touched)
-            band = (
-                rows_bytes
-                + touched * self.storedChunkBytes()
-                + decoding * self.nominalChunkBytes()
-                + self.objectBytes(touched, decoding)
-            )
+            band = decoding * (
+                self.storedChunkBytes() + self.readScratchBytes
+            ) + self.heldDecodeBytes(touched, decoding)
+            return rows_bytes + band
+        decoding = min(max(1, int(concurrency)), touched)
+        band = (
+            rows_bytes
+            + touched * self.storedChunkBytes()
+            + decoding * self.nominalChunkBytes()
+            + self.objectBytes(touched, decoding)
+        )
         return rows_bytes + band + self.readScratchBytes
 
     def readBytes(
@@ -500,9 +526,9 @@ def array_geometry(
     scratch = chunk_read_scratch_bytes(array)
     if scratch < 0:
         raise ValueError(f"Array read scratch cannot be negative, got {scratch}")
-    # A store that computes the array's chunks fetches no part of a file.
-    if shards is not None and not scratch:
-        scratch = _range_read_buffer_bytes(array)
+    # A store that computes the array's chunks reads no file.
+    if not scratch:
+        scratch = _file_buffer_bytes(array, sharded=shards is not None)
     fused_workers, fused_async = _fused_pool(array)
 
     text = (
@@ -724,14 +750,18 @@ def _utf8_lengths(
     return utf8, widest, part_bytes
 
 
-def _range_read_buffer_bytes(array: Any) -> int:
-    """Return the buffer that a fetch of part of a shard of ``array`` holds, 0 for a store that reads without one.
+def _file_buffer_bytes(array: Any, *, sharded: bool) -> int:
+    """Return the buffer that each fetch of ``array``'s stored bytes holds, 0 for a store that reads no file.
 
-    Zarr's local store fetches a byte range of a file through a buffered
-    file from ``open``, which buffers the file system's block size, and from
-    Python 3.14 at least ``io.DEFAULT_BUFFER_SIZE``, 128 KiB, and at most
-    8 MiB; it reads a whole file, as a chunk of an unsharded array, without
-    that buffer. Zarr's wrappers of the store are looked through.
+    Zarr's local store reads a whole file, as a chunk of an unsharded array
+    or a whole shard, through ``Path.read_bytes``, and a byte range of a
+    file, as part of a shard, through ``open``. Before Python 3.14 both
+    buffer the file at its file system's block size, or at
+    ``io.DEFAULT_BUFFER_SIZE`` where that is unknown. From Python 3.14 a
+    whole file is read unbuffered, and a byte range is buffered at the block
+    size, at least ``io.DEFAULT_BUFFER_SIZE``, 128 KiB, and at most 8 MiB, so
+    a sharded array, read in part, is charged that buffer. Zarr's wrappers of
+    the store are looked through.
     """
     store = getattr(array, "store", None)
     storage: Any = importlib.import_module("zarr.storage")
@@ -739,7 +769,22 @@ def _range_read_buffer_bytes(array: Any) -> int:
         store = store._store
     if not isinstance(store, storage.LocalStore):
         return 0
-    return max(io.DEFAULT_BUFFER_SIZE, int(os.stat(store.root).st_blksize))
+    block = _block_size(str(store.root))
+    if not _WHOLE_FILES_UNBUFFERED:
+        return block if block > 1 else io.DEFAULT_BUFFER_SIZE
+    if not sharded:
+        return 0
+    return max(min(block, _FILE_BUFFER_LIMIT_BYTES), io.DEFAULT_BUFFER_SIZE)
+
+
+@functools.cache
+def _block_size(root: str) -> int:
+    """Return the block size of the file system that holds ``root``, 0 where the platform reports none, as Windows does not.
+
+    A store's files share its root's file system, so each root is asked once
+    in a process.
+    """
+    return int(getattr(os.stat(root), "st_blksize", 0))
 
 
 def _coalesce_gap_bytes(array: Any) -> int:

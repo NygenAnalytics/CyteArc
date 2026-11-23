@@ -148,6 +148,15 @@ def test_a_read_on_cytearcs_pools_holds_its_objects_where_a_plain_pool_keeps_a_c
     assert replace(unsharded, fusedPoolWorkers=2).wholeReadBytes(2) == (
         160_000_000 + 2 * stored + 2 * 40_000_000 + read_objects
     )
+    # An unsharded array of a local store reads each chunk as a file, so a
+    # buffer of 4,096 bytes is held for each of the chunks read at once: two
+    # in a whole read, and four of a band of ten chunks.
+    buffered = replace(unsharded, readScratchBytes=4_096)
+    assert buffered.wholeReadBytes(2) == unsharded.wholeReadBytes(2) + 2 * 4_096
+    band = replace(sharded, shards=None)
+    assert replace(band, readScratchBytes=4_096).bandReadBytes(1_000, 4) == (
+        band.bandReadBytes(1_000, 4) + 4 * 4_096
+    )
 
 
 def test_a_read_through_zarrs_fused_pipeline_is_charged_at_the_reads_it_runs_at_once() -> (
