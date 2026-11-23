@@ -91,6 +91,9 @@ def _read_dataset_fingerprint(assay: zarr.Group) -> str:
 
 
 COUNT_SUMMARIES = "countSummaries"
+# The summary that counts each row's nonzero values, which summaries written
+# before it was stored lack.
+ROW_NONZERO = "rowNonzero"
 
 
 class CountSummary:
@@ -99,9 +102,11 @@ class CountSummary:
     Writers fill rows from bands in any order while the values are in memory.
     The fingerprint depends only on each row's nonzero values, so chunk layout,
     band size, and byte order do not change it. Row sums and positive-entry
-    counts are the raw inputs for cell and feature summaries. Every count
-    writer passes its bands through ``update``, which rejects NaN and infinity
-    because count matrices hold finite values. Negative values are kept.
+    counts are the raw inputs for cell and feature summaries, and each row's
+    number of nonzero values counts a matrix's values without a read. Every
+    count writer passes its bands through ``update``, which rejects NaN and
+    infinity because count matrices hold finite values. Negative values are
+    kept.
     """
 
     def __init__(self, counts: zarr.Array, rows: tuple[int, int] | None = None):
@@ -119,6 +124,7 @@ class CountSummary:
         self.digests = np.zeros((n_rows, 2), dtype=np.uint64)
         self.rowSums = np.zeros(n_rows, dtype=np.float64)
         self.rowPositive = np.zeros(n_rows, dtype=np.int64)
+        self.rowNonzero = np.zeros(n_rows, dtype=np.int64)
         self.columnPositive = np.zeros(self.shape[1], dtype=np.int64)
         self._covered = 0
         self._lock = threading.Lock()
@@ -127,10 +133,11 @@ class CountSummary:
     def nbytes_for(n_rows: int, n_columns: int) -> int:
         """Bytes held for ``n_rows`` rows and ``n_columns`` columns.
 
-        Each row keeps two digest words, a total, and a positive count. Column
-        counts are held twice while bands add their local counts.
+        Each row keeps two digest words, a total, a positive count and a
+        nonzero count. Column counts are held twice while bands add their
+        local counts.
         """
-        return 32 * int(n_rows) + 16 * int(n_columns)
+        return 40 * int(n_rows) + 16 * int(n_columns)
 
     @property
     def nbytes(self) -> int:
@@ -157,21 +164,26 @@ class CountSummary:
             self.digests[rows],
             self.rowSums[rows],
             self.rowPositive[rows],
+            self.rowNonzero[rows],
             columns,
         )
         self._add(stop - start, columns)
 
     def merge(
-        self, window: tuple[int, np.ndarray, np.ndarray, np.ndarray, np.ndarray]
+        self,
+        window: tuple[int, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray],
     ) -> None:
-        start, digests, row_sums, row_positive, column_positive = window
+        start, digests, row_sums, row_positive, row_nonzero, column_positive = window
         rows = self._rows(start, start + len(digests))
         self.digests[rows] = digests
         self.rowSums[rows] = row_sums
         self.rowPositive[rows] = row_positive
+        self.rowNonzero[rows] = row_nonzero
         self._add(len(digests), column_positive)
 
-    def window(self) -> tuple[int, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    def window(
+        self,
+    ) -> tuple[int, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         if self._covered != self.stop - self.start:
             raise RuntimeError("Count summary does not cover its row window")
         return (
@@ -179,6 +191,7 @@ class CountSummary:
             self.digests,
             self.rowSums,
             self.rowPositive,
+            self.rowNonzero,
             self.columnPositive,
         )
 
@@ -222,6 +235,7 @@ def finalize_counts(counts: zarr.Array, summary: CountSummary) -> str:
     for name, values in (
         ("rowSums", summary.rowSums),
         ("rowPositive", summary.rowPositive),
+        (ROW_NONZERO, summary.rowNonzero),
         ("columnPositive", summary.columnPositive),
     ):
         totals.create_array(
@@ -311,48 +325,63 @@ def load_count_summaries(
     return loaded[0], loaded[1], loaded[2]
 
 
-def summaries_count_every_value(counts: zarr.Array) -> bool:
-    """Return whether the count summaries of ``counts`` count each of its nonzero values.
+def row_nonzero_counts(matrix: zarr.Group, counts: zarr.Array) -> zarr.Array | None:
+    """Return the stored number of nonzero values of each row of ``counts``, or None.
 
-    The summaries count the positive values of each row and column, so they
-    count every nonzero value whenever the counts hold no negative value,
-    which unsigned counts guarantee: the count dtype policy
-    (:mod:`cytearc.storage.count_dtype`) stores a matrix unsigned exactly
-    when its values are whole non-negative counts. Signed and float counts
-    can hold negative values, which the summaries leave out.
-    """
-    return np.dtype(counts.dtype).kind == "u"
-
-
-def positive_value_count(
-    matrix: zarr.Group, counts: zarr.Array, rows: np.ndarray | None = None
-) -> int:
-    """Return how many positive values ``counts`` holds in ``rows``, every row by default.
-
-    ``rows`` are increasing row indices. The number of positive values of
-    each row that the counts' writer stored is summed a chunk of rows at a
-    time, so no more than a chunk of them is held.
+    Count summaries store it as ``rowNonzero`` for counts of every dtype.
+    Summaries written by earlier CyteArc versions lack it; for them,
+    ``rowPositive`` gives the number when the counts are unsigned, since the
+    count dtype policy (:mod:`cytearc.storage.count_dtype`) stores a matrix
+    unsigned exactly when its values are whole non-negative counts, so that
+    every nonzero value is positive. Signed and float counts of such stores
+    give None, and the caller counts their values in a read.
 
     Raises:
-        ValueError: If the summaries do not match the counts.
+        ValueError: If the summaries do not match the counts, or the array
+            does not hold an integer for each row of the counts.
     """
-    n_rows = int(counts.shape[0])
-    row_positive = as_zarr_array(
-        _matching_summaries(matrix, counts)["rowPositive"], name="rowPositive"
-    )
-    if row_positive.shape != (n_rows,):
+    totals = _matching_summaries(matrix, counts)
+    if ROW_NONZERO in totals:
+        name = ROW_NONZERO
+    elif np.dtype(counts.dtype).kind == "u":
+        name = "rowPositive"
+    else:
+        return None
+    array = as_zarr_array(totals[name], name=name)
+    if array.shape != (int(counts.shape[0]),) or np.dtype(array.dtype).kind not in "iu":
         raise ValueError(f"Count summaries are malformed. {REBUILD_REQUIRED}")
+    return array
+
+
+def nonzero_value_count(
+    matrix: zarr.Group, counts: zarr.Array, rows: np.ndarray | None = None
+) -> int | None:
+    """Return how many nonzero values ``counts`` holds in ``rows``, or None.
+
+    ``rows`` are increasing row indices, every row by default. The stored
+    number of nonzero values of each row (:func:`row_nonzero_counts`) is
+    summed a chunk of rows at a time, so no more than a chunk of them is
+    held. None when the summaries cannot give the number, for signed and
+    float counts of stores written by earlier CyteArc versions.
+
+    Raises:
+        ValueError: If the summaries do not match the counts or are malformed.
+    """
+    row_nonzero = row_nonzero_counts(matrix, counts)
+    if row_nonzero is None:
+        return None
+    n_rows = int(counts.shape[0])
     selected = None if rows is None else np.asarray(rows, dtype=np.int64)
-    step = max(1, int(row_positive.chunks[0]))
+    step = max(1, int(row_nonzero.chunks[0]))
     total = 0
     for start in range(0, n_rows, step):
         stop = min(n_rows, start + step)
         if selected is None:
-            total += int(np.asarray(row_positive[start:stop]).sum(dtype=np.int64))
+            total += int(np.asarray(row_nonzero[start:stop]).sum(dtype=np.int64))
             continue
         first, last = (int(bound) for bound in np.searchsorted(selected, (start, stop)))
         if first < last:
-            chunk = np.asarray(row_positive[start:stop])
+            chunk = np.asarray(row_nonzero[start:stop])
             total += int(chunk[selected[first:last] - start].sum(dtype=np.int64))
     return total
 

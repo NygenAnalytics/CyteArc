@@ -37,6 +37,7 @@ from cytearc.writers._store import write_membership_column
 from cytearc.writers.counts_t import finalize_writer_counts_t
 from tests.storage_helpers import (
     by_cell_id,
+    drop_row_nonzero,
     finalize_test_counts,
     write_count_store,
 )
@@ -224,6 +225,7 @@ def test_row_summary_kernel_rejects_non_finite_counts(value):
     outputs = (
         np.zeros((2, 2), dtype=np.uint64),
         np.zeros(2),
+        np.zeros(2, dtype=np.int64),
         np.zeros(2, dtype=np.int64),
         np.zeros(2, dtype=np.int64),
     )
@@ -879,19 +881,41 @@ def _counting_refusal(needed: int, budget: int, item: str) -> str:
 
 
 def test_merge_refuses_a_feature_profile_beyond_its_budget(tmp_path):
+    from cytearc.merge.row_plan import build_row_plan
+
     counts = np.zeros((4, 25_000), dtype=np.uint16)
     counts[:, ::997] = 1
     sources = [_open(_write_source(MemoryStore(), {"RNA": counts})) for _ in _NAMES]
     destination = tmp_path / "merged.zarr"
-    # Every phase holds the feature alignment. Count summaries and the
-    # nonzero profile of the sources add about 40 bytes per feature, or 1 MB.
-    alignment = align_features([source.get_assay("RNA") for source in sources], _NAMES)
-    budget = alignment.resident_bytes() + 500_000
+    assays = [source.get_assay("RNA") for source in sources]
+    alignment = align_features(assays, _NAMES)
+    row_plan = build_row_plan(
+        [4, 4], [assay.rawData.chunksize[0] for assay in assays], _NAMES, seed=0
+    )
+    # Every phase holds the row plan, the feature alignment and the
+    # destination's count summary, 40 bytes for each of the 8 merged cells
+    # and 16 for each of the 25,000 features. Counting each merged cell's
+    # values adds 8 bytes for each cell and one more, and a whole read of a
+    # source's summary of its 4 cells in one chunk: the counts, a decoded copy
+    # and an encoded one at its bound, 1 KiB more, and the 52 KiB of objects
+    # of Zarr's read of one chunk.
+    needed = (
+        row_plan.resident_bytes()
+        + alignment.resident_bytes()
+        + 40 * 8
+        + 16 * 25_000
+        + 8 * 9
+        + 3 * 8 * 4
+        + 1_024
+        + 32_768
+        + 4_096
+        + 16_384
+    )
 
     with pytest.raises(MemoryError) as refused:
-        _merge(sources, str(destination), mem_budget=budget).plan()
+        _merge(sources, str(destination), mem_budget=needed - 1).plan()
     assert str(refused.value) == _counting_refusal(
-        refused.value.needed_bytes, budget, "the count summaries of source 'left'"
+        needed, needed - 1, "the count summaries of source 'left'"
     )
     assert not destination.exists()
 
@@ -1008,15 +1032,20 @@ def test_merge_plans_its_sparse_batches_from_every_value_of_each_cell(
     )
 
 
+@pytest.mark.parametrize("summaries", ["current", "older"])
+@pytest.mark.parametrize("dtype", ["int16", "float32"])
 def test_merge_reads_only_the_counts_that_their_summaries_cannot_count(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, dtype, summaries
 ):
     from collections import Counter
 
     from zarr.storage import LocalStore
 
-    left_path, _ = _counts_with_negative_values(tmp_path / "left.zarr", "int16")
+    left_path, _ = _counts_with_negative_values(tmp_path / "left.zarr", dtype)
     right_path, _ = _sparse_unsigned_counts(tmp_path / "right.zarr")
+    if summaries == "older":
+        drop_row_nonzero(left_path)
+        drop_row_nonzero(right_path)
     sources = [_open(left_path), _open(right_path)]
     fetched: Counter = Counter()
     get = LocalStore.get
@@ -1029,9 +1058,12 @@ def test_merge_reads_only_the_counts_that_their_summaries_cannot_count(
     monkeypatch.setattr(LocalStore, "get", record)
     _merge(sources, str(tmp_path / "merged.zarr"), feature_key="names").plan()
 
-    # The int16 counts are read once to count their values; the uint16
-    # counts take theirs from their count summaries.
-    assert fetched == {("left.zarr", "RNA/counts/c/0/0"): 1}
+    # Count summaries count each cell's nonzero values, the negative ones
+    # among them, so the plan reads no count. Summaries written before they
+    # did count only the values of the uint16 counts, so the signed or float
+    # counts are read once to count theirs.
+    expected = {} if summaries == "current" else {("left.zarr", "RNA/counts/c/0/0"): 1}
+    assert fetched == expected
 
 
 # 24 cells of 600 features, 25 times more features than cells, stored in two
@@ -1043,10 +1075,15 @@ _WIDE_LAYOUT = CountMatrixPolicy(unitBytes=14_400, chunkBytes=2_880)
 def _wide_signed_counts(
     location: Path, seed: int, layout: CountMatrixPolicy = _WIDE_LAYOUT
 ) -> tuple[str, np.ndarray]:
-    """Write a store of 24 cells and 600 int16 features, about 43% of them negative."""
+    """Write a store of 24 cells and 600 int16 features, about 43% of them negative.
+
+    Its count summaries lack ``rowNonzero``, as those of stores written
+    before it was stored do, so a merge counts its values in a read.
+    """
     values = np.random.default_rng(seed).integers(-3, 4, size=(24, 600))
     path = str(location)
     _write_source(path, {"RNA": values}, dtype="int16", policy=layout)
+    drop_row_nonzero(path)
     # The first opening prepares the store; the tests open it again.
     _open(path)
     return path, values
@@ -1222,6 +1259,51 @@ def test_merge_refuses_before_it_reads_any_source_when_one_cannot_be_read(
     np.testing.assert_array_equal(
         np.diff(profile(needed)), _merged_order_values(row_plan, stores)
     )
+
+
+def test_merge_names_the_count_summaries_that_its_budget_cannot_load(
+    tmp_path, recorded_blocks
+):
+    import cytearc.merge.writer as merge_writer
+    from cytearc.merge.row_plan import build_row_plan
+    from cytearc.storage.budget import ResourceBudget
+    from cytearc.utils.memory_budget import MemoryBudgetError
+
+    # Float counts, nearly half of them negative, whose summaries count each
+    # cell's nonzero values: 400 cells on the left, 200 on the right.
+    stores = [
+        _counts_with_negative_values(tmp_path / "left.zarr", "float32"),
+        _counts_with_negative_values(tmp_path / "right.zarr", "float32", n_cells=200),
+    ]
+    assays = [_open(path).get_assay("RNA") for path, _ in stores]
+    row_plan = build_row_plan(
+        [400, 200], [assay.rawData.chunksize[0] for assay in assays], _NAMES, seed=0
+    )
+
+    def profile(budget: int) -> np.ndarray:
+        recorded_blocks.clear()
+        return merge_writer._cumulative_row_nnz(
+            assays, row_plan, ResourceBudget(budget, 1), resident_bytes=1_000
+        )
+
+    # Beside the 1,000 bytes held, a count of each of the 600 merged cells
+    # and one more, 8 bytes each, and a whole read of the left source's
+    # summary of its 400 cells in one chunk: the counts, a decoded copy and
+    # an encoded one at its bound, 1/128 more and 1 KiB, and the 52 KiB of
+    # objects of Zarr's read of one chunk.
+    summary = 3 * 8 * 400 + 8 * 400 // 128 + 1_024 + 32_768 + 4_096 + 16_384
+    needed = 1_000 + 8 * 601 + summary
+    with pytest.raises(MemoryBudgetError) as refused:
+        profile(needed - 1)
+    assert str(refused.value) == _counting_refusal(
+        needed, needed - 1, "the count summaries of source 'left'"
+    )
+    # At that budget each merged cell takes its source cell's nonzero values,
+    # counted here with NumPy, and no count is read.
+    np.testing.assert_array_equal(
+        np.diff(profile(needed)), _merged_order_values(row_plan, stores)
+    )
+    assert recorded_blocks == []
 
 
 def test_merge_reads_signed_counts_within_its_own_budget_whatever_the_sources_budgets(

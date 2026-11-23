@@ -87,6 +87,21 @@ def test_matrix_market_counts_keep_their_text_and_feature_types(tmp_path, compre
     np.testing.assert_array_equal(np.asarray(reopened.ADT.rawData.compute()), adt)
 
 
+@pytest.mark.parametrize("dtype", [np.int8, np.int16, np.int64])
+def test_matrix_market_signed_counts_keep_their_signs(tmp_path, dtype) -> None:
+    # The least value of the dtype, beside other negative and positive
+    # counts, as corrected counts can hold.
+    least = int(np.iinfo(dtype).min)
+    values = np.array([[least, 0, 3], [0, -1, 0], [2, 0, -7]])
+    store = _store(tmp_path, {"RNA": values}, dtype)
+
+    to_mtx(store.RNA, str(tmp_path / "signed"))
+
+    assert (tmp_path / "signed" / "matrix.mtx").read_bytes() == (
+        _reference_matrix_market(values, "integer")
+    )
+
+
 def test_matrix_market_exports_write_one_feature_type_per_assay(tmp_path) -> None:
     rna = np.asarray([[1, 0, 2], [0, 3, 1]])
     adt = np.asarray([[4, 1], [0, 2]])

@@ -3145,11 +3145,17 @@ def test_dataset_merge_charges_a_source_it_reads_its_counts_and_smallest_read():
     # each row (3,000 + 8 bytes).
     expected = 4 * 8 + 24_000 + 24_000 + 4 * (3_000 + 8)
     assert merge_writer._row_nnz_load_bytes(signed, reader) == expected
-    # Unsigned counts load their row sums, row and column positive counts,
-    # and the decoded and encoded copies of the longest of them, 8 bytes each.
-    unsigned = assay(np.ones((4, 3_000), dtype=np.uint16))
-    expected = 8 * (4 + 4 + 3_000 + 2 * 3_000)
-    assert merge_writer._row_nnz_load_bytes(unsigned, None) == expected
+    # Counts whose summaries count their values read that summary whole, in
+    # one chunk as finalize_counts stores it: each cell's count, 8 bytes, a
+    # decoded copy of the chunk and an encoded one at its bound, 1/128 more
+    # and 1 KiB, and the objects of Zarr's read, 32 KiB, 4 KiB for the chunk
+    # and 16 KiB for its decode, whatever the number of features.
+    summarized = assay(np.ones((4, 3_000), dtype=np.uint16))
+    summary = zarr.open_group(store=MemoryStore(), mode="w").create_array(
+        "rowNonzero", data=np.full(4, 3_000, dtype=np.int64), chunks=(4,)
+    )
+    expected = 4 * 8 + 4 * 8 + (4 * 8 + 1_024) + 32_768 + 4_096 + 16_384
+    assert merge_writer._row_nnz_load_bytes(summarized, summary) == expected
     # Counts without features or without cells hold no value to read: each
     # cell's count of 0 is all that they hold, within a budget of just it.
     for n_cells, n_features in ((5, 0), (0, 4)):
@@ -3185,9 +3191,20 @@ def test_dataset_merge_rejects_insufficient_metadata_budget(tmp_path):
 @pytest.mark.parametrize(
     ("budget", "reason"),
     [
-        (8_000, "Resident data needs about"),
-        (16_000, "One task needs about"),
-        (32_000, "countsT write needs at least"),
+        # The cell metadata fits, but not counting each merged cell's values
+        # beside a whole read of a source's count summary.
+        (
+            170_000,
+            "Counting the nonzero values of each merged cell of assay 'RNA' holds "
+            r"about \d+ bytes for each merged cell's count and the count "
+            "summaries of source 'left'",
+        ),
+        # Counting fits, but not the counts of one row.
+        (
+            250_000,
+            "The merge does not fit mem_budget even with count shards of one row. "
+            "Increase mem_budget. Resident data needs about",
+        ),
     ],
 )
 def test_dataset_merge_rejects_insufficient_counts_budget(tmp_path, budget, reason):
@@ -3196,10 +3213,10 @@ def test_dataset_merge_rejects_insufficient_counts_budget(tmp_path, budget, reas
         [
             _MergeAssay(
                 "RNA",
-                np.ones((8, 32), dtype=np.uint16),
+                np.ones((8, 1_000), dtype=np.uint16),
                 [f"c{i}" for i in range(8)],
-                [f"id_{i}" for i in range(32)],
-                [f"G{i}" for i in range(32)],
+                [f"id_{i}" for i in range(1_000)],
+                [f"G{i}" for i in range(1_000)],
                 block_size=4,
             )
         ],
@@ -3209,10 +3226,10 @@ def test_dataset_merge_rejects_insufficient_counts_budget(tmp_path, budget, reas
         [
             _MergeAssay(
                 "RNA",
-                np.ones((8, 32), dtype=np.uint16) * 2,
+                np.ones((8, 1_000), dtype=np.uint16) * 2,
                 [f"c{i}" for i in range(8)],
-                [f"id_{i}" for i in range(32)],
-                [f"G{i}" for i in range(32)],
+                [f"id_{i}" for i in range(1_000)],
+                [f"G{i}" for i in range(1_000)],
                 block_size=4,
             )
         ],
@@ -3227,12 +3244,9 @@ def test_dataset_merge_rejects_insufficient_counts_budget(tmp_path, budget, reas
         nthreads=1,
         overwrite=True,
     )
-    # These budgets hold the cell metadata, but not the counts of one row.
-    with pytest.raises(
-        MemoryError,
-        match=f"^The merge does not fit mem_budget even with count shards of one "
-        f"row. Increase mem_budget. {reason}",
-    ):
+    # These budgets hold the cell metadata, which 1,000 features of 8 cells
+    # need about 136,000 bytes for, but not the counts write that follows.
+    with pytest.raises(MemoryError, match=f"^{reason}"):
         merger.plan()
     assert not (tmp_path / "counts_budget.zarr").exists()
 

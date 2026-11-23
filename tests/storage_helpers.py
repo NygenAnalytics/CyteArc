@@ -147,6 +147,18 @@ def finalize_test_counts(counts: zarr.Array) -> str:
     return finalize_counts(counts, summary=summary)
 
 
+def drop_row_nonzero(location: Any, assay: str = "RNA") -> None:
+    """Remove the ``rowNonzero`` count summary of an assay at ``location``, a path or a store.
+
+    Stores written before the summaries counted each row's nonzero values
+    hold their summaries without it.
+    """
+    from cytearc.storage.stores import load_zarr
+
+    matrix = load_zarr(location, mode="r+")[assay]
+    del matrix["countSummaries/rowNonzero"]
+
+
 def write_count_store(
     zarr_loc: str,
     counts: Mapping[str, np.ndarray],

@@ -63,7 +63,7 @@ from cytearc.writers.export import (
     reordered_matrix,
 )
 from tests.row_store_helpers import asked_bytes, finalized_bytes, free_disk
-from tests.storage_helpers import by_cell_id, write_count_store
+from tests.storage_helpers import by_cell_id, drop_row_nonzero, write_count_store
 
 anndata = pytest.importorskip("anndata")
 
@@ -1421,21 +1421,24 @@ def test_an_export_asks_for_the_disk_that_its_temporary_files_take(
 _NEGATIVE_CELLS = 120
 
 
-@pytest.fixture(scope="module", params=["int16", "float32"])
-def negative_counts(request, tmp_path_factory) -> SimpleNamespace:
-    """A store of signed or float counts, some negative, whose cells claim the rows of a shuffle.
+def _negative_counts_store(
+    folder: Path, dtype: np.dtype, older: bool
+) -> SimpleNamespace:
+    """Write a store of signed or float counts, some negative, whose cells claim the rows of a shuffle.
 
-    Its cell selection holds every third cell in store order.
+    Its cell selection holds every third cell in store order. With
+    ``older``, its count summaries lack ``rowNonzero``, as those of stores
+    written before it was stored do.
     """
-    dtype = np.dtype(request.param)
-    folder = tmp_path_factory.mktemp(f"negative_{dtype}")
     rng = np.random.default_rng(21)
     values = rng.poisson(1.0, (_NEGATIVE_CELLS, 15)).astype(dtype)
-    # Corrected counts can be negative, and the store's summaries count only
-    # the positive ones.
+    # Corrected counts can be negative, and the store's positive counts
+    # leave them out.
     values[rng.random(values.shape) < 0.1] = -2 if dtype.kind == "i" else -1.5
     order = shuffled_order(_NEGATIVE_CELLS, _SEED)
     write_count_store(str(folder / "store.zarr"), {"RNA": values}, dtype)
+    if older:
+        drop_row_nonzero(str(folder / "store.zarr"))
     root = zarr.open_group(str(folder / "store.zarr"), mode="r+")
     write_shuffled_cell_order(root["cellData"], order, _SEED)
     store = _open(folder / "store.zarr")
@@ -1449,6 +1452,22 @@ def negative_counts(request, tmp_path_factory) -> SimpleNamespace:
         selection=store.snapshot_cell_selection("chosen"),
         selected=int(np.count_nonzero(values[chosen])),
     )
+
+
+@pytest.fixture(scope="module", params=["int16", "float32"])
+def negative_counts(request, tmp_path_factory) -> SimpleNamespace:
+    """A store of signed or float counts, some negative, as :func:`_negative_counts_store` writes it."""
+    dtype = np.dtype(request.param)
+    folder = tmp_path_factory.mktemp(f"negative_{dtype}")
+    return _negative_counts_store(folder, dtype, older=False)
+
+
+@pytest.fixture(scope="module", params=["int16", "float32"])
+def negative_counts_of_older_summaries(request, tmp_path_factory) -> SimpleNamespace:
+    """The store of :func:`negative_counts` with summaries that lack ``rowNonzero``."""
+    dtype = np.dtype(request.param)
+    folder = tmp_path_factory.mktemp(f"older_negative_{dtype}")
+    return _negative_counts_store(folder, dtype, older=True)
 
 
 # The exports in source order, and one of a cell selection.
@@ -1517,24 +1536,17 @@ def test_an_export_of_unsigned_counts_counts_them_from_the_store_summaries(
 
 
 @pytest.mark.parametrize(
-    ("call", "counts", "streams"),
-    [
-        ("to_mtx", 1, 1),
-        ("to_h5ad counting first", 1, 1),
-        ("to_h5ad", 0, 2),
-        ("to_h5ad of a selection", 0, 2),
-    ],
+    "call", ["to_mtx", "to_h5ad counting first", "to_h5ad", "to_h5ad of a selection"]
 )
-def test_an_export_of_counts_that_can_be_negative_counts_them_in_a_pass(
-    negative_counts, tmp_path, monkeypatch, call, counts, streams
+def test_an_export_of_counts_that_can_be_negative_counts_them_from_the_store_summaries(
+    negative_counts, tmp_path, monkeypatch, call
 ) -> None:
-    # The store's summaries leave the negative values out, so to_mtx counts
-    # them for its header and to_h5ad in its preliminary pass, which the
-    # reorder takes, or else the reorder in a read of its own before it
-    # writes.
+    # The store's summaries count each cell's nonzero values, the negative
+    # ones among them, so no export reads the counts more than to write them
+    # once, and the files are sized for every value of the exported cells.
     assert _counted_export(negative_counts, call, tmp_path, monkeypatch) == (
-        counts,
-        streams,
+        0,
+        1,
         [
             negative_counts.selected
             if call == "to_h5ad of a selection"
@@ -1543,15 +1555,58 @@ def test_an_export_of_counts_that_can_be_negative_counts_them_in_a_pass(
     )
 
 
+@pytest.mark.parametrize(
+    ("call", "counts", "streams"),
+    [
+        ("to_mtx", 1, 1),
+        ("to_h5ad counting first", 1, 1),
+        ("to_h5ad", 0, 2),
+        ("to_h5ad of a selection", 0, 2),
+    ],
+)
+def test_an_export_of_counts_that_can_be_negative_with_older_summaries_counts_them_in_a_pass(
+    negative_counts_of_older_summaries, tmp_path, monkeypatch, call, counts, streams
+) -> None:
+    # Summaries written before rowNonzero count only the positive values, so
+    # to_mtx counts the values for its header and to_h5ad in its preliminary
+    # pass, which the reorder takes, or else the reorder in a read of its own
+    # before it writes.
+    source = negative_counts_of_older_summaries
+    assert _counted_export(source, call, tmp_path, monkeypatch) == (
+        counts,
+        streams,
+        [
+            source.selected
+            if call == "to_h5ad of a selection"
+            else np.count_nonzero(source.values)
+        ],
+    )
+
+
+def _assert_written_in_the_files_order(source: SimpleNamespace, folder: Path) -> None:
+    """Export the store's counts as H5AD and Matrix Market, and check that each holds them in the file's order."""
+    values, order = source.values, source.order
+    assert np.count_nonzero(values < 0) > 0
+    to_h5ad(source.store.RNA, str(folder / "out.h5ad"), temp_dir=folder)
+    to_mtx(source.store.RNA, str(folder / "mtx"), temp_dir=folder)
+    # The cell that the store holds at row r is row order[r] of the files.
+    expected = values[np.argsort(order)]
+    exported = anndata.read_h5ad(folder / "out.h5ad")
+    np.testing.assert_array_equal(exported.X.toarray(), expected)
+    matrix = mmread(folder / "mtx" / "matrix.mtx")
+    np.testing.assert_array_equal(matrix.toarray().T, expected)
+
+
 def test_an_export_of_counts_that_can_be_negative_writes_them_in_the_files_order(
     negative_counts, tmp_path
 ) -> None:
-    values, order = negative_counts.values, negative_counts.order
-    assert np.count_nonzero(values < 0) > 0
-    to_h5ad(negative_counts.store.RNA, str(tmp_path / "out.h5ad"), temp_dir=tmp_path)
-    exported = anndata.read_h5ad(tmp_path / "out.h5ad")
-    # The cell that the store holds at row r is row order[r] of the file.
-    np.testing.assert_array_equal(exported.X.toarray(), values[np.argsort(order)])
+    _assert_written_in_the_files_order(negative_counts, tmp_path)
+
+
+def test_an_export_of_counts_with_older_summaries_writes_them_in_the_files_order(
+    negative_counts_of_older_summaries, tmp_path
+) -> None:
+    _assert_written_in_the_files_order(negative_counts_of_older_summaries, tmp_path)
 
 
 def test_an_export_leaves_no_temporary_files(imported, tmp_path) -> None:

@@ -199,11 +199,13 @@ class DataStoreMerge:
     that features summed by name cannot overflow it.
 
     The number of nonzero values of each cell sizes the batches of the
-    counts write within ``mem_budget``. Unsigned counts, which imports store
-    for whole counts, give it from their count summaries. Signed and float
-    counts, such as normalized or corrected values, can hold negative
-    values, which those summaries leave out, so the merge counts them in a
-    read of the source's counts, once as it plans and once before it writes.
+    counts write within ``mem_budget``, and the sources' count summaries
+    give it. The summaries of stores written by earlier CyteArc versions
+    give it only for unsigned counts, which imports store for whole counts;
+    for signed and float counts of such stores, which can hold negative
+    values, the merge counts the values in a read of the source's counts,
+    once as it plans and once before it writes. A repack of such a store
+    stores the number.
 
     With ``features="union"``, the cells of a source that holds the assay but
     lacks one of its features get zero counts of that feature. Planning then

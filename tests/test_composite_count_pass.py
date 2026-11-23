@@ -98,7 +98,7 @@ def _summaries(joint: DataStore) -> dict[str, Any]:
         "fingerprint": matrix["counts"].attrs["content_fingerprint"],
         **{
             name: totals[name][:]
-            for name in ("rowSums", "rowPositive", "columnPositive")
+            for name in ("rowSums", "rowPositive", "rowNonzero", "columnPositive")
         },
     }
     for key, array in totals["featureSums"].arrays():
@@ -116,6 +116,9 @@ def _assert_summaries_of(joint: DataStore, sources: dict[str, Any]) -> None:
         observed["rowSums"], expected.sum(axis=1, dtype=np.float64)
     )
     np.testing.assert_array_equal(observed["rowPositive"], (expected > 0).sum(axis=1))
+    np.testing.assert_array_equal(
+        observed["rowNonzero"], np.count_nonzero(expected, axis=1)
+    )
     np.testing.assert_array_equal(
         observed["columnPositive"], (expected > 0).sum(axis=0)
     )

@@ -619,6 +619,7 @@ def test_row_summary_python_kernel_matches_compiled_kernel(monkeypatch) -> None:
             np.zeros((3, 2), dtype=np.uint64),
             np.zeros(3),
             np.zeros(3, dtype=np.int64),
+            np.zeros(3, dtype=np.int64),
             np.zeros(4, dtype=np.int64),
         )
         kernel(values, values.view(np.uint32), *outputs)
@@ -632,9 +633,11 @@ def test_row_summary_python_kernel_matches_compiled_kernel(monkeypatch) -> None:
 
     for expected, actual in zip(compiled, python, strict=True):
         np.testing.assert_array_equal(actual, expected)
-    digests, row_sums, row_positive, column_positive = compiled
+    digests, row_sums, row_positive, row_nonzero, column_positive = compiled
     np.testing.assert_array_equal(row_sums, [4, 0, 6])
     np.testing.assert_array_equal(row_positive, [2, 0, 2])
+    # The negative value is nonzero but not positive.
+    np.testing.assert_array_equal(row_nonzero, [2, 0, 3])
     np.testing.assert_array_equal(column_positive, [1, 1, 0, 2])
     assert len({tuple(row) for row in digests.tolist()}) == 3
 

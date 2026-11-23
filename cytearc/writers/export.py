@@ -2455,20 +2455,17 @@ def _live_count_blocks(
 def _summarized_nonzero(assay: Any, rows: np.ndarray | None = None) -> int | None:
     """Return the nonzero raw counts of an assay's cells from its count summaries, or None.
 
-    The summaries count the positive counts of each cell, which are all of
-    its nonzero counts when the counts are unsigned, as every import stores
-    whole non-negative counts. Counts of another dtype may hold negative
-    values, so they return None
-    (:func:`~cytearc.storage.identity.summaries_count_every_value`).
-    ``rows`` are increasing store rows, every cell by default.
+    The summaries count the nonzero counts of each cell, whatever the dtype.
+    The summaries of stores written by earlier CyteArc versions count them
+    only for unsigned counts, so other counts of such stores return None
+    (:func:`~cytearc.storage.identity.nonzero_value_count`). ``rows`` are
+    increasing store rows, every cell by default.
     """
-    from ..storage.identity import positive_value_count, summaries_count_every_value
+    from ..storage.identity import nonzero_value_count
     from ..storage.types import as_zarr_array
 
     counts = as_zarr_array(assay.matrixGroup["counts"], name="counts")
-    if not summaries_count_every_value(counts):
-        return None
-    return positive_value_count(assay.matrixGroup, counts, rows)
+    return nonzero_value_count(assay.matrixGroup, counts, rows)
 
 
 def _live_count_nonzero(assay: Any, nthreads: int) -> int:
@@ -2602,7 +2599,9 @@ def live_h5ad_plan(
         ),
     )
     if order is not None:
-        # Unsigned counts give the reorder their number without a read.
+        # The count summaries give the reorder the number of values without a
+        # read, except for counts that can be negative in a store written by
+        # an earlier CyteArc version, which the reorder counts in a read.
         x = reordered_matrix(
             x,
             order,
@@ -2675,9 +2674,9 @@ def to_h5ad(
     order and sent to their rows of the file through temporary files on
     local disk, in ``temp_dir``, about the size of the counts in the file,
     each deleted once its rows are written. The export takes the number of
-    stored values first, from the store's count summaries when the counts
-    are unsigned, as every import stores whole counts, and otherwise in a
-    pass over them, and raises ``OSError`` before it writes a row when
+    stored values first, from the store's count summaries, or in a pass over
+    the counts when they can be negative in a store written by an earlier
+    CyteArc version, and raises ``OSError`` before it writes a row when
     ``temp_dir`` lacks the disk that the files take.
     ``cell_order="stored"`` writes the cells in store order and needs no
     temporary files.
@@ -2705,10 +2704,11 @@ def to_h5ad(
                          embeddings.
         skip_recalc_nfeats: Skip a preliminary count of the stored values,
                             for which the file's arrays are allocated:
-                            from the store's count summaries for unsigned
-                            counts, otherwise in a pass over them. An
-                            export in source order counts them either way,
-                            once. (Default value: True)
+                            from the store's count summaries, or in a pass
+                            over counts that can be negative in a store
+                            written by an earlier CyteArc version. An export
+                            in source order counts them either way, once.
+                            (Default value: True)
         nthreads: Threads that read the counts and compress them into the
                   file. (Default value: 4)
         run: Completed pipeline run opened from the datastore that owns
@@ -2935,10 +2935,13 @@ def _matrix_market_lines(
 ) -> bytes:
     """Return Matrix Market coordinate lines, ``feature cell value``, one-based.
 
-    Integer values are formatted with NumPy; other values as ``str`` of the
-    value in its dtype, as pandas writes them.
+    Non-negative integer values are formatted with NumPy; other values,
+    negative integers among them, as ``str`` of the value in its dtype, as
+    pandas writes them.
     """
-    if values.dtype.kind in "biu":
+    if values.dtype.kind in "bu" or (
+        values.dtype.kind == "i" and (values.size == 0 or int(values.min()) >= 0)
+    ):
         return _integer_lines([features, cells, values.astype(np.uint64)])
     text = values.astype(str).tolist()
     return "".join(
