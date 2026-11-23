@@ -60,6 +60,7 @@ _COMMON_ARRAYS = frozenset(
         "reference_distance_values",
     }
 )
+_FIT_ARRAYS = frozenset(REFERENCE_FIT_ARRAYS.values())
 _SYMPHONY_ARRAYS = frozenset(
     {
         "centroids",
@@ -199,13 +200,13 @@ def write_artifact_mapping_reference_from_sources(
                 symphony_sources[name],
                 transpose=name == "centroids",
             )
-    fit_names = reference_fit_array_names(metadata["normalization_parameters"])
-    if set(normalization_arrays or {}) != set(fit_names):
-        raise ValueError(
-            "Mapping reference normalization arrays do not match its normalizer"
-        )
-    for name in fit_names:
-        _write_array(group, name, (normalization_arrays or {})[name])
+    for name, values in sorted((normalization_arrays or {}).items()):
+        if name not in _FIT_ARRAYS:
+            raise ValueError(
+                f"Mapping reference normalization array {name!r} is outside the "
+                "payload contract"
+            )
+        _write_array(group, name, values)
     group.attrs["reference_metadata"] = metadata
     method = metadata.get("method")
     if method not in {"pca", "symphony"}:
@@ -1260,7 +1261,7 @@ def _complete_status(
 
 
 def _validate_payload_names(
-    group: zarr.Group, method: str, fit_names: tuple[str, ...]
+    group: zarr.Group, method: str, fit_names: tuple[str, ...] = ()
 ) -> None:
     if set(group.group_keys()):
         raise contract_error(
@@ -1327,11 +1328,14 @@ def _payload_fingerprint(
     method: str,
     metadata: Mapping[str, Any],
 ) -> str:
+    # The arrays of what a normalizer fitted are fingerprinted when present,
+    # so a reference of another normalizer keeps its fingerprint.
+    fitted = tuple(sorted(_FIT_ARRAYS & set(group.array_keys())))
     names = (
         _COMMON_ARRAY_ORDER + _SYMPHONY_ARRAY_ORDER
         if method == "symphony"
         else _COMMON_ARRAY_ORDER
-    ) + reference_fit_array_names(metadata["normalization_parameters"])
+    ) + fitted
     return payload_fingerprint(
         fingerprint_stored_arrays(group, names),
         "reference_metadata",

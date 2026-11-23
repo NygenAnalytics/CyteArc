@@ -1163,7 +1163,7 @@ def test_build_mapping_reference_rejects_each_inconsistent_chain_record(
             "parameters",
             "feat_scaling",
             False,
-            "require PCA with feature scaling",
+            "require the PCA's feature scaling of the same normalized data",
         ),
         (
             plain,
@@ -1187,7 +1187,7 @@ def test_build_mapping_reference_rejects_each_inconsistent_chain_record(
             "parameters",
             "enabled",
             False,
-            "require enabled scaling for the same normalized data",
+            "require the PCA's feature scaling of the same normalized data",
         ),
         (plain, "ann_index", "parameters", "ann_metric", "ip", "only l2 and cosine"),
         (

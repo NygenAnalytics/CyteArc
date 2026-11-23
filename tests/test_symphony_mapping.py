@@ -886,6 +886,7 @@ def test_symphony_reservation_counts_one_batch_of_gathered_rows():
         ),
         feature_ids=np.asarray([f"g{index}" for index in range(n_features)]),
         symphony_state=None,
+        normalization_arrays={},
     )
     _, plain_row = _mapping_memory_reservations(
         reference, n_batches=1, save_k=10, batch_codes=None, batch_design=None

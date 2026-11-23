@@ -17,7 +17,7 @@ import zarr
 from zarr.storage import LocalStore, MemoryStore
 
 from cytearc import CancellationToken, DataStore, PipelineRun
-from cytearc.assay import norm_lib_size, norm_pearson_residuals
+from cytearc.assay import norm_lib_size
 from cytearc.datastore._pipeline.executor import (
     COORDINATES,
     PlannedStage,
@@ -542,17 +542,17 @@ def test_a_plan_checks_the_call_as_the_recipe_does(completed) -> None:
         pipeline.plan("rna", **{**SETTINGS, "pca": {"dims": 0}})
 
 
-def test_a_run_and_its_plan_refuse_doublets_without_library_size_before_writing(
+def _halve_counts(_assay: Any, counts: Any) -> Any:
+    """A custom normalizer, defined at module level so provenance can name it."""
+    return counts / 2
+
+
+def test_a_run_and_its_plan_refuse_doublets_of_a_custom_normalizer_before_writing(
     completed, tmp_path
 ) -> None:
     datastore = _copy(completed.location, tmp_path)
     location = tmp_path / "data.zarr"
-    datastore.RNA.normMethod = norm_pearson_residuals
-    message = (
-        "The run normalizes assay 'RNA' with pearson_residuals, but doublet "
-        "scoring normalizes its simulated doublets by library size and needs "
-        "lib_size; pass normalization={'method': 'lib_size'} or doublets=False"
-    )
+    datastore.RNA.normMethod = _halve_counts
     before = _digest(location)
 
     with pytest.raises(ValueError) as planned:
@@ -560,31 +560,34 @@ def test_a_run_and_its_plan_refuse_doublets_without_library_size_before_writing(
     with pytest.raises(ValueError) as ran:
         datastore.pipeline.rna(**SETTINGS)
 
-    assert str(planned.value) == message
-    assert str(ran.value) == message
+    assert str(planned.value) == str(ran.value)
+    assert str(planned.value).startswith(
+        "The run normalizes assay 'RNA' with the custom normalizer "
+        "{'module': 'tests.test_pipeline_plan', 'qualname': '_halve_counts'"
+    )
+    assert str(planned.value).endswith(
+        "but doublet scoring normalizes its simulated doublets as the run's cells "
+        "were, which it can do for the built-in normalizers lib_size, "
+        "lib_size_log, pearson_residuals, clr and passthrough alone; pass "
+        "normalization={'method': ...} with one of them or doublets=False"
+    )
     # Neither call wrote a run record, an artifact, or any other file.
     assert _digest(location) == before
     assert [run.run_id for run in datastore.pipeline.list_runs()] == [
         completed.run.run_id
     ]
-    # Without doublet scoring the plan goes ahead with the residuals: gene
-    # selection, whose statistics record the normalizer, is the first stage
-    # that changes.
-    plan = datastore.pipeline.plan("rna", **{**SETTINGS, "doublets": False})
+    # Pearson residuals score doublets on a PCA without feature scaling: the
+    # plan computes gene selection, whose statistics record the normalizer,
+    # and every stage after it, doublets included.
+    plan = datastore.pipeline.plan(
+        "rna", **SETTINGS, normalization={"method": "pearson_residuals"}
+    )
     hvg = plan["highly_variable_features"]
     assert (hvg.status, hvg.reason) == ("computed", "changed")
     assert hvg.changed_parameters == ("normalization_method",)
-    assert plan["normalization"].upstream == ("highly_variable_features",)
-    assert plan["doublets"].status == "skipped"
-    # The remedy that the message names plans the committed run, every stage
-    # reused, and leaves the session's normalizer as it was.
-    named = datastore.pipeline.plan(
-        "rna", **SETTINGS, normalization={"method": "lib_size"}
-    )
-    assert named.computed == ()
-    assert datastore.RNA.normMethod is norm_pearson_residuals
-    # With the library-size default back, the same call runs and reuses the
-    # committed doublet scores.
+    assert plan["doublets"].status == "computed"
+    assert datastore.RNA.normMethod is _halve_counts
+    # The library-size default runs and reuses the committed doublet scores.
     datastore.RNA.normMethod = norm_lib_size
     run = datastore.pipeline.rna(**SETTINGS)
     assert run.status == "completed"
@@ -595,18 +598,6 @@ def test_a_run_and_its_plan_refuse_doublets_without_library_size_before_writing(
     ("changes", "message", "accepted", "changed", "doublets"),
     [
         (
-            {"pca": {"dims": 5, "feat_scaling": False}},
-            "pca={'feat_scaling': False} fits PCA without feature scaling, but "
-            "doublet scoring projects its simulated doublets onto the PCA through "
-            "a mapping reference, which needs feature scaling; pass doublets=False "
-            "or omit feat_scaling",
-            # Without doublet scoring, PCA may skip feature scaling; its plan
-            # names the feature scaling, which is no longer enabled.
-            {"pca": {"dims": 5, "feat_scaling": False}, "doublets": False},
-            ("pca", "enabled"),
-            "skipped",
-        ),
-        (
             {"ann_index": {"ann_metric": "ip"}},
             "ann_index: ann_metric must be 'l2' or 'cosine', got 'ip'",
             # Doublet scoring also scores on a cosine index.
@@ -615,7 +606,7 @@ def test_a_run_and_its_plan_refuse_doublets_without_library_size_before_writing(
             "computed",
         ),
     ],
-    ids=["unscaled-pca", "inner-product-index"],
+    ids=["inner-product-index"],
 )
 def test_a_run_and_its_plan_refuse_doublets_without_a_mapping_reference_before_writing(
     completed, tmp_path, changes, message, accepted, changed, doublets

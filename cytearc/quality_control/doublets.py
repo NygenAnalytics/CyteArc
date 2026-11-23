@@ -1020,6 +1020,7 @@ class PcaDoubletProjection:
                 model.feature_means,
                 model.feature_scales,
                 model.center,
+                *self.reference.normalization_arrays.values(),
             )
         )
 

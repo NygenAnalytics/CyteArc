@@ -623,6 +623,7 @@ def _integration_call(_tmp_path: Path) -> Callable[[], object]:
 
 
 def _doublet_call(_tmp_path: Path) -> Callable[[], object]:
+    from cytearc.assay.normalization import LibrarySizeFit
     from cytearc.mapping.symphony import ScaledPCAProjectionModel
     from cytearc.matrix import ChunkedArray
     from cytearc.quality_control import doublets
@@ -639,11 +640,9 @@ def _doublet_call(_tmp_path: Path) -> Callable[[], object]:
     )
     reference = types.SimpleNamespace(
         model=model,
-        normalization_parameters={
-            "size_factor": 100.0,
-            "log_transform": True,
-            "renormalize_subset": True,
-        },
+        normalization=LibrarySizeFit(100.0, True),
+        normalization_arrays={},
+        normalization_parameters={"renormalize_subset": True},
     )
     assay = types.SimpleNamespace(rawData=ChunkedArray.from_numpy(counts), name="RNA")
     members = np.arange(len(counts))

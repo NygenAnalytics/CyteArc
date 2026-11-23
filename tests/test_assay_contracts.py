@@ -14,16 +14,29 @@ from cytearc.assay import (
     ADTassay,
     ATACassay,
     Assay,
+    PearsonResidualNormalizer,
     RNAassay,
     lib_size_feature_stream_eligible,
     norm_clr,
     norm_dummy,
     norm_lib_size,
+    norm_lib_size_log,
+    norm_pearson_residuals,
     norm_tf_idf,
+)
+from cytearc.assay.normalization import (
+    ClrFit,
+    LibrarySizeFit,
+    PassthroughFit,
+    PearsonResidualFit,
+    TfIdfFit,
+    fit_normalization,
+    normalize_rows,
+    recorded_normalizer,
 )
 from cytearc.assay.base import raw_csr
 from cytearc.assay.rna import library_size_factor
-from cytearc.storage.artifacts import ArtifactRef, artifact_group
+from cytearc.storage.artifacts import ArtifactRef, artifact_group, callable_identity
 from cytearc.matrix import ChunkedArray
 from cytearc.datastore.datastore import DataStore
 from cytearc.writers import SparseToZarr
@@ -410,6 +423,151 @@ def test_normalization_kernels_share_arrays_and_chunked_arrays():
             msg="",
             operation="Test frequency",
         )
+
+
+# Rows that are not stored cells: their counts of three selected features, a
+# row without counts among them, and each row's total over every feature.
+_ROWS = np.array([[0, 2, 6], [1, 0, 3], [0, 0, 0]], dtype=np.uint16)
+_TOTALS = np.array([10.0, 4.0, 0.0])
+
+
+def test_library_size_and_passthrough_fits_normalize_new_rows_by_hand():
+    by_totals = 1000.0 * _ROWS.astype(np.float64) / np.array([[10.0], [4.0], [1.0]])
+    by_rows = 1000.0 * _ROWS.astype(np.float64) / np.array([[8.0], [4.0], [1.0]])
+
+    # A total of 0 divides by 1, so a row without counts gives zeros; without
+    # totals, each row's total over its own columns divides it.
+    for log, transform in ((False, np.asarray), (True, np.log1p)):
+        fit = LibrarySizeFit(1000.0, log)
+        np.testing.assert_array_equal(
+            normalize_rows(fit, _ROWS, _TOTALS, source="t"), transform(by_totals)
+        )
+        np.testing.assert_array_equal(
+            normalize_rows(fit, _ROWS, None, source="t"), transform(by_rows)
+        )
+        np.testing.assert_array_equal(
+            normalize_rows(PassthroughFit(log), _ROWS, _TOTALS, source="t"),
+            transform(_ROWS.astype(np.float64)),
+        )
+    np.testing.assert_array_equal(_TOTALS, [10.0, 4.0, 0.0])
+
+
+def test_pearson_residual_fit_normalizes_new_rows_by_hand():
+    fit = PearsonResidualFit(np.array([0.1, 0.0, 0.3]), theta=4.0, clip=1.0)
+
+    for totals, row_totals in ((_TOTALS, [10.0, 4.0, 0.0]), (None, [8.0, 4.0, 0.0])):
+        mu = np.array(row_totals)[:, None] * np.array([0.1, 0.0, 0.3])
+        # A feature or a row that expects no count gives residuals of 0.
+        expected = np.zeros((3, 3))
+        positive = mu > 0
+        expected[positive] = (_ROWS[positive] - mu[positive]) / np.sqrt(
+            mu[positive] + mu[positive] ** 2 / 4.0
+        )
+        assert np.any(np.abs(expected) > 1.0)
+        expected = np.clip(expected, -1.0, 1.0)
+
+        actual = normalize_rows(fit, _ROWS, totals, source="t")
+
+        np.testing.assert_allclose(actual, expected, rtol=1e-14, atol=0)
+    with pytest.raises(ValueError, match="Query totals holds negative or non-finite"):
+        normalize_rows(fit, _ROWS, np.array([1.0, np.nan, 2.0]), source="Query totals")
+
+
+def test_clr_and_tf_idf_fits_normalize_new_rows_by_hand():
+    scales = np.array([1.5, 2.0, 4.0])
+    np.testing.assert_array_equal(
+        normalize_rows(ClrFit(scales), _ROWS, _TOTALS, source="t"),
+        np.log1p(_ROWS / scales),
+    )
+
+    idf = np.array([0.5, 1.0, 2.0])
+    by_totals = _ROWS / np.array([[10.0], [4.0], [1.0]]) * idf
+    by_rows = _ROWS / np.array([[8.0], [4.0], [1.0]]) * idf
+    for totals, expected in ((_TOTALS, by_totals), (None, by_rows)):
+        np.testing.assert_array_equal(
+            normalize_rows(TfIdfFit(idf), _ROWS, totals, source="t"), expected
+        )
+        # CSR rows stay sparse and hold the same values.
+        sparse = normalize_rows(TfIdfFit(idf), csr_matrix(_ROWS), totals, source="t")
+        assert isinstance(sparse, csr_matrix)
+        np.testing.assert_array_equal(sparse.toarray(), expected)
+    with pytest.raises(ValueError, match="one value per row of counts"):
+        normalize_rows(TfIdfFit(idf), _ROWS, np.ones(2), source="t")
+
+
+def test_fit_normalization_fits_what_each_rna_normalizer_reads():
+    counts = np.array([[1, 0, 4], [3, 2, 0], [0, 6, 2], [2, 0, 0]], dtype=np.uint16)
+    totals = np.array([9.0, 7.0, 12.0, 5.0])
+    options = {"size_factor": 1000.0, "log_transform": False}
+
+    assert fit_normalization(norm_lib_size, counts, totals, **options) == (
+        LibrarySizeFit(1000.0, False)
+    )
+    assert fit_normalization(
+        norm_lib_size, counts, totals, size_factor=1000.0, log_transform=True
+    ) == LibrarySizeFit(1000.0, True)
+    assert fit_normalization(norm_lib_size_log, counts, totals, **options) == (
+        LibrarySizeFit(1000.0, True)
+    )
+    assert fit_normalization(norm_dummy, counts, totals, **options) == (
+        PassthroughFit(False)
+    )
+    # Each feature's share of all counts, of totals over every feature.
+    pearson = fit_normalization(
+        PearsonResidualNormalizer(theta=5.0), counts, totals, **options
+    )
+    assert isinstance(pearson, PearsonResidualFit)
+    np.testing.assert_array_equal(pearson.fractions, np.array([6.0, 8.0, 6.0]) / 33.0)
+    assert (pearson.theta, pearson.clip) == (5.0, 2.0)
+    clr = fit_normalization(norm_clr, counts, totals, **options)
+    assert isinstance(clr, ClrFit)
+    np.testing.assert_allclose(
+        clr.scales, np.exp(np.log1p(counts.astype(float)).mean(axis=0)), rtol=1e-15
+    )
+    # TF-IDF fits document frequencies that an ATAC assay counts, and a
+    # custom normalizer has no fit.
+    assert fit_normalization(norm_tf_idf, counts, totals, **options) is None
+    assert fit_normalization(lambda _, x: x, counts, totals, **options) is None
+    with pytest.raises(ValueError, match="RNA_nCounts holds negative"):
+        fit_normalization(
+            norm_pearson_residuals,
+            counts,
+            -totals,
+            source="RNA_nCounts",
+            **options,
+        )
+
+
+def test_recorded_normalizer_finds_each_builtin_by_its_recorded_identity():
+    pearson = PearsonResidualNormalizer(theta=10.0, clip=5.0)
+    for normalizer in (
+        norm_lib_size,
+        norm_lib_size_log,
+        norm_clr,
+        norm_tf_idf,
+        norm_dummy,
+        norm_pearson_residuals,
+    ):
+        identity = callable_identity(normalizer)
+        for recorded in (identity, {"external_hook": True, **identity}):
+            assert recorded_normalizer(recorded) is normalizer or (
+                normalizer is norm_pearson_residuals
+                and recorded_normalizer(recorded).artifact_identity
+                == normalizer.artifact_identity
+            )
+    rebuilt = recorded_normalizer(callable_identity(pearson))
+    assert isinstance(rebuilt, PearsonResidualNormalizer)
+    assert (rebuilt.theta, rebuilt.clip) == (10.0, 5.0)
+    for identity in (
+        {"module": "lab.norms", "qualname": "half", "code": "0f"},
+        {"identity": "cytearc.assay.pearson_residuals:theta=0.0:clip=sqrt-n"},
+        {"identity": "cytearc.assay.pearson_residuals:theta=1e2:clip=sqrt-n"},
+        {"identity": "cytearc.assay.pearson_residuals:theta=100.0"},
+        {"identity": "cytearc.assay.pearson_residuals:theta=x:clip=sqrt-n"},
+        {"identity": 3},
+        {},
+    ):
+        assert recorded_normalizer(identity) is None
 
 
 def test_clr_does_not_reuse_artifacts_with_ambiguous_axis(monkeypatch):

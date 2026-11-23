@@ -8,6 +8,7 @@ import pytest
 from scipy.sparse import csr_matrix
 
 from cytearc import DataStore
+from cytearc.assay.normalization import LibrarySizeFit
 from cytearc.mapping.features import AlignedFeatureStream
 from cytearc.mapping.models import ScaledPCAProjectionModel
 from cytearc.mapping.symphony import project_pca
@@ -81,11 +82,9 @@ def test_simulated_doublets_keep_every_pair_and_add_parent_libraries(
     )
     reference = SimpleNamespace(
         model=model,
-        normalization_parameters={
-            "size_factor": 100.0,
-            "log_transform": True,
-            "renormalize_subset": subset,
-        },
+        normalization=LibrarySizeFit(100.0, True),
+        normalization_arrays={},
+        normalization_parameters={"renormalize_subset": subset},
     )
     assay = SimpleNamespace(rawData=ChunkedArray.from_numpy(counts), name="RNA")
     # Library sizes count features outside the selection too.
@@ -501,8 +500,6 @@ def test_streamed_doublets_match_materialized_doublets(
 
 
 def test_doublets_without_selected_feature_counts_are_scored(tmp_path, monkeypatch):
-    from cytearc.mapping.features import normalize_reference_counts
-
     counts = np.random.default_rng(29).integers(1, 200, (30, 24), dtype=np.uint16)
     labels = np.arange(len(counts)) % 3
     feature_indices = np.arange(0, counts.shape[1], 2)
@@ -572,13 +569,11 @@ def test_doublets_without_selected_feature_counts_are_scored(tmp_path, monkeypat
         scores.simulated_parents, np.column_stack((left, right))
     )
     parameters = reference.normalization_parameters
+    # Library size scales a row without counts to zeros, whatever its total.
     empty_projection = project_pca(
-        normalize_reference_counts(
-            np.zeros((1, len(feature_indices))),
-            size_factor=parameters["size_factor"],
-            log_transform=parameters["log_transform"],
-            source="The doublet simulation of RNA",
-        ),
+        np.log1p(np.zeros((1, len(feature_indices))))
+        if parameters["log_transform"]
+        else np.zeros((1, len(feature_indices))),
         reference.model,
     )
     assert np.linalg.norm(empty_projection) > 0

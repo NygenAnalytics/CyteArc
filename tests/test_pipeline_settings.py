@@ -14,12 +14,13 @@ import pytest
 from cytearc import DataStore, PipelineExecutionError
 from cytearc.assay import (
     PearsonResidualNormalizer,
+    norm_clr,
     norm_dummy,
-    norm_lib_size,
     norm_lib_size_log,
     norm_pearson_residuals,
 )
 from cytearc.datastore._pipeline.filtering import FILTERING_SETTINGS
+from cytearc.datastore._pipeline.normalizers import normalizer_label
 from cytearc.datastore._pipeline.recipes.adt import resolve_adt
 from cytearc.datastore._pipeline.recipes.rna import resolve_rna
 from cytearc.datastore._pipeline.settings import (
@@ -1178,22 +1179,36 @@ _CUSTOM_LABEL = (
         ),
         (norm_lib_size_log, "lib_size_log"),
         (norm_dummy, "passthrough"),
-        (_pass_counts_through, _CUSTOM_LABEL),
+        (norm_clr, "clr"),
     ],
-    ids=["pearson", "pearson-options", "lib-size-log", "dummy", "custom"],
+    ids=["pearson", "pearson-options", "lib-size-log", "dummy", "clr"],
 )
-def test_recipe_refuses_doublets_unless_the_run_normalizes_by_library_size(
+def test_recipe_scores_doublets_for_each_builtin_normalizer(
     readonly_store, monkeypatch, normalizer, name
 ):
     store = readonly_store
     monkeypatch.setattr(store.RNA, "normMethod", normalizer)
-    message = (
-        f"The run normalizes assay 'RNA' with {name}, but doublet scoring "
-        "normalizes its simulated doublets by library size and needs lib_size; "
-        "pass normalization={'method': 'lib_size'} or doublets=False"
-    )
 
     # Doublet scoring is on by default, and a mapping of settings turns it on.
+    for doublets, settings in ((True, {}), ({"random_seed": 1}, {"random_seed": 1})):
+        plan = _resolve(store, doublets=doublets)
+        assert plan.config["stages"]["doublets"] == settings
+        assert _doublet_action(plan) is not None
+        assert plan.normalizers == {"RNA": normalizer}
+    assert normalizer_label(normalizer) == name
+
+
+def test_recipe_refuses_doublets_of_a_custom_normalizer(readonly_store, monkeypatch):
+    store = readonly_store
+    monkeypatch.setattr(store.RNA, "normMethod", _pass_counts_through)
+    message = (
+        f"The run normalizes assay 'RNA' with {_CUSTOM_LABEL}, but doublet "
+        "scoring normalizes its simulated doublets as the run's cells were, which "
+        "it can do for the built-in normalizers lib_size, lib_size_log, "
+        "pearson_residuals, clr and passthrough alone; pass "
+        "normalization={'method': ...} with one of them or doublets=False"
+    )
+
     for doublets in (True, {"random_seed": 1}):
         with pytest.raises(ValueError) as caught:
             _resolve(store, doublets=doublets)
@@ -1201,65 +1216,31 @@ def test_recipe_refuses_doublets_unless_the_run_normalizes_by_library_size(
     # Without doublet scoring the same normalizer passes the checks.
     plan = _resolve(store, doublets=False)
     assert plan.config["stages"]["doublets"] is False
-    assert {stage.name: stage.action for stage in plan.stages}["doublets"] is None
-    # The remedy that the message names schedules doublet scoring, whatever
-    # the assay's normMethod.
-    plan = _resolve(store, normalization={"method": "lib_size"})
+    assert _doublet_action(plan) is None
+    # A built-in normalizer that the call names schedules doublet scoring,
+    # whatever the assay's normMethod.
+    plan = _resolve(store, normalization={"method": "pearson_residuals"})
     assert plan.config["stages"]["doublets"] == {}
-    assert plan.normalizers == {"RNA": norm_lib_size}
-
-
-def test_recipe_reads_the_normalizer_the_run_will_use(readonly_store, monkeypatch):
-    store = readonly_store
-    monkeypatch.setattr(store.RNA, "normMethod", norm_pearson_residuals)
-    with pytest.raises(ValueError, match="with pearson_residuals, but doublet"):
-        _resolve(store)
-    # A run that names the residuals is refused alike in a session of the
-    # library-size default.
-    store.RNA.normMethod = norm_lib_size
-    with pytest.raises(ValueError, match="with pearson_residuals, but doublet"):
-        _resolve(store, normalization={"method": "pearson_residuals"})
-
-    # Without a method, the run takes the assay's normMethod.
-    plan = _resolve(store)
-
-    assert plan.config["stages"]["doublets"] == {}
-    assert {stage.name: stage.action for stage in plan.stages}["doublets"] is not None
+    assert plan.normalizers == {"RNA": norm_pearson_residuals}
 
 
 def _doublet_action(plan: Any) -> Any:
     return {stage.name: stage.action for stage in plan.stages}["doublets"]
 
 
-def test_recipe_refuses_doublets_on_a_pca_without_feature_scaling(readonly_store):
-    store = readonly_store
-    message = (
-        "pca={'feat_scaling': False} fits PCA without feature scaling, but "
-        "doublet scoring projects its simulated doublets onto the PCA through "
-        "a mapping reference, which needs feature scaling; pass doublets=False "
-        "or omit feat_scaling"
-    )
-
-    # Doublet scoring is on by default, and a mapping of settings turns it on.
-    # NumPy's False is the same setting as Python's.
-    for doublets in (True, {"random_seed": 1}):
-        for unscaled in (False, np.False_):
-            with pytest.raises(ValueError) as caught:
-                _resolve(
-                    store,
-                    pca={"dims": 10, "feat_scaling": unscaled},
-                    doublets=doublets,
-                )
-            assert str(caught.value) == message
-    # Without doublet scoring, PCA may skip feature scaling.
-    plan = _resolve(store, pca={"dims": 10, "feat_scaling": False}, doublets=False)
-    assert plan.config["stages"]["pca"] == {"dims": 10, "feat_scaling": False}
-    assert _doublet_action(plan) is None
-    # Feature scaling, given or by default, lets the call schedule doublets.
-    for pca in ({"dims": 10, "feat_scaling": True}, {"dims": 10}):
-        plan = _resolve(store, pca=pca)
-        assert plan.config["stages"]["pca"] == pca
+@pytest.mark.parametrize("unscaled", [False, np.False_])
+def test_recipe_scores_doublets_on_a_pca_without_feature_scaling(
+    readonly_store, unscaled
+):
+    # A run of Pearson residuals fits its PCA without scaling by default, and
+    # any run may turn scaling off; NumPy's False is the same setting.
+    for settings in (
+        {"normalization": {"method": "pearson_residuals"}},
+        {"pca": {"dims": 10, "feat_scaling": unscaled}},
+    ):
+        plan = _resolve(readonly_store, **settings)
         assert _doublet_action(plan) is not None
+        assert plan.config["stages"]["doublets"] == {}
 
 
 @pytest.mark.parametrize("metric", ["ip", "L2", "euclidean", "", None, 2, ["l2"]])

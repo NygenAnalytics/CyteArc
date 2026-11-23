@@ -28,7 +28,11 @@ from cytearc.assay.hvg_statistics import (
     grouped_moments,
     grouped_pearson_residual_moments,
 )
-from cytearc.assay.normalization import applicable_normalization_flags
+from cytearc.assay.normalization import (
+    applicable_normalization_flags,
+    fit_normalization,
+    normalize_rows,
+)
 from cytearc.datastore.datastore import DataStore
 from cytearc.features.variability import (
     DEFAULT_HVG_BLACKLIST,
@@ -68,6 +72,7 @@ from tests.storage_helpers import (
 )
 
 _GOLDEN = Path(__file__).parent / "scanpy_hvg_1_12_4_golden.json"
+_PEARSON_GOLDEN = Path(__file__).parent / "scanpy_pearson_residuals_1_12_4_golden.json"
 
 
 def _warnings(run: Any) -> list[str]:
@@ -1583,6 +1588,56 @@ def test_golden_fixture_pins_its_inputs(golden_store) -> None:
     for values in (matrix.indptr, matrix.indices, matrix.data):
         digest.update(np.ascontiguousarray(values, dtype="<i8").tobytes())
     assert digest.hexdigest() == golden["inputs"]["countsSha256"]
+
+
+@pytest.mark.parametrize("renormalize_subset", [False, True])
+def test_pearson_residuals_and_their_fit_match_scanpy(
+    golden_store, monkeypatch, renormalize_subset
+) -> None:
+    golden = json.loads(_PEARSON_GOLDEN.read_text())
+    provenance = golden["provenance"]
+    assert (provenance["packageVersion"], provenance["theta"], provenance["clip"]) == (
+        "1.12.4",
+        100.0,
+        None,
+    )
+    assert golden["inputs"]["countsSha256"] == _golden()["inputs"]["countsSha256"]
+    # scanpy over every gene, or over the selected genes alone.
+    expected = np.asarray(
+        golden["selection" if renormalize_subset else "everyGene"], dtype=np.float64
+    )
+    store = golden_store
+    monkeypatch.setattr(store.RNA, "normMethod", norm_pearson_residuals)
+    active = np.flatnonzero(np.asarray(store.cells.fetch_all("I"), dtype=bool))
+    genes = np.asarray(golden["genes"])
+    normalized = store.features.normalize(
+        store.snapshot_cell_selection(),
+        store.features.snapshot(from_assay="RNA", feature_indexes=genes.tolist()),
+        renormalize_subset=renormalize_subset,
+    )
+
+    # The stored float32 residuals of the selected cells.
+    stored = store.artifacts.load(normalized)["data"][:][golden["cells"]]
+    np.testing.assert_allclose(stored, expected, rtol=1e-6, atol=1e-6)
+    # The fit over every active cell normalizes those cells' counts, as rows
+    # that are not stored cells, to the same residuals in float64; scanpy's
+    # are kept to 9 significant digits.
+    counts = np.asarray(store.RNA.rawData[active][:, genes].compute())
+    totals = np.asarray(store.cells.fetch_all("RNA_nCounts"), dtype=np.float64)[active]
+    if renormalize_subset:
+        totals = counts.sum(axis=1, dtype=np.float64)
+    fit = fit_normalization(
+        norm_pearson_residuals, counts, totals, size_factor=None, log_transform=False
+    )
+    rows = np.asarray(golden["cells"])
+    np.testing.assert_allclose(
+        normalize_rows(
+            fit, counts[rows], None if renormalize_subset else totals[rows], source="t"
+        ),
+        expected,
+        rtol=1e-8,
+        atol=1e-7,
+    )
 
 
 def _selection_agreement(
