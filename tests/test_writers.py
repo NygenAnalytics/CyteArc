@@ -632,15 +632,29 @@ _SHARD_BAND_BUDGET = {
 
 
 class _Pipe:
+    """One end of a pipe that records what a process sends through it."""
+
     def __init__(self, *, fail_send: bool = False) -> None:
-        self.messages: list[object] = []
+        self.sent: list[tuple[str, object]] = []
         self.closed = False
         self.fail_send = fail_send
 
     def send(self, item: object) -> None:
         if self.fail_send:
             raise OSError("closed")
-        self.messages.append(item)
+        self.sent.append(("message", item))
+
+    def send_bytes(self, buffer: object) -> None:
+        if self.fail_send:
+            raise OSError("closed")
+        self.sent.append(("bytes", bytes(buffer)))
+
+    @property
+    def messages(self) -> list[tuple[str, object]]:
+        """The messages as the import reads them, with their arrays."""
+        from tests.memory_helpers import received_messages
+
+        return received_messages(self.sent)
 
     def close(self) -> None:
         self.closed = True
@@ -1128,10 +1142,27 @@ def test_h5ad_direct_writers_fit_their_windows_beside_what_the_parent_alone_hold
     np.testing.assert_array_equal(root["RNA/counts"][:], values)
 
 
-@pytest.mark.parametrize("shuffle_cells", [False, True], ids=["file", "shuffled"])
-@pytest.mark.parametrize("encoding", ["csr", "dense"])
+@pytest.mark.parametrize(
+    ("encoding", "shuffle_cells", "split"),
+    [
+        ("csr", False, False),
+        ("csr", True, False),
+        ("dense", False, False),
+        ("dense", True, False),
+        ("csr", False, True),
+        ("dense", False, True),
+    ],
+    ids=[
+        "csr-file",
+        "csr-shuffled",
+        "dense-file",
+        "dense-shuffled",
+        "csr-split",
+        "dense-split",
+    ],
+)
 def test_h5ad_import_processes_are_charged_what_tracing_finds_their_reader_keeps(
-    tmp_path, encoding, shuffle_cells
+    tmp_path, encoding, shuffle_cells, split
 ):
     import gc
     import tracemalloc
@@ -1141,13 +1172,15 @@ def test_h5ad_import_processes_are_charged_what_tracing_finds_their_reader_keeps
 
     from cytearc.readers import H5adReader
     from cytearc.writers import H5adToZarr
+    from cytearc.writers import h5ad as h5ad_writer
 
-    n_cells = 50_000
+    n_cells, n_feats = 50_000, 4
     rng = np.random.default_rng(2)
     matrix = csr_matrix(
-        (rng.integers(1, 10, (n_cells, 4)) * (rng.random((n_cells, 4)) < 0.25)).astype(
-            np.float32
-        )
+        (
+            rng.integers(1, 10, (n_cells, n_feats))
+            * (rng.random((n_cells, n_feats)) < 0.25)
+        ).astype(np.float32)
     )
     path = tmp_path / "cells.h5ad"
     with h5py.File(path, "w") as h5:
@@ -1163,10 +1196,31 @@ def test_h5ad_import_processes_are_charged_what_tracing_finds_their_reader_keeps
         h5.create_group("obs").create_dataset(
             "_index", data=np.array([f"c{i}".encode() for i in range(n_cells)])
         )
-        h5.create_group("var").create_dataset(
-            "_index", data=np.array([b"f0", b"f1", b"f2", b"f3"])
+        var = h5.create_group("var")
+        var.create_dataset("_index", data=np.array([b"f0", b"f1", b"f2", b"f3"]))
+        var.create_dataset(
+            "feature_types",
+            data=np.array([b"Gene Expression"] * 2 + [b"Antibody Capture"] * 2),
         )
     reader = H5adReader(str(path), temp_dir=str(tmp_path))
+    pipe = _Pipe()
+    kept: list[int] = []
+
+    def work(process_reader: H5adReader) -> None:
+        # The first batch of the second half of the rows, read as a process
+        # reads its window.
+        read = (
+            process_reader.consume_dense_rows
+            if encoding == "dense" and not shuffle_cells
+            else process_reader.consume_row_range
+        )
+        batches = read(1_000, n_cells // 2, n_cells)
+        next(batches)
+        batches.close()
+        del batches
+        gc.collect()
+        kept.append(tracemalloc.get_traced_memory()[0])
+
     try:
         writer = H5adToZarr(
             reader,
@@ -1174,45 +1228,178 @@ def test_h5ad_import_processes_are_charged_what_tracing_finds_their_reader_keeps
             mem_budget="1G",
             nthreads=2,
             shuffle_cells=shuffle_cells,
+            assay_split_key="feature_types" if split else None,
         )
         # The sparse counts write loads the row pointers before it plans.
         reader._prepare_sparse_import()
         charged = writer._window_process_bytes()
-        directory = writer._shuffled_rows_directory()
         gc.collect()
         tracemalloc.start()
         try:
-            # A reader opened as a process of the counts write opens it, to
-            # write its window or to send its bands, once it has read the
-            # first batch of the second half of the rows.
-            process_reader = H5adReader(**reader._clone_kwargs())
-            if directory is not None:
-                process_reader._open_shuffled_rows(directory)
-            read = (
-                process_reader.consume_dense_rows
-                if encoding == "dense" and directory is None
-                else process_reader.consume_row_range
+            # The reader that each process of the counts write opens, to
+            # write its window or to send its bands, and closes once its work
+            # returns.
+            h5ad_writer._run_worker(
+                reader._clone_kwargs(), pipe, work, writer._shuffled_rows_directory()
             )
-            batches = read(1_000, n_cells // 2, n_cells)
-            next(batches)
-            batches.close()
-            del batches
-            gc.collect()
-            kept, _peak = tracemalloc.get_traced_memory()
         finally:
             tracemalloc.stop()
-        process_reader.close()
     finally:
         reader.close()
+    assert pipe.messages == [] and pipe.closed
 
     # The reader keeps the int64 pointers of every row, 400,008 bytes, unless
     # it reads a dense matrix's rows whole; the summaries of every cell, the
     # cell order and a dense matrix's count of the values in each row, which
-    # the import alone holds, would each add 400,000 bytes or more to the
-    # charge. A few kilobytes of other objects stay beside the pointers.
+    # the import alone holds, would each add 400,000 bytes or more. A few
+    # kilobytes of other objects stay beside the pointers. A split also hands
+    # each process the assay and column of every source feature, two int64
+    # arrays, beside the int64 source features of each assay: 24 bytes for
+    # each of the four features.
+    (kept_bytes,) = kept
     pointers = 0 if encoding == "dense" and not shuffle_cells else 8 * (n_cells + 1)
-    assert charged == pointers
-    assert 0 <= kept - charged <= 64 * 1024
+    features = 24 * n_feats if split else 0
+    assert charged == pointers + features
+    assert 0 <= kept_bytes - pointers <= 64 * 1024
+
+
+@pytest.mark.parametrize("process", ["sparse writer", "dense writer", "sparse reader"])
+def test_h5ad_processes_send_their_arrays_without_a_pickled_copy(tmp_path, process):
+    import gc
+    import threading
+    import tracemalloc
+    from multiprocessing.reduction import ForkingPickler
+
+    from cytearc.readers import H5adReader
+    from cytearc.storage.budget import ResourceBudget
+    from cytearc.storage.count_matrix import plan_count_matrix_pair
+    from cytearc.storage.layout import array_shard_rows
+    from cytearc.storage.sharding import plan_dense_band_writes
+    from cytearc.writers import H5adToZarr
+    from cytearc.writers import h5ad as h5ad_writer
+    from tests.memory_helpers import TracedPipeEnd
+
+    n_cells, n_feats = 20_000, 8
+    rng = np.random.default_rng(4)
+    values = (
+        rng.integers(1, 10, (n_cells, n_feats)) * (rng.random((n_cells, n_feats)) < 0.5)
+    ).astype(np.uint32)
+    encoding = "dense" if process == "dense writer" else "csr"
+    path = _write_h5ad(tmp_path / "cells.h5ad", values, encoding=encoding)
+    location = str(tmp_path / "cells.zarr")
+    policy = CountMatrixPolicy(unitBytes=40_000, chunkBytes=40_000)
+    reader = H5adReader(str(path), feature_name_key="feature_name")
+    pipe = TracedPipeEnd()
+    try:
+        writer = H5adToZarr(
+            reader, location, nthreads=1, shuffle_cells=False, policy=policy
+        )
+        counts = writer.z["RNA/counts"]
+        # Bands of 5,000 cells of eight uint8 counts.
+        assert counts.dtype == np.uint8 and array_shard_rows(counts) == 5_000
+        stop = threading.Event()
+        # The process runs here, sending through a pipe end that pickles a
+        # message as multiprocessing's connections do.
+        gc.collect()
+        tracemalloc.start()
+        try:
+            if process == "sparse writer":
+                h5ad_writer._write_h5ad_process_window(
+                    reader._clone_kwargs(),
+                    None,
+                    1_000,
+                    0,
+                    n_cells,
+                    location,
+                    None,
+                    None,
+                    ("RNA",),
+                    None,
+                    ResourceBudget(1 << 30, 1),
+                    0,
+                    1,
+                    None,
+                    pipe,
+                    stop,
+                    {},
+                )
+            elif process == "dense writer":
+                h5ad_writer._write_dense_h5ad_process_window(
+                    reader._clone_kwargs(),
+                    1_000,
+                    0,
+                    n_cells,
+                    location,
+                    None,
+                    None,
+                    ("RNA",),
+                    None,
+                    plan_dense_band_writes((counts,), ResourceBudget(1 << 30, 1), 4),
+                    pipe,
+                    stop,
+                    {},
+                )
+            else:
+                spec = plan_count_matrix_pair(
+                    n_cells, n_feats, np.uint8, policy=policy
+                ).counts
+                h5ad_writer._read_h5ad_process_window(
+                    reader._clone_kwargs(),
+                    None,
+                    1_000,
+                    0,
+                    n_cells,
+                    {"RNA": spec},
+                    ("RNA",),
+                    None,
+                    pipe,
+                    stop,
+                    {},
+                )
+        finally:
+            tracemalloc.stop()
+    finally:
+        reader.close()
+
+    messages = pipe.messages
+    assert [kind for kind, _payload in messages][-1] == "done"
+    if process == "sparse reader":
+        bands = [payload[1] for kind, payload in messages if kind == "band"]
+        np.testing.assert_array_equal(
+            np.vstack([band.dense() for band in bands]), values
+        )
+        largest = max(bands, key=lambda band: band.sparseBytes)
+        sent: object = ("band", ("RNA", largest, 0))
+        sent_bytes = largest.sparseBytes
+    else:
+        ((_kind, (reports, windows)),) = messages
+        _start, _digests, row_sums, _positive, row_nonzero, column_positive = windows[
+            "RNA"
+        ]
+        np.testing.assert_array_equal(row_sums, values.sum(axis=1))
+        np.testing.assert_array_equal(row_nonzero, np.count_nonzero(values, axis=1))
+        np.testing.assert_array_equal(column_positive, np.count_nonzero(values, axis=0))
+        np.testing.assert_array_equal(counts[:], values)
+        sent = ("done", (reports, windows))
+        sent_bytes = sum(int(array.nbytes) for array in windows["RNA"][1:])
+
+    # The summaries of the 20,000 cells take 800,128 bytes, and a band about
+    # 340,000. A process's share holds them, and each send holds at most
+    # 64 KiB beside them.
+    assert sent_bytes > 4 * 64 * 1024
+    assert max(pipe.held) <= 64 * 1024
+    # Pickled into the message, as processes sent them before, the same
+    # arrays hold more than their own bytes beside them.
+    gc.collect()
+    tracemalloc.start()
+    try:
+        before, _ = tracemalloc.get_traced_memory()
+        pickled = ForkingPickler.dumps(sent)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    del pickled
+    assert peak - before > sent_bytes
 
 
 def test_dense_h5ad_reader_processes_hold_their_batches_beside_the_writes(
@@ -4585,7 +4772,9 @@ def test_h5ad_stop_workers_escalates_and_drains_pipes(monkeypatch):
         h5ad_writer, "time", SimpleNamespace(monotonic=lambda: next(clock))
     )
     receiver, sender = Pipe(duplex=False)
-    sender.send(("rows", "blocked"))
+    # The arrays of a band, which follow its message as raw bytes, are still
+    # in the pipe when the import stops reading; draining reads them as bytes.
+    sender.send_bytes(np.arange(8, dtype=np.int64))
     closed, closed_sender = Pipe(duplex=False)
     closed.close()
     stop = threading.Event()

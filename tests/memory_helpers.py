@@ -1,10 +1,10 @@
-"""Read the budget that a memory refusal names, follow refusals to a budget that runs, give a domain function a ledger of a budget, trace what a call holds against what its ledger charges, wait until the arrays handed to writes are freed, hold a read's decodes together while it is traced, and skip tests that need the resident memory of the test process."""
+"""Read the budget that a memory refusal names, follow refusals to a budget that runs, give a domain function a ledger of a budget, trace what a call holds against what its ledger charges, wait until the arrays handed to writes are freed, hold a read's decodes together while it is traced, record and trace what an import's process sends through its pipe, and skip tests that need the resident memory of the test process."""
 
 import asyncio
 import re
 import threading
 import weakref
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -272,3 +272,85 @@ def decodes_on_threads_held_together(
         yield
     finally:
         codec._decode_sync = decode
+
+
+def received_messages(sent: Sequence[tuple[str, Any]]) -> list[tuple[str, Any]]:
+    """Read back what a process sent through one end of a pipe, as an H5AD import reads it.
+
+    ``sent`` holds, in order, ``("message", value)`` or ``("pickled", bytes)``
+    for each message and ``("bytes", buffer)`` for each raw buffer. Each
+    message comes back with the arrays that follow it as raw bytes.
+
+    Raises:
+        AssertionError: If a message ends before the arrays it announced.
+    """
+    import pickle
+
+    from cytearc.writers.h5ad import _received
+
+    stream = iter(sent)
+
+    class _Receiving:
+        def recv(self) -> Any:
+            form, value = next(stream)
+            assert form in ("message", "pickled"), (
+                f"a {form} entry where a message was due"
+            )
+            return pickle.loads(value) if form == "pickled" else value
+
+        def recv_bytes(self) -> bytes:
+            entry = next(stream, None)
+            assert entry is not None and entry[0] == "bytes", (
+                "a message ended before its arrays"
+            )
+            return bytes(entry[1])
+
+    messages: list[tuple[str, Any]] = []
+    end = _Receiving()
+    while True:
+        try:
+            messages.append(_received(end))
+        except StopIteration:
+            return messages
+
+
+class TracedPipeEnd:
+    """One end of a pipe that sends as multiprocessing's connections do, tracing each send.
+
+    ``send`` pickles a message with ``ForkingPickler``, as
+    ``multiprocessing.connection.Connection.send`` does, and ``send_bytes``
+    keeps a view of the buffer, which ``Connection.send_bytes`` writes to the
+    pipe from the buffer itself. ``held`` records for each send the most that
+    tracemalloc saw allocated beside what was allocated before it; tracing
+    must be on.
+    """
+
+    def __init__(self) -> None:
+        self.sent: list[tuple[str, Any]] = []
+        self.held: list[int] = []
+        self.closed = False
+
+    def _traced(self, form: str, send: Callable[[], Any]) -> None:
+        import tracemalloc
+
+        before, _ = tracemalloc.get_traced_memory()
+        tracemalloc.reset_peak()
+        self.sent.append((form, send()))
+        _, peak = tracemalloc.get_traced_memory()
+        self.held.append(peak - before)
+
+    def send(self, message: Any) -> None:
+        from multiprocessing.reduction import ForkingPickler
+
+        self._traced("pickled", lambda: ForkingPickler.dumps(message))
+
+    def send_bytes(self, buffer: Any) -> None:
+        self._traced("bytes", lambda: memoryview(buffer))
+
+    def close(self) -> None:
+        self.closed = True
+
+    @property
+    def messages(self) -> list[tuple[str, Any]]:
+        """The messages as the import reads them, with their arrays."""
+        return received_messages(self.sent)

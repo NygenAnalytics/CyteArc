@@ -281,20 +281,109 @@ def _dense_band_writes(
         del band
 
 
-def _producer_process_bytes(
-    producers: int, reserveBytes: int, residentBytes: int
-) -> int:
+def _producer_process_bytes(producers: int, processBytes: int) -> int:
     """Return the bytes that producer processes hold while the parent writes.
 
     A single producer is a generator in the writing process and is suspended
     while bands are written. Several producers run in their own processes and
-    keep buffering during the writes, so each holds its whole reserve beside
-    the ``residentBytes`` that it holds throughout, such as the row pointers
-    of its own reader.
+    keep buffering during the writes, so each holds ``processBytes``: its
+    whole reserve and what it holds throughout, such as the row pointers of
+    its own reader.
     """
-    if int(producers) <= 1:
-        return 0
-    return int(producers) * (int(reserveBytes) + int(residentBytes))
+    return int(producers) * int(processBytes) if int(producers) > 1 else 0
+
+
+@dataclass(frozen=True, slots=True)
+class _ArraysAfter:
+    """The payload of a message whose arrays follow it on the pipe as raw bytes.
+
+    ``rebuild(value, arrays)`` gives the payload back from ``value`` and the
+    arrays, whose dtypes and shapes ``layout`` holds.
+    """
+
+    rebuild: Callable[[Any, list[np.ndarray]], Any]
+    value: Any
+    layout: tuple[tuple[str, tuple[int, ...]], ...]
+
+
+def _send_with_arrays(
+    connection: Any,
+    kind: str,
+    value: Any,
+    arrays: Sequence[np.ndarray],
+    rebuild: Callable[[Any, list[np.ndarray]], Any],
+) -> None:
+    """Send a message whose ``arrays`` follow it as raw bytes, which :func:`_received` reads.
+
+    Pickling copies arrays into a buffer that grows as it is written, about
+    twice their bytes beside them, which a process's share does not hold.
+    Raw bytes go to the pipe from the arrays themselves.
+    """
+    layout = tuple((array.dtype.str, tuple(array.shape)) for array in arrays)
+    connection.send((kind, _ArraysAfter(rebuild, value, layout)))
+    for array in arrays:
+        connection.send_bytes(np.ascontiguousarray(array).reshape(-1).view(np.uint8))
+
+
+def _received(connection: Any) -> tuple[str, Any]:
+    """Receive a message from a process, with the arrays that follow it as raw bytes."""
+    kind, payload = connection.recv()
+    if isinstance(payload, _ArraysAfter):
+        arrays = [
+            np.frombuffer(connection.recv_bytes(), dtype=np.dtype(dtype)).reshape(shape)
+            for dtype, shape in payload.layout
+        ]
+        payload = payload.rebuild(payload.value, arrays)
+    return kind, payload
+
+
+def _sparse_band_item(value: Any, arrays: list[np.ndarray]) -> tuple[str, Any, int]:
+    """Rebuild the assay, sparse band and producer bytes that a reader process sent."""
+    from ..storage.sharding import SparseRowBand
+
+    assay_name, start, end, n_columns, dtype, producer_bytes = value
+    row, column, data = arrays
+    band = SparseRowBand(start, end, n_columns, row, column, data, dtype)
+    return assay_name, band, producer_bytes
+
+
+def _send_sparse_band(connection: Any, item: tuple[str, Any, int]) -> None:
+    """Send a reader process's sparse band, with its arrays as raw bytes."""
+    assay_name, band, producer_bytes = item
+    _send_with_arrays(
+        connection,
+        "band",
+        (assay_name, band.start, band.end, band.nColumns, band.dtype, producer_bytes),
+        (band.row, band.column, band.data),
+        _sparse_band_item,
+    )
+
+
+def _summary_windows(value: Any, arrays: list[np.ndarray]) -> tuple[Any, dict]:
+    """Rebuild the reports and window summaries that a writer process sent."""
+    reports, starts = value
+    fields = len(arrays) // max(1, len(starts))
+    windows = {
+        assay_name: (start, *arrays[index * fields : (index + 1) * fields])
+        for index, (assay_name, start) in enumerate(starts.items())
+    }
+    return reports, windows
+
+
+def _send_window_summaries(
+    connection: Any, reports: Any, summaries: Mapping[str, Any]
+) -> None:
+    """Send a writer process's reports and the count summaries of its window, as its done message."""
+    windows = {
+        assay_name: summary.window() for assay_name, summary in summaries.items()
+    }
+    _send_with_arrays(
+        connection,
+        "done",
+        (reports, {assay_name: window[0] for assay_name, window in windows.items()}),
+        [array for window in windows.values() for array in window[1:]],
+        _summary_windows,
+    )
 
 
 def _run_worker(
@@ -355,7 +444,7 @@ def _worker_messages(
         for connection in ready:
             index = active[connection]
             try:
-                kind, payload = connection.recv()
+                kind, payload = _received(connection)
             except EOFError as exc:
                 raise RuntimeError(
                     f"H5AD {role} {index} closed without a result"
@@ -391,7 +480,8 @@ def _stop_workers(
         )
         for connection in ready:
             try:
-                connection.recv()
+                # Raw bytes, whether of a message or of the arrays after it.
+                connection.recv_bytes()
             except (EOFError, OSError):
                 pass
         for worker in workers:
@@ -426,7 +516,7 @@ def _read_h5ad_process_window(
     def send_band(item: tuple[str, Any, int]) -> bool:
         if stop.is_set():
             return False
-        connection.send(("band", item))
+        _send_sparse_band(connection, item)
         return not stop.is_set()
 
     def work(reader: H5adReader) -> None:
@@ -552,8 +642,7 @@ def _write_h5ad_process_window(
                 },
             )
         if not stop.is_set():
-            windows = {name: summary.window() for name, summary in summaries.items()}
-            connection.send(("done", (reports, windows)))
+            _send_window_summaries(connection, reports, summaries)
 
     _run_worker(reader_kwargs, connection, work, shuffled_rows)
 
@@ -645,8 +734,7 @@ def _write_dense_h5ad_process_window(
                 },
             )
         if not stop.is_set():
-            windows = {name: summary.window() for name, summary in summaries.items()}
-            connection.send(("done", (reports, windows)))
+            _send_window_summaries(connection, reports, summaries)
 
     _run_worker(reader_kwargs, connection, work)
 
@@ -2043,8 +2131,8 @@ class H5adToZarr:
         reads its window through its own reader, which holds the row
         pointers of every row, as this process's reader does, whether it
         writes the window or sends its bands here. A writer process also
-        summarizes its window, whose summaries its admission adds, while this
-        process holds those of every cell.
+        summarizes its window, as :meth:`_writer_process_bytes` counts, while
+        this process holds the summaries of every cell.
         """
         held = self._resident_bytes() - self._kept_bytes()
         if self._cellOrder is not None:
@@ -2052,6 +2140,20 @@ class H5adToZarr:
         if self.h5ad.matrixOrientation == "dense":
             held -= max(0, int(self.h5ad._sparse_import_resident_bytes()))
         return held
+
+    def _writer_process_bytes(self, process_bytes: int, window_rows: int) -> int:
+        """Return what a process that writes ``window_rows`` rows of its own holds beside its writes.
+
+        It holds ``process_bytes``, what :meth:`_window_process_bytes`
+        counts, and the count summaries of its window, which it sends here
+        from their own arrays, without a copy, once its writes are done.
+        """
+        from ..storage.identity import CountSummary
+
+        return int(process_bytes) + sum(
+            CountSummary.nbytes_for(window_rows, width)
+            for width in self._assay_widths().values()
+        )
 
     def _count_import_requirements(
         self,
@@ -2332,7 +2434,6 @@ class H5adToZarr:
         window when the destination is a path, and otherwise sends its bands
         to this process to write.
         """
-        from ..storage.identity import CountSummary
         from ..storage.layout import array_shard_rows
         from ..storage.sharding import (
             aligned_row_windows,
@@ -2352,6 +2453,7 @@ class H5adToZarr:
         batch_rows = self._dense_batch_rows(min(band_rows), batch_size)
         producer_bytes = self._dense_producer_bytes(batch_rows)
         resident = self._count_resident_bytes()
+        process_bytes = self._window_process_bytes()
         filling = filling_band_bytes(arrays)
 
         def window_tasks(start: int, stop: int) -> int:
@@ -2375,9 +2477,8 @@ class H5adToZarr:
         for candidate in range(self._producer_window_limit(shard_rows), 1, -1):
             candidate_windows = aligned_row_windows(n_cells, shard_rows, candidate)
             if direct:
-                # Each writer process holds its batch, the bands it fills, and
-                # the count summaries of its window, beside what
-                # _window_process_bytes counts.
+                # Each writer process holds its batch and the bands it fills
+                # beside what _writer_process_bytes counts.
                 window_rows = max(stop - start for start, stop in candidate_windows)
                 candidate_resources = ResourceBudget(
                     (self.resources.memoryBytes - resident) // candidate,
@@ -2387,11 +2488,7 @@ class H5adToZarr:
                     window_tasks(start, stop) for start, stop in candidate_windows
                 )
                 candidate_resident = (
-                    self._window_process_bytes()
-                    + sum(
-                        CountSummary.nbytes_for(window_rows, array.shape[1])
-                        for array in arrays
-                    )
+                    self._writer_process_bytes(process_bytes, window_rows)
                     + producer_bytes
                     + filling
                 )
@@ -2535,7 +2632,6 @@ class H5adToZarr:
         summaries: dict[str, Any],
     ) -> None:
         """Write a sparse matrix's counts through sparse bands of every assay."""
-        from ..storage.identity import CountSummary
         from ..storage.layout import array_shard_rows
         from ..storage.sharding import (
             SparseShardBuffer,
@@ -2571,6 +2667,8 @@ class H5adToZarr:
         )
         self._lastImportPlan = plan
         resolved_batch_rows = plan.batchRows
+        # A reader process holds its reserve beside its reader's pointers.
+        reader_process_bytes = plan.producerReserveBytes + process_resident_bytes
         shard_rows = math.lcm(
             *(array_shard_rows(destination) for destination in destinations.values())
         )
@@ -2588,22 +2686,20 @@ class H5adToZarr:
                     available_memory // candidate,
                     max(1, int(self.resources.workers) // candidate),
                 )
-                # Each writer process also holds the count summaries of its window.
                 window_rows = max(
                     stop - start
                     for start, stop in aligned_row_windows(
                         self.h5ad.nCells, shard_rows, candidate
                     )
                 )
-                candidate_resident = process_resident_bytes + sum(
-                    CountSummary.nbytes_for(window_rows, destination.shape[1])
-                    for destination in destinations.values()
+                candidate_resident = self._writer_process_bytes(
+                    process_resident_bytes, window_rows
                 )
                 candidate_batch_rows = None
             else:
                 candidate_resources = self.resources
                 candidate_resident = resident_source_bytes + _producer_process_bytes(
-                    candidate, plan.producerReserveBytes, process_resident_bytes
+                    candidate, reader_process_bytes
                 )
                 candidate_batch_rows = resolved_batch_rows
             try:
@@ -2691,7 +2787,7 @@ class H5adToZarr:
             )
         else:
             extra_producer_resident = _producer_process_bytes(
-                n_producers, plan.producerReserveBytes, process_resident_bytes
+                n_producers, reader_process_bytes
             )
             write_sparse_bands(
                 self._count_shard_tasks(
