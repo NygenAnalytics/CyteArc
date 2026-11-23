@@ -56,7 +56,13 @@ from cytearc.metadata.membership import (
     require_measured_features,
 )
 from cytearc.metadata.selection import CellField, FeatureRef, NormalizationSpec
-from cytearc.storage.artifacts import ArtifactRef, fingerprint_array, list_artifacts
+from cytearc.storage.artifacts import (
+    ArtifactRef,
+    artifact_path,
+    fingerprint_array,
+    list_artifacts,
+)
+from cytearc.storage.errors import ArtifactResolutionError
 from cytearc.storage.arrays import create_metadata_column
 from cytearc.storage.categorical import CategoricalColumn
 from cytearc.features.variability import fit_lowess
@@ -2131,6 +2137,14 @@ def panels(tmp_path_factory) -> _PanelStores:
     merged.cells.insert(
         "cell_type", by_cell_id(merged.cells, np.where(cd3.ravel() > 100, "T", "B"))
     )
+    # The cell types of the left study's cells, missing in the right study's.
+    merged.cells.insert(
+        "left_type",
+        by_cell_id(
+            merged.cells,
+            np.where(left, np.where(cd3.ravel() > 100, "T", "B"), None),
+        ),
+    )
     # A live layout: x is the cell's row.
     merged.cells.insert(
         "xy1", by_cell_id(merged.cells, np.arange(len(ids), dtype=np.float64))
@@ -3284,6 +3298,19 @@ def test_bulk_profiles_leave_out_features_that_a_source_of_their_cells_did_not_m
     assert own.detected is not None
     pd.testing.assert_frame_equal(left.detected, own.detected)
 
+    # Groups of the left study's cells alone: sums read only those cells, and
+    # keep the left study's antibodies, while a mean fits the normalization
+    # over every selected cell, the right study's too.
+    with pytest.warns(UserWarning) as caught:
+        grouped = store.compare.compute_bulk("left_type", **options)
+    lacking = "Source 'left' lacks 1: 'CD20'." if aggregation == "sum" else _PANELS_LACK
+    assert [message.split("measurements. ", 1)[1] for message in _left_out(caught)] == [
+        lacking
+    ]
+    assert grouped.profiles.index.tolist() == (
+        _PANELS["left"] if aggregation == "sum" else _SHARED_ANTIBODIES
+    )
+
 
 _RNA_SHARED = [f"G{index}" for index in range(120)]
 _RNA_LEFT_ONLY = [f"L{index}" for index in range(40)]
@@ -3503,6 +3530,19 @@ def test_hvgs_leave_out_genes_that_a_source_of_their_cells_did_not_measure(
         np.testing.assert_array_equal(
             selected[shared], _top(expected_scores, np.ones(shared.sum(), bool), 30)
         )
+    # The detection ratio compares the selected genes with the genes that the
+    # selection could take, which leave out the left source's own.
+    detected = (_dense_counts(store, "RNA") > 0).sum(axis=0)
+    eligible = shared & (detected > 0)
+    assert store.artifacts.inspect(ref).diagnostics[
+        "selectedDetectionRatio"
+    ] == pytest.approx(np.median(detected[selected]) / np.median(detected[eligible]))
+    # A top_n above the shared genes selects every shared gene and no other.
+    with pytest.warns(UserWarning, match="features.hvgs leaves out 40 genes"):
+        every_gene = store.features.hvgs(
+            store.snapshot_cell_selection("I"), **{**options, "top_n": 150}
+        )
+    assert _selected_names(store, every_gene) == _RNA_SHARED
 
     # Each source's cells select what the source's own store selects: the
     # right source lacks the left genes, which the left source measured.
@@ -3753,6 +3793,21 @@ def test_selections_record_the_measured_features_only_when_the_record_changes_th
             "measured_features_fingerprint"
             not in store.artifacts.inspect(again).parameters
         )
+
+    # A recorded fingerprint must be one.
+    store = rna_sources.copy(tmp_path / "corrupt")
+    ref = store.features.hvgs(store.snapshot_cell_selection("I"), **_HVG_OPTIONS)
+    group = zarr.open_group(store.zw.store, mode="r+", path=artifact_path(ref))
+    provenance = dict(group.attrs["provenance"])
+    provenance["parameters"] = {
+        **provenance["parameters"],
+        "measured_features_fingerprint": "not a fingerprint",
+    }
+    group.attrs["provenance"] = provenance
+    with pytest.raises(
+        ArtifactResolutionError, match="Fingerprint of the measured features"
+    ):
+        store.features.resolve("RNA", ref)
 
     # A score of cells whose sources measured every feature records the
     # selection that it was given.
