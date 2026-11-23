@@ -81,13 +81,18 @@ class _MappingReferenceOperationsMixin(_MappingReferenceOperationsBase):
     ) -> ArtifactRef:
         """Package a PCA neighbor chain as an immutable artifact.
 
+        The PCA may scale its features or not, and its values may come from
+        any built-in RNA normalizer: ``norm_lib_size``, ``norm_lib_size_log``,
+        ``norm_pearson_residuals``, ``norm_clr`` or ``norm_dummy``. Queries
+        are normalized as the reference's cells were. Pearson residuals and
+        CLR fit numbers over those cells, each feature's share of their counts
+        or its scale; the reference fits them from the cells' counts, with
+        the function that normalized them, when it is written, and saves them.
         A read-only store returns a saved reference of the same chain and
-        refuses only to write a new one. A reference of values whose
-        normalizer fits numbers over its cells, Pearson residuals or CLR,
-        fits them from the counts of those cells when it is written and saves
-        them, so its queries are normalized as its cells were.
+        refuses only to write a new one.
 
         Raises:
+            ValueError: If the PCA's values come from a custom normalizer.
             PermissionError: If the reference must be written and the store
                 is not opened with ``zarr_mode='r+'``.
         """
