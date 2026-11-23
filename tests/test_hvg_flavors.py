@@ -1626,9 +1626,7 @@ def test_pearson_residuals_and_their_fit_match_scanpy(
     totals = np.asarray(store.cells.fetch_all("RNA_nCounts"), dtype=np.float64)[active]
     if renormalize_subset:
         totals = counts.sum(axis=1, dtype=np.float64)
-    fit = fit_normalization(
-        norm_pearson_residuals, counts, totals, size_factor=None, log_transform=False
-    )
+    fit = fit_normalization(norm_pearson_residuals, counts, totals)
     rows = np.asarray(golden["cells"])
     np.testing.assert_allclose(
         normalize_rows(
