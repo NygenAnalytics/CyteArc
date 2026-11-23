@@ -3145,11 +3145,11 @@ def test_dataset_merge_charges_a_source_it_reads_its_counts_and_smallest_read():
     # each row (3,000 + 8 bytes).
     expected = 4 * 8 + 24_000 + 24_000 + 4 * (3_000 + 8)
     assert merge_writer._row_nnz_load_bytes(signed, reader) == expected
-    # Unsigned counts load their row sums, row and column positive counts,
-    # and the decoded and encoded copies of the longest of them, 8 bytes each.
-    unsigned = assay(np.ones((4, 3_000), dtype=np.uint16))
-    expected = 8 * (4 + 4 + 3_000 + 2 * 3_000)
-    assert merge_writer._row_nnz_load_bytes(unsigned, None) == expected
+    # Counts whose summaries count their values load each cell's count, 8
+    # bytes, beside a decoded and an encoded copy of it while it decodes,
+    # whatever the number of features.
+    summarized = assay(np.ones((4, 3_000), dtype=np.uint16))
+    assert merge_writer._row_nnz_load_bytes(summarized, None) == 3 * 8 * 4
     # Counts without features or without cells hold no value to read: each
     # cell's count of 0 is all that they hold, within a budget of just it.
     for n_cells, n_features in ((5, 0), (0, 4)):

@@ -720,8 +720,37 @@ def test_count_summary_rejects_non_finite_counts_and_keeps_negative_values():
     assert signed.rowSums[0] == 1
 
 
-def test_positive_values_are_summed_from_the_stored_summaries(tmp_path) -> None:
-    from cytearc.storage.identity import COUNT_SUMMARIES, positive_value_count
+def test_count_summary_windows_carry_the_nonzero_values_of_their_rows():
+    from cytearc.storage.identity import CountSummary
+
+    root = zarr.open_group(store=MemoryStore(), mode="w")
+    counts = root.create_array("counts", shape=(5, 3), dtype=np.float32)
+    values = np.array(
+        [
+            [1.5, -2.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [-0.5, -1.0, 4.0],
+            [0.0, 3.0, 0.0],
+            [-1, 0, 0],
+        ],
+        dtype=np.float32,
+    )
+    # Writer processes summarize windows of rows, which the parent merges.
+    whole = CountSummary(counts)
+    for rows in ((3, 5), (0, 3)):
+        window = CountSummary(counts, rows=rows)
+        window.update(rows[0], values[rows[0] : rows[1]])
+        whole.merge(window.window())
+
+    np.testing.assert_array_equal(whole.rowNonzero, [2, 0, 3, 1, 1])
+    np.testing.assert_array_equal(whole.rowPositive, [1, 0, 1, 1, 0])
+    reference = CountSummary(counts)
+    reference.update(0, values)
+    assert whole.hexdigest() == reference.hexdigest()
+
+
+def test_nonzero_values_are_summed_from_the_stored_summaries(tmp_path) -> None:
+    from cytearc.storage.identity import COUNT_SUMMARIES, nonzero_value_count
     from tests.storage_helpers import write_count_store
 
     values = np.random.default_rng(31).poisson(0.8, (10, 6)).astype(np.int16)
@@ -731,48 +760,72 @@ def test_positive_values_are_summed_from_the_stored_summaries(tmp_path) -> None:
     counts = matrix["counts"]
     # Rows of 3 counts each, so that sums cross the summary's chunks.
     totals = matrix[COUNT_SUMMARIES]
-    stored = totals["rowPositive"][:]
-    totals.create_array("rowPositive", data=stored, chunks=(3,), overwrite=True)
-    positive = np.count_nonzero(values > 0, axis=1)
+    stored = totals["rowNonzero"][:]
+    totals.create_array("rowNonzero", data=stored, chunks=(3,), overwrite=True)
+    nonzero = np.count_nonzero(values, axis=1)
 
-    assert positive_value_count(matrix, counts) == positive.sum()
+    # The negative counts count as nonzero values.
+    assert nonzero_value_count(matrix, counts) == np.count_nonzero(values)
     for rows in ([0, 2, 3, 7, 8, 9], [4], [5, 6, 8], []):
-        assert positive_value_count(matrix, counts, np.asarray(rows)) == (
-            positive[rows].sum()
+        assert nonzero_value_count(matrix, counts, np.asarray(rows)) == (
+            nonzero[rows].sum()
         )
-    # The negative counts are no positive values.
-    assert positive_value_count(matrix, counts) == np.count_nonzero(values) - 2
-    totals.create_array("rowPositive", data=stored[:9], overwrite=True)
+    totals.create_array("rowNonzero", data=stored[:9], overwrite=True)
     with pytest.raises(ValueError, match="Count summaries are malformed"):
-        positive_value_count(matrix, counts)
+        nonzero_value_count(matrix, counts)
     totals.attrs["source_fingerprint"] = "another"
     with pytest.raises(ValueError, match="Count summaries do not match the counts"):
-        positive_value_count(matrix, counts)
+        nonzero_value_count(matrix, counts)
 
 
 @pytest.mark.parametrize(
     "dtype",
-    ["uint8", "uint16", "uint32", "uint64", "int8", "int16", "int64", "float32"],
+    [
+        "uint8",
+        "uint16",
+        "uint32",
+        "uint64",
+        "int8",
+        "int16",
+        "int32",
+        "int64",
+        "float32",
+        "float64",
+    ],
 )
-def test_summaries_count_every_value_only_of_unsigned_counts(tmp_path, dtype) -> None:
-    from cytearc.storage.identity import (
-        positive_value_count,
-        summaries_count_every_value,
-    )
-    from tests.storage_helpers import write_count_store
+def test_count_summaries_count_the_nonzero_values_of_every_count_dtype(
+    tmp_path, dtype
+) -> None:
+    from cytearc.storage.identity import nonzero_value_count, row_nonzero_counts
+    from tests.storage_helpers import drop_row_nonzero, write_count_store
 
-    # The least integer that the dtype holds, beside counts and zeros.
-    least = int(np.iinfo(dtype).min) if np.dtype(dtype).kind in "iu" else -1
-    values = np.array([[least, 0, 3], [0, 0, 0], [1, least, 2]])
-    write_count_store(str(tmp_path / "store.zarr"), {"RNA": values}, dtype)
-    matrix = zarr.open_group(str(tmp_path / "store.zarr"), mode="r")["RNA"]
+    kind = np.dtype(dtype).kind
+    # The least value that the dtype holds, or a negative one and a negative
+    # zero for floats, and a value far below 1, beside counts and zeros.
+    least = int(np.iinfo(dtype).min) if kind in "iu" else -1.5
+    small = 1 if kind in "iu" else 2.0**-60
+    values = np.array([[least, 0, 3], [0, 0, 0], [small, least, 2], [0, -0.0, 0]])
+    location = str(tmp_path / "store.zarr")
+    write_count_store(location, {"RNA": values}, dtype)
+    matrix = zarr.open_group(location, mode="r")["RNA"]
     counts = matrix["counts"]
 
-    # The summaries count each nonzero value exactly when the rule says so.
-    assert summaries_count_every_value(counts) == (dtype.startswith("u"))
-    assert summaries_count_every_value(counts) == (
-        positive_value_count(matrix, counts) == np.count_nonzero(values)
-    )
+    row_nonzero = row_nonzero_counts(matrix, counts)
+    assert row_nonzero is not None
+    np.testing.assert_array_equal(row_nonzero[:], np.count_nonzero(values, axis=1))
+    assert nonzero_value_count(matrix, counts) == np.count_nonzero(values)
+    # Summaries written before they stored rowNonzero give each row's
+    # nonzero values from its positive values, which counts that can be
+    # negative may leave short.
+    drop_row_nonzero(location)
+    matrix = zarr.open_group(location, mode="r")["RNA"]
+    older = row_nonzero_counts(matrix, matrix["counts"])
+    if kind == "u":
+        assert older is not None
+        np.testing.assert_array_equal(older[:], np.count_nonzero(values, axis=1))
+    else:
+        assert older is None
+        assert nonzero_value_count(matrix, matrix["counts"]) is None
 
 
 @pytest.mark.parametrize(
@@ -780,7 +833,7 @@ def test_summaries_count_every_value_only_of_unsigned_counts(tmp_path, dtype) ->
     [[0, 3, 70_000], [0.0, 2.0], [-1, 2], [0.5, 2.0], [-0.25], [0, 2**40]],
 )
 def test_counts_stored_unsigned_hold_no_negative_value(values) -> None:
-    from cytearc.storage.identity import summaries_count_every_value
+    from cytearc.storage.identity import cannot_hold_negative_values
 
     array = np.asarray(values)
     value_range = CountValueRange()
@@ -790,10 +843,10 @@ def test_counts_stored_unsigned_hold_no_negative_value(values) -> None:
     )
 
     # The count dtype policy stores whole non-negative counts unsigned, so
-    # counts that can hold a negative value are never counted from their
-    # summaries.
+    # counts that can hold a negative value are never counted from the
+    # positive values of summaries written before rowNonzero.
     whole = bool((array >= 0).all() and (array == np.round(array)).all())
-    assert summaries_count_every_value(stored) == whole
+    assert cannot_hold_negative_values(stored) == whole
 
 
 _VALUES = np.array(

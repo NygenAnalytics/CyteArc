@@ -722,13 +722,15 @@ def test_h5ad_parallel_producer_count_is_memory_admitted(tmp_path):
     # them need both of their reserves beside the parent's write band, and
     # beside the IDs and names that the parent keeps: the cell and feature IDs
     # as bytes objects, 33 bytes and one a character each with a reference of
-    # 8, and the names as text, 4 bytes a character of the longest.
+    # 8, and the names as text, 4 bytes a character of the longest. The count
+    # summary of the 12 cells holds 8 bytes more for each cell's count of its
+    # nonzero values, 96 bytes beside the 5,300 of the rest.
     cells = [f"c{i}" for i in range(12)]
     kept = sum(8 + 33 + len(text) for text in [*cells, "f0", "f1", "f2"]) + 3 * 4 * 2
     assert kept == 671
-    producers, store = write(5_300 + kept)
+    producers, store = write(5_300 + 8 * 12 + kept)
     assert producers == 2
-    assert write(5_299 + kept)[0] == 1
+    assert write(5_299 + 8 * 12 + kept)[0] == 1
 
     root = zarr.open_group(store=store, mode="r")
     np.testing.assert_array_equal(root["RNA/counts"][:], values)
@@ -796,6 +798,45 @@ def test_h5ad_writer_processes_undo_the_log_of_their_windows(tmp_path, encoding)
     assert writer._lastImportProducerCount >= 2
     root = zarr.open_group(store=location, mode="r")
     np.testing.assert_allclose(root["RNA/counts"][:], linear, rtol=1e-12)
+
+
+@pytest.mark.parametrize("encoding", ["csr", "dense"])
+def test_h5ad_writer_processes_count_the_nonzero_values_of_their_windows(
+    tmp_path, encoding
+):
+    from cytearc.readers import H5adReader
+    from cytearc.storage.budget import ResourceBudget
+    from cytearc.storage.io_policy import StorageIoPolicy
+    from cytearc.writers import H5adToZarr
+
+    # Fractional counts in halves, beside zeros, which the import stores as
+    # floats.
+    values = np.random.default_rng(13).integers(0, 4, size=(12, 3)) / 2.0
+    path = _write_h5ad(tmp_path / "halves.h5ad", values, encoding=encoding)
+    location = str(tmp_path / "written.zarr")
+    reader = H5adReader(str(path), feature_name_key="feature_name")
+    try:
+        writer = H5adToZarr(
+            reader,
+            zarr_loc=location,
+            io=StorageIoPolicy(readWorkers=2),
+            **_SHARD_BAND_BUDGET,
+            values="counts",
+            shuffle_cells=False,
+        )
+        writer.resources = ResourceBudget(1_000_000, 4)
+        writer._write_counts(batch_size=2)
+    finally:
+        reader.close()
+
+    # Each process summarizes its window of rows, which the parent gathers.
+    assert writer._lastImportProducerCount >= 2
+    root = zarr.open_group(store=location, mode="r")
+    assert root["RNA/counts"].dtype.kind == "f"
+    np.testing.assert_array_equal(root["RNA/counts"][:], values)
+    np.testing.assert_array_equal(
+        root["RNA/countSummaries/rowNonzero"][:], np.count_nonzero(values, axis=1)
+    )
 
 
 @pytest.mark.parametrize("encoding", ["csr", "dense"])
@@ -4070,10 +4111,13 @@ def test_h5ad_process_windows_run_in_the_parent_process(tmp_path) -> None:
         ((kind, (_reports, windows)),) = write(threading.Event())
         assert kind == "done"
         np.testing.assert_array_equal(counts[:], values)
-        start, _digests, row_sums, row_positive, column_positive = windows["RNA"]
+        start, _digests, row_sums, row_positive, row_nonzero, column_positive = windows[
+            "RNA"
+        ]
         assert start == 0
         np.testing.assert_array_equal(row_sums, values.sum(axis=1))
         np.testing.assert_array_equal(row_positive, np.count_nonzero(values, axis=1))
+        np.testing.assert_array_equal(row_nonzero, np.count_nonzero(values, axis=1))
         np.testing.assert_array_equal(column_positive, np.count_nonzero(values, axis=0))
         # A stopped write window writes nothing.
         assert write(stopped()) == []

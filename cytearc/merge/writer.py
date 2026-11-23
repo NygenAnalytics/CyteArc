@@ -12,8 +12,7 @@ from ..storage.budget import ResourceBudget
 from ..storage.identity import (
     CountSummary,
     finalize_counts,
-    load_count_summaries,
-    summaries_count_every_value,
+    row_nonzero_counts,
 )
 from ..storage.count_matrix import CountMatrixPolicy
 from ..storage.io_policy import StorageIoPolicy
@@ -288,17 +287,16 @@ def _smallest_count_read_bytes(counts: ChunkedArray) -> int:
 def _row_nnz_load_bytes(assay: Any, reader: ChunkedArray | None) -> int:
     """Bound what taking one source's nonzero counts per row holds beside the profile.
 
-    Unsigned counts load their count summaries. Other counts, which
-    ``reader`` reads, hold a count of each row beside the smallest read of
-    the counts.
+    Counts whose summaries give them load that one summary. Other counts,
+    which ``reader`` reads, hold a count of each row beside the smallest read
+    of the counts.
     """
-    n_rows, n_columns = (int(value) for value in assay.rawData.shape)
+    n_rows = int(assay.rawData.shape[0])
     itemsize = np.dtype(np.int64).itemsize
     if reader is not None:
         return itemsize * n_rows + _smallest_count_read_bytes(reader)
-    # Row sums, row positives, and column positives are loaded together, and
-    # decoding one of them briefly holds a decoded and an encoded copy.
-    return itemsize * (2 * n_rows + n_columns + 2 * max(n_rows, n_columns))
+    # The loaded summary, and while it decodes a decoded and an encoded copy.
+    return 3 * itemsize * n_rows
 
 
 def _counting_refusal(
@@ -376,11 +374,11 @@ def _cumulative_row_nnz(
     """Return cumulative nonzero counts over merged rows.
 
     Each row count is the number of nonzero values of the source row, taken
-    once per source. Unsigned counts take it from their saved count
-    summaries; signed and float counts can hold negative values, which the
-    summaries leave out, so their values are counted in a read within the
-    merge's budget (:func:`~cytearc.storage.identity.summaries_count_every_value`).
-    Missing sources contribute zeros.
+    once per source from its count summaries
+    (:func:`~cytearc.storage.identity.row_nonzero_counts`). Summaries
+    written before they stored that number give it only for unsigned counts,
+    so the values of other counts are counted in a read within the merge's
+    budget. Missing sources contribute zeros.
 
     Raises:
         MemoryBudgetError: If the profile and the summaries or the smallest
@@ -391,12 +389,11 @@ def _cumulative_row_nnz(
         if assay is None:
             continue
         counts = as_zarr_array(assay.matrixGroup["counts"], name="counts")
+        summarized = row_nonzero_counts(assay.matrixGroup, counts)
         reader = (
-            None
-            if summaries_count_every_value(counts)
-            else assay.rawData._with_resources(resources)
+            None if summarized is not None else assay.rawData._with_resources(resources)
         )
-        sources.append((index, assay, counts, reader))
+        sources.append((index, assay, summarized, reader))
     profile_bytes = (row_plan.nCells + 1) * np.dtype(np.int64).itemsize
     held = max(0, int(resident_bytes)) + profile_bytes
     budget = int(resources.memoryBytes)
@@ -415,18 +412,19 @@ def _cumulative_row_nnz(
         raise _counting_refusal(assay_name, item, needed, budget)
     cumulative = np.zeros(row_plan.nCells + 1, dtype=np.int64)
     row_nnz = cumulative[1:]
-    for source_idx, assay, counts, reader in sources:
-        row_values = (
-            load_count_summaries(assay.matrixGroup, counts)[1]
-            if reader is None
-            else _counted_row_values(
+    for source_idx, assay, summarized, reader in sources:
+        if reader is None:
+            # A source without a reader has summaries that count its values.
+            assert summarized is not None
+            row_values = np.asarray(summarized[:])
+        else:
+            row_values = _counted_row_values(
                 assay,
                 row_plan.sourceNames[source_idx],
                 reader,
                 resources,
                 held_bytes=held,
             )
-        )
         for segment in iter_row_plan_segments(row_plan):
             if segment.sourceIdx != source_idx:
                 continue

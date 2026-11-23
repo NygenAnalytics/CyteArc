@@ -141,13 +141,15 @@ def summarize_rows(
     digests: np.ndarray,
     row_sums: np.ndarray,
     row_positive: np.ndarray,
+    row_nonzero: np.ndarray,
     column_positive: np.ndarray,
 ) -> None:
     """Digest each row's nonzero column-value pairs and total its values.
 
     ``bits`` is the unsigned-integer view of ``values``. Zero entries are
-    skipped, so digests depend only on each row's sparse content. Positive
-    entries are counted per row and added to ``column_positive``.
+    skipped, so digests depend only on each row's sparse content. Nonzero
+    entries are counted per row, and positive entries per row and added to
+    ``column_positive``.
 
     Raises:
         ValueError: If a value is NaN or infinite. Count matrices hold finite
@@ -181,3 +183,4 @@ def summarize_rows(
         digests[row, 1] = mix64(second ^ (nonzero * _GOLDEN))
         row_sums[row] = total
         row_positive[row] = positive
+        row_nonzero[row] = np.int64(nonzero)
