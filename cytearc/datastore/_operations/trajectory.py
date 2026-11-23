@@ -162,6 +162,7 @@ from ...trajectory.artifacts import (
     require_exact_record_keys as _require_exact_record_keys,
     selection_size as _selection_size,
     states_payload_is_valid as _states_payload_is_valid,
+    stored_states_bytes as _stored_states_bytes_impl,
     stored_profile_sizes as _stored_profile_sizes_impl,
     true_array_indices as _true_array_indices,
     validate_aggregation_parameters as _validate_aggregation_parameters,
@@ -254,8 +255,11 @@ from ...trajectory.pseudotime import (
     validate_source_sink_vector as _validate_source_sink_vector_impl,
 )
 from ...trajectory.states import (
+    TIE_TOLERANCE as _TIE_TOLERANCE,
+    boundary_gap as _boundary_gap_impl,
     find_states as _find_states_impl,
     search_bytes as _search_bytes_impl,
+    state_labels as _state_labels_impl,
     state_names as _state_names_impl,
 )
 from ...trajectory.results import (
@@ -789,9 +793,22 @@ _STATES_WARNINGS = (
         "statesShortOfCells",
         applies=lambda numbers: numbers["statesShortOfCells"] > 0,
         message=lambda numbers: (
-            f"{numbers['statesShortOfCells']} states hold fewer than cells_per_state "
-            "cells, because a cell that several states take belongs to the one in "
-            "which its membership is largest; their labels mark fewer cells"
+            f"{numbers['statesShortOfCells']} "
+            + ("state holds" if numbers["statesShortOfCells"] == 1 else "states hold")
+            + " fewer than cells_per_state cells, because a cell that several "
+            "states take belongs to the one in which its membership is largest; "
+            "their labels mark fewer cells"
+        ),
+    ),
+    DiagnosticRule(
+        "boundaryGap",
+        applies=lambda numbers: numbers["boundaryGap"] <= _TIE_TOLERANCE,
+        message=lambda numbers: (
+            "The walk's eigenvalue of the last state ties the next one, apart by "
+            f"{numbers['boundaryGap']:.1e} of the next one's distance from one, as "
+            "the eigenvalues of identical parts of a walk tie, so the last state "
+            "is one mix of their two directions among many. Ask for a number of "
+            "states that keeps both eigenvalues or neither"
         ),
     ),
 )
@@ -2717,7 +2734,10 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         state's ``stability`` for comparison. A late intermediate state in
         which the walk slows, such as the Pre-endocrine cells before the
         endocrine fates, can also hold more than its share, so check
-        terminal calls with markers.
+        terminal calls with markers. The roles need the walk to have a
+        direction: at ``beta=0`` a long walk spends its time in proportion
+        to the cells' degrees, so enrichment measures how densely a state's
+        cells are joined rather than where the process ends.
 
         The ``cells_per_state`` most likely cells of each state carry its
         name in the artifact's canonical array, missing for other cells, so
@@ -2727,14 +2747,17 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
             found = ds.trajectory.load_states(states)
             fate = ds.trajectory.fate(
                 sink_labels=states, graph=graph, direction=score,
-                sinks=list(found.terminal),
+                sinks=found.terminal,
             )
 
         The search covers the largest connected component of the graph's
         scored cells; cells of other components belong to no state, with a
         warning. Choose ``n_states`` a few above the number of populations
         that you expect along the process, and trust the terminal states
-        that persist when ``n_states`` changes by one or two.
+        that persist when ``n_states`` changes by one or two. A warning also
+        names a last state whose eigenvalue ties the next one's, as those of
+        identical parts of a walk tie, since the last state is then one mix
+        of their directions among many.
 
         Args:
             graph: Explicit connectivity-map or integrated-graph artifact to
@@ -2898,6 +2921,7 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
                 ),
                 ArrayRequirement("valid", shape=(n_cells,), dtype_kind="b"),
                 ArrayRequirement("state_names", shape=(n_states,), dtype_kind="U"),
+                ArrayRequirement("state_labels", shape=(n_states,), dtype_kind="U"),
                 ArrayRequirement("roles", shape=(n_states,), dtype_kind="U"),
                 ArrayRequirement(
                     "coarse_transitions", shape=(n_states, n_states), dtype_kind="f"
@@ -2937,15 +2961,14 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
                 _copy_graph=False,
             )
             del component_graph
-            names = np.asarray(
-                _state_names_impl(
-                    found.cells,
-                    n_states,
-                    None if codes is None else codes[searched],
-                    categories,
-                ),
-                dtype=str,
+            state_labels = _state_labels_impl(
+                found.cells,
+                n_states,
+                None if codes is None else codes[searched],
+                categories,
             )
+            names = np.asarray(_state_names_impl(state_labels), dtype=str)
+            cell_counts = np.bincount(found.cells[found.cells >= 0], minlength=n_states)
             state_of_cell = np.full(n_cells, -1, dtype=np.int64)
             state_of_cell[searched] = found.cells
             named = state_of_cell >= 0
@@ -2962,12 +2985,13 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
                     "memberships": memberships,
                     "valid": searched,
                     "state_names": names,
+                    "state_labels": np.asarray(state_labels, dtype=names.dtype),
                     "roles": np.asarray(found.roles, dtype=str),
                     "coarse_transitions": found.coarse_transitions,
                     "cell_share": found.cell_share,
                     "walk_share": found.walk_share,
                     "direction": found.direction,
-                    "cells": found.cell_counts.astype(np.int64),
+                    "cells": cell_counts.astype(np.int64),
                     "eigenvalues": np.column_stack(
                         (found.eigenvalues.real, found.eigenvalues.imag)
                     ),
@@ -2979,11 +3003,10 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
                     "cellsLeftOut": int(n_cells - searched.sum()),
                     "terminalStates": int(found.roles.count("terminal")),
                     "statesShortOfCells": int(
-                        np.count_nonzero(
-                            found.cell_counts < validated["cells_per_state"]
-                        )
+                        np.count_nonzero(cell_counts < validated["cells_per_state"])
                     ),
                     "crispness": float(found.crispness),
+                    "boundaryGap": _boundary_gap_impl(found.eigenvalues, n_states),
                 },
             )
             logger.info(
@@ -3046,6 +3069,16 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         )
         n_cells = _selection_size(self.zw, selection)
         group = artifact_group(self.zw, states)
+        # What checking and reading the stored search holds is charged before
+        # either reads it.
+        MemoryLedger(
+            self.resources.memoryBytes,
+            f"Loading the states of {n_cells} cells",
+            codec_threads=self.nthreads,
+        ).peak(
+            "checking and reading the state search",
+            _stored_states_bytes_impl(group, n_cells=n_cells, n_states=n_states),
+        )
         if not _states_payload_is_valid(group, n_cells=n_cells, n_states=n_states):
             raise ValueError("State-search arrays do not match their contract")
 
@@ -3053,15 +3086,18 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
             return np.asarray(as_zarr_array(group[name], name=name)[:])
 
         names = tuple(str(name) for name in stored("state_names"))
-        values = stored("values").astype(object)
-        missing = stored(_STATES_LABELS_MISSING).astype(bool)
-        values[missing] = None
+        # Each cell's state as a code, without a Python string for each cell.
+        labels = _listed_labels(
+            stored("values"), stored(_STATES_LABELS_MISSING), names, "State labels"
+        )
         coarse = stored("coarse_transitions").astype(np.float64)
         cell_share = stored("cell_share").astype(np.float64)
         walk_share = stored("walk_share").astype(np.float64)
         eigenvalues = stored("eigenvalues").astype(np.float64)
         table = pd.DataFrame(
             {
+                # The label that most of a state's cells hold, None without one.
+                "label": [str(label) or None for label in stored("state_labels")],
                 "role": [str(role) for role in stored("roles")],
                 "cells": stored("cells").astype(np.int64),
                 "cell_share": cell_share,
@@ -3088,8 +3124,8 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
                 else parse_artifact_ref(labels_input, "State-search labels input")
             ),
             names=names,
-            labels=pd.Categorical(values, categories=list(names)),
-            memberships=stored("memberships").astype(np.float64),
+            labels=labels,
+            memberships=stored("memberships"),
             valid=stored("valid").astype(bool),
             coarse_transitions=coarse,
             table=table,

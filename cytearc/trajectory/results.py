@@ -678,6 +678,7 @@ class LineageMembershipResult:
 
 #: The columns of a state search's table, one row per state.
 STATE_TABLE_COLUMNS = (
+    "label",
     "role",
     "cells",
     "cell_share",
@@ -696,10 +697,12 @@ class TrajectoryStatesResult:
     direction first. ``labels`` gives, for each cell of ``cell_selection``,
     the state whose most likely cells it is among, missing elsewhere, and
     ``memberships`` each cell's membership in each state, cells by states,
-    NaN outside the ``valid`` cells that the search covered.
-    ``coarse_transitions`` is the walk between the states, each row summing
-    to one. ``table`` holds one row per state: its ``role``, the ``cells``
-    that its label marks, its ``cell_share``, the mean of its memberships,
+    in float32 as stored, NaN outside the ``valid`` cells that the search
+    covered. ``coarse_transitions`` is the walk between the states, each row
+    summing to one. ``table`` holds one row per state: the ``label`` that
+    most of its cells hold, which its name repeats with a suffix where
+    states share one, None without labels; its ``role``, the ``cells``
+    that its name marks, its ``cell_share``, the mean of its memberships,
     its ``walk_share``, its share of a long walk's time, their ratio
     ``enrichment``, its ``stability``, the probability that one step of the
     walk stays in it, and its mean ``direction`` score rescaled to [0, 1].
@@ -751,11 +754,13 @@ class TrajectoryStatesResult:
             )
 
     @property
-    def initial(self) -> tuple[str, ...]:
-        """The initial state, the one that the direction places earliest."""
-        return tuple(self.table.index[self.table["role"] == "initial"])
+    def initial(self) -> str:
+        """The name of the initial state, the one that the direction places earliest."""
+        return str(self.names[0])
 
     @property
-    def terminal(self) -> tuple[str, ...]:
-        """The terminal states, in the order of the walk, to pass to ``fate`` as ``sinks``."""
-        return tuple(self.table.index[self.table["role"] == "terminal"])
+    def terminal(self) -> list[str]:
+        """The names of the terminal states, in the order of the walk, to pass to ``fate`` as ``sinks``."""
+        return [
+            str(name) for name in self.table.index[self.table["role"] == "terminal"]
+        ]

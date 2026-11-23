@@ -56,7 +56,9 @@ from .fate import _make_transition, _normalize_pseudotime
 from .pseudotime import _counted_operator, _SolveProgress
 
 __all__ = [
+    "TIE_TOLERANCE",
     "FoundStates",
+    "boundary_gap",
     "coarse_grain",
     "feasible_rotation",
     "find_states",
@@ -67,6 +69,7 @@ __all__ = [
     "search_bytes",
     "splits_conjugate_pair",
     "state_cells",
+    "state_labels",
     "state_names",
     "vertex_rows",
 ]
@@ -88,6 +91,11 @@ _SPAN_TOLERANCE = 1e-24
 #: What a search holds whatever its cells and states: NumPy's buffers for
 #: reductions and the small arrays of each step, measured at under 0.2 MiB.
 _SMALL_ARRAY_BYTES = 2**20
+#: How close the last eigenvalue kept and the first one left out may come,
+#: relative to the latter's distance from one, before they count as tied.
+#: Identical parts of a walk tie them to 1e-9; on the pancreas walks and the
+#: synthetic processes of the tests the closest pair stayed 8e-3 apart.
+TIE_TOLERANCE = 1e-6
 
 
 @dataclass(frozen=True, slots=True, eq=False)
@@ -96,17 +104,16 @@ class FoundStates:
 
     ``memberships`` holds each cell's membership in each state, cells by
     states, each row summing to one. ``cells`` gives the state whose most
-    likely cells each cell is among, or -1, and ``cell_counts`` how many
-    cells each state holds. ``coarse_transitions`` is the walk between the
-    states, ``cell_share`` each state's mean membership, ``walk_share`` its
-    share of a long walk's time, ``direction`` its mean direction score
-    rescaled to [0, 1], and ``roles`` its role. ``eigenvalues`` holds the
-    walk's ``n_states + 1`` leading eigenvalues, largest real part first.
+    likely cells each cell is among, or -1. ``coarse_transitions`` is the
+    walk between the states, ``cell_share`` each state's mean membership,
+    ``walk_share`` its share of a long walk's time, ``direction`` its mean
+    direction score rescaled to [0, 1], and ``roles`` its role.
+    ``eigenvalues`` holds the walk's ``n_states + 1`` leading eigenvalues,
+    largest real part first.
     """
 
     memberships: np.ndarray = field(repr=False)
     cells: np.ndarray = field(repr=False)
-    cell_counts: np.ndarray
     coarse_transitions: np.ndarray
     cell_share: np.ndarray
     walk_share: np.ndarray
@@ -124,6 +131,18 @@ def splits_conjugate_pair(eigenvalues: np.ndarray, n_states: int) -> bool:
     last eigenvalue kept is such a first member.
     """
     return bool(eigenvalues[n_states - 1].imag > 0.0)
+
+
+def boundary_gap(eigenvalues: np.ndarray, n_states: int) -> float:
+    """How far apart the last eigenvalue kept and the first one left out lie, relative to the latter's distance from one.
+
+    When they tie, as the eigenvalues of identical parts of a walk do, any
+    mix of their two eigenvectors spans an invariant subspace, so the last
+    state is one choice among many; a gap below :data:`TIE_TOLERANCE`
+    counts as a tie.
+    """
+    kept, left_out = eigenvalues[n_states - 1], eigenvalues[n_states]
+    return float(abs(kept - left_out) / abs(1.0 - left_out))
 
 
 def leading_eigenvectors(
@@ -203,20 +222,19 @@ def invariant_basis(
     Raises:
         ValueError: If ``n_states`` would split a complex conjugate pair of
             eigenvalues, which no real subspace can do.
-        RuntimeError: If the leading eigenvalue is not one, the walk has a
-            second eigenvalue one and so falls into parts that never meet,
-            or the basis is not invariant under the walk.
+        RuntimeError: If the walk's second eigenvalue rounds to one, as for
+            parts joined too weakly for the walk to cross, or the basis is
+            not invariant under the walk.
     """
     n_cells = int(walk.shape[0])
-    if abs(eigenvalues[0] - 1.0) > 1e-8:
-        raise RuntimeError(
-            f"The walk's leading eigenvalue is {eigenvalues[0]:.6g} rather than "
-            "one, so its rows do not sum to one"
-        )
     if eigenvalues[1].real >= 1.0 - _SEPARATION_TOLERANCE:
         raise RuntimeError(
-            "The walk has a second eigenvalue of one, so it falls into parts "
-            "that never meet: search the cells of one connected component"
+            f"The walk's second eigenvalue, {eigenvalues[1].real:.15g}, rounds "
+            "to one: the graph joins parts of its cells too weakly for the walk "
+            "to cross between them, so no split of the walk weighs one part "
+            "against another. Build the graph so that its parts join more "
+            "strongly, such as with more neighbors, or search each part on a "
+            "graph of its own cells"
         )
     if splits_conjugate_pair(eigenvalues, n_states):
         choices = (
@@ -256,8 +274,9 @@ def invariant_basis(
         raise RuntimeError(
             "The eigenvectors that the state search found span no invariant "
             f"subspace of the walk (largest residual {residual:.2e}, at most "
-            f"{_INVARIANCE_TOLERANCE * scale:.2e} allowed); raise max_iterations "
-            "or ask for fewer states"
+            f"{_INVARIANCE_TOLERANCE * scale:.2e} allowed), so its eigenvectors "
+            "could not be computed accurately enough; ask for another n_states, "
+            "or pass a lower beta, which directs the walk less strongly"
         )
     return basis
 
@@ -346,18 +365,23 @@ def optimize_rotation(basis: np.ndarray) -> np.ndarray:
 
     Weber (2006), Algorithm 3.11, as Lange et al. (2022) run it: SciPy's
     ``fmin`` with its defaults optimizes the entries of the rotation outside
-    its first row and column, from the feasible form of the initial guess,
-    making each trial feasible before evaluating it, and stops after at most
-    ``200 * (n_states - 1)**2`` evaluations. Two states have one free entry,
-    which only scales the rotation and so leaves the objective unchanged,
-    so their feasible initial guess is returned. The optimization advances
-    a progress bar with its evaluations.
+    its first row and column, making each trial feasible before evaluating
+    it, and stops after at most ``200 * (n_states - 1)**2`` evaluations. It
+    starts from the entries of Algorithm 3.9's guess. Algorithm 3.11 starts
+    from the feasible guess, whose entries Algorithm 3.10 divides by the sum
+    of its first row; the objective does not depend on that scale, but
+    ``fmin``'s absolute tolerances do, and the guess before division gives
+    CellRank 2.4.0's memberships. Two states have one free entry, which
+    only scales the rotation and so leaves the objective unchanged, so their
+    feasible guess is returned. The optimization advances a progress bar
+    with its evaluations.
     """
     n_states = basis.shape[1]
     # Each trial reads the basis's columns after the first, held contiguous
     # once rather than copied by every product.
     tail = np.ascontiguousarray(basis[:, 1:])
-    start = feasible_rotation(initial_rotation(basis), tail)
+    guess = initial_rotation(basis)
+    start = feasible_rotation(guess, tail)
     if n_states == 2:
         return start
     n_free = (n_states - 1) ** 2
@@ -378,7 +402,7 @@ def optimize_rotation(basis: np.ndarray) -> np.ndarray:
 
     finished = False
     try:
-        free = fmin(objective, start[1:, 1:].ravel(), disp=False)
+        free = fmin(objective, guess[1:, 1:].ravel(), disp=False)
         finished = True
     finally:
         progress.close(finished)
@@ -431,36 +455,46 @@ def state_cells(memberships: np.ndarray, cells_per_state: int) -> np.ndarray:
     return cells
 
 
-def state_names(
+def state_labels(
     cells: np.ndarray,
     n_states: int,
     label_codes: np.ndarray | None = None,
     label_categories: Sequence[Any] | None = None,
-) -> tuple[str, ...]:
-    """Name each state, by the label most common among its cells or by its number.
+) -> list[str]:
+    """Return the text of the label that most of each state's cells hold, or empty text.
 
-    With labels, a state takes the text of the label that most of its cells
-    hold, a tie going to the earlier label in ``label_categories``; a state
-    none of whose cells holds a label, or whose most common label is empty
-    text, takes its number. Names that several
-    states take gain the suffixes ``_1``, ``_2`` in the states' order, as
-    CellRank 2.4.0 names macrostates after reference clusters, and a suffix
-    is skipped where it would repeat another state's name. Without labels,
-    states are named ``1`` to ``n_states``. ``label_codes`` holds each
-    cell's position in ``label_categories``, or -1 for no label.
+    A tie goes to the earlier label in ``label_categories``. A state none of
+    whose cells holds a label takes empty text, and without labels so does
+    every state. ``label_codes`` holds each cell's position in
+    ``label_categories``, or -1 for no label.
     """
     if label_codes is None:
-        return tuple(str(state + 1) for state in range(n_states))
+        return [""] * n_states
     assert label_categories is not None
-    base: list[str] = []
+    labels: list[str] = []
     for state in range(n_states):
         codes = label_codes[(cells == state) & (label_codes >= 0)]
-        name = ""
-        if codes.size:
-            counts = np.bincount(codes, minlength=len(label_categories))
-            name = str(label_categories[int(np.argmax(counts))])
-        # A label of empty text cannot name a state, which then takes its number.
-        base.append(name or str(state + 1))
+        labels.append(
+            str(
+                label_categories[
+                    int(np.argmax(np.bincount(codes, minlength=len(label_categories))))
+                ]
+            )
+            if codes.size
+            else ""
+        )
+    return labels
+
+
+def state_names(labels: Sequence[str]) -> tuple[str, ...]:
+    """Name each state by its label, or by its number where the label is empty text.
+
+    Names that several states take gain the suffixes ``_1``, ``_2`` in the
+    states' order, as CellRank 2.4.0 names macrostates after reference
+    clusters, and a suffix is skipped where it would repeat another state's
+    name.
+    """
+    base = [str(label) or str(state + 1) for state, label in enumerate(labels)]
     repeats = Counter(base)
     taken = {name for name, count in repeats.items() if count == 1}
     suffixes: Counter[str] = Counter()
@@ -565,7 +599,6 @@ def find_states(
     return FoundStates(
         memberships=memberships,
         cells=cells,
-        cell_counts=np.bincount(cells[cells >= 0], minlength=n_states),
         coarse_transitions=coarse,
         cell_share=cell_share,
         walk_share=walk_share,
@@ -593,9 +626,6 @@ def search_bytes(
       work array, and when it extracts the eigenvectors, its ``k + 1`` real
       Ritz vectors, their complex copy and the copy of ``k`` of them that
       it reorders when it finds one eigenvalue more;
-    - forming the basis: the eigenvectors beside the constant vector, the
-      stacked columns, and the QR factorization's copy of them, its two
-      work buffers and its factor;
     - the optimization: the basis, its contiguous tail, and the copy that
       the corner search projects with the outer product that it subtracts,
       beside Nelder-Mead's simplex of ``(n_states - 1)**2 + 1`` trials, the
@@ -604,8 +634,9 @@ def search_bytes(
       reordered copy, beside the float32 memberships and the names of up to
       ``name_width`` characters written for every cell.
 
-    A mebibyte more covers NumPy's buffers for reductions and the small
-    arrays of each step.
+    Forming the basis holds at least 104 bytes a cell less than the
+    eigen-solve, so it never decides. A mebibyte more covers NumPy's buffers
+    for reductions and the small arrays of each step.
     """
     n, m = int(n_cells), int(n_states)
     k = m + 1
@@ -615,8 +646,7 @@ def search_bytes(
     taking = 2 * int(graph_bytes) + (8 + 4 * index_bytes) * n
     walk = (8 + index_bytes) * int(n_entries) + 8 * (n + 1)
     solving = 8 * n * (ncv + 5) + 24 * ncv * (ncv + 2) + 24 * n * (k + 1) + 16 * n * k
-    forming = 16 * n * k + 8 * n + 40 * n * m
     optimizing = 32 * n * m + 8 * n + 24 * free * (free + 1)
     writing = 28 * n * m + 4 * n * int(name_width) + 2 * n
-    steps = max(solving, forming, optimizing, writing)
+    steps = max(solving, optimizing, writing)
     return int(graph_bytes) + 64 * n + max(taking, walk + steps) + _SMALL_ARRAY_BYTES

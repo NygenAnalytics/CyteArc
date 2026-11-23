@@ -19,5 +19,5 @@
   "platform": "macOS 26 arm64"
  },
  "license": "CellRank 2.4.0 is BSD-3-Clause and pyGPCCA 1.1.0 is LGPL-3.0-or-later; both were run to produce these values, and no code of pyGPCCA was read or copied.",
- "agreement": "At 2 to 5 states CyteArc's memberships agree with these within 1e-10; at 6 states Nelder-Mead takes another path, and they agree within 1e-3."
+ "agreement": "At 2 to 6 states CyteArc's memberships agree with these within 5.3e-11, its coarse transitions within 5.1e-14 and its shares of the walk's time within 1.8e-11, and each state takes CellRank's most likely cells."
 }

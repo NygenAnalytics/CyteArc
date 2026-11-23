@@ -278,6 +278,7 @@ class TrajectoryStatesArguments(OperationArguments):
         "terminalStates",
         "statesShortOfCells",
         "crispness",
+        "boundaryGap",
     )
     call: ClassVar[str | None] = "ds.trajectory.states"
 

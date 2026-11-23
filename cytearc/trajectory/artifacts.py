@@ -66,6 +66,7 @@ STATES_PAYLOAD = (
     "memberships",
     "valid",
     "state_names",
+    "state_labels",
     "roles",
     "coarse_transitions",
     "cell_share",
@@ -906,6 +907,44 @@ def fate_payload_is_valid(
     return True
 
 
+#: What checking and loading a stored state search holds whatever its cells:
+#: Zarr's and pandas' objects, and the record and the small arrays.
+_STATES_LOAD_FIXED_BYTES = 2**20
+
+
+def stored_states_bytes(group: Any, *, n_cells: int, n_states: int) -> int:
+    """Return the most bytes that checking and loading the stored state search in ``group`` holds.
+
+    The check of :func:`states_payload_is_valid` holds which cells are
+    valid and which labeled, and reads the stored arrays a chunk of rows at
+    a time: the float32 memberships and their float64 copy, the searched
+    cells' memberships, their sums and comparisons, and the labels as text
+    and as Python objects, up to ``33 * n_states + 12 * width + 152`` bytes
+    a row, the labels' text ``width`` characters wide. Loading then holds
+    the labels' text beside the codes that :func:`listed_labels` makes of
+    them, or the float32 memberships and their read-only copy, beside 6
+    bytes a cell for the codes, the valid cells and their copy. The width
+    and the rows of a chunk are read from the stored arrays' metadata.
+    """
+    n, m = int(n_cells), int(n_states)
+    stored_memberships = group.get("memberships")
+    rows = (
+        min(n, row_band(array_geometry(stored_memberships), unit="chunk", fallback=1))
+        if isinstance(stored_memberships, zarr.Array)
+        else n
+    )
+    stored_labels = group.get("values")
+    width = (
+        max(1, np.dtype(stored_labels.dtype).itemsize // 4)
+        if isinstance(stored_labels, zarr.Array)
+        and np.dtype(stored_labels.dtype).kind == "U"
+        else 1
+    )
+    checking = 2 * n + rows * (33 * m + 12 * width + 152)
+    loading = max(4 * width * n, 8 * n * m) + 6 * n
+    return max(checking, loading) + _STATES_LOAD_FIXED_BYTES
+
+
 def states_payload_is_valid(
     group: Any,
     *,
@@ -945,23 +984,30 @@ def states_payload_is_valid(
     # The fingerprint's check found exactly the payload's arrays.
     labels = as_zarr_array(group["values"], name="values")
     names_array = as_zarr_array(group["state_names"], name="state_names")
+    labels_array = as_zarr_array(group["state_labels"], name="state_labels")
     roles_array = as_zarr_array(group["roles"], name="roles")
     if (
         tuple(labels.shape) != (n_cells,)
         or dict(labels.attrs) != {"missing_mask": STATES_LABELS_MISSING}
-        or tuple(names_array.shape) != (n_states,)
-        or tuple(roles_array.shape) != (n_states,)
+        or any(
+            tuple(array.shape) != (n_states,)
+            for array in (names_array, labels_array, roles_array)
+        )
         or any(
             np.dtype(array.dtype).kind != "U"
-            for array in (labels, names_array, roles_array)
+            for array in (labels, names_array, labels_array, roles_array)
         )
     ):
         return False
+    from .states import state_names
+
     names = [str(name) for name in np.asarray(names_array[:])]
     roles = [str(role) for role in np.asarray(roles_array[:])]
     if (
-        len(set(names)) != n_states
-        or "" in names
+        # Each state's name is its label, or its number, with a suffix that
+        # tells apart the states that share one.
+        tuple(names)
+        != state_names([str(label) for label in np.asarray(labels_array[:])])
         or roles[0] != "initial"
         or any(role not in ("intermediate", "terminal") for role in roles[1:])
     ):

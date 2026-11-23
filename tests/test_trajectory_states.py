@@ -12,6 +12,7 @@ labels give a fate map its sinks.
 
 import json
 import tracemalloc
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +30,7 @@ from cytearc.storage.diagnostics import DiagnosticWarning
 from cytearc.trajectory import TrajectoryStatesResult
 from cytearc.trajectory.fate import _make_transition, _normalize_pseudotime
 from cytearc.trajectory.states import (
+    boundary_gap,
     coarse_grain,
     feasible_rotation,
     find_states,
@@ -39,6 +41,7 @@ from cytearc.trajectory.states import (
     search_bytes,
     splits_conjugate_pair,
     state_cells,
+    state_labels,
     state_names,
 )
 from cytearc.utils.memory_budget import MemoryBudgetError
@@ -193,6 +196,29 @@ def test_three_blocks_in_a_row_put_the_start_first_and_the_end_last() -> None:
         assert set(cells // size) == {state}
 
 
+def test_states_of_unequal_size_are_ordered_by_their_mean_direction() -> None:
+    # Blocks of 40, 30 and 10 cells in a row, scored 0, 0.5 and 1. Their
+    # states' mean scores are the blocks' own, while the totals of the scores,
+    # 0, 15 and 10, would put the smallest block before the middle one.
+    sizes = [40, 30, 10]
+    weights = _blocks(sizes, 1.0, [[0, 0.02, 0], [0.02, 0, 0.02], [0, 0.02, 0]])
+    direction = np.repeat([0.0, 0.5, 1.0], sizes)
+
+    found = find_states(sparse.csr_matrix(weights), direction, 3, cells_per_state=10)
+
+    np.testing.assert_allclose(found.direction, [0.0, 0.5, 1.0], atol=0.02)
+    np.testing.assert_allclose(found.cell_share, np.divide(sizes, 80), atol=0.02)
+
+
+def test_the_boundary_gap_is_the_gap_over_the_distance_from_one() -> None:
+    values = np.array([1.0, 0.9, 0.9, 0.5])
+
+    # The second and third eigenvalues tie; the third and fourth lie apart by
+    # 0.4, eight tenths of the fourth's distance from one.
+    assert boundary_gap(values, 2) == 0.0
+    assert boundary_gap(values, 3) == pytest.approx(0.8)
+
+
 @pytest.mark.parametrize("seed", [0, 1, 2])
 def test_the_basis_spans_the_leading_subspace_of_the_dense_real_schur_form(
     seed: int,
@@ -301,16 +327,15 @@ def test_states_take_the_label_most_of_their_cells_hold() -> None:
     codes = np.array([0, 0, 1, 1, 1, 0, 1, 2, -1])
     # State 0 holds two "a" and one "b"; state 1 two "b"; state 2 ties "a"
     # and "b", the earlier label winning; state 3's cell has no label.
-    assert state_names(cells, 4, codes, ["a", "b", "c"]) == ("a_1", "b", "a_2", "4")
-    assert state_names(cells, 4) == ("1", "2", "3", "4")
+    labels = state_labels(cells, 4, codes, ["a", "b", "c"])
+    assert labels == ["a", "b", "a", ""]
+    assert state_names(labels) == ("a_1", "b", "a_2", "4")
+    assert state_labels(cells, 4) == ["", "", "", ""]
+    assert state_names(["", "", "", ""]) == ("1", "2", "3", "4")
     # A suffix that another state's name already takes is skipped.
-    assert state_names(np.array([0, 1, 2]), 3, np.array([0, 0, 1]), ["x", "x_1"]) == (
-        "x_2",
-        "x_3",
-        "x_1",
-    )
-    # A label of empty text names no state.
-    assert state_names(np.array([0, 1]), 2, np.array([0, 1]), ["", "b"]) == ("1", "b")
+    assert state_names(["x", "x", "x_1"]) == ("x_2", "x_3", "x_1")
+    # A label that is a number takes the suffixes of a state named by its own.
+    assert state_names(["2", ""]) == ("2_1", "2_2")
 
 
 def test_a_number_of_states_that_splits_a_complex_pair_is_refused_naming_its_neighbours() -> (
@@ -343,15 +368,28 @@ def test_eigenvectors_that_span_no_invariant_subspace_are_refused() -> None:
     values, vectors = leading_eigenvectors(walk, 4)
     noise = np.random.default_rng(5).normal(size=vectors.shape)
 
-    with pytest.raises(RuntimeError, match="span no invariant subspace"):
+    with pytest.raises(
+        RuntimeError,
+        match=r"span no invariant subspace.*ask for another n_states, or pass a "
+        r"lower beta, which directs the walk less strongly$",
+    ):
         invariant_basis(walk, values, vectors + 0.1 * noise, 3)
 
 
-def test_a_walk_of_two_parts_that_never_meet_is_refused() -> None:
+@pytest.mark.parametrize("weight", [0.0, 1e-9])
+def test_parts_joined_too_weakly_for_the_walk_to_cross_are_refused(weight) -> None:
+    # Two cliques that no edge joins, or one edge of weight 1e-9, which leaves
+    # the walk's second eigenvalue within rounding of one.
     weights = _blocks([40, 40], 1.0, [[0, 0], [0, 0]])
+    weights[39, 40] = weights[40, 39] = weight
     direction = np.r_[np.zeros(40), np.ones(40)]
 
-    with pytest.raises(RuntimeError, match="never meet"):
+    with pytest.raises(
+        RuntimeError,
+        match=r"rounds to one: the graph joins parts of its cells too weakly for "
+        r"the walk to cross between them.*search each part on a graph of its own "
+        r"cells$",
+    ):
         find_states(sparse.csr_matrix(weights), direction, 2, cells_per_state=10)
 
 
@@ -464,30 +502,29 @@ def test_memberships_and_coarse_walk_match_cellrank(n_states: int) -> None:
 
     expected = reference[f"memberships_{n_states}"]
     rows, columns = _matched(found.memberships, expected)
-    # Below six states both tools take one path; at six, Nelder-Mead parts.
-    tolerance = 1e-10 if n_states < 6 else 1e-3
+    # Nelder-Mead takes CellRank's path from the same start, so the results
+    # agree to rounding.
     np.testing.assert_allclose(
-        found.memberships[:, rows], expected[:, columns], atol=tolerance
+        found.memberships[:, rows], expected[:, columns], atol=1e-10
     )
     np.testing.assert_allclose(
         found.coarse_transitions[np.ix_(rows, rows)],
         reference[f"coarse_transitions_{n_states}"][np.ix_(columns, columns)],
-        atol=tolerance * 1e-2,
+        atol=1e-12,
     )
     np.testing.assert_allclose(
         found.walk_share[rows],
         reference[f"coarse_stationary_{n_states}"][columns],
-        atol=tolerance,
+        atol=1e-10,
     )
-    assert found.crispness == pytest.approx(_crispness(expected), abs=1e-3)
-    if n_states < 6:
-        # CellRank's most likely cells of each state are the same cells.
-        cellrank_cells = reference[f"macrostates_{n_states}"]
-        for row, column in zip(rows, columns, strict=True):
-            np.testing.assert_array_equal(
-                np.flatnonzero(found.cells == row),
-                np.flatnonzero(cellrank_cells == column),
-            )
+    assert found.crispness == pytest.approx(_crispness(expected), abs=1e-10)
+    # CellRank's most likely cells of each state are the same cells.
+    cellrank_cells = reference[f"macrostates_{n_states}"]
+    for row, column in zip(rows, columns, strict=True):
+        np.testing.assert_array_equal(
+            np.flatnonzero(found.cells == row),
+            np.flatnonzero(cellrank_cells == column),
+        )
 
 
 def test_five_states_of_the_saved_process_find_its_start_and_its_three_ends() -> None:
@@ -497,7 +534,7 @@ def test_five_states_of_the_saved_process_find_its_start_and_its_three_ends() ->
     found = find_states(_reference_graph(reference), reference["direction"], 5)
 
     codes, categories = pd.factorize(labels)
-    names = state_names(found.cells, 5, codes, list(categories))
+    names = state_names(state_labels(found.cells, 5, codes, list(categories)))
     roles = dict(zip(names, found.roles, strict=True))
     assert roles == {
         "start": "initial",
@@ -570,7 +607,7 @@ def test_the_search_names_the_known_start_and_ends_and_leaves_out_the_island() -
     found = trajectory.store.trajectory.load_states(ref)
 
     assert isinstance(found, TrajectoryStatesResult)
-    assert found.initial == ("start",)
+    assert found.initial == "start"
     assert sorted(found.terminal) == ["end0", "end1", "end2"]
     assert found.table.loc["pocket", "role"] == "intermediate"
     assert list(found.table.index) == list(found.names)
@@ -585,6 +622,8 @@ def test_the_search_names_the_known_start_and_ends_and_leaves_out_the_island() -
         assert cells.sum() == found.table.loc[name, "cells"] == 30
         assert np.mean(labels[cells] == name) > 0.5
     table = found.table
+    # No two states share a label, so each state's name is its label.
+    assert table["label"].tolist() == list(found.names)
     np.testing.assert_allclose(
         table["enrichment"], table["walk_share"] / table["cell_share"]
     )
@@ -599,7 +638,8 @@ def test_the_states_give_fate_its_sinks_as_the_same_labels_would() -> None:
     with pytest.warns(DiagnosticWarning):
         ref = _states(trajectory, direction, labels=trajectory.labels(labels))
     found = trajectory.store.trajectory.load_states(ref)
-    sinks = list(found.terminal)
+    # The terminal states' names are a list, as fate takes its sinks.
+    sinks = found.terminal
     same_labels = trajectory.labels(
         np.where(found.labels.isna(), "", found.labels.astype(object)).astype(str)
     )
@@ -704,10 +744,128 @@ def test_a_walk_that_collects_in_its_initial_state_warns_that_it_found_no_termin
     found = trajectory.store.trajectory.load_states(ref)
 
     assert list(found.table["role"]) == ["initial", "intermediate"]
-    assert found.terminal == ()
+    assert found.terminal == []
     assert found.table["enrichment"].iloc[0] > 1.0 > found.table["enrichment"].iloc[1]
     with pytest.warns(DiagnosticWarning, match="no terminal state"):
         assert _states(trajectory, direction, n_states=2, beta=0.0) == ref
+
+
+def _blocks_and_junction() -> tuple[np.ndarray, np.ndarray]:
+    """Three cliques of 25 cells joined through a clique of 25, and a score for each cell.
+
+    Three states take their 30 most likely cells among 100, and the
+    junction's cells, which every state shares, go to one state each, so a
+    state ends with fewer than 30.
+    """
+    weights = _blocks(
+        [25, 25, 25, 25],
+        1.0,
+        [
+            [0, 0, 0, 0.05],
+            [0, 0, 0, 0.05],
+            [0, 0, 0, 0.05],
+            [0.05, 0.05, 0.05, 0],
+        ],
+    )
+    direction = np.r_[
+        np.full(25, 1.0), np.full(25, 1.1), np.full(25, 1.2), np.zeros(25)
+    ]
+    return weights, direction + np.linspace(0.0, 0.01, 100)
+
+
+def test_a_state_short_of_cells_is_named_in_a_warning() -> None:
+    weights, scores = _blocks_and_junction()
+    trajectory = _trajectory_store(weights)
+    direction = pd.Series(scores, index=trajectory.cell_ids)
+
+    # Every cell holds one label, which names the three states with suffixes.
+    with pytest.warns(
+        DiagnosticWarning,
+        match="^1 state holds fewer than cells_per_state cells, because a cell",
+    ):
+        ref = _states(
+            trajectory,
+            direction,
+            n_states=3,
+            beta=0.0,
+            labels=trajectory.labels(np.full(100, "same")),
+        )
+
+    found = trajectory.store.trajectory.load_states(ref)
+    assert found.names == ("same_1", "same_2", "same_3")
+    assert found.table["label"].tolist() == ["same"] * 3
+    counts = found.table["cells"].to_numpy()
+    assert sorted(counts.tolist()) == [27, 30, 30]
+    np.testing.assert_array_equal(
+        counts, [np.count_nonzero(found.labels == name) for name in found.names]
+    )
+    diagnostics = trajectory.store.artifacts.inspect(ref).diagnostics
+    assert diagnostics["statesShortOfCells"] == 1
+
+
+def test_a_search_covers_the_scored_cells_beside_a_larger_unscored_component() -> None:
+    # The 100 scored cells of the blocks lie beside a path of 150 cells that
+    # the score leaves out: the search covers the scored component, though
+    # the path is the graph's largest.
+    weights, scores = _blocks_and_junction()
+    path = np.diag(np.ones(149), 1)
+    adjacency = np.zeros((250, 250))
+    adjacency[:150, :150] = path + path.T
+    adjacency[150:, 150:] = weights
+    trajectory = _trajectory_store(adjacency)
+    direction = pd.Series(
+        np.r_[np.full(150, np.nan), scores], index=trajectory.cell_ids
+    )
+
+    with pytest.warns(DiagnosticWarning, match="left out 150 cells of the graph"):
+        ref = _states(trajectory, direction, n_states=3, beta=0.0)
+
+    found = trajectory.store.trajectory.load_states(ref)
+    np.testing.assert_array_equal(found.valid, np.arange(250) >= 150)
+    assert found.labels[:150].isna().all()
+
+
+def test_eigenvalues_that_tie_at_the_last_state_are_named_in_a_warning() -> None:
+    # A start and three identical ends, each a clique of 20 cells joined to
+    # the start alone: the walk's second and third eigenvalues tie.
+    cross = [[0, 0.001, 0.001, 0.001]] + [[0.001, 0, 0, 0]] * 3
+    weights = _blocks([20] * 4, 1.0, cross)
+    trajectory = _trajectory_store(weights)
+    direction = pd.Series(np.r_[np.zeros(20), np.ones(60)], index=trajectory.cell_ids)
+
+    # The second state is one mix of the three ends' directions among many, so
+    # its role means little: here it holds no more than its share of the walk.
+    with pytest.warns(DiagnosticWarning) as warned:
+        two = _states(trajectory, direction, n_states=2)
+    messages = sorted(str(warning.message) for warning in warned)
+    assert len(messages) == 2
+    assert messages[0].startswith("The state search found no terminal state")
+    assert messages[1].startswith(
+        "The walk's eigenvalue of the last state ties the next one"
+    )
+    assert trajectory.store.artifacts.inspect(two).diagnostics["boundaryGap"] < 1e-6
+    # Four states keep every eigenvalue of the tie.
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", DiagnosticWarning)
+        four = _states(trajectory, direction, n_states=4, cells_per_state=20)
+    assert trajectory.store.artifacts.inspect(four).diagnostics["boundaryGap"] > 0.1
+
+
+def test_loading_a_search_is_charged_to_the_memory_budget() -> None:
+    trajectory, direction, _labels = _process_store()
+    with pytest.warns(DiagnosticWarning):
+        ref = _states(trajectory, direction)
+    _set_budget(trajectory.store, 1)
+
+    with pytest.raises(MemoryBudgetError, match="Loading the states of") as refused:
+        trajectory.store.trajectory.load_states(ref)
+
+    assert refused.value.item == "checking and reading the state search"
+    _set_budget(trajectory.store, refused.value.needed_bytes)
+    found = trajectory.store.trajectory.load_states(ref)
+    # Each cell's state is a code, and the memberships stay as stored.
+    assert found.labels.codes.dtype == np.int8
+    assert found.memberships.dtype == np.float32
 
 
 #: A path of 1,500 cells has few edges, so 16 states need more than its graph:
@@ -890,6 +1048,12 @@ def _tampered(name: str) -> Any:
             names = np.asarray(group["state_names"][:])
             names[1] = names[0]
             group["state_names"][:] = names
+        elif name == "label":
+            # A state's label that its stored name no longer follows from.
+            labels = np.asarray(group["state_labels"][:]).astype("U40")
+            labels[0] = "renamed"
+            del group["state_labels"]
+            group.create_array("state_labels", data=labels)
         elif name == "roles":
             roles = np.asarray(group["roles"][:]).astype("U12")
             roles[0] = "terminal"
@@ -939,6 +1103,7 @@ _LABELS_MISSING = "__cytearc_missing__values"
         "dtype",
         "link",
         "names",
+        "label",
         "roles",
         "none valid",
         "not finite",
@@ -1046,15 +1211,6 @@ def test_the_search_reports_its_products_and_evaluations_while_it_runs(
         and message.endswith("solving the memberships of 3 states of 480 cells")
         for message in evaluations
     )
-
-
-def test_a_matrix_whose_rows_do_not_sum_to_one_is_refused() -> None:
-    weights = _blocks([20, 20], 1.0, [[0, 0.01], [0.01, 0]])
-    walk = _row_normalized(weights) * 0.9
-    values, vectors = leading_eigenvectors(walk, 3)
-
-    with pytest.raises(RuntimeError, match="rows do not sum to one"):
-        invariant_basis(walk, values, vectors, 2)
 
 
 def test_a_basis_whose_rows_span_fewer_states_is_refused() -> None:
