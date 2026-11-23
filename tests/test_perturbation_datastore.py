@@ -445,7 +445,9 @@ def _merged_screen(
     it also names each cell's sample in the categorical cell column
     ``dataset``, with the role that a merge gives that column when its
     sources measured different features. The cell columns ``every``,
-    ``first`` and ``second`` select the cells of both samples and of each.
+    ``first`` and ``second`` select the cells of both samples and of each,
+    and ``boundary`` the last cell of the first sample and the first of the
+    second.
     """
     codes = (np.arange(8) >= 4).astype(np.int64)
     ids = np.asarray(
@@ -461,6 +463,7 @@ def _merged_screen(
         ("every", np.ones(8, dtype=bool)),
         ("first", codes == 0),
         ("second", codes == 1),
+        ("boundary", np.isin(np.arange(8), [3, 4])),
     ):
         merged.cells.insert(name, by_cell_id(merged.cells, keep))
     return merged
@@ -494,6 +497,7 @@ def test_an_import_tells_apart_samples_whose_names_differ_by_a_trailing_undersco
 ) -> None:
     merged = _merged_screen(store, ("pool", "pool_"), sources=sources)
     every = merged.snapshot_cell_selection("every")
+    boundary = merged.snapshot_cell_selection("boundary")
     path = _call_file(tmp_path)
     saved = written(merged)
 
@@ -507,6 +511,9 @@ def test_an_import_tells_apart_samples_whose_names_differ_by_a_trailing_undersco
         else _unclear_ids("pool___cell4", "pool"),
     ):
         merged.perturbation.import_guide_calls(path, cell_selection=every)
+    # The samples are those of the selected cells, here one of each.
+    with pytest.raises(ValueError, match="several samples|do not tell their"):
+        merged.perturbation.import_guide_calls(path, cell_selection=boundary)
     # With pool's prefix, the cells of pool_ go on from it with "_", and are
     # refused rather than labeled Negative.
     with pytest.raises(

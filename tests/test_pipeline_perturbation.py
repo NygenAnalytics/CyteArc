@@ -1677,8 +1677,17 @@ def test_the_call_file_check_reads_the_samples_of_the_runs_cells(
         ),
     ):
         _check_call_file_cells(store, CellSource(column="I", selection=None), None)
-    # The cells of lane L1 are of one sample by the column, whatever their IDs.
-    _check_call_file_cells(store, CellSource(column="lane1", selection=None), None)
+    # The cells of lane L1 are of one sample by the column, whatever their IDs,
+    # and the check lets go of their samples: its ledger holds their IDs alone,
+    # as it does once the column no longer names the sources.
+    _ids, ledger = _check_call_file_cells(
+        store, CellSource(column="lane1", selection=None), None
+    )
+    cells["dataset"].attrs.update({"role": None})
+    _ids, without = _check_call_file_cells(
+        _open(location), CellSource(column="lane1", selection=None), None
+    )
+    assert ledger.held_bytes == without.held_bytes > 0
 
 
 def test_a_call_file_that_cannot_label_the_runs_cells_is_refused(
