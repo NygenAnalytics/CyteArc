@@ -1508,7 +1508,7 @@ def test_pipeline_hvg_settings_cover_the_flavors(banded) -> None:
     defaults = {
         name: parameter.default
         for name, parameter in parameters.items()
-        if name not in {"self", "callback", "cancel"}
+        if name not in {"self", "run_until", "callback", "cancel"}
     }
     for settings in (
         {"flavor": "pearson_residuals", "batch": "batch", "theta": 50, "clip": 3.0},

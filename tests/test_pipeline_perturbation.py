@@ -315,7 +315,7 @@ def _recipe_defaults(recipe: str) -> dict[str, Any]:
             getattr(PipelineAccessor, recipe)
         ).parameters.items()
         if parameter.kind is inspect.Parameter.KEYWORD_ONLY
-        and name not in {"callback", "cancel", "labels"}
+        and name not in {"run_until", "callback", "cancel", "labels"}
     }
 
 
@@ -995,6 +995,23 @@ def test_an_identical_second_call_creates_no_artifacts(runs, tmp_path) -> None:
     assert [stage["summary"] for stage in again.report()["stages"]] == [
         stage["summary"] for stage in runs.full.report()["stages"]
     ]
+
+
+def test_a_paused_screen_resumes_to_the_run_that_a_single_call_commits(
+    runs, tmp_path
+) -> None:
+    store = _copy(runs.location, tmp_path)
+
+    paused = store.pipeline.perturbation(labels=LABELS, run_until="pca", **FULL)
+    stages = list(_stages(paused))
+    resumed = store.pipeline.resume(paused.run_id)
+
+    assert paused.status == "paused" and stages[-1] == "pca"
+    assert (resumed.run_id, resumed.status) == (paused.run_id, "completed")
+    # The resume rebuilt the recipe that the call ran from the run's record.
+    assert resumed.settings() == runs.full.settings()
+    assert dict(resumed) == dict(runs.full)
+    assert list(_stages(resumed)) == STAGES
 
 
 def test_the_recipe_reuses_the_artifacts_of_standalone_calls(screen, tmp_path) -> None:

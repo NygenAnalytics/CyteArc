@@ -84,7 +84,7 @@ def _minimal_plan(datastore: DataStore, **changes: Any) -> RecipePlan:
     defaults = {
         name: parameter.default
         for name, parameter in parameters.items()
-        if name not in {"self", "callback", "cancel"}
+        if name not in {"self", "run_until", "callback", "cancel"}
     }
     return resolve_rna(datastore, **{**defaults, **_minimal_run_options(), **changes})
 
@@ -513,6 +513,7 @@ def test_pipeline_accessor_has_four_keyword_only_recipes() -> None:
             "markers",
             "snapshot_columns",
             "species",
+            "run_until",
             "callback",
             "cancel",
         ),
@@ -539,6 +540,7 @@ def test_pipeline_accessor_has_four_keyword_only_recipes() -> None:
             "markers",
             "snapshot_columns",
             "species",
+            "run_until",
             "callback",
             "cancel",
         ),
@@ -565,6 +567,7 @@ def test_pipeline_accessor_has_four_keyword_only_recipes() -> None:
             "markers",
             "snapshot_columns",
             "species",
+            "run_until",
             "callback",
             "cancel",
         ),
@@ -583,6 +586,7 @@ def test_pipeline_accessor_has_four_keyword_only_recipes() -> None:
             "membership_strength",
             "markers",
             "snapshot_columns",
+            "run_until",
             "callback",
             "cancel",
         ),

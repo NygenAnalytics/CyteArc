@@ -85,7 +85,7 @@ def _recipe_defaults(recipe: str) -> dict[str, Any]:
     cancellation token belong to the run, not to its resolution.
     """
     keywords = _keywords(getattr(PipelineAccessor, recipe))
-    for name in ("self", "callback", "cancel"):
+    for name in ("self", "run_until", "callback", "cancel"):
         keywords.pop(name)
     return keywords
 

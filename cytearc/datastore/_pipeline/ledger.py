@@ -224,7 +224,8 @@ class RunLedger:
     warnings are collected, its progress bars become progress events, and the
     Zarr reads and writes made in its context decode and encode on a pool of
     exactly ``workers`` threads, so a stage of a one-worker store decodes on
-    one thread whatever the machine.
+    one thread whatever the machine. A ledger that resumes a paused run
+    starts at ``ordinal``, the first stage that the run has left to run.
     """
 
     __slots__ = (
@@ -247,6 +248,7 @@ class RunLedger:
         *,
         workers: int,
         memory_budget_bytes: int,
+        ordinal: int = 0,
     ) -> None:
         for name, value in (
             ("workers", workers),
@@ -254,9 +256,11 @@ class RunLedger:
         ):
             if isinstance(value, bool) or not isinstance(value, int) or value < 1:
                 raise ValueError(f"{name} must be a positive integer, not {value!r}")
+        if isinstance(ordinal, bool) or not isinstance(ordinal, int) or ordinal < 0:
+            raise ValueError(f"ordinal must be a non-negative integer, not {ordinal!r}")
         self.root = root
         self.run_id = run_id
-        self.ordinal = 0
+        self.ordinal = ordinal
         self.events = events
         self.summarize = summarize
         self.workers = workers

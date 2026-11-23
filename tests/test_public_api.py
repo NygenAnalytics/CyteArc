@@ -872,8 +872,9 @@ def test_pipeline_accessor_has_a_public_import_path():
     }
     # One recipe per modality replaced the single run method, with no alias,
     # a plan reports what a recipe call would do without running it, a
-    # description gives each recipe's stage settings and defaults, and a rerun
-    # runs a run's recipe again with some of its settings changed.
+    # description gives each recipe's stage settings and defaults, a rerun
+    # runs a run's recipe again with some of its settings changed, and a
+    # resume runs the rest of a paused run under its run ID.
     assert public_methods == {
         "open",
         "list_runs",
@@ -881,6 +882,7 @@ def test_pipeline_accessor_has_a_public_import_path():
         "plan",
         "describe",
         "rerun",
+        "resume",
         "rna",
         "atac",
         "adt",

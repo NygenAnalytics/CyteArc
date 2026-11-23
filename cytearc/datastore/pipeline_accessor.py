@@ -24,7 +24,7 @@ from ._pipeline.events import (
     PipelineProgress as PipelineProgress,
     pipeline_listener as pipeline_listener,
 )
-from ._pipeline.executor import RecipePlan, execute_recipe
+from ._pipeline.executor import RecipePlan, check_resumable_record, execute_recipe
 from ._pipeline.normalizers import add_applied_feat_scaling, recorded_normalizer
 from ._pipeline.planning import (
     PipelinePlan as PipelinePlan,
@@ -82,7 +82,7 @@ _RECORDED_CALLS: dict[str, RecordedCall] = {
     "perturbation": recorded_perturbation_call,
 }
 # The keywords of a recipe that belong to its run, which a plan does not start.
-_RUN_KEYWORDS = ("callback", "cancel")
+_RUN_KEYWORDS = ("run_until", "callback", "cancel")
 # The keywords of a recipe that a run does not record as settings: its label,
 # unique in the store, and the keywords of the run itself.
 _UNRECORDED_KEYWORDS = ("self", "label", *_RUN_KEYWORDS)
@@ -280,13 +280,14 @@ class PipelineAccessor:
             *args: The positional arguments of the recipe's method: the
                 ``runs`` of ``"multimodal"``. A plan of a run takes none.
             **settings: The keywords of the recipe's method, as a call would
-                pass them, without ``callback`` and ``cancel``.
+                pass them, without ``run_until``, ``callback``, and ``cancel``.
 
         Raises:
             ValueError: If ``recipe`` names no recipe, or the call fails the
                 recipe's checks.
-            TypeError: If the call passes ``callback`` or ``cancel``, a
-                keyword that the recipe lacks, or fails the recipe's checks.
+            TypeError: If the call passes ``run_until``, ``callback``, or
+                ``cancel``, a keyword that the recipe lacks, or fails the
+                recipe's checks.
             KeyError: If the call names a missing column.
             UnmeasuredCellsError: If an assay did not measure one of the cells.
 
@@ -406,6 +407,7 @@ class PipelineAccessor:
         markers: bool = True,
         snapshot_columns: Sequence[str] = (),
         species: str | None = None,
+        run_until: str | None = None,
         callback: PipelineCallback | None = None,
         cancel: CancellationToken | None = None,
     ) -> PipelineRun:
@@ -506,6 +508,12 @@ class PipelineAccessor:
             markers: Rank markers for each saved cluster.
             snapshot_columns: Cell columns to freeze into the run's cell view.
             species: A species key recorded with the run.
+            run_until: The stage after which the run pauses, such as
+                ``"pca"``: the call returns the run with status ``"paused"``
+                once that stage has completed, and :meth:`resume` runs the
+                rest under the same run ID, on any machine that opens the
+                store. It must be a stage that the call runs. A run whose only
+                stages after it are skipped completes instead.
             callback: Called with each :class:`PipelineEvent` of the run.
             cancel: A :class:`~cytearc.CancellationToken` that stops the run.
 
@@ -516,7 +524,9 @@ class PipelineAccessor:
             KeyError: If the call names a missing column; nothing is written.
             UnmeasuredCellsError: If the assay did not measure one of
                 ``cells``; nothing is written.
-            PipelineExecutionError: If a stage fails; the run is recorded failed.
+            PipelineExecutionError: If a stage fails, or the run cannot pause
+                because another run committed its label; the run is recorded
+                failed.
             PipelineCancelled: If ``cancel`` is cancelled; the run is recorded
                 interrupted.
 
@@ -555,7 +565,9 @@ class PipelineAccessor:
             snapshot_columns=snapshot_columns,
             species=species,
         )
-        return execute_recipe(self._store, plan, callback=callback, cancel=cancel)
+        return execute_recipe(
+            self._store, plan, run_until=run_until, callback=callback, cancel=cancel
+        )
 
     @validation_scoped
     def atac(
@@ -582,6 +594,7 @@ class PipelineAccessor:
         markers: bool = True,
         snapshot_columns: Sequence[str] = (),
         species: str | None = None,
+        run_until: str | None = None,
         callback: PipelineCallback | None = None,
         cancel: CancellationToken | None = None,
     ) -> PipelineRun:
@@ -647,7 +660,9 @@ class PipelineAccessor:
             snapshot_columns=snapshot_columns,
             species=species,
         )
-        return execute_recipe(self._store, plan, callback=callback, cancel=cancel)
+        return execute_recipe(
+            self._store, plan, run_until=run_until, callback=callback, cancel=cancel
+        )
 
     @validation_scoped
     def adt(
@@ -674,6 +689,7 @@ class PipelineAccessor:
         markers: bool = True,
         snapshot_columns: Sequence[str] = (),
         species: str | None = None,
+        run_until: str | None = None,
         callback: PipelineCallback | None = None,
         cancel: CancellationToken | None = None,
     ) -> PipelineRun:
@@ -748,7 +764,9 @@ class PipelineAccessor:
             snapshot_columns=snapshot_columns,
             species=species,
         )
-        return execute_recipe(self._store, plan, callback=callback, cancel=cancel)
+        return execute_recipe(
+            self._store, plan, run_until=run_until, callback=callback, cancel=cancel
+        )
 
     @validation_scoped
     def multimodal(
@@ -767,6 +785,7 @@ class PipelineAccessor:
         membership_strength: bool = False,
         markers: bool = True,
         snapshot_columns: Sequence[str] = (),
+        run_until: str | None = None,
         callback: PipelineCallback | None = None,
         cancel: CancellationToken | None = None,
     ) -> PipelineRun:
@@ -834,7 +853,9 @@ class PipelineAccessor:
             markers=markers,
             snapshot_columns=snapshot_columns,
         )
-        return execute_recipe(self._store, plan, callback=callback, cancel=cancel)
+        return execute_recipe(
+            self._store, plan, run_until=run_until, callback=callback, cancel=cancel
+        )
 
     @validation_scoped
     def perturbation(
@@ -859,6 +880,7 @@ class PipelineAccessor:
         profiles: StageSettings = None,
         clusters: StageSwitch = False,
         snapshot_columns: Sequence[str] = (),
+        run_until: str | None = None,
         callback: PipelineCallback | None = None,
         cancel: CancellationToken | None = None,
     ) -> PipelineRun:
@@ -961,6 +983,8 @@ class PipelineAccessor:
             clusters: Clusters of the perturbations whose profiles agree, with
                 the keywords of ``perturbation.cluster``.
             snapshot_columns: Cell columns to freeze into the run's cell view.
+            run_until: The stage after which the run pauses, as for
+                :meth:`rna`.
             callback: Called with each :class:`PipelineEvent` of the run.
             cancel: A :class:`~cytearc.CancellationToken` that stops the run.
 
@@ -1007,7 +1031,9 @@ class PipelineAccessor:
             clusters=clusters,
             snapshot_columns=snapshot_columns,
         )
-        return execute_recipe(self._store, plan, callback=callback, cancel=cancel)
+        return execute_recipe(
+            self._store, plan, run_until=run_until, callback=callback, cancel=cancel
+        )
 
     def _rerun_call(
         self, run: object, overrides: Mapping[str, object]
@@ -1031,6 +1057,7 @@ class PipelineAccessor:
         /,
         *,
         label: str | None = None,
+        run_until: str | None = None,
         callback: PipelineCallback | None = None,
         cancel: CancellationToken | None = None,
         **overrides: object,
@@ -1062,6 +1089,8 @@ class PipelineAccessor:
         Args:
             run: A run of this datastore.
             label: An immutable label for the new run, unique in the store.
+            run_until: The stage after which the new run pauses, as for
+                :meth:`rna`.
             callback: Called with each :class:`PipelineEvent` of the run.
             cancel: A :class:`~cytearc.CancellationToken` that stops the run.
             **overrides: Keywords of the run's recipe, which change its
@@ -1087,4 +1116,101 @@ class PipelineAccessor:
         self._require_runnable(callback)
         recipe, keywords = self._rerun_call(run, overrides)
         method: Callable[..., PipelineRun] = getattr(self, recipe)
-        return method(**keywords, label=label, callback=callback, cancel=cancel)
+        return method(
+            **keywords,
+            label=label,
+            run_until=run_until,
+            callback=callback,
+            cancel=cancel,
+        )
+
+    @validation_scoped
+    def resume(
+        self,
+        run_id: str,
+        /,
+        *,
+        run_until: str | None = None,
+        callback: PipelineCallback | None = None,
+        cancel: CancellationToken | None = None,
+    ) -> PipelineRun:
+        """Run the rest of a paused run under the same run ID, on any machine that opens the store.
+
+        A recipe called with ``run_until`` pauses once that stage has
+        completed. ``resume`` rebuilds the recipe from the settings that the
+        run recorded, as :meth:`rerun` does, and restores what the finished
+        stages left from their saved artifacts, computing and writing nothing
+        for them. It then runs the next stages and completes the run, or
+        pauses it again after the stage that ``run_until`` names. The store
+        is all that a resume reads, so the process that resumes can run on a
+        larger machine, with the ``nthreads`` and memory budget of the store
+        that it opened. The run record's ``segments`` hold when each process
+        started and stopped, the stages that it ran, and why it stopped.
+
+        The run keeps its requested label without reserving it: the label is
+        checked when the run pauses and resumes, and claimed when the run
+        completes. A resume claims the pause with an atomic write, so of two
+        processes that resume one paused run, one runs it and the other
+        raises ``RuntimeError``.
+
+        Args:
+            run_id: The ID of a paused run of this datastore, such as
+                ``ds.pipeline.list_runs(status="paused")[0].run_id``.
+            run_until: The stage after which the run pauses again, one that
+                the run has not run yet. None runs it to the end.
+            callback: Called with each :class:`PipelineEvent` of the run.
+            cancel: A :class:`~cytearc.CancellationToken` that stops the run.
+
+        Returns:
+            The run, completed, or paused again after ``run_until``.
+
+        Raises:
+            PermissionError: If the store is read-only.
+            TypeError: If ``run_id`` is not text.
+            KeyError: If the store holds no run ``run_id``.
+            ValueError: If the run cannot resume, and nothing is written: it
+                is not paused, another release recorded it, its settings or
+                finished stages no longer match what it recorded, another run
+                committed its label, or ``run_until`` names no stage that it
+                has left to run.
+            RuntimeError: If the store lacks atomic conditional writes, an
+                unfinished run holds the claim of its label, or another
+                process resumed the run first.
+            PipelineExecutionError: If a stage fails, or the run cannot pause
+                again; the run is recorded failed.
+            PipelineCancelled: If ``cancel`` is cancelled; the run is recorded
+                interrupted.
+
+        Example:
+            >>> paused = ds.pipeline.rna(label="rna", run_until="pca")
+            >>> # Later, on a larger machine that opens the same store:
+            >>> run = ds.pipeline.resume(paused.run_id)
+            >>> run.status, run.report()["run"]["segments"][0]["stages"][-1]
+            ('completed', 'pca')
+        """
+        from .. import __version__
+
+        self._require_runnable(callback)
+        if not isinstance(run_id, str):
+            raise TypeError(f"run_id must be a run's ID, not {type(run_id).__name__}")
+        record = load_pipeline_run_record(self._store.zw, run_id)
+        check_resumable_record(record, __version__)
+        settings = recorded_settings(self._store, record)
+        bound = inspect.signature(getattr(PipelineAccessor, record.recipe)).bind(
+            self, label=record.requested_label, **settings
+        )
+        bound.apply_defaults()
+        arguments = {
+            name: value
+            for name, value in bound.arguments.items()
+            if name != "self" and name not in _RUN_KEYWORDS
+        }
+        plan = _RESOLVERS[record.recipe](self._store, **arguments)
+        return execute_recipe(
+            self._store,
+            plan,
+            run_until=run_until,
+            callback=callback,
+            cancel=cancel,
+            resumed=record,
+        )

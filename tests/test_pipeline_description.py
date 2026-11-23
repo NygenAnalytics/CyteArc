@@ -42,6 +42,7 @@ _NOT_STAGES = frozenset(
         "method",
         "snapshot_columns",
         "species",
+        "run_until",
         "callback",
         "cancel",
     }
