@@ -537,6 +537,7 @@ def test_pipeline_accessor_has_four_keyword_only_recipes() -> None:
             "leiden",
             "paris",
             "membership_strength",
+            "doublets",
             "markers",
             "snapshot_columns",
             "species",
