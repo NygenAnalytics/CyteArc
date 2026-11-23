@@ -85,6 +85,9 @@ _SEPARATION_TOLERANCE = 1e-12
 #: The smallest squared distance from the span of the corners found so far,
 #: in units of the last corner's length, at which a row is a new corner.
 _SPAN_TOLERANCE = 1e-24
+#: What a search holds whatever its cells and states: NumPy's buffers for
+#: reductions and the small arrays of each step, measured at under 0.2 MiB.
+_SMALL_ARRAY_BYTES = 2**20
 
 
 @dataclass(frozen=True, slots=True, eq=False)
@@ -585,27 +588,35 @@ def search_bytes(
     cells' places in the graph's index type. The search then holds the walk,
     a float64 copy of that graph, beside the largest of its steps:
 
-    - the eigen-solve: ARPACK's ``ncv`` Arnoldi vectors and its work vectors,
-      the real Ritz vectors and the complex eigenvectors that ``eigs``
-      returns;
-    - forming the basis: the eigenvectors beside the real basis, the QR
-      factorization's copy of it and its factor, then the basis, its product
-      with the walk and that product's check;
-    - the optimization: the basis, its contiguous tail, the copy that the
-      corner search projects and its temporary, or the product of a trial;
+    - the eigen-solve, for ``k = n_states + 1`` eigenvalues: ARPACK's start
+      vector, residual, ``ncv`` Arnoldi vectors, three work vectors and
+      work array, and when it extracts the eigenvectors, its ``k + 1`` real
+      Ritz vectors, their complex copy and the copy of ``k`` of them that
+      it reorders when it finds one eigenvalue more;
+    - forming the basis: the eigenvectors beside the constant vector, the
+      stacked columns, and the QR factorization's copy of them, its two
+      work buffers and its factor;
+    - the optimization: the basis, its contiguous tail, and the copy that
+      the corner search projects with the outer product that it subtracts,
+      beside Nelder-Mead's simplex of ``(n_states - 1)**2 + 1`` trials, the
+      copy that sorts it and the differences that its stopping test takes;
     - the results: the memberships, their product with the walk and their
       reordered copy, beside the float32 memberships and the names of up to
       ``name_width`` characters written for every cell.
+
+    A mebibyte more covers NumPy's buffers for reductions and the small
+    arrays of each step.
     """
     n, m = int(n_cells), int(n_states)
     k = m + 1
     ncv = min(n, max(2 * k + 1, 20))
+    free = (m - 1) ** 2
     index_bytes = _sparse_index_bytes(n, int(n_entries))
     taking = 2 * int(graph_bytes) + (8 + 4 * index_bytes) * n
     walk = (8 + index_bytes) * int(n_entries) + 8 * (n + 1)
-    solving = 8 * n * (ncv + 6) + 8 * n * (k + 1) + 16 * n * k
-    forming = 16 * n * k + 32 * n * m
-    optimizing = 32 * n * m
+    solving = 8 * n * (ncv + 5) + 24 * ncv * (ncv + 2) + 24 * n * (k + 1) + 16 * n * k
+    forming = 16 * n * k + 8 * n + 40 * n * m
+    optimizing = 32 * n * m + 8 * n + 24 * free * (free + 1)
     writing = 28 * n * m + 4 * n * int(name_width) + 2 * n
     steps = max(solving, forming, optimizing, writing)
-    return int(graph_bytes) + 64 * n + max(taking, walk + steps)
+    return int(graph_bytes) + 64 * n + max(taking, walk + steps) + _SMALL_ARRAY_BYTES

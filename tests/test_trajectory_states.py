@@ -11,6 +11,7 @@ labels give a fate map its sinks.
 """
 
 import json
+import tracemalloc
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,7 @@ import pytest
 from scipy import sparse
 from scipy.linalg import schur
 from scipy.optimize import linear_sum_assignment
+from scipy.spatial import cKDTree
 
 import cytearc.trajectory.states as states_module
 from cytearc.storage.artifacts import ArtifactRef, artifact_group, list_artifacts
@@ -1136,3 +1138,143 @@ def test_the_eigen_solve_dominates_the_charge_of_a_sparse_graph_with_few_states(
         graph_bytes + 12 * n_entries + 8 * n_cells * (ncv + k + 1) + 16 * n_cells * k
     )
     assert search_bytes(n_cells, graph_bytes, n_entries, n_states, 1) >= eigen_solve
+
+
+def _branching_graph(n_cells: int) -> tuple[sparse.csr_matrix, np.ndarray]:
+    """An 11-neighbor graph with float32 weights of cells along a trunk that parts in three, and each cell's progress."""
+    rng = np.random.default_rng(12)
+    progress = rng.random(n_cells)
+    angle = np.array([0.0, 0.8, -0.8])[rng.integers(0, 3, n_cells)]
+    late = np.clip(progress - 0.4, 0.0, None)
+    points = np.column_stack(
+        (np.minimum(progress, 0.4) + late * np.cos(angle), late * np.sin(angle))
+    ) + rng.normal(scale=0.01, size=(n_cells, 2))
+    distances, nearest = cKDTree(points).query(points, k=12)
+    weights = np.exp(-distances[:, 1:] / distances[:, 1:].mean()).astype(np.float32)
+    directed = sparse.csr_matrix(
+        (weights.ravel(), (np.repeat(np.arange(n_cells), 11), nearest[:, 1:].ravel())),
+        shape=(n_cells, n_cells),
+    )
+    return directed.maximum(directed.T).tocsr(), progress
+
+
+def _circulating_graph(n_blocks: int, block: int) -> sparse.csr_matrix:
+    """Blocks in a ring, each cell linked to 10 others of its block, to one cell ahead with weight 0.3 and one behind with 0.05."""
+    rng = np.random.default_rng(13)
+    n_cells = n_blocks * block
+    cells = np.arange(n_cells)
+    first = cells // block * block
+    picks = np.stack([rng.choice(block - 1, 10, replace=False) for _ in cells])
+    # Skip each cell itself among the others of its block.
+    picks += picks >= (cells - first)[:, np.newaxis]
+    ahead = (cells // block + 1) % n_blocks * block + rng.integers(0, block, n_cells)
+    behind = (cells // block - 1) % n_blocks * block + rng.integers(0, block, n_cells)
+    columns = np.column_stack((first[:, np.newaxis] + picks, ahead, behind))
+    weights = np.tile(np.r_[np.ones(10), 0.3, 0.05], (n_cells, 1)).astype(np.float32)
+    return sparse.csr_matrix(
+        (weights.ravel(), (np.repeat(cells, 12), columns.ravel())),
+        shape=(n_cells, n_cells),
+    )
+
+
+def _traced_search(
+    graph: sparse.csr_matrix, direction: np.ndarray, n_states: int, beta: float
+) -> tuple[int, int]:
+    """The most that a search holds, traced, and what its estimate charges beside the graph and the 64 bytes a cell around it."""
+    # The first search warms what a process allocates once, such as compiled
+    # kernels; the operation hands the search a graph that it may change.
+    find_states(graph.copy(), direction, n_states, beta=beta, _copy_graph=False)
+    searched = graph.copy()
+    tracemalloc.start()
+    try:
+        before, _ = tracemalloc.get_traced_memory()
+        find_states(searched, direction, n_states, beta=beta, _copy_graph=False)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    n_cells = graph.shape[0]
+    graph_bytes = graph.data.nbytes + graph.indices.nbytes + graph.indptr.nbytes
+    charged = search_bytes(n_cells, graph_bytes, graph.nnz, n_states, 1)
+    return peak - before, charged - graph_bytes - 64 * n_cells
+
+
+def test_a_search_on_a_branching_graph_holds_no_more_than_its_estimate() -> None:
+    graph, direction = _branching_graph(4_000)
+
+    held, charged = _traced_search(graph, direction, 3, 10.0)
+
+    assert held <= charged
+    # Beside its fixed mebibyte, the estimate stays close to what is held.
+    assert held >= 0.6 * (charged - states_module._SMALL_ARRAY_BYTES)
+
+
+def test_the_costliest_eigen_solve_grows_no_faster_than_its_estimate() -> None:
+    # Without a bias the walk circulates around six blocks, and the fourth
+    # eigenvalue begins a complex pair: asked for the four of three states,
+    # ARPACK returns five and reorders their eigenvectors.
+    traced = []
+    for block in (400, 1_200):
+        graph = _circulating_graph(6, block)
+        direction = np.arange(graph.shape[0], dtype=np.float64)
+        walk = _make_transition(
+            graph.copy(),
+            _normalize_pseudotime(direction),
+            np.zeros(graph.shape[0], dtype=bool),
+            0.0,
+        )
+        values, _ = leading_eigenvectors(walk, 5)
+        assert values[3].imag > 0.0
+        assert values[4] == pytest.approx(np.conj(values[3]))
+        traced.append(_traced_search(graph, direction, 3, 0.0))
+
+    for held, charged in traced:
+        assert held <= charged
+    # The growth from 2,400 to 7,200 cells leaves out the fixed mebibyte, so
+    # every per-cell term of the eigen-solve counts.
+    (small_held, small_charged), (large_held, large_charged) = traced
+    held_growth = (large_held - small_held) / 4_800
+    charged_growth = (large_charged - small_charged) / 4_800
+    assert 0.8 * charged_growth <= held_growth <= charged_growth
+
+
+def test_the_simplex_of_many_states_stays_within_the_estimate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scipy.optimize import fmin
+
+    # Sixteen blocks of 30 cells: a basis whose rows take one value a block.
+    n_states, n_cells = 16, 480
+    blocks = np.repeat(np.arange(n_states), 30)
+    columns = np.column_stack(
+        [np.ones(n_cells)] + [blocks == block for block in range(n_states - 1)]
+    ).astype(np.float64)
+    basis = np.linalg.qr(columns)[0] * np.sqrt(n_cells)
+    basis[:, 0] = 1.0
+    # Nelder-Mead holds its simplex of 226 trials, the copy that sorts it and
+    # its stopping test's differences from its first iteration on, so two
+    # iterations hold what a run of 45,000 trials holds.
+    monkeypatch.setattr(
+        states_module,
+        "fmin",
+        lambda objective, start, disp: fmin(objective, start, disp=disp, maxiter=2),
+    )
+    optimize_rotation(basis)
+    tracemalloc.start()
+    try:
+        before, _ = tracemalloc.get_traced_memory()
+        optimize_rotation(basis)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    held = peak - before + basis.nbytes
+
+    # The simplex outweighs the cells' arrays, so the optimization decides
+    # the estimate of a graph without entries beside its 64 bytes a cell.
+    simplex = 8 * 226 * 225
+    assert held > simplex + 2 * basis.nbytes
+    charged = (
+        search_bytes(n_cells, 0, 0, n_states, 1)
+        - 64 * n_cells
+        - states_module._SMALL_ARRAY_BYTES
+    )
+    assert 0.8 * charged <= held <= charged

@@ -2829,8 +2829,18 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
             graph,
             direction,
             held_bytes=0 if codes is None else codes.nbytes,
-            later_bytes=lambda cells, load: _search_bytes_impl(
-                cells, load.heldBytes, load.maxEntries, n_states, name_width
+            # The search, then what writing its names and memberships holds
+            # beside them.
+            later_bytes=lambda cells, load: (
+                _search_bytes_impl(
+                    cells, load.heldBytes, load.maxEntries, n_states, name_width
+                )
+                + cell_data_write_bytes(
+                    {
+                        "values": ((cells,), np.dtype(f"U{name_width}")),
+                        "memberships": ((cells, n_states), np.float32),
+                    }
+                )
             ),
             later_item="the state search",
             work="Finding states",
