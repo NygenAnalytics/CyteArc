@@ -267,8 +267,11 @@ def test_merged_case_distinct_ids_resolve_and_fetch_exactly():
         merged, resolved, np.arange(2), NormalizationSpec(source="raw")
     )
     # Each source's cell has no value of the other source's gene, which it did
-    # not measure.
-    np.testing.assert_array_equal(values, [[5, np.nan], [np.nan, 7]])
+    # not measure, and a merge of no seed lists the two cells in either order.
+    expected = {"left__left": [5, np.nan], "right__right": [np.nan, 7]}
+    np.testing.assert_array_equal(
+        values, [expected[cell] for cell in merged.cells.fetch_all("ids")]
+    )
     with pytest.raises(KeyError, match="not found"):
         resolve_feature(merged, FeatureRef("GENEA", by="id"))
     with pytest.raises(ValueError, match="matches 2 entries"):
@@ -7694,7 +7697,7 @@ def _sparse_band_write_assay_counts(
                     shape=(window.nRows, alignment.nFeats),
                 )
                 if data
-                else merge_writer.empty_block_coo(window.nRows, alignment.nFeats)
+                else coo_matrix((window.nRows, alignment.nFeats))
             )
 
     counter = accumulate_sparse_to_shards(
@@ -7818,6 +7821,9 @@ def sparse_band_references():
         ("float", (), "wide", True, "block"),
         ("float", (), "narrow", True, "8 rows"),
         ("missing", (), "narrow", True, "block"),
+        # Sparse batches of cells of the source without antibodies alone
+        # hold no coordinates.
+        ("missing", ("dense",), "narrow", False, "block"),
     ],
 )
 def test_merged_counts_match_the_sparse_band_write_byte_for_byte(
@@ -7932,8 +7938,9 @@ def test_merged_counts_match_the_sparse_band_write_byte_for_byte(
     assert (calls["scatter_block_dense"] > 0) == dense
     assert (calls["remap_block_to_coo"] > 0) == (not dense)
     # The RNA counts are written first; antibody bands hold every row. A
-    # batch takes about 37 / 66 of its cells from the larger source.
-    part_rows, rows = held_rows[0 if scenario == "missing" else -1]
+    # refused dense write searches its windows before the sparse write does.
+    # A batch takes about 37 / 66 of its cells from the larger source.
+    part_rows, rows = held_rows[("dense" in refused) if scenario == "missing" else -1]
     batch_rows = batches[0 if scenario == "missing" else -1]
     assert batch_rows < 8 if shard_rows == "narrow" else batch_rows >= 16
     assert part_rows == -(-batch_rows * 37 // 66)

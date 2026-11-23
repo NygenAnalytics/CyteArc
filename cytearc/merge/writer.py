@@ -102,10 +102,6 @@ def remap_block_to_coo(
     return canonicalize_sparse(mapped, destination_dtype)
 
 
-def empty_block_coo(n_rows: int, n_feats: int) -> coo_matrix:
-    return coo_matrix((n_rows, n_feats))
-
-
 # Column maps of fewer runs than this are copied run by run.
 _SCATTER_RUNS = 64
 
@@ -866,9 +862,10 @@ def write_assay_counts(
 
     def remapped_batches() -> Iterator[coo_matrix]:
         for window, pieces in batch_pieces(window_rows):
-            rows: list[np.ndarray] = []
-            columns: list[np.ndarray] = []
-            data: list[np.ndarray] = []
+            # A batch of cells of sources without the assay has no coordinates.
+            rows = [np.empty(0, dtype=np.int64)]
+            columns = [np.empty(0, dtype=np.int64)]
+            data = [np.empty(0, dtype=destination_dtype)]
             for source_idx, positions, values in pieces:
                 coordinates = remap_block_to_coo(
                     values,
@@ -885,16 +882,9 @@ def write_assay_counts(
                 del coordinates
             # Each source's coordinates are canonical and the sources fill
             # different rows; the shard buffer sorts the rows of the batch.
-            yield (
-                coo_matrix(
-                    (
-                        np.concatenate(data),
-                        (np.concatenate(rows), np.concatenate(columns)),
-                    ),
-                    shape=(window.nRows, alignment.nFeats),
-                )
-                if data
-                else empty_block_coo(window.nRows, alignment.nFeats)
+            yield coo_matrix(
+                (np.concatenate(data), (np.concatenate(rows), np.concatenate(columns))),
+                shape=(window.nRows, alignment.nFeats),
             )
             del rows, columns, data
 
