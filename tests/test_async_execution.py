@@ -1247,6 +1247,69 @@ def test_completed_io_releases_payloads_without_cyclic_collection():
             gc.enable()
 
 
+class _WriteFailed(OSError):
+    """A write's failure, to which a test can hold a weak reference."""
+
+
+@pytest.mark.parametrize("held", [False, True], ids=["error dropped", "error held"])
+@pytest.mark.parametrize("path", ["no running loop", "inside a running loop"])
+def test_a_failed_operation_frees_what_its_frames_held(path, held) -> None:
+    import gc
+    import time
+
+    buffers: list[weakref.ref] = []
+    errors: list[weakref.ref] = []
+    kept: list[BaseException] = []
+
+    async def operation(runner):
+        # The operation's frame holds this buffer when it fails.
+        buffer = np.ones(1_000_000, dtype=np.uint8)
+        buffers.append(weakref.ref(buffer))
+        raise _WriteFailed("the write failed")
+
+    def run() -> None:
+        try:
+            _runner(ResourceBudget(1024**2, 2)).run(operation)
+        except OSError as error:
+            errors.append(weakref.ref(error))
+            if held:
+                kept.append(error)
+
+    async def inside() -> None:
+        # A thread that runs an event loop, as a notebook's does, runs the
+        # operation on a helper thread of its own.
+        run()
+
+    was_enabled = gc.isenabled()
+    gc.disable()
+    try:
+        if path == "no running loop":
+            run()
+        else:
+            asyncio.run(inside())
+        # With the collector off, only reference counting frees the buffer,
+        # so anything that keeps the error in a cycle keeps the buffer too.
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if buffers[0]() is None and (held or errors[0]() is None):
+                break
+            time.sleep(0.01)
+        freed = buffers[0]() is None
+        # A dropped error goes too, rather than staying in a cycle with the
+        # task that raised it.
+        error_freed = errors[0]() is None
+    finally:
+        if was_enabled:
+            gc.enable()
+    assert freed
+    assert error_freed is not held
+    if held:
+        [error] = kept
+        # The caller still has the error, with the lines of its traceback.
+        assert str(error) == "the write failed"
+        assert error.__traceback__ is not None
+
+
 def test_task_factory_forwards_keywords_that_newer_asyncio_passes():
     async def operation(active):
         async def value():

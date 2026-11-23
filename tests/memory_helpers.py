@@ -188,3 +188,32 @@ def decodes_held_together(
         yield
     finally:
         codec._decode_single = decode
+
+
+@contextmanager
+def decodes_on_threads_held_together(
+    codec: type, parties: int, timeout: float = 10.0
+) -> Iterator[None]:
+    """Make each synchronous decode of Zarr's ``codec`` hold its chunk, as stored and decoded, until ``parties`` decodes hold theirs.
+
+    Zarr's ``FusedCodecPipeline`` decodes on the threads of a pool of its
+    own, outside any event loop, so the decodes that overlap there depend on
+    the machine as well. Each decode that ends waits on its thread until
+    ``parties`` decodes hold their chunks, so a read that runs that many at
+    once holds that many decoded chunks on any machine. A read with fewer
+    decodes at once raises ``threading.BrokenBarrierError`` after
+    ``timeout`` seconds instead of being traced at less.
+    """
+    decode = codec._decode_sync
+    barrier = threading.Barrier(parties, timeout=timeout)
+
+    def held(self: Any, chunk_bytes: Any, chunk_spec: Any) -> Any:
+        decoded = decode(self, chunk_bytes, chunk_spec)
+        barrier.wait()
+        return decoded
+
+    codec._decode_sync = held
+    try:
+        yield
+    finally:
+        codec._decode_sync = decode

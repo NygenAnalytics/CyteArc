@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 import zarr
 
-from .async_execution import AsyncStorageRunner
+from .async_execution import AsyncStorageRunner, release_exception_frames
 from .budget import ResourceBudget, resolve_budget
 from .execution import admitted_worker_split
 from .execution import (
@@ -1483,6 +1483,15 @@ def write_dense_in_shard_rows(
     mirror = None if also_write_to is None else writable(also_write_to)
 
     def produce_and_write(bounds: tuple[int, int]) -> Any:
+        try:
+            return write_band(bounds)
+        except BaseException as error:
+            # A failed band leaves without the frames that held it, such as
+            # the frame of Zarr's sync, which keeps a failed read's error.
+            release_exception_frames(error)
+            raise
+
+    def write_band(bounds: tuple[int, int]) -> Any:
         start, end = bounds
         block = np.asarray(produce(start, end))
         expected = (end - start, int(dst.shape[1]))

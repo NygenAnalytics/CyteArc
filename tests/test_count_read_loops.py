@@ -305,6 +305,145 @@ def test_an_interrupted_read_stops_before_run_read_returns():
     assert time.monotonic() - started < 5
 
 
+def _interrupt() -> None:
+    raise KeyboardInterrupt
+
+
+def test_an_interruption_while_a_read_finishes_its_tasks_stops_them_before_its_loop_closes(
+    caplog,
+):
+    import logging
+
+    stopped: list[str] = []
+
+    async def fill() -> None:
+        # A task that the read started, such as a shared cache fill, which
+        # run_read runs to its end after the read itself has failed.
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            stopped.append("cancelled")
+            raise
+
+    async def read() -> None:
+        loop = asyncio.get_running_loop()
+        loop.create_task(fill())
+        # A second Ctrl-C, raised while run_read waits for the fill.
+        loop.call_later(0.1, _interrupt)
+        raise OSError("the store could not read a chunk")
+
+    started = time.monotonic()
+    with caplog.at_level(logging.ERROR, logger="asyncio"):
+        with pytest.raises(KeyboardInterrupt) as interrupted:
+            run_read(read())
+        gc.collect()
+    # The fill was cancelled on the read's loop before the loop closed, not
+    # destroyed with it, and the interruption still reached the caller, after
+    # the read's own error.
+    assert stopped == ["cancelled"]
+    assert not [
+        record for record in caplog.records if "destroyed" in record.getMessage()
+    ]
+    assert isinstance(interrupted.value.__context__, OSError)
+    assert time.monotonic() - started < 5
+
+
+def test_a_real_ctrl_c_while_a_read_finishes_its_tasks_stops_them_before_its_loop_closes(
+    caplog,
+):
+    import logging
+    import signal
+
+    if threading.current_thread() is not threading.main_thread():
+        pytest.skip("Python runs signal handlers only in the main thread")
+    stopped: list[str] = []
+    waiting = threading.Event()
+
+    async def fill() -> None:
+        waiting.set()
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            stopped.append("cancelled")
+            raise
+
+    async def read() -> None:
+        asyncio.get_running_loop().create_task(fill())
+        raise OSError("the store could not read a chunk")
+
+    def press_ctrl_c(main: int) -> None:
+        # Once run_read waits for the fill, a SIGINT to the main thread, which
+        # Python's default handler raises there as KeyboardInterrupt.
+        if waiting.wait(10):
+            time.sleep(0.2)
+            signal.pthread_kill(main, signal.SIGINT)
+
+    previous = signal.signal(signal.SIGINT, signal.default_int_handler)
+    sender = threading.Thread(target=press_ctrl_c, args=(threading.get_ident(),))
+    try:
+        with caplog.at_level(logging.ERROR, logger="asyncio"):
+            sender.start()
+            with pytest.raises(KeyboardInterrupt):
+                run_read(read())
+            gc.collect()
+    finally:
+        sender.join()
+        signal.signal(signal.SIGINT, previous)
+    assert stopped == ["cancelled"]
+    assert not [
+        record for record in caplog.records if "destroyed" in record.getMessage()
+    ]
+
+
+def test_an_interruption_while_a_read_finishes_its_tasks_still_waits_for_its_pool_calls():
+    ended: list[float] = []
+
+    def decode() -> None:
+        # A decode that the read handed to Zarr's codec pool, which runs on
+        # after the task that awaits it is cancelled.
+        time.sleep(0.5)
+        ended.append(time.monotonic())
+
+    async def fill() -> None:
+        await asyncio.get_running_loop().run_in_executor(None, decode)
+
+    async def read() -> None:
+        loop = asyncio.get_running_loop()
+        loop.create_task(fill())
+        loop.call_later(0.1, _interrupt)
+        raise OSError("the store could not read a chunk")
+
+    with pytest.raises(KeyboardInterrupt):
+        run_read(read())
+    returned = time.monotonic()
+    # run_read returned only once the decode had ended, so no call that it
+    # handed to the pool still holds a chunk.
+    assert ended and ended[0] <= returned
+
+
+def test_a_further_interruption_while_a_reads_tasks_stop_leaves_the_wait_for_them():
+    async def stubborn() -> None:
+        # A task that goes on each time it is cancelled, whose wait a further
+        # Ctrl-C must be able to leave.
+        for _ in range(3):
+            try:
+                await asyncio.sleep(10)
+            except asyncio.CancelledError:
+                continue
+
+    async def read() -> None:
+        loop = asyncio.get_running_loop()
+        loop.create_task(stubborn())
+        loop.call_later(0.1, _interrupt)
+        loop.call_later(0.3, _interrupt)
+        raise OSError("the store could not read a chunk")
+
+    started = time.monotonic()
+    with pytest.raises(KeyboardInterrupt):
+        run_read(read())
+    assert time.monotonic() - started < 5
+
+
 def _known_stores(tmp_path) -> dict[str, object]:
     """Stores known to work on any event loop, one of each kind."""
     from obstore.store import MemoryStore as ObjectMemory

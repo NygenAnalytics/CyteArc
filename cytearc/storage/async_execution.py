@@ -607,9 +607,11 @@ _ZARR_CODEC_PIPELINE = "zarr.core.codec_pipeline.BatchedCodecPipeline"
 def _install_store_threads_pipeline() -> None:
     """Make CyteArc's codec pipeline Zarr's while Zarr's default pipeline is configured.
 
-    A pipeline that a user configured, such as ``FusedCodecPipeline``, stays.
-    Zarr builds each array's pipeline as the array opens, so arrays opened
-    before keep theirs.
+    A pipeline that a user configured, such as ``FusedCodecPipeline``, stays,
+    and reads on its own pool whatever a store's registered threads;
+    ``ArrayGeometry.readsAtOnce`` charges the reads of an array that keeps
+    the fused pipeline at that pool's threads. Zarr builds each array's
+    pipeline as the array opens, so arrays opened before keep theirs.
     """
     if zarr.config.get("codec_pipeline.path") == _ZARR_CODEC_PIPELINE:
         register_pipeline(StoreThreadsCodecPipeline)
@@ -672,9 +674,23 @@ class _LentPool(ThreadPoolExecutor):
 
 
 def _finish_tasks(loop: asyncio.AbstractEventLoop) -> None:
-    """Run every task left on ``loop`` to its end, then close its async generators."""
-    while pending := [task for task in asyncio.all_tasks(loop) if not task.done()]:
-        loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+    """Run every task left on ``loop`` to its end, then close its async generators.
+
+    An interruption while the tasks run, such as a second Ctrl-C, cancels
+    the tasks still pending and waits for them to stop before it is raised,
+    so the loop never closes with a task pending; a further interruption
+    leaves that wait.
+    """
+    try:
+        while pending := [task for task in asyncio.all_tasks(loop) if not task.done()]:
+            loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+    except BaseException:
+        while pending := [task for task in asyncio.all_tasks(loop) if not task.done()]:
+            for task in pending:
+                task.cancel()
+            loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+        loop.run_until_complete(loop.shutdown_asyncgens())
+        raise
     loop.run_until_complete(loop.shutdown_asyncgens())
 
 
@@ -854,8 +870,10 @@ def run_read(coroutine: Coroutine[Any, Any, T]) -> T:
             raise
         finally:
             del task, cancel
-            _finish_tasks(loop)
-            pool.wait_for_calls()
+            try:
+                _finish_tasks(loop)
+            finally:
+                pool.wait_for_calls()
     finally:
         loop.close()
 
@@ -1024,7 +1042,13 @@ class AsyncStorageRunner:
         # Outside an except clause, so a failure is not chained to the error
         # that found no running loop.
         if not _in_event_loop():
-            return asyncio.run(self._run(operation))
+            try:
+                return asyncio.run(self._run(operation))
+            except BaseException as failure:
+                # asyncio's run_until_complete raises the operation's error
+                # from a frame that keeps its task, which keeps the error.
+                release_exception_frames(failure)
+                raise
         error: list[BaseException] = []
         result: list[T] = []
         context = contextvars.copy_context()
@@ -1042,6 +1066,7 @@ class AsyncStorageRunner:
             try:
                 result.append(context.run(lambda: asyncio.run(_main())))
             except BaseException as exc:
+                release_exception_frames(exc)
                 error.append(exc)
             finally:
                 started.set()
@@ -1062,8 +1087,11 @@ class AsyncStorageRunner:
                     pass
             thread.join()
             raise
+        # The operation's task holds its error, and neither the task nor the
+        # error stays in a local of this frame once the error leaves it.
+        main.clear()
         if error:
-            raise error[0]
+            raise error.pop()
         return result[0]
 
     async def _run(
