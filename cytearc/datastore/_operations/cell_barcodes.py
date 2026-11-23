@@ -47,6 +47,7 @@ __all__ = [
     "derived_id_bytes",
     "empty_files_rule",
     "file_names",
+    "files_with_rows",
     "id_hashing_bytes",
     "join_bytes",
     "lookup_bytes",
@@ -874,6 +875,17 @@ def file_names(files: Sequence[BarcodeFile]) -> str:
     named = ", ".join(quoted_value(os.fspath(file.path)) for file in files[:EXAMPLES])
     more = len(files) - EXAMPLES
     return named + (f" and {more} more" if more > 0 else "")
+
+
+def files_with_rows[T](files: Sequence[T], counts: Sequence[int] | None) -> list[T]:
+    """The files that hold rows, of ``files`` in the canonical order of an import's files, by its count of each file's rows.
+
+    An import saved before a revision added the counts reads them as None,
+    and all of its files are returned.
+    """
+    if counts is None:
+        return list(files)
+    return [file for file, count in zip(files, counts, strict=True) if count]
 
 
 def empty_files_rule(

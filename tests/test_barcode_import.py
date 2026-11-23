@@ -960,6 +960,239 @@ def test_an_import_saved_before_its_rows_per_file_is_imported_anew(
     assert store.artifacts.inspect(again).diagnostics["rowsPerFile"] == [1]
 
 
+# The ten cells of the truth that the files of rows without a barcode name.
+_LISTED = [str(cell) for cell in TRUTH.cell_ids[:10]]
+_PAIRS = {"cell": "cell", "barcode": "barcode", "umis": "umis"}
+
+# Files whose rows name the ten cells but hold no barcode, by the columns of
+# their layout, with the rows that hold none: pairs without a barcode,
+# pairs counted 0 UMIs or 0 reads, molecules and reads without a barcode,
+# and list fields of two missing barcodes for each cell.
+_BARCODELESS: dict[str, tuple[str, dict, int]] = {
+    "pairs_without_barcodes": (
+        "cell,barcode,umis\n" + "".join(f"{c},NA,3\n" for c in _LISTED),
+        {"format": "pairs", "columns": _PAIRS},
+        10,
+    ),
+    "pairs_counted_0": (
+        "cell,barcode,umis\n" + "".join(f"{c},ACGT,0\n" for c in _LISTED),
+        {"format": "pairs", "columns": _PAIRS},
+        10,
+    ),
+    "pairs_of_0_reads": (
+        "cell,barcode,reads\n" + "".join(f"{c},ACGT,0\n" for c in _LISTED),
+        {
+            "format": "pairs",
+            "columns": {"cell": "cell", "barcode": "barcode", "reads": "reads"},
+        },
+        10,
+    ),
+    "molecules_without_barcodes": (
+        "cell,umi,barcode\n" + "".join(f"{c},AAAA,NA\n" for c in _LISTED),
+        {
+            "format": "molecules",
+            "columns": {"cell": "cell", "umi": "umi", "barcode": "barcode"},
+        },
+        10,
+    ),
+    "reads_without_barcodes": (
+        "cell,umi,barcode\n" + "".join(f"{c},AAAA,\n" for c in _LISTED),
+        {
+            "format": "reads",
+            "columns": {"cell": "cell", "umi": "umi", "barcode": "barcode"},
+        },
+        10,
+    ),
+    "lists_of_missing_barcodes": (
+        "cell,barcode,umis\n" + "".join(f"{c},NA;NA,1;2\n" for c in _LISTED),
+        {"format": "pairs", "columns": {**_PAIRS, "separator": ";"}},
+        20,
+    ),
+}
+
+
+def _write_pairs(path: Path, rows: dict[str, str]) -> Path:
+    """Write a pair table of a barcode, or NA, for each cell, counted 3 UMIs."""
+    path.write_text(
+        "cell,barcode,umis\n"
+        + "".join(f"{cell},{barcode},3\n" for cell, barcode in rows.items())
+    )
+    return path
+
+
+@pytest.mark.parametrize("case", sorted(_BARCODELESS))
+def test_files_whose_rows_of_selected_cells_hold_no_barcode_warn_naming_them(
+    shared, tmp_path, case
+) -> None:
+    content, options, n_rows = _BARCODELESS[case]
+    path = tmp_path / f"{case}.csv"
+    path.write_text(content)
+
+    refs = []
+    for _call in range(2):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            refs.append(
+                shared.store.clones.import_barcodes(
+                    path, cell_selection=shared.cells, **options
+                )
+            )
+        assert [type(item.message) for item in caught] == [DiagnosticWarning]
+        warning = caught[0].message
+        assert isinstance(warning, DiagnosticWarning)
+        # The selection holds every cell, so the warning suggests no other.
+        assert re.fullmatch(
+            f"The barcode file '[^']*{re.escape(path.name)}' names 10 selected "
+            r"cells but holds no barcode for them\. Pass a file that lists the "
+            r"cells' lineage barcodes\.",
+            str(warning),
+        )
+        assert (warning.operation, warning.diagnostic, warning.value) == (
+            "import_lineage_barcodes",
+            "emptyRows",
+            n_rows,
+        )
+    assert refs[0] == refs[1]
+    diagnostics = shared.store.artifacts.inspect(refs[0]).diagnostics
+    assert (diagnostics["fileRows"], diagnostics["unmatchedRows"]) == (n_rows, 0)
+    assert diagnostics["rowsPerFile"] == [n_rows]
+    assert shared.store.clones.load_barcodes(refs[0]).records.empty
+
+
+def test_only_rows_of_selected_cells_that_all_hold_no_barcode_warn(
+    shared, tmp_path
+) -> None:
+    store, cells = shared.store, shared.cells
+    # One barcode among missing ones is enough, and gives no warning.
+    one = _write_pairs(
+        tmp_path / "one.csv",
+        {cell: "ACGT" if cell == _LISTED[0] else "NA" for cell in _LISTED},
+    )
+    with collect_warnings() as messages:
+        held = store.clones.import_barcodes(
+            one, cell_selection=cells, format="pairs", columns=_PAIRS
+        )
+    assert messages == []
+    assert len(store.clones.load_barcodes(held).records) == 1
+    # Two files without barcodes are named together.
+    first = _write_pairs(tmp_path / "first.csv", dict.fromkeys(_LISTED, "NA"))
+    second = _write_pairs(tmp_path / "second.csv", dict.fromkeys(_LISTED[:4], "NA"))
+    with pytest.warns(DiagnosticWarning) as caught:
+        store.clones.import_barcodes(
+            [first, second], cell_selection=cells, format="pairs", columns=_PAIRS
+        )
+    assert len(caught) == 1
+    named = re.fullmatch(
+        "The barcode files '([^']*)', '([^']*)' name 10 selected cells but hold no "
+        r"barcode for them\. Pass files that list the cells' lineage barcodes\.",
+        str(caught[0].message),
+    )
+    assert named is not None
+    assert {Path(name).name for name in named.groups()} == {"first.csv", "second.csv"}
+    # Beside a table of a header alone, the file of missing barcodes is the one
+    # file that holds rows, and each warning names its own file.
+    empty = tmp_path / "empty.csv"
+    empty.write_text("cell,barcode,umis\n")
+    with pytest.warns(DiagnosticWarning) as caught:
+        store.clones.import_barcodes(
+            [first, empty], cell_selection=cells, format="pairs", columns=_PAIRS
+        )
+    messages = sorted(str(item.message) for item in caught)
+    assert len(messages) == 2
+    assert re.fullmatch(
+        r"The barcode file '[^']*first\.csv' names 10 selected cells but holds no "
+        r"barcode for them\. Pass a file that lists the cells' lineage barcodes\.",
+        messages[0],
+    )
+    assert re.fullmatch(
+        r"The import read no row from the barcode file '[^']*empty\.csv', 1 of its "
+        r"2 barcode files, so that file gives no cell a barcode\. Pass the file you "
+        r"meant in its place, or leave it out\.",
+        messages[1],
+    )
+    # A file of missing barcodes beside one of barcodes gives no warning, as
+    # the barcodes of the import are saved together.
+    full = _write_pairs(tmp_path / "full.csv", dict.fromkeys(_LISTED[4:], "ACGT"))
+    with collect_warnings() as messages:
+        store.clones.import_barcodes(
+            [second, full], cell_selection=cells, format="pairs", columns=_PAIRS
+        )
+    assert messages == []
+    # Rows of cells outside the store hold no barcode of a selected cell, and
+    # only the warning of barcodes of no cell names them.
+    stray = _write_pairs(tmp_path / "stray.csv", {"stray-1": "NA"})
+    with collect_warnings() as messages, pytest.warns(DiagnosticWarning):
+        store.clones.import_barcodes(
+            stray, cell_selection=cells, format="pairs", columns=_PAIRS
+        )
+    assert len(messages) == 1
+    assert messages[0].startswith("1 of 1 barcodes of the barcode file match no cell")
+
+
+def test_files_that_hold_barcodes_only_outside_the_selection_suggest_those_cells(
+    tmp_path,
+) -> None:
+    path = tmp_path / "store.zarr"
+    write_truth_store(path, TRUTH)
+    store = open_store(path)
+    d2 = TRUTH.samples == "d2"
+    store.cells.insert("only_d2", by_cell_id(store.cells, d2))
+    store.cells.insert("only_d4", by_cell_id(store.cells, ~d2))
+    early = store.snapshot_cell_selection("only_d2")
+    n_early = int(d2.sum())
+    # The selected cells of d2 hold no barcode, and the cells of d4, outside
+    # the selection, one barcode each.
+    rows = {
+        str(cell): "NA" if is_early else "ACGT"
+        for cell, is_early in zip(TRUTH.cell_ids, d2, strict=True)
+    }
+    every = _write_pairs(tmp_path / "every.csv", rows)
+    with pytest.warns(DiagnosticWarning) as caught:
+        store.clones.import_barcodes(
+            every, cell_selection=early, format="pairs", columns=_PAIRS
+        )
+    assert len(caught) == 1
+    assert re.fullmatch(
+        f"The barcode file '[^']*every\\.csv' names {n_early} selected cells but "
+        "holds no barcode for them\\. Pass a file that lists the cells' lineage "
+        "barcodes, or a cell_selection of the cells whose barcodes it lists\\.",
+        str(caught[0].message),
+    )
+    # The cells whose barcodes the file lists take them, without a warning.
+    with collect_warnings() as messages:
+        late = store.clones.import_barcodes(
+            every,
+            cell_selection=store.snapshot_cell_selection("only_d4"),
+            format="pairs",
+            columns=_PAIRS,
+        )
+    assert messages == []
+    assert len(store.clones.load_barcodes(late).records) == int((~d2).sum())
+    # The same rows in two files give the plural forms.
+    missing = _write_pairs(
+        tmp_path / "missing.csv", {cell: "NA" for cell, b in rows.items() if b == "NA"}
+    )
+    others = _write_pairs(
+        tmp_path / "others.csv", {cell: b for cell, b in rows.items() if b != "NA"}
+    )
+    with pytest.warns(DiagnosticWarning) as caught:
+        store.clones.import_barcodes(
+            [missing, others], cell_selection=early, format="pairs", columns=_PAIRS
+        )
+    assert len(caught) == 1
+    named = re.fullmatch(
+        f"The barcode files '([^']*)', '([^']*)' name {n_early} selected cells but "
+        "hold no barcode for them. Pass files that list the cells' lineage "
+        "barcodes, or a cell_selection of the cells whose barcodes they list.",
+        str(caught[0].message),
+    )
+    assert named is not None
+    assert {Path(name).name for name in named.groups()} == {
+        "missing.csv",
+        "others.csv",
+    }
+
+
 def test_rows_without_a_barcode_or_counted_zero_hold_none(shared, tmp_path) -> None:
     cell = TRUTH.cell_ids[0]
     path = tmp_path / "pairs.csv"

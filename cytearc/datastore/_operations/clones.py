@@ -62,6 +62,7 @@ from ...clones.overlap import (
     tracking_reach,
 )
 from ...metadata.arguments import (
+    BarcodeCloneArguments,
     ClonalExpansionArguments,
     CloneColumnArguments,
     CloneFateBiasArguments,
@@ -126,6 +127,7 @@ from .cell_barcodes import (
     derived_id_bytes,
     empty_files_rule,
     file_names,
+    files_with_rows,
     unmatched_barcode_rules,
 )
 from .cell_groups import (
@@ -145,11 +147,14 @@ from .clone_artifacts import (
 from .clone_steps import (
     CODES_WITHIN_TYPE,
     artifact_cell_ids,
+    barcode_import_cause,
     exported_cell_positions,
     files_text,
     measured_within_types,
     plan_artifact_cells,
     read_codes,
+    selected_cells_named,
+    selected_cells_text,
 )
 
 if TYPE_CHECKING:
@@ -339,15 +344,6 @@ def _namespaced(labels: np.ndarray, namespace: str | None) -> np.ndarray:
     return named
 
 
-def _cells_named(diagnostics: Mapping[str, Any]) -> int:
-    """The selected cells that a clone import's files name, from the join's saved counts."""
-    return (
-        int(diagnostics["fileBarcodes"])
-        - int(diagnostics["unmatchedBarcodes"])
-        - int(diagnostics["unselectedBarcodes"])
-    )
-
-
 def _gives_no_clone(diagnostics: Mapping[str, Any]) -> bool:
     """Whether a clone import's files name selected cells but give none of them a clone.
 
@@ -357,22 +353,10 @@ def _gives_no_clone(diagnostics: Mapping[str, Any]) -> bool:
     import that left out some cells gave clones.
     """
     return (
-        _cells_named(diagnostics) > 0
+        selected_cells_named(diagnostics) > 0
         and int(diagnostics["cellsWithClone"]) == 0
         and int(diagnostics["cellsInSeveralClones"]) == 0
     )
-
-
-def _files_with_rows[T](files: Sequence[T], diagnostics: Mapping[str, Any]) -> list[T]:
-    """The files of a clone import that hold rows, of ``files`` in the canonical order of its files.
-
-    An import saved before ``rowsPerFile`` reads it as None, and all of its
-    files are returned.
-    """
-    rows = diagnostics["rowsPerFile"]
-    if rows is None:
-        return list(files)
-    return [file for file, count in zip(files, rows, strict=True) if count]
 
 
 def _no_clone_cause(n_files: int, n_cells: int, matrices: Sequence[bool]) -> str:
@@ -387,11 +371,7 @@ def _no_clone_cause(n_files: int, n_cells: int, matrices: Sequence[bool]) -> str
     name, label, hold = (
         ("names", "labels", "holds") if n_files == 1 else ("name", "label", "hold")
     )
-    cells, them = (
-        ("1 selected cell", "it")
-        if n_cells == 1
-        else (f"{n_cells} selected cells", "them")
-    )
+    cells, them = selected_cells_text(n_cells)
     if not any(matrices):
         return f"{name} {cells} but {label} {them} with no clone"
     if all(matrices):
@@ -413,7 +393,9 @@ def _no_clone_rule(
     """
 
     def message(diagnostics: Mapping[str, Any]) -> str:
-        held = _files_with_rows(list(zip(files, matrices, strict=True)), diagnostics)
+        held = files_with_rows(
+            list(zip(files, matrices, strict=True)), diagnostics["rowsPerFile"]
+        )
         one = len(held) == 1
         remedy = (
             "Pass a file that lists the cells' clones"
@@ -426,7 +408,9 @@ def _no_clone_rule(
                 f"{'it gives' if one else 'they give'} a clone"
             )
         cause = _no_clone_cause(
-            len(held), _cells_named(diagnostics), [matrix for _file, matrix in held]
+            len(held),
+            selected_cells_named(diagnostics),
+            [matrix for _file, matrix in held],
         )
         named = file_names([file for file, _matrix in held])
         return (
@@ -965,30 +949,39 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         return artifact_group(self.zw, clones)
 
     def _require_file_clones(self, clones: ArtifactRef) -> None:
-        """Refuse clones whose import gave no selected cell a clone from its files, for a call that would read them as clones of no cell.
+        """Refuse clones whose files gave no selected cell a clone, for a call that would read them as clones of no cell.
 
-        Such an import read no row, as a table of a header alone gives; read
-        rows that name selected cells but give none of them a clone, as
-        labels that mean no clone and a clone matrix without entries give;
-        or left out every cell that it gave a clone, as ``multiple="drop"``
-        does with the cells that its files list in several clones.
-        :meth:`_clone_group` opens such clones, which ``load_clones`` reads,
-        and ``plots.clone_abundance`` says that there is nothing to plot.
-        ``export_clones``, which would write a file of a header alone, and
-        the summaries, where they find no measured cell with a clone and
-        would name the grouping or the early cells, refuse them with a
-        message that names the cause. Clones whose files' rows name no
-        selected cell, as a selection without the files' cells gives, and the
-        clones of other sources, which record no rows of files, pass.
+        An import of clones gives none when it read no row, as a table of a
+        header alone gives; read rows that name selected cells but give none
+        of them a clone, as labels that mean no clone and a clone matrix
+        without entries give; or left out every cell that it gave a clone, as
+        ``multiple="drop"`` does with the cells that its files list in several
+        clones. Clones called from lineage barcodes give none when the
+        barcodes' files hold no row, or rows of selected cells that hold no
+        barcode. :meth:`_clone_group` opens such clones, which
+        ``load_clones`` reads, and ``plots.clone_abundance`` says that there
+        is nothing to plot. ``export_clones``, which would write a file of a
+        header alone, and the summaries, where they find no measured cell
+        with a clone and would name the grouping or the early cells, refuse
+        them with a message that names the cause. Clones whose files' rows
+        name no selected cell, as a selection without the files' cells gives,
+        and the clones of other sources, which record no rows of files, pass.
 
         Raises:
             ValueError: If the clones' import read no row, read rows that
                 name selected cells but give none of them a clone, or left
-                out every cell that it gave a clone.
+                out every cell that it gave a clone, or the barcodes of
+                barcode clones hold no barcode of a selected cell.
         """
         from ...readers.clone_tables import MATRIX_FORMATS
 
         status = inspect_artifact(self.zw, clones)
+        if status.operation == BarcodeCloneArguments.operation:
+            barcodes = ArtifactRef.from_dict((status.inputs or {})["barcodes"])
+            cause = barcode_import_cause(self.zw, barcodes)
+            if cause is not None:
+                raise ValueError(f"The clones give no cell a clone: {cause}")
+            return
         if status.operation != CloneImportArguments.operation:
             return
         diagnostics = status.diagnostics
@@ -1017,10 +1010,10 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         if _gives_no_clone(diagnostics):
             cause = _no_clone_cause(
                 len(sources),
-                _cells_named(diagnostics),
+                selected_cells_named(diagnostics),
                 [
                     source["format"] in MATRIX_FORMATS
-                    for source in _files_with_rows(sources, diagnostics)
+                    for source in files_with_rows(sources, diagnostics["rowsPerFile"])
                 ],
             )
             if int(diagnostics["unselectedBarcodes"]):
@@ -1156,9 +1149,10 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         in store order with ``cell_order="stored"``. Clones whose import gave
         no selected cell a clone, from files without rows or whose rows give
         none of the selected cells they name a clone, or because
-        ``multiple="drop"`` left out every cell that the files gave one, are
-        refused before anything is written, while clones of a selection that
-        the files' rows do not reach write the header alone.
+        ``multiple="drop"`` left out every cell that the files gave one, and
+        clones called from barcodes whose files hold no barcode of a selected
+        cell, are refused before anything is written, while clones of a
+        selection that the files' rows do not reach write the header alone.
 
         Args:
             clones: A clone artifact, such as ``clones`` or ``clonotypes``.

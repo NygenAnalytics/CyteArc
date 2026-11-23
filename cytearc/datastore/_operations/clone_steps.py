@@ -3,11 +3,13 @@
 Clone import, the clone summaries, lineage barcodes, recorder alleles,
 phylogenies and receptors read the same kinds of stored arrays and name their
 files and clones alike: integer codes read whole as int64, the IDs of a
-cell-aligned artifact's cells, the labels of clones ranked by size and the
-words for the files of an import. Operation modules may not import each
-other, so each step lives here once.
+cell-aligned artifact's cells, the labels of clones ranked by size, the
+words for the files and the selected cells of an import, and why clones
+called from lineage barcodes give no cell a clone. Operation modules may not
+import each other, so each step lives here once.
 """
 
+from collections.abc import Mapping
 from typing import Any
 
 import numpy as np
@@ -28,12 +30,17 @@ __all__ = [
     "CODES_WITHIN_TYPE",
     "REPRESENTATIVES_WITHIN_TYPE",
     "artifact_cell_ids",
+    "barcode_import_cause",
     "exported_cell_positions",
     "files_text",
     "hold_ranked_clone_labels",
+    "holds_no_barcode",
     "measured_within_types",
+    "no_barcode_cause",
     "plan_artifact_cells",
     "read_codes",
+    "selected_cells_named",
+    "selected_cells_text",
 ]
 
 # Bytes of one int64 row position.
@@ -52,6 +59,86 @@ REPRESENTATIVES_WITHIN_TYPE = "representatives_within_type"
 def files_text(noun: str, n_files: int) -> str:
     """The words for the files of an import in its messages, such as "the clone files"."""
     return f"the {noun} file" if n_files == 1 else f"the {noun} files"
+
+
+def selected_cells_named(diagnostics: Mapping[str, Any]) -> int:
+    """The selected cells that an import's files name, from the join's saved counts: their barcodes less those of no cell of the store and those of cells outside the selection."""
+    return (
+        int(diagnostics["fileBarcodes"])
+        - int(diagnostics["unmatchedBarcodes"])
+        - int(diagnostics["unselectedBarcodes"])
+    )
+
+
+def selected_cells_text(n_cells: int) -> tuple[str, str]:
+    """The words of a message for ``n_cells`` selected cells, and the pronoun that refers to them, such as ``("1 selected cell", "it")``."""
+    if n_cells == 1:
+        return "1 selected cell", "it"
+    return f"{n_cells} selected cells", "them"
+
+
+def holds_no_barcode(diagnostics: Mapping[str, Any]) -> bool:
+    """Whether a barcode import's rows name selected cells but none of them holds a barcode.
+
+    A row without a barcode and a pair counted 0 hold none, and ``emptyRows``
+    counts the rows of selected cells that hold none, among the files' rows
+    less ``unmatchedRows``, those of no selected cell. An import of an
+    assay's counts holds a barcode in each of its rows.
+    """
+    selected = int(diagnostics["fileRows"]) - int(diagnostics["unmatchedRows"])
+    return selected > 0 and int(diagnostics["emptyRows"]) == selected
+
+
+def no_barcode_cause(n_files: int, n_cells: int) -> str:
+    """How files name selected cells but hold no barcode for them."""
+    cells, them = selected_cells_text(n_cells)
+    if n_files == 1:
+        return f"names {cells} but holds no barcode for {them}"
+    return f"name {cells} but hold no barcode for {them}"
+
+
+def barcode_import_cause(root: zarr.Group, barcodes: ArtifactRef) -> str | None:
+    """Why clones called from ``barcodes`` give no cell a clone, in a refusal's words, when the barcodes' files hold no barcode of a selected cell; otherwise None.
+
+    Files that hold no row, or whose rows of selected cells hold no barcode,
+    leave every selected cell without a barcode, so every clone called from
+    them is a clone of no cell, whatever the rules. The words name the
+    remedy: other files, or a selection of the cells whose barcodes the
+    files list, and clones called from the new barcodes. An import of an
+    assay's counts reads no file, and barcodes that are not complete are not
+    read, so neither gives a cause.
+    """
+    status = inspect_artifact(root, barcodes)
+    if not status.complete:
+        return None
+    sources = (status.inputs or {})["sources"]
+    if "assay" in sources[0]:
+        return None
+    diagnostics = status.diagnostics
+    one = len(sources) == 1
+    files = files_text("barcode", len(sources))
+    remedy = (
+        "import a file that lists the cells' lineage barcodes"
+        if one
+        else "import files that list the cells' lineage barcodes"
+    )
+    if int(diagnostics["fileRows"]) == 0:
+        return (
+            f"their barcodes' import read no row from {files}; {remedy} and call "
+            "the clones from the new barcodes"
+        )
+    if not holds_no_barcode(diagnostics):
+        return None
+    if int(diagnostics["unselectedBarcodes"]):
+        remedy += (
+            f", or import {'it' if one else 'them'} on a cell_selection of the cells "
+            f"whose barcodes {'it lists' if one else 'they list'},"
+        )
+    cause = no_barcode_cause(len(sources), selected_cells_named(diagnostics))
+    return (
+        f"{files} of their barcodes {cause}; {remedy} and call the clones from the "
+        "new barcodes"
+    )
 
 
 def measured_within_types(clones: ArtifactRef, status: Any, group: zarr.Group) -> bool:

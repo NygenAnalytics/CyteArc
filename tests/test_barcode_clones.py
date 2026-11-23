@@ -17,6 +17,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from cytearc import DiagnosticWarning
 from cytearc.datastore.datastore import DataStore
 from cytearc.storage.artifacts import artifact_group
 from cytearc.storage.refs import ArtifactRef
@@ -694,6 +695,171 @@ def test_barcode_clones_name_missing_and_incomplete_barcodes(store, tmp_path) ->
     artifact_group(store.zw, barcodes).attrs["complete"] = False
     with pytest.raises(RuntimeError, match="Artifact is incomplete"):
         store.clones.barcode_clones(barcodes, preset="larry")
+
+
+_PAIRS = {"cell": "cell", "barcode": "barcode", "umis": "umis"}
+# The ten cells of the truth that the tables of barcode pairs name.
+_LISTED = [str(cell) for cell in TRUTH.cell_ids[:10]]
+
+
+def _pairs(path: Path, rows: dict[str, str]) -> Path:
+    """Write a pair table of a barcode, or NA, for each cell, counted 3 UMIs."""
+    path.write_text(
+        "cell,barcode,umis\n"
+        + "".join(f"{cell},{barcode},3\n" for cell, barcode in rows.items())
+    )
+    return path
+
+
+def _clones_of(store: DataStore, paths: list[Path], cells: ArtifactRef) -> ArtifactRef:
+    """Call clones from the barcodes of pair tables, whose warnings the caller checked."""
+    with collect_warnings():
+        barcodes = store.clones.import_barcodes(
+            paths, cell_selection=cells, format="pairs", columns=_PAIRS
+        )
+    return store.clones.barcode_clones(barcodes, method="sets")
+
+
+def test_summaries_and_the_export_name_barcodes_that_hold_none_of_a_selected_cell(
+    store, tmp_path
+) -> None:
+    cells = every_cell(store)
+    path = _pairs(tmp_path / "pairs.csv", dict.fromkeys(_LISTED, "NA"))
+    with pytest.warns(DiagnosticWarning, match="holds no barcode for them"):
+        barcodes = store.clones.import_barcodes(
+            path, cell_selection=cells, format="pairs", columns=_PAIRS
+        )
+    # Calling clones gives none and no warning; the summaries and the export
+    # name the barcodes' file instead of the grouping, and save nothing.
+    with collect_warnings() as messages:
+        clones = store.clones.barcode_clones(barcodes, method="sets")
+    assert messages == []
+    assert store.artifacts.inspect(clones).diagnostics["cellsWithClone"] == 0
+    for sample in ("d2", "d4"):
+        store.cells.insert(
+            f"is_{sample}",
+            by_cell_id(store.cells, TRUTH.samples == sample),
+            overwrite=True,
+        )
+    early = store.snapshot_cell_selection("is_d2")
+    late = store.snapshot_cell_selection("is_d4")
+    saved = store.artifacts.list(scope="datastore")
+    refusal = (
+        "^The clones give no cell a clone: the barcode file of their barcodes "
+        "names 10 selected cells but holds no barcode for them; import a file "
+        "that lists the cells' lineage barcodes and call the clones from the new "
+        "barcodes$"
+    )
+    for call in (
+        lambda: store.clones.expansion(clones, group_by="sample"),
+        lambda: store.clones.diversity(clones, group_by="sample"),
+        lambda: store.clones.overlap(clones, group_by="cell_type"),
+        lambda: store.clones.fate_bias(
+            clones, group_by="cell_type", early=early, late=late
+        ),
+    ):
+        with pytest.raises(ValueError, match=refusal):
+            call()
+    out = tmp_path / "out"
+    out.mkdir()
+    for format, name in (("cospar", "clones.csv"), ("matrix", "clones.mtx")):
+        with pytest.raises(ValueError, match=refusal):
+            store.clones.export_clones(clones, out / name, format=format)
+    assert list(out.iterdir()) == []
+    assert store.artifacts.list(scope="datastore") == saved
+    assert store.clones.load_clones(clones).clones.empty
+
+
+def test_clones_of_barcodes_whose_files_hold_no_row_or_name_other_cells(
+    store, tmp_path
+) -> None:
+    cells = every_cell(store)
+    # Files that hold no row are named as the import that read none.
+    first = tmp_path / "first.csv"
+    first.write_text("cell,barcode,umis\n")
+    second = tmp_path / "second.csv"
+    second.write_text("cell,barcode,umis,reads\n")
+    with pytest.raises(
+        ValueError,
+        match="^The clones give no cell a clone: their barcodes' import read no row "
+        "from the barcode files; import files that list the cells' lineage barcodes "
+        "and call the clones from the new barcodes$",
+    ):
+        store.clones.expansion(_clones_of(store, [first, second], cells))
+    # Selected cells without a barcode beside cells outside the selection
+    # with one: the refusal suggests those cells.
+    d2 = TRUTH.samples == "d2"
+    store.cells.insert("only_d2", by_cell_id(store.cells, d2))
+    early = store.snapshot_cell_selection("only_d2")
+    rows = {
+        str(cell): "NA" if is_early else "ACGT"
+        for cell, is_early in zip(TRUTH.cell_ids, d2, strict=True)
+    }
+    every = _pairs(tmp_path / "every.csv", rows)
+    with pytest.raises(
+        ValueError,
+        match=f"^The clones give no cell a clone: the barcode file of their barcodes "
+        f"names {int(d2.sum())} selected cells but holds no barcode for them; "
+        "import a file that lists the cells' lineage barcodes, or import it on a "
+        "cell_selection of the cells whose barcodes it lists, and call the clones "
+        "from the new barcodes$",
+    ):
+        store.clones.expansion(_clones_of(store, [every], early))
+    missing = _pairs(
+        tmp_path / "missing.csv", {cell: "NA" for cell, b in rows.items() if b == "NA"}
+    )
+    others = _pairs(
+        tmp_path / "others.csv", {cell: b for cell, b in rows.items() if b != "NA"}
+    )
+    with pytest.raises(
+        ValueError,
+        match=f"^The clones give no cell a clone: the barcode files of their "
+        f"barcodes name {int(d2.sum())} selected cells but hold no barcode for "
+        "them; import files that list the cells' lineage barcodes, or import them "
+        "on a cell_selection of the cells whose barcodes they list, and call the "
+        "clones from the new barcodes$",
+    ):
+        store.clones.expansion(_clones_of(store, [missing, others], early))
+    # Rows of cells outside the selection alone keep the grouping message.
+    with pytest.raises(ValueError, match="^No cell has both a clone and a group$"):
+        store.clones.expansion(_clones_of(store, [others], early))
+
+
+def test_clones_of_an_assays_counts_or_of_incomplete_barcodes_keep_their_refusal(
+    tmp_path,
+) -> None:
+    path = tmp_path / "store.zarr"
+    write_count_store(
+        str(path),
+        {
+            "RNA": np.ones((N_CELLS, 3), dtype=np.uint16),
+            "LINEAGE": np.zeros((N_CELLS, 2), dtype=np.uint16),
+        },
+        "uint16",
+        cell_ids=TRUTH.cell_ids,
+    )
+    store = open_store(path)
+    store.cells.insert(
+        "every_cell", by_cell_id(store.cells, np.ones(N_CELLS, dtype=bool))
+    )
+    cells = every_cell(store)
+    # An assay without a count reads no file, so the summaries name no file.
+    with collect_warnings():
+        counted = store.clones.import_barcodes(
+            cell_selection=cells, from_assay="LINEAGE"
+        )
+    assert store.artifacts.inspect(counted).diagnostics["fileRows"] == 0
+    clones = store.clones.barcode_clones(counted, method="sets")
+    with pytest.raises(ValueError, match="^No cell has both a clone and a group$"):
+        store.clones.expansion(clones)
+    # Barcodes that are no longer complete are not read for a cause.
+    empty = tmp_path / "empty.csv"
+    empty.write_text("cell,barcode,umis\n")
+    clones = _clones_of(store, [empty], cells)
+    barcodes = ArtifactRef.from_dict(store.artifacts.inspect(clones).inputs["barcodes"])
+    artifact_group(store.zw, barcodes).attrs["complete"] = False
+    with pytest.raises(ValueError, match="^No cell has both a clone and a group$"):
+        store.clones.expansion(clones)
 
 
 def test_counts_that_a_table_leaves_unknown_are_refused_by_the_rules_that_read_them(

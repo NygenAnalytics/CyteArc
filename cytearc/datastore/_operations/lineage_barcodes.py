@@ -46,7 +46,7 @@ from ...storage.artifacts import (
     inspect_artifact,
     require_complete_artifact,
 )
-from ...storage.diagnostics import warn_diagnostics
+from ...storage.diagnostics import DiagnosticRule, warn_diagnostics
 from ...storage.types import as_zarr_array, read_array
 from ...storage.validation_scope import validation_scoped
 from ...utils.arguments import bool_argument, optional_bool_argument, quoted_value
@@ -58,11 +58,20 @@ from .cell_barcodes import (
     CellBarcodeJoin,
     barcode_files,
     empty_files_rule,
+    file_names,
+    files_with_rows,
     texts_per_file,
     unmatched_barcode_rules,
 )
 from .clone_artifacts import plan_clones, write_clones
-from .clone_steps import files_text, hold_ranked_clone_labels, read_codes
+from .clone_steps import (
+    files_text,
+    hold_ranked_clone_labels,
+    holds_no_barcode,
+    no_barcode_cause,
+    read_codes,
+    selected_cells_named,
+)
 from .record_tables import (
     record_arrays,
     record_chunk_lengths,
@@ -120,6 +129,34 @@ _CALLED_RECORD_ARRAYS = (
 # of distinct barcodes, its packed bytes, and the string itself when a
 # fixed-width array gave it.
 _ALLOWLIST_BYTES = 300
+
+
+def _no_barcode_rule(files: Sequence[BarcodeFile]) -> DiagnosticRule:
+    """Return the import's warning when its files' rows name selected cells but hold no barcode for any of them.
+
+    The warning names the files that hold rows, and when they also name
+    cells outside the selection, offers a selection of the cells whose
+    barcodes they list.
+    """
+
+    def message(diagnostics: Mapping[str, Any]) -> str:
+        held = files_with_rows(files, diagnostics["rowsPerFile"])
+        one = len(held) == 1
+        remedy = (
+            "Pass a file that lists the cells' lineage barcodes"
+            if one
+            else "Pass files that list the cells' lineage barcodes"
+        )
+        if int(diagnostics["unselectedBarcodes"]):
+            remedy += (
+                ", or a cell_selection of the cells whose barcodes "
+                f"{'it lists' if one else 'they list'}"
+            )
+        cause = no_barcode_cause(len(held), selected_cells_named(diagnostics))
+        named = file_names(held)
+        return f"{files_text('barcode', len(held)).capitalize()} {named} {cause}. {remedy}."
+
+    return DiagnosticRule("emptyRows", applies=holds_no_barcode, message=message)
 
 
 def _kept_rows(rows: "BarcodeRows", cells: np.ndarray, level: str) -> np.ndarray:
@@ -193,8 +230,12 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
         selected cell, which count each item of a list field and each nonzero
         count of a merged table or a matrix. Barcodes of no cell of the
         store, such as droplets that cell calling rejected, are named in a
-        warning, and the files that hold no row, such as a table of a header
-        alone, in another. A reused import gives both again.
+        warning, the files that hold no row, such as a table of a header
+        alone, in another, and files whose rows name selected cells but hold
+        no barcode for any of them in a third, which suggests a
+        ``cell_selection`` of the cells whose barcodes the files list when
+        they also name cells outside the selection. A reused import gives the
+        warnings again.
         A file is identified by the SHA-256 of its bytes and by its library,
         the file's name unless ``library`` names it, so a file moved to
         another folder reuses the saved barcodes, as does a renamed one whose
@@ -320,6 +361,9 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
                     "Pass files that list the cells' lineage barcodes.",
                 ),
             ),
+            # An assay's counts hold a barcode in every row, so this rule
+            # applies to files alone.
+            _no_barcode_rule(files),
         )
         planned = self._plan_barcodes(arguments, cell_selection, n_cells)
         if planned.reused:
@@ -866,7 +910,9 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
         API reference lists; and, as every source's clones,
         ``cellsWithClone``, the cells given a clone, and
         ``largestCloneShare``, the share of them that the largest clone
-        holds.
+        holds. Barcodes whose files hold no row, or whose rows of selected
+        cells hold no barcode, give clones of no cell, which the clone
+        summaries and ``export_clones`` refuse, naming that cause.
 
         Args:
             barcodes: A ``lineage_barcodes`` artifact, such as one from
