@@ -40,6 +40,7 @@ from tests.storage_helpers import (
     insert_nullable_cell_column,
     write_count_store,
 )
+from tests.test_doublet_streaming import _exact_simulated_neighbors
 from tests.test_reduction_graph_diagnostics import _warned
 
 _INDEX = doublets.DoubletIndexSettings(
@@ -1902,15 +1903,16 @@ def test_atac_doublet_scores_count_simulated_doublets_among_exact_lsi_neighbors(
     simulated = (summed / summed.sum(axis=1, keepdims=True) * idf) @ lsi["loadings"][:]
     points = np.vstack([lsi["data"][:], simulated]).astype(np.float32)
     # Each cell's simulated doublets among its k nearest other points, by
-    # Euclidean distance.
-    values = points.astype(np.float64)
-    squared = (values**2).sum(axis=1)
-    distances = squared[:, None] + squared[None, :] - 2 * values @ values.T
-    np.fill_diagonal(distances, np.inf)
-    nearest = np.argsort(distances[: len(counts)], axis=1, kind="stable")[:, :k]
-    exact = np.count_nonzero(nearest >= len(counts), axis=1)
+    # exact Euclidean distance. A point whose distance ties the k-th to within
+    # the float32 rounding of the index may count either way, as it does on
+    # one cell of this store, so the exact distances bound each count.
+    low, high = _exact_simulated_neighbors(points, len(counts), k)
+    low, high = low[: len(counts)], high[: len(counts)]
+    scored = np.rint(payload["raw_scores"][:] * k)
 
-    np.testing.assert_array_equal(np.rint(payload["raw_scores"][:] * k), exact)
+    assert np.all((low <= scored) & (scored <= high))
+    # Almost every cell has no such tie, and its count is the exact one.
+    assert np.count_nonzero(low == high) >= 0.99 * len(counts)
 
 
 def test_atac_doublets_recover_injected_heterotypic_doublets(

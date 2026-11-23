@@ -300,21 +300,27 @@ def _exact_simulated_neighbors(
 
     The bounds are equal unless the k-th distance ties others, to within the
     float32 rounding of hnswlib's distances; a tie may then go either way.
+    The distances are taken from the differences, in blocks of rows, so a few
+    thousand points stay small.
     """
     values = points.astype(np.float64)
-    distances = ((values[:, None, :] - values[None, :, :]) ** 2).sum(axis=2)
-    np.fill_diagonal(distances, np.inf)
-    kth = np.sort(distances, axis=1)[:, k - 1 : k]
-    tolerance = 1e-5 * np.maximum(kth, 1e-12)
-    certain = distances < kth - tolerance
-    tied = np.abs(distances - kth) <= tolerance
     simulated = np.arange(len(points)) >= n_observed
-    known = np.count_nonzero(certain & simulated, axis=1)
-    free = k - np.count_nonzero(certain, axis=1)
-    tied_simulated = np.count_nonzero(tied & simulated, axis=1)
-    tied_observed = np.count_nonzero(tied & ~simulated, axis=1)
-    low = known + np.maximum(0, free - tied_observed)
-    high = known + np.minimum(tied_simulated, free)
+    low = np.empty(len(points), dtype=np.int64)
+    high = np.empty(len(points), dtype=np.int64)
+    for start in range(0, len(points), 64):
+        rows = np.arange(start, min(start + 64, len(points)))
+        distances = ((values[rows, None, :] - values[None, :, :]) ** 2).sum(axis=2)
+        distances[np.arange(len(rows)), rows] = np.inf
+        kth = np.sort(distances, axis=1)[:, k - 1 : k]
+        tolerance = 1e-5 * np.maximum(kth, 1e-12)
+        certain = distances < kth - tolerance
+        tied = np.abs(distances - kth) <= tolerance
+        known = np.count_nonzero(certain & simulated, axis=1)
+        free = k - np.count_nonzero(certain, axis=1)
+        tied_simulated = np.count_nonzero(tied & simulated, axis=1)
+        tied_observed = np.count_nonzero(tied & ~simulated, axis=1)
+        low[rows] = known + np.maximum(0, free - tied_observed)
+        high[rows] = known + np.minimum(tied_simulated, free)
     return low, high
 
 
