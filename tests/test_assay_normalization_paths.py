@@ -32,7 +32,6 @@ from cytearc.storage.stores import load_zarr
 from cytearc.utils import configure_output, logger
 from cytearc.writers import write_renorm_subset_to_zarr
 from cytearc.writers.counts_t import finalize_writer_counts_t
-from tests.conftest import quiet_cytearc_output
 from tests.storage_helpers import by_cell_id, finalize_test_counts, write_count_store
 
 SIZE_FACTOR = 1000.0
@@ -371,7 +370,7 @@ def test_renormalized_subset_progress_bar_shows_the_given_message(
             msg="Renormalizing marker genes",
         )
     finally:
-        quiet_cytearc_output()
+        configure_output(progress=False)
 
     assert "Renormalizing marker genes" in capsys.readouterr().err
     raw = COUNTS["RNA"][:, features].astype(np.float64)

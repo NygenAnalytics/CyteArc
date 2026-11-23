@@ -292,10 +292,8 @@ def flag_store(tmp_path_factory):
 
 @pytest.fixture
 def restored_output_settings():
-    try:
-        yield
-    finally:
-        quiet_cytearc_output()
+    yield
+    quiet_cytearc_output()
 
 
 def test_the_surface_holds_the_flags_of_every_namespace_and_plot() -> None:

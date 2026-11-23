@@ -661,7 +661,7 @@ def test_atac_settings_are_checked_before_the_run(atac) -> None:
         lsi={"dims": 6, "skip_first": False},
     )
     assert plan.config["stages"]["lsi"] == {"dims": 6, "skip_first": False}
-    # Settings without dims keep the method's default dims.
+    # Settings without dims resolve and record only the settings given.
     plan = _resolve("atac", atac.datastore, lsi={"n_iter": 3})
     assert plan.config["stages"]["lsi"] == {"n_iter": 3}
 

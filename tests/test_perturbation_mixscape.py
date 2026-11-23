@@ -71,7 +71,7 @@ N_CELLS = len(RNA)
 
 
 def _signature(store: DataStore, cells=None, genes: range = range(5, N_GENES)):
-    """A signature of ``genes``, 5 to 59, over every cell, from labels of ``cells``."""
+    """A signature of ``genes``, by default 5 to 59, over every cell, from labels of ``cells``."""
     calls = store.perturbation.call_guides(
         cells or store.select_measured_cells("CRISPR"), method="fixed", min_umi=10
     )

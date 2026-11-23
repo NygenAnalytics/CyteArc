@@ -17,6 +17,7 @@ if int(os.environ.get("PYTEST_XDIST_WORKER_COUNT", "1")) > 1:
     os.environ.setdefault("OMP_WAIT_POLICY", "PASSIVE")
 
 import functools
+import signal
 import sys
 
 import pytest
@@ -106,8 +107,13 @@ def quiet_cytearc_output() -> None:
     CyteArc's settings return to the library's defaults without progress bars,
     and loguru keeps one handler, which writes errors to stderr, so a test
     captures only what it prints. A test that changes CyteArc's output calls
-    this when it ends; restoring the library's defaults instead would show
-    CyteArc's INFO lines in every later test of the process.
+    this from a fixture's teardown; restoring the library's defaults instead
+    would show CyteArc's INFO lines in every later test of the process.
+
+    Never call it while capsys captures a test's output: loguru keeps the
+    stream that ``sys.stderr`` names when the handler is added, and capsys
+    closes its stream when the test ends, so every later error record of the
+    process would fail to write.
     """
     set_verbosity("INFO")
     configure_output(progress=False, timestamps=False)
@@ -119,6 +125,23 @@ def quiet_cytearc_output() -> None:
 def _quiet_test_logs() -> None:
     """Keep pytest output readable while standalone CLIs retain INFO logs."""
     quiet_cytearc_output()
+
+
+@pytest.fixture(autouse=True)
+def _sigint_handler_restored() -> None:
+    """Fail a test that leaves SIGINT's handler other than the one it found.
+
+    Python's own handler turns Ctrl-C into KeyboardInterrupt; a test that
+    replaces it and does not put it back would keep later tests of its worker
+    from being interrupted. The handler is restored before the failure, so a
+    leak is reported once.
+    """
+    found = signal.getsignal(signal.SIGINT)
+    yield
+    left = signal.getsignal(signal.SIGINT)
+    if left != found:
+        signal.signal(signal.SIGINT, found)
+        pytest.fail(f"The test left SIGINT's handler {left!r} in place of {found!r}")
 
 
 @pytest.fixture(autouse=True)

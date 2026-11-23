@@ -1,3 +1,4 @@
+import io
 import json
 import re
 import subprocess
@@ -88,37 +89,27 @@ def test_reconfiguration_tolerates_a_stale_cytearc_handler(capsys):
     assert capsys.readouterr().out == "DEBUG: restored\n"
 
 
-def test_quieting_the_output_keeps_only_errors_on_stderr(tmp_path, capsys):
+def test_quieting_the_output_keeps_only_errors_on_stderr(tmp_path, monkeypatch):
     log_file = tmp_path / "cytearc.log"
     set_verbosity("DEBUG", str(log_file))
     configure_output(progress=True, timestamps=True)
+    # Streams that stay open after the test, unlike those of capsys, since
+    # the handler keeps the stderr that it is added with.
+    stdout, stderr = io.StringIO(), io.StringIO()
+    monkeypatch.setattr(sys, "stdout", stdout)
+    monkeypatch.setattr(sys, "stderr", stderr)
 
     quiet_cytearc_output()
     logger.info("an INFO line")
     logger.warning("a warning")
     logger.error("an error")
 
-    captured = capsys.readouterr()
-    assert captured.out == ""
-    assert captured.err.endswith(" - an error\n")
-    assert "an INFO line" not in captured.err and "a warning" not in captured.err
+    assert stdout.getvalue() == ""
+    assert stderr.getvalue().endswith(" - an error\n")
+    assert "an INFO line" not in stderr.getvalue()
+    assert "a warning" not in stderr.getvalue()
     assert log_file.read_text(encoding="utf-8") == ""
     assert _config == _OutputConfig(progress=False)
-
-
-# pytest runs a module's tests in their order, so the restore after the first
-# of these two tests runs before the second.
-def test_turning_the_output_up_before_the_next_test(capsys):
-    set_verbosity("DEBUG")
-    logger.debug("turned up")
-
-    assert capsys.readouterr().out == "DEBUG: turned up\n"
-
-
-def test_the_test_before_leaves_the_output_quiet(capsys):
-    logger.info("an INFO line")
-
-    assert capsys.readouterr().out == ""
 
 
 @pytest.mark.parametrize("setting", ["progress", "timestamps"])

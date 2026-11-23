@@ -161,7 +161,14 @@ def test_set_verbosity_rejects_invalid_level():
         set_verbosity("NOT_A_REAL_LEVEL")
 
 
-def test_set_verbosity_accepts_valid_level():
+@pytest.fixture
+def quiet_output_afterwards():
+    """Leave the suite's quiet output once a test that changes it ends."""
+    yield
+    quiet_cytearc_output()
+
+
+def test_set_verbosity_accepts_valid_level(quiet_output_afterwards):
     from cytearc.utils.logging import _config
 
     try:
@@ -173,11 +180,13 @@ def test_set_verbosity_accepts_valid_level():
             set_verbosity(None)
         assert _config.level == "ERROR"
     finally:
-        quiet_cytearc_output()
+        set_verbosity("INFO")
     assert (_config.level, _config.filepath) == ("INFO", None)
 
 
-def test_tqdmbar_uses_explicit_progress_independently_of_severity(monkeypatch):
+def test_tqdmbar_uses_explicit_progress_independently_of_severity(
+    monkeypatch, quiet_output_afterwards
+):
     import tqdm.auto as tqdm_auto
 
     captured: list[bool] = []
@@ -201,7 +210,7 @@ def test_tqdmbar_uses_explicit_progress_independently_of_severity(monkeypatch):
         configure_output(progress=True)
         list(tqdmbar(range(1), desc="test", disable=True))
     finally:
-        quiet_cytearc_output()
+        configure_output(level="INFO", progress=False, timestamps=False)
 
     assert captured == [False, False, True, True, True]
 
