@@ -111,20 +111,30 @@ def scatter_block_dense(
     order_map: np.ndarray,
     n_feats: int,
     destination_dtype: np.dtype[Any],
+    *,
+    out: np.ndarray | None = None,
+    rows: np.ndarray | None = None,
 ) -> np.ndarray:
     """Place source columns at their merged positions in dense destination rows.
 
     ``order_map`` must give every source column its own merged column. The
     rows equal the dense bands that ``remap_block_to_coo`` coordinates fill:
     values are checked and cast in the same way, and as sparse coordinates
-    hold no zero, a negative zero is written as zero.
+    hold no zero, a negative zero is written as zero. With ``out``, the rows
+    go to its rows ``rows`` instead of a new array, and the caller turns the
+    negative zeros of ``out`` to zeros once it holds every row.
     """
     values = np.asarray(block)
     if np.can_cast(values.dtype, destination_dtype, casting="safe"):
         values = values.astype(destination_dtype, copy=False)
     else:
         values = checked_sparse_cast(values, destination_dtype)
-    dense = np.zeros((values.shape[0], n_feats), dtype=destination_dtype)
+    if out is None:
+        dense = np.zeros((values.shape[0], n_feats), dtype=destination_dtype)
+        target: slice | np.ndarray = slice(None)
+    else:
+        dense = out
+        target = np.asarray(rows)
     # Merged columns mostly follow each other in runs, which copy as slices.
     breaks = np.flatnonzero(np.diff(order_map) != 1) + 1
     if breaks.size < _SCATTER_RUNS:
@@ -132,10 +142,12 @@ def scatter_block_dense(
             np.r_[0, breaks].tolist(), np.r_[breaks, order_map.size].tolist()
         ):
             first = int(order_map[start])
-            dense[:, first : first + stop - start] = values[:, start:stop]
-    else:
+            dense[target, first : first + stop - start] = values[:, start:stop]
+    elif out is None:
         dense[:, order_map] = values
-    if destination_dtype.kind in "fc":
+    else:
+        dense[target[:, None], order_map] = values
+    if out is None and destination_dtype.kind in "fc":
         np.copyto(dense, 0, where=dense == 0)
     return dense
 
@@ -751,15 +763,13 @@ def write_assay_counts(
     ):
         destination_shard_rows = array_shard_rows(destination)
         mask_bytes = np.dtype(bool).itemsize if destination_dtype.kind in "fc" else 0
-        # A batch holds the merged rows that it assembles and its window's
-        # index arrays; each piece holds the cast of its source rows, its
-        # merged rows and a float destination's zero mask, beside the band
-        # that the batch is copied into.
+        # A batch holds the merged rows that it assembles, a float
+        # destination's zero mask and its window's index arrays, and the
+        # cast of a piece's source rows, beside the band that the batch is
+        # copied into.
         batch_reserve = (
             batch_rows * source_n_feats * destination_dtype.itemsize
-            + batch_rows
-            * alignment.nFeats
-            * (2 * destination_dtype.itemsize + mask_bytes)
+            + batch_rows * alignment.nFeats * (destination_dtype.itemsize + mask_bytes)
             + destination_shard_rows * alignment.nFeats * destination_dtype.itemsize
             + batch_rows * WINDOW_BYTES_PER_ROW
         )
@@ -796,14 +806,19 @@ def write_assay_counts(
                     (window.nRows, alignment.nFeats), dtype=destination_dtype
                 )
                 for source_idx, positions, values in pieces:
-                    dense[positions] = scatter_block_dense(
+                    scatter_block_dense(
                         values,
                         kept_maps[source_idx],
                         alignment.nFeats,
                         destination_dtype,
+                        out=dense,
+                        rows=positions,
                     )
                     # The source rows may be a view of a held window.
                     del values
+                if destination_dtype.kind in "fc":
+                    # Sparse coordinates hold no negative zero.
+                    np.copyto(dense, 0, where=dense == 0)
                 yield dense
 
         window_rows = _held_window_rows(

@@ -2782,10 +2782,9 @@ def test_dataset_merge_sparse_write_respects_admitted_batch_geometry(
         batches["sparse"].append(int(result.shape[0]))
         return result
 
-    def tracking_scatter(block, order_map, n_feats, destination_dtype):
-        result = original_scatter(block, order_map, n_feats, destination_dtype)
-        batches["dense"].append(int(result.shape[0]))
-        return result
+    def tracking_scatter(block, order_map, n_feats, destination_dtype, **options):
+        batches["dense"].append(int(np.asarray(block).shape[0]))
+        return original_scatter(block, order_map, n_feats, destination_dtype, **options)
 
     def tracking_batch(*args, **kwargs):
         plan = original_batch(*args, **kwargs)
