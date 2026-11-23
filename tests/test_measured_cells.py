@@ -3623,8 +3623,11 @@ _THREE_SOURCES = {
 def three_sources(tmp_path_factory) -> Path:
     """Merge three RNA sources of 150 cells that share 100 genes, A and B 20 more, B and C 20 more, and A and C 15 of their own each.
 
-    Ten shared genes mark each of two cell types. The intersection merge of
-    A and B holds the 120 genes that both measured.
+    Ten shared genes mark each of two cell types, and one cell of B holds an
+    outlier of the first gene that B and C share, above its seurat_v3 clip.
+    The intersection merges of A and B, and of B and C, hold the 120 genes
+    that each pair measured; the genes of B and C follow those of A in the
+    merge of all three, so they are not its first genes.
     """
     base = tmp_path_factory.mktemp("three_sources")
     rng = np.random.default_rng(13)
@@ -3635,16 +3638,20 @@ def three_sources(tmp_path_factory) -> Path:
         rates[cell_type, :10] *= 8
         rates[~cell_type, 10:20] *= 8
         own = rng.poisson(2.0, size=(150, len(genes) - len(_SHARED_GENES)))
+        counts = np.hstack([rng.poisson(rates), own])
+        if name == "B":
+            counts[0, genes.index("BC0")] = 600
         write_count_store(
             str(base / f"{name}.zarr"),
-            {"RNA": np.hstack([rng.poisson(rates), own])},
+            {"RNA": counts},
             "uint32",
             feature_ids={"RNA": genes},
         )
     stores = _MergedSources(base, "RNA")
     for name, sources, kind in (
         ("merged", ["A", "B", "C"], "union"),
-        ("intersection", ["A", "B"], "intersection"),
+        ("a_and_b", ["A", "B"], "intersection"),
+        ("b_and_c", ["B", "C"], "intersection"),
     ):
         DataStoreMerge(
             [stores.open(source) for source in sources],
@@ -3655,15 +3662,29 @@ def three_sources(tmp_path_factory) -> Path:
         ).dump()
     merged = stores.open()
     ids = merged.cells.fetch_all("ids").astype(str)
-    merged.cells.insert(
-        "a_and_b", by_cell_id(merged.cells, ~np.char.startswith(ids, "C__"))
-    )
+    for column, left_out in (("a_and_b", "C__"), ("b_and_c", "A__")):
+        merged.cells.insert(
+            column, by_cell_id(merged.cells, ~np.char.startswith(ids, left_out))
+        )
     return base
 
 
+_PAIR_LACKS = {
+    "a_and_b": (
+        "Source 'A' lacks 35: 'BC0', 'BC1', 'BC2', 'BC3', 'BC4' and 30 more. "
+        "Source 'B' lacks 30: 'AO0', 'AO1', 'AO2', 'AO3', 'AO4' and 25 more."
+    ),
+    "b_and_c": (
+        "Source 'B' lacks 30: 'AO0', 'AO1', 'AO2', 'AO3', 'AO4' and 25 more. "
+        "Source 'C' lacks 35: 'AB0', 'AB1', 'AB2', 'AB3', 'AB4' and 30 more."
+    ),
+}
+
+
+@pytest.mark.parametrize("pair", ["a_and_b", "b_and_c"])
 @pytest.mark.parametrize("flavor", ["cytearc", "seurat_v3", "pearson_residuals"])
 def test_hvgs_of_some_sources_name_the_genes_that_those_sources_lack(
-    three_sources, flavor
+    three_sources, flavor, pair
 ) -> None:
     stores = _MergedSources(three_sources, "RNA")
     store = stores.open()
@@ -3671,22 +3692,25 @@ def test_hvgs_of_some_sources_name_the_genes_that_those_sources_lack(
     if flavor == "seurat_v3":
         options.pop("max_cells")
     with pytest.warns(UserWarning) as caught:
-        ref = store.features.hvgs(store.snapshot_cell_selection("a_and_b"), **options)
-    # The cells of A and B leave out the genes that either lacks, C's own
-    # among them, and the warning names A and B alone.
+        ref = store.features.hvgs(store.snapshot_cell_selection(pair), **options)
+    # The cells of two sources leave out the genes that either lacks, those of
+    # the third source among them, and the warning names those two alone.
     assert _left_out(caught) == [
         "features.hvgs leaves out 50 genes that some source of the selected cells "
         "did not measure, since their zero counts in its cells are not "
-        "measurements. Source 'A' lacks 35: 'BC0', 'BC1', 'BC2', 'BC3', 'BC4' and "
-        "30 more. Source 'B' lacks 30: 'AO0', 'AO1', 'AO2', 'AO3', 'AO4' and 25 "
-        "more."
+        f"measurements. {_PAIR_LACKS[pair]}"
     ]
-    intersection = stores.open("intersection")
+    # The pair's genes score and select as the pair's intersection merge, also
+    # for B and C, whose genes are not the first of the merge of all three.
+    intersection = stores.open(pair)
     expected = intersection.features.hvgs(
         intersection.snapshot_cell_selection("I"), **options
     )
+    first, second = pair.upper().split("_AND_")
     names = store.RNA.feats.fetch_all("names").astype(str)
-    kept = np.isin(names, _THREE_SOURCES["A"]) & np.isin(names, _THREE_SOURCES["B"])
+    kept = np.isin(names, _THREE_SOURCES[first]) & np.isin(
+        names, _THREE_SOURCES[second]
+    )
     np.testing.assert_allclose(
         np.asarray(store.artifacts.load(ref)["corrected_variance"][:])[kept],
         intersection.artifacts.load(expected)["corrected_variance"][:],
