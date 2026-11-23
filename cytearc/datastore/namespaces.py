@@ -32,6 +32,9 @@ from ._operations.trajectory import _TrajectoryOperationsMixin
 from ._operations.variants import _VariantOperationsMixin
 from .datastore import DataStore
 
+from ..storage.refs import ArtifactRef
+from .trajectory_plan import planned_call, refuse_call_plans
+
 __all__ = [
     "ClonesAccessor",
     "ClustersAccessor",
@@ -59,8 +62,36 @@ def _bind[**P, R](
 ) -> Callable[Concatenate[Any, P], R]:
     @wraps(entry)
     def call(self: Any, /, *args: P.args, **kwargs: P.kwargs) -> R:
+        # The plan of a call in a trajectory plan stands for no saved result.
+        refuse_call_plans(call.__name__, args, kwargs)
         method = cast(Callable[P, R], getattr(self._store, entry.__name__))
         return method(*args, **kwargs)
+
+    return call
+
+
+def _planned[**P](
+    entry: Callable[Concatenate[Any, P], ArtifactRef],
+) -> Callable[Concatenate[Any, P], ArtifactRef]:
+    """Bind a trajectory call that ``ds.trajectory.plan()`` plans inside its block.
+
+    Inside a plan's block, the call returns its plan in place of the ref when
+    it would compute, which the calls after it take as an input.
+    """
+
+    @wraps(entry)
+    def call(self: Any, /, *args: P.args, **kwargs: P.kwargs) -> ArtifactRef:
+        method = cast(Callable[P, ArtifactRef], getattr(self._store, entry.__name__))
+        return cast(
+            ArtifactRef,
+            planned_call(
+                self._store,
+                call.__name__,
+                lambda: method(*args, **kwargs),
+                args,
+                kwargs,
+            ),
+        )
 
     return call
 
@@ -330,44 +361,45 @@ class ScoresAccessor(_Accessor):
 class TrajectoryAccessor(_Accessor):
     __slots__ = ()
 
-    pseudotime = _bind(_TrajectoryOperationsMixin._trajectory_pseudotime)
+    plan = _bind(_TrajectoryOperationsMixin._trajectory_plan)
+    pseudotime = _planned(_TrajectoryOperationsMixin._trajectory_pseudotime)
     load_pseudotime = _bind(_TrajectoryOperationsMixin._trajectory_load_pseudotime)
-    fate = _bind(_TrajectoryOperationsMixin._trajectory_fate)
+    fate = _planned(_TrajectoryOperationsMixin._trajectory_fate)
     load_fate = _bind(_TrajectoryOperationsMixin._trajectory_load_fate)
-    states = _bind(_TrajectoryOperationsMixin._trajectory_states)
+    states = _planned(_TrajectoryOperationsMixin._trajectory_states)
     load_states = _bind(_TrajectoryOperationsMixin._trajectory_load_states)
-    markers = _bind(_TrajectoryFeatureOperationsMixin._trajectory_markers)
+    markers = _planned(_TrajectoryFeatureOperationsMixin._trajectory_markers)
     load_markers = _bind(_TrajectoryFeatureOperationsMixin._trajectory_load_markers)
-    aggregation = _bind(_TrajectoryFeatureOperationsMixin._trajectory_aggregation)
+    aggregation = _planned(_TrajectoryFeatureOperationsMixin._trajectory_aggregation)
     load_aggregation = _bind(
         _TrajectoryFeatureOperationsMixin._trajectory_load_aggregation
     )
-    lineage_markers = _bind(
+    lineage_markers = _planned(
         _TrajectoryFeatureOperationsMixin._trajectory_lineage_markers
     )
     load_lineage_markers = _bind(
         _TrajectoryFeatureOperationsMixin._trajectory_load_lineage_markers
     )
-    drivers = _bind(_TrajectoryFeatureOperationsMixin._trajectory_drivers)
+    drivers = _planned(_TrajectoryFeatureOperationsMixin._trajectory_drivers)
     load_drivers = _bind(_TrajectoryFeatureOperationsMixin._trajectory_load_drivers)
-    lineage_aggregation = _bind(
+    lineage_aggregation = _planned(
         _TrajectoryFeatureOperationsMixin._trajectory_lineage_aggregation
     )
     load_lineage_aggregation = _bind(
         _TrajectoryFeatureOperationsMixin._trajectory_load_lineage_aggregation
     )
-    curves = _bind(_TrajectoryOperationsMixin._trajectory_curves)
+    curves = _planned(_TrajectoryOperationsMixin._trajectory_curves)
     load_curves = _bind(_TrajectoryOperationsMixin._trajectory_load_curves)
     curves_in_layout = _bind(_TrajectoryOperationsMixin._trajectory_curves_in_layout)
-    lineage_tree = _bind(_TrajectoryOperationsMixin._trajectory_lineage_tree)
+    lineage_tree = _planned(_TrajectoryOperationsMixin._trajectory_lineage_tree)
     load_lineage_tree = _bind(_TrajectoryOperationsMixin._trajectory_load_lineage_tree)
-    lineage_membership = _bind(
+    lineage_membership = _planned(
         _TrajectoryOperationsMixin._trajectory_lineage_membership
     )
     load_lineage_membership = _bind(
         _TrajectoryOperationsMixin._trajectory_load_lineage_membership
     )
-    branch_cells = _bind(_TrajectoryOperationsMixin._trajectory_branch_cells)
+    branch_cells = _planned(_TrajectoryOperationsMixin._trajectory_branch_cells)
 
 
 class VariantsAccessor(_Accessor):

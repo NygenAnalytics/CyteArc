@@ -221,6 +221,7 @@ from ...trajectory.lineages import (
     stream_weighted_correlations as _stream_weighted_correlations_impl,
 )
 from ...storage.selections import resolve_generated_selection_artifact
+from ..trajectory_plan import TrajectoryPlan
 from ...trajectory.membership import (
     branch_points as _branch_points_impl,
     branch_window as _branch_window_impl,
@@ -1310,6 +1311,55 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         ledger.release(ledger.held_bytes - before)
         ledger.hold(f"the codes of the {name}", compact.codes.nbytes)
         return compact
+
+    def _trajectory_plan(self) -> TrajectoryPlan:
+        """Report what the trajectory calls made in a block would reuse and compute, without running them.
+
+        Use the plan as a context manager around the calls of a trajectory,
+        written as they would run::
+
+            with ds.trajectory.plan() as plan:
+                pseudotime = ds.trajectory.pseudotime(
+                    graph, source_sink=clusters, sources=[1], sinks=[2]
+                )
+                fate = ds.trajectory.fate(pseudotime, clusters, sinks=[2, 3])
+            plan.computed
+
+        Inside the block, ``pseudotime``, ``fate``, ``states``, ``curves``,
+        ``lineage_tree``, ``lineage_membership``, ``branch_cells``,
+        ``markers``, ``aggregation``, ``lineage_markers``, ``drivers`` and
+        ``lineage_aggregation`` look for their results as they do when they
+        run, and the plan records each of them. A call whose result the store
+        holds, complete and current, returns the result's ref. A call that
+        would compute returns its plan, a
+        :class:`~cytearc.datastore.trajectory_plan.TrajectoryCallPlan` that
+        says why, in place of the ref, and a later call that takes that plan
+        is reported computed with the reason ``"upstream"``, since its result
+        depends on one that does not exist yet; it does not run. After the
+        block, the calls run as they always do.
+
+        The plan writes nothing and works on a read-only store. Each call does
+        the work that it does before it looks for its result: it reads its
+        inputs' records and small arrays, metadata, and the graph that it
+        walks, so a plan costs about one graph load for each call but
+        ``lineage_tree``, and reads no count matrix. A plan raises the errors
+        that a call raises before it writes, such as a refused memory budget.
+
+        Every other call inside the block reuses a saved result as it always
+        does, and one that would compute raises ``RuntimeError`` when the block
+        ends, as a plan writes nothing: make such calls before the plan or
+        after it. The plan of a call stands for no saved result, so another
+        call given it raises ``TypeError``, with the call to run instead.
+
+        Returns:
+            The plan, whose calls fill as the block runs.
+
+        Raises:
+            RuntimeError: If the block opens while another plan is open, makes
+                a planned call on another DataStore, or makes a call that the
+                plan does not cover and that would compute.
+        """
+        return TrajectoryPlan(self)
 
     @validation_scoped
     def _trajectory_pseudotime(
