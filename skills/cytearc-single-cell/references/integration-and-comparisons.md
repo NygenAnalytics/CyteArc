@@ -256,8 +256,11 @@ restarts only an earlier merge; a destination that holds another store or other 
 `ValueError`. Studies of different antibody panels: the default `features="union"` writes zero
 counts for an antibody in the cells of a study that never stained it and records each study's
 panel in the feature columns `measured_in_<name>`, which the ADT recipe reads to leave those
-antibodies out of its panel and markers; `features="intersection"` keeps only the antibodies that
-every study measured. Study names that differ only in case are refused when panels differ.
+antibodies out of its panel and markers (a run of one study's cells keeps that study's panel);
+plots show such an antibody as missing in the other studies' cells, `markers.search` leaves it out
+with a warning, and `compare.test` and `imputation.compute_imputed` refuse it over cells of a study
+that did not stain it. `features="intersection"` keeps only the antibodies that every study
+measured. Study names that differ only in case are refused when panels differ.
 `out_workspace=` adds a workspace to an existing CyteArc store and keeps its other members. Mapping
 keeps a reference fixed; the query is another store.
 

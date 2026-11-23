@@ -36,6 +36,7 @@ from ...metadata.alignment import (
     keyed_values_remedy,
     require_keyed,
 )
+from ...metadata.membership import require_measured_features
 from ...metadata.rows import (
     fingerprint_stored_rows,
     read_array_rows_chunkwise,
@@ -1038,6 +1039,9 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
                 ``reduction`` of a ``FeatureRef``, or a ``FeatureRef`` names
                 another assay.
             UnmeasuredCellsError: If the assay did not measure a cell of the operator.
+            ValueError: If the source of a merge of a cell of the operator did
+                not measure a requested feature, as the assay's
+                ``measured_in_<source>`` feature columns record.
         """
         single_feature = isinstance(feature_name, str | FeatureRef)
         keys: list[Any]
@@ -1123,6 +1127,18 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
             # Features read the assay; metadata columns read no assay.
             self._require_measured_cells(
                 assay_name, cell_indices, operation="get_imputed", remedy="graph"
+            )
+            imputed_assay = self._get_assay(assay_name)
+            require_measured_features(
+                imputed_assay.cells,
+                imputed_assay.feats,
+                cell_indices,
+                {feature.label: feature.indices for feature in resolved},
+                assay=assay_name,
+                remedy=(
+                    "impute it over a diffusion operator of the cells of the "
+                    "sources that measured it"
+                ),
             )
 
         sparse = diff_op.tocsc()

@@ -12,7 +12,7 @@ from ..storage.metadata_keys import (
     measured_features_column,
     measured_features_columns,
 )
-from ..utils.arguments import quoted_value
+from ..utils.arguments import quoted_examples, quoted_value
 
 #: The most features that the warning about unshared features names per source.
 UNSHARED_FEATURE_EXAMPLES = 5
@@ -348,14 +348,9 @@ def unshared_features_warning(
                 f"lacks every {adjective} feature."
             )
             continue
-        listed = ", ".join(
-            quoted_value(name)
-            for name in feature_names[missing[:UNSHARED_FEATURE_EXAMPLES]].tolist()
-        )
-        more = missing.size - UNSHARED_FEATURE_EXAMPLES
         lacking.append(
-            f"Source {source_name!r} lacks {missing.size:,}: {listed}"
-            + (f" and {more:,} more." if more > 0 else ".")
+            f"Source {source_name!r} lacks {missing.size:,}: "
+            f"{quoted_examples(feature_names[missing], UNSHARED_FEATURE_EXAMPLES)}."
         )
     if not lacking:
         return None
@@ -370,11 +365,14 @@ def unshared_features_warning(
         f"{adjective} features {'was' if unshared == 1 else 'were'} not measured "
         "by every source that holds the assay. "
         + " ".join(lacking)
+        + f"{zeros}; {record}, so "
         + (
-            f"{zeros}; {record}, so the ADT recipe leaves those antibodies out of "
-            "its panel and markers, while other analyses read the zeros as counts."
+            "plots, marker search, compare.test and the ADT recipe leave those "
+            "zeros out, while normalization and scores still read them as counts."
             if assay_type == "ADT"
-            else f"{zeros}, which analyses read as counts; {record}."
+            else "plots, marker search and compare.test leave those zeros out, "
+            "while normalization, feature selection and scores still read them "
+            "as counts."
         )
     )
     if combination == "merge":

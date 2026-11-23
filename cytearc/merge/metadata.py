@@ -39,7 +39,11 @@ from ..storage.arrays import (
 )
 from ..metadata.selection import valid_category_mask
 from ..storage.budget import ResourceBudget
-from ..storage.categorical import CategoricalColumn
+from ..storage.categorical import (
+    CategoricalColumn,
+    category_codes_dtype,
+    link_categories,
+)
 from ..storage.cell_order import (
     SOURCE_ROW,
     SOURCE_ROW_ROLE,
@@ -56,6 +60,7 @@ from ..storage.layout import (
 )
 from ..storage.metadata_keys import (
     ASSAY_MEMBERSHIP_ROLE,
+    CELL_SOURCES_ROLE,
     assay_membership_column,
     is_reserved_metadata_name,
     measured_features_attributes,
@@ -1078,6 +1083,8 @@ def plan_cell_metadata(
     excluded_columns: list[frozenset[str]] | None = None,
     n_cells: int | None = None,
     row_plan: RowPlan | None = None,
+    record_sources: bool = False,
+    default_source_column: bool = False,
 ) -> CellMetadataPlan:
     """Resolve the destination cell-metadata schema without writing.
 
@@ -1085,7 +1092,12 @@ def plan_cell_metadata(
     writing ``sourceRow`` holds; None counts every cell of every source.
     ``row_plan``, the rows that a composite takes from each source, limits
     the labels that become a column's categories to those rows; None takes
-    every row.
+    every row. ``record_sources``, set when the merge records which features
+    each source measured, stores ``source_column`` as a categorical column of
+    the source names with the attributes of
+    :func:`~cytearc.storage.metadata_keys.cell_sources_attributes`, which
+    the record names; ``default_source_column`` says that the merge, not its
+    caller, chose that name.
     """
     block_rows = max(1, int(block_rows))
     scan_rows = block_rows if scan_rows is None else max(1, int(scan_rows))
@@ -1137,6 +1149,16 @@ def plan_cell_metadata(
     all_public.update(_PROTECTED)
     all_public.update(membership_columns)
     if source_column is not None:
+        if source_column in all_public and default_source_column:
+            raise ValueError(
+                "The sources measured different features, so the merge writes "
+                f"each cell's source in the cell column {source_column!r} beside "
+                "its record of which features each source measured, but a "
+                "source's own cell column takes that name. Pass source_column= "
+                "another name for the column of sources, or a prepend_text that "
+                "keeps the sources' own columns under other names, such as the "
+                "default 'orig'."
+            )
         if source_column in all_public:
             raise ValueError(
                 f"source_column {source_column!r} conflicts with merged metadata"
@@ -1316,6 +1338,18 @@ def plan_cell_metadata(
             )
             continue
         if public == source_column:
+            if record_sources:
+                # Each cell's code is its source's position among the names,
+                # the categories that write_cell_metadata links.
+                columns.append(
+                    _metadata_column_spec(
+                        public,
+                        category_codes_dtype(len(source_names)),
+                        False,
+                        role=CELL_SOURCES_ROLE,
+                    )
+                )
+                continue
             max_len = max(1, max(len(name) for name in source_names))
             columns.append(
                 _metadata_column_spec(public, np.dtype(f"U{max_len}"), False)
@@ -1653,6 +1687,7 @@ def write_feature_metadata(
     profile: StorageProfile,
     measured: Mapping[str, np.ndarray],
     names: Sequence[str],
+    source_column: str | None,
 ) -> None:
     """Merge feature annotations that agree across sources, and record each source's measured features.
 
@@ -1667,9 +1702,11 @@ def write_feature_metadata(
     :func:`~cytearc.storage.metadata_keys.measured_features_column` and with
     the attributes of
     :func:`~cytearc.storage.metadata_keys.measured_features_attributes`; it is
-    empty when the sources measured the same features. A source column of the
-    same name is left out with a warning, and a source's own record is left
-    out, as the merged record holds it.
+    empty when the sources measured the same features. Each column names
+    ``source_column``, the cell column of each cell's source, which the merge
+    writes whenever it writes the record. A source column of the same name is
+    left out with a warning, and a source's own record is left out, as the
+    merged record holds it.
     """
     columns = measured_features_columns(measured)
     reserved = frozenset(columns.values())
@@ -1748,6 +1785,7 @@ def write_feature_metadata(
             "Feature columns that differ between merged sources were not merged: "
             + ", ".join(skipped)
         )
+    assert source_column is not None or not measured, "a record needs its cell column"
     for name, vector in measured.items():
         values = np.asarray(vector, dtype=bool)
         assert values.shape == (n_features,), (name, values.shape, n_features)
@@ -1758,7 +1796,7 @@ def write_feature_metadata(
             dtype=bool,
             chunkSize=column_chunk_rows(n_features, values.dtype.itemsize),
             profile=profile,
-            attributes=measured_features_attributes(name),
+            attributes=measured_features_attributes(name, str(source_column)),
         )
     if taken:
         logger.warning(
@@ -1888,7 +1926,11 @@ def _iter_column_blocks(
             selected, merged = lookups[source_idx]
             values = merged[np.searchsorted(selected, local_rows)]
         elif spec.name == source_column:
-            values = np.full(n, name, dtype=spec.dtype)
+            values = np.full(
+                n,
+                source_idx if spec.role == CELL_SOURCES_ROLE else name,
+                dtype=spec.dtype,
+            )
         elif spec.role == ASSAY_MEMBERSHIP_ROLE:
             assert spec.assay is not None
             state = membership[spec.assay][source_idx]
@@ -2005,6 +2047,10 @@ def write_cell_metadata(
             profile=profile,
             attributes=attributes or None,
         )
+        if spec.role == CELL_SOURCES_ROLE:
+            link_categories(
+                group, spec.name, np.asarray(row_plan.sourceNames), profile=profile
+            )
     group.attrs["complete"] = True
     return group
 

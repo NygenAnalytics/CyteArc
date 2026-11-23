@@ -293,6 +293,8 @@ plt.close(fig)
   when figures must match.
 - A run opened from another `DataStore` object raises `ValueError` in plots.
 - Unclosed `show=False` figures accumulate in long loops.
+- On a store merged from different panels, an antibody also has no value in the cells of a study
+  that did not stain it (`measured_in_<study>` feature columns), drawn and summarized as below.
 - On a merged store, a gene has no value in cells that its assay did not measure (`<assay>_I`
   False): embeddings draw them in `missing_color`, distributions drop them, and dot and matrix
   plots compute `mean`, `fraction`, and `n_cells` over measured cells only, so a group without a

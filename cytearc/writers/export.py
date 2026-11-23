@@ -149,6 +149,7 @@ class H5adExportPlan:
     layers: Mapping[str, H5adMatrix] = field(default_factory=dict)
     membership: Mapping[str, str] = field(default_factory=dict)
     measured_features: Mapping[str, Mapping[str, str]] = field(default_factory=dict)
+    cell_sources: str | None = None
     obsp: Mapping[str, Callable[[], csr_matrix]] = field(default_factory=dict)
     varm: Mapping[str, Callable[[], np.ndarray]] = field(default_factory=dict)
     uns: Mapping[str, Any] = field(default_factory=dict)
@@ -1455,9 +1456,11 @@ def plan_uns(
     ``<column>_colors``, the membership columns that the export holds are
     declared under ``uns["cytearc"]["assayMembership"]``, and the ``var``
     columns that record which features each source measured under
-    ``uns["cytearc"]["measuredFeatures"]``.
+    ``uns["cytearc"]["measuredFeatures"]``, with the ``obs`` column of each
+    cell's source, which they name, under ``uns["cytearc"]["cellSources"]``.
     """
     from ..metadata.membership import (
+        cell_sources_declaration,
         measured_features_declaration,
         membership_declaration,
     )
@@ -1472,8 +1475,13 @@ def plan_uns(
         if column in written
     }
     return _merged(
-        _merged(uns, membership_declaration(declared)),
-        measured_features_declaration(plan.measured_features),
+        _merged(
+            _merged(uns, membership_declaration(declared)),
+            measured_features_declaration(plan.measured_features),
+        ),
+        cell_sources_declaration(
+            plan.cell_sources if plan.cell_sources in written else None
+        ),
     )
 
 
@@ -2536,7 +2544,9 @@ def live_h5ad_plan(
 
     membership, omitted = exported_membership(assay.cells, assay.name)
     cells, feats = assay.cells, assay.feats
-    measured_features = exported_measured_features(feats, assay.name)
+    measured_features, cell_sources_column = exported_measured_features(
+        feats, assay.name
+    )
     exported_rows = cell_rows
     if order is not None:
         exported_rows = (
@@ -2616,22 +2626,23 @@ def live_h5ad_plan(
             temp_dir=temp_dir,
             entries=_summarized_nonzero(assay, cell_rows),
         )
+    obs_names = unique_column_names("_index", obs_keys, table="obs")
+    # The record names the cell column of sources as the export names it.
+    cell_sources = dict(zip(obs_keys, obs_names, strict=True)).get(
+        cell_sources_column or ""
+    )
     return H5adExportPlan(
         x=x,
         obs_index=H5adColumn(
             "_index", partial(_live_column, cells, "ids", exported_rows)
         ),
-        obs=planned(
-            cells,
-            obs_keys,
-            unique_column_names("_index", obs_keys, table="obs"),
-            exported_rows,
-        ),
+        obs=planned(cells, obs_keys, obs_names, exported_rows),
         var_index=H5adColumn("_index", partial(_live_column, feats, "ids", None)),
         var=planned(feats, var_keys, var_names, None),
         obsm=obsm,
         membership=membership,
         measured_features=measured_features,
+        cell_sources=cell_sources,
     )
 
 

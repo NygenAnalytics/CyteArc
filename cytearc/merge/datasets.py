@@ -130,6 +130,10 @@ class _DestinationInspection:
     restart: bool = False
 
 
+DEFAULT_SOURCE_COLUMN = "dataset"
+"""Cell column of each cell's source that a merge writes when it records which features each source measured and ``source_column`` is None."""
+
+
 class DataStoreMerge:
     """Merge multiple DataStores into one Zarr store.
 
@@ -162,7 +166,12 @@ class DataStoreMerge:
         seed: RNG seed for interleaving source cell blocks. None draws a fresh,
               unseeded interleaving, so the merged row order can differ between runs.
         storage_options: Backend options passed when opening the destination.
-        source_column: Optional cell-metadata column storing source names.
+        source_column: Cell column that stores each cell's source name. None
+            writes none, unless the sources measured different features of
+            an assay, when the merge writes the column ``dataset``. Beside a
+            record of which features each source measured, the column is
+            categorical, and it cannot be overwritten or dropped while the
+            record names it.
         mem_budget: Memory budget for the merge. Accepts bytes, a size such
                     as ``8G``, or a fraction of detected system memory.
                     When None, the tightest source budget is used. The merge
@@ -325,6 +334,10 @@ class DataStoreMerge:
         self._normalization: dict[str, dict[str, Any]] = {}
         # Each source's membership state of every merged assay.
         self._sourceMembership: dict[str, list[str]] = {}
+        # The cell column of sources, and whether the merge records which
+        # features each source measured, once the sources are prepared.
+        self._sourcesColumn: str | None = source_column
+        self._recordsSources = False
         self._metadataPlan: CellMetadataPlan | None = None
         # The count layout of each assay that a planned dump writes.
         self._countLayouts: dict[str, CountMatrixPolicy] = {}
@@ -422,6 +435,13 @@ class DataStoreMerge:
                 if features_warning is not None:
                     logger.warning(features_warning)
             self._sourceMembership = self._source_membership()
+            # Known while every alignment is held, which the dump releases.
+            self._recordsSources = self._records_measured_features()
+            self._sourcesColumn = (
+                DEFAULT_SOURCE_COLUMN
+                if self.sourceColumn is None and self._recordsSources
+                else self.sourceColumn
+            )
         except BaseException:
             # A failed preparation leaves no partial state for a later call.
             self._reset_prepared_state()
@@ -440,6 +460,12 @@ class DataStoreMerge:
     def _measured_features(self, assay_name: str) -> dict[str, np.ndarray]:
         """Return the record of what each source that holds ``assay_name`` measured, empty when they measured the same features."""
         return feature_record(self._alignments[assay_name], self.names)
+
+    def _records_measured_features(self) -> bool:
+        """Return whether the merge records which features each source measured for some assay."""
+        return any(
+            self._measured_features(assay_name) for assay_name in self.uniqueAssays
+        )
 
     def _assay_sources(self, assay_name: str) -> list[Any | None]:
         """Return each source's assay, or None for a source without it."""
@@ -1027,7 +1053,9 @@ class DataStoreMerge:
                 self.names,
                 prepend_text=self.prependText,
                 reset_cell_filter=self.resetCellFilter,
-                source_column=self.sourceColumn,
+                source_column=self._sourcesColumn,
+                record_sources=self._recordsSources,
+                default_source_column=self.sourceColumn is None,
                 membership=self._sourceMembership,
                 block_rows=preferred_rows,
                 scan_rows=scan_rows,
@@ -1370,7 +1398,7 @@ class DataStoreMerge:
                 self._metadataPlan,
                 profile=self.profile,
                 reset_cell_filter=self.resetCellFilter,
-                source_column=self.sourceColumn,
+                source_column=self._sourcesColumn,
                 membership=self._sourceMembership,
             )
             components.append(ComponentResult("cellData", cell_action))
@@ -1433,6 +1461,7 @@ class DataStoreMerge:
                     profile=self.profile,
                     measured=self._measured_features(assay_name),
                     names=self._assay_source_names(assay_name),
+                    source_column=self._sourcesColumn,
                 )
                 write_assay_counts(
                     root,
@@ -1502,5 +1531,7 @@ class DataStoreMerge:
         self._assayTypes.clear()
         self._normalization.clear()
         self._sourceMembership = {}
+        self._sourcesColumn = self.sourceColumn
+        self._recordsSources = False
         self._metadataPlan = None
         self._countLayouts = {}

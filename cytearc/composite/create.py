@@ -824,7 +824,9 @@ def create_composite(
                          never saved; reopen the composite with them, and
                          with ``source_storage_options`` for its sources.
         source_column: Cell metadata column that holds each cell's source
-                       name.
+                       name. Beside a record of which features each source
+                       measured, it is categorical, and it cannot be
+                       overwritten or dropped while the record names it.
         relative_sources: If True, the default, record a source in the
                           directory that holds ``at``, or below it, by its
                           path relative to that directory, when both are
@@ -1105,6 +1107,7 @@ def _write_composite(
             excluded_columns=excluded_columns,
             n_cells=row_plan.nCells,
             row_plan=row_plan,
+            record_sources=bool(measured_record),
         )
         metadata_plan = admit_cell_metadata_plan(
             metadata_plan, row_plan, resources, resident_bytes=resident
@@ -1217,6 +1220,7 @@ def _write_composite(
             profile=profile,
             measured=measured_record,
             names=names,
+            source_column=source_column,
         )
         del feature_tables
         if metadata_cache is not None:

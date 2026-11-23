@@ -126,6 +126,10 @@ from ...metadata.arguments import (
     StatisticalTestingArguments,
     WaggrArguments,
 )
+from ...metadata.membership import (
+    features_measured_by_cells,
+    require_measured_features,
+)
 from ...metadata.selection import (
     CellField,
     FeatureRef,
@@ -147,6 +151,7 @@ from ...utils.arguments import (
     bool_argument,
     float_argument,
     integer_argument,
+    quoted_examples,
 )
 from ...utils.arrays import (
     array_digest,
@@ -2035,7 +2040,13 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
         invalidate_cache: bool = False,
         **norm_params: Any,
     ) -> ArtifactRef:
-        """Create or reuse one immutable marker-table artifact."""
+        """Create or reuse one immutable marker-table artifact.
+
+        When the assay records which features each source of a merge
+        measured, the search ranks only the selected features that the
+        source of every selected cell measured, through a feature selection
+        of them, and warns of those that it leaves out.
+        """
         from ...features.markers import find_markers_by_rank
         from ...storage.stores import metadata_workers
 
@@ -2054,7 +2065,6 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
             _feature_selection_values(self.zw, feature_selection),
             dtype=bool,
         )
-        feature_index = np.flatnonzero(feature_values).astype(np.int64, copy=False)
         labels = np.asarray(cluster_values)
         if labels.ndim != 1 or len(labels) != len(cell_index):
             raise ValueError("Cluster values must contain one label per selected cell")
@@ -2067,6 +2077,45 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
         for group_id in group_ids:
             _validate_marker_group_label(str(group_id))
         tested = _validate_rank_marker_groups(group_ids, group_sizes)
+        # The labels are checked, so the features that the cells' sources did
+        # not measure are left out of a selection of the others.
+        measured = features_measured_by_cells(
+            assay.cells,
+            assay.feats,
+            cell_index,
+            assay=assay.name,
+            selected=feature_values,
+        )
+        unmeasured = (
+            np.empty(0, dtype=np.int64)
+            if measured is None
+            else np.flatnonzero(feature_values & ~measured)
+        )
+        if unmeasured.size:
+            assert measured is not None
+            names = np.asarray(
+                assay.feats.fetch_all("names")
+                if feature_names is None
+                else feature_names
+            ).astype(str)
+            listed = quoted_examples(names[unmeasured])
+            feature_values = feature_values & measured
+            if not feature_values.any():
+                raise ValueError(
+                    "No selected feature was measured by the source of every "
+                    f"selected cell; some source of the cells did not measure "
+                    f"{listed}. Search the markers of the cells of the sources "
+                    "that measured them, or of features that every source measured."
+                )
+            feature_selection = self._features_snapshot(
+                from_assay=assay.name, mask=feature_values
+            )
+            warn(
+                "The marker search leaves out the features that some source of "
+                "the selected cells did not measure, since their zero counts in "
+                f"its cells are not measurements: {listed}."
+            )
+        feature_index = np.flatnonzero(feature_values).astype(np.int64, copy=False)
         # The distinct values of one array have distinct string forms.
         expected_group_cell_counts = {
             str(group_id): (int(group_size), n_selected - int(group_size))
@@ -2236,7 +2285,11 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
         """Persist marker tables for an explicit clustering artifact.
 
         Raw counts of any storage dtype are ranked. Library-size markers
-        require finite non-negative counts and cell totals.
+        require finite non-negative counts and cell totals. On a store merged
+        from sources that measured different features, the search ranks only
+        the selected features that the source of every labeled cell
+        measured, as the assay's ``measured_in_<source>`` feature columns
+        record, and warns of those that it leaves out.
 
         Args:
             from_assay: Name of the assay to be used. If no value is provided then the default assay will be used.
@@ -2265,6 +2318,8 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
                 not opened with ``zarr_mode='r+'``. The check runs before
                 the search.
             UnmeasuredCellsError: If the assay did not measure a labeled cell.
+            ValueError: If no selected feature was measured by the source of
+                every labeled cell.
         """
         invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
         reject_unknown_normalization_params(
@@ -3537,6 +3592,9 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
                 not opened with ``zarr_mode='r+'``. The check runs before any
                 value is computed.
             UnmeasuredCellsError: If a feature's assay did not measure a tested cell.
+            ValueError: If the source of a merge of a tested cell did not
+                measure a tested feature, as the assay's
+                ``measured_in_<source>`` feature columns record.
         """
         skip_save = bool_argument(skip_save, "skip_save")
         invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
@@ -3620,6 +3678,23 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
         # Explicit metadata masks are semantic missing values. Only rows that
         # survive the full design selection are required to be present.
         reject_missing_statistical_values(statistical_keys, selection.selection_mask)
+        if source_assay is not None:
+            tested_assay = self._get_assay(source_assay)
+            require_measured_features(
+                tested_assay.cells,
+                tested_assay.feats,
+                selection.effective_cell_idx,
+                {
+                    key.label: key.feature.indices
+                    for key in statistical_keys
+                    if key.feature is not None
+                },
+                assay=source_assay,
+                remedy=(
+                    "test the cells of the sources that measured it, with a "
+                    "cell_selection or subset_by that leaves the others out"
+                ),
+            )
         key_labels = [str(key) for key in distinct_label_keys(labels)]
         effective_method = choose_statistical_method(
             test,

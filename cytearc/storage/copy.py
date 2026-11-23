@@ -6,6 +6,7 @@ import numpy as np
 import zarr
 
 from .types import as_zarr_array
+from .metadata_keys import SOURCE_COLUMN_ATTRIBUTE
 from .arrays import (
     MISSING_MASK_PREFIX,
     _decode_metadata_values,
@@ -56,6 +57,7 @@ COLUMN_METADATA_ATTRIBUTES = (
     "source",
     "description",
     "unit",
+    SOURCE_COLUMN_ATTRIBUTE,
 )
 
 

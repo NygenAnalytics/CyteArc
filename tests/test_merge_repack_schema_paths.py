@@ -811,6 +811,11 @@ def test_merge_resume_refuses_counts_of_another_feature_union(
         _write_source(MemoryStore(), {"RNA": _COUNTS + 1}, ids=["RNA0", "RNA1", "x"])
     )
 
+    # The sources now measure different features, so the merge would also
+    # write a column of cell sources beside its record, which the completed
+    # cell metadata lacks; cell metadata left incomplete is rewritten, which
+    # leaves the counts to decide.
+    zarr.open_group(destination, mode="r+")["cellData"].attrs["complete"] = False
     plan = _merge([sources[0], renamed], destination).plan()
     assert plan.canDump is False
     assert plan.blockedReason is not None
@@ -829,6 +834,11 @@ def test_merge_resume_refuses_counts_narrower_than_the_names_now_summed(
         )
     )
 
+    # The sources now measure different features, so the merge would also
+    # write a column of cell sources beside its record, which the completed
+    # cell metadata lacks; cell metadata left incomplete is rewritten, which
+    # leaves the counts to decide.
+    zarr.open_group(destination, mode="r+")["cellData"].attrs["complete"] = False
     plan = _merge([sources[0], renamed], destination, feature_key="names").plan()
     assert plan.canDump is False
     assert plan.blockedReason is not None
@@ -1338,17 +1348,17 @@ def _zeros_read_as_counts(first: str = "left", *, adt: bool = False) -> str:
     ``first`` is the first source that holds the assay, and ``adt`` whether
     the assay is of type ADT, which the ADT recipe reads.
     """
-    if adt:
-        return (
-            " The merge writes zero counts for the features a source lacks; "
-            f"columns such as 'measured_in_{first}' record what each source "
-            "measured, so the ADT recipe leaves those antibodies out of its panel "
-            "and markers, while other analyses read the zeros as counts."
-        )
     return (
-        " The merge writes zero counts for the features a source lacks, which "
-        f"analyses read as counts; columns such as 'measured_in_{first}' record "
-        "what each source measured."
+        " The merge writes zero counts for the features a source lacks; columns "
+        f"such as 'measured_in_{first}' record what each source measured, so "
+        + (
+            "plots, marker search, compare.test and the ADT recipe leave those "
+            "zeros out, while normalization and scores still read them as counts."
+            if adt
+            else "plots, marker search and compare.test leave those zeros out, "
+            "while normalization, feature selection and scores still read them "
+            "as counts."
+        )
     )
 
 
@@ -1475,8 +1485,9 @@ def test_merge_names_at_most_five_of_the_genes_that_each_source_lacks(tmp_path):
         "'g1000', 'g1001', 'g1002', 'g1003', 'g1004' and 195 more."
         + _zeros_read_as_counts()
     )
+    # Five names of each source and a count of the others keep it short.
     assert "x" * 100 not in message
-    assert len(message) < 500
+    assert len(message) < 700
 
 
 @pytest.mark.parametrize(
@@ -1735,9 +1746,30 @@ def test_merge_records_which_features_each_source_measured(tmp_path):
         name: dict(features[name].attrs)
         for name in ("measured_in_left", "measured_in_right")
     } == {
-        "measured_in_left": {"role": "measured_features", "source": "left"},
-        "measured_in_right": {"role": "measured_features", "source": "right"},
+        "measured_in_left": {
+            "role": "measured_features",
+            "source": "left",
+            "sourceColumn": "dataset",
+        },
+        "measured_in_right": {
+            "role": "measured_features",
+            "source": "right",
+            "sourceColumn": "dataset",
+        },
     }
+    # Each column names the cell column of sources that the merge writes
+    # beside it: the codes of every source's name, the third one's included.
+    cells = zarr.open_group(destination, mode="r")["cellData"]
+    assert dict(cells["dataset"].attrs) == {
+        "role": "cell_sources",
+        "categories": "__cytearc_categories__dataset",
+    }
+    assert cells["__cytearc_categories__dataset"][:].tolist() == [
+        "left",
+        "right",
+        "third",
+    ]
+    assert np.bincount(cells["dataset"][:]).tolist() == [3, 3, 3]
     # Every source measured both genes, which needs no record.
     assert _measured_columns(destination, "RNA") == {}
     assert (
@@ -2021,8 +2053,11 @@ def test_merge_refuses_sources_whose_record_columns_would_be_one(
     assert _measured_columns(str(destination)) == {}
 
 
-def test_subsets_keep_the_record_of_the_features_each_source_measured(tmp_path):
+def test_copies_keep_the_record_and_the_cell_column_of_sources(tmp_path):
+    import cytearc
     from cytearc.metadata.membership import measured_feature_columns
+    from cytearc.readers import H5adReader
+    from cytearc.writers import H5adToZarr
 
     sources = [
         _panel_source({"RNA": _GENES, "ADT": _LEFT_PANEL}),
@@ -2031,19 +2066,71 @@ def test_subsets_keep_the_record_of_the_features_each_source_measured(tmp_path):
     merged = str(tmp_path / "merged.zarr")
     _merge(sources, merged).dump()
     store = _open(merged)
-    subset = str(tmp_path / "subset.zarr")
-    ids = store.cells.fetch_all("ids")[[0, 5]]
+    left_only = next(name for name in _LEFT_PANEL if name not in _RIGHT_PANEL)
 
-    SubsetZarr(subset, [store.ADT], cell_ids=ids, nthreads=1).dump()
-    assert _measured_columns(subset) == _measured_columns(merged)
-    # The subset keeps each column's source, which a read of the record checks.
-    reopened = DataStore(
-        subset, default_assay="ADT", min_features_per_cell=0, nthreads=1
-    )
-    assert measured_feature_columns(reopened.ADT.feats) == {
-        "measured_in_left": "left",
-        "measured_in_right": "right",
+    def opened(location: str) -> DataStore:
+        return DataStore(
+            location, default_assay="ADT", min_features_per_cell=0, nthreads=1
+        )
+
+    def missing(copy: DataStore) -> dict[str, bool]:
+        """Return whether each cell of a copy has no value of the left-only antibody."""
+        return dict(
+            zip(
+                copy.cells.fetch_all("ids").astype(str),
+                np.isnan(copy.get_cell_vals("ADT", "I", left_only)).tolist(),
+                strict=True,
+            )
+        )
+
+    expected = missing(store)
+    # The right source did not measure it.
+    assert {cell for cell, absent in expected.items() if absent} == {
+        cell for cell in expected if cell.startswith("right__")
     }
+    SubsetZarr(
+        str(tmp_path / "subset.zarr"),
+        [store.ADT],
+        cell_ids=store.cells.fetch_all("ids")[[0, 5]],
+        nthreads=1,
+    ).dump()
+    repack_store(merged, str(tmp_path / "repack.zarr"), nthreads=1)
+    repack_store(merged, str(tmp_path / "data_only.zarr"), nthreads=1, data_only=True)
+    mount_datastore(
+        merged,
+        str(tmp_path / "mount.zarr"),
+        default_assay="ADT",
+        min_features_per_cell=0,
+        nthreads=1,
+    )
+    copies = {
+        name: opened(str(tmp_path / f"{name}.zarr"))
+        for name in ("subset", "repack", "data_only", "mount")
+    }
+    # An H5AD export of a copy declares the column of sources, so its import
+    # reads the same.
+    cytearc.to_h5ad(copies["subset"].ADT, str(tmp_path / "subset.h5ad"))
+    reader = H5adReader(str(tmp_path / "subset.h5ad"))
+    try:
+        H5adToZarr(
+            reader, str(tmp_path / "imported.zarr"), assay_name="ADT", nthreads=1
+        ).dump()
+    finally:
+        reader.close()
+    copies["imported"] = opened(str(tmp_path / "imported.zarr"))
+    for name, copy in copies.items():
+        # Each copy keeps each column's source and the link to the cells' sources.
+        assert measured_feature_columns(copy.ADT.feats) == {
+            "measured_in_left": "left",
+            "measured_in_right": "right",
+        }, name
+        assert copy.ADT.feats._get_array("measured_in_left").attrs["sourceColumn"] == (
+            "dataset"
+        ), name
+        assert copy.cells._get_array("dataset").attrs["role"] == "cell_sources", name
+        kept = missing(copy)
+        assert kept == {cell: expected[cell] for cell in kept}, name
+    assert len(missing(copies["subset"])) == 2
 
 
 def test_a_merge_of_merged_stores_records_what_every_cell_of_each_source_measured(

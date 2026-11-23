@@ -179,6 +179,8 @@ group means of `marker_heatmap` leave out unmeasured cells. Dot plots, matrix pl
 `marker_heatmap` record `provenance.extras["unmeasured_cells"]`, a mapping from each feature assay
 to the number of plotted cells that it did not measure, when that number is not zero.
 
+On a store merged from sources that measured different features, such as two antibody panels, a feature also has no value in a cell whose source did not measure it, as the assay's feature columns `measured_in_<source>` record ({doc}`import_export`). Each cell's source is its label in the cell column of sources that the merge or composite writes beside the record, `dataset` unless `source_column` names another. Plots read and normalize each feature over the cells whose source measured it, so the CLR of an antibody that one source stained spans that source's cells, and they draw and summarize the other cells as they do unmeasured cells: in `missing_color`, out of the distribution, and out of the statistics and `n_cells` of dot and matrix plots.
+
 WNN is the default for `DataStore.integration.modalities`. Its integrated graph stores one weight per input assay and cell. Use `ds.plots.modality_weights(graph=wnn_graph, layout=embedding)` or {py:func}`cytearc.plotting.modality_weights` to show those weights over an explicit embedding of the graph's cells. Explicit SNN graphs do not contain modality weights.
 
 Store-backed plotters and diagnostics generally return a `PlotResult` and render by default with `show=True`. `run_recipe` returns a `PlotRecipeResult` and defaults to `show=False`. Helpers differ: `label_panels` returns `None`, `theme_context` is an iterator, and `compose_results` returns a `PlotResult` without a `show` parameter.

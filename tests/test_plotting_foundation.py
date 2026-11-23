@@ -43,6 +43,10 @@ class _ArrayCells:
 
 
 class _ArrayFeatures:
+    # A synthetic assay comes from no merge: its feature table holds no record
+    # of which features each source measured.
+    columns = ()
+
     def __init__(self, names):
         self._names = np.asarray(names, dtype=object)
         self._ids = np.asarray(

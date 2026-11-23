@@ -328,31 +328,65 @@ def test_a_record_of_measured_features_round_trips_through_h5ad(tmp_path) -> Non
     assert merged.to_anndata(from_assay="ADT").uns["cytearc"] == {
         "assayMembership": {"ADT": "ADT_I"},
         "measuredFeatures": {"ADT": record},
+        "cellSources": "dataset",
     }
+    lacking = dict(
+        zip(
+            merged.cells.fetch_all("ids").astype(str),
+            np.isnan(merged.get_cell_vals("ADT", "I", "ADT2")),
+            strict=True,
+        )
+    )
+    # Only the cells of source y measured ADT2.
+    assert sorted(str(cell) for cell, missing in lacking.items() if not missing) == [
+        "y__y0",
+        "y__y1",
+    ]
 
     exported = tmp_path / "merged.h5ad"
     cytearc.to_h5ad(merged.ADT, str(exported))
-    for assay in ("ADT", "Protein"):
+    for assay, categorical in (("ADT", True), ("text", False), ("Protein", True)):
         reader = H5adReader(str(exported))
         try:
             assert reader.measured_features() == {"ADT": record}
+            assert reader.cell_sources() == "dataset"
             H5adToZarr(
-                reader, str(tmp_path / f"{assay}.zarr"), assay_name=assay, nthreads=1
+                reader,
+                str(tmp_path / f"{assay}.zarr"),
+                assay_name="ADT" if assay == "text" else assay,
+                categorical_columns=categorical,
+                nthreads=1,
             ).dump()
         finally:
             reader.close()
-    imported = DataStore(
-        str(tmp_path / "ADT.zarr"),
-        default_assay="ADT",
-        min_features_per_cell=-1,
-        nthreads=1,
-    )
-    # The import restores the record, so the store still reads which features
-    # each source measured.
-    assert measured_feature_columns(imported.ADT.feats) == record
-    assert {
-        column: imported.ADT.feats.fetch_all(column).tolist() for column in record
-    } == values
+    for name in ("ADT", "text"):
+        imported = DataStore(
+            str(tmp_path / f"{name}.zarr"),
+            default_assay="ADT",
+            min_features_per_cell=-1,
+            nthreads=1,
+        )
+        # The import restores the record and the column of cell sources that
+        # it names, as codes or as text, so the store still reads which
+        # features each cell's source measured.
+        assert measured_feature_columns(imported.ADT.feats) == record
+        assert {
+            column: imported.ADT.feats.fetch_all(column).tolist() for column in record
+        } == values
+        assert imported.ADT.feats._get_array("measured_in_x").attrs["sourceColumn"] == (
+            "dataset"
+        )
+        assert imported.cells._get_array("dataset").attrs["role"] == "cell_sources"
+        assert (
+            dict(
+                zip(
+                    imported.cells.fetch_all("ids").astype(str),
+                    np.isnan(imported.get_cell_vals("ADT", "I", "ADT2")),
+                    strict=True,
+                )
+            )
+            == lacking
+        )
     # The record describes an assay named ADT; an assay imported under another
     # name keeps the columns as ordinary metadata.
     protein = zarr.open_group(str(tmp_path / "Protein.zarr"), mode="r")
@@ -441,6 +475,123 @@ def test_a_malformed_record_of_measured_features_is_refused_before_writing(
     finally:
         reader.close()
     assert _untouched(destination)
+
+
+@pytest.mark.parametrize(
+    ("declared", "named"),
+    [
+        (
+            None,
+            "declares no obs column of each cell's source; export the store "
+            "again with this release",
+        ),
+        (
+            "study",
+            "obs lacks the column 'study' that it declares as each cell's source",
+        ),
+    ],
+)
+def test_a_record_without_its_column_of_cell_sources_is_refused_before_writing(
+    tmp_path, declared, named
+) -> None:
+    uns: dict = {"cytearc": {"measuredFeatures": {"RNA": {"measured_in_a": "a"}}}}
+    if declared is not None:
+        uns["cytearc"]["cellSources"] = declared
+    source = _var_h5ad(tmp_path / "unnamed.h5ad", {"measured_in_a": [True, False]}, uns)
+    destination = _sentinel_store()
+    reader = H5adReader(str(source))
+    try:
+        with pytest.raises(ValueError) as refused:
+            H5adToZarr(reader, destination, nthreads=1)
+    finally:
+        reader.close()
+    assert str(refused.value) == (
+        "The file declares which features each source of a merge measured, for "
+        f"assays ['RNA'], but {named}"
+    )
+    assert _untouched(destination)
+
+
+def test_a_record_whose_column_of_cell_sources_the_import_skips_is_refused(
+    tmp_path,
+) -> None:
+    import anndata
+
+    # CyteArc reserves the cell column I, so an import skips an obs column of
+    # that name, which the record names as the column of cell sources.
+    adata = anndata.AnnData(
+        csr_matrix(_counts(3, 2, 7).astype(np.float32)),
+        obs=pd.DataFrame({"I": ["a", "a", "b"]}, index=["c0", "c1", "c2"]),
+        var=pd.DataFrame({"measured_in_a": [True, False]}, index=["f0", "f1"]),
+        uns={
+            "cytearc": {
+                "measuredFeatures": {"RNA": {"measured_in_a": "a"}},
+                "cellSources": "I",
+            }
+        },
+    )
+    source = tmp_path / "reserved.h5ad"
+    adata.write_h5ad(source)
+    destination = _sentinel_store()
+    reader = H5adReader(str(source))
+    try:
+        with pytest.raises(ValueError) as refused:
+            H5adToZarr(reader, destination, nthreads=1)
+    finally:
+        reader.close()
+    assert str(refused.value) == (
+        "The file declares which features each source of a merge measured, for "
+        "assays ['RNA'], but the import would skip the obs column 'I' that it "
+        "declares as each cell's source, whose name CyteArc reserves or cannot "
+        "store; rename it in the file and import it again"
+    )
+    assert _untouched(destination)
+
+
+def test_an_import_names_the_column_of_sources_by_the_key_it_writes(
+    tmp_path,
+) -> None:
+    import anndata
+
+    # The obs column 'lab\\study' is stored as 'lab_study', which the record
+    # must name for the store to find each cell's source.
+    counts = np.array([[4, 2], [3, 5], [6, 1]], dtype=np.float32)
+    adata = anndata.AnnData(
+        csr_matrix(counts),
+        obs=pd.DataFrame(
+            {"lab\\study": pd.Categorical(["x", "x", "y"])}, index=["c0", "c1", "c2"]
+        ),
+        var=pd.DataFrame(
+            {"measured_in_x": [True, True], "measured_in_y": [True, False]},
+            index=["f0", "f1"],
+        ),
+        uns={
+            "cytearc": {
+                "measuredFeatures": {
+                    "RNA": {"measured_in_x": "x", "measured_in_y": "y"}
+                },
+                "cellSources": "lab\\study",
+            }
+        },
+    )
+    source = tmp_path / "renamed.h5ad"
+    adata.write_h5ad(source)
+    reader = H5adReader(str(source))
+    try:
+        H5adToZarr(
+            reader, str(tmp_path / "renamed.zarr"), nthreads=1, shuffle_cells=False
+        ).dump()
+    finally:
+        reader.close()
+    store = DataStore(
+        str(tmp_path / "renamed.zarr"), min_features_per_cell=-1, nthreads=1
+    )
+    assert store.RNA.feats._get_array("measured_in_y").attrs["sourceColumn"] == (
+        "lab_study"
+    )
+    # Only source x measured f1, so the cell of y has no value of it.
+    values = store.get_cell_vals("RNA", "I", "f1")
+    np.testing.assert_array_equal(np.isnan(values), [False, False, True])
 
 
 def test_csv_and_cell_ranger_imports_reserve_membership_names(tmp_path) -> None:
