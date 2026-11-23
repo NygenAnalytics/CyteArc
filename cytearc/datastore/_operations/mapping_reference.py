@@ -502,8 +502,6 @@ class _MappingReferenceOperationsMixin(_MappingReferenceOperationsBase):
                     normalizer,
                     counts,
                     totals,
-                    size_factor=normalization_parameters["size_factor"],
-                    log_transform=normalization_parameters["log_transform"],
                     nthreads=self.nthreads,
                     name=assay_name,
                     source=source,

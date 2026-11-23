@@ -859,36 +859,26 @@ def recorded_normalizer(identity: Mapping[str, Any]) -> NormMethod | None:
 def fit_normalization(
     normalizer: NormMethod,
     counts: Any,
-    totals: NDArray[np.float64] | None,
+    totals: NDArray[np.float64],
     *,
-    size_factor: float | None,
-    log_transform: bool,
     nthreads: int | None = None,
     name: str = "",
     source: str = "Cell totals",
-) -> NormalizationFit | None:
-    """Fit an RNA normalizer over the counts of the cells it normalizes.
+) -> PearsonResidualFit | ClrFit | None:
+    """Fit what an RNA normalizer takes from the counts of the cells it normalizes.
 
-    ``totals`` holds each cell's total, as ``normed`` reads it, which only
-    Pearson residuals read; ``source`` names them in errors. CLR and Pearson
-    residuals fit numbers from the counts. TF-IDF fits document frequencies
-    that an ATAC assay counts, and a custom normalizer has no fit, so both
-    give None.
+    Pearson residuals fit each feature's share of the counts, of the cells'
+    ``totals``, which ``source`` names in errors, and CLR each feature's
+    scale. Every other normalizer fits nothing from the counts and gives
+    None: library size takes its recorded size factor, and TF-IDF takes
+    document frequencies that an ATAC assay counts.
 
     Raises:
         ValueError: If Pearson residuals get a negative or non-finite total.
     """
-    if normalizer is norm_lib_size or normalizer is norm_lib_size_log:
-        assert size_factor is not None
-        return LibrarySizeFit(
-            size_factor, log_transform or normalizer is norm_lib_size_log
-        )
-    if normalizer is norm_dummy:
-        return PassthroughFit(log_transform)
     if normalizer is norm_clr:
         return ClrFit.fit(counts)
     if isinstance(normalizer, PearsonResidualNormalizer):
-        assert totals is not None
         library_size_divisors(totals, source=source)
         return normalizer.fit(counts, totals, nthreads=nthreads, name=name)
     return None

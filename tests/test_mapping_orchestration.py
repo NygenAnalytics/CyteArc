@@ -1179,6 +1179,51 @@ def test_a_passthrough_reference_maps_only_a_query_of_its_kind_of_values(
     assert query.artifacts.list(kind="projection", from_assay="RNA") == []
 
 
+def test_an_unscaled_reference_keeps_the_statistics_that_scaling_would_use(tmp_path):
+    # The first gene has no count in any cell, so its deviation is 0.
+    counts = mapping_counts()
+    counts[:, 0] = 0
+    path = tmp_path / "reference.zarr"
+    write_count_store(str(path), {"RNA": counts}, "uint32")
+    datastore = DataStore(str(path), default_assay="RNA", min_features_per_cell=0)
+    datastore.RNA.normMethod = norm_pearson_residuals
+    normalized = datastore.features.normalize(
+        datastore.snapshot_cell_selection("I"),
+        datastore.features.snapshot(
+            from_assay="RNA", feature_indexes=list(range(MAPPING_REFERENCE_GENES))
+        ),
+    )
+    reduction = datastore.reduction.pca(
+        normalized, dims=4, feat_scaling=False, local_cache=False
+    )
+    neighbors = datastore.graph.neighbors(
+        datastore.graph.ann_index(reduction), coordinates=reduction, k=5
+    )
+    reference = datastore.mapping.load_reference(
+        datastore.mapping.build_reference(neighbors)
+    )
+
+    # Each gene's mean and population deviation over the stored residuals,
+    # a deviation of 0 taken as 1, as feature scaling would standardize them.
+    values = np.asarray(
+        datastore.artifacts.load(normalized)["data"][:], dtype=np.float64
+    )
+    deviations = values.std(axis=0)
+    assert deviations[0] == 0
+    np.testing.assert_allclose(
+        reference.model.feature_means, values.mean(axis=0), rtol=1e-6, atol=1e-9
+    )
+    np.testing.assert_allclose(
+        reference.model.feature_scales,
+        np.where(deviations == 0, 1.0, deviations),
+        rtol=1e-6,
+    )
+    assert (reference.model.feature_means[0], reference.model.feature_scales[0]) == (
+        0.0,
+        1.0,
+    )
+
+
 def _halve_counts(_assay, counts):
     """A custom normalizer, defined at module level so provenance can name it."""
     return counts / 2

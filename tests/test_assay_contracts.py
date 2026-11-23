@@ -495,47 +495,33 @@ def test_clr_and_tf_idf_fits_normalize_new_rows_by_hand():
         normalize_rows(TfIdfFit(idf), _ROWS, np.ones(2), source="t")
 
 
-def test_fit_normalization_fits_what_each_rna_normalizer_reads():
+def test_fit_normalization_fits_what_pearson_residuals_and_clr_take_from_counts():
     counts = np.array([[1, 0, 4], [3, 2, 0], [0, 6, 2], [2, 0, 0]], dtype=np.uint16)
     totals = np.array([9.0, 7.0, 12.0, 5.0])
-    options = {"size_factor": 1000.0, "log_transform": False}
 
-    assert fit_normalization(norm_lib_size, counts, totals, **options) == (
-        LibrarySizeFit(1000.0, False)
-    )
-    assert fit_normalization(
-        norm_lib_size, counts, totals, size_factor=1000.0, log_transform=True
-    ) == LibrarySizeFit(1000.0, True)
-    assert fit_normalization(norm_lib_size_log, counts, totals, **options) == (
-        LibrarySizeFit(1000.0, True)
-    )
-    assert fit_normalization(norm_dummy, counts, totals, **options) == (
-        PassthroughFit(False)
-    )
     # Each feature's share of all counts, of totals over every feature.
-    pearson = fit_normalization(
-        PearsonResidualNormalizer(theta=5.0), counts, totals, **options
-    )
+    pearson = fit_normalization(PearsonResidualNormalizer(theta=5.0), counts, totals)
     assert isinstance(pearson, PearsonResidualFit)
     np.testing.assert_array_equal(pearson.fractions, np.array([6.0, 8.0, 6.0]) / 33.0)
     assert (pearson.theta, pearson.clip) == (5.0, 2.0)
-    clr = fit_normalization(norm_clr, counts, totals, **options)
+    clr = fit_normalization(norm_clr, counts, totals)
     assert isinstance(clr, ClrFit)
     np.testing.assert_allclose(
         clr.scales, np.exp(np.log1p(counts.astype(float)).mean(axis=0)), rtol=1e-15
     )
-    # TF-IDF fits document frequencies that an ATAC assay counts, and a
-    # custom normalizer has no fit.
-    assert fit_normalization(norm_tf_idf, counts, totals, **options) is None
-    assert fit_normalization(lambda _, x: x, counts, totals, **options) is None
+    # Library size and passthrough fit nothing from the counts, TF-IDF fits
+    # document frequencies that an ATAC assay counts, and a custom normalizer
+    # has no fit.
+    for normalizer in (
+        norm_lib_size,
+        norm_lib_size_log,
+        norm_dummy,
+        norm_tf_idf,
+        lambda _, x: x,
+    ):
+        assert fit_normalization(normalizer, counts, totals) is None
     with pytest.raises(ValueError, match="RNA_nCounts holds negative"):
-        fit_normalization(
-            norm_pearson_residuals,
-            counts,
-            -totals,
-            source="RNA_nCounts",
-            **options,
-        )
+        fit_normalization(norm_pearson_residuals, counts, -totals, source="RNA_nCounts")
 
 
 def test_recorded_normalizer_finds_each_builtin_by_its_recorded_identity():
