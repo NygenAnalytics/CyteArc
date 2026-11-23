@@ -286,8 +286,7 @@ class PipelineAccessor:
             ValueError: If ``recipe`` names no recipe, or the call fails the
                 recipe's checks.
             TypeError: If the call passes ``run_until``, ``callback``, or
-                ``cancel``, a keyword that the recipe lacks, or fails the
-                recipe's checks.
+                ``cancel``, a keyword that the recipe lacks, or fails its checks.
             KeyError: If the call names a missing column.
             UnmeasuredCellsError: If an assay did not measure one of the cells.
 
