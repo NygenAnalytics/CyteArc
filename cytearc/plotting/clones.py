@@ -35,7 +35,6 @@ from ._style import (
     item_inches,
     palette_for_n,
     scale_argument,
-    theme_argument,
     theme_context,
 )
 
@@ -237,7 +236,6 @@ def clone_abundance(
     """
     show_legend = bool_argument(show_legend, "show_legend")
     show = bool_argument(show, "show")
-    theme = theme_argument(theme)
     max_clones = integer_argument(max_clones, "max_clones", minimum=1)
     loaded = store_method(store, "clones.load_clones")(clones)
     plotted = plot_groups(
@@ -442,7 +440,6 @@ def clonal_expansion(
     normalize = bool_argument(normalize, "normalize")
     show_legend = bool_argument(show_legend, "show_legend")
     show = bool_argument(show, "show")
-    theme = theme_argument(theme)
     if count not in ("cells", "clones"):
         raise ValueError("count must be 'cells' or 'clones'")
     loaded = store_method(store, "clones.load_expansion")(expansion, splits=splits)
@@ -649,7 +646,6 @@ def clonal_rarefaction(
     """
     show_legend = bool_argument(show_legend, "show_legend")
     show = bool_argument(show, "show")
-    theme = theme_argument(theme)
     if not isinstance(rarefaction, Rarefaction):
         raise TypeError("rarefaction must be the Rarefaction of ds.clones.rarefaction")
     if base not in ("size", "coverage"):
@@ -808,7 +804,6 @@ def clonal_diversity(
     """
     show_legend = bool_argument(show_legend, "show_legend")
     show = bool_argument(show, "show")
-    theme = theme_argument(theme)
     chosen = _diversity_indices(indices)
     if not isinstance(diversity, ClonalDiversity):
         raise TypeError("diversity must be the ClonalDiversity of ds.clones.diversity")
@@ -945,7 +940,6 @@ def clone_overlap(
     """
     show_legend = bool_argument(show_legend, "show_legend")
     show = bool_argument(show, "show")
-    theme = theme_argument(theme)
     color_scale = scale_argument(color_scale, "color_scale", ColorScale)
     if not isinstance(overlap, CloneOverlap):
         raise TypeError("overlap must be the CloneOverlap of ds.clones.overlap")
@@ -1055,7 +1049,6 @@ def clone_tracking(
     """
     show_legend = bool_argument(show_legend, "show_legend")
     show = bool_argument(show, "show")
-    theme = theme_argument(theme)
     if order is not None:
         if isinstance(order, np.ndarray) and order.ndim == 1:
             order = order.tolist()
@@ -1205,7 +1198,6 @@ def clone_coupling(
     """
     show_legend = bool_argument(show_legend, "show_legend")
     show = bool_argument(show, "show")
-    theme = theme_argument(theme)
     color_scale = scale_argument(color_scale, "color_scale", ColorScale)
     if not isinstance(coupling, CloneCoupling):
         raise TypeError("coupling must be the CloneCoupling of ds.clones.coupling")
@@ -1346,7 +1338,6 @@ def clone_fate_bias(
     normalize = bool_argument(normalize, "normalize")
     show_legend = bool_argument(show_legend, "show_legend")
     show = bool_argument(show, "show")
-    theme = theme_argument(theme)
     max_clones = integer_argument(max_clones, "max_clones", minimum=1)
     loaded = store_method(store, "clones.load_fate_bias")(bias)
     fate_names = [str(name) for name in loaded.fates["fate"].tolist()]

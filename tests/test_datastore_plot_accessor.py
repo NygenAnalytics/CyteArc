@@ -802,19 +802,20 @@ def test_run_plots_check_show_before_they_draw(
     assert len(harness.calls) == 2 and len(shown) == 1
 
 
+class _UnreadableRunCells:
+    """Frozen cells of a run whose every read fails."""
+
+    def __getattr__(self, attribute: str) -> object:
+        raise AssertionError(f"The plot read the run's cells.{attribute}")
+
+
 @pytest.mark.parametrize("name", ["embedding", "embedding_raster"])
 def test_run_plots_check_their_theme_before_they_read_the_run(
     monkeypatch: pytest.MonkeyPatch,
     name: str,
 ):
-    class UnreadableCells:
-        """Frozen cells whose every read fails."""
-
-        def __getattr__(self, attribute: str) -> object:
-            raise AssertionError(f"The plot read the run's cells.{attribute}")
-
     harness = _RunHarness(monkeypatch)
-    harness.run.cells = UnreadableCells()
+    harness.run.cells = _UnreadableRunCells()
     method = getattr(harness.accessor, name)
 
     with pytest.raises(KeyError) as unknown:
@@ -826,6 +827,79 @@ def test_run_plots_check_their_theme_before_they_read_the_run(
     assert unknown.value.args == (
         "Unknown theme 'sepia'. Choose from: ['dark', 'minimal', 'notebook', 'paper']",
     )
+    assert harness.calls == []
+
+
+_NOT_A_COLORMAP = (
+    "{}.cmap must name a Matplotlib colormap, such as 'viridis'; 'x' is not one"
+)
+
+
+@pytest.mark.parametrize(
+    ("name", "argument", "value", "message"),
+    [
+        (
+            "embedding",
+            "color_scale",
+            "magma",
+            "color_scale must be a ColorScale or None, not str",
+        ),
+        (
+            "embedding",
+            "density_overlay",
+            "magma",
+            "density_overlay must be a DensityOverlay or None, not str",
+        ),
+        (
+            "embedding",
+            "color_scale",
+            splt.ColorScale(cmap="x"),
+            _NOT_A_COLORMAP.format("color_scale"),
+        ),
+        (
+            "embedding",
+            "density_overlay",
+            splt.DensityOverlay(cmap="x"),
+            _NOT_A_COLORMAP.format("density_overlay"),
+        ),
+        (
+            "embedding_raster",
+            "color_scale",
+            "magma",
+            "color_scale must be a ColorScale or None, not str",
+        ),
+        (
+            "embedding_raster",
+            "color_scale",
+            splt.ColorScale(cmap="x"),
+            _NOT_A_COLORMAP.format("color_scale"),
+        ),
+    ],
+)
+def test_run_plots_check_their_scales_before_they_read_the_run(
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    argument: str,
+    value: object,
+    message: str,
+):
+    harness = _RunHarness(monkeypatch)
+    harness.run.cells = _UnreadableRunCells()
+    method = getattr(harness.accessor, name)
+
+    with pytest.raises((TypeError, ValueError)) as refused:
+        method(run=harness.run, color_by="sample_id", show=False, **{argument: value})
+    # A scale of its kind passes, and the plot goes on to read the run's cells.
+    kind = splt.DensityOverlay if argument == "density_overlay" else splt.ColorScale
+    with pytest.raises(AssertionError, match="The plot read the run's cells"):
+        method(
+            run=harness.run,
+            color_by="sample_id",
+            show=False,
+            **{argument: kind(cmap="magma")},
+        )
+
+    assert refused.value.args == (message,)
     assert harness.calls == []
 
 

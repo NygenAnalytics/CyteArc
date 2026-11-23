@@ -34,7 +34,6 @@ from ._style import (
     finish_embedding_axes,
     padded_square_limits,
     scatter_edgecolor,
-    theme_argument,
     theme_context,
 )
 from ..utils.arguments import bool_argument
@@ -165,7 +164,6 @@ def modality_weights(
     a Matplotlib colormap name or a registered ``Colormap``.
     """
     show = bool_argument(show, "show")
-    theme = theme_argument(theme)
     if point_size is not None and (not np.isfinite(point_size) or point_size <= 0):
         raise ValueError("point_size must be positive and finite")
     if not np.isfinite(point_alpha) or not 0 <= point_alpha <= 1:

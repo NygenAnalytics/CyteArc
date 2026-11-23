@@ -21,7 +21,6 @@ from ._style import (
     figure_size,
     foreground_color,
     resolve_category_scale,
-    theme_argument,
     theme_context,
 )
 
@@ -116,7 +115,6 @@ def barcode_calls(
     """
     show_legend = bool_argument(show_legend, "show_legend")
     show = bool_argument(show, "show")
-    theme = theme_argument(theme)
     max_barcodes_per_cell = integer_argument(
         max_barcodes_per_cell, "max_barcodes_per_cell", minimum=1
     )

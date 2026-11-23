@@ -30,7 +30,6 @@ from ._style import (
     apply_figure_chrome,
     resolve_color_limits,
     scale_argument,
-    theme_argument,
     theme_context,
 )
 from ..utils.arguments import bool_argument
@@ -287,7 +286,6 @@ def embedding_raster(
     to keep cells marked ``True`` in a boolean cell-metadata column.
     """
     show = bool_argument(show, "show")
-    theme = theme_argument(theme)
     color_scale = scale_argument(color_scale, "color_scale", ColorScale)
     require_matplotlib()
     if (layout_key is None) == (layout is None):

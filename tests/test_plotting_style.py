@@ -8,6 +8,7 @@ import textwrap
 
 import matplotlib
 import numpy as np
+import pandas as pd
 import pytest
 
 matplotlib.use("Agg")
@@ -810,6 +811,37 @@ def test_plots_check_their_theme_before_they_read_the_store(plot):
     assert unknown.value.args == (f"Unknown theme 'sepia'. {choices}",)
     assert unhashable.value.args == (f"Unknown theme ['paper']. {choices}",)
     assert "theme" not in str(passed.value)
+
+
+# The plots of arrays and tables, which take no store, and data that each
+# refuses with a theme of THEMES.
+_DATA_PLOTS = {
+    "elbow": {"variance_explained": []},
+    "graph_qc": {"graph": object()},
+    "highly_variable_features": {
+        "mean_nonzero": [],
+        "corrected_variance": [],
+        "n_cells": 0,
+        "selected": [],
+    },
+    "qc": {"data": pd.DataFrame()},
+}
+
+
+@pytest.mark.parametrize("plot", sorted(_DATA_PLOTS))
+def test_plots_of_arrays_and_tables_check_their_theme_before_their_data(plot):
+    draw = getattr(splt, plot)
+
+    with pytest.raises(KeyError) as unknown:
+        draw(**_DATA_PLOTS[plot], theme="sepia", show=False)
+    # With a theme of THEMES, the plot refuses its data instead.
+    with pytest.raises((KeyError, TypeError, ValueError)) as refused:
+        draw(**_DATA_PLOTS[plot], theme="paper", show=False)
+
+    assert unknown.value.args == (
+        "Unknown theme 'sepia'. Choose from: ['dark', 'minimal', 'notebook', 'paper']",
+    )
+    assert "theme" not in str(refused.value)
 
 
 @pytest.mark.parametrize(

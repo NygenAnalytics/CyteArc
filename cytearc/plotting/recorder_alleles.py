@@ -15,13 +15,7 @@ from ._figure import (
     finish_plot,
     normalize_axes_target,
 )
-from ._style import (
-    RECORDER_STATE_SCALE,
-    figure_size,
-    item_inches,
-    theme_argument,
-    theme_context,
-)
+from ._style import RECORDER_STATE_SCALE, figure_size, item_inches, theme_context
 
 __all__ = ["recorder_states"]
 
@@ -95,7 +89,6 @@ def recorder_states(
     """
     show_legend = bool_argument(show_legend, "show_legend")
     show = bool_argument(show, "show")
-    theme = theme_argument(theme)
     max_sites = integer_argument(max_sites, "max_sites", minimum=1)
     loaded = store_method(store, "clones.load_alleles")(alleles)
     table = _site_table(loaded.site_states())

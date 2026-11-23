@@ -54,7 +54,6 @@ from ._style import (
     refresh_layout_point_sizes,
     register_layout_point_size,
     scatter_edgecolor,
-    theme_argument,
     theme_context,
 )
 
@@ -220,7 +219,6 @@ def variant_depth(
     """
     show_legend = bool_argument(show_legend, "show_legend")
     show = bool_argument(show, "show")
-    theme = theme_argument(theme)
     load = store_method(store, "variants.load_counts")
     by_site = load(counts, cell_selection=[])
     by_cell = load(counts, sites=[])
@@ -372,7 +370,6 @@ def variant_statistics(
     """
     show_legend = bool_argument(show_legend, "show_legend")
     show = bool_argument(show, "show")
-    theme = theme_argument(theme)
     selection = _load_selection(store, variants)
     frame = selection.variants
     strand = frame["strand_correlation"].to_numpy(dtype=np.float64)
@@ -534,7 +531,6 @@ def allele_frequencies(
     """
     show_legend = bool_argument(show_legend, "show_legend")
     show = bool_argument(show, "show")
-    theme = theme_argument(theme)
     max_cells = integer_argument(max_cells, "max_cells", minimum=1)
     selection = _load_selection(store, variants)
     chosen = selection.variants[selection.variants["informative"]]
@@ -765,7 +761,6 @@ def genotypes(
     """
     show_legend = bool_argument(show_legend, "show_legend")
     show = bool_argument(show, "show")
-    theme = theme_argument(theme)
     if layout is not None and not isinstance(layout, ArtifactRef):
         raise TypeError("layout must be an ArtifactRef or None")
     loaded = store_method(store, "variants.load_genotypes")(genotypes, sites=sites)

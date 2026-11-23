@@ -43,7 +43,6 @@ from ._style import (
     resolve_category_scale,
     resolve_color_limits,
     scale_argument,
-    theme_argument,
     theme_context,
 )
 
@@ -367,7 +366,6 @@ def marker_heatmap(
     cluster_columns = bool_argument(cluster_columns, "cluster_columns")
     show_legend = bool_argument(show_legend, "show_legend")
     show = bool_argument(show, "show")
-    theme = theme_argument(theme)
     cluster_rows = bool(heatmap_kwargs.pop("row_cluster", cluster_rows))
     cluster_columns = bool(heatmap_kwargs.pop("col_cluster", cluster_columns))
     cluster_method = str(heatmap_kwargs.pop("method", cluster_method))
@@ -815,7 +813,6 @@ def pseudotime_heatmap(
     """
     show_legend = bool_argument(show_legend, "show_legend")
     show = bool_argument(show, "show")
-    theme = theme_argument(theme)
     heatmap_cmap = colormap_argument(heatmap_cmap, "heatmap_cmap", optional=True)
     pseudotime_cmap = colormap_argument(
         pseudotime_cmap, "pseudotime_cmap", optional=True

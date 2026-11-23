@@ -64,7 +64,6 @@ from ._style import (
     scale_argument,
     scatter_edgecolor,
     size_legend_layout,
-    theme_argument,
     theme_context,
 )
 from ..utils.arguments import bool_argument
@@ -566,7 +565,6 @@ def dotplot(
     italicize_features = bool_argument(italicize_features, "italicize_features")
     show_legend = bool_argument(show_legend, "show_legend")
     show = bool_argument(show, "show")
-    theme = theme_argument(theme)
     color_scale = scale_argument(color_scale, "color_scale", ColorScale)
     _, mpl = require_matplotlib()
     color_scale = color_scale or ColorScale(cmap="viridis")
@@ -1013,7 +1011,6 @@ def matrixplot(
     cluster_groups = bool_argument(cluster_groups, "cluster_groups")
     show_legend = bool_argument(show_legend, "show_legend")
     show = bool_argument(show, "show")
-    theme = theme_argument(theme)
     color_scale = scale_argument(color_scale, "color_scale", ColorScale)
     _, mpl = require_matplotlib()
     if value not in ("mean", "fraction"):

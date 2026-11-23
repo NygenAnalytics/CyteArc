@@ -31,7 +31,7 @@ from ..plotting._contracts import (
     StudyDesign,
 )
 from ..plotting._figure import PlotResult
-from ..plotting._style import theme_argument
+from ..plotting._style import scale_argument, theme_argument
 from ..plotting.recipes import PlotRecipe, PlotRecipeResult
 from ..repertoire.usage import GeneUsage, Spectratype
 from ..storage.refs import ArtifactRef
@@ -426,6 +426,10 @@ class DataStorePlotAccessor:
             # A run plot shows the result itself, after recording the run.
             show = bool_argument(show, "show")
             theme = theme_argument(theme)
+            color_scale = scale_argument(color_scale, "color_scale", ColorScale)
+            density_overlay = scale_argument(
+                density_overlay, "density_overlay", DensityOverlay
+            )
             run, layout_name = _require_run(self._store, run, layout_key, layout)
             if cell_key != "I":
                 raise ValueError(
@@ -487,6 +491,7 @@ class DataStorePlotAccessor:
             # A run plot shows the result itself, after recording the run.
             show = bool_argument(show, "show")
             theme = theme_argument(theme)
+            color_scale = scale_argument(color_scale, "color_scale", ColorScale)
             run, layout_name = _require_run(self._store, run, layout_key, layout)
             if cell_key != "I":
                 raise ValueError("Run raster uses the frozen pipeline cell selection")

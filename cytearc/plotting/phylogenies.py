@@ -27,7 +27,6 @@ from ._style import (
     NO_VALUE_COLOR,
     figure_size,
     foreground_color,
-    theme_argument,
     theme_context,
 )
 
@@ -215,7 +214,6 @@ def phylogeny(
     """
     show_legend = bool_argument(show_legend, "show_legend")
     show = bool_argument(show, "show")
-    theme = theme_argument(theme)
     max_leaves = integer_argument(max_leaves, "max_leaves", minimum=1)
     if not isinstance(clones, ArtifactRef):
         raise TypeError("clones must be an ArtifactRef")

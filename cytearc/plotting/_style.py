@@ -1251,7 +1251,7 @@ def positive_argument(value: object, name: str) -> float:
 def theme_argument(name: object) -> str:
     """Check the name of a theme of ``THEMES``, and return it.
 
-    A plot that takes a store checks its ``theme`` with it before it reads the store, the mean-variance plot of ``features.hvgs`` before the store computes anything, and ``theme_context`` when a plot enters the theme.
+    ``close_figures_on_error`` checks with it the ``theme`` of each plot that it wraps before the plot runs, run plots check theirs before they read the run, the mean-variance plot of ``features.hvgs`` before the store computes anything, and ``theme_context`` when a plot enters the theme.
 
     Raises:
         KeyError: If ``name`` names no theme, a value that is not a string included.

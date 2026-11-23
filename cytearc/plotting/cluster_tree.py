@@ -25,7 +25,6 @@ from ._style import (
     continuous_norm,
     resolve_category_scale,
     resolve_color_limits,
-    theme_argument,
     theme_context,
 )
 from ..utils.arguments import bool_argument
@@ -297,7 +296,6 @@ def cluster_tree(
     force_ints_as_cats = bool_argument(force_ints_as_cats, "force_ints_as_cats")
     show_labels = bool_argument(show_labels, "show_labels")
     show = bool_argument(show, "show")
-    theme = theme_argument(theme)
     cmap = colormap_argument(cmap, "cmap", optional=True)
     import networkx as nx
 

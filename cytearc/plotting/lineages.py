@@ -32,7 +32,6 @@ from ._style import (
     finish_embedding_axes,
     padded_square_limits,
     positive_argument,
-    theme_argument,
     theme_context,
 )
 
@@ -141,7 +140,6 @@ def lineage_heatmap(
     """
     show_legend = bool_argument(show_legend, "show_legend")
     show = bool_argument(show, "show")
-    theme = theme_argument(theme)
     heatmap_cmap = colormap_argument(heatmap_cmap, "heatmap_cmap", optional=True)
     pseudotime_cmap = colormap_argument(
         pseudotime_cmap, "pseudotime_cmap", optional=True
@@ -401,7 +399,6 @@ def lineage_trends(
     """
     show_legend = bool_argument(show_legend, "show_legend")
     show = bool_argument(show, "show")
-    theme = theme_argument(theme)
     lineage_cmap = colormap_argument(lineage_cmap, "lineage_cmap", optional=True)
     if not isinstance(aggregation, ArtifactRef):
         raise TypeError("aggregation must be an ArtifactRef")
@@ -578,7 +575,6 @@ def lineage_curves(
     """
     show_legend = bool_argument(show_legend, "show_legend")
     show = bool_argument(show, "show")
-    theme = theme_argument(theme)
     lineage_cmap = colormap_argument(lineage_cmap, "lineage_cmap", optional=True)
     if not isinstance(curves, ArtifactRef):
         raise TypeError("curves must be an ArtifactRef")
@@ -731,7 +727,6 @@ def lineage_tree(
     labels = bool_argument(labels, "labels")
     show_legend = bool_argument(show_legend, "show_legend")
     show = bool_argument(show, "show")
-    theme = theme_argument(theme)
     if not isinstance(tree, ArtifactRef):
         raise TypeError("tree must be an ArtifactRef")
     node_size = positive_argument(node_size, "node_size")
