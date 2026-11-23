@@ -5,7 +5,7 @@ import math
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
 import numpy as np
@@ -18,7 +18,9 @@ from zarr.storage import FsspecStore, LocalStore, WrapperStore
 from ..assay.classification import default_feature_sets, declared_assay_type
 from ..merge.features import (
     FeatureAlignment,
+    FeatureSet,
     align_features,
+    feature_record,
     resolve_merge_dtype,
     select_features,
     shared_features_warning,
@@ -74,7 +76,6 @@ from ..storage.identity import (
 )
 from ..storage.metadata_keys import (
     assay_membership_column,
-    measured_features_column,
     validate_metadata_column_name,
 )
 from ..storage.parallel import stream_shards
@@ -534,7 +535,8 @@ def _feature_alignment(
     assay: str,
     assays: list[Any],
     names: list[str],
-    features: Literal["union", "intersection"],
+    features: FeatureSet,
+    assay_type: str,
 ) -> tuple[FeatureAlignment, np.ndarray, str]:
     union = align_features(assays, names, require_overlap=False)
     dtype = resolve_merge_dtype(assays, union.featOrderMap)
@@ -546,7 +548,7 @@ def _feature_alignment(
     # features out, and warns when it keeps under a tenth of the union.
     if features == "union":
         unshared = unshared_features_warning(
-            assay, alignment, names, combination="composite"
+            assay, alignment, names, combination="composite", assay_type=assay_type
         )
         if unshared is not None:
             logger.warning(unshared)
@@ -764,7 +766,7 @@ def create_composite(
     sources: Mapping[str, "DataStore"],
     *,
     at: ZarrLocation | Path,
-    features: Literal["union", "intersection"],
+    features: FeatureSet,
     assay: str = "RNA",
     rows: Mapping[str, Sequence[int] | np.ndarray] | None = None,
     mem_budget: int | str | None = None,
@@ -803,9 +805,10 @@ def create_composite(
                   every source measured, and logs a warning that gives their
                   number, the union's, and how many each source's absence
                   would keep, when they are fewer than a tenth of the union.
-                  Either way the feature table records which features each
-                  source measured, in a Boolean column ``measured_in_<name>``
-                  for each, as a merge does.
+                  When the sources measured different features, the feature
+                  table records which features each source measured, in a
+                  Boolean column ``measured_in_<name>`` for each, as a merge
+                  does.
         assay: Assay to combine, which every source holds as one type.
         rows: Positions of the cells to include, by source name. The
               positions select cells and don't order them. A source left
@@ -850,14 +853,6 @@ def create_composite(
         not isinstance(name, str) or not name.strip() or "__" in name for name in names
     ):
         raise ValueError("Source names must be nonempty strings without '__'")
-    for name in names:
-        try:
-            validate_metadata_column_name(measured_features_column(name))
-        except ValueError as error:
-            raise ValueError(
-                f"Source name {name!r} cannot name the feature column that "
-                f"records which features it measured: {error}"
-            ) from error
     datasets = list(sources.values())
     if any(not isinstance(source, DataStore) for source in datasets):
         raise TypeError("Every source must be an open DataStore")
@@ -903,7 +898,7 @@ def _write_composite(
     selections: dict[str, Sequence[int] | np.ndarray],
     *,
     assay: str,
-    features: Literal["union", "intersection"],
+    features: FeatureSet,
     target: ZarrLocation,
     resources: ResourceBudget,
     storage_options: dict[str, Any] | None,
@@ -980,9 +975,13 @@ def _write_composite(
     for source, source_assay in zip(datasets, assays, strict=True):
         prefetch_metadata_listing(source.cells._group)
         prefetch_metadata_listing(source_assay.feats._group)
+    (assay_type,) = assay_types
     alignment, feature_columns, dtype = _feature_alignment(
-        assay, assays, names, features
+        assay, assays, names, features, assay_type
     )
+    # Names whose record columns would collide fail here, before anything is
+    # written.
+    measured_record = feature_record(alignment, names)
     row_plan = build_row_plan(
         [source.cells.N for source in datasets],
         [int(source.rawData.chunksize[0]) for source in assays],
@@ -1202,7 +1201,7 @@ def _write_composite(
             resources=resources,
             resident_bytes=resident,
             profile=profile,
-            measured=dict(zip(names, alignment.measuredFeatures, strict=True)),
+            measured=measured_record,
         )
         del feature_tables
         if metadata_cache is not None:

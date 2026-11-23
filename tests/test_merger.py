@@ -5889,7 +5889,10 @@ def test_dataset_merge_plans_no_source_column_that_its_record_replaces(tmp_path)
     np.testing.assert_array_equal(features["ids"][:], ["a", "b", "c"])
     assert features["measured_in_left"][:].tolist() == [True, True, False]
     assert features["measured_in_right"][:].tolist() == [False, True, True]
-    assert features["measured_in_right"].attrs["role"] == "measured_features"
+    assert dict(features["measured_in_right"].attrs) == {
+        "role": "measured_features",
+        "source": "right",
+    }
 
 
 def test_a_merged_feature_column_names_the_budget_beside_the_feature_mappings(

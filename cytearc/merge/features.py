@@ -8,7 +8,10 @@ import numpy as np
 import pandas as pd
 
 from ..metadata.membership import features_measured_by_every_source
-from ..storage.metadata_keys import measured_features_column
+from ..storage.metadata_keys import (
+    measured_features_column,
+    measured_features_columns,
+)
 from ..utils.arguments import quoted_value
 
 #: The most features that the warning about unshared features names per source.
@@ -208,16 +211,13 @@ def select_features(
     itself. ``"intersection"`` keeps the features that every source holding
     the assay measured, in merged order, maps every other source feature to
     -1, and so measures every feature that it keeps. An assay of no features
-    in any source keeps its alignment either way.
+    in any source keeps its alignment either way. The merge and the composite
+    check ``features`` where they take it.
 
     Raises:
-        ValueError: If ``features`` is neither, or ``"intersection"`` keeps no
-            feature of an assay whose sources hold some.
+        ValueError: If ``"intersection"`` keeps no feature of an assay whose
+            sources hold some.
     """
-    if features not in {"union", "intersection"}:
-        raise ValueError(
-            f"features must be 'union' or 'intersection', got {features!r}"
-        )
     # An assay of no features in any source keeps none either way, and none
     # of its sources lacks one.
     if features == "union" or alignment.nFeats == 0:
@@ -244,12 +244,40 @@ def select_features(
     )
 
 
-def _combination_words(combination: str) -> tuple[str, str]:
-    """Return the adjective of the combined features and the subject that keeps them."""
+def feature_record(
+    alignment: FeatureAlignment, names: Sequence[str]
+) -> dict[str, np.ndarray]:
+    """Return whether each source that holds the assay measured each feature, by source, when the sources measured different features.
+
+    A merge or a composite records what each source measured only then, as
+    when a source lacks a feature that another holds, or a merged source's own
+    record marks a feature as unmeasured. Otherwise every source measured
+    every feature, and the record is empty.
+
+    Raises:
+        ValueError: If the record's columns of two sources would be named
+            alike once case is ignored
+            (:func:`~cytearc.storage.metadata_keys.measured_features_columns`).
+    """
+    record = {
+        name: measured
+        for name, measured, present in zip(
+            names, alignment.measuredFeatures, alignment.sourcePresent, strict=True
+        )
+        if present
+    }
+    if all(measured.all() for measured in record.values()):
+        return {}
+    measured_features_columns(record)
+    return record
+
+
+def _combination_words(combination: str) -> tuple[str, str, str]:
+    """Return the adjective of the combined features, the noun of the combination, and the verb of its zero counts."""
     if combination == "merge":
-        return "merged", "the merge"
+        return "merged", "merge", "writes"
     if combination == "composite":
-        return "composite", "the composite"
+        return "composite", "composite", "reads"
     raise ValueError(f"combination must be 'merge' or 'composite', got {combination!r}")
 
 
@@ -259,23 +287,24 @@ def unshared_features_warning(
     names: list[str],
     *,
     combination: Literal["merge", "composite"],
+    assay_type: str,
 ) -> str | None:
     """Return the warning about the merged features that a source lacks.
 
     A merge writes zero counts for a feature in the cells of a source that
-    lacks it, and a union composite reads them. Both record which features
-    each source measured in a feature column of its own
+    lacks it, and a union composite reads them; analyses take the zeros as
+    measured counts. Both record which features each source measured in a
+    feature column of its own
     (:func:`~cytearc.storage.metadata_keys.measured_features_column`), which
-    the ADT recipe reads, while other analyses take the zeros as measured
-    counts. The warning counts the merged features of ``assay_name`` that
-    not every source holding the assay measured, then gives each such
-    source's number of missing features and names the first
-    ``UNSHARED_FEATURE_EXAMPLES`` of them in merged order. A source whose
-    assay holds no features lacks every merged feature, and the warning says
-    that it holds none. A source without the assay is left out, since a merge
-    marks its cells as not measured. The warning ends with
-    ``features='intersection'`` as the alternative, or says that it would
-    keep no feature when every source lacks some.
+    the ADT recipe reads for an assay of type ``"ADT"``. The warning counts
+    the merged features of ``assay_name`` that not every source holding the
+    assay measured, then gives each such source's number of missing features
+    and names the first ``UNSHARED_FEATURE_EXAMPLES`` of them in merged
+    order. A source whose assay holds no features lacks every merged feature,
+    and the warning says that it holds none. A source without the assay is
+    left out, since a merge marks its cells as not measured. A composite's
+    warning ends with ``features='intersection'`` as the alternative, or says
+    that it would keep no feature when every source lacks some.
 
     Args:
         assay_name: The merged assay, named in the warning.
@@ -284,12 +313,14 @@ def unshared_features_warning(
         names: The source names, in the order of ``alignment.featOrderMap``.
         combination: ``"merge"`` for a merge, which writes the zeros, or
             ``"composite"`` for a union composite, which reads them.
+        assay_type: The assay's type; the warning of an ``"ADT"`` assay says
+            what the ADT recipe does with the antibodies.
 
     Returns:
         The warning, or None when every source that holds the assay measured
         every merged feature, or when fewer than two sources hold it.
     """
-    adjective, subject = _combination_words(combination)
+    adjective, noun, verb = _combination_words(combination)
     holding = [
         (source_name, order_map, measured)
         for source_name, order_map, measured, present in zip(
@@ -329,19 +360,25 @@ def unshared_features_warning(
     if not lacking:
         return None
     unshared = int(np.count_nonzero(measured_by < len(holding)))
-    zeros = "writes" if combination == "merge" else "reads"
-    column = quoted_value(measured_features_column(holding[0][0]))
+    zeros = f" The {noun} {verb} zero counts for the features a source lacks"
+    record = (
+        f"columns such as {quoted_value(measured_features_column(holding[0][0]))} "
+        "record what each source measured"
+    )
     warning = (
         f"Assay {assay_name!r}: {unshared:,} of the {alignment.nFeats:,} "
         f"{adjective} features {'was' if unshared == 1 else 'were'} not measured "
         "by every source that holds the assay. "
         + " ".join(lacking)
-        + f" {subject.capitalize()} {zeros} zero counts for a feature in the "
-        "cells of each source that lacks it, and records which features each "
-        f"source measured in a feature column of its own, such as {column}. The "
-        "ADT recipe leaves the antibodies that not every source measured out of "
-        "its panel; other analyses read those zeros as measured counts."
+        + (
+            f"{zeros}; {record}, so the ADT recipe leaves those antibodies out of "
+            "its panel and markers, while other analyses read the zeros as counts."
+            if assay_type == "ADT"
+            else f"{zeros}, which analyses read as counts; {record}."
+        )
     )
+    if combination == "merge":
+        return warning
     if unshared < alignment.nFeats:
         return warning + (
             " Pass features='intersection' to keep only the features that every "
@@ -380,7 +417,7 @@ def shared_features_warning(
         The warning, or None when the intersection keeps at least a tenth of
         the union.
     """
-    _adjective, subject = _combination_words(combination)
+    _adjective, noun, _verb = _combination_words(combination)
     holding = [
         (source_name, measured)
         for source_name, measured, present in zip(
@@ -399,7 +436,7 @@ def shared_features_warning(
         kept_without = int(np.count_nonzero(presence - measured == len(holding) - 1))
         without.append(f"{kept_without:,} without {source_name!r}")
     return (
-        f"Assay {assay_name!r}: {subject} keeps {kept:,} of the "
+        f"Assay {assay_name!r}: the {noun} keeps {kept:,} of the "
         f"{alignment.nFeats:,} features of its sources, since "
         "features='intersection' keeps only the features that every source "
         f"measured. It would keep {', '.join(without[:-1])} and {without[-1]}."

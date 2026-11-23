@@ -7,9 +7,12 @@ describe assays that the file does not hold and are not exported. An import
 restores a declared column as the membership of an imported assay of that
 name, skips any other column named for an imported assay with a warning, and
 keeps the column of an assay that it does not import as ordinary metadata.
+A merge's record of which features each source measured travels the same
+way, declared in ``uns["cytearc"]["measuredFeatures"]``.
 """
 
 import json
+import re
 import shutil
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -26,7 +29,10 @@ from zarr.storage import MemoryStore
 import cytearc
 from cytearc import DataStore
 from cytearc.merge import DataStoreMerge
-from cytearc.metadata.membership import membership_attributes
+from cytearc.metadata.membership import (
+    measured_feature_columns,
+    membership_attributes,
+)
 from cytearc.readers import CSVReader, H5adReader
 from cytearc.utils.logging import logger
 from cytearc.writers import CrToZarr, CSVtoZarr, H5adToZarr, SparseToZarr
@@ -295,6 +301,142 @@ def test_a_malformed_declaration_is_refused_before_writing(
     reader = H5adReader(str(source))
     try:
         with pytest.raises(ValueError, match=message):
+            H5adToZarr(reader, destination, nthreads=1)
+    finally:
+        reader.close()
+    assert _untouched(destination)
+
+
+def test_a_record_of_measured_features_round_trips_through_h5ad(tmp_path) -> None:
+    # The second panel holds ADT2, which the first lacks.
+    sources = [
+        _store(tmp_path / "x.zarr", {"ADT": _counts(3, 2, 1)}, "x"),
+        _store(tmp_path / "y.zarr", {"ADT": _counts(2, 3, 2)}, "y"),
+    ]
+    merged_path = str(tmp_path / "merged.zarr")
+    DataStoreMerge(sources, merged_path, ["x", "y"], nthreads=1).dump()
+    merged = DataStore(
+        merged_path, default_assay="ADT", min_features_per_cell=-1, nthreads=1
+    )
+    record = {"measured_in_x": "x", "measured_in_y": "y"}
+    assert measured_feature_columns(merged.ADT.feats) == record
+    values = {column: merged.ADT.feats.fetch_all(column).tolist() for column in record}
+    assert values == {
+        "measured_in_x": [True, True, False],
+        "measured_in_y": [True, True, True],
+    }
+    assert merged.to_anndata(from_assay="ADT").uns["cytearc"] == {
+        "assayMembership": {"ADT": "ADT_I"},
+        "measuredFeatures": {"ADT": record},
+    }
+
+    exported = tmp_path / "merged.h5ad"
+    cytearc.to_h5ad(merged.ADT, str(exported))
+    for assay in ("ADT", "Protein"):
+        reader = H5adReader(str(exported))
+        try:
+            assert reader.measured_features() == {"ADT": record}
+            H5adToZarr(
+                reader, str(tmp_path / f"{assay}.zarr"), assay_name=assay, nthreads=1
+            ).dump()
+        finally:
+            reader.close()
+    imported = DataStore(
+        str(tmp_path / "ADT.zarr"),
+        default_assay="ADT",
+        min_features_per_cell=-1,
+        nthreads=1,
+    )
+    # The import restores the record, so the store still reads which features
+    # each source measured.
+    assert measured_feature_columns(imported.ADT.feats) == record
+    assert {
+        column: imported.ADT.feats.fetch_all(column).tolist() for column in record
+    } == values
+    # The record describes an assay named ADT; an assay imported under another
+    # name keeps the columns as ordinary metadata.
+    protein = zarr.open_group(str(tmp_path / "Protein.zarr"), mode="r")
+    assert "role" not in protein["Protein/featureData/measured_in_x"].attrs
+
+
+def _var_h5ad(path: Path, var: dict[str, object], uns: dict) -> Path:
+    import anndata
+
+    n_features = len(next(iter(var.values())))
+    adata = anndata.AnnData(
+        csr_matrix(_counts(3, n_features, 7).astype(np.float32)),
+        obs=pd.DataFrame(index=["c0", "c1", "c2"]),
+        var=pd.DataFrame(var, index=[f"f{index}" for index in range(n_features)]),
+        uns=uns,
+    )
+    adata.write_h5ad(path)
+    return path
+
+
+@pytest.mark.parametrize(
+    ("var", "declared", "message"),
+    [
+        (
+            {"measured_in_a": [1, 0]},
+            {"RNA": {"measured_in_a": "a"}},
+            "Column 'measured_in_a' is declared as the record of which features a "
+            "source of assay 'RNA' measured, but it has dtype int64, not bool",
+        ),
+        (
+            {"measured_in_a": pd.array([True, None], dtype="boolean")},
+            {"RNA": {"measured_in_a": "a"}},
+            "Column 'measured_in_a' is declared as the record of which features a "
+            "source of assay 'RNA' measured, but it has missing values",
+        ),
+        (
+            {"other": [True, False]},
+            {"RNA": {"measured_in_a": "a"}},
+            "The file declares 'measured_in_a' as the record of which features a "
+            "source of assay 'RNA' measured, but var has no such column",
+        ),
+        (
+            {"measured_in_a": [True, False]},
+            {"RNA": {"measured_in_a": "b"}},
+            "maps column 'measured_in_a' of assay 'RNA' to the source 'b'",
+        ),
+        (
+            {"measured_in_a": [True, False]},
+            "measured_in_a",
+            "uns/cytearc/measuredFeatures must be a mapping from assay name",
+        ),
+        (
+            {"measured_in_a": [True, False]},
+            {"RNA": "measured_in_a"},
+            "uns/cytearc/measuredFeatures/RNA must be a mapping from column name",
+        ),
+        (
+            {"measured_in_a": [True, False]},
+            {"RNA": {"measured_in_a": ["a"]}},
+            "uns/cytearc/measuredFeatures/RNA/measured_in_a must hold one text value",
+        ),
+    ],
+    ids=[
+        "not-boolean",
+        "missing",
+        "absent",
+        "other-source",
+        "string",
+        "assay-not-mapping",
+        "list",
+    ],
+)
+def test_a_malformed_record_of_measured_features_is_refused_before_writing(
+    tmp_path, var, declared, message
+) -> None:
+    source = _var_h5ad(
+        tmp_path / "malformed.h5ad",
+        var,
+        uns={"cytearc": {"measuredFeatures": declared}},
+    )
+    destination = _sentinel_store()
+    reader = H5adReader(str(source))
+    try:
+        with pytest.raises(ValueError, match=re.escape(message)):
             H5adToZarr(reader, destination, nthreads=1)
     finally:
         reader.close()

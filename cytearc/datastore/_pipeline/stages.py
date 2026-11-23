@@ -649,8 +649,13 @@ def tsne_stage(
     )
 
 
-def markers_stage(enabled: bool) -> PlannedStage:
-    """Rank every feature of the run's assay for each saved cluster."""
+def markers_stage(
+    enabled: bool, *, feature_selection: str = "feature_universe"
+) -> PlannedStage:
+    """Rank the features of the run's ``feature_selection`` output for each saved cluster.
+
+    The run's ``feature_universe`` holds every feature of its assay.
+    """
     if not enabled:
         return PlannedStage("markers", None)
 
@@ -662,7 +667,7 @@ def markers_stage(enabled: bool) -> PlannedStage:
             cell_selection=state.artifacts["analysis_cell_selection"],
             clusters=clusters,
             cluster_values=cluster_label_values(store.zw, clusters),
-            feature_selection=state.artifacts["feature_universe"],
+            feature_selection=state.artifacts[feature_selection],
             feature_names=state.feature_names,
             feature_snapshot=state.artifacts["feature_snapshot"],
         )
@@ -674,7 +679,7 @@ def markers_stage(enabled: bool) -> PlannedStage:
         inputs=(
             "clusters",
             "analysis_cell_selection",
-            "feature_universe",
+            feature_selection,
             "feature_snapshot",
             FEATURE_NAMES,
         ),

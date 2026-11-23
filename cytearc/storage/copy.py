@@ -53,6 +53,7 @@ COLUMN_METADATA_ATTRIBUTES = (
     "ordered",
     "role",
     "assay",
+    "source",
     "description",
     "unit",
 )

@@ -1243,25 +1243,23 @@ def test_merge_reads_signed_counts_within_its_own_budget_whatever_the_sources_bu
 _GENES = ["G0", "G1"]
 
 
-def _zeros_read_as_counts(first: str = "left", *, shared: bool = True) -> str:
+def _zeros_read_as_counts(first: str = "left", *, adt: bool = False) -> str:
     """Return how a merge's warning about unmeasured features ends.
 
-    ``first`` is the first source that holds the assay, and ``shared`` whether
-    every source measured some feature.
+    ``first`` is the first source that holds the assay, and ``adt`` whether
+    the assay is of type ADT, which the ADT recipe reads.
     """
-    return (
-        " The merge writes zero counts for a feature in the cells of each source "
-        "that lacks it, and records which features each source measured in a "
-        f"feature column of its own, such as 'measured_in_{first}'. The ADT "
-        "recipe leaves the antibodies that not every source measured out of its "
-        "panel; other analyses read those zeros as measured counts."
-        + (
-            " Pass features='intersection' to keep only the features that every "
-            "source measured."
-            if shared
-            else " No feature was measured by every source, so "
-            "features='intersection' would keep none."
+    if adt:
+        return (
+            " The merge writes zero counts for the features a source lacks; "
+            f"columns such as 'measured_in_{first}' record what each source "
+            "measured, so the ADT recipe leaves those antibodies out of its panel "
+            "and markers, while other analyses read the zeros as counts."
         )
+    return (
+        " The merge writes zero counts for the features a source lacks, which "
+        f"analyses read as counts; columns such as 'measured_in_{first}' record "
+        "what each source measured."
     )
 
 
@@ -1299,7 +1297,7 @@ def test_merge_gives_one_warning_naming_each_assay_whose_sources_share_few_featu
         "Assay 'ADT': 18 of the 19 merged features were not measured by every "
         "source that holds the assay. Source 'left' lacks 9: 'b1', 'b2', 'b3', "
         "'b4', 'b5' and 4 more. Source 'right' lacks 9: 'a1', 'a2', 'a3', 'a4', "
-        "'a5' and 4 more." + _zeros_read_as_counts(),
+        "'a5' and 4 more." + _zeros_read_as_counts(adt=True),
         "Assay 'RNA': 20 of the 21 merged features were not measured by every "
         "source that holds the assay. Source 'left' lacks 10: 'y1', 'y2', 'y3', "
         "'y4', 'y5' and 5 more. Source 'right' lacks 10: 'x1', 'x2', 'x3', 'x4', "
@@ -1342,7 +1340,8 @@ def test_merge_warns_of_the_antibodies_that_each_panel_lacks(tmp_path):
     assert messages == [
         "Assay 'ADT': 5 of the 8 merged features were not measured by every "
         "source that holds the assay. Source 'left' lacks 3: 'CD14', 'CD16', "
-        "'CD19'. Source 'right' lacks 2: 'CD45RA', 'CD27'." + _zeros_read_as_counts()
+        "'CD19'. Source 'right' lacks 2: 'CD45RA', 'CD27'."
+        + _zeros_read_as_counts(adt=True)
     ]
     # The merged counts hold the zeros that the warning describes.
     root = zarr.open_group(destination, mode="r")
@@ -1388,7 +1387,7 @@ def test_merge_names_at_most_five_of_the_genes_that_each_source_lacks(tmp_path):
         + _zeros_read_as_counts()
     )
     assert "x" * 100 not in message
-    assert len(message) - len(_zeros_read_as_counts()) < 500
+    assert len(message) < 500
 
 
 @pytest.mark.parametrize(
@@ -1429,7 +1428,9 @@ def test_merge_plan_counts_the_antibodies_that_every_one_of_three_panels_measure
     adt = next(item for item in plan.assays if item.assayName == "ADT")
     assert adt.nFeatures == 4
     assert adt.featureOverlapFraction == fraction
-    assert messages == ["Assay 'ADT': " + warning + _zeros_read_as_counts("a")]
+    assert messages == [
+        "Assay 'ADT': " + warning + _zeros_read_as_counts("a", adt=True)
+    ]
 
 
 def test_three_panels_of_which_two_overlap_merge_with_no_antibody_in_all_three(
@@ -1451,7 +1452,7 @@ def test_three_panels_of_which_two_overlap_merge_with_no_antibody_in_all_three(
         "Assay 'ADT': 4 of the 4 merged features were not measured by every "
         "source that holds the assay. Source 'a' lacks 2: 'CD8', 'CD14'. Source "
         "'b' lacks 2: 'CD8', 'CD14'. Source 'c' lacks 2: 'CD3', 'CD4'."
-        + _zeros_read_as_counts("a", shared=False)
+        + _zeros_read_as_counts("a", adt=True)
     ]
     rows = _rows_by_cell(destination, "ADT/counts")
     assert [rows["a__c0"], rows["b__c0"], rows["c__c0"]] == [
@@ -1542,7 +1543,7 @@ def test_merge_of_sources_that_measured_one_panel_names_no_feature(
 _NO_ANTIBODIES = (
     "Assay 'ADT': 2 of the 2 merged features were not measured by every source "
     "that holds the assay. Source 'c' holds no features of the assay, so it "
-    "lacks every merged feature." + _zeros_read_as_counts("a", shared=False)
+    "lacks every merged feature." + _zeros_read_as_counts("a", adt=True)
 )
 
 
@@ -1632,16 +1633,28 @@ def test_merge_records_which_features_each_source_measured(tmp_path):
     plan = merger.plan()
     merger.dump()
 
-    ids = zarr.open_group(destination, mode="r")["ADT/featureData/ids"][:].tolist()
+    features = zarr.open_group(destination, mode="r")["ADT/featureData"]
+    ids = features["ids"][:].tolist()
     # Each source that holds an assay gets a column, true for the features of
-    # its panel; the source without ADT gets none.
+    # its panel, whose attributes keep the source's name; the source without
+    # ADT gets none.
     assert _measured_columns(destination) == {
         "measured_in_left": [name in _LEFT_PANEL for name in ids],
         "measured_in_right": [name in _RIGHT_PANEL for name in ids],
     }
-    assert _measured_columns(destination, "RNA") == {
-        f"measured_in_{name}": [True, True] for name in ("left", "right", "third")
+    assert {
+        name: dict(features[name].attrs)
+        for name in ("measured_in_left", "measured_in_right")
+    } == {
+        "measured_in_left": {"role": "measured_features", "source": "left"},
+        "measured_in_right": {"role": "measured_features", "source": "right"},
     }
+    # Every source measured both genes, which needs no record.
+    assert _measured_columns(destination, "RNA") == {}
+    assert (
+        "measured_in_left"
+        not in zarr.open_group(destination, mode="r")["RNA/featureData"]
+    )
     # A merge of the union records no setting in its manifest, as merges
     # written before the setting did.
     assert "features" not in plan.manifest
@@ -1693,10 +1706,9 @@ def test_intersection_merge_keeps_the_features_that_every_source_measured(tmp_pa
         assert rows[f"left__c{cell}"] == left[cell, [0, 1, 2]].tolist()
         assert rows[f"right__c{cell}"] == right[cell, [2, 4, 0]].tolist()
         assert rows[f"third__c{cell}"] == [0, 0, 0]
-    assert _measured_columns(destination) == {
-        "measured_in_left": [True, True, True],
-        "measured_in_right": [True, True, True],
-    }
+    # Every source measured every antibody that the merge keeps, which needs
+    # no record.
+    assert _measured_columns(destination) == {}
 
 
 def test_select_features_keeps_what_every_holder_measured_and_renumbers_it():
@@ -1714,10 +1726,6 @@ def test_select_features_keeps_what_every_holder_measured_and_renumbers_it():
     assert union.mergedFeatsMap["ids"].tolist() == ["CD45RA", "CD3", "CD4", "CD19"]
     assert union.overlapFraction == 0.5
     assert select_features("ADT", union, "union") is union
-    with pytest.raises(
-        ValueError, match="^features must be 'union' or 'intersection', got 'shared'$"
-    ):
-        select_features("ADT", union, "shared")  # type: ignore[arg-type]
 
     shared = select_features("ADT", union, "intersection")
     assert shared.mergedFeatsMap.to_dict("list") == {
@@ -1850,40 +1858,83 @@ def test_intersection_merge_by_name_sums_the_features_it_keeps(tmp_path):
         "right__c0": [10, 50],
         "right__c1": [50, 130],
     }
-    assert _measured_columns(destination, "RNA") == {
-        "measured_in_left": [True, True],
-        "measured_in_right": [True, True],
-    }
+    assert _measured_columns(destination, "RNA") == {}
 
 
-@pytest.mark.parametrize(
-    ("options", "message"),
-    [
-        (
-            {"features": "shared"},
-            "features must be 'union' or 'intersection', got 'shared'",
-        ),
-        (
-            {"names": ["left", "right/2"]},
-            "Source name 'right/2' cannot name the feature column that records "
-            "which features it measured",
-        ),
-    ],
-)
-def test_merge_refuses_settings_that_cannot_record_measured_features(
-    tmp_path, options, message
-):
+def test_merge_refuses_features_that_are_neither_union_nor_intersection(tmp_path):
     sources = [
         _panel_source({"RNA": _GENES, "ADT": _LEFT_PANEL}),
         _panel_source({"RNA": _GENES, "ADT": _RIGHT_PANEL}),
     ]
-    names = options.pop("names", ["left", "right"])
 
-    with pytest.raises(ValueError, match=re.escape(message)):
-        DataStoreMerge(sources, str(tmp_path / "merged.zarr"), names, **options)
+    with pytest.raises(
+        ValueError,
+        match=re.escape("features must be 'union' or 'intersection', got 'shared'"),
+    ):
+        DataStoreMerge(
+            sources, str(tmp_path / "merged.zarr"), _NAMES, features="shared"
+        )
+
+
+def test_merge_records_a_source_whose_name_holds_a_path_separator(tmp_path):
+    from cytearc.metadata.membership import measured_feature_columns
+
+    sources = [
+        _panel_source({"RNA": _GENES, "ADT": _LEFT_PANEL}),
+        _panel_source({"RNA": _GENES, "ADT": _RIGHT_PANEL}),
+    ]
+    destination = str(tmp_path / "merged.zarr")
+    names = ["GSE1/run1", "GSE2\\run1"]
+
+    DataStoreMerge(sources, destination, names, nthreads=1).dump()
+    ids = zarr.open_group(destination, mode="r")["ADT/featureData/ids"][:].tolist()
+    # Zarr would nest a column named with a path separator, so each column
+    # takes '_' in its place and keeps the source's name in its attributes.
+    assert _measured_columns(destination) == {
+        "measured_in_GSE1_run1": [name in _LEFT_PANEL for name in ids],
+        "measured_in_GSE2_run1": [name in _RIGHT_PANEL for name in ids],
+    }
+    assert measured_feature_columns(_open(destination).ADT.feats) == {
+        "measured_in_GSE1_run1": "GSE1/run1",
+        "measured_in_GSE2_run1": "GSE2\\run1",
+    }
+
+
+@pytest.mark.parametrize(
+    ("names", "columns"),
+    [
+        (["Ctrl", "ctrl"], "'measured_in_Ctrl' and 'measured_in_ctrl'"),
+        (["a/b", "a_b"], "'measured_in_a_b' and 'measured_in_a_b'"),
+    ],
+    ids=["case", "separator"],
+)
+def test_merge_refuses_sources_whose_record_columns_would_be_one(
+    tmp_path, names, columns
+):
+    destination = tmp_path / "merged.zarr"
+    panels = [
+        _panel_source({"RNA": _GENES, "ADT": _LEFT_PANEL}),
+        _panel_source({"RNA": _GENES, "ADT": _RIGHT_PANEL}),
+    ]
+
+    with pytest.raises(ValueError) as refused:
+        DataStoreMerge(panels, str(destination), names, nthreads=1).plan()
+    assert str(refused.value) == (
+        f"Sources {names[0]!r} and {names[1]!r} would record which features they "
+        f"measured in the feature columns {columns}, which a file system that "
+        "ignores case stores as one column. Name the sources so that the names "
+        "differ in more than case, with '/' and '\\' counted as '_'."
+    )
+    assert not destination.exists()
+    # Sources that measured the same features need no record, and merge.
+    same = [_panel_source({"RNA": _GENES, "ADT": _LEFT_PANEL}) for _ in names]
+    DataStoreMerge(same, str(destination), names, nthreads=1).dump()
+    assert _measured_columns(str(destination)) == {}
 
 
 def test_subsets_keep_the_record_of_the_features_each_source_measured(tmp_path):
+    from cytearc.metadata.membership import measured_feature_columns
+
     sources = [
         _panel_source({"RNA": _GENES, "ADT": _LEFT_PANEL}),
         _panel_source({"RNA": _GENES, "ADT": _RIGHT_PANEL}),
@@ -1896,7 +1947,14 @@ def test_subsets_keep_the_record_of_the_features_each_source_measured(tmp_path):
 
     SubsetZarr(subset, [store.ADT], cell_ids=ids, nthreads=1).dump()
     assert _measured_columns(subset) == _measured_columns(merged)
-    assert set(_measured_columns(subset)) == {"measured_in_left", "measured_in_right"}
+    # The subset keeps each column's source, which a read of the record checks.
+    reopened = DataStore(
+        subset, default_assay="ADT", min_features_per_cell=0, nthreads=1
+    )
+    assert measured_feature_columns(reopened.ADT.feats) == {
+        "measured_in_left": "left",
+        "measured_in_right": "right",
+    }
 
 
 def test_a_merge_of_merged_stores_records_what_every_cell_of_each_source_measured(
@@ -1925,7 +1983,7 @@ def test_a_merge_of_merged_stores_records_what_every_cell_of_each_source_measure
         "Assay 'ADT': 5 of the 8 merged features were not measured by every "
         "source that holds the assay. Source 'inner' lacks 5: 'CD45RA', 'CD27', "
         "'CD14', 'CD16', 'CD19'. Source 'third' lacks 4: 'CD27', 'CD14', 'CD16', "
-        "'CD19'." + _zeros_read_as_counts("inner")
+        "'CD19'." + _zeros_read_as_counts("inner", adt=True)
     ]
     # The inner store holds all eight antibodies, but the cells of its right
     # source never stained CD45RA or CD27, and those of its left source never
@@ -1950,6 +2008,33 @@ def test_a_merge_of_merged_stores_records_what_every_cell_of_each_source_measure
         "CD4",
         "CD8",
     ]
+
+
+def test_an_intersection_of_a_merged_store_warns_of_what_its_cells_measured(
+    tmp_path,
+):
+    left = [f"x{index}" for index in range(11)]
+    right = ["x0", *(f"y{index}" for index in range(1, 11))]
+    inner = str(tmp_path / "inner.zarr")
+    _merge([_panel_source({"RNA": left}), _panel_source({"RNA": right})], inner).dump()
+    # The inner store holds all 21 genes, but only x0 in every one of its
+    # cells, and the third source measured all 21.
+    sources = [_open(inner), _panel_source({"RNA": [*left, *right[1:]]})]
+
+    with _captured_warnings() as messages:
+        plan = DataStoreMerge(
+            sources,
+            str(tmp_path / "shared.zarr"),
+            ["inner", "third"],
+            nthreads=1,
+            features="intersection",
+        ).plan()
+    assert messages == [
+        "Assay 'RNA': the merge keeps 1 of the 21 features of its sources, since "
+        "features='intersection' keeps only the features that every source "
+        "measured. It would keep 21 without 'inner' and 1 without 'third'."
+    ]
+    assert plan.assays[0].nFeatures == 1
 
 
 def test_merge_leaves_out_a_source_column_that_its_record_would_replace(tmp_path):
@@ -1991,36 +2076,77 @@ def test_a_feature_table_without_a_record_counts_every_feature_as_measured(tmp_p
     for name in ("measured_in_left", "measured_in_right"):
         del root[f"ADT/featureData/{name}"]
     earlier = _open(destination)
-    assert measured_feature_columns(earlier.ADT.feats) == []
+    assert measured_feature_columns(earlier.ADT.feats) == {}
     assert features_measured_by_every_source(earlier.ADT.feats).all()
 
 
 @pytest.mark.parametrize(
-    "values",
+    ("values", "attributes", "problem"),
     [
-        pytest.param(np.ones(3, dtype=np.int8), id="not Boolean"),
         pytest.param(
-            pd.array([True, None, True], dtype="boolean"), id="with missing values"
+            pd.array([True, None, False], dtype="boolean"),
+            {"role": "measured_features"},
+            "its source attribute, None, does not name it",
+            id="copied by an earlier release",
+        ),
+        pytest.param(
+            np.array([True, True, False]),
+            {"role": "measured_features", "source": "right"},
+            "its source attribute, 'right', does not name it",
+            id="of another source",
+        ),
+        pytest.param(
+            np.ones(3, dtype=np.int8),
+            {"role": "measured_features", "source": "left"},
+            "it has dtype int8, not bool",
+            id="not Boolean",
+        ),
+        pytest.param(
+            pd.array([True, None, False], dtype="boolean"),
+            {"role": "measured_features", "source": "left"},
+            "it has missing values",
+            id="with missing values",
         ),
     ],
 )
-def test_a_record_of_measured_features_must_be_boolean_without_missing_values(
-    values,
+def test_a_malformed_record_of_measured_features_is_refused_with_its_remedy(
+    values, attributes, problem
 ):
     from cytearc.metadata.membership import features_measured_by_every_source
 
     source = _panel_source({"RNA": _GENES, "ADT": ["CD3", "CD4", "CD8"]})
     source.ADT.feats.insert("measured_in_left", values)
-    source.ADT.feats._get_array("measured_in_left").attrs["role"] = "measured_features"
+    source.ADT.feats._get_array("measured_in_left").attrs.update(attributes)
 
+    with pytest.raises(ValueError) as refused:
+        features_measured_by_every_source(source.ADT.feats)
+    assert str(refused.value) == (
+        "Feature column 'measured_in_left' has the role of a record of which "
+        f"features one source of a merge measured, but {problem}. Earlier "
+        "releases of CyteArc copy such a column without its source and with "
+        "missing values when they merge stores. Drop it with "
+        "ds.ADT.feats.drop('measured_in_left'), or merge the sources again to "
+        "record what each one measured."
+    )
+    # The call that the message names leaves no record.
+    source.ADT.feats.drop("measured_in_left")
+    assert features_measured_by_every_source(source.ADT.feats).all()
+
+
+def test_the_remedy_of_a_malformed_record_names_an_assay_that_is_no_attribute():
+    from cytearc.metadata.membership import measured_feature_columns
+
+    source = _panel_source({"RNA": _GENES, "ADT-2": ["CD3", "CD4", "CD8"]})
+    features = source.get_assay("ADT-2").feats
+    features.insert("measured_in_left", np.array([True, False, True]))
+    features._get_array("measured_in_left").attrs["role"] = "measured_features"
+
+    # ds.ADT-2 is no Python expression, so the message names get_assay.
     with pytest.raises(
         ValueError,
-        match=re.escape(
-            "Feature column 'measured_in_left' records which features a source of "
-            "a merge measured, so it must be Boolean without missing values"
-        ),
+        match=re.escape("Drop it with ds.get_assay('ADT-2').feats.drop("),
     ):
-        features_measured_by_every_source(source.ADT.feats)
+        measured_feature_columns(features)
 
 
 def test_merge_by_name_sums_signed_counts_in_a_wider_dtype(tmp_path):

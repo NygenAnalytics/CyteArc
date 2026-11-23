@@ -74,32 +74,50 @@ def _excluded(names: np.ndarray, pattern: re.Pattern[str] | None) -> np.ndarray:
 
 
 def _panel_stage(
-    assay: str, pattern: re.Pattern[str] | None, measured: np.ndarray
+    assay: str, pattern: re.Pattern[str] | None, measured: np.ndarray | None
 ) -> PlannedStage:
-    """Return the stage that keeps the antibodies of ``measured`` that ``pattern`` does not match."""
+    """Return the stage that keeps the antibodies that ``pattern`` does not match.
+
+    When not every source of a merged store measured every antibody,
+    ``measured`` marks those that every source measured: the panel keeps
+    only them, and the stage saves them as ``measured_antibodies``, which the
+    markers rank in place of the feature universe.
+    """
 
     def action(state: RunState) -> Outputs:
         assert state.feature_names is not None
-        ref = state.store._features_snapshot(
-            from_assay=assay,
-            mask=~_excluded(state.feature_names, pattern) & measured,
+        kept = ~_excluded(state.feature_names, pattern)
+        if measured is None:
+            ref = state.store._features_snapshot(from_assay=assay, mask=kept)
+            return (("panel", ref),)
+        return (
+            (
+                "panel",
+                state.store._features_snapshot(from_assay=assay, mask=kept & measured),
+            ),
+            (
+                "measured_antibodies",
+                state.store._features_snapshot(from_assay=assay, mask=measured),
+            ),
         )
-        return (("panel", ref),)
 
-    return PlannedStage("panel", action, inputs=(FEATURE_NAMES,), outputs=("panel",))
+    outputs = ("panel",) if measured is None else ("panel", "measured_antibodies")
+    return PlannedStage("panel", action, inputs=(FEATURE_NAMES,), outputs=outputs)
 
 
 def _resolve_panel(
     store: Any,
     assay: str,
     value: object,
-) -> tuple[re.Pattern[str] | None, np.ndarray, dict[str, Any], int]:
+) -> tuple[re.Pattern[str] | None, np.ndarray | None, dict[str, Any], int]:
     """Return the exclusion pattern, the antibodies that every source measured, the recorded settings, and the panel size.
 
-    A merged store records which antibodies each of its sources measured,
-    and the panel leaves out those that not every source measured, whose
-    zero counts in the other sources' cells are no measurement, with a
-    warning that names them. The run records them as ``unmeasured``.
+    A merged store records which antibodies each of its sources measured
+    when they measured different ones. The panel and the markers then leave
+    out those that not every source measured, whose zero counts in the other
+    sources' cells are not measurements, with a warning that names them, and
+    the run records them as ``unmeasured``. The antibodies that every source
+    measured are None when every source measured every antibody.
     """
     _enabled, settings = stage_settings("panel", value, optional=False)
     raw = settings.get("exclude", DEFAULT_PANEL_EXCLUDE)
@@ -132,14 +150,14 @@ def _resolve_panel(
         listed = ", ".join(map(quoted_value, left_out[:_UNMEASURED_EXAMPLES]))
         more = len(left_out) - _UNMEASURED_EXAMPLES
         logger.warning(
-            "The ADT panel leaves out the antibodies that not every source of the "
-            "merged store measured, whose zero counts in the cells of the other "
-            f"sources are no measurement: {listed}"
+            "The ADT panel and markers leave out the antibodies that not every "
+            "source of the merged store measured, whose zero counts in the cells "
+            f"of the other sources are not measurements: {listed}"
             + (f" and {more} more" if more > 0 else "")
             + ". The run records them as the panel's 'unmeasured'."
         )
         recorded["unmeasured"] = left_out
-    return pattern, measured, recorded, kept
+    return pattern, None if measured.all() else measured, recorded, kept
 
 
 def resolve_adt(
@@ -265,7 +283,12 @@ def resolve_adt(
         ),
         *first_tail,
         *tsne_tail,
-        markers_stage(markers),
+        markers_stage(
+            markers,
+            feature_selection=(
+                "feature_universe" if measured is None else "measured_antibodies"
+            ),
+        ),
     )
     config = {
         "cells": source.to_config(),
@@ -286,7 +309,7 @@ def resolve_adt(
         },
     }
     output_keys = graph_output_keys(
-        head=("panel",),
+        head=("panel", "measured_antibodies"),
         reduction=("pca",),
         tail=("markers",),
     )

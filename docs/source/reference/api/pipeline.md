@@ -118,7 +118,7 @@ adt.features.fetch("panel")
 
 The `adt` recipe runs `input_snapshot`, `filtering`, `panel`, `normalization`, `pca`, `harmony`, `ann_index`, `neighbors`, `connectivity`, `embedding_initialization`, `umap`, `localmap`, `leiden`, `paris`, `cluster_selection`, `membership_strength`, `tsne`, and `markers`.
 
-The assay must be of type `ADT`; an `HTO` assay is read by the RNA recipe's `hashing` stage instead. The panel leaves out the antibodies whose names match `cytearc.datastore.pipeline_accessor.DEFAULT_PANEL_EXCLUDE`, the regular expression `(?i)isotype|control|ctrl`, so isotype controls stay out of the reduction. `panel={"exclude": ...}` sets another pattern, and `panel={"exclude": None}` keeps every antibody. On a store merged from studies of different antibody panels, the panel also leaves out the antibodies that not every study measured, as the merged feature table records them ({doc}`import_export`), since their zero counts in the other studies' cells are no measurement; a warning names them, and the run records them as the panel's `unmeasured`. The panel must keep at least two antibodies, and the run records the excluded names. The antibodies are normalized with the assay's normalizer, CLR for an ADT assay ([Normalization method](#normalization-method)), and PCA keeps one dimension fewer than the panel holds, at most 21, unless `pca` sets `dims`, which must be at least 1 and below the panel's number of antibodies. The recipe filters cells only when `filtering` asks for it, because an ADT run usually takes the QC-passing cells of an RNA run.
+The assay must be of type `ADT`; an `HTO` assay is read by the RNA recipe's `hashing` stage instead. The panel leaves out the antibodies whose names match `cytearc.datastore.pipeline_accessor.DEFAULT_PANEL_EXCLUDE`, the regular expression `(?i)isotype|control|ctrl`, so isotype controls stay out of the reduction. `panel={"exclude": ...}` sets another pattern, and `panel={"exclude": None}` keeps every antibody that every source of the store measured. On a store merged from studies of different antibody panels, the panel leaves out the antibodies that not every study measured, as the merged feature table records them ({doc}`import_export`), since their zero counts in the other studies' cells are not measurements; a warning names them, and the run records them as the panel's `unmeasured`. The run's markers then rank the antibodies that every study measured, which the run saves as `measured_antibodies`, in place of every antibody of the assay, so a run of the merged store ranks what a run of a merge of the shared antibodies alone ranks. The panel must keep at least two antibodies, and the run records the excluded names. The antibodies are normalized with the assay's normalizer, CLR for an ADT assay ([Normalization method](#normalization-method)), and PCA keeps one dimension fewer than the panel holds, at most 21, unless `pca` sets `dims`, which must be at least 1 and below the panel's number of antibodies. The recipe filters cells only when `filtering` asks for it, because an ADT run usually takes the QC-passing cells of an RNA run.
 
 ### Multimodal
 
@@ -746,7 +746,8 @@ markers, leiden
 ```
 
 A default `adt` run has the same outputs with `panel` in place of `prevalent_peaks` and `pca` in
-place of `lsi`. A default WNN `multimodal` run of an `RNA` run and an `ADT` run has:
+place of `lsi`, and `measured_antibodies` after `panel` on a store whose sources measured
+different antibodies. A default WNN `multimodal` run of an `RNA` run and an `ADT` run has:
 
 ```text
 input_cell_selection, analysis_cell_selection, feature_universe, integrated_graph,

@@ -704,8 +704,12 @@ class PipelineAccessor:
             panel: ``exclude``, a regular expression of the antibody names to
                 leave out (default ``DEFAULT_PANEL_EXCLUDE``, which matches
                 "isotype", "control", and "ctrl" in any case), or None to keep
-                every antibody. The panel must keep at least two antibodies,
-                and the run records the excluded names.
+                every antibody that every source of the store measured. On a
+                store merged from different panels, the panel leaves out the
+                antibodies that not every source measured, which the run
+                records as ``unmeasured``, and the markers rank only those
+                that every source measured. The panel must keep at least two
+                antibodies, and the run records the excluded names.
             normalization: ``method`` and the keywords of
                 ``features.normalize``, as for :meth:`rna`. ``method``
                 defaults to the assay's ``normMethod``, ``"clr"`` for an ADT

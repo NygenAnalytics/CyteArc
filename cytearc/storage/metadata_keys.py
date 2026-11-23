@@ -10,7 +10,7 @@ categories of categorical columns linked through
 The cell column named by :func:`assay_membership_column` records which cells
 an assay measures, and the feature columns named by
 :func:`measured_features_column` which features each source of a merge
-measured.
+measured, under names that :func:`measured_features_columns` checks.
 """
 
 from collections.abc import Iterable
@@ -47,10 +47,43 @@ MEASURED_FEATURES_ROLE = "measured_features"
 def measured_features_column(source: str) -> str:
     """Return the name of the feature column that records which features ``source`` measured.
 
-    A merge writes one, a Boolean column whose ``role`` attribute is
-    :data:`MEASURED_FEATURES_ROLE`, for each source that holds the assay.
+    It is ``measured_in_<source>``, with ``_`` in place of each ``/`` and
+    ``\\`` (:func:`metadata_column_key`). A merge or a composite writes it as
+    a Boolean column with the attributes that
+    :func:`measured_features_attributes` returns, which keep the source's own
+    name.
     """
-    return f"measured_in_{source}"
+    return metadata_column_key(f"measured_in_{source}")
+
+
+def measured_features_attributes(source: str) -> dict[str, str]:
+    """Return the attributes that mark a feature column as the record of what ``source`` measured."""
+    return {"role": MEASURED_FEATURES_ROLE, "source": source}
+
+
+def measured_features_columns(sources: Iterable[str]) -> dict[str, str]:
+    """Return the column that records which features each source measured, by source.
+
+    Raises:
+        ValueError: If the columns of two sources are named alike once case
+            is ignored, as a file system that ignores case stores them as one
+            column.
+    """
+    columns: dict[str, str] = {}
+    first: dict[str, str] = {}
+    for source in sources:
+        column = measured_features_column(source)
+        other = first.setdefault(column.casefold(), source)
+        if other != source:
+            raise ValueError(
+                f"Sources {other!r} and {source!r} would record which features "
+                f"they measured in the feature columns {columns[other]!r} and "
+                f"{column!r}, which a file system that ignores case stores as one "
+                "column. Name the sources so that the names differ in more than "
+                "case, with '/' and '\\' counted as '_'."
+            )
+        columns[source] = column
+    return columns
 
 
 _UNSTORABLE_NAMES = frozenset({"", ".", ".."})

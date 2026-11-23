@@ -55,10 +55,10 @@ from ..storage.layout import (
 )
 from ..storage.metadata_keys import (
     ASSAY_MEMBERSHIP_ROLE,
-    MEASURED_FEATURES_ROLE,
     assay_membership_column,
     is_reserved_metadata_name,
-    measured_features_column,
+    measured_features_attributes,
+    measured_features_columns,
     metadata_column_key,
     validate_metadata_column_name,
 )
@@ -1365,7 +1365,7 @@ def admit_feature_metadata(
         n_features,
         resources=resources,
         resident_bytes=resident_bytes,
-        reserved=frozenset(measured_features_column(name) for name in sources),
+        reserved=frozenset(measured_features_columns(sources).values()),
     )
 
 
@@ -1387,15 +1387,18 @@ def write_feature_metadata(
     warning. Per-dataset analysis outputs such as highly variable gene flags
     usually fall in this group. Every column is planned before any is written.
 
-    ``measured`` maps each source that holds the assay to whether it
-    measured each merged feature, which a Boolean column of its own records,
-    named by :func:`~cytearc.storage.metadata_keys.measured_features_column`
-    and marked by the ``role`` attribute
-    :data:`~cytearc.storage.metadata_keys.MEASURED_FEATURES_ROLE`. A source
-    column of the same name is left out with a warning, and a source's own
-    record is left out, as the merged record holds it.
+    ``measured``, the record of :func:`~cytearc.merge.features.feature_record`,
+    maps each source that holds the assay to whether it measured each merged
+    feature, which a Boolean column of its own records, named by
+    :func:`~cytearc.storage.metadata_keys.measured_features_column` and with
+    the attributes of
+    :func:`~cytearc.storage.metadata_keys.measured_features_attributes`; it is
+    empty when the sources measured the same features. A source column of the
+    same name is left out with a warning, and a source's own record is left
+    out, as the merged record holds it.
     """
-    reserved = frozenset(measured_features_column(name) for name in measured)
+    columns = measured_features_columns(measured)
+    reserved = frozenset(columns.values())
     taken = sorted(reserved & set().union(*_annotation_columns(tables)))
     skipped: list[str] = []
     for column_plan in _plan_feature_columns(
@@ -1469,12 +1472,12 @@ def write_feature_metadata(
         assert values.shape == (n_features,), (name, values.shape, n_features)
         create_metadata_column(
             destination,
-            measured_features_column(name),
+            columns[name],
             data=values,
             dtype=bool,
             chunkSize=column_chunk_rows(n_features, values.dtype.itemsize),
             profile=profile,
-            attributes={"role": MEASURED_FEATURES_ROLE},
+            attributes=measured_features_attributes(name),
         )
     if taken:
         logger.warning(

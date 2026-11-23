@@ -20,7 +20,6 @@ from ..storage.io_policy import StorageIoPolicy
 from ..storage.layout import ZarrArraySpec, _group_zarr_format, count_array_spec
 from ..storage.metadata_keys import (
     assay_membership_column,
-    measured_features_column,
     validate_metadata_column_name,
 )
 from ..storage.profiles import (
@@ -44,6 +43,7 @@ from .features import (
     FeatureKey,
     FeatureSet,
     align_features,
+    feature_record,
     resolve_merge_dtype,
     select_features,
     shared_features_warning,
@@ -209,16 +209,19 @@ class DataStoreMerge:
     lacks one of its features get zero counts of that feature. Planning then
     logs a warning for the assay with the number of features that each such
     source lacks and up to five of their names, so that a merge of different
-    antibody panels is flagged. The merged feature table records which
-    features each source that holds the assay measured, in a Boolean column
-    ``measured_in_<name>`` for each, such as ``measured_in_ctrl``, which
+    antibody panels is flagged. When the sources measured different
+    features, the merged feature table records which features each source
+    that holds the assay measured, in a Boolean column ``measured_in_<name>``
+    for each, such as ``measured_in_ctrl``, which
     ``ds.ADT.feats.to_pandas_dataframe(["names", "measured_in_ctrl",
-    "measured_in_stim"])`` reads; subsets and repacks keep them. The ADT
-    recipe leaves the antibodies that not every source measured out of its
-    panel. A source that a merge wrote counts a feature as measured when
-    every one of its own sources measured it, and its own columns are not
-    copied. A source column of the same name as one of these is left out
-    with a warning.
+    "measured_in_stim"])`` reads; subsets, repacks and H5AD exports keep
+    them. A name with ``/`` or ``\\`` takes ``_`` in their place, and names
+    whose columns would differ only in case are refused before anything is
+    written. The ADT recipe leaves the antibodies that not every source
+    measured out of its panel and its markers. A source that a merge wrote
+    counts a feature as measured when every one of its own sources measured
+    it, and its own columns are not copied. A source column of the same name
+    as one of these is left out with a warning.
 
     Merged cells are in an order of their own, neither the sources' order nor
     a uniform random order. The cells of each source are split into blocks,
@@ -279,14 +282,6 @@ class DataStoreMerge:
             raise ValueError(
                 f"features must be 'union' or 'intersection', got {features!r}"
             )
-        for name in names:
-            try:
-                validate_metadata_column_name(measured_features_column(name))
-            except ValueError as error:
-                raise ValueError(
-                    f"Source name {name!r} cannot name the feature column that "
-                    f"records which features it measured: {error}"
-                ) from error
         # Zarr would nest a merged column whose name holds a path separator.
         if source_column is not None:
             validate_metadata_column_name(source_column)
@@ -411,7 +406,11 @@ class DataStoreMerge:
                 self._alignments[assay_name] = alignment
                 features_warning = (
                     unshared_features_warning(
-                        assay_name, alignment, self.names, combination="merge"
+                        assay_name,
+                        alignment,
+                        self.names,
+                        combination="merge",
+                        assay_type=self._assayTypes[assay_name],
                     )
                     if self.features == "union"
                     else shared_features_warning(
@@ -427,18 +426,8 @@ class DataStoreMerge:
             raise
 
     def _measured_features(self, assay_name: str) -> dict[str, np.ndarray]:
-        """Return whether each source that holds ``assay_name`` measured each merged feature."""
-        alignment = self._alignments[assay_name]
-        return {
-            name: measured
-            for name, measured, present in zip(
-                self.names,
-                alignment.measuredFeatures,
-                alignment.sourcePresent,
-                strict=True,
-            )
-            if present
-        }
+        """Return the record of what each source that holds ``assay_name`` measured, empty when they measured the same features."""
+        return feature_record(self._alignments[assay_name], self.names)
 
     def _assay_sources(self, assay_name: str) -> list[Any | None]:
         """Return each source's assay, or None for a source without it."""
