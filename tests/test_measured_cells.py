@@ -3274,11 +3274,17 @@ def test_bulk_profiles_leave_out_features_that_a_source_of_their_cells_did_not_m
     assert expected.detected is not None
     pd.testing.assert_frame_equal(bulk.detected, expected.detected)
     pd.testing.assert_frame_equal(bulk.columns, expected.columns)
-    # The profiles leave the unmeasured antibodies out with empty rows kept too.
+    # The profiles leave the unmeasured antibodies out with empty rows kept
+    # too, and without detected counts.
     kept = store.compare.compute_bulk(
         "cell_type", remove_empty_features=False, **options
     )
     assert kept.profiles.index.tolist() == _SHARED_ANTIBODIES
+    profiles_only = store.compare.compute_bulk(
+        "cell_type", **{**options, "count_detected": False}
+    )
+    assert profiles_only.detected is None
+    pd.testing.assert_frame_equal(profiles_only.profiles, bulk.profiles)
 
     # The left study's cells keep its own antibodies, as its own store's
     # profiles do, and leave out CD20, which the left study did not stain.
