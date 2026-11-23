@@ -1543,6 +1543,7 @@ def test_reads_of_variable_width_text_hold_what_they_charge(
     kind, characters, n_values, chunk_rows, random, tmp_path
 ) -> None:
     from cytearc.metadata.rows import (
+        array_row_selection_parts,
         read_rows,
         read_rows_bytes,
         read_text_rows,
@@ -1563,6 +1564,7 @@ def test_reads_of_variable_width_text_hold_what_they_charge(
     rng = np.random.default_rng(1)
     scattered = np.sort(rng.choice(n_values, n_values // 3, replace=False))
     one = np.array([chunk_rows // 2])
+    fixed, per_row = array_row_selection_parts(stored)
     # Each read, and what the planners of reads state it holds beside its
     # own charge.
     reads = {
@@ -1573,7 +1575,10 @@ def test_reads_of_variable_width_text_hold_what_they_charge(
         ),
         "scattered rows": (
             lambda ledger: read_rows(ledger, stored, scattered, item="the IDs"),
-            read_rows_bytes(stored, len(scattered)),
+            min(
+                read_rows_bytes(stored, len(scattered)),
+                fixed + len(scattered) * per_row,
+            ),
         ),
         "rows as strings": (
             lambda ledger: read_text_rows(ledger, stored, scattered, item="the IDs"),
@@ -1591,6 +1596,11 @@ def test_reads_of_variable_width_text_hold_what_they_charge(
         # What the read returns stays charged, beside the few KiB of objects
         # that Zarr keeps after a read.
         assert traced.kept <= traced.kept_charged + 32 * 1024, name
+    if random:
+        # One row of long values is charged near what decoding its chunk
+        # holds, its own row returned rather than the chunk's.
+        one_row = traced_charge(reads["one row"][0])
+        assert one_row.held >= 0.75 * one_row.charged
 
 
 def test_a_read_of_variable_width_labels_is_charged_by_their_characters(

@@ -322,7 +322,8 @@ def row_read_bytes(geometry: ArrayGeometry | None, n_rows: int) -> int:
     a chunk's rows; a sharded array's read places them through its
     shard-level copy, which ``bandReadBytes`` counts. Variable-width text is
     read a chunk's span of the rows at a time, which Zarr returns up to a
-    chunk's rows, before the rows are taken from it. Without a geometry, as
+    chunk's rows, before the rows are taken from it, and one row alone.
+    Without a geometry, as
     for an array in memory, a row's bytes are not known, so only the rows'
     indices are counted; :func:`read_rows_bytes` adds the rows from the
     array.
@@ -333,8 +334,10 @@ def row_read_bytes(geometry: ArrayGeometry | None, n_rows: int) -> int:
         return ordering
     band_rows = min(n_rows, geometry.axisChunk(0))
     # Variable-width text is read a chunk's span of the rows at a time, which
-    # Zarr returns up to a chunk of rows.
-    returned_rows = band_rows if geometry.text is None else geometry.axisChunk(0)
+    # Zarr returns up to a chunk of rows; one row is its own span.
+    returned_rows = (
+        geometry.axisChunk(0) if geometry.text is not None and n_rows > 1 else band_rows
+    )
     reading = (
         n_rows * (geometry.rowBytes() + ROW_KEPT_INDEX_BYTES)
         + geometry.bandReadBytes(returned_rows, operation_concurrency())
