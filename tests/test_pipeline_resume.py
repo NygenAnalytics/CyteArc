@@ -640,7 +640,6 @@ def test_a_second_resume_of_one_pause_is_refused(paused, tmp_path) -> None:
     assert _attrs(store, paused.run_id) == before
 
 
-@pytest.mark.slow
 def test_of_two_processes_that_resume_one_run_at_once_one_wins(
     paused, tmp_path, monkeypatch
 ) -> None:
