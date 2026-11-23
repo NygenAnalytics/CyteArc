@@ -1092,7 +1092,7 @@ class AsyncStorageRunner:
         main.clear()
         if error:
             raise error.pop()
-        return result.pop()
+        return result[0]
 
     async def _run(
         self,

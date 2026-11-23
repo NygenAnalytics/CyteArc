@@ -16,7 +16,6 @@ from .arrays import (
     create_streamed_metadata_column,
     stored_metadata_dtype,
 )
-from .async_execution import release_exception_frames
 from .budget import ResourceBudget
 from .categorical import (
     CATEGORIES_LINK,
@@ -88,27 +87,6 @@ def band_read_bytes(src: zarr.Array, rows: int) -> Callable[[int], int]:
     return held
 
 
-def row_band_reader(src: zarr.Array) -> Callable[[int, int], np.ndarray]:
-    """Return a producer of rows ``start`` to ``end`` of every column of ``src``, as a dense write of row bands asks for them.
-
-    The producer reads through Zarr's synchronous API, whose ``sync`` raises
-    a failed read's error from a frame that keeps it, a reference cycle that
-    would keep the band's output and the shards it decoded until Python's
-    cycle collector runs. The producer clears the finished frames of the
-    error before the error leaves it, as
-    :func:`~cytearc.storage.async_execution.release_exception_frames` does.
-    """
-
-    def read(start: int, end: int) -> np.ndarray:
-        try:
-            return np.asarray(src[start:end, :])
-        except BaseException as error:
-            release_exception_frames(error)
-            raise
-
-    return read
-
-
 def copy_zarr_array(
     src: zarr.Array,
     dst: zarr.Array,
@@ -128,7 +106,7 @@ def copy_zarr_array(
     band_rows = min(array_shard_rows(dst), int(src.shape[0]))
     write_dense_in_shard_rows(
         dst,
-        row_band_reader(src),
+        lambda start, end: np.asarray(src[start:end, :]),
         msg=msg or "Copying Zarr array",
         resources=resources,
         producerBytes=band_read_bytes(src, band_rows),

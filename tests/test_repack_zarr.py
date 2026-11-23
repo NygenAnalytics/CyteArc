@@ -14,7 +14,6 @@ from cytearc.storage.ann_index import (
 )
 from tests.memory_helpers import decodes_held_together
 from tests.storage_helpers import finalize_test_counts
-from cytearc.storage.copy import row_band_reader
 from cytearc.storage.layout import normalize_chunks
 from cytearc.storage.pipeline_runs import (
     PipelineOutputRecord,
@@ -770,29 +769,6 @@ def sharded_counts_store(tmp_path_factory):
     return path
 
 
-def test_a_repack_reads_its_count_bands_through_the_reader_that_frees_a_failed_band(
-    tmp_path, monkeypatch
-):
-    # The reader that copies share clears a failed band read's frames, so the
-    # band is freed once its error is dropped, as the copy test checks.
-    values = np.arange(2_000 * 400, dtype=np.uint32).reshape(2_000, 400)
-    source = _sharded_counts_source(tmp_path / "source.zarr", values)
-    readers: list[tuple[int, ...]] = []
-    reader = repack_module.row_band_reader
-
-    def recording(array):
-        readers.append(array.shape)
-        return reader(array)
-
-    monkeypatch.setattr(repack_module, "row_band_reader", recording)
-    output = tmp_path / "output.zarr"
-    repack_store(str(tmp_path / "source.zarr"), str(output), data_only=True)
-    assert readers == [source.shape]
-    np.testing.assert_array_equal(
-        zarr.open_group(str(output), mode="r")["RNA/counts"][:], values
-    )
-
-
 def test_a_repack_reserves_what_reading_a_band_of_sharded_counts_holds(
     tmp_path, monkeypatch
 ):
@@ -839,7 +815,7 @@ def test_a_repack_reserves_what_reading_a_band_of_sharded_counts_holds(
     # decode holds its chunk until all ten hold theirs.
     (shards,) = source.metadata.codecs
     compressor = type(shards.codecs[-1])
-    produce = row_band_reader(source)
+    produce = repack_module._row_block_producer(source)
     held: dict[int, int] = {}
     for concurrency in (1, 10):
         with (
