@@ -27,7 +27,7 @@ from zarr.storage import (
     WrapperStore,
 )
 
-from .async_execution import run_on_zarr_loop, run_read
+from .async_execution import run_on_zarr_loop, run_read, store_decoding_threads
 from .types import array_metadata_shards
 
 if TYPE_CHECKING:
@@ -177,9 +177,11 @@ def run_array_read[T](array: zarr.Array, coroutine: Coroutine[Any, Any, T]) -> T
     through this, and so does composite creation, which reads its sources'
     counts with ``copy_source_selection``.
     """
-    if _reads_on_any_loop(array.store, array.path):
-        return run_read(coroutine)
-    return run_on_zarr_loop(coroutine)
+    # A composite's reads of its sources decode on the composite's threads.
+    with store_decoding_threads(array.store):
+        if _reads_on_any_loop(array.store, array.path):
+            return run_read(coroutine)
+        return run_on_zarr_loop(coroutine)
 
 
 def chunk_read_scratch_bytes(array: Any) -> int:

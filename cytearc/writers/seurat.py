@@ -359,6 +359,7 @@ class SeuratToZarr:
             normalized_values_record,
             validate_assay_name,
         )
+        from ..storage.async_execution import register_store_threads
         from ..storage.destinations import check_destination, create_destination
         from ..storage.sharding import count_layout_request
 
@@ -549,6 +550,8 @@ class SeuratToZarr:
             self.z = create_destination(
                 zarr_loc, overwrite=overwrite, storage_options=storage_options
             )
+            # The import writes the new store on its threads.
+            register_store_threads(self.z.store, self.resources.workers)
         except BaseException:
             self._release_shuffled_rows()
             raise

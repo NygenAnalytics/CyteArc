@@ -473,6 +473,8 @@ def test_a_one_worker_run_codes_and_clusters_on_one_thread(
 
         monkeypatch.setattr(RunLedger, "run", labeled)
         run = store.pipeline.rna(**_SMALL)
+        pools.label = "view"
+        clusters = run.cells.fetch("clusters")
 
     records = load_pipeline_stage_records(store.zw, run.run_id)
     assert {
@@ -489,6 +491,12 @@ def test_a_one_worker_run_codes_and_clusters_on_one_thread(
     assert {"filtering", "pca", "neighbors", "leiden"} <= {
         stage for stage, _threads in in_stages
     }
+    # The run's own reads beside its stages, as it plans, records its fields
+    # and opens its views to finalize, and the reads of its views after it,
+    # decode on one thread too.
+    assert pools.threads(None) and set(pools.threads(None)) == {1}
+    assert len(clusters) == run.cells.fetch("I").size
+    assert pools.threads("view") and set(pools.threads("view")) == {1}
     # Both resolutions cluster on one of Numba's threads.
     assert leiden_threads == [1, 1]
 
@@ -520,6 +528,42 @@ def test_a_stage_encodes_and_decodes_on_a_pool_of_its_workers_threads(
     # read after the stage decodes on the host's seven threads.
     assert pools.threads("stage") == [workers] * 96
     assert pools.threads("after") == [7] * 48
+
+
+def test_a_store_of_two_threads_read_in_a_one_worker_stage_decodes_on_one(
+    tmp_path: Path, datastore_zarr_root: str
+) -> None:
+    # A stage's threads win over the store's own: the arrays of a store of
+    # two threads, and an operation of a DataStore of two threads, read
+    # inside a one-worker stage decode on the stage's one thread, and on the
+    # store's two after the stage.
+    from cytearc.storage.async_execution import register_store_threads
+
+    _root, ledger = _ledger("work", workers=1)
+    group = zarr.open_group(str(tmp_path / "values.zarr"), mode="w")
+    values = group.create_array(
+        "values", data=np.arange(4_000), chunks=(1_000,), compressors=ZstdCodec()
+    )
+    register_store_threads(group.store, 2)
+    store = _store(datastore_zarr_root, tmp_path, nthreads=2)
+
+    with recorded_codec_pools(host_threads=7) as pools:
+
+        def work() -> tuple[()]:
+            pools.label = "stage"
+            np.testing.assert_array_equal(values[:], np.arange(4_000))
+            pools.label = "operation"
+            store.snapshot_cell_selection("I")
+            pools.label = None
+            return ()
+
+        ledger.run("work", work)
+        pools.label = "after"
+        np.testing.assert_array_equal(values[:], np.arange(4_000))
+
+    assert pools.threads("stage") == [1] * 4
+    assert pools.threads("operation") and set(pools.threads("operation")) == {1}
+    assert pools.threads("after") == [2] * 4
 
 
 def test_a_three_worker_stage_streams_its_blocks_on_three_threads(
