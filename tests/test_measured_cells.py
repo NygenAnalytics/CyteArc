@@ -3624,6 +3624,12 @@ def test_prevalent_peaks_leave_out_peaks_that_a_source_of_their_cells_did_not_me
     ) * np.log2(1 + len(counts) / (frequency + 1))
     ranked = np.flatnonzero(shared)[np.argsort(-prevalence[shared], kind="stable")]
     assert _selected_names(store, ref) == names[np.sort(ranked[:30])].tolist()
+    # A top_n above the shared peaks selects every shared peak and no other.
+    with pytest.warns(UserWarning, match="features.prevalent_peaks leaves out 20"):
+        every_peak = store.features.prevalent_peaks(
+            store.snapshot_cell_selection("I"), from_assay="ATAC", top_n=70
+        )
+    assert _selected_names(store, every_peak) == _PEAKS_SHARED
 
     # Each source's cells select what its own store selects.
     for source in ("right", "left"):
