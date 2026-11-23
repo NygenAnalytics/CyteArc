@@ -27,6 +27,8 @@ from cytearc import DataStore, DiagnosticWarning
 from cytearc.assay import norm_clr, norm_lib_size, norm_pearson_residuals, norm_tf_idf
 from cytearc.datastore._pipeline.recipes import rna as rna_recipe
 from cytearc.datastore.pipeline_accessor import PipelineAccessor
+from cytearc.mapping.models import ScaledPCAProjectionModel
+from cytearc.matrix import ChunkedArray
 from cytearc.quality_control import doublets
 from cytearc.storage.artifacts import ArtifactRef, artifact_group
 from cytearc.storage.budget import ResourceBudget
@@ -1700,6 +1702,109 @@ def test_lsi_projection_holds_its_loadings_and_charges_each_doublet():
         doublets.LsiDoubletProjection(
             loadings, np.ones(4), np.zeros((2, 3)), renormalize_subset=1
         )
+
+
+def test_pca_projection_charges_its_model_and_each_doublet_by_hand():
+    model = ScaledPCAProjectionModel(
+        feature_means=np.zeros(5),
+        feature_scales=np.ones(5),
+        center=np.zeros(5),
+        loadings=np.zeros((5, 3)),
+    )
+    reference = SimpleNamespace(
+        model=model, normalization_parameters={"renormalize_subset": False}
+    )
+
+    projection = doublets.PcaDoubletProjection(reference)
+
+    assert (projection.n_dims, projection.renormalize_subset) == (3, False)
+    # The float64 loadings, means, scales and center.
+    assert projection.resident_bytes() == (15 + 5 + 5 + 5) * 8
+    # Per doublet: a float64 copy of its counts of the 5 features, its
+    # normalized values with their scaled and centered copies, and its
+    # coordinates.
+    counts = csr_matrix(np.ones((2, 5), dtype=np.int16))
+    assert projection.row_bytes(counts) == 5 * (8 + 3 * 8) + 3 * 32 + 64
+
+
+class _ChargedProjection:
+    """A projection that holds and charges set bytes and counts what it projects."""
+
+    def __init__(self, n_cells: int, *, resident: int = 0, row: int = 0) -> None:
+        self.n_dims = 2
+        self.renormalize_subset = True
+        self.coordinates = np.zeros((n_cells, 2), dtype=np.float32)
+        self.resident, self.row, self.projected = resident, row, 0
+
+    def resident_bytes(self) -> int:
+        return self.resident
+
+    def row_bytes(self, counts: csr_matrix) -> int:
+        return self.row
+
+    def project(
+        self, summed: csr_matrix, denominators: Any, *, source: str
+    ) -> np.ndarray:
+        self.projected += summed.shape[0]
+        return np.zeros((summed.shape[0], 2))
+
+
+def test_doublet_scoring_charges_what_its_projection_holds_and_projects():
+    budget = ResourceBudget(1_000_000, 1)
+    # A projection that holds more than the budget is refused before any
+    # count is read; without an assay, a read would fail otherwise.
+    with pytest.raises(MemoryError):
+        doublets.score_synthetic_doublets(
+            None,
+            _ChargedProjection(4, resident=2_000_000),
+            np.arange(4),
+            np.zeros(4),
+            np.zeros(4, dtype=np.int64),
+            np.arange(3),
+            None,
+            index=_INDEX,
+            cluster_sample_fraction=1.0,
+            max_cells_per_cluster=None,
+            simulation_ratio=2.0,
+            heterotypic_fraction=0.0,
+            n_neighbors=2,
+            expected_doublet_rate=0.05,
+            threshold=None,
+            random_seed=0,
+            resources=budget,
+        )
+    # A doublet that the projection needs more than the budget for is
+    # refused before any is projected.
+    counts = np.arange(1, 13, dtype=np.int16).reshape(4, 3)
+    assay = SimpleNamespace(rawData=ChunkedArray.from_numpy(counts), name="ATAC")
+    (plan,) = doublets.plan_doublet_samples([4], simulation_ratio=2.0, n_neighbors=2)
+
+    def simulate(projection: _ChargedProjection) -> Any:
+        return doublets._simulate_sample(
+            assay,
+            projection,
+            np.random.default_rng(0),
+            np.arange(4),
+            plan,
+            active_indices=np.arange(4),
+            labels=np.zeros(4, dtype=np.int64),
+            feature_indices=np.arange(3),
+            cell_totals=None,
+            cluster_sample_fraction=1.0,
+            max_cells_per_cluster=None,
+            heterotypic_fraction=0.0,
+            resources=budget,
+            resident_bytes=0,
+        )
+
+    refused = _ChargedProjection(4, row=2_000_000)
+    with pytest.raises(MemoryError):
+        simulate(refused)
+    assert refused.projected == 0
+    # With room for its doublets, the projection maps every one of them.
+    admitted = _ChargedProjection(4, row=1_000)
+    coordinates, _parents, _fraction = simulate(admitted)
+    assert admitted.projected == plan.simulated == len(coordinates) == 8
 
 
 @pytest.mark.parametrize("renormalize", [False, True], ids=["totals", "renormalized"])
