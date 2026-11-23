@@ -449,10 +449,8 @@ def _cumulative_row_nnz(
             )
         else:
             row_values = np.asarray(source[:])
-        selected = row_plan.selectedRows[source_idx]
-        row_nnz[row_plan.destination_rows(source_idx)] = (
-            row_values if selected is None else row_values[selected]
-        )
+        # A merge takes every cell of each source, in its stored order.
+        row_nnz[row_plan.destination_rows(source_idx)] = row_values
         del row_values
     np.cumsum(row_nnz, out=row_nnz)
     return cumulative

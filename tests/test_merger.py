@@ -8920,3 +8920,27 @@ def _open_fixture_store(tmp_path, name: str, n_cells: int):
     location = tmp_path / f"{name}.zarr"
     write_count_store(str(location), {"RNA": counts}, "uint16")
     return open_store(location)
+
+
+def test_a_merge_write_refuses_a_plan_that_leaves_cells_of_a_source_out(
+    tmp_path, monkeypatch
+):
+    import cytearc.merge.datasets as datasets
+
+    # A merge writes every cell of each source; a plan of selected rows, as a
+    # composite makes, would read other rows than its windows name.
+    build = datasets.build_row_plan
+    monkeypatch.setattr(
+        datasets,
+        "build_row_plan",
+        lambda cells, names, **options: build(
+            cells, names, selected_rows=[np.arange(cells[0]), None], **options
+        ),
+    )
+    stores = [
+        _open_fixture_store(tmp_path, name, rows) for name, rows in (("a", 5), ("b", 4))
+    ]
+    with pytest.raises(ValueError, match="^A merge writes every cell of each source$"):
+        DataStoreMerge(
+            stores, str(tmp_path / "merged.zarr"), ["a", "b"], nthreads=1
+        ).dump()

@@ -389,9 +389,8 @@ def _count_segments(
     for source in range(len(row_plan.sourceNames)):
         rows = row_plan.source_rows(source)
         geometry = geometries[source]
-        shard_rows = max(
-            1, int(rows.size if geometry is None else geometry.axisShard(0))
-        )
+        assert geometry is not None
+        shard_rows = max(1, int(geometry.axisShard(0)))
         edges = np.flatnonzero(np.diff(rows // shard_rows)) + 1
         for start, stop in zip(
             [0, *edges.tolist()], [*edges.tolist(), int(rows.size)], strict=True
