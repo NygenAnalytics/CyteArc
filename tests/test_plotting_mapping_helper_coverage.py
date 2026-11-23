@@ -1,5 +1,7 @@
 """Focused edge coverage for plotting and mapping helper contracts."""
 
+from dataclasses import replace
+from functools import partial
 from collections.abc import Mapping
 from importlib import import_module
 from types import SimpleNamespace
@@ -9,7 +11,20 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from cytearc.assay import RNAassay, norm_lib_size
+from cytearc.assay import (
+    PearsonResidualNormalizer,
+    RNAassay,
+    norm_clr,
+    norm_dummy,
+    norm_lib_size,
+    norm_lib_size_log,
+    norm_tf_idf,
+)
+from cytearc.assay.normalization import (
+    LibrarySizeFit,
+    PassthroughFit,
+    PearsonResidualFit,
+)
 from cytearc.mapping import artifact as mapping_artifact
 from cytearc.mapping import features as mapping_features
 from cytearc.mapping import reference as mapping_reference
@@ -742,6 +757,133 @@ def test_distribution_stats_compatibility_reports_every_identity_mismatch() -> N
         assert expected in str(
             _compatibility_issue(_changed(base, **changes), **call_changes)
         )
+
+
+@pytest.mark.parametrize(
+    ("normalizer", "size_factor", "log_transform", "arrays", "expected"),
+    [
+        (norm_lib_size, 1_000.0, True, {}, LibrarySizeFit(1_000.0, True)),
+        # norm_lib_size_log takes its logarithm without the flag.
+        (norm_lib_size_log, 500.0, False, {}, LibrarySizeFit(500.0, True)),
+        (norm_dummy, None, True, {}, PassthroughFit(True)),
+    ],
+)
+def test_reference_normalization_rebuilds_a_fit_that_fits_no_number(
+    normalizer, size_factor, log_transform, arrays, expected
+) -> None:
+    parameters = {
+        "normalization_method": {
+            "external_hook": True,
+            **callable_identity(normalizer),
+        },
+        "size_factor": size_factor,
+        "log_transform": log_transform,
+        "renormalize_subset": False,
+    }
+
+    assert mapping_features.reference_normalization(parameters) == expected
+    assert mapping_features.reference_fit_array_names(parameters) == ()
+
+
+def test_reference_normalization_rebuilds_pearson_residuals_and_clr_from_saved_arrays():
+    fractions, scales = np.array([0.1, 0.3]), np.array([1.5, 2.0])
+    pearson = PearsonResidualNormalizer(theta=20.0)
+    parameters = {
+        "normalization_method": callable_identity(pearson),
+        # A run of any normalizer records the assay's size factor, which
+        # neither residuals nor CLR read, or None.
+        "size_factor": None,
+        "log_transform": False,
+        "renormalize_subset": True,
+    }
+
+    fit = mapping_features.reference_normalization(
+        parameters, n_cells=16, arrays={"pearson_feature_fractions": fractions}
+    )
+    assert isinstance(fit, PearsonResidualFit)
+    np.testing.assert_array_equal(fit.fractions, fractions)
+    # The default clip is the square root of the reference's cell count.
+    assert (fit.theta, fit.clip) == (20.0, 4.0)
+    clipped = {
+        **parameters,
+        "normalization_method": callable_identity(PearsonResidualNormalizer(clip=2.5)),
+    }
+    assert (
+        mapping_features.reference_normalization(
+            clipped, n_cells=16, arrays={"pearson_feature_fractions": fractions}
+        ).clip
+        == 2.5
+    )
+    clr = {**parameters, "normalization_method": callable_identity(norm_clr)}
+    assert mapping_features.reference_fit_array_names(clr) == ("clr_feature_scales",)
+    np.testing.assert_array_equal(
+        mapping_features.reference_normalization(
+            clr, n_cells=16, arrays={"clr_feature_scales": scales}
+        ).scales,
+        scales,
+    )
+    for options in ({}, {"n_cells": 16}, {"arrays": {"clr_feature_scales": scales}}):
+        with pytest.raises(ValueError, match="'pearson_feature_fractions'"):
+            mapping_features.reference_normalization(parameters, **options)
+
+
+@pytest.mark.parametrize(
+    ("method", "size_factor", "message"),
+    [
+        # A custom normalizer, TF-IDF and a record that names no normalizer.
+        ({"module": "lab.norms", "qualname": "half", "code": "0f"}, 1.0, "Unsupported"),
+        (callable_identity(norm_tf_idf), 1.0, "Unsupported"),
+        ("norm_lib_size", 1.0, "Unsupported"),
+        ({"external_hook": False, **callable_identity(norm_clr)}, 1.0, "Unsupported"),
+        # Library size reads the size factor that the run recorded.
+        (callable_identity(norm_lib_size), None, "size_factor must be finite"),
+        (callable_identity(norm_lib_size_log), None, "size_factor must be finite"),
+        (callable_identity(norm_clr), -1.0, "size_factor must be finite"),
+        (callable_identity(norm_clr), True, "size_factor must be finite"),
+    ],
+)
+def test_reference_normalization_parameters_refuse_what_no_fit_applies(
+    method, size_factor, message
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        mapping_features._normalization_parameters(
+            {
+                "normalization_method": method,
+                "size_factor": size_factor,
+                "log_transform": False,
+                "renormalize_subset": False,
+            }
+        )
+
+
+def test_a_scaled_reference_without_fit_arrays_keeps_its_digest() -> None:
+    model = ScaledPCAProjectionModel(
+        feature_means=np.array([0.5, 1.0, 1.5]),
+        feature_scales=np.array([1.0, 2.0, 0.5]),
+        center=np.array([0.0, 0.1, -0.1]),
+        loadings=np.arange(6, dtype=np.float64).reshape(3, 2),
+    )
+    digest = partial(
+        mapping_reference.mapping_reference_model_digest,
+        symphony_state=None,
+        feature_ids=np.array(["a", "b", "c"]),
+        metadata={"method": "pca", "normalization_parameters": {"size_factor": 1000.0}},
+        reference_distance_quantiles=np.array([0.0, 0.5, 1.0]),
+        reference_distance_values=np.array([0.0, 1.0, 2.0]),
+    )
+
+    # The digest that releases before PCAs without scaling and fit arrays
+    # computed for these arrays, which a loaded handle is checked against.
+    assert digest(model=model) == (
+        "0c633c324fcc9316f379bf8a385762362543d68cb0dd273a64c1f0d8c44ed8b1"
+    )
+    assert digest(model=model, normalization_arrays={}) == digest(model=model)
+    # A PCA without scaling and fit arrays each change it.
+    unscaled = replace(model, feature_scaling=False)
+    fitted = digest(
+        model=model, normalization_arrays={"clr_feature_scales": np.ones(3)}
+    )
+    assert len({digest(model=model), digest(model=unscaled), fitted}) == 3
 
 
 def test_mapping_feature_helper_validation_and_lightweight_methods() -> None:
