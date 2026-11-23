@@ -198,10 +198,13 @@ class CustomNormalizerUnset(ValueError):
         method: The recorded identity of the custom normalizer.
     """
 
-    def __init__(self, message: str, *, assay: str, method: object) -> None:
+    def __init__(self, message: str, assay: str, method: object) -> None:
         super().__init__(message)
         self.assay = assay
         self.method = method
+
+    def __reduce__(self) -> tuple[Any, tuple[Any, ...], dict[str, Any]]:
+        return (type(self), (self.args[0], self.assay, self.method), self.__dict__)
 
 
 def resolve_normalizer(

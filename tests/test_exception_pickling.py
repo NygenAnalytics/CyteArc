@@ -21,6 +21,7 @@ import pytest
 import cytearc
 from cytearc.clones.recorders import RefusedTokens
 from cytearc.datasets import _StoreAppeared
+from cytearc.datastore._pipeline.normalizers import CustomNormalizerUnset
 from cytearc.datastore.pipeline_run import PipelineCancelled, PipelineExecutionError
 from cytearc.merge.metadata import _SourceConflict
 from cytearc.metadata.encoding import CollectionValuesError, UnstorableCategoriesError
@@ -62,6 +63,13 @@ SAMPLES: dict[type[BaseException], Callable[[], BaseException]] = {
         RUN_ID, "pca", ValueError("bad pca")
     ),
     PipelineCancelled: lambda: PipelineCancelled(RUN_ID, "pca", "stopped"),
+    CustomNormalizerUnset: lambda: CustomNormalizerUnset(
+        "normalization['method'] is the custom normalizer {'module': 'lab.norm', "
+        "'qualname': 'log_library_size'}, which a run applies only as the assay's "
+        "normMethod",
+        assay="RNA",
+        method={"module": "lab.norm", "qualname": "log_library_size"},
+    ),
     _SourceConflict: lambda: _SourceConflict("The sources disagree on 'batch'"),
     _FetchAbandoned: lambda: _FetchAbandoned(),
     _StoreAppeared: lambda: _StoreAppeared(
