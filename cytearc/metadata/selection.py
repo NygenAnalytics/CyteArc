@@ -317,6 +317,12 @@ CELL_VALUE_NAMES: Mapping[str, CellValueSpec] = MappingProxyType(
         "pseudotime": CellValueSpec("pseudotime", False, {"valid": True}),
         "quality_metric": CellValueSpec("values", False),
         "smart_label": CellValueSpec("values", True),
+        # values names the state whose most likely cells a cell is among,
+        # missing elsewhere, so the artifact gives fate its sink labels;
+        # memberships holds one column per state.
+        "trajectory_states": CellValueSpec(
+            "values", True, {"memberships": False, "valid": True}
+        ),
         # mean_depth is NaN for a selected cell that no imported file names;
         # listed marks the cells that a file names.
         "variant_counts": CellValueSpec(

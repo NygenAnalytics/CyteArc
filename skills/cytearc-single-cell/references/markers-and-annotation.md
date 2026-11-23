@@ -251,6 +251,29 @@ print([round(float(np.corrcoef(a[:, j], b[:, j])[0, 1]), 3) for j in range(len(s
 
 (Pancreas docs dataset, `bastidas-ponce_4K_pancreas-d15_rnaseq`, whose features are gene symbols) 14,004 network genes matched by symbol and 13,858 were used. By the default measure, CCAT, the least differentiated clusters were three mostly ductal clusters, two of them cycling by their markers, and the signaling entropy rate put two ductal clusters and an Ngn3-high progenitor cluster first. Within every cluster, deeper cells scored as less differentiated (Spearman -0.35 to -0.89 between differentiation and depth). With the Alpha, Beta and Delta clusters as sinks, every cell was mapped. Against a pseudotime from one ductal cluster, each fate's probabilities correlated at 0.99 outside the sinks, and the most probable fate agreed for 94% of those cells and 99% of the 394 that one fate dominated. The fate mapping tutorial runs the same comparison step by step.
 
+### Find initial and terminal states without naming them
+
+When the ends of a process are not known, find them from the walk that the score directs, and check each terminal state with markers before it becomes a sink.
+
+```python
+graph = run["connectivity_map"]
+states_ref = ds.trajectory.states(graph, potency_ref, n_states=10,  # TEMPLATE: a few above the populations expected
+                                  labels=run["clusters"])  # names each state by its most common cluster
+found = ds.trajectory.load_states(states_ref)
+print(found.table.round(3))  # label, role, cells, cell_share, walk_share, enrichment, stability, direction
+for n in (9, 11):  # trust the terminal states that persist when n_states moves by one
+    print(n, ds.trajectory.load_states(
+        ds.trajectory.states(graph, potency_ref, n_states=n, labels=run["clusters"])).terminal)
+top = ds.markers.load(marker=run["markers"])
+for state in found.terminal:  # a late intermediate state can also collect the walk
+    cluster = found.table.loc[state, "label"]  # the cluster that most of its cells hold
+    print(state, top[top["group_id"] == cluster]["feature_name"].head(8).tolist())
+fate_ref = ds.trajectory.fate(sink_labels=states_ref, graph=graph, direction=potency_ref,
+                              sinks=found.terminal)  # or the states the markers support
+```
+
+(The `bastidas-ponce_4K_pancreas-d15_rnaseq` fixture, analyzed with the docs dataset's recipe) With `n_states=10`, the terminal states were four Leiden clusters whose 30 cells each were Alpha, Epsilon, Beta and Delta cells by the published types, and a search took about 3 s on 3,696 cells. At 9 and 11 states the terminal states also included a Pre-endocrine state, and at 9 a Ductal and at 11 an Ngn3 high EP state, so only the Beta, Delta and Alpha states persisted across the three.
+
 ### Compare with existing labels (final post-hoc evaluation only)
 
 Run once, after labels are frozen. Read the reference column here first, write the map from its

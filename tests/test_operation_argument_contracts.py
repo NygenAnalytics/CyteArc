@@ -283,6 +283,13 @@ _CONTRACTS = (
         model_only=_classified("resolved_input", "cell_selection"),
     ),
     OperationContract(
+        TrajectoryAccessor.states,
+        metadata_arguments.TrajectoryStatesArguments,
+        aliases={"graph": "connectivity_map"},
+        # The graph's cells are the search's cell selection.
+        model_only=_classified("resolved_input", "cell_selection"),
+    ),
+    OperationContract(
         ClonesAccessor.import_clones,
         metadata_arguments.CloneImportArguments,
         # Each file is identified by its format and columns, the SHA-256 of

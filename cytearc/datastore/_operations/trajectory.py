@@ -57,6 +57,7 @@ from ...metadata.arguments import (
     PseudotimeAggregationArguments,
     PseudotimeMarkerArguments,
     PseudotimeScoringArguments,
+    TrajectoryStatesArguments,
 )
 from ...metadata.artifacts import (
     cell_data_write_bytes,
@@ -70,6 +71,7 @@ from ...metadata.selection import (
     cell_value_spec,
     resolve_cell_aligned_artifact,
 )
+from ...storage.diagnostics import DiagnosticRule, warn_diagnostics
 from ...storage.validation_scope import validation_scoped
 from ...storage.artifact_writer import (
     ArrayRequirement,
@@ -125,6 +127,11 @@ from ...trajectory.artifacts import (
     MARKER_INPUTS as _MARKER_INPUTS,
     MARKER_PAYLOAD as _MARKER_PAYLOAD,
     PSEUDOTIME_INPUTS as _PSEUDOTIME_INPUTS,
+    STATES_INPUTS as _STATES_INPUTS,
+    STATES_LABELS_MISSING as _STATES_LABELS_MISSING,
+    STATES_OPTIONAL_INPUTS as _STATES_OPTIONAL_INPUTS,
+    STATES_OPTIONAL_PARAMETERS as _STATES_OPTIONAL_PARAMETERS,
+    STATES_PARAMETERS as _STATES_PARAMETERS,
     aggregation_check_bytes as _aggregation_check_bytes_impl,
     aggregation_load_bytes as _aggregation_load_bytes_impl,
     aggregation_payload_is_valid as _aggregation_payload_is_valid,
@@ -154,6 +161,8 @@ from ...trajectory.artifacts import (
     pseudotime_payload_is_valid as _pseudotime_payload_is_valid,
     require_exact_record_keys as _require_exact_record_keys,
     selection_size as _selection_size,
+    states_payload_is_valid as _states_payload_is_valid,
+    stored_states_bytes as _stored_states_bytes_impl,
     stored_profile_sizes as _stored_profile_sizes_impl,
     true_array_indices as _true_array_indices,
     validate_aggregation_parameters as _validate_aggregation_parameters,
@@ -167,6 +176,7 @@ from ...trajectory.artifacts import (
     validate_marker_parameters as _validate_marker_parameters,
     validate_pseudotime_parameters as _validate_pseudotime_parameters,
     validate_resolved_ann_parameters as _validate_resolved_ann_parameters,
+    validate_states_parameters as _validate_states_parameters,
 )
 from ...trajectory.curves import (
     CURVE_FIT_BINS,
@@ -244,7 +254,16 @@ from ...trajectory.pseudotime import (
     validate_source_sink_labels as _validate_source_sink_labels_impl,
     validate_source_sink_vector as _validate_source_sink_vector_impl,
 )
+from ...trajectory.states import (
+    TIE_TOLERANCE as _TIE_TOLERANCE,
+    boundary_gap as _boundary_gap_impl,
+    find_states as _find_states_impl,
+    search_bytes as _search_bytes_impl,
+    state_labels as _state_labels_impl,
+    state_names as _state_names_impl,
+)
 from ...trajectory.results import (
+    STATE_TABLE_COLUMNS,
     FateMappingResult,
     LineageAggregationResult,
     LineageCurvesResult,
@@ -256,6 +275,7 @@ from ...trajectory.results import (
     PseudotimeAggregationResult,
     PseudotimeMarkerResult,
     PseudotimeScoreResult,
+    TrajectoryStatesResult,
 )
 from ...utils.arguments import (
     bool_argument,
@@ -744,6 +764,53 @@ _POTENCY_SMOOTHED_INPUTS = frozenset({"cell_selection", "graph"})
 _POTENCY_PARAMETERS = frozenset({"measure", "species", "string_network"})
 _POTENCY_SMOOTHED_PARAMETERS = frozenset(
     {"measure", "species", "string_network", "smoothing"}
+)
+
+
+#: The warnings that a state search gives from its saved diagnostics, after
+#: it computes or reuses its artifact.
+_STATES_WARNINGS = (
+    DiagnosticRule(
+        "cellsLeftOut",
+        applies=lambda numbers: numbers["cellsLeftOut"] > 0,
+        message=lambda numbers: (
+            f"The state search left out {numbers['cellsLeftOut']} cells of the graph "
+            "outside the largest connected component of scored cells; they belong "
+            "to no state"
+        ),
+    ),
+    DiagnosticRule(
+        "terminalStates",
+        applies=lambda numbers: numbers["terminalStates"] == 0,
+        message=lambda _numbers: (
+            "The state search found no terminal state apart from the initial one: "
+            "no other state holds a larger share of a long walk's time than of the "
+            "cells. Check that the direction rises along the process, or ask for "
+            "more states"
+        ),
+    ),
+    DiagnosticRule(
+        "statesShortOfCells",
+        applies=lambda numbers: numbers["statesShortOfCells"] > 0,
+        message=lambda numbers: (
+            f"{numbers['statesShortOfCells']} "
+            + ("state holds" if numbers["statesShortOfCells"] == 1 else "states hold")
+            + " fewer than cells_per_state cells, because a cell that several "
+            "states take belongs to the one in which its membership is largest; "
+            "their labels mark fewer cells"
+        ),
+    ),
+    DiagnosticRule(
+        "boundaryGap",
+        applies=lambda numbers: numbers["boundaryGap"] <= _TIE_TOLERANCE,
+        message=lambda numbers: (
+            "The walk's eigenvalue of the last state ties the next one, apart by "
+            f"{numbers['boundaryGap']:.1e} of the next one's distance from one, as "
+            "the eigenvalues of identical parts of a walk tie, so the last state "
+            "is one mix of their two directions among many. Ask for a number of "
+            "states that keeps both eigenvalues or neither"
+        ),
+    ),
 )
 
 
@@ -2067,6 +2134,7 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         later_bytes: Callable[[int, GraphLoadMemory], int] | None = None,
         later_item: str | None = None,
         work: str = "Loading a direction score",
+        call: str = "trajectory.fate",
     ) -> tuple[_FateDirection, csr_matrix]:
         """Read a direction score of a graph's cells, with the symmetric graph.
 
@@ -2078,7 +2146,8 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         against the memory budget before the graph is read, beside the
         scores, or against the ``later_bytes`` that the caller needs after the
         load, when more, which a refusal names as ``later_item``. ``work``
-        names the call in refusals.
+        names the call in refusals, and ``call`` the public call whose
+        ``direction`` a refused Series was.
         """
         require_graph_kind(graph)
         selection = graph_cell_selection(self.zw, graph)
@@ -2139,7 +2208,7 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
             aligned = align_to_cell_ids(
                 direction,
                 graph_ids,
-                name="trajectory.fate(direction=)",
+                name=f"{call}(direction=)",
                 cells=f"the {graph_ids.size} cells of the graph",
                 remedy=keyed_values_remedy(),
                 leave_out_others=True,
@@ -2182,6 +2251,50 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
             scored_cells="the cells with a direction score",
         )
         return directed, graph_matrix
+
+    def _direction_snapshot(
+        self,
+        ledger: MemoryLedger,
+        scores: np.ndarray,
+        selection: ArtifactRef,
+        *,
+        invalidate_cache: bool,
+    ) -> ArtifactRef:
+        """Save a direction score given as a Series as a snapshot of the graph's cells.
+
+        ``scores`` holds the score of each cell of ``selection``, NaN where it
+        has none. Reading the cells' IDs is charged to ``ledger`` for a
+        moment. A fate map and a state search save one snapshot for one
+        score, so a Series passed to both directs one walk.
+        """
+        n_cells = len(scores)
+        ids = self.cells._get_array("ids")
+        ledger.peak(
+            "the cells' IDs of the direction's snapshot",
+            text_read_bytes(ids, n_cells) + fixed_text_bytes(n_cells, text_width(ids)),
+        )
+        selected_row_ids = read_metadata_rows_chunkwise(
+            self.cells,
+            "ids",
+            read_stored_selection_indices(
+                self.zw,
+                selection,
+                kind="cell_selection",
+                scope="datastore",
+                assay=None,
+                table_path="cellData",
+            ),
+        )
+        return resolve_metadata_snapshot(
+            self.zw,
+            values=scores,
+            row_ids=selected_row_ids,
+            operation="snapshot_fate_direction",
+            parameters={},
+            inputs={"cell_selection": selection},
+            source_columns=["direction"],
+            invalidate_cache=invalidate_cache,
+        )
 
     @validation_scoped
     def _trajectory_fate(
@@ -2414,35 +2527,9 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
                 "of the fate map"
             )
         if direction is not None and not isinstance(direction, ArtifactRef):
-            ids = self.cells._get_array("ids")
-            ledger.peak(
-                "the cells' IDs of the direction's snapshot",
-                text_read_bytes(ids, n_cells)
-                + fixed_text_bytes(n_cells, text_width(ids)),
+            direction = self._direction_snapshot(
+                ledger, scores, stored_selection, invalidate_cache=invalidate_cache
             )
-            selected_row_ids = read_metadata_rows_chunkwise(
-                self.cells,
-                "ids",
-                read_stored_selection_indices(
-                    self.zw,
-                    stored_selection,
-                    kind="cell_selection",
-                    scope="datastore",
-                    assay=None,
-                    table_path="cellData",
-                ),
-            )
-            direction = resolve_metadata_snapshot(
-                self.zw,
-                values=scores,
-                row_ids=selected_row_ids,
-                operation="snapshot_fate_direction",
-                parameters={},
-                inputs={"cell_selection": stored_selection},
-                source_columns=["direction"],
-                invalidate_cache=invalidate_cache,
-            )
-            del selected_row_ids
 
         arguments = FateMappingArguments(
             connectivity_map=graph_ref,
@@ -2557,6 +2644,494 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
     ) -> FateMappingResult:
         """Load fate probabilities from an explicit completed artifact."""
         return self._load_fate_inputs(ref).fate
+
+    def _state_label_codes(
+        self, labels: ArtifactRef, selection: ArtifactRef
+    ) -> tuple[np.ndarray, list[Any]]:
+        """Read the labels that name states, as each cell's code and the labels in natural order.
+
+        The labels must hold the cells of ``selection``, the graph's. A cell
+        without a label has code -1. Reading and coding them are charged to a
+        ledger of the memory budget; only the codes stay.
+        """
+        if not isinstance(labels, ArtifactRef):
+            raise TypeError("labels must be an ArtifactRef or None")
+        ledger = MemoryLedger(
+            self.resources.memoryBytes,
+            "Naming the states by labels",
+            codec_threads=self.nthreads,
+        )
+        resolved = resolve_cell_aligned_artifact(
+            self.zw, labels, ndim=None, ledger=ledger
+        )
+        values = resolved.values
+        missing = resolved.missing_mask
+        if resolved.source_cell_selection != selection:
+            raise ValueError(
+                "labels must hold the cells of the graph, the cells that the "
+                "state search covers"
+            )
+        if values.ndim != 1:
+            raise ValueError("labels must hold one label per cell")
+        if values.dtype.kind in "fc":
+            raise ValueError(
+                "labels must hold labels, such as clusters, and the "
+                f"{labels.kind} artifact holds real values"
+            )
+        del resolved
+        ledger.peak("coding the labels", listed_labels_bytes(len(values), values.dtype))
+        present = (
+            np.ones(len(values), dtype=bool)
+            if missing is None
+            else ~np.asarray(missing, dtype=bool)
+        )
+        if values.dtype.kind in "OSU":
+            # A snapshot stores a missing text label as empty text.
+            present &= np.asarray(values != values.dtype.type(), dtype=bool)
+        codes = np.full(len(values), -1, dtype=np.int64)
+        categories: list[Any] = []
+        if present.any():
+            categories, codes[present] = _cluster_codes_impl(values[present])
+        return codes, categories
+
+    @validation_scoped
+    def _trajectory_states(
+        self,
+        graph: ArtifactRef,
+        direction: ArtifactRef | pd.Series,
+        *,
+        n_states: int,
+        labels: ArtifactRef | None = None,
+        cells_per_state: int = 30,
+        beta: float = 10.0,
+        max_iterations: int | None = None,
+        invalidate_cache: bool = False,
+    ) -> ArtifactRef:
+        """Find the initial and terminal states of the walk that a per-cell score directs on a graph.
+
+        The walk is the one that :meth:`fate` takes with the same ``graph``,
+        ``direction`` and ``beta``: it follows the graph's edges, and an edge
+        to a cell of lower score keeps ``2 / (1 + exp(beta * d))`` of its
+        weight. The search splits it into ``n_states`` metastable states,
+        groups of cells that the walk enters and rarely leaves, by
+        generalized robust Perron cluster analysis (Reuter et al. (2018),
+        Journal of Chemical Theory and Computation 14:3579-3594,
+        doi:10.1021/acs.jctc.8b00079; Reuter, Fackeldey and Weber (2019),
+        Journal of Chemical Physics 150:174103, doi:10.1063/1.5064530), as
+        CellRank does (Lange et al. (2022), Nature Methods 19:159-170,
+        doi:10.1038/s41592-021-01346-6). Each cell gets a membership in each
+        state, a cell's memberships summing to one, and the states get the
+        walk between them.
+
+        The states are ordered by their mean direction score. The first is
+        the initial state. Each other state is terminal when a long walk
+        spends a larger share of its time in it than the state's share of
+        the cells, an enrichment above one, and intermediate otherwise.
+        CellRank instead calls a state terminal when one step of the walk
+        stays in it with probability at least 0.96; on the pancreas walk of
+        the fate mapping tutorial every state stays with probability 0.97 or
+        more, so that rule calls every state terminal. The table keeps each
+        state's ``stability`` for comparison. A late intermediate state in
+        which the walk slows, such as the Pre-endocrine cells before the
+        endocrine fates, can also hold more than its share, so check
+        terminal calls with markers. The roles need the walk to have a
+        direction: at ``beta=0`` a long walk spends its time in proportion
+        to the cells' degrees, so enrichment measures how densely a state's
+        cells are joined rather than where the process ends.
+
+        The ``cells_per_state`` most likely cells of each state carry its
+        name in the artifact's canonical array, missing for other cells, so
+        the artifact gives :meth:`fate` its ``sink_labels``, and any state can
+        be a sink::
+
+            found = ds.trajectory.load_states(states)
+            fate = ds.trajectory.fate(
+                sink_labels=states, graph=graph, direction=score,
+                sinks=found.terminal,
+            )
+
+        The search covers the largest connected component of the graph's
+        scored cells; cells of other components belong to no state, with a
+        warning. Choose ``n_states`` a few above the number of populations
+        that you expect along the process, and trust the terminal states
+        that persist when ``n_states`` changes by one or two. A warning also
+        names a last state whose eigenvalue ties the next one's, as those of
+        identical parts of a walk tie, since the last state is then one mix
+        of their directions among many.
+
+        Args:
+            graph: Explicit connectivity-map or integrated-graph artifact to
+                walk on.
+            direction: Per-cell score that directs the walk, higher meaning
+                later, as :meth:`fate` takes it: a cell-aligned artifact of
+                real values over the graph's cells other than a pseudotime,
+                such as the ``cell_potency`` artifact of
+                :meth:`~cytearc.datastore.namespaces.ScoresAccessor.potency`,
+                or a pandas Series indexed by cell ID, which is saved as the
+                snapshot that ``fate`` saves of it. A missing or non-finite
+                value leaves a cell unscored, and the scored cells must make
+                up whole connected components of the graph.
+            n_states: Number of states, initial, intermediate and terminal
+                together; at least 2.
+            labels: Cell labels of the graph's cells, such as clusters. Each
+                state takes the name of the label that most of its cells
+                hold, with ``_1``, ``_2`` for repeats. Without labels, states
+                are named ``1`` to ``n_states`` in the walk's order.
+            cells_per_state: How many of each state's most likely cells its
+                name marks.
+            beta: Strength of the penalty on edges to cells of lower score,
+                as in :meth:`fate`.
+            max_iterations: Bound on the restarts of the eigen-solve. None
+                takes SciPy's bound of ten per cell.
+            invalidate_cache: Compute a new search even when one matches.
+
+        Returns:
+            Reference to a ``trajectory_states`` artifact, which
+            :meth:`load_states` loads and :meth:`fate` takes as
+            ``sink_labels``.
+
+        Raises:
+            TypeError: If an argument has the wrong type, such as a
+                ``direction`` that is neither an artifact reference nor a
+                pandas Series indexed by cell ID.
+            ValueError: If an argument is out of range, ``direction`` is a
+                pseudotime or holds labels, ``labels`` holds values or other
+                cells, the searched cells are too few, or ``n_states`` would
+                split a pair of complex conjugate eigenvalues.
+            RuntimeError: If the eigen-solve does not converge within
+                ``max_iterations`` or finds no invariant subspace.
+            MemoryBudgetError: If the search does not fit the memory budget;
+                the graph is checked before it is read.
+            PermissionError: If the search must be computed and the store is
+                not opened with ``zarr_mode='r+'``.
+        """
+        invalidate_cache = bool_argument(invalidate_cache, "invalidate_cache")
+        if not isinstance(graph, ArtifactRef):
+            raise TypeError("graph must be an ArtifactRef")
+        require_graph_kind(graph)
+        validated = _validate_states_parameters(
+            {
+                "n_states": n_states,
+                "cells_per_state": cells_per_state,
+                "beta": beta,
+                **(
+                    {} if max_iterations is None else {"max_iterations": max_iterations}
+                ),
+            }
+        )
+        n_states = validated["n_states"]
+        if isinstance(direction, ArtifactRef):
+            if direction.kind == "pseudotime":
+                raise ValueError(
+                    "A pseudotime cannot direct the state search, since it records "
+                    "the graph that it scored; pass its values as a pandas Series "
+                    "indexed by cell ID"
+                )
+        else:
+            require_keyed(
+                direction,
+                name="trajectory.states(direction=)",
+                remedy=keyed_values_remedy(),
+            )
+        if self._get_graph_ncells_k(self._graph_location(graph))[0] == 0:
+            raise ValueError("The graph holds no cells, so it has no states to find")
+        selection = graph_cell_selection(self.zw, graph)
+        codes, categories = (
+            (None, None)
+            if labels is None
+            else self._state_label_codes(labels, selection)
+        )
+        # A name is a label, or a number, with a suffix when several states
+        # share it.
+        name_width = len(str(n_states)) + (
+            0
+            if categories is None
+            else 1 + max((len(str(label)) for label in categories), default=0)
+        )
+        directed, graph_matrix = self._load_fate_direction(
+            graph,
+            direction,
+            held_bytes=0 if codes is None else codes.nbytes,
+            # The search, then what writing its names and memberships holds
+            # beside them.
+            later_bytes=lambda cells, load: (
+                _search_bytes_impl(
+                    cells, load.heldBytes, load.maxEntries, n_states, name_width
+                )
+                + cell_data_write_bytes(
+                    {
+                        "values": ((cells,), np.dtype(f"U{name_width}")),
+                        "memberships": ((cells, n_states), np.float32),
+                    }
+                )
+            ),
+            later_item="the state search",
+            work="Finding states",
+            call="trajectory.states",
+        )
+        scores = directed.scores
+        n_cells = len(scores)
+        scored = ~np.isnan(scores)
+        # Components are numbered by decreasing size, so the lowest number of
+        # a scored cell's component is the largest scored component.
+        searched = directed.component == int(directed.component[scored].min())
+        if not isinstance(direction, ArtifactRef):
+            ledger = MemoryLedger(
+                self.resources.memoryBytes,
+                "Finding states",
+                codec_threads=self.nthreads,
+            )
+            ledger.hold(
+                "the graph and the direction",
+                graph_matrix.data.nbytes
+                + graph_matrix.indices.nbytes
+                + graph_matrix.indptr.nbytes
+                + scores.nbytes
+                + directed.component.nbytes,
+            )
+            direction = self._direction_snapshot(
+                ledger,
+                scores,
+                directed.cell_selection,
+                invalidate_cache=invalidate_cache,
+            )
+        arguments = TrajectoryStatesArguments(
+            connectivity_map=graph,
+            direction=direction,
+            cell_selection=directed.cell_selection,
+            n_states=n_states,
+            cells_per_state=validated["cells_per_state"],
+            beta=validated["beta"],
+            invalidate_cache=invalidate_cache,
+            labels=labels,
+            max_iterations=validated.get("max_iterations"),
+        )
+        planned = arguments.plan(
+            self.zw,
+            scope=graph.scope,
+            assay=graph.assay,
+            invalidate_cache=invalidate_cache,
+            required_arrays=(
+                ArrayRequirement("values", shape=(n_cells,), dtype_kind="U"),
+                ArrayRequirement(
+                    _STATES_LABELS_MISSING, shape=(n_cells,), dtype_kind="b"
+                ),
+                ArrayRequirement(
+                    "memberships", shape=(n_cells, n_states), dtype_kind="f"
+                ),
+                ArrayRequirement("valid", shape=(n_cells,), dtype_kind="b"),
+                ArrayRequirement("state_names", shape=(n_states,), dtype_kind="U"),
+                ArrayRequirement("state_labels", shape=(n_states,), dtype_kind="U"),
+                ArrayRequirement("roles", shape=(n_states,), dtype_kind="U"),
+                ArrayRequirement(
+                    "coarse_transitions", shape=(n_states, n_states), dtype_kind="f"
+                ),
+                ArrayRequirement("cell_share", shape=(n_states,), dtype_kind="f"),
+                ArrayRequirement("walk_share", shape=(n_states,), dtype_kind="f"),
+                ArrayRequirement("direction", shape=(n_states,), dtype_kind="f"),
+                ArrayRequirement("cells", shape=(n_states,), dtype_kind="i"),
+                ArrayRequirement(
+                    "eigenvalues", shape=(n_states + 1, 2), dtype_kind="f"
+                ),
+            ),
+            required_attributes=(
+                AttributeRequirement("payload_fingerprint", expected_types=(str,)),
+            ),
+            reuse_validator=lambda _ref, group: _states_payload_is_valid(
+                group, n_cells=n_cells, n_states=n_states, expected_valid=searched
+            ),
+        )
+        if not planned.reused:
+            self._require_writable(arguments.operation)
+            logger.info(
+                f"Finding {n_states} states of {int(searched.sum())} cells on graph "
+                f"{graph.artifact_id}"
+            )
+            component_graph = _mapped_cells_graph_impl(graph_matrix, searched)
+            del graph_matrix
+            found = _find_states_impl(
+                component_graph,
+                scores[searched],
+                n_states,
+                beta=validated["beta"],
+                cells_per_state=validated["cells_per_state"],
+                max_iterations=validated.get("max_iterations"),
+                # The graph was loaded for this call, so the search may
+                # normalize it in place.
+                _copy_graph=False,
+            )
+            del component_graph
+            state_labels = _state_labels_impl(
+                found.cells,
+                n_states,
+                None if codes is None else codes[searched],
+                categories,
+            )
+            names = np.asarray(_state_names_impl(state_labels), dtype=str)
+            cell_counts = np.bincount(found.cells[found.cells >= 0], minlength=n_states)
+            state_of_cell = np.full(n_cells, -1, dtype=np.int64)
+            state_of_cell[searched] = found.cells
+            named = state_of_cell >= 0
+            values = np.full(n_cells, "", dtype=names.dtype)
+            values[named] = names[state_of_cell[named]]
+            memberships = np.full((n_cells, n_states), np.nan, dtype=np.float32)
+            memberships[searched] = found.memberships
+            write_cell_data_artifact(
+                self.zw,
+                planned,
+                {
+                    "values": values,
+                    _STATES_LABELS_MISSING: ~named,
+                    "memberships": memberships,
+                    "valid": searched,
+                    "state_names": names,
+                    "state_labels": np.asarray(state_labels, dtype=names.dtype),
+                    "roles": np.asarray(found.roles, dtype=str),
+                    "coarse_transitions": found.coarse_transitions,
+                    "cell_share": found.cell_share,
+                    "walk_share": found.walk_share,
+                    "direction": found.direction,
+                    "cells": cell_counts.astype(np.int64),
+                    "eigenvalues": np.column_stack(
+                        (found.eigenvalues.real, found.eigenvalues.imag)
+                    ),
+                },
+                fingerprint_payload=True,
+                array_attributes={"values": {"missing_mask": _STATES_LABELS_MISSING}},
+                diagnostics={
+                    "searchedCells": int(searched.sum()),
+                    "cellsLeftOut": int(n_cells - searched.sum()),
+                    "terminalStates": int(found.roles.count("terminal")),
+                    "statesShortOfCells": int(
+                        np.count_nonzero(cell_counts < validated["cells_per_state"])
+                    ),
+                    "crispness": float(found.crispness),
+                    "boundaryGap": _boundary_gap_impl(found.eigenvalues, n_states),
+                },
+            )
+            logger.info(
+                f"Stored {n_states} states: initial {names[0]!r}, terminal "
+                f"{[str(name) for name, role in zip(names, found.roles) if role == 'terminal']}"
+            )
+        warn_diagnostics(
+            arguments,
+            inspect_artifact(self.zw, planned.ref).diagnostics,
+            _STATES_WARNINGS,
+        )
+        return planned.ref
+
+    @validation_scoped
+    def _trajectory_load_states(self, states: ArtifactRef) -> TrajectoryStatesResult:
+        """Load the states of a walk from an explicit completed artifact.
+
+        Args:
+            states: A ``trajectory_states`` artifact from :meth:`states`.
+
+        Returns:
+            Each cell's state and memberships, the walk between the states,
+            and the table of each state's role and scores.
+
+        Raises:
+            TypeError: If ``states`` is not an ArtifactRef.
+            ValueError: If it is not a complete ``trajectory_states`` artifact
+                of :meth:`states`, or its record or arrays do not match the
+                contract.
+        """
+        if not isinstance(states, ArtifactRef):
+            raise TypeError("states must be an ArtifactRef")
+        if states.kind != "trajectory_states":
+            raise ValueError("states must be a trajectory_states artifact")
+        status = inspect_artifact(self.zw, states)
+        if (
+            not status.exists
+            or not status.complete
+            or status.operation != TrajectoryStatesArguments.operation
+        ):
+            raise ValueError("State-search artifact is unavailable or invalid")
+        inputs = status.inputs or {}
+        parameters = status.parameters or {}
+        _require_exact_record_keys(
+            inputs,
+            frozenset(_STATES_INPUTS | (_STATES_OPTIONAL_INPUTS & set(inputs))),
+            "State-search inputs",
+        )
+        _require_exact_record_keys(
+            parameters,
+            frozenset(
+                _STATES_PARAMETERS | (_STATES_OPTIONAL_PARAMETERS & set(parameters))
+            ),
+            "State-search parameters",
+        )
+        validated = _validate_states_parameters(parameters)
+        n_states = validated["n_states"]
+        selection = parse_artifact_ref(
+            inputs["cell_selection"], "State-search cell selection input"
+        )
+        n_cells = _selection_size(self.zw, selection)
+        group = artifact_group(self.zw, states)
+        # What checking and reading the stored search holds is charged before
+        # either reads it.
+        MemoryLedger(
+            self.resources.memoryBytes,
+            f"Loading the states of {n_cells} cells",
+            codec_threads=self.nthreads,
+        ).peak(
+            "checking and reading the state search",
+            _stored_states_bytes_impl(group, n_cells=n_cells, n_states=n_states),
+        )
+        if not _states_payload_is_valid(group, n_cells=n_cells, n_states=n_states):
+            raise ValueError("State-search arrays do not match their contract")
+
+        def stored(name: str) -> np.ndarray:
+            return np.asarray(as_zarr_array(group[name], name=name)[:])
+
+        names = tuple(str(name) for name in stored("state_names"))
+        # Each cell's state as a code, without a Python string for each cell.
+        labels = _listed_labels(
+            stored("values"), stored(_STATES_LABELS_MISSING), names, "State labels"
+        )
+        coarse = stored("coarse_transitions").astype(np.float64)
+        cell_share = stored("cell_share").astype(np.float64)
+        walk_share = stored("walk_share").astype(np.float64)
+        eigenvalues = stored("eigenvalues").astype(np.float64)
+        table = pd.DataFrame(
+            {
+                # The label that most of a state's cells hold, None without one.
+                "label": [str(label) or None for label in stored("state_labels")],
+                "role": [str(role) for role in stored("roles")],
+                "cells": stored("cells").astype(np.int64),
+                "cell_share": cell_share,
+                "walk_share": walk_share,
+                "enrichment": walk_share / cell_share,
+                "stability": np.diag(coarse),
+                "direction": stored("direction").astype(np.float64),
+            },
+            index=pd.Index(names, name="state"),
+        )[list(STATE_TABLE_COLUMNS)]
+        labels_input = inputs.get("labels")
+        return TrajectoryStatesResult(
+            ref=states,
+            graph=parse_artifact_ref(
+                inputs["connectivity_map"], "State-search graph input"
+            ),
+            direction=parse_artifact_ref(
+                inputs["direction"], "State-search direction input"
+            ),
+            cell_selection=selection,
+            labels_artifact=(
+                None
+                if labels_input is None
+                else parse_artifact_ref(labels_input, "State-search labels input")
+            ),
+            names=names,
+            labels=labels,
+            memberships=stored("memberships"),
+            valid=stored("valid").astype(bool),
+            coarse_transitions=coarse,
+            table=table,
+            eigenvalues=eigenvalues[:, 0] + 1j * eigenvalues[:, 1],
+            crispness=float(status.diagnostics["crispness"]),
+        )
 
     def _fate_map_record(self, ref: ArtifactRef) -> _FateMapRecord:
         """Read and check a fate map's record, without loading what it holds."""

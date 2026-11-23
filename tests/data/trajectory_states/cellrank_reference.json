@@ -1,0 +1,23 @@
+{
+ "data": "A synthetic branching process of 480 cells in six dimensions, drawn with NumPy's default generator seeded 7: a start population of 40 cells, a trunk of 100 cells to a branch point, three branches of 60 cells each ending in populations of 40 cells, and a side pocket of 40 cells attached halfway up the trunk at constant progress. The graph joins each cell to its 11 nearest neighbors with Gaussian weights exp(-(d/s)^2), s the median distance to the 11th neighbor, made symmetric by the larger weight. The direction is each cell's progress along the tree divided by its largest value, plus normal noise of standard deviation 0.03. The walk is CyteArc's fate walk on that graph with beta 10.",
+ "labels": "Each cell's population: start, trunk, branch0 to branch2, end0 to end2, or pocket.",
+ "calls": [
+  "estimator = cellrank.estimators.GPCCA(cellrank.kernels.PrecomputedKernel(walk, adata=adata))",
+  "estimator.compute_schur(n_components=8, method='brandts')",
+  "estimator.compute_macrostates(n_states=m, n_cells=30, cluster_key='labels') for m in 2 to 6",
+  "pygpcca.GPCCA(walk.toarray(), z='LR', method='brandts').optimize(m) gave memberships identical to CellRank's for every m"
+ ],
+ "arrays": "graph_* and walk_* are CSR parts; schur_eigenvalues and schur_vectors are CellRank's eigendecomposition['D'] and schur_vectors; memberships_m, coarse_transitions_m, coarse_stationary_m and macrostates_m are macrostates_memberships.X, coarse_T, coarse_stationary_distribution and the codes of macrostates for m states.",
+ "environment": {
+  "cellrank": "2.4.0",
+  "pygpcca": "1.1.0",
+  "anndata": "0.13.4",
+  "scanpy": "1.13.0",
+  "numpy": "2.5.5",
+  "scipy": "1.18.1",
+  "python": "3.13.18",
+  "platform": "macOS 26 arm64"
+ },
+ "license": "CellRank 2.4.0 is BSD-3-Clause and pyGPCCA 1.1.0 is LGPL-3.0-or-later; both were run to produce these values, and no code of pyGPCCA was read or copied.",
+ "agreement": "At 2 to 6 states CyteArc's memberships agree with these within 5.3e-11, its coarse transitions within 5.1e-14 and its shares of the walk's time within 1.8e-11, and each state takes CellRank's most likely cells."
+}

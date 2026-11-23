@@ -334,6 +334,8 @@ class TrajectoryAccessor(_Accessor):
     load_pseudotime = _bind(_TrajectoryOperationsMixin._trajectory_load_pseudotime)
     fate = _bind(_TrajectoryOperationsMixin._trajectory_fate)
     load_fate = _bind(_TrajectoryOperationsMixin._trajectory_load_fate)
+    states = _bind(_TrajectoryOperationsMixin._trajectory_states)
+    load_states = _bind(_TrajectoryOperationsMixin._trajectory_load_states)
     markers = _bind(_TrajectoryFeatureOperationsMixin._trajectory_markers)
     load_markers = _bind(_TrajectoryFeatureOperationsMixin._trajectory_load_markers)
     aggregation = _bind(_TrajectoryFeatureOperationsMixin._trajectory_aggregation)

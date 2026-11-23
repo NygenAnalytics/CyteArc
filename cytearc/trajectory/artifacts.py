@@ -51,6 +51,30 @@ FATE_DIRECTION_INPUTS = frozenset(
     {"connectivity_map", "direction", "sink_labels", "cell_selection"}
 )
 FATE_PARAMETERS = frozenset({"sinks", "beta", "solver_tol", "max_iterations"})
+# A state search records its labels and its eigen-solve's bound only when set.
+STATES_INPUTS = frozenset({"connectivity_map", "direction", "cell_selection"})
+STATES_OPTIONAL_INPUTS = frozenset({"labels"})
+STATES_PARAMETERS = frozenset({"n_states", "cells_per_state", "beta"})
+STATES_OPTIONAL_PARAMETERS = frozenset({"max_iterations"})
+#: The missing-value mask of a state search's labels.
+STATES_LABELS_MISSING = "__cytearc_missing__values"
+#: The arrays of a state search: the cell-aligned labels with their mask,
+#: memberships and validity, then one row per state and the eigenvalues.
+STATES_PAYLOAD = (
+    "values",
+    STATES_LABELS_MISSING,
+    "memberships",
+    "valid",
+    "state_names",
+    "state_labels",
+    "roles",
+    "coarse_transitions",
+    "cell_share",
+    "walk_share",
+    "direction",
+    "cells",
+    "eigenvalues",
+)
 MARKER_INPUTS = frozenset(
     {
         "cell_selection",
@@ -333,6 +357,26 @@ def validate_fate_parameters(parameters: Mapping[str, Any]) -> dict[str, Any]:
             minimum=1,
         ),
     }
+
+
+def validate_states_parameters(parameters: Mapping[str, Any]) -> dict[str, Any]:
+    """Check a state search's parameters, as the call takes them or its record holds them."""
+    expected = STATES_PARAMETERS | (STATES_OPTIONAL_PARAMETERS & set(parameters))
+    require_exact_record_keys(
+        parameters, frozenset(expected), "State-search parameters"
+    )
+    validated: dict[str, Any] = {
+        "n_states": integer_argument(parameters["n_states"], "n_states", minimum=2),
+        "cells_per_state": integer_argument(
+            parameters["cells_per_state"], "cells_per_state", minimum=1
+        ),
+        "beta": _real_parameter(parameters["beta"], "beta", minimum=0.0),
+    }
+    if "max_iterations" in parameters:
+        validated["max_iterations"] = integer_argument(
+            parameters["max_iterations"], "max_iterations", minimum=1
+        )
+    return validated
 
 
 def validate_marker_parameters(parameters: Mapping[str, Any]) -> dict[str, Any]:
@@ -860,6 +904,144 @@ def fate_payload_is_valid(
                 atol=tolerance,
             ):
                 return False
+    return True
+
+
+#: What checking and loading a stored state search holds whatever its cells:
+#: Zarr's and pandas' objects, and the record and the small arrays.
+_STATES_LOAD_FIXED_BYTES = 2**20
+
+
+def stored_states_bytes(group: Any, *, n_cells: int, n_states: int) -> int:
+    """Return the most bytes that checking and loading the stored state search in ``group`` holds.
+
+    The check of :func:`states_payload_is_valid` holds which cells are
+    valid and which labeled, and reads the stored arrays a chunk of rows at
+    a time: the float32 memberships and their float64 copy, the searched
+    cells' memberships, their sums and comparisons, and the labels as text
+    and as Python objects, up to ``33 * n_states + 12 * width + 152`` bytes
+    a row, the labels' text ``width`` characters wide. Loading then holds
+    the labels' text beside the codes that :func:`listed_labels` makes of
+    them, or the float32 memberships and their read-only copy, beside 6
+    bytes a cell for the codes, the valid cells and their copy. The width
+    and the rows of a chunk are read from the stored arrays' metadata.
+    """
+    n, m = int(n_cells), int(n_states)
+    stored_memberships = group.get("memberships")
+    rows = (
+        min(n, row_band(array_geometry(stored_memberships), unit="chunk", fallback=1))
+        if isinstance(stored_memberships, zarr.Array)
+        else n
+    )
+    stored_labels = group.get("values")
+    width = (
+        max(1, np.dtype(stored_labels.dtype).itemsize // 4)
+        if isinstance(stored_labels, zarr.Array)
+        and np.dtype(stored_labels.dtype).kind == "U"
+        else 1
+    )
+    checking = 2 * n + rows * (33 * m + 12 * width + 152)
+    loading = max(4 * width * n, 8 * n * m) + 6 * n
+    return max(checking, loading) + _STATES_LOAD_FIXED_BYTES
+
+
+def states_payload_is_valid(
+    group: Any,
+    *,
+    n_cells: int,
+    n_states: int,
+    expected_valid: np.ndarray | None = None,
+) -> bool:
+    """Check a stored state search against its cells, its states and their roles.
+
+    ``expected_valid`` marks the cells that the search must cover, the
+    largest connected component of scored cells, or is None to accept the
+    cells that the artifact marks. Every searched cell's memberships are
+    finite and sum to one, every other cell's are NaN, and a label names a
+    state and marks only searched cells.
+    """
+    if set(group.attrs) != _RESULT_ATTRIBUTES | {"diagnostics"}:
+        return False
+    if not payload_fingerprint_matches(group, STATES_PAYLOAD):
+        return False
+    contracts = {
+        "memberships": ((n_cells, n_states), "f"),
+        "valid": ((n_cells,), "b"),
+        STATES_LABELS_MISSING: ((n_cells,), "b"),
+        "coarse_transitions": ((n_states, n_states), "f"),
+        "cell_share": ((n_states,), "f"),
+        "walk_share": ((n_states,), "f"),
+        "direction": ((n_states,), "f"),
+        "cells": ((n_states,), "i"),
+        "eigenvalues": ((n_states + 1, 2), "f"),
+    }
+    for name, (shape, kind) in contracts.items():
+        if (
+            _array_contract(group, name, shape=shape, dtype_kinds=frozenset({kind}))
+            is None
+        ):
+            return False
+    # The fingerprint's check found exactly the payload's arrays.
+    labels = as_zarr_array(group["values"], name="values")
+    names_array = as_zarr_array(group["state_names"], name="state_names")
+    labels_array = as_zarr_array(group["state_labels"], name="state_labels")
+    roles_array = as_zarr_array(group["roles"], name="roles")
+    if (
+        tuple(labels.shape) != (n_cells,)
+        or dict(labels.attrs) != {"missing_mask": STATES_LABELS_MISSING}
+        or any(
+            tuple(array.shape) != (n_states,)
+            for array in (names_array, labels_array, roles_array)
+        )
+        or any(
+            np.dtype(array.dtype).kind != "U"
+            for array in (labels, names_array, labels_array, roles_array)
+        )
+    ):
+        return False
+    from .states import state_names
+
+    names = [str(name) for name in np.asarray(names_array[:])]
+    roles = [str(role) for role in np.asarray(roles_array[:])]
+    if (
+        # Each state's name is its label, or its number, with a suffix that
+        # tells apart the states that share one.
+        tuple(names)
+        != state_names([str(label) for label in np.asarray(labels_array[:])])
+        or roles[0] != "initial"
+        or any(role not in ("intermediate", "terminal") for role in roles[1:])
+    ):
+        return False
+    valid = np.asarray(group["valid"][:], dtype=bool)
+    if expected_valid is not None and not np.array_equal(
+        valid, np.asarray(expected_valid, dtype=bool)
+    ):
+        return False
+    if not valid.any():
+        return False
+    missing = np.asarray(group[STATES_LABELS_MISSING][:], dtype=bool)
+    memberships = as_zarr_array(group["memberships"], name="memberships")
+    known = np.asarray(names, dtype=object)
+    block_rows = row_band(array_geometry(memberships), unit="chunk", fallback=1)
+    for start in range(0, n_cells, block_rows):
+        stop = min(start + block_rows, n_cells)
+        block = np.asarray(memberships[start:stop], dtype=np.float64)
+        block_valid = valid[start:stop]
+        inside = block[block_valid]
+        if inside.size and (
+            not np.isfinite(inside).all()
+            or float(inside.min()) < -1e-6
+            or not np.allclose(inside.sum(axis=1), 1.0, rtol=0.0, atol=1e-4)
+        ):
+            return False
+        if np.any(~block_valid) and not np.isnan(block[~block_valid]).all():
+            return False
+        block_missing = missing[start:stop]
+        if np.any(~block_missing & ~block_valid):
+            return False
+        named = np.asarray(labels[start:stop])[~block_missing].astype(object)
+        if named.size and not np.isin(named, known).all():
+            return False
     return True
 
 
