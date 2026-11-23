@@ -108,7 +108,7 @@ the resolved `top_n`. The LSI needs `dims` prevalent peaks, one more when `skip_
 the first component, so `lsi` `dims` with that component must not exceed `top_n`, and `skip_first`
 must be a boolean.
 
-`doublets=True` scores doublets after the run clusters, with the keywords of `qc.doublets`, as the RNA recipe does ([Doublets and Harmony](#doublets-and-harmony)). The simulated doublets are weighted by TF-IDF and projected onto the run's LSI ([Doublet detection](../reference/methods#doublet-method)), so the run must normalize with `"tf_idf"`, the ATAC default, and its ANN index must measure Euclidean distances, `ann_index` `ann_metric="l2"`, the default. Doublet scoring is off by default, so a run recorded before the ATAC recipe scored doublets replays as it ran.
+`doublets=True` scores doublets after the run clusters, with the keywords of `qc.doublets`, as the RNA recipe does ([Doublets and Harmony](#doublets-and-harmony)). The simulated doublets are weighted by TF-IDF and projected onto the run's LSI ([Doublet detection](../reference/methods#doublet-method)), so the run must normalize with `"tf_idf"`, the ATAC default, and each sample is scored by Euclidean distances in the LSI, whatever `ann_index` `ann_metric` the graph uses. Doublet scoring is off by default, so a run recorded before the ATAC recipe scored doublets replays as it ran.
 
 ### ADT
 
@@ -341,7 +341,7 @@ A recipe checks its call against the store before it creates a run record, and a
   `pca={'dims': 0} builds the graph on normalized values, but doublet scoring needs a PCA graph; ...`;
 - `The run normalizes assay 'RNA' with ..., but doublet scoring normalizes its simulated doublets by library size and needs lib_size; ...` (`rna` with doublet scoring on, when the run normalizes with another normalizer, such as `"pearson_residuals"`): pass `normalization={"method": "lib_size"}` or `doublets=False`;
 - `pca={'feat_scaling': False} fits PCA without feature scaling, but doublet scoring projects its simulated doublets onto the PCA through a mapping reference, which needs feature scaling; ...` (`rna` with doublet scoring on): pass `doublets=False`, or omit `feat_scaling`, which defaults to True for library-size values;
-- `The run normalizes assay 'ATAC' with ..., but doublet scoring weights its simulated doublets by TF-IDF and needs tf_idf; ...` and `ann_index={'ann_metric': 'cosine'} builds the graph on cosine distances, but doublet scoring of an ATAC assay scores cells by Euclidean distances in the LSI; ...` (`atac` with doublet scoring on): pass `doublets=False`, or keep the TF-IDF normalizer and the `"l2"` metric;
+- `The run normalizes assay 'ATAC' with ..., but doublet scoring weights its simulated doublets by TF-IDF and needs tf_idf; ...` (`atac` with doublet scoring on, when the run normalizes with another normalizer): pass `normalization={"method": "tf_idf"}` or `doublets=False`;
 - `normalization['method'] must be one of [...], or the identity of a custom normalizer that a run recorded; ...`, `Assay 'ATAC' opens as ATACassay, but lib_size needs an RNAassay; ...`, and `normalization['method'] is the custom normalizer ..., which a run applies only as the assay's normMethod, ...` ([Normalization method](#normalization-method));
 - `PCA settings need dims above 0; dims=0 skips PCA`, for other `pca` settings beside `dims=0`;
 - `leiden selected must be one of the partitions`;

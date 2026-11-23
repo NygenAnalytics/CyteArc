@@ -225,7 +225,7 @@ one type looks like a singlet and is rarely called. Cells between two population
 intermediate state, can also score high, so check the markers of a cluster that is rich in
 predicted doublets before removing it as an artifact.
 
-An ATAC run scores doublets only when asked, with `doublets=True`, and removes nothing either. Its score finds doublets of two distinct cell types, such as a T cell and a monocyte; a doublet of two similar types, such as two T cell subsets, is often missed. A doublet that holds the fragments of both its cells also has more accessible peaks than a singlet, so read `ATAC_nFeatures` beside the score, and in a multiome dataset compare the calls of the RNA and ATAC runs of the same cells before removing any.
+An ATAC run scores doublets only when asked, with `doublets=True`, and removes nothing either. Its score ranks doublets of two distinct cell types, such as a T cell and a monocyte, well above singlets, and doublets of two similar types, such as two T cell subsets, less well than SnapATAC2's Scrublet does on the same data ([Doublet detection](reference/methods.md#doublet_method)). A doublet that holds the fragments of both its cells also has more accessible peaks than a singlet, so read `ATAC_nFeatures` beside the score, and in a multiome dataset compare the calls of the RNA and ATAC runs of the same cells before removing any.
 
 ### Modalities of the same cells
 

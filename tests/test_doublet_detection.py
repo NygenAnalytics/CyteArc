@@ -1807,9 +1807,13 @@ def test_doublet_scoring_charges_what_its_projection_holds_and_projects():
     assert admitted.projected == plan.simulated == len(coordinates) == 8
 
 
-@pytest.mark.parametrize("renormalize", [False, True], ids=["totals", "renormalized"])
+@pytest.mark.parametrize(
+    ("top_n", "renormalize"),
+    [(None, False), (150, False), (150, True)],
+    ids=["every-peak", "prevalent-peaks", "renormalized"],
+)
 def test_lsi_projection_of_the_cells_reproduces_their_stored_lsi(
-    one_capture_peaks, tmp_path, renormalize
+    one_capture_peaks, tmp_path, top_n, renormalize
 ):
     from cytearc.graph.feature_projection import resolve_graph_assay_inputs
     from cytearc.storage.feature_selection import read_feature_selection_indices
@@ -1818,14 +1822,20 @@ def test_lsi_projection_of_the_cells_reproduces_their_stored_lsi(
     opened = _open_synthetic(one_capture_peaks, tmp_path)
     store = opened.store
     graph = opened.graph
-    if renormalize:
-        # TF over 150 prevalent peaks, and IDF over the cells that are not
-        # homotypic doublets, so that neither is that of every peak or cell.
-        keep = one_capture_peaks.truth != 2
+    truth = one_capture_peaks.truth
+    # With renormalize_subset, IDF over the cells that are not homotypic
+    # doublets, so that it is not that of every cell either.
+    keep = truth != 2 if renormalize else np.ones(len(truth), dtype=bool)
+    if top_n is not None:
+        # The template's LSI holds every peak, over which a cell's total and
+        # its total of the selected peaks agree; over 150 prevalent peaks
+        # they differ.
         store.cells.insert("kept", by_cell_id(store.cells, keep))
         cells = store.snapshot_cell_selection("kept")
-        peaks = store.features.prevalent_peaks(cells, top_n=150)
-        normalized = store.features.normalize(cells, peaks, renormalize_subset=True)
+        peaks = store.features.prevalent_peaks(cells, top_n=top_n)
+        normalized = store.features.normalize(
+            cells, peaks, renormalize_subset=renormalize
+        )
         lsi = store.reduction.lsi(normalized, dims=8, local_cache=False)
         graph = store.graph.connectivity(
             store.graph.neighbors(store.graph.ann_index(lsi), coordinates=lsi, k=10)
@@ -1842,11 +1852,8 @@ def test_lsi_projection_of_the_cells_reproduces_their_stored_lsi(
     features = read_feature_selection_indices(
         store.zw, "ATAC", lineage.feature_selection
     )
-    truth = one_capture_peaks.truth
-    np.testing.assert_array_equal(
-        rows, np.flatnonzero(truth != 2) if renormalize else np.arange(len(truth))
-    )
-    assert len(features) == (150 if renormalize else 400)
+    np.testing.assert_array_equal(rows, np.flatnonzero(keep))
+    assert len(features) == (400 if top_n is None else top_n)
 
     projection, totals = store._lsi_doublet_projection(
         store.ATAC, lineage, rows, features, resident_bytes=0
@@ -1857,7 +1864,11 @@ def test_lsi_projection_of_the_cells_reproduces_their_stored_lsi(
     # The counts that the store was written with, apart from its reads.
     counts, *_ = _synthetic_counts(3, _ONE_CAPTURE, peaks=True)
     if totals is not None:
+        # Each cell's total over every peak, not over the LSI's peaks.
         np.testing.assert_array_equal(totals, counts[rows].sum(axis=1))
+        if top_n is not None:
+            selected = counts[rows][:, features].sum(axis=1)
+            assert np.mean(totals > selected) > 0.9
     coordinates = projection.project(
         csr_matrix(counts[rows][:, features]), totals, source="test"
     )
@@ -1951,14 +1962,11 @@ def test_the_lsi_doublet_graph_check_names_what_it_needs(monkeypatch):
             parameters={"normalization_method": {"external_hook": True, **_TF_IDF}}
         ),
         "reduction": SimpleNamespace(operation="run_lsi"),
-        "ann_index": SimpleNamespace(parameters={"ann_metric": "l2"}),
     }
     monkeypatch.setattr(
         quality_control, "inspect_artifact", lambda _root, ref: statuses[ref]
     )
-    lineage = SimpleNamespace(
-        normalized="normalized", reduction="reduction", ann_index="ann_index"
-    )
+    lineage = SimpleNamespace(normalized="normalized", reduction="reduction")
 
     def refusal() -> str:
         with pytest.raises(ValueError) as caught:
@@ -1969,16 +1977,7 @@ def test_the_lsi_doublet_graph_check_names_what_it_needs(monkeypatch):
     quality_control._require_lsi_doublet_graph(None, lineage)
     statuses["normalized"].parameters = {"normalization_method": _TF_IDF}
     quality_control._require_lsi_doublet_graph(None, lineage)
-    # A cosine index, or one that records no metric, is refused last.
-    statuses["ann_index"].parameters = {"ann_metric": "cosine"}
-    assert refusal() == (
-        "The graph's ANN index measures 'cosine' distances, but doublet scoring "
-        "of an ATAC assay scores cells by Euclidean distances in the LSI; build "
-        "the ANN index with ann_metric='l2' and the graph on it"
-    )
-    statuses["ann_index"].parameters = None
-    assert refusal().startswith("The graph's ANN index measures None distances")
-    # A reduction other than an LSI is refused before the index.
+    # A reduction other than an LSI is refused.
     statuses["reduction"].operation = "run_pca"
     assert refusal() == _LSI_REDUCTION
     # The normalizer is checked first and named as provenance records it.
@@ -1997,18 +1996,6 @@ def test_the_lsi_doublet_graph_check_names_what_it_needs(monkeypatch):
     )
     statuses["normalized"].parameters = None
     assert refusal().startswith("The graph was built on values normalized with None")
-    # An explicit error, not an assertion, so it holds under python -O.
-    for incomplete in (
-        SimpleNamespace(normalized="normalized", reduction=None),
-        SimpleNamespace(normalized=None, reduction="reduction"),
-    ):
-        lineage = incomplete
-        assert refusal() == (
-            "Doublet scoring of an ATAC assay projects its simulated doublets "
-            "onto the LSI of the graph's normalized values, but the graph's "
-            "lineage names no LSI or no normalized values; build the graph on "
-            "reduction.lsi"
-        )
 
 
 @pytest.mark.slow
@@ -2050,13 +2037,6 @@ def test_atac_doublets_refuse_a_graph_whose_lsi_they_cannot_project_onto(
             _LSI_REDUCTION,
         ),
         (graph_on(store.reduction.custom(loadings, tf_idf)), {}, _LSI_REDUCTION),
-        (
-            graph_on(lsi(tf_idf), ann_metric="cosine"),
-            {},
-            "The graph's ANN index measures 'cosine' distances, but doublet "
-            "scoring of an ATAC assay scores cells by Euclidean distances in the "
-            "LSI; build the ANN index with ann_metric='l2' and the graph on it",
-        ),
         (graph_on(tf_idf), {}, "Doublet detection requires an uncorrected LSI graph"),
         (
             graph_on(store.reduction.harmony(lsi(tf_idf), ["sample"])),
@@ -2085,6 +2065,149 @@ def test_atac_doublets_refuse_a_graph_whose_lsi_they_cannot_project_onto(
     # still scores.
     assert store.artifacts.list(kind="doublet_score", from_assay="ATAC") == before
     assert store.qc.doublets(opened.clusters, opened.graph).kind == "doublet_score"
+
+
+def test_a_session_that_normalizes_otherwise_scores_a_tf_idf_graph_alike(
+    one_capture_peaks, tmp_path, monkeypatch
+):
+    from cytearc.assay import normalization
+
+    scored = []
+    for normalizer in (norm_tf_idf, norm_clr):
+        opened = _open_synthetic(one_capture_peaks, tmp_path / normalizer.__name__)
+        store = opened.store
+        # A graph of the cells that are not homotypic doublets and of 150
+        # prevalent peaks, whose summary prevalent peaks saves, so that the
+        # document frequencies are neither those of every cell nor of every
+        # peak.
+        keep = one_capture_peaks.truth != 2
+        store.cells.insert("kept", by_cell_id(store.cells, keep))
+        cells = store.snapshot_cell_selection("kept")
+        normalized = store.features.normalize(
+            cells, store.features.prevalent_peaks(cells, top_n=150)
+        )
+        lsi = store.reduction.lsi(normalized, dims=8, local_cache=False)
+        graph = store.graph.connectivity(
+            store.graph.neighbors(store.graph.ann_index(lsi), coordinates=lsi, k=10)
+        )
+        clusters = store.snapshot_cluster_labels("cell_type", cell_selection=cells)
+        summaries = store.artifacts.list(kind="feature_summary", from_assay="ATAC")
+        store.ATAC.normMethod = normalizer
+        with monkeypatch.context() as patch:
+            if normalizer is norm_tf_idf:
+                # A TF-IDF session reads the document frequencies from the
+                # cells' summary and counts nothing itself.
+                def counted(*_args: Any, **_kwargs: Any) -> None:
+                    raise AssertionError("the document frequencies were counted")
+
+                patch.setattr(normalization, "stream_document_frequency", counted)
+
+            payload = _payload(store, store.qc.doublets(clusters, graph))
+
+        scored.append({name: payload[name][:] for name in _DOUBLET_ARRAYS})
+        # Another session's summary would count other values, so that session
+        # counts the cells of each peak itself and saves no summary.
+        assert (
+            store.artifacts.list(kind="feature_summary", from_assay="ATAC") == summaries
+        )
+    for name in _DOUBLET_ARRAYS:
+        np.testing.assert_array_equal(scored[0][name], scored[1][name])
+
+
+_FEW_DETECTABLE = (
+    "the automatic threshold leaves fewer than 1% of the simulated doublets "
+    "above it, so it calls almost no cell"
+)
+
+
+def test_a_threshold_that_calls_almost_no_doublet_warns_when_computed_and_reused(
+    small_captures, tmp_path, monkeypatch
+):
+    opened = _open_synthetic(small_captures, tmp_path)
+    store = opened.store
+
+    def score(**options: Any) -> ArtifactRef:
+        return store.qc.doublets(opened.clusters, opened.graph, **options)
+
+    # The thresholds of these samples leave many simulated doublets above
+    # them, and a threshold that the call sets is the call's choice.
+    for options in ({"sample_column": "sample"}, {"threshold": 0.9999}):
+        _ref, warned, _texts = _warned(lambda: score(**options), "")
+        assert warned == []
+    # A threshold above every simulated doublet, as the minimum method can
+    # choose when one or two outlying doublets form its second mode.
+    monkeypatch.setattr(
+        doublets,
+        "doublet_threshold",
+        lambda values: (float(np.max(values)), "minimum"),
+    )
+    cases = (
+        ({"sample_column": "sample", "random_seed": 1}, "In each of 2 samples"),
+        ({"random_seed": 1}, "In 1 sample"),
+    )
+    computed = [_warned(lambda: score(**options), where) for options, where in cases]
+    monkeypatch.undo()
+    reused = [_warned(lambda: score(**options), where) for options, where in cases]
+
+    suffix = (
+        ". The scores still rank the cells; pass threshold to call those that "
+        "score above it"
+    )
+    expected = [
+        f"In each of 2 samples {_FEW_DETECTABLE}: (sample='A'), (sample='B'){suffix}",
+        f"In 1 sample {_FEW_DETECTABLE}{suffix}",
+    ]
+    for (first, first_warned, first_texts), (again, warned, texts), text in zip(
+        computed, reused, expected, strict=True
+    ):
+        assert again == first
+        # Each sample records the threshold's method and that none of its
+        # simulated doublets is above it.
+        samples = _payload(store, first).attrs["samples"]
+        assert {sample["thresholdMethod"] for sample in samples} == {"minimum"}
+        assert [sample["detectableDoubletFraction"] for sample in samples] == [
+            0.0
+        ] * len(samples)
+        for diagnostic, messages in ((first_warned, first_texts), (warned, texts)):
+            assert messages == [text]
+            (warning,) = diagnostic
+            assert (warning.operation, warning.diagnostic, warning.value) == (
+                "run_doublet_detection",
+                "detectableDoubletFraction",
+                [0.0] * len(samples),
+            )
+
+
+@pytest.mark.parametrize("assay", ["RNA", "ATAC"])
+def test_a_cosine_graph_scores_rna_by_its_metric_and_atac_by_euclidean_distances(
+    small_captures, one_capture_peaks, tmp_path, assay
+):
+    synthetic = one_capture_peaks if assay == "ATAC" else small_captures
+    opened = _open_synthetic(synthetic, tmp_path)
+    store = opened.store
+    coordinates = _graph_pca(store, opened.graph)
+    # The index of the template's graph with another metric alone.
+    cosine = store.graph.connectivity(
+        store.graph.neighbors(
+            store.graph.ann_index(coordinates, ann_metric="cosine"),
+            coordinates=coordinates,
+            k=10,
+        )
+    )
+
+    ref = store.qc.doublets(opened.clusters, cosine)
+    euclidean = store.qc.doublets(opened.clusters, opened.graph)
+
+    assert ref != euclidean
+    same = [
+        np.array_equal(
+            _payload(store, ref)[name][:], _payload(store, euclidean)[name][:]
+        )
+        for name in ("values", "raw_scores")
+    ]
+    # An RNA sample's index takes the graph's metric, and an ATAC sample's
+    # Euclidean distances in the LSI whatever the graph's metric.
+    assert same == ([True, True] if assay == "ATAC" else [False, False])
 
 
 def test_a_harmony_graph_scores_each_sample_on_the_lsi_it_corrected(

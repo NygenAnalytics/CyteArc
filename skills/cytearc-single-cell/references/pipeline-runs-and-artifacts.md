@@ -424,7 +424,7 @@ cytearc.ArtifactRef.from_dict(saved["refs"]["fineClusters"]) == fine_clusters  #
 | `leiden` | `True`: 0.5, 0.75, 1.0, 1.25 with a silhouette pick (multimodal: 1.0) | Other candidates: `{"partitions": [...]}`; pin with `{"selected": ...}`; `backend`, `random_seed`. |
 | `paris` | `False` | `True` for a hierarchy to diagnose (`ds.plots.cluster_tree`); `{"n_clusters": ...}`. |
 | `doublets` (rna) | `True` | `False` to skip; `{"sample_column": "capture"}` with several captures. Needs Leiden, PCA with feature scaling (the default for library-size values), and a run that normalizes with `"lib_size"`, the RNA default. |
-| `doublets` (atac) | `False` | `True` to score doublets on the LSI; `{"sample_column": "capture"}` with several captures. Needs Leiden, a run that normalizes with `"tf_idf"`, the ATAC default, and `ann_index` `ann_metric="l2"`, the default. |
+| `doublets` (atac) | `False` | `True` to score doublets on the LSI, by Euclidean distances whatever the graph's metric; `{"sample_column": "capture"}` with several captures. Needs Leiden and a run that normalizes with `"tf_idf"`, the ATAC default. |
 | `markers` | `True` | `False` to skip; needs Leiden. |
 | `snapshot_columns` | `()` | Run-mode plots or `run.cells` need live columns. A new run that adds them reuses every artifact (see Pitfalls). |
 | `species` | `None` | Recorded with the run only. |

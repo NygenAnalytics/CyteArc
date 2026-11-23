@@ -9,7 +9,6 @@ from ..fields import cell_fields, feature_fields
 from ..filtering import default_filter_columns
 from ..normalizers import normalizer_label
 from ..settings import (
-    ANN_METRIC_DEFAULT,
     LSI_DIMS_DEFAULT,
     LSI_SKIP_FIRST_DEFAULT,
     PEAKS_TOP_N_DEFAULT,
@@ -84,15 +83,12 @@ def _lsi_stage(settings: Mapping[str, Any]) -> PlannedStage:
     )
 
 
-def _check_doublet_settings(
-    assay: str, normalizer: NormMethod, ann_metric: object
-) -> None:
-    """Refuse doublet scoring of a run whose LSI graph it cannot score.
+def _check_doublet_normalization(assay: str, normalizer: NormMethod) -> None:
+    """Refuse doublet scoring of a run that does not normalize by TF-IDF.
 
     Doublet scoring weights the counts of each simulated doublet by TF-IDF
     and projects them onto the LSI of the graph's cells, so the run must
-    normalize those cells by TF-IDF too, and it scores cells by Euclidean
-    distances, so the graph's index must measure them.
+    normalize those cells by TF-IDF too.
     """
     if normalizer is not norm_tf_idf:
         raise ValueError(
@@ -100,13 +96,6 @@ def _check_doublet_settings(
             f"{normalizer_label(normalizer)}, but doublet scoring weights its "
             "simulated doublets by TF-IDF and needs tf_idf; pass "
             "normalization={'method': 'tf_idf'} or doublets=False"
-        )
-    if ann_metric != "l2":
-        raise ValueError(
-            f"ann_index={{'ann_metric': {ann_metric!r}}} builds the graph on "
-            f"{ann_metric} distances, but doublet scoring of an ATAC assay "
-            "scores cells by Euclidean distances in the LSI; pass "
-            "ann_index={'ann_metric': 'l2'} or doublets=False"
         )
 
 
@@ -193,11 +182,7 @@ def resolve_atac(
     if not partitions and membership_strength:
         raise ValueError("membership_strength requires at least one Leiden candidate")
     if doublets_enabled:
-        _check_doublet_settings(
-            assay_name,
-            normalization_settings.normalizer,
-            graph.ann_index.get("ann_metric", ANN_METRIC_DEFAULT),
-        )
+        _check_doublet_normalization(assay_name, normalization_settings.normalizer)
     snapshots = resolve_snapshot_columns(
         store,
         snapshot_columns,

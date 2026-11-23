@@ -706,22 +706,14 @@ def test_atac_settings_are_checked_before_the_run(atac) -> None:
             with pytest.raises(error) as caught:
                 call()
             assert str(caught.value) == expected
-    # Doublet scoring weights its simulated doublets by TF-IDF and scores
-    # them by Euclidean distances, so a run of other values or of a cosine
-    # index refuses it, as it refuses what qc.doublets refuses.
+    # Doublet scoring weights its simulated doublets by TF-IDF, so a run of
+    # other values refuses it, as it refuses what qc.doublets refuses.
     for settings, message in (
         (
             {"doublets": True, "normalization": {"method": "clr"}},
             "The run normalizes assay 'ATAC' with clr, but doublet scoring "
             "weights its simulated doublets by TF-IDF and needs tf_idf; pass "
             "normalization={'method': 'tf_idf'} or doublets=False",
-        ),
-        (
-            {"doublets": True, "ann_index": {"ann_metric": "cosine"}},
-            "ann_index={'ann_metric': 'cosine'} builds the graph on cosine "
-            "distances, but doublet scoring of an ATAC assay scores cells by "
-            "Euclidean distances in the LSI; pass ann_index={'ann_metric': 'l2'} "
-            "or doublets=False",
         ),
         (
             {"doublets": {"simulation_ratio": 0}},
@@ -756,6 +748,11 @@ def test_atac_settings_are_checked_before_the_run(atac) -> None:
     with pytest.raises(KeyError, match="Doublet sample column 'missing' was not found"):
         pipeline.atac(doublets={"sample_column": "missing"})
     assert _run_ids(atac.datastore) == before
+    # A graph of cosine distances is scored by Euclidean distances in its LSI.
+    plan = _resolve(
+        "atac", atac.datastore, doublets=True, ann_index={"ann_metric": "cosine"}
+    )
+    assert plan.config["stages"]["doublets"] == {}
 
     # At the limits, the settings resolve.
     _resolve("atac", atac.datastore, prevalent_peaks={"top_n": peaks - 1})

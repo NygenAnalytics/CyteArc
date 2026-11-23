@@ -646,10 +646,11 @@ class PipelineAccessor:
             doublets: Doublet scoring, with the keywords of ``qc.doublets``;
                 off by default. It weights simulated doublets by TF-IDF and
                 projects them onto the LSI, so it needs the run to normalize
-                with ``"tf_idf"``, the ATAC default, and ``ann_index``
-                ``ann_metric`` to be ``"l2"``, the default. A run with
-                Harmony scores doublets within each batch unless
-                ``doublets`` names another ``sample_column``.
+                with ``"tf_idf"``, the ATAC default, and it scores cells by
+                Euclidean distances in the LSI whatever ``ann_index``
+                ``ann_metric`` is. A run with Harmony scores doublets within
+                each batch unless ``doublets`` names another
+                ``sample_column``.
 
         The other arguments mean what they mean for :meth:`rna`. The run
         records the selected peaks as its ``prevalent_peaks`` feature field.
