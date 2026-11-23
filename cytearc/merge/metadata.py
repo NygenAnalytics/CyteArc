@@ -440,11 +440,15 @@ def _max_text_width(
             width = max(width, int(np.char.str_len(strings).max(initial=0)))
         if labels is not None:
             if strings is None:
-                # Variable-width labels become their Python strings as the
-                # merged column's fixed-width text holds them, without its
-                # trailing NULs, rather than a cast as wide as the longest.
+                # Variable-width labels become Python strings without
+                # trailing NULs, as the merged column's fixed-width text holds
+                # them: NumPy's strip of such text keeps NULs, and a cast would
+                # make every label as wide as the longest.
                 strings = (
-                    np.strings.rstrip(block, "\x00").astype(object)
+                    np.asarray(
+                        [value.rstrip("\x00") for value in block.tolist()],
+                        dtype=object,
+                    )
                     if block.dtype.kind == "T"
                     else np.asarray(block, dtype=str)
                 )
@@ -537,22 +541,30 @@ def resolve_metadata_schema_scan_rows(
     for table in source_cell_tables:
         for column in table.columns:
             dtype = np.dtype(table.get_dtype(column))
-            if column in {"ids", "names"} or dtype.kind in {"U", "S", "O"}:
+            # Variable-width text, which another tool can store, is scanned
+            # as fixed-width text is.
+            if column in {"ids", "names"} or dtype.kind in {"U", "S", "O", "T"}:
                 arrays.append(table._get_array(column))
     preferred = max(1, int(preferred_rows))
+    # Each column's costs, which measure variable-width text, are the same at
+    # every width.
+    costs: list[tuple[tuple[int, int], int]] = []
+    for array in arrays:
+        dtype = np.dtype(array.dtype)
+        costs.append(
+            (
+                array_row_selection_parts(array),
+                max(1, int(dtype.itemsize))
+                + _string_itemsize_bound(dtype)
+                + np.dtype(np.int64).itemsize,
+            )
+        )
 
     def admit(width: int) -> None:
-        task_bytes: list[int] = []
-        for array in arrays:
-            dtype = np.dtype(array.dtype)
-            itemsize = max(1, int(dtype.itemsize))
-            text_itemsize = _string_itemsize_bound(dtype)
-            selection = array_row_selection_parts(array)
-            selection_peak = selection[0] + width * selection[1]
-            conversion_peak = width * (
-                itemsize + text_itemsize + np.dtype(np.int64).itemsize
-            )
-            task_bytes.append(max(selection_peak, conversion_peak))
+        task_bytes = [
+            max(selection[0] + width * selection[1], width * conversion)
+            for selection, conversion in costs
+        ]
         admitted_worker_split(
             resources,
             nTasks=1,

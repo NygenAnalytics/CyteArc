@@ -327,9 +327,10 @@ def _kept_bytes(
 
     NumPy counts a value of variable-width text at its 16-byte element; the
     geometry counts its characters too, as ``ArrayGeometry.rowsBytes`` counts
-    rows, beside what the read leaves for Python's next collection, which the
-    strings that such a read makes, charged by their characters, leave no
-    room for; text read from an array without chunks is measured itself.
+    rows, beside what the read leaves of its objects once it returns, as
+    ``ArrayGeometry.leftoverBytes`` counts them, which the strings that such
+    a read makes, charged by their characters, leave no room for; text read
+    from an array without chunks is measured itself.
     """
     if values.dtype.kind != "T":
         return int(values.nbytes)

@@ -4192,6 +4192,113 @@ def test_a_merge_adds_the_labels_that_a_stored_display_leaves_out(tmp_path, seco
     assert dropped == []
 
 
+def test_a_merge_adds_the_labels_of_a_column_of_variable_width_text(tmp_path):
+    from tests.storage_helpers import by_cell_id, open_store, write_count_store
+
+    # The second store's labels are the variable-width text that another tool
+    # can store, one of them behind a NUL, which the merged column's
+    # fixed-width text drops; the pass that measures their width collects
+    # them as the merged column holds them.
+    labels = {
+        "first": np.asarray(["T", "B"] * 3, dtype=object),
+        "second": np.asarray(
+            ["NK", "T", "", "DC\x00", "NK", "B"], dtype=np.dtypes.StringDType()
+        ),
+    }
+    stores = []
+    for name, values in labels.items():
+        location = str(tmp_path / f"{name}.zarr")
+        write_count_store(
+            location,
+            {"RNA": np.ones((6, 3), dtype=int)},
+            "uint16",
+            cell_ids=[f"{name}{index}" for index in range(6)],
+        )
+        store = open_store(location)
+        if name == "first":
+            store.cells.insert("cell_type", by_cell_id(store.cells, values))
+            store.zw["cellData"]["cell_type"].attrs.update(_IMPORTED_CELL_TYPES)
+        else:
+            store.zw["cellData"].create_array("cell_type", data=values, chunks=(6,))
+            store = open_store(location)
+        stores.append(store)
+
+    DataStoreMerge(
+        stores, str(tmp_path / "merged.zarr"), ["first", "second"], nthreads=1
+    ).dump()
+
+    merged = zarr.open_group(str(tmp_path / "merged.zarr"), mode="r")["cellData"]
+    assert merged["orig_cell_type"].attrs["levels"] == ["T", "B", "DC", "NK"]
+    by_cell = dict(
+        zip(
+            np.asarray(merged["ids"][:]).tolist(),
+            np.asarray(merged["orig_cell_type"][:]).tolist(),
+            strict=True,
+        )
+    )
+    assert [by_cell[f"second__second{index}"] for index in range(6)] == [
+        "NK",
+        "T",
+        "",
+        "DC",
+        "NK",
+        "B",
+    ]
+
+
+def test_a_merge_charges_its_scan_of_a_column_of_variable_width_labels(tmp_path):
+    import gc
+    import tracemalloc
+
+    from cytearc.merge import metadata as merge_metadata
+    from cytearc.metadata.rows import array_row_selection_parts
+    from tests.storage_helpers import open_store, write_count_store
+
+    # 40,000 labels of 10 characters in one chunk, which another tool stored
+    # as variable-width text, beside fixed-width cell IDs of 6 characters.
+    n_cells = 40_000
+    location = str(tmp_path / "labels.zarr")
+    write_count_store(
+        location,
+        {"RNA": np.ones((n_cells, 2), dtype=np.uint8)},
+        "uint8",
+        cell_ids=[f"c{index:05d}" for index in range(n_cells)],
+    )
+    labels = np.asarray([f"type-{index % 40:05d}" for index in range(n_cells)])
+    zarr.open_group(f"{location}/cellData", mode="r+").create_array(
+        "cell_type", data=labels.astype(np.dtypes.StringDType()), chunks=(n_cells,)
+    )
+    table = open_store(location).cells
+    fixed, per_row = array_row_selection_parts(table._get_array("cell_type"))
+
+    def scan():
+        merge_metadata._max_text_width(
+            table, "cell_type", block_rows=n_cells, labels=merge_metadata._Labels()
+        )
+
+    scan()
+    gc.collect()
+    tracemalloc.start()
+    before, _ = tracemalloc.get_traced_memory()
+    scan()
+    _, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+    # The pass that measures the labels' width and collects them holds no
+    # more than the scan charges the column.
+    assert peak - before <= fixed + n_cells * per_row
+    # A budget that one row of the labels' read cannot fit, which the IDs
+    # alone fit, refuses the scan.
+    ids_fixed, ids_per_row = array_row_selection_parts(table._get_array("ids"))
+    assert ids_fixed + ids_per_row < fixed
+    with pytest.raises(MemoryBudgetError, match="schema discovery cannot fit"):
+        merge_metadata.resolve_metadata_schema_scan_rows(
+            [table],
+            ResourceBudget(fixed, 1),
+            resident_bytes=0,
+            preferred_rows=n_cells,
+        )
+
+
 def test_a_merge_adds_the_labels_beyond_the_categories_of_a_categorical_column(
     tmp_path,
 ):

@@ -1624,6 +1624,13 @@ def _chunk_bytes(values: list[str]) -> tuple[int, int]:
         # Columns of 40 chunks, and shards of 5 chunks.
         ("ascii", 50, 20_000, 500, None, True),
         ("latin-1", 50, 20_000, 1_000, 5_000, True),
+        # Short values, whose strings and NumPy values are charged exactly,
+        # so that only what Zarr's read leaves of its objects lies between
+        # what the whole read as strings holds and its charge: the objects of
+        # the read itself in one shard of 5 chunks, and those of each chunk in
+        # 40 chunks.
+        ("ascii", 6, 20_000, 4_000, 20_000, False),
+        ("ascii", 6, 20_000, 500, None, False),
     ],
     ids=[
         "short",
@@ -1633,6 +1640,8 @@ def _chunk_bytes(values: list[str]) -> tuple[int, int]:
         "long-astral",
         "forty-chunks",
         "sharded",
+        "short-in-one-shard",
+        "short-in-forty-chunks",
     ],
 )
 def test_reads_of_variable_width_text_hold_what_they_charge(

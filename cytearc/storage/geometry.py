@@ -37,14 +37,15 @@ ROW_KEPT_INDEX_BYTES = 32
 #: decode at once 12.5 KB, on Zarr 3.4 after a full collection had emptied
 #: CPython's free lists, so that each object was allocated anew; reads of
 #: tiny chunks are held between half of these charges and the whole of them.
+#: Once a read returns, the objects of the read and of its chunks stay held
+#: until its caller lets go of them, CPython reuses them from its free lists
+#: or Python's next collection frees the reference cycles of Zarr's event
+#: loop among them: a read of one chunk left up to 23 KB, and each further
+#: chunk up to 2.4 KB more, traced after reads of 1 to 100 chunks, in shards
+#: and not, on Python 3.13 to 3.15.
 _READ_OBJECT_BYTES = 32 * 1024
 _READ_CHUNK_OBJECT_BYTES = 4 * 1024
 _READ_DECODE_OBJECT_BYTES = 16 * 1024
-#: What each chunk that a read takes leaves of those objects in reference
-#: cycles of Zarr's event loop, which Python frees at its next collection:
-#: 0.7 to 1.5 KB a chunk, and 1.7 to 2.4 KB a chunk of a shard, traced after
-#: reads of 10 to 80 chunks on Zarr 3.4.
-_READ_LEFTOVER_CHUNK_BYTES = 3 * 1024
 
 #: NumPy keeps each value of variable-width text in a 16-byte element, and a
 #: value of more than 15 bytes in UTF-8 in an arena beside the array, behind
@@ -231,9 +232,18 @@ class ArrayGeometry:
         return math.prod(self.shape[1:]) * self.itemsize
 
     def leftoverBytes(self, rows: int) -> int:
-        """Return the objects that a read of ``rows`` rows leaves for Python's next collection, for each chunk that it takes."""
-        bands = min(max(0, int(rows)), -(-self.shape[0] // self.axisChunk(0)))
-        return bands * self.bandChunks() * _READ_LEFTOVER_CHUNK_BYTES
+        """Return what a read of ``rows`` rows leaves of its objects once it returns.
+
+        They are counted as :meth:`objectBytes` counts the objects of the read
+        and of each chunk that it takes while it runs.
+        """
+        chunks = (
+            min(max(0, int(rows)), -(-self.shape[0] // self.axisChunk(0)))
+            * self.bandChunks()
+        )
+        if chunks == 0:
+            return 0
+        return _READ_OBJECT_BYTES + chunks * _READ_CHUNK_OBJECT_BYTES
 
     def rowsBytes(self, rows: int) -> int:
         """Return the bytes of ``rows`` rows as a read returns them.
