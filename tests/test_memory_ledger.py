@@ -617,6 +617,8 @@ def test_the_reads_of_bands_leave_the_objects_of_a_read_and_of_each_chunk() -> N
     # array has.
     assert geometry.leftoverBytes(2) == geometry.bandsLeftoverBytes(2)
     assert geometry.leftoverBytes(5_000) == 32 * 1024 + 40 * 4 * 1024
+    column = ArrayGeometry((1_000,), (100,), None, 4)
+    assert column.leftoverBytes(5_000) == 32 * 1024 + 10 * 4 * 1024
     # What the reads leave levels off at 192 KiB, which 40 chunks reach.
     long = ArrayGeometry((100_000, 40), (100, 10), None, 4)
     assert long.bandsLeftoverBytes(10) == 32 * 1024 + 40 * 4 * 1024
