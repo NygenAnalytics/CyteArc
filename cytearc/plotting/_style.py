@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 
 from ..utils.arguments import float_argument
-from ..utils.palettes import palette_for_n
+from ..metadata.palettes import palette_for_n
 from ._display import labels_in_stored_order, merge_categorical_scales
 from ._contracts import (
     CategoricalScale,

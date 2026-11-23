@@ -1,4 +1,3 @@
-import colorsys
 import math
 import re
 from collections.abc import Callable, Mapping, Sequence
@@ -37,6 +36,7 @@ from ..storage.finite_values import requires_finite_values, write_finite_array
 from ..storage.layout import column_chunk_rows
 from ..storage.selections import validate_cell_selection
 from ..storage.types import as_zarr_array, as_zarr_group
+from .palettes import category_color
 from .selection import (
     CellField,
     cell_value_spec,
@@ -44,18 +44,6 @@ from .selection import (
     valid_category_mask,
 )
 
-_CATEGORY_COLORS = (
-    "#4e79a7",
-    "#f28e2b",
-    "#e15759",
-    "#76b7b2",
-    "#59a14f",
-    "#edc948",
-    "#b07aa1",
-    "#ff9da7",
-    "#9c755f",
-    "#bab0ab",
-)
 _HEX_COLOR = re.compile(r"^#[0-9a-fA-F]{6}$")
 _TEXT_LABEL_KINDS = frozenset({"O", "S", "T", "U"})
 _LABEL_KINDS = _TEXT_LABEL_KINDS | {"b", "i", "u"}
@@ -664,6 +652,38 @@ class RecordedCategories:
         return self.levels if self.ordered else None
 
 
+def stored_levels(dtype: np.dtype[Any], categories: Sequence[Any]) -> list[Any] | None:
+    """Return categories as a stored column of ``dtype`` holds its values, or None.
+
+    A text column holds text, and a boolean, integer, or float column holds
+    categories of that type. Categories that the column's type cannot hold
+    exactly, such as text categories of a numeric column, return None, as
+    do the categories of a column of any other type, such as dates. An
+    import keeps a categorical's categories so, and a merge the categories
+    of each source as its merged column holds them.
+    """
+    if dtype.kind == "U":
+        return [
+            category.decode("utf-8") if isinstance(category, bytes) else str(category)
+            for category in categories
+        ]
+    checks = {
+        "b": lambda value: isinstance(value, bool),
+        "i": lambda value: isinstance(value, int) and not isinstance(value, bool),
+        "f": lambda value: (
+            isinstance(value, int | float)
+            and not isinstance(value, bool)
+            and math.isfinite(value)
+        ),
+    }
+    check = checks.get("i" if dtype.kind == "u" else dtype.kind)
+    if check is None or not all(check(category) for category in categories):
+        return None
+    if dtype.kind == "f":
+        return [float(category) for category in categories]
+    return list(categories)
+
+
 def recorded_categories(attributes: Mapping[str, Any]) -> RecordedCategories:
     """Read the ``levels``, ``ordered``, and ``display`` attributes of a stored array.
 
@@ -853,17 +873,6 @@ def continuous_display(
     }
 
 
-def _category_color(index: int, count: int) -> str:
-    if count <= len(_CATEGORY_COLORS):
-        return _CATEGORY_COLORS[index]
-    red, green, blue = colorsys.hsv_to_rgb(
-        (index * 0.618033988749895) % 1.0,
-        0.55,
-        0.85,
-    )
-    return f"#{round(red * 255):02x}{round(green * 255):02x}{round(blue * 255):02x}"
-
-
 def categorical_display(values: np.ndarray) -> dict[str, Any]:
     categories: list[Any] = []
     seen: set[tuple[str, str]] = set()
@@ -890,7 +899,7 @@ def categorical_display(values: np.ndarray) -> dict[str, Any]:
             {
                 "value": value,
                 "label": "NA" if value is None else str(value),
-                "color": _category_color(index, count),
+                "color": category_color(index, count),
             }
             for index, value in enumerate(categories)
         ],

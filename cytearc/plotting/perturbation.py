@@ -27,7 +27,7 @@ from ._figure import (
     normalize_axes_target,
 )
 from ._labels import place_layout_labels, register_layout_labels
-from ..utils.palettes import COLORBLIND_PALETTE
+from ..metadata.palettes import COLORBLIND_PALETTE
 from ._style import (
     DEFAULT_RASTERIZE_THRESHOLD,
     apply_figure_chrome,

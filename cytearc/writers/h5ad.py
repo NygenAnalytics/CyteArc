@@ -28,42 +28,13 @@ from ..utils.memory_budget import MemoryBudgetError, memory_refusal
 from ..utils.progress import iter_progress
 from ..utils.arguments import bool_argument, quoted_value
 from ..utils.matrix_values import ImportValues, MatrixValuesKind
-from ..metadata.artifacts import MAX_STORED_CATEGORIES
+from ..metadata.artifacts import MAX_STORED_CATEGORIES, stored_levels
 
 
 # A dense matrix is read about this many values at a time, as its value scan
 # reads it, or in whole rows of its HDF5 chunks. Each batch is copied into a
 # band of every assay, so a batch need not hold a destination row band.
 _DENSE_BATCH_VALUES = 1 << 20
-
-
-def _stored_levels(dtype: np.dtype[Any], categories: Sequence[Any]) -> list[Any] | None:
-    """Return categories as the stored column holds its values, or None.
-
-    A text column holds text, and a boolean, integer, or float column holds
-    categories of that type. Categories that the column's type cannot hold
-    exactly, such as text categories of a numeric column, return None.
-    """
-    if dtype.kind == "U":
-        return [
-            category.decode("utf-8") if isinstance(category, bytes) else str(category)
-            for category in categories
-        ]
-    checks = {
-        "b": lambda value: isinstance(value, bool),
-        "i": lambda value: isinstance(value, int) and not isinstance(value, bool),
-        "f": lambda value: (
-            isinstance(value, int | float)
-            and not isinstance(value, bool)
-            and math.isfinite(value)
-        ),
-    }
-    check = checks.get("i" if dtype.kind == "u" else dtype.kind)
-    if check is None or not all(check(category) for category in categories):
-        return None
-    if dtype.kind == "f":
-        return [float(category) for category in categories]
-    return list(categories)
 
 
 def _categorical_attributes(
@@ -89,7 +60,7 @@ def _categorical_attributes(
 
     if len(categories.values) > MAX_STORED_CATEGORIES:
         return {}
-    levels = _stored_levels(dtype, categories.values)
+    levels = stored_levels(dtype, categories.values)
     if levels is None:
         return {}
     positions = distinct_level_positions(levels)

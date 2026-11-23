@@ -1,14 +1,33 @@
-"""The generated colors of categories, which plots draw and merges store.
+"""The generated colors of categories, which displays store and plots draw.
 
-Plots color categories without a stored color from these palettes, in the
-order of their categories, and a merge gives the same colors to the
-categories that it adds to a column's stored display, so both layers share
-one copy of them.
+A display that CyteArc stores for categories without colors of their own,
+as an import of a categorical without colors writes it, takes
+:func:`category_color`. Plots color categories without a stored color with
+:func:`palette_for_n`, in the order of their categories, and a merge gives
+the categories that it adds to a display the same colors, or beyond the
+palettes' 102 colors the hues of :func:`category_color`, which need no
+seaborn.
 """
 
+import colorsys
 from typing import Any
 
-from .logging import logger
+from ..utils.logging import logger
+
+# The colors of a stored display's categories, Tableau's 10, and evenly
+# spaced hues beyond them.
+_CATEGORY_COLORS = (
+    "#4e79a7",
+    "#f28e2b",
+    "#e15759",
+    "#76b7b2",
+    "#59a14f",
+    "#edc948",
+    "#b07aa1",
+    "#ff9da7",
+    "#9c755f",
+    "#bab0ab",
+)
 
 # Okabe-Ito plus four high-contrast extensions for categorical figures.
 COLORBLIND_PALETTE = [
@@ -252,3 +271,31 @@ def palette_for_n(
         return list(CUSTOM_PALETTES[102][:n])
     sns = _seaborn()
     return list(sns.color_palette("husl", n_colors=n).as_hex())
+
+
+def category_color(index: int, count: int) -> str:
+    """The color of a stored display's category at ``index`` of ``count``.
+
+    Up to 10 categories take Tableau's 10 colors, and more take hues spaced
+    by the golden ratio, which need no seaborn.
+    """
+    if count <= len(_CATEGORY_COLORS):
+        return _CATEGORY_COLORS[index]
+    red, green, blue = colorsys.hsv_to_rgb(
+        (index * 0.618033988749895) % 1.0,
+        0.55,
+        0.85,
+    )
+    return f"#{round(red * 255):02x}{round(green * 255):02x}{round(blue * 255):02x}"
+
+
+def stored_category_colors(n: int) -> list[str]:
+    """The colors that a stored display gives ``n`` categories without colors of their own, in their order.
+
+    They are the colors that plots generate (:func:`palette_for_n`) up to
+    the 102 of its palettes, and beyond them the hues of
+    :func:`category_color`, so that storing a display never needs seaborn.
+    """
+    if n <= len(CUSTOM_PALETTES[102]):
+        return palette_for_n(n)
+    return [category_color(index, n) for index in range(n)]

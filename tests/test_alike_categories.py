@@ -698,12 +698,13 @@ def test_merges_compare_and_keep_the_first_of_levels_that_read_alike() -> None:
 
     earlier = array("earlier", {"levels": ["b", "a", "b"], "ordered": True})
     current = array("current", {"levels": ["b", "a"], "ordered": True})
-    assert _reconciled_cell_attributes([earlier, current]) == (
+    text_labels = np.dtype("U1")
+    assert _reconciled_cell_attributes([earlier, current], [], text_labels) == (
         {"levels": ["b", "a"], "ordered": True},
         [],
     )
     # Two sources that each repeat a level keep it once.
-    assert _reconciled_cell_attributes([earlier, earlier]) == (
+    assert _reconciled_cell_attributes([earlier, earlier], [], text_labels) == (
         {"levels": ["b", "a"], "ordered": True},
         [],
     )
@@ -714,7 +715,7 @@ def test_merges_compare_and_keep_the_first_of_levels_that_read_alike() -> None:
     # Levels in another order keep the first source's order, which is then
     # no order that every source agrees on.
     reordered = array("reordered", {"levels": ["a", "b"], "ordered": True})
-    assert _reconciled_cell_attributes([earlier, reordered]) == (
+    assert _reconciled_cell_attributes([earlier, reordered], [], text_labels) == (
         {"levels": ["b", "a"], "ordered": False},
         ["ordered"],
     )
@@ -722,4 +723,7 @@ def test_merges_compare_and_keep_the_first_of_levels_that_read_alike() -> None:
         _merged_column_attributes([earlier, reordered], "kind")
     # Levels that are not a list are compared as stored.
     text = array("text", {"levels": "bab"})
-    assert _reconciled_cell_attributes([text, text]) == ({"levels": "bab"}, [])
+    assert _reconciled_cell_attributes([text, text], [], text_labels) == (
+        {"levels": "bab"},
+        [],
+    )

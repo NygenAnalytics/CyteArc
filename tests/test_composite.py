@@ -639,6 +639,78 @@ def test_selected_composite_matches_values_and_reopens(
         np.testing.assert_array_equal(array.oindex[[0], [0]], reference[:1, :1])
 
 
+@pytest.mark.parametrize(
+    ("rows", "levels"),
+    [
+        # The composite leaves out the cells of b that hold NK and Plasma.
+        pytest.param([0, 1, 3, 4, 6, 7, 8, 9], ["T", "B"], id="leaves them out"),
+        pytest.param([0, 2, 5], ["T", "B", "NK", "Plasma"], id="takes them"),
+    ],
+)
+def test_a_composite_takes_categories_from_the_cells_that_it_takes(
+    sources, tmp_path, rows, levels
+):
+    import anndata
+
+    import cytearc
+
+    labels = {
+        "a": np.asarray(["T", "B"] * 6 + ["T"], dtype=object),
+        "b": np.asarray(
+            ["T", "B", "NK", "T", "B", "Plasma", "T", "B", "T", "B", "T"], dtype=object
+        ),
+    }
+    # The cells of b that hold NK and Plasma also hold clusters 7 and 8.
+    clusters = {
+        "a": np.asarray([0, 1] * 6 + [0]),
+        "b": np.asarray([0, 1, 7, 0, 1, 8, 0, 1, 0, 1, 0]),
+    }
+    for name, source in sources.items():
+        source.cells.insert(
+            "cell_type", by_cell_id(source.cells, labels[name], key=None), key=None
+        )
+        source.cells.insert(
+            "cluster", by_cell_id(source.cells, clusters[name], key=None), key=None
+        )
+    sources["a"].zw["cellData"]["cluster"].attrs.update(
+        {"levels": [0, 1], "ordered": False}
+    )
+    # An import of a's file kept its order and colors of T and B.
+    sources["a"].zw["cellData"]["cell_type"].attrs.update(
+        {
+            "levels": ["T", "B"],
+            "ordered": False,
+            "display": {
+                "kind": "categorical",
+                "categories": [
+                    {"value": "T", "label": "T", "color": "#ff0000"},
+                    {"value": "B", "label": "B", "color": "#00aa00"},
+                ],
+            },
+        }
+    )
+    joint = create_composite(
+        sources,
+        at=tmp_path / "joint.zarr",
+        features="union",
+        rows={"b": rows},
+        mem_budget="64M",
+        nthreads=1,
+    )
+    attributes = joint.z["cellData"]["orig_cell_type"].attrs
+    assert attributes["levels"] == levels
+    assert joint.z["cellData"]["orig_cluster"].attrs["levels"] == (
+        [0, 1] if levels == ["T", "B"] else [0, 1, 7, 8]
+    )
+    assert [
+        category["value"] for category in attributes["display"]["categories"]
+    ] == levels
+    cytearc.to_h5ad(joint.RNA, str(tmp_path / "export.h5ad"))
+    exported = anndata.read_h5ad(tmp_path / "export.h5ad")
+    assert exported.obs["orig_cell_type"].cat.categories.tolist() == levels
+    assert set(exported.obs["orig_cell_type"].astype(str)) == set(levels)
+
+
 @pytest.mark.parametrize("features", ["union", "intersection"])
 def test_disjoint_feature_composite(sources, tmp_path, features):
     values = np.arange(12, dtype=np.uint16).reshape(4, 3)
