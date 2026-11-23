@@ -325,40 +325,30 @@ def load_count_summaries(
     return loaded[0], loaded[1], loaded[2]
 
 
-def cannot_hold_negative_values(counts: zarr.Array) -> bool:
-    """Return whether the dtype of ``counts`` rules out negative values.
-
-    The count dtype policy (:mod:`cytearc.storage.count_dtype`) stores a
-    matrix unsigned exactly when its values are whole non-negative counts.
-    Signed and float counts, such as normalized or corrected values, can hold
-    negative values.
-    """
-    return np.dtype(counts.dtype).kind == "u"
-
-
 def row_nonzero_counts(matrix: zarr.Group, counts: zarr.Array) -> zarr.Array | None:
     """Return the stored number of nonzero values of each row of ``counts``, or None.
 
     Count summaries store it as ``rowNonzero`` for counts of every dtype.
-    Summaries written before that array was stored lack it; for them,
-    ``rowPositive`` gives the number when the counts cannot hold negative
-    values (:func:`cannot_hold_negative_values`), since every nonzero value
-    is then positive, and other counts give None, so that the caller counts
-    their values in a read.
+    Summaries written by earlier CyteArc versions lack it; for them,
+    ``rowPositive`` gives the number when the counts are unsigned, since the
+    count dtype policy (:mod:`cytearc.storage.count_dtype`) stores a matrix
+    unsigned exactly when its values are whole non-negative counts, so that
+    every nonzero value is positive. Signed and float counts of such stores
+    give None, and the caller counts their values in a read.
 
     Raises:
-        ValueError: If the summaries do not match the counts or the array has
-            another length than the counts' rows.
+        ValueError: If the summaries do not match the counts, or the array
+            does not hold an integer for each row of the counts.
     """
     totals = _matching_summaries(matrix, counts)
     if ROW_NONZERO in totals:
         name = ROW_NONZERO
-    elif cannot_hold_negative_values(counts):
+    elif np.dtype(counts.dtype).kind == "u":
         name = "rowPositive"
     else:
         return None
     array = as_zarr_array(totals[name], name=name)
-    if array.shape != (int(counts.shape[0]),):
+    if array.shape != (int(counts.shape[0]),) or np.dtype(array.dtype).kind not in "iu":
         raise ValueError(f"Count summaries are malformed. {REBUILD_REQUIRED}")
     return array
 
@@ -371,11 +361,11 @@ def nonzero_value_count(
     ``rows`` are increasing row indices, every row by default. The stored
     number of nonzero values of each row (:func:`row_nonzero_counts`) is
     summed a chunk of rows at a time, so no more than a chunk of them is
-    held. None when the summaries cannot give the number, for counts that
-    can hold negative values whose summaries predate ``rowNonzero``.
+    held. None when the summaries cannot give the number, for signed and
+    float counts of stores written by earlier CyteArc versions.
 
     Raises:
-        ValueError: If the summaries do not match the counts.
+        ValueError: If the summaries do not match the counts or are malformed.
     """
     row_nonzero = row_nonzero_counts(matrix, counts)
     if row_nonzero is None:

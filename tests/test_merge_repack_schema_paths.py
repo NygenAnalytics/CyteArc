@@ -881,22 +881,42 @@ def _counting_refusal(needed: int, budget: int, item: str) -> str:
 
 
 def test_merge_refuses_a_feature_profile_beyond_its_budget(tmp_path):
+    from cytearc.merge.row_plan import build_row_plan
+
     counts = np.zeros((4, 25_000), dtype=np.uint16)
     counts[:, ::997] = 1
     sources = [_open(_write_source(MemoryStore(), {"RNA": counts})) for _ in _NAMES]
     destination = tmp_path / "merged.zarr"
-    # Every phase holds the feature alignment. The write adds the
-    # destination's count summary, 16 bytes per feature, and a band of source
-    # rows, about 1.2 MB in all.
-    alignment = align_features([source.get_assay("RNA") for source in sources], _NAMES)
-    budget = alignment.resident_bytes() + 500_000
+    assays = [source.get_assay("RNA") for source in sources]
+    alignment = align_features(assays, _NAMES)
+    row_plan = build_row_plan(
+        [4, 4], [assay.rawData.chunksize[0] for assay in assays], _NAMES, seed=0
+    )
+    # Every phase holds the row plan, the feature alignment and the
+    # destination's count summary, 40 bytes for each of the 8 merged cells
+    # and 16 for each of the 25,000 features. Counting each merged cell's
+    # values adds 8 bytes for each cell and one more, and a whole read of a
+    # source's summary of its 4 cells in one chunk: the counts, a decoded copy
+    # and an encoded one at its bound, 1 KiB more, and the 52 KiB of objects
+    # of Zarr's read of one chunk.
+    needed = (
+        row_plan.resident_bytes()
+        + alignment.resident_bytes()
+        + 40 * 8
+        + 16 * 25_000
+        + 8 * 9
+        + 3 * 8 * 4
+        + 1_024
+        + 32_768
+        + 4_096
+        + 16_384
+    )
 
     with pytest.raises(MemoryError) as refused:
-        _merge(sources, str(destination), mem_budget=budget).plan()
-    assert str(refused.value).startswith(
-        "The merge does not fit mem_budget even with count shards of one row."
+        _merge(sources, str(destination), mem_budget=needed - 1).plan()
+    assert str(refused.value) == _counting_refusal(
+        needed, needed - 1, "the count summaries of source 'left'"
     )
-    assert refused.value.needed_bytes > budget
     assert not destination.exists()
 
 
@@ -1267,9 +1287,12 @@ def test_merge_names_the_count_summaries_that_its_budget_cannot_load(
         )
 
     # Beside the 1,000 bytes held, a count of each of the 600 merged cells
-    # and one more, 8 bytes each, and the left source's summary of its 400
-    # cells, which loads with a decoded and an encoded copy, 24 bytes a cell.
-    needed = 1_000 + 8 * 601 + 24 * 400
+    # and one more, 8 bytes each, and a whole read of the left source's
+    # summary of its 400 cells in one chunk: the counts, a decoded copy and
+    # an encoded one at its bound, 1/128 more and 1 KiB, and the 52 KiB of
+    # objects of Zarr's read of one chunk.
+    summary = 3 * 8 * 400 + 8 * 400 // 128 + 1_024 + 32_768 + 4_096 + 16_384
+    needed = 1_000 + 8 * 601 + summary
     with pytest.raises(MemoryBudgetError) as refused:
         profile(needed - 1)
     assert str(refused.value) == _counting_refusal(

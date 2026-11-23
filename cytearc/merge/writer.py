@@ -8,6 +8,7 @@ from scipy.sparse import coo_matrix
 
 from ..assay.rna import RNAassay, library_size_factor
 from ..matrix.chunked import ChunkedArray
+from ..metadata.rows import operation_concurrency
 from ..storage.budget import ResourceBudget
 from ..storage.identity import (
     CountSummary,
@@ -15,6 +16,7 @@ from ..storage.identity import (
     row_nonzero_counts,
 )
 from ..storage.count_matrix import CountMatrixPolicy
+from ..storage.geometry import array_geometry
 from ..storage.io_policy import StorageIoPolicy
 from ..storage.profiles import StorageProfile
 from ..storage.layout import array_shard_rows
@@ -284,19 +286,20 @@ def _smallest_count_read_bytes(counts: ChunkedArray) -> int:
     return _column_run(counts, 0, columns).stream_bytes(_count_scratch_bytes(columns))
 
 
-def _row_nnz_load_bytes(assay: Any, reader: ChunkedArray | None) -> int:
+def _row_nnz_load_bytes(assay: Any, source: ChunkedArray | zarr.Array) -> int:
     """Bound what taking one source's nonzero counts per row holds beside the profile.
 
-    Counts whose summaries give them load that one summary. Other counts,
-    which ``reader`` reads, hold a count of each row beside the smallest read
-    of the counts.
+    ``source`` is the summary that gives the counts, which is read whole, as
+    its geometry charges such a read, or else the reader of the counts, which
+    holds a count of each row beside the smallest read of the counts.
     """
-    n_rows = int(assay.rawData.shape[0])
-    itemsize = np.dtype(np.int64).itemsize
-    if reader is not None:
-        return itemsize * n_rows + _smallest_count_read_bytes(reader)
-    # The loaded summary, and while it decodes a decoded and an encoded copy.
-    return 3 * itemsize * n_rows
+    if isinstance(source, ChunkedArray):
+        n_rows = int(assay.rawData.shape[0])
+        return np.dtype(np.int64).itemsize * n_rows + _smallest_count_read_bytes(source)
+    geometry = array_geometry(source)
+    # A Zarr array always has a chunk layout.
+    assert geometry is not None
+    return geometry.wholeReadBytes(operation_concurrency())
 
 
 def _counting_refusal(
@@ -375,10 +378,10 @@ def _cumulative_row_nnz(
 
     Each row count is the number of nonzero values of the source row, taken
     once per source from its count summaries
-    (:func:`~cytearc.storage.identity.row_nonzero_counts`). Summaries
-    written before they stored that number give it only for unsigned counts,
-    so the values of other counts are counted in a read within the merge's
-    budget. Missing sources contribute zeros.
+    (:func:`~cytearc.storage.identity.row_nonzero_counts`). The summaries
+    of stores written by earlier CyteArc versions give it only for unsigned
+    counts, so the values of other counts are counted in a read within the
+    merge's budget. Missing sources contribute zeros.
 
     Raises:
         MemoryBudgetError: If the profile and the summaries or the smallest
@@ -390,41 +393,41 @@ def _cumulative_row_nnz(
             continue
         counts = as_zarr_array(assay.matrixGroup["counts"], name="counts")
         summarized = row_nonzero_counts(assay.matrixGroup, counts)
-        reader = (
-            None if summarized is not None else assay.rawData._with_resources(resources)
+        source: zarr.Array | ChunkedArray = (
+            summarized
+            if summarized is not None
+            else assay.rawData._with_resources(resources)
         )
-        sources.append((index, assay, summarized, reader))
+        sources.append((index, assay, source))
     profile_bytes = (row_plan.nCells + 1) * np.dtype(np.int64).itemsize
     held = max(0, int(resident_bytes)) + profile_bytes
     budget = int(resources.memoryBytes)
     needed, item, assay_name = held, "each merged cell's count", None
-    for index, assay, _, reader in sources:
-        load = _row_nnz_load_bytes(assay, reader)
+    for index, assay, source in sources:
+        load = _row_nnz_load_bytes(assay, source)
         if held + load > needed:
-            source = row_plan.sourceNames[index]
+            name = row_plan.sourceNames[index]
             needed, assay_name = held + load, assay.name
             item = (
-                f"each merged cell's count and the count summaries of source {source!r}"
-                if reader is None
-                else _read_item(source)
+                _read_item(name)
+                if isinstance(source, ChunkedArray)
+                else f"each merged cell's count and the count summaries of source {name!r}"
             )
     if needed > budget:
         raise _counting_refusal(assay_name, item, needed, budget)
     cumulative = np.zeros(row_plan.nCells + 1, dtype=np.int64)
     row_nnz = cumulative[1:]
-    for source_idx, assay, summarized, reader in sources:
-        if reader is None:
-            # A source without a reader has summaries that count its values.
-            assert summarized is not None
-            row_values = np.asarray(summarized[:])
-        else:
+    for source_idx, assay, source in sources:
+        if isinstance(source, ChunkedArray):
             row_values = _counted_row_values(
                 assay,
                 row_plan.sourceNames[source_idx],
-                reader,
+                source,
                 resources,
                 held_bytes=held,
             )
+        else:
+            row_values = np.asarray(source[:])
         for segment in iter_row_plan_segments(row_plan):
             if segment.sourceIdx != source_idx:
                 continue

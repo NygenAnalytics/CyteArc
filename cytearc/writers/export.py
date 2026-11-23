@@ -2456,8 +2456,8 @@ def _summarized_nonzero(assay: Any, rows: np.ndarray | None = None) -> int | Non
     """Return the nonzero raw counts of an assay's cells from its count summaries, or None.
 
     The summaries count the nonzero counts of each cell, whatever the dtype.
-    Summaries written before they did count them only for unsigned counts,
-    so other counts of such stores return None
+    The summaries of stores written by earlier CyteArc versions count them
+    only for unsigned counts, so other counts of such stores return None
     (:func:`~cytearc.storage.identity.nonzero_value_count`). ``rows`` are
     increasing store rows, every cell by default.
     """
@@ -2599,7 +2599,9 @@ def live_h5ad_plan(
         ),
     )
     if order is not None:
-        # Unsigned counts give the reorder their number without a read.
+        # The count summaries give the reorder the number of values without a
+        # read, except for counts that can be negative in a store written by
+        # an earlier CyteArc version, which the reorder counts in a read.
         x = reordered_matrix(
             x,
             order,
@@ -2673,9 +2675,9 @@ def to_h5ad(
     local disk, in ``temp_dir``, about the size of the counts in the file,
     each deleted once its rows are written. The export takes the number of
     stored values first, from the store's count summaries, or in a pass over
-    the counts when they can be negative and the summaries were written
-    before they counted every value, and raises ``OSError`` before it writes
-    a row when ``temp_dir`` lacks the disk that the files take.
+    the counts when they can be negative in a store written by an earlier
+    CyteArc version, and raises ``OSError`` before it writes a row when
+    ``temp_dir`` lacks the disk that the files take.
     ``cell_order="stored"`` writes the cells in store order and needs no
     temporary files.
     Rows that a nullable metadata column's linked missing mask flags are
@@ -2703,9 +2705,10 @@ def to_h5ad(
         skip_recalc_nfeats: Skip a preliminary count of the stored values,
                             for which the file's arrays are allocated:
                             from the store's count summaries, or in a pass
-                            over the counts that those summaries cannot
-                            count. An export in source order counts them
-                            either way, once. (Default value: True)
+                            over counts that can be negative in a store
+                            written by an earlier CyteArc version. An export
+                            in source order counts them either way, once.
+                            (Default value: True)
         nthreads: Threads that read the counts and compress them into the
                   file. (Default value: 4)
         run: Completed pipeline run opened from the datastore that owns

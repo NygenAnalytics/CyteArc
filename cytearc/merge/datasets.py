@@ -200,11 +200,12 @@ class DataStoreMerge:
 
     The number of nonzero values of each cell sizes the batches of the
     counts write within ``mem_budget``, and the sources' count summaries
-    give it. Summaries written before they counted each cell's nonzero
-    values give it only for unsigned counts, which imports store for whole
-    counts; for signed and float counts of such sources, which can hold
-    negative values, the merge counts the values in a read of the source's
-    counts, once as it plans and once before it writes.
+    give it. The summaries of stores written by earlier CyteArc versions
+    give it only for unsigned counts, which imports store for whole counts;
+    for signed and float counts of such stores, which can hold negative
+    values, the merge counts the values in a read of the source's counts,
+    once as it plans and once before it writes. A repack of such a store
+    stores the number.
 
     With ``features="union"``, the cells of a source that holds the assay but
     lacks one of its features get zero counts of that feature. Planning then

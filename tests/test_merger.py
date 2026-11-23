@@ -3145,11 +3145,17 @@ def test_dataset_merge_charges_a_source_it_reads_its_counts_and_smallest_read():
     # each row (3,000 + 8 bytes).
     expected = 4 * 8 + 24_000 + 24_000 + 4 * (3_000 + 8)
     assert merge_writer._row_nnz_load_bytes(signed, reader) == expected
-    # Counts whose summaries count their values load each cell's count, 8
-    # bytes, beside a decoded and an encoded copy of it while it decodes,
-    # whatever the number of features.
+    # Counts whose summaries count their values read that summary whole, in
+    # one chunk as finalize_counts stores it: each cell's count, 8 bytes, a
+    # decoded copy of the chunk and an encoded one at its bound, 1/128 more
+    # and 1 KiB, and the objects of Zarr's read, 32 KiB, 4 KiB for the chunk
+    # and 16 KiB for its decode, whatever the number of features.
     summarized = assay(np.ones((4, 3_000), dtype=np.uint16))
-    assert merge_writer._row_nnz_load_bytes(summarized, None) == 3 * 8 * 4
+    summary = zarr.open_group(store=MemoryStore(), mode="w").create_array(
+        "rowNonzero", data=np.full(4, 3_000, dtype=np.int64), chunks=(4,)
+    )
+    expected = 4 * 8 + 4 * 8 + (4 * 8 + 1_024) + 32_768 + 4_096 + 16_384
+    assert merge_writer._row_nnz_load_bytes(summarized, summary) == expected
     # Counts without features or without cells hold no value to read: each
     # cell's count of 0 is all that they hold, within a budget of just it.
     for n_cells, n_features in ((5, 0), (0, 4)):

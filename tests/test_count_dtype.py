@@ -770,9 +770,10 @@ def test_nonzero_values_are_summed_from_the_stored_summaries(tmp_path) -> None:
         assert nonzero_value_count(matrix, counts, np.asarray(rows)) == (
             nonzero[rows].sum()
         )
-    totals.create_array("rowNonzero", data=stored[:9], overwrite=True)
-    with pytest.raises(ValueError, match="Count summaries are malformed"):
-        nonzero_value_count(matrix, counts)
+    for malformed in (stored[:9], stored.astype(np.float64)):
+        totals.create_array("rowNonzero", data=malformed, overwrite=True)
+        with pytest.raises(ValueError, match="Count summaries are malformed"):
+            nonzero_value_count(matrix, counts)
     totals.attrs["source_fingerprint"] = "another"
     with pytest.raises(ValueError, match="Count summaries do not match the counts"):
         nonzero_value_count(matrix, counts)
@@ -833,8 +834,6 @@ def test_count_summaries_count_the_nonzero_values_of_every_count_dtype(
     [[0, 3, 70_000], [0.0, 2.0], [-1, 2], [0.5, 2.0], [-0.25], [0, 2**40]],
 )
 def test_counts_stored_unsigned_hold_no_negative_value(values) -> None:
-    from cytearc.storage.identity import cannot_hold_negative_values
-
     array = np.asarray(values)
     value_range = CountValueRange()
     value_range.update(array)
@@ -846,7 +845,7 @@ def test_counts_stored_unsigned_hold_no_negative_value(values) -> None:
     # counts that can hold a negative value are never counted from the
     # positive values of summaries written before rowNonzero.
     whole = bool((array >= 0).all() and (array == np.round(array)).all())
-    assert cannot_hold_negative_values(stored) == whole
+    assert (np.dtype(stored.dtype).kind == "u") == whole
 
 
 _VALUES = np.array(
