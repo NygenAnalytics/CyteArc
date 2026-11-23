@@ -510,10 +510,17 @@ def test_band_shards_count_the_distinct_shards_of_a_selection_a_piece_at_a_time(
     few = rng.permutation(300)
     assert band_shards(geometry, few, 300) == 3
     assert band_shards(geometry, few, 150) == 3
-    # The count holds a piece of the selection, not the whole of it.
+    # The count of a million rows holds a piece of them, where all of them at
+    # once would hold 9 bytes a row. Each band of 1,000 takes a row of ten
+    # shards 100 times each, in a shuffled order.
+    million = ArrayGeometry((1_000_000, 4), (100, 4), (100, 4), 2)
+    rows = rng.permuted(
+        np.repeat(np.arange(10_000) * 100, 100).reshape(1_000, 1_000), axis=1
+    )
+    rows = rows.reshape(-1)
     tracemalloc.start()
     try:
-        band_shards(geometry, shuffled, 1_000)
+        assert band_shards(million, rows, 1_000) == 10
         _current, peak = tracemalloc.get_traced_memory()
     finally:
         tracemalloc.stop()
@@ -539,6 +546,11 @@ def test_is_contiguous_checks_a_run_a_piece_at_a_time() -> None:
         swapped = np.arange(200_000)
         swapped[[index, index + 1]] = swapped[[index + 1, index]]
         assert not is_contiguous(swapped)
+    # So do a step of two and a step of none exactly between pieces, which
+    # only a check of the step from each piece to the next sees.
+    shifted = np.arange(200_000)
+    shifted[65_536:131_072] += 1
+    assert not is_contiguous(shifted)
     assert is_contiguous(np.arange(65_537).astype(np.uint32))
 
 
