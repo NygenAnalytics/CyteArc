@@ -16,15 +16,19 @@ import pandas as pd
 import pytest
 
 from cytearc import DiagnosticWarning
+from cytearc.storage.operation_revisions import OPERATION_REVISIONS
 from cytearc.utils.digest import file_sha256
 from tests.clone_helpers import (
     assert_joined,
     every_cell,
-    imported_anew,
-    rewrite_as_saved_by_1_4,
     write_truth_store,
 )
-from tests.storage_helpers import by_cell_id, copy_store
+from tests.storage_helpers import (
+    by_cell_id,
+    computed_anew,
+    copy_store,
+    rewrite_as_saved_by_1_4,
+)
 from tests.clone_truth import (
     CHAIN_TAPES,
     DARLIN_ARRAYS,
@@ -892,11 +896,26 @@ def test_an_allele_import_saved_before_its_rows_per_file_is_imported_anew(
         )
 
     saved = imported()
-    rewrite_as_saved_by_1_4(store, saved, "rowsPerFile")
+    status = rewrite_as_saved_by_1_4(store, saved, revision=1, without="rowsPerFile")
+    assert (status.revision, status.current_revision, status.is_current) == (
+        1,
+        2,
+        False,
+    )
+    assert status.diagnostics["rowsPerFile"] is None
     # It still serves the calls that pass it.
     assert len(store.clones.load_alleles(saved).records) == 1
 
-    again = imported_anew(store, saved, imported)
+    (revision,) = OPERATION_REVISIONS["import_recorder_alleles"]
+    again = computed_anew(
+        store,
+        saved,
+        imported,
+        operation="import_recorder_alleles",
+        revision=1,
+        current=2,
+        change=revision.change,
+    )
     assert store.artifacts.inspect(again).diagnostics["rowsPerFile"] == [1]
 
 

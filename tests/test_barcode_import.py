@@ -22,14 +22,13 @@ import pytest
 
 from cytearc import DiagnosticWarning
 from cytearc.clones.barcodes import LineageBarcodes
+from cytearc.storage.operation_revisions import OPERATION_REVISIONS
 from cytearc.utils.digest import file_sha256
 from cytearc.utils.logging import collect_warnings
 from tests.clone_helpers import (
     assert_joined,
     every_cell,
     example_ids,
-    imported_anew,
-    rewrite_as_saved_by_1_4,
     write_truth_store,
 )
 from tests.clone_truth import (
@@ -50,8 +49,10 @@ from tests.clone_truth import (
 )
 from tests.storage_helpers import (
     by_cell_id,
+    computed_anew,
     copy_store,
     open_store,
+    rewrite_as_saved_by_1_4,
     write_count_store,
 )
 
@@ -936,12 +937,25 @@ def test_an_import_saved_before_its_rows_per_file_is_imported_anew(
     path.write_text(f"#cell_id\tumi\tclone_id\n{TRUTH.cell_ids[0]}\tAAAA\tACGT\n")
     cells = every_cell(store)
     saved = store.clones.import_barcodes(path, cell_selection=cells)
-    rewrite_as_saved_by_1_4(store, saved, "rowsPerFile")
+    status = rewrite_as_saved_by_1_4(store, saved, revision=1, without="rowsPerFile")
+    assert (status.revision, status.current_revision, status.is_current) == (
+        1,
+        2,
+        False,
+    )
+    assert status.diagnostics["rowsPerFile"] is None
     # It still serves the calls that pass it.
     assert len(store.clones.load_barcodes(saved).records) == 1
 
-    again = imported_anew(
-        store, saved, lambda: store.clones.import_barcodes(path, cell_selection=cells)
+    (revision,) = OPERATION_REVISIONS["import_lineage_barcodes"]
+    again = computed_anew(
+        store,
+        saved,
+        lambda: store.clones.import_barcodes(path, cell_selection=cells),
+        operation="import_lineage_barcodes",
+        revision=1,
+        current=2,
+        change=revision.change,
     )
     assert store.artifacts.inspect(again).diagnostics["rowsPerFile"] == [1]
 

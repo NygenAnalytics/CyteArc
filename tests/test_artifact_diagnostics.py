@@ -138,8 +138,8 @@ _KEYS_OF_EVERY_KIND = (
                 "label": "",
                 "unmeasured": 7,
                 "barcodeExamples": ["1", "2", "3", "4", "5"],
-                # An earlier revision, which counted no file, reads as None.
-                "rowsPerFile": None,
+                # An import of an assay's counts reads no file.
+                "rowsPerFile": [],
             },
             {
                 "count": 0,
@@ -147,7 +147,7 @@ _KEYS_OF_EVERY_KIND = (
                 "label": "",
                 "unmeasured": 7,
                 "barcodeExamples": ["1", "2", "3", "4", "5"],
-                "rowsPerFile": None,
+                "rowsPerFile": [],
             },
         ),
     ],
@@ -162,8 +162,7 @@ def test_diagnostics_are_numbers_texts_none_or_a_few_example_texts(
         type(value) for value in saved.values()
     ]
     assert list(checked) == list(_KEYS_OF_EVERY_KIND)
-    counts = checked["rowsPerFile"]
-    assert counts is None or all(type(count) is int for count in counts)
+    assert all(type(count) is int for count in checked["rowsPerFile"])
 
 
 @pytest.mark.parametrize(
@@ -179,6 +178,9 @@ def test_diagnostics_are_numbers_texts_none_or_a_few_example_texts(
         ("barcodeExamples", "a", "must be a list of texts"),
         ("barcodeExamples", [1], "must be a list of texts"),
         ("barcodeExamples", [str(n) for n in range(EXAMPLES + 1)], "at most 5"),
+        # Only a revision that added the key leaves it unmeasured, which the
+        # reader fills in, so a saved count per file is a list.
+        ("rowsPerFile", None, "must be a list of counts, one for each file"),
         ("rowsPerFile", 3, "must be a list of counts, one for each file"),
         ("rowsPerFile", "3", "must be a list of counts, one for each file"),
         ("rowsPerFile", [3, -1], "must be a list of counts, one for each file"),
@@ -663,11 +665,18 @@ def test_imports_saved_before_their_counts_per_file_read_them_as_not_measured(
     )
     assert read[key] is None
     assert list(read) == list(keys)
-    # An import of the revision that added the key saved it, so losing it is
-    # refused.
+    # An import of the revision that added the key saved it, so losing it,
+    # or saving None, is refused.
     with pytest.raises(ValueError, match=f"missing {key}"):
         read_diagnostics(
             {DIAGNOSTICS_ATTRIBUTE: saved}, operation, path="imported", revision=2
+        )
+    with pytest.raises(ValueError, match=f"'{key}' of {operation} must be a list"):
+        read_diagnostics(
+            {DIAGNOSTICS_ATTRIBUTE: {**saved, key: None}},
+            operation,
+            path="imported",
+            revision=2,
         )
 
 

@@ -48,66 +48,6 @@ def example_ids(examples: Sequence[str]) -> list[str]:
     return [example.rsplit(" -> ", 1)[-1] for example in examples]
 
 
-def rewrite_as_saved_by_1_4(
-    store: "DataStore", imported: "ArtifactRef", key: str
-) -> None:
-    """Rewrite an import's record as CyteArc 1.4.0 saved it for the same call.
-
-    Revision 2 of each import added its count per file, ``key``: the record
-    of ``imported``, of revision 2, becomes revision 1, and its diagnostics
-    lose ``key``, which it then reads as None.
-    """
-    from cytearc.storage.artifacts import artifact_group
-
-    status = store.artifacts.inspect(imported)
-    assert (status.revision, status.is_current) == (2, True)
-    group = artifact_group(store.zw, imported)
-    provenance = dict(group.attrs["provenance"])
-    assert provenance.pop("revision") == 2
-    group.attrs["provenance"] = provenance
-    group.attrs["diagnostics"] = {
-        name: value for name, value in group.attrs["diagnostics"].items() if name != key
-    }
-    group.attrs["cytearc_version"] = "1.4.0"
-    status = store.artifacts.inspect(imported)
-    assert (status.revision, status.current_revision, status.is_current) == (
-        1,
-        2,
-        False,
-    )
-    assert status.diagnostics[key] is None
-
-
-def imported_anew(
-    store: "DataStore", saved: "ArtifactRef", again: Callable[[], "ArtifactRef"]
-) -> "ArtifactRef":
-    """Check that ``again``, the call that saved an import of revision 1, imports anew and logs why.
-
-    Returns:
-        The import that ``again`` computes, of revision 2.
-    """
-    from cytearc.storage.operation_revisions import OPERATION_REVISIONS
-    from cytearc.utils.logging import logger
-
-    messages: list[str] = []
-    sink = logger.add(
-        lambda message: messages.append(message.record["message"]), level="INFO"
-    )
-    try:
-        computed = again()
-    finally:
-        logger.remove(sink)
-    assert computed != saved
-    operation = str(store.artifacts.inspect(saved).operation)
-    (change,) = (entry.change for entry in OPERATION_REVISIONS[operation])
-    assert [message for message in messages if message.startswith("Recomputing")] == [
-        f"Recomputing {operation}: artifact {saved.artifact_id[:12]} is revision "
-        f"1, current 2: {change}"
-    ]
-    assert store.artifacts.inspect(computed).revision == 2
-    return computed
-
-
 def assert_joined(
     diagnostics: Mapping[str, object],
     *,

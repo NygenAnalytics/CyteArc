@@ -807,12 +807,12 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         of each file in the canonical order of the files, ``unmatchedContigs``,
         those that match no selected cell, and ``cellsWithChain``, the
         selected cells with a chain. Barcodes that match no cell of the store
-        are named in a warning, and the files that hold no contig in another:
-        when none holds one, the calls that read contigs refuse the receptors,
-        and when some of several hold none, they add no receptor. A reused
-        import gives the warnings again. A file is identified by the SHA-256
-        of its bytes, so a moved file reuses the saved receptors and an edited
-        file gives new ones, and the order of the files does not matter.
+        are named in a warning, and the files that hold no contig in another;
+        the calls that read contigs refuse receptors whose import read none. A
+        reused import gives both warnings again. A file is identified by the
+        SHA-256 of its bytes, so a moved file reuses the saved receptors and
+        an edited file gives new ones, and the order of the files does not
+        matter.
 
         The artifact's canonical ``values`` hold each cell's receptor type,
         and its other per-cell arrays are ``receptor_subtype``,

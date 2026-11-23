@@ -194,8 +194,7 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
         count of a merged table or a matrix. Barcodes of no cell of the
         store, such as droplets that cell calling rejected, are named in a
         warning, and the files that hold no row, such as a table of a header
-        alone, in another, whether none of the files holds one or some of
-        several hold none. A reused import gives both again.
+        alone, in another. A reused import gives both again.
         A file is identified by the SHA-256 of its bytes and by its library,
         the file's name unless ``library`` names it, so a file moved to
         another folder reuses the saved barcodes, as does a renamed one whose

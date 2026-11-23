@@ -870,8 +870,10 @@ def unmatched_barcode_rules(files: str) -> tuple[DiagnosticRule, ...]:
 
 
 def file_names(files: Sequence[BarcodeFile]) -> str:
-    """The paths of files as warnings name them, quoted and joined by commas."""
-    return ", ".join(quoted_value(os.fspath(file.path)) for file in files)
+    """The paths of files as warnings name them: five at most, quoted and joined by commas, then how many more."""
+    named = ", ".join(quoted_value(os.fspath(file.path)) for file in files[:EXAMPLES])
+    more = len(files) - EXAMPLES
+    return named + (f" and {more} more" if more > 0 else "")
 
 
 def empty_files_rule(
@@ -893,7 +895,8 @@ def empty_files_rule(
     selected cell has ``item``, such as ``"a clone"``, and ends with the
     first ``remedy`` for one file and the second for several. When some of
     several files hold none, it names those, says that they give no cell
-    ``item`` and asks for the files meant in their place.
+    ``item`` and asks for the files meant in their place. It names five files
+    at most and counts the others, as :func:`file_names` does.
     """
 
     def empty(diagnostics: Mapping[str, Any]) -> list[BarcodeFile]:

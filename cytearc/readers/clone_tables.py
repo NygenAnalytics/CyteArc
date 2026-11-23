@@ -93,6 +93,7 @@ from ..utils.arguments import quoted_value
 __all__ = [
     "CELL_ID_SEPARATOR",
     "CLONE_FORMATS",
+    "MATRIX_FORMATS",
     "CloneLayout",
     "CloneRows",
     "MatrixEntries",
@@ -118,6 +119,9 @@ CLONE_FORMATS: tuple[str, ...] = (
     "mito",
     "h5ad",
 )
+#: The formats whose clones come as a cells by clones matrix, which gives a
+#: cell a clone by an entry rather than by a label.
+MATRIX_FORMATS: tuple[str, ...] = ("matrix", "cospar_h5ad")
 #: Joins the columns that together hold a cell's barcode, such as LARRY's
 #: ``Library`` and ``Cell barcode``, as a merged store joins sample and cell.
 CELL_ID_SEPARATOR = "__"
@@ -195,7 +199,7 @@ class CloneLayout:
     @property
     def is_matrix(self) -> bool:
         """Whether the clones come as a cells by clones matrix."""
-        return self.format in ("matrix", "cospar_h5ad")
+        return self.format in MATRIX_FORMATS
 
     @property
     def n_fields(self) -> int:

@@ -20,14 +20,13 @@ import pytest
 
 from cytearc import DiagnosticWarning
 from cytearc.repertoire import ImmuneReceptors
+from cytearc.storage.operation_revisions import OPERATION_REVISIONS
 from cytearc.utils.digest import file_sha256
 from cytearc.utils.logging import collect_warnings
 from tests.clone_helpers import (
     AIRR_HEADER,
     CELLRANGER_HEADER,
     assert_joined,
-    imported_anew,
-    rewrite_as_saved_by_1_4,
     N_RECEPTOR_CELLS,
     TCR_ROWS,
     airr_file,
@@ -39,7 +38,12 @@ from tests.clone_helpers import (
     write_truth_store,
 )
 from cytearc.utils.memory_budget import MemoryBudgetError
-from tests.storage_helpers import by_cell_id, copy_store
+from tests.storage_helpers import (
+    by_cell_id,
+    computed_anew,
+    copy_store,
+    rewrite_as_saved_by_1_4,
+)
 from tests.clone_truth import (
     N_OUTSIDE,
     RECEPTOR_SLOTS,
@@ -571,14 +575,25 @@ def test_a_receptor_import_saved_before_its_contigs_per_file_is_imported_anew(
     cells = store.snapshot_cell_selection()
     path = write_lines(tmp_path, "one.tsv", BARE_AIRR, ["cell0\tc1\tTRB\tCASS\tT"])
     saved = store.repertoire.import_receptors(path, cell_selection=cells)
-    rewrite_as_saved_by_1_4(store, saved, "contigsPerFile")
+    status = rewrite_as_saved_by_1_4(store, saved, revision=1, without="contigsPerFile")
+    assert (status.revision, status.current_revision, status.is_current) == (
+        1,
+        2,
+        False,
+    )
+    assert status.diagnostics["contigsPerFile"] is None
     # It still serves the calls that pass it.
     assert len(store.repertoire.load_receptors(saved).chains) == 1
 
-    again = imported_anew(
+    (revision,) = OPERATION_REVISIONS["import_immune_receptors"]
+    again = computed_anew(
         store,
         saved,
         lambda: store.repertoire.import_receptors(path, cell_selection=cells),
+        operation="import_immune_receptors",
+        revision=1,
+        current=2,
+        change=revision.change,
     )
     assert store.artifacts.inspect(again).diagnostics["contigsPerFile"] == [1]
 
