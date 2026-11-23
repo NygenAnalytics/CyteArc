@@ -2197,6 +2197,13 @@ def test_a_run_pauses_resumes_and_completes_with_one_segment_per_process() -> No
         shutdown=_ELSEWHERE,
     )
     assert load_pipeline_run_record(root, run.run_id) == resumed
+    # A process that read the run while it was paused resumes nothing, and
+    # learns why, whatever the run's status now: here, running.
+    with pytest.raises(RuntimeError, match="was resumed by another process after"):
+        pipeline_run_storage.resume_pipeline_run_record(
+            root, run_id=run.run_id, segment=1, shutdown=_SHUTDOWN
+        )
+    assert load_pipeline_run_record(root, run.run_id) == resumed
     markdown = PipelineRun(_Owner(root), resumed).report(format="markdown")
     assert "| 1 | 100 | 200 | one | paused |" in markdown
     assert "| 2 | 300 |  |  | running |" in markdown
@@ -2213,7 +2220,8 @@ def test_a_run_pauses_resumes_and_completes_with_one_segment_per_process() -> No
     assert [segment.stages for segment in again.segments] == [("one",), ("two",)]
     assert again.segments[1].stopped_at_ns == 400
     assert again.segments[1].shutdown == _ELSEWHERE
-    # A process that read the run at its first pause resumes nothing.
+    # A process that read the run at its first pause resumes nothing, whether
+    # the run is paused again or runs.
     with pytest.raises(RuntimeError, match="resumed by another process after this"):
         pipeline_run_storage.resume_pipeline_run_record(
             root, run_id=run.run_id, segment=1, shutdown=_SHUTDOWN
@@ -2316,7 +2324,7 @@ def test_pause_refuses_a_run_that_cannot_pause_and_writes_nothing() -> None:
         assert load_pipeline_run_record(root, run.run_id).status == "running"
 
 
-def test_a_run_whose_label_cannot_be_claimed_fails_when_it_pauses() -> None:
+def test_a_run_fails_when_it_pauses_only_once_another_run_committed_its_label() -> None:
     root = _root()
     first, second, third = (_three_stage_run(root, label="baseline") for _ in range(3))
     for run in (second, third):
@@ -2326,20 +2334,17 @@ def test_a_run_whose_label_cannot_be_claimed_fails_when_it_pauses() -> None:
         _finish_stage(root, first.run_id, ordinal, stage)
     pipeline_run_storage._claim_pipeline_label(root, "baseline", first.run_id)
 
-    with pytest.raises(RuntimeError, match="is held by unfinished run"):
-        pause_pipeline_run_record(root, run_id=second.run_id, shutdown=_SHUTDOWN)
+    # The finalizing run may still fail and leave the label, so the run pauses.
+    paused = pause_pipeline_run_record(root, run_id=second.run_id, shutdown=_SHUTDOWN)
+    assert (paused.status, paused.error) == ("paused", None)
     complete_pipeline_run_record(root, run_id=first.run_id, outputs=(), fields=())
     with pytest.raises(ValueError, match=f"already committed by run {first.run_id}"):
         pause_pipeline_run_record(root, run_id=third.run_id, shutdown=_SHUTDOWN)
 
-    # Each run fails with the error that its finalize would have recorded.
-    for run, kind in (
-        (second, "PipelineLabelClaimUnavailable"),
-        (third, "PipelineLabelConflict"),
-    ):
-        failed = load_pipeline_run_record(root, run.run_id)
-        assert (failed.status, failed.segments) == ("failed", ())
-        assert failed.error is not None and failed.error.type == kind
+    # The run fails with the error that its finalize would have recorded.
+    failed = load_pipeline_run_record(root, third.run_id)
+    assert (failed.status, failed.segments) == ("failed", ())
+    assert failed.error is not None and failed.error.type == "PipelineLabelConflict"
 
 
 def test_resume_refuses_a_run_that_is_not_paused_or_whose_pause_is_torn() -> None:
@@ -2370,30 +2375,57 @@ def test_each_pause_is_resumed_by_one_process_only() -> None:
     claim = pipeline_run_storage._claim_pipeline_run_resume
     barrier = Barrier(4)
 
-    def attempt(_index: int) -> str:
+    def attempt(_index: int) -> bool:
         barrier.wait()
-        try:
-            claim(root, run.run_id, 1)
-        except RuntimeError as error:
-            return str(error)
-        return "claimed"
+        return claim(root, run.run_id, 1)
 
     with ThreadPoolExecutor(4) as pool:
         outcomes = list(pool.map(attempt, range(4)))
 
-    assert outcomes.count("claimed") == 1
-    refused = [outcome for outcome in outcomes if outcome != "claimed"]
-    assert (
-        refused
-        == [
-            f"Pipeline run {run.run_id} is already being resumed by another process, "
-            "or a process stopped while it resumed the run; pipeline.rerun(run) starts "
-            "a new run that reuses its finished stages"
-        ]
-        * 3
+    assert sorted(outcomes) == [False, False, False, True]
+    # A claim reads the same holder again, and the next pause is another key.
+    assert claim(root, run.run_id, 1) is False
+    assert claim(root, run.run_id, 2) is True
+
+
+def test_a_resume_that_loses_the_claim_says_why(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _root()
+    run = _three_stage_run(root)
+    _finish_stage(root, run.run_id, 0, "one")
+    paused = pause_pipeline_run_record(root, run_id=run.run_id, shutdown=_SHUTDOWN)
+    claim = pipeline_run_storage._claim_pipeline_run_resume
+
+    def another_resume_first(root: zarr.Group, run_id: str, segment: int) -> bool:
+        # Another process claims the pause and records its resume first.
+        monkeypatch.setattr(pipeline_run_storage, "_claim_pipeline_run_resume", claim)
+        pipeline_run_storage.resume_pipeline_run_record(
+            root, run_id=run_id, segment=segment, shutdown=_ELSEWHERE
+        )
+        return claim(root, run_id, segment)
+
+    monkeypatch.setattr(
+        pipeline_run_storage, "_claim_pipeline_run_resume", another_resume_first
     )
-    # The claim of the next pause is another key.
-    claim(root, run.run_id, 2)
+    with pytest.raises(RuntimeError, match="was resumed by another process after"):
+        pipeline_run_storage.resume_pipeline_run_record(
+            root, run_id=run.run_id, segment=1, shutdown=_SHUTDOWN
+        )
+    resumed = load_pipeline_run_record(root, run.run_id)
+    assert resumed.segments[1].shutdown == _ELSEWHERE
+
+    # A claim that no resume recorded, as of a process that stopped between
+    # the two writes, leaves the run paused, and the error says so.
+    second = _three_stage_run(root)
+    _finish_stage(root, second.run_id, 0, "one")
+    paused = pause_pipeline_run_record(root, run_id=second.run_id, shutdown=_SHUTDOWN)
+    assert claim(root, second.run_id, 1) is True
+    with pytest.raises(RuntimeError, match="is claimed by another resume that has not"):
+        pipeline_run_storage.resume_pipeline_run_record(
+            root, run_id=second.run_id, segment=1, shutdown=_SHUTDOWN
+        )
+    assert load_pipeline_run_record(root, second.run_id) == paused
 
 
 def test_a_resume_shares_a_claim_container_created_by_a_concurrent_resume(

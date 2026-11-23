@@ -2400,15 +2400,15 @@ def pause_pipeline_run_record(
     """Commit a running run as paused after the stages it has recorded, for any process to resume.
 
     The run's segments gain, or close, the one of this process, with its
-    ``shutdown`` details. A requested label is checked as finalizing will
-    claim it; a label that can no longer be claimed fails the run, with the
-    error that finalizing records, and the error is raised.
+    ``shutdown`` details. A requested label that another run has committed
+    fails the run, with the error that finalizing records, and the error is
+    raised. A label whose claim a finalizing run holds does not: that run
+    may still fail and leave the label to this one.
 
     Raises:
         ValueError: If the run is not running, a stage that it recorded did
-            not complete, no stage is left to run, or its label is committed.
-        RuntimeError: If its label cannot be claimed on this store, or an
-            unfinished run holds it.
+            not complete, no stage is left to run, or another run committed
+            its label.
     """
     run = load_pipeline_run_record(root, run_id)
     if run.complete or run.status != "running":
@@ -2427,8 +2427,10 @@ def pause_pipeline_run_record(
         raise ValueError("A pipeline run with no stage left to run completes instead")
     if run.requested_label is not None:
         try:
-            ensure_pipeline_label_claimable(root, run.requested_label)
-        except (ValueError, RuntimeError) as exc:
+            ensure_pipeline_label_available(
+                root, run.requested_label, exclude_run_id=run_id
+            )
+        except ValueError as exc:
             fail_pipeline_run_record(root, run_id=run_id, error=_label_claim_error(exc))
             raise
     stopped = _finish_time(run.started_at_ns, stopped_at_ns)
@@ -2453,6 +2455,14 @@ def pause_pipeline_run_record(
     return record
 
 
+def resumed_since_read(run_id: str) -> RuntimeError:
+    """Return the error of a resume whose run another process resumed after this one read it."""
+    return RuntimeError(
+        f"Pipeline run {run_id} was resumed by another process after this process "
+        "read it; open the run again to see its status"
+    )
+
+
 def _resume_claim_bytes(run_id: str, segment: int, token: str) -> Buffer:
     payload = json.dumps(
         {"runId": run_id, "segment": segment, "token": token},
@@ -2462,16 +2472,15 @@ def _resume_claim_bytes(run_id: str, segment: int, token: str) -> Buffer:
     return default_buffer_prototype().buffer.from_bytes(payload)
 
 
-def _claim_pipeline_run_resume(root: zarr.Group, run_id: str, segment: int) -> None:
-    """Make this process the one that resumes ``run_id`` into its ``segment``-th segment.
+def _claim_pipeline_run_resume(root: zarr.Group, run_id: str, segment: int) -> bool:
+    """Claim the pause of ``run_id`` that precedes its ``segment``-th segment, and return whether this process holds it.
 
     The claim is an append-only key that ``set_if_not_exists`` writes once,
-    so of the processes that resume one pause at once, exactly one wins.
+    so of the processes that resume one pause at once, exactly one holds it.
 
     Raises:
         RuntimeError: If the store cannot write a key only where none
-            exists, or another process claimed this pause first, which
-            includes one that stopped before it recorded the resume.
+            exists, or does not read back the key that it wrote.
     """
     if not has_atomic_conditional_writes(root.store):
         raise RuntimeError(
@@ -2497,12 +2506,7 @@ def _claim_pipeline_run_resume(root: zarr.Group, run_id: str, segment: int) -> N
         _RESUME_CLAIM_FIELDS,
         "pipeline resume claim",
     )
-    if claim["token"] != token:
-        raise RuntimeError(
-            f"Pipeline run {run_id} is already being resumed by another process, "
-            "or a process stopped while it resumed the run; pipeline.rerun(run) "
-            "starts a new run that reuses its finished stages"
-        )
+    return bool(claim["token"] == token)
 
 
 def resume_pipeline_run_record(
@@ -2521,12 +2525,18 @@ def resume_pipeline_run_record(
     one that read the run before another process resumed it, raises.
 
     Raises:
-        ValueError: If the run is not paused, or its pause was not written
-            completely.
-        RuntimeError: If the store cannot claim the resume, or another
-            process resumed this pause.
+        ValueError: If the run is not paused, its pause was not written
+            completely, or it holds fewer segments than ``segment``.
+        RuntimeError: If another process resumed the run after the caller
+            read it, another process claimed this pause, or the store cannot
+            claim it.
     """
+    _validate_non_negative_int(segment, "segment")
     run = load_pipeline_run_record(root, run_id)
+    # Whatever the run's status now, a record with more segments than the
+    # pause that the caller read means that another process resumed it.
+    if len(run.segments) > segment:
+        raise resumed_since_read(run_id)
     if run.status != "paused":
         raise ValueError(
             f"Pipeline run {run_id} is {run.status!r}; only a paused run resumes"
@@ -2536,13 +2546,22 @@ def resume_pipeline_run_record(
             f"Pipeline run {run_id} did not finish writing its pause, so it cannot "
             "resume"
         )
-    _validate_non_negative_int(segment, "segment")
     if len(run.segments) != segment:
-        raise RuntimeError(
-            f"Pipeline run {run_id} was resumed by another process after this one "
-            "read it"
+        raise ValueError(
+            f"Pipeline run {run_id} holds {len(run.segments)} segments, not the "
+            f"{segment} of the pause that the caller read"
         )
-    _claim_pipeline_run_resume(root, run_id, segment)
+    if not _claim_pipeline_run_resume(root, run_id, segment):
+        if len(load_pipeline_run_record(root, run_id).segments) > segment:
+            raise resumed_since_read(run_id)
+        raise RuntimeError(
+            f"Pipeline run {run_id} is claimed by another resume that has not yet "
+            "recorded itself: another process is resuming the run, or one stopped "
+            "between claiming the pause and recording the resume, and the run "
+            "then stays paused. Open the run again to see whether it runs; if it "
+            "stays paused, ds.pipeline.rerun(run) starts a new run that reuses its "
+            "finished stages"
+        )
     record = replace(
         run,
         status="running",
