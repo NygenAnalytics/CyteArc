@@ -6,6 +6,7 @@ import pandas as pd
 
 from ..metadata.alignment import align_to_cell_ids, keyed_values_remedy
 from ..storage.refs import ArtifactRef, ExternalArtifactRef
+from ..utils.arguments import bool_argument
 from ..utils.arrays import read_only_copy
 from .confidence import _conformal_membership, _validated_conformal_calibration
 
@@ -15,12 +16,27 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class ScaledPCAProjectionModel:
+    """A reference PCA that projects normalized values onto its loadings.
+
+    ``feature_means`` and ``feature_scales`` hold each feature's mean and
+    standard deviation over the reference cells. With ``feature_scaling``,
+    the PCA standardized each feature by them before it subtracted
+    ``center``; without it, the PCA subtracted ``center`` from the values
+    themselves, and the means and scales serve only to compare queries.
+    """
+
     feature_means: np.ndarray
     feature_scales: np.ndarray
     center: np.ndarray
     loadings: np.ndarray
+    feature_scaling: bool = True
 
     def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "feature_scaling",
+            bool_argument(self.feature_scaling, "feature_scaling"),
+        )
         feature_means = np.asarray(self.feature_means)
         feature_scales = np.asarray(self.feature_scales)
         center = np.asarray(self.center)

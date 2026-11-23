@@ -2808,6 +2808,7 @@ def test_composite_consumers_admit_source_scratch_before_count_reads(
     from zarr.core.array import AsyncArray
 
     from cytearc.assay import norm_lib_size
+    from cytearc.assay.normalization import LibrarySizeFit
     from cytearc.mapping.features import AlignedFeatureStream
     from cytearc.quality_control.doublets import _load_parent_counts
     from cytearc.storage.artifacts import callable_identity
@@ -2851,6 +2852,7 @@ def test_composite_consumers_admit_source_scratch_before_count_reads(
             },
             "error",
             current.resources,
+            normalization=LibrarySizeFit(1.0, False),
         )
         return np.concatenate([block.values[:, 0] for block in stream.iter_blocks()])
 

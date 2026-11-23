@@ -74,6 +74,22 @@ def test_scaled_pca_projection_model_rejects_invalid_payloads(overrides, message
         ScaledPCAProjectionModel(**values)
 
 
+def test_scaled_pca_projection_model_takes_a_boolean_feature_scaling():
+    arrays = {
+        "feature_means": np.zeros(2),
+        "feature_scales": np.ones(2),
+        "center": np.zeros(2),
+        "loadings": np.eye(2),
+    }
+    assert (
+        ScaledPCAProjectionModel(**arrays, feature_scaling=np.False_).feature_scaling
+        is False
+    )
+    for flag in (1, None, "False"):
+        with pytest.raises(TypeError, match="feature_scaling must be a boolean"):
+            ScaledPCAProjectionModel(**arrays, feature_scaling=flag)
+
+
 @pytest.mark.parametrize(
     ("overrides", "message"),
     [
@@ -886,6 +902,7 @@ def test_symphony_reservation_counts_one_batch_of_gathered_rows():
         ),
         feature_ids=np.asarray([f"g{index}" for index in range(n_features)]),
         symphony_state=None,
+        normalization_arrays={},
     )
     _, plain_row = _mapping_memory_reservations(
         reference, n_batches=1, save_k=10, batch_codes=None, batch_design=None

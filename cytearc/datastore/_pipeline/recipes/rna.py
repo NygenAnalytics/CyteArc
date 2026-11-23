@@ -6,8 +6,14 @@ from typing import Any
 import numpy as np
 
 from ....quality_control.hto import checked_hashtag_mapping, checked_hashtags
-from ....assay import ADTassay, NormMethod, RNAassay, norm_lib_size
-from ....storage.artifacts import ArtifactRef, artifact_group, inspect_artifact
+from ....assay import ADTassay, NormMethod, RNAassay
+from ....assay.normalization import builtin_normalizer
+from ....storage.artifacts import (
+    ArtifactRef,
+    artifact_group,
+    callable_identity,
+    inspect_artifact,
+)
 from ....storage.selections import resolve_generated_selection_artifact
 from ..._operations.cell_samples import require_cell_column
 from ..executor import FEATURE_NAMES, PlannedStage, RecipePlan, RunState
@@ -259,19 +265,22 @@ def _check_hashing_samples(
 
 
 def _check_doublet_normalization(assay: str, normalizer: NormMethod) -> None:
-    """Refuse doublet scoring of a run that does not normalize by library size.
+    """Refuse doublet scoring of a run whose normalizer it cannot apply to doublets.
 
-    Doublet scoring normalizes the counts of each simulated doublet by library
-    size and projects them onto the PCA of the graph's cells, so the run must
-    normalize those cells by library size too.
+    Doublet scoring normalizes the counts of each simulated doublet as the
+    run normalized the graph's cells, with what a built-in normalizer fitted
+    over them, and projects them onto the PCA of those cells.
     """
-    if normalizer is norm_lib_size:
+    # The run has already refused a normalizer that provenance cannot
+    # identify, and TF-IDF, which needs an ATAC assay.
+    if builtin_normalizer(callable_identity(normalizer)) is not None:
         return
     raise ValueError(
         f"The run normalizes assay {assay!r} with {normalizer_label(normalizer)}, "
-        "but doublet scoring normalizes its simulated doublets by library size "
-        "and needs lib_size; pass normalization={'method': 'lib_size'} or "
-        "doublets=False"
+        "but doublet scoring normalizes its simulated doublets as the run's "
+        "cells were, which it can do for the built-in normalizers lib_size, "
+        "lib_size_log, pearson_residuals, clr and passthrough alone; pass "
+        "normalization={'method': ...} with one of them or doublets=False"
     )
 
 
@@ -404,16 +413,6 @@ def resolve_rna(
         )
     if doublets_enabled:
         _check_doublet_normalization(assay_name, head.normalization.normalizer)
-    # Doublet scoring projects its simulated doublets through a mapping
-    # reference of the graph, which reads the PCA's feature scaling. A run of
-    # library-size values scales its features unless the call turns it off.
-    if doublets_enabled and head.feat_scaling is False:
-        raise ValueError(
-            "pca={'feat_scaling': False} fits PCA without feature scaling, but "
-            "doublet scoring projects its simulated doublets onto the PCA "
-            "through a mapping reference, which needs feature scaling; pass "
-            "doublets=False or omit feat_scaling"
-        )
     snapshots = resolve_snapshot_columns(
         store,
         snapshot_columns,

@@ -171,7 +171,7 @@ pca_residual = ds.reduction.pca(ds.features.normalize(cells, residual), dims=30,
 ds.RNA.normMethod = cytearc.assay.norm_lib_size  # markers and scores on normalized values
 ```
 
-A recipe takes the residuals as `normalization={"method": "pearson_residuals"}` instead of the session's `normMethod`: the run records the method, applies it to every stage, reduces the residuals without feature scaling unless `pca` sets `feat_scaling`, and needs `doublets=False`. A rerun in a new session then normalizes as the run did.
+A recipe takes the residuals as `normalization={"method": "pearson_residuals"}` instead of the session's `normMethod`: the run records the method, applies it to every stage, reduces the residuals without feature scaling unless `pca` sets `feat_scaling`, and scores doublets on them. A rerun in a new session then normalizes as the run did.
 
 Every batch needs labels for all selected cells and at least two cells; tiny batches raise
 `ValueError` naming them. The count flavors' artifacts store `mean_nonzero` and `detected` for the

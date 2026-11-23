@@ -531,20 +531,9 @@ class RNAassay(Assay):
             cell_idx = self.cells.active_index("I")
         if feat_idx is None:
             feat_idx = np.arange(self.feats.N, dtype=np.int64)
-        counts = self.rawData[:, feat_idx][cell_idx, :]
-        if renormalize_subset:
-            scalar = np.asarray(
-                compute_with_progress(
-                    counts.sum(axis=1, dtype=np.float64),
-                    "Normalizing with feature subset",
-                    self.nthreads,
-                ),
-                dtype=np.float64,
-            )
-            source = _feature_subset_source(self)
-        else:
-            scalar = self._cell_count_totals(cell_idx)
-            source = self._totals_name
+        counts, scalar, source = self._normalization_inputs(
+            cell_idx, feat_idx, renormalize_subset=renormalize_subset
+        )
         if library_size:
             # Zero-total cells normalize to zero, as on every library-size
             # path, and invalid totals raise.
@@ -566,6 +555,31 @@ class RNAassay(Assay):
                 return normalize_counts(self, counts, log_transform=log_transform)
             finally:
                 self.scalar = scalar_cache
+
+    def _normalization_inputs(
+        self,
+        cell_idx: np.ndarray,
+        feat_idx: np.ndarray,
+        *,
+        renormalize_subset: bool,
+    ) -> tuple[ChunkedArray, np.ndarray, str]:
+        """Return the counts that ``normed`` normalizes and each cell's total.
+
+        The totals are over every feature, or over ``feat_idx`` with
+        ``renormalize_subset``; the text names them in errors.
+        """
+        counts = self.rawData[:, feat_idx][cell_idx, :]
+        if renormalize_subset:
+            scalar = np.asarray(
+                compute_with_progress(
+                    counts.sum(axis=1, dtype=np.float64),
+                    "Normalizing with feature subset",
+                    self.nthreads,
+                ),
+                dtype=np.float64,
+            )
+            return counts, scalar, _feature_subset_source(self)
+        return counts, self._cell_count_totals(cell_idx), self._totals_name
 
     def _normalization_flags(self) -> frozenset[str]:
         """Return the normalization flags that ``normed`` applies.

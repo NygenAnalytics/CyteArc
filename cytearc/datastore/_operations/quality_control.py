@@ -5,7 +5,8 @@ from typing import TYPE_CHECKING, Any, Literal
 import numpy as np
 import pandas as pd
 
-from ...assay import Assay, ATACassay, RNAassay, norm_lib_size, norm_tf_idf
+from ...assay import Assay, ATACassay, RNAassay, norm_tf_idf
+from ...assay.normalization import builtin_normalizer
 from ...assay.feature_summary import (
     ensure_feature_summary,
     feature_summary_selected_count,
@@ -155,11 +156,10 @@ def _recorded_normalizer(root: Any, normalized: ArtifactRef) -> object:
 def _require_doublet_graph(root: Any, lineage: NativeGraphInputs) -> None:
     """Refuse a graph whose PCA doublet scoring cannot project its doublets onto.
 
-    Doublet scoring normalizes the counts of its simulated doublets by
-    library size and projects them onto the graph's PCA through a mapping
-    reference, so the PCA must be fitted with feature scaling on values that
-    ``norm_lib_size`` normalized. The normalizer is checked first, since a
-    PCA of Pearson residuals also skips feature scaling by default.
+    Doublet scoring normalizes the counts of its simulated doublets as the
+    graph's cells were and projects them onto the graph's PCA through a
+    mapping reference, so the values must come from a built-in RNA
+    normalizer, whose fit the reference can apply to new rows.
     """
     if lineage.reduction is None or lineage.normalized is None:
         raise ValueError(
@@ -168,13 +168,15 @@ def _require_doublet_graph(root: Any, lineage: NativeGraphInputs) -> None:
             "PCA or no normalized values; build the graph on reduction.pca"
         )
     identity = _recorded_normalizer(root, lineage.normalized)
-    if identity != callable_identity(norm_lib_size):
+    normalizer = builtin_normalizer(identity) if isinstance(identity, Mapping) else None
+    if normalizer is None or normalizer is norm_tf_idf:
         raise ValueError(
             "The graph was built on values normalized with "
             f"{_normalizer_text(identity)}, but doublet scoring normalizes its "
-            "simulated doublets by library size and needs a graph of "
-            "norm_lib_size values; normalize with cytearc.assay.norm_lib_size "
-            "and build the PCA and graph again"
+            "simulated doublets as the graph's cells were, which it can do for "
+            "the built-in RNA normalizers alone: norm_lib_size, "
+            "norm_lib_size_log, norm_pearson_residuals, norm_clr and norm_dummy; "
+            "normalize with one of them and build the PCA and graph again"
         )
     reduction = inspect_artifact(root, lineage.reduction)
     if reduction.operation != "run_pca":
@@ -182,13 +184,6 @@ def _require_doublet_graph(root: Any, lineage: NativeGraphInputs) -> None:
             "The graph was built on a reduction other than a PCA, but doublet "
             "scoring projects its simulated doublets onto the graph's PCA; "
             "build the graph on reduction.pca"
-        )
-    if (reduction.parameters or {}).get("feat_scaling") is not True:
-        raise ValueError(
-            "The graph was built on a PCA fitted without feature scaling, but "
-            "doublet scoring projects its simulated doublets onto the PCA "
-            "through a mapping reference, which needs feature scaling; fit the "
-            "PCA again with feat_scaling=True and build the graph on it"
         )
 
 
@@ -2449,13 +2444,15 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
             clusters: Cluster labels over the graph's cell selection. They
                 matter only with ``heterotypic_fraction`` above 0 or a parent
                 pool smaller than every cell.
-            graph: For an RNA assay, a connectivity map built on a PCA with
-                feature scaling of values that ``norm_lib_size`` normalized,
-                since the simulated doublets are normalized by library size
-                and projected onto that PCA. For an ATAC assay, a map built
-                on an LSI of values that ``norm_tf_idf`` normalized. A map
-                built on a Harmony correction of either needs
-                ``sample_column``.
+            graph: For an RNA assay, a connectivity map built on a PCA, with
+                or without feature scaling, of values that a built-in RNA
+                normalizer gave: ``norm_lib_size``, ``norm_lib_size_log``,
+                ``norm_pearson_residuals``, ``norm_clr`` or ``norm_dummy``.
+                The simulated doublets are normalized as the graph's cells
+                were, with what the normalizer fitted over them, and
+                projected onto that PCA. For an ATAC assay, a map built on an
+                LSI of values that ``norm_tf_idf`` normalized. A map built on
+                a Harmony correction of either needs ``sample_column``.
             from_assay: The RNA or ATAC assay of the graph; required for an
                 integrated graph.
             cluster_sample_fraction: The fraction of each cluster of a sample
@@ -2496,9 +2493,8 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
             TypeError: If the graph's assay is neither an RNA nor an ATAC
                 assay.
             ValueError: If the graph of an RNA assay was built on values of a
-                normalizer other than ``norm_lib_size``, such as Pearson
-                residuals, or on a PCA without feature scaling, or the graph
-                of an ATAC assay on values of a normalizer other than
+                custom normalizer or on a reduction other than a PCA, or the
+                graph of an ATAC assay on values of a normalizer other than
                 ``norm_tf_idf`` or on a reduction other than an LSI, which is
                 checked before anything is planned.
                 Also if ``heterotypic_fraction`` is above 0 with one

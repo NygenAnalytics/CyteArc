@@ -623,6 +623,8 @@ def _integration_call(_tmp_path: Path) -> Callable[[], object]:
 
 
 def _doublet_call(_tmp_path: Path) -> Callable[[], object]:
+    from cytearc.assay import norm_lib_size
+    from cytearc.storage.artifacts import callable_identity
     from cytearc.mapping.symphony import ScaledPCAProjectionModel
     from cytearc.matrix import ChunkedArray
     from cytearc.quality_control import doublets
@@ -639,7 +641,9 @@ def _doublet_call(_tmp_path: Path) -> Callable[[], object]:
     )
     reference = types.SimpleNamespace(
         model=model,
+        normalization_arrays={},
         normalization_parameters={
+            "normalization_method": callable_identity(norm_lib_size),
             "size_factor": 100.0,
             "log_transform": True,
             "renormalize_subset": True,

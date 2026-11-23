@@ -3,6 +3,11 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 from ...assay import RNAassay
+from ...assay.normalization import (
+    PearsonResidualFit,
+    builtin_normalizer,
+    fit_normalization,
+)
 from ...graph.distances import (
     validate_distance_provenance,
     validate_neighbors_payload,
@@ -12,13 +17,14 @@ from ...mapping.artifact import (
     load_artifact_mapping_reference,
     mapping_reference_payload_matches_sources,
     mapping_reference_source_fingerprint,
+    reference_feature_statistics,
     symphony_batch_metadata,
     validate_artifact_mapping_reference,
     validate_mapping_reference_sources,
     write_artifact_mapping_reference_from_sources,
 )
 from ...mapping.confidence import _distance_quantile_summary
-from ...mapping.features import _normalization_parameters
+from ...mapping.features import _normalization_parameters, fitted_array_name
 from ...mapping.reference import MappingReference
 from ...storage.validation_scope import validation_scoped
 from ...storage.artifact_writer import (
@@ -31,6 +37,7 @@ from ...storage.artifacts import (
     ArtifactRef,
     artifact_group,
 )
+from ...storage.feature_selection import read_feature_selection_indices
 from ...storage.types import as_zarr_array
 from ...storage.selections import validate_stored_selection_integrity
 from ...utils.arrays import has_duplicates
@@ -68,12 +75,20 @@ class _MappingReferenceOperationsMixin(_MappingReferenceOperationsBase):
         *,
         invalidate_cache: bool = False,
     ) -> ArtifactRef:
-        """Package a scaled-PCA neighbor chain as an immutable artifact.
+        """Package a PCA neighbor chain as an immutable artifact.
 
+        The PCA may scale its features or not, and its values may come from
+        any built-in RNA normalizer: ``norm_lib_size``, ``norm_lib_size_log``,
+        ``norm_pearson_residuals``, ``norm_clr`` or ``norm_dummy``. Queries
+        are normalized as the reference's cells were. Pearson residuals and
+        CLR fit numbers over those cells, each feature's share of their counts
+        or its scale; the reference fits them from the cells' counts, with
+        the function that normalized them, when it is written, and saves them.
         A read-only store returns a saved reference of the same chain and
         refuses only to write a new one.
 
         Raises:
+            ValueError: If the PCA's values come from a custom normalizer.
             PermissionError: If the reference must be written and the store
                 is not opened with ``zarr_mode='r+'``.
         """
@@ -165,8 +180,12 @@ class _MappingReferenceOperationsMixin(_MappingReferenceOperationsBase):
         )
         if reduction_status.operation != "run_pca":
             raise ValueError("Mapping references require a run_pca reduction")
-        if (reduction_status.parameters or {}).get("feat_scaling") is not True:
-            raise ValueError("Mapping references require PCA with feature scaling")
+        recorded_scaling = (reduction_status.parameters or {}).get("feat_scaling")
+        if not isinstance(recorded_scaling, bool):
+            raise ValueError(
+                "Mapping references require a PCA that records feat_scaling"
+            )
+        feature_scaling_enabled: bool = recorded_scaling
         normalized = self._artifact_input_ref(
             reduction,
             "normalized",
@@ -198,7 +217,8 @@ class _MappingReferenceOperationsMixin(_MappingReferenceOperationsBase):
             raise ValueError("Normalized artifact is missing its dataset fingerprint")
         if (
             scaling_status.operation != "calculate_feature_scaling"
-            or (scaling_status.parameters or {}).get("enabled") is not True
+            or (scaling_status.parameters or {}).get("enabled")
+            is not feature_scaling_enabled
             or self._artifact_input_ref(
                 feature_scaling,
                 "normalized",
@@ -207,7 +227,8 @@ class _MappingReferenceOperationsMixin(_MappingReferenceOperationsBase):
             != normalized
         ):
             raise ValueError(
-                "Mapping references require enabled scaling for the same normalized data"
+                "Mapping references require the PCA's feature scaling of the same "
+                "normalized data"
             )
         cell_selection = self._artifact_input_ref(
             normalized,
@@ -241,9 +262,14 @@ class _MappingReferenceOperationsMixin(_MappingReferenceOperationsBase):
         )
 
         reduction_group = artifact_group(self.zw, reduction)
-        scaling_group = artifact_group(self.zw, feature_scaling)
-        feature_means = as_zarr_array(scaling_group["mean"], name="mean")
-        feature_scales = as_zarr_array(scaling_group["scale"], name="scale")
+        # A PCA without feature scaling centered the values themselves; its
+        # reference keeps the statistics that scaling would have used.
+        feature_means, feature_scales = reference_feature_statistics(
+            self,
+            normalized=normalized,
+            feature_scaling=feature_scaling,
+            scaled=feature_scaling_enabled,
+        )
         if "center" not in reduction_group:
             raise ValueError(
                 "Reference PCA has no fitted center. Recompute PCA and its "
@@ -442,6 +468,32 @@ class _MappingReferenceOperationsMixin(_MappingReferenceOperationsBase):
         )
         if not planned.reused:
             self._require_writable("build_mapping_reference")
+            normalization_arrays: dict[str, np.ndarray] = {}
+            array_name = fitted_array_name(normalization_parameters)
+            if array_name is not None:
+                normalizer = builtin_normalizer(
+                    normalization_parameters["normalization_method"]
+                )
+                assert normalizer is not None
+                counts, totals, source = assay._normalization_inputs(
+                    np.flatnonzero(validated_cells.values[:]),
+                    read_feature_selection_indices(
+                        self.zw, assay_name, feature_selection
+                    ),
+                    renormalize_subset=normalization_parameters["renormalize_subset"],
+                )
+                fit = fit_normalization(
+                    normalizer,
+                    counts,
+                    totals,
+                    nthreads=self.nthreads,
+                    name=assay_name,
+                    source=source,
+                )
+                assert fit is not None
+                normalization_arrays[array_name] = (
+                    fit.fractions if isinstance(fit, PearsonResidualFit) else fit.scales
+                )
             with artifact_transaction(self.zw, planned) as group:
                 write_artifact_mapping_reference_from_sources(
                     group,
@@ -454,5 +506,6 @@ class _MappingReferenceOperationsMixin(_MappingReferenceOperationsBase):
                     metadata=metadata,
                     reference_distance_quantiles=distance_quantiles,
                     reference_distance_values=distance_values,
+                    normalization_arrays=normalization_arrays,
                 )
         return planned.ref

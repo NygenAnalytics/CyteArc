@@ -7,7 +7,8 @@ import pytest
 import zarr
 
 from cytearc.assay import RNAassay, norm_lib_size
-from cytearc.mapping.features import AlignedFeatureStream, normalize_reference_counts
+from cytearc.assay.normalization import LibrarySizeFit, normalize_rows
+from cytearc.mapping.features import AlignedFeatureStream
 from cytearc.matrix import ChunkedArray
 from cytearc.storage.artifacts import callable_identity
 from cytearc.storage.budget import ResourceBudget
@@ -26,12 +27,11 @@ from tests.store_probes import RecordingStore
 def test_reference_normalization_rejects_invalid_totals(totals, message):
     counts = np.array([[1, 2], [3, 4]], dtype=np.uint16)
     with pytest.raises(ValueError, match=re.escape(message)):
-        normalize_reference_counts(
+        normalize_rows(
+            LibrarySizeFit(100.0, False),
             counts,
-            size_factor=100,
-            log_transform=False,
+            np.array(totals),
             source="Query assay 'RNA_nCounts'",
-            denominator=np.array(totals),
         )
     np.testing.assert_array_equal(counts, [[1, 2], [3, 4]])
 
@@ -42,12 +42,11 @@ def test_reference_normalization_divides_by_the_library_size_divisors() -> None:
     expected = 100 * counts.astype(np.float64) / np.array([[3.0], [1.0], [3.75]])
 
     for denominator in (totals, None):
-        normalized = normalize_reference_counts(
+        normalized = normalize_rows(
+            LibrarySizeFit(100.0, False),
             counts,
-            size_factor=100,
-            log_transform=False,
+            denominator,
             source="Query assay 'RNA_nCounts'",
-            denominator=denominator,
         )
         # A row without counts normalizes to zeros, never NaN.
         np.testing.assert_array_equal(normalized, expected)
@@ -56,10 +55,10 @@ def test_reference_normalization_divides_by_the_library_size_divisors() -> None:
         ValueError,
         match="The reference-feature subset of query assay 'RNA' holds negative",
     ):
-        normalize_reference_counts(
+        normalize_rows(
+            LibrarySizeFit(100.0, False),
             -counts,
-            size_factor=100,
-            log_transform=False,
+            None,
             source="The reference-feature subset of query assay 'RNA'",
         )
 
@@ -156,14 +155,18 @@ def _stream(
         reference_ids = np.array(["a", "missing", "b"])
     if means is None:
         means = np.array([1.5, 7.5, 2.5])
+    parameters = normalization or _normalization()
     return AlignedFeatureStream(
         query_assay=assay,
         query_cell_indices=cells,
         reference_feature_keys=reference_ids,
         reference_normalized_means=means,
-        reference_normalization_parameters=normalization or _normalization(),
+        reference_normalization_parameters=parameters,
         missing_feature_policy=policy,
         resources=resources or ResourceBudget(1_000_000, 2),
+        normalization=LibrarySizeFit(
+            parameters["size_factor"], parameters["log_transform"]
+        ),
         feature_key=feature_key,
         reserved_resident_bytes=reserved_resident_bytes,
         reserved_per_row_bytes=reserved_per_row_bytes,

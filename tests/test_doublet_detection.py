@@ -24,13 +24,21 @@ from sklearn.metrics import roc_auc_score
 
 import cytearc.storage.operation_revisions as operation_revisions
 from cytearc import DataStore, DiagnosticWarning
-from cytearc.assay import norm_clr, norm_lib_size, norm_pearson_residuals, norm_tf_idf
+from cytearc.assay import (
+    PearsonResidualNormalizer,
+    norm_clr,
+    norm_dummy,
+    norm_lib_size,
+    norm_lib_size_log,
+    norm_pearson_residuals,
+    norm_tf_idf,
+)
 from cytearc.datastore._pipeline.recipes import rna as rna_recipe
 from cytearc.datastore.pipeline_accessor import PipelineAccessor
 from cytearc.mapping.models import ScaledPCAProjectionModel
 from cytearc.matrix import ChunkedArray
 from cytearc.quality_control import doublets
-from cytearc.storage.artifacts import ArtifactRef, artifact_group
+from cytearc.storage.artifacts import ArtifactRef, artifact_group, callable_identity
 from cytearc.storage.budget import ResourceBudget
 from cytearc.storage.selections import read_stored_selection_mask
 from cytearc.utils.logging import logger
@@ -38,6 +46,7 @@ from tests import full_path
 from tests.storage_helpers import (
     by_cell_id,
     insert_nullable_cell_column,
+    record_normalized_values,
     write_count_store,
 )
 from tests.test_doublet_streaming import _exact_simulated_neighbors
@@ -610,12 +619,19 @@ def _synthetic_counts(
 
 
 def _build_synthetic(
-    path: Path, design: dict[str, dict[str, Any]], *, assay: str = "RNA"
+    path: Path,
+    design: dict[str, dict[str, Any]],
+    *,
+    assay: str = "RNA",
+    normalizer: Any = None,
+    normalization: dict[str, Any] | None = None,
+    feat_scaling: bool = True,
 ) -> _SyntheticDoublets:
     """Write the design's counts with a graph and the cell types as clusters.
 
-    An RNA graph is built on a PCA of library-size values, and an ATAC graph
-    on an LSI of TF-IDF values.
+    An RNA graph is built on a PCA of library-size values, or of the values
+    of ``normalizer`` with the flags of ``normalization`` and the PCA's
+    ``feat_scaling``, and an ATAC graph on an LSI of TF-IDF values.
     """
     counts, truth, samples, types = _synthetic_counts(3, design, peaks=assay == "ATAC")
     write_count_store(str(path), {assay: counts}, "uint32")
@@ -624,12 +640,18 @@ def _build_synthetic(
     )
     store.cells.insert("sample", by_cell_id(store.cells, samples))
     store.cells.insert("cell_type", by_cell_id(store.cells, types.astype(str)))
+    if normalizer is not None:
+        store.RNA.normMethod = normalizer
     cells = store.snapshot_cell_selection("I")
-    normalized = store.features.normalize(cells, store.features.universe())
+    normalized = store.features.normalize(
+        cells, store.features.universe(), **(normalization or {})
+    )
     reduction = (
         store.reduction.lsi(normalized, dims=8, local_cache=False)
         if assay == "ATAC"
-        else store.reduction.pca(normalized, dims=10, local_cache=False)
+        else store.reduction.pca(
+            normalized, dims=10, feat_scaling=feat_scaling, local_cache=False
+        )
     )
     neighbors = store.graph.neighbors(
         store.graph.ann_index(reduction), coordinates=reduction, k=10
@@ -1058,20 +1080,9 @@ def test_a_harmony_graph_scores_each_sample_on_the_pca_it_corrected(
         )
 
 
-_LIBRARY_SIZE = {"module": "cytearc.assay", "qualname": "norm_lib_size"}
-
-
 @pytest.mark.parametrize(
     ("recorded", "named"),
     [
-        (
-            {
-                "external_hook": True,
-                "module": "cytearc.assay",
-                "qualname": "norm_lib_size_log",
-            },
-            "cytearc.assay.norm_lib_size_log",
-        ),
         (
             {
                 "external_hook": True,
@@ -1082,8 +1093,13 @@ _LIBRARY_SIZE = {"module": "cytearc.assay", "qualname": "norm_lib_size"}
             "lab.norms.half",
         ),
         (
-            {"identity": "cytearc.assay.pearson_residuals:theta=50.0:clip=sqrt-n"},
-            "cytearc.assay.pearson_residuals:theta=50.0:clip=sqrt-n",
+            {"identity": "cytearc.assay.norm_tf_idf:selected-cell-df:total-count-tf"},
+            "cytearc.assay.norm_tf_idf:selected-cell-df:total-count-tf",
+        ),
+        # Options that no PearsonResidualNormalizer takes name no built-in.
+        (
+            {"identity": "cytearc.assay.pearson_residuals:theta=-1.0:clip=sqrt-n"},
+            "cytearc.assay.pearson_residuals:theta=-1.0:clip=sqrt-n",
         ),
         # Records that name no normalizer are quoted as they are.
         ({"external_hook": True, "module": 3}, "{'module': 3}"),
@@ -1113,12 +1129,24 @@ def test_the_doublet_graph_check_names_the_recorded_normalizer(
 
     assert str(caught.value).startswith(
         f"The graph was built on values normalized with {named}, but doublet "
-        "scoring normalizes its simulated doublets by library size"
+        "scoring normalizes its simulated doublets as the graph's cells were"
     )
-    # norm_lib_size passes, recorded with or without its external_hook key.
-    for library_size in (_LIBRARY_SIZE, {"external_hook": True, **_LIBRARY_SIZE}):
-        statuses["normalized"].parameters = {"normalization_method": library_size}
-        quality_control._require_doublet_graph(None, lineage)
+    # Each built-in RNA normalizer passes, recorded with or without its
+    # external_hook key, on a PCA with or without feature scaling.
+    for normalizer in (
+        norm_lib_size,
+        norm_lib_size_log,
+        norm_pearson_residuals,
+        PearsonResidualNormalizer(theta=50.0, clip=4.0),
+        norm_clr,
+        norm_dummy,
+    ):
+        identity = callable_identity(normalizer)
+        for method in (identity, {"external_hook": True, **identity}):
+            for scaling in (True, False):
+                statuses["normalized"].parameters = {"normalization_method": method}
+                statuses["reduction"].parameters = {"feat_scaling": scaling}
+                quality_control._require_doublet_graph(None, lineage)
 
 
 def test_the_doublet_graph_check_needs_a_pca_of_normalized_values():
@@ -1139,8 +1167,13 @@ def test_the_doublet_graph_check_needs_a_pca_of_normalized_values():
         assert str(caught.value) == message
 
 
+def _halve_counts(_assay: Any, counts: Any) -> Any:
+    """A custom normalizer, defined at module level so provenance can name it."""
+    return counts / 2
+
+
 @pytest.mark.slow
-def test_doublets_refuse_a_graph_whose_pca_they_cannot_project_onto(
+def test_doublets_score_a_pca_graph_of_any_builtin_and_refuse_the_others(
     small_captures, tmp_path
 ):
     opened = _open_synthetic(small_captures, tmp_path)
@@ -1160,37 +1193,23 @@ def test_doublets_refuse_a_graph_whose_pca_they_cannot_project_onto(
     library_size = store.features.normalize(cells, features)
     store.RNA.normMethod = norm_pearson_residuals
     residuals = store.features.normalize(cells, features)
+    store.RNA.normMethod = _halve_counts
+    halved = store.features.normalize(cells, features)
     store.RNA.normMethod = norm_lib_size
     unscaled = pca(library_size, feat_scaling=False)
     loadings = np.random.default_rng(0).normal(size=(int(store.RNA.feats.N), 10))
-    normalizer = (
-        "The graph was built on values normalized with "
-        "cytearc.assay.pearson_residuals:theta=100.0:clip=sqrt-n, but doublet "
-        "scoring normalizes its simulated doublets by library size and needs a "
-        "graph of norm_lib_size values; normalize with cytearc.assay.norm_lib_size "
-        "and build the PCA and graph again"
-    )
-    scaling = (
-        "The graph was built on a PCA fitted without feature scaling, but doublet "
-        "scoring projects its simulated doublets onto the PCA through a mapping "
-        "reference, which needs feature scaling; fit the PCA again with "
-        "feat_scaling=True and build the graph on it"
-    )
-    cases = [
-        # Residuals are standardized, so their PCA scales no gene; the
-        # normalizer is the cause, so it is named first.
-        (graph_on(pca(residuals, feat_scaling=False)), {}, normalizer),
-        (graph_on(pca(residuals)), {}, normalizer),
-        (graph_on(unscaled), {}, scaling),
-        # A Harmony graph is scored on the PCA that it corrected.
+    refused = [
         (
-            graph_on(store.reduction.harmony(unscaled, ["sample"])),
-            {"sample_column": "sample"},
-            scaling,
+            graph_on(pca(halved)),
+            "The graph was built on values normalized with "
+            "tests.test_doublet_detection._halve_counts, but doublet scoring "
+            "normalizes its simulated doublets as the graph's cells were, which it "
+            "can do for the built-in RNA normalizers alone: norm_lib_size, "
+            "norm_lib_size_log, norm_pearson_residuals, norm_clr and norm_dummy; "
+            "normalize with one of them and build the PCA and graph again",
         ),
         (
             graph_on(store.reduction.custom(loadings, library_size)),
-            {},
             "The graph was built on a reduction other than a PCA, but doublet "
             "scoring projects its simulated doublets onto the graph's PCA; build "
             "the graph on reduction.pca",
@@ -1199,17 +1218,29 @@ def test_doublets_refuse_a_graph_whose_pca_they_cannot_project_onto(
     kinds = ("doublet_score", "mapping_reference")
     before = [store.artifacts.list(kind=kind, from_assay="RNA") for kind in kinds]
 
-    for graph, options, message in cases:
+    for graph, message in refused:
         with pytest.raises(ValueError) as caught:
-            store.qc.doublets(opened.clusters, graph, **options)
+            store.qc.doublets(opened.clusters, graph)
         assert str(caught.value) == message
-
-    # Nothing was planned or written, and a graph of scaled library-size
-    # values still scores.
+    # Nothing was planned or written.
     assert [store.artifacts.list(kind=kind, from_assay="RNA") for kind in kinds] == (
         before
     )
-    assert store.qc.doublets(opened.clusters, opened.graph).kind == "doublet_score"
+    # Residuals with or without feature scaling, library-size values without
+    # it, and a Harmony graph of those, which is scored on the PCA it
+    # corrected, each score.
+    for graph, options in (
+        (graph_on(pca(residuals, feat_scaling=False)), {}),
+        (graph_on(pca(residuals)), {}),
+        (graph_on(unscaled), {}),
+        (
+            graph_on(store.reduction.harmony(unscaled, ["sample"])),
+            {"sample_column": "sample"},
+        ),
+    ):
+        assert store.qc.doublets(opened.clusters, graph, **options).kind == (
+            "doublet_score"
+        )
 
 
 @pytest.mark.slow
@@ -1581,6 +1612,138 @@ def test_doublet_scores_saved_without_diagnostics_are_computed_anew(
     )
 
 
+# RNA doublets of the other built-in normalizers -------------------------------
+
+# Each normalizer with the flags and PCA scaling that a run of it takes by
+# default: Pearson residuals are already standardized, so their PCA does not
+# scale them.
+_RNA_NORMALIZERS = {
+    "lib_size_log": (norm_lib_size_log, {}, True),
+    "pearson_residuals": (norm_pearson_residuals, {}, False),
+    "clr": (norm_clr, {}, True),
+    "passthrough": (norm_dummy, {"log_transform": True}, True),
+}
+
+
+@pytest.fixture(scope="module", params=sorted(_RNA_NORMALIZERS))
+def one_capture_normalized(request, tmp_path_factory) -> tuple[str, _SyntheticDoublets]:
+    """One capture with a graph on the values of each built-in RNA normalizer."""
+    normalizer, flags, scaling = _RNA_NORMALIZERS[request.param]
+    path = tmp_path_factory.mktemp(f"one_capture_{request.param}") / "data.zarr"
+    return request.param, _build_synthetic(
+        path,
+        _ONE_CAPTURE,
+        normalizer=normalizer,
+        normalization=flags,
+        feat_scaling=scaling,
+    )
+
+
+def _normalized_by_hand(
+    name: str,
+    cells: np.ndarray,
+    rows: np.ndarray,
+    totals: np.ndarray,
+    *,
+    size_factor: float,
+) -> np.ndarray:
+    """Normalize ``rows`` of counts as ``cells``, the counts of every cell, were.
+
+    ``totals`` holds each row's total over every gene. Each normalizer is
+    written out from its definition.
+    """
+    if name == "lib_size_log":
+        return np.log1p(size_factor * rows / totals[:, None])
+    if name == "passthrough":
+        return np.log1p(rows)
+    if name == "clr":
+        return np.log1p(rows / np.exp(np.log1p(cells).mean(axis=0)))
+    # Analytic Pearson residuals with theta 100, clipped at the square root
+    # of the number of cells, and 0 where no count is expected.
+    mu = totals[:, None] * (cells.sum(axis=0) / cells.sum())
+    residuals = np.zeros_like(mu)
+    positive = mu > 0
+    residuals[positive] = (rows[positive] - mu[positive]) / np.sqrt(
+        mu[positive] + mu[positive] ** 2 / 100
+    )
+    return np.clip(residuals, -np.sqrt(len(cells)), np.sqrt(len(cells)))
+
+
+# The automatic threshold of the passthrough scores calls almost no cell
+# (#546), which a warning reports; this test checks the scores.
+@pytest.mark.filterwarnings("ignore:In 1 sample the automatic threshold")
+def test_rna_doublets_of_each_normalizer_count_simulated_doublets_among_exact_neighbors(
+    one_capture_normalized, tmp_path
+):
+    name, synthetic = one_capture_normalized
+    opened = _open_synthetic(synthetic, tmp_path)
+    store = opened.store
+    # Doublets are normalized as the graph's cells were, whatever normalizer
+    # the session sets.
+    store.RNA.normMethod = norm_lib_size
+    payload = _payload(store, store.qc.doublets(opened.clusters, opened.graph))
+    (sample,) = payload.attrs["samples"]
+    k = sample["adjustedNeighbors"]
+    pca = store.artifacts.inspect(_graph_pca(store, opened.graph))
+    stored = artifact_group(store.zw, pca.ref)
+    size_factor = store.artifacts.inspect(pca.input_ref("normalized")).parameters[
+        "size_factor"
+    ]
+
+    # The doublets of the parents that the scores record, rebuilt from the
+    # written counts of every gene, the graph's features, and projected as
+    # the PCA projected its cells: scaled by the PCA's feature scaling when
+    # it scaled them, then centered and multiplied by the loadings.
+    cells = _synthetic_counts(3, _ONE_CAPTURE)[0].astype(np.float64)
+    parents = payload["simulated_parents"][:]
+    summed = cells[parents[:, 0]] + cells[parents[:, 1]]
+    values = _normalized_by_hand(
+        name, cells, summed, summed.sum(axis=1), size_factor=size_factor
+    )
+    if pca.parameters["feat_scaling"]:
+        scaling = artifact_group(store.zw, pca.input_ref("feature_scaling"))
+        values = (values - scaling["mean"][:]) / scaling["scale"][:]
+    simulated = (values - stored["center"][:]) @ stored["loadings"][:]
+    points = np.vstack([stored["data"][:], simulated]).astype(np.float32)
+    low, high = _exact_simulated_neighbors(points, len(cells), k)
+    low, high = low[: len(cells)], high[: len(cells)]
+    scored = np.rint(payload["raw_scores"][:] * k)
+
+    assert pca.parameters["feat_scaling"] is _RNA_NORMALIZERS[name][2]
+    assert np.all((low <= scored) & (scored <= high))
+    # Almost every cell has no tie at its k-th neighbor, and its count is the
+    # exact one.
+    assert np.count_nonzero(low == high) >= 0.99 * len(cells)
+    # Heterotypic doublets rank above singlets under every normalizer.
+    truth, scores = synthetic.truth, payload["values"][:]
+    assert roc_auc_score((truth == 1)[truth != 2], scores[truth != 2]) >= 0.98
+
+
+def test_passthrough_doublets_refuse_an_assay_of_values_normalized_before_import(
+    tmp_path,
+):
+    # A passthrough graph of such values would sum two cells' normalized
+    # values into a doublet, so doublet scoring refuses the assay.
+    path = tmp_path / "data.zarr"
+    synthetic = _build_synthetic(
+        path,
+        _SMALL_CAPTURES,
+        normalizer=norm_dummy,
+        normalization={"log_transform": True},
+    )
+    record_normalized_values(path, "RNA")
+    opened = _open_synthetic(synthetic, tmp_path / "copy")
+
+    with pytest.raises(TypeError) as caught:
+        opened.store.qc.doublets(opened.clusters, opened.graph)
+
+    assert str(caught.value).startswith(
+        "Doublet scoring needs counts: it simulates each doublet by adding two "
+        "cells' counts. Assay 'RNA' holds normalized values"
+    )
+    assert opened.store.artifacts.list(kind="doublet_score", from_assay="RNA") == []
+
+
 # ATAC doublets, projected onto an LSI by TF-IDF ------------------------------
 
 _TF_IDF = {"identity": "cytearc.assay.norm_tf_idf:selected-cell-df:total-count-tf"}
@@ -1660,7 +1823,7 @@ def test_lsi_projection_weights_summed_counts_by_tf_idf_by_hand():
         np.testing.assert_array_equal(
             projection.project(stored_zero, denominators, source="test"), [[0, 0]]
         )
-    with pytest.raises(ValueError, match="test needs one denominator per doublet"):
+    with pytest.raises(ValueError, match="one value per row of counts"):
         _lsi_projection(loadings, idf).project(summed, np.ones(3), source="test")
 
 
@@ -1705,7 +1868,19 @@ def test_lsi_projection_holds_its_loadings_and_charges_each_doublet():
         )
 
 
-def test_pca_projection_charges_its_model_and_each_doublet_by_hand():
+@pytest.mark.parametrize(
+    ("normalizer", "arrays", "values_per_feature"),
+    [
+        # Library-size values with their scaled and centered copies.
+        (norm_lib_size, {}, 3),
+        # Pearson residuals hold their expected counts, residuals and three
+        # temporaries of their square roots beside those copies.
+        (norm_pearson_residuals, {"pearson_feature_fractions": np.full(5, 0.2)}, 7),
+    ],
+)
+def test_pca_projection_charges_its_model_and_each_doublet_by_hand(
+    normalizer, arrays, values_per_feature
+):
     model = ScaledPCAProjectionModel(
         feature_means=np.zeros(5),
         feature_scales=np.ones(5),
@@ -1713,19 +1888,29 @@ def test_pca_projection_charges_its_model_and_each_doublet_by_hand():
         loadings=np.zeros((5, 3)),
     )
     reference = SimpleNamespace(
-        model=model, normalization_parameters={"renormalize_subset": False}
+        model=model,
+        normalization_arrays=arrays,
+        normalization_parameters={
+            "normalization_method": callable_identity(normalizer),
+            "size_factor": 1000.0,
+            "log_transform": False,
+            "renormalize_subset": False,
+        },
+        selected_cell_count=9,
     )
 
     projection = doublets.PcaDoubletProjection(reference)
 
     assert (projection.n_dims, projection.renormalize_subset) == (3, False)
-    # The float64 loadings, means, scales and center.
-    assert projection.resident_bytes() == (15 + 5 + 5 + 5) * 8
-    # Per doublet: a float64 copy of its counts of the 5 features, its
-    # normalized values with their scaled and centered copies, and its
-    # coordinates.
+    # The float64 loadings, means, scales and center, and fitted fractions.
+    held = 5 * len(arrays)
+    assert projection.resident_bytes() == (15 + 5 + 5 + 5 + held) * 8
+    # Per doublet: a float64 copy of its counts of the 5 features, what
+    # normalizing them holds, and its coordinates.
     counts = csr_matrix(np.ones((2, 5), dtype=np.int16))
-    assert projection.row_bytes(counts) == 5 * (8 + 3 * 8) + 3 * 32 + 64
+    assert projection.row_bytes(counts) == (
+        5 * (8 + values_per_feature * 8) + 3 * 32 + 64
+    )
 
 
 class _ChargedProjection:

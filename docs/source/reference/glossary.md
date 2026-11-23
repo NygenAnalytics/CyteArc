@@ -83,7 +83,7 @@ batch correction
 : Adjusting embeddings or graphs so technical sample batches mix while biological structure is preserved.
 
 mapping reference
-: Immutable RNA mapping artifact built from a scaled PCA or Symphony neighbor chain with `mapping.build_reference(neighbors)`. A writable query datastore uses it to create query-owned projections without changing the reference.
+: Immutable RNA mapping artifact built from a PCA or Symphony neighbor chain with `mapping.build_reference(neighbors)`. A writable query datastore uses it to create query-owned projections without changing the reference.
 
 label transfer
 : Query-owned artifact from `mapping.transfer_labels` that gives each projected query cell the reference label with the largest share of its neighbors' weight, or no label when the cell abstains. The reference labels it uses are first frozen into the query datastore, so saved labels do not change when the reference is re-annotated.

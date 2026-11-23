@@ -2,7 +2,7 @@
 
 import copy
 from collections.abc import Iterator, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, cast
 
@@ -129,17 +129,24 @@ def mapping_reference_model_digest(
     metadata: Mapping[str, Any],
     reference_distance_quantiles: np.ndarray,
     reference_distance_values: np.ndarray,
+    normalization_arrays: Mapping[str, np.ndarray] | None = None,
 ) -> str:
     """Digest the arrays and metadata a mapping reference holds in memory.
 
     The loader records this digest on the handle it builds, and the binding
     check recomputes it from the handle, so a handle whose arrays were
-    replaced is rejected without reading the stored payload.
+    replaced is rejected without reading the stored payload. A PCA without
+    feature scaling and the arrays of a fitted normalization enter the digest
+    only when present, so other references keep their digest.
     """
     builder = ValueFingerprintBuilder()
     builder.update_array("feature_ids", np.asarray(feature_ids).astype(str))
     for name in ("feature_means", "feature_scales", "center", "loadings"):
         builder.update_array(name, np.asarray(getattr(model, name)))
+    if not model.feature_scaling:
+        builder.update_bytes("feature_scaling", b"false")
+    for name, values in sorted((normalization_arrays or {}).items()):
+        builder.update_array(name, np.asarray(values))
     builder.update_array(
         "reference_distance_quantiles",
         np.asarray(reference_distance_quantiles),
@@ -192,12 +199,24 @@ class MappingReference:
     reference_distance_values: np.ndarray
     payload_fingerprint: str
     model_digest: str
+    # The arrays that the reference's normalizer fitted over its cells, by name.
+    normalization_arrays: Mapping[str, np.ndarray] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         for name in ("payload_fingerprint", "model_digest"):
             value = getattr(self, name)
             if not isinstance(value, str) or not value:
                 raise TypeError(f"Mapping reference {name} must be a non-empty string")
+        object.__setattr__(
+            self,
+            "normalization_arrays",
+            MappingProxyType(
+                {
+                    name: read_only_copy(np.asarray(values))
+                    for name, values in self.normalization_arrays.items()
+                }
+            ),
+        )
         feature_ids = np.asarray(self.feature_ids)
         if feature_ids.ndim != 1 or feature_ids.dtype.kind not in {"O", "S", "U"}:
             raise TypeError("Mapping reference feature IDs must contain strings")
@@ -224,6 +243,7 @@ class MappingReference:
             metadata=self.metadata,
             reference_distance_quantiles=self.reference_distance_quantiles,
             reference_distance_values=self.reference_distance_values,
+            normalization_arrays=self.normalization_arrays,
         )
 
     @property
@@ -242,8 +262,10 @@ class MappingReference:
         return cast(dict[str, Any], _thaw_metadata(values))
 
     @property
-    def size_factor(self) -> float:
-        return float(self.normalization_parameters["size_factor"])
+    def size_factor(self) -> float | None:
+        """The size factor of library-size values, or None for other values."""
+        value = self.normalization_parameters["size_factor"]
+        return None if value is None else float(value)
 
     @property
     def external_ref(self) -> ExternalArtifactRef:

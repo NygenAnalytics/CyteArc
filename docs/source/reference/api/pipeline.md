@@ -321,9 +321,7 @@ Every stage of a run that reads normalized values, such as gene selection, norma
 | `"passthrough"` | `cytearc.assay.norm_dummy`, which passes the stored values through | every assay |
 
 ```python
-run = ds.pipeline.rna(
-    label="residuals", normalization={"method": "pearson_residuals"}, doublets=False
-)
+run = ds.pipeline.rna(label="residuals", normalization={"method": "pearson_residuals"})
 run.settings()["normalization"]  # {'method': 'pearson_residuals'}
 ```
 
@@ -331,7 +329,7 @@ The run makes its normalizer the assay's `normMethod` while its stages run, and 
 
 A custom normalizer, and a `PearsonResidualNormalizer` with options other than the defaults, has no name: a run applies it as the assay's `normMethod` and records the identity that provenance records for it ({doc}`assays`), such as `{"identity": "cytearc.assay.pearson_residuals:theta=50.0:clip=sqrt-n"}`, which `run.settings()` returns as its `method`. A rerun or a plan of such a run raises `ValueError` before it computes anything unless the assay's `normMethod` has that identity, and the message names it. `normalization={"method": None}` reruns with the assay's `normMethod` instead.
 
-Pearson residuals are already standardized, so the PCA of a run of residuals scales no feature: `pca` `feat_scaling` defaults to False for such a run, as `reduction.pca(residuals, feat_scaling=False)` does, and to True for every other normalizer, and a value that the call gives wins. The run's cell cycle scores average residuals and its markers rank them. Doublet scoring normalizes its simulated doublets by library size, so a run of residuals passes `doublets=False`. A `multimodal` run ranks each assay's markers with the normalizer that the run of that assay recorded.
+Pearson residuals are already standardized, so the PCA of a run of residuals scales no feature: `pca` `feat_scaling` defaults to False for such a run, as `reduction.pca(residuals, feat_scaling=False)` does, and to True for every other normalizer, and a value that the call gives wins. The run's cell cycle scores average residuals and its markers rank them. Doublet scoring normalizes its simulated doublets as the run normalized its cells, with what the normalizer fitted over them, and projects them onto the PCA, scaled or not, so a run of any built-in normalizer scores doublets; a custom normalizer passes `doublets=False`. A `multimodal` run ranks each assay's markers with the normalizer that the run of that assay recorded.
 
 ### Validation before a run starts
 
@@ -340,8 +338,7 @@ A recipe checks its call against the store before it creates a run record, and a
 - `doublets and markers require at least one Leiden candidate` (`rna` with `leiden=False`; `atac` names the stages that the call turns on, such as `markers require at least one Leiden candidate`, and `adt` raises that message), and `membership_strength requires at least one Leiden candidate`;
 - `pca={'dims': 0} builds the graph on normalized values, which Harmony cannot correct; ...` and
   `pca={'dims': 0} builds the graph on normalized values, but doublet scoring needs a PCA graph; ...`;
-- `The run normalizes assay 'RNA' with ..., but doublet scoring normalizes its simulated doublets by library size and needs lib_size; ...` (`rna` with doublet scoring on, when the run normalizes with another normalizer, such as `"pearson_residuals"`): pass `normalization={"method": "lib_size"}` or `doublets=False`;
-- `pca={'feat_scaling': False} fits PCA without feature scaling, but doublet scoring projects its simulated doublets onto the PCA through a mapping reference, which needs feature scaling; ...` (`rna` with doublet scoring on): pass `doublets=False`, or omit `feat_scaling`, which defaults to True for library-size values;
+- `The run normalizes assay 'RNA' with ..., but doublet scoring normalizes its simulated doublets as the run's cells were, which it can do for the built-in normalizers ... alone; ...` (`rna` with doublet scoring on, when the run normalizes with a custom normalizer): pass `normalization={"method": ...}` with a built-in normalizer, or `doublets=False`;
 - `The run normalizes assay 'ATAC' with ..., but doublet scoring weights its simulated doublets by TF-IDF and needs tf_idf; ...` (`atac` with doublet scoring on, when the run normalizes with another normalizer): pass `normalization={"method": "tf_idf"}` or `doublets=False`;
 - `normalization['method'] must be one of [...], or the identity of a custom normalizer that a run recorded; ...`, `Assay 'ATAC' opens as ATACassay, but lib_size needs an RNAassay; ...`, and `normalization['method'] is the custom normalizer ..., which a run applies only as the assay's normMethod, ...` ([Normalization method](#normalization-method));
 - `PCA settings need dims above 0; dims=0 skips PCA`, for other `pca` settings beside `dims=0`;

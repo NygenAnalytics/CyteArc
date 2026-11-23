@@ -8,12 +8,13 @@ import pytest
 from scipy.sparse import csr_matrix
 
 from cytearc import DataStore
-from cytearc.mapping.features import AlignedFeatureStream
+from cytearc.assay import norm_lib_size_log
+from cytearc.mapping.features import AlignedFeatureStream, reference_normalization
 from cytearc.mapping.models import ScaledPCAProjectionModel
 from cytearc.mapping.symphony import project_pca
 from cytearc.matrix import ChunkedArray
 from cytearc.quality_control import doublets
-from cytearc.storage.artifacts import artifact_group
+from cytearc.storage.artifacts import artifact_group, callable_identity
 from cytearc.storage.budget import ResourceBudget
 from cytearc.storage.count_matrix import CountMatrixPolicy
 
@@ -81,9 +82,11 @@ def test_simulated_doublets_keep_every_pair_and_add_parent_libraries(
     )
     reference = SimpleNamespace(
         model=model,
+        normalization_arrays={},
         normalization_parameters={
+            "normalization_method": callable_identity(norm_lib_size_log),
             "size_factor": 100.0,
-            "log_transform": True,
+            "log_transform": False,
             "renormalize_subset": subset,
         },
     )
@@ -413,6 +416,7 @@ def test_streamed_doublets_match_materialized_doublets(
         reference.normalization_parameters,
         "error",
         ResourceBudget(128 * 1024**2, 1),
+        normalization=reference_normalization(reference),
     )
     expected = project_pca(
         np.vstack([block.values for block in stream.iter_blocks()]), reference.model
@@ -501,8 +505,6 @@ def test_streamed_doublets_match_materialized_doublets(
 
 
 def test_doublets_without_selected_feature_counts_are_scored(tmp_path, monkeypatch):
-    from cytearc.mapping.features import normalize_reference_counts
-
     counts = np.random.default_rng(29).integers(1, 200, (30, 24), dtype=np.uint16)
     labels = np.arange(len(counts)) % 3
     feature_indices = np.arange(0, counts.shape[1], 2)
@@ -572,13 +574,11 @@ def test_doublets_without_selected_feature_counts_are_scored(tmp_path, monkeypat
         scores.simulated_parents, np.column_stack((left, right))
     )
     parameters = reference.normalization_parameters
+    # Library size scales a row without counts to zeros, whatever its total.
     empty_projection = project_pca(
-        normalize_reference_counts(
-            np.zeros((1, len(feature_indices))),
-            size_factor=parameters["size_factor"],
-            log_transform=parameters["log_transform"],
-            source="The doublet simulation of RNA",
-        ),
+        np.log1p(np.zeros((1, len(feature_indices))))
+        if parameters["log_transform"]
+        else np.zeros((1, len(feature_indices))),
         reference.model,
     )
     assert np.linalg.norm(empty_projection) > 0

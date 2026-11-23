@@ -680,7 +680,9 @@ def test_load_rejects_each_tampered_graph_chain_record(
     for target, section, key, value, message in (
         ("reference", "parameters", "extra", 1, "parameters do not match"),
         ("reduction", None, "operation", "run_svd", "reduction is not PCA"),
-        ("reduction", "parameters", "feat_scaling", False, "feature scaling"),
+        # A PCA that no longer scales disagrees with its feature scaling.
+        ("reduction", "parameters", "feat_scaling", False, "Feature scaling does not"),
+        ("reduction", "parameters", "feat_scaling", None, "records no feature scaling"),
         ("ann_index", None, "operation", "old_ann", "ANN input has an old operation"),
         ("neighbors", None, "operation", "old_knn", "neighbors input has an old"),
         ("neighbors", "inputs", "coordinates", unrelated, "ANN coordinate chain"),

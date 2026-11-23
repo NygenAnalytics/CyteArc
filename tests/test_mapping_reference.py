@@ -662,6 +662,17 @@ def test_loaded_mapping_reference_is_deeply_immutable(
     normalization["size_factor"] = -1
     assert reference.size_factor == 1000.0
     assert reference.current_model_digest() == reference.model_digest
+    # Values of a normalizer that reads no size factor may record None.
+    from dataclasses import replace
+
+    unscaled = replace(
+        reference,
+        metadata={
+            **reference.metadata,
+            "normalization_parameters": {**normalization, "size_factor": None},
+        },
+    )
+    assert unscaled.size_factor is None
 
 
 def test_mapping_reference_binding_and_publication_validation_are_blockwise(
@@ -1163,7 +1174,15 @@ def test_build_mapping_reference_rejects_each_inconsistent_chain_record(
             "parameters",
             "feat_scaling",
             False,
-            "require PCA with feature scaling",
+            "require the PCA's feature scaling of the same normalized data",
+        ),
+        (
+            plain,
+            "reduction",
+            "parameters",
+            "feat_scaling",
+            None,
+            "require a PCA that records feat_scaling",
         ),
         (
             plain,
@@ -1187,7 +1206,7 @@ def test_build_mapping_reference_rejects_each_inconsistent_chain_record(
             "parameters",
             "enabled",
             False,
-            "require enabled scaling for the same normalized data",
+            "require the PCA's feature scaling of the same normalized data",
         ),
         (plain, "ann_index", "parameters", "ann_metric", "ip", "only l2 and cosine"),
         (

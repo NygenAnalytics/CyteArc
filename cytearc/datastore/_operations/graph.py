@@ -140,7 +140,7 @@ from ...storage.selections import (
     snapshot_run_metadata,
     validate_run_metadata_snapshot,
 )
-from ...utils.arrays import clean_array
+from ...assay.normalization import feature_scaling_statistics
 from ...utils.arguments import (
     bool_argument,
     integer_argument,
@@ -149,7 +149,6 @@ from ...utils.arguments import (
 )
 from ...utils.logging import logger
 from ...utils.memory_budget import MemoryBudgetError
-from ...utils.moments import ColumnMoments
 from ...utils.numba import numba_threads
 from ...utils.shutdown import shutdown_checkpoint
 from ...utils.warnings import warn
@@ -254,39 +253,6 @@ def _row_block(
             "them. Leave batch_size unset to follow the stored layout."
         )
     return resolved
-
-
-def _feature_scaling_statistics(
-    data_group: zarr.Group,
-    normalized_data: ChunkedArray,
-    *,
-    nthreads: int,
-) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
-    """Return the mean and population standard deviation of each feature.
-
-    A normalized artifact stores each feature's sum and its sum of squared
-    deviations from the mean (``feature_sum`` and ``feature_m2``), which give
-    both without reading the data. If ``feature_m2`` is absent, statistics
-    are streamed from the normalized data. A variance computed from
-    ``feature_squared_sum`` loses precision.
-    """
-    if "feature_sum" in data_group and "feature_m2" in data_group:
-        moments = ColumnMoments(
-            int(normalized_data.shape[0]),
-            np.asarray(
-                as_zarr_array(data_group["feature_sum"], name="feature_sum")[:],
-                dtype=np.float64,
-            ),
-            np.asarray(
-                as_zarr_array(data_group["feature_m2"], name="feature_m2")[:],
-                dtype=np.float64,
-            ),
-        )
-        return moments.mean, np.sqrt(moments.variance())
-    return normalized_data.mean_and_std(
-        nthreads=nthreads,
-        msg="Calculating normalization statistics",
-    )
 
 
 def _streaming_lsi_block_rows(
@@ -1574,11 +1540,9 @@ class _GraphOperationsMixin(_GraphOperationsBase):
                 )
             else:
                 if enabled_scaling:
-                    mu_raw, sigma_raw = _feature_scaling_statistics(
+                    mu, sigma = feature_scaling_statistics(
                         data_group, normalized_data, nthreads=self.nthreads
                     )
-                    mu = clean_array(mu_raw)
-                    sigma = clean_array(sigma_raw, 1)
                 else:
                     mu = np.array([], dtype=np.float64)
                     sigma = np.array([], dtype=np.float64)
