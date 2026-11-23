@@ -2472,13 +2472,13 @@ def _changed_pause(run: PipelineRunRecord, segment: int) -> bool:
 
 
 def _claimed_pause(run_id: str) -> RuntimeError:
-    """Return the error of a pause that a resume claimed without recording itself."""
+    """Return the error of a pause that a resume or an end claimed without recording itself."""
     return RuntimeError(
-        f"Pipeline run {run_id} is claimed by another resume that has not yet "
-        "recorded itself: another process is resuming the run, or one stopped "
-        "between claiming the pause and recording the resume, and the run then "
-        "stays paused. Open the run again to see whether it runs; if it stays "
-        "paused, confirm that no process resumes it, and "
+        f"Pipeline run {run_id} is claimed by another resume or end that has not "
+        "yet recorded itself: another process is resuming or ending the run, or "
+        "one stopped between claiming the pause and recording itself, and the "
+        "run then stays paused. Open the run again to see whether it moved on; "
+        "if it stays paused, confirm that no process resumes or ends it, and "
         "ds.pipeline.end_paused(run, release_claim=True) ends it, while "
         "ds.pipeline.rerun(run) starts a new run that reuses its finished stages"
     )
@@ -2608,22 +2608,25 @@ def end_paused_pipeline_run_record(
     segment: int,
     reason: str,
     release_claim: bool = False,
-    ended_at_ns: int | None = None,
+    finished_at_ns: int | None = None,
 ) -> PipelineRunRecord:
-    """End a paused run that will not resume, recorded as interrupted with kind ``abandoned_pause``.
+    """End a paused run that will not resume, recorded as interrupted with kind ``ended_pause``.
 
     ``segment`` is the number of segments that the paused run held when the
     caller read it. The end claims that pause as a resume does, with the
     same append-only key, so of a resume and an end that race for one pause,
-    one wins and the other raises. A pause that a resume claimed without
-    recording itself, as a process that stopped between the two writes
-    leaves it, ends only with ``release_claim``, which the caller passes
-    once it has confirmed that no process resumes the run: CyteArc cannot
-    tell a stopped process from a live one in that window. A pause whose
-    write was cut off, ``paused`` with ``complete`` false, ends too.
+    one wins and the other raises. Two states need ``release_claim``, which
+    the caller passes once it has confirmed that the other process stopped,
+    since CyteArc cannot tell a stopped process from a live one: a pause
+    that a resume or an end claimed without recording itself, and a pause
+    whose write was cut off, ``paused`` with ``complete`` false, whose
+    process may still be writing it. If that process is alive after all, the
+    write that lands last wins: the end is lost, or the resume's next stage
+    fails on the ended record.
 
     The run keeps its stage records and artifacts, its last segment closes
-    with reason ``interrupted``, and its interruption holds ``reason``.
+    with reason ``interrupted`` and otherwise as it was, and its
+    interruption holds ``reason``.
 
     Raises:
         TypeError: If ``segment`` is not a non-negative integer, ``reason``
@@ -2631,8 +2634,8 @@ def end_paused_pipeline_run_record(
         ValueError: If the run is not paused, or holds fewer segments than
             ``segment``.
         RuntimeError: If the store cannot claim the pause, another process
-            resumed or ended the run after the caller read it, or a resume
-            claimed the pause and ``release_claim`` is False.
+            resumed or ended the run after the caller read it, or, without
+            ``release_claim``, the pause is claimed or still being written.
     """
     _validate_non_negative_int(segment, "segment")
     _validate_non_empty_string(reason, "reason")
@@ -2661,18 +2664,29 @@ def end_paused_pipeline_run_record(
             "segment must be the number of segments of the paused run, "
             f"{len(run.segments)}, not {segment}"
         )
+    if not run.complete and not release_claim:
+        raise RuntimeError(
+            f"Pipeline run {run_id} has not finished writing its pause: the process "
+            "that pauses it may still be writing, and its last write would put the "
+            "pause back over an end. Once you have confirmed that it stopped, "
+            "ds.pipeline.end_paused(run, release_claim=True) ends the run"
+        )
     if not _claim_pipeline_run_resume(root, run_id, segment):
+        # A resume that claimed the pause after this read may have recorded
+        # itself since; with or without release_claim, the end must not
+        # write over it.
         if _changed_pause(load_pipeline_run_record(root, run_id), segment):
             raise changed_since_read(run_id)
         if not release_claim:
             raise _claimed_pause(run_id)
         # The caller confirmed that the claim's process stopped. A resume can
         # no longer claim the pause, and ends that race write the same end.
-    ended = _finish_time(run.started_at_ns, ended_at_ns)
+    finished = _finish_time(run.started_at_ns, finished_at_ns)
+    *earlier, last = run.segments
     record = replace(
         run,
         label=None,
-        finished_at_ns=ended,
+        finished_at_ns=finished,
         status="interrupted",
         complete=True,
         outputs=(),
@@ -2680,11 +2694,11 @@ def end_paused_pipeline_run_record(
         fields=(),
         error=None,
         interruption=PipelineInterruptionRecord(
-            kind="abandoned_pause",
+            kind="ended_pause",
             message=bounded_record_text(reason),
-            requested_at_ns=ended,
+            requested_at_ns=finished,
         ),
-        segments=_closed_segments(root, run, "interrupted", ended),
+        segments=(*earlier, replace(last, reason="interrupted")),
     )
     _write_terminal_attrs(
         _get_group(root, pipeline_run_path(run_id), "Pipeline run"),

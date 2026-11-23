@@ -821,7 +821,7 @@ def test_a_resume_of_a_pause_that_another_resume_claimed_is_refused(
 
     with pytest.raises(
         RuntimeError,
-        match="is claimed by another resume that has not yet recorded itself: .* "
+        match="is claimed by another resume or end that has not yet recorded itself: .* "
         "ds\\.pipeline\\.end_paused\\(run, release_claim=True\\) ends it, while "
         "ds\\.pipeline\\.rerun\\(run\\) starts a new run",
     ):
@@ -880,8 +880,9 @@ def test_of_two_processes_that_resume_one_run_at_once_one_wins(
 
     assert outcomes["winner"] == "completed"
     assert isinstance(outcomes["loser"], RuntimeError)
-    assert "is claimed by another resume that has not yet recorded itself" in str(
-        outcomes["loser"]
+    assert (
+        "is claimed by another resume or end that has not yet recorded itself"
+        in str(outcomes["loser"])
     )
     # The loser left the run record as the pause wrote it, for the winner.
     assert seen["after the loser"] == paused_record
@@ -1033,7 +1034,7 @@ def test_a_paused_run_ends_and_a_rerun_reuses_its_finished_stages(
         report["run"]["interruption"]["kind"],
         report["run"]["interruption"]["message"],
     ) == (
-        "abandoned_pause",
+        "ended_pause",
         "analysis dropped",
     )
     assert report["run"]["segments"][-1]["reason"] == "interrupted"
@@ -1049,11 +1050,19 @@ def test_a_paused_run_ends_and_a_rerun_reuses_its_finished_stages(
     assert plan.computed and not set(plan.computed) & set(finished)
 
 
-def test_a_pause_whose_write_was_cut_off_ends(paused, tmp_path) -> None:
+def test_a_pause_still_being_written_ends_only_with_release_claim(
+    paused, tmp_path
+) -> None:
     store = _paused_copy(paused, tmp_path)
     _edit_run(store, paused.run_id, complete=False)
+    before = _files(store)
 
-    ended = store.pipeline.end_paused(paused.run_id)
+    with pytest.raises(RuntimeError, match="may still be writing") as refused:
+        store.pipeline.end_paused(paused.run_id)
+    assert "ds.pipeline.end_paused(run, release_claim=True)" in str(refused.value)
+    assert _files(store) == before
+
+    ended = store.pipeline.end_paused(paused.run_id, release_claim=True)
 
     assert ended.status == "interrupted"
     assert ended.report()["run"]["interruption"]["message"] == "ended while paused"
@@ -1084,6 +1093,9 @@ def test_end_paused_refuses_other_values_and_a_read_only_store(
         store.pipeline.end_paused(42)  # type: ignore[arg-type]
     with pytest.raises(TypeError, match="reason must be a non-empty string"):
         store.pipeline.end_paused(paused.run_id, reason="")
+    # The arguments are checked before the store is read.
+    with pytest.raises(TypeError, match="reason must be a non-empty string"):
+        store.pipeline.end_paused("0" * 64, reason="")
     with pytest.raises(TypeError, match="release_claim must be a boolean"):
         store.pipeline.end_paused(paused.run_id, release_claim=1)  # type: ignore[arg-type]
     reader = DataStore(store.zarr_loc, default_assay="RNA", zarr_mode="r")
@@ -1103,7 +1115,7 @@ def test_a_paused_run_that_a_stopped_resume_claimed_ends_once_its_claim_is_relea
     for attempt in (store.pipeline.resume, store.pipeline.end_paused):
         with pytest.raises(
             RuntimeError,
-            match="is claimed by another resume that has not yet recorded itself",
+            match="is claimed by another resume or end that has not yet recorded itself",
         ) as refused:
             attempt(paused.run_id)
         assert "ds.pipeline.end_paused(run, release_claim=True)" in str(refused.value)
@@ -1112,7 +1124,7 @@ def test_a_paused_run_that_a_stopped_resume_claimed_ends_once_its_claim_is_relea
     ended = store.pipeline.end_paused(paused.run_id, release_claim=True)
 
     assert ended.status == "interrupted"
-    assert ended.report()["run"]["interruption"]["kind"] == "abandoned_pause"
+    assert ended.report()["run"]["interruption"]["kind"] == "ended_pause"
 
 
 @pytest.mark.parametrize("first", ["end", "resume"])

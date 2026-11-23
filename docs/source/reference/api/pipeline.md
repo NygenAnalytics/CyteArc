@@ -489,13 +489,20 @@ A cancellation, signal, or failure after a resume ends the run interrupted or fa
 A paused run waits for a resume until a process resumes it. `ds.pipeline.end_paused` ends one that never will, because the analysis was dropped or its resume cannot go on:
 
 ```python
-for paused in ds.pipeline.list_runs(status="paused"):
-    ds.pipeline.end_paused(paused, reason="analysis dropped")
+ds.pipeline.end_paused(paused, reason="analysis dropped")
+
+# Every paused run of the store: list_runs returns at most limit runs, and a
+# run that another process resumed or ended since the listing raises.
+for run in ds.pipeline.list_runs(status="paused", limit=10_000):
+    try:
+        ds.pipeline.end_paused(run, reason="analysis dropped")
+    except (ValueError, RuntimeError):
+        continue
 ```
 
-The run ends `interrupted`, with an interruption of kind `abandoned_pause` whose message is `reason` (default `"ended while paused"`), and its last segment closes with reason `interrupted`, keeping when it paused and the stages that it ran. `list_runs(status="paused")` and the paused count of `DataStore.summary()` no longer include it. The run keeps its stage records and artifacts, and it never held its requested label, so `ds.pipeline.rerun(run, label=...)` reuses every finished stage under a new run ID and can take that label. `end_paused` takes the paused run or its run ID, and refuses a run that is not paused with `ValueError`, writing nothing. A paused run whose pause write was cut off, which cannot resume, ends the same way.
+The run ends `interrupted`, with an interruption of kind `ended_pause` whose message is `reason` (default `"ended while paused"`), and its last segment closes with reason `interrupted` and otherwise as the pause left it, with the time of the pause and the stages that it ran. `list_runs(status="paused")` and the paused count of `DataStore.summary()` no longer include it. The run keeps its stage records and artifacts, and it never held its requested label, so `ds.pipeline.rerun(run, label=...)` reuses every finished stage under a new run ID and can take that label. `end_paused` takes the paused run or its run ID, and refuses a run that is not paused with `ValueError`, writing nothing.
 
-The end claims the pause with the same atomic write as a resume, so of a resume and an end of one paused run, only one goes ahead, and the other raises `RuntimeError` without writing. A pause that a resume claimed without recording itself, as a process that died between the two writes leaves it, ends only with `release_claim=True`. Pass it once you have confirmed that no process resumes the run: CyteArc cannot tell a stopped process from one that is about to record its resume, and does not guess from elapsed time.
+The end claims the pause with the same atomic write as a resume, so of a resume and an end of one paused run, only one goes ahead, and the other raises without writing: `RuntimeError`, which says that another process resumed or ended the run, or, for a resume that the end overtook while it replayed the finished stages, `ValueError`, which says that the run is no longer paused. Two states need `release_claim=True`: a pause that a resume or an end claimed without recording itself, as a process that died between its two writes leaves it, and a pause whose write was cut off, `paused` with `complete` false, whose process may still be writing it. Pass it once you have confirmed that the other process stopped: CyteArc cannot tell a stopped process from a live one, and does not guess from elapsed time. If that process is alive after all, the write that lands last wins: the end can be lost, as a resume's record replaces it and the run goes on, or the resume's next stage fails, as the ended record refuses it.
 
 ## Describe a recipe
 
