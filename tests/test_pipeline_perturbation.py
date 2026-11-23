@@ -1719,6 +1719,33 @@ def _check_every_cell(store: DataStore, path: Path) -> None:
     _check_call_file(ledger, store, store._get_assay("CRISPR"), call_file, cell_ids)
 
 
+def test_the_call_file_check_takes_cell_ids_stored_as_variable_width_text(
+    screen, tmp_path
+) -> None:
+    from tests.storage_helpers import store_as_variable_width_text
+
+    # Another tool stored the cells' IDs as variable-width text, which the
+    # recipe checks a call file against as it checks fixed-width IDs.
+    location = tmp_path / "screen.zarr"
+    shutil.copytree(screen, location)
+    store_as_variable_width_text(
+        zarr.open_group(str(location / "cellData"), mode="r+"), "ids"
+    )
+    store = _open(location)
+    assert zarr.open_group(str(location), mode="r")["cellData/ids"].dtype.kind == "T"
+    path = _call_file(tmp_path / "calls.csv")
+
+    _check_every_cell(store, path)
+    plan = _resolve(store, guide_calling={"path": path}, **HEAD)
+    assert plan.config["stages"]["guide_calling"] == {"path": str(path)}
+    # A file whose barcodes name none of the cells is refused, naming one of
+    # them as stored.
+    with pytest.raises(
+        ValueError, match="but the run's cells have IDs such as 'cell0'"
+    ):
+        _check_every_cell(store, _call_file(tmp_path / "other.csv", prefix="L1__"))
+
+
 def test_the_call_file_check_refuses_a_small_budget_before_the_run(
     screen, tmp_path
 ) -> None:

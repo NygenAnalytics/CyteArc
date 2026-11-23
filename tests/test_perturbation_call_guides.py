@@ -1201,3 +1201,138 @@ def test_loading_thresholds_needs_the_status_names_that_decode_them(
     pd.testing.assert_frame_equal(
         store.perturbation.load_guide_thresholds(ref).table, table
     )
+
+
+def _call_arrays(n_cells: int) -> dict[str, np.ndarray]:
+    """Per-cell arrays of guide calls, as saved calls store them: two slots of calls a cell, some empty."""
+    rng = np.random.default_rng(4)
+    codes = rng.integers(-1, 5, size=(n_cells, 2))
+    codes[:, 1] = np.where(codes[:, 0] < 0, -1, codes[:, 1])
+    return {
+        "values": rng.choice(np.asarray(["CRISPR0", "Multiple", "Negative"]), n_cells),
+        "n_guides": rng.integers(0, 3, n_cells),
+        "top_guide": rng.choice(np.asarray(["CRISPR0", "CRISPR1", ""]), n_cells),
+        "top_umi": rng.integers(0, 50, n_cells),
+        "top_fraction": rng.random(n_cells),
+        "total_umi": rng.integers(0, 100, n_cells),
+        "guide_codes": codes,
+        "guide_umis": rng.integers(0, 50, size=(n_cells, 2)),
+    }
+
+
+@pytest.mark.parametrize("width", ["fixed", "variable"])
+def test_the_tables_of_calls_hold_what_loading_them_charges(width) -> None:
+    import gc
+    import tracemalloc
+
+    from cytearc.perturbation.guide_calls import guide_calls_frames
+
+    # 20,000 cells whose IDs have 6 to 40 characters, every seventh beyond
+    # ASCII, as fixed-width text or as variable-width text that another tool
+    # stored, whose longer IDs NumPy keeps beside its elements.
+    n_cells = 20_000
+    lengths = np.random.default_rng(5).integers(6, 41, n_cells)
+    ids = np.asarray(
+        [
+            f"cell{index:06d}" + "x" * (length - 10) + ("ü" * (index % 7 == 0))
+            for index, length in enumerate(lengths)
+        ]
+    )
+    if width == "variable":
+        ids = ids.astype(np.dtypes.StringDType())
+    arrays = _call_arrays(n_cells)
+    guide_ids = np.asarray([f"CRISPR{index}" for index in range(5)])
+    charged = operations._frame_bytes(ids, arrays, entries="guide_codes")
+    guide_calls_frames(ids, **arrays, guide_ids=guide_ids)
+    held = []
+    for _ in range(3):
+        gc.collect()
+        tracemalloc.start()
+        try:
+            before, _ = tracemalloc.get_traced_memory()
+            tables = guide_calls_frames(ids, **arrays, guide_ids=guide_ids)
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        del tables
+        held.append(peak - before)
+    # The tables of cells and calls, beside the arrays they are made from,
+    # hold no more than loading the calls charges them, the least of three
+    # builds.
+    assert min(held) <= charged
+
+
+def test_the_cells_ids_are_charged_as_their_strings_and_values() -> None:
+    import sys
+
+    # IDs of 2 to 32 characters, each beyond ASCII, so that every Python
+    # string is of one kind, the longest beyond the 15 bytes that NumPy keeps
+    # in a variable-width value's element.
+    ids = np.asarray(
+        [f"é{index}" + "x" * (index % 30) for index in range(40)],
+        dtype=np.dtypes.StringDType(),
+    )
+    # The strings that a table makes of the IDs, fresh from NumPy's values.
+    strings = ids.tolist()
+    longest = max(strings, key=len)
+    utf8 = [len(value.encode("utf-8")) for value in strings]
+    # NEP 55: a 16-byte element for each value and, beyond 15 bytes, its
+    # bytes behind a one-byte size in an arena beside them.
+    elements = 16 * len(strings) + sum(size + 1 for size in utf8 if size > 15)
+
+    every, one = operations._text_bytes(ids)
+
+    # Python strings of one kind are counted as sys.getsizeof gives each,
+    # beside a reference to each.
+    assert every == sum(map(sys.getsizeof, strings)) + 8 * len(strings)
+    # One entry holds the longest ID as NumPy gathers it, at least its
+    # element and sized bytes and at most a quarter more of them for the
+    # arena's growth, and as a Python string beside its reference.
+    sized = 16 + len(longest.encode("utf-8")) + 1
+    string = sys.getsizeof(longest) + 8
+    assert sized + string <= one <= sized + (sized - 16) // 4 + 1 + string
+    # A copy of some of the IDs holds no more than NumPy keeps for every one,
+    # and those at least NEP 55's elements and sized bytes.
+    copy = operations._text_copy_bytes(ids)
+    assert elements <= copy <= elements + (elements - 16 * len(strings)) // 4 + 1
+
+
+def test_a_fixed_width_entry_counts_its_id_at_the_widest_character_of_any() -> None:
+    import sys
+
+    # The first ID is ASCII, a later one beyond Latin-1, so a table entry of
+    # any cell can hold a string of two characters of two bytes each.
+    ids = np.asarray(["ab", "c中"])
+
+    every, one = operations._text_bytes(ids)
+
+    assert one >= ids.dtype.itemsize + 8 + sys.getsizeof("中中")
+    assert every >= sum(sys.getsizeof(str(value)) for value in ids) + 8 * len(ids)
+
+
+def test_checking_variable_width_ids_against_a_call_file_holds_what_it_charges() -> (
+    None
+):
+    from tests.memory_helpers import least_traced_charge
+
+    # IDs of a merged store's sample, 41 characters each, which NumPy keeps
+    # beside its elements, so that the check's copy of the IDs that hold the
+    # samples' separator holds their bytes too.
+    ids = np.asarray(
+        [f"s1__{'A' * 30}{index:05d}-1" for index in range(20_000)],
+        dtype=np.dtypes.StringDType(),
+    )
+
+    def check(ledger) -> None:
+        operations._check_cell_ids(
+            ledger,
+            ids,
+            None,
+            barcode_suffix="-1",
+            cells="the cells",
+            restrict="select only",
+            remedy="or call the guides from their counts",
+        )
+
+    traced = least_traced_charge(check)
+    assert traced.held <= traced.charged

@@ -543,12 +543,7 @@ def variable_width_joined(join_template, tmp_path):
     return open_store(target)
 
 
-# The importers that read the selected cells' IDs as Python strings; guide
-# calls read them as stored.
-STRING_ID_IMPORTERS = sorted(name for name in IMPORTERS if name != "import_guide_calls")
-
-
-@pytest.mark.parametrize("name", STRING_ID_IMPORTERS)
+@pytest.mark.parametrize("name", sorted(IMPORTERS))
 def test_barcodes_join_to_cells_whose_ids_are_variable_width_text(
     variable_width_joined, tmp_path, name
 ) -> None:
@@ -586,6 +581,50 @@ def test_barcodes_join_to_cells_whose_ids_are_variable_width_text(
     assert list(messages) == [
         importer.warning(importer.files[0], 1, 4, unmatched, True)
     ]
+
+
+def test_a_guide_call_import_lets_go_of_the_ids_it_read_whatever_their_width(
+    join_template, tmp_path, monkeypatch
+) -> None:
+    import shutil
+
+    import zarr
+
+    from cytearc.datastore._operations import perturbation_guides
+    from cytearc.utils.memory_budget import MemoryLedger
+    from tests.storage_helpers import open_store, store_as_variable_width_text
+
+    # The import holds its guide IDs, padded calls and summaries once it has
+    # joined the barcodes, and lets go of the selected cells' IDs and the
+    # join, as it read them: the same over IDs stored as either width.
+    ledgers: list[MemoryLedger] = []
+
+    class Kept(MemoryLedger):
+        def __init__(self, *args, **kwargs) -> None:
+            super().__init__(*args, **kwargs)
+            ledgers.append(self)
+
+    monkeypatch.setattr(perturbation_guides, "MemoryLedger", Kept)
+    held = {}
+    for width in ("fixed", "variable"):
+        target = tmp_path / f"{width}.zarr"
+        shutil.copytree(join_template, target)
+        if width == "variable":
+            store_as_variable_width_text(
+                zarr.open_group(target / "cellData", mode="r+"), "ids"
+            )
+        store = open_store(target)
+        path = write_guide_call_file(tmp_path / f"{width}.csv", ["s2__GGGT-1"])
+        ledgers.clear()
+        store.perturbation.import_guide_calls(
+            path, cell_selection=store.snapshot_cell_selection("s2")
+        )
+        (ledger,) = (
+            kept for kept in ledgers if kept.doing.startswith("Importing the guide")
+        )
+        held[width] = ledger.held_bytes
+
+    assert held["variable"] == held["fixed"] > 0
 
 
 @pytest.mark.parametrize("name", sorted(IMPORTERS))

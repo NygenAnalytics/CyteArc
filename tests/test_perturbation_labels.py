@@ -228,6 +228,45 @@ def test_a_target_column_of_variable_width_text_labels_cells_alike(
     )
 
 
+def test_calls_and_labels_of_cells_whose_ids_are_variable_width_text_load_alike(
+    store, template
+) -> None:
+    import zarr
+
+    from tests.storage_helpers import store_as_variable_width_text
+
+    # The tables of the same calls and labels over the cells' IDs as
+    # fixed-width text, before another tool stored them as variable-width
+    # text.
+    fixed_calls = store.perturbation.load_guide_calls(template.calls)
+    fixed_labels = store.perturbation.load_labels(
+        store.perturbation.labels(template.calls, controls=CONTROLS)
+    )
+    store_as_variable_width_text(
+        zarr.open_group(f"{store.zarr_loc}/cellData", mode="r+"), "ids"
+    )
+    store = open_store(store.zarr_loc)
+    assert store.cells._get_array("ids").dtype.kind == "T"
+
+    calls = store.perturbation.load_guide_calls(template.calls)
+    labels = store.perturbation.load_labels(
+        store.perturbation.labels(template.calls, controls=CONTROLS)
+    )
+
+    cells = [f"cell{index}" for index in range(len(COUNTS))]
+    assert calls.cells.index.tolist() == fixed_calls.cells.index.tolist() == cells
+    for name, column in fixed_calls.cells.items():
+        assert calls.cells[name].tolist() == column.tolist(), name
+    for name, column in fixed_calls.calls.items():
+        assert calls.calls[name].tolist() == column.tolist(), name
+    assert labels.cells.index.tolist() == cells
+    assert labels.cells["label"].tolist() == SINGLE
+    for frame in ("cells", "targets", "guides"):
+        loaded, fixed = getattr(labels, frame), getattr(fixed_labels, frame)
+        for name, column in fixed.items():
+            assert loaded[name].tolist() == column.tolist(), (frame, name)
+
+
 def test_a_target_column_of_numbers_names_each_target_by_its_number(
     store, template
 ) -> None:
