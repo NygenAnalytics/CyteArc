@@ -21,6 +21,7 @@ from ..settings import (
 from ..stages import (
     Outputs,
     clustering_tail,
+    doublet_stage,
     filtering_stage,
     graph_output_keys,
     graph_stages,
@@ -36,7 +37,6 @@ from .common import (
     check_harmony_labels,
     cell_snapshots,
     check_tsne,
-    doublet_stage,
     harmony_config,
     modality_assay,
     recorded_modality_call,

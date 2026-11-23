@@ -24,6 +24,7 @@ from ..settings import (
 from ..stages import (
     Outputs,
     clustering_tail,
+    doublet_stage,
     filtering_stage,
     graph_output_keys,
     graph_stages,
@@ -37,7 +38,6 @@ from .common import (
     cell_snapshots,
     check_labeled_cells,
     check_tsne,
-    doublet_stage,
     modality_assay,
     recorded_modality_call,
     resolve_embeddings,

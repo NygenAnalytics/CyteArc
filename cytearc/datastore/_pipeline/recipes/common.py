@@ -9,17 +9,12 @@ import numpy as np
 from ....assay import NormMethod
 from ....assay.normalization import resolve_normalization_params
 from ....metadata.membership import require_measured_cells
-from ....metadata.rows import apply_missing_mask
 from ....metadata.selection import valid_category_mask
-from ....storage.artifacts import ArtifactRef, artifact_group
-from ....storage.selections import (
-    read_stored_selection_indices,
-    read_stored_selection_mask,
-)
+from ....storage.artifacts import ArtifactRef
+from ....storage.selections import read_stored_selection_mask
 from ....storage.types import as_zarr_group
 from ....utils.arguments import bool_argument, integer_argument
-from ..cluster_selection import cluster_label_values
-from ..executor import PlannedStage, RunState
+from ..executor import PlannedStage
 from ..fields import reserved_fields
 from ..filtering import (
     filter_columns,
@@ -47,22 +42,11 @@ from ..settings import (
 )
 from ..stages import (
     CellSource,
-    Outputs,
     cells_argument,
     harmony_stage,
     hvg_stage,
     normalization_stage,
     pca_stage,
-)
-
-
-# The settings that make doublet scoring possible when the saved clustering
-# has one cluster. Silhouette selection never picks such a partition.
-ONE_CLUSTER_DOUBLET_REMEDY = (
-    "Select a Leiden partition with two or more clusters with "
-    "leiden={'selected': ...}, or omit 'selected' so that cluster selection "
-    "chooses one; set doublets={'heterotypic_fraction': 0} to simulate "
-    "doublets from any two sampled cells; or pass doublets=False."
 )
 
 
@@ -717,79 +701,6 @@ def resolve_doublet_samples(
     if column not in store.cells.columns:
         raise KeyError(f"Doublet sample column {column!r} was not found")
     return (column,)
-
-
-def doublet_stage(
-    enabled: bool,
-    settings: Mapping[str, Any],
-    sample_columns: tuple[str, ...],
-) -> PlannedStage:
-    """Return the ``doublets`` stage, which scores the run's saved clustering.
-
-    ``sample_columns`` are the columns that :func:`resolve_doublet_samples`
-    resolved, whose labels the run froze in ``doublet_sample_snapshot``.
-    """
-    if not enabled:
-        return PlannedStage("doublets", None)
-    # The recipe resolved the sample columns, Harmony's included.
-    scoring = {key: value for key, value in settings.items() if key != "sample_column"}
-
-    def action(state: RunState) -> Outputs:
-        store = state.store
-        analysis_selection = state.artifacts["analysis_cell_selection"]
-        clusters = state.artifacts["clusters"]
-        sample_labels = None
-        if sample_columns:
-            rows = read_stored_selection_indices(
-                store.zw,
-                analysis_selection,
-                kind="cell_selection",
-                scope="datastore",
-                assay=None,
-                table_path="cellData",
-            )
-            snapshot = artifact_group(
-                store.zw, state.artifacts["doublet_sample_snapshot"]
-            )
-            sample_labels = []
-            for column in sample_columns:
-                values, missing = snapshot_column_values(snapshot, column)
-                sample_labels.append(
-                    apply_missing_mask(
-                        values[rows],
-                        None if missing is None else missing[rows],
-                        labels=True,
-                    )
-                )
-        # With Harmony the graph is the corrected one, and each sample is
-        # scored on the uncorrected PCA or LSI that Harmony took as input, so
-        # no other graph is built.
-        ref = store._run_doublet_detection_artifact(
-            source_assay=state.assay,
-            cell_selection=analysis_selection,
-            clusters=clusters,
-            cluster_values=cluster_label_values(store.zw, clusters),
-            connectivity=state.artifacts["connectivity_map"],
-            feature_snapshot=state.artifacts["feature_snapshot"],
-            sample_column=sample_columns or None,
-            sample_labels=sample_labels,
-            one_cluster_remedy=ONE_CLUSTER_DOUBLET_REMEDY,
-            **scoring,
-        )
-        return (("doublets", ref),)
-
-    return PlannedStage(
-        "doublets",
-        action,
-        inputs=(
-            "analysis_cell_selection",
-            "clusters",
-            "connectivity_map",
-            "feature_snapshot",
-            *(("doublet_sample_snapshot",) if sample_columns else ()),
-        ),
-        outputs=("doublets",),
-    )
 
 
 def check_tsne(embeddings: EmbeddingSettings) -> None:
