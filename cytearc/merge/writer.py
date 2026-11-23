@@ -75,6 +75,9 @@ class _MergeImportRequirements:
     sourceDtype: np.dtype[Any]
     residentBytes: int
     extraProducerBytes: Callable[[int], int]
+    # The bytes of one source row of a batch, which extraProducerBytes counts
+    # for each row beside the remap's staging and a read's decode.
+    sourceRowBytes: int
 
 
 def remap_block_to_coo(
@@ -251,6 +254,15 @@ def _column_run(counts: ChunkedArray, start: int, stop: int) -> ChunkedArray:
     )
 
 
+def _column_runs(counts: ChunkedArray, width: int) -> list[ChunkedArray]:
+    """Return ``counts`` split into runs of ``width`` columns, the last of the rest."""
+    n_columns = int(counts.shape[1])
+    return [
+        _column_run(counts, start, min(n_columns, start + width))
+        for start in range(0, n_columns, width)
+    ]
+
+
 def _count_read_runs(counts: ChunkedArray, room: int) -> list[ChunkedArray] | None:
     """Return runs of whole chunk columns of ``counts`` whose streams fit in ``room`` bytes.
 
@@ -267,10 +279,7 @@ def _count_read_runs(counts: ChunkedArray, room: int) -> list[ChunkedArray] | No
         columns = min(n_columns, chunks * width)
         run = _column_run(counts, 0, columns)
         if run.stream_bytes(_count_scratch_bytes(columns)) <= room:
-            return [
-                _column_run(counts, start, min(n_columns, start + columns))
-                for start in range(0, n_columns, columns)
-            ]
+            return _column_runs(counts, columns)
     return None
 
 
@@ -489,9 +498,11 @@ def _merge_import_requirements(
     )
     resident_bytes = base_resident + int(cumulative.nbytes)
 
+    source_row_bytes = int(source_n_feats * value_bytes)
+
     def extra_producer_bytes(width: int) -> int:
         rows = max(0, int(width))
-        dense_bytes = rows * source_n_feats * value_bytes
+        dense_bytes = rows * source_row_bytes
         # Remap/canonicalize staging for source-width COO indices and values.
         remap_bytes = (
             rows
@@ -505,6 +516,7 @@ def _merge_import_requirements(
         sourceDtype=np.dtype(source_dtype),
         residentBytes=resident_bytes,
         extraProducerBytes=extra_producer_bytes,
+        sourceRowBytes=source_row_bytes,
     )
 
 
@@ -710,11 +722,13 @@ def write_assay_counts(
     ):
         shard_rows = array_shard_rows(destination)
         mask_bytes = np.dtype(bool).itemsize if destination_dtype.kind in "fc" else 0
-        # A batch holds its source rows and their cast, its destination rows,
-        # and a float destination's zero mask, beside the band it is copied
-        # into and what its read holds, or the read of held rows.
+        # A batch holds the cast of its source rows, its destination rows and
+        # a float destination's zero mask, beside the band it is copied into.
+        # A batch read alone also holds its source rows and what its read
+        # decodes; a batch cut from held cells takes its rows as a view of
+        # them, beside the read of the held cells.
         batch_reserve = (
-            batch_rows * source_n_feats * (value_bytes + destination_dtype.itemsize)
+            batch_rows * source_n_feats * destination_dtype.itemsize
             + batch_rows * alignment.nFeats * (destination_dtype.itemsize + mask_bytes)
             + shard_rows * alignment.nFeats * destination_dtype.itemsize
         )
@@ -725,7 +739,12 @@ def write_assay_counts(
                 held = held_bytes(held_rows)
                 reserve = batch_reserve + held_read_bytes(held_rows)
             else:
-                held, reserve = 0, batch_reserve + requirements.extraProducerBytes(0)
+                held = 0
+                reserve = (
+                    batch_reserve
+                    + batch_rows * source_n_feats * value_bytes
+                    + requirements.extraProducerBytes(0)
+                )
             try:
                 plan_dense_write(
                     destination,
@@ -777,7 +796,8 @@ def write_assay_counts(
 
     def sparse_plan(held_rows: int) -> SparseImportPlan:
         """Plan the sparse write of batches cut from ``held_rows`` held rows."""
-        # The held rows' reads replace what a batch's read decodes.
+        # The held rows' reads replace what a batch's read decodes, and a
+        # batch takes its source rows as a view of the held rows.
         decode = requirements.extraProducerBytes(0)
         return resolve_sparse_import_batch(
             (destination,),
@@ -790,6 +810,7 @@ def write_assay_counts(
             extraProducerBytes=lambda width: (
                 requirements.extraProducerBytes(width)
                 - decode
+                - width * requirements.sourceRowBytes
                 + held_read_bytes(held_rows)
             ),
         )
@@ -861,23 +882,28 @@ def _chunk_column_runs(counts: ChunkedArray) -> list[ChunkedArray]:
     those rows. Counts that are not stored in chunks give all of their
     columns as one run.
     """
-    n_columns = int(counts.shape[1])
-    width = max(1, counts.chunk_columns())
-    return [
-        _column_run(counts, start, min(n_columns, start + width))
-        for start in range(0, n_columns, width)
-    ]
+    return _column_runs(counts, max(1, counts.chunk_columns()))
+
+
+# Zarr's orthogonal indexing makes several arrays of 8-byte integers over
+# the rows that an index array selects, sorting them by chunk at the array
+# and again inside the shard: reads of up to 400,000 rows of one chunk
+# column traced about 60 to 64 bytes a row beside their values.
+_INDEX_BYTES_PER_SELECTED_ROW = 72
 
 
 def _held_read_bytes(run: ChunkedArray, rows: int) -> int:
     """Return what a read of ``rows`` rows of ``run``, one chunk column, holds beside the rows held.
 
     A read of rows by an index array also holds Zarr's copy of the rows that
-    it selects from each chunk, which the read's charge leaves out; within
-    one chunk column that copy can be as large as the rows read.
+    it selects from each chunk and the integers that index them, which the
+    read's charge leaves out; within one chunk column the copy can be as
+    large as the rows read, and the integers outweigh a narrow column.
     """
     selected = int(rows) * int(run.shape[1]) * run.dtype.itemsize
-    return run._read_bytes(selected) + selected
+    return (
+        run._read_bytes(selected) + selected + int(rows) * _INDEX_BYTES_PER_SELECTED_ROW
+    )
 
 
 def _held_block_rows(

@@ -7971,6 +7971,8 @@ def _merge_chunk_columns(
 
     def cut(name):
         def call(values, *args, **kwargs):
+            # A batch, read alone or cut from held cells, spans one batch.
+            assert values.shape[0] <= held[-1][0]
             if isinstance(values, np.ndarray) and values.base is not None:
                 held_cells.append(weakref.ref(values.base))
             return real[name](values, *args, **kwargs)
@@ -8045,6 +8047,25 @@ def _same_files(merged: dict, reference: dict) -> None:
     assert [name for name in files if files[name] != expected[name]] == []
 
 
+def _traced_band_read(location, rows: int) -> int:
+    """Return the traced peak of reading ``rows`` shuffled cells of every column of a source."""
+    import tracemalloc
+
+    from cytearc import DataStore
+    from cytearc.utils.compute import controlled_compute
+
+    counts = DataStore(location, default_assay="Counts", nthreads=1).Counts.rawData
+    cells = np.random.default_rng(3).permutation(int(counts.shape[0]))[:rows]
+    # The first read makes the objects that every later read reuses.
+    controlled_compute(counts[cells, :], 1)
+    tracemalloc.start()
+    try:
+        controlled_compute(counts[cells, :], 1)
+        return tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+
+
 @pytest.mark.parametrize("most_batches", [None, 5, 1])
 def test_a_merge_decodes_each_source_chunk_once_for_each_run_of_cells_it_holds(
     tmp_path, monkeypatch, chunk_column_sources, most_batches
@@ -8081,6 +8102,13 @@ def test_a_merge_decodes_each_source_chunk_once_for_each_run_of_cells_it_holds(
     # are read.
     assert (merged["cut"] > 0) == (most_batches != 1)
     assert merged["alive"] == 0
+    if most_batches == 1:
+        # Reading a band at a time, the write reserves what a band's read of
+        # every column holds, traced on a shuffled band of each source.
+        assert merged["reserve"] >= max(
+            _traced_band_read(location, merged["batch_rows"])
+            for location in chunk_column_sources
+        )
     # The store's files are those of a merge that reads a band at a time.
     _same_files(merged, reference)
     stored = zarr.open_group(str(tmp_path / "merged.zarr"), mode="r")
@@ -8163,30 +8191,212 @@ def test_a_merge_at_its_least_budget_holds_runs_of_its_source_cells(
     )
 
 
-def test_a_held_read_holds_no_more_than_its_charge(tmp_path):
+@pytest.mark.slow
+def test_a_merge_holds_runs_of_a_composite_source(
+    tmp_path, monkeypatch, chunk_column_sources
+):
+    from cytearc import DataStore
+    from cytearc.composite import create_composite
+
+    left, right = chunk_column_sources
+    joint = str(tmp_path / "joint.zarr")
+    create_composite(
+        {
+            name: DataStore(location, default_assay="Counts", nthreads=1)
+            for name, location in (("a", left), ("b", right))
+        },
+        at=joint,
+        features="union",
+        assay="Counts",
+        nthreads=1,
+    )
+    merged = _merge_chunk_columns(
+        [joint, left], tmp_path / "merged.zarr", monkeypatch, most_batches=5
+    )
+    reference = _merge_chunk_columns(
+        [joint, left], tmp_path / "reference.zarr", monkeypatch, most_batches=1
+    )
+
+    # The composite's 1,100 cells, which it reads from its sources in one run
+    # of every column, are held five bands of 16 cells at a time, beside
+    # runs of the left source's 600 cells read a chunk column at a time.
+    rows = merged["held_rows"]
+    assert merged["batch_rows"] == 16
+    assert rows == 80
+    assert merged["widths"] == {40: -(-1100 // rows), 10: 4 * -(-600 // rows)}
+    assert sum(merged["decodes"].values()) < sum(reference["decodes"].values())
+    assert merged["cut"] > 0
+    assert merged["alive"] == 0
+    _same_files(merged, reference)
+
+
+def test_a_merge_holds_what_fits_of_one_chunk_column_whose_whole_read_does_not(
+    tmp_path, monkeypatch
+):
+    import cytearc.merge.writer as merge_writer
+    from cytearc import DataStore
+    from tests.storage_helpers import write_count_store
+
+    # Sources of 1,200 and 1,000 cells by 200 float32 features, 10% of them 1
+    # to 9, each stored in one chunk of every cell and feature; the right
+    # source's last feature shares its name with its first, so a merge by
+    # name sums them. At 4,324,240 bytes a merge by name planned to hold each
+    # whole block, whose read then refused the budget halfway through the
+    # dump (#541).
+    ids = [f"g{index}" for index in range(200)]
+    right_names = [*ids[:-1], ids[0]]
+    sources = {}
+    for name, n_cells, seed, names in (
+        ("left", 1200, 1, ids),
+        ("right", 1000, 2, right_names),
+    ):
+        rng = np.random.default_rng(seed)
+        values = np.zeros((n_cells, 200), dtype=np.float32)
+        nonzero = rng.random(values.shape) < 0.1
+        values[nonzero] = rng.integers(1, 10, size=int(nonzero.sum()))
+        location = str(tmp_path / f"{name}.zarr")
+        write_count_store(
+            location,
+            {"Counts": values},
+            "float32",
+            feature_ids={"Counts": ids},
+            feature_names={"Counts": names},
+            cell_ids=[f"{name[0]}{index}" for index in range(n_cells)],
+            policy=CountMatrixPolicy(
+                unitBytes=1200 * 200 * 4, chunkBytes=1200 * 200 * 4
+            ),
+        )
+        sources[name] = location, values, names
+    held: list[tuple[int, int, int]] = []
+    real = merge_writer._held_block_rows
+
+    def recorded(block_rows, batch_rows, fits):
+        rows = real(block_rows, batch_rows, fits)
+        held.append((block_rows, batch_rows, rows))
+        return rows
+
+    monkeypatch.setattr(merge_writer, "_held_block_rows", recorded)
+    path = tmp_path / "merged.zarr"
+    DataStoreMerge(
+        datasets=[
+            DataStore(location, default_assay="Counts", nthreads=1)
+            for location, _, _ in sources.values()
+        ],
+        zarr_path=str(path),
+        names=list(sources),
+        prepend_text="",
+        nthreads=1,
+        mem_budget=4_324_240,
+        overwrite=True,
+        feature_key="names",
+    ).dump()
+
+    # The write holds runs of whole batches of each 1,200-cell block.
+    block_rows, batch_rows, rows = held[-1]
+    assert block_rows == 1200
+    assert batch_rows < rows
+    assert rows % batch_rows == 0 or rows == block_rows
+    # Each merged cell holds its source's values summed by feature name.
+    stored = zarr.open_group(str(path), mode="r")
+    merged_names = np.asarray(stored["Counts/featureData/names"][:]).astype(str)
+    expected = {}
+    for name, (_, values, names) in sources.items():
+        columns = np.asarray(names)
+        for index, row in enumerate(values):
+            expected[f"{name}__{name[0]}{index}"] = [
+                float(row[columns == feature].sum()) for feature in merged_names
+            ]
+    assert _rows_by_id(stored, "Counts/counts") == expected
+
+
+def test_a_merge_lets_an_allocation_failure_in_its_held_row_search_through(
+    tmp_path, monkeypatch, chunk_column_sources
+):
+    import cytearc.merge.writer as merge_writer
+    from cytearc import DataStore
+
+    # Blocks of 600 cells span many bands of 16, so the write plans the cells
+    # it could hold before it reads any; an allocation that fails while it
+    # plans is no refusal of those cells and reaches the caller.
+    failure = MemoryError("the allocation failed")
+    plans: list[int] = []
+    searches: list[tuple[int, int]] = []
+    plan = merge_writer.plan_dense_write
+    search = merge_writer._held_block_rows
+
+    def fails_first(*args, **kwargs):
+        plans.append(kwargs["residentBytes"])
+        if len(plans) == 1:
+            raise failure
+        return plan(*args, **kwargs)
+
+    def recorded(block_rows, batch_rows, fits):
+        searches.append((block_rows, batch_rows))
+        return search(block_rows, batch_rows, fits)
+
+    monkeypatch.setattr(merge_writer, "plan_dense_write", fails_first)
+    monkeypatch.setattr(merge_writer, "_held_block_rows", recorded)
+    with pytest.raises(MemoryError) as raised:
+        DataStoreMerge(
+            datasets=[
+                DataStore(location, default_assay="Counts", nthreads=1)
+                for location in chunk_column_sources
+            ],
+            zarr_path=str(tmp_path / "merged.zarr"),
+            names=["left", "right"],
+            prepend_text="",
+            nthreads=1,
+            overwrite=True,
+            policy=CountMatrixPolicy(unitBytes=1280, chunkBytes=640),
+        ).dump()
+    assert raised.value is failure
+    assert searches == [(600, 16)]
+    assert len(plans) == 1
+
+
+@pytest.mark.parametrize("column", ["wide", "narrow"])
+def test_a_held_read_holds_no_more_than_its_charge(tmp_path, column):
     import tracemalloc
 
     from cytearc import DataStore
-    from cytearc.merge.writer import _chunk_column_runs, _held_read_bytes
+    from cytearc.merge.writer import (
+        _INDEX_BYTES_PER_SELECTED_ROW,
+        _chunk_column_runs,
+        _held_read_bytes,
+    )
     from cytearc.utils.compute import controlled_compute
     from tests.storage_helpers import write_count_store
 
-    # 1,000 cells by 2,000 features in chunks of every cell and 500
-    # features, half zeros, which compress to a fraction of their 2 MB.
     rng = np.random.default_rng(5)
-    values = rng.integers(0, 10, size=(1000, 2000)).astype(np.float32)
+    if column == "wide":
+        # 1,000 cells by 2,000 float32 features in chunks of every cell and
+        # 500 features, half zeros, which compress to a fraction of 2 MB.
+        n_cells, n_features, width, dtype = 1000, 2000, 500, np.float32
+    else:
+        # 100,000 cells by 4 uint16 features in chunks of every cell and one
+        # feature, so a read holds far more integers indexing its cells
+        # than values.
+        n_cells, n_features, width, dtype = 100_000, 4, 1, np.uint16
+    values = rng.integers(0, 10, size=(n_cells, n_features)).astype(dtype)
     values[rng.random(values.shape) < 0.5] = 0
     location = str(tmp_path / "source.zarr")
+    itemsize = np.dtype(dtype).itemsize
     write_count_store(
         location,
         {"Counts": values},
-        "float32",
-        policy=CountMatrixPolicy(unitBytes=8_000_000, chunkBytes=2_000_000),
+        np.dtype(dtype).name,
+        policy=CountMatrixPolicy(
+            unitBytes=n_cells * n_features * itemsize,
+            chunkBytes=n_cells * width * itemsize,
+        ),
     )
-    counts = DataStore(location, default_assay="Counts", nthreads=1).Counts.rawData
+    # No floor of features per cell, which four features would trip.
+    counts = DataStore(
+        location, default_assay="Counts", nthreads=1, min_features_per_cell=-1
+    ).Counts.rawData
     run = _chunk_column_runs(counts)[0]
-    assert run.shape == (1000, 500)
-    cells = rng.permutation(1000)
+    assert run.shape == (n_cells, width)
+    cells = rng.permutation(n_cells)
     # The first read makes the objects that every later read reuses.
     controlled_compute(run[cells, :], 1)
     tracemalloc.start()
@@ -8196,13 +8406,18 @@ def test_a_held_read_holds_no_more_than_its_charge(tmp_path):
     finally:
         tracemalloc.stop()
 
-    np.testing.assert_array_equal(held, values[cells, :500])
-    # Every cell of the chunk column read by an index array holds the rows
-    # that Zarr copies from the chunk beside the copies that the read's
-    # charge counts, so the charge holds the read only with that copy.
-    charge = _held_read_bytes(run, 1000)
+    np.testing.assert_array_equal(held, values[cells, :width])
+    # A read of every cell of the chunk column by an index array holds the
+    # rows that Zarr copies from the chunk and the integers that index the
+    # cells, beside the copies that the read's charge counts. The charge
+    # holds the read only with the copy for the wide column, and only with
+    # the integers for the narrow one.
+    charge = _held_read_bytes(run, n_cells)
     assert peak <= charge
-    assert peak > charge - 1000 * 500 * 4
+    if column == "wide":
+        assert peak > charge - n_cells * width * itemsize
+    else:
+        assert peak > charge - n_cells * _INDEX_BYTES_PER_SELECTED_ROW
 
 
 @pytest.mark.parametrize(
