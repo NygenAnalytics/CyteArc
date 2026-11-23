@@ -1961,6 +1961,23 @@ def test_a_failed_staging_leaves_nothing_in_the_cache(tmp_path, monkeypatch):
     np.testing.assert_array_equal(staged[:], source[:])
 
 
+def test_a_place_that_other_files_hold_raises_the_rename_error_and_keeps_them(
+    tmp_path,
+):
+    import errno
+
+    source = _normalized_source(tmp_path / "source.zarr", (32, 4))
+    cache = tmp_path / "cache" / "artifact" / "normed.zarr"
+    cache.mkdir(parents=True)
+    (cache / "notes.txt").write_text("kept")
+    # The folder holds no copy, so the call stages one, whose rename fails.
+    with pytest.raises(OSError) as refused:
+        stage_normed_array(str(cache), source)
+    assert refused.value.errno in (errno.ENOTEMPTY, errno.EEXIST)
+    assert sorted(path.name for path in cache.parent.iterdir()) == ["normed.zarr"]
+    assert [path.name for path in cache.iterdir()] == ["notes.txt"]
+
+
 @pytest.mark.parametrize("left", ["incomplete", "another shape", "no array"])
 def test_a_copy_that_an_earlier_release_left_incomplete_is_refused(tmp_path, left):
     source = _normalized_source(tmp_path / "source.zarr", (32, 4))

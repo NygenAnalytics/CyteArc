@@ -104,6 +104,7 @@
   "tests/test_composite_reader.py": 29.9,
   "tests/test_composite_source_cache.py": 4.4,
   "tests/test_compute_thread_limits.py": 16.9,
+  "tests/test_concurrent_writers.py": 85.8,
   "tests/test_consolidated_metadata.py": 2.4,
   "tests/test_content_stamps.py": 0.6,
   "tests/test_count_dtype.py": 1.9,
@@ -300,7 +301,7 @@
   "tests/test_pipeline_plan.py": 18.2,
   "tests/test_pipeline_recipes.py": 65.5,
   "tests/test_pipeline_rerun.py": 20.7,
-  "tests/test_pipeline_run_foundation.py": 5.1,
+  "tests/test_pipeline_run_foundation.py": 9.1,
   "tests/test_pipeline_run_record_paths.py": 14.9,
   "tests/test_pipeline_settings.py": 13.4,
   "tests/test_pipeline_shutdown_subprocess.py": 14.6,
@@ -483,5 +484,5 @@
   "tests/test_writers_contracts.py": 1.1,
   "tests/test_zarr_block_indexing.py": 0.1,
   "tests/test_zarr_decoding_threads.py": 47.7,
-  "tests/test_zarr_store.py": 5.1
+  "tests/test_zarr_store.py": 6.4
 }
