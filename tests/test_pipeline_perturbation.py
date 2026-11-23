@@ -1327,6 +1327,35 @@ def test_guide_calling_imports_cell_rangers_calls(runs, tmp_path) -> None:
     assert _stages(again)["guide_calling"]["warnings"] == warned
 
 
+def test_a_paused_screen_resumes_only_where_its_call_file_is(runs, tmp_path) -> None:
+    store = _copy(runs.location, tmp_path)
+    path = _call_file(tmp_path / "protospacer_calls_per_cell.csv")
+    settings = {"efficiency": False, "edistance": False, **QUICK}
+    # PCA is the last stage that these settings run.
+    paused = store.pipeline.perturbation(
+        labels=LABELS,
+        guide_calling={"path": path},
+        run_until="normalization",
+        **settings,
+    )
+    assert paused.status == "paused"
+    record = zarr.open_group(store.zarr_loc, mode="r")[f"pipeline/runs/{paused.run_id}"]
+    before = dict(record.attrs)
+    # The machine that resumes holds the call file at another path.
+    moved = path.rename(tmp_path / "calls_elsewhere.csv")
+
+    with pytest.raises(
+        FileNotFoundError, match="guide_calling\\['path'\\] .* is not a file"
+    ):
+        store.pipeline.resume(paused.run_id)
+    assert dict(record.attrs) == before
+
+    moved.rename(path)
+    run = store.pipeline.resume(paused.run_id)
+    assert (run.run_id, run.status) == (paused.run_id, "completed")
+    assert store.artifacts.inspect(run["guide_calls"]).operation == "import_guide_calls"
+
+
 def test_an_import_after_qc_filtering_warns_only_about_unknown_barcodes(
     runs, tmp_path
 ) -> None:

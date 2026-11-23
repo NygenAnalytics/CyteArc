@@ -1140,11 +1140,13 @@ class PipelineAccessor:
         run recorded, as :meth:`rerun` does, and restores what the finished
         stages left from their saved artifacts, computing and writing nothing
         for them. It then runs the next stages and completes the run, or
-        pauses it again after the stage that ``run_until`` names. The store
-        is all that a resume reads, so the process that resumes can run on a
-        larger machine, with the ``nthreads`` and memory budget of the store
-        that it opened. The run record's ``segments`` hold when each process
-        started and stopped, the stages that it ran, and why it stopped.
+        pauses it again after the stage that ``run_until`` names. A resume
+        reads only the store, and the call file of a ``perturbation`` run
+        that imports its guide calls, at its recorded path, so the process
+        that resumes can run on a larger machine, with the ``nthreads`` and
+        memory budget of the store that it opened. The run record's
+        ``segments`` hold when each process started and stopped, the stages
+        that it ran, and why it stopped.
 
         The run keeps its requested label without reserving it: the label is
         checked when the run pauses and resumes, and claimed when the run
@@ -1175,6 +1177,8 @@ class PipelineAccessor:
             RuntimeError: If the store lacks atomic conditional writes, an
                 unfinished run holds the claim of its label, or another
                 process resumed the run first.
+            FileNotFoundError: If the run imports guide calls from a file
+                that is no longer at its recorded path.
             PipelineExecutionError: If a stage fails, or the run cannot pause
                 again; the run is recorded failed.
             PipelineCancelled: If ``cancel`` is cancelled; the run is recorded
