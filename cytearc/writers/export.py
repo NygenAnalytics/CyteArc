@@ -2935,10 +2935,13 @@ def _matrix_market_lines(
 ) -> bytes:
     """Return Matrix Market coordinate lines, ``feature cell value``, one-based.
 
-    Integer values are formatted with NumPy; other values as ``str`` of the
-    value in its dtype, as pandas writes them.
+    Non-negative integer values are formatted with NumPy; other values,
+    negative integers among them, as ``str`` of the value in its dtype, as
+    pandas writes them.
     """
-    if values.dtype.kind in "biu":
+    if values.dtype.kind in "bu" or (
+        values.dtype.kind == "i" and (values.size == 0 or int(values.min()) >= 0)
+    ):
         return _integer_lines([features, cells, values.astype(np.uint64)])
     text = values.astype(str).tolist()
     return "".join(
