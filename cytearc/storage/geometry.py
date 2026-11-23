@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
+import zarr
 
 from ..utils.memory_budget import MemoryLedger, object_array_bytes, python_text_bytes
 from .types import array_metadata_shards
