@@ -15,6 +15,7 @@ import zarr
 from numpy.typing import DTypeLike
 
 from cytearc.storage import async_execution
+from cytearc.storage.count_matrix import CountMatrixPolicy
 from cytearc.storage.identity import CountSummary, finalize_counts
 
 if TYPE_CHECKING:
@@ -167,6 +168,7 @@ def write_count_store(
     feature_ids: Mapping[str, Sequence[str]] | None = None,
     cell_ids: Sequence[str] | None = None,
     feature_names: Mapping[str, Sequence[str]] | None = None,
+    policy: CountMatrixPolicy | None = None,
 ) -> None:
     """Write a store whose count matrices have the storage dtype ``dtype``.
 
@@ -176,8 +178,9 @@ def write_count_store(
     ``f"{assay}{index}"``, or by ``feature_ids`` for the assays it names, and
     cells ``f"cell{index}"`` unless ``cell_ids`` names them. A feature's name
     is its ID unless ``feature_names`` names the features of its assay. The
-    values must be exactly representable in ``dtype``, so the stored counts
-    equal them.
+    counts take the layout of ``policy``, or the default layout. The values
+    must be exactly representable in ``dtype``, so the stored counts equal
+    them.
     """
     from cytearc.storage.schema import create_cell_data, create_zarr_count_assay
     from cytearc.storage.stores import load_zarr
@@ -215,6 +218,7 @@ def write_count_store(
             feat_ids=ids,
             feat_names=ids if names is None else np.array(list(names)),
             dtype=storage_dtype.name,
+            policy=policy,
         )
         array[:] = stored
         finalize_test_counts(array)
