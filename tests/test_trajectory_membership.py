@@ -1989,9 +1989,15 @@ _MEMBERSHIP_CHECK_BYTES = {
     "load_lineage_membership": 275_340,
     "branch_cells": 275_340,
 }
-# Calling a membership names the membership as what needs its bytes, and
-# the other calls the graph.
-_NAMES_THE_MEMBERSHIP = {"lineage_membership", "reused lineage_membership"}
+# Calling a membership names the membership as what needs its bytes,
+# loading a saved one or selecting branch cells the check of the saved
+# membership, and the other calls the graph.
+_MEMBERSHIP_ITEMS = {
+    "lineage_membership": "the lineage membership of every cell",
+    "reused lineage_membership": "the lineage membership of every cell",
+    "load_lineage_membership": "the check of the saved lineage membership",
+    "branch_cells": "the check of the saved lineage membership",
+}
 # Each call names itself in the refusal of the graph's load.
 _GRAPH_LOAD_WORK = {
     "lineage_membership": "Calling lineage membership",
@@ -2034,8 +2040,8 @@ def test_a_budget_below_the_graph_load_is_refused_before_the_graph_is_read(
     with pytest.raises(MemoryBudgetError) as refused:
         calls[call](branching, ref)
     work = _GRAPH_LOAD_WORK.get(call, "Loading a pseudotime")
-    if call in _NAMES_THE_MEMBERSHIP:
-        named = item = "the lineage membership of every cell"
+    if call in _MEMBERSHIP_ITEMS:
+        named = item = _MEMBERSHIP_ITEMS[call]
     else:
         named, item = "a graph of 725 edges", "the graph of 725 edges and its work"
     assert str(refused.value) == (
@@ -2054,6 +2060,52 @@ def test_a_budget_below_the_graph_load_is_refused_before_the_graph_is_read(
     _set_budget(store, refused.value.needed_bytes)
     calls[call](branching, ref)
     assert reads == {"_store_to_sparse": 1}
+
+
+def test_the_membership_loaders_name_a_graph_that_outweighs_the_membership_check(
+    monkeypatch,
+) -> None:
+    # The two-armed store with each of its 145 cells linked to its 26 nearest
+    # cells, 3,770 stored edges of uint32 pairs and float32 weights, which
+    # SciPy loads at 8 bytes an entry beside 146 int32 row pointers of 584
+    # bytes. Forming the fuzzy union holds 7 * 3,770 * 8 + 5 * 584 = 214,040
+    # bytes beside the load's 65,536; numbering the components of the union,
+    # at most 7,540 entries and 60,904 bytes, holds it, three copies of it, 4
+    # bytes an entry and 12 a cell, 275,516 bytes, less. Beside the cells'
+    # positions and their labels' codes, 1,160 + 725 bytes, the load needs
+    # 281,461 bytes, more than the 275,340 that checking the saved membership
+    # holds with its inputs, so the loaders name the graph.
+    branching = _branching(_TWO_ARMS, neighbors=26)
+    store = branching.store
+    ref = store.trajectory.lineage_membership(branching.curves)
+    needed = 214_040 + 65_536 + 1_160 + 725
+    assert needed == 281_461 > membership_load_bytes(145, ["a2", "b2"], 2)
+    loaders = {
+        "Loading a lineage membership": lambda: (
+            store.trajectory.load_lineage_membership(ref)
+        ),
+        "Selecting branch cells": lambda: store.trajectory.branch_cells(
+            ref, ["a2", "b2"]
+        ),
+    }
+    reads = _count_calls(monkeypatch, store, "_store_to_sparse")
+    for work, call in loaders.items():
+        reads.clear()
+        _set_budget(store, needed - 1)
+        with pytest.raises(MemoryBudgetError) as refused:
+            call()
+        assert str(refused.value) == (
+            f"{work} of 145 cells needs about {needed} bytes in memory for a "
+            f"graph of 3770 edges, but the operation limit is {needed - 1} "
+            "bytes. Raise mem_budget."
+        )
+        assert refused.value.item == "the graph of 3770 edges and its work"
+        assert reads == {}
+        # The budget that the refusal names reads the graph once and runs
+        # the call.
+        _set_budget(store, needed)
+        call()
+        assert reads == {"_store_to_sparse": 1}
 
 
 def _full_collections() -> int:

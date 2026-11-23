@@ -3993,6 +3993,7 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
             record=record,
             fate_record=fate_record,
             later_bytes=lambda _cells, _load: needed,
+            later_item="the check of the saved lineage membership",
             work=work,
         )
         pseudotime = np.asarray(fate_inputs.direction.scores, dtype=np.float64)
@@ -4101,7 +4102,8 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
 
         Raises:
             MemoryBudgetError: If loading the graph of the membership's fate
-                map needs more than ``mem_budget``, before the graph is read.
+                map, or checking the saved membership, needs more than
+                ``mem_budget``; the graph is checked before it is read.
             ValueError: If ``lineages`` does not name two lineages of the
                 membership, or the two have no branch point: they never share
                 a cell, never part, or their shared cells do not come before
