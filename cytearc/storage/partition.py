@@ -38,7 +38,7 @@ SCAN_BAND_BYTES = 64 * 1024**2
 #: stable sort and masks held less beside them, 26 bytes an index traced.
 _BAND_INDEX_BYTES = 32
 #: Passes over a selection's indices take them this many at a time, so a pass
-#: holds under 1 MB however many indices the selection holds.
+#: holds about 600 KB of 8-byte indices however many the selection holds.
 _INDEX_PIECE = 65_536
 
 
