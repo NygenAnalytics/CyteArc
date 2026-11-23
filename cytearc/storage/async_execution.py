@@ -678,27 +678,20 @@ def _finish_tasks(loop: asyncio.AbstractEventLoop) -> None:
 
     An interruption while the tasks run, such as a second Ctrl-C, cancels
     the tasks still pending and waits for them to stop before it is raised,
-    so the loop never closes with a task pending. A further interruption
-    while they stop is raised at once.
+    so the loop never closes with a task pending; a further interruption
+    leaves that wait.
     """
-    interruption: BaseException | None = None
-    while pending := [task for task in asyncio.all_tasks(loop) if not task.done()]:
-        if interruption is not None:
+    try:
+        while pending := [task for task in asyncio.all_tasks(loop) if not task.done()]:
+            loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+    except BaseException:
+        while pending := [task for task in asyncio.all_tasks(loop) if not task.done()]:
             for task in pending:
                 task.cancel()
             loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
-            continue
-        try:
-            loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
-        except BaseException as error:
-            interruption = error
+        loop.run_until_complete(loop.shutdown_asyncgens())
+        raise
     loop.run_until_complete(loop.shutdown_asyncgens())
-    if interruption is not None:
-        try:
-            raise interruption
-        finally:
-            # This frame stays in the interruption's traceback.
-            del interruption
 
 
 class ReadStopped(BaseException):
