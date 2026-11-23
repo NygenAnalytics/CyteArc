@@ -316,6 +316,62 @@ def test_plot_result_show_outside_ipython_keeps_a_caller_figure_open(monkeypatch
     assert result.figure.number in plt.get_fignums()
 
 
+def _subfigure_result():
+    """A caller's plot drawn into the axes of the left of two subfigures, and their figure."""
+    figure = plt.figure()
+    left, right = figure.subfigures(1, 2)
+    right.subplots().plot([1, 0])
+    axis = left.subplots()
+    axis.plot([0, 1])
+    result = PlotResult(
+        figure=axis.figure,
+        axes={"main": axis},
+        tables={},
+        legends=(),
+        scales=(),
+        provenance=splt.PlotProvenance(cytearc_version="test"),
+        owns_figure=False,
+    )
+    return result, figure
+
+
+def test_plot_result_show_in_ipython_shows_and_closes_the_figure_of_a_subfigure(
+    monkeypatch,
+):
+    result, figure = _subfigure_result()
+    subfigure = result.figure
+    displayed = []
+    monkeypatch.setattr("IPython.get_ipython", lambda: object())
+    monkeypatch.setattr("IPython.display.display", displayed.append)
+    assert type(subfigure).__name__ == "SubFigure"
+
+    result.show()
+
+    # The figure that holds the subfigure is shown whole and leaves pyplot,
+    # and the result keeps the subfigure that the plot drew into.
+    assert displayed == [figure]
+    assert not plt.fignum_exists(figure.number)
+    assert result.figure is subfigure
+    assert "rendered=True" in repr(result)
+
+
+def test_plot_result_show_outside_ipython_shows_the_figure_of_a_subfigure(monkeypatch):
+    result, figure = _subfigure_result()
+    show_calls = []
+    monkeypatch.setattr("IPython.get_ipython", lambda: None)
+    monkeypatch.setattr(plt, "show", lambda: show_calls.append(True))
+    monkeypatch.setattr(
+        figure.canvas, "required_interactive_framework", "qt", raising=False
+    )
+
+    result.show()
+
+    # pyplot shows the figure's window, and a caller's figure stays open.
+    assert show_calls == [True]
+    assert plt.fignum_exists(figure.number)
+    plt.close(figure)
+
+
 def test_plot_result_save_restores_chrome_when_backend_raises(monkeypatch, tmp_path):
     result = _plot_result()
     result.theme = "dark"

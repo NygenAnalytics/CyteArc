@@ -22,11 +22,19 @@ from cytearc.plotting.recipes import (
 )
 
 
+class _FakeFigure:
+    """A figure of a fake plot, which holds itself as a Matplotlib figure does."""
+
+    @property
+    def figure(self) -> "_FakeFigure":
+        return self
+
+
 class FakePlotResult:
     def __init__(self, name: str, *, owns_figure: bool = True) -> None:
         self.name = name
         # Each fake draws on a figure of its own.
-        self.figure = object()
+        self.figure = _FakeFigure()
         self.owns_figure = owns_figure
         self.saved: list[Path] = []
         self.save_kwargs: list[dict[str, object]] = []
@@ -298,6 +306,24 @@ def panels(monkeypatch: pytest.MonkeyPatch):
     plt.close(figure)
     for own in created:
         plt.close(own)
+
+
+def test_show_displays_the_figure_that_holds_the_subfigures_that_steps_fill(
+    displayed, panels
+) -> None:
+    import matplotlib.pyplot as plt
+
+    figure = plt.figure()
+    left, right = figure.subfigures(1, 2)
+    targets = {"left": left.subplots(), "right": right.subplots()}
+
+    try:
+        run_recipe(object(), _steps("left", "right"), targets=targets, show=True)
+    finally:
+        plt.close(figure)
+
+    # The steps drew into two subfigures of one figure, which is shown once.
+    assert displayed == [(figure, [1, 1])]
 
 
 def test_show_displays_a_figure_that_several_steps_fill_once_with_every_panel(

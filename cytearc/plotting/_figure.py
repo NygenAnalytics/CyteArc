@@ -99,6 +99,14 @@ def close_figures_on_error[**P, R](function: Callable[P, R]) -> Callable[P, R]:
     return wrapper
 
 
+def root_figure(figure: Any) -> Any:
+    """Return the figure that holds ``figure``: itself, or the figure of a SubFigure.
+
+    Matplotlib gives the axes of a SubFigure that subfigure as their figure. A SubFigure, however deeply nested, gives the figure that holds it as ``figure``, from Matplotlib 3.9 on, and a figure gives itself.
+    """
+    return figure.figure
+
+
 def is_colorbar_axes(ax: Any) -> bool:
     """Whether an axes holds a Matplotlib colorbar."""
     return getattr(ax, "_colorbar", None) is not None or ax.get_label() == "<colorbar>"
@@ -113,7 +121,7 @@ class PlotResult:
     is True when CyteArc created the figure. ``close()`` closes an owned
     figure in pyplot and keeps the result metadata.
 
-    In IPython, ``show()`` displays the figure and then closes it in pyplot, as ``plt.show()`` does in Jupyter, so the end of the cell does not draw it a second time. This holds for every figure, a figure passed with ``target=`` or composed with :func:`compose_results` included. Outside IPython, ``show()`` hands an interactive canvas to ``plt.show()`` and closes only an owned figure. A closed figure can still be saved or drawn on. In Jupyter, ``display(result.figure)`` and ``result.show()`` show it with everything drawn on it, and ``plt.show()`` does not.
+    In IPython, ``show()`` displays the figure and then closes it in pyplot, as ``plt.show()`` does in Jupyter, so the end of the cell does not draw it a second time. This holds for every figure, a figure passed with ``target=`` or composed with :func:`compose_results` included. Outside IPython, ``show()`` hands an interactive canvas to ``plt.show()`` and closes only an owned figure. A closed figure can still be saved or drawn on. In Jupyter, ``display(result.figure)`` and ``result.show()`` show it with everything drawn on it, and ``plt.show()`` does not. A plot drawn into the axes of a SubFigure keeps the subfigure as ``figure``; ``show()`` shows the whole figure that holds it, and closes that figure where it closes one.
     """
 
     figure: Any
@@ -128,6 +136,9 @@ class PlotResult:
 
     def show(self) -> None:
         plt, _ = require_matplotlib()
+        # A plot drawn into the axes of a SubFigure shows the figure that holds
+        # it, which pyplot can close.
+        figure = root_figure(self.figure)
         in_ipython = False
         try:
             from IPython import get_ipython
@@ -139,12 +150,12 @@ class PlotResult:
             if in_ipython:
                 from IPython.display import display
 
-                display(self.figure)  # type: ignore[no-untyped-call]
+                display(figure)  # type: ignore[no-untyped-call]
                 self._rendered = True
                 return
             if (
                 getattr(
-                    self.figure.canvas,
+                    figure.canvas,
                     "required_interactive_framework",
                     None,
                 )
@@ -156,7 +167,7 @@ class PlotResult:
             # Jupyter's inline backend draws every figure a cell leaves open,
             # so a caller's figure is closed after display as well.
             if self.owns_figure or in_ipython:
-                plt.close(self.figure)
+                plt.close(figure)
 
     def __repr__(self) -> str:
         return (

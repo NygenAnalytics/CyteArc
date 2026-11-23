@@ -27,6 +27,7 @@ from ._contracts import (
     StudyDesign,
 )
 from ..utils.arguments import bool_argument
+from ._figure import root_figure
 
 
 ALLOWED_PLOTS = frozenset(
@@ -818,12 +819,12 @@ def _show_targeted_figures(
 ) -> tuple[list[str], list[tuple[tuple[str, ...], Exception]]]:
     """Show each figure of the caller's that the steps drew through ``targets`` once.
 
-    Each figure is shown in the order of the first step that drew it, with every panel that the steps drew. Returns the warnings that showing each figure raised, under each step that drew it, and the steps of each figure that failed to show, with the error; with ``stop_at_error``, the first error is raised instead.
+    Each figure is shown in the order of the first step that drew it, with every panel that the steps drew, the subfigures of a figure included. Returns the warnings that showing each figure raised, under each step that drew it, and the steps of each figure that failed to show, with the error; with ``stop_at_error``, the first error is raised instead.
     """
     figures: dict[int, list[PlotOutput]] = {}
     for output in outputs:
         if not getattr(output.result, "owns_figure", False):
-            figures.setdefault(id(output.result.figure), []).append(output)
+            figures.setdefault(id(root_figure(output.result.figure)), []).append(output)
     shown_warnings: list[str] = []
     failed: list[tuple[tuple[str, ...], Exception]] = []
     for steps in figures.values():
@@ -855,7 +856,7 @@ def run_recipe(
 ) -> PlotRecipeResult:
     """Run a plotting recipe's steps in order after any analysis has completed.
 
-    With ``show=True``, a figure that a step creates is shown when the step has drawn it, and closed. A figure of the caller's that steps draw on through ``targets`` is shown once, after the last step, in the order of the first step that drew it, so a figure whose panels several steps fill is shown complete, and the warnings that showing it raises are recorded under each step that drew it. A step writes its file from its figure as it stands after the step, so give a figure that several steps fill its ``output_filename``, or ``outputFilename`` in a recipe file, on the last of them. Plots do not display themselves otherwise.
+    With ``show=True``, a figure that a step creates is shown when the step has drawn it, and closed. A figure of the caller's that steps draw on through ``targets``, in its subfigures too, is shown once, after the last step, in the order of the first step that drew it, so a figure whose panels several steps fill is shown complete, and the warnings that showing it raises are recorded under each step that drew it. A step writes its file from its figure as it stands after the step, so give a figure that several steps fill its ``output_filename``, or ``outputFilename`` in a recipe file, on the last of them. Plots do not display themselves otherwise.
 
     A step that raises stops the recipe, after the caller's figures that the steps before it drew are shown, unless ``continue_on_error`` records the error under the step's name in ``failures`` and runs the other steps. A figure that fails to show fails its step, or every step that drew a figure of the caller's: the error stops the recipe, or with ``continue_on_error`` is recorded in ``failures``, and ``outputs`` leaves those steps out.
     """
