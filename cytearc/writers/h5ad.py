@@ -2016,9 +2016,9 @@ class H5adToZarr:
         """Return the bytes that this process holds from the start of the counts write to its end.
 
         They are what :meth:`_resident_bytes` counts and the count summaries
-        of every cell. A producer process that writes its own window is
-        charged them less the IDs, names and memberships of
-        :meth:`_kept_bytes`, which it never reads.
+        of every cell, into which the windows of writer processes merge. A
+        process that writes its own window holds what
+        :meth:`_writer_process_bytes` counts instead.
         """
         from ..storage.identity import CountSummary
 
@@ -2026,6 +2026,25 @@ class H5adToZarr:
             CountSummary.nbytes_for(self.h5ad.nCells, width)
             for width in self._assay_widths().values()
         )
+
+    def _writer_process_bytes(self) -> int:
+        """Return the bytes that each process writing its own window of the counts holds throughout.
+
+        They are what :meth:`_resident_bytes` counts less what this process
+        alone holds: the IDs, names and memberships of :meth:`_kept_bytes`, a
+        shuffled import's order of the cells, and the count of the values in
+        each row of a dense matrix, which its value scan recorded. A writer
+        process reads its window through its own reader, which holds the row
+        pointers of every row, as this process's reader does. It summarizes
+        only its window, whose summaries its admission adds, while this
+        process holds those of every cell.
+        """
+        held = self._resident_bytes() - self._kept_bytes()
+        if self._cellOrder is not None:
+            held -= int(self._cellOrder.nbytes)
+        if self.h5ad.matrixOrientation == "dense":
+            held -= max(0, int(self.h5ad._sparse_import_resident_bytes()))
+        return held
 
     def _count_import_requirements(
         self,
@@ -2350,8 +2369,8 @@ class H5adToZarr:
             candidate_windows = aligned_row_windows(n_cells, shard_rows, candidate)
             if direct:
                 # Each writer process holds its batch, the bands it fills, and
-                # the count summaries of its window. It never reads the IDs,
-                # names and memberships that this process keeps.
+                # the count summaries of its window, beside what
+                # _writer_process_bytes counts.
                 window_rows = max(stop - start for start, stop in candidate_windows)
                 candidate_resources = ResourceBudget(
                     (self.resources.memoryBytes - resident) // candidate,
@@ -2361,8 +2380,7 @@ class H5adToZarr:
                     window_tasks(start, stop) for start, stop in candidate_windows
                 )
                 candidate_resident = (
-                    resident
-                    - self._kept_bytes()
+                    self._writer_process_bytes()
                     + sum(
                         CountSummary.nbytes_for(window_rows, array.shape[1])
                         for array in arrays
@@ -2527,9 +2545,9 @@ class H5adToZarr:
         resident_source_bytes, extra_producer_bytes, canonical_batches = (
             self._count_import_requirements()
         )
-        # Producer processes that write their own windows never read the IDs,
-        # names and memberships that this process keeps.
-        process_resident_bytes = resident_source_bytes - self._kept_bytes()
+        # Processes that write their own windows hold what
+        # _writer_process_bytes counts beside the summaries of their windows.
+        process_resident_bytes = self._writer_process_bytes()
 
         plan = resolve_sparse_import_batch(
             tuple(destinations.values()),

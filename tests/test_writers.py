@@ -873,7 +873,7 @@ def test_h5ad_reader_processes_undo_the_log_of_their_bands(tmp_path, encoding):
 
 
 @pytest.mark.parametrize("encoding", ["csr", "dense"])
-def test_h5ad_direct_writers_fit_their_window_summaries_without_the_parents_ids(
+def test_h5ad_direct_writers_fit_their_windows_beside_what_the_parent_alone_holds(
     tmp_path, monkeypatch, encoding
 ):
     import cytearc.storage.sharding as sharding
@@ -951,27 +951,50 @@ def test_h5ad_direct_writers_fit_their_window_summaries_without_the_parents_ids(
         return high
 
     budget = smallest_process_budget()
+    original = CountSummary.nbytes_for
+
+    def summaries_grown_for(window: bool):
+        """Return summary sizes 1,000 bytes larger for a window's rows, or every cell's."""
+        return staticmethod(
+            lambda rows, columns: (
+                original(rows, columns)
+                + (1_000 if (rows < values.shape[0]) == window else 0)
+            )
+        )
+
     # Two processes write the row windows (0, 8) and (8, 12), and each holds
     # the count summaries of its window. Growing the summaries of a window by
     # 1,000 bytes therefore raises the budget the parent needs by 2,000 bytes.
-    original = CountSummary.nbytes_for
     with monkeypatch.context() as patch:
-        patch.setattr(
-            CountSummary,
-            "nbytes_for",
-            staticmethod(
-                lambda rows, columns: (
-                    original(rows, columns) + (1_000 if rows < values.shape[0] else 0)
-                )
-            ),
-        )
+        patch.setattr(CountSummary, "nbytes_for", summaries_grown_for(window=True))
         assert smallest_process_budget() == budget + 2_000
+    # The parent alone holds the summaries of every cell, which it merges the
+    # windows into, so summaries of the 12 cells that take 1,000 bytes more
+    # raise that budget by 1,000 bytes only.
+    with monkeypatch.context() as patch:
+        patch.setattr(CountSummary, "nbytes_for", summaries_grown_for(window=False))
+        assert smallest_process_budget() == budget + 1_000
     # The parent keeps the IDs and names, which writer processes never read,
     # so IDs that take 1,000 bytes more raise that budget by 1,000 bytes only.
     ids = H5adReader._id_bytes
     with monkeypatch.context() as patch:
         patch.setattr(H5adReader, "_id_bytes", lambda self: ids(self) + 1_000)
         assert smallest_process_budget() == budget + 1_000
+    # Each process reads the rows of a sparse matrix through its own reader,
+    # which holds the row pointers as the parent's does, so row pointers that
+    # take 1,000 bytes more raise that budget by 3,000 bytes. Processes read a
+    # dense matrix's rows whole, and the parent alone holds the count of the
+    # values in each row, which its value scan recorded: 1,000 bytes more
+    # there raise the budget by 1,000 bytes.
+    rows = H5adReader._sparse_import_resident_bytes
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            H5adReader, "_sparse_import_resident_bytes", lambda self: rows(self) + 1_000
+        )
+        assert (
+            smallest_process_budget()
+            == budget + {"csr": 3_000, "dense": 1_000}[encoding]
+        )
 
     # At that budget two processes, of two workers each, write every count
     # into disjoint row windows of the destination.
@@ -993,6 +1016,92 @@ def test_h5ad_direct_writers_fit_their_window_summaries_without_the_parents_ids(
     assert writer._lastImportWorkersPerProcess == 2
     root = zarr.open_group(store=location, mode="r")
     np.testing.assert_array_equal(root["RNA/counts"][:], values)
+
+
+@pytest.mark.parametrize("shuffle_cells", [False, True], ids=["file", "shuffled"])
+@pytest.mark.parametrize("encoding", ["csr", "dense"])
+def test_h5ad_writer_processes_are_charged_what_tracing_finds_their_reader_keeps(
+    tmp_path, encoding, shuffle_cells
+):
+    import gc
+    import tracemalloc
+
+    import h5py
+    from scipy.sparse import csr_matrix
+
+    from cytearc.readers import H5adReader
+    from cytearc.writers import H5adToZarr
+
+    n_cells = 50_000
+    rng = np.random.default_rng(2)
+    matrix = csr_matrix(
+        (rng.integers(1, 10, (n_cells, 4)) * (rng.random((n_cells, 4)) < 0.25)).astype(
+            np.float32
+        )
+    )
+    path = tmp_path / "cells.h5ad"
+    with h5py.File(path, "w") as h5:
+        if encoding == "dense":
+            h5.create_dataset("X", data=matrix.toarray())
+        else:
+            group = h5.create_group("X")
+            group.attrs["encoding-type"] = "csr_matrix"
+            group.attrs["shape"] = matrix.shape
+            group.create_dataset("data", data=matrix.data)
+            group.create_dataset("indices", data=matrix.indices)
+            group.create_dataset("indptr", data=matrix.indptr.astype(np.int64))
+        h5.create_group("obs").create_dataset(
+            "_index", data=np.array([f"c{i}".encode() for i in range(n_cells)])
+        )
+        h5.create_group("var").create_dataset(
+            "_index", data=np.array([b"f0", b"f1", b"f2", b"f3"])
+        )
+    reader = H5adReader(str(path), temp_dir=str(tmp_path))
+    try:
+        writer = H5adToZarr(
+            reader,
+            str(tmp_path / "cells.zarr"),
+            mem_budget="1G",
+            nthreads=2,
+            shuffle_cells=shuffle_cells,
+        )
+        # The sparse counts write loads the row pointers before it plans.
+        reader._prepare_sparse_import()
+        charged = writer._writer_process_bytes()
+        directory = writer._shuffled_rows_directory()
+        gc.collect()
+        tracemalloc.start()
+        try:
+            # A reader opened as a writer process opens it, once it has read
+            # the first batch of the second half of the rows.
+            process_reader = H5adReader(**reader._clone_kwargs())
+            if directory is not None:
+                process_reader._open_shuffled_rows(directory)
+            read = (
+                process_reader.consume_dense_rows
+                if encoding == "dense" and directory is None
+                else process_reader.consume_row_range
+            )
+            batches = read(1_000, n_cells // 2, n_cells)
+            next(batches)
+            batches.close()
+            del batches
+            gc.collect()
+            kept, _peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        process_reader.close()
+    finally:
+        reader.close()
+
+    # The reader keeps the int64 pointers of every row, 400,008 bytes, unless
+    # it reads a dense matrix's rows whole; the summaries of every cell, the
+    # cell order and a dense matrix's count of the values in each row, which
+    # the import alone holds, would each add 400,000 bytes or more to the
+    # charge. A few kilobytes of other objects stay beside the pointers.
+    pointers = 0 if encoding == "dense" and not shuffle_cells else 8 * (n_cells + 1)
+    assert charged == pointers
+    assert 0 <= kept - charged <= 64 * 1024
 
 
 def test_dense_h5ad_reader_processes_hold_their_batches_beside_the_writes(

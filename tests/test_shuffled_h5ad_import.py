@@ -691,6 +691,114 @@ def test_producer_processes_read_and_delete_their_buckets(
     np.testing.assert_array_equal(_open(destination)["RNA/counts"][...], counts[order])
 
 
+@pytest.mark.parametrize("encoding", ["csr", "dense"])
+def test_writer_processes_hold_their_row_pointers_and_leave_the_cell_order_to_the_parent(
+    tmp_path, monkeypatch, encoding
+) -> None:
+    import cytearc.storage.sharding as sharding
+    from cytearc.storage.schema import load_count_array
+
+    counts = np.random.default_rng(5).integers(0, 5, (12, 3)).astype(np.uint32)
+    source = tmp_path / "source.h5ad"
+    anndata.AnnData(
+        csr_matrix(counts) if encoding == "csr" else counts,
+        obs=pd.DataFrame(index=[f"c{row}" for row in range(12)]),
+        var=pd.DataFrame(index=["f0", "f1", "f2"]),
+    ).write_h5ad(source)
+    destination = tmp_path / "shuffled.zarr"
+
+    class Planned(Exception):
+        pass
+
+    chosen: list[bool] = []
+
+    def stop(processes: bool):
+        def record(*_args, **_kwargs):
+            chosen.append(processes)
+            raise Planned
+
+        return record
+
+    reader = H5adReader(str(source), temp_dir=str(tmp_path))
+    try:
+        writer = H5adToZarr(
+            reader, str(destination), shuffle_cells=True, **_SHARD_BANDS
+        )
+        destinations = {
+            name: load_count_array(writer.z, name, None) for name in writer.assayNames
+        }
+
+        def uses_processes(budget: int) -> bool:
+            chosen.clear()
+            writer.resources = ResourceBudget(budget, 4)
+            try:
+                # The admission alone, which leaves the shuffled rows for the
+                # next probe and for the write.
+                writer._write_sparse_counts(2, destinations, {})
+            except (Planned, MemoryError):
+                pass
+            return chosen == [True]
+
+        def smallest_process_budget() -> int:
+            """Return the smallest budget at which the parent starts writer processes."""
+            with monkeypatch.context() as patch:
+                patch.setattr(H5adToZarr, "_write_parallel_count_windows", stop(True))
+                patch.setattr(sharding, "write_sparse_bands", stop(False))
+                low, high = 1_000, 1_000_000
+                assert not uses_processes(low)
+                assert uses_processes(high)
+                while high - low > 1:
+                    middle = (low + high) // 2
+                    if uses_processes(middle):
+                        high = middle
+                    else:
+                        low = middle
+            return high
+
+        budget = smallest_process_budget()
+        # Two processes write the shuffled rows (0, 8) and (8, 12). The parent
+        # alone holds the order of the cells, which places the other per-cell
+        # arrays, so an order that takes 1,000 bytes more raises the budget at
+        # which the two start by 1,000 bytes.
+        order = writer._cellOrder
+        with monkeypatch.context() as patch:
+            patch.setattr(
+                writer, "_cellOrder", np.append(order, np.zeros(125, order.dtype))
+            )
+            assert smallest_process_budget() == budget + 1_000
+        # Each process reads the shuffled rows through its own reader, which
+        # holds their row pointers as the parent's does, so pointers that take
+        # 1,000 bytes more raise that budget by 3,000 bytes.
+        pointers = H5adReader.materialized_csr_bytes
+        with monkeypatch.context() as patch:
+            patch.setattr(
+                H5adReader,
+                "materialized_csr_bytes",
+                lambda self: pointers(self) + 1_000,
+            )
+            assert smallest_process_budget() == budget + 3_000
+        if encoding == "dense":
+            # The parent alone holds the count of the values in each of the
+            # file's rows, which its scan recorded.
+            counted = H5adReader._sparse_import_resident_bytes
+            with monkeypatch.context() as patch:
+                patch.setattr(
+                    H5adReader,
+                    "_sparse_import_resident_bytes",
+                    lambda self: counted(self) + 1_000,
+                )
+                assert smallest_process_budget() == budget + 1_000
+        # At that budget the two processes write every count.
+        writer.resources = ResourceBudget(budget, 4)
+        writer._write_counts(batch_size=2)
+    finally:
+        reader.close()
+    assert writer._lastImportProducerCount == 2
+    np.testing.assert_array_equal(
+        _open(destination)["RNA/counts"][...], counts[shuffled_order(12, 0)]
+    )
+
+
 def test_a_single_producer_deletes_every_bucket_as_it_reads(
     tmp_path, monkeypatch
 ) -> None:
