@@ -8048,22 +8048,31 @@ def _same_files(merged: dict, reference: dict) -> None:
 
 
 def _traced_band_read(location, rows: int) -> int:
-    """Return the traced peak of reading ``rows`` shuffled cells of every column of a source."""
+    """Return the traced peak of reading ``rows`` shuffled cells of every column of a source.
+
+    The read's plan counts the host's CPUs, which on Linux reads cgroup files
+    through a buffer of at least 128 KiB from Python 3.14 on, so the count is
+    taken once beforehand and the band's read alone is traced.
+    """
     import tracemalloc
 
     from cytearc import DataStore
+    from cytearc.storage import execution
     from cytearc.utils.compute import controlled_compute
 
     counts = DataStore(location, default_assay="Counts", nthreads=1).Counts.rawData
     cells = np.random.default_rng(3).permutation(int(counts.shape[0]))[:rows]
-    # The first read makes the objects that every later read reuses.
-    controlled_compute(counts[cells, :], 1)
-    tracemalloc.start()
-    try:
+    workers = execution.detect_workers()
+    with pytest.MonkeyPatch.context() as patched:
+        patched.setattr(execution, "detect_workers", lambda: workers)
+        # The first read makes the objects that every later read reuses.
         controlled_compute(counts[cells, :], 1)
-        return tracemalloc.get_traced_memory()[1]
-    finally:
-        tracemalloc.stop()
+        tracemalloc.start()
+        try:
+            controlled_compute(counts[cells, :], 1)
+            return tracemalloc.get_traced_memory()[1]
+        finally:
+            tracemalloc.stop()
 
 
 @pytest.mark.parametrize("most_batches", [None, 5, 1])
