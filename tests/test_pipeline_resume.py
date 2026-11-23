@@ -8,12 +8,14 @@ it must compute what the resumed run computed.
 """
 
 import concurrent.futures
+import inspect
 import json
 import shutil
 import subprocess
 import sys
 import textwrap
 import threading
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -29,6 +31,8 @@ from cytearc import (
     PipelineCancelled,
     PipelineExecutionError,
 )
+from cytearc.datastore._pipeline.recipes.rna import resolve_rna
+from cytearc.datastore.pipeline_accessor import PipelineAccessor, recorded_settings
 from cytearc.storage.artifacts import artifact_group
 from cytearc.storage.pipeline_runs import (
     create_pipeline_run_record,
@@ -557,13 +561,62 @@ def test_resume_refuses_a_run_whose_settings_resolve_to_another_plan(
     _edit_run(
         store,
         paused.run_id,
-        config={**config, "stages": {**config["stages"], "normalization": normalization}},
+        config={
+            **config,
+            "stages": {**config["stages"], "normalization": normalization},
+        },
     )
     before = _attrs(store, paused.run_id)
 
-    with pytest.raises(ValueError, match="no longer resolve to the stages and settings"):
+    with pytest.raises(
+        ValueError, match="no longer resolve to the stages and settings"
+    ):
         store.pipeline.resume(paused.run_id)
     assert _attrs(store, paused.run_id) == before
+
+
+@pytest.mark.parametrize(
+    ("stage", "action", "message"),
+    [
+        (
+            "cell_cycle",
+            lambda state: (),
+            "it skipped stage 'cell_cycle', which its settings now run",
+        ),
+        (
+            "normalization",
+            None,
+            "it ran stage 'normalization', which its settings now skip",
+        ),
+    ],
+    ids=["skipped_now_runs", "ran_now_skipped"],
+)
+def test_the_replay_refuses_a_plan_that_runs_or_skips_a_finished_stage_otherwise(
+    paused, tmp_path, stage, action, message
+) -> None:
+    store = _paused_copy(paused, tmp_path)
+    record = load_pipeline_run_record(store.zw, paused.run_id)
+    defaults = {
+        name: parameter.default
+        for name, parameter in inspect.signature(
+            PipelineAccessor.rna
+        ).parameters.items()
+        if parameter.kind is inspect.Parameter.KEYWORD_ONLY
+        and name not in {"run_until", "callback", "cancel"}
+    }
+    plan = resolve_rna(store, **{**defaults, **recorded_settings(store, record)})
+    # Settings that resolve to the recorded ones run the same stages, so only
+    # a changed plan reaches these refusals.
+    stages = tuple(
+        replace(planned, action=action) if planned.name == stage else planned
+        for planned in plan.stages
+    )
+    finished = load_pipeline_stage_records(store.zw, paused.run_id)
+
+    with pytest.raises(ValueError, match=message):
+        executor_module._replay_finished_stages(
+            replace(plan, stages=stages), plan.start(store), finished, paused.run_id
+        )
 
 
 def test_a_second_resume_of_one_pause_is_refused(paused, tmp_path) -> None:
@@ -729,7 +782,9 @@ def test_a_resumed_run_that_is_cancelled_ends_its_segment_interrupted(
     assert stages[-1] == "neighbors"
 
 
-def test_a_cancellation_after_the_pause_returns_the_paused_run(paused, tmp_path) -> None:
+def test_a_cancellation_after_the_pause_returns_the_paused_run(
+    paused, tmp_path
+) -> None:
     store = _paused_copy(paused, tmp_path)
     cancel = CancellationToken()
 
@@ -772,11 +827,17 @@ def test_a_pause_that_cannot_be_written_ends_the_run(
             **SETTINGS,
         )
 
-    (run,) = [run for run in store.pipeline.list_runs(limit=100) if run.run_id != paused.run_id]
+    (run,) = [
+        run
+        for run in store.pipeline.list_runs(limit=100)
+        if run.run_id != paused.run_id
+    ]
     record = load_pipeline_run_record(store.zw, run.run_id)
     assert (record.status, record.complete, record.segments) == (status, True, ())
     assert _stage_names(store, run.run_id)[-1] == "pca"
-    expected = ("run_failed", "pause") if status == "failed" else ("run_interrupted", None)
+    expected = (
+        ("run_failed", "pause") if status == "failed" else ("run_interrupted", None)
+    )
     assert events[-1] == expected
 
 

@@ -2396,6 +2396,59 @@ def test_each_pause_is_resumed_by_one_process_only() -> None:
     claim(root, run.run_id, 2)
 
 
+def test_a_resume_shares_a_claim_container_created_by_a_concurrent_resume(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _root()
+    run = _three_stage_run(root)
+    _finish_stage(root, run.run_id, 0, "one")
+    pause_pipeline_run_record(root, run_id=run.run_id, shutdown=_SHUTDOWN)
+    create_array = zarr.Group.create_array
+
+    def create_after_competitor(group: zarr.Group, name: str, **options: Any) -> Any:
+        if name == ".resume-claims":
+            # Another first resume creates the container after this one found
+            # it missing.
+            create_array(group, name, **options)
+        return create_array(group, name, **options)
+
+    monkeypatch.setattr(zarr.Group, "create_array", create_after_competitor)
+    resumed = pipeline_run_storage.resume_pipeline_run_record(
+        root, run_id=run.run_id, segment=1, shutdown=_SHUTDOWN
+    )
+
+    assert resumed.status == "running"
+    assert tuple(root["pipeline/runs/.resume-claims"].shape) == (0,)
+
+
+def test_a_claim_that_the_store_does_not_read_back_resumes_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from zarr.storage import StorePath
+
+    root = _root()
+    run = _three_stage_run(root)
+    _finish_stage(root, run.run_id, 0, "one")
+    paused = pause_pipeline_run_record(root, run_id=run.run_id, shutdown=_SHUTDOWN)
+    get = StorePath.get
+
+    async def lost_claims(path: StorePath, *args: Any, **kwargs: Any) -> Any:
+        # As a store whose reads do not yet see its own writes.
+        if ".resume-claims/" in path.path:
+            return None
+        return await get(path, *args, **kwargs)
+
+    monkeypatch.setattr(StorePath, "get", lost_claims)
+
+    with pytest.raises(
+        RuntimeError, match="resume claim of pipeline run .* was not written"
+    ):
+        pipeline_run_storage.resume_pipeline_run_record(
+            root, run_id=run.run_id, segment=1, shutdown=_SHUTDOWN
+        )
+    assert load_pipeline_run_record(root, run.run_id) == paused
+
+
 def test_resume_requires_a_store_that_writes_a_key_only_where_none_exists(
     tmp_path: Any,
 ) -> None:
@@ -2451,6 +2504,14 @@ def test_a_segment_refuses_fields_outside_its_contract(
 
     with pytest.raises(error, match=message):
         pipeline_run_storage.PipelineRunSegment.from_dict({**valid, **changes})
+    with pytest.raises(TypeError, match="segment stages must be a tuple"):
+        pipeline_run_storage.PipelineRunSegment(
+            started_at_ns=100,
+            stopped_at_ns=None,
+            stages=["one"],  # type: ignore[arg-type]
+            reason=None,
+            shutdown=_SHUTDOWN,
+        )
 
 
 def _segment(stages: list[str], reason: str | None, start: int = 100) -> dict[str, Any]:
@@ -2503,6 +2564,7 @@ def _segment(stages: list[str], reason: str | None, start: int = 100) -> dict[st
             "paused runs cannot contain terminal details",
         ),
         ({"segments": "one"}, "run segments must be a sequence"),
+        ({"status": "suspended"}, "Invalid pipeline run status: 'suspended'"),
     ],
 )
 def test_a_run_record_refuses_segments_that_do_not_match_its_stages_and_status(
@@ -2518,3 +2580,5 @@ def test_a_run_record_refuses_segments_that_do_not_match_its_stages_and_status(
         PipelineRunRecord.from_dict({**raw, **changes})
     with pytest.raises(TypeError, match="PipelineRunSegment values"):
         replace(paused, segments=list(paused.segments))
+    with pytest.raises(ValueError, match="Invalid pipeline run status: 'suspended'"):
+        replace(paused, status="suspended")
