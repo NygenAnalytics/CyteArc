@@ -753,7 +753,10 @@ def test_reads_of_selected_cells_copy_one_chunk_at_a_time_however_many_they_deco
     geometry = array_geometry(stored)
     cells = np.random.default_rng(4).permutation(2_000)
     features = np.arange(512)
-    with zarr_io_concurrency(4):
+    # How many decodes overlap depends on how the machine schedules their
+    # threads, so the four decodes are made to hold their chunks together.
+    codecs = stored.metadata.codecs[0].codecs if sharded else stored.metadata.codecs
+    with zarr_io_concurrency(4), decodes_held_together(type(codecs[-1]), 4):
         read_selection(stored, cells, features)
         tracemalloc.start()
         try:
