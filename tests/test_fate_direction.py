@@ -896,15 +896,18 @@ def test_a_map_directed_by_a_score_is_refused_a_small_budget_before_its_graph_is
     # bytes for each of the 145 cells and the solver's 2 * 1,450 * 12 + 145 *
     # 280 = 75,400, 102,664 bytes in all, less than the graph's load, which
     # the refusal of fate names too. Calling the membership holds 347,836
-    # bytes, as the membership tests derive, more than the load.
+    # bytes, as the membership tests derive, more than the load, and its
+    # refusal names the membership.
+    named = "a graph of 725 edges"
     if call == "lineage_membership":
         needed = 347_836
+        named = "the lineage membership of every cell"
     _set_budget(store, needed - 1)
     with pytest.raises(MemoryBudgetError) as refused:
         calls[call]()
     assert str(refused.value) == (
         f"{work} of 145 cells needs about {needed} bytes in "
-        "memory for a graph of 725 edges, but the operation limit is "
+        f"memory for {named}, but the operation limit is "
         f"{needed - 1} bytes. Raise mem_budget."
     )
     assert reads == {}

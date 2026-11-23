@@ -3172,6 +3172,7 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         record: _LineageCurvesRecord | None = None,
         fate_record: _FateMapRecord | None = None,
         later_bytes: Callable[[int, GraphLoadMemory], int] | None = None,
+        later_item: str | None = None,
         work: str | None = None,
     ) -> tuple[LineageCurvesResult, _FateInputs]:
         """Load lineage curves with the fate map, direction and sink labels that validated them.
@@ -3180,8 +3181,8 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         of a fate map that a score directs, the score. Lineage membership
         needs them again, so it keeps what validation loaded. ``record`` and
         ``fate_record`` are the records of the curves and their fate map,
-        when the caller has read them; ``later_bytes`` and ``work`` go to the
-        fate map's loader.
+        when the caller has read them; ``later_bytes``, ``later_item`` and
+        ``work`` go to the fate map's loader.
         """
         if record is None:
             record = self._lineage_curves_record(ref)
@@ -3190,7 +3191,11 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         coordinates = record.coordinates
         selection = record.selection
         fate_inputs = self._load_fate_inputs(
-            fate, record=fate_record, later_bytes=later_bytes, work=work
+            fate,
+            record=fate_record,
+            later_bytes=later_bytes,
+            later_item=later_item,
+            work=work,
         )
         fate_result = fate_inputs.fate
         if fate_result.cell_selection != selection:
@@ -3800,6 +3805,7 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
             record=record,
             fate_record=fate_record,
             later_bytes=lambda _cells, _load: needed,
+            later_item="the lineage membership of every cell",
             work="Calling lineage membership",
         )
         pseudotime = np.asarray(inputs.direction.scores, dtype=np.float64)
@@ -3854,16 +3860,6 @@ class _TrajectoryOperationsMixin(_TrajectoryOperationsBase):
         if planned.reused:
             return planned.ref
         self._require_writable("call_lineage_membership")
-        if needed > self.memoryBytes:
-            raise MemoryBudgetError(
-                f"Lineage membership needs about {needed} bytes of memory with "
-                "its inputs, which exceeds the memory budget of "
-                f"{self.memoryBytes} bytes. Increase the memory budget or fit "
-                "curves of fewer lineages or cells.",
-                needed_bytes=needed,
-                budget_bytes=int(self.memoryBytes),
-                item="the lineage membership of every cell",
-            )
         limits = _distance_limits_impl(
             loaded.distance,
             loaded.progress,

@@ -1036,11 +1036,16 @@ def _download_network(entry: NetworkFile, destination: Path) -> None:
         shutil.rmtree(staging, ignore_errors=True)
         if not saved:
             # Leave no directory behind that the failed download created.
-            for directory in created:
-                try:
-                    directory.rmdir()
-                except OSError:
-                    break
+            _remove_directories(created)
+
+
+def _remove_directories(directories: list[Path]) -> None:
+    """Remove ``directories`` in order, stopping at the first that cannot be removed."""
+    for directory in directories:
+        try:
+            directory.rmdir()
+        except OSError:
+            break
 
 
 def _unavailable_message(

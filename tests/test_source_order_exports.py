@@ -754,6 +754,55 @@ def test_a_reorder_refuses_a_disk_without_room_and_leaves_no_files(
     assert list(tmp_path.iterdir()) == []
 
 
+def test_closing_a_reorder_early_removes_its_files(tmp_path, monkeypatch) -> None:
+    rng = np.random.default_rng(10)
+    values = rng.poisson(2.0, (300, 20)).astype(np.uint32)
+    # Buckets of a few kilobytes, so the rows are read back in many batches.
+    monkeypatch.setattr(export, "_REORDER_READ_BYTES", 4096)
+    blocks = reordered_matrix(
+        _matrix(values, rows=33),
+        rng.permutation(300),
+        max_bytes=64 << 20,
+        temp_dir=tmp_path,
+    ).blocks()
+
+    next(blocks)
+    assert len(list(tmp_path.iterdir())) == 1
+    # The reorder's frame, held past the close, keeps its store from garbage
+    # collection, whose finalizer would remove the files too.
+    frame = blocks.gi_frame
+    blocks.close()
+
+    assert list(tmp_path.iterdir()) == []
+    assert frame.f_locals["store"] is not None
+
+
+def test_a_reorder_whose_rows_fail_after_its_first_block_removes_its_files(
+    tmp_path,
+) -> None:
+    values = np.random.default_rng(11).poisson(2.0, (300, 20)).astype(np.uint32)
+
+    def failing() -> Iterator[np.ndarray]:
+        yield values[:33]
+        raise OSError("the source stopped")
+
+    blocks = reordered_matrix(
+        H5adMatrix(shape=values.shape, dtype=values.dtype, blocks=failing),
+        np.arange(300),
+        max_bytes=64 << 20,
+        temp_dir=tmp_path,
+        entries=int(np.count_nonzero(values)),
+    ).blocks()
+
+    with pytest.raises(OSError, match="the source stopped") as failure:
+        next(blocks)
+
+    # The error's traceback still holds the reorder and its store, whose
+    # files went as the error left it.
+    assert "_reordered_blocks" in [entry.name for entry in failure.traceback]
+    assert list(tmp_path.iterdir()) == []
+
+
 # ---------------------------------------------------------------------------
 # Reordering rows of text
 
